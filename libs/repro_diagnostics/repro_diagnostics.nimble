@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild diagnostic helpers"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

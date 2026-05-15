@@ -1,0 +1,5 @@
+# M0 compileable library skeletons.
+repro_core
+repro_platform
+repro_diagnostics
+repro_cli_support

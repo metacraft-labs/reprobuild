@@ -1,0 +1,1 @@
+# HCR Agent IPC

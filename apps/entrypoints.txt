@@ -1,0 +1,8 @@
+# name path
+repro apps/repro/repro.nim
+repro-fs-snoop apps/repro-fs-snoop/repro_fs_snoop.nim
+repro-hcr-link apps/repro-hcr-link/repro_hcr_link.nim
+repro-controller apps/repro-controller/repro_controller.nim
+repro-worker apps/repro-worker/repro_worker.nim
+repro-daemon apps/repro-daemon/repro_daemon.nim
+repro-provider-host apps/repro-provider-host/repro_provider_host.nim

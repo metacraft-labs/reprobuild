@@ -1,21 +1,27 @@
 # Reprobuild
 
-> **Status:** Planning — Architecture design phase
+> **Status:** M0 repository skeleton
 
 **Reprobuild** (CLI: `repro`) is a unified build system combining reproducible environments, automatic dependency discovery, incremental rebuilds with artifact caching, and distributed execution.
 
-## Key Ideas
+This repository is the public `metacraft-labs/reprobuild` product repository.
+M0 establishes the local repository shape, app entry point manifests, policy
+checks, and compileable Nim skeletons that later milestones build on.
 
-- **Forward-pass build language**: Running a tool automatically records what it reads — no manual dependency declarations needed.
-- **Sandbox-based dependency tracking**: Uses FUSE-based file access monitoring to discover actual inputs and outputs.
-- **Two-phase caching** (inspired by BuildXL): Weak fingerprint for candidate lookup, strong fingerprint incorporating observed inputs for cache hits.
-- **Content-addressed store**: All artifacts stored by content hash, enabling deduplication and parallel multi-version installation.
-- **Distributed execution**: Implements the [Remote Execution API](https://github.com/bazelbuild/remote-apis) for local, LAN, and cloud builds.
-- **Declarative resource management**: Manages external resources (databases, caches, cloud services) with Terraform-like plan/apply lifecycle.
+## Commands
 
-## Design Documents
+- `just build` compiles all app entry points listed in `apps/entrypoints.txt`.
+- `just test` runs the local Nim test suite.
+- `just lint` runs repository requirement and Nim source checks.
+- `just bench-quick` exercises the benchmark reporting path.
 
-See [reprobuild-specs](https://github.com/metacraft-labs/reprobuild-specs) for detailed architecture and specifications.
+## Repository Shape
+
+- `libs/` contains importable Nim libraries.
+- `apps/` contains thin application entry points.
+- `tests/` contains unit, integration, compatibility, fixture, and E2E tests.
+- `benchmarks/` contains repeatable benchmark suites.
+- `docs/` contains public repository documentation.
 
 ## License
 

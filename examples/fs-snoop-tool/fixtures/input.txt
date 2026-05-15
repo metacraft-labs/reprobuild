@@ -1,0 +1,1 @@
+fs snoop fixture input

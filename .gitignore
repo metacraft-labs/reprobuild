@@ -1,0 +1,18 @@
+.direnv/
+result
+result-*
+
+build/
+nimcache/
+htmldocs/
+*.nimble-link
+
+test-logs/
+repomix/
+bench-results/
+
+# Workspace-managed reference checkouts.
+references/*
+!references/README.md
+
+.DS_Store

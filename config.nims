@@ -1,0 +1,5 @@
+switch("styleCheck", "hint")
+switch("path", "libs/repro_core/src")
+switch("path", "libs/repro_platform/src")
+switch("path", "libs/repro_diagnostics/src")
+switch("path", "libs/repro_cli_support/src")
