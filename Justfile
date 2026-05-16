@@ -60,6 +60,15 @@ e2e_codetracer_build_subset_without_tup:
         tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim \
         2>&1 | tee test-logs/e2e_codetracer_build_subset_without_tup.log
 
+e2e_codetracer_in_place_project_file:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_codetracer_in_place_project_file \
+        --out:build/test-bin/e2e_codetracer_in_place_project_file \
+        tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
+        2>&1 | tee test-logs/e2e_codetracer_in_place_project_file.log
+
 e2e_codetracer_dev_environment_slice:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
