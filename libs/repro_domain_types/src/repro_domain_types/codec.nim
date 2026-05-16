@@ -128,18 +128,22 @@ proc writeDependencyPolicy(outp: var seq[byte]; policy: DependencyGatheringPolic
   outp.writeU32Le(uint32(policy.recognizedReports.len))
   for report in policy.recognizedReports:
     outp.writeString($report.formatName)
+    outp.writeByte(byte(ord(report.completeness)))
     outp.writeU32Le(uint32(report.outputs.len))
     for output in report.outputs:
       outp.writeExpectedFile(output)
   outp.writeU32Le(uint32(policy.postBuildConverters.len))
   for converterSpec in policy.postBuildConverters:
-    outp.writeString(converterSpec.converterPath)
-    outp.writeU32Le(uint32(converterSpec.args.len))
-    for arg in converterSpec.args:
-      outp.writeString(arg)
+    outp.writeProcess(converterSpec.converterProcess)
+    outp.writeU32Le(uint32(converterSpec.inputs.len))
+    for input in converterSpec.inputs:
+      outp.writeExpectedFile(input)
     outp.writeU32Le(uint32(converterSpec.outputs.len))
     for output in converterSpec.outputs:
       outp.writeExpectedFile(output)
+    outp.writeByte(byte(ord(converterSpec.outputKind)))
+    outp.writeString($converterSpec.outputFormatName)
+    outp.writeByte(byte(ord(converterSpec.completeness)))
 
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int): DependencyGatheringPolicy =
   let kind = readByte(bytes, pos)
@@ -154,24 +158,42 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int): DependencyGathe
   result.recognizedReports = newSeq[RecognizedDependencyReportSpec](reportCount)
   for i in 0 ..< reportCount:
     let name = DependencyFormatName(readString(bytes, pos))
+    let reportCompleteness = readByte(bytes, pos)
+    if reportCompleteness > byte(ord(decDiagnosticOnly)):
+      raiseEnvelopeError(eeMalformed, "invalid report evidence completeness")
     let outputCount = int(readU32Le(bytes, pos))
     var outputs = newSeq[ExpectedDependencyFile](outputCount)
     for j in 0 ..< outputCount:
       outputs[j] = readExpectedFile(bytes, pos)
     result.recognizedReports[i] =
-      RecognizedDependencyReportSpec(formatName: name, outputs: outputs)
+      RecognizedDependencyReportSpec(
+        formatName: name,
+        outputs: outputs,
+        completeness: DependencyEvidenceCompleteness(reportCompleteness))
   let converterCount = int(readU32Le(bytes, pos))
   result.postBuildConverters = newSeq[PostBuildDependencyConverterSpec](converterCount)
   for i in 0 ..< converterCount:
-    result.postBuildConverters[i].converterPath = readString(bytes, pos)
-    let argCount = int(readU32Le(bytes, pos))
-    result.postBuildConverters[i].args = newSeq[string](argCount)
-    for j in 0 ..< argCount:
-      result.postBuildConverters[i].args[j] = readString(bytes, pos)
+    result.postBuildConverters[i].converterProcess = readProcess(bytes, pos)
+    let inputCount = int(readU32Le(bytes, pos))
+    result.postBuildConverters[i].inputs = newSeq[ExpectedDependencyFile](inputCount)
+    for j in 0 ..< inputCount:
+      result.postBuildConverters[i].inputs[j] = readExpectedFile(bytes, pos)
     let outputCount = int(readU32Le(bytes, pos))
     result.postBuildConverters[i].outputs = newSeq[ExpectedDependencyFile](outputCount)
     for j in 0 ..< outputCount:
       result.postBuildConverters[i].outputs[j] = readExpectedFile(bytes, pos)
+    let outputKind = readByte(bytes, pos)
+    if outputKind > byte(ord(dcoRecognizedFormat)):
+      raiseEnvelopeError(eeMalformed, "invalid converter output kind")
+    result.postBuildConverters[i].outputKind =
+      DependencyConverterOutputKind(outputKind)
+    result.postBuildConverters[i].outputFormatName =
+      DependencyFormatName(readString(bytes, pos))
+    let converterCompleteness = readByte(bytes, pos)
+    if converterCompleteness > byte(ord(decDiagnosticOnly)):
+      raiseEnvelopeError(eeMalformed, "invalid converter evidence completeness")
+    result.postBuildConverters[i].completeness =
+      DependencyEvidenceCompleteness(converterCompleteness)
 
 proc writeContentDigest(outp: var seq[byte]; digest: ContentDigest) =
   outp.writeByte(byte(ord(digest.algorithm)))

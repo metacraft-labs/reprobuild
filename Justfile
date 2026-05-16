@@ -63,6 +63,16 @@ integration-build-engine-api:
         tests/integration/t_integration_build_engine_api_ready_queue.nim \
         2>&1 | tee test-logs/integration-build-engine-api.log
 
+integration-dependency-reports:
+    mkdir -p test-logs build/test-bin build/nimcache
+    cd ../runquota && just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration-dependency-reports \
+        --out:build/test-bin/integration_dependency_report_and_converter_paths \
+        tests/integration/t_dependency_report_and_converter_paths.nim \
+        2>&1 | tee test-logs/integration-dependency-reports.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

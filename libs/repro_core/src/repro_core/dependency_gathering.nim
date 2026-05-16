@@ -1,3 +1,5 @@
+import repro_core/process_specs
+
 type
   DependencyGatheringKind* = enum
     dgDeclaredOnly
@@ -23,11 +25,19 @@ type
   RecognizedDependencyReportSpec* = object
     formatName*: DependencyFormatName
     outputs*: seq[ExpectedDependencyFile]
+    completeness*: DependencyEvidenceCompleteness
+
+  DependencyConverterOutputKind* = enum
+    dcoReproPathSet
+    dcoRecognizedFormat
 
   PostBuildDependencyConverterSpec* = object
-    converterPath*: string
-    args*: seq[string]
+    converterProcess*: ProcessSpec
+    inputs*: seq[ExpectedDependencyFile]
     outputs*: seq[ExpectedDependencyFile]
+    outputKind*: DependencyConverterOutputKind
+    outputFormatName*: DependencyFormatName
+    completeness*: DependencyEvidenceCompleteness
 
   DependencyGatheringPolicy* = object
     kind*: DependencyGatheringKind

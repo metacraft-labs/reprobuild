@@ -1,5 +1,7 @@
-import std/[algorithm, json, os, osproc, sets, streams, strutils, tables]
+import std/[algorithm, json, os, osproc, sets, streams, strtabs, strutils, tables]
 
+import repro_core
+import repro_depfile
 import repro_hash
 import repro_local_store
 import repro_monitor_depfile
@@ -41,6 +43,7 @@ type
     weakFingerprint*: ContentDigest
     depfile*: string
     monitorDepfile*: string
+    dependencyPolicy*: DependencyGatheringPolicy
 
   BuildPool* = object
     name*: string
@@ -65,6 +68,10 @@ type
     monitorWrites*: seq[string]
     monitorProbes*: seq[string]
     diagnostics*: seq[string]
+
+  EvidenceCollection = object
+    evidence: PathSetEvidence
+    publishable: bool
 
   ActionResult* = object
     id*: string
@@ -119,6 +126,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              commandStatsId = ""; cacheable = false;
              weakFingerprint = weakFingerprintFromText(id);
              depfile = ""; monitorDepfile = "";
+             dependencyPolicy = declaredOnlyPolicy();
              env: openArray[string] = []): BuildAction =
   BuildAction(
     id: id,
@@ -136,7 +144,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     cacheable: cacheable,
     weakFingerprint: weakFingerprint,
     depfile: depfile,
-    monitorDepfile: monitorDepfile)
+    monitorDepfile: monitorDepfile,
+    dependencyPolicy: dependencyPolicy)
 
 proc pool*(name: string; capacity: uint32): BuildPool =
   BuildPool(name: name, capacity: capacity)
@@ -220,49 +229,185 @@ proc allOutputsExist(action: BuildAction): bool =
       return false
   true
 
-proc normalizeDepfileText(text: string): string =
-  text.replace("\\\n", " ").replace("\\\r\n", " ")
-
-proc parseDepfileInputs(path: string): seq[string] =
-  if path.len == 0 or not fileExists(path):
-    return
-  let normalized = normalizeDepfileText(readFile(path))
-  let colon = normalized.find(':')
-  if colon < 0:
-    return
-  let rest = normalized[colon + 1 .. ^1]
-  for token in rest.splitWhitespace:
-    if token.len > 0:
-      result.add(token)
-
 proc addUnique(values: var seq[string]; value: string) =
   if value.len == 0:
     return
   if values.find(value) < 0:
     values.add(value)
 
-proc collectEvidence(action: BuildAction): PathSetEvidence =
-  result.declaredInputs = action.inputs
-  result.declaredOutputs = action.outputs
-  for input in parseDepfileInputs(action.depfile):
-    result.depfileInputs.addUnique(input)
+proc materialPath(root, path: string): string =
+  if path.isAbsolute or root.len == 0:
+    path
+  else:
+    root / path
+
+proc expectedPath(action: BuildAction; file: ExpectedDependencyFile): string =
+  materialPath(action.cwd, file.path)
+
+proc legacyDepfileReports(action: BuildAction): seq[RecognizedDependencyReportSpec] =
+  result = action.dependencyPolicy.recognizedReports
+  if action.depfile.len > 0:
+    result.add RecognizedDependencyReportSpec(
+      formatName: DependencyFormatName(MakeDepfileFormatName),
+      outputs: @[ExpectedDependencyFile(
+        logicalName: "depfile",
+        path: action.depfile,
+        required: true)],
+      completeness: decComplete)
+
+proc addPathSet(evidence: var PathSetEvidence; pathSet: DependencyPathSet;
+                recognized: bool) =
+  if recognized:
+    for input in pathSet.inputs:
+      evidence.depfileInputs.addUnique(input)
+  else:
+    for input in pathSet.inputs:
+      evidence.monitorReads.addUnique(input)
+    for output in pathSet.outputs:
+      evidence.monitorWrites.addUnique(output)
+    for probe in pathSet.probes:
+      evidence.monitorProbes.addUnique(probe)
+  for diagnostic in pathSet.diagnostics:
+    evidence.diagnostics.add(diagnostic)
+
+proc collectConvertedEvidence(action: BuildAction; evidence: var PathSetEvidence):
+    bool
+
+proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
+  result.publishable = true
+  result.evidence.declaredInputs = action.inputs
+  result.evidence.declaredOutputs = action.outputs
+  for report in action.legacyDepfileReports():
+    for output in report.outputs:
+      let path = action.expectedPath(output)
+      if output.required and not fileExists(path):
+        result.evidence.diagnostics.add("dependency report missing: " & path)
+        result.publishable = false
+        continue
+      if not fileExists(path):
+        continue
+      try:
+        result.evidence.addPathSet(
+          readRecognizedDependencyReport($report.formatName, path),
+          recognized = true)
+      except DependencyReportError as err:
+        result.evidence.diagnostics.add("dependency report invalid: " & err.msg)
+        result.publishable = false
+  if not action.collectConvertedEvidence(result.evidence):
+    result.publishable = false
   if action.monitorDepfile.len > 0:
     try:
       let dep = readMonitorDepFile(action.monitorDepfile)
       for record in dep.records:
         case record.kind
         of mrFileRead, mrFileOpen:
-          result.monitorReads.addUnique(record.path)
+          result.evidence.monitorReads.addUnique(record.path)
         of mrFileWrite:
-          result.monitorWrites.addUnique(record.path)
+          result.evidence.monitorWrites.addUnique(record.path)
         of mrPathProbe, mrDirectoryEnumerate:
-          result.monitorProbes.addUnique(record.path)
+          result.evidence.monitorProbes.addUnique(record.path)
         else:
           discard
       if dep.completeness != mcComplete:
-        result.diagnostics.add("monitor depfile is incomplete")
+        result.evidence.diagnostics.add("monitor depfile is incomplete")
+        result.publishable = false
     except MonitorDepFileReaderError as err:
-      result.diagnostics.add("monitor depfile read failed: " & err.msg)
+      result.evidence.diagnostics.add("monitor depfile read failed: " & err.msg)
+      result.publishable = false
+  if strict and not result.publishable:
+    discard
+
+proc evidenceInputPaths(evidence: PathSetEvidence): seq[string] =
+  for input in evidence.declaredInputs:
+    result.addUnique(input)
+  for input in evidence.depfileInputs:
+    result.addUnique(input)
+  for input in evidence.monitorReads:
+    result.addUnique(input)
+  for probe in evidence.monitorProbes:
+    result.addUnique(probe)
+
+proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSetEvidence =
+  result.declaredInputs = action.inputs
+  result.declaredOutputs = action.outputs
+  for input in record.inputs:
+    if result.declaredInputs.find(input.path) < 0:
+      result.depfileInputs.addUnique(input.path)
+
+proc processCwd(action: BuildAction; process: ProcessSpec): string =
+  let cwd = $process.cwd
+  if cwd.len > 0:
+    cwd
+  else:
+    action.cwd
+
+proc envTable(env: openArray[EnvVar]): StringTableRef =
+  result = newStringTable(modeCaseSensitive)
+  for item in env:
+    result[item.name] = item.value
+
+proc runConverter(action: BuildAction; converterSpec: PostBuildDependencyConverterSpec):
+    tuple[ok: bool; diagnostic: string] =
+  for input in converterSpec.inputs:
+    let path = action.expectedPath(input)
+    if input.required and not fileExists(path):
+      return (ok: false, diagnostic: "converter input missing: " & path)
+  let process = converterSpec.converterProcess
+  if process.executable.value.len == 0:
+    return (ok: false, diagnostic: "converter executable is empty")
+  let env = if process.env.len > 0: envTable(process.env) else: nil
+  let child = startProcess($process.executable,
+    args = process.args,
+    env = env,
+    workingDir = action.processCwd(process),
+    options = {poUsePath, poStdErrToStdOut})
+  let exitCode = child.waitForExit()
+  var output = ""
+  if child.outputStream != nil:
+    output = child.outputStream.readAll()
+  child.close()
+  if exitCode != 0:
+    var diagnostic = "converter failed with exit " & $exitCode
+    if output.len > 0:
+      diagnostic.add(": " & output.strip())
+    return (ok: false, diagnostic: diagnostic)
+  for output in converterSpec.outputs:
+    let path = action.expectedPath(output)
+    if output.required and not fileExists(path):
+      return (ok: false, diagnostic: "converter output missing: " & path)
+  (ok: true, diagnostic: "")
+
+proc runConverters(action: BuildAction): tuple[ok: bool; diagnostics: seq[string]] =
+  result.ok = true
+  for converterSpec in action.dependencyPolicy.postBuildConverters:
+    let converterResult = action.runConverter(converterSpec)
+    if not converterResult.ok:
+      result.ok = false
+      result.diagnostics.add("dependency converter: " & converterResult.diagnostic)
+
+proc collectConvertedEvidence(action: BuildAction; evidence: var PathSetEvidence):
+    bool =
+  result = true
+  for converterSpec in action.dependencyPolicy.postBuildConverters:
+    for output in converterSpec.outputs:
+      let path = action.expectedPath(output)
+      if output.required and not fileExists(path):
+        evidence.diagnostics.add("converted dependency report missing: " & path)
+        result = false
+        continue
+      if not fileExists(path):
+        continue
+      try:
+        case converterSpec.outputKind
+        of dcoReproPathSet:
+          evidence.addPathSet(readReproPathSet(path), recognized = false)
+        of dcoRecognizedFormat:
+          evidence.addPathSet(
+            readRecognizedDependencyReport($converterSpec.outputFormatName, path),
+            recognized = true)
+      except DependencyReportError as err:
+        evidence.diagnostics.add("converted dependency report invalid: " & err.msg)
+        result = false
 
 proc defaultRunQuotaHelperPath(): string =
   let configured = getEnv("REPRO_RUNQUOTA_HELPER")
@@ -435,14 +580,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           case lookup.status
           of aclHit:
             cas.restoreOutputs(lookup.record, action.cwd)
-            runResult.results[idToIndex.resultIndex(id)].evidence = collectEvidence(action)
+            runResult.results[idToIndex.resultIndex(id)].evidence =
+              evidenceFromRecord(action, lookup.record)
             completeSuccess(id, asCacheHit, cdHit, false, "restored")
             inc completed
             launchedAny = true
             continue
           of aclHybridCutoff:
             cas.restoreOutputs(lookup.record, action.cwd)
-            runResult.results[idToIndex.resultIndex(id)].evidence = collectEvidence(action)
+            runResult.results[idToIndex.resultIndex(id)].evidence =
+              evidenceFromRecord(action, lookup.record)
             completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
             inc completed
             launchedAny = true
@@ -453,7 +600,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
 
         if action.allOutputsExist():
-          runResult.results[idToIndex.resultIndex(id)].evidence = collectEvidence(action)
+          let evidence = collectEvidence(action, strict = true)
+          runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence
+          if not evidence.publishable:
+            statuses[id] = asFailed
+            runResult.results[idToIndex.resultIndex(id)].status = asFailed
+            runResult.results[idToIndex.resultIndex(id)].stderr =
+              evidence.evidence.diagnostics.join("\n")
+            runResult.trace(id, "failed", "dependency evidence invalid")
+            blockClosure(id, id)
+            inc completed
+            launchedAny = true
+            continue
           completeSuccess(id, asUpToDate, runResult.results[idToIndex.resultIndex(id)].cacheDecision,
             false, "outputs-present")
           inc completed
@@ -474,6 +632,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           resultPath: resultPath))
         runResult.trace(id, "launched", "pool=" & poolName)
         launchedAny = true
+
+      if completed >= g.actions.len:
+        break
 
       if running.len == 0:
         if ready.len > 0 and not launchedAny:
@@ -517,10 +678,41 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       statuses[finished.id] = finished.status
       if finished.status == asSucceeded:
         let action = actionsById[finished.id]
-        runResult.results[idx].evidence = collectEvidence(action)
+        let converterResult = action.runConverters()
+        if not converterResult.ok:
+          runResult.results[idx].status = asFailed
+          var diagnostics: seq[string] = @[]
+          if runResult.results[idx].stderr.len > 0:
+            diagnostics.add(runResult.results[idx].stderr)
+          diagnostics.add(converterResult.diagnostics)
+          runResult.results[idx].stderr = diagnostics.join("\n").strip()
+          statuses[finished.id] = asFailed
+          runResult.trace(finished.id, "failed", "dependency converter failed")
+          blockClosure(finished.id, finished.id)
+          inc completed
+          completed = 0
+          for action in g.actions:
+            if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
+              inc completed
+          continue
+        let evidence = collectEvidence(action, strict = true)
+        runResult.results[idx].evidence = evidence.evidence
+        if not evidence.publishable:
+          runResult.results[idx].status = asFailed
+          runResult.results[idx].stderr =
+            [runResult.results[idx].stderr, evidence.evidence.diagnostics.join("\n")].join("\n").strip()
+          statuses[finished.id] = asFailed
+          runResult.trace(finished.id, "failed", "dependency evidence invalid")
+          blockClosure(finished.id, finished.id)
+          inc completed
+          completed = 0
+          for action in g.actions:
+            if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
+              inc completed
+          continue
         if action.cacheable:
           discard cache.recordActionResult(cas, action.weakFingerprint, ffpChecksum,
-            action.inputs, action.outputs, action.cwd)
+            evidence.evidence.evidenceInputPaths(), action.outputs, action.cwd)
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:
