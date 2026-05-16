@@ -89,6 +89,10 @@ bench *args:
 bench-quick:
     just bench --quick
 
+bench_reprobuild_core_mvp_performance *args:
+    mkdir -p bench-results test-logs
+    ./scripts/run-m23-benchmark.sh {{args}} 2> >(tee test-logs/bench_reprobuild_core_mvp_performance.log >&2)
+
 integration-build-engine-api:
     mkdir -p test-logs build/test-bin build/nimcache
     cd ../runquota && just build
