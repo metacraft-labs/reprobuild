@@ -146,6 +146,15 @@ integration_hcr_reference_corpus_and_object_inputs:
         tests/integration/t_integration_hcr_reference_corpus_and_object_inputs.nim \
         2>&1 | tee test-logs/integration_hcr_reference_corpus_and_object_inputs.log
 
+integration_hcr_linkgraph_relocation_classification:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linkgraph_relocation_classification \
+        --out:build/test-bin/integration_hcr_linkgraph_relocation_classification \
+        tests/integration/t_integration_hcr_linkgraph_relocation_classification.nim \
+        2>&1 | tee test-logs/integration_hcr_linkgraph_relocation_classification.log
+
 integration_provider_fragment_refresh_and_pruning:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

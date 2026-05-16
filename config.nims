@@ -20,6 +20,7 @@ switch("path", "libs/repro_local_store/src")
 switch("path", "libs/repro_runquota/src")
 switch("path", "libs/repro_build_engine/src")
 switch("path", "libs/repro_provider_runtime/src")
+switch("path", "libs/repro_hcr_linkgraph/src")
 
 switch("path", "../runquota/libs/runquota_core/src")
 switch("path", "../runquota/libs/runquota_codec/src")

@@ -1,0 +1,6 @@
+version       = "0.1.0"
+author        = "Metacraft Labs"
+description   = "HCR object LinkGraph facts, relocation classification, and pure patch planning"
+license       = "MIT"
+srcDir        = "src"
+requires "nim >= 2.2.0"

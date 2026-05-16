@@ -20,3 +20,4 @@ repro_local_store
 repro_runquota
 repro_build_engine
 repro_provider_runtime
+repro_hcr_linkgraph
