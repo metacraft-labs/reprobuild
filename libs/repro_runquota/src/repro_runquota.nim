@@ -1,9 +1,10 @@
-import std/[json, strutils]
+import std/[json, os, strutils]
 
 import runquota_client
 import runquota_codec
 import runquota_core
-import runquota_exec
+import runquota_process
+import runquota_protocol
 
 type
   ReproRunQuotaError* = object of CatchableError
@@ -60,6 +61,52 @@ proc toRunQuotaRequest*(request: ReproResourceRequest): ResourceRequest =
     priority: priorityNormal,
     metadata: metadataNone())
 
+proc diagnosticText(diagnostic: Diagnostic): string =
+  if diagnostic.detail.len > 0:
+    diagnostic.message & ": " & diagnostic.detail
+  else:
+    diagnostic.message
+
+proc waitForQueuedGrant(session: var RunQuotaSession;
+                        request: ResourceRequest): RunQuotaLease =
+  const CandidateId = 1'u64
+  let firstDecisions = session.offerCandidates([toCandidate(CandidateId, request)])
+  var sawQueued = false
+  for decision in firstDecisions:
+    if decision.clientCandidateId != CandidateId:
+      continue
+    if decision.lease.active and not decision.queued:
+      return decision.lease
+    if decision.lease.active and decision.queued:
+      sawQueued = true
+    else:
+      raise newException(ReproRunQuotaError,
+        "runquota denied lease: " & decision.diagnostic.diagnosticText())
+  if not sawQueued:
+    raise newException(ReproRunQuotaError,
+      "runquota did not return a decision for the offered lease")
+
+  while true:
+    for decision in session.pollNextGrant():
+      if decision.clientCandidateId != CandidateId:
+        continue
+      if decision.lease.active and not decision.queued:
+        return decision.lease
+      if not decision.lease.active:
+        raise newException(ReproRunQuotaError,
+          "runquota denied queued lease: " & decision.diagnostic.diagnosticText())
+    sleep(25)
+
+proc finishOutcome(completion: ProcessCompletion): LeaseFinishOutcome =
+  if completion.cancelled or completion.timedOut:
+    leaseFinishCancelled
+  elif completion.signaled:
+    leaseFinishCrashed
+  elif completion.exited and completion.exitCode == 0:
+    leaseFinishSucceeded
+  else:
+    leaseFinishFailed
+
 proc acquireCliArgs*(request: ReproResourceRequest;
                      command: ReproCommandSpec): seq[string] =
   result = @[
@@ -98,31 +145,52 @@ proc runWithRunQuota*(request: ReproResourceRequest;
   var client = connectDefault()
   try:
     var session = client.registerSession("reprobuild action", "0.1.0")
+    var lease = session.waitForQueuedGrant(request.toRunQuotaRequest())
+    result.leaseId = lease.id.value
     try:
-      let execution = session.runWithLease(
-        request.toRunQuotaRequest(),
+      lease.markStarting()
+      var child = launchProcess(commandSpec(
         command.argv,
         cwd = command.cwd,
         env = command.env,
         stdoutLimit = command.stdoutLimit,
-        stderrLimit = command.stderrLimit)
+        stderrLimit = command.stderrLimit))
+      lease.markRunning(
+        childProcessId = child.info.processId,
+        processGroupId = child.info.processGroupId,
+        cleanupRegistered = true)
+      let completion = child.waitForCompletion()
+      child.close()
+      lease.finish(
+        outcome = finishOutcome(completion),
+        exitCode = if completion.exited: uint32(max(completion.exitCode, 0)) else: 0'u32,
+        signal = if completion.signaled: uint32(max(completion.signal, 0)) else: 0'u32,
+        peakMemoryBytes = completion.peakResidentMemoryBytes,
+        processCount = completion.processCount)
       result = ReproRunQuotaExecution(
-        leaseId: execution.leaseId,
-        exitCode: execution.process.exitCode,
-        exited: execution.process.exited,
-        signaled: execution.process.signaled,
-        signal: execution.process.signal,
-        stdout: execution.process.stdout,
-        stderr: execution.process.stderr,
-        stdoutBytes: execution.stdoutBytes,
-        stderrBytes: execution.stderrBytes,
-        elapsedMillis: execution.process.elapsedMillis,
-        peakResidentMemoryBytes: execution.process.peakResidentMemoryBytes,
-        processCount: execution.process.processCount,
-        backendName: execution.backend.name,
-        leaseFinishedSent: execution.leaseFinishedSent,
-        leaseReleased: execution.leaseReleased)
+        leaseId: lease.id.value,
+        exitCode: completion.exitCode,
+        exited: completion.exited,
+        signaled: completion.signaled,
+        signal: completion.signal,
+        stdout: completion.stdout,
+        stderr: completion.stderr,
+        stdoutBytes: completion.stdoutBytes,
+        stderrBytes: completion.stderrBytes,
+        elapsedMillis: completion.elapsedMillis,
+        peakResidentMemoryBytes: completion.peakResidentMemoryBytes,
+        processCount: completion.processCount,
+        backendName: child.info.backend.name,
+        leaseFinishedSent: true)
+    except CatchableError:
+      if lease.active and lease.state == leaseClientStarting:
+        lease.finish(outcome = leaseFinishLaunchFailed)
+        result.leaseFinishedSent = true
+      raise
     finally:
+      if lease.active:
+        lease.release()
+        result.leaseReleased = true
       if session.active:
         session.closeSession()
   except CatchableError as err:
@@ -141,6 +209,7 @@ proc executionJson(execution: ReproRunQuotaExecution; runnerError = ""): JsonNod
     "stdout": execution.stdout,
     "stderr": execution.stderr,
     "backend_name": execution.backendName,
+    "runquota_socket": getEnv("RUNQUOTA_SOCKET", ""),
     "lease_finished_sent": execution.leaseFinishedSent,
     "lease_released": execution.leaseReleased
   }

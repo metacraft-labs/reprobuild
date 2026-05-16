@@ -119,6 +119,16 @@ integration_scheduler_dependency_gathering_policies:
         tests/integration/t_integration_scheduler_dependency_gathering_policies.nim \
         2>&1 | tee test-logs/integration_scheduler_dependency_gathering_policies.log
 
+integration_reprobuild_sessions_share_runquota:
+    mkdir -p test-logs build/test-bin build/nimcache
+    cd ../runquota && just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_reprobuild_sessions_share_runquota \
+        --out:build/test-bin/integration_reprobuild_sessions_share_runquota \
+        tests/integration/t_integration_reprobuild_sessions_share_runquota.nim \
+        2>&1 | tee test-logs/integration_reprobuild_sessions_share_runquota.log
+
 integration_provider_fragment_refresh_and_pruning:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

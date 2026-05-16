@@ -232,6 +232,8 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
       "cacheDecision": $item.cacheDecision,
       "dependencyPolicyKind": $item.dependencyPolicyKind,
       "runQuotaBackend": item.runQuotaBackend,
+      "runQuotaSocket": item.runQuotaSocket,
+      "leaseId": item.leaseId,
       "evidence": evidenceJson(item.evidence)
     })
   var trace = newJArray()
@@ -286,6 +288,13 @@ proc modeName(mode: ToolProvisioningMode): string =
   of tpmPathOnly: "path"
   of tpmNix: "nix"
   else: "unspecified"
+
+proc runQuotaSocketDiagnostic(): string =
+  let socket = getEnv("RUNQUOTA_SOCKET", "")
+  if socket.len > 0:
+    socket
+  else:
+    "default"
 
 proc binDirsForDevelop(identity: PathOnlyBuildIdentity): seq[string] =
   for profile in identity.profiles:
@@ -376,6 +385,7 @@ proc runBuildCommand(args: openArray[string]): int =
       else:
         "local-only"
     echo "cachePortability: " & portability
+    echo "runQuotaSocket: " & runQuotaSocketDiagnostic()
     if not moduleHasBuildBlock(modulePath):
       return 0
     let providerBinaryPath = outDir / "provider" / "project-provider"
@@ -418,6 +428,9 @@ proc runBuildCommand(args: openArray[string]): int =
     for item in buildResult.results:
       echo "action: " & item.id & " status=" & $item.status &
         " launched=" & $item.launched & " cache=" & $item.cacheDecision &
+        " runquota=" & item.runQuotaBackend &
+        " socket=" & (if item.runQuotaSocket.len > 0: item.runQuotaSocket else: "default") &
+        " lease=" & $item.leaseId &
         " evidence=depfile:" & $item.evidence.depfileInputs.len
     echo "buildReport: " & reportPath
     if buildResult.hasFailedActions():

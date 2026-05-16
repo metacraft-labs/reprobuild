@@ -88,6 +88,7 @@ type
     stderr*: string
     leaseId*: uint64
     runQuotaBackend*: string
+    runQuotaSocket*: string
     evidence*: PathSetEvidence
 
   SchedulerTraceEvent* = object
@@ -578,6 +579,7 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string): Ac
         result.stderr.add("\n")
       result.stderr.add(helperOutput)
     result.runQuotaBackend = node{"backend_name"}.getStr("runquota-helper")
+    result.runQuotaSocket = node{"runquota_socket"}.getStr("")
     result.status =
       if helperExit == 0 and runnerError.len == 0 and result.exitCode == 0:
         asSucceeded

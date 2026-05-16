@@ -1,0 +1,355 @@
+import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
+
+proc q(value: string): string =
+  quoteShell(value)
+
+proc shellCommand(args: openArray[string]): string =
+  for index, arg in args:
+    if index > 0:
+      result.add(" ")
+    result.add(q(arg))
+
+proc runShell(command: string; cwd = getCurrentDir()):
+    tuple[code: int; output: string] =
+  let res = execCmdEx(command, workingDir = cwd)
+  (code: res.exitCode, output: res.output)
+
+proc requireSuccess(command: string; cwd = getCurrentDir()): string =
+  let res = runShell(command, cwd)
+  if res.code != 0:
+    checkpoint(res.output)
+  check res.code == 0
+  res.output
+
+proc pathExists(path: string): bool =
+  try:
+    discard getFileInfo(path, followSymlink = false)
+    true
+  except OSError:
+    false
+
+proc nowMillis(): int64 =
+  int64(epochTime() * 1000.0)
+
+proc nimString(value: string): string =
+  value.escape()
+
+proc valueAfter(output, prefix: string): string =
+  for line in output.splitLines:
+    if line.startsWith(prefix):
+      return line[prefix.len .. ^1].strip()
+  ""
+
+proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
+  createDir(projectRoot / "src" / "frontend" / "tests")
+  createDir(projectRoot / "src" / "frontend" / "index")
+  createDir(projectRoot / "src" / "frontend" / "lib")
+  createDir(projectRoot / "src" / "c")
+  copyFile(codeTracerRoot / "src" / "frontend" / "tests" /
+    "ipc_registry_test.nim",
+    projectRoot / "src" / "frontend" / "tests" / "ipc_registry_test.nim")
+  copyFile(codeTracerRoot / "src" / "frontend" / "index" /
+    "ipc_registry.nim",
+    projectRoot / "src" / "frontend" / "index" / "ipc_registry.nim")
+  copyFile(codeTracerRoot / "src" / "frontend" / "lib" / "jslib.nim",
+    projectRoot / "src" / "frontend" / "lib" / "jslib.nim")
+  copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
+    projectRoot / "src" / "c" / "main.c")
+
+proc writeTimingHelper(path: string) =
+  writeFile(path,
+    "import std/[os, strutils, times]\n\n" &
+    "proc nowMillis(): int64 = int64(epochTime() * 1000.0)\n\n" &
+    "let args = commandLineParams()\n" &
+    "if args.len != 5:\n" &
+    "  quit 2\n" &
+    "let stamp = args[0]\n" &
+    "let gate = args[1]\n" &
+    "let label = args[2]\n" &
+    "let waitMaxMs = parseInt(args[3])\n" &
+    "let sleepMs = parseInt(args[4])\n" &
+    "createDir(parentDir(stamp))\n" &
+    "let started = nowMillis()\n" &
+    "writeFile(stamp & \".start\", $started & \"\\n\")\n" &
+    "let deadline = started + int64(waitMaxMs)\n" &
+    "while not fileExists(gate) and nowMillis() < deadline:\n" &
+    "  sleep(25)\n" &
+    "let gateSeen = fileExists(gate)\n" &
+    "sleep(sleepMs)\n" &
+    "let ended = nowMillis()\n" &
+    "writeFile(stamp, \"label=\" & label & \"\\n\" &\n" &
+    "  \"start_ms=\" & $started & \"\\n\" &\n" &
+    "  \"end_ms=\" & $ended & \"\\n\" &\n" &
+    "  \"gate_seen=\" & $gateSeen & \"\\n\")\n" &
+    "if not gateSeen:\n" &
+    "  quit 42\n")
+
+proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
+                  label, outputRel: string; inputs: openArray[string];
+                  extraShellChecks = "") =
+  createDir(path.splitPath.head)
+  let script =
+    "set -eu\n" &
+    "helper=$1\n" &
+    "stamp=$2\n" &
+    "gate=$3\n" &
+    "label=$4\n" &
+    "out=$5\n" &
+    "test -x \"$helper\"\n" &
+    extraShellChecks &
+    "\"$helper\" \"$stamp\" \"$gate\" \"$label\" 12000 900\n" &
+    "mkdir -p \"$(dirname \"$out\")\"\n" &
+    "printf '%s\\n' \"$label\" > \"$out\"\n"
+
+  var inputLiteral = ""
+  for index, input in inputs:
+    if index > 0:
+      inputLiteral.add(", ")
+    inputLiteral.add(nimString(input))
+
+  writeFile(path,
+    "import repro_project_dsl\n\n" &
+    "package " & packageName & ":\n" &
+    "  uses:\n" &
+    "    \"sh >=1\"\n\n" &
+    "  executable shTool:\n" &
+    "    name \"sh\"\n" &
+    "    cli:\n" &
+    "      subcmd \"-c\":\n" &
+    "        pos args, seq[string], position = 0\n\n" &
+    "    build:\n" &
+    "      discard buildAction(" & nimString(actionId) & ",\n" &
+    "        " & packageName & ".executable(\"sh\").subcmd_2d_c(\n" &
+    "          args = @[" & nimString(script) & ", " & nimString("sh") &
+      ", " & nimString(helperPath) & ", " & nimString(stampPath) & ", " &
+      nimString(gatePath) & ", " & nimString(label) & ", " &
+      nimString(outputRel) & "]),\n" &
+    "        inputs = @[" & inputLiteral & "],\n" &
+    "        outputs = @[" & nimString(outputRel) & "],\n" &
+    "        cacheable = false)\n")
+
+proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
+    socket: string; cli: string] =
+  let runquotaRoot = repoRoot.parentDir / "runquota"
+  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let cliBin = runquotaRoot / "build" / "bin" / "runquota"
+  if not fileExists(daemonBin) or not fileExists(cliBin):
+    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+  let socketPath = "/tmp/repro-m22-rq-" & $getCurrentProcessId() & ".sock"
+  if pathExists(socketPath):
+    removeFile(socketPath)
+  let daemon = startProcess(daemonBin, args = [
+    "--socket", socketPath,
+    "--cpu-milli", "1000",
+    "--memory-bytes", "17179869184"
+  ], options = {poUsePath, poStdErrToStdOut})
+  putEnv("RUNQUOTA_SOCKET", socketPath)
+  for _ in 0 ..< 200:
+    if pathExists(socketPath):
+      return (process: daemon, socket: socketPath, cli: cliBin)
+    sleep(25)
+  daemon.terminate()
+  raise newException(OSError, "runquotad socket did not appear")
+
+proc runQuotaJson(cliPath: string; args: openArray[string]): JsonNode =
+  let command = shellCommand(@[cliPath] & @args)
+  let res = execCmdEx(command)
+  if res.exitCode != 0:
+    raise newException(OSError, "runquota CLI failed: " & res.output)
+  parseJson(res.output)
+
+proc hasQueuedAndRunningBuildLeases(cliPath, actionA, actionB: string;
+                                    snapshot: var string): bool =
+  let node = runQuotaJson(cliPath, ["leases", "--json"])
+  snapshot = $node
+  var sawA = false
+  var sawB = false
+  var sawQueued = false
+  var sawActive = false
+  for lease in node{"leases"}.getElems():
+    let label = lease{"label"}.getStr()
+    if label == actionA:
+      sawA = true
+    if label == actionB:
+      sawB = true
+    if label != actionA and label != actionB:
+      continue
+    let state = lease{"state"}.getStr()
+    if state == "queued":
+      sawQueued = true
+    if state in ["granted", "starting", "running"]:
+      sawActive = true
+  sawA and sawB and sawQueued and sawActive
+
+proc collect(process: Process): tuple[code: int; output: string] =
+  if process.outputStream != nil:
+    result.output = process.outputStream.readAll()
+  result.code = process.waitForExit()
+  process.close()
+
+type
+  Interval = object
+    label: string
+    startMs: int64
+    endMs: int64
+    gateSeen: bool
+
+proc readInterval(path: string): Interval =
+  for line in readFile(path).splitLines:
+    let split = line.find('=')
+    if split < 0:
+      continue
+    let key = line[0 ..< split]
+    let value = line[split + 1 .. ^1]
+    case key
+    of "label":
+      result.label = value
+    of "start_ms":
+      result.startMs = parseBiggestInt(value)
+    of "end_ms":
+      result.endMs = parseBiggestInt(value)
+    of "gate_seen":
+      result.gateSeen = value == "true"
+    else:
+      discard
+
+proc overlaps(a, b: Interval): bool =
+  a.startMs < b.endMs and b.startMs < a.endMs
+
+proc reportAction(reportPath, actionId: string): JsonNode =
+  for action in parseFile(reportPath){"actions"}.getElems():
+    if action{"id"}.getStr() == actionId:
+      return action
+  raise newException(ValueError, "missing action in report: " & actionId)
+
+proc checkRunQuotaReportDiagnostics(action: JsonNode; socket: string) =
+  check action{"runQuotaBackend"}.getStr() == "posix-fork-exec-poll"
+  check action{"runQuotaSocket"}.getStr() == socket
+  check action{"leaseId"}.getBiggestInt() > 0
+
+suite "integration_reprobuild_sessions_share_runquota":
+  test "two repro build sessions serialize default 1000 milliCPU actions through one daemon":
+    let repoRoot = getCurrentDir()
+    let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+    check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
+      "ipc_registry_test.nim")
+    check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
+      "main.c")
+
+    let tempRoot = createTempDir("repro-m22-shared-runquota", "")
+    let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
+    defer:
+      putEnv("RUNQUOTA_SOCKET", previousSocket)
+      removeDir(tempRoot)
+
+    let reproBin = tempRoot / "repro"
+    discard requireSuccess(shellCommand([
+      "nim", "c", "--verbosity:0", "--hints:off",
+      "--nimcache:" & (tempRoot / "nimcache-repro"),
+      "--out:" & reproBin,
+      repoRoot / "apps" / "repro" / "repro.nim"
+    ]), repoRoot)
+
+    let helperSource = tempRoot / "timing_helper.nim"
+    let helperBin = tempRoot / "timing-helper"
+    writeTimingHelper(helperSource)
+    discard requireSuccess(shellCommand([
+      "nim", "c", "--verbosity:0", "--hints:off",
+      "--nimcache:" & (tempRoot / "nimcache-helper"),
+      "--out:" & helperBin,
+      helperSource
+    ]), repoRoot)
+
+    let stampsDir = tempRoot / "stamps"
+    let gatePath = tempRoot / "release-gate"
+    let codeProject = tempRoot / "codetracer-project"
+    let fixtureProject = tempRoot / "fixture-project"
+    createDir(codeProject)
+    createDir(fixtureProject)
+    copySelectedCodeTracerFiles(codeTracerRoot, codeProject)
+    writeFile(fixtureProject / "input.txt", "fixture\n")
+
+    const CodeAction = "m22-codetracer-sleep"
+    const FixtureAction = "m22-fixture-sleep"
+    writeProject(codeProject / "reprobuild.nim", "codeTracerM22", CodeAction,
+      helperBin, stampsDir / "codetracer.stamp", gatePath, "codetracer",
+      "build/codetracer.done",
+      ["src/frontend/tests/ipc_registry_test.nim", "src/c/main.c"],
+      "test -f src/frontend/tests/ipc_registry_test.nim\n" &
+        "test -f src/c/main.c\n")
+    writeProject(fixtureProject / "reprobuild.nim", "fixtureM22", FixtureAction,
+      helperBin, stampsDir / "fixture.stamp", gatePath, "fixture",
+      "build/fixture.done",
+      ["input.txt"])
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let launchStart = nowMillis()
+    let codeBuild = startProcess(reproBin, workingDir = repoRoot,
+      args = ["build", codeProject, "--tool-provisioning=path"],
+      options = {poUsePath, poStdErrToStdOut})
+    let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
+      args = ["build", fixtureProject, "--tool-provisioning=path"],
+      options = {poUsePath, poStdErrToStdOut})
+    let launchEnd = nowMillis()
+    check launchEnd - launchStart < 1000
+
+    var lastLeases = ""
+    var observedQueue = false
+    for _ in 0 ..< 400:
+      if hasQueuedAndRunningBuildLeases(daemon.cli, CodeAction, FixtureAction,
+          lastLeases):
+        observedQueue = true
+        break
+      if codeBuild.peekExitCode() != -1 and fixtureBuild.peekExitCode() != -1:
+        break
+      sleep(25)
+    writeFile(gatePath, "release\n")
+    if not observedQueue:
+      checkpoint(lastLeases)
+    check observedQueue
+
+    let codeResult = collect(codeBuild)
+    let fixtureResult = collect(fixtureBuild)
+    if codeResult.code != 0:
+      checkpoint(codeResult.output)
+    if fixtureResult.code != 0:
+      checkpoint(fixtureResult.output)
+    check codeResult.code == 0
+    check fixtureResult.code == 0
+
+    for output in [codeResult.output, fixtureResult.output]:
+      check output.contains("runQuotaSocket: " & daemon.socket)
+      check output.contains("socket=" & daemon.socket)
+      check output.contains("runquota=posix-fork-exec-poll")
+      check output.contains("lease=")
+
+    let codeInterval = readInterval(stampsDir / "codetracer.stamp")
+    let fixtureInterval = readInterval(stampsDir / "fixture.stamp")
+    check codeInterval.label == "codetracer"
+    check fixtureInterval.label == "fixture"
+    check codeInterval.gateSeen
+    check fixtureInterval.gateSeen
+    check codeInterval.startMs < codeInterval.endMs
+    check fixtureInterval.startMs < fixtureInterval.endMs
+    check not codeInterval.overlaps(fixtureInterval)
+
+    let codeReport = valueAfter(codeResult.output, "buildReport:")
+    let fixtureReport = valueAfter(fixtureResult.output, "buildReport:")
+    checkRunQuotaReportDiagnostics(reportAction(codeReport, CodeAction),
+      daemon.socket)
+    checkRunQuotaReportDiagnostics(reportAction(fixtureReport, FixtureAction),
+      daemon.socket)
+
+    let status = runQuotaJson(daemon.cli, ["status", "--json"])
+    check status{"active_sessions"}.getInt() == 0
+    check status{"active_leases"}.getInt() == 0
+    check status{"queued_leases"}.getInt() == 0
+    check status{"total_granted"}.getInt() == 2
+    check status{"total_finished"}.getInt() == 2
