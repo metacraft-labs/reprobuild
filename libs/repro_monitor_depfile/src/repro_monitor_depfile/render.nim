@@ -1,5 +1,6 @@
 import std/[json, strutils]
 
+import repro_monitor_depfile/capabilities
 import repro_monitor_depfile/types
 import repro_monitor_depfile/reader
 
@@ -14,6 +15,8 @@ proc recordKindName(record: MonitorRecord): string =
   of mrFileWrite: "file-write"
   of mrEventLoss: "event-loss"
   of mrDirectoryEnumerate: "directory-enumerate"
+  of mrBackendProfile: "backend-profile"
+  of mrCapabilityGap: "capability-gap"
 
 proc observationKindName(record: MonitorRecord): string =
   case record.observationKind
@@ -25,6 +28,8 @@ proc observationKindName(record: MonitorRecord): string =
   of moFileWrite: "file-write"
   of moEventLoss: "event-loss"
   of moDirectoryEnumerate: "directory-enumerate"
+  of moBackendProfile: "backend-profile"
+  of moCapabilityGap: "capability-gap"
 
 proc itemKindName(kind: FsSnoopStreamItemKind): string =
   case kind
@@ -43,6 +48,39 @@ proc summaryJson(summary: MonitorSummary): JsonNode =
   result["processCount"] = %int(summary.processCount)
   result["observationCount"] = %int(summary.observationCount)
   result["eventLossCount"] = %int(summary.eventLossCount)
+
+proc capabilitySetJson(capabilities: set[MonitorCapability]): JsonNode =
+  result = newJArray()
+  for capability in capabilities:
+    result.add(%capabilityId(capability))
+
+proc diagnosticJson(diagnostic: MonitorDiagnostic): JsonNode =
+  result = newJObject()
+  result["level"] = %($diagnostic.level)
+  result["message"] = %diagnostic.message
+
+proc capabilityGapJson(gap: MonitorCapabilityGap): JsonNode =
+  result = newJObject()
+  result["backendFamily"] = %backendFamilyId(gap.backendFamily)
+  result["capability"] = %capabilityId(gap.capability)
+  result["required"] = %gap.required
+  result["reason"] = %gap.reason
+
+proc backendProfileJson(profile: MonitorBackendProfile): JsonNode =
+  result = newJObject()
+  result["profileName"] = %profile.profileName
+  result["backendFamily"] = %backendFamilyId(profile.backendFamily)
+  result["supportedCapabilities"] = capabilitySetJson(profile.supportedCapabilities)
+  result["requiredCapabilities"] = capabilitySetJson(profile.requiredCapabilities)
+  result["evidenceComplete"] = %profile.evidenceComplete
+  var gaps = newJArray()
+  for gap in profile.gaps:
+    gaps.add capabilityGapJson(gap)
+  result["gaps"] = gaps
+  var diagnostics = newJArray()
+  for diagnostic in profile.diagnostics:
+    diagnostics.add diagnosticJson(diagnostic)
+  result["diagnostics"] = diagnostics
 
 proc recordJson*(record: MonitorRecord): JsonNode =
   result = newJObject()
@@ -123,8 +161,13 @@ proc renderMonitorDepFileJson*(dep: MonitorDepFile): string =
   root["format"] = %"RMDF"
   root["version"] = %int(dep.version)
   root["producerVersion"] = %dep.producerVersion
-  root["backendFamily"] = %($dep.backendFamily)
+  root["backendFamily"] = %backendFamilyId(dep.backendFamily)
   root["completeness"] = %($dep.completeness)
+  root["backendProfile"] = backendProfileJson(dep.profile)
+  var gaps = newJArray()
+  for gap in dep.capabilityGaps:
+    gaps.add capabilityGapJson(gap)
+  root["capabilityGaps"] = gaps
   root["summary"] = summaryJson(dep.summary)
   var records = newJArray()
   for record in dep.records:

@@ -1,6 +1,7 @@
 import std/[algorithm, os, strutils]
 
 import repro_core/codec
+import repro_monitor_depfile/capabilities
 import repro_monitor_depfile/types
 
 const
@@ -121,17 +122,22 @@ proc summarizeRecords*(records: openArray[MonitorRecord]): MonitorSummary =
   result.processCount = uint64(processPids.len)
 
 proc depFileFromRecords*(records: openArray[MonitorRecord]): MonitorDepFile =
+  let summary = summarizeRecords(records)
+  var profile = profileFromRecords(records)
+  if summary.eventLossCount != 0:
+    profile.evidenceComplete = false
   MonitorDepFile(
     version: RmdfVersion,
     producerVersion: ReproMonitorDepfileProducer,
-    backendFamily: mbfMacosHooks,
-    requiredFeatures: {mcapProcess, mcapFileRead, mcapFileWrite, mcapPathProbe,
-      mcapDirectoryEnumerate, mcapEventLoss},
-    completeness: if summarizeRecords(records).eventLossCount == 0:
+    backendFamily: profile.backendFamily,
+    requiredFeatures: profile.requiredCapabilities,
+    completeness: if profile.evidenceComplete and summary.eventLossCount == 0:
         mcComplete
       else:
         mcIncomplete,
-    summary: summarizeRecords(records),
+    profile: profile,
+    capabilityGaps: profile.gaps,
+    summary: summary,
     records: @records)
 
 proc encodeCanonical*(records: openArray[MonitorRecord]): seq[byte] =
@@ -161,6 +167,8 @@ proc mergeFragments*(fragmentDir, outputPath: string): MonitorDepFile =
     for kind, path in walkDir(fragmentDir):
       if kind == pcFile and path.endsWith(".rmdf-frag"):
         records.add readFragmentRecords(path)
+  records.add profileRecords(macosInterposeMonitorProfile(
+    MacosMonitorShimTaxonomyCapabilities))
 
   let canonical = encodeCanonical(records)
   writeFile(outputPath, canonical.fromBytes())

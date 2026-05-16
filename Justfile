@@ -33,6 +33,15 @@ e2e-debug-fs-snoop:
         tests/e2e/fs-snoop/t_debug_fs_snoop_reads_monitor_depfile.nim \
         2>&1 | tee test-logs/e2e-debug-fs-snoop.log
 
+e2e-macos-monitor-shim-event-taxonomy:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e-macos-monitor-shim-event-taxonomy \
+        --out:build/test-bin/e2e_macos_monitor_shim_event_taxonomy \
+        tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim \
+        2>&1 | tee test-logs/e2e-macos-monitor-shim-event-taxonomy.log
+
 lint:
     mkdir -p test-logs
     ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log

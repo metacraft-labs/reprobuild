@@ -11,6 +11,8 @@ type
     mrFileWrite = 7
     mrEventLoss = 8
     mrDirectoryEnumerate = 9
+    mrBackendProfile = 10
+    mrCapabilityGap = 11
 
   MonitorObservationKind* = enum
     moProcessStart = 1
@@ -21,6 +23,8 @@ type
     moFileWrite = 6
     moEventLoss = 7
     moDirectoryEnumerate = 8
+    moBackendProfile = 9
+    moCapabilityGap = 10
 
   ProbeResult* = enum
     prUnknown = 0
@@ -35,6 +39,8 @@ type
 
   MonitorBackendFamily* = enum
     mbfMacosHooks
+    mbfMacosEndpointSecurity
+    mbfMacosHybrid
     mbfUnknown
 
   MonitorCapability* = enum
@@ -44,6 +50,19 @@ type
     mcapPathProbe
     mcapDirectoryEnumerate
     mcapEventLoss
+    mcapProcessTree
+    mcapProcessExec
+    mcapBackendProvenance
+    mcapFileCreate
+    mcapFileTruncate
+    mcapFileAppend
+    mcapEndpointSecurity
+    mcapHybrid
+    mcapRename
+    mcapSymlink
+    mcapLibraryLoad
+    mcapAuthorizationEnforcement
+    mcapPathMutation
 
   MonitorDiagnosticLevel* = enum
     mdlInfo
@@ -53,6 +72,21 @@ type
   MonitorDiagnostic* = object
     level*: MonitorDiagnosticLevel
     message*: string
+
+  MonitorCapabilityGap* = object
+    backendFamily*: MonitorBackendFamily
+    capability*: MonitorCapability
+    required*: bool
+    reason*: string
+
+  MonitorBackendProfile* = object
+    profileName*: string
+    backendFamily*: MonitorBackendFamily
+    supportedCapabilities*: set[MonitorCapability]
+    requiredCapabilities*: set[MonitorCapability]
+    gaps*: seq[MonitorCapabilityGap]
+    evidenceComplete*: bool
+    diagnostics*: seq[MonitorDiagnostic]
 
   MonitorRecord* = object
     kind*: MonitorRecordKind
@@ -80,6 +114,8 @@ type
     backendFamily*: MonitorBackendFamily
     requiredFeatures*: set[MonitorCapability]
     completeness*: MonitorCompleteness
+    profile*: MonitorBackendProfile
+    capabilityGaps*: seq[MonitorCapabilityGap]
     summary*: MonitorSummary
     records*: seq[MonitorRecord]
 
