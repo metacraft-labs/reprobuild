@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Provider graph runtime protocol and fragment refresh store"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

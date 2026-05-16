@@ -92,6 +92,15 @@ integration_scheduler_dependency_gathering_policies:
         tests/integration/t_integration_scheduler_dependency_gathering_policies.nim \
         2>&1 | tee test-logs/integration_scheduler_dependency_gathering_policies.log
 
+integration_provider_fragment_refresh_and_pruning:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_provider_fragment_refresh_and_pruning \
+        --out:build/test-bin/integration_provider_fragment_refresh_and_pruning \
+        tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim \
+        2>&1 | tee test-logs/integration_provider_fragment_refresh_and_pruning.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \
