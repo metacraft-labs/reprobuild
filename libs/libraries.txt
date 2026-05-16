@@ -9,3 +9,5 @@ gxhash
 repro_hash
 cbor
 repro_domain_types
+repro_project_dsl
+repro_interface_artifacts

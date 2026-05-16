@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Project interface artifacts and provider compile edge helpers"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"
