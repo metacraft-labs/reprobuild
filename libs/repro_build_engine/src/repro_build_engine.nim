@@ -613,6 +613,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var poolRunning = initTable[string, uint32]()
   var ready: seq[string] = @[]
   var actionsById = initTable[string, BuildAction]()
+  var launchedSucceeded = initHashSet[string]()
 
   poolCapacity[""] = maxParallel
   for p in g.pools:
@@ -648,6 +649,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     runResult.results[idx].cacheDecision = cacheDecision
     runResult.results[idx].launched = launched
     statuses[id] = status
+    if launched and status == asSucceeded:
+      launchedSucceeded.incl(id)
     runResult.trace(id, $status, detail)
     for dep in dependents.getOrDefault(id):
       if statuses[dep] == asPending:
@@ -697,7 +700,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         runResult.trace(id, "dependency-policy", $action.dependencyPolicy.kind)
 
         var cacheMissInputChanged = false
-        if action.cacheable:
+        var dependencyLaunched = false
+        for dep in action.deps:
+          if launchedSucceeded.contains(dep):
+            dependencyLaunched = true
+            break
+        if dependencyLaunched:
+          runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+          runResult.trace(id, "cache-skipped", "dependency-launched")
+        elif action.cacheable:
           let lookup = cache.lookupActionResult(cas, action.weakFingerprint, ffpChecksum)
           case lookup.status
           of aclHit:
@@ -731,6 +742,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
 
         if action.allOutputsExist() and not cacheMissInputChanged and
+            not dependencyLaunched and
             not action.needsExecutionForPolicy():
           let evidence = collectEvidence(action, strict = true)
           runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence

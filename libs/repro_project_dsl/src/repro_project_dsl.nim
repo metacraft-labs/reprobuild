@@ -54,6 +54,9 @@ type
   PublicCliArg* = object
     name*: string
     nimType*: string
+    kind*: CliParamKind
+    position*: int
+    alias*: string
     encodedValue*: string
 
   PublicCliCall* = object
@@ -83,7 +86,7 @@ var buildActionRegistry: seq[BuildActionDef] = @[]
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 1'u16
+  BuildActionPayloadVersion = 2'u16
 
 proc resetPackageRegistry*() =
   registry.setLen(0)
@@ -100,17 +103,25 @@ proc resetBuildActionRegistry*() =
 proc registeredBuildActions*(): seq[BuildActionDef] =
   buildActionRegistry
 
-proc cliArg*(name: string; value: string): PublicCliArg =
-  PublicCliArg(name: name, nimType: "string", encodedValue: value)
+proc cliArg*(name: string; value: string; kind = cpkFlag; position = 0;
+             alias = ""): PublicCliArg =
+  PublicCliArg(name: name, nimType: "string", kind: kind, position: position,
+    alias: alias, encodedValue: value)
 
-proc cliArg*(name: string; value: int): PublicCliArg =
-  PublicCliArg(name: name, nimType: "int", encodedValue: $value)
+proc cliArg*(name: string; value: int; kind = cpkFlag; position = 0;
+             alias = ""): PublicCliArg =
+  PublicCliArg(name: name, nimType: "int", kind: kind, position: position,
+    alias: alias, encodedValue: $value)
 
-proc cliArg*(name: string; value: bool): PublicCliArg =
-  PublicCliArg(name: name, nimType: "bool", encodedValue: $value)
+proc cliArg*(name: string; value: bool; kind = cpkFlag; position = 0;
+             alias = ""): PublicCliArg =
+  PublicCliArg(name: name, nimType: "bool", kind: kind, position: position,
+    alias: alias, encodedValue: $value)
 
-proc cliArgSeq*(name: string; value: seq[string]): PublicCliArg =
-  PublicCliArg(name: name, nimType: "seq[string]", encodedValue: value.join("\x1f"))
+proc cliArgSeq*(name: string; value: seq[string]; kind = cpkFlag; position = 0;
+                alias = ""): PublicCliArg =
+  PublicCliArg(name: name, nimType: "seq[string]", kind: kind, position: position,
+    alias: alias, encodedValue: value.join("\x1f"))
 
 proc publicCliCall*(packageName, executableName, subcommand,
                     providerEntrypointId: string;
@@ -209,13 +220,25 @@ proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
 proc writeCliArg(outp: var seq[byte]; arg: PublicCliArg) =
   outp.writeString(arg.name)
   outp.writeString(arg.nimType)
+  outp.writeByte(byte(ord(arg.kind)))
+  outp.writeU32Le(uint32(arg.position))
+  outp.writeString(arg.alias)
   outp.writeString(arg.encodedValue)
 
-proc readCliArg(bytes: openArray[byte]; pos: var int): PublicCliArg =
-  PublicCliArg(
-    name: readString(bytes, pos),
-    nimType: readString(bytes, pos),
-    encodedValue: readString(bytes, pos))
+proc readCliArg(bytes: openArray[byte]; pos: var int; version: uint16):
+    PublicCliArg =
+  result.name = readString(bytes, pos)
+  result.nimType = readString(bytes, pos)
+  if version >= 2'u16:
+    let kind = readByte(bytes, pos)
+    if kind > byte(ord(cpkFlag)):
+      raisePayload("invalid CLI argument kind in build action payload")
+    result.kind = CliParamKind(kind)
+    result.position = int(readU32Le(bytes, pos))
+    result.alias = readString(bytes, pos)
+  else:
+    result.kind = cpkFlag
+  result.encodedValue = readString(bytes, pos)
 
 proc writeCliCall(outp: var seq[byte]; call: PublicCliCall) =
   outp.writeString(call.packageName)
@@ -226,7 +249,8 @@ proc writeCliCall(outp: var seq[byte]; call: PublicCliCall) =
   for arg in call.arguments:
     outp.writeCliArg(arg)
 
-proc readCliCall(bytes: openArray[byte]; pos: var int): PublicCliCall =
+proc readCliCall(bytes: openArray[byte]; pos: var int; version: uint16):
+    PublicCliCall =
   result.packageName = readString(bytes, pos)
   result.executableName = readString(bytes, pos)
   result.subcommand = readString(bytes, pos)
@@ -234,7 +258,7 @@ proc readCliCall(bytes: openArray[byte]; pos: var int): PublicCliCall =
   let count = int(readU32Le(bytes, pos))
   result.arguments = newSeq[PublicCliArg](count)
   for i in 0 ..< count:
-    result.arguments[i] = readCliArg(bytes, pos)
+    result.arguments[i] = readCliArg(bytes, pos, version)
 
 proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
   var payload: seq[byte] = @[]
@@ -260,14 +284,14 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
       raisePayload("unknown build action payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != BuildActionPayloadVersion:
+  if version notin {1'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
     raisePayload("build action payload length mismatch")
 
   result.id = readString(bytes, pos)
-  result.call = readCliCall(bytes, pos)
+  result.call = readCliCall(bytes, pos, version)
   result.deps = readStringSeq(bytes, pos)
   result.inputs = readStringSeq(bytes, pos)
   result.outputs = readStringSeq(bytes, pos)
@@ -514,10 +538,47 @@ proc nimDefault(nimType: string): string =
     "default(" & nimType & ")"
 
 proc argBuilder(param: CliParamDef): string =
+  let kindCode =
+    if param.kind == cpkPositional:
+      "cpkPositional"
+    else:
+      "cpkFlag"
+  let metaArgs = ", " & kindCode & ", " & $param.position & ", " &
+    escForCode(param.alias)
   if param.nimType.normalize == "seq[string]":
-    "cliArgSeq(\"" & param.name & "\", " & param.name & ")"
+    "cliArgSeq(\"" & param.name & "\", " & param.name & metaArgs & ")"
   else:
-    "cliArg(\"" & param.name & "\", " & param.name & ")"
+    "cliArg(\"" & param.name & "\", " & param.name & metaArgs & ")"
+
+proc validGeneratedIdent(text: string): bool =
+  const keywords = [
+    "addr", "and", "as", "asm", "bind", "block", "break", "case", "cast",
+    "concept", "const", "continue", "converter", "defer", "discard", "distinct",
+    "div", "do", "elif", "else", "end", "enum", "except", "export", "finally",
+    "for", "from", "func", "if", "import", "in", "include", "interface", "is",
+    "isnot", "iterator", "let", "macro", "method", "mixin", "mod", "nil", "not",
+    "notin", "object", "of", "or", "out", "proc", "ptr", "raise", "ref",
+    "return", "shl", "shr", "static", "template", "try", "tuple", "type",
+    "using", "var", "when", "while", "xor", "yield"
+  ]
+  if text.len == 0 or text.normalize in keywords:
+    return false
+  if not (text[0].isAlphaAscii() or text[0] == '_'):
+    return false
+  for ch in text:
+    if not (ch.isAlphaNumeric() or ch == '_'):
+      return false
+  true
+
+proc commandProcName(cmdName: string): string =
+  if validGeneratedIdent(cmdName):
+    return cmdName
+  result = "subcmd"
+  for ch in cmdName:
+    if ch.isAlphaNumeric():
+      result.add("_" & $ch)
+    else:
+      result.add("_" & toHex(ord(ch), 2).toLowerAscii())
 
 proc titleIdent(text: string): string =
   if text.len == 0:
@@ -542,7 +603,8 @@ proc wrapperCode(pkg: PackageDef): string =
     for cmd in exe.commands:
       var params: seq[string] = @["exe: " & exeTypeName]
       var argCalls: seq[string] = @[]
-      var signature = cmd.name
+      let procName = commandProcName(cmd.name)
+      var signature = procName & "|" & cmd.name
       for param in cmd.params:
         var spec = param.name & ": " & param.nimType
         if not param.required:
@@ -553,7 +615,7 @@ proc wrapperCode(pkg: PackageDef): string =
       if selectedCommands.find(signature) >= 0:
         continue
       selectedCommands.add(signature)
-      result.add("proc " & cmd.name & "*( " & params.join("; ") &
+      result.add("proc " & procName & "*( " & params.join("; ") &
         "): PublicCliCall =\n")
       result.add("  publicCliCall(exe.value.packageName, " &
         "exe.value.executableName, " & escForCode(cmd.name) &
@@ -570,7 +632,8 @@ proc wrapperCode(pkg: PackageDef): string =
           spec.add(" = " & nimDefault(param.nimType))
         params.add(spec)
         argCalls.add(argBuilder(param))
-      result.add("proc " & cmd.name & "*( " & params.join("; ") &
+      let procName = commandProcName(cmd.name)
+      result.add("proc " & procName & "*( " & params.join("; ") &
         "): PublicCliCall =\n")
       result.add("  discard pkg\n")
       result.add("  publicCliCall(" & escForCode(pkg.packageName) & ", " &

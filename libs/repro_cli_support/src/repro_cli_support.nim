@@ -1,4 +1,4 @@
-import std/[json, os, strutils, tables]
+import std/[algorithm, json, os, strutils, tables]
 import repro_core
 import repro_build_engine
 import repro_depfile
@@ -93,21 +93,39 @@ proc profileIndex(identity: PathOnlyBuildIdentity):
 
 proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string] =
   result = @[profile.resolvedExecutablePath, call.subcommand]
+
+  proc addEncodedValue(outp: var seq[string]; arg: PublicCliArg) =
+    if arg.nimType.normalize == "seq[string]":
+      if arg.encodedValue.len > 0:
+        for item in arg.encodedValue.split("\x1f"):
+          outp.add(item)
+    else:
+      outp.add(arg.encodedValue)
+
+  var positional: seq[PublicCliArg] = @[]
   for arg in call.arguments:
     let name = arg.name
     let nimType = arg.nimType
     let value = arg.encodedValue
-    case nimType.normalize
-    of "bool":
+    if arg.kind == cpkPositional:
+      positional.add(arg)
+      continue
+    let flagName =
+      if arg.alias.len > 0:
+        arg.alias
+      else:
+        "--" & name
+    if nimType.normalize == "bool":
       if value.normalize == "true":
-        result.add("--" & name)
-    of "seq[string]":
-      if value.len > 0:
-        for item in value.split("\x1f"):
-          result.add(item)
+        result.add(flagName)
     else:
-      result.add("--" & name)
-      result.add(value)
+      result.add(flagName)
+      result.addEncodedValue(arg)
+
+  positional.sort do (a, b: PublicCliArg) -> int:
+    cmp(a.position, b.position)
+  for arg in positional:
+    result.addEncodedValue(arg)
 
 proc depfilePolicy(depfile: string): DependencyGatheringPolicy =
   if depfile.len == 0:

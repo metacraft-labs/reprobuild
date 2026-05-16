@@ -51,6 +51,15 @@ e2e_local_reprobuild_project_build:
         tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim \
         2>&1 | tee test-logs/e2e_local_reprobuild_project_build.log
 
+e2e_codetracer_build_subset_without_tup:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_codetracer_build_subset_without_tup \
+        --out:build/test-bin/e2e_codetracer_build_subset_without_tup \
+        tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim \
+        2>&1 | tee test-logs/e2e_codetracer_build_subset_without_tup.log
+
 lint:
     mkdir -p test-logs
     ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log

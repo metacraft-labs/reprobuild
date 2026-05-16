@@ -517,17 +517,57 @@ proc nimDefault(nimType: string): string =
   else:
     "default(" & nimType & ")"
 
+proc escForCode(text: string): string =
+  text.escape()
+
 proc argBuilder(param: InterfaceParam): string =
+  let kindCode =
+    if param.kind == ipkPositional:
+      "cpkPositional"
+    else:
+      "cpkFlag"
+  let metaArgs = ", " & kindCode & ", " & $param.position & ", " &
+    escForCode(param.alias)
   if param.nimType.normalize == "seq[string]":
-    "cliArgSeq(\"" & param.name & "\", " & param.name & ")"
+    "cliArgSeq(\"" & param.name & "\", " & param.name & metaArgs & ")"
   else:
-    "cliArg(\"" & param.name & "\", " & param.name & ")"
+    "cliArg(\"" & param.name & "\", " & param.name & metaArgs & ")"
 
 proc titleIdent(text: string): string =
   if text.len == 0:
     "Package"
   else:
     text[0].toUpperAscii() & text.substr(1) & "Package"
+
+proc validGeneratedIdent(text: string): bool =
+  const keywords = [
+    "addr", "and", "as", "asm", "bind", "block", "break", "case", "cast",
+    "concept", "const", "continue", "converter", "defer", "discard", "distinct",
+    "div", "do", "elif", "else", "end", "enum", "except", "export", "finally",
+    "for", "from", "func", "if", "import", "in", "include", "interface", "is",
+    "isnot", "iterator", "let", "macro", "method", "mixin", "mod", "nil", "not",
+    "notin", "object", "of", "or", "out", "proc", "ptr", "raise", "ref",
+    "return", "shl", "shr", "static", "template", "try", "tuple", "type",
+    "using", "var", "when", "while", "xor", "yield"
+  ]
+  if text.len == 0 or text.normalize in keywords:
+    return false
+  if not (text[0].isAlphaAscii() or text[0] == '_'):
+    return false
+  for ch in text:
+    if not (ch.isAlphaNumeric() or ch == '_'):
+      return false
+  true
+
+proc commandProcName(cmdName: string): string =
+  if validGeneratedIdent(cmdName):
+    return cmdName
+  result = "subcmd"
+  for ch in cmdName:
+    if ch.isAlphaNumeric():
+      result.add("_" & $ch)
+    else:
+      result.add("_" & toHex(ord(ch), 2).toLowerAscii())
 
 proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   let pkg = artifact.projectInterface
@@ -548,7 +588,8 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
     for cmd in exe.commands:
       var params: seq[string] = @["exe: " & exeTypeName]
       var argCalls: seq[string] = @[]
-      var signature = cmd.name
+      let procName = commandProcName(cmd.name)
+      var signature = procName & "|" & cmd.name
       for param in cmd.params:
         var spec = param.name & ": " & param.nimType
         if not param.required:
@@ -559,7 +600,7 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
       if selectedCommands.find(signature) >= 0:
         continue
       selectedCommands.add(signature)
-      code.add("proc " & cmd.name & "*( " & params.join("; ") &
+      code.add("proc " & procName & "*( " & params.join("; ") &
         "): PublicCliCall =\n")
       code.add("  publicCliCall(exe.value.packageName, " &
         "exe.value.executableName, \"" & cmd.name &
@@ -576,7 +617,8 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
           spec.add(" = " & nimDefault(param.nimType))
         params.add(spec)
         argCalls.add(argBuilder(param))
-      code.add("proc " & cmd.name & "*( " & params.join("; ") &
+      let procName = commandProcName(cmd.name)
+      code.add("proc " & procName & "*( " & params.join("; ") &
         "): PublicCliCall =\n")
       code.add("  discard pkg\n")
       code.add("  publicCliCall(\"" & pkg.packageName & "\", \"" &
