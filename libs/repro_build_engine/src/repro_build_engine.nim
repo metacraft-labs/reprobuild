@@ -56,6 +56,7 @@ type
   BuildEngineConfig* = object
     cacheRoot*: string
     runQuotaCliPath*: string
+    monitorCliPath*: string
     maxParallelism*: uint32
     stdoutLimit*: int
     stderrLimit*: int
@@ -79,6 +80,8 @@ type
     exitCode*: int
     launched*: bool
     cacheDecision*: CacheDecision
+    dependencyPolicyKind*: DependencyGatheringKind
+    monitorDepfilePath*: string
     blockedBy*: string
     stdout*: string
     stderr*: string
@@ -100,13 +103,30 @@ type
     id: string
     pool: string
     poolUnits: uint32
+    action: BuildAction
     process: Process
     resultPath: string
+
+const
+  RecognizedPolicyKinds = {
+    dgRecognizedFormat,
+    dgRecognizedFormatValidatedByMonitor
+  }
+  ConverterPolicyKinds = {
+    dgPostBuildConverter,
+    dgPostBuildConverterValidatedByMonitor
+  }
+  MonitorPolicyKinds = {
+    dgAutomaticMonitor,
+    dgRecognizedFormatValidatedByMonitor,
+    dgPostBuildConverterValidatedByMonitor
+  }
 
 proc defaultBuildEngineConfig*(cacheRoot: string): BuildEngineConfig =
   BuildEngineConfig(
     cacheRoot: cacheRoot,
     runQuotaCliPath: "",
+    monitorCliPath: "",
     maxParallelism: 8'u32,
     stdoutLimit: 1_048_576,
     stderrLimit: 1_048_576)
@@ -244,8 +264,8 @@ proc materialPath(root, path: string): string =
 proc expectedPath(action: BuildAction; file: ExpectedDependencyFile): string =
   materialPath(action.cwd, file.path)
 
-proc legacyDepfileReports(action: BuildAction): seq[RecognizedDependencyReportSpec] =
-  result = action.dependencyPolicy.recognizedReports
+proc legacyDepfileReports(action: BuildAction):
+    seq[RecognizedDependencyReportSpec] =
   if action.depfile.len > 0:
     result.add RecognizedDependencyReportSpec(
       formatName: DependencyFormatName(MakeDepfileFormatName),
@@ -254,6 +274,28 @@ proc legacyDepfileReports(action: BuildAction): seq[RecognizedDependencyReportSp
         path: action.depfile,
         required: true)],
       completeness: decComplete)
+
+proc reportSpecsForPolicy(action: BuildAction):
+    seq[RecognizedDependencyReportSpec] =
+  if action.dependencyPolicy.kind in RecognizedPolicyKinds:
+    return action.dependencyPolicy.recognizedReports
+  if action.dependencyPolicy.kind == dgDeclaredOnly:
+    return action.legacyDepfileReports()
+  @[]
+
+proc converterSpecsForPolicy(action: BuildAction):
+    seq[PostBuildDependencyConverterSpec] =
+  if action.dependencyPolicy.kind in ConverterPolicyKinds:
+    return action.dependencyPolicy.postBuildConverters
+  @[]
+
+proc monitorEvidenceRequired(action: BuildAction): bool =
+  action.dependencyPolicy.kind in MonitorPolicyKinds or
+    (action.dependencyPolicy.kind == dgDeclaredOnly and
+      action.monitorDepfile.len > 0)
+
+proc needsExecutionForPolicy(action: BuildAction): bool =
+  action.dependencyPolicy.kind in MonitorPolicyKinds
 
 proc addPathSet(evidence: var PathSetEvidence; pathSet: DependencyPathSet;
                 recognized: bool) =
@@ -270,14 +312,20 @@ proc addPathSet(evidence: var PathSetEvidence; pathSet: DependencyPathSet;
   for diagnostic in pathSet.diagnostics:
     evidence.diagnostics.add(diagnostic)
 
-proc collectConvertedEvidence(action: BuildAction; evidence: var PathSetEvidence):
-    bool
+proc collectConvertedEvidence(action: BuildAction;
+                              specs: openArray[PostBuildDependencyConverterSpec];
+                              evidence: var PathSetEvidence): bool
 
 proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
   result.publishable = true
   result.evidence.declaredInputs = action.inputs
   result.evidence.declaredOutputs = action.outputs
-  for report in action.legacyDepfileReports():
+  let reports = action.reportSpecsForPolicy()
+  if action.dependencyPolicy.kind in RecognizedPolicyKinds and reports.len == 0:
+    result.evidence.diagnostics.add(
+      "dependency policy requires a recognized report but none is declared")
+    result.publishable = false
+  for report in reports:
     for output in report.outputs:
       let path = action.expectedPath(output)
       if output.required and not fileExists(path):
@@ -293,15 +341,35 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
       except DependencyReportError as err:
         result.evidence.diagnostics.add("dependency report invalid: " & err.msg)
         result.publishable = false
-  if not action.collectConvertedEvidence(result.evidence):
+  let converters = action.converterSpecsForPolicy()
+  if action.dependencyPolicy.kind in ConverterPolicyKinds and converters.len == 0:
+    result.evidence.diagnostics.add(
+      "dependency policy requires a post-build converter but none is declared")
     result.publishable = false
-  if action.monitorDepfile.len > 0:
+  if not action.collectConvertedEvidence(converters, result.evidence):
+    result.publishable = false
+  if action.monitorEvidenceRequired():
+    if action.monitorDepfile.len == 0:
+      result.evidence.diagnostics.add(
+        "dependency policy requires monitor evidence but no RMDF path is selected")
+      result.publishable = false
+      if strict and not result.publishable:
+        discard
+      return
     try:
       let dep = readMonitorDepFile(action.monitorDepfile)
       for record in dep.records:
         case record.kind
-        of mrFileRead, mrFileOpen:
+        of mrFileRead:
           result.evidence.monitorReads.addUnique(record.path)
+        of mrFileOpen:
+          case record.observationKind
+          of moFileRead, moFileOpen:
+            result.evidence.monitorReads.addUnique(record.path)
+          of moFileWrite:
+            result.evidence.monitorWrites.addUnique(record.path)
+          else:
+            discard
         of mrFileWrite:
           result.evidence.monitorWrites.addUnique(record.path)
         of mrPathProbe, mrDirectoryEnumerate:
@@ -377,18 +445,21 @@ proc runConverter(action: BuildAction; converterSpec: PostBuildDependencyConvert
       return (ok: false, diagnostic: "converter output missing: " & path)
   (ok: true, diagnostic: "")
 
-proc runConverters(action: BuildAction): tuple[ok: bool; diagnostics: seq[string]] =
+proc runConverters(action: BuildAction;
+                   specs: openArray[PostBuildDependencyConverterSpec]):
+                   tuple[ok: bool; diagnostics: seq[string]] =
   result.ok = true
-  for converterSpec in action.dependencyPolicy.postBuildConverters:
+  for converterSpec in specs:
     let converterResult = action.runConverter(converterSpec)
     if not converterResult.ok:
       result.ok = false
       result.diagnostics.add("dependency converter: " & converterResult.diagnostic)
 
-proc collectConvertedEvidence(action: BuildAction; evidence: var PathSetEvidence):
-    bool =
+proc collectConvertedEvidence(action: BuildAction;
+                              specs: openArray[PostBuildDependencyConverterSpec];
+                              evidence: var PathSetEvidence): bool =
   result = true
-  for converterSpec in action.dependencyPolicy.postBuildConverters:
+  for converterSpec in specs:
     for output in converterSpec.outputs:
       let path = action.expectedPath(output)
       if output.required and not fileExists(path):
@@ -414,6 +485,47 @@ proc defaultRunQuotaHelperPath(): string =
   if configured.len > 0:
     return configured
   raiseEngine("BuildEngineConfig.runQuotaCliPath or REPRO_RUNQUOTA_HELPER is required")
+
+proc monitorCliPath(config: BuildEngineConfig): string =
+  if config.monitorCliPath.len > 0:
+    return config.monitorCliPath
+  let configured = getEnv("REPRO_FS_SNOOP")
+  if configured.len > 0:
+    return configured
+  let repoBuild = getCurrentDir() / "build" / "bin" / "repro-fs-snoop"
+  if fileExists(repoBuild):
+    return repoBuild
+  ""
+
+proc sanitizeActionId(value: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
+        ch in {'-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = "action"
+
+proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
+                     cacheRoot: string): tuple[action: BuildAction;
+                                               diagnostic: string] =
+  result.action = action
+  if action.dependencyPolicy.kind notin MonitorPolicyKinds:
+    return
+  when not defined(macosx):
+    result.diagnostic =
+      "automatic monitor dependency gathering is unsupported on this platform"
+  else:
+    let monitorCli = monitorCliPath(config)
+    if monitorCli.len == 0:
+      result.diagnostic =
+        "automatic monitor dependency gathering requires repro-fs-snoop"
+      return
+    let depfile = cacheRoot / "monitor-depfiles" /
+      (sanitizeActionId(action.id) & ".rdep")
+    result.action.monitorDepfile = depfile
+    result.action.argv = @[monitorCli, "--depfile", depfile, "--"] & action.argv
 
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
                           resultPath: string): Process =
@@ -521,6 +633,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     runResult.results.add(ActionResult(
       id: action.id,
       status: asPending,
+      dependencyPolicyKind: action.dependencyPolicy.kind,
       cacheDecision: if action.cacheable: cdMiss else: cdNotCacheable))
 
   proc readyCmp(a, b: string): int =
@@ -551,6 +664,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         runResult.trace(dep, "blocked", blocker)
         blockClosure(dep, blocker)
 
+  proc terminalCount(): int =
+    for action in g.actions:
+      if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
+        inc result
+
   var completed = 0
   var running: seq[RunningAction] = @[]
   let runQuotaResultRoot = cacheRoot / "runquota-results"
@@ -574,7 +692,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
         ready.delete(i)
         runResult.trace(id, "ready", "pool=" & poolName)
+        runResult.trace(id, "dependency-policy", $action.dependencyPolicy.kind)
 
+        var cacheMissInputChanged = false
         if action.cacheable:
           let lookup = cache.lookupActionResult(cas, action.weakFingerprint, ffpChecksum)
           case lookup.status
@@ -596,10 +716,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             continue
           of aclRejectedCorruptOutput:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdRejected
+          of aclMissInputChanged:
+            runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+            cacheMissInputChanged = true
           else:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
 
-        if action.allOutputsExist():
+        if action.allOutputsExist() and not cacheMissInputChanged and
+            not action.needsExecutionForPolicy():
           let evidence = collectEvidence(action, strict = true)
           runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence
           if not evidence.publishable:
@@ -609,7 +733,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               evidence.evidence.diagnostics.join("\n")
             runResult.trace(id, "failed", "dependency evidence invalid")
             blockClosure(id, id)
-            inc completed
+            completed = terminalCount()
             launchedAny = true
             continue
           completeSuccess(id, asUpToDate, runResult.results[idToIndex.resultIndex(id)].cacheDecision,
@@ -618,16 +742,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           launchedAny = true
           continue
 
+        let plan = monitoredAction(action, config, cacheRoot)
+        if plan.diagnostic.len > 0:
+          statuses[id] = asFailed
+          let idx = idToIndex.resultIndex(id)
+          runResult.results[idx].status = asFailed
+          runResult.results[idx].stderr = plan.diagnostic
+          runResult.trace(id, "failed", plan.diagnostic)
+          blockClosure(id, id)
+          completed = terminalCount()
+          launchedAny = true
+          continue
+
         statuses[id] = asRunning
         runResult.results[idToIndex.resultIndex(id)].status = asRunning
+        runResult.results[idToIndex.resultIndex(id)].monitorDepfilePath =
+          plan.action.monitorDepfile
         poolRunning[poolName] = used + units
         inc launchSeq
         let resultPath = runQuotaResultRoot / ($launchSeq & ".json")
-        let process = startRunQuotaProcess(action, config, resultPath)
+        let process = startRunQuotaProcess(plan.action, config, resultPath)
         running.add(RunningAction(
           id: id,
           pool: poolName,
           poolUnits: units,
+          action: plan.action,
           process: process,
           resultPath: resultPath))
         runResult.trace(id, "launched", "pool=" & poolName)
@@ -653,23 +792,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             break
         if runIndex < 0:
           sleep(10)
+      let runningItem = running[runIndex]
       let finished = finishRunQuotaProcess(
-        running[runIndex].id,
-        running[runIndex].process,
-        running[runIndex].resultPath)
+        runningItem.id,
+        runningItem.process,
+        runningItem.resultPath)
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
-      running[runIndex].process.close()
-      let finishedUsed = poolRunning.getOrDefault(running[runIndex].pool, 0'u32)
-      poolRunning[running[runIndex].pool] =
-        if finishedUsed > running[runIndex].poolUnits:
-          finishedUsed - running[runIndex].poolUnits
+      runningItem.process.close()
+      let finishedUsed = poolRunning.getOrDefault(runningItem.pool, 0'u32)
+      poolRunning[runningItem.pool] =
+        if finishedUsed > runningItem.poolUnits:
+          finishedUsed - runningItem.poolUnits
         else:
           0'u32
       running.delete(runIndex)
 
       let idx = idToIndex.resultIndex(finished.id)
       runResult.results[idx] = finished
+      runResult.results[idx].dependencyPolicyKind =
+        runningItem.action.dependencyPolicy.kind
+      runResult.results[idx].monitorDepfilePath = runningItem.action.monitorDepfile
       runResult.results[idx].cacheDecision =
         if actionsById[finished.id].cacheable and runResult.results[idx].cacheDecision == cdNotCacheable:
           cdMiss
@@ -677,8 +820,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.results[idx].cacheDecision
       statuses[finished.id] = finished.status
       if finished.status == asSucceeded:
-        let action = actionsById[finished.id]
-        let converterResult = action.runConverters()
+        let action = runningItem.action
+        let converterResult = action.runConverters(action.converterSpecsForPolicy())
         if not converterResult.ok:
           runResult.results[idx].status = asFailed
           var diagnostics: seq[string] = @[]
@@ -689,11 +832,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           statuses[finished.id] = asFailed
           runResult.trace(finished.id, "failed", "dependency converter failed")
           blockClosure(finished.id, finished.id)
-          inc completed
-          completed = 0
-          for action in g.actions:
-            if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
-              inc completed
+          completed = terminalCount()
           continue
         let evidence = collectEvidence(action, strict = true)
         runResult.results[idx].evidence = evidence.evidence
@@ -704,11 +843,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           statuses[finished.id] = asFailed
           runResult.trace(finished.id, "failed", "dependency evidence invalid")
           blockClosure(finished.id, finished.id)
-          inc completed
-          completed = 0
-          for action in g.actions:
-            if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
-              inc completed
+          completed = terminalCount()
           continue
         if action.cacheable:
           discard cache.recordActionResult(cas, action.weakFingerprint, ffpChecksum,

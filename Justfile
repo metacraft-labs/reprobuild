@@ -82,6 +82,16 @@ integration-dependency-reports:
         tests/integration/t_dependency_report_and_converter_paths.nim \
         2>&1 | tee test-logs/integration-dependency-reports.log
 
+integration_scheduler_dependency_gathering_policies:
+    mkdir -p test-logs build/test-bin build/nimcache
+    cd ../runquota && just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_scheduler_dependency_gathering_policies \
+        --out:build/test-bin/integration_scheduler_dependency_gathering_policies \
+        tests/integration/t_integration_scheduler_dependency_gathering_policies.nim \
+        2>&1 | tee test-logs/integration_scheduler_dependency_gathering_policies.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \
