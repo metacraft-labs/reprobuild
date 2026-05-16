@@ -205,6 +205,7 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
   copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
   copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
   copyTree(codeTracerRoot / "src" / "frontend",
     projectRoot / "src" / "frontend")
   copyTree(codeTracerRoot / "src" / "common",
@@ -270,7 +271,20 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(projectRoot / "server_index.js.map")
   check fileExists(projectRoot / "src" / "subwindow.js")
   check fileExists(projectRoot / "subwindow.js.map")
+  check fileExists(projectRoot / "index.html")
+  check fileExists(projectRoot / "subwindow.html")
+  check fileExists(projectRoot / "src" / "helpers.js")
   check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
+  check readFile(projectRoot / "src" / "frontend" / "index.html") ==
+    readFile(projectRoot / "index.html")
+  check readFile(projectRoot / "src" / "frontend" / "subwindow.html") ==
+    readFile(projectRoot / "subwindow.html")
+  check readFile(projectRoot / "helpers.js") ==
+    readFile(projectRoot / "src" / "helpers.js")
+  let stamp = readFile(projectRoot / "build" / "reprobuild" / "frontend.stamp")
+  check stamp.contains("index.html")
+  check stamp.contains("subwindow.html")
+  check stamp.contains("src/helpers.js")
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "repro"
@@ -511,18 +525,17 @@ when defined(macosx):
       check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
 
       let selectedTarget = projectRoot & "#frontend"
-      let importedInput = projectRoot / "src" / "frontend" / "ui" /
-        "calltrace.nim"
+      let importedInput = projectRoot / "src" / "frontend" / "index.html"
       let log = runWatchAndEdit(reproBin, selectedTarget, repoRoot,
         codeTracerPathValue(tempRoot), tempRoot / "codetracer-frontend-watch.log",
-        importedInput, "\n# reprobuild m38 watch frontend edit\n",
+        importedInput, "\n<!-- reprobuild m39 watch frontend static edit -->\n",
         env = monitorEnv)
       check log.contains("repro watch: target=" & selectedTarget)
       check log.contains("repro watch: event seen path=")
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: frontend")
-      check log.contains("scheduler: actions=8")
+      check log.contains("scheduler: actions=11")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: generate-config-header")
       check not log.contains("action: c-sudoku-object-tup")
@@ -531,14 +544,17 @@ when defined(macosx):
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 8
-      assertAction(report, "frontend-ui-js", "asSucceeded", true)
-      assertAction(report, "frontend-public-ui-js", "asSucceeded", true)
+      check report{"actions"}.len == 11
+      assertAction(report, "frontend-ui-js", "asCacheHit", false)
+      assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-index-js", "asCacheHit", false)
       assertAction(report, "frontend-src-index-js", "asCacheHit", false)
       assertAction(report, "frontend-server-index-js", "asCacheHit", false)
       assertAction(report, "frontend-subwindow-js", "asCacheHit", false)
       assertAction(report, "frontend-src-subwindow-js", "asCacheHit", false)
+      assertAction(report, "frontend-index-html", "asSucceeded", true)
+      assertAction(report, "frontend-subwindow-html", "asCacheHit", false)
+      assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
       assertAction(report, "frontend", "asSucceeded", true)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull

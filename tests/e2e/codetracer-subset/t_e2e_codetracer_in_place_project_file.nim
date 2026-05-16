@@ -166,6 +166,7 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
   copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
   copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
   copyTree(codeTracerRoot / "src" / "frontend",
     projectRoot / "src" / "frontend")
   copyTree(codeTracerRoot / "src" / "common",
@@ -261,6 +262,9 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(projectRoot / "subwindow.js")
   check fileExists(projectRoot / "subwindow.js.map")
   check fileExists(projectRoot / "src" / "subwindow.js")
+  check fileExists(projectRoot / "index.html")
+  check fileExists(projectRoot / "subwindow.html")
+  check fileExists(projectRoot / "src" / "helpers.js")
   check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
   check readFile(projectRoot / "ui.js") ==
     readFile(projectRoot / "public" / "ui.js")
@@ -268,6 +272,16 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
     readFile(projectRoot / "src" / "index.js")
   check readFile(projectRoot / "subwindow.js") ==
     readFile(projectRoot / "src" / "subwindow.js")
+  check readFile(projectRoot / "src" / "frontend" / "index.html") ==
+    readFile(projectRoot / "index.html")
+  check readFile(projectRoot / "src" / "frontend" / "subwindow.html") ==
+    readFile(projectRoot / "subwindow.html")
+  check readFile(projectRoot / "helpers.js") ==
+    readFile(projectRoot / "src" / "helpers.js")
+  let stamp = readFile(projectRoot / "build" / "reprobuild" / "frontend.stamp")
+  check stamp.contains("index.html")
+  check stamp.contains("subwindow.html")
+  check stamp.contains("src/helpers.js")
 
 when defined(macosx):
   suite "e2e_codetracer_in_place_project_file":
@@ -773,7 +787,7 @@ when defined(macosx):
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check first.contains("selectedTarget: frontend")
-      check first.contains("scheduler: actions=8")
+      check first.contains("scheduler: actions=11")
       check first.contains(
         "action: frontend-ui-js status=asSucceeded launched=true")
       check first.contains(
@@ -788,6 +802,12 @@ when defined(macosx):
         "action: frontend-subwindow-js status=asSucceeded launched=true")
       check first.contains(
         "action: frontend-src-subwindow-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-index-html status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-subwindow-html status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-src-helpers-js status=asSucceeded launched=true")
       check first.contains("action: frontend status=asSucceeded launched=true")
       check not first.contains("action: nim-js-ipc-registry-test")
       check not first.contains("action: generate-config-header")
@@ -796,7 +816,7 @@ when defined(macosx):
       checkFrontendBundleOutputs(projectRoot)
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 8
+      check firstReport{"actions"}.len == 11
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
@@ -805,6 +825,9 @@ when defined(macosx):
       assertAction(firstReport, "frontend-subwindow-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-subwindow-js", "asSucceeded",
         true)
+      assertAction(firstReport, "frontend-index-html", "asSucceeded", true)
+      assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
+      assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       assertAction(firstReport, "frontend", "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
@@ -824,33 +847,91 @@ when defined(macosx):
       assertAction(secondReport, "frontend-subwindow-js", "asCacheHit", false)
       assertAction(secondReport, "frontend-src-subwindow-js", "asCacheHit",
         false)
+      assertAction(secondReport, "frontend-index-html", "asCacheHit", false)
+      assertAction(secondReport, "frontend-subwindow-html", "asCacheHit",
+        false)
+      assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
+        false)
       assertAction(secondReport, "frontend", "asCacheHit", false)
 
-      let importedInput = projectRoot / "src" / "frontend" / "ui" /
-        "calltrace.nim"
-      writeFile(importedInput, readFile(importedInput) &
-        "\n# reprobuild m38 selected frontend edit\n")
-      let changed = build(reproBin, selectedTarget, repoRoot, pathValue,
+      let indexHtml = projectRoot / "src" / "frontend" / "index.html"
+      writeFile(indexHtml, readFile(indexHtml) &
+        "\n<!-- reprobuild m39 frontend static html edit -->\n")
+      let htmlChanged = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
-      check not changed.contains("action: nim-js-ipc-registry-test")
-      check not changed.contains("action: generate-config-header")
-      check not changed.contains("action: c-sudoku-object-tup")
-      check not changed.contains("action: c-sudoku-object-with-generated-header")
-      let changedReport = parseFile(valueAfter(changed, "buildReport:"))
-      assertAction(changedReport, "frontend-ui-js", "asSucceeded", true)
-      assertAction(changedReport, "frontend-public-ui-js", "asSucceeded", true)
-      assertAction(changedReport, "frontend-index-js", "asCacheHit", false)
-      assertAction(changedReport, "frontend-src-index-js", "asCacheHit",
+      check not htmlChanged.contains("action: nim-js-ipc-registry-test")
+      check not htmlChanged.contains("action: generate-config-header")
+      check not htmlChanged.contains("action: c-sudoku-object-tup")
+      check not htmlChanged.contains(
+        "action: c-sudoku-object-with-generated-header")
+      let htmlChangedReport = parseFile(valueAfter(htmlChanged, "buildReport:"))
+      assertAction(htmlChangedReport, "frontend-ui-js", "asCacheHit", false)
+      assertAction(htmlChangedReport, "frontend-public-ui-js", "asCacheHit",
         false)
-      assertAction(changedReport, "frontend-server-index-js", "asCacheHit",
+      assertAction(htmlChangedReport, "frontend-index-js", "asCacheHit", false)
+      assertAction(htmlChangedReport, "frontend-src-index-js", "asCacheHit",
         false)
-      assertAction(changedReport, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(changedReport, "frontend-src-subwindow-js", "asCacheHit",
+      assertAction(htmlChangedReport, "frontend-server-index-js", "asCacheHit",
         false)
-      assertAction(changedReport, "frontend", "asSucceeded", true)
-      check reportAction(changedReport, "nim-js-ipc-registry-test").kind == JNull
-      check reportAction(changedReport, "generate-config-header").kind == JNull
-      check reportAction(changedReport, "c-sudoku-object-tup").kind == JNull
+      assertAction(htmlChangedReport, "frontend-subwindow-js", "asCacheHit",
+        false)
+      assertAction(htmlChangedReport, "frontend-src-subwindow-js",
+        "asCacheHit", false)
+      assertAction(htmlChangedReport, "frontend-index-html", "asSucceeded",
+        true)
+      assertAction(htmlChangedReport, "frontend-subwindow-html", "asCacheHit",
+        false)
+      assertAction(htmlChangedReport, "frontend-src-helpers-js", "asCacheHit",
+        false)
+      assertAction(htmlChangedReport, "frontend", "asSucceeded", true)
+      check readFile(projectRoot / "src" / "frontend" / "index.html") ==
+        readFile(projectRoot / "index.html")
+      check reportAction(htmlChangedReport, "nim-js-ipc-registry-test").kind ==
+        JNull
+      check reportAction(htmlChangedReport, "generate-config-header").kind ==
+        JNull
+      check reportAction(htmlChangedReport, "c-sudoku-object-tup").kind == JNull
+
+      writeFile(projectRoot / "helpers.js",
+        readFile(projectRoot / "helpers.js") &
+        "\n// reprobuild m39 static helper edit\n")
+      let helperChanged = build(reproBin, selectedTarget, repoRoot, pathValue,
+        monitorEnv)
+      check not helperChanged.contains("action: nim-js-ipc-registry-test")
+      check not helperChanged.contains("action: generate-config-header")
+      check not helperChanged.contains("action: c-sudoku-object-tup")
+      check not helperChanged.contains(
+        "action: c-sudoku-object-with-generated-header")
+      let helperChangedReport =
+        parseFile(valueAfter(helperChanged, "buildReport:"))
+      assertAction(helperChangedReport, "frontend-ui-js", "asCacheHit", false)
+      assertAction(helperChangedReport, "frontend-public-ui-js", "asCacheHit",
+        false)
+      assertAction(helperChangedReport, "frontend-index-js", "asCacheHit",
+        false)
+      assertAction(helperChangedReport, "frontend-src-index-js", "asCacheHit",
+        false)
+      assertAction(helperChangedReport, "frontend-server-index-js",
+        "asCacheHit", false)
+      assertAction(helperChangedReport, "frontend-subwindow-js", "asCacheHit",
+        false)
+      assertAction(helperChangedReport, "frontend-src-subwindow-js",
+        "asCacheHit", false)
+      assertAction(helperChangedReport, "frontend-index-html", "asCacheHit",
+        false)
+      assertAction(helperChangedReport, "frontend-subwindow-html",
+        "asCacheHit", false)
+      assertAction(helperChangedReport, "frontend-src-helpers-js",
+        "asSucceeded", true)
+      assertAction(helperChangedReport, "frontend", "asSucceeded", true)
+      check readFile(projectRoot / "helpers.js") ==
+        readFile(projectRoot / "src" / "helpers.js")
+      check reportAction(helperChangedReport,
+        "nim-js-ipc-registry-test").kind == JNull
+      check reportAction(helperChangedReport, "generate-config-header").kind ==
+        JNull
+      check reportAction(helperChangedReport, "c-sudoku-object-tup").kind ==
+        JNull
 
     test "real committed CodeTracer reprobuild.nim builds in place through public CLI, provider, scheduler, cache, and invalidation":
       let repoRoot = getCurrentDir()
@@ -893,7 +974,7 @@ when defined(macosx):
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=12")
+      check first.contains("scheduler: actions=15")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
       check first.contains("action: frontend-ui-js status=asSucceeded launched=true")
@@ -903,6 +984,9 @@ when defined(macosx):
       check first.contains("action: frontend-server-index-js status=asSucceeded launched=true")
       check first.contains("action: frontend-subwindow-js status=asSucceeded launched=true")
       check first.contains("action: frontend-src-subwindow-js status=asSucceeded launched=true")
+      check first.contains("action: frontend-index-html status=asSucceeded launched=true")
+      check first.contains("action: frontend-subwindow-html status=asSucceeded launched=true")
+      check first.contains("action: frontend-src-helpers-js status=asSucceeded launched=true")
       check first.contains("action: frontend status=asSucceeded launched=true")
       check first.contains("action: c-sudoku-object-tup status=asSucceeded launched=true")
       check first.contains("action: c-sudoku-object-with-generated-header status=asSucceeded launched=true")
@@ -918,6 +1002,9 @@ when defined(macosx):
       check fileExists(projectRoot / "subwindow.js")
       check fileExists(projectRoot / "subwindow.js.map")
       check fileExists(projectRoot / "src" / "subwindow.js")
+      check fileExists(projectRoot / "index.html")
+      check fileExists(projectRoot / "subwindow.html")
+      check fileExists(projectRoot / "src" / "helpers.js")
       check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
       check fileExists(projectRoot / "build" / "c" / "main.tup.o")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
@@ -942,6 +1029,9 @@ when defined(macosx):
       assertAction(firstReport, "frontend-subwindow-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-subwindow-js", "asSucceeded",
         true)
+      assertAction(firstReport, "frontend-index-html", "asSucceeded", true)
+      assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
+      assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       assertAction(firstReport, "frontend", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-with-generated-header",
@@ -978,6 +1068,11 @@ when defined(macosx):
       assertAction(secondReport, "frontend-subwindow-js", "asCacheHit", false)
       assertAction(secondReport, "frontend-src-subwindow-js", "asCacheHit",
         false)
+      assertAction(secondReport, "frontend-index-html", "asCacheHit", false)
+      assertAction(secondReport, "frontend-subwindow-html", "asCacheHit",
+        false)
+      assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
+        false)
       assertAction(secondReport, "frontend", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-with-generated-header",
@@ -999,6 +1094,11 @@ when defined(macosx):
         false)
       assertAction(cChangedReport, "frontend-subwindow-js", "asCacheHit", false)
       assertAction(cChangedReport, "frontend-src-subwindow-js", "asCacheHit",
+        false)
+      assertAction(cChangedReport, "frontend-index-html", "asCacheHit", false)
+      assertAction(cChangedReport, "frontend-subwindow-html", "asCacheHit",
+        false)
+      assertAction(cChangedReport, "frontend-src-helpers-js", "asCacheHit",
         false)
       assertAction(cChangedReport, "frontend", "asCacheHit", false)
       assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
@@ -1022,6 +1122,12 @@ when defined(macosx):
       assertAction(headerDeletedReport, "frontend-subwindow-js", "asCacheHit",
         false)
       assertAction(headerDeletedReport, "frontend-src-subwindow-js",
+        "asCacheHit", false)
+      assertAction(headerDeletedReport, "frontend-index-html", "asCacheHit",
+        false)
+      assertAction(headerDeletedReport, "frontend-subwindow-html", "asCacheHit",
+        false)
+      assertAction(headerDeletedReport, "frontend-src-helpers-js",
         "asCacheHit", false)
       assertAction(headerDeletedReport, "frontend", "asCacheHit", false)
       assertAction(headerDeletedReport, "c-sudoku-object-tup", "asCacheHit", false)
