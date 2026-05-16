@@ -1,5 +1,45 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
+const GccProxySource = r"""
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static void read_for_monitor(const char *path) {
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) return;
+  char buffer[4096];
+  while (read(fd, buffer, sizeof(buffer)) > 0) {}
+  close(fd);
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+    puts("gcc proxy 1.0.0");
+    return 0;
+  }
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-include") == 0 && i + 1 < argc) {
+      read_for_monitor(argv[i + 1]);
+      i++;
+    } else if (argv[i][0] != '-' && strstr(argv[i], ".c") != NULL) {
+      read_for_monitor(argv[i]);
+    }
+  }
+  unsetenv("DYLD_INSERT_LIBRARIES");
+  setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
+  char **next_argv = calloc((size_t)argc + 1, sizeof(char *));
+  if (next_argv == NULL) return 126;
+  next_argv[0] = "/usr/bin/gcc";
+  for (int i = 1; i < argc; i++) next_argv[i] = argv[i];
+  execv("/usr/bin/gcc", next_argv);
+  perror("execv /usr/bin/gcc");
+  return 127;
+}
+"""
+
 proc q(value: string): string =
   quoteShell(value)
 
@@ -171,6 +211,15 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
 
+proc codeTracerPathValue(tempRoot: string): string =
+  let binDir = tempRoot / "codetracer-tool-bin"
+  createDir(binDir)
+  let sourcePath = binDir / "gcc-proxy.c"
+  let gccPath = binDir / "gcc"
+  writeFile(sourcePath, GccProxySource)
+  discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
+  binDir & $PathSep & getEnv("PATH")
+
 proc nonEmptyLines(path: string): seq[string] =
   if not fileExists(path):
     return @[]
@@ -191,6 +240,10 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
+proc hasMonitorEvidence(action: JsonNode): bool =
+  action{"evidence"}{"monitorReads"}.getElems().len > 0 or
+    action{"evidence"}{"monitorProbes"}.getElems().len > 0
+
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "repro"
   discard requireSuccess(shellCommand([
@@ -200,11 +253,61 @@ proc compileRepro(repoRoot, tempRoot: string): string =
     repoRoot / "apps" / "repro" / "repro.nim"
   ]), repoRoot)
 
+proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
+  discard requireSuccess(shellCommand([
+    "nim", "c", "--verbosity:0", "--hints:off",
+    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
+    "--out:" & outputPath,
+    sourcePath
+  ]), repoRoot)
+
+when defined(macosx):
+  proc compileShim(repoRoot, outputPath: string) =
+    let arm64Path = outputPath & ".arm64"
+    let arm64ePath = outputPath & ".arm64e"
+    discard requireSuccess(shellCommand([
+      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
+      "--path:/Users/zahary/metacraft/ct_interpose/src",
+      "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-watch-shim",
+      "--out:" & arm64Path,
+      repoRoot / "libs" / "repro_monitor_shim" / "src" /
+        "repro_monitor_shim" / "macos_interpose.nim"
+    ]), repoRoot)
+    discard requireSuccess(shellCommand([
+      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
+      "--passC:-arch arm64e", "--passL:-arch arm64e",
+      "--path:/Users/zahary/metacraft/ct_interpose/src",
+      "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-watch-shim-arm64e",
+      "--out:" & arm64ePath,
+      repoRoot / "libs" / "repro_monitor_shim" / "src" /
+        "repro_monitor_shim" / "macos_interpose.nim"
+    ]), repoRoot)
+    discard requireSuccess(shellCommand([
+      "lipo", "-create", "-output", outputPath, arm64Path, arm64ePath
+    ]), repoRoot)
+
+  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
+      shim: string] =
+    let binDir = tempRoot / "bin"
+    let libDir = tempRoot / "lib"
+    createDir(binDir)
+    createDir(libDir)
+    result.fsSnoop = binDir / "repro-fs-snoop"
+    result.shim = libDir / "librepro_monitor_shim.dylib"
+    compileShim(repoRoot, result.shim)
+    compileNim(repoRoot,
+      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
+      result.fsSnoop, "m32-watch-repro-fs-snoop")
+
 proc runWatchAndEdit(reproBin, target, repoRoot, pathValue, logPath, editPath,
-                     editText: string; debounceMs = 50): string =
+                     editText: string; debounceMs = 50;
+                     env: openArray[(string, string)] = []): string =
+  var envLines = "export PATH=" & q(pathValue) & "\n"
+  for (name, value) in env:
+    envLines.add("export " & name & "=" & q(value) & "\n")
   let script =
     "set -eu\n" &
-    "export PATH=" & q(pathValue) & "\n" &
+    envLines &
     shellCommand([reproBin, "watch", target, "--tool-provisioning=path",
       "--max-cycles=2", "--debounce-ms=" & $debounceMs]) &
       " > " & q(logPath) & " 2>&1 &\n" &
@@ -302,6 +405,11 @@ when defined(macosx):
           removeFile(daemon.socket)
 
       let reproBin = compileRepro(repoRoot, tempRoot)
+      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+      let monitorEnv = [
+        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+      ]
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
@@ -312,8 +420,8 @@ when defined(macosx):
       let cSource = projectRoot / "test-programs" /
         "c_sudoku_solver" / "main.c"
       let log = runWatchAndEdit(reproBin, selectedTarget, repoRoot,
-        getEnv("PATH"), tempRoot / "codetracer-watch.log", cSource,
-        "\n/* reprobuild m31 watch edit */\n")
+        codeTracerPathValue(tempRoot), tempRoot / "codetracer-watch.log", cSource,
+        "\n/* reprobuild m31 watch edit */\n", env = monitorEnv)
       check log.contains("repro watch: event seen path=")
       check log.contains(
         "selectedTarget: c-sudoku-object-with-generated-header")
@@ -327,6 +435,9 @@ when defined(macosx):
       assertAction(report, "generate-config-header", "asCacheHit", false)
       assertAction(report, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
+      let selectedC = reportAction(report, "c-sudoku-object-with-generated-header")
+      check selectedC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
+      check hasMonitorEvidence(selectedC)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull
 

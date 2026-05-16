@@ -66,6 +66,16 @@ type
     providerEntrypointId*: string
     arguments*: seq[PublicCliArg]
 
+  BuildActionDependencyPolicyKind* = enum
+    bdpDefault
+    bdpDeclaredOnly
+    bdpAutomaticMonitor
+    bdpMakeDepfile
+
+  BuildActionDependencyPolicy* = object
+    kind*: BuildActionDependencyPolicyKind
+    depfile*: string
+
   SelectedExecutable* = object
     packageName*: string
     executableName*: string
@@ -79,6 +89,7 @@ type
     depfile*: string
     cacheable*: bool
     commandStatsId*: string
+    dependencyPolicy*: BuildActionDependencyPolicy
 
 var registry: seq[PackageDef] = @[]
 var buildActionRegistry: seq[BuildActionDef] = @[]
@@ -86,7 +97,7 @@ var buildActionRegistry: seq[BuildActionDef] = @[]
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 2'u16
+  BuildActionPayloadVersion = 3'u16
 
 proc resetPackageRegistry*() =
   registry.setLen(0)
@@ -136,13 +147,26 @@ proc publicCliCall*(packageName, executableName, subcommand,
 proc selectedExecutable*(packageName, executableName: string): SelectedExecutable =
   SelectedExecutable(packageName: packageName, executableName: executableName)
 
+proc defaultDependencyPolicy*(): BuildActionDependencyPolicy =
+  BuildActionDependencyPolicy(kind: bdpDefault)
+
+proc declaredOnlyDependencyPolicy*(): BuildActionDependencyPolicy =
+  BuildActionDependencyPolicy(kind: bdpDeclaredOnly)
+
+proc automaticMonitorPolicy*(): BuildActionDependencyPolicy =
+  BuildActionDependencyPolicy(kind: bdpAutomaticMonitor)
+
+proc makeDepfilePolicy*(depfile = ""): BuildActionDependencyPolicy =
+  BuildActionDependencyPolicy(kind: bdpMakeDepfile, depfile: depfile)
+
 proc buildAction*(id: string; call: PublicCliCall;
                   deps: openArray[string] = [];
                   inputs: openArray[string] = [];
                   outputs: openArray[string] = [];
                   depfile = "";
                   cacheable = true;
-                  commandStatsId = ""): BuildActionDef =
+                  commandStatsId = "";
+                  dependencyPolicy = defaultDependencyPolicy()): BuildActionDef =
   result = BuildActionDef(
     id: id,
     call: call,
@@ -151,7 +175,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     outputs: @outputs,
     depfile: depfile,
     cacheable: cacheable,
-    commandStatsId: if commandStatsId.len > 0: commandStatsId else: id)
+    commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
+    dependencyPolicy: dependencyPolicy)
   buildActionRegistry.add(result)
 
 proc writeByte(outp: var seq[byte]; value: byte) =
@@ -260,6 +285,19 @@ proc readCliCall(bytes: openArray[byte]; pos: var int; version: uint16):
   for i in 0 ..< count:
     result.arguments[i] = readCliArg(bytes, pos, version)
 
+proc writeDependencyPolicy(outp: var seq[byte];
+                           policy: BuildActionDependencyPolicy) =
+  outp.writeByte(byte(ord(policy.kind)))
+  outp.writeString(policy.depfile)
+
+proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
+    BuildActionDependencyPolicy =
+  let kind = readByte(bytes, pos)
+  if kind > byte(ord(bdpMakeDepfile)):
+    raisePayload("invalid dependency policy kind in build action payload")
+  result.kind = BuildActionDependencyPolicyKind(kind)
+  result.depfile = readString(bytes, pos)
+
 proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
   var payload: seq[byte] = @[]
   payload.writeString(action.id)
@@ -270,6 +308,7 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
   payload.writeString(action.depfile)
   payload.writeByte(if action.cacheable: 1'u8 else: 0'u8)
   payload.writeString(action.commandStatsId)
+  payload.writeDependencyPolicy(action.dependencyPolicy)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -284,7 +323,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
       raisePayload("unknown build action payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, BuildActionPayloadVersion}:
+  if version notin {1'u16, 2'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -298,6 +337,10 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
   result.depfile = readString(bytes, pos)
   result.cacheable = readByte(bytes, pos) == 1'u8
   result.commandStatsId = readString(bytes, pos)
+  if version >= 3'u16:
+    result.dependencyPolicy = readDependencyPolicy(bytes, pos)
+  else:
+    result.dependencyPolicy = defaultDependencyPolicy()
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

@@ -362,21 +362,22 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
     try:
       let dep = readMonitorDepFile(action.monitorDepfile)
       for record in dep.records:
+        let path = materialPath(action.cwd, record.path)
         case record.kind
         of mrFileRead:
-          result.evidence.monitorReads.addUnique(record.path)
+          result.evidence.monitorReads.addUnique(path)
         of mrFileOpen:
           case record.observationKind
           of moFileRead, moFileOpen:
-            result.evidence.monitorReads.addUnique(record.path)
+            result.evidence.monitorReads.addUnique(path)
           of moFileWrite:
-            result.evidence.monitorWrites.addUnique(record.path)
+            result.evidence.monitorWrites.addUnique(path)
           else:
             discard
         of mrFileWrite:
-          result.evidence.monitorWrites.addUnique(record.path)
+          result.evidence.monitorWrites.addUnique(path)
         of mrPathProbe, mrDirectoryEnumerate:
-          result.evidence.monitorProbes.addUnique(record.path)
+          result.evidence.monitorProbes.addUnique(path)
         else:
           discard
       if dep.completeness != mcComplete:
@@ -403,7 +404,10 @@ proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSe
   result.declaredOutputs = action.outputs
   for input in record.inputs:
     if result.declaredInputs.find(input.path) < 0:
-      result.depfileInputs.addUnique(input.path)
+      if action.dependencyPolicy.kind in MonitorPolicyKinds:
+        result.monitorReads.addUnique(input.path)
+      else:
+        result.depfileInputs.addUnique(input.path)
 
 proc processCwd(action: BuildAction; process: ProcessSpec): string =
   let cwd = $process.cwd

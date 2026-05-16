@@ -175,7 +175,7 @@ proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string]
 
 proc depfilePolicy(depfile: string): DependencyGatheringPolicy =
   if depfile.len == 0:
-    return declaredOnlyPolicy()
+    return repro_core.declaredOnlyPolicy()
   DependencyGatheringPolicy(
     kind: dgRecognizedFormat,
     completeness: decComplete,
@@ -188,6 +188,36 @@ proc depfilePolicy(depfile: string): DependencyGatheringPolicy =
           required: true)],
         completeness: decComplete)
     ])
+
+proc lowerDependencyPolicy(actionId, depfile: string;
+                           policy: BuildActionDependencyPolicy):
+    DependencyGatheringPolicy =
+  case policy.kind
+  of bdpDefault:
+    depfilePolicy(depfile)
+  of bdpDeclaredOnly:
+    repro_core.declaredOnlyPolicy()
+  of bdpAutomaticMonitor:
+    if depfile.len > 0:
+      raise newException(ValueError,
+        "action " & actionId & " supplies legacy depfile and " &
+          "automatic monitor dependencyPolicy; remove depfile or use " &
+          "makeDepfilePolicy")
+    DependencyGatheringPolicy(kind: dgAutomaticMonitor, completeness: decComplete)
+  of bdpMakeDepfile:
+    let selectedDepfile =
+      if policy.depfile.len > 0:
+        policy.depfile
+      else:
+        depfile
+    if selectedDepfile.len == 0:
+      raise newException(ValueError,
+        "action " & actionId & " uses makeDepfilePolicy without a depfile path")
+    if depfile.len > 0 and policy.depfile.len > 0 and depfile != policy.depfile:
+      raise newException(ValueError,
+        "action " & actionId & " supplies conflicting depfile paths: " &
+          depfile & " and " & policy.depfile)
+    depfilePolicy(selectedDepfile)
 
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
@@ -234,7 +264,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     depfile = depfile,
     cacheable = payload.cacheable,
     weakFingerprint = weakFingerprintFromText(fingerprintText),
-    dependencyPolicy = depfilePolicy(depfile),
+    dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
+      payload.dependencyPolicy),
     commandStatsId = commandStatsId)
 
 proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
