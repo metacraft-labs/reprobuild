@@ -1,0 +1,5 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "PATH-only tool profile identities for Reprobuild"
+license = "MIT"
+requires "nim >= 2.2.0"

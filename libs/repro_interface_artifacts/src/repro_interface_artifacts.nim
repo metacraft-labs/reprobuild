@@ -41,10 +41,18 @@ type
     commands*: seq[InterfaceCommand]
     location*: SourceLocation
 
+  InterfaceToolUse* = object
+    rawConstraint*: string
+    packageSelector*: string
+    executableName*: string
+    policyPath*: seq[string]
+    location*: SourceLocation
+
   ProjectInterface* = object
     projectName*: string
     packageName*: string
     publicExecutables*: seq[InterfaceExecutable]
+    toolUses*: seq[InterfaceToolUse]
     publicSignatureDependencies*: seq[string]
     location*: SourceLocation
 
@@ -194,7 +202,8 @@ proc providerCompileEdge*(inputSources: openArray[string];
     processArgs.add(compilerCommand[i])
   let process =
     if compilerCommand.len == 0:
-      directProcess(corepaths.normalizedPath("nim"), [], corepaths.normalizedPath(workDir))
+      directProcess(corepaths.normalizedPath("nim"), [],
+          corepaths.normalizedPath(workDir))
     else:
       directProcess(
         corepaths.normalizedPath(compilerCommand[0]),
@@ -206,7 +215,8 @@ proc providerCompileEdge*(inputSources: openArray[string];
       process: process,
       dependencyPolicy: declaredOnlyPolicy(),
       metadata: providerCompileMetadata(declaredInputs, declaredOutputs,
-        compilerCommand, interfaceFingerprint, providerFingerprint, fingerprint)),
+        compilerCommand, interfaceFingerprint, providerFingerprint,
+        fingerprint)),
     declaredInputs: declaredInputs,
     declaredOutputs: declaredOutputs,
     actionFingerprint: fingerprint)
@@ -273,6 +283,20 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
 
+proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse) =
+  outp.writeString(useDef.rawConstraint)
+  outp.writeString(useDef.packageSelector)
+  outp.writeString(useDef.executableName)
+  outp.writeStringSeq(useDef.policyPath)
+  outp.writeLocation(useDef.location)
+
+proc readToolUse(bytes: openArray[byte]; pos: var int): InterfaceToolUse =
+  result.rawConstraint = readString(bytes, pos)
+  result.packageSelector = readString(bytes, pos)
+  result.executableName = readString(bytes, pos)
+  result.policyPath = readStringSeq(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
 proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
   result.writeString(value.projectName)
   result.writeString(value.packageName)
@@ -281,6 +305,9 @@ proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
   result.writeU32Le(uint32(value.publicExecutables.len))
   for exe in value.publicExecutables:
     result.writeExecutable(exe)
+  result.writeU32Le(uint32(value.toolUses.len))
+  for useDef in value.toolUses:
+    result.writeToolUse(useDef)
 
 proc decodeInterfacePayload*(bytes: openArray[byte]): ProjectInterface =
   var pos = 0
@@ -292,6 +319,10 @@ proc decodeInterfacePayload*(bytes: openArray[byte]): ProjectInterface =
   result.publicExecutables = newSeq[InterfaceExecutable](count)
   for i in 0 ..< count:
     result.publicExecutables[i] = readExecutable(bytes, pos)
+  let useCount = int(readU32Le(bytes, pos))
+  result.toolUses = newSeq[InterfaceToolUse](useCount)
+  for i in 0 ..< useCount:
+    result.toolUses[i] = readToolUse(bytes, pos)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing interface payload bytes")
 
@@ -316,7 +347,8 @@ proc encodeProjectInterfaceArtifact*(artifact: ProjectInterfaceArtifact): seq[by
   result.writeEnvelopeHeader(iekProjectInterface, payload.len)
   result.add(payload)
 
-proc decodeProjectInterfaceArtifact*(bytes: openArray[byte]): ProjectInterfaceArtifact =
+proc decodeProjectInterfaceArtifact*(bytes: openArray[
+    byte]): ProjectInterfaceArtifact =
   if bytes.len < 12:
     raiseEnvelopeError(eeMalformed, "truncated interface artifact envelope")
   for i in 0 ..< 4:
@@ -339,7 +371,8 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[byte]): ProjectInterfaceAr
     decodeInterfacePayload(bytes.toOpenArray(pos, pos + interfacePayloadLen - 1))
   pos += interfacePayloadLen
   result.interfaceFingerprint = readDigest(bytes, pos)
-  if result.interfaceFingerprint != interfaceFingerprint(result.projectInterface):
+  if result.interfaceFingerprint != interfaceFingerprint(
+      result.projectInterface):
     raiseEnvelopeError(eeMalformed, "interface fingerprint mismatch")
 
 proc encodeProviderCompileArtifact*(artifact: ProviderCompileArtifact): seq[byte] =
@@ -358,7 +391,8 @@ proc encodeProviderCompileArtifact*(artifact: ProviderCompileArtifact): seq[byte
   result.writeEnvelopeHeader(iekProviderCompile, payload.len)
   result.add(payload)
 
-proc decodeProviderCompileArtifact*(bytes: openArray[byte]): ProviderCompileArtifact =
+proc decodeProviderCompileArtifact*(bytes: openArray[
+    byte]): ProviderCompileArtifact =
   if bytes.len < 12:
     raiseEnvelopeError(eeMalformed, "truncated provider compile envelope")
   for i in 0 ..< 4:
@@ -415,7 +449,8 @@ proc writeInterfaceArtifact*(path: string; artifact: ProjectInterfaceArtifact) =
 proc readInterfaceArtifact*(path: string): ProjectInterfaceArtifact =
   decodeProjectInterfaceArtifact(fromByteString(readFile(path)))
 
-proc writeProviderCompileArtifact*(path: string; artifact: ProviderCompileArtifact) =
+proc writeProviderCompileArtifact*(path: string;
+    artifact: ProviderCompileArtifact) =
   createDir(parentDir(path))
   writeFile(path, toByteString(encodeProviderCompileArtifact(artifact)))
 
@@ -432,11 +467,21 @@ proc toInterfaceParam(param: CliParamDef): InterfaceParam =
     required: param.required,
     location: SourceLocation(file: param.sourceFile, line: param.sourceLine))
 
+proc toInterfaceToolUse(useDef: PackageUseDef): InterfaceToolUse =
+  InterfaceToolUse(
+    rawConstraint: useDef.rawConstraint,
+    packageSelector: useDef.packageSelector,
+    executableName: useDef.executableName,
+    policyPath: useDef.policyPath,
+    location: SourceLocation(file: useDef.sourceFile, line: useDef.sourceLine))
+
 proc toProjectInterface*(pkg: PackageDef): ProjectInterface =
   result.projectName = pkg.packageName
   result.packageName = pkg.packageName
   result.publicSignatureDependencies = pkg.publicSignatureDependencies
   result.location = SourceLocation(file: pkg.sourceFile, line: pkg.sourceLine)
+  for useDef in pkg.toolUses:
+    result.toolUses.add(toInterfaceToolUse(useDef))
   for exe in pkg.executables:
     var normalizedExe = InterfaceExecutable(
       exportName: exe.exportName,
@@ -503,7 +548,8 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
       code.add("proc " & cmd.name & "*( " & params.join("; ") &
         "): PublicCliCall =\n")
       code.add("  discard pkg\n")
-      code.add("  publicCliCall(\"" & pkg.packageName & "\", \"" & exe.binaryName &
+      code.add("  publicCliCall(\"" & pkg.packageName & "\", \"" &
+        exe.binaryName &
         "\", \"" & cmd.name & "\", \"" & cmd.providerEntrypointId &
         "\", @[" & argCalls.join(", ") & "])\n\n")
   createDir(parentDir(path))
@@ -512,7 +558,8 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
 proc shellQuote(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
 
-proc runCommand(command: openArray[string]; cwd = ""): ProviderCompileExecutionResult =
+proc runCommand(command: openArray[string];
+    cwd = ""): ProviderCompileExecutionResult =
   let quoted = command.mapIt(shellQuote(it)).join(" ")
   let res = execCmdEx(quoted, workingDir = cwd)
   result = ProviderCompileExecutionResult(

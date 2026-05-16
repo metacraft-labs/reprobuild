@@ -29,9 +29,18 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  PackageUseDef* = object
+    rawConstraint*: string
+    packageSelector*: string
+    executableName*: string
+    policyPath*: seq[string]
+    sourceFile*: string
+    sourceLine*: int
+
   PackageDef* = object
     packageName*: string
     executables*: seq[ExecutableDef]
+    toolUses*: seq[PackageUseDef]
     publicSignatureDependencies*: seq[string]
     sourceFile*: string
     sourceLine*: int
@@ -133,7 +142,8 @@ proc calleeName(node: NimNode): string =
     ""
 
 proc namedValue(node: NimNode; name: string): NimNode =
-  if node.kind == nnkExprEqExpr and identText(node[0]).normalize == name.normalize:
+  if node.kind == nnkExprEqExpr and identText(node[0]).normalize ==
+      name.normalize:
     node[1]
   else:
     nil
@@ -169,7 +179,8 @@ proc parseParam(node: NimNode): CliParamDef =
   result.sourceFile = loc.file
   result.sourceLine = loc.line
 
-proc parseCommand(packageName, executableName: string; node: NimNode): CliCommandDef =
+proc parseCommand(packageName, executableName: string;
+    node: NimNode): CliCommandDef =
   let loc = lineFile(node)
   result.name = stringLiteral(node[1])
   result.providerEntrypointId =
@@ -201,6 +212,40 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
     else:
       discard
 
+proc selectorFromConstraint(value: string): string =
+  let parts = value.strip().splitWhitespace()
+  if parts.len == 0:
+    ""
+  else:
+    parts[0]
+
+proc collectUses(node: NimNode; policyPath: seq[string];
+                 output: var seq[PackageUseDef]) =
+  case node.kind
+  of nnkStrLit..nnkTripleStrLit:
+    let loc = lineFile(node)
+    let selector = selectorFromConstraint(node.strVal)
+    output.add(PackageUseDef(
+      rawConstraint: node.strVal,
+      packageSelector: selector,
+      executableName: selector,
+      policyPath: policyPath,
+      sourceFile: loc.file,
+      sourceLine: loc.line))
+  of nnkStmtList:
+    for child in node:
+      collectUses(child, policyPath, output)
+  of nnkCall, nnkCommand:
+    let name = calleeName(node)
+    if node.len > 0 and name.len > 0:
+      for i in 1 ..< node.len:
+        if node[i].kind == nnkStmtList:
+          collectUses(node[i], policyPath & @[name], output)
+        else:
+          collectUses(node[i], policyPath, output)
+  else:
+    discard
+
 proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   let loc = lineFile(name)
   result.packageName = identText(name)
@@ -209,14 +254,33 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   for stmt in body:
     if calleeName(stmt).normalize == "executable":
       result.executables.add(parseExecutable(result.packageName, stmt))
+    elif calleeName(stmt).normalize == "uses":
+      for i in 1 ..< stmt.len:
+        collectUses(stmt[i], @[], result.toolUses)
 
 proc escForCode(text: string): string =
   text.escape()
 
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
-    ", publicSignatureDependencies: @[], sourceFile: " & escForCode(pkg.sourceFile) &
-    ", sourceLine: " & $pkg.sourceLine & ", executables: @["
+    ", publicSignatureDependencies: @[], sourceFile: " & escForCode(
+        pkg.sourceFile) &
+    ", sourceLine: " & $pkg.sourceLine & ", toolUses: @["
+  for useIndex, useDef in pkg.toolUses:
+    if useIndex > 0:
+      result.add(", ")
+    result.add("PackageUseDef(rawConstraint: " & escForCode(
+        useDef.rawConstraint) &
+      ", packageSelector: " & escForCode(useDef.packageSelector) &
+      ", executableName: " & escForCode(useDef.executableName) &
+      ", policyPath: @[")
+    for policyIndex, policy in useDef.policyPath:
+      if policyIndex > 0:
+        result.add(", ")
+      result.add(escForCode(policy))
+    result.add("], sourceFile: " & escForCode(useDef.sourceFile) &
+      ", sourceLine: " & $useDef.sourceLine & ")")
+  result.add("], executables: @[")
   for exeIndex, exe in pkg.executables:
     if exeIndex > 0:
       result.add(", ")

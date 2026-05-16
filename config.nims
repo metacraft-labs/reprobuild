@@ -11,6 +11,7 @@ switch("path", "libs/cbor/src")
 switch("path", "libs/repro_domain_types/src")
 switch("path", "libs/repro_project_dsl/src")
 switch("path", "libs/repro_interface_artifacts/src")
+switch("path", "libs/repro_tool_profiles/src")
 
 import std/[os, strutils]
 
