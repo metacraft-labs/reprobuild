@@ -24,4 +24,10 @@ Run it with:
 
 ```bash
 just e2e_codetracer_build_subset_without_tup
+just e2e_reprobuild_mvp_acceptance
 ```
+
+The acceptance target runs this selected subset together with the selected
+Nix-backed development-environment slice, shared RunQuota coordination, and the
+core MVP benchmark gate. It is a macOS MVP slice gate, not a full CodeTracer
+repository build replacement.

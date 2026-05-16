@@ -1,6 +1,6 @@
 # Reprobuild
 
-> **Status:** M6 foundation slice
+> **Status:** macOS MVP slice candidate
 
 **Reprobuild** (CLI: `repro`) is a unified build system combining reproducible environments, automatic dependency discovery, incremental rebuilds with artifact caching, and distributed execution.
 
@@ -14,6 +14,13 @@ binary-first domain envelopes, and real BLAKE3/XXH3-backed hash policy.
 - `just test` runs the local Nim test suite.
 - `just lint` runs repository requirement and Nim source checks.
 - `just bench-quick` exercises the benchmark reporting path.
+- `just e2e_reprobuild_mvp_acceptance` runs the accepted macOS MVP slice gates
+  together: selected CodeTracer build subset, selected Nix-backed developer
+  environment, shared RunQuota coordination, and core MVP benchmarks. It writes
+  `test-logs/reprobuild-mvp-acceptance.json`.
+
+This target does not claim full CodeTracer build replacement or Windows
+development-environment replacement; those remain follow-up integration scopes.
 
 ## Repository Shape
 

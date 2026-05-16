@@ -58,7 +58,7 @@ require_contains flake.nix "checks ="
 require_contains flake.nix "git-hooks.lib"
 require_contains flake.nix "shellHook = pre-commit-check.shellHook"
 
-for recipe in build test lint format fmt t bump-version bench bench-quick bench_reprobuild_core_mvp_performance repomix check-repo-requirements; do
+for recipe in build test lint format fmt t bump-version bench bench-quick bench_reprobuild_core_mvp_performance e2e_reprobuild_mvp_acceptance repomix check-repo-requirements; do
   just --summary | tr ' ' '\n' | grep -Fxq "${recipe}" || fail "missing Justfile recipe ${recipe}"
 done
 
