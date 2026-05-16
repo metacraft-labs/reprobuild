@@ -12,6 +12,7 @@ switch("path", "libs/repro_domain_types/src")
 switch("path", "libs/repro_project_dsl/src")
 switch("path", "libs/repro_interface_artifacts/src")
 switch("path", "libs/repro_tool_profiles/src")
+switch("path", "libs/repro_local_store/src")
 
 import std/[os, strutils]
 

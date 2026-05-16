@@ -12,3 +12,4 @@ repro_domain_types
 repro_project_dsl
 repro_interface_artifacts
 repro_tool_profiles
+repro_local_store
