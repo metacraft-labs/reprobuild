@@ -15,6 +15,16 @@ test:
 
 t: test
 
+integration-stackable-hooks:
+    mkdir -p test-logs
+    nim c -r \
+        --nimcache:build/nimcache/integration-stackable-hooks \
+        --out:build/test-bin/t_stackable_hooks_extracted_process_tree \
+        tests/integration/t_stackable_hooks_extracted_process_tree.nim \
+        2>&1 | tee test-logs/integration-stackable-hooks.log
+    cd /Users/zahary/metacraft/ct_interpose && direnv exec /Users/zahary/metacraft/codetracer-native-recorder nimble test \
+        2>&1 | tee -a /Users/zahary/metacraft/reprobuild/test-logs/integration-stackable-hooks.log
+
 lint:
     mkdir -p test-logs
     ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
