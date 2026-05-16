@@ -137,6 +137,15 @@ integration_reprobuild_sessions_share_runquota:
         tests/integration/t_integration_reprobuild_sessions_share_runquota.nim \
         2>&1 | tee test-logs/integration_reprobuild_sessions_share_runquota.log
 
+integration_hcr_reference_corpus_and_object_inputs:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_reference_corpus_and_object_inputs \
+        --out:build/test-bin/integration_hcr_reference_corpus_and_object_inputs \
+        tests/integration/t_integration_hcr_reference_corpus_and_object_inputs.nim \
+        2>&1 | tee test-logs/integration_hcr_reference_corpus_and_object_inputs.log
+
 integration_provider_fragment_refresh_and_pruning:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
