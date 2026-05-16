@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, strutils, tables]
+import std/[algorithm, json, os, osproc, sequtils, strutils, tables]
 import repro_core
 import repro_build_engine
 import repro_depfile
@@ -20,7 +20,8 @@ proc renderUsage*(programName: string): string =
   if programName == "repro":
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
-      " build <target[#name]> --tool-provisioning=path\n       " & programName &
+      " build <target[#name]> --tool-provisioning=path|nix\n       " & programName &
+      " develop <target[#name]> --tool-provisioning=nix -- <command> [args...]\n       " & programName &
       " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]"
   elif programName == "repro-fs-snoop":
     programName & " " & versionString() & "\nusage: " & programName &
@@ -33,6 +34,8 @@ proc parseToolProvisioning(value: string): ToolProvisioningMode =
   case value
   of "path":
     tpmPathOnly
+  of "nix":
+    tpmNix
   else:
     raise newException(ValueError, "unsupported --tool-provisioning=" & value)
 
@@ -64,6 +67,12 @@ proc outputDirForModule(modulePath: string; target: string): string =
 
 proc digestHex(digest: ContentDigest): string =
   toHex(digest.bytes)
+
+proc q(value: string): string =
+  quoteShell(value)
+
+proc shellCommand(args: openArray[string]): string =
+  args.mapIt(q(it)).join(" ")
 
 proc projectRootForModule(modulePath: string): string =
   parentDir(modulePath)
@@ -158,7 +167,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       raise newException(ValueError,
         "tool-resolution failed: action " & payload.id &
           " references executable " & executableName &
-          " but no PATH-only profile was resolved for it")
+          " but no tool profile was resolved for it")
   var inputs: seq[string] = @[]
   for input in payload.inputs:
     inputs.add(materialProjectPath(projectRoot, input))
@@ -250,6 +259,71 @@ proc hasFailedActions(buildResult: BuildRunResult): bool =
     if item.status in {asFailed, asBlocked}:
       return true
 
+proc identityPaths(outDir: string; mode: ToolProvisioningMode):
+    tuple[identityPath: string; inspectionPath: string] =
+  case mode
+  of tpmNix:
+    (identityPath: outDir / "nix-tool-identities.rbtp",
+      inspectionPath: outDir / "nix-tool-identities.inspect.json")
+  else:
+    (identityPath: outDir / "path-only-tool-identities.rbtp",
+      inspectionPath: outDir / "path-only-tool-identities.inspect.json")
+
+proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
+                             outDir: string;
+                             mode: ToolProvisioningMode):
+    tuple[identity: PathOnlyBuildIdentity; identityPath: string;
+      inspectionPath: string] =
+  let identity = toolBuildIdentity(artifact, mode)
+  let paths = identityPaths(outDir, mode)
+  writePathOnlyBuildIdentity(paths.identityPath, identity)
+  writeInspectionJson(paths.inspectionPath, identity)
+  (identity: identity, identityPath: paths.identityPath,
+    inspectionPath: paths.inspectionPath)
+
+proc modeName(mode: ToolProvisioningMode): string =
+  case mode
+  of tpmPathOnly: "path"
+  of tpmNix: "nix"
+  else: "unspecified"
+
+proc binDirsForDevelop(identity: PathOnlyBuildIdentity): seq[string] =
+  for profile in identity.profiles:
+    if profile.installMethod == "nix":
+      for storePath in profile.realizedStorePaths:
+        let binDir = storePath / "bin"
+        if dirExists(binDir) and not result.contains(binDir):
+          result.add(binDir)
+    else:
+      for binDir in profile.pathSearchList:
+        if binDir.len > 0 and dirExists(binDir) and not result.contains(binDir):
+          result.add(binDir)
+
+proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
+                             identity: PathOnlyBuildIdentity;
+                             identityPath, inspectionPath,
+                             interfacePath: string): int =
+  if command.len == 0:
+    raise newException(ValueError, "develop command is empty")
+  let profileBinDirs = binDirsForDevelop(identity)
+  let pathValue =
+    if profileBinDirs.len > 0:
+      profileBinDirs.join($PathSep) & $PathSep & getEnv("PATH")
+    else:
+      getEnv("PATH")
+  var envPrefix: seq[string] = @[
+    "PATH=" & q(pathValue),
+    "REPRO_TOOL_PROFILE_ARTIFACT=" & q(identityPath),
+    "REPRO_TOOL_PROFILE_INSPECTION=" & q(inspectionPath),
+    "REPRO_PROJECT_INTERFACE=" & q(interfacePath),
+    "REPRO_PROJECT_ROOT=" & q(projectRoot)
+  ]
+  let res = execCmdEx("cd " & q(projectRoot) & " && " &
+    envPrefix.join(" ") & " " & shellCommand(command))
+  if res.output.len > 0:
+    stdout.write(res.output)
+  res.exitCode
+
 proc runBuildCommand(args: openArray[string]): int =
   var target = ""
   var mode = tpmUnspecified
@@ -285,18 +359,23 @@ proc runBuildCommand(args: openArray[string]): int =
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
 
-  if mode == tpmPathOnly:
-    let identity = pathOnlyBuildIdentity(artifact)
-    let identityPath = outDir / "path-only-tool-identities.rbtp"
-    let inspectionPath = outDir / "path-only-tool-identities.inspect.json"
-    writePathOnlyBuildIdentity(identityPath, identity)
-    writeInspectionJson(inspectionPath, identity)
-    echo "repro build: provisioning-disabled mode active (tool-provisioning=path)"
+  if mode in {tpmPathOnly, tpmNix}:
+    let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
+    let identity = resolved.identity
+    echo "repro build: tool provisioning active (tool-provisioning=" &
+      mode.modeName & ")"
+    if mode == tpmPathOnly:
+      echo "repro build: provisioning-disabled mode active (tool-provisioning=path)"
     echo "project: " & artifact.projectInterface.projectName
     echo "interface: " & interfacePath
-    echo "toolIdentity: " & identityPath
-    echo "inspection: " & inspectionPath
-    echo "cachePortability: local-only"
+    echo "toolIdentity: " & resolved.identityPath
+    echo "inspection: " & resolved.inspectionPath
+    let portability =
+      if mode == tpmNix:
+        "portable"
+      else:
+        "local-only"
+    echo "cachePortability: " & portability
     if not moduleHasBuildBlock(modulePath):
       return 0
     let providerBinaryPath = outDir / "provider" / "project-provider"
@@ -349,6 +428,79 @@ proc runBuildCommand(args: openArray[string]): int =
   echo "interface: " & interfacePath
   0
 
+proc runDevelopCommand(args: openArray[string]): int =
+  var target = ""
+  var mode = tpmUnspecified
+  var command: seq[string] = @[]
+  var afterSeparator = false
+  for arg in args:
+    if afterSeparator:
+      command.add(arg)
+    elif arg == "--":
+      afterSeparator = true
+    elif arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
+    elif arg == "--tool-provisioning":
+      raise newException(ValueError,
+        "--tool-provisioning requires an inline value, for example " &
+          "--tool-provisioning=nix")
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported develop flag: " & arg)
+    elif target.len == 0:
+      target = arg
+    else:
+      raise newException(ValueError, "unexpected develop argument before --: " & arg)
+
+  if target.len == 0:
+    raise newException(ValueError, "missing develop target")
+
+  let modulePath = absolutePath(moduleForTarget(target))
+  if not fileExists(modulePath):
+    raise newException(IOError, "develop target module not found: " & modulePath)
+
+  let outDir = parentDir(modulePath) / ".repro" / "develop"
+  let interfacePath = outDir / "project-interface.rbsz"
+  let stubPath = outDir / "project-interface.nim"
+  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath)
+
+  if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
+    raise newException(ValueError,
+      "typed tool provisioning is required for uses declarations; refusing " &
+        "implicit PATH fallback. Pass --tool-provisioning=nix to resolve a " &
+        "Nix-backed development environment.")
+
+  if mode == tpmUnspecified:
+    echo "repro develop: no external tools requested"
+    if command.len == 0:
+      return 0
+    return runInDevelopEnvironment(command, projectRootForModule(modulePath),
+      PathOnlyBuildIdentity(projectName: artifact.projectInterface.projectName,
+        interfaceFingerprint: artifact.interfaceFingerprint),
+      "", "", interfacePath)
+
+  if mode notin {tpmPathOnly, tpmNix}:
+    raise newException(ValueError,
+      "unsupported develop tool provisioning mode: " & mode.modeName)
+
+  let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
+  echo "repro develop: tool provisioning active (tool-provisioning=" &
+    mode.modeName & ")"
+  echo "project: " & artifact.projectInterface.projectName
+  echo "interface: " & interfacePath
+  echo "toolIdentity: " & resolved.identityPath
+  echo "inspection: " & resolved.inspectionPath
+  echo "binDirs: " & binDirsForDevelop(resolved.identity).join($PathSep)
+
+  if command.len == 0:
+    for profile in resolved.identity.profiles:
+      echo "tool: " & profile.executableName & " " &
+        profile.resolvedExecutablePath
+    return 0
+
+  runInDevelopEnvironment(command, projectRootForModule(modulePath),
+    resolved.identity, resolved.identityPath, resolved.inspectionPath,
+    interfacePath)
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   if wantsVersion(args):
@@ -381,6 +533,17 @@ proc runThinApp*(programName: string): int =
       return runBuildCommand(buildArgs)
     except CatchableError as err:
       stderr.writeLine("repro build: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "develop":
+    try:
+      let developArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runDevelopCommand(developArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro develop: error: " & err.msg)
       return 1
   echo renderUsage(programName)
   0

@@ -11,6 +11,7 @@ type
   ToolProvisioningMode* = enum
     tpmUnspecified
     tpmPathOnly
+    tpmNix
 
   AdapterStrength* = enum
     asWeak
@@ -38,6 +39,12 @@ type
   PathOnlyToolProfile* = object
     installMethod*: string
     packageSelector*: string
+    packageId*: string
+    nixSelector*: string
+    realizedStorePaths*: seq[string]
+    selectedStorePath*: string
+    lockIdentity*: string
+    realizationBoundary*: string
     executableName*: string
     pathSearchList*: seq[string]
     resolvedExecutablePath*: string
@@ -48,13 +55,21 @@ type
 
   ToolActionIdentity* = object
     providerEntrypointId*: string
+    installMethod*: string
     packageSelector*: string
+    packageId*: string
+    nixSelector*: string
+    realizedStorePaths*: seq[string]
+    selectedStorePath*: string
+    lockIdentity*: string
+    realizationBoundary*: string
     executableName*: string
     subcommand*: string
     pathSearchList*: seq[string]
     resolvedExecutablePath*: string
     probes*: seq[ToolProbeResult]
     actionFingerprint*: ContentDigest
+    adapterStrength*: AdapterStrength
     cachePortability*: CachePortability
 
   PathOnlyBuildIdentity* = object
@@ -65,7 +80,7 @@ type
 
 const
   ArtifactMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')), byte(ord('P'))]
-  ArtifactVersion = 1'u16
+  ArtifactVersion = 2'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -120,6 +135,16 @@ proc fromByteString(text: string): seq[byte] =
 proc digestHex(digest: ContentDigest): string =
   toHex(digest.bytes)
 
+proc strengthName(strength: AdapterStrength): string =
+  case strength
+  of asWeak: "weak"
+  of asStrong: "strong"
+
+proc portabilityName(portability: CachePortability): string =
+  case portability
+  of cpLocalOnly: "local-only"
+  of cpPortable: "portable"
+
 proc splitPathList(pathValue: string): seq[string] =
   if pathValue.len == 0:
     return @[]
@@ -131,16 +156,25 @@ proc configuredProbes*(packageSelector, executableName: string): seq[
   discard executableName
   @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["--version"])]
 
+proc shellCommand(args: openArray[string]): string =
+  args.mapIt(quoteShell(it)).join(" ")
+
 proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
   let command = @[executablePath] & spec.args
-  let res = execCmdEx(command.mapIt("'" & it.replace("'", "'\\''") & "'").join(" "))
+  let res = execCmdEx(shellCommand(command))
   ToolProbeResult(spec: spec, exitCode: res.exitCode, output: res.output)
 
 proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.pathOnlyToolProfile.v1")
+  payload.writeString("reprobuild.toolProfile.v2")
   payload.writeString(profile.installMethod)
   payload.writeString(profile.packageSelector)
+  payload.writeString(profile.packageId)
+  payload.writeString(profile.nixSelector)
+  payload.writeStringSeq(profile.realizedStorePaths)
+  payload.writeString(profile.selectedStorePath)
+  payload.writeString(profile.lockIdentity)
+  payload.writeString(profile.realizationBoundary)
   payload.writeString(profile.executableName)
   payload.writeStringSeq(profile.pathSearchList)
   payload.writeString(profile.resolvedExecutablePath)
@@ -156,9 +190,16 @@ proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
 
 proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.pathOnlyToolAction.v1")
+  payload.writeString("reprobuild.toolAction.v2")
   payload.writeString(identity.providerEntrypointId)
+  payload.writeString(identity.installMethod)
   payload.writeString(identity.packageSelector)
+  payload.writeString(identity.packageId)
+  payload.writeString(identity.nixSelector)
+  payload.writeStringSeq(identity.realizedStorePaths)
+  payload.writeString(identity.selectedStorePath)
+  payload.writeString(identity.lockIdentity)
+  payload.writeString(identity.realizationBoundary)
   payload.writeString(identity.executableName)
   payload.writeString(identity.subcommand)
   payload.writeStringSeq(identity.pathSearchList)
@@ -169,6 +210,7 @@ proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
     payload.writeStringSeq(probe.spec.args)
     payload.writeU32Le(uint32(max(probe.exitCode, 0)))
     payload.writeString(probe.output)
+  payload.writeByte(byte(ord(identity.adapterStrength)))
   payload.writeByte(byte(ord(identity.cachePortability)))
   blake3DomainDigest(payload, hdActionFingerprint)
 
@@ -198,6 +240,7 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
   result = PathOnlyToolProfile(
     installMethod: "path",
     packageSelector: useDef.packageSelector,
+    packageId: useDef.packageSelector,
     executableName: useDef.executableName,
     pathSearchList: searchList,
     resolvedExecutablePath: resolved,
@@ -210,6 +253,88 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
       raise newException(OSError,
         "tool-resolution failed: probe " & probe.name & " for " &
         useDef.executableName & " exited " & $probeResult.exitCode)
+    result.probes.add(probeResult)
+
+  result.profileFingerprint = profileFingerprintFor(result)
+
+proc nixSelectorFor(useDef: InterfaceToolUse): string =
+  case useDef.packageSelector
+  of "nim":
+    "nixpkgs#nim"
+  of "node":
+    "nixpkgs#nodejs"
+  of "gcc":
+    "nixpkgs#gcc"
+  of "sh":
+    "nixpkgs#bash"
+  else:
+    if useDef.packageSelector.contains("#"):
+      useDef.packageSelector
+    else:
+      "nixpkgs#" & useDef.packageSelector
+
+proc executableInStorePath(storePath, executableName: string): string =
+  let candidate = storePath / "bin" / executableName
+  if fileExists(candidate) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
+      it in getFilePermissions(candidate)):
+    absolutePath(candidate)
+  else:
+    ""
+
+proc resolveNixTool*(useDef: InterfaceToolUse): PathOnlyToolProfile =
+  let selector = nixSelectorFor(useDef)
+  let res = execCmdEx(shellCommand(@["nix", "build", "--no-link",
+    "--print-out-paths", selector]))
+  if res.exitCode != 0:
+    raise newException(OSError,
+      "tool-resolution failed: nix build for " & selector & " exited " &
+      $res.exitCode & "\n" & res.output)
+
+  var realized: seq[string] = @[]
+  for line in res.output.splitLines:
+    let stripped = line.strip()
+    if stripped.startsWith("/nix/store/"):
+      realized.add(stripped)
+  if realized.len == 0:
+    raise newException(OSError,
+      "tool-resolution failed: nix build for " & selector &
+      " did not print any /nix/store outputs")
+
+  var selectedStorePath = ""
+  var resolved = ""
+  for storePath in realized:
+    let candidate = executableInStorePath(storePath, useDef.executableName)
+    if candidate.len > 0:
+      selectedStorePath = storePath
+      resolved = candidate
+      break
+  if resolved.len == 0:
+    raise newException(OSError,
+      "tool-resolution failed: nix build for " & selector &
+      " realized outputs without bin/" & useDef.executableName)
+
+  result = PathOnlyToolProfile(
+    installMethod: "nix",
+    packageSelector: useDef.packageSelector,
+    packageId: selector,
+    nixSelector: selector,
+    realizedStorePaths: realized,
+    selectedStorePath: selectedStorePath,
+    lockIdentity: selector,
+    realizationBoundary: selectedStorePath,
+    executableName: useDef.executableName,
+    pathSearchList: @[selectedStorePath / "bin"],
+    resolvedExecutablePath: resolved,
+    adapterStrength: asStrong,
+    cachePortability: cpPortable)
+
+  for probe in configuredProbes(useDef.packageSelector, useDef.executableName):
+    let probeResult = runProbe(resolved, probe)
+    if probeResult.exitCode != 0:
+      raise newException(OSError,
+        "tool-resolution failed: probe " & probe.name & " for " &
+        useDef.executableName & " from " & selector & " exited " &
+        $probeResult.exitCode)
     result.probes.add(probeResult)
 
   result.profileFingerprint = profileFingerprintFor(result)
@@ -229,14 +354,19 @@ proc metadataFor(identity: ToolActionIdentity): DynamicValue =
   cborMap([
     entry("kind", cborText("pathOnlyToolAction")),
     entry("schema", cborUInt(1)),
-    entry("installMethod", cborText("path")),
+    entry("installMethod", cborText(identity.installMethod)),
     entry("packageSelector", cborText(identity.packageSelector)),
+    entry("packageId", cborText(identity.packageId)),
+    entry("nixSelector", cborText(identity.nixSelector)),
+    entry("selectedStorePath", cborText(identity.selectedStorePath)),
+    entry("lockIdentity", cborText(identity.lockIdentity)),
+    entry("realizationBoundary", cborText(identity.realizationBoundary)),
     entry("executableName", cborText(identity.executableName)),
     entry("pathSearchList", cborArray(pathValues)),
     entry("resolvedExecutablePath", cborText(identity.resolvedExecutablePath)),
     entry("probes", cborArray(probeValues)),
-    entry("adapterStrength", cborText("weak")),
-    entry("cachePortability", cborText("local-only")),
+    entry("adapterStrength", cborText(strengthName(identity.adapterStrength))),
+    entry("cachePortability", cborText(portabilityName(identity.cachePortability))),
     entry("actionFingerprint", cborText(digestHex(identity.actionFingerprint)))
   ])
 
@@ -256,34 +386,56 @@ proc actionSpecFor*(identity: ToolActionIdentity): ActionSpec =
     dependencyPolicy: declaredOnlyPolicy(),
     metadata: metadataFor(identity))
 
-proc pathOnlyBuildIdentity*(artifact: ProjectInterfaceArtifact;
-                            pathValue = getEnv("PATH")):
+proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
+                    pathValue: string): PathOnlyToolProfile =
+  case mode
+  of tpmPathOnly:
+    resolvePathOnlyTool(useDef, pathValue)
+  of tpmNix:
+    resolveNixTool(useDef)
+  else:
+    raise newException(ValueError, "tool provisioning mode is not resolved")
+
+proc actionIdentityFor(useDef: InterfaceToolUse;
+                       profile: PathOnlyToolProfile): ToolActionIdentity =
+  result = ToolActionIdentity(
+    providerEntrypointId: useDef.packageSelector & "." &
+      useDef.executableName & "." & profile.installMethod,
+    installMethod: profile.installMethod,
+    packageSelector: useDef.packageSelector,
+    packageId: profile.packageId,
+    nixSelector: profile.nixSelector,
+    realizedStorePaths: profile.realizedStorePaths,
+    selectedStorePath: profile.selectedStorePath,
+    lockIdentity: profile.lockIdentity,
+    realizationBoundary: profile.realizationBoundary,
+    executableName: useDef.executableName,
+    subcommand: profile.installMethod,
+    pathSearchList: profile.pathSearchList,
+    resolvedExecutablePath: profile.resolvedExecutablePath,
+    probes: profile.probes,
+    adapterStrength: profile.adapterStrength,
+    cachePortability: profile.cachePortability)
+  result.actionFingerprint = actionFingerprintFor(result)
+
+proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
+                        mode: ToolProvisioningMode;
+                        pathValue = getEnv("PATH")):
     PathOnlyBuildIdentity =
   result.projectName = artifact.projectInterface.projectName
   result.interfaceFingerprint = artifact.interfaceFingerprint
   for useDef in artifact.projectInterface.toolUses:
-    let profile = resolvePathOnlyTool(useDef, pathValue)
+    let profile = toolProfileFor(useDef, mode, pathValue)
     result.profiles.add(profile)
-    result.actionIdentities.add(ToolActionIdentity(
-      providerEntrypointId: useDef.packageSelector & "." &
-        useDef.executableName & ".path",
-      packageSelector: useDef.packageSelector,
-      executableName: useDef.executableName,
-      subcommand: "path",
-      pathSearchList: profile.pathSearchList,
-      resolvedExecutablePath: profile.resolvedExecutablePath,
-      probes: profile.probes,
-      actionFingerprint: actionFingerprintFor(ToolActionIdentity(
-        providerEntrypointId: useDef.packageSelector & "." &
-          useDef.executableName & ".path",
-        packageSelector: useDef.packageSelector,
-        executableName: useDef.executableName,
-        subcommand: "path",
-        pathSearchList: profile.pathSearchList,
-        resolvedExecutablePath: profile.resolvedExecutablePath,
-        probes: profile.probes,
-        cachePortability: cpLocalOnly)),
-      cachePortability: cpLocalOnly))
+    result.actionIdentities.add(actionIdentityFor(useDef, profile))
+
+proc pathOnlyBuildIdentity*(artifact: ProjectInterfaceArtifact;
+                            pathValue = getEnv("PATH")):
+    PathOnlyBuildIdentity =
+  toolBuildIdentity(artifact, tpmPathOnly, pathValue)
+
+proc nixBuildIdentity*(artifact: ProjectInterfaceArtifact): PathOnlyBuildIdentity =
+  toolBuildIdentity(artifact, tpmNix)
 
 proc writeProbeSpec(outp: var seq[byte]; spec: ToolProbeSpec) =
   outp.writeByte(byte(ord(spec.kind)))
@@ -324,6 +476,12 @@ proc readProbeResults(bytes: openArray[byte]; pos: var int): seq[
 proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeString(profile.installMethod)
   outp.writeString(profile.packageSelector)
+  outp.writeString(profile.packageId)
+  outp.writeString(profile.nixSelector)
+  outp.writeStringSeq(profile.realizedStorePaths)
+  outp.writeString(profile.selectedStorePath)
+  outp.writeString(profile.lockIdentity)
+  outp.writeString(profile.realizationBoundary)
   outp.writeString(profile.executableName)
   outp.writeStringSeq(profile.pathSearchList)
   outp.writeString(profile.resolvedExecutablePath)
@@ -332,9 +490,19 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeByte(byte(ord(profile.cachePortability)))
   outp.writeDigest(profile.profileFingerprint)
 
-proc readProfile(bytes: openArray[byte]; pos: var int): PathOnlyToolProfile =
+proc readProfile(bytes: openArray[byte]; pos: var int;
+                 version: uint16): PathOnlyToolProfile =
   result.installMethod = readString(bytes, pos)
   result.packageSelector = readString(bytes, pos)
+  if version >= 2'u16:
+    result.packageId = readString(bytes, pos)
+    result.nixSelector = readString(bytes, pos)
+    result.realizedStorePaths = readStringSeq(bytes, pos)
+    result.selectedStorePath = readString(bytes, pos)
+    result.lockIdentity = readString(bytes, pos)
+    result.realizationBoundary = readString(bytes, pos)
+  else:
+    result.packageId = result.packageSelector
   result.executableName = readString(bytes, pos)
   result.pathSearchList = readStringSeq(bytes, pos)
   result.resolvedExecutablePath = readString(bytes, pos)
@@ -351,25 +519,53 @@ proc readProfile(bytes: openArray[byte]; pos: var int): PathOnlyToolProfile =
 
 proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeString(identity.providerEntrypointId)
+  outp.writeString(identity.installMethod)
   outp.writeString(identity.packageSelector)
+  outp.writeString(identity.packageId)
+  outp.writeString(identity.nixSelector)
+  outp.writeStringSeq(identity.realizedStorePaths)
+  outp.writeString(identity.selectedStorePath)
+  outp.writeString(identity.lockIdentity)
+  outp.writeString(identity.realizationBoundary)
   outp.writeString(identity.executableName)
   outp.writeString(identity.subcommand)
   outp.writeStringSeq(identity.pathSearchList)
   outp.writeString(identity.resolvedExecutablePath)
   outp.writeProbeResults(identity.probes)
   outp.writeDigest(identity.actionFingerprint)
+  outp.writeByte(byte(ord(identity.adapterStrength)))
   outp.writeByte(byte(ord(identity.cachePortability)))
 
 proc readActionIdentity(bytes: openArray[byte];
-    pos: var int): ToolActionIdentity =
+    pos: var int; version: uint16): ToolActionIdentity =
   result.providerEntrypointId = readString(bytes, pos)
+  if version >= 2'u16:
+    result.installMethod = readString(bytes, pos)
+  else:
+    result.installMethod = "path"
   result.packageSelector = readString(bytes, pos)
+  if version >= 2'u16:
+    result.packageId = readString(bytes, pos)
+    result.nixSelector = readString(bytes, pos)
+    result.realizedStorePaths = readStringSeq(bytes, pos)
+    result.selectedStorePath = readString(bytes, pos)
+    result.lockIdentity = readString(bytes, pos)
+    result.realizationBoundary = readString(bytes, pos)
+  else:
+    result.packageId = result.packageSelector
   result.executableName = readString(bytes, pos)
   result.subcommand = readString(bytes, pos)
   result.pathSearchList = readStringSeq(bytes, pos)
   result.resolvedExecutablePath = readString(bytes, pos)
   result.probes = readProbeResults(bytes, pos)
   result.actionFingerprint = readDigest(bytes, pos)
+  if version >= 2'u16:
+    let strength = readByte(bytes, pos)
+    if strength > byte(ord(asStrong)):
+      raiseEnvelopeError(eeMalformed, "invalid adapter strength")
+    result.adapterStrength = AdapterStrength(strength)
+  else:
+    result.adapterStrength = asWeak
   let portability = readByte(bytes, pos)
   if portability > byte(ord(cpPortable)):
     raiseEnvelopeError(eeMalformed, "invalid cache portability")
@@ -399,7 +595,7 @@ proc decodePathOnlyBuildIdentity*(bytes: openArray[
       raiseEnvelopeError(eeUnknownMagic, "unknown path-only tool artifact magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != ArtifactVersion:
+  if version < 1'u16 or version > ArtifactVersion:
     raiseEnvelopeError(eeUnsupportedVersion,
       "unsupported path-only tool artifact version")
   let payloadLength = int(readU32Le(bytes, pos))
@@ -410,11 +606,11 @@ proc decodePathOnlyBuildIdentity*(bytes: openArray[
   let profileCount = int(readU32Le(bytes, pos))
   result.profiles = newSeq[PathOnlyToolProfile](profileCount)
   for i in 0 ..< profileCount:
-    result.profiles[i] = readProfile(bytes, pos)
+    result.profiles[i] = readProfile(bytes, pos, version)
   let actionCount = int(readU32Le(bytes, pos))
   result.actionIdentities = newSeq[ToolActionIdentity](actionCount)
   for i in 0 ..< actionCount:
-    result.actionIdentities[i] = readActionIdentity(bytes, pos)
+    result.actionIdentities[i] = readActionIdentity(bytes, pos, version)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing path-only tool payload bytes")
 
@@ -442,12 +638,18 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
   %*{
     "installMethod": profile.installMethod,
     "packageSelector": profile.packageSelector,
+    "packageId": profile.packageId,
+    "nixSelector": profile.nixSelector,
+    "realizedStorePaths": profile.realizedStorePaths,
+    "selectedStorePath": profile.selectedStorePath,
+    "lockIdentity": profile.lockIdentity,
+    "realizationBoundary": profile.realizationBoundary,
     "executableName": profile.executableName,
     "pathSearchList": profile.pathSearchList,
     "resolvedExecutablePath": profile.resolvedExecutablePath,
     "probes": probes,
-    "adapterStrength": "weak",
-    "cachePortability": "local-only",
+    "adapterStrength": strengthName(profile.adapterStrength),
+    "cachePortability": portabilityName(profile.cachePortability),
     "profileFingerprint": digestHex(profile.profileFingerprint)
   }
 
@@ -457,13 +659,21 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     probes.add(jsonProbe(probe))
   %*{
     "providerEntrypointId": identity.providerEntrypointId,
+    "installMethod": identity.installMethod,
     "packageSelector": identity.packageSelector,
+    "packageId": identity.packageId,
+    "nixSelector": identity.nixSelector,
+    "realizedStorePaths": identity.realizedStorePaths,
+    "selectedStorePath": identity.selectedStorePath,
+    "lockIdentity": identity.lockIdentity,
+    "realizationBoundary": identity.realizationBoundary,
     "executableName": identity.executableName,
     "subcommand": identity.subcommand,
     "pathSearchList": identity.pathSearchList,
     "resolvedExecutablePath": identity.resolvedExecutablePath,
     "probes": probes,
-    "cachePortability": "local-only",
+    "adapterStrength": strengthName(identity.adapterStrength),
+    "cachePortability": portabilityName(identity.cachePortability),
     "actionFingerprint": digestHex(identity.actionFingerprint)
   }
 
