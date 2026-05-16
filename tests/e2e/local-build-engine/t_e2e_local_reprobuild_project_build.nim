@@ -373,6 +373,17 @@ proc build(reproBin, target, repoRoot, pathValue: string;
   requireSuccess(shellCommand([reproBin, "build", target,
     "--tool-provisioning=path"], entries), repoRoot)
 
+proc compilePublicReproTestBin(repoRoot: string): string =
+  result = repoRoot / "build" / "test-bin" / "repro"
+  createDir(result.splitPath.head)
+  discard requireSuccess(shellCommand([
+    "nim", "c", "--verbosity:0", "--hints:off",
+    "--nimcache:" & repoRoot / "build" / "nimcache" /
+      "m35-relative-public-repro",
+    "--out:" & result,
+    repoRoot / "apps" / "repro" / "repro.nim"
+  ]), repoRoot)
+
 proc reportAction(report: JsonNode; id: string): JsonNode =
   for item in report{"actions"}:
     if item{"id"}.getStr() == id:
@@ -559,6 +570,47 @@ suite "e2e_local_reprobuild_project_build":
     check unknown.contains("unknown build target/action id: does-not-exist")
     check unknown.contains("available:")
     check unknown.contains("consume")
+
+  test "relative public CLI keeps RunQuota helper path stable across project cwd":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m35-relative-public-cli", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    discard compilePublicReproTestBin(repoRoot)
+
+    let binDir = tempRoot / "bin"
+    writeFixtureTools(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+
+    let projectRoot = tempRoot / "project"
+    createDir(projectRoot / "src")
+    writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
+    writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
+    writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
+    writeProject(projectRoot / "reprobuild.nim")
+
+    let selected = requireSuccess(shellCommand([
+      "build/test-bin/repro", "build", projectRoot & "#consume",
+      "--tool-provisioning=path"
+    ], [("PATH", pathValue)]), repoRoot)
+    check selected.contains("selectedTarget: consume")
+    check selected.contains("scheduler: actions=2")
+    check selected.contains("action: produce status=asSucceeded launched=true")
+    check selected.contains("action: consume status=asSucceeded launched=true")
+    check selected.contains("runquota=")
+    check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
+      @["producer", "consumer"]
+    let report = parseFile(valueAfter(selected, "buildReport:"))
+    check reportAction(report, "produce"){"runQuotaBackend"}.getStr().len > 0
+    check reportAction(report, "consume"){"runQuotaBackend"}.getStr().len > 0
 
   test "public CLI builds local DSL project through provider, scheduler, cache, and depfile evidence":
     let repoRoot = getCurrentDir()

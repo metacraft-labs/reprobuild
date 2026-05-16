@@ -402,6 +402,19 @@ proc runQuotaSocketDiagnostic(): string =
   else:
     "default"
 
+proc stablePublicCliPath(): string =
+  let app = getAppFilename()
+  if app.isAbsolute:
+    return os.normalizedPath(app)
+  if app.contains(DirSep) or app.contains(AltSep):
+    return os.normalizedPath(getCurrentDir() / app)
+  let resolved = findExe(app)
+  if resolved.len > 0:
+    if resolved.isAbsolute:
+      return os.normalizedPath(resolved)
+    return os.normalizedPath(getCurrentDir() / resolved)
+  os.normalizedPath(getCurrentDir() / app)
+
 type
   BuildCommandOutcome = object
     exitCode: int
@@ -410,7 +423,8 @@ type
     outDir: string
     buildReportPath: string
 
-proc executeBuildTarget(target: string; mode: ToolProvisioningMode):
+proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
+                        publicCliPath: string):
     BuildCommandOutcome =
   var parsedTarget = parseBuildTarget(target)
   parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
@@ -488,7 +502,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode):
       return
     let buildResult = runBuild(graph(actions), BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
-      runQuotaCliPath: getAppFilename(),
+      runQuotaCliPath: publicCliPath,
       maxParallelism: 8'u32,
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
@@ -590,7 +604,7 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
     stdout.write(res.output)
   res.exitCode
 
-proc runBuildCommand(args: openArray[string]): int =
+proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var target = ""
   var mode = tpmUnspecified
   for arg in args:
@@ -610,7 +624,7 @@ proc runBuildCommand(args: openArray[string]): int =
   if target.len == 0:
     raise newException(ValueError, "missing build target")
 
-  executeBuildTarget(target, mode).exitCode
+  executeBuildTarget(target, mode, publicCliPath).exitCode
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:
@@ -620,7 +634,7 @@ proc parsePositiveIntFlag(flagName, value: string): int =
   if result <= 0:
     raise newException(ValueError, flagName & " must be greater than zero")
 
-proc runWatchCommand(args: openArray[string]): int =
+proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
   var target = ""
   var mode = tpmUnspecified
   var maxCycles = 0
@@ -667,7 +681,7 @@ proc runWatchCommand(args: openArray[string]): int =
     echo "repro watch: cycle " & $cycle & " start" &
       (if cycle == 1: " initial" else: " rebuild")
     flushStdout()
-    let outcome = executeBuildTarget(target, mode)
+    let outcome = executeBuildTarget(target, mode, publicCliPath)
     echo "repro watch: cycle " & $cycle & " result exitCode=" &
       $outcome.exitCode
     flushStdout()
@@ -769,6 +783,7 @@ proc runDevelopCommand(args: openArray[string]): int =
 
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
+  let publicCliPath = stablePublicCliPath()
   if wantsVersion(args):
     echo renderVersion(programName)
     return 0
@@ -796,7 +811,7 @@ proc runThinApp*(programName: string): int =
           args[1 .. ^1]
         else:
           @[]
-      return runBuildCommand(buildArgs)
+      return runBuildCommand(buildArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro build: error: " & err.msg)
       return 1
@@ -807,7 +822,7 @@ proc runThinApp*(programName: string): int =
           args[1 .. ^1]
         else:
           @[]
-      return runWatchCommand(watchArgs)
+      return runWatchCommand(watchArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro watch: error: " & err.msg)
       return 1

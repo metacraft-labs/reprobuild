@@ -81,6 +81,17 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
     sourcePath
   ]), repoRoot)
 
+proc compilePublicReproTestBin(repoRoot: string): string =
+  result = repoRoot / "build" / "test-bin" / "repro"
+  createDir(result.splitPath.head)
+  discard requireSuccess(shellCommand([
+    "nim", "c", "--verbosity:0", "--hints:off",
+    "--nimcache:" & repoRoot / "build" / "nimcache" /
+      "m35-codetracer-relative-public-repro",
+    "--out:" & result,
+    repoRoot / "apps" / "repro" / "repro.nim"
+  ]), repoRoot)
+
 when defined(macosx):
   proc compileShim(repoRoot, outputPath: string) =
     let arm64Path = outputPath & ".arm64"
@@ -256,13 +267,8 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -329,13 +335,8 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -417,13 +418,8 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)

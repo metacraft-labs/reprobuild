@@ -253,6 +253,17 @@ proc compileRepro(repoRoot, tempRoot: string): string =
     repoRoot / "apps" / "repro" / "repro.nim"
   ]), repoRoot)
 
+proc compilePublicReproTestBin(repoRoot: string): string =
+  result = repoRoot / "build" / "test-bin" / "repro"
+  createDir(result.splitPath.head)
+  discard requireSuccess(shellCommand([
+    "nim", "c", "--verbosity:0", "--hints:off",
+    "--nimcache:" & repoRoot / "build" / "nimcache" /
+      "m35-watch-relative-public-repro",
+    "--out:" & result,
+    repoRoot / "apps" / "repro" / "repro.nim"
+  ]), repoRoot)
+
 proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
   discard requireSuccess(shellCommand([
     "nim", "c", "--verbosity:0", "--hints:off",
@@ -354,7 +365,8 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compileRepro(repoRoot, tempRoot)
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
       let binDir = tempRoot / "bin"
       writeFixtureTools(binDir)
       let pathValue = binDir & $PathSep & getEnv("PATH")
