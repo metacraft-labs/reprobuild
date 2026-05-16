@@ -1,3 +1,5 @@
+import repro_hcr_agent/debug_unwind
 import repro_hcr_agent/minimal_target
 
+export debug_unwind
 export minimal_target
