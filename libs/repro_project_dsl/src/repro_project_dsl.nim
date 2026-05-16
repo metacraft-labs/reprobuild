@@ -94,6 +94,10 @@ type
 var registry: seq[PackageDef] = @[]
 var buildActionRegistry: seq[BuildActionDef] = @[]
 
+when defined(reproProviderMode):
+  var providerEvaluationInputRegistry: seq[GraphEvaluationInput] = @[]
+  var currentProviderProjectRoot = ""
+
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
@@ -113,6 +117,27 @@ proc resetBuildActionRegistry*() =
 
 proc registeredBuildActions*(): seq[BuildActionDef] =
   buildActionRegistry
+
+when defined(reproProviderMode):
+  proc resetProviderEvaluationInputRegistry() =
+    providerEvaluationInputRegistry.setLen(0)
+
+  proc materialProviderPath(path: string): string =
+    if path.len == 0 or path.isAbsolute:
+      path
+    else:
+      os.normalizedPath(currentProviderProjectRoot / path)
+
+  proc providerDirectoryInput*(path: string) =
+    providerEvaluationInputRegistry.add(
+      directoryEnumerationInput(materialProviderPath(path), "", ""))
+
+  proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
+    providerEvaluationInputRegistry
+
+else:
+  proc providerDirectoryInput*(path: string) =
+    discard path
 
 proc cliArg*(name: string; value: string; kind = cpkFlag; position = 0;
              alias = ""): PublicCliArg =
@@ -725,7 +750,12 @@ when defined(reproProviderMode):
   proc buildPackageFragment(pkg: PackageDef; request: ProviderGraphRequest;
                             buildProc: proc ()): GraphFragment =
     resetBuildActionRegistry()
-    buildProc()
+    resetProviderEvaluationInputRegistry()
+    currentProviderProjectRoot = request.arguments
+    try:
+      buildProc()
+    finally:
+      currentProviderProjectRoot = ""
     let actions = registeredBuildActions()
     result = GraphFragment(
       entryPointId: request.entryPointId,
@@ -734,6 +764,8 @@ when defined(reproProviderMode):
       namespace: request.namespace)
     if fileExists(pkg.sourceFile):
       result.evaluationInputs.add(fileReadInput(pkg.sourceFile))
+    for input in registeredProviderEvaluationInputs():
+      result.evaluationInputs.add(input)
     for action in actions:
       let nodeId = actionNode(request.namespace, action.id)
       result.nodes.add(GraphNode(

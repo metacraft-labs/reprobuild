@@ -252,6 +252,25 @@ proc writeFixtureTools(binDir: string) =
     "cat \"$input\" >> \"$output\"\n" &
     "printf 'consumer\\n' >> \"$marker\"\n")
 
+  writeExecutable(binDir / "m40-copy",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"--version\" ]; then echo 'm40-copy 1.0.0'; exit 0; fi\n" &
+    "test \"${1:-}\" = copy\n" &
+    "shift\n" &
+    "input= output= marker=\n" &
+    "while [ \"$#\" -gt 0 ]; do\n" &
+    "  case \"$1\" in\n" &
+    "    --input) input=$2; shift 2 ;;\n" &
+    "    --output) output=$2; shift 2 ;;\n" &
+    "    --marker) marker=$2; shift 2 ;;\n" &
+    "    *) echo \"unknown arg $1\" >&2; exit 64 ;;\n" &
+    "  esac\n" &
+    "done\n" &
+    "mkdir -p \"$(dirname \"$output\")\" \"$(dirname \"$marker\")\"\n" &
+    "cp \"$input\" \"$output\"\n" &
+    "printf 'copy:%s\\n' \"$output\" >> \"$marker\"\n")
+
 proc writeProject(path: string) =
   createDir(path.splitPath.head)
   writeFile(path,
@@ -350,6 +369,46 @@ proc writePolicyProject(path: string; policyText: string) =
     "        outputs = @[\"build/generated.txt\"],\n" &
     "        depfile = \"build/generated.d\",\n" &
     "        dependencyPolicy = " & policyText & ")\n")
+
+proc writeDirectoryEnumerationProject(path: string) =
+  createDir(path.splitPath.head)
+  writeFile(path,
+    "import std/[algorithm, os]\n" &
+    "import repro_project_dsl\n\n" &
+    "package m40Project:\n" &
+    "  uses:\n" &
+    "    \"m40-copy >=1.0 <2.0\"\n\n" &
+    "  executable copier:\n" &
+    "    name \"m40-copy\"\n" &
+    "    cli:\n" &
+    "      subcmd \"copy\":\n" &
+    "        flag input, string, required = true\n" &
+    "        flag output, string, required = true\n" &
+    "        flag marker, string, required = true\n" &
+    "    build:\n" &
+    "      providerDirectoryInput(\"src/resources\")\n" &
+    "      var sourceFiles: seq[string] = @[]\n" &
+    "      for sourcePath in walkFiles(\"src/resources/*\"):\n" &
+    "        sourceFiles.add(sourcePath)\n" &
+    "      sourceFiles.sort()\n" &
+    "      var copyDeps: seq[string] = @[]\n" &
+    "      let marker = \".repro/m40-tool-runs.log\"\n" &
+    "      for sourcePath in sourceFiles:\n" &
+    "        let name = splitPath(sourcePath).tail\n" &
+    "        let actionId = \"copy-\" & name\n" &
+    "        let output = \"dist/\" & name & \".out\"\n" &
+    "        copyDeps.add(actionId)\n" &
+    "        discard buildAction(actionId,\n" &
+    "          m40Project.copy(input = sourcePath, output = output,\n" &
+    "            marker = marker),\n" &
+    "          inputs = @[sourcePath],\n" &
+    "          outputs = @[output])\n" &
+    "      discard buildAction(\"aggregate\",\n" &
+    "        m40Project.copy(input = \"src/aggregate.txt\",\n" &
+    "          output = \"dist/aggregate.stamp\", marker = marker),\n" &
+    "        deps = copyDeps,\n" &
+    "        inputs = @[\"src/aggregate.txt\"],\n" &
+    "        outputs = @[\"dist/aggregate.stamp\"])\n")
 
 proc nonEmptyLines(path: string): seq[string] =
   if not fileExists(path):
@@ -611,6 +670,68 @@ suite "e2e_local_reprobuild_project_build":
     let report = parseFile(valueAfter(selected, "buildReport:"))
     check reportAction(report, "produce"){"runQuotaBackend"}.getStr().len > 0
     check reportAction(report, "consume"){"runQuotaBackend"}.getStr().len > 0
+
+  test "public CLI reruns provider root for DSL directory enumeration inputs":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m40-directory-dsl", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    discard compilePublicReproTestBin(repoRoot)
+
+    let binDir = tempRoot / "bin"
+    writeFixtureTools(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+
+    let projectRoot = tempRoot / "project"
+    createDir(projectRoot / "src" / "resources")
+    writeFile(projectRoot / "src" / "aggregate.txt", "aggregate\n")
+    writeFile(projectRoot / "src" / "resources" / "alpha.txt", "alpha\n")
+    writeFile(projectRoot / "src" / "resources" / "beta.txt", "beta\n")
+    writeDirectoryEnumerationProject(projectRoot / "reprobuild.nim")
+
+    let target = projectRoot & "#aggregate"
+    let first = requireSuccess(shellCommand([
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+    ], [("PATH", pathValue)]), repoRoot)
+    check first.contains("selectedTarget: aggregate")
+    check first.contains("providerInvocations: 1")
+    check first.contains("scheduler: actions=3")
+    check first.contains("action: copy-alpha.txt status=asSucceeded launched=true")
+    check first.contains("action: copy-beta.txt status=asSucceeded launched=true")
+    check fileExists(projectRoot / "dist" / "alpha.txt.out")
+    check fileExists(projectRoot / "dist" / "beta.txt.out")
+    check readFile(projectRoot / "dist" / "alpha.txt.out") == "alpha\n"
+
+    writeFile(projectRoot / "src" / "resources" / "gamma.txt", "gamma\n")
+    let added = requireSuccess(shellCommand([
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+    ], [("PATH", pathValue)]), repoRoot)
+    check added.contains("providerInvocations: 1")
+    check added.contains("scheduler: actions=4")
+    check added.contains("action: copy-gamma.txt status=asSucceeded launched=true")
+    check fileExists(projectRoot / "dist" / "gamma.txt.out")
+    check readFile(projectRoot / "dist" / "gamma.txt.out") == "gamma\n"
+
+    removeFile(projectRoot / "src" / "resources" / "beta.txt")
+    let removed = requireSuccess(shellCommand([
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+    ], [("PATH", pathValue)]), repoRoot)
+    check removed.contains("providerInvocations: 1")
+    check removed.contains("scheduler: actions=3")
+    check not removed.contains("action: copy-beta.txt")
+    let removedReport = parseFile(valueAfter(removed, "buildReport:"))
+    check removedReport{"actions"}.len == 3
+    check reportAction(removedReport, "copy-alpha.txt").kind != JNull
+    check reportAction(removedReport, "copy-gamma.txt").kind != JNull
+    check reportAction(removedReport, "copy-beta.txt").kind == JNull
 
   test "public CLI builds local DSL project through provider, scheduler, cache, and depfile evidence":
     let repoRoot = getCurrentDir()
