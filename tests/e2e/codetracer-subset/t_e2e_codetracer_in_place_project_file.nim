@@ -250,6 +250,25 @@ proc monitorEvidenceContains(action: JsonNode; suffix: string): bool =
       if item.getStr().endsWith(suffix):
         return true
 
+proc checkFrontendBundleOutputs(projectRoot: string) =
+  check fileExists(projectRoot / "ui.js")
+  check fileExists(projectRoot / "public" / "ui.js")
+  check fileExists(projectRoot / "index.js")
+  check fileExists(projectRoot / "index.js.map")
+  check fileExists(projectRoot / "src" / "index.js")
+  check fileExists(projectRoot / "server_index.js")
+  check fileExists(projectRoot / "server_index.js.map")
+  check fileExists(projectRoot / "subwindow.js")
+  check fileExists(projectRoot / "subwindow.js.map")
+  check fileExists(projectRoot / "src" / "subwindow.js")
+  check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
+  check readFile(projectRoot / "ui.js") ==
+    readFile(projectRoot / "public" / "ui.js")
+  check readFile(projectRoot / "index.js") ==
+    readFile(projectRoot / "src" / "index.js")
+  check readFile(projectRoot / "subwindow.js") ==
+    readFile(projectRoot / "src" / "subwindow.js")
+
 when defined(macosx):
   suite "e2e_codetracer_in_place_project_file":
     test "real committed CodeTracer reprobuild.nim supports action-id target selection":
@@ -321,6 +340,7 @@ when defined(macosx):
       check reportAction(selectedReport, "frontend-src-index-js").kind == JNull
       check reportAction(selectedReport, "frontend-server-index-js").kind ==
         JNull
+      check reportAction(selectedReport, "frontend").kind == JNull
       check reportAction(selectedReport, "c-sudoku-object-tup").kind == JNull
       check mainSymbol("build/c/main.with-header.o", projectRoot).len > 0
 
@@ -389,6 +409,7 @@ when defined(macosx):
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "frontend-index-js").kind == JNull
       check reportAction(firstReport, "frontend-server-index-js").kind == JNull
+      check reportAction(firstReport, "frontend").kind == JNull
       check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
       check reportAction(firstReport,
         "c-sudoku-object-with-generated-header").kind == JNull
@@ -414,6 +435,7 @@ when defined(macosx):
       check reportAction(changedReport, "frontend-index-js").kind == JNull
       check reportAction(changedReport, "frontend-server-index-js").kind ==
         JNull
+      check reportAction(changedReport, "frontend").kind == JNull
       check reportAction(changedReport, "c-sudoku-object-tup").kind == JNull
 
     test "selected frontend src subwindow.js target builds real Nim JS closure with monitor evidence":
@@ -485,6 +507,7 @@ when defined(macosx):
       check reportAction(firstReport, "frontend-public-ui-js").kind == JNull
       check reportAction(firstReport, "frontend-index-js").kind == JNull
       check reportAction(firstReport, "frontend-server-index-js").kind == JNull
+      check reportAction(firstReport, "frontend").kind == JNull
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
       check reportAction(firstReport,
@@ -514,6 +537,7 @@ when defined(macosx):
       check reportAction(changedReport, "frontend-index-js").kind == JNull
       check reportAction(changedReport, "frontend-server-index-js").kind ==
         JNull
+      check reportAction(changedReport, "frontend").kind == JNull
       check reportAction(changedReport, "c-sudoku-object-tup").kind == JNull
 
     test "selected frontend src index.js target builds real Nim JS closure with monitor evidence":
@@ -588,6 +612,7 @@ when defined(macosx):
       check reportAction(firstReport, "frontend-src-subwindow-js").kind ==
         JNull
       check reportAction(firstReport, "frontend-server-index-js").kind == JNull
+      check reportAction(firstReport, "frontend").kind == JNull
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
       check reportAction(firstReport,
@@ -616,6 +641,7 @@ when defined(macosx):
       check reportAction(changedReport, "frontend-subwindow-js").kind == JNull
       check reportAction(changedReport, "frontend-server-index-js").kind ==
         JNull
+      check reportAction(changedReport, "frontend").kind == JNull
       check reportAction(changedReport, "c-sudoku-object-tup").kind == JNull
 
     test "selected frontend server index.js target builds real Nim JS closure with monitor evidence":
@@ -683,6 +709,7 @@ when defined(macosx):
       check reportAction(firstReport, "frontend-index-js").kind == JNull
       check reportAction(firstReport, "frontend-ui-js").kind == JNull
       check reportAction(firstReport, "frontend-subwindow-js").kind == JNull
+      check reportAction(firstReport, "frontend").kind == JNull
       check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
 
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
@@ -707,6 +734,122 @@ when defined(macosx):
       check reportAction(changedReport, "frontend-index-js").kind == JNull
       check reportAction(changedReport, "frontend-ui-js").kind == JNull
       check reportAction(changedReport, "frontend-subwindow-js").kind == JNull
+      check reportAction(changedReport, "frontend").kind == JNull
+      check reportAction(changedReport, "c-sudoku-object-tup").kind == JNull
+
+    test "selected frontend aggregate target builds current frontend bundle set":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      check fileExists(realProjectFile)
+
+      let tempRoot = createTempDir("repro-m38-codetracer-frontend", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
+
+      let projectRoot = tempRoot / "codetracer"
+      createDir(projectRoot)
+      copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
+      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+
+      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+      let monitorEnv = [
+        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+      ]
+      let pathValue = codeTracerPathValue(tempRoot)
+      let selectedTarget = projectRoot & "#frontend"
+      let first = build(reproBin, selectedTarget, repoRoot, pathValue,
+        monitorEnv)
+      check first.contains("selectedTarget: frontend")
+      check first.contains("scheduler: actions=8")
+      check first.contains(
+        "action: frontend-ui-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-public-ui-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-index-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-src-index-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-server-index-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-subwindow-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-src-subwindow-js status=asSucceeded launched=true")
+      check first.contains("action: frontend status=asSucceeded launched=true")
+      check not first.contains("action: nim-js-ipc-registry-test")
+      check not first.contains("action: generate-config-header")
+      check not first.contains("action: c-sudoku-object-tup")
+      check not first.contains("action: c-sudoku-object-with-generated-header")
+      checkFrontendBundleOutputs(projectRoot)
+
+      let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      check firstReport{"actions"}.len == 8
+      assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-src-index-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-server-index-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-subwindow-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-src-subwindow-js", "asSucceeded",
+        true)
+      assertAction(firstReport, "frontend", "asSucceeded", true)
+      check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
+      check reportAction(firstReport, "generate-config-header").kind == JNull
+      check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
+      check reportAction(firstReport,
+        "c-sudoku-object-with-generated-header").kind == JNull
+
+      let second = build(reproBin, selectedTarget, repoRoot, pathValue,
+        monitorEnv)
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-public-ui-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-index-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-src-index-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-server-index-js", "asCacheHit",
+        false)
+      assertAction(secondReport, "frontend-subwindow-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-src-subwindow-js", "asCacheHit",
+        false)
+      assertAction(secondReport, "frontend", "asCacheHit", false)
+
+      let importedInput = projectRoot / "src" / "frontend" / "ui" /
+        "calltrace.nim"
+      writeFile(importedInput, readFile(importedInput) &
+        "\n# reprobuild m38 selected frontend edit\n")
+      let changed = build(reproBin, selectedTarget, repoRoot, pathValue,
+        monitorEnv)
+      check not changed.contains("action: nim-js-ipc-registry-test")
+      check not changed.contains("action: generate-config-header")
+      check not changed.contains("action: c-sudoku-object-tup")
+      check not changed.contains("action: c-sudoku-object-with-generated-header")
+      let changedReport = parseFile(valueAfter(changed, "buildReport:"))
+      assertAction(changedReport, "frontend-ui-js", "asSucceeded", true)
+      assertAction(changedReport, "frontend-public-ui-js", "asSucceeded", true)
+      assertAction(changedReport, "frontend-index-js", "asCacheHit", false)
+      assertAction(changedReport, "frontend-src-index-js", "asCacheHit",
+        false)
+      assertAction(changedReport, "frontend-server-index-js", "asCacheHit",
+        false)
+      assertAction(changedReport, "frontend-subwindow-js", "asCacheHit", false)
+      assertAction(changedReport, "frontend-src-subwindow-js", "asCacheHit",
+        false)
+      assertAction(changedReport, "frontend", "asSucceeded", true)
+      check reportAction(changedReport, "nim-js-ipc-registry-test").kind == JNull
+      check reportAction(changedReport, "generate-config-header").kind == JNull
       check reportAction(changedReport, "c-sudoku-object-tup").kind == JNull
 
     test "real committed CodeTracer reprobuild.nim builds in place through public CLI, provider, scheduler, cache, and invalidation":
@@ -750,7 +893,7 @@ when defined(macosx):
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=11")
+      check first.contains("scheduler: actions=12")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
       check first.contains("action: frontend-ui-js status=asSucceeded launched=true")
@@ -760,6 +903,7 @@ when defined(macosx):
       check first.contains("action: frontend-server-index-js status=asSucceeded launched=true")
       check first.contains("action: frontend-subwindow-js status=asSucceeded launched=true")
       check first.contains("action: frontend-src-subwindow-js status=asSucceeded launched=true")
+      check first.contains("action: frontend status=asSucceeded launched=true")
       check first.contains("action: c-sudoku-object-tup status=asSucceeded launched=true")
       check first.contains("action: c-sudoku-object-with-generated-header status=asSucceeded launched=true")
       check fileExists(projectRoot / "build" / "generated" / "ct_config.h")
@@ -774,6 +918,7 @@ when defined(macosx):
       check fileExists(projectRoot / "subwindow.js")
       check fileExists(projectRoot / "subwindow.js.map")
       check fileExists(projectRoot / "src" / "subwindow.js")
+      check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
       check fileExists(projectRoot / "build" / "c" / "main.tup.o")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
@@ -797,6 +942,7 @@ when defined(macosx):
       assertAction(firstReport, "frontend-subwindow-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-subwindow-js", "asSucceeded",
         true)
+      assertAction(firstReport, "frontend", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
@@ -832,6 +978,7 @@ when defined(macosx):
       assertAction(secondReport, "frontend-subwindow-js", "asCacheHit", false)
       assertAction(secondReport, "frontend-src-subwindow-js", "asCacheHit",
         false)
+      assertAction(secondReport, "frontend", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-with-generated-header",
         "asCacheHit", false)
@@ -853,6 +1000,7 @@ when defined(macosx):
       assertAction(cChangedReport, "frontend-subwindow-js", "asCacheHit", false)
       assertAction(cChangedReport, "frontend-src-subwindow-js", "asCacheHit",
         false)
+      assertAction(cChangedReport, "frontend", "asCacheHit", false)
       assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(cChangedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
@@ -875,6 +1023,7 @@ when defined(macosx):
         false)
       assertAction(headerDeletedReport, "frontend-src-subwindow-js",
         "asCacheHit", false)
+      assertAction(headerDeletedReport, "frontend", "asCacheHit", false)
       assertAction(headerDeletedReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)

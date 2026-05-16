@@ -191,20 +191,38 @@ proc writeProject(path: string) =
     "        inputs = @[\"src/unrelated.txt\"],\n" &
     "        outputs = @[\"dist/unrelated.txt\"])\n")
 
+proc copyTree(sourceRoot, destRoot: string) =
+  for sourcePath in walkDirRec(sourceRoot):
+    let relative = relativePath(sourcePath, sourceRoot)
+    let destPath = destRoot / relative
+    if dirExists(sourcePath):
+      createDir(destPath)
+    elif fileExists(sourcePath):
+      createDir(destPath.splitPath.head)
+      copyFile(sourcePath, destPath)
+
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
-  createDir(projectRoot / "src" / "frontend" / "tests")
-  createDir(projectRoot / "src" / "frontend" / "index")
-  createDir(projectRoot / "src" / "frontend" / "lib")
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
   copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
-  copyFile(codeTracerRoot / "src" / "frontend" / "tests" /
-    "ipc_registry_test.nim",
-    projectRoot / "src" / "frontend" / "tests" / "ipc_registry_test.nim")
-  copyFile(codeTracerRoot / "src" / "frontend" / "index" /
-    "ipc_registry.nim",
-    projectRoot / "src" / "frontend" / "index" / "ipc_registry.nim")
-  copyFile(codeTracerRoot / "src" / "frontend" / "lib" / "jslib.nim",
-    projectRoot / "src" / "frontend" / "lib" / "jslib.nim")
+  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  copyTree(codeTracerRoot / "src" / "frontend",
+    projectRoot / "src" / "frontend")
+  copyTree(codeTracerRoot / "src" / "common",
+    projectRoot / "src" / "common")
+  copyTree(codeTracerRoot / "src" / "lsp",
+    projectRoot / "src" / "lsp")
+  createDir(projectRoot / "src" / "ct")
+  copyFile(codeTracerRoot / "src" / "ct" / "version.nim",
+    projectRoot / "src" / "ct" / "version.nim")
+  copyTree(codeTracerRoot / "src" / "ct" / "acp",
+    projectRoot / "src" / "ct" / "acp")
+  createDir(projectRoot / "src" / "public" / "third_party" /
+    "monaco-themes" / "themes" / "customThemes" / "json")
+  for theme in ["codetracerWhite.json", "codetracerDark.json"]:
+    copyFile(codeTracerRoot / "src" / "public" / "third_party" /
+      "monaco-themes" / "themes" / "customThemes" / "json" / theme,
+      projectRoot / "src" / "public" / "third_party" / "monaco-themes" /
+      "themes" / "customThemes" / "json" / theme)
   copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
     projectRoot / "test-programs" / "c_sudoku_solver" / "main.c")
   discard requireSuccess(shellCommand([
@@ -243,6 +261,16 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
 proc hasMonitorEvidence(action: JsonNode): bool =
   action{"evidence"}{"monitorReads"}.getElems().len > 0 or
     action{"evidence"}{"monitorProbes"}.getElems().len > 0
+
+proc checkFrontendBundleOutputs(projectRoot: string) =
+  check fileExists(projectRoot / "public" / "ui.js")
+  check fileExists(projectRoot / "src" / "index.js")
+  check fileExists(projectRoot / "index.js.map")
+  check fileExists(projectRoot / "server_index.js")
+  check fileExists(projectRoot / "server_index.js.map")
+  check fileExists(projectRoot / "src" / "subwindow.js")
+  check fileExists(projectRoot / "subwindow.js.map")
+  check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "repro"
@@ -452,6 +480,71 @@ when defined(macosx):
       check hasMonitorEvidence(selectedC)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull
+
+    test "CodeTracer copied checkout watch rebuilds selected frontend aggregate":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      check fileExists(realProjectFile)
+
+      let tempRoot = createTempDir("repro-m38-codetracer-frontend-watch", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
+      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+      let monitorEnv = [
+        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+      ]
+      let projectRoot = tempRoot / "codetracer"
+      createDir(projectRoot)
+      copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
+      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+
+      let selectedTarget = projectRoot & "#frontend"
+      let importedInput = projectRoot / "src" / "frontend" / "ui" /
+        "calltrace.nim"
+      let log = runWatchAndEdit(reproBin, selectedTarget, repoRoot,
+        codeTracerPathValue(tempRoot), tempRoot / "codetracer-frontend-watch.log",
+        importedInput, "\n# reprobuild m38 watch frontend edit\n",
+        env = monitorEnv)
+      check log.contains("repro watch: target=" & selectedTarget)
+      check log.contains("repro watch: event seen path=")
+      check log.contains("repro watch: cycle 2 start rebuild")
+      check log.contains("repro watch: max cycles reached")
+      check log.contains("selectedTarget: frontend")
+      check log.contains("scheduler: actions=8")
+      check not log.contains("action: nim-js-ipc-registry-test")
+      check not log.contains("action: generate-config-header")
+      check not log.contains("action: c-sudoku-object-tup")
+      check not log.contains("action: c-sudoku-object-with-generated-header")
+      checkFrontendBundleOutputs(projectRoot)
+
+      let report = parseFile(projectRoot / ".repro" / "build" /
+        "reprobuild" / "build-report.json")
+      check report{"actions"}.len == 8
+      assertAction(report, "frontend-ui-js", "asSucceeded", true)
+      assertAction(report, "frontend-public-ui-js", "asSucceeded", true)
+      assertAction(report, "frontend-index-js", "asCacheHit", false)
+      assertAction(report, "frontend-src-index-js", "asCacheHit", false)
+      assertAction(report, "frontend-server-index-js", "asCacheHit", false)
+      assertAction(report, "frontend-subwindow-js", "asCacheHit", false)
+      assertAction(report, "frontend-src-subwindow-js", "asCacheHit", false)
+      assertAction(report, "frontend", "asSucceeded", true)
+      check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
+      check reportAction(report, "generate-config-header").kind == JNull
+      check reportAction(report, "c-sudoku-object-tup").kind == JNull
+      check reportAction(report,
+        "c-sudoku-object-with-generated-header").kind == JNull
 
 else:
   suite "e2e_repro_watch":
