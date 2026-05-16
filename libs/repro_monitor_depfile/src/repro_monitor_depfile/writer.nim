@@ -1,7 +1,7 @@
 import std/[algorithm, os, strutils]
 
 import repro_core/codec
-import repro_monitor_shim/types
+import repro_monitor_depfile/types
 
 const
   CanonicalFileKind = 1'u16
@@ -108,6 +108,32 @@ proc canonicalOrder(a, b: MonitorRecord): int =
   if result != 0: return
   result = cmp(a.path, b.path)
 
+proc summarizeRecords*(records: openArray[MonitorRecord]): MonitorSummary =
+  result.recordCount = uint64(records.len)
+  var processPids: seq[uint64] = @[]
+  for record in records:
+    if record.osPid != 0 and processPids.find(record.osPid) < 0:
+      processPids.add(record.osPid)
+    if record.kind == mrEventLoss or record.observationKind == moEventLoss:
+      inc result.eventLossCount
+    else:
+      inc result.observationCount
+  result.processCount = uint64(processPids.len)
+
+proc depFileFromRecords*(records: openArray[MonitorRecord]): MonitorDepFile =
+  MonitorDepFile(
+    version: RmdfVersion,
+    producerVersion: ReproMonitorDepfileProducer,
+    backendFamily: mbfMacosHooks,
+    requiredFeatures: {mcapProcess, mcapFileRead, mcapFileWrite, mcapPathProbe,
+      mcapDirectoryEnumerate, mcapEventLoss},
+    completeness: if summarizeRecords(records).eventLossCount == 0:
+        mcComplete
+      else:
+        mcIncomplete,
+    summary: summarizeRecords(records),
+    records: @records)
+
 proc encodeCanonical*(records: openArray[MonitorRecord]): seq[byte] =
   var ordered = @records
   ordered.sort(canonicalOrder)
@@ -138,7 +164,7 @@ proc mergeFragments*(fragmentDir, outputPath: string): MonitorDepFile =
 
   let canonical = encodeCanonical(records)
   writeFile(outputPath, canonical.fromBytes())
-  MonitorDepFile(version: RmdfVersion, records: records)
+  depFileFromRecords(records)
 
 proc writeCanonical*(outputPath: string; records: openArray[MonitorRecord]) =
   let canonical = encodeCanonical(records)

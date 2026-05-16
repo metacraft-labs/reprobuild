@@ -9,6 +9,7 @@ gxhash
 repro_hash
 cbor
 repro_domain_types
+repro_monitor_depfile
 repro_monitor_shim
 repro_monitor_hooks
 repro_project_dsl

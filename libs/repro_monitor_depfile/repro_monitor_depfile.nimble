@@ -1,6 +1,6 @@
 version = "0.1.0"
 author = "Metacraft Labs"
-description = "Reprobuild monitor shim over ct_interpose"
+description = "Reprobuild monitor dependency file reader, writer, and inspection tools"
 license = "MIT"
 srcDir = "src"
 

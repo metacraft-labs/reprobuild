@@ -25,6 +25,14 @@ integration-stackable-hooks:
     cd /Users/zahary/metacraft/ct_interpose && direnv exec /Users/zahary/metacraft/codetracer-native-recorder nimble test \
         2>&1 | tee -a /Users/zahary/metacraft/reprobuild/test-logs/integration-stackable-hooks.log
 
+e2e-debug-fs-snoop:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --nimcache:build/nimcache/e2e-debug-fs-snoop \
+        --out:build/test-bin/e2e_debug_fs_snoop_reads_monitor_depfile \
+        tests/e2e/fs-snoop/t_debug_fs_snoop_reads_monitor_depfile.nim \
+        2>&1 | tee test-logs/e2e-debug-fs-snoop.log
+
 lint:
     mkdir -p test-logs
     ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log

@@ -1,6 +1,7 @@
 import std/[os, strutils]
 import repro_core
 import repro_interface_artifacts
+import repro_monitor_depfile/fs_snoop
 import repro_tool_profiles
 
 proc wantsVersion*(args: openArray[string]): bool =
@@ -13,7 +14,12 @@ proc renderUsage*(programName: string): string =
   if programName == "repro":
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
-      " build <target[#name]> --tool-provisioning=path"
+      " build <target[#name]> --tool-provisioning=path\n       " & programName &
+      " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]"
+  elif programName == "repro-fs-snoop":
+    programName & " " & versionString() & "\nusage: " & programName &
+      " [options] -- <command> [args...]\n       " & programName &
+      " inspect <depfile> --format text|json"
   else:
     programName & " " & versionString() & "\nusage: " & programName & " --version"
 
@@ -108,6 +114,16 @@ proc runThinApp*(programName: string): int =
   if wantsVersion(args):
     echo renderVersion(programName)
     return 0
+  if programName == "repro-fs-snoop":
+    return runFsSnoopCli(programName, args)
+  if programName == "repro" and args.len >= 2 and args[0] == "debug" and
+      args[1] == "fs-snoop":
+    let fsArgs =
+      if args.len > 2:
+        args[2 .. ^1]
+      else:
+        @[]
+    return runFsSnoopCli("repro debug fs-snoop", fsArgs)
   if programName == "repro" and args.len > 0 and args[0] == "build":
     try:
       let buildArgs =

@@ -1,7 +1,7 @@
 import std/[algorithm, os, osproc, streams, strutils, tables, tempfiles, unittest]
 
 import repro_monitor_hooks
-import repro_monitor_shim
+import repro_monitor_depfile
 
 when defined(macosx):
   const ParentSource = r"""
