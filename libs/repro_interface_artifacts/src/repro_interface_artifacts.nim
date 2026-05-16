@@ -533,9 +533,40 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   let pkg = artifact.projectInterface
   var code = "import repro_project_dsl\n\n"
   let typeName = titleIdent(pkg.packageName)
-  code.add("type\n  " & typeName & "* = object\n\n")
+  let exeTypeName = typeName & "Executable"
+  code.add("type\n  " & typeName & "* = object\n")
+  code.add("  " & exeTypeName & "* = object\n")
+  code.add("    value*: SelectedExecutable\n\n")
   code.add("const " & pkg.packageName & "* = " & typeName & "()\n\n")
+  code.add("proc executable*(pkg: " & typeName & "; name: string): " &
+    exeTypeName & " =\n")
+  code.add("  discard pkg\n")
+  code.add("  " & exeTypeName & "(value: selectedExecutable(\"" &
+    pkg.packageName & "\", name))\n\n")
+  var selectedCommands: seq[string] = @[]
   for exe in pkg.publicExecutables:
+    for cmd in exe.commands:
+      var params: seq[string] = @["exe: " & exeTypeName]
+      var argCalls: seq[string] = @[]
+      var signature = cmd.name
+      for param in cmd.params:
+        var spec = param.name & ": " & param.nimType
+        if not param.required:
+          spec.add(" = " & nimDefault(param.nimType))
+        params.add(spec)
+        signature.add("|" & spec)
+        argCalls.add(argBuilder(param))
+      if selectedCommands.find(signature) >= 0:
+        continue
+      selectedCommands.add(signature)
+      code.add("proc " & cmd.name & "*( " & params.join("; ") &
+        "): PublicCliCall =\n")
+      code.add("  publicCliCall(exe.value.packageName, " &
+        "exe.value.executableName, \"" & cmd.name &
+        "\", exe.value.packageName & \".\" & exe.value.executableName & " &
+        "\"." & cmd.name & "\", @[" & argCalls.join(", ") & "])\n\n")
+  if pkg.publicExecutables.len == 1:
+    let exe = pkg.publicExecutables[0]
     for cmd in exe.commands:
       var params: seq[string] = @["pkg: " & typeName]
       var argCalls: seq[string] = @[]
@@ -578,6 +609,88 @@ proc reproLibPathFlags(workDir: string): seq[string] =
         if dirExists(src):
           result.add("--path:" & src)
   result.sort(system.cmp[string])
+
+proc firstExistingPrefix(candidates: openArray[string]; header: string;
+                         libraryNames: openArray[string]): string =
+  proc hasLibrary(prefix, libraryName: string): bool =
+    let exact = prefix / "lib" / libraryName
+    if fileExists(exact):
+      return true
+    let dot = libraryName.find('.')
+    let stem =
+      if dot > 0:
+        libraryName[0 ..< dot]
+      else:
+        libraryName
+    if not dirExists(prefix / "lib"):
+      return false
+    for kind, path in walkDir(prefix / "lib"):
+      if kind == pcFile:
+        let tail = splitPath(path).tail
+        if tail == libraryName or tail.startsWith(stem & "."):
+          return true
+
+  for prefix in candidates:
+    if prefix.len == 0:
+      continue
+    if not fileExists(prefix / header):
+      continue
+    for libraryName in libraryNames:
+      if hasLibrary(prefix, libraryName):
+        return prefix
+  ""
+
+proc nixPrefix(namePattern, header: string;
+               libraryNames: openArray[string]): string =
+  if not dirExists("/nix/store"):
+    return ""
+  let needle = namePattern.replace("*", "")
+  for kind, path in walkDir("/nix/store"):
+    if kind != pcDir:
+      continue
+    let tail = splitPath(path).tail
+    if needle.len > 0 and tail.find(needle) < 0:
+      continue
+    if not fileExists(path / header):
+      continue
+    if dirExists(path / "lib"):
+      return path
+    for libraryName in libraryNames:
+      if firstExistingPrefix([path], header, [libraryName]).len > 0:
+        return path
+
+proc externalHashFlags(): seq[string] =
+  let blake3Prefix = block:
+    let direct = firstExistingPrefix(
+      [getEnv("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
+        "/usr/local/opt/blake3"],
+      "include/blake3.h",
+      ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+    if direct.len > 0:
+      direct
+    else:
+      nixPrefix("*-libblake3-*", "include/blake3.h",
+        ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+  if blake3Prefix.len > 0:
+    result.add("--passC:-I" & blake3Prefix / "include")
+    result.add("--passL:-L" & blake3Prefix / "lib")
+    result.add("--passL:-lblake3")
+
+  let xxhashPrefix = block:
+    let direct = firstExistingPrefix(
+      [getEnv("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash",
+        "/usr/local/opt/xxhash"],
+      "include/xxhash.h",
+      ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+    if direct.len > 0:
+      direct
+    else:
+      nixPrefix("*-xxHash-*", "include/xxhash.h",
+        ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+  if xxhashPrefix.len > 0:
+    result.add("--passC:-I" & xxhashPrefix / "include")
+    result.add("--passL:-L" & xxhashPrefix / "lib")
+    result.add("--passL:-lxxhash")
 
 proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  workDir = getCurrentDir()): ProjectInterfaceArtifact =
@@ -640,11 +753,13 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   let nimcache = parentDir(outputBinaryPath) / "nimcache-provider"
   var command = @[
     "nim", "c",
+    "--define:reproProviderMode",
     "--path:" & parentDir(modulePath),
     "--nimcache:" & nimcache,
     "--out:" & outputBinaryPath,
     modulePath
   ]
+  command.insert(externalHashFlags(), 2)
   command.insert(reproLibPathFlags(workDir), 2)
   let edge = providerCompileEdge(sources, outputBinaryPath, command,
     interfaceFingerprint, providerFingerprint, workDir = workDir)

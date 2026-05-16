@@ -42,6 +42,15 @@ e2e-macos-monitor-shim-event-taxonomy:
         tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim \
         2>&1 | tee test-logs/e2e-macos-monitor-shim-event-taxonomy.log
 
+e2e_local_reprobuild_project_build:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_local_reprobuild_project_build \
+        --out:build/test-bin/e2e_local_reprobuild_project_build \
+        tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim \
+        2>&1 | tee test-logs/e2e_local_reprobuild_project_build.log
+
 lint:
     mkdir -p test-logs
     ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log

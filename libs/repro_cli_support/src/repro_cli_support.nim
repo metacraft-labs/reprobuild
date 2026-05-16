@@ -1,7 +1,13 @@
-import std/[os, strutils]
+import std/[json, os, strutils, tables]
 import repro_core
+import repro_build_engine
+import repro_depfile
 import repro_interface_artifacts
 import repro_monitor_depfile/fs_snoop
+import repro_provider_runtime
+import repro_project_dsl
+import repro_runquota
+import repro_hash
 import repro_tool_profiles
 
 proc wantsVersion*(args: openArray[string]): bool =
@@ -56,6 +62,176 @@ proc outputDirForModule(modulePath: string; target: string): string =
       splitFile(modulePath).name
   parentDir(modulePath) / ".repro" / "build" / name
 
+proc digestHex(digest: ContentDigest): string =
+  toHex(digest.bytes)
+
+proc projectRootForModule(modulePath: string): string =
+  parentDir(modulePath)
+
+proc moduleHasBuildBlock(modulePath: string): bool =
+  for line in readFile(modulePath).splitLines:
+    if line.strip() == "build:":
+      return true
+
+proc materialProjectPath(projectRoot, path: string): string =
+  if path.len == 0 or path.isAbsolute:
+    path
+  else:
+    projectRoot / path
+
+proc jsonStringSeq(values: openArray[string]): JsonNode =
+  result = newJArray()
+  for value in values:
+    result.add(%value)
+
+proc profileIndex(identity: PathOnlyBuildIdentity):
+    Table[string, PathOnlyToolProfile] =
+  for profile in identity.profiles:
+    result[profile.packageSelector & "|" & profile.executableName] = profile
+    if not result.hasKey(profile.executableName):
+      result[profile.executableName] = profile
+
+proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string] =
+  result = @[profile.resolvedExecutablePath, call.subcommand]
+  for arg in call.arguments:
+    let name = arg.name
+    let nimType = arg.nimType
+    let value = arg.encodedValue
+    case nimType.normalize
+    of "bool":
+      if value.normalize == "true":
+        result.add("--" & name)
+    of "seq[string]":
+      if value.len > 0:
+        for item in value.split("\x1f"):
+          result.add(item)
+    else:
+      result.add("--" & name)
+      result.add(value)
+
+proc depfilePolicy(depfile: string): DependencyGatheringPolicy =
+  if depfile.len == 0:
+    return declaredOnlyPolicy()
+  DependencyGatheringPolicy(
+    kind: dgRecognizedFormat,
+    completeness: decComplete,
+    recognizedReports: @[
+      RecognizedDependencyReportSpec(
+        formatName: DependencyFormatName(MakeDepfileFormatName),
+        outputs: @[ExpectedDependencyFile(
+          logicalName: "deps",
+          path: depfile,
+          required: true)],
+        completeness: decComplete)
+    ])
+
+proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
+                      projectRoot: string): BuildAction =
+  let payload = decodeBuildActionPayload(toBytes(node.payload))
+  let executableName = payload.call.executableName
+  let packageName = payload.call.packageName
+  let exactKey = packageName & "|" & executableName
+  let profile =
+    if profiles.hasKey(exactKey):
+      profiles[exactKey]
+    elif profiles.hasKey(executableName):
+      profiles[executableName]
+    else:
+      raise newException(ValueError,
+        "tool-resolution failed: action " & payload.id &
+          " references executable " & executableName &
+          " but no PATH-only profile was resolved for it")
+  var inputs: seq[string] = @[]
+  for input in payload.inputs:
+    inputs.add(materialProjectPath(projectRoot, input))
+  let outputs = payload.outputs
+  let depfile = payload.depfile
+  let commandStatsId =
+    if payload.commandStatsId.len > 0:
+      payload.commandStatsId
+    else:
+      payload.id
+  let fingerprintText = [
+    "reprobuild.localProjectAction.v1",
+    payload.id,
+    payload.call.packageName,
+    executableName,
+    payload.call.subcommand,
+    node.payload,
+    digestHex(profile.profileFingerprint)
+  ].join("\n")
+  repro_build_engine.action(
+    payload.id,
+    argvForCall(payload.call, profile),
+    cwd = projectRoot,
+    deps = payload.deps,
+    inputs = inputs,
+    outputs = outputs,
+    depfile = depfile,
+    cacheable = payload.cacheable,
+    weakFingerprint = weakFingerprintFromText(fingerprintText),
+    dependencyPolicy = depfilePolicy(depfile),
+    commandStatsId = commandStatsId)
+
+proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
+                           identity: PathOnlyBuildIdentity;
+                           projectRoot: string): seq[BuildAction] =
+  let profiles = profileIndex(identity)
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        result.add(lowerGraphAction(node, profiles, projectRoot))
+
+proc evidenceJson(evidence: PathSetEvidence): JsonNode =
+  %*{
+    "declaredInputs": jsonStringSeq(evidence.declaredInputs),
+    "declaredOutputs": jsonStringSeq(evidence.declaredOutputs),
+    "depfileInputs": jsonStringSeq(evidence.depfileInputs),
+    "monitorReads": jsonStringSeq(evidence.monitorReads),
+    "monitorWrites": jsonStringSeq(evidence.monitorWrites),
+    "monitorProbes": jsonStringSeq(evidence.monitorProbes),
+    "diagnostics": jsonStringSeq(evidence.diagnostics)
+  }
+
+proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
+                      refresh: ProviderRefreshReport;
+                      buildResult: BuildRunResult) =
+  var actions = newJArray()
+  for item in buildResult.results:
+    actions.add(%*{
+      "id": item.id,
+      "status": $item.status,
+      "launched": item.launched,
+      "cacheDecision": $item.cacheDecision,
+      "dependencyPolicyKind": $item.dependencyPolicyKind,
+      "runQuotaBackend": item.runQuotaBackend,
+      "evidence": evidenceJson(item.evidence)
+    })
+  var trace = newJArray()
+  for event in buildResult.trace:
+    trace.add(%*{
+      "seq": event.seq,
+      "actionId": event.actionId,
+      "event": event.event,
+      "detail": event.detail
+    })
+  let root = %*{
+    "providerBinary": provider.outputBinaryPath,
+    "providerFingerprint": digestHex(provider.providerFingerprint),
+    "providerCompileOutput": provider.executionResult.output,
+    "providerSnapshot": refresh.persistedSnapshotPath,
+    "providerInvocations": refresh.invoked.len,
+    "actions": actions,
+    "trace": trace
+  }
+  createDir(parentDir(path))
+  writeFile(path, root.pretty())
+
+proc hasFailedActions(buildResult: BuildRunResult): bool =
+  for item in buildResult.results:
+    if item.status in {asFailed, asBlocked}:
+      return true
+
 proc runBuildCommand(args: openArray[string]): int =
   var target = ""
   var mode = tpmUnspecified
@@ -103,6 +279,52 @@ proc runBuildCommand(args: openArray[string]): int =
     echo "toolIdentity: " & identityPath
     echo "inspection: " & inspectionPath
     echo "cachePortability: local-only"
+    if not moduleHasBuildBlock(modulePath):
+      return 0
+    let providerBinaryPath = outDir / "provider" / "project-provider"
+    let providerArtifactPath = outDir / "provider-compile.rbsz"
+    echo "providerCompile: started"
+    let provider = compileProviderBinary(modulePath, providerBinaryPath,
+      artifact.interfaceFingerprint, providerArtifactPath, getCurrentDir())
+    let providerArtifactId = digestHex(provider.providerFingerprint)
+    echo "providerBinary: " & provider.outputBinaryPath
+    echo "providerCompileArtifact: " & providerArtifactPath
+    echo "providerArtifact: " & providerArtifactId
+
+    let projectRoot = projectRootForModule(modulePath)
+    let refresh = refreshProviderGraph(RefreshConfig(
+      storeRoot: outDir / "provider-graph",
+      providerBinaryPath: provider.outputBinaryPath,
+      providerArtifactId: providerArtifactId,
+      rootEntryPointId: artifact.projectInterface.packageName & ".root",
+      rootArguments: projectRoot,
+      namespace: "project",
+      lockSliceId: digestHex(artifact.interfaceFingerprint),
+      activity: "build",
+      providerWorkingDir: projectRoot))
+    echo "providerGraphSnapshot: " & refresh.persistedSnapshotPath
+    echo "providerInvocations: " & $refresh.invoked.len
+
+    let actions = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot)
+    echo "scheduler: actions=" & $actions.len
+    if actions.len == 0:
+      return 0
+    let buildResult = runBuild(graph(actions), BuildEngineConfig(
+      cacheRoot: outDir / "build-engine-cache",
+      runQuotaCliPath: getAppFilename(),
+      maxParallelism: 8'u32,
+      stdoutLimit: 1024 * 1024,
+      stderrLimit: 1024 * 1024,
+      rebuildMissingOutputsOnCacheHit: true))
+    let reportPath = outDir / "build-report.json"
+    writeBuildReport(reportPath, provider, refresh, buildResult)
+    for item in buildResult.results:
+      echo "action: " & item.id & " status=" & $item.status &
+        " launched=" & $item.launched & " cache=" & $item.cacheDecision &
+        " evidence=depfile:" & $item.evidence.depfileInputs.len
+    echo "buildReport: " & reportPath
+    if buildResult.hasFailedActions():
+      return 1
     return 0
 
   echo "repro build: no external tools requested"
@@ -116,6 +338,13 @@ proc runThinApp*(programName: string): int =
     return 0
   if programName == "repro-fs-snoop":
     return runFsSnoopCli(programName, args)
+  if args.len > 0 and args[0] == "__repro-runquota-helper":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runRunQuotaHelperCli(helperArgs)
   if programName == "repro" and args.len >= 2 and args[0] == "debug" and
       args[1] == "fs-snoop":
     let fsArgs =

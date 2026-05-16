@@ -60,6 +60,7 @@ type
     maxParallelism*: uint32
     stdoutLimit*: int
     stderrLimit*: int
+    rebuildMissingOutputsOnCacheHit*: bool
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -129,7 +130,8 @@ proc defaultBuildEngineConfig*(cacheRoot: string): BuildEngineConfig =
     monitorCliPath: "",
     maxParallelism: 8'u32,
     stdoutLimit: 1_048_576,
-    stderrLimit: 1_048_576)
+    stderrLimit: 1_048_576,
+    rebuildMissingOutputsOnCacheHit: false)
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -699,21 +701,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let lookup = cache.lookupActionResult(cas, action.weakFingerprint, ffpChecksum)
           case lookup.status
           of aclHit:
-            cas.restoreOutputs(lookup.record, action.cwd)
-            runResult.results[idToIndex.resultIndex(id)].evidence =
-              evidenceFromRecord(action, lookup.record)
-            completeSuccess(id, asCacheHit, cdHit, false, "restored")
-            inc completed
-            launchedAny = true
-            continue
+            if not config.rebuildMissingOutputsOnCacheHit or action.allOutputsExist():
+              cas.restoreOutputs(lookup.record, action.cwd)
+              runResult.results[idToIndex.resultIndex(id)].evidence =
+                evidenceFromRecord(action, lookup.record)
+              completeSuccess(id, asCacheHit, cdHit, false, "restored")
+              inc completed
+              launchedAny = true
+              continue
+            runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+            runResult.trace(id, "cache-restore-skipped", "missing-output")
           of aclHybridCutoff:
-            cas.restoreOutputs(lookup.record, action.cwd)
-            runResult.results[idToIndex.resultIndex(id)].evidence =
-              evidenceFromRecord(action, lookup.record)
-            completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
-            inc completed
-            launchedAny = true
-            continue
+            if not config.rebuildMissingOutputsOnCacheHit or action.allOutputsExist():
+              cas.restoreOutputs(lookup.record, action.cwd)
+              runResult.results[idToIndex.resultIndex(id)].evidence =
+                evidenceFromRecord(action, lookup.record)
+              completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
+              inc completed
+              launchedAny = true
+              continue
+            runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+            runResult.trace(id, "cache-restore-skipped", "missing-output")
           of aclRejectedCorruptOutput:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdRejected
           of aclMissInputChanged:

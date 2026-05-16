@@ -1,6 +1,12 @@
 import std/[macros, strutils]
 
+when defined(reproProviderMode):
+  import std/os
+  import repro_provider_runtime
+
 type
+  BuildActionPayloadError* = object of CatchableError
+
   CliParamKind* = enum
     cpkPositional
     cpkFlag
@@ -57,7 +63,27 @@ type
     providerEntrypointId*: string
     arguments*: seq[PublicCliArg]
 
+  SelectedExecutable* = object
+    packageName*: string
+    executableName*: string
+
+  BuildActionDef* = object
+    id*: string
+    call*: PublicCliCall
+    deps*: seq[string]
+    inputs*: seq[string]
+    outputs*: seq[string]
+    depfile*: string
+    cacheable*: bool
+    commandStatsId*: string
+
 var registry: seq[PackageDef] = @[]
+var buildActionRegistry: seq[BuildActionDef] = @[]
+
+const
+  BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
+    byte(ord('P'))]
+  BuildActionPayloadVersion = 1'u16
 
 proc resetPackageRegistry*() =
   registry.setLen(0)
@@ -67,6 +93,12 @@ proc registerPackageDef*(pkg: PackageDef) =
 
 proc registeredPackages*(): seq[PackageDef] =
   registry
+
+proc resetBuildActionRegistry*() =
+  buildActionRegistry.setLen(0)
+
+proc registeredBuildActions*(): seq[BuildActionDef] =
+  buildActionRegistry
 
 proc cliArg*(name: string; value: string): PublicCliArg =
   PublicCliArg(name: name, nimType: "string", encodedValue: value)
@@ -89,6 +121,164 @@ proc publicCliCall*(packageName, executableName, subcommand,
     subcommand: subcommand,
     providerEntrypointId: providerEntrypointId,
     arguments: @arguments)
+
+proc selectedExecutable*(packageName, executableName: string): SelectedExecutable =
+  SelectedExecutable(packageName: packageName, executableName: executableName)
+
+proc buildAction*(id: string; call: PublicCliCall;
+                  deps: openArray[string] = [];
+                  inputs: openArray[string] = [];
+                  outputs: openArray[string] = [];
+                  depfile = "";
+                  cacheable = true;
+                  commandStatsId = ""): BuildActionDef =
+  result = BuildActionDef(
+    id: id,
+    call: call,
+    deps: @deps,
+    inputs: @inputs,
+    outputs: @outputs,
+    depfile: depfile,
+    cacheable: cacheable,
+    commandStatsId: if commandStatsId.len > 0: commandStatsId else: id)
+  buildActionRegistry.add(result)
+
+proc writeByte(outp: var seq[byte]; value: byte) =
+  outp.add(value)
+
+proc raisePayload(message: string) {.noreturn.} =
+  raise newException(BuildActionPayloadError, message)
+
+proc readByte(bytes: openArray[byte]; pos: var int): byte =
+  if pos >= bytes.len:
+    raisePayload("truncated build action payload byte")
+  result = bytes[pos]
+  inc pos
+
+proc writeU16Le(outp: var seq[byte]; value: uint16) =
+  outp.add(byte(value and 0xff'u16))
+  outp.add(byte((value shr 8) and 0xff'u16))
+
+proc writeU32Le(outp: var seq[byte]; value: uint32) =
+  for shift in [0, 8, 16, 24]:
+    outp.add(byte((value shr shift) and 0xff'u32))
+
+proc readU16Le(bytes: openArray[byte]; pos: var int): uint16 =
+  if pos + 2 > bytes.len:
+    raisePayload("truncated uint16 in build action payload")
+  result = uint16(bytes[pos]) or (uint16(bytes[pos + 1]) shl 8)
+  pos += 2
+
+proc readU32Le(bytes: openArray[byte]; pos: var int): uint32 =
+  if pos + 4 > bytes.len:
+    raisePayload("truncated uint32 in build action payload")
+  for i in 0 ..< 4:
+    result = result or (uint32(bytes[pos + i]) shl (8 * i))
+  pos += 4
+
+proc writeString(outp: var seq[byte]; value: string) =
+  outp.writeU32Le(uint32(value.len))
+  for ch in value:
+    outp.add(byte(ord(ch)))
+
+proc readString(bytes: openArray[byte]; pos: var int): string =
+  let length = int(readU32Le(bytes, pos))
+  if pos + length > bytes.len:
+    raisePayload("truncated string in build action payload")
+  result = newString(length)
+  for i in 0 ..< length:
+    result[i] = char(bytes[pos + i])
+  pos += length
+
+proc fromBytes(bytes: openArray[byte]): string =
+  result = newString(bytes.len)
+  for i, b in bytes:
+    result[i] = char(b)
+
+proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
+  outp.writeU32Le(uint32(values.len))
+  for value in values:
+    outp.writeString(value)
+
+proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
+  let count = int(readU32Le(bytes, pos))
+  result = newSeq[string](count)
+  for i in 0 ..< count:
+    result[i] = readString(bytes, pos)
+
+proc writeCliArg(outp: var seq[byte]; arg: PublicCliArg) =
+  outp.writeString(arg.name)
+  outp.writeString(arg.nimType)
+  outp.writeString(arg.encodedValue)
+
+proc readCliArg(bytes: openArray[byte]; pos: var int): PublicCliArg =
+  PublicCliArg(
+    name: readString(bytes, pos),
+    nimType: readString(bytes, pos),
+    encodedValue: readString(bytes, pos))
+
+proc writeCliCall(outp: var seq[byte]; call: PublicCliCall) =
+  outp.writeString(call.packageName)
+  outp.writeString(call.executableName)
+  outp.writeString(call.subcommand)
+  outp.writeString(call.providerEntrypointId)
+  outp.writeU32Le(uint32(call.arguments.len))
+  for arg in call.arguments:
+    outp.writeCliArg(arg)
+
+proc readCliCall(bytes: openArray[byte]; pos: var int): PublicCliCall =
+  result.packageName = readString(bytes, pos)
+  result.executableName = readString(bytes, pos)
+  result.subcommand = readString(bytes, pos)
+  result.providerEntrypointId = readString(bytes, pos)
+  let count = int(readU32Le(bytes, pos))
+  result.arguments = newSeq[PublicCliArg](count)
+  for i in 0 ..< count:
+    result.arguments[i] = readCliArg(bytes, pos)
+
+proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeString(action.id)
+  payload.writeCliCall(action.call)
+  payload.writeStringSeq(action.deps)
+  payload.writeStringSeq(action.inputs)
+  payload.writeStringSeq(action.outputs)
+  payload.writeString(action.depfile)
+  payload.writeByte(if action.cacheable: 1'u8 else: 0'u8)
+  payload.writeString(action.commandStatsId)
+
+  result.add(BuildActionPayloadMagic)
+  result.writeU16Le(BuildActionPayloadVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
+  if bytes.len < 10:
+    raisePayload("truncated build action payload envelope")
+  for i in 0 ..< BuildActionPayloadMagic.len:
+    if bytes[i] != BuildActionPayloadMagic[i]:
+      raisePayload("unknown build action payload magic")
+  var pos = 4
+  let version = readU16Le(bytes, pos)
+  if version != BuildActionPayloadVersion:
+    raisePayload("unsupported build action payload version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raisePayload("build action payload length mismatch")
+
+  result.id = readString(bytes, pos)
+  result.call = readCliCall(bytes, pos)
+  result.deps = readStringSeq(bytes, pos)
+  result.inputs = readStringSeq(bytes, pos)
+  result.outputs = readStringSeq(bytes, pos)
+  result.depfile = readString(bytes, pos)
+  result.cacheable = readByte(bytes, pos) == 1'u8
+  result.commandStatsId = readString(bytes, pos)
+  if pos != bytes.len:
+    raisePayload("trailing build action payload bytes")
+
+proc actionPayload*(action: BuildActionDef): string =
+  fromBytes(encodeBuildActionPayload(action))
 
 proc callIdentity*(call: PublicCliCall): string =
   var parts = @[call.packageName, call.executableName, call.subcommand,
@@ -337,9 +527,40 @@ proc titleIdent(text: string): string =
 
 proc wrapperCode(pkg: PackageDef): string =
   let typeName = titleIdent(pkg.packageName)
+  let exeTypeName = typeName & "Executable"
   result = "type\n  " & typeName & "* = object\n" &
-    "const " & pkg.packageName & "* = " & typeName & "()\n"
+    "  " & exeTypeName & "* = object\n" &
+    "    value*: SelectedExecutable\n" &
+    "const " & pkg.packageName & "* = " & typeName & "()\n" &
+    "proc executable*(pkg: " & typeName & "; name: string): " &
+      exeTypeName & " =\n" &
+    "  discard pkg\n" &
+    "  " & exeTypeName & "(value: selectedExecutable(" &
+      escForCode(pkg.packageName) & ", name))\n"
+  var selectedCommands: seq[string] = @[]
   for exe in pkg.executables:
+    for cmd in exe.commands:
+      var params: seq[string] = @["exe: " & exeTypeName]
+      var argCalls: seq[string] = @[]
+      var signature = cmd.name
+      for param in cmd.params:
+        var spec = param.name & ": " & param.nimType
+        if not param.required:
+          spec.add(" = " & nimDefault(param.nimType))
+        params.add(spec)
+        signature.add("|" & spec)
+        argCalls.add(argBuilder(param))
+      if selectedCommands.find(signature) >= 0:
+        continue
+      selectedCommands.add(signature)
+      result.add("proc " & cmd.name & "*( " & params.join("; ") &
+        "): PublicCliCall =\n")
+      result.add("  publicCliCall(exe.value.packageName, " &
+        "exe.value.executableName, " & escForCode(cmd.name) &
+        ", exe.value.packageName & \".\" & exe.value.executableName & \".\" & " &
+        escForCode(cmd.name) & ", @[" & argCalls.join(", ") & "])\n")
+  if pkg.executables.len == 1:
+    let exe = pkg.executables[0]
     for cmd in exe.commands:
       var params: seq[string] = @["pkg: " & typeName]
       var argCalls: seq[string] = @[]
@@ -357,6 +578,112 @@ proc wrapperCode(pkg: PackageDef): string =
         escForCode(cmd.providerEntrypointId) & ", @[" & argCalls.join(", ") &
         "])\n")
 
+when defined(reproProviderMode):
+  proc providerBodyHash(pkg: PackageDef): string =
+    pkg.packageName & ".build.v1"
+
+  proc rootEntryPointId(pkg: PackageDef): string =
+    pkg.packageName & ".root"
+
+  proc sanitizeNodePart(value: string): string =
+    for ch in value:
+      if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
+          ch in {'-', '_', '.'}:
+        result.add(ch)
+      else:
+        result.add('_')
+    if result.len == 0:
+      result = "node"
+
+  proc providerManifest(pkg: PackageDef; providerArtifactId: string): ProviderManifest =
+    ProviderManifest(
+      providerArtifactId: providerArtifactId,
+      protocolVersion: ProviderProtocolVersion,
+      entryPoints: @[
+        GraphEntryPointDescriptor(
+          id: rootEntryPointId(pkg),
+          kind: gpkProjectRoot,
+          stableName: pkg.packageName,
+          bodyHash: providerBodyHash(pkg),
+          argumentSchemaId: "reprobuild.project-root.v1",
+          outputSchemaId: "reprobuild.graph-fragment.v1")
+      ])
+
+  proc actionNode(namespace, id: string): string =
+    namespace & ":action:" & sanitizeNodePart(id)
+
+  proc outputNode(namespace, actionId, output: string): string =
+    namespace & ":output:" & sanitizeNodePart(actionId) & ":" &
+      sanitizeNodePart(output)
+
+  proc buildPackageFragment(pkg: PackageDef; request: ProviderGraphRequest;
+                            buildProc: proc ()): GraphFragment =
+    resetBuildActionRegistry()
+    buildProc()
+    let actions = registeredBuildActions()
+    result = GraphFragment(
+      entryPointId: request.entryPointId,
+      entryPointBodyHash: request.entryPointBodyHash,
+      arguments: request.arguments,
+      namespace: request.namespace)
+    if fileExists(pkg.sourceFile):
+      result.evaluationInputs.add(fileReadInput(pkg.sourceFile))
+    for action in actions:
+      let nodeId = actionNode(request.namespace, action.id)
+      result.nodes.add(GraphNode(
+        id: nodeId,
+        kind: gnkAction,
+        stableName: action.id,
+        payload: actionPayload(action)))
+    for action in actions:
+      let nodeId = actionNode(request.namespace, action.id)
+      for dep in action.deps:
+        result.edges.add(GraphEdge(
+          id: request.namespace & ":dep:" & sanitizeNodePart(action.id) & ":" &
+            sanitizeNodePart(dep),
+          kind: gekDependsOn,
+          fromNode: nodeId,
+          toNode: actionNode(request.namespace, dep)))
+      for output in action.outputs:
+        let outNode = outputNode(request.namespace, action.id, output)
+        result.nodes.add(GraphNode(
+          id: outNode,
+          kind: gnkGeneratedOutput,
+          stableName: output,
+          payload: output))
+        result.edges.add(GraphEdge(
+          id: request.namespace & ":produces:" & sanitizeNodePart(action.id) &
+            ":" & sanitizeNodePart(output),
+          kind: gekProduces,
+          fromNode: nodeId,
+          toNode: outNode))
+        result.effectClaims.add(OwnedEffectClaim(
+          kind: oekFile,
+          stableName: output,
+          identity: output,
+          cleanupPolicy: cplDeleteWhenUnclaimed,
+          payload: action.id))
+    result.fragmentDigest = computeGraphFragmentDigest(result)
+
+  proc runPackageProvider*(pkg: PackageDef; buildProc: proc ()): int =
+    try:
+      let paths = parseProviderProtocolArgs(commandLineParams())
+      let request = readProviderRequestFile(paths.requestPath)
+      let manifest = providerManifest(pkg, request.providerArtifactId)
+      case request.kind
+      of prkManifest:
+        writeProviderResponseFile(paths.responsePath, manifestResponse(manifest))
+      of prkGraphInvocation:
+        if request.entryPointId != rootEntryPointId(pkg):
+          stderr.writeLine("unknown provider entry point: " & request.entryPointId)
+          return 2
+        writeProviderResponseFile(paths.responsePath,
+          graphResponse(manifest, buildPackageFragment(pkg, request, buildProc)))
+      0
+    except CatchableError as err:
+      stderr.writeLine("repro project provider: error: " & err.msg)
+      1
+
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   var buildBody = newStmtList()
   for stmt in body:
@@ -368,10 +695,13 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   if buildBody.len == 0:
     return newStmtList()
   let procName = ident("build" & titleIdent(pkg.packageName))
+  let pkgLiteral = parseExpr(packageLiteral(pkg))
   result = quote do:
     when not defined(reproInterfaceMode):
       proc `procName`*() =
         `buildBody`
+      when defined(reproProviderMode) and isMainModule:
+        quit runPackageProvider(`pkgLiteral`, `procName`)
 
 macro package*(name: untyped; body: untyped): untyped =
   let pkg = parsePackageDef(name, body)
