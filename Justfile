@@ -53,6 +53,16 @@ bench *args:
 bench-quick:
     just bench --quick
 
+integration-build-engine-api:
+    mkdir -p test-logs build/test-bin build/nimcache
+    cd ../runquota && just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration-build-engine-api \
+        --out:build/test-bin/integration_build_engine_api_ready_queue \
+        tests/integration/t_integration_build_engine_api_ready_queue.nim \
+        2>&1 | tee test-logs/integration-build-engine-api.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

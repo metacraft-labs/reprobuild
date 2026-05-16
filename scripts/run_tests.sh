@@ -8,6 +8,7 @@ while IFS= read -r -d '' test_file; do
   found=1
   test_name="$(basename "${test_file}" .nim)"
   nim c -r \
+    --threads:on \
     --nimcache:"build/nimcache/${test_name}" \
     --out:"build/test-bin/${test_name}" \
     "${test_file}"

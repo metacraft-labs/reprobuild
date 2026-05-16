@@ -1,0 +1,5 @@
+version       = "0.1.0"
+author        = "Metacraft Labs"
+description   = "Reprobuild normalized action graph and local build engine"
+license       = "MIT"
+srcDir        = "src"

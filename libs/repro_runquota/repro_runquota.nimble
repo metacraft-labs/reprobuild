@@ -1,0 +1,5 @@
+version       = "0.1.0"
+author        = "Metacraft Labs"
+description   = "Reprobuild integration adapter for RunQuota"
+license       = "MIT"
+srcDir        = "src"
