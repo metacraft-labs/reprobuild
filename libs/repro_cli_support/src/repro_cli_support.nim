@@ -9,6 +9,7 @@ import repro_project_dsl
 import repro_runquota
 import repro_hash
 import repro_tool_profiles
+import repro_cli_support/watch
 
 proc wantsVersion*(args: openArray[string]): bool =
   args.len == 1 and args[0] in ["--version", "-V"]
@@ -21,6 +22,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " build <target[#name]> --tool-provisioning=path|nix\n       " & programName &
+      " watch <target[#name]> --tool-provisioning=path|nix [--max-cycles=N] [--debounce-ms=N]\n       " & programName &
       " develop <target[#name]> --tool-provisioning=nix -- <command> [args...]\n       " & programName &
       " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]"
   elif programName == "repro-fs-snoop":
@@ -369,6 +371,157 @@ proc runQuotaSocketDiagnostic(): string =
   else:
     "default"
 
+type
+  BuildCommandOutcome = object
+    exitCode: int
+    modulePath: string
+    projectRoot: string
+    outDir: string
+    buildReportPath: string
+
+proc executeBuildTarget(target: string; mode: ToolProvisioningMode):
+    BuildCommandOutcome =
+  var parsedTarget = parseBuildTarget(target)
+  parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
+  let modulePath = parsedTarget.modulePath
+  if not fileExists(modulePath):
+    raise newException(IOError, "build target module not found: " & modulePath)
+
+  let outDir = outputDirForTarget(parsedTarget)
+  result.modulePath = modulePath
+  result.projectRoot = projectRootForModule(modulePath)
+  result.outDir = outDir
+
+  let interfacePath = outDir / "project-interface.rbsz"
+  let stubPath = outDir / "project-interface.nim"
+  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath)
+
+  if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
+    raise newException(ValueError,
+      "typed tool provisioning is required for uses declarations; refusing " &
+        "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
+        "explicit weak local profile.")
+
+  if mode in {tpmPathOnly, tpmNix}:
+    let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
+    let identity = resolved.identity
+    echo "repro build: tool provisioning active (tool-provisioning=" &
+      mode.modeName & ")"
+    if mode == tpmPathOnly:
+      echo "repro build: provisioning-disabled mode active (tool-provisioning=path)"
+    echo "project: " & artifact.projectInterface.projectName
+    echo "interface: " & interfacePath
+    echo "toolIdentity: " & resolved.identityPath
+    echo "inspection: " & resolved.inspectionPath
+    let portability =
+      if mode == tpmNix:
+        "portable"
+      else:
+        "local-only"
+    echo "cachePortability: " & portability
+    echo "runQuotaSocket: " & runQuotaSocketDiagnostic()
+    if not moduleHasBuildBlock(modulePath):
+      result.exitCode = 0
+      return
+    let providerBinaryPath = outDir / "provider" / "project-provider"
+    let providerArtifactPath = outDir / "provider-compile.rbsz"
+    echo "providerCompile: started"
+    let provider = compileProviderBinary(modulePath, providerBinaryPath,
+      artifact.interfaceFingerprint, providerArtifactPath, getCurrentDir())
+    let providerArtifactId = digestHex(provider.providerFingerprint)
+    echo "providerBinary: " & provider.outputBinaryPath
+    echo "providerCompileArtifact: " & providerArtifactPath
+    echo "providerArtifact: " & providerArtifactId
+
+    let projectRoot = result.projectRoot
+    let refresh = refreshProviderGraph(RefreshConfig(
+      storeRoot: outDir / "provider-graph",
+      providerBinaryPath: provider.outputBinaryPath,
+      providerArtifactId: providerArtifactId,
+      rootEntryPointId: artifact.projectInterface.packageName & ".root",
+      rootArguments: projectRoot,
+      namespace: "project",
+      lockSliceId: digestHex(artifact.interfaceFingerprint),
+      activity: "build",
+      providerWorkingDir: projectRoot))
+    echo "providerGraphSnapshot: " & refresh.persistedSnapshotPath
+    echo "providerInvocations: " & $refresh.invoked.len
+
+    let actions = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
+      parsedTarget.selectedActionId)
+    if parsedTarget.fragmentKind == tfkActionSelection:
+      echo "selectedTarget: " & parsedTarget.selectedActionId
+    echo "scheduler: actions=" & $actions.len
+    if actions.len == 0:
+      result.exitCode = 0
+      return
+    let buildResult = runBuild(graph(actions), BuildEngineConfig(
+      cacheRoot: outDir / "build-engine-cache",
+      runQuotaCliPath: getAppFilename(),
+      maxParallelism: 8'u32,
+      stdoutLimit: 1024 * 1024,
+      stderrLimit: 1024 * 1024,
+      rebuildMissingOutputsOnCacheHit: true))
+    let reportPath = outDir / "build-report.json"
+    writeBuildReport(reportPath, provider, refresh, buildResult)
+    result.buildReportPath = reportPath
+    for item in buildResult.results:
+      echo "action: " & item.id & " status=" & $item.status &
+        " launched=" & $item.launched & " cache=" & $item.cacheDecision &
+        " runquota=" & item.runQuotaBackend &
+        " socket=" & (if item.runQuotaSocket.len > 0: item.runQuotaSocket else: "default") &
+        " lease=" & $item.leaseId &
+        " evidence=depfile:" & $item.evidence.depfileInputs.len
+    echo "buildReport: " & reportPath
+    result.exitCode =
+      if buildResult.hasFailedActions():
+        1
+      else:
+        0
+    return
+
+  echo "repro build: no external tools requested"
+  echo "interface: " & interfacePath
+  result.exitCode = 0
+
+proc isUnderReproDir(path: string): bool =
+  for part in path.split({'/', '\\'}):
+    if part == ".repro":
+      return true
+
+proc addWatchCandidate(paths: var HashSet[string]; projectRoot, path: string) =
+  if path.len == 0:
+    return
+  var candidate =
+    if path.isAbsolute:
+      path
+    else:
+      projectRoot / path
+  candidate = os.normalizedPath(candidate)
+  if candidate.isUnderReproDir():
+    return
+  paths.incl(candidate)
+  let parent = parentDir(candidate)
+  if parent.len > 0 and not parent.isUnderReproDir():
+    paths.incl(parent)
+
+proc watchPathsFromReport(outcome: BuildCommandOutcome): seq[string] =
+  var paths = initHashSet[string]()
+  addWatchCandidate(paths, outcome.projectRoot, outcome.modulePath)
+  if outcome.buildReportPath.len > 0 and fileExists(outcome.buildReportPath):
+    let report = parseFile(outcome.buildReportPath)
+    for action in report{"actions"}:
+      let evidence = action{"evidence"}
+      for key in ["declaredInputs", "depfileInputs", "monitorReads",
+          "monitorProbes"]:
+        for item in evidence{key}:
+          addWatchCandidate(paths, outcome.projectRoot, item.getStr())
+  result = toSeq(paths)
+  result.sort()
+
+proc flushStdout() =
+  stdout.flushFile()
+
 proc binDirsForDevelop(identity: PathOnlyBuildIdentity): seq[string] =
   for profile in identity.profiles:
     if profile.installMethod == "nix":
@@ -426,98 +579,89 @@ proc runBuildCommand(args: openArray[string]): int =
   if target.len == 0:
     raise newException(ValueError, "missing build target")
 
-  var parsedTarget = parseBuildTarget(target)
-  parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
-  let modulePath = parsedTarget.modulePath
-  if not fileExists(modulePath):
-    raise newException(IOError, "build target module not found: " & modulePath)
+  executeBuildTarget(target, mode).exitCode
 
-  let outDir = outputDirForTarget(parsedTarget)
-  let interfacePath = outDir / "project-interface.rbsz"
-  let stubPath = outDir / "project-interface.nim"
-  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath)
+proc parsePositiveIntFlag(flagName, value: string): int =
+  try:
+    result = parseInt(value)
+  except ValueError:
+    raise newException(ValueError, flagName & " must be an integer")
+  if result <= 0:
+    raise newException(ValueError, flagName & " must be greater than zero")
 
-  if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
+proc runWatchCommand(args: openArray[string]): int =
+  var target = ""
+  var mode = tpmUnspecified
+  var maxCycles = 0
+  var debounceMs = 250
+
+  for arg in args:
+    if arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
+    elif arg == "--tool-provisioning":
+      raise newException(ValueError,
+        "--tool-provisioning requires an inline value, for example " &
+          "--tool-provisioning=path")
+    elif arg.startsWith("--max-cycles="):
+      maxCycles = parsePositiveIntFlag("--max-cycles",
+        arg.split("=", maxsplit = 1)[1])
+    elif arg.startsWith("--debounce-ms="):
+      debounceMs = parsePositiveIntFlag("--debounce-ms",
+        arg.split("=", maxsplit = 1)[1])
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported watch flag: " & arg)
+    elif target.len == 0:
+      target = arg
+    else:
+      raise newException(ValueError, "unexpected watch argument: " & arg)
+
+  if target.len == 0:
+    raise newException(ValueError, "missing watch target")
+  if mode notin {tpmPathOnly, tpmNix}:
     raise newException(ValueError,
-      "typed tool provisioning is required for uses declarations; refusing " &
-        "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
-        "explicit weak local profile.")
+      "repro watch requires --tool-provisioning=path|nix")
+  when not defined(macosx):
+    raise newException(OSError,
+      "repro watch currently supports macOS kqueue only; Linux and Windows " &
+        "filesystem watch backends are deferred")
 
-  if mode in {tpmPathOnly, tpmNix}:
-    let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
-    let identity = resolved.identity
-    echo "repro build: tool provisioning active (tool-provisioning=" &
-      mode.modeName & ")"
-    if mode == tpmPathOnly:
-      echo "repro build: provisioning-disabled mode active (tool-provisioning=path)"
-    echo "project: " & artifact.projectInterface.projectName
-    echo "interface: " & interfacePath
-    echo "toolIdentity: " & resolved.identityPath
-    echo "inspection: " & resolved.inspectionPath
-    let portability =
-      if mode == tpmNix:
-        "portable"
-      else:
-        "local-only"
-    echo "cachePortability: " & portability
-    echo "runQuotaSocket: " & runQuotaSocketDiagnostic()
-    if not moduleHasBuildBlock(modulePath):
+  echo "repro watch: target=" & target & " tool-provisioning=" &
+    mode.modeName & " debounceMs=" & $debounceMs &
+    (if maxCycles > 0: " maxCycles=" & $maxCycles else: " maxCycles=unbounded")
+  flushStdout()
+
+  var cycle = 0
+  while true:
+    cycle.inc
+    echo "repro watch: cycle " & $cycle & " start" &
+      (if cycle == 1: " initial" else: " rebuild")
+    flushStdout()
+    let outcome = executeBuildTarget(target, mode)
+    echo "repro watch: cycle " & $cycle & " result exitCode=" &
+      $outcome.exitCode
+    flushStdout()
+    if outcome.exitCode != 0:
+      return outcome.exitCode
+    if maxCycles > 0 and cycle >= maxCycles:
+      echo "repro watch: max cycles reached"
+      flushStdout()
       return 0
-    let providerBinaryPath = outDir / "provider" / "project-provider"
-    let providerArtifactPath = outDir / "provider-compile.rbsz"
-    echo "providerCompile: started"
-    let provider = compileProviderBinary(modulePath, providerBinaryPath,
-      artifact.interfaceFingerprint, providerArtifactPath, getCurrentDir())
-    let providerArtifactId = digestHex(provider.providerFingerprint)
-    echo "providerBinary: " & provider.outputBinaryPath
-    echo "providerCompileArtifact: " & providerArtifactPath
-    echo "providerArtifact: " & providerArtifactId
 
-    let projectRoot = projectRootForModule(modulePath)
-    let refresh = refreshProviderGraph(RefreshConfig(
-      storeRoot: outDir / "provider-graph",
-      providerBinaryPath: provider.outputBinaryPath,
-      providerArtifactId: providerArtifactId,
-      rootEntryPointId: artifact.projectInterface.packageName & ".root",
-      rootArguments: projectRoot,
-      namespace: "project",
-      lockSliceId: digestHex(artifact.interfaceFingerprint),
-      activity: "build",
-      providerWorkingDir: projectRoot))
-    echo "providerGraphSnapshot: " & refresh.persistedSnapshotPath
-    echo "providerInvocations: " & $refresh.invoked.len
-
-    let actions = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
-      parsedTarget.selectedActionId)
-    if parsedTarget.fragmentKind == tfkActionSelection:
-      echo "selectedTarget: " & parsedTarget.selectedActionId
-    echo "scheduler: actions=" & $actions.len
-    if actions.len == 0:
-      return 0
-    let buildResult = runBuild(graph(actions), BuildEngineConfig(
-      cacheRoot: outDir / "build-engine-cache",
-      runQuotaCliPath: getAppFilename(),
-      maxParallelism: 8'u32,
-      stdoutLimit: 1024 * 1024,
-      stderrLimit: 1024 * 1024,
-      rebuildMissingOutputsOnCacheHit: true))
-    let reportPath = outDir / "build-report.json"
-    writeBuildReport(reportPath, provider, refresh, buildResult)
-    for item in buildResult.results:
-      echo "action: " & item.id & " status=" & $item.status &
-        " launched=" & $item.launched & " cache=" & $item.cacheDecision &
-        " runquota=" & item.runQuotaBackend &
-        " socket=" & (if item.runQuotaSocket.len > 0: item.runQuotaSocket else: "default") &
-        " lease=" & $item.leaseId &
-        " evidence=depfile:" & $item.evidence.depfileInputs.len
-    echo "buildReport: " & reportPath
-    if buildResult.hasFailedActions():
-      return 1
-    return 0
-
-  echo "repro build: no external tools requested"
-  echo "interface: " & interfacePath
-  0
+    let paths = watchPathsFromReport(outcome)
+    var watcher = openFilesystemWatcher(paths)
+    try:
+      echo "repro watch: watching paths=" & $watcher.watchedPathCount
+      flushStdout()
+      let event = watcher.waitForEvent()
+      echo "repro watch: event seen path=" & event.path &
+        " detail=" & event.detail
+      flushStdout()
+      let coalesced = watcher.drainDebouncedEvents(debounceMs)
+      echo "repro watch: debounce complete coalesced=" & $coalesced
+      echo "repro watch: rebuild cycle after filesystem event"
+      flushStdout()
+    finally:
+      watcher.closeFilesystemWatcher()
 
 proc runDevelopCommand(args: openArray[string]): int =
   var target = ""
@@ -624,6 +768,17 @@ proc runThinApp*(programName: string): int =
       return runBuildCommand(buildArgs)
     except CatchableError as err:
       stderr.writeLine("repro build: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "watch":
+    try:
+      let watchArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runWatchCommand(watchArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro watch: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "develop":
     try:

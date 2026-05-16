@@ -1,0 +1,336 @@
+import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
+
+proc q(value: string): string =
+  quoteShell(value)
+
+proc shellCommand(args: openArray[string]): string =
+  args.mapIt(q(it)).join(" ")
+
+proc runShell(command: string; cwd = getCurrentDir()):
+    tuple[code: int; output: string] =
+  let res = execCmdEx(command, workingDir = cwd)
+  (code: res.exitCode, output: res.output)
+
+proc requireSuccess(command: string; cwd = getCurrentDir()): string =
+  let res = runShell(command, cwd)
+  if res.code != 0:
+    checkpoint(res.output)
+  check res.code == 0
+  res.output
+
+proc pathExists(path: string): bool =
+  try:
+    discard getFileInfo(path, followSymlink = false)
+    true
+  except OSError:
+    false
+
+proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
+    socket: string] =
+  let runquotaRoot = repoRoot.parentDir / "runquota"
+  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  if not fileExists(daemonBin):
+    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+  let socketPath = "/tmp/repro-m31-rq-" & $getCurrentProcessId() & ".sock"
+  if fileExists(socketPath):
+    removeFile(socketPath)
+  let daemon = startProcess(daemonBin, args = [
+    "--socket", socketPath,
+    "--cpu-milli", "16000",
+    "--memory-bytes", "17179869184"
+  ], options = {poUsePath})
+  putEnv("RUNQUOTA_SOCKET", socketPath)
+  for _ in 0 ..< 200:
+    if pathExists(socketPath):
+      return (process: daemon, socket: socketPath)
+    sleep(25)
+  daemon.terminate()
+  raise newException(OSError, "runquotad socket did not appear")
+
+proc writeExecutable(path, content: string) =
+  createDir(path.splitPath.head)
+  writeFile(path, content)
+  setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
+    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+proc writeFixtureTools(binDir: string) =
+  writeExecutable(binDir / "m31-producer",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"--version\" ]; then echo 'm31-producer 1.0.0'; exit 0; fi\n" &
+    "test \"${1:-}\" = produce\n" &
+    "shift\n" &
+    "visible= hidden= output= depfile= marker=\n" &
+    "while [ \"$#\" -gt 0 ]; do\n" &
+    "  case \"$1\" in\n" &
+    "    --visible) visible=$2; shift 2 ;;\n" &
+    "    --hidden) hidden=$2; shift 2 ;;\n" &
+    "    --output) output=$2; shift 2 ;;\n" &
+    "    --depfile) depfile=$2; shift 2 ;;\n" &
+    "    --marker) marker=$2; shift 2 ;;\n" &
+    "    *) echo \"unknown arg $1\" >&2; exit 64 ;;\n" &
+    "  esac\n" &
+    "done\n" &
+    "mkdir -p \"$(dirname \"$output\")\" \"$(dirname \"$depfile\")\" \"$(dirname \"$marker\")\"\n" &
+    "printf 'producer\\nvisible=%s\\nhidden=%s\\n' \"$(cat \"$visible\")\" \"$(cat \"$hidden\")\" > \"$output\"\n" &
+    "abs_visible=$(cd \"$(dirname \"$visible\")\" && pwd)/$(basename \"$visible\")\n" &
+    "abs_hidden=$(cd \"$(dirname \"$hidden\")\" && pwd)/$(basename \"$hidden\")\n" &
+    "abs_output=$(cd \"$(dirname \"$output\")\" && pwd)/$(basename \"$output\")\n" &
+    "printf '%s: %s %s\\n' \"$abs_output\" \"$abs_visible\" \"$abs_hidden\" > \"$depfile\"\n" &
+    "printf 'producer\\n' >> \"$marker\"\n")
+
+  writeExecutable(binDir / "m31-consumer",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"--version\" ]; then echo 'm31-consumer 1.0.0'; exit 0; fi\n" &
+    "test \"${1:-}\" = consume\n" &
+    "shift\n" &
+    "input= output= marker=\n" &
+    "while [ \"$#\" -gt 0 ]; do\n" &
+    "  case \"$1\" in\n" &
+    "    --input) input=$2; shift 2 ;;\n" &
+    "    --output) output=$2; shift 2 ;;\n" &
+    "    --marker) marker=$2; shift 2 ;;\n" &
+    "    *) echo \"unknown arg $1\" >&2; exit 64 ;;\n" &
+    "  esac\n" &
+    "done\n" &
+    "mkdir -p \"$(dirname \"$output\")\" \"$(dirname \"$marker\")\"\n" &
+    "printf 'consumer\\n' > \"$output\"\n" &
+    "cat \"$input\" >> \"$output\"\n" &
+    "printf 'consumer\\n' >> \"$marker\"\n")
+
+proc writeProject(path: string) =
+  createDir(path.splitPath.head)
+  writeFile(path,
+    "import repro_project_dsl\n\n" &
+    "package m31Project:\n" &
+    "  uses:\n" &
+    "    \"m31-producer >=1.0 <2.0\"\n" &
+    "    \"m31-consumer >=1.0 <2.0\"\n\n" &
+    "  executable producer:\n" &
+    "    name \"m31-producer\"\n" &
+    "    cli:\n" &
+    "      subcmd \"produce\":\n" &
+    "        flag visible, string, required = true\n" &
+    "        flag hidden, string, required = true\n" &
+    "        flag output, string, required = true\n" &
+    "        flag depfile, string, required = true\n" &
+    "        flag marker, string, required = true\n\n" &
+    "  executable consumer:\n" &
+    "    name \"m31-consumer\"\n" &
+    "    cli:\n" &
+    "      subcmd \"consume\":\n" &
+    "        flag input, string, required = true\n" &
+    "        flag output, string, required = true\n" &
+    "        flag marker, string, required = true\n" &
+    "    build:\n" &
+    "      let marker = \".repro/tool-runs.log\"\n" &
+    "      discard buildAction(\"produce\",\n" &
+    "        m31Project.executable(\"m31-producer\").produce(\n" &
+    "          visible = \"src/visible.txt\",\n" &
+    "          hidden = \"src/hidden.txt\",\n" &
+    "          output = \"build/generated.txt\",\n" &
+    "          depfile = \"build/generated.d\",\n" &
+    "          marker = marker),\n" &
+    "        inputs = @[\"src/visible.txt\"],\n" &
+    "        outputs = @[\"build/generated.txt\"],\n" &
+    "        depfile = \"build/generated.d\")\n" &
+    "      discard buildAction(\"consume\",\n" &
+    "        m31Project.executable(\"m31-consumer\").consume(\n" &
+    "          input = \"build/generated.txt\",\n" &
+    "          output = \"dist/final.txt\",\n" &
+    "          marker = marker),\n" &
+    "        deps = @[\"produce\"],\n" &
+    "        inputs = @[\"build/generated.txt\"],\n" &
+    "        outputs = @[\"dist/final.txt\"])\n" &
+    "      discard buildAction(\"unrelated\",\n" &
+    "        m31Project.executable(\"m31-consumer\").consume(\n" &
+    "          input = \"src/unrelated.txt\",\n" &
+    "          output = \"dist/unrelated.txt\",\n" &
+    "          marker = \".repro/tool-runs-unrelated.log\"),\n" &
+    "        inputs = @[\"src/unrelated.txt\"],\n" &
+    "        outputs = @[\"dist/unrelated.txt\"])\n")
+
+proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
+  createDir(projectRoot / "src" / "frontend" / "tests")
+  createDir(projectRoot / "src" / "frontend" / "index")
+  createDir(projectRoot / "src" / "frontend" / "lib")
+  createDir(projectRoot / "test-programs" / "c_sudoku_solver")
+  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
+  copyFile(codeTracerRoot / "src" / "frontend" / "tests" /
+    "ipc_registry_test.nim",
+    projectRoot / "src" / "frontend" / "tests" / "ipc_registry_test.nim")
+  copyFile(codeTracerRoot / "src" / "frontend" / "index" /
+    "ipc_registry.nim",
+    projectRoot / "src" / "frontend" / "index" / "ipc_registry.nim")
+  copyFile(codeTracerRoot / "src" / "frontend" / "lib" / "jslib.nim",
+    projectRoot / "src" / "frontend" / "lib" / "jslib.nim")
+  copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
+    projectRoot / "test-programs" / "c_sudoku_solver" / "main.c")
+  discard requireSuccess(shellCommand([
+    "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
+  ]))
+
+proc nonEmptyLines(path: string): seq[string] =
+  if not fileExists(path):
+    return @[]
+  for line in readFile(path).splitLines:
+    let stripped = line.strip()
+    if stripped.len > 0:
+      result.add(stripped)
+
+proc reportAction(report: JsonNode; id: string): JsonNode =
+  for item in report{"actions"}:
+    if item{"id"}.getStr() == id:
+      return item
+  newJNull()
+
+proc assertAction(report: JsonNode; id, status: string; launched: bool) =
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  check action{"status"}.getStr() == status
+  check action{"launched"}.getBool() == launched
+
+proc compileRepro(repoRoot, tempRoot: string): string =
+  result = tempRoot / "repro"
+  discard requireSuccess(shellCommand([
+    "nim", "c", "--verbosity:0", "--hints:off",
+    "--nimcache:" & (tempRoot / "nimcache-repro"),
+    "--out:" & result,
+    repoRoot / "apps" / "repro" / "repro.nim"
+  ]), repoRoot)
+
+proc runWatchAndEdit(reproBin, target, repoRoot, pathValue, logPath, editPath,
+                     editText: string; debounceMs = 50): string =
+  let script =
+    "set -eu\n" &
+    "export PATH=" & q(pathValue) & "\n" &
+    shellCommand([reproBin, "watch", target, "--tool-provisioning=path",
+      "--max-cycles=2", "--debounce-ms=" & $debounceMs]) &
+      " > " & q(logPath) & " 2>&1 &\n" &
+    "pid=$!\n" &
+    "ready=0\n" &
+    "for i in $(seq 1 600); do\n" &
+    "  if grep -q 'repro watch: watching paths=' " & q(logPath) &
+      "; then ready=1; break; fi\n" &
+    "  if ! kill -0 \"$pid\" 2>/dev/null; then wait \"$pid\"; exit $?; fi\n" &
+    "  sleep 0.05\n" &
+    "done\n" &
+    "if [ \"$ready\" != 1 ]; then\n" &
+    "  echo 'watch did not become ready' >> " & q(logPath) & "\n" &
+    "  kill \"$pid\" 2>/dev/null || true\n" &
+    "  wait \"$pid\" || true\n" &
+    "  exit 124\n" &
+    "fi\n" &
+    "printf '%s' " & q(editText) & " >> " & q(editPath) & "\n" &
+    "wait \"$pid\"\n"
+  let res = runShell("sh -c " & q(script), repoRoot)
+  let log =
+    if fileExists(logPath):
+      readFile(logPath)
+    else:
+      ""
+  if res.code != 0:
+    checkpoint(res.output)
+    checkpoint(log)
+  check res.code == 0
+  log
+
+when defined(macosx):
+  suite "e2e_repro_watch":
+    test "local project watch rebuilds selected target from depfile event":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m31-local-watch", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compileRepro(repoRoot, tempRoot)
+      let binDir = tempRoot / "bin"
+      writeFixtureTools(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
+
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "src")
+      writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
+      writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
+      writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
+      writeProject(projectRoot / "reprobuild.nim")
+
+      let log = runWatchAndEdit(reproBin, projectRoot & "#consume", repoRoot,
+        pathValue, tempRoot / "local-watch.log",
+        projectRoot / "src" / "hidden.txt", "hidden v2\n")
+      check log.contains("repro watch: cycle 1 start initial")
+      check log.contains("repro watch: event seen path=")
+      check log.contains("repro watch: cycle 2 start rebuild")
+      check log.contains("repro watch: max cycles reached")
+      check log.contains("selectedTarget: consume")
+      check log.contains("scheduler: actions=2")
+      check not log.contains("action: unrelated")
+      check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
+        @["producer", "consumer", "producer", "consumer"]
+      check nonEmptyLines(projectRoot / ".repro" /
+        "tool-runs-unrelated.log").len == 0
+
+      let report = parseFile(projectRoot / ".repro" / "build" /
+        "reprobuild" / "build-report.json")
+      assertAction(report, "produce", "asSucceeded", true)
+      assertAction(report, "consume", "asSucceeded", true)
+      check reportAction(report, "unrelated").kind == JNull
+
+    test "CodeTracer copied checkout watch rebuilds selected C action only":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      check fileExists(realProjectFile)
+
+      let tempRoot = createTempDir("repro-m31-codetracer-watch", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compileRepro(repoRoot, tempRoot)
+      let projectRoot = tempRoot / "codetracer"
+      createDir(projectRoot)
+      copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
+      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+
+      let selectedTarget =
+        projectRoot & "#c-sudoku-object-with-generated-header"
+      let cSource = projectRoot / "test-programs" /
+        "c_sudoku_solver" / "main.c"
+      let log = runWatchAndEdit(reproBin, selectedTarget, repoRoot,
+        getEnv("PATH"), tempRoot / "codetracer-watch.log", cSource,
+        "\n/* reprobuild m31 watch edit */\n")
+      check log.contains("repro watch: event seen path=")
+      check log.contains(
+        "selectedTarget: c-sudoku-object-with-generated-header")
+      check log.contains("scheduler: actions=2")
+      check not log.contains("action: nim-js-ipc-registry-test")
+      check not log.contains("action: c-sudoku-object-tup")
+
+      let report = parseFile(projectRoot / ".repro" / "build" /
+        "reprobuild" / "build-report.json")
+      check report{"actions"}.len == 2
+      assertAction(report, "generate-config-header", "asCacheHit", false)
+      assertAction(report, "c-sudoku-object-with-generated-header",
+        "asSucceeded", true)
+      check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
+      check reportAction(report, "c-sudoku-object-tup").kind == JNull
+
+else:
+  suite "e2e_repro_watch":
+    test "event-driven watch E2E is macOS kqueue-only in M31":
+      echo "SKIP: repro watch filesystem E2E currently requires macOS kqueue"
