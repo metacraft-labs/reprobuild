@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, strutils, tables]
+import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables]
 import repro_core
 import repro_build_engine
 import repro_depfile
@@ -46,24 +46,59 @@ proc splitTarget(target: string): tuple[base: string; fragment: string] =
   else:
     (base: target[0 ..< marker], fragment: target[marker + 1 .. ^1])
 
-proc moduleForTarget(target: string): string =
+type
+  TargetFragmentKind = enum
+    tfkNone
+    tfkModule
+    tfkActionSelection
+
+  ParsedBuildTarget = object
+    modulePath: string
+    outputName: string
+    selectedActionId: string
+    fragmentKind: TargetFragmentKind
+
+proc parseBuildTarget(target: string): ParsedBuildTarget =
   let parts = splitTarget(target)
   if parts.fragment.len > 0:
     if dirExists(parts.base):
-      return parts.base / (parts.fragment & ".nim")
-    return parts.base
-  if dirExists(parts.base):
-    return parts.base / "reprobuild.nim"
-  parts.base
+      let fragmentModule = parts.base / (parts.fragment & ".nim")
+      if fileExists(fragmentModule):
+        return ParsedBuildTarget(
+          modulePath: fragmentModule,
+          outputName: parts.fragment,
+          fragmentKind: tfkModule)
+      let rootModule = parts.base / "reprobuild.nim"
+      if fileExists(rootModule):
+        return ParsedBuildTarget(
+          modulePath: rootModule,
+          outputName: splitFile(rootModule).name,
+          selectedActionId: parts.fragment,
+          fragmentKind: tfkActionSelection)
+      return ParsedBuildTarget(
+        modulePath: fragmentModule,
+        outputName: parts.fragment,
+        fragmentKind: tfkModule)
+    return ParsedBuildTarget(
+      modulePath: parts.base,
+      outputName: parts.fragment,
+      fragmentKind: tfkModule)
 
-proc outputDirForModule(modulePath: string; target: string): string =
-  let parts = splitTarget(target)
-  let name =
-    if parts.fragment.len > 0:
-      parts.fragment
+  let modulePath =
+    if dirExists(parts.base):
+      parts.base / "reprobuild.nim"
     else:
-      splitFile(modulePath).name
-  parentDir(modulePath) / ".repro" / "build" / name
+      parts.base
+  ParsedBuildTarget(
+    modulePath: modulePath,
+    outputName: splitFile(modulePath).name,
+    fragmentKind: tfkNone)
+
+proc moduleForTarget(target: string): string =
+  parseBuildTarget(target).modulePath
+
+proc outputDirForTarget(target: ParsedBuildTarget): string =
+  parentDir(target.modulePath) / ".repro" / "build" / target.outputName
 
 proc digestHex(digest: ContentDigest): string =
   toHex(digest.bytes)
@@ -202,12 +237,50 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
 
 proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
                            identity: PathOnlyBuildIdentity;
-                           projectRoot: string): seq[BuildAction] =
+                           projectRoot: string;
+                           selectedActionId = ""): seq[BuildAction] =
   let profiles = profileIndex(identity)
+  var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkAction:
-        result.add(lowerGraphAction(node, profiles, projectRoot))
+        actionNodes.add((
+          node: node,
+          payload: decodeBuildActionPayload(toBytes(node.payload))))
+  if selectedActionId.len == 0:
+    for item in actionNodes:
+      result.add(lowerGraphAction(item.node, profiles, projectRoot))
+    return
+
+  var byId = initTable[string, BuildActionDef]()
+  for item in actionNodes:
+    byId[item.payload.id] = item.payload
+  if not byId.hasKey(selectedActionId):
+    var available: seq[string] = @[]
+    for item in actionNodes:
+      available.add(item.payload.id)
+    available.sort()
+    raise newException(ValueError,
+      "unknown build target/action id: " & selectedActionId &
+        (if available.len > 0: " (available: " & available.join(", ") & ")"
+         else: " (project defines no build actions)"))
+
+  var selected = initHashSet[string]()
+  proc includeClosure(actionId: string) =
+    if selected.contains(actionId):
+      return
+    if not byId.hasKey(actionId):
+      raise newException(ValueError,
+        "unknown dependency " & actionId & " while selecting build target " &
+          selectedActionId)
+    selected.incl(actionId)
+    for dep in byId[actionId].deps:
+      includeClosure(dep)
+
+  includeClosure(selectedActionId)
+  for item in actionNodes:
+    if selected.contains(item.payload.id):
+      result.add(lowerGraphAction(item.node, profiles, projectRoot))
 
 proc evidenceJson(evidence: PathSetEvidence): JsonNode =
   %*{
@@ -353,11 +426,13 @@ proc runBuildCommand(args: openArray[string]): int =
   if target.len == 0:
     raise newException(ValueError, "missing build target")
 
-  let modulePath = absolutePath(moduleForTarget(target))
+  var parsedTarget = parseBuildTarget(target)
+  parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
+  let modulePath = parsedTarget.modulePath
   if not fileExists(modulePath):
     raise newException(IOError, "build target module not found: " & modulePath)
 
-  let outDir = outputDirForModule(modulePath, target)
+  let outDir = outputDirForTarget(parsedTarget)
   let interfacePath = outDir / "project-interface.rbsz"
   let stubPath = outDir / "project-interface.nim"
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath)
@@ -412,7 +487,10 @@ proc runBuildCommand(args: openArray[string]): int =
     echo "providerGraphSnapshot: " & refresh.persistedSnapshotPath
     echo "providerInvocations: " & $refresh.invoked.len
 
-    let actions = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot)
+    let actions = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
+      parsedTarget.selectedActionId)
+    if parsedTarget.fragmentKind == tfkActionSelection:
+      echo "selectedTarget: " & parsedTarget.selectedActionId
     echo "scheduler: actions=" & $actions.len
     if actions.len == 0:
       return 0

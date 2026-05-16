@@ -113,6 +113,62 @@ proc jsonStringSet(node: JsonNode): seq[string] =
     result.add(item.getStr())
 
 suite "e2e_codetracer_in_place_project_file":
+  test "real committed CodeTracer reprobuild.nim supports action-id target selection":
+    let repoRoot = getCurrentDir()
+    let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+    let realProjectFile = codeTracerRoot / "reprobuild.nim"
+    check fileExists(realProjectFile)
+
+    let tempRoot = createTempDir("repro-m30-codetracer-target-selection", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = tempRoot / "repro"
+    discard requireSuccess(shellCommand([
+      "nim", "c", "--verbosity:0", "--hints:off",
+      "--nimcache:" & (tempRoot / "nimcache-repro"),
+      "--out:" & reproBin,
+      repoRoot / "apps" / "repro" / "repro.nim"
+    ]), repoRoot)
+
+    let projectRoot = tempRoot / "codetracer"
+    createDir(projectRoot)
+    copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
+    check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+    check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+
+    let pathValue = getEnv("PATH")
+    let selectedTarget = projectRoot & "#c-sudoku-object-with-generated-header"
+    let selected = build(reproBin, selectedTarget, repoRoot, pathValue)
+    check selected.contains("selectedTarget: c-sudoku-object-with-generated-header")
+    check selected.contains("scheduler: actions=2")
+    check selected.contains(
+      "action: generate-config-header status=asSucceeded launched=true")
+    check selected.contains(
+      "action: c-sudoku-object-with-generated-header status=asSucceeded launched=true")
+    check not selected.contains("action: nim-js-ipc-registry-test")
+    check not selected.contains("action: c-sudoku-object-tup")
+    check fileExists(projectRoot / "build" / "generated" / "ct_config.h")
+    check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
+    check not fileExists(projectRoot / "tests" / "ipc_registry_test.js")
+    check not fileExists(projectRoot / "build" / "c" / "main.tup.o")
+
+    let selectedReport = parseFile(valueAfter(selected, "buildReport:"))
+    check selectedReport{"actions"}.len == 2
+    assertAction(selectedReport, "generate-config-header", "asSucceeded", true)
+    assertAction(selectedReport, "c-sudoku-object-with-generated-header",
+      "asSucceeded", true)
+    check reportAction(selectedReport, "nim-js-ipc-registry-test").kind == JNull
+    check reportAction(selectedReport, "c-sudoku-object-tup").kind == JNull
+    check mainSymbol("build/c/main.with-header.o", projectRoot).len > 0
+
   test "real committed CodeTracer reprobuild.nim builds in place through public CLI, provider, scheduler, cache, and invalidation":
     let repoRoot = getCurrentDir()
     let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
