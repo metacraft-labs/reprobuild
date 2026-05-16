@@ -3,3 +3,9 @@ repro_core
 repro_platform
 repro_diagnostics
 repro_cli_support
+blake3
+xxh3
+gxhash
+repro_hash
+cbor
+repro_domain_types

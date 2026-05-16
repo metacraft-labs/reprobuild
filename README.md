@@ -1,12 +1,12 @@
 # Reprobuild
 
-> **Status:** M0 repository skeleton
+> **Status:** M6 foundation slice
 
 **Reprobuild** (CLI: `repro`) is a unified build system combining reproducible environments, automatic dependency discovery, incremental rebuilds with artifact caching, and distributed execution.
 
 This repository is the public `metacraft-labs/reprobuild` product repository.
-M0 establishes the local repository shape, app entry point manifests, policy
-checks, and compileable Nim skeletons that later milestones build on.
+The current foundation includes core value/process/dependency-policy types,
+binary-first domain envelopes, and real BLAKE3/XXH3-backed hash policy.
 
 ## Commands
 

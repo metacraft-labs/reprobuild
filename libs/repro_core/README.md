@@ -1,3 +1,5 @@
 # repro_core
 
-Core value types and version helpers shared by the M0 skeleton.
+Core value helpers shared by Reprobuild libraries and applications: stable IDs,
+normalized paths, pure process specs, dependency-gathering policy values,
+parallel facade types, and binary codec/envelope policy helpers.

@@ -44,6 +44,8 @@
             nativeBuildInputs = [
               pkgs.just
               pkgs.nim2
+              pkgs.libblake3
+              pkgs.xxHash
             ];
             buildPhase = "just build";
             doCheck = true;
@@ -69,6 +71,8 @@
             packages = [
               pkgs.just
               pkgs.nim2
+              pkgs.libblake3
+              pkgs.xxHash
               pkgs.nixfmt-rfc-style
               pkgs.repomix
               pkgs.pre-commit
