@@ -21,3 +21,6 @@ repro_runquota
 repro_build_engine
 repro_provider_runtime
 repro_hcr_linkgraph
+repro_hcr_linker
+repro_hcr_agent
+repro_hcr_test

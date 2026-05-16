@@ -1,0 +1,3 @@
+import repro_hcr_agent/minimal_target
+
+export minimal_target

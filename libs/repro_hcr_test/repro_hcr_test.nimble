@@ -1,0 +1,6 @@
+version       = "0.1.0"
+author        = "Metacraft Labs"
+description   = "Strict fake target environment for direct HCR tests"
+license       = "MIT"
+srcDir        = "src"
+requires "nim >= 2.2.0"

@@ -1,0 +1,6 @@
+version       = "0.1.0"
+author        = "Metacraft Labs"
+description   = "Minimal in-target HCR runtime for direct trampoline tests"
+license       = "MIT"
+srcDir        = "src"
+requires "nim >= 2.2.0"

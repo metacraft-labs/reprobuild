@@ -155,6 +155,15 @@ integration_hcr_linkgraph_relocation_classification:
         tests/integration/t_integration_hcr_linkgraph_relocation_classification.nim \
         2>&1 | tee test-logs/integration_hcr_linkgraph_relocation_classification.log
 
+e2e_hcr_in_target_link_and_trampoline:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_in_target_link_and_trampoline \
+        --out:build/test-bin/e2e_hcr_in_target_link_and_trampoline \
+        tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim \
+        2>&1 | tee test-logs/e2e_hcr_in_target_link_and_trampoline.log
+
 integration_provider_fragment_refresh_and_pruning:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
