@@ -499,8 +499,13 @@ when defined(macosx):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      let projectText = readFile(projectRoot / "reprobuild.nim")
+      check projectText == readFile(realProjectFile)
+      check not projectText.contains("writeProject")
+      check not projectText.contains("buildAction(")
+      check not projectText.contains("gcc.compile")
+      check not projectText.contains("nim_js")
+      check not projectText.contains("args = @[")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [

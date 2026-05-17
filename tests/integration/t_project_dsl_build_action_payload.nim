@@ -31,6 +31,8 @@ proc writeCliArgLegacy(outp: var seq[byte]; arg: PublicCliArg;
     outp.writeByte(byte(ord(arg.kind)))
     outp.writeU32Le(uint32(arg.position))
     outp.writeString(arg.alias)
+  if version >= 4'u16:
+    outp.writeByte(byte(ord(arg.role)))
   outp.writeString(arg.encodedValue)
 
 proc writeCliCallLegacy(outp: var seq[byte]; call: PublicCliCall;
@@ -73,7 +75,9 @@ proc sampleAction(policy = defaultDependencyPolicy(); depfile = ""):
     "compile",
     publicCliCall("pkg", "cc", "build", "pkg.cc.build", [
       inputArg("input", "src/main.c"),
-      cliArg("debug", true)
+      cliArg("debug", true, alias = "-g"),
+      inputArgSeq("include", @["include/a.h", "include/b.h"],
+        alias = "-include", repeated = true)
     ]),
     deps = ["generate"],
     inputs = ["src/main.c"],
@@ -87,13 +91,16 @@ suite "project DSL build action payload":
   setup:
     resetBuildActionRegistry()
 
-  test "version 4 round-trips CLI argument roles and explicit dependency policies":
+  test "version 5 round-trips CLI argument roles, formats, and explicit dependency policies":
     let automatic = decodeBuildActionPayload(encodeBuildActionPayload(
       sampleAction(automaticMonitorPolicy())))
     check automatic.id == "compile"
-    check automatic.call.arguments.len == 2
+    check automatic.call.arguments.len == 3
     check automatic.call.arguments[0].role == carInput
     check automatic.call.arguments[1].role == carOrdinary
+    check automatic.call.arguments[2].role == carInput
+    check automatic.call.arguments[2].format == cafSeparate
+    check automatic.call.arguments[2].repeated
     check automatic.dependencyPolicy.kind == bdpAutomaticMonitor
     check automatic.dependencyPolicy.depfile == ""
 
@@ -108,7 +115,7 @@ suite "project DSL build action payload":
     let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
       sampleAction(makeDepfilePolicy("deps/generated.d")), 3'u16))
     check decoded.id == "compile"
-    check decoded.call.arguments.len == 2
+    check decoded.call.arguments.len == 3
     check decoded.call.arguments[0].role == carOrdinary
     check decoded.dependencyPolicy.kind == bdpMakeDepfile
     check decoded.dependencyPolicy.depfile == "deps/generated.d"
@@ -129,3 +136,13 @@ suite "project DSL build action payload":
 
     expect BuildActionPayloadError:
       discard decodeBuildActionPayload(encoded)
+  test "version 4 payloads decode with default CLI argument formatting":
+    let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
+      sampleAction(makeDepfilePolicy("deps/generated.d")), 4'u16))
+    check decoded.id == "compile"
+    check decoded.call.arguments.len == 3
+    check decoded.call.arguments[0].role == carInput
+    check decoded.call.arguments[0].format == cafSeparate
+    check not decoded.call.arguments[0].repeated
+    check decoded.dependencyPolicy.kind == bdpMakeDepfile
+    check decoded.dependencyPolicy.depfile == "deps/generated.d"

@@ -6,6 +6,8 @@ when defined(reproProviderMode):
 type
   BuildActionPayloadError* = object of CatchableError
 
+  Tool*[name: static string] = object
+
   CliParamKind* = enum
     cpkPositional
     cpkFlag
@@ -15,10 +17,18 @@ type
     carInput
     carOutput
 
+  CliArgFormat* = enum
+    cafSeparate
+    cafConcat
+    cafEquals
+
   CliParamDef* = object
     name*: string
     nimType*: string
     kind*: CliParamKind
+    role*: CliArgRole
+    format*: CliArgFormat
+    repeated*: bool
     position*: int
     alias*: string
     required*: bool
@@ -61,6 +71,8 @@ type
     nimType*: string
     kind*: CliParamKind
     role*: CliArgRole
+    format*: CliArgFormat
+    repeated*: bool
     position*: int
     alias*: string
     encodedValue*: string
@@ -108,7 +120,7 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 4'u16
+  BuildActionPayloadVersion = 5'u16
 
 proc resetPackageRegistry*() =
   registry.setLen(0)
@@ -156,43 +168,52 @@ else:
     discard path
 
 proc cliArg*(name: string; value: string; kind = cpkFlag; position = 0;
-             alias = ""): PublicCliArg =
+             alias = ""; format = cafSeparate;
+             repeated = false): PublicCliArg =
   PublicCliArg(name: name, nimType: "string", kind: kind, position: position,
-    alias: alias, encodedValue: value)
+    alias: alias, format: format, repeated: repeated, encodedValue: value)
 
 proc cliArg*(name: string; value: int; kind = cpkFlag; position = 0;
-             alias = ""): PublicCliArg =
+             alias = ""; format = cafSeparate;
+             repeated = false): PublicCliArg =
   PublicCliArg(name: name, nimType: "int", kind: kind, position: position,
-    alias: alias, encodedValue: $value)
+    alias: alias, format: format, repeated: repeated, encodedValue: $value)
 
 proc cliArg*(name: string; value: bool; kind = cpkFlag; position = 0;
-             alias = ""): PublicCliArg =
+             alias = ""; format = cafSeparate;
+             repeated = false): PublicCliArg =
   PublicCliArg(name: name, nimType: "bool", kind: kind, position: position,
-    alias: alias, encodedValue: $value)
+    alias: alias, format: format, repeated: repeated, encodedValue: $value)
 
 proc cliArgSeq*(name: string; value: seq[string]; kind = cpkFlag; position = 0;
-                alias = ""): PublicCliArg =
+                alias = ""; format = cafSeparate;
+                repeated = false): PublicCliArg =
   PublicCliArg(name: name, nimType: "seq[string]", kind: kind, position: position,
-    alias: alias, encodedValue: value.join("\x1f"))
+    alias: alias, format: format, repeated: repeated,
+    encodedValue: value.join("\x1f"))
 
 proc inputArg*(name: string; value: string; kind = cpkFlag; position = 0;
-               alias = ""): PublicCliArg =
-  result = cliArg(name, value, kind, position, alias)
+               alias = ""; format = cafSeparate;
+               repeated = false): PublicCliArg =
+  result = cliArg(name, value, kind, position, alias, format, repeated)
   result.role = carInput
 
 proc outputArg*(name: string; value: string; kind = cpkFlag; position = 0;
-                alias = ""): PublicCliArg =
-  result = cliArg(name, value, kind, position, alias)
+                alias = ""; format = cafSeparate;
+                repeated = false): PublicCliArg =
+  result = cliArg(name, value, kind, position, alias, format, repeated)
   result.role = carOutput
 
 proc inputArgSeq*(name: string; value: seq[string]; kind = cpkFlag; position = 0;
-                  alias = ""): PublicCliArg =
-  result = cliArgSeq(name, value, kind, position, alias)
+                  alias = ""; format = cafSeparate;
+                  repeated = false): PublicCliArg =
+  result = cliArgSeq(name, value, kind, position, alias, format, repeated)
   result.role = carInput
 
 proc outputArgSeq*(name: string; value: seq[string]; kind = cpkFlag;
-                   position = 0; alias = ""): PublicCliArg =
-  result = cliArgSeq(name, value, kind, position, alias)
+                   position = 0; alias = ""; format = cafSeparate;
+                   repeated = false): PublicCliArg =
+  result = cliArgSeq(name, value, kind, position, alias, format, repeated)
   result.role = carOutput
 
 proc publicCliCall*(packageName, executableName, subcommand,
@@ -267,17 +288,25 @@ proc declaredOutputPaths*(call: PublicCliCall): seq[string] =
 
 proc recordCommandAction*(id: string; call: PublicCliCall;
                           deps: openArray[string] = [];
+                          extraInputs: openArray[string] = [];
+                          extraOutputs: openArray[string] = [];
                           depfile = "";
                           cacheable = true;
                           commandStatsId = "";
                           dependencyPolicy = defaultDependencyPolicy()):
     BuildActionDef =
+  var inputs = declaredInputPaths(call)
+  var outputs = declaredOutputPaths(call)
+  for item in extraInputs:
+    inputs.addUniquePath(item)
+  for item in extraOutputs:
+    outputs.addUniquePath(item)
   buildAction(
     id,
     call,
     deps = deps,
-    inputs = declaredInputPaths(call),
-    outputs = declaredOutputPaths(call),
+    inputs = inputs,
+    outputs = outputs,
     depfile = depfile,
     cacheable = cacheable,
     commandStatsId = commandStatsId,
@@ -285,6 +314,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
 
 proc recordToolInvocation*(id: string; call: PublicCliCall;
                            deps: openArray[string] = [];
+                           extraInputs: openArray[string] = [];
+                           extraOutputs: openArray[string] = [];
                            depfile = "";
                            cacheable = true;
                            commandStatsId = "";
@@ -294,6 +325,8 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
     id,
     call,
     deps = deps,
+    extraInputs = extraInputs,
+    extraOutputs = extraOutputs,
     depfile = depfile,
     cacheable = cacheable,
     commandStatsId = commandStatsId,
@@ -408,6 +441,8 @@ proc writeCliArg(outp: var seq[byte]; arg: PublicCliArg) =
   outp.writeU32Le(uint32(arg.position))
   outp.writeString(arg.alias)
   outp.writeByte(byte(ord(arg.role)))
+  outp.writeByte(byte(ord(arg.format)))
+  outp.writeByte(if arg.repeated: 1'u8 else: 0'u8)
   outp.writeString(arg.encodedValue)
 
 proc readCliArg(bytes: openArray[byte]; pos: var int; version: uint16):
@@ -430,6 +465,15 @@ proc readCliArg(bytes: openArray[byte]; pos: var int; version: uint16):
     result.role = CliArgRole(role)
   else:
     result.role = carOrdinary
+  if version >= 5'u16:
+    let format = readByte(bytes, pos)
+    if format > byte(ord(cafEquals)):
+      raisePayload("invalid CLI argument format in build action payload")
+    result.format = CliArgFormat(format)
+    result.repeated = readByte(bytes, pos) == 1'u8
+  else:
+    result.format = cafSeparate
+    result.repeated = false
   result.encodedValue = readString(bytes, pos)
 
 proc writeCliCall(outp: var seq[byte]; call: PublicCliCall) =
@@ -490,7 +534,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
       raisePayload("unknown build action payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, 3'u16, BuildActionPayloadVersion}:
+  if version notin {1'u16, 2'u16, 3'u16, 4'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -518,9 +562,36 @@ proc callIdentity*(call: PublicCliCall): string =
   var parts = @[call.packageName, call.executableName, call.subcommand,
                 call.providerEntrypointId]
   for arg in call.arguments:
-    parts.add(arg.name & ":" & arg.nimType & ":" & $arg.role & "=" &
-      arg.encodedValue)
+    parts.add(arg.name & ":" & arg.nimType & ":" & $arg.role & ":" &
+      $arg.format & ":" & $arg.repeated & "=" & arg.encodedValue)
   parts.join("|")
+
+proc stableHashHex(value: string): string =
+  var hash = 0xcbf29ce484222325'u64
+  for ch in value:
+    hash = hash xor uint64(ord(ch))
+    hash = hash * 0x100000001b3'u64
+  hash.toHex(16).toLowerAscii()
+
+proc actionIdPart(value: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-'}:
+      result.add(ch.toLowerAscii())
+    elif ch in {' ', '/', '\\', ':'}:
+      if result.len == 0 or result[^1] != '-':
+        result.add('-')
+    else:
+      result.add(toHex(ord(ch), 2).toLowerAscii())
+  while result.len > 0 and result[^1] == '-':
+    result.setLen(result.len - 1)
+  if result.len == 0:
+    result = "tool"
+
+proc defaultToolActionId*(call: PublicCliCall): string =
+  var base = actionIdPart(call.executableName)
+  if call.subcommand.len > 0:
+    base.add("-" & actionIdPart(call.subcommand))
+  base & "-" & stableHashHex(callIdentity(call))
 
 proc identText(node: NimNode): string =
   case node.kind
@@ -556,6 +627,30 @@ proc boolLiteral(node: NimNode; fallback: bool): bool =
   else:
     fallback
 
+proc roleLiteral(node: NimNode; fallback: CliArgRole): CliArgRole =
+  let text = identText(node).normalize
+  case text
+  of "input", "carinput", "inputpath":
+    carInput
+  of "output", "caroutput", "outputpath":
+    carOutput
+  of "ordinary", "carordinary":
+    carOrdinary
+  else:
+    fallback
+
+proc formatLiteral(node: NimNode; fallback: CliArgFormat): CliArgFormat =
+  let text = identText(node).normalize
+  case text
+  of "separate", "cafseparate":
+    cafSeparate
+  of "concat", "cafconcat":
+    cafConcat
+  of "equals", "cafequals":
+    cafEquals
+  else:
+    fallback
+
 proc lineFile(node: NimNode): tuple[file: string; line: int] =
   let info = node.lineInfoObj()
   (info.filename, info.line)
@@ -586,6 +681,12 @@ proc parseParam(node: NimNode): CliParamDef =
       let value = namedValue(node[i], "position")
       if not value.isNil:
         result.position = intLiteral(value, result.position)
+      let roleValue = namedValue(node[i], "role")
+      if not roleValue.isNil:
+        result.role = roleLiteral(roleValue, result.role)
+      let repeatedValue = namedValue(node[i], "repeated")
+      if not repeatedValue.isNil:
+        result.repeated = boolLiteral(repeatedValue, result.repeated)
   elif kindName == "flag":
     result.kind = cpkFlag
     result.name = identText(node[1])
@@ -599,6 +700,15 @@ proc parseParam(node: NimNode): CliParamDef =
       let requiredValue = namedValue(node[i], "required")
       if not requiredValue.isNil:
         result.required = boolLiteral(requiredValue, result.required)
+      let roleValue = namedValue(node[i], "role")
+      if not roleValue.isNil:
+        result.role = roleLiteral(roleValue, result.role)
+      let formatValue = namedValue(node[i], "format")
+      if not formatValue.isNil:
+        result.format = formatLiteral(formatValue, result.format)
+      let repeatedValue = namedValue(node[i], "repeated")
+      if not repeatedValue.isNil:
+        result.repeated = boolLiteral(repeatedValue, result.repeated)
   else:
     error("unsupported CLI parameter DSL form: " & node.repr, node)
   result.sourceFile = loc.file
@@ -758,6 +868,9 @@ proc packageLiteral(pkg: PackageDef): string =
         result.add("CliParamDef(name: " & escForCode(param.name) &
           ", nimType: " & escForCode(param.nimType) &
           ", kind: " & $param.kind &
+          ", role: " & $param.role &
+          ", format: " & $param.format &
+          ", repeated: " & $param.repeated &
           ", position: " & $param.position &
           ", alias: " & escForCode(param.alias) &
           ", required: " & $param.required &
@@ -786,12 +899,20 @@ proc argBuilder(param: CliParamDef): string =
       "cpkPositional"
     else:
       "cpkFlag"
+  let helper =
+    case param.role
+    of carInput:
+      if param.nimType.normalize == "seq[string]": "inputArgSeq" else: "inputArg"
+    of carOutput:
+      if param.nimType.normalize == "seq[string]": "outputArgSeq" else: "outputArg"
+    of carOrdinary:
+      if param.nimType.normalize == "seq[string]": "cliArgSeq" else: "cliArg"
   let metaArgs = ", " & kindCode & ", " & $param.position & ", " &
-    escForCode(param.alias)
+    escForCode(param.alias) & ", " & $param.format & ", " & $param.repeated
   if param.nimType.normalize == "seq[string]":
-    "cliArgSeq(\"" & param.name & "\", " & param.name & metaArgs & ")"
+    helper & "(\"" & param.name & "\", " & param.name & metaArgs & ")"
   else:
-    "cliArg(\"" & param.name & "\", " & param.name & metaArgs & ")"
+    helper & "(\"" & param.name & "\", " & param.name & metaArgs & ")"
 
 proc validGeneratedIdent(text: string): bool =
   const keywords = [
@@ -908,11 +1029,188 @@ proc usesImportCode(pkg: PackageDef): string =
       if modules.find(modulePath) < 0:
         modules.add(modulePath)
   for modulePath in modules:
-    result.add("from " & modulePath & " import nil\n")
     let moduleName = modulePath.split('/')[^1]
-    result.add("when compiles(" & moduleName &
+    let moduleAlias = moduleName & "_module"
+    result.add("import " & modulePath & " as " & moduleAlias & "\n")
+    result.add("when compiles(" & moduleAlias &
       ".reprobuildPackageMarker()):\n")
-    result.add("  " & moduleName & ".reprobuildPackageMarker()\n")
+    result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
+
+proc parseInterfaceParam(node: NimNode): CliParamDef =
+  let kindName = calleeName(node).normalize
+  if node.len < 2:
+    error("CLI parameter requires a name", node)
+  result.name = identText(node[1])
+  case kindName
+  of "pos":
+    if node.len < 3:
+      error("pos requires a type", node)
+    result.kind = cpkPositional
+    result.nimType = node[2].repr
+    result.required = true
+  of "flag":
+    if node.len < 3:
+      error("flag requires a type", node)
+    result.kind = cpkFlag
+    result.nimType = node[2].repr
+    result.required = false
+  of "boolflag":
+    result.kind = cpkFlag
+    result.nimType = "bool"
+    result.required = false
+  else:
+    error("CLI command bodies accept pos/flag/boolFlag statements", node)
+
+  let loc = lineFile(node)
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  for i in 2 ..< node.len:
+    if kindName in ["pos", "flag"] and i == 2:
+      continue
+    let aliasValue = namedValue(node[i], "alias")
+    if not aliasValue.isNil:
+      result.alias = stringLiteral(aliasValue)
+    let requiredValue = namedValue(node[i], "required")
+    if not requiredValue.isNil:
+      result.required = boolLiteral(requiredValue, result.required)
+    let positionValue = namedValue(node[i], "position")
+    if not positionValue.isNil:
+      result.position = intLiteral(positionValue, result.position)
+    let roleValue = namedValue(node[i], "role")
+    if not roleValue.isNil:
+      result.role = roleLiteral(roleValue, result.role)
+    let formatValue = namedValue(node[i], "format")
+    if not formatValue.isNil:
+      result.format = formatLiteral(formatValue, result.format)
+    let repeatedValue = namedValue(node[i], "repeated")
+    if not repeatedValue.isNil:
+      result.repeated = boolLiteral(repeatedValue, result.repeated)
+
+proc parseInterfaceCommand(toolId: string; node: NimNode): CliCommandDef =
+  let loc = lineFile(node)
+  let head = calleeName(node).normalize
+  case head
+  of "call":
+    result.name = ""
+  of "subcmd":
+    if node.len < 3:
+      error("subcmd requires a string name and a body", node)
+    result.name = stringLiteral(node[1])
+  else:
+    error("CLI interface accepts call: or subcmd \"name\": sections", node)
+  result.providerEntrypointId =
+    if result.name.len == 0: toolId & ".call" else: toolId & "." & result.name
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  let body = node[node.len - 1]
+  for stmt in body:
+    let name = calleeName(stmt).normalize
+    if name in ["pos", "flag", "boolflag"]:
+      result.params.add(parseInterfaceParam(stmt))
+    else:
+      error("CLI command bodies accept pos/flag/boolFlag statements", stmt)
+
+proc cliArgHelperName(param: CliParamDef): string =
+  case param.role
+  of carInput:
+    if param.nimType.normalize == "seq[string]": "inputArgSeq" else: "inputArg"
+  of carOutput:
+    if param.nimType.normalize == "seq[string]": "outputArgSeq" else: "outputArg"
+  of carOrdinary:
+    if param.nimType.normalize == "seq[string]": "cliArgSeq" else: "cliArg"
+
+proc interfaceParamDefault(param: CliParamDef): string =
+  if param.required:
+    return ""
+  nimDefault(param.nimType)
+
+proc interfaceFormal(param: CliParamDef): string =
+  result = param.name & ": " & param.nimType
+  let defaultValue = interfaceParamDefault(param)
+  if defaultValue.len > 0:
+    result.add(" = " & defaultValue)
+
+proc interfaceArgExpr(param: CliParamDef): string =
+  let kindCode =
+    if param.kind == cpkPositional: "cpkPositional" else: "cpkFlag"
+  cliArgHelperName(param) & "(" & escForCode(param.name) & ", " &
+    param.name & ", " & kindCode & ", " & $param.position & ", " &
+    escForCode(param.alias) & ", " & $param.format & ", " &
+    $param.repeated & ")"
+
+proc shouldRecordCondition(param: CliParamDef): string =
+  if param.required:
+    return "true"
+  case param.nimType.normalize
+  of "bool":
+    param.name
+  of "int":
+    param.name & " != 0"
+  of "seq[string]":
+    param.name & ".len > 0"
+  else:
+    param.name & ".len > 0"
+
+proc interfaceProcName(command: CliCommandDef): string =
+  if command.name.len == 0:
+    "`()`"
+  else:
+    commandProcName(command.name)
+
+proc defineCliInterfaceCode(toolSymbol, toolId: string;
+                            commands: openArray[CliCommandDef]): string =
+  result = "{.experimental: \"callOperator\".}\n"
+  result.add("const " & toolSymbol & "* = Tool[" & escForCode(toolId) &
+    "]()\n")
+  result.add("proc reprobuildPackageMarker*() = discard\n")
+  for command in commands:
+    var formals = @["tool: Tool[" & escForCode(toolId) & "]"]
+    for param in command.params:
+      formals.add(interfaceFormal(param))
+    formals.add("actionId = \"\"")
+    formals.add("deps: openArray[string] = []")
+    formals.add("extraInputs: openArray[string] = []")
+    formals.add("extraOutputs: openArray[string] = []")
+    formals.add("depfile = \"\"")
+    formals.add("cacheable = true")
+    formals.add("commandStatsId = \"\"")
+    formals.add("dependencyPolicy = defaultDependencyPolicy()")
+    result.add("proc " & interfaceProcName(command) & "*( " &
+      formals.join("; ") & "): BuildActionDef {.discardable.} =\n")
+    result.add("  discard tool\n")
+    result.add("  var cliArgs: seq[PublicCliArg] = @[]\n")
+    for param in command.params:
+      result.add("  if " & shouldRecordCondition(param) & ":\n")
+      result.add("    cliArgs.add(" & interfaceArgExpr(param) & ")\n")
+    result.add("  let call = publicCliCall(" & escForCode(toolId) & ", " &
+      escForCode(toolId) & ", " & escForCode(command.name) & ", " &
+      escForCode(command.providerEntrypointId) & ", cliArgs)\n")
+    result.add("  let selectedActionId = if actionId.len > 0: actionId " &
+      "else: defaultToolActionId(call)\n")
+    result.add("  recordToolInvocation(selectedActionId, call, " &
+      "deps = deps, extraInputs = extraInputs, " &
+      "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
+      "commandStatsId = commandStatsId, dependencyPolicy = " &
+      "dependencyPolicy)\n")
+
+macro defineCliInterface*(toolSymbol: untyped;
+                          toolId: static string;
+                          body: untyped): untyped =
+  if toolSymbol.kind notin {nnkIdent, nnkSym}:
+    error("defineCliInterface expects a Nim identifier for the tool symbol",
+      toolSymbol)
+  var commands: seq[CliCommandDef] = @[]
+  for stmt in body:
+    let head = calleeName(stmt).normalize
+    case head
+    of "call", "subcmd":
+      commands.add(parseInterfaceCommand(toolId, stmt))
+    of "policy":
+      discard
+    else:
+      error("CLI interface accepts call: or subcmd \"name\": sections", stmt)
+  result = parseStmt(defineCliInterfaceCode(identText(toolSymbol), toolId,
+    commands))
 
 when defined(reproProviderMode):
   proc providerBodyHash(pkg: PackageDef): string =

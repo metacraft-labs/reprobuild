@@ -464,22 +464,17 @@ proc writeM46ImportedPackageProject(path: string) =
   createDir(projectRoot / "reprobuild" / "packages")
   writeFile(projectRoot / "reprobuild" / "packages" / "m46_tool.nim",
     "import repro_project_dsl\n\n" &
-    "package m46Tool:\n" &
-    "  executable cli:\n" &
-    "    name \"m46-tool\"\n" &
-    "    cli:\n" &
-    "      subcmd \"produce\":\n" &
-    "        flag input, string, required = true\n" &
-    "        flag output, string, required = true\n" &
-    "        flag marker, string, required = true\n" &
-    "      subcmd \"consume\":\n" &
-    "        flag input, string, required = true\n" &
-    "        flag output, string, required = true\n" &
-    "        flag marker, string, required = true\n" &
-    "      subcmd \"\":\n" &
-    "        pos args, seq[string], position = 0\n\n" &
-    "proc run*(args: seq[string]): PublicCliCall =\n" &
-    "  subcmd(args = args)\n")
+    "defineCliInterface m46Tool, \"m46-tool\":\n" &
+    "  call:\n" &
+    "    pos args, seq[string], position = 0, required = false\n" &
+    "  subcmd \"produce\":\n" &
+    "    flag input, string, required = true, role = input\n" &
+    "    flag output, string, required = true, role = output\n" &
+    "    flag marker, string, required = true\n" &
+    "  subcmd \"consume\":\n" &
+    "    flag input, string, required = true, role = input\n" &
+    "    flag output, string, required = true, role = output\n" &
+    "    flag marker, string, required = true\n")
   writeFile(path,
     "import repro_project_dsl\n\n" &
     "package m46Project:\n" &
@@ -488,19 +483,15 @@ proc writeM46ImportedPackageProject(path: string) =
     "    \"m46-tool >=1.0 <2.0\"\n" &
     "  build:\n" &
     "    let marker = \".repro/m46-tool-runs.log\"\n" &
-    "    discard buildAction(\"produce\",\n" &
-    "      m46_tool.produce(input = \"src/input.txt\",\n" &
-    "        output = \"build/generated.txt\", marker = marker),\n" &
-    "      inputs = @[\"src/input.txt\"],\n" &
-    "      outputs = @[\"build/generated.txt\"])\n" &
-    "    discard buildAction(\"consume\",\n" &
-    "      m46_tool.consume(input = \"build/generated.txt\",\n" &
-    "        output = \"dist/final.txt\", marker = marker),\n" &
-    "      inputs = @[\"build/generated.txt\"],\n" &
-    "      outputs = @[\"dist/final.txt\"])\n" &
-    "    discard buildAction(\"direct\",\n" &
-    "      m46_tool.run(args = @[\"direct\", \"dist/direct.txt\"]),\n" &
-    "      outputs = @[\"dist/direct.txt\"])\n" &
+    "    m46Tool.produce(actionId = \"produce\",\n" &
+    "      input = \"src/input.txt\",\n" &
+    "      output = \"build/generated.txt\", marker = marker)\n" &
+    "    m46Tool.consume(actionId = \"consume\",\n" &
+    "      input = \"build/generated.txt\",\n" &
+    "      output = \"dist/final.txt\", marker = marker)\n" &
+    "    m46Tool(actionId = \"direct\",\n" &
+    "      args = @[\"direct\", \"dist/direct.txt\"],\n" &
+    "      extraOutputs = @[\"dist/direct.txt\"])\n" &
     "    defaultBuildAction(\"consume\")\n")
 
 proc writeM46ProjectWithoutImportPath(path: string) =
@@ -511,11 +502,9 @@ proc writeM46ProjectWithoutImportPath(path: string) =
     "  uses:\n" &
     "    \"m46-tool >=1.0 <2.0\"\n" &
     "  build:\n" &
-    "    discard buildAction(\"produce\",\n" &
-    "      m46_tool.produce(input = \"src/input.txt\",\n" &
-    "        output = \"build/generated.txt\", marker = \".repro/runs.log\"),\n" &
-    "      inputs = @[\"src/input.txt\"],\n" &
-    "      outputs = @[\"build/generated.txt\"])\n")
+    "    m46Tool.produce(actionId = \"produce\",\n" &
+    "      input = \"src/input.txt\",\n" &
+    "      output = \"build/generated.txt\", marker = \".repro/runs.log\")\n")
 
 proc writeM47GccFixtureTool(binDir: string) =
   writeExecutable(binDir / "m47-gcc",
@@ -555,30 +544,14 @@ proc writeM47TypedCommandProject(path: string) =
   createDir(projectRoot / "reprobuild" / "packages")
   writeFile(projectRoot / "reprobuild" / "packages" / "m47_gcc.nim",
     "import repro_project_dsl\n\n" &
-    "proc compile*(source, output: string;\n" &
-    "              actionId = \"\";\n" &
-    "              pic = false;\n" &
-    "              debug3 = false;\n" &
-    "              compileOnly = true;\n" &
-    "              includes: seq[string] = @[];\n" &
-    "              dependencyPolicy = declaredOnlyDependencyPolicy()):\n" &
-    "    BuildActionDef {.discardable.} =\n" &
-    "  var args: seq[PublicCliArg] = @[]\n" &
-    "  if pic:\n" &
-    "    args.add(cliArg(\"pic\", true, alias = \"-fPIC\"))\n" &
-    "  if debug3:\n" &
-    "    args.add(cliArg(\"debug3\", true, alias = \"-g3\"))\n" &
-    "  if compileOnly:\n" &
-    "    args.add(cliArg(\"compileOnly\", true, alias = \"-c\"))\n" &
-    "  for path in includes:\n" &
-    "    args.add(inputArg(\"include\", path, alias = \"-include\"))\n" &
-    "  args.add(outputArg(\"output\", output, alias = \"-o\"))\n" &
-    "  args.add(inputArg(\"source\", source, kind = cpkPositional, position = 0))\n" &
-    "  let selectedActionId =\n" &
-    "    if actionId.len > 0: actionId else: \"compile-\" & output\n" &
-    "  recordToolInvocation(selectedActionId,\n" &
-    "    publicCliCall(\"m47-gcc\", \"m47-gcc\", \"\", \"m47-gcc.direct\", args),\n" &
-    "    dependencyPolicy = dependencyPolicy)\n")
+    "defineCliInterface m47Gcc, \"m47-gcc\":\n" &
+    "  call:\n" &
+    "    boolFlag pic, alias = \"-fPIC\"\n" &
+    "    boolFlag debug3, alias = \"-g3\"\n" &
+    "    boolFlag compileOnly, alias = \"-c\"\n" &
+    "    flag includes, seq[string], alias = \"-include\", role = input, repeated = true\n" &
+    "    flag output, string, alias = \"-o\", role = output, required = true\n" &
+    "    pos source, string, role = input, position = 0\n")
   writeFile(path,
     "import repro_project_dsl\n\n" &
     "package m47Project:\n" &
@@ -586,12 +559,13 @@ proc writeM47TypedCommandProject(path: string) =
     "  uses:\n" &
     "    \"m47-gcc >=1.0 <2.0\"\n\n" &
     "  build:\n" &
-    "    m47_gcc.compile(\n" &
+    "    m47Gcc(\n" &
     "      actionId = \"compile-main\",\n" &
     "      source = \"src/main.c\",\n" &
     "      output = \"build/main.o\",\n" &
     "      pic = true,\n" &
     "      debug3 = true,\n" &
+    "      compileOnly = true,\n" &
     "      includes = @[\"include/config.h\"])\n" &
     "    defaultBuildAction(\"compile-main\")\n")
 
@@ -935,9 +909,9 @@ suite "e2e_local_reprobuild_project_build":
       "--path:" & repoRoot / "libs" / "repro_project_dsl" / "src",
       projectRoot / "reprobuild.nim"
     ]), projectRoot)
-    check output.contains("m46_tool")
+    check output.contains("m46Tool")
 
-  test "typed command helper records action and path roles without buildAction":
+  test "generated tool object records action and path roles without buildAction":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m47-typed-command-action", "")
     defer: removeDir(tempRoot)

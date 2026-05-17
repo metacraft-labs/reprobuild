@@ -161,38 +161,61 @@ proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string]
   if call.subcommand.len > 0:
     result.add(call.subcommand)
 
-  proc addEncodedValue(outp: var seq[string]; arg: PublicCliArg) =
+  proc encodedValues(arg: PublicCliArg): seq[string] =
     if arg.nimType.normalize == "seq[string]":
       if arg.encodedValue.len > 0:
         for item in arg.encodedValue.split("\x1f"):
-          outp.add(item)
+          result.add(item)
     else:
-      outp.add(arg.encodedValue)
+      result.add(arg.encodedValue)
 
-  var positional: seq[PublicCliArg] = @[]
-  for arg in call.arguments:
-    let name = arg.name
-    let nimType = arg.nimType
-    let value = arg.encodedValue
-    if arg.kind == cpkPositional:
-      positional.add(arg)
-      continue
+  proc addFormattedValue(outp: var seq[string]; flagName, value: string;
+                         format: CliArgFormat) =
+    case format
+    of cafSeparate:
+      outp.add(flagName)
+      outp.add(value)
+    of cafConcat:
+      outp.add(flagName & value)
+    of cafEquals:
+      outp.add(flagName & "=" & value)
+
+  proc addFlagArg(outp: var seq[string]; arg: PublicCliArg) =
     let flagName =
       if arg.alias.len > 0:
         arg.alias
       else:
-        "--" & name
-    if nimType.normalize == "bool":
-      if value.normalize == "true":
-        result.add(flagName)
+        "--" & arg.name
+    if arg.nimType.normalize == "bool":
+      if arg.encodedValue.normalize == "true":
+        outp.add(flagName)
+      return
+    let values = encodedValues(arg)
+    if values.len == 0:
+      return
+    if arg.format == cafSeparate and not arg.repeated:
+      outp.add(flagName)
+      for value in values:
+        outp.add(value)
     else:
-      result.add(flagName)
-      result.addEncodedValue(arg)
+      for value in values:
+        outp.addFormattedValue(flagName, value, arg.format)
+
+  proc addPositionalArg(outp: var seq[string]; arg: PublicCliArg) =
+    for value in encodedValues(arg):
+      outp.add(value)
+
+  var positional: seq[PublicCliArg] = @[]
+  for arg in call.arguments:
+    if arg.kind == cpkPositional:
+      positional.add(arg)
+      continue
+    result.addFlagArg(arg)
 
   positional.sort do (a, b: PublicCliArg) -> int:
     cmp(a.position, b.position)
   for arg in positional:
-    result.addEncodedValue(arg)
+    result.addPositionalArg(arg)
 
 proc depfilePolicy(depfile: string): DependencyGatheringPolicy =
   if depfile.len == 0:
