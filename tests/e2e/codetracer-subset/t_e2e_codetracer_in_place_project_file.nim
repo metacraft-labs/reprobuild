@@ -200,14 +200,66 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
 
-proc codeTracerPathValue(tempRoot: string): string =
+proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
+  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
+  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  copyTree(codeTracerRoot / "src" / "ct", projectRoot / "src" / "ct")
+  copyTree(codeTracerRoot / "src" / "common", projectRoot / "src" / "common")
+  copyTree(codeTracerRoot / "src" / "db_connector",
+    projectRoot / "src" / "db_connector")
+  discard requireSuccess(shellCommand([
+    "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
+  ]))
+
+proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let binDir = tempRoot / "codetracer-tool-bin"
   createDir(binDir)
   let sourcePath = binDir / "gcc-proxy.c"
   let gccPath = binDir / "gcc"
+  let clangPath = binDir / "clang"
   writeFile(sourcePath, GccProxySource)
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
+  if includeClang:
+    discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
   binDir & $PathSep & getEnv("PATH")
+
+proc codeTracerNativePathValue(codeTracerRoot, tempRoot: string): string =
+  let nimBinDir = codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin"
+  let nimPath = nimBinDir / "nim"
+  check fileExists(nimPath)
+  nimBinDir & $PathSep & codeTracerPathValue(tempRoot, includeClang = true)
+
+proc nixStorePaths(output: string): seq[string] =
+  for line in output.splitLines:
+    let item = line.strip()
+    if item.startsWith("/nix/store/"):
+      result.add(item)
+
+proc nativeLibraryEnv(repoRoot: string): seq[(string, string)] =
+  let output = requireSuccess(shellCommand([
+    "nix", "build", "--no-link", "--print-out-paths",
+    "nixpkgs#openssl.out",
+    "nixpkgs#sqlite.out",
+    "nixpkgs#pcre.out",
+    "nixpkgs#libzip.out"
+  ]), repoRoot)
+  let storePaths = nixStorePaths(output)
+  check storePaths.len == 4
+
+  var libraryPaths: seq[string] = @[]
+  var includePaths: seq[string] = @[]
+  for storePath in storePaths:
+    libraryPaths.add(storePath / "lib")
+    includePaths.add(storePath / "include")
+  if getEnv("LIBRARY_PATH").len > 0:
+    libraryPaths.add(getEnv("LIBRARY_PATH"))
+  if getEnv("C_INCLUDE_PATH").len > 0:
+    includePaths.add(getEnv("C_INCLUDE_PATH"))
+
+  result = @[
+    ("LIBRARY_PATH", libraryPaths.join($PathSep)),
+    ("C_INCLUDE_PATH", includePaths.join($PathSep))
+  ]
 
 proc build(reproBin, target, repoRoot, pathValue: string;
            env: openArray[(string, string)] = []): string =
@@ -317,6 +369,11 @@ proc monitorEvidenceContains(action: JsonNode; suffix: string): bool =
     for item in action{"evidence"}{key}.getElems():
       if item.getStr().endsWith(suffix):
         return true
+
+proc declaredEvidenceContains(action: JsonNode; suffix: string): bool =
+  for item in action{"evidence"}{"declaredInputs"}.getElems():
+    if item.getStr().endsWith(suffix):
+      return true
 
 proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(projectRoot / "ui.js")
@@ -724,6 +781,99 @@ when defined(macosx):
         JNull
       check reportAction(changedReport, "frontend").kind == JNull
       check reportAction(changedReport, "c-sudoku-object-tup").kind == JNull
+
+    test "selected db-backend-record target builds real native Nim binary":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      check fileExists(realProjectFile)
+
+      let tempRoot = createTempDir("repro-m42-codetracer-db-backend-record", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
+
+      let projectRoot = tempRoot / "codetracer"
+      createDir(projectRoot)
+      copyNativeCodeTracerProject(codeTracerRoot, projectRoot)
+      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+
+      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+      let monitorEnv = [
+        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+      ]
+      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
+        [("PATH", pathValue)]), repoRoot).strip() ==
+        codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
+      var nativeEnv: seq[(string, string)] = @[]
+      for item in monitorEnv:
+        nativeEnv.add(item)
+      for item in nativeLibraryEnv(repoRoot):
+        nativeEnv.add(item)
+      let selectedTarget = projectRoot & "#db-backend-record"
+      let first = build(reproBin, selectedTarget, repoRoot, pathValue,
+        nativeEnv)
+      check first.contains("selectedTarget: db-backend-record")
+      check first.contains("scheduler: actions=1")
+      check first.contains(
+        "action: db-backend-record status=asSucceeded launched=true")
+      check not first.contains("action: frontend-ui-js")
+      check not first.contains("action: frontend-index-js")
+      check not first.contains("action: frontend-server-index-js")
+      check not first.contains("action: nim-js-ipc-registry-test")
+      check not first.contains("action: c-sudoku-object-tup")
+      check not first.contains("action: c-sudoku-object-with-generated-header")
+      check fileExists(projectRoot / "src" / "bin" / "db-backend-record")
+
+      let fileOutput = requireSuccess(shellCommand([
+        "file", "src/bin/db-backend-record"
+      ]), projectRoot)
+      check fileOutput.contains("Mach-O")
+
+      let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      check firstReport{"actions"}.len == 1
+      assertAction(firstReport, "db-backend-record", "asSucceeded", true)
+      let nativeAction = reportAction(firstReport, "db-backend-record")
+      check nativeAction{"dependencyPolicyKind"}.getStr() ==
+        "dgAutomaticMonitor"
+      check hasMonitorEvidence(nativeAction)
+      check declaredEvidenceContains(nativeAction,
+        "src/ct/db_backend_record.nim")
+      check monitorEvidenceContains(nativeAction,
+        "src/ct/trace/storage_and_import.nim")
+      check reportAction(firstReport, "frontend-ui-js").kind == JNull
+      check reportAction(firstReport, "frontend-index-js").kind == JNull
+      check reportAction(firstReport, "frontend-server-index-js").kind == JNull
+      check reportAction(firstReport, "frontend").kind == JNull
+      check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
+
+      let second = build(reproBin, selectedTarget, repoRoot, pathValue,
+        nativeEnv)
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      assertAction(secondReport, "db-backend-record", "asCacheHit", false)
+
+      let nativeInput = projectRoot / "src" / "ct" / "db_backend_record.nim"
+      writeFile(nativeInput, readFile(nativeInput) &
+        "\n# reprobuild m42 selected native edit\n")
+      let changed = build(reproBin, selectedTarget, repoRoot, pathValue,
+        nativeEnv)
+      check not changed.contains("action: frontend-ui-js")
+      check not changed.contains("action: frontend-index-js")
+      check not changed.contains("action: c-sudoku-object-tup")
+      let changedReport = parseFile(valueAfter(changed, "buildReport:"))
+      assertAction(changedReport, "db-backend-record", "asSucceeded", true)
 
     test "selected frontend server index.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
