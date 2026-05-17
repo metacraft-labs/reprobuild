@@ -517,6 +517,84 @@ proc writeM46ProjectWithoutImportPath(path: string) =
     "      inputs = @[\"src/input.txt\"],\n" &
     "      outputs = @[\"build/generated.txt\"])\n")
 
+proc writeM47GccFixtureTool(binDir: string) =
+  writeExecutable(binDir / "m47-gcc",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"--version\" ]; then echo 'm47-gcc 1.0.0'; exit 0; fi\n" &
+    "pic=false debug3=false compile_only=false output= source= includes=\n" &
+    "while [ \"$#\" -gt 0 ]; do\n" &
+    "  case \"$1\" in\n" &
+    "    -fPIC) pic=true; shift ;;\n" &
+    "    -g3) debug3=true; shift ;;\n" &
+    "    -c) compile_only=true; shift ;;\n" &
+    "    -include) includes=\"${includes}${includes:+ }$2\"; shift 2 ;;\n" &
+    "    -o) output=$2; shift 2 ;;\n" &
+    "    -*) echo \"unknown gcc-style flag $1\" >&2; exit 64 ;;\n" &
+    "    *) source=$1; shift ;;\n" &
+    "  esac\n" &
+    "done\n" &
+    "test \"$pic\" = true\n" &
+    "test \"$debug3\" = true\n" &
+    "test \"$compile_only\" = true\n" &
+    "test -n \"$output\"\n" &
+    "test -n \"$source\"\n" &
+    "mkdir -p \"$(dirname \"$output\")\"\n" &
+    "{\n" &
+    "  printf 'source=%s\\n' \"$source\"\n" &
+    "  printf 'output=%s\\n' \"$output\"\n" &
+    "  printf 'includes=%s\\n' \"$includes\"\n" &
+    "  cat \"$source\"\n" &
+    "  for include in $includes; do cat \"$include\"; done\n" &
+    "} > \"$output\"\n")
+
+proc writeM47TypedCommandProject(path: string) =
+  let projectRoot = path.splitPath.head
+  createDir(projectRoot / "src")
+  createDir(projectRoot / "include")
+  createDir(projectRoot / "reprobuild" / "packages")
+  writeFile(projectRoot / "reprobuild" / "packages" / "m47_gcc.nim",
+    "import repro_project_dsl\n\n" &
+    "proc compile*(source, output: string;\n" &
+    "              actionId = \"\";\n" &
+    "              pic = false;\n" &
+    "              debug3 = false;\n" &
+    "              compileOnly = true;\n" &
+    "              includes: seq[string] = @[];\n" &
+    "              dependencyPolicy = declaredOnlyDependencyPolicy()):\n" &
+    "    BuildActionDef {.discardable.} =\n" &
+    "  var args: seq[PublicCliArg] = @[]\n" &
+    "  if pic:\n" &
+    "    args.add(cliArg(\"pic\", true, alias = \"-fPIC\"))\n" &
+    "  if debug3:\n" &
+    "    args.add(cliArg(\"debug3\", true, alias = \"-g3\"))\n" &
+    "  if compileOnly:\n" &
+    "    args.add(cliArg(\"compileOnly\", true, alias = \"-c\"))\n" &
+    "  for path in includes:\n" &
+    "    args.add(inputArg(\"include\", path, alias = \"-include\"))\n" &
+    "  args.add(outputArg(\"output\", output, alias = \"-o\"))\n" &
+    "  args.add(inputArg(\"source\", source, kind = cpkPositional, position = 0))\n" &
+    "  let selectedActionId =\n" &
+    "    if actionId.len > 0: actionId else: \"compile-\" & output\n" &
+    "  recordToolInvocation(selectedActionId,\n" &
+    "    publicCliCall(\"m47-gcc\", \"m47-gcc\", \"\", \"m47-gcc.direct\", args),\n" &
+    "    dependencyPolicy = dependencyPolicy)\n")
+  writeFile(path,
+    "import repro_project_dsl\n\n" &
+    "package m47Project:\n" &
+    "  usesImportPath \"reprobuild/packages\"\n" &
+    "  uses:\n" &
+    "    \"m47-gcc >=1.0 <2.0\"\n\n" &
+    "  build:\n" &
+    "    m47_gcc.compile(\n" &
+    "      actionId = \"compile-main\",\n" &
+    "      source = \"src/main.c\",\n" &
+    "      output = \"build/main.o\",\n" &
+    "      pic = true,\n" &
+    "      debug3 = true,\n" &
+    "      includes = @[\"include/config.h\"])\n" &
+    "    defaultBuildAction(\"compile-main\")\n")
+
 proc nonEmptyLines(path: string): seq[string] =
   if not fileExists(path):
     return @[]
@@ -858,6 +936,52 @@ suite "e2e_local_reprobuild_project_build":
       projectRoot / "reprobuild.nim"
     ]), projectRoot)
     check output.contains("m46_tool")
+
+  test "typed command helper records action and path roles without buildAction":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m47-typed-command-action", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = compilePublicReproTestBin(repoRoot)
+    let binDir = tempRoot / "bin"
+    writeM47GccFixtureTool(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+
+    let projectRoot = tempRoot / "project"
+    writeM47TypedCommandProject(projectRoot / "reprobuild.nim")
+    writeFile(projectRoot / "src" / "main.c", "int main(void) { return 0; }\n")
+    writeFile(projectRoot / "include" / "config.h", "#define CONFIG_VALUE 1\n")
+
+    let projectText = readFile(projectRoot / "reprobuild.nim")
+    check not projectText.contains("buildAction")
+    check not projectText.contains("inputs =")
+    check not projectText.contains("outputs =")
+
+    let output = buildCurrentProject(reproBin, projectRoot, pathValue)
+    check output.contains("defaultTarget: compile-main")
+    check output.contains("selectedTarget: compile-main")
+    check output.contains("scheduler: actions=1")
+    check output.contains("action: compile-main status=asSucceeded launched=true")
+    check readFile(projectRoot / "build" / "main.o").contains(
+      "includes=include/config.h")
+
+    let report = parseFile(valueAfter(output, "buildReport:"))
+    let action = reportAction(report, "compile-main")
+    check action{"status"}.getStr() == "asSucceeded"
+    check action{"evidence"}{"declaredInputs"}.getElems().
+      anyIt(it.getStr().endsWith("src/main.c"))
+    check action{"evidence"}{"declaredInputs"}.getElems().
+      anyIt(it.getStr().endsWith("include/config.h"))
+    check action{"evidence"}{"declaredOutputs"}.getElems().
+      anyIt(it.getStr() == "build/main.o")
 
   test "relative public CLI keeps RunQuota helper path stable across project cwd":
     let repoRoot = getCurrentDir()

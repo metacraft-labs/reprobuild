@@ -10,6 +10,11 @@ type
     cpkPositional
     cpkFlag
 
+  CliArgRole* = enum
+    carOrdinary
+    carInput
+    carOutput
+
   CliParamDef* = object
     name*: string
     nimType*: string
@@ -55,6 +60,7 @@ type
     name*: string
     nimType*: string
     kind*: CliParamKind
+    role*: CliArgRole
     position*: int
     alias*: string
     encodedValue*: string
@@ -102,7 +108,7 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 3'u16
+  BuildActionPayloadVersion = 4'u16
 
 proc resetPackageRegistry*() =
   registry.setLen(0)
@@ -169,6 +175,26 @@ proc cliArgSeq*(name: string; value: seq[string]; kind = cpkFlag; position = 0;
   PublicCliArg(name: name, nimType: "seq[string]", kind: kind, position: position,
     alias: alias, encodedValue: value.join("\x1f"))
 
+proc inputArg*(name: string; value: string; kind = cpkFlag; position = 0;
+               alias = ""): PublicCliArg =
+  result = cliArg(name, value, kind, position, alias)
+  result.role = carInput
+
+proc outputArg*(name: string; value: string; kind = cpkFlag; position = 0;
+                alias = ""): PublicCliArg =
+  result = cliArg(name, value, kind, position, alias)
+  result.role = carOutput
+
+proc inputArgSeq*(name: string; value: seq[string]; kind = cpkFlag; position = 0;
+                  alias = ""): PublicCliArg =
+  result = cliArgSeq(name, value, kind, position, alias)
+  result.role = carInput
+
+proc outputArgSeq*(name: string; value: seq[string]; kind = cpkFlag;
+                   position = 0; alias = ""): PublicCliArg =
+  result = cliArgSeq(name, value, kind, position, alias)
+  result.role = carOutput
+
 proc publicCliCall*(packageName, executableName, subcommand,
                     providerEntrypointId: string;
                     arguments: openArray[PublicCliArg]): PublicCliCall =
@@ -213,6 +239,65 @@ proc buildAction*(id: string; call: PublicCliCall;
     commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
     dependencyPolicy: dependencyPolicy)
   buildActionRegistry.add(result)
+
+proc addUniquePath(paths: var seq[string]; path: string) =
+  let stripped = path.strip()
+  if stripped.len > 0 and paths.find(stripped) < 0:
+    paths.add(stripped)
+
+proc addRoleValues(paths: var seq[string]; arg: PublicCliArg) =
+  if arg.nimType.normalize == "bool":
+    return
+  if arg.nimType.normalize == "seq[string]":
+    if arg.encodedValue.len > 0:
+      for item in arg.encodedValue.split("\x1f"):
+        paths.addUniquePath(item)
+  else:
+    paths.addUniquePath(arg.encodedValue)
+
+proc declaredInputPaths*(call: PublicCliCall): seq[string] =
+  for arg in call.arguments:
+    if arg.role == carInput:
+      result.addRoleValues(arg)
+
+proc declaredOutputPaths*(call: PublicCliCall): seq[string] =
+  for arg in call.arguments:
+    if arg.role == carOutput:
+      result.addRoleValues(arg)
+
+proc recordCommandAction*(id: string; call: PublicCliCall;
+                          deps: openArray[string] = [];
+                          depfile = "";
+                          cacheable = true;
+                          commandStatsId = "";
+                          dependencyPolicy = defaultDependencyPolicy()):
+    BuildActionDef =
+  buildAction(
+    id,
+    call,
+    deps = deps,
+    inputs = declaredInputPaths(call),
+    outputs = declaredOutputPaths(call),
+    depfile = depfile,
+    cacheable = cacheable,
+    commandStatsId = commandStatsId,
+    dependencyPolicy = dependencyPolicy)
+
+proc recordToolInvocation*(id: string; call: PublicCliCall;
+                           deps: openArray[string] = [];
+                           depfile = "";
+                           cacheable = true;
+                           commandStatsId = "";
+                           dependencyPolicy = defaultDependencyPolicy()):
+    BuildActionDef =
+  recordCommandAction(
+    id,
+    call,
+    deps = deps,
+    depfile = depfile,
+    cacheable = cacheable,
+    commandStatsId = commandStatsId,
+    dependencyPolicy = dependencyPolicy)
 
 proc normalizedDeclaredProjectPath*(projectRoot, path: string): string =
   result = path.replace('\\', '/').strip()
@@ -322,6 +407,7 @@ proc writeCliArg(outp: var seq[byte]; arg: PublicCliArg) =
   outp.writeByte(byte(ord(arg.kind)))
   outp.writeU32Le(uint32(arg.position))
   outp.writeString(arg.alias)
+  outp.writeByte(byte(ord(arg.role)))
   outp.writeString(arg.encodedValue)
 
 proc readCliArg(bytes: openArray[byte]; pos: var int; version: uint16):
@@ -337,6 +423,13 @@ proc readCliArg(bytes: openArray[byte]; pos: var int; version: uint16):
     result.alias = readString(bytes, pos)
   else:
     result.kind = cpkFlag
+  if version >= 4'u16:
+    let role = readByte(bytes, pos)
+    if role > byte(ord(carOutput)):
+      raisePayload("invalid CLI argument role in build action payload")
+    result.role = CliArgRole(role)
+  else:
+    result.role = carOrdinary
   result.encodedValue = readString(bytes, pos)
 
 proc writeCliCall(outp: var seq[byte]; call: PublicCliCall) =
@@ -397,7 +490,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
       raisePayload("unknown build action payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, BuildActionPayloadVersion}:
+  if version notin {1'u16, 2'u16, 3'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -425,7 +518,8 @@ proc callIdentity*(call: PublicCliCall): string =
   var parts = @[call.packageName, call.executableName, call.subcommand,
                 call.providerEntrypointId]
   for arg in call.arguments:
-    parts.add(arg.name & ":" & arg.nimType & "=" & arg.encodedValue)
+    parts.add(arg.name & ":" & arg.nimType & ":" & $arg.role & "=" &
+      arg.encodedValue)
   parts.join("|")
 
 proc identText(node: NimNode): string =
