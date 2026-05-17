@@ -178,6 +178,14 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "ct" / "version.nim")
   copyTree(codeTracerRoot / "src" / "ct" / "acp",
     projectRoot / "src" / "ct" / "acp")
+  createDir(projectRoot / "src" / "public" / "resources")
+  createDir(projectRoot / "src" / "public" / "third_party")
+  copyFile(codeTracerRoot / "src" / "public" / "Tupfile",
+    projectRoot / "src" / "public" / "Tupfile")
+  copyFile(codeTracerRoot / "src" / "public" / "resources" / "calltrace.js",
+    projectRoot / "src" / "public" / "resources" / "calltrace.js")
+  copyFile(codeTracerRoot / "src" / "public" / "third_party" / "io.js",
+    projectRoot / "src" / "public" / "third_party" / "io.js")
   createDir(projectRoot / "src" / "public" / "third_party" / "monaco-themes" /
     "themes" / "customThemes" / "json")
   for theme in ["codetracerWhite.json", "codetracerDark.json"]:
@@ -226,6 +234,65 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action.kind != JNull
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
+
+proc stableHashHex(value: string): string =
+  var hash = 2166136261'u32
+  for ch in value:
+    hash = (hash xor uint32(ord(ch))) * 16777619'u32
+  toHex(hash, 8).toLowerAscii()
+
+proc actionSlug(value: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-'}:
+      result.add(ch.toLowerAscii())
+    else:
+      result.add("-" & toHex(ord(ch), 2).toLowerAscii())
+  if result.len == 0:
+    result = "resource"
+
+proc publicResourceActionId(relative: string): string =
+  let normalized = relative.replace('\\', '/')
+  let tail = splitPath(normalized).tail
+  "frontend-public-resource-" & actionSlug(tail) & "-" &
+    stableHashHex(normalized)
+
+let rootTupfileResourceAction = publicResourceActionId("Tupfile")
+let calltraceResourceAction = publicResourceActionId("resources/calltrace.js")
+let thirdPartyIoResourceAction = publicResourceActionId("third_party/io.js")
+let addedSharedResourceAction =
+  publicResourceActionId("resources/shared/add_file.svg")
+
+let initialPublicResourceActions = @[
+  rootTupfileResourceAction,
+  calltraceResourceAction,
+  thirdPartyIoResourceAction,
+  publicResourceActionId("third_party/monaco-themes/themes/customThemes/json/" &
+    "codetracerDark.json"),
+  publicResourceActionId("third_party/monaco-themes/themes/customThemes/json/" &
+    "codetracerWhite.json")
+]
+
+proc checkPublicResourceOutputs(projectRoot: string) =
+  let pairs = [
+    ("src/public/Tupfile", "public/Tupfile"),
+    ("src/public/resources/calltrace.js", "public/resources/calltrace.js"),
+    ("src/public/third_party/io.js", "public/third_party/io.js"),
+    ("src/public/third_party/monaco-themes/themes/customThemes/json/" &
+      "codetracerWhite.json",
+      "public/third_party/monaco-themes/themes/customThemes/json/" &
+      "codetracerWhite.json")
+  ]
+  for (source, output) in pairs:
+    check fileExists(projectRoot / output)
+    check readFile(projectRoot / source) == readFile(projectRoot / output)
+  check fileExists(projectRoot / "build" / "reprobuild" /
+    "frontend-public-resources.stamp")
+
+proc assertPublicResourceActions(report: JsonNode; status: string;
+                                 launched: bool) =
+  for actionId in initialPublicResourceActions:
+    assertAction(report, actionId, status, launched)
+  assertAction(report, "frontend-public-resources", status, launched)
 
 proc runNode(path: string; cwd = getCurrentDir()): string =
   requireSuccess(shellCommand(["node", path]), cwd)
@@ -751,6 +818,104 @@ when defined(macosx):
       check reportAction(changedReport, "frontend").kind == JNull
       check reportAction(changedReport, "c-sudoku-object-tup").kind == JNull
 
+    test "selected frontend public resource tree target copies generated resources":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      check fileExists(realProjectFile)
+
+      let tempRoot = createTempDir("repro-m41-codetracer-public-resources", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
+
+      let projectRoot = tempRoot / "codetracer"
+      createDir(projectRoot)
+      copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
+      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+
+      let pathValue = codeTracerPathValue(tempRoot)
+      let selectedTarget = projectRoot & "#frontend-public-resources"
+      let first = build(reproBin, selectedTarget, repoRoot, pathValue)
+      check first.contains("selectedTarget: frontend-public-resources")
+      check first.contains("providerInvocations: 1")
+      check first.contains("scheduler: actions=6")
+      check first.contains(
+        "action: " & rootTupfileResourceAction &
+          " status=asSucceeded launched=true")
+      check first.contains(
+        "action: " & calltraceResourceAction &
+          " status=asSucceeded launched=true")
+      check first.contains(
+        "action: " & thirdPartyIoResourceAction &
+          " status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-public-resources status=asSucceeded launched=true")
+      check not first.contains("action: frontend-ui-js")
+      check not first.contains("action: frontend-index-js")
+      check not first.contains("action: frontend-subwindow-js")
+      check not first.contains("action: frontend-server-index-js")
+      check not first.contains("action: nim-js-ipc-registry-test")
+      check not first.contains("action: generate-config-header")
+      check not first.contains("action: c-sudoku-object-tup")
+      check not first.contains("action: c-sudoku-object-with-generated-header")
+      checkPublicResourceOutputs(projectRoot)
+
+      let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      check firstReport{"actions"}.len == 6
+      assertPublicResourceActions(firstReport, "asSucceeded", true)
+      check reportAction(firstReport, "frontend-ui-js").kind == JNull
+      check reportAction(firstReport, "frontend-index-js").kind == JNull
+      check reportAction(firstReport, "frontend-subwindow-js").kind == JNull
+      check reportAction(firstReport, "frontend-server-index-js").kind == JNull
+      check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
+      check reportAction(firstReport, "generate-config-header").kind == JNull
+      check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
+      check reportAction(firstReport,
+        "c-sudoku-object-with-generated-header").kind == JNull
+
+      let second = build(reproBin, selectedTarget, repoRoot, pathValue)
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      check secondReport{"actions"}.len == 6
+      assertPublicResourceActions(secondReport, "asCacheHit", false)
+
+      let addedSource = projectRoot / "src" / "public" / "resources" /
+        "shared" / "add_file.svg"
+      createDir(addedSource.splitPath.head)
+      copyFile(codeTracerRoot / "src" / "public" / "resources" / "shared" /
+        "add_file.svg", addedSource)
+      let added = build(reproBin, selectedTarget, repoRoot, pathValue)
+      check added.contains("providerInvocations: 1")
+      check added.contains("scheduler: actions=7")
+      check added.contains(
+        "action: " & addedSharedResourceAction &
+          " status=asSucceeded launched=true")
+      check fileExists(projectRoot / "public" / "resources" / "shared" /
+        "add_file.svg")
+      check readFile(addedSource) == readFile(projectRoot / "public" /
+        "resources" / "shared" / "add_file.svg")
+
+      removeFile(projectRoot / "src" / "public" / "third_party" / "io.js")
+      let removed = build(reproBin, selectedTarget, repoRoot, pathValue)
+      check removed.contains("providerInvocations: 1")
+      check removed.contains("scheduler: actions=6")
+      check not removed.contains("action: " & thirdPartyIoResourceAction)
+      let removedReport = parseFile(valueAfter(removed, "buildReport:"))
+      check removedReport{"actions"}.len == 6
+      check reportAction(removedReport, thirdPartyIoResourceAction).kind == JNull
+      check reportAction(removedReport, addedSharedResourceAction).kind != JNull
+      check reportAction(removedReport, "frontend-public-resources").kind != JNull
+
     test "selected frontend aggregate target builds current frontend bundle set":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
@@ -787,7 +952,7 @@ when defined(macosx):
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check first.contains("selectedTarget: frontend")
-      check first.contains("scheduler: actions=11")
+      check first.contains("scheduler: actions=17")
       check first.contains(
         "action: frontend-ui-js status=asSucceeded launched=true")
       check first.contains(
@@ -808,15 +973,27 @@ when defined(macosx):
         "action: frontend-subwindow-html status=asSucceeded launched=true")
       check first.contains(
         "action: frontend-src-helpers-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: frontend-public-resources status=asSucceeded launched=true")
+      check first.contains(
+        "action: " & rootTupfileResourceAction &
+          " status=asSucceeded launched=true")
+      check first.contains(
+        "action: " & calltraceResourceAction &
+          " status=asSucceeded launched=true")
+      check first.contains(
+        "action: " & thirdPartyIoResourceAction &
+          " status=asSucceeded launched=true")
       check first.contains("action: frontend status=asSucceeded launched=true")
       check not first.contains("action: nim-js-ipc-registry-test")
       check not first.contains("action: generate-config-header")
       check not first.contains("action: c-sudoku-object-tup")
       check not first.contains("action: c-sudoku-object-with-generated-header")
       checkFrontendBundleOutputs(projectRoot)
+      checkPublicResourceOutputs(projectRoot)
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 11
+      check firstReport{"actions"}.len == 17
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
@@ -828,6 +1005,7 @@ when defined(macosx):
       assertAction(firstReport, "frontend-index-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
+      assertPublicResourceActions(firstReport, "asSucceeded", true)
       assertAction(firstReport, "frontend", "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
@@ -852,6 +1030,7 @@ when defined(macosx):
         false)
       assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      assertPublicResourceActions(secondReport, "asCacheHit", false)
       assertAction(secondReport, "frontend", "asCacheHit", false)
 
       let indexHtml = projectRoot / "src" / "frontend" / "index.html"
@@ -883,6 +1062,7 @@ when defined(macosx):
         false)
       assertAction(htmlChangedReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      assertPublicResourceActions(htmlChangedReport, "asCacheHit", false)
       assertAction(htmlChangedReport, "frontend", "asSucceeded", true)
       check readFile(projectRoot / "src" / "frontend" / "index.html") ==
         readFile(projectRoot / "index.html")
@@ -923,6 +1103,7 @@ when defined(macosx):
         "asCacheHit", false)
       assertAction(helperChangedReport, "frontend-src-helpers-js",
         "asSucceeded", true)
+      assertPublicResourceActions(helperChangedReport, "asCacheHit", false)
       assertAction(helperChangedReport, "frontend", "asSucceeded", true)
       check readFile(projectRoot / "helpers.js") ==
         readFile(projectRoot / "src" / "helpers.js")
@@ -974,7 +1155,7 @@ when defined(macosx):
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=15")
+      check first.contains("scheduler: actions=21")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
       check first.contains("action: frontend-ui-js status=asSucceeded launched=true")
@@ -987,6 +1168,10 @@ when defined(macosx):
       check first.contains("action: frontend-index-html status=asSucceeded launched=true")
       check first.contains("action: frontend-subwindow-html status=asSucceeded launched=true")
       check first.contains("action: frontend-src-helpers-js status=asSucceeded launched=true")
+      check first.contains("action: frontend-public-resources status=asSucceeded launched=true")
+      check first.contains("action: " & rootTupfileResourceAction & " status=asSucceeded launched=true")
+      check first.contains("action: " & calltraceResourceAction & " status=asSucceeded launched=true")
+      check first.contains("action: " & thirdPartyIoResourceAction & " status=asSucceeded launched=true")
       check first.contains("action: frontend status=asSucceeded launched=true")
       check first.contains("action: c-sudoku-object-tup status=asSucceeded launched=true")
       check first.contains("action: c-sudoku-object-with-generated-header status=asSucceeded launched=true")
@@ -1006,6 +1191,7 @@ when defined(macosx):
       check fileExists(projectRoot / "subwindow.html")
       check fileExists(projectRoot / "src" / "helpers.js")
       check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
+      checkPublicResourceOutputs(projectRoot)
       check fileExists(projectRoot / "build" / "c" / "main.tup.o")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
@@ -1032,6 +1218,7 @@ when defined(macosx):
       assertAction(firstReport, "frontend-index-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
+      assertPublicResourceActions(firstReport, "asSucceeded", true)
       assertAction(firstReport, "frontend", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-with-generated-header",
@@ -1073,6 +1260,7 @@ when defined(macosx):
         false)
       assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      assertPublicResourceActions(secondReport, "asCacheHit", false)
       assertAction(secondReport, "frontend", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-with-generated-header",
@@ -1100,6 +1288,7 @@ when defined(macosx):
         false)
       assertAction(cChangedReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      assertPublicResourceActions(cChangedReport, "asCacheHit", false)
       assertAction(cChangedReport, "frontend", "asCacheHit", false)
       assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(cChangedReport, "c-sudoku-object-with-generated-header",
@@ -1129,6 +1318,7 @@ when defined(macosx):
         false)
       assertAction(headerDeletedReport, "frontend-src-helpers-js",
         "asCacheHit", false)
+      assertPublicResourceActions(headerDeletedReport, "asCacheHit", false)
       assertAction(headerDeletedReport, "frontend", "asCacheHit", false)
       assertAction(headerDeletedReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",

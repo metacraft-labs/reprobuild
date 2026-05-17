@@ -276,6 +276,14 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "ct" / "version.nim")
   copyTree(codeTracerRoot / "src" / "ct" / "acp",
     projectRoot / "src" / "ct" / "acp")
+  createDir(projectRoot / "src" / "public" / "resources")
+  createDir(projectRoot / "src" / "public" / "third_party")
+  copyFile(codeTracerRoot / "src" / "public" / "Tupfile",
+    projectRoot / "src" / "public" / "Tupfile")
+  copyFile(codeTracerRoot / "src" / "public" / "resources" / "calltrace.js",
+    projectRoot / "src" / "public" / "resources" / "calltrace.js")
+  copyFile(codeTracerRoot / "src" / "public" / "third_party" / "io.js",
+    projectRoot / "src" / "public" / "third_party" / "io.js")
   createDir(projectRoot / "src" / "public" / "third_party" /
     "monaco-themes" / "themes" / "customThemes" / "json")
   for theme in ["codetracerWhite.json", "codetracerDark.json"]:
@@ -318,6 +326,49 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
+proc stableHashHex(value: string): string =
+  var hash = 2166136261'u32
+  for ch in value:
+    hash = (hash xor uint32(ord(ch))) * 16777619'u32
+  toHex(hash, 8).toLowerAscii()
+
+proc actionSlug(value: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-'}:
+      result.add(ch.toLowerAscii())
+    else:
+      result.add("-" & toHex(ord(ch), 2).toLowerAscii())
+  if result.len == 0:
+    result = "resource"
+
+proc publicResourceActionId(relative: string): string =
+  let normalized = relative.replace('\\', '/')
+  let tail = splitPath(normalized).tail
+  "frontend-public-resource-" & actionSlug(tail) & "-" &
+    stableHashHex(normalized)
+
+let rootTupfileResourceAction = publicResourceActionId("Tupfile")
+let calltraceResourceAction = publicResourceActionId("resources/calltrace.js")
+let thirdPartyIoResourceAction = publicResourceActionId("third_party/io.js")
+let addedSharedResourceAction =
+  publicResourceActionId("resources/shared/add_file.svg")
+
+let initialPublicResourceActions = @[
+  rootTupfileResourceAction,
+  calltraceResourceAction,
+  thirdPartyIoResourceAction,
+  publicResourceActionId("third_party/monaco-themes/themes/customThemes/json/" &
+    "codetracerDark.json"),
+  publicResourceActionId("third_party/monaco-themes/themes/customThemes/json/" &
+    "codetracerWhite.json")
+]
+
+proc assertPublicResourceActions(report: JsonNode; status: string;
+                                 launched: bool) =
+  for actionId in initialPublicResourceActions:
+    assertAction(report, actionId, status, launched)
+  assertAction(report, "frontend-public-resources", status, launched)
+
 proc hasMonitorEvidence(action: JsonNode): bool =
   action{"evidence"}{"monitorReads"}.getElems().len > 0 or
     action{"evidence"}{"monitorProbes"}.getElems().len > 0
@@ -334,6 +385,10 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(projectRoot / "subwindow.html")
   check fileExists(projectRoot / "src" / "helpers.js")
   check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
+  check fileExists(projectRoot / "public" / "resources" / "calltrace.js")
+  check fileExists(projectRoot / "public" / "third_party" / "io.js")
+  check fileExists(projectRoot / "build" / "reprobuild" /
+    "frontend-public-resources.stamp")
   check readFile(projectRoot / "src" / "frontend" / "index.html") ==
     readFile(projectRoot / "index.html")
   check readFile(projectRoot / "src" / "frontend" / "subwindow.html") ==
@@ -438,6 +493,47 @@ proc runWatchAndEdit(reproBin, target, repoRoot, pathValue, logPath, editPath,
     "  exit 124\n" &
     "fi\n" &
     "printf '%s' " & q(editText) & " >> " & q(editPath) & "\n" &
+    "wait \"$pid\"\n"
+  let res = runShell("sh -c " & q(script), repoRoot)
+  let log =
+    if fileExists(logPath):
+      readFile(logPath)
+    else:
+      ""
+  if res.code != 0:
+    checkpoint(res.output)
+    checkpoint(log)
+  check res.code == 0
+  log
+
+proc runWatchAndCopy(reproBin, target, repoRoot, pathValue, logPath,
+                     sourcePath, destPath: string; debounceMs = 50;
+                     env: openArray[(string, string)] = []): string =
+  var envLines = "export PATH=" & q(pathValue) & "\n"
+  for (name, value) in env:
+    envLines.add("export " & name & "=" & q(value) & "\n")
+  let script =
+    "set -eu\n" &
+    envLines &
+    shellCommand([reproBin, "watch", target, "--tool-provisioning=path",
+      "--max-cycles=2", "--debounce-ms=" & $debounceMs]) &
+      " > " & q(logPath) & " 2>&1 &\n" &
+    "pid=$!\n" &
+    "ready=0\n" &
+    "for i in $(seq 1 600); do\n" &
+    "  if grep -q 'repro watch: watching paths=' " & q(logPath) &
+      "; then ready=1; break; fi\n" &
+    "  if ! kill -0 \"$pid\" 2>/dev/null; then wait \"$pid\"; exit $?; fi\n" &
+    "  sleep 0.05\n" &
+    "done\n" &
+    "if [ \"$ready\" != 1 ]; then\n" &
+    "  echo 'watch did not become ready' >> " & q(logPath) & "\n" &
+    "  kill \"$pid\" 2>/dev/null || true\n" &
+    "  wait \"$pid\" || true\n" &
+    "  exit 124\n" &
+    "fi\n" &
+    "mkdir -p " & q(destPath.splitPath.head) & "\n" &
+    "cp " & q(sourcePath) & " " & q(destPath) & "\n" &
     "wait \"$pid\"\n"
   let res = runShell("sh -c " & q(script), repoRoot)
   let log =
@@ -641,7 +737,7 @@ when defined(macosx):
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: frontend")
-      check log.contains("scheduler: actions=11")
+      check log.contains("scheduler: actions=17")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: generate-config-header")
       check not log.contains("action: c-sudoku-object-tup")
@@ -650,7 +746,7 @@ when defined(macosx):
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 11
+      check report{"actions"}.len == 17
       assertAction(report, "frontend-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-index-js", "asCacheHit", false)
@@ -661,12 +757,73 @@ when defined(macosx):
       assertAction(report, "frontend-index-html", "asSucceeded", true)
       assertAction(report, "frontend-subwindow-html", "asCacheHit", false)
       assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
+      assertPublicResourceActions(report, "asCacheHit", false)
       assertAction(report, "frontend", "asSucceeded", true)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull
       check reportAction(report,
         "c-sudoku-object-with-generated-header").kind == JNull
+
+    test "CodeTracer copied checkout watch builds added frontend public resource":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      check fileExists(realProjectFile)
+
+      let tempRoot = createTempDir("repro-m41-codetracer-resource-watch", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
+      let projectRoot = tempRoot / "codetracer"
+      createDir(projectRoot)
+      copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
+      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+
+      let selectedTarget = projectRoot & "#frontend-public-resources"
+      let sourcePath = codeTracerRoot / "src" / "public" / "resources" /
+        "shared" / "add_file.svg"
+      let destPath = projectRoot / "src" / "public" / "resources" /
+        "shared" / "add_file.svg"
+      let log = runWatchAndCopy(reproBin, selectedTarget, repoRoot,
+        codeTracerPathValue(tempRoot), tempRoot / "codetracer-resource-watch.log",
+        sourcePath, destPath)
+      check log.contains("repro watch: target=" & selectedTarget)
+      check log.contains("repro watch: event seen path=")
+      check log.contains("repro watch: cycle 2 start rebuild")
+      check log.contains("repro watch: max cycles reached")
+      check log.contains("selectedTarget: frontend-public-resources")
+      check log.contains("scheduler: actions=7")
+      check log.contains(
+        "action: " & addedSharedResourceAction &
+          " status=asSucceeded launched=true")
+      check not log.contains("action: frontend-ui-js")
+      check not log.contains("action: frontend-index-js")
+      check not log.contains("action: nim-js-ipc-registry-test")
+      check not log.contains("action: c-sudoku-object-tup")
+      check fileExists(projectRoot / "public" / "resources" / "shared" /
+        "add_file.svg")
+      check readFile(sourcePath) == readFile(projectRoot / "public" /
+        "resources" / "shared" / "add_file.svg")
+
+      let report = parseFile(projectRoot / ".repro" / "build" /
+        "reprobuild" / "build-report.json")
+      check report{"actions"}.len == 7
+      assertAction(report, addedSharedResourceAction, "asSucceeded", true)
+      assertAction(report, "frontend-public-resources", "asSucceeded", true)
+      check reportAction(report, "frontend-ui-js").kind == JNull
+      check reportAction(report, "frontend-index-js").kind == JNull
+      check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
+      check reportAction(report, "c-sudoku-object-tup").kind == JNull
 
 else:
   suite "e2e_repro_watch":
