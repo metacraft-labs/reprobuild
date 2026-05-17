@@ -208,7 +208,8 @@ proc writeProject(path: string) =
     "          output = \"dist/unrelated.txt\",\n" &
     "          marker = \".repro/tool-runs-unrelated.log\"),\n" &
     "        inputs = @[\"src/unrelated.txt\"],\n" &
-    "        outputs = @[\"dist/unrelated.txt\"])\n")
+    "        outputs = @[\"dist/unrelated.txt\"])\n" &
+    "      defaultBuildAction(\"consume\")\n")
 
 proc writeDirectoryEnumerationProject(path: string) =
   createDir(path.splitPath.head)
@@ -602,6 +603,47 @@ proc runWatchAndEdit(reproBin, target, repoRoot, pathValue, logPath, editPath,
   check res.code == 0
   log
 
+proc runWatchCurrentProjectAndEdit(reproBin, projectRoot, pathValue, logPath,
+                                   editPath, editText: string;
+                                   debounceMs = 50;
+                                   env: openArray[(string, string)] = []): string =
+  var envLines = "export PATH=" & q(pathValue) & "\n"
+  for (name, value) in env:
+    envLines.add("export " & name & "=" & q(value) & "\n")
+  let script =
+    "set -eu\n" &
+    envLines &
+    shellCommand([reproBin, "watch", "--tool-provisioning=path",
+      "--max-cycles=2", "--debounce-ms=" & $debounceMs]) &
+      " > " & q(logPath) & " 2>&1 &\n" &
+    "pid=$!\n" &
+    "ready=0\n" &
+    "for i in $(seq 1 600); do\n" &
+    "  if grep -q 'repro watch: watching paths=' " & q(logPath) &
+      "; then ready=1; break; fi\n" &
+    "  if ! kill -0 \"$pid\" 2>/dev/null; then wait \"$pid\"; exit $?; fi\n" &
+    "  sleep 0.05\n" &
+    "done\n" &
+    "if [ \"$ready\" != 1 ]; then\n" &
+    "  echo 'watch did not become ready' >> " & q(logPath) & "\n" &
+    "  kill \"$pid\" 2>/dev/null || true\n" &
+    "  wait \"$pid\" || true\n" &
+    "  exit 124\n" &
+    "fi\n" &
+    "printf '%s' " & q(editText) & " >> " & q(editPath) & "\n" &
+    "wait \"$pid\"\n"
+  let res = runShell("sh -c " & q(script), projectRoot)
+  let log =
+    if fileExists(logPath):
+      readFile(logPath)
+    else:
+      ""
+  if res.code != 0:
+    checkpoint(res.output)
+    checkpoint(log)
+  check res.code == 0
+  log
+
 proc runWatchAndReplace(reproBin, target, repoRoot, pathValue, logPath,
                         editPath, oldText, newText: string; debounceMs = 50;
                         env: openArray[(string, string)] = []): string =
@@ -720,6 +762,54 @@ when defined(macosx):
       check log.contains("repro watch: event seen path=")
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
+      check log.contains("selectedTarget: consume")
+      check log.contains("scheduler: actions=2")
+      check not log.contains("action: unrelated")
+      check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
+        @["producer", "consumer", "producer", "consumer"]
+      check nonEmptyLines(projectRoot / ".repro" /
+        "tool-runs-unrelated.log").len == 0
+
+      let report = parseFile(projectRoot / ".repro" / "build" /
+        "reprobuild" / "build-report.json")
+      assertAction(report, "produce", "asSucceeded", true)
+      assertAction(report, "consume", "asSucceeded", true)
+      check reportAction(report, "unrelated").kind == JNull
+
+    test "local project no-target watch uses current project default action":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m45-local-default-watch", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let binDir = tempRoot / "bin"
+      writeFixtureTools(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
+
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "src")
+      writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
+      writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
+      writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
+      writeProject(projectRoot / "reprobuild.nim")
+
+      let log = runWatchCurrentProjectAndEdit(reproBin, projectRoot, pathValue,
+        tempRoot / "m45-local-default-watch.log",
+        projectRoot / "src" / "hidden.txt", "hidden v2\n")
+      check log.contains("repro watch: target=.")
+      check log.contains("repro watch: cycle 1 start initial")
+      check log.contains("repro watch: event seen path=")
+      check log.contains("repro watch: cycle 2 start rebuild")
+      check log.contains("repro watch: max cycles reached")
+      check log.contains("defaultTarget: consume")
       check log.contains("selectedTarget: consume")
       check log.contains("scheduler: actions=2")
       check not log.contains("action: unrelated")

@@ -21,8 +21,8 @@ proc renderUsage*(programName: string): string =
   if programName == "repro":
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
-      " build <target[#name]> --tool-provisioning=path|nix\n       " & programName &
-      " watch <target[#name]> --tool-provisioning=path|nix [--max-cycles=N] [--debounce-ms=N]\n       " & programName &
+      " build [target[#name]] --tool-provisioning=path|nix\n       " & programName &
+      " watch [target[#name]] --tool-provisioning=path|nix [--max-cycles=N] [--debounce-ms=N]\n       " & programName &
       " develop <target[#name]> --tool-provisioning=nix -- <command> [args...]\n       " & programName &
       " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]"
   elif programName == "repro-fs-snoop":
@@ -102,6 +102,8 @@ proc moduleForTarget(target: string): string =
 proc outputDirForTarget(target: ParsedBuildTarget): string =
   parentDir(target.modulePath) / ".repro" / "build" / target.outputName
 
+const DefaultBuildActionMetadataName = "reprobuild.default-build-action.v1"
+
 proc digestHex(digest: ContentDigest): string =
   toHex(digest.bytes)
 
@@ -113,6 +115,23 @@ proc shellCommand(args: openArray[string]): string =
 
 proc projectRootForModule(modulePath: string): string =
   parentDir(modulePath)
+
+proc reprobuildLibraryWorkDir(): string =
+  proc hasReprobuildLibs(root: string): bool =
+    dirExists(root / "libs" / "repro_project_dsl" / "src")
+
+  let envRoot = getEnv("REPROBUILD_SOURCE_ROOT")
+  if envRoot.len > 0 and hasReprobuildLibs(envRoot):
+    return envRoot
+  let cwd = getCurrentDir()
+  if hasReprobuildLibs(cwd):
+    return cwd
+  var sourceRoot = parentDir(currentSourcePath())
+  for _ in 0 ..< 3:
+    sourceRoot = parentDir(sourceRoot)
+  if hasReprobuildLibs(sourceRoot):
+    return sourceRoot
+  cwd
 
 proc moduleHasBuildBlock(modulePath: string): bool =
   for line in readFile(modulePath).splitLines:
@@ -315,6 +334,17 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
     if selected.contains(item.payload.id):
       result.add(lowerGraphAction(item.node, profiles, projectRoot))
 
+proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == DefaultBuildActionMetadataName:
+        if result.len > 0 and result != node.payload:
+          raise newException(ValueError,
+            "conflicting default build action metadata: " & result &
+              " and " & node.payload)
+        result = node.payload
+
 proc evidenceJson(evidence: PathSetEvidence): JsonNode =
   %*{
     "declaredInputs": jsonStringSeq(evidence.declaredInputs),
@@ -424,7 +454,8 @@ type
     buildReportPath: string
 
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
-                        publicCliPath: string):
+                        publicCliPath: string;
+                        selectDefaultAction = false):
     BuildCommandOutcome =
   var parsedTarget = parseBuildTarget(target)
   parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
@@ -439,7 +470,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
   let interfacePath = outDir / "project-interface.rbsz"
   let stubPath = outDir / "project-interface.nim"
-  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath)
+  let compileWorkDir = reprobuildLibraryWorkDir()
+  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
+    compileWorkDir)
 
   if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
     raise newException(ValueError,
@@ -472,7 +505,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let providerArtifactPath = outDir / "provider-compile.rbsz"
     echo "providerCompile: started"
     let provider = compileProviderBinary(modulePath, providerBinaryPath,
-      artifact.interfaceFingerprint, providerArtifactPath, getCurrentDir())
+      artifact.interfaceFingerprint, providerArtifactPath, compileWorkDir)
     let providerArtifactId = digestHex(provider.providerFingerprint)
     echo "providerBinary: " & provider.outputBinaryPath
     echo "providerCompileArtifact: " & providerArtifactPath
@@ -492,10 +525,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     echo "providerGraphSnapshot: " & refresh.persistedSnapshotPath
     echo "providerInvocations: " & $refresh.invoked.len
 
+    var selectedActionId = parsedTarget.selectedActionId
+    if selectDefaultAction and selectedActionId.len == 0:
+      selectedActionId = defaultBuildActionId(refresh.snapshot)
+      if selectedActionId.len > 0:
+        echo "defaultTarget: " & selectedActionId
+
     let actions = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
-      parsedTarget.selectedActionId)
+      selectedActionId)
     if parsedTarget.fragmentKind == tfkActionSelection:
       echo "selectedTarget: " & parsedTarget.selectedActionId
+    elif selectDefaultAction and selectedActionId.len > 0:
+      echo "selectedTarget: " & selectedActionId
     echo "scheduler: actions=" & $actions.len
     if actions.len == 0:
       result.exitCode = 0
@@ -621,10 +662,12 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     else:
       raise newException(ValueError, "unexpected build argument: " & arg)
 
-  if target.len == 0:
-    raise newException(ValueError, "missing build target")
+  let targetWasOmitted = target.len == 0
+  if targetWasOmitted:
+    target = "."
 
-  executeBuildTarget(target, mode, publicCliPath).exitCode
+  executeBuildTarget(target, mode, publicCliPath,
+    selectDefaultAction = targetWasOmitted).exitCode
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:
@@ -660,8 +703,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
     else:
       raise newException(ValueError, "unexpected watch argument: " & arg)
 
-  if target.len == 0:
-    raise newException(ValueError, "missing watch target")
+  let targetWasOmitted = target.len == 0
+  if targetWasOmitted:
+    target = "."
   if mode notin {tpmPathOnly, tpmNix}:
     raise newException(ValueError,
       "repro watch requires --tool-provisioning=path|nix")
@@ -681,7 +725,8 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
     echo "repro watch: cycle " & $cycle & " start" &
       (if cycle == 1: " initial" else: " rebuild")
     flushStdout()
-    let outcome = executeBuildTarget(target, mode, publicCliPath)
+    let outcome = executeBuildTarget(target, mode, publicCliPath,
+      selectDefaultAction = targetWasOmitted)
     echo "repro watch: cycle " & $cycle & " result exitCode=" &
       $outcome.exitCode
     flushStdout()

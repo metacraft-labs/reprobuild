@@ -93,6 +93,7 @@ type
 
 var registry: seq[PackageDef] = @[]
 var buildActionRegistry: seq[BuildActionDef] = @[]
+var defaultBuildActionRegistry = ""
 
 when defined(reproProviderMode):
   var providerEvaluationInputRegistry: seq[GraphEvaluationInput] = @[]
@@ -117,6 +118,15 @@ proc resetBuildActionRegistry*() =
 
 proc registeredBuildActions*(): seq[BuildActionDef] =
   buildActionRegistry
+
+proc resetDefaultBuildActionRegistry*() =
+  defaultBuildActionRegistry = ""
+
+proc defaultBuildAction*(id: string) =
+  defaultBuildActionRegistry = id
+
+proc registeredDefaultBuildAction*(): string =
+  defaultBuildActionRegistry
 
 when defined(reproProviderMode):
   proc resetProviderEvaluationInputRegistry() =
@@ -747,9 +757,13 @@ when defined(reproProviderMode):
     namespace & ":output:" & sanitizeNodePart(actionId) & ":" &
       sanitizeNodePart(output)
 
+  proc defaultBuildActionNode(namespace: string): string =
+    namespace & ":metadata:default-build-action"
+
   proc buildPackageFragment(pkg: PackageDef; request: ProviderGraphRequest;
                             buildProc: proc ()): GraphFragment =
     resetBuildActionRegistry()
+    resetDefaultBuildActionRegistry()
     resetProviderEvaluationInputRegistry()
     currentProviderProjectRoot = request.arguments
     try:
@@ -757,6 +771,7 @@ when defined(reproProviderMode):
     finally:
       currentProviderProjectRoot = ""
     let actions = registeredBuildActions()
+    let defaultAction = registeredDefaultBuildAction()
     result = GraphFragment(
       entryPointId: request.entryPointId,
       entryPointBodyHash: request.entryPointBodyHash,
@@ -773,6 +788,21 @@ when defined(reproProviderMode):
         kind: gnkAction,
         stableName: action.id,
         payload: actionPayload(action)))
+    if defaultAction.len > 0:
+      var found = false
+      for action in actions:
+        if action.id == defaultAction:
+          found = true
+          break
+      if not found:
+        raise newException(ValueError,
+          "default build action does not match a declared build action: " &
+            defaultAction)
+      result.nodes.add(GraphNode(
+        id: defaultBuildActionNode(request.namespace),
+        kind: gnkMetadata,
+        stableName: "reprobuild.default-build-action.v1",
+        payload: defaultAction))
     for action in actions:
       let nodeId = actionNode(request.namespace, action.id)
       for dep in action.deps:

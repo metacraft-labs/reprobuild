@@ -321,7 +321,8 @@ proc writeProject(path: string) =
     "          output = \"dist/unrelated.txt\",\n" &
     "          marker = \".repro/tool-runs-unrelated.log\"),\n" &
     "        inputs = @[\"src/unrelated.txt\"],\n" &
-    "        outputs = @[\"dist/unrelated.txt\"])\n")
+    "        outputs = @[\"dist/unrelated.txt\"])\n" &
+    "      defaultBuildAction(\"consume\")\n")
 
 proc writeMissingProject(path: string) =
   createDir(path.splitPath.head)
@@ -431,6 +432,14 @@ proc build(reproBin, target, repoRoot, pathValue: string;
     entries.add(item)
   requireSuccess(shellCommand([reproBin, "build", target,
     "--tool-provisioning=path"], entries), repoRoot)
+
+proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
+                         env: openArray[(string, string)] = []): string =
+  var entries = @[("PATH", pathValue)]
+  for item in env:
+    entries.add(item)
+  requireSuccess(shellCommand([reproBin, "build", "--tool-provisioning=path"],
+    entries), projectRoot)
 
 proc compilePublicReproTestBin(repoRoot: string): string =
   result = repoRoot / "build" / "test-bin" / "repro"
@@ -629,6 +638,60 @@ suite "e2e_local_reprobuild_project_build":
     check unknown.contains("unknown build target/action id: does-not-exist")
     check unknown.contains("available:")
     check unknown.contains("consume")
+
+  test "public CLI no-target build uses current project default action":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m45-local-default-build", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = tempRoot / "repro"
+    discard requireSuccess(shellCommand([
+      "nim", "c", "--verbosity:0", "--hints:off",
+      "--nimcache:" & (tempRoot / "nimcache-repro"),
+      "--out:" & reproBin,
+      repoRoot / "apps" / "repro" / "repro.nim"
+    ]), repoRoot)
+
+    let binDir = tempRoot / "bin"
+    writeFixtureTools(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+
+    let projectRoot = tempRoot / "project"
+    createDir(projectRoot / "src")
+    writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
+    writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
+    writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
+    writeProject(projectRoot / "reprobuild.nim")
+
+    let selected = buildCurrentProject(reproBin, projectRoot, pathValue)
+    check selected.contains("defaultTarget: consume")
+    check selected.contains("selectedTarget: consume")
+    check selected.contains("scheduler: actions=2")
+    check selected.contains("action: produce status=asSucceeded launched=true")
+    check selected.contains("action: consume status=asSucceeded launched=true")
+    check not selected.contains("action: unrelated")
+    check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
+      @["producer", "consumer"]
+    check nonEmptyLines(projectRoot / ".repro" / "tool-runs-unrelated.log").len == 0
+    check fileExists(projectRoot / "build" / "generated.txt")
+    check fileExists(projectRoot / "dist" / "final.txt")
+    check not fileExists(projectRoot / "dist" / "unrelated.txt")
+
+    let selectedReport = parseFile(valueAfter(selected, "buildReport:"))
+    check selectedReport{"actions"}.len == 2
+    check reportAction(selectedReport, "produce"){"status"}.getStr() ==
+      "asSucceeded"
+    check reportAction(selectedReport, "consume"){"status"}.getStr() ==
+      "asSucceeded"
+    check reportAction(selectedReport, "unrelated").kind == JNull
 
   test "relative public CLI keeps RunQuota helper path stable across project cwd":
     let repoRoot = getCurrentDir()

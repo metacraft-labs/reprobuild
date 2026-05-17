@@ -318,6 +318,14 @@ proc build(reproBin, target, repoRoot, pathValue: string;
   requireSuccess(shellCommand([reproBin, "build", target,
     "--tool-provisioning=path"], entries), repoRoot)
 
+proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
+                         env: openArray[(string, string)] = []): string =
+  var entries = @[("PATH", pathValue)]
+  for item in env:
+    entries.add(item)
+  requireSuccess(shellCommand([reproBin, "build", "--tool-provisioning=path"],
+    entries), projectRoot)
+
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
     if line.startsWith(prefix):
@@ -1053,8 +1061,7 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1081,8 +1088,9 @@ when defined(macosx):
         nativeEnv.add(item)
 
       let selectedTarget = projectRoot & "#codetracer"
-      let first = build(reproBin, selectedTarget, repoRoot, pathValue,
+      let first = buildCurrentProject(reproBin, projectRoot, pathValue,
         nativeEnv)
+      check first.contains("defaultTarget: codetracer")
       check first.contains("selectedTarget: codetracer")
       check first.contains("scheduler: actions=22")
       check first.contains("action: frontend status=asSucceeded launched=true")
@@ -1163,6 +1171,7 @@ when defined(macosx):
 
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
+      check second.contains("selectedTarget: codetracer")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       check secondReport{"actions"}.len == 22
       assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
