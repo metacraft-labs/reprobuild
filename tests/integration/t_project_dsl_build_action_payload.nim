@@ -33,6 +33,11 @@ proc writeCliArgLegacy(outp: var seq[byte]; arg: PublicCliArg;
     outp.writeString(arg.alias)
   if version >= 4'u16:
     outp.writeByte(byte(ord(arg.role)))
+  if version >= 5'u16:
+    outp.writeByte(byte(ord(arg.format)))
+    outp.writeByte(if arg.repeated: 1'u8 else: 0'u8)
+  if version >= 6'u16:
+    outp.writeByte(byte(ord(arg.placement)))
   outp.writeString(arg.encodedValue)
 
 proc writeCliCallLegacy(outp: var seq[byte]; call: PublicCliCall;
@@ -75,6 +80,8 @@ proc sampleAction(policy = defaultDependencyPolicy(); depfile = ""):
     "compile",
     publicCliCall("pkg", "cc", "build", "pkg.cc.build", [
       inputArg("input", "src/main.c"),
+      cliArg("config", "release", alias = "-C",
+        placement = capBeforeSubcommand),
       cliArg("debug", true, alias = "-g"),
       inputArgSeq("include", @["include/a.h", "include/b.h"],
         alias = "-include", repeated = true)
@@ -91,16 +98,17 @@ suite "project DSL build action payload":
   setup:
     resetBuildActionRegistry()
 
-  test "version 5 round-trips CLI argument roles, formats, and explicit dependency policies":
+  test "version 6 round-trips CLI argument roles, formats, placements, and explicit dependency policies":
     let automatic = decodeBuildActionPayload(encodeBuildActionPayload(
       sampleAction(automaticMonitorPolicy())))
     check automatic.id == "compile"
-    check automatic.call.arguments.len == 3
+    check automatic.call.arguments.len == 4
     check automatic.call.arguments[0].role == carInput
-    check automatic.call.arguments[1].role == carOrdinary
-    check automatic.call.arguments[2].role == carInput
-    check automatic.call.arguments[2].format == cafSeparate
-    check automatic.call.arguments[2].repeated
+    check automatic.call.arguments[1].placement == capBeforeSubcommand
+    check automatic.call.arguments[2].role == carOrdinary
+    check automatic.call.arguments[3].role == carInput
+    check automatic.call.arguments[3].format == cafSeparate
+    check automatic.call.arguments[3].repeated
     check automatic.dependencyPolicy.kind == bdpAutomaticMonitor
     check automatic.dependencyPolicy.depfile == ""
 
@@ -115,7 +123,7 @@ suite "project DSL build action payload":
     let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
       sampleAction(makeDepfilePolicy("deps/generated.d")), 3'u16))
     check decoded.id == "compile"
-    check decoded.call.arguments.len == 3
+    check decoded.call.arguments.len == 4
     check decoded.call.arguments[0].role == carOrdinary
     check decoded.dependencyPolicy.kind == bdpMakeDepfile
     check decoded.dependencyPolicy.depfile == "deps/generated.d"
@@ -140,9 +148,19 @@ suite "project DSL build action payload":
     let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
       sampleAction(makeDepfilePolicy("deps/generated.d")), 4'u16))
     check decoded.id == "compile"
-    check decoded.call.arguments.len == 3
+    check decoded.call.arguments.len == 4
     check decoded.call.arguments[0].role == carInput
     check decoded.call.arguments[0].format == cafSeparate
     check not decoded.call.arguments[0].repeated
+    check decoded.call.arguments[1].placement == capAfterSubcommand
     check decoded.dependencyPolicy.kind == bdpMakeDepfile
     check decoded.dependencyPolicy.depfile == "deps/generated.d"
+
+  test "version 5 payloads decode with after-subcommand CLI argument placement":
+    let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
+      sampleAction(makeDepfilePolicy("deps/generated.d")), 5'u16))
+    check decoded.id == "compile"
+    check decoded.call.arguments.len == 4
+    check decoded.call.arguments[1].format == cafSeparate
+    check decoded.call.arguments[1].placement == capAfterSubcommand
+    check decoded.dependencyPolicy.kind == bdpMakeDepfile

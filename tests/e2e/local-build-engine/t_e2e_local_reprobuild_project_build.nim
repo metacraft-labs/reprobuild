@@ -416,6 +416,7 @@ proc writeM46FixtureTool(binDir: string) =
     "#!/bin/sh\n" &
     "set -eu\n" &
     "if [ \"${1:-}\" = \"--version\" ]; then echo 'm46-tool 1.0.0'; exit 0; fi\n" &
+    "if [ \"${1:-}\" = \"--global\" ]; then shift; fi\n" &
     "case \"${1:-}\" in\n" &
     "  produce)\n" &
     "    shift\n" &
@@ -465,6 +466,7 @@ proc writeM46ImportedPackageProject(path: string) =
   writeFile(projectRoot / "reprobuild" / "packages" / "m46_tool.nim",
     "import repro_project_dsl\n\n" &
     "defineCliInterface m46Tool, \"m46-tool\":\n" &
+    "  boolFlag global is bool, alias = \"--global\"\n" &
     "  call:\n" &
     "    pos args is seq[string], position = 0, required = false\n" &
     "  subcmd \"produce\":\n" &
@@ -484,15 +486,16 @@ proc writeM46ImportedPackageProject(path: string) =
     "  build:\n" &
     "    let marker = \".repro/m46-tool-runs.log\"\n" &
     "    m46Tool.produce(actionId = \"produce\",\n" &
+    "      global = true,\n" &
     "      input = \"src/input.txt\",\n" &
     "      output = \"build/generated.txt\", marker = marker)\n" &
-    "    m46Tool.consume(actionId = \"consume\",\n" &
+    "    let consume = m46Tool.consume(actionId = \"consume\",\n" &
     "      input = \"build/generated.txt\",\n" &
     "      output = \"dist/final.txt\", marker = marker)\n" &
     "    m46Tool(actionId = \"direct\",\n" &
     "      args = @[\"direct\", \"dist/direct.txt\"],\n" &
     "      extraOutputs = @[\"dist/direct.txt\"])\n" &
-    "    defaultBuildAction(\"consume\")\n")
+    "    defaultBuildAction(consume)\n")
 
 proc writeM46ProjectWithoutImportPath(path: string) =
   writeM46ImportedPackageProject(path)

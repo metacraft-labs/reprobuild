@@ -158,8 +158,6 @@ proc profileIndex(identity: PathOnlyBuildIdentity):
 
 proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string] =
   result = @[profile.resolvedExecutablePath]
-  if call.subcommand.len > 0:
-    result.add(call.subcommand)
 
   proc encodedValues(arg: PublicCliArg): seq[string] =
     if arg.nimType.normalize == "seq[string]":
@@ -205,11 +203,23 @@ proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string]
     for value in encodedValues(arg):
       outp.add(value)
 
+  var beforeSubcommand: seq[PublicCliArg] = @[]
+  var afterSubcommand: seq[PublicCliArg] = @[]
   var positional: seq[PublicCliArg] = @[]
   for arg in call.arguments:
     if arg.kind == cpkPositional:
       positional.add(arg)
       continue
+    if arg.placement == capBeforeSubcommand:
+      beforeSubcommand.add(arg)
+    else:
+      afterSubcommand.add(arg)
+
+  for arg in beforeSubcommand:
+    result.addFlagArg(arg)
+  if call.subcommand.len > 0:
+    result.add(call.subcommand)
+  for arg in afterSubcommand:
     result.addFlagArg(arg)
 
   positional.sort do (a, b: PublicCliArg) -> int:
