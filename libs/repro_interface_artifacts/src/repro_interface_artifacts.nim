@@ -497,8 +497,32 @@ proc toProjectInterface*(pkg: PackageDef): ProjectInterface =
       normalizedExe.commands.add(normalizedCmd)
     result.publicExecutables.add(normalizedExe)
 
-proc artifactFromRegisteredDsl*(): ProjectInterfaceArtifact =
+proc sameSourceFile(a, b: string): bool =
+  if a.len == 0 or b.len == 0:
+    return false
+  let rawA = a.replace('\\', '/')
+  let rawB = b.replace('\\', '/')
+  if rawA == rawB or rawA.endsWith("/" & rawB) or rawB.endsWith("/" & rawA):
+    return true
+  try:
+    os.normalizedPath(expandFilename(a)) ==
+      os.normalizedPath(expandFilename(b))
+  except CatchableError:
+    a == b
+
+proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   let packages = registeredPackages()
+  if rootSourceFile.len > 0:
+    var matches: seq[PackageDef] = @[]
+    for pkg in packages:
+      if sameSourceFile(pkg.sourceFile, rootSourceFile):
+        matches.add(pkg)
+    if matches.len == 1:
+      return artifactFor(toProjectInterface(matches[0]))
+    if matches.len > 1:
+      raise newException(ValueError,
+        "expected one root package in " & rootSourceFile & ", got " &
+          $matches.len)
   if packages.len != 1:
     raise newException(ValueError, "expected exactly one registered package, got " &
       $packages.len)
@@ -749,7 +773,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "import repro_project_dsl\n" &
     "import " & moduleName & "\n\n" &
     "when isMainModule:\n" &
-    "  let artifact = artifactFromRegisteredDsl()\n" &
+    "  let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
     "  writeInterfaceArtifact(paramStr(1), artifact)\n" &
     "  writeNimInterfaceStub(paramStr(2), artifact)\n")
   let runnerBin = tempRoot / "extract_runner"
@@ -761,7 +785,8 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "--out:" & runnerBin,
     runnerPath,
     artifactPath,
-    stubPath
+    stubPath,
+    modulePath
   ]
   command.insert(reproLibPathFlags(workDir), 4)
   discard runCommand(command, cwd = workDir)

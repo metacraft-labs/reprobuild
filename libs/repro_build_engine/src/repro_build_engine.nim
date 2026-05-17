@@ -258,6 +258,38 @@ proc addUnique(values: var seq[string]; value: string) =
   if values.find(value) < 0:
     values.add(value)
 
+proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
+  result = path.replace('\\', '/').strip()
+  while result.startsWith("./"):
+    result = result.substr(2)
+  while result.endsWith("/") and result.len > 1:
+    result.setLen(result.len - 1)
+  if result.len == 0:
+    return
+
+  if path.isAbsolute:
+    result = os.normalizedPath(path).replace('\\', '/')
+  elif action.cwd.len > 0:
+    result = os.normalizedPath(action.cwd / path).replace('\\', '/')
+
+proc inferDeclaredActionDeps(g: BuildGraph): BuildGraph =
+  result = g
+  var outputProducer = initTable[string, string]()
+  for action in g.actions:
+    for output in action.outputs:
+      let normalized = normalizedDeclaredActionPath(action, output)
+      if normalized.len > 0 and not outputProducer.hasKey(normalized):
+        outputProducer[normalized] = action.id
+
+  for i in 0 ..< result.actions.len:
+    for input in result.actions[i].inputs:
+      let normalized = normalizedDeclaredActionPath(result.actions[i], input)
+      if normalized.len == 0 or not outputProducer.hasKey(normalized):
+        continue
+      let producerId = outputProducer[normalized]
+      if producerId != result.actions[i].id:
+        result.actions[i].deps.addUnique(producerId)
+
 proc materialPath(root, path: string): string =
   if path.isAbsolute or root.len == 0:
     path
@@ -600,8 +632,9 @@ proc resultIndex(ids: Table[string, int]; id: string): int =
   ids[id]
 
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
+  let buildGraph = inferDeclaredActionDeps(g)
   var runResult: BuildRunResult
-  validateGraph(g)
+  validateGraph(buildGraph)
 
   let maxParallel = if config.maxParallelism == 0'u32: 1'u32 else: config.maxParallelism
   let cacheRoot = if config.cacheRoot.len == 0:
@@ -622,15 +655,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var launchedSucceeded = initHashSet[string]()
 
   poolCapacity[""] = maxParallel
-  for p in g.pools:
+  for p in buildGraph.pools:
     poolCapacity[p.name] = p.capacity
-  for action in g.actions:
+  for action in buildGraph.actions:
     let cap = poolCapacity.getOrDefault(action.pool, maxParallel)
     let units = if action.poolUnits == 0'u32: 1'u32 else: action.poolUnits
     if units > cap:
       raiseEngine("action " & action.id & " requests " & $units &
         " units from pool " & action.pool & " with capacity " & $cap)
-  for i, action in g.actions:
+  for i, action in buildGraph.actions:
     idToIndex[action.id] = i
     actionsById[action.id] = action
     remaining[action.id] = action.deps.len
@@ -676,7 +709,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         blockClosure(dep, blocker)
 
   proc terminalCount(): int =
-    for action in g.actions:
+    for action in buildGraph.actions:
       if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
         inc result
 
@@ -686,7 +719,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   createDir(runQuotaResultRoot)
   var launchSeq = 0
   try:
-    while completed < g.actions.len:
+    while completed < buildGraph.actions.len:
       ready.sort(readyCmp)
       var launchedAny = false
       var i = 0
@@ -798,14 +831,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         runResult.trace(id, "launched", "pool=" & poolName)
         launchedAny = true
 
-      if completed >= g.actions.len:
+      if completed >= buildGraph.actions.len:
         break
 
       if running.len == 0:
         if ready.len > 0 and not launchedAny:
           raiseEngine("ready queue is blocked by pool capacity")
         var pending: seq[string] = @[]
-        for action in g.actions:
+        for action in buildGraph.actions:
           if statuses[action.id] == asPending:
             pending.add(action.id)
         raiseEngine("build graph made no progress; pending actions: " & pending.join(", "))
@@ -882,7 +915,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       inc completed
 
       completed = 0
-      for action in g.actions:
+      for action in buildGraph.actions:
         if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
           inc completed
   finally:

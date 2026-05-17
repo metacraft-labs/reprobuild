@@ -162,10 +162,14 @@ proc copyTree(sourceRoot, destRoot: string) =
       createDir(destPath.splitPath.head)
       copyFile(sourcePath, destPath)
 
+proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
+  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
+  copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
+  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
-  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
-  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
   copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
   copyTree(codeTracerRoot / "src" / "frontend",
     projectRoot / "src" / "frontend")
@@ -201,8 +205,7 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   ]))
 
 proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
-  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
-  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
   copyTree(codeTracerRoot / "src" / "ct", projectRoot / "src" / "ct")
   copyTree(codeTracerRoot / "src" / "common", projectRoot / "src" / "common")
   copyTree(codeTracerRoot / "src" / "db_connector",
@@ -215,8 +218,7 @@ proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
 
 proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
-  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
-  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
   copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
   copyTree(codeTracerRoot / "src" / "frontend",
     projectRoot / "src" / "frontend")

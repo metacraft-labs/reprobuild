@@ -157,7 +157,9 @@ proc profileIndex(identity: PathOnlyBuildIdentity):
       result[profile.executableName] = profile
 
 proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string] =
-  result = @[profile.resolvedExecutablePath, call.subcommand]
+  result = @[profile.resolvedExecutablePath]
+  if call.subcommand.len > 0:
+    result.add(call.subcommand)
 
   proc addEncodedValue(outp: var seq[string]; arg: PublicCliArg) =
     if arg.nimType.normalize == "seq[string]":
@@ -299,6 +301,10 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
         actionNodes.add((
           node: node,
           payload: decodeBuildActionPayload(toBytes(node.payload))))
+  let inferredActions = inferDeclaredActionDeps(
+    actionNodes.mapIt(it.payload), projectRoot)
+  for i in 0 ..< actionNodes.len:
+    actionNodes[i].payload = inferredActions[i]
   if selectedActionId.len == 0:
     for item in actionNodes:
       result.add(lowerGraphAction(item.node, profiles, projectRoot))

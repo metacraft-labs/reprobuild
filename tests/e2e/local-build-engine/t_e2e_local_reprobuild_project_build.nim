@@ -411,6 +411,112 @@ proc writeDirectoryEnumerationProject(path: string) =
     "        inputs = @[\"src/aggregate.txt\"],\n" &
     "        outputs = @[\"dist/aggregate.stamp\"])\n")
 
+proc writeM46FixtureTool(binDir: string) =
+  writeExecutable(binDir / "m46-tool",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"--version\" ]; then echo 'm46-tool 1.0.0'; exit 0; fi\n" &
+    "case \"${1:-}\" in\n" &
+    "  produce)\n" &
+    "    shift\n" &
+    "    input= output= marker=\n" &
+    "    while [ \"$#\" -gt 0 ]; do\n" &
+    "      case \"$1\" in\n" &
+    "        --input) input=$2; shift 2 ;;\n" &
+    "        --output) output=$2; shift 2 ;;\n" &
+    "        --marker) marker=$2; shift 2 ;;\n" &
+    "        *) echo \"unknown produce arg $1\" >&2; exit 64 ;;\n" &
+    "      esac\n" &
+    "    done\n" &
+    "    mkdir -p \"$(dirname \"$output\")\" \"$(dirname \"$marker\")\"\n" &
+    "    printf 'produced:%s' \"$(cat \"$input\")\" > \"$output\"\n" &
+    "    printf 'produce\\n' >> \"$marker\"\n" &
+    "    ;;\n" &
+    "  consume)\n" &
+    "    shift\n" &
+    "    input= output= marker=\n" &
+    "    while [ \"$#\" -gt 0 ]; do\n" &
+    "      case \"$1\" in\n" &
+    "        --input) input=$2; shift 2 ;;\n" &
+    "        --output) output=$2; shift 2 ;;\n" &
+    "        --marker) marker=$2; shift 2 ;;\n" &
+    "        *) echo \"unknown consume arg $1\" >&2; exit 64 ;;\n" &
+    "      esac\n" &
+    "    done\n" &
+    "    mkdir -p \"$(dirname \"$output\")\" \"$(dirname \"$marker\")\"\n" &
+    "    printf 'consumed:%s' \"$(cat \"$input\")\" > \"$output\"\n" &
+    "    printf 'consume\\n' >> \"$marker\"\n" &
+    "    ;;\n" &
+    "  direct)\n" &
+    "    output=$2\n" &
+    "    mkdir -p \"$(dirname \"$output\")\"\n" &
+    "    printf 'direct\\n' > \"$output\"\n" &
+    "    ;;\n" &
+    "  *)\n" &
+    "    echo \"unexpected first argv slot: '${1:-}'\" >&2\n" &
+    "    exit 64\n" &
+    "    ;;\n" &
+    "esac\n")
+
+proc writeM46ImportedPackageProject(path: string) =
+  let projectRoot = path.splitPath.head
+  createDir(projectRoot / "src")
+  createDir(projectRoot / "reprobuild" / "packages")
+  writeFile(projectRoot / "reprobuild" / "packages" / "m46_tool.nim",
+    "import repro_project_dsl\n\n" &
+    "package m46Tool:\n" &
+    "  executable cli:\n" &
+    "    name \"m46-tool\"\n" &
+    "    cli:\n" &
+    "      subcmd \"produce\":\n" &
+    "        flag input, string, required = true\n" &
+    "        flag output, string, required = true\n" &
+    "        flag marker, string, required = true\n" &
+    "      subcmd \"consume\":\n" &
+    "        flag input, string, required = true\n" &
+    "        flag output, string, required = true\n" &
+    "        flag marker, string, required = true\n" &
+    "      subcmd \"\":\n" &
+    "        pos args, seq[string], position = 0\n\n" &
+    "proc run*(args: seq[string]): PublicCliCall =\n" &
+    "  subcmd(args = args)\n")
+  writeFile(path,
+    "import repro_project_dsl\n\n" &
+    "package m46Project:\n" &
+    "  usesImportPath \"reprobuild/packages\"\n" &
+    "  uses:\n" &
+    "    \"m46-tool >=1.0 <2.0\"\n" &
+    "  build:\n" &
+    "    let marker = \".repro/m46-tool-runs.log\"\n" &
+    "    discard buildAction(\"produce\",\n" &
+    "      m46_tool.produce(input = \"src/input.txt\",\n" &
+    "        output = \"build/generated.txt\", marker = marker),\n" &
+    "      inputs = @[\"src/input.txt\"],\n" &
+    "      outputs = @[\"build/generated.txt\"])\n" &
+    "    discard buildAction(\"consume\",\n" &
+    "      m46_tool.consume(input = \"build/generated.txt\",\n" &
+    "        output = \"dist/final.txt\", marker = marker),\n" &
+    "      inputs = @[\"build/generated.txt\"],\n" &
+    "      outputs = @[\"dist/final.txt\"])\n" &
+    "    discard buildAction(\"direct\",\n" &
+    "      m46_tool.run(args = @[\"direct\", \"dist/direct.txt\"]),\n" &
+    "      outputs = @[\"dist/direct.txt\"])\n" &
+    "    defaultBuildAction(\"consume\")\n")
+
+proc writeM46ProjectWithoutImportPath(path: string) =
+  writeM46ImportedPackageProject(path)
+  writeFile(path,
+    "import repro_project_dsl\n\n" &
+    "package m46Project:\n" &
+    "  uses:\n" &
+    "    \"m46-tool >=1.0 <2.0\"\n" &
+    "  build:\n" &
+    "    discard buildAction(\"produce\",\n" &
+    "      m46_tool.produce(input = \"src/input.txt\",\n" &
+    "        output = \"build/generated.txt\", marker = \".repro/runs.log\"),\n" &
+    "      inputs = @[\"src/input.txt\"],\n" &
+    "      outputs = @[\"build/generated.txt\"])\n")
+
 proc nonEmptyLines(path: string): seq[string] =
   if not fileExists(path):
     return @[]
@@ -692,6 +798,66 @@ suite "e2e_local_reprobuild_project_build":
     check reportAction(selectedReport, "consume"){"status"}.getStr() ==
       "asSucceeded"
     check reportAction(selectedReport, "unrelated").kind == JNull
+
+  test "uses import path exposes typed tool package and declared paths infer dependency closure":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m46-uses-import-path", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = compilePublicReproTestBin(repoRoot)
+    let binDir = tempRoot / "bin"
+    writeM46FixtureTool(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+
+    let projectRoot = tempRoot / "project"
+    writeM46ImportedPackageProject(projectRoot / "reprobuild.nim")
+    writeFile(projectRoot / "src" / "input.txt", "v1\n")
+
+    let selected = build(reproBin, projectRoot & "#consume", repoRoot, pathValue)
+    check selected.contains("selectedTarget: consume")
+    check selected.contains("scheduler: actions=2")
+    check selected.contains("action: produce status=asSucceeded launched=true")
+    check selected.contains("action: consume status=asSucceeded launched=true")
+    check not selected.contains("action: direct")
+    check nonEmptyLines(projectRoot / ".repro" / "m46-tool-runs.log") ==
+      @["produce", "consume"]
+    check readFile(projectRoot / "dist" / "final.txt").contains("produced:v1")
+
+    let report = parseFile(valueAfter(selected, "buildReport:"))
+    check report{"actions"}.len == 2
+    check reportAction(report, "produce"){"status"}.getStr() == "asSucceeded"
+    check reportAction(report, "consume"){"status"}.getStr() == "asSucceeded"
+    check reportAction(report, "direct").kind == JNull
+
+    let direct = build(reproBin, projectRoot & "#direct", repoRoot, pathValue)
+    check direct.contains("selectedTarget: direct")
+    check direct.contains("scheduler: actions=1")
+    check direct.contains("action: direct status=asSucceeded launched=true")
+    check readFile(projectRoot / "dist" / "direct.txt") == "direct\n"
+
+  test "uses import path is opt-in for imported package helpers":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m46-no-implicit-import", "")
+    defer: removeDir(tempRoot)
+
+    let projectRoot = tempRoot / "project"
+    writeM46ProjectWithoutImportPath(projectRoot / "reprobuild.nim")
+    writeFile(projectRoot / "src" / "input.txt", "v1\n")
+
+    let output = requireFailure(shellCommand([
+      "nim", "check", "--verbosity:0", "--hints:off",
+      "--path:" & repoRoot / "libs" / "repro_project_dsl" / "src",
+      projectRoot / "reprobuild.nim"
+    ]), projectRoot)
+    check output.contains("m46_tool")
 
   test "relative public CLI keeps RunQuota helper path stable across project cwd":
     let repoRoot = getCurrentDir()

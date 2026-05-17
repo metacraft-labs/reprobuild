@@ -1,7 +1,6 @@
-import std/[macros, strutils]
+import std/[macros, os, strutils, tables]
 
 when defined(reproProviderMode):
-  import std/os
   import repro_provider_runtime
 
 type
@@ -47,6 +46,7 @@ type
     packageName*: string
     executables*: seq[ExecutableDef]
     toolUses*: seq[PackageUseDef]
+    usesImportPaths*: seq[string]
     publicSignatureDependencies*: seq[string]
     sourceFile*: string
     sourceLine*: int
@@ -213,6 +213,45 @@ proc buildAction*(id: string; call: PublicCliCall;
     commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
     dependencyPolicy: dependencyPolicy)
   buildActionRegistry.add(result)
+
+proc normalizedDeclaredProjectPath*(projectRoot, path: string): string =
+  result = path.replace('\\', '/').strip()
+  while result.startsWith("./"):
+    result = result.substr(2)
+  while result.endsWith("/") and result.len > 1:
+    result.setLen(result.len - 1)
+  if result.len == 0:
+    return
+  if projectRoot.len > 0 and path.isAbsolute:
+    let normalizedRoot = normalizedPath(projectRoot).replace('\\', '/')
+    let normalizedPathValue = normalizedPath(path).replace('\\', '/')
+    if normalizedPathValue == normalizedRoot:
+      return "."
+    let prefix = normalizedRoot & "/"
+    if normalizedPathValue.startsWith(prefix):
+      return normalizedPathValue.substr(prefix.len)
+    result = normalizedPathValue
+
+proc inferDeclaredActionDeps*(actions: openArray[BuildActionDef];
+                              projectRoot = ""): seq[BuildActionDef] =
+  result = @actions
+  var outputProducer = initTable[string, string]()
+  for action in actions:
+    for output in action.outputs:
+      let normalized = normalizedDeclaredProjectPath(projectRoot, output)
+      if normalized.len > 0 and not outputProducer.hasKey(normalized):
+        outputProducer[normalized] = action.id
+  for i in 0 ..< result.len:
+    var knownDeps = result[i].deps
+    for input in result[i].inputs:
+      let normalized = normalizedDeclaredProjectPath(projectRoot, input)
+      if normalized.len == 0:
+        continue
+      if outputProducer.hasKey(normalized):
+        let producerId = outputProducer[normalized]
+        if producerId != result[i].id and knownDeps.find(producerId) < 0:
+          knownDeps.add(producerId)
+    result[i].deps = knownDeps
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -511,6 +550,29 @@ proc selectorFromConstraint(value: string): string =
   else:
     parts[0]
 
+proc selectorModuleName(selector: string): string =
+  var previousWasWord = false
+  for ch in selector:
+    if ch.isAlphaNumeric():
+      if ch.isUpperAscii() and previousWasWord and
+          result.len > 0 and result[^1] != '_':
+        result.add('_')
+      result.add(ch.toLowerAscii())
+      previousWasWord = true
+    else:
+      if result.len > 0 and result[^1] != '_':
+        result.add('_')
+      previousWasWord = false
+  while result.len > 0 and result[^1] == '_':
+    result.setLen(result.len - 1)
+  if result.len == 0:
+    result = "package"
+
+proc normalizedImportBase(path: string): string =
+  result = path.replace('\\', '/').strip()
+  while result.endsWith("/") and result.len > 0:
+    result.setLen(result.len - 1)
+
 proc collectUses(node: NimNode; policyPath: seq[string];
                  output: var seq[PackageUseDef]) =
   case node.kind
@@ -549,15 +611,24 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
         collectUses(stmt[i], @[], result.toolUses)
+    elif calleeName(stmt).normalize == "usesimportpath":
+      if stmt.len != 2:
+        error("usesImportPath expects exactly one string literal", stmt)
+      result.usesImportPaths.add(stringLiteral(stmt[1]))
 
 proc escForCode(text: string): string =
   text.escape()
 
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
-    ", publicSignatureDependencies: @[], sourceFile: " & escForCode(
-        pkg.sourceFile) &
-    ", sourceLine: " & $pkg.sourceLine & ", toolUses: @["
+    ", usesImportPaths: @["
+  for pathIndex, path in pkg.usesImportPaths:
+    if pathIndex > 0:
+      result.add(", ")
+    result.add(escForCode(path))
+  result.add("], publicSignatureDependencies: @[], sourceFile: " & escForCode(
+      pkg.sourceFile) &
+    ", sourceLine: " & $pkg.sourceLine & ", toolUses: @[")
   for useIndex, useDef in pkg.toolUses:
     if useIndex > 0:
       result.add(", ")
@@ -671,6 +742,7 @@ proc wrapperCode(pkg: PackageDef): string =
     "  " & exeTypeName & "* = object\n" &
     "    value*: SelectedExecutable\n" &
     "const " & pkg.packageName & "* = " & typeName & "()\n" &
+    "proc reprobuildPackageMarker*() = discard\n" &
     "proc executable*(pkg: " & typeName & "; name: string): " &
       exeTypeName & " =\n" &
     "  discard pkg\n" &
@@ -718,6 +790,35 @@ proc wrapperCode(pkg: PackageDef): string =
         escForCode(exe.binaryName) & ", " & escForCode(cmd.name) & ", " &
         escForCode(cmd.providerEntrypointId) & ", @[" & argCalls.join(", ") &
         "])\n")
+      let directParams =
+        if params.len > 1:
+          params[1 .. ^1].join("; ")
+        else:
+          ""
+      result.add("proc " & procName & "*(" & directParams &
+        "): PublicCliCall =\n")
+      result.add("  publicCliCall(" & escForCode(pkg.packageName) & ", " &
+        escForCode(exe.binaryName) & ", " & escForCode(cmd.name) & ", " &
+        escForCode(cmd.providerEntrypointId) & ", @[" & argCalls.join(", ") &
+        "])\n")
+
+proc usesImportCode(pkg: PackageDef): string =
+  var modules: seq[string] = @[]
+  for base in pkg.usesImportPaths:
+    let normalizedBase = normalizedImportBase(base)
+    if normalizedBase.len == 0:
+      continue
+    for useDef in pkg.toolUses:
+      let modulePath = normalizedBase & "/" &
+        selectorModuleName(useDef.packageSelector)
+      if modules.find(modulePath) < 0:
+        modules.add(modulePath)
+  for modulePath in modules:
+    result.add("from " & modulePath & " import nil\n")
+    let moduleName = modulePath.split('/')[^1]
+    result.add("when compiles(" & moduleName &
+      ".reprobuildPackageMarker()):\n")
+    result.add("  " & moduleName & ".reprobuildPackageMarker()\n")
 
 when defined(reproProviderMode):
   proc providerBodyHash(pkg: PackageDef): string =
@@ -770,7 +871,8 @@ when defined(reproProviderMode):
       buildProc()
     finally:
       currentProviderProjectRoot = ""
-    let actions = registeredBuildActions()
+    let actions = inferDeclaredActionDeps(
+      registeredBuildActions(), request.arguments)
     let defaultAction = registeredDefaultBuildAction()
     result = GraphFragment(
       entryPointId: request.entryPointId,
@@ -855,7 +957,9 @@ when defined(reproProviderMode):
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   var buildBody = newStmtList()
   for stmt in body:
-    if calleeName(stmt).normalize == "executable":
+    if calleeName(stmt).normalize == "build":
+      buildBody.add(stmt[1])
+    elif calleeName(stmt).normalize == "executable":
       let exeBody = stmt[2]
       for exeStmt in exeBody:
         if calleeName(exeStmt).normalize == "build":
@@ -874,6 +978,7 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
 macro package*(name: untyped; body: untyped): untyped =
   let pkg = parsePackageDef(name, body)
   let generated = parseStmt(
+    usesImportCode(pkg) &
     "registerPackageDef(" & packageLiteral(pkg) & ")\n" & wrapperCode(pkg))
   result = newStmtList()
   result.add(generated)

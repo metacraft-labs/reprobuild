@@ -165,6 +165,61 @@ suite "integration_build_engine_api_ready_queue":
     expect BuildEngineError:
       discard runBuild(buildGraph, defaultBuildEngineConfig(tempRoot))
 
+  test "runBuild infers declared output to input dependencies before scheduling":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m46-api-inferred-deps", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot, tempRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let inputPath = workRoot / "src" / "input.txt"
+    let generatedPath = workRoot / "gen" / "generated.txt"
+    let finalPath = workRoot / "dist" / "final.txt"
+    fixtureWrite(inputPath, "api inferred deps\n")
+
+    let buildResult = runBuild(graph([
+      action("produce", [app, "fixture-action", "copy", "producer",
+        inputPath, generatedPath], cwd = workRoot, inputs = [inputPath],
+        outputs = ["gen/generated.txt"], commandStatsId = "m46-api-produce"),
+      action("consume", [app, "fixture-action", "copy", "consumer",
+        generatedPath, finalPath], cwd = workRoot,
+        inputs = ["gen/generated.txt"], outputs = ["dist/final.txt"],
+        commandStatsId = "m46-api-consume")
+    ]), BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 2'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024))
+
+    proc byId(id: string): ActionResult =
+      for item in buildResult.results:
+        if item.id == id:
+          return item
+      raise newException(ValueError, "missing result " & id)
+
+    proc launchedIndex(id: string): int =
+      for i, event in buildResult.trace:
+        if event.actionId == id and event.event == "launched":
+          return i
+      -1
+
+    check byId("produce").status == asSucceeded
+    check byId("consume").status == asSucceeded
+    check readFile(finalPath).contains("producer:api inferred deps")
+    check launchedIndex("produce") >= 0
+    check launchedIndex("consume") > launchedIndex("produce")
+
   test "normalized API schedules ready queue with RunQuota, cache, pools, failure, and evidence":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m12-build-engine", "")
