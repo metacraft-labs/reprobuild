@@ -92,6 +92,12 @@ proc compilePublicReproTestBin(repoRoot: string): string =
     repoRoot / "apps" / "repro" / "repro.nim"
   ]), repoRoot)
 
+proc writeExecutable(path, content: string) =
+  createDir(path.splitPath.head)
+  writeFile(path, content)
+  setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
+    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
 when defined(macosx):
   proc compileShim(repoRoot, outputPath: string) =
     let arm64Path = outputPath & ".arm64"
@@ -263,13 +269,8 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let sourcePath = binDir / "gcc-proxy.c"
   let gccPath = binDir / "gcc"
   let clangPath = binDir / "clang"
-  let nimJsPath = binDir / "nim-js"
-  let hostNim = findExe("nim")
-  check hostNim.len > 0
   writeFile(sourcePath, GccProxySource)
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
-  if not fileExists(nimJsPath):
-    discard requireSuccess(shellCommand(["ln", "-s", hostNim, nimJsPath]))
   if includeClang:
     discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
   binDir & $PathSep & getEnv("PATH")
@@ -279,6 +280,23 @@ proc codeTracerNativePathValue(codeTracerRoot, tempRoot: string): string =
   let nimPath = nimBinDir / "nim"
   check fileExists(nimPath)
   nimBinDir & $PathSep & codeTracerPathValue(tempRoot, includeClang = true)
+
+proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
+  let basePath = codeTracerPathValue(tempRoot, includeClang = true)
+  let binDir = tempRoot / "codetracer-tool-bin"
+  let localNim = codeTracerRoot / "non-nix-build" / "deps" / "nim" /
+    "bin" / "nim"
+  let hostNim = findExe("nim")
+  check fileExists(localNim)
+  check hostNim.len > 0
+  writeExecutable(binDir / "nim",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"js\" ]; then\n" &
+    "  exec " & q(hostNim) & " \"$@\"\n" &
+    "fi\n" &
+    "exec " & q(localNim) & " \"$@\"\n")
+  basePath
 
 proc nixStorePaths(output: string): seq[string] =
   for line in output.splitLines:
@@ -505,6 +523,8 @@ when defined(macosx):
       check not projectText.contains("buildAction(")
       check not projectText.contains("gcc.compile")
       check not projectText.contains("nim_js")
+      check not projectText.contains("nimJs")
+      check not projectText.contains("\"nim-js >=2\"")
       check not projectText.contains("args = @[")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
@@ -889,9 +909,6 @@ when defined(macosx):
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
         codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
-      check requireSuccess(shellCommand(["sh", "-c", "command -v nim-js"],
-        [("PATH", pathValue)]), repoRoot).strip() ==
-        tempRoot / "codetracer-tool-bin" / "nim-js"
       var nativeEnv: seq[(string, string)] = @[]
       for item in monitorEnv:
         nativeEnv.add(item)
@@ -985,9 +1002,6 @@ when defined(macosx):
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
         codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
-      check requireSuccess(shellCommand(["sh", "-c", "command -v nim-js"],
-        [("PATH", pathValue)]), repoRoot).strip() ==
-        tempRoot / "codetracer-tool-bin" / "nim-js"
       var nativeEnv: seq[(string, string)] = @[]
       for item in monitorEnv:
         nativeEnv.add(item)
@@ -1081,13 +1095,9 @@ when defined(macosx):
         ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      let pathValue = codeTracerHybridNimPathValue(codeTracerRoot, tempRoot)
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
-        [("PATH", pathValue)]), repoRoot).strip() ==
-        codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
-      check requireSuccess(shellCommand(["sh", "-c", "command -v nim-js"],
-        [("PATH", pathValue)]), repoRoot).strip() ==
-        tempRoot / "codetracer-tool-bin" / "nim-js"
+        [("PATH", pathValue)]), repoRoot).strip().len > 0
       var nativeEnv: seq[(string, string)] = @[]
       for item in monitorEnv:
         nativeEnv.add(item)
@@ -1167,14 +1177,8 @@ when defined(macosx):
 
       let aggregateIdentity =
         readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check aggregateIdentity.profiles.anyIt(
-        it.executableName == "nim" and
-        it.resolvedExecutablePath ==
-          codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim")
-      check aggregateIdentity.profiles.anyIt(
-        it.executableName == "nim-js" and
-        it.resolvedExecutablePath ==
-          tempRoot / "codetracer-tool-bin" / "nim-js")
+      check aggregateIdentity.profiles.anyIt(it.executableName == "nim")
+      check not aggregateIdentity.profiles.anyIt(it.executableName == "nim-js")
 
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
@@ -1719,18 +1723,14 @@ when defined(macosx):
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == 5
+      check identity.profiles.len == 4
       check identity.profiles.allIt(it.installMethod == "path")
       check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
       check identity.profiles.anyIt(it.executableName == "nim")
-      check identity.profiles.anyIt(it.executableName == "nim-js")
       check identity.profiles.anyIt(it.executableName == "node")
       check identity.profiles.anyIt(it.executableName == "gcc")
       check identity.profiles.anyIt(it.executableName == "sh")
-      check identity.profiles.anyIt(
-        it.executableName == "nim-js" and
-        it.resolvedExecutablePath ==
-          tempRoot / "codetracer-tool-bin" / "nim-js")
+      check not identity.profiles.anyIt(it.executableName == "nim-js")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       assertAction(firstReport, "generate-config-header", "asSucceeded", true)

@@ -466,15 +466,15 @@ proc writeM46ImportedPackageProject(path: string) =
     "import repro_project_dsl\n\n" &
     "defineCliInterface m46Tool, \"m46-tool\":\n" &
     "  call:\n" &
-    "    pos args, seq[string], position = 0, required = false\n" &
+    "    pos args is seq[string], position = 0, required = false\n" &
     "  subcmd \"produce\":\n" &
-    "    flag input, string, required = true, role = input\n" &
-    "    flag output, string, required = true, role = output\n" &
-    "    flag marker, string, required = true\n" &
+    "    flag input is string, required = true, role = input\n" &
+    "    flag output is string, required = true, role = output\n" &
+    "    flag marker is string, required = true\n" &
     "  subcmd \"consume\":\n" &
-    "    flag input, string, required = true, role = input\n" &
-    "    flag output, string, required = true, role = output\n" &
-    "    flag marker, string, required = true\n")
+    "    flag input is string, required = true, role = input\n" &
+    "    flag output is string, required = true, role = output\n" &
+    "    flag marker is string, required = true\n")
   writeFile(path,
     "import repro_project_dsl\n\n" &
     "package m46Project:\n" &
@@ -545,13 +545,15 @@ proc writeM47TypedCommandProject(path: string) =
   writeFile(projectRoot / "reprobuild" / "packages" / "m47_gcc.nim",
     "import repro_project_dsl\n\n" &
     "defineCliInterface m47Gcc, \"m47-gcc\":\n" &
+    "  template commonCompileFlags() =\n" &
+    "    boolFlag pic is bool, alias = \"-fPIC\"\n" &
+    "    boolFlag debug3 is bool, alias = \"-g3\"\n" &
+    "    boolFlag compileOnly is bool, alias = \"-c\"\n" &
     "  call:\n" &
-    "    boolFlag pic, alias = \"-fPIC\"\n" &
-    "    boolFlag debug3, alias = \"-g3\"\n" &
-    "    boolFlag compileOnly, alias = \"-c\"\n" &
-    "    flag includes, seq[string], alias = \"-include\", role = input, repeated = true\n" &
-    "    flag output, string, alias = \"-o\", role = output, required = true\n" &
-    "    pos source, string, role = input, position = 0\n")
+    "    commonCompileFlags()\n" &
+    "    flag includes is seq[string], alias = \"-include\", role = input, repeated = true\n" &
+    "    flag output is string, alias = \"-o\", role = output, required = true\n" &
+    "    pos source is string, role = input, position = 0\n")
   writeFile(path,
     "import repro_project_dsl\n\n" &
     "package m47Project:\n" &

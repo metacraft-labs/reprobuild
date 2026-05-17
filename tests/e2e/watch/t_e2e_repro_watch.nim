@@ -349,22 +349,28 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let sourcePath = binDir / "gcc-proxy.c"
   let gccPath = binDir / "gcc"
   let clangPath = binDir / "clang"
-  let nimJsPath = binDir / "nim-js"
-  let hostNim = findExe("nim")
-  check hostNim.len > 0
   writeFile(sourcePath, GccProxySource)
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
-  if not fileExists(nimJsPath):
-    discard requireSuccess(shellCommand(["ln", "-s", hostNim, nimJsPath]))
   if includeClang:
     discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
   binDir & $PathSep & getEnv("PATH")
 
-proc codeTracerNativePathValue(codeTracerRoot, tempRoot: string): string =
-  let nimBinDir = codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin"
-  let nimPath = nimBinDir / "nim"
-  check fileExists(nimPath)
-  nimBinDir & $PathSep & codeTracerPathValue(tempRoot, includeClang = true)
+proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
+  let basePath = codeTracerPathValue(tempRoot, includeClang = true)
+  let binDir = tempRoot / "codetracer-tool-bin"
+  let localNim = codeTracerRoot / "non-nix-build" / "deps" / "nim" /
+    "bin" / "nim"
+  let hostNim = findExe("nim")
+  check fileExists(localNim)
+  check hostNim.len > 0
+  writeExecutable(binDir / "nim",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"js\" ]; then\n" &
+    "  exec " & q(hostNim) & " \"$@\"\n" &
+    "fi\n" &
+    "exec " & q(localNim) & " \"$@\"\n")
+  basePath
 
 proc nixStorePaths(output: string): seq[string] =
   for line in output.splitLines:
@@ -1036,13 +1042,9 @@ when defined(macosx):
       let oldText = "CodeTracer - the user-friendly time-travelling debugger"
       let newText = "CodeTracer - the user-friendly reprobuild m44 debugger"
       check readFile(nativeInput).contains(oldText)
-      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      let pathValue = codeTracerHybridNimPathValue(codeTracerRoot, tempRoot)
       check requireSuccess("PATH=" & q(pathValue) & " " &
-        shellCommand(["sh", "-c", "command -v nim"]), repoRoot).strip() ==
-        codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
-      check requireSuccess("PATH=" & q(pathValue) & " " &
-        shellCommand(["sh", "-c", "command -v nim-js"]), repoRoot).strip() ==
-        tempRoot / "codetracer-tool-bin" / "nim-js"
+        shellCommand(["sh", "-c", "command -v nim"]), repoRoot).strip().len > 0
       let log = runWatchAndReplace(reproBin, selectedTarget, repoRoot,
         pathValue, tempRoot / "codetracer-aggregate-watch.log", nativeInput,
         oldText, newText, env = nativeEnv)

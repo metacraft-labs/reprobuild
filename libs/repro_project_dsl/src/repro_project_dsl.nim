@@ -668,16 +668,35 @@ proc namedValue(node: NimNode; name: string): NimNode =
   else:
     nil
 
+proc parseIsTypedHead(node: NimNode;
+                      context: string): tuple[matched: bool, name: string,
+                                               nimType: string] =
+  if node.kind == nnkInfix and node.len == 3 and node[0].eqIdent("is"):
+    result.matched = true
+    result.name = identText(node[1])
+    result.nimType = node[2].repr
+  elif node.kind == nnkInfix:
+    error(context & " uses an unsupported infix form: " & node.repr, node)
+
 proc parseParam(node: NimNode): CliParamDef =
   let kindName = calleeName(node).normalize
   let loc = lineFile(node)
   if kindName == "pos":
+    if node.len < 2:
+      error("pos requires a parameter name", node)
+    let head = parseIsTypedHead(node[1], "pos parameter")
     result.kind = cpkPositional
-    result.name = identText(node[1])
-    result.nimType = node[2].repr
+    result.name = if head.matched: head.name else: identText(node[1])
+    if head.matched:
+      result.nimType = head.nimType
+    else:
+      if node.len < 3:
+        error("pos requires a type", node)
+      result.nimType = node[2].repr
     result.position = 0
     result.required = true
-    for i in 3 ..< node.len:
+    let optionStart = if head.matched: 2 else: 3
+    for i in optionStart ..< node.len:
       let value = namedValue(node[i], "position")
       if not value.isNil:
         result.position = intLiteral(value, result.position)
@@ -688,12 +707,21 @@ proc parseParam(node: NimNode): CliParamDef =
       if not repeatedValue.isNil:
         result.repeated = boolLiteral(repeatedValue, result.repeated)
   elif kindName == "flag":
+    if node.len < 2:
+      error("flag requires a parameter name", node)
+    let head = parseIsTypedHead(node[1], "flag parameter")
     result.kind = cpkFlag
-    result.name = identText(node[1])
-    result.nimType = node[2].repr
+    result.name = if head.matched: head.name else: identText(node[1])
+    if head.matched:
+      result.nimType = head.nimType
+    else:
+      if node.len < 3:
+        error("flag requires a type", node)
+      result.nimType = node[2].repr
     result.position = 0
     result.required = false
-    for i in 3 ..< node.len:
+    let optionStart = if head.matched: 2 else: 3
+    for i in optionStart ..< node.len:
       let aliasValue = namedValue(node[i], "alias")
       if not aliasValue.isNil:
         result.alias = stringLiteral(aliasValue)
@@ -1040,23 +1068,35 @@ proc parseInterfaceParam(node: NimNode): CliParamDef =
   let kindName = calleeName(node).normalize
   if node.len < 2:
     error("CLI parameter requires a name", node)
-  result.name = identText(node[1])
+  let head = parseIsTypedHead(node[1], "CLI parameter")
+  result.name = if head.matched: head.name else: identText(node[1])
+  var optionStart = 2
   case kindName
   of "pos":
-    if node.len < 3:
-      error("pos requires a type", node)
     result.kind = cpkPositional
-    result.nimType = node[2].repr
+    if head.matched:
+      result.nimType = head.nimType
+    else:
+      if node.len < 3:
+        error("pos requires a type", node)
+      result.nimType = node[2].repr
+      optionStart = 3
     result.required = true
   of "flag":
-    if node.len < 3:
-      error("flag requires a type", node)
     result.kind = cpkFlag
-    result.nimType = node[2].repr
+    if head.matched:
+      result.nimType = head.nimType
+    else:
+      if node.len < 3:
+        error("flag requires a type", node)
+      result.nimType = node[2].repr
+      optionStart = 3
     result.required = false
   of "boolflag":
     result.kind = cpkFlag
-    result.nimType = "bool"
+    result.nimType = if head.matched: head.nimType else: "bool"
+    if result.nimType.normalize != "bool":
+      error("boolFlag requires bool type", node[1])
     result.required = false
   else:
     error("CLI command bodies accept pos/flag/boolFlag statements", node)
@@ -1064,9 +1104,7 @@ proc parseInterfaceParam(node: NimNode): CliParamDef =
   let loc = lineFile(node)
   result.sourceFile = loc.file
   result.sourceLine = loc.line
-  for i in 2 ..< node.len:
-    if kindName in ["pos", "flag"] and i == 2:
-      continue
+  for i in optionStart ..< node.len:
     let aliasValue = namedValue(node[i], "alias")
     if not aliasValue.isNil:
       result.alias = stringLiteral(aliasValue)
@@ -1086,7 +1124,37 @@ proc parseInterfaceParam(node: NimNode): CliParamDef =
     if not repeatedValue.isNil:
       result.repeated = boolLiteral(repeatedValue, result.repeated)
 
-proc parseInterfaceCommand(toolId: string; node: NimNode): CliCommandDef =
+proc collectParamGroup(node: NimNode): tuple[name: string,
+                                            statements: seq[NimNode]] =
+  if node.kind != nnkTemplateDef:
+    error("CLI parameter group must be a template definition", node)
+  result.name = identText(node[0]).normalize
+  if node[3].kind != nnkFormalParams or node[3].len != 1:
+    error("CLI parameter group templates must not accept parameters", node[3])
+  let body = node[^1]
+  if body.kind != nnkStmtList:
+    error("CLI parameter group template must contain a statement body", body)
+  for stmt in body:
+    result.statements.add(stmt)
+
+proc expandInterfaceParamStmt(stmt: NimNode;
+                              paramGroups: Table[string, seq[NimNode]];
+                              stack: var seq[string]): seq[NimNode] =
+  let groupName = calleeName(stmt).normalize
+  if groupName.len > 0 and paramGroups.hasKey(groupName) and stmt.len == 1:
+    if stack.find(groupName) >= 0:
+      error("recursive CLI parameter group: " & groupName, stmt)
+    stack.add(groupName)
+    for groupedStmt in paramGroups[groupName]:
+      for expandedStmt in expandInterfaceParamStmt(groupedStmt, paramGroups,
+          stack):
+        result.add(expandedStmt)
+    discard stack.pop()
+  else:
+    result.add(stmt)
+
+proc parseInterfaceCommand(toolId: string; node: NimNode;
+                           paramGroups: Table[string, seq[NimNode]]): CliCommandDef =
   let loc = lineFile(node)
   let head = calleeName(node).normalize
   case head
@@ -1104,11 +1172,14 @@ proc parseInterfaceCommand(toolId: string; node: NimNode): CliCommandDef =
   result.sourceLine = loc.line
   let body = node[node.len - 1]
   for stmt in body:
-    let name = calleeName(stmt).normalize
-    if name in ["pos", "flag", "boolflag"]:
-      result.params.add(parseInterfaceParam(stmt))
-    else:
-      error("CLI command bodies accept pos/flag/boolFlag statements", stmt)
+    var stack: seq[string] = @[]
+    for expandedStmt in expandInterfaceParamStmt(stmt, paramGroups, stack):
+      let name = calleeName(expandedStmt).normalize
+      if name in ["pos", "flag", "boolflag"]:
+        result.params.add(parseInterfaceParam(expandedStmt))
+      else:
+        error("CLI command bodies accept pos/flag/boolFlag statements",
+          expandedStmt)
 
 proc cliArgHelperName(param: CliParamDef): string =
   case param.role
@@ -1199,12 +1270,22 @@ macro defineCliInterface*(toolSymbol: untyped;
   if toolSymbol.kind notin {nnkIdent, nnkSym}:
     error("defineCliInterface expects a Nim identifier for the tool symbol",
       toolSymbol)
+  var paramGroups: Table[string, seq[NimNode]]
+  for stmt in body:
+    if stmt.kind == nnkTemplateDef:
+      let group = collectParamGroup(stmt)
+      paramGroups[group.name] = group.statements
   var commands: seq[CliCommandDef] = @[]
   for stmt in body:
     let head = calleeName(stmt).normalize
     case head
     of "call", "subcmd":
-      commands.add(parseInterfaceCommand(toolId, stmt))
+      commands.add(parseInterfaceCommand(toolId, stmt, paramGroups))
+    of "":
+      if stmt.kind == nnkTemplateDef:
+        discard
+      else:
+        error("CLI interface accepts call: or subcmd \"name\": sections", stmt)
     of "policy":
       discard
     else:
