@@ -297,14 +297,102 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
 
-proc codeTracerPathValue(tempRoot: string): string =
+proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
+  createDir(projectRoot / "test-programs" / "c_sudoku_solver")
+  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
+  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
+  copyTree(codeTracerRoot / "src" / "frontend",
+    projectRoot / "src" / "frontend")
+  copyTree(codeTracerRoot / "src" / "common",
+    projectRoot / "src" / "common")
+  copyTree(codeTracerRoot / "src" / "lsp",
+    projectRoot / "src" / "lsp")
+  copyTree(codeTracerRoot / "src" / "ct", projectRoot / "src" / "ct")
+  copyTree(codeTracerRoot / "src" / "db_connector",
+    projectRoot / "src" / "db_connector")
+  copyTree(codeTracerRoot / "src" / "shell-integrations",
+    projectRoot / "src" / "shell-integrations")
+  createDir(projectRoot / "src" / "config")
+  copyFile(codeTracerRoot / "src" / "config" / "default_layout.json",
+    projectRoot / "src" / "config" / "default_layout.json")
+  copyFile(codeTracerRoot / "src" / "config" / "default_config.yaml",
+    projectRoot / "src" / "config" / "default_config.yaml")
+  createDir(projectRoot / "src" / "public" / "resources")
+  createDir(projectRoot / "src" / "public" / "third_party")
+  copyFile(codeTracerRoot / "src" / "public" / "Tupfile",
+    projectRoot / "src" / "public" / "Tupfile")
+  copyFile(codeTracerRoot / "src" / "public" / "resources" / "calltrace.js",
+    projectRoot / "src" / "public" / "resources" / "calltrace.js")
+  copyFile(codeTracerRoot / "src" / "public" / "third_party" / "io.js",
+    projectRoot / "src" / "public" / "third_party" / "io.js")
+  createDir(projectRoot / "src" / "public" / "third_party" /
+    "monaco-themes" / "themes" / "customThemes" / "json")
+  for theme in ["codetracerWhite.json", "codetracerDark.json"]:
+    copyFile(codeTracerRoot / "src" / "public" / "third_party" /
+      "monaco-themes" / "themes" / "customThemes" / "json" / theme,
+      projectRoot / "src" / "public" / "third_party" / "monaco-themes" /
+      "themes" / "customThemes" / "json" / theme)
+  copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
+    projectRoot / "test-programs" / "c_sudoku_solver" / "main.c")
+  discard requireSuccess(shellCommand([
+    "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
+  ]))
+
+proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let binDir = tempRoot / "codetracer-tool-bin"
   createDir(binDir)
   let sourcePath = binDir / "gcc-proxy.c"
   let gccPath = binDir / "gcc"
+  let clangPath = binDir / "clang"
+  let nimJsPath = binDir / "nim-js"
+  let hostNim = findExe("nim")
+  check hostNim.len > 0
   writeFile(sourcePath, GccProxySource)
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
+  if not fileExists(nimJsPath):
+    discard requireSuccess(shellCommand(["ln", "-s", hostNim, nimJsPath]))
+  if includeClang:
+    discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
   binDir & $PathSep & getEnv("PATH")
+
+proc codeTracerNativePathValue(codeTracerRoot, tempRoot: string): string =
+  let nimBinDir = codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin"
+  let nimPath = nimBinDir / "nim"
+  check fileExists(nimPath)
+  nimBinDir & $PathSep & codeTracerPathValue(tempRoot, includeClang = true)
+
+proc nixStorePaths(output: string): seq[string] =
+  for line in output.splitLines:
+    let item = line.strip()
+    if item.startsWith("/nix/store/"):
+      result.add(item)
+
+proc nativeLibraryEnv(repoRoot: string): seq[(string, string)] =
+  let output = requireSuccess(shellCommand([
+    "nix", "build", "--no-link", "--print-out-paths",
+    "nixpkgs#openssl.out",
+    "nixpkgs#sqlite.out",
+    "nixpkgs#pcre.out",
+    "nixpkgs#libzip.out"
+  ]), repoRoot)
+  let storePaths = nixStorePaths(output)
+  check storePaths.len == 4
+
+  var libraryPaths: seq[string] = @[]
+  var includePaths: seq[string] = @[]
+  for storePath in storePaths:
+    libraryPaths.add(storePath / "lib")
+    includePaths.add(storePath / "include")
+  if getEnv("LIBRARY_PATH").len > 0:
+    libraryPaths.add(getEnv("LIBRARY_PATH"))
+  if getEnv("C_INCLUDE_PATH").len > 0:
+    includePaths.add(getEnv("C_INCLUDE_PATH"))
+
+  result = @[
+    ("LIBRARY_PATH", libraryPaths.join($PathSep)),
+    ("C_INCLUDE_PATH", includePaths.join($PathSep))
+  ]
 
 proc nonEmptyLines(path: string): seq[string] =
   if not fileExists(path):
@@ -400,6 +488,14 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check stamp.contains("subwindow.html")
   check stamp.contains("src/helpers.js")
 
+proc checkConfigOutputs(projectRoot: string) =
+  check fileExists(projectRoot / "config" / "default_layout.json")
+  check fileExists(projectRoot / "config" / "default_config.yaml")
+  check readFile(projectRoot / "src" / "config" / "default_layout.json") ==
+    readFile(projectRoot / "config" / "default_layout.json")
+  check readFile(projectRoot / "src" / "config" / "default_config.yaml") ==
+    readFile(projectRoot / "config" / "default_config.yaml")
+
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "repro"
   discard requireSuccess(shellCommand([
@@ -493,6 +589,48 @@ proc runWatchAndEdit(reproBin, target, repoRoot, pathValue, logPath, editPath,
     "  exit 124\n" &
     "fi\n" &
     "printf '%s' " & q(editText) & " >> " & q(editPath) & "\n" &
+    "wait \"$pid\"\n"
+  let res = runShell("sh -c " & q(script), repoRoot)
+  let log =
+    if fileExists(logPath):
+      readFile(logPath)
+    else:
+      ""
+  if res.code != 0:
+    checkpoint(res.output)
+    checkpoint(log)
+  check res.code == 0
+  log
+
+proc runWatchAndReplace(reproBin, target, repoRoot, pathValue, logPath,
+                        editPath, oldText, newText: string; debounceMs = 50;
+                        env: openArray[(string, string)] = []): string =
+  var envLines = "export PATH=" & q(pathValue) & "\n"
+  for (name, value) in env:
+    envLines.add("export " & name & "=" & q(value) & "\n")
+  let script =
+    "set -eu\n" &
+    envLines &
+    shellCommand([reproBin, "watch", target, "--tool-provisioning=path",
+      "--max-cycles=2", "--debounce-ms=" & $debounceMs]) &
+      " > " & q(logPath) & " 2>&1 &\n" &
+    "pid=$!\n" &
+    "ready=0\n" &
+    "for i in $(seq 1 600); do\n" &
+    "  if grep -q 'repro watch: watching paths=' " & q(logPath) &
+      "; then ready=1; break; fi\n" &
+    "  if ! kill -0 \"$pid\" 2>/dev/null; then wait \"$pid\"; exit $?; fi\n" &
+    "  sleep 0.05\n" &
+    "done\n" &
+    "if [ \"$ready\" != 1 ]; then\n" &
+    "  echo 'watch did not become ready' >> " & q(logPath) & "\n" &
+    "  kill \"$pid\" 2>/dev/null || true\n" &
+    "  wait \"$pid\" || true\n" &
+    "  exit 124\n" &
+    "fi\n" &
+    "RB_OLD=" & q(oldText) & " RB_NEW=" & q(newText) &
+      " perl -0pi -e 'BEGIN{$old=$ENV{RB_OLD};$new=$ENV{RB_NEW}} " &
+      "s/\\Q$old\\E/$new/g' " & q(editPath) & "\n" &
     "wait \"$pid\"\n"
   let res = runShell("sh -c " & q(script), repoRoot)
   let log =
@@ -759,6 +897,99 @@ when defined(macosx):
       assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
       assertPublicResourceActions(report, "asCacheHit", false)
       assertAction(report, "frontend", "asSucceeded", true)
+      check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
+      check reportAction(report, "generate-config-header").kind == JNull
+      check reportAction(report, "c-sudoku-object-tup").kind == JNull
+      check reportAction(report,
+        "c-sudoku-object-with-generated-header").kind == JNull
+
+    test "CodeTracer copied checkout watch rebuilds selected app aggregate":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      check fileExists(realProjectFile)
+
+      let tempRoot = createTempDir("repro-m44-codetracer-aggregate-watch", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
+      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+      let monitorEnv = [
+        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+      ]
+      var nativeEnv: seq[(string, string)] = @[]
+      for item in monitorEnv:
+        nativeEnv.add(item)
+      for item in nativeLibraryEnv(repoRoot):
+        nativeEnv.add(item)
+
+      let projectRoot = tempRoot / "codetracer"
+      createDir(projectRoot)
+      copyAggregateCodeTracerProject(codeTracerRoot, projectRoot)
+      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+
+      let selectedTarget = projectRoot & "#codetracer"
+      let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
+      let oldText = "CodeTracer - the user-friendly time-travelling debugger"
+      let newText = "CodeTracer - the user-friendly reprobuild m44 debugger"
+      check readFile(nativeInput).contains(oldText)
+      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      check requireSuccess("PATH=" & q(pathValue) & " " &
+        shellCommand(["sh", "-c", "command -v nim"]), repoRoot).strip() ==
+        codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
+      check requireSuccess("PATH=" & q(pathValue) & " " &
+        shellCommand(["sh", "-c", "command -v nim-js"]), repoRoot).strip() ==
+        tempRoot / "codetracer-tool-bin" / "nim-js"
+      let log = runWatchAndReplace(reproBin, selectedTarget, repoRoot,
+        pathValue, tempRoot / "codetracer-aggregate-watch.log", nativeInput,
+        oldText, newText, env = nativeEnv)
+      check log.contains("repro watch: target=" & selectedTarget)
+      check log.contains("repro watch: event seen path=")
+      check log.contains("repro watch: cycle 2 start rebuild")
+      check log.contains("repro watch: max cycles reached")
+      check log.contains("selectedTarget: codetracer")
+      check log.contains("scheduler: actions=22")
+      check not log.contains("action: nim-js-ipc-registry-test")
+      check not log.contains("action: generate-config-header")
+      check not log.contains("action: c-sudoku-object-tup")
+      check not log.contains("action: c-sudoku-object-with-generated-header")
+      checkFrontendBundleOutputs(projectRoot)
+      checkConfigOutputs(projectRoot)
+      check fileExists(projectRoot / "src" / "bin" / "ct")
+      check fileExists(projectRoot / "src" / "bin" / "db-backend-record")
+      check fileExists(projectRoot / "build" / "reprobuild" /
+        "codetracer.stamp")
+
+      let report = parseFile(projectRoot / ".repro" / "build" /
+        "reprobuild" / "build-report.json")
+      check report{"actions"}.len == 22
+      assertAction(report, "frontend-ui-js", "asCacheHit", false)
+      assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
+      assertAction(report, "frontend-index-js", "asCacheHit", false)
+      assertAction(report, "frontend-src-index-js", "asCacheHit", false)
+      assertAction(report, "frontend-server-index-js", "asCacheHit", false)
+      assertAction(report, "frontend-subwindow-js", "asCacheHit", false)
+      assertAction(report, "frontend-src-subwindow-js", "asCacheHit", false)
+      assertAction(report, "frontend-index-html", "asCacheHit", false)
+      assertAction(report, "frontend-subwindow-html", "asCacheHit", false)
+      assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
+      assertPublicResourceActions(report, "asCacheHit", false)
+      assertAction(report, "frontend", "asCacheHit", false)
+      assertAction(report, "config-default-layout-json", "asCacheHit", false)
+      assertAction(report, "config-default-config-yaml", "asCacheHit", false)
+      assertAction(report, "db-backend-record", "asCacheHit", false)
+      assertAction(report, "ct", "asSucceeded", true)
+      assertAction(report, "codetracer", "asSucceeded", true)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull

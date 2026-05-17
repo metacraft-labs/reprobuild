@@ -213,14 +213,61 @@ proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
 
+proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
+  createDir(projectRoot / "test-programs" / "c_sudoku_solver")
+  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
+  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
+  copyTree(codeTracerRoot / "src" / "frontend",
+    projectRoot / "src" / "frontend")
+  copyTree(codeTracerRoot / "src" / "common",
+    projectRoot / "src" / "common")
+  copyTree(codeTracerRoot / "src" / "lsp",
+    projectRoot / "src" / "lsp")
+  copyTree(codeTracerRoot / "src" / "ct", projectRoot / "src" / "ct")
+  copyTree(codeTracerRoot / "src" / "db_connector",
+    projectRoot / "src" / "db_connector")
+  copyTree(codeTracerRoot / "src" / "shell-integrations",
+    projectRoot / "src" / "shell-integrations")
+  createDir(projectRoot / "src" / "config")
+  copyFile(codeTracerRoot / "src" / "config" / "default_layout.json",
+    projectRoot / "src" / "config" / "default_layout.json")
+  copyFile(codeTracerRoot / "src" / "config" / "default_config.yaml",
+    projectRoot / "src" / "config" / "default_config.yaml")
+  createDir(projectRoot / "src" / "public" / "resources")
+  createDir(projectRoot / "src" / "public" / "third_party")
+  copyFile(codeTracerRoot / "src" / "public" / "Tupfile",
+    projectRoot / "src" / "public" / "Tupfile")
+  copyFile(codeTracerRoot / "src" / "public" / "resources" / "calltrace.js",
+    projectRoot / "src" / "public" / "resources" / "calltrace.js")
+  copyFile(codeTracerRoot / "src" / "public" / "third_party" / "io.js",
+    projectRoot / "src" / "public" / "third_party" / "io.js")
+  createDir(projectRoot / "src" / "public" / "third_party" /
+    "monaco-themes" / "themes" / "customThemes" / "json")
+  for theme in ["codetracerWhite.json", "codetracerDark.json"]:
+    copyFile(codeTracerRoot / "src" / "public" / "third_party" /
+      "monaco-themes" / "themes" / "customThemes" / "json" / theme,
+      projectRoot / "src" / "public" / "third_party" / "monaco-themes" /
+      "themes" / "customThemes" / "json" / theme)
+  copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
+    projectRoot / "test-programs" / "c_sudoku_solver" / "main.c")
+  discard requireSuccess(shellCommand([
+    "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
+  ]))
+
 proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let binDir = tempRoot / "codetracer-tool-bin"
   createDir(binDir)
   let sourcePath = binDir / "gcc-proxy.c"
   let gccPath = binDir / "gcc"
   let clangPath = binDir / "clang"
+  let nimJsPath = binDir / "nim-js"
+  let hostNim = findExe("nim")
+  check hostNim.len > 0
   writeFile(sourcePath, GccProxySource)
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
+  if not fileExists(nimJsPath):
+    discard requireSuccess(shellCommand(["ln", "-s", hostNim, nimJsPath]))
   if includeClang:
     discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
   binDir & $PathSep & getEnv("PATH")
@@ -408,6 +455,14 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check stamp.contains("index.html")
   check stamp.contains("subwindow.html")
   check stamp.contains("src/helpers.js")
+
+proc checkConfigOutputs(projectRoot: string) =
+  check fileExists(projectRoot / "config" / "default_layout.json")
+  check fileExists(projectRoot / "config" / "default_config.yaml")
+  check readFile(projectRoot / "src" / "config" / "default_layout.json") ==
+    readFile(projectRoot / "config" / "default_layout.json")
+  check readFile(projectRoot / "src" / "config" / "default_config.yaml") ==
+    readFile(projectRoot / "config" / "default_config.yaml")
 
 when defined(macosx):
   suite "e2e_codetracer_in_place_project_file":
@@ -819,6 +874,9 @@ when defined(macosx):
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
         codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
+      check requireSuccess(shellCommand(["sh", "-c", "command -v nim-js"],
+        [("PATH", pathValue)]), repoRoot).strip() ==
+        tempRoot / "codetracer-tool-bin" / "nim-js"
       var nativeEnv: seq[(string, string)] = @[]
       for item in monitorEnv:
         nativeEnv.add(item)
@@ -912,6 +970,9 @@ when defined(macosx):
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
         codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
+      check requireSuccess(shellCommand(["sh", "-c", "command -v nim-js"],
+        [("PATH", pathValue)]), repoRoot).strip() ==
+        tempRoot / "codetracer-tool-bin" / "nim-js"
       var nativeEnv: seq[(string, string)] = @[]
       for item in monitorEnv:
         nativeEnv.add(item)
@@ -974,6 +1035,202 @@ when defined(macosx):
       check not changed.contains("action: c-sudoku-object-tup")
       let changedReport = parseFile(valueAfter(changed, "buildReport:"))
       assertAction(changedReport, "ct", "asSucceeded", true)
+
+    test "selected codetracer aggregate builds implemented app slice":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      check fileExists(realProjectFile)
+
+      let tempRoot = createTempDir("repro-m44-codetracer-aggregate", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
+
+      let projectRoot = tempRoot / "codetracer"
+      createDir(projectRoot)
+      copyAggregateCodeTracerProject(codeTracerRoot, projectRoot)
+      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+
+      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+      let monitorEnv = [
+        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+      ]
+      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
+        [("PATH", pathValue)]), repoRoot).strip() ==
+        codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
+      check requireSuccess(shellCommand(["sh", "-c", "command -v nim-js"],
+        [("PATH", pathValue)]), repoRoot).strip() ==
+        tempRoot / "codetracer-tool-bin" / "nim-js"
+      var nativeEnv: seq[(string, string)] = @[]
+      for item in monitorEnv:
+        nativeEnv.add(item)
+      for item in nativeLibraryEnv(repoRoot):
+        nativeEnv.add(item)
+
+      let selectedTarget = projectRoot & "#codetracer"
+      let first = build(reproBin, selectedTarget, repoRoot, pathValue,
+        nativeEnv)
+      check first.contains("selectedTarget: codetracer")
+      check first.contains("scheduler: actions=22")
+      check first.contains("action: frontend status=asSucceeded launched=true")
+      check first.contains("action: ct status=asSucceeded launched=true")
+      check first.contains(
+        "action: db-backend-record status=asSucceeded launched=true")
+      check first.contains(
+        "action: config-default-layout-json status=asSucceeded launched=true")
+      check first.contains(
+        "action: config-default-config-yaml status=asSucceeded launched=true")
+      check first.contains(
+        "action: codetracer status=asSucceeded launched=true")
+      check not first.contains("action: nim-js-ipc-registry-test")
+      check not first.contains("action: generate-config-header")
+      check not first.contains("action: c-sudoku-object-tup")
+      check not first.contains("action: c-sudoku-object-with-generated-header")
+      checkFrontendBundleOutputs(projectRoot)
+      checkPublicResourceOutputs(projectRoot)
+      checkConfigOutputs(projectRoot)
+      check fileExists(projectRoot / "src" / "bin" / "ct")
+      check fileExists(projectRoot / "src" / "bin" / "db-backend-record")
+      check fileExists(projectRoot / "build" / "reprobuild" /
+        "codetracer.stamp")
+      let appStamp = readFile(projectRoot / "build" / "reprobuild" /
+        "codetracer.stamp")
+      check appStamp.contains("CodeTracer selected app aggregate")
+      check appStamp.contains("build/reprobuild/frontend.stamp")
+      check appStamp.contains("src/bin/ct")
+      check appStamp.contains("src/bin/db-backend-record")
+      check appStamp.contains("config/default_layout.json")
+      check appStamp.contains("config/default_config.yaml")
+
+      let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      check firstReport{"actions"}.len == 22
+      assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-src-index-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-server-index-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-subwindow-js", "asSucceeded", true)
+      assertAction(firstReport, "frontend-src-subwindow-js", "asSucceeded",
+        true)
+      assertAction(firstReport, "frontend-index-html", "asSucceeded", true)
+      assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
+      assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
+      assertPublicResourceActions(firstReport, "asSucceeded", true)
+      assertAction(firstReport, "frontend", "asSucceeded", true)
+      assertAction(firstReport, "config-default-layout-json", "asSucceeded",
+        true)
+      assertAction(firstReport, "config-default-config-yaml", "asSucceeded",
+        true)
+      assertAction(firstReport, "db-backend-record", "asSucceeded", true)
+      assertAction(firstReport, "ct", "asSucceeded", true)
+      assertAction(firstReport, "codetracer", "asSucceeded", true)
+      check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
+      check reportAction(firstReport, "generate-config-header").kind == JNull
+      check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
+      check reportAction(firstReport,
+        "c-sudoku-object-with-generated-header").kind == JNull
+      check reportAction(firstReport, "ct"){"dependencyPolicyKind"}.getStr() ==
+        "dgAutomaticMonitor"
+      check hasMonitorEvidence(reportAction(firstReport, "ct"))
+      check monitorEvidenceContains(reportAction(firstReport, "ct"),
+        "src/ct/codetracerconf.nim")
+      check declaredEvidenceContains(reportAction(firstReport, "ct"),
+        "src/ct/codetracer.nim")
+
+      let aggregateIdentity =
+        readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
+      check aggregateIdentity.profiles.anyIt(
+        it.executableName == "nim" and
+        it.resolvedExecutablePath ==
+          codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim")
+      check aggregateIdentity.profiles.anyIt(
+        it.executableName == "nim-js" and
+        it.resolvedExecutablePath ==
+          tempRoot / "codetracer-tool-bin" / "nim-js")
+
+      let second = build(reproBin, selectedTarget, repoRoot, pathValue,
+        nativeEnv)
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      check secondReport{"actions"}.len == 22
+      assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-public-ui-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-index-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-src-index-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-server-index-js", "asCacheHit",
+        false)
+      assertAction(secondReport, "frontend-subwindow-js", "asCacheHit", false)
+      assertAction(secondReport, "frontend-src-subwindow-js", "asCacheHit",
+        false)
+      assertAction(secondReport, "frontend-index-html", "asCacheHit", false)
+      assertAction(secondReport, "frontend-subwindow-html", "asCacheHit",
+        false)
+      assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
+        false)
+      assertPublicResourceActions(secondReport, "asCacheHit", false)
+      assertAction(secondReport, "frontend", "asCacheHit", false)
+      assertAction(secondReport, "config-default-layout-json", "asCacheHit",
+        false)
+      assertAction(secondReport, "config-default-config-yaml", "asCacheHit",
+        false)
+      assertAction(secondReport, "db-backend-record", "asCacheHit", false)
+      assertAction(secondReport, "ct", "asCacheHit", false)
+      assertAction(secondReport, "codetracer", "asCacheHit", false)
+
+      let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
+      let nativeSource = readFile(nativeInput)
+      check nativeSource.contains(
+        "CodeTracer - the user-friendly time-travelling debugger")
+      writeFile(nativeInput, nativeSource.replace(
+        "CodeTracer - the user-friendly time-travelling debugger",
+        "CodeTracer - the user-friendly reprobuild m44 debugger"))
+      let changed = build(reproBin, selectedTarget, repoRoot, pathValue,
+        nativeEnv)
+      check not changed.contains("action: nim-js-ipc-registry-test")
+      check not changed.contains("action: c-sudoku-object-tup")
+      let changedReport = parseFile(valueAfter(changed, "buildReport:"))
+      assertAction(changedReport, "frontend-ui-js", "asCacheHit", false)
+      assertAction(changedReport, "frontend-public-ui-js", "asCacheHit", false)
+      assertAction(changedReport, "frontend-index-js", "asCacheHit", false)
+      assertAction(changedReport, "frontend-src-index-js", "asCacheHit",
+        false)
+      assertAction(changedReport, "frontend-server-index-js", "asCacheHit",
+        false)
+      assertAction(changedReport, "frontend-subwindow-js", "asCacheHit", false)
+      assertAction(changedReport, "frontend-src-subwindow-js", "asCacheHit",
+        false)
+      assertAction(changedReport, "frontend-index-html", "asCacheHit", false)
+      assertAction(changedReport, "frontend-subwindow-html", "asCacheHit",
+        false)
+      assertAction(changedReport, "frontend-src-helpers-js", "asCacheHit",
+        false)
+      assertPublicResourceActions(changedReport, "asCacheHit", false)
+      assertAction(changedReport, "frontend", "asCacheHit", false)
+      assertAction(changedReport, "config-default-layout-json", "asCacheHit",
+        false)
+      assertAction(changedReport, "config-default-config-yaml", "asCacheHit",
+        false)
+      assertAction(changedReport, "db-backend-record", "asCacheHit", false)
+      assertAction(changedReport, "ct", "asSucceeded", true)
+      assertAction(changedReport, "codetracer", "asSucceeded", true)
+      check reportAction(changedReport, "nim-js-ipc-registry-test").kind ==
+        JNull
+      check reportAction(changedReport, "generate-config-header").kind == JNull
+      check reportAction(changedReport, "c-sudoku-object-tup").kind == JNull
+      check reportAction(changedReport,
+        "c-sudoku-object-with-generated-header").kind == JNull
 
     test "selected frontend server index.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
@@ -1446,13 +1703,18 @@ when defined(macosx):
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == 4
+      check identity.profiles.len == 5
       check identity.profiles.allIt(it.installMethod == "path")
       check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
       check identity.profiles.anyIt(it.executableName == "nim")
+      check identity.profiles.anyIt(it.executableName == "nim-js")
       check identity.profiles.anyIt(it.executableName == "node")
       check identity.profiles.anyIt(it.executableName == "gcc")
       check identity.profiles.anyIt(it.executableName == "sh")
+      check identity.profiles.anyIt(
+        it.executableName == "nim-js" and
+        it.resolvedExecutablePath ==
+          tempRoot / "codetracer-tool-bin" / "nim-js")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       assertAction(firstReport, "generate-config-header", "asSucceeded", true)
