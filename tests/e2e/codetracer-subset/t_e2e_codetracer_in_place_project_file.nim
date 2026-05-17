@@ -207,6 +207,8 @@ proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
   copyTree(codeTracerRoot / "src" / "common", projectRoot / "src" / "common")
   copyTree(codeTracerRoot / "src" / "db_connector",
     projectRoot / "src" / "db_connector")
+  copyTree(codeTracerRoot / "src" / "shell-integrations",
+    projectRoot / "src" / "shell-integrations")
   discard requireSuccess(shellCommand([
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
@@ -874,6 +876,104 @@ when defined(macosx):
       check not changed.contains("action: c-sudoku-object-tup")
       let changedReport = parseFile(valueAfter(changed, "buildReport:"))
       assertAction(changedReport, "db-backend-record", "asSucceeded", true)
+
+    test "selected ct target builds real native Nim binary":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      check fileExists(realProjectFile)
+
+      let tempRoot = createTempDir("repro-m43-codetracer-ct", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = "build/test-bin/repro"
+
+      let projectRoot = tempRoot / "codetracer"
+      createDir(projectRoot)
+      copyNativeCodeTracerProject(codeTracerRoot, projectRoot)
+      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+
+      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+      let monitorEnv = [
+        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+      ]
+      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
+        [("PATH", pathValue)]), repoRoot).strip() ==
+        codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
+      var nativeEnv: seq[(string, string)] = @[]
+      for item in monitorEnv:
+        nativeEnv.add(item)
+      for item in nativeLibraryEnv(repoRoot):
+        nativeEnv.add(item)
+      let selectedTarget = projectRoot & "#ct"
+      let first = build(reproBin, selectedTarget, repoRoot, pathValue,
+        nativeEnv)
+      check first.contains("selectedTarget: ct")
+      check first.contains("scheduler: actions=1")
+      check first.contains("action: ct status=asSucceeded launched=true")
+      check not first.contains("action: db-backend-record")
+      check not first.contains("action: frontend-ui-js")
+      check not first.contains("action: frontend-index-js")
+      check not first.contains("action: frontend-server-index-js")
+      check not first.contains("action: nim-js-ipc-registry-test")
+      check not first.contains("action: c-sudoku-object-tup")
+      check not first.contains("action: c-sudoku-object-with-generated-header")
+      check fileExists(projectRoot / "src" / "bin" / "ct")
+      discard requireSuccess(shellCommand([
+        "sh", "-c", "test -x src/bin/ct"
+      ]), projectRoot)
+
+      let fileOutput = requireSuccess(shellCommand([
+        "file", "src/bin/ct"
+      ]), projectRoot)
+      check fileOutput.contains("Mach-O")
+      check fileOutput.contains("executable")
+
+      let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      check firstReport{"actions"}.len == 1
+      assertAction(firstReport, "ct", "asSucceeded", true)
+      let nativeAction = reportAction(firstReport, "ct")
+      check nativeAction{"dependencyPolicyKind"}.getStr() ==
+        "dgAutomaticMonitor"
+      check hasMonitorEvidence(nativeAction)
+      check declaredEvidenceContains(nativeAction, "src/ct/codetracer.nim")
+      check monitorEvidenceContains(nativeAction, "src/ct/codetracerconf.nim")
+      check reportAction(firstReport, "db-backend-record").kind == JNull
+      check reportAction(firstReport, "frontend-ui-js").kind == JNull
+      check reportAction(firstReport, "frontend-index-js").kind == JNull
+      check reportAction(firstReport, "frontend-server-index-js").kind == JNull
+      check reportAction(firstReport, "frontend").kind == JNull
+      check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
+
+      let second = build(reproBin, selectedTarget, repoRoot, pathValue,
+        nativeEnv)
+      check second.contains("action: ct status=asCacheHit launched=false")
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      assertAction(secondReport, "ct", "asCacheHit", false)
+
+      let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
+      writeFile(nativeInput, readFile(nativeInput) &
+        "\n# reprobuild m43 selected native edit\n")
+      let changed = build(reproBin, selectedTarget, repoRoot, pathValue,
+        nativeEnv)
+      check not changed.contains("action: db-backend-record")
+      check not changed.contains("action: frontend-ui-js")
+      check not changed.contains("action: frontend-index-js")
+      check not changed.contains("action: c-sudoku-object-tup")
+      let changedReport = parseFile(valueAfter(changed, "buildReport:"))
+      assertAction(changedReport, "ct", "asSucceeded", true)
 
     test "selected frontend server index.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
