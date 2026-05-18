@@ -650,13 +650,24 @@ proc valueAfter(output, prefix: string): string =
       return line[prefix.len .. ^1].strip()
   ""
 
+proc evidenceFile(evidenceRoot, actionId: string): string =
+  for kind, path in walkDir(evidenceRoot):
+    if kind == pcFile:
+      let parts = splitFile(path)
+      if parts.ext == ".rbar" and parts.name.startsWith(actionId & "-"):
+        return path
+  ""
+
 proc build(reproBin, target, repoRoot, pathValue: string;
-           env: openArray[(string, string)] = []): string =
+           env: openArray[(string, string)] = [];
+           extraArgs: openArray[string] = []): string =
   var entries = @[("PATH", pathValue)]
   for item in env:
     entries.add(item)
-  requireSuccess(shellCommand([reproBin, "build", target,
-    "--tool-provisioning=path"], entries), repoRoot)
+  var args = @[reproBin, "build", target, "--tool-provisioning=path"]
+  for arg in extraArgs:
+    args.add(arg)
+  requireSuccess(shellCommand(args, entries), repoRoot)
 
 proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
                          env: openArray[(string, string)] = []): string =
@@ -1063,6 +1074,34 @@ suite "e2e_local_reprobuild_project_build":
     check reportAction(report, "stamp"){"evidence"}{"declaredOutputs"}.
       getElems().anyIt(it.getStr() == "out/stamp.txt")
 
+  test "public CLI work root override isolates metadata by worktree":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m54-work-root", "")
+    defer: removeDir(tempRoot)
+
+    let reproBin = compilePublicReproTestBin(repoRoot)
+    let sharedWorkRoot = tempRoot / "shared-work"
+    let projectA = tempRoot / "a" / "project"
+    let projectB = tempRoot / "b" / "project"
+    writeM53BuiltinFsProject(projectA / "reprobuild.nim")
+    writeM53BuiltinFsProject(projectB / "reprobuild.nim")
+
+    let outputA = build(reproBin, projectA, repoRoot, getEnv("PATH"),
+      extraArgs = ["--work-root=" & sharedWorkRoot])
+    let outputB = build(reproBin, projectB, repoRoot, getEnv("PATH"),
+      extraArgs = ["--work-root=" & sharedWorkRoot])
+
+    let interfaceA = valueAfter(outputA, "interface:")
+    let interfaceB = valueAfter(outputB, "interface:")
+    check interfaceA.startsWith(sharedWorkRoot & DirSep)
+    check interfaceB.startsWith(sharedWorkRoot & DirSep)
+    check interfaceA != interfaceB
+    check interfaceA.parentDir != interfaceB.parentDir
+    check fileExists(interfaceA)
+    check fileExists(interfaceB)
+    check not dirExists(projectA / ".repro" / "build")
+    check not dirExists(projectB / ".repro" / "build")
+
   test "relative public CLI keeps RunQuota helper path stable across project cwd":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m35-relative-public-cli", "")
@@ -1326,7 +1365,8 @@ suite "e2e_local_reprobuild_project_build":
     let evidenceRoot = projectRoot / ".repro" / "build" / "reprobuild" /
       "build-engine-cache" / "dependency-evidence"
     for actionId in ["produce", "consume", "unrelated"]:
-      let evidencePath = evidenceRoot / (actionId & ".rbar")
+      let evidencePath = evidenceFile(evidenceRoot, actionId)
+      check evidencePath.len > 0
       check fileExists(evidencePath)
       check readFile(evidencePath)[0 .. 3] == "RBAR"
 

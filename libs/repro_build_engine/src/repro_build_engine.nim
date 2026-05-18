@@ -583,8 +583,13 @@ proc sanitizeActionId(value: string): string =
   if result.len == 0:
     result = "action"
 
+proc actionIdFileSuffix(value: string): string =
+  let hash = toHex(weakFingerprintFromText(value).bytes)
+  hash[0 .. 15]
+
 proc dependencyEvidencePath*(cacheRoot, actionId: string): string =
-  cacheRoot / "dependency-evidence" / (sanitizeActionId(actionId) & ".rbar")
+  cacheRoot / "dependency-evidence" /
+    (sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId) & ".rbar")
 
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
                      cacheRoot: string): tuple[action: BuildAction;

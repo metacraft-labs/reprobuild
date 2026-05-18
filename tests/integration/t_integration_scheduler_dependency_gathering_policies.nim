@@ -413,6 +413,16 @@ when isMainModule:
     quit runRunQuotaHelperCli(params[1 .. ^1])
 
 suite "integration_scheduler_dependency_gathering_policies":
+  test "dependency evidence paths include hash suffixes for sanitized id collisions":
+    let cacheRoot = "/tmp/repro-cache"
+    let first = dependencyEvidencePath(cacheRoot, "compile:main")
+    let second = dependencyEvidencePath(cacheRoot, "compile/main")
+    check first != second
+    check first.parentDir == cacheRoot / "dependency-evidence"
+    check second.parentDir == cacheRoot / "dependency-evidence"
+    check first.endsWith(".rbar")
+    check second.endsWith(".rbar")
+
   test "declared, recognized, and converted dependency evidence share cache invalidation":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m17-policy-basic", "")

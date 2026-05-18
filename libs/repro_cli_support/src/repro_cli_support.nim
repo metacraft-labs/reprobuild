@@ -21,9 +21,9 @@ proc renderUsage*(programName: string): string =
   if programName == "repro":
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix\n       " & programName &
-      " watch [target[#name]] --tool-provisioning=path|nix [--max-cycles=N] [--debounce-ms=N]\n       " & programName &
-      " develop <target[#name]> --tool-provisioning=nix -- <command> [args...]\n       " & programName &
+      " build [target[#name]] --tool-provisioning=path|nix [--work-root=PATH]\n       " & programName &
+      " watch [target[#name]] --tool-provisioning=path|nix [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " & programName &
+      " develop <target[#name]> --tool-provisioning=nix [--work-root=PATH] -- <command> [args...]\n       " & programName &
       " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]"
   elif programName == "repro-fs-snoop":
     programName & " " & versionString() & "\nusage: " & programName &
@@ -40,6 +40,29 @@ proc parseToolProvisioning(value: string): ToolProvisioningMode =
     tpmNix
   else:
     raise newException(ValueError, "unsupported --tool-provisioning=" & value)
+
+proc bytesOf(text: string): seq[byte] =
+  result = newSeq[byte](text.len)
+  for i, ch in text:
+    result[i] = byte(ord(ch))
+
+proc digestHex(digest: ContentDigest): string =
+  toHex(digest.bytes)
+
+proc safePathSegment(value, fallback: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
+        ch in {'-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = fallback
+
+proc configuredWorkRoot(explicitRoot: string): string =
+  if explicitRoot.len > 0:
+    return explicitRoot
+  getEnv("REPROBUILD_WORK_ROOT")
 
 proc splitTarget(target: string): tuple[base: string; fragment: string] =
   let marker = target.find('#')
@@ -99,13 +122,28 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
 proc moduleForTarget(target: string): string =
   parseBuildTarget(target).modulePath
 
-proc outputDirForTarget(target: ParsedBuildTarget): string =
+proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
+  let workRoot = configuredWorkRoot(explicitWorkRoot)
+  if workRoot.len == 0:
+    return ""
+  let base =
+    if workRoot.isAbsolute:
+      os.normalizedPath(workRoot)
+    else:
+      os.normalizedPath(absolutePath(workRoot))
+  let projectRoot = os.normalizedPath(parentDir(absolutePath(modulePath)))
+  let (_, tail) = splitPath(projectRoot)
+  let hash = digestHex(blake3DomainDigest(projectRoot.bytesOf(),
+    hdMetadataEnvelope))
+  base / "worktrees" / (safePathSegment(tail, "worktree") & "-" & hash[0 .. 15])
+
+proc outputDirForTarget(target: ParsedBuildTarget; explicitWorkRoot = ""): string =
+  let scopedRoot = scopedWorktreeRoot(target.modulePath, explicitWorkRoot)
+  if scopedRoot.len > 0:
+    return scopedRoot / "build" / target.outputName
   parentDir(target.modulePath) / ".repro" / "build" / target.outputName
 
 const DefaultBuildActionMetadataName = "reprobuild.default-build-action.v1"
-
-proc digestHex(digest: ContentDigest): string =
-  toHex(digest.bytes)
 
 proc q(value: string): string =
   quoteShell(value)
@@ -602,7 +640,8 @@ type
 
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
-                        selectDefaultAction = false):
+                        selectDefaultAction = false;
+                        workRoot = ""):
     BuildCommandOutcome =
   var parsedTarget = parseBuildTarget(target)
   parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
@@ -610,7 +649,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   if not fileExists(modulePath):
     raise newException(IOError, "build target module not found: " & modulePath)
 
-  let outDir = outputDirForTarget(parsedTarget)
+  let outDir = outputDirForTarget(parsedTarget, workRoot)
   result.modulePath = modulePath
   result.projectRoot = projectRootForModule(modulePath)
   result.outDir = outDir
@@ -795,6 +834,7 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
 proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var target = ""
   var mode = tpmUnspecified
+  var workRoot = ""
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
@@ -802,6 +842,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       raise newException(ValueError,
         "--tool-provisioning requires an inline value, for example " &
           "--tool-provisioning=path")
+    elif arg.startsWith("--work-root="):
+      workRoot = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--work-root":
+      raise newException(ValueError,
+        "--work-root requires an inline value, for example --work-root=.repro")
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported build flag: " & arg)
     elif target.len == 0:
@@ -814,7 +859,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     target = "."
 
   executeBuildTarget(target, mode, publicCliPath,
-    selectDefaultAction = targetWasOmitted).exitCode
+    selectDefaultAction = targetWasOmitted,
+    workRoot = workRoot).exitCode
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:
@@ -829,6 +875,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
   var mode = tpmUnspecified
   var maxCycles = 0
   var debounceMs = 250
+  var workRoot = ""
 
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
@@ -837,6 +884,11 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
       raise newException(ValueError,
         "--tool-provisioning requires an inline value, for example " &
           "--tool-provisioning=path")
+    elif arg.startsWith("--work-root="):
+      workRoot = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--work-root":
+      raise newException(ValueError,
+        "--work-root requires an inline value, for example --work-root=.repro")
     elif arg.startsWith("--max-cycles="):
       maxCycles = parsePositiveIntFlag("--max-cycles",
         arg.split("=", maxsplit = 1)[1])
@@ -873,7 +925,8 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
       (if cycle == 1: " initial" else: " rebuild")
     flushStdout()
     let outcome = executeBuildTarget(target, mode, publicCliPath,
-      selectDefaultAction = targetWasOmitted)
+      selectDefaultAction = targetWasOmitted,
+      workRoot = workRoot)
     echo "repro watch: cycle " & $cycle & " result exitCode=" &
       $outcome.exitCode
     flushStdout()
@@ -905,6 +958,7 @@ proc runDevelopCommand(args: openArray[string]): int =
   var mode = tpmUnspecified
   var command: seq[string] = @[]
   var afterSeparator = false
+  var workRoot = ""
   for arg in args:
     if afterSeparator:
       command.add(arg)
@@ -916,6 +970,11 @@ proc runDevelopCommand(args: openArray[string]): int =
       raise newException(ValueError,
         "--tool-provisioning requires an inline value, for example " &
           "--tool-provisioning=nix")
+    elif arg.startsWith("--work-root="):
+      workRoot = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--work-root":
+      raise newException(ValueError,
+        "--work-root requires an inline value, for example --work-root=.repro")
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported develop flag: " & arg)
     elif target.len == 0:
@@ -930,7 +989,12 @@ proc runDevelopCommand(args: openArray[string]): int =
   if not fileExists(modulePath):
     raise newException(IOError, "develop target module not found: " & modulePath)
 
-  let outDir = parentDir(modulePath) / ".repro" / "develop"
+  let scopedRoot = scopedWorktreeRoot(modulePath, workRoot)
+  let outDir =
+    if scopedRoot.len > 0:
+      scopedRoot / "develop"
+    else:
+      parentDir(modulePath) / ".repro" / "develop"
   let interfacePath = outDir / "project-interface.rbsz"
   let stubPath = outDir / "project-interface.nim"
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath)
