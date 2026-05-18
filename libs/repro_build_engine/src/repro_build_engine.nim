@@ -32,6 +32,7 @@ type
     bakEnsureDir
     bakWriteText
     bakStamp
+    bakPreserveTree
 
   BuildAction* = object
     kind*: BuildActionKind
@@ -367,7 +368,8 @@ proc monitorEvidenceRequired(action: BuildAction): bool =
       action.monitorDepfile.len > 0)
 
 proc needsExecutionForPolicy(action: BuildAction): bool =
-  action.dependencyPolicy.kind in MonitorPolicyKinds
+  action.dependencyPolicy.kind in MonitorPolicyKinds or
+    action.kind == bakPreserveTree
 
 proc addPathSet(evidence: var PathSetEvidence; pathSet: DependencyPathSet;
                 recognized: bool) =
@@ -674,6 +676,32 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string): Ac
 proc builtinPath(action: BuildAction; path: string): string =
   materialPath(action.cwd, path)
 
+proc builtinRoots(text: string): tuple[sourceRoot: string; outputRoot: string] =
+  let lines = text.splitLines()
+  if lines.len < 2:
+    raiseEngine("preserveTree action requires sourceRoot and outputRoot")
+  (sourceRoot: lines[0], outputRoot: lines[1])
+
+proc preserveTreeManifestPath(action: BuildAction): string =
+  action.builtinPath(".repro" / "preserve-tree" /
+    (sanitizeActionId(action.id) & ".manifest"))
+
+proc readManifestEntries(path: string): seq[string] =
+  if not fileExists(path):
+    return @[]
+  for line in readFile(path).splitLines:
+    let entry = line.strip().replace('\\', '/')
+    if entry.len > 0:
+      result.add(entry)
+
+proc writeManifestEntries(path: string; entries: openArray[string]) =
+  createDir(path.splitPath.head)
+  var text = ""
+  for entry in entries:
+    text.add(entry)
+    text.add("\n")
+  writeFile(path, text)
+
 proc executeBuiltinAction(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -712,6 +740,34 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
         text.add(entry)
         text.add("\n")
       writeFile(destination, text)
+    of bakPreserveTree:
+      let roots = builtinRoots(action.builtinText)
+      let sourceRoot = action.builtinPath(roots.sourceRoot)
+      let outputRoot = action.builtinPath(roots.outputRoot)
+      createDir(outputRoot)
+      var expected = initHashSet[string]()
+      var currentEntries: seq[string] = @[]
+      for entry in action.builtinEntries:
+        let relative = entry.replace('\\', '/')
+        if relative.len == 0:
+          continue
+        expected.incl(relative)
+        currentEntries.add(relative)
+        let source = sourceRoot / relative
+        let destination = outputRoot / relative
+        if not fileExists(source):
+          raiseEngine("preserveTree source file disappeared before execution: " &
+            source)
+        createDir(destination.splitPath.head)
+        copyFile(source, destination)
+      let manifestPath = preserveTreeManifestPath(action)
+      for previous in readManifestEntries(manifestPath):
+        if not expected.contains(previous):
+          let stale = outputRoot / previous
+          if fileExists(stale):
+            removeFile(stale)
+      currentEntries.sort(system.cmp[string])
+      writeManifestEntries(manifestPath, currentEntries)
     of bakProcess:
       raiseEngine("process action cannot be executed as a built-in: " & action.id)
     result.status = asSucceeded

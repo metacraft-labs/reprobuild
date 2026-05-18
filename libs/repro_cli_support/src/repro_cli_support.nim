@@ -345,6 +345,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       of "ensureDir": bakEnsureDir
       of "writeText": bakWriteText
       of "stamp": bakStamp
+      of "preserveTree": bakPreserveTree
       else:
         raise newException(ValueError,
           "unknown built-in fs operation: " & payload.call.subcommand)
@@ -358,7 +359,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       commandStatsId = commandStatsId,
       cacheable = payload.cacheable,
       weakFingerprint = weakFingerprintFromText(fingerprintText),
-      text = argValue("text") & argValue("title"),
+      text = if payload.call.subcommand == "preserveTree":
+          argValue("sourceRoot") & "\n" & argValue("outputRoot")
+        else:
+          argValue("text") & argValue("title"),
       entries = argSeqValue("entries"))
 
   let executableName = payload.call.executableName

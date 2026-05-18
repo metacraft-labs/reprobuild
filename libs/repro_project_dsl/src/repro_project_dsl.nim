@@ -181,6 +181,12 @@ proc defaultBuildAction*(action: BuildActionDef) =
 proc defaultBuildAction*(target: BuildTargetDef) =
   defaultBuildActionRegistry = target.name
 
+proc defaultTarget*(action: BuildActionDef) =
+  defaultBuildAction(action)
+
+proc defaultTarget*(target: BuildTargetDef) =
+  defaultBuildAction(target)
+
 proc registeredDefaultBuildAction*(): string =
   defaultBuildActionRegistry
 
@@ -383,6 +389,21 @@ proc target*(name: string; action: BuildActionDef): BuildTargetDef
     {.discardable.} =
   registerBuildTarget(BuildTargetDef(name: name, actions: @[action.id]))
 
+proc target*(name: string; actions: openArray[BuildActionDef]): BuildTargetDef
+    {.discardable.} =
+  var actionRefs: seq[string] = @[]
+  for action in actions:
+    actionRefs.addUniqueValue(action.id)
+  registerBuildTarget(BuildTargetDef(name: name, actions: actionRefs))
+
+proc exportTarget*(name: string; action: BuildActionDef): BuildTargetDef
+    {.discardable.} =
+  target(name, action)
+
+proc exportTarget*(name: string; actions: openArray[BuildActionDef]):
+    BuildTargetDef {.discardable.} =
+  target(name, actions)
+
 proc aggregate*(name: string; actions: openArray[BuildActionDef] = [];
                 targets: openArray[BuildTargetDef] = []): BuildTargetDef
     {.discardable.} =
@@ -396,6 +417,17 @@ proc aggregate*(name: string; actions: openArray[BuildActionDef] = [];
     name: name,
     actions: actionRefs,
     targets: targetRefs))
+
+proc exportTarget*(name: string; target: BuildTargetDef): BuildTargetDef
+    {.discardable.} =
+  registerBuildTarget(BuildTargetDef(name: name, targets: @[target.name]))
+
+proc exportTarget*(name: string; targets: openArray[BuildTargetDef]):
+    BuildTargetDef {.discardable.} =
+  var targetRefs: seq[string] = @[]
+  for target in targets:
+    targetRefs.addUniqueValue(target.name)
+  registerBuildTarget(BuildTargetDef(name: name, targets: targetRefs))
 
 proc addUniquePath(paths: var seq[string]; path: string) =
   let stripped = path.strip()
@@ -531,6 +563,60 @@ proc stamp*(tool: ReproFs; output, title: string;
     if actionId.len > 0: actionId else: defaultBuiltinActionId("stamp", output)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     extraInputs = inputs, cacheable = cacheable, commandStatsId = commandStatsId,
+    dependencyPolicy = declaredOnlyDependencyPolicy())
+
+proc normalizedRelPath(path: string): string =
+  path.replace('\\', '/')
+
+proc collectRegularTree(root: string): tuple[dirs: seq[string]; files: seq[string]] =
+  if not dirExists(root):
+    return
+  var pending = @[root]
+  while pending.len > 0:
+    let dir = pending.pop()
+    result.dirs.add(dir)
+    for kind, child in walkDir(dir):
+      case kind
+      of pcDir:
+        pending.add(child)
+      of pcFile:
+        result.files.add(child)
+      else:
+        discard
+  result.dirs.sort(system.cmp[string])
+  result.files.sort(system.cmp[string])
+
+proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
+                   actionId = ""; deps: openArray[string] = [];
+                   after: openArray[BuildActionDef] = [];
+                   commandStatsId = ""):
+    BuildActionDef {.discardable.} =
+  discard tool
+  providerDirectoryInput(sourceRoot)
+  let tree = collectRegularTree(sourceRoot)
+  for dirPath in tree.dirs:
+    providerDirectoryInput(normalizedRelPath(dirPath))
+  var relativeFiles: seq[string] = @[]
+  var inputs: seq[string] = @[]
+  var outputs: seq[string] = @[]
+  for sourcePath in tree.files:
+    let relative = normalizedRelPath(relativePath(sourcePath, sourceRoot))
+    relativeFiles.add(relative)
+    inputs.add(normalizedRelPath(sourcePath))
+    outputs.add(normalizedRelPath(outputRoot / relative))
+  let call = builtinFsCall("preserveTree", [
+    cliArg("sourceRoot", normalizedRelPath(sourceRoot)),
+    outputArg("outputRoot", normalizedRelPath(outputRoot)),
+    cliArgSeq("entries", relativeFiles)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("preserveTree", outputRoot)
+  recordCommandAction(selectedActionId, call,
+    deps = combineActionDeps(deps, after),
+    extraInputs = inputs,
+    extraOutputs = outputs,
+    cacheable = false,
+    commandStatsId = commandStatsId,
     dependencyPolicy = declaredOnlyDependencyPolicy())
 
 proc normalizedDeclaredProjectPath*(projectRoot, path: string): string =
