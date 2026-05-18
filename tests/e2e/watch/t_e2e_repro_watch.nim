@@ -353,6 +353,22 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
   if includeClang:
     discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
+  writeExecutable(binDir / "stylus",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"--version\" ]; then echo 'stylus 1.0.0'; exit 0; fi\n" &
+    "output= source=\n" &
+    "while [ \"$#\" -gt 0 ]; do\n" &
+    "  case \"$1\" in\n" &
+    "    -o) output=$2; shift 2 ;;\n" &
+    "    -*) echo \"unknown stylus flag $1\" >&2; exit 64 ;;\n" &
+    "    *) source=$1; shift ;;\n" &
+    "  esac\n" &
+    "done\n" &
+    "test -n \"$output\"\n" &
+    "test -n \"$source\"\n" &
+    "mkdir -p \"$(dirname \"$output\")\"\n" &
+    "{ printf '/* %s */\\n' \"$source\"; cat \"$source\"; } > \"$output\"\n")
   binDir & $PathSep & getEnv("PATH")
 
 proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
@@ -418,8 +434,22 @@ proc reportAction(report: JsonNode; id: string): JsonNode =
       return item
   newJNull()
 
+proc reportActionWithDeclaredOutput(report: JsonNode; output: string): JsonNode =
+  for item in report{"actions"}:
+    for declared in item{"evidence"}{"declaredOutputs"}.getElems():
+      if declared.getStr() == output:
+        return item
+  newJNull()
+
 proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   let action = reportAction(report, id)
+  check action.kind != JNull
+  check action{"status"}.getStr() == status
+  check action{"launched"}.getBool() == launched
+
+proc assertOutputAction(report: JsonNode; output, status: string;
+                        launched: bool) =
+  let action = reportActionWithDeclaredOutput(report, output)
   check action.kind != JNull
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
@@ -465,7 +495,6 @@ proc assertPublicResourceActions(report: JsonNode; status: string;
                                  launched: bool) =
   for actionId in initialPublicResourceActions:
     assertAction(report, actionId, status, launched)
-  assertAction(report, "frontend-public-resources", status, launched)
 
 proc hasMonitorEvidence(action: JsonNode): bool =
   action{"evidence"}{"monitorReads"}.getElems().len > 0 or
@@ -482,21 +511,24 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(projectRoot / "index.html")
   check fileExists(projectRoot / "subwindow.html")
   check fileExists(projectRoot / "src" / "helpers.js")
-  check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
+  for stylesheet in [
+    "default_white_theme.css",
+    "default_dark_theme_electron.css",
+    "default_dark_theme_extension.css",
+    "default_dark_theme.css",
+    "loader.css",
+    "subwindow.css"
+  ]:
+    check fileExists(projectRoot / "src" / "frontend" / "styles" /
+      stylesheet)
   check fileExists(projectRoot / "public" / "resources" / "calltrace.js")
   check fileExists(projectRoot / "public" / "third_party" / "io.js")
-  check fileExists(projectRoot / "build" / "reprobuild" /
-    "frontend-public-resources.stamp")
   check readFile(projectRoot / "src" / "frontend" / "index.html") ==
     readFile(projectRoot / "index.html")
   check readFile(projectRoot / "src" / "frontend" / "subwindow.html") ==
     readFile(projectRoot / "subwindow.html")
   check readFile(projectRoot / "helpers.js") ==
     readFile(projectRoot / "src" / "helpers.js")
-  let stamp = readFile(projectRoot / "build" / "reprobuild" / "frontend.stamp")
-  check stamp.contains("index.html")
-  check stamp.contains("subwindow.html")
-  check stamp.contains("src/helpers.js")
 
 proc checkConfigOutputs(projectRoot: string) =
   check fileExists(projectRoot / "config" / "default_layout.json")
@@ -975,7 +1007,7 @@ when defined(macosx):
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: frontend")
-      check log.contains("scheduler: actions=17")
+      check log.contains("scheduler: actions=21")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: generate-config-header")
       check not log.contains("action: c-sudoku-object-tup")
@@ -984,7 +1016,7 @@ when defined(macosx):
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 17
+      check report{"actions"}.len == 21
       assertAction(report, "frontend-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-index-js", "asCacheHit", false)
@@ -995,8 +1027,17 @@ when defined(macosx):
       assertAction(report, "frontend-index-html", "asSucceeded", true)
       assertAction(report, "frontend-subwindow-html", "asCacheHit", false)
       assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(report,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(report, "asCacheHit", false)
-      assertAction(report, "frontend", "asSucceeded", true)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull
@@ -1054,7 +1095,7 @@ when defined(macosx):
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: codetracer")
-      check log.contains("scheduler: actions=22")
+      check log.contains("scheduler: actions=25")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: generate-config-header")
       check not log.contains("action: c-sudoku-object-tup")
@@ -1063,12 +1104,10 @@ when defined(macosx):
       checkConfigOutputs(projectRoot)
       check fileExists(projectRoot / "src" / "bin" / "ct")
       check fileExists(projectRoot / "src" / "bin" / "db-backend-record")
-      check fileExists(projectRoot / "build" / "reprobuild" /
-        "codetracer.stamp")
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 22
+      check report{"actions"}.len == 25
       assertAction(report, "frontend-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-index-js", "asCacheHit", false)
@@ -1079,13 +1118,21 @@ when defined(macosx):
       assertAction(report, "frontend-index-html", "asCacheHit", false)
       assertAction(report, "frontend-subwindow-html", "asCacheHit", false)
       assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(report,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(report, "asCacheHit", false)
-      assertAction(report, "frontend", "asCacheHit", false)
       assertAction(report, "config-default-layout-json", "asCacheHit", false)
       assertAction(report, "config-default-config-yaml", "asCacheHit", false)
       assertAction(report, "db-backend-record", "asCacheHit", false)
       assertAction(report, "ct", "asSucceeded", true)
-      assertAction(report, "codetracer", "asSucceeded", true)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull
@@ -1129,7 +1176,7 @@ when defined(macosx):
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: frontend-public-resources")
-      check log.contains("scheduler: actions=7")
+      check log.contains("scheduler: actions=6")
       check log.contains(
         "action: " & addedSharedResourceAction &
           " status=asSucceeded launched=true")
@@ -1144,9 +1191,8 @@ when defined(macosx):
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 7
+      check report{"actions"}.len == 6
       assertAction(report, addedSharedResourceAction, "asSucceeded", true)
-      assertAction(report, "frontend-public-resources", "asSucceeded", true)
       check reportAction(report, "frontend-ui-js").kind == JNull
       check reportAction(report, "frontend-index-js").kind == JNull
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull

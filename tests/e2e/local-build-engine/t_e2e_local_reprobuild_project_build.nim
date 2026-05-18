@@ -1323,6 +1323,12 @@ suite "e2e_local_reprobuild_project_build":
       getElems().anyIt(it.getStr().endsWith("src/hidden.txt"))
     check fileExists(projectRoot / ".repro" / "build" / "reprobuild" /
       "build-engine-cache" / "action-cache" / "action-results.records")
+    let evidenceRoot = projectRoot / ".repro" / "build" / "reprobuild" /
+      "build-engine-cache" / "dependency-evidence"
+    for actionId in ["produce", "consume", "unrelated"]:
+      let evidencePath = evidenceRoot / (actionId & ".rbar")
+      check fileExists(evidencePath)
+      check readFile(evidencePath)[0 .. 3] == "RBAR"
 
     let markerAfterFirst = readFile(marker)
     let unrelatedMarkerAfterFirst = readFile(unrelatedMarker)

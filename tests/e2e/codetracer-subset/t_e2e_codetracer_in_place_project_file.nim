@@ -273,6 +273,22 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
   if includeClang:
     discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
+  writeExecutable(binDir / "stylus",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"--version\" ]; then echo 'stylus 1.0.0'; exit 0; fi\n" &
+    "output= source=\n" &
+    "while [ \"$#\" -gt 0 ]; do\n" &
+    "  case \"$1\" in\n" &
+    "    -o) output=$2; shift 2 ;;\n" &
+    "    -*) echo \"unknown stylus flag $1\" >&2; exit 64 ;;\n" &
+    "    *) source=$1; shift ;;\n" &
+    "  esac\n" &
+    "done\n" &
+    "test -n \"$output\"\n" &
+    "test -n \"$source\"\n" &
+    "mkdir -p \"$(dirname \"$output\")\"\n" &
+    "{ printf '/* %s */\\n' \"$source\"; cat \"$source\"; } > \"$output\"\n")
   binDir & $PathSep & getEnv("PATH")
 
 proc codeTracerNativePathValue(codeTracerRoot, tempRoot: string): string =
@@ -358,8 +374,22 @@ proc reportAction(report: JsonNode; id: string): JsonNode =
       return item
   newJNull()
 
+proc reportActionWithDeclaredOutput(report: JsonNode; output: string): JsonNode =
+  for item in report{"actions"}:
+    for declared in item{"evidence"}{"declaredOutputs"}.getElems():
+      if declared.getStr() == output:
+        return item
+  newJNull()
+
 proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   let action = reportAction(report, id)
+  check action.kind != JNull
+  check action{"status"}.getStr() == status
+  check action{"launched"}.getBool() == launched
+
+proc assertOutputAction(report: JsonNode; output, status: string;
+                        launched: bool) =
+  let action = reportActionWithDeclaredOutput(report, output)
   check action.kind != JNull
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
@@ -414,14 +444,11 @@ proc checkPublicResourceOutputs(projectRoot: string) =
   for (source, output) in pairs:
     check fileExists(projectRoot / output)
     check readFile(projectRoot / source) == readFile(projectRoot / output)
-  check fileExists(projectRoot / "build" / "reprobuild" /
-    "frontend-public-resources.stamp")
 
 proc assertPublicResourceActions(report: JsonNode; status: string;
                                  launched: bool) =
   for actionId in initialPublicResourceActions:
     assertAction(report, actionId, status, launched)
-  assertAction(report, "frontend-public-resources", status, launched)
 
 proc runNode(path: string; cwd = getCurrentDir()): string =
   requireSuccess(shellCommand(["node", path]), cwd)
@@ -463,10 +490,19 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(projectRoot / "subwindow.js")
   check fileExists(projectRoot / "subwindow.js.map")
   check fileExists(projectRoot / "src" / "subwindow.js")
+  for stylesheet in [
+    "default_white_theme.css",
+    "default_dark_theme_electron.css",
+    "default_dark_theme_extension.css",
+    "default_dark_theme.css",
+    "loader.css",
+    "subwindow.css"
+  ]:
+    check fileExists(projectRoot / "src" / "frontend" / "styles" /
+      stylesheet)
   check fileExists(projectRoot / "index.html")
   check fileExists(projectRoot / "subwindow.html")
   check fileExists(projectRoot / "src" / "helpers.js")
-  check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
   check readFile(projectRoot / "ui.js") ==
     readFile(projectRoot / "public" / "ui.js")
   check readFile(projectRoot / "index.js") ==
@@ -479,10 +515,6 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
     readFile(projectRoot / "subwindow.html")
   check readFile(projectRoot / "helpers.js") ==
     readFile(projectRoot / "src" / "helpers.js")
-  let stamp = readFile(projectRoot / "build" / "reprobuild" / "frontend.stamp")
-  check stamp.contains("index.html")
-  check stamp.contains("subwindow.html")
-  check stamp.contains("src/helpers.js")
 
 proc checkConfigOutputs(projectRoot: string) =
   check fileExists(projectRoot / "config" / "default_layout.json")
@@ -1114,8 +1146,7 @@ when defined(macosx):
         nativeEnv)
       check first.contains("defaultTarget: codetracer")
       check first.contains("selectedTarget: codetracer")
-      check first.contains("scheduler: actions=22")
-      check first.contains("action: frontend status=asSucceeded launched=true")
+      check first.contains("scheduler: actions=25")
       check first.contains("action: ct status=asSucceeded launched=true")
       check first.contains(
         "action: db-backend-record status=asSucceeded launched=true")
@@ -1123,8 +1154,6 @@ when defined(macosx):
         "action: config-default-layout-json status=asSucceeded launched=true")
       check first.contains(
         "action: config-default-config-yaml status=asSucceeded launched=true")
-      check first.contains(
-        "action: codetracer status=asSucceeded launched=true")
       check not first.contains("action: nim-js-ipc-registry-test")
       check not first.contains("action: generate-config-header")
       check not first.contains("action: c-sudoku-object-tup")
@@ -1134,19 +1163,9 @@ when defined(macosx):
       checkConfigOutputs(projectRoot)
       check fileExists(projectRoot / "src" / "bin" / "ct")
       check fileExists(projectRoot / "src" / "bin" / "db-backend-record")
-      check fileExists(projectRoot / "build" / "reprobuild" /
-        "codetracer.stamp")
-      let appStamp = readFile(projectRoot / "build" / "reprobuild" /
-        "codetracer.stamp")
-      check appStamp.contains("CodeTracer selected app aggregate")
-      check appStamp.contains("build/reprobuild/frontend.stamp")
-      check appStamp.contains("src/bin/ct")
-      check appStamp.contains("src/bin/db-backend-record")
-      check appStamp.contains("config/default_layout.json")
-      check appStamp.contains("config/default_config.yaml")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 22
+      check firstReport{"actions"}.len == 25
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
@@ -1158,15 +1177,23 @@ when defined(macosx):
       assertAction(firstReport, "frontend-index-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(firstReport,
+          "src/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
-      assertAction(firstReport, "frontend", "asSucceeded", true)
       assertAction(firstReport, "config-default-layout-json", "asSucceeded",
         true)
       assertAction(firstReport, "config-default-config-yaml", "asSucceeded",
         true)
       assertAction(firstReport, "db-backend-record", "asSucceeded", true)
       assertAction(firstReport, "ct", "asSucceeded", true)
-      assertAction(firstReport, "codetracer", "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
       check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
@@ -1189,7 +1216,7 @@ when defined(macosx):
         nativeEnv)
       check second.contains("selectedTarget: codetracer")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      check secondReport{"actions"}.len == 22
+      check secondReport{"actions"}.len == 25
       assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
       assertAction(secondReport, "frontend-public-ui-js", "asCacheHit", false)
       assertAction(secondReport, "frontend-index-js", "asCacheHit", false)
@@ -1204,15 +1231,23 @@ when defined(macosx):
         false)
       assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(secondReport,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(secondReport, "asCacheHit", false)
-      assertAction(secondReport, "frontend", "asCacheHit", false)
       assertAction(secondReport, "config-default-layout-json", "asCacheHit",
         false)
       assertAction(secondReport, "config-default-config-yaml", "asCacheHit",
         false)
       assertAction(secondReport, "db-backend-record", "asCacheHit", false)
       assertAction(secondReport, "ct", "asCacheHit", false)
-      assertAction(secondReport, "codetracer", "asCacheHit", false)
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       let nativeSource = readFile(nativeInput)
@@ -1241,15 +1276,23 @@ when defined(macosx):
         false)
       assertAction(changedReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(changedReport,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(changedReport, "asCacheHit", false)
-      assertAction(changedReport, "frontend", "asCacheHit", false)
       assertAction(changedReport, "config-default-layout-json", "asCacheHit",
         false)
       assertAction(changedReport, "config-default-config-yaml", "asCacheHit",
         false)
       assertAction(changedReport, "db-backend-record", "asCacheHit", false)
       assertAction(changedReport, "ct", "asSucceeded", true)
-      assertAction(changedReport, "codetracer", "asSucceeded", true)
       check reportAction(changedReport, "nim-js-ipc-registry-test").kind ==
         JNull
       check reportAction(changedReport, "generate-config-header").kind == JNull
@@ -1381,7 +1424,7 @@ when defined(macosx):
       let first = build(reproBin, selectedTarget, repoRoot, pathValue)
       check first.contains("selectedTarget: frontend-public-resources")
       check first.contains("providerInvocations: 1")
-      check first.contains("scheduler: actions=6")
+      check first.contains("scheduler: actions=5")
       check first.contains(
         "action: " & rootTupfileResourceAction &
           " status=asSucceeded launched=true")
@@ -1391,8 +1434,6 @@ when defined(macosx):
       check first.contains(
         "action: " & thirdPartyIoResourceAction &
           " status=asSucceeded launched=true")
-      check first.contains(
-        "action: frontend-public-resources status=asSucceeded launched=true")
       check not first.contains("action: frontend-ui-js")
       check not first.contains("action: frontend-index-js")
       check not first.contains("action: frontend-subwindow-js")
@@ -1404,7 +1445,7 @@ when defined(macosx):
       checkPublicResourceOutputs(projectRoot)
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 6
+      check firstReport{"actions"}.len == 5
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       check reportAction(firstReport, "frontend-ui-js").kind == JNull
       check reportAction(firstReport, "frontend-index-js").kind == JNull
@@ -1418,7 +1459,7 @@ when defined(macosx):
 
       let second = build(reproBin, selectedTarget, repoRoot, pathValue)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      check secondReport{"actions"}.len == 6
+      check secondReport{"actions"}.len == 5
       assertPublicResourceActions(secondReport, "asCacheHit", false)
 
       let addedSource = projectRoot / "src" / "public" / "resources" /
@@ -1428,7 +1469,7 @@ when defined(macosx):
         "add_file.svg", addedSource)
       let added = build(reproBin, selectedTarget, repoRoot, pathValue)
       check added.contains("providerInvocations: 1")
-      check added.contains("scheduler: actions=7")
+      check added.contains("scheduler: actions=6")
       check added.contains(
         "action: " & addedSharedResourceAction &
           " status=asSucceeded launched=true")
@@ -1440,13 +1481,12 @@ when defined(macosx):
       removeFile(projectRoot / "src" / "public" / "third_party" / "io.js")
       let removed = build(reproBin, selectedTarget, repoRoot, pathValue)
       check removed.contains("providerInvocations: 1")
-      check removed.contains("scheduler: actions=6")
+      check removed.contains("scheduler: actions=5")
       check not removed.contains("action: " & thirdPartyIoResourceAction)
       let removedReport = parseFile(valueAfter(removed, "buildReport:"))
-      check removedReport{"actions"}.len == 6
+      check removedReport{"actions"}.len == 5
       check reportAction(removedReport, thirdPartyIoResourceAction).kind == JNull
       check reportAction(removedReport, addedSharedResourceAction).kind != JNull
-      check reportAction(removedReport, "frontend-public-resources").kind != JNull
 
     test "selected frontend aggregate target builds current frontend bundle set":
       let repoRoot = getCurrentDir()
@@ -1484,7 +1524,7 @@ when defined(macosx):
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check first.contains("selectedTarget: frontend")
-      check first.contains("scheduler: actions=17")
+      check first.contains("scheduler: actions=21")
       check first.contains(
         "action: frontend-ui-js status=asSucceeded launched=true")
       check first.contains(
@@ -1506,8 +1546,6 @@ when defined(macosx):
       check first.contains(
         "action: frontend-src-helpers-js status=asSucceeded launched=true")
       check first.contains(
-        "action: frontend-public-resources status=asSucceeded launched=true")
-      check first.contains(
         "action: " & rootTupfileResourceAction &
           " status=asSucceeded launched=true")
       check first.contains(
@@ -1516,7 +1554,6 @@ when defined(macosx):
       check first.contains(
         "action: " & thirdPartyIoResourceAction &
           " status=asSucceeded launched=true")
-      check first.contains("action: frontend status=asSucceeded launched=true")
       check not first.contains("action: nim-js-ipc-registry-test")
       check not first.contains("action: generate-config-header")
       check not first.contains("action: c-sudoku-object-tup")
@@ -1525,7 +1562,7 @@ when defined(macosx):
       checkPublicResourceOutputs(projectRoot)
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 17
+      check firstReport{"actions"}.len == 21
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
@@ -1537,8 +1574,17 @@ when defined(macosx):
       assertAction(firstReport, "frontend-index-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(firstReport,
+          "src/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
-      assertAction(firstReport, "frontend", "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
       check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
@@ -1562,8 +1608,17 @@ when defined(macosx):
         false)
       assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(secondReport,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(secondReport, "asCacheHit", false)
-      assertAction(secondReport, "frontend", "asCacheHit", false)
 
       let indexHtml = projectRoot / "src" / "frontend" / "index.html"
       writeFile(indexHtml, readFile(indexHtml) &
@@ -1594,8 +1649,17 @@ when defined(macosx):
         false)
       assertAction(htmlChangedReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(htmlChangedReport,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(htmlChangedReport, "asCacheHit", false)
-      assertAction(htmlChangedReport, "frontend", "asSucceeded", true)
       check readFile(projectRoot / "src" / "frontend" / "index.html") ==
         readFile(projectRoot / "index.html")
       check reportAction(htmlChangedReport, "nim-js-ipc-registry-test").kind ==
@@ -1635,8 +1699,17 @@ when defined(macosx):
         "asCacheHit", false)
       assertAction(helperChangedReport, "frontend-src-helpers-js",
         "asSucceeded", true)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(helperChangedReport,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(helperChangedReport, "asCacheHit", false)
-      assertAction(helperChangedReport, "frontend", "asSucceeded", true)
       check readFile(projectRoot / "helpers.js") ==
         readFile(projectRoot / "src" / "helpers.js")
       check reportAction(helperChangedReport,
@@ -1687,7 +1760,7 @@ when defined(macosx):
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=22")
+      check first.contains("scheduler: actions=26")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
       check first.contains("action: build-c-dir status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
@@ -1701,11 +1774,9 @@ when defined(macosx):
       check first.contains("action: frontend-index-html status=asSucceeded launched=true")
       check first.contains("action: frontend-subwindow-html status=asSucceeded launched=true")
       check first.contains("action: frontend-src-helpers-js status=asSucceeded launched=true")
-      check first.contains("action: frontend-public-resources status=asSucceeded launched=true")
       check first.contains("action: " & rootTupfileResourceAction & " status=asSucceeded launched=true")
       check first.contains("action: " & calltraceResourceAction & " status=asSucceeded launched=true")
       check first.contains("action: " & thirdPartyIoResourceAction & " status=asSucceeded launched=true")
-      check first.contains("action: frontend status=asSucceeded launched=true")
       check first.contains("action: c-sudoku-object-tup status=asSucceeded launched=true")
       check first.contains("action: c-sudoku-object-with-generated-header status=asSucceeded launched=true")
       check fileExists(projectRoot / "build" / "generated" / "ct_config.h")
@@ -1723,18 +1794,28 @@ when defined(macosx):
       check fileExists(projectRoot / "index.html")
       check fileExists(projectRoot / "subwindow.html")
       check fileExists(projectRoot / "src" / "helpers.js")
-      check fileExists(projectRoot / "build" / "reprobuild" / "frontend.stamp")
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        check fileExists(projectRoot / "src" / "frontend" / "styles" /
+          stylesheet)
       checkPublicResourceOutputs(projectRoot)
       check fileExists(projectRoot / "build" / "c" / "main.tup.o")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == 3
+      check identity.profiles.len == 4
       check identity.profiles.allIt(it.installMethod == "path")
       check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
       check identity.profiles.anyIt(it.executableName == "nim")
       check identity.profiles.anyIt(it.executableName == "node")
       check identity.profiles.anyIt(it.executableName == "gcc")
+      check identity.profiles.anyIt(it.executableName == "stylus")
       check not identity.profiles.anyIt(it.executableName == "nim-js")
       check not identity.profiles.anyIt(it.executableName == "sh")
 
@@ -1753,8 +1834,17 @@ when defined(macosx):
       assertAction(firstReport, "frontend-index-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(firstReport,
+          "src/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
-      assertAction(firstReport, "frontend", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
@@ -1796,8 +1886,17 @@ when defined(macosx):
         false)
       assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(secondReport,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(secondReport, "asCacheHit", false)
-      assertAction(secondReport, "frontend", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-with-generated-header",
         "asCacheHit", false)
@@ -1825,8 +1924,17 @@ when defined(macosx):
         false)
       assertAction(cChangedReport, "frontend-src-helpers-js", "asCacheHit",
         false)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(cChangedReport,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(cChangedReport, "asCacheHit", false)
-      assertAction(cChangedReport, "frontend", "asCacheHit", false)
       assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(cChangedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
@@ -1856,8 +1964,17 @@ when defined(macosx):
         false)
       assertAction(headerDeletedReport, "frontend-src-helpers-js",
         "asCacheHit", false)
+      for stylesheet in [
+        "default_white_theme.css",
+        "default_dark_theme_electron.css",
+        "default_dark_theme_extension.css",
+        "default_dark_theme.css",
+        "loader.css",
+        "subwindow.css"
+      ]:
+        assertOutputAction(headerDeletedReport,
+          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(headerDeletedReport, "asCacheHit", false)
-      assertAction(headerDeletedReport, "frontend", "asCacheHit", false)
       assertAction(headerDeletedReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)

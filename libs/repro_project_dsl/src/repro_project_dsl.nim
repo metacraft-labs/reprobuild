@@ -124,8 +124,14 @@ type
     commandStatsId*: string
     dependencyPolicy*: BuildActionDependencyPolicy
 
+  BuildTargetDef* = object
+    name*: string
+    actions*: seq[string]
+    targets*: seq[string]
+
 var registry: seq[PackageDef] = @[]
 var buildActionRegistry: seq[BuildActionDef] = @[]
+var buildTargetRegistry: seq[BuildTargetDef] = @[]
 var defaultBuildActionRegistry = ""
 
 const fs* = ReproFs()
@@ -138,6 +144,9 @@ const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
   BuildActionPayloadVersion = 6'u16
+  BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
+    byte(ord('P'))]
+  BuildTargetPayloadVersion = 1'u16
 
 proc resetPackageRegistry*() =
   registry.setLen(0)
@@ -154,6 +163,12 @@ proc resetBuildActionRegistry*() =
 proc registeredBuildActions*(): seq[BuildActionDef] =
   buildActionRegistry
 
+proc resetBuildTargetRegistry*() =
+  buildTargetRegistry.setLen(0)
+
+proc registeredBuildTargets*(): seq[BuildTargetDef] =
+  buildTargetRegistry
+
 proc resetDefaultBuildActionRegistry*() =
   defaultBuildActionRegistry = ""
 
@@ -162,6 +177,9 @@ proc defaultBuildAction*(id: string) =
 
 proc defaultBuildAction*(action: BuildActionDef) =
   defaultBuildActionRegistry = action.id
+
+proc defaultBuildAction*(target: BuildTargetDef) =
+  defaultBuildActionRegistry = target.name
 
 proc registeredDefaultBuildAction*(): string =
   defaultBuildActionRegistry
@@ -338,6 +356,47 @@ proc buildAction*(id: string; call: PublicCliCall;
     dependencyPolicy: dependencyPolicy)
   buildActionRegistry.add(result)
 
+proc addUniqueValue(values: var seq[string]; value: string) =
+  if value.len > 0 and values.find(value) < 0:
+    values.add(value)
+
+proc actionIds*(actions: openArray[BuildActionDef]): seq[string] =
+  for action in actions:
+    result.addUniqueValue(action.id)
+
+proc targetNames*(targets: openArray[BuildTargetDef]): seq[string] =
+  for target in targets:
+    result.addUniqueValue(target.name)
+
+proc combineActionDeps*(deps: openArray[string];
+                        after: openArray[BuildActionDef] = []): seq[string] =
+  for dep in deps:
+    result.addUniqueValue(dep)
+  for action in after:
+    result.addUniqueValue(action.id)
+
+proc registerBuildTarget(target: BuildTargetDef): BuildTargetDef =
+  result = target
+  buildTargetRegistry.add(result)
+
+proc target*(name: string; action: BuildActionDef): BuildTargetDef
+    {.discardable.} =
+  registerBuildTarget(BuildTargetDef(name: name, actions: @[action.id]))
+
+proc aggregate*(name: string; actions: openArray[BuildActionDef] = [];
+                targets: openArray[BuildTargetDef] = []): BuildTargetDef
+    {.discardable.} =
+  var actionRefs: seq[string] = @[]
+  var targetRefs: seq[string] = @[]
+  for action in actions:
+    actionRefs.addUniqueValue(action.id)
+  for target in targets:
+    targetRefs.addUniqueValue(target.name)
+  registerBuildTarget(BuildTargetDef(
+    name: name,
+    actions: actionRefs,
+    targets: targetRefs))
+
 proc addUniquePath(paths: var seq[string]; path: string) =
   let stripped = path.strip()
   if stripped.len > 0 and paths.find(stripped) < 0:
@@ -410,8 +469,10 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
     dependencyPolicy = dependencyPolicy)
 
 proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
-               deps: openArray[string] = []; cacheable = true;
-               commandStatsId = ""): BuildActionDef {.discardable.} =
+               deps: openArray[string] = [];
+               after: openArray[BuildActionDef] = [];
+               cacheable = true; commandStatsId = ""):
+    BuildActionDef {.discardable.} =
   discard tool
   let call = builtinFsCall("copyFile", [
     inputArg("source", source),
@@ -419,12 +480,14 @@ proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
   ])
   let selectedActionId =
     if actionId.len > 0: actionId else: defaultBuiltinActionId("copyFile", output)
-  recordCommandAction(selectedActionId, call, deps = deps,
+  recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     cacheable = cacheable, commandStatsId = commandStatsId,
     dependencyPolicy = declaredOnlyDependencyPolicy())
 
 proc ensureDir*(tool: ReproFs; path: string; actionId = "";
-                deps: openArray[string] = []; commandStatsId = ""):
+                deps: openArray[string] = [];
+                after: openArray[BuildActionDef] = [];
+                commandStatsId = ""):
     BuildActionDef {.discardable.} =
   discard tool
   let call = builtinFsCall("ensureDir", [
@@ -432,13 +495,15 @@ proc ensureDir*(tool: ReproFs; path: string; actionId = "";
   ])
   let selectedActionId =
     if actionId.len > 0: actionId else: defaultBuiltinActionId("ensureDir", path)
-  recordCommandAction(selectedActionId, call, deps = deps,
+  recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     cacheable = false, commandStatsId = commandStatsId,
     dependencyPolicy = declaredOnlyDependencyPolicy())
 
 proc writeText*(tool: ReproFs; output, text: string; actionId = "";
-                deps: openArray[string] = []; cacheable = true;
-                commandStatsId = ""): BuildActionDef {.discardable.} =
+                deps: openArray[string] = [];
+                after: openArray[BuildActionDef] = [];
+                cacheable = true; commandStatsId = ""):
+    BuildActionDef {.discardable.} =
   discard tool
   let call = builtinFsCall("writeText", [
     outputArg("output", output),
@@ -446,14 +511,16 @@ proc writeText*(tool: ReproFs; output, text: string; actionId = "";
   ])
   let selectedActionId =
     if actionId.len > 0: actionId else: defaultBuiltinActionId("writeText", output)
-  recordCommandAction(selectedActionId, call, deps = deps,
+  recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     cacheable = cacheable, commandStatsId = commandStatsId,
     dependencyPolicy = declaredOnlyDependencyPolicy())
 
 proc stamp*(tool: ReproFs; output, title: string;
             entries: openArray[string] = []; inputs: openArray[string] = [];
-            actionId = ""; deps: openArray[string] = []; cacheable = true;
-            commandStatsId = ""): BuildActionDef {.discardable.} =
+            actionId = ""; deps: openArray[string] = [];
+            after: openArray[BuildActionDef] = [];
+            cacheable = true; commandStatsId = ""):
+    BuildActionDef {.discardable.} =
   discard tool
   let call = builtinFsCall("stamp", [
     outputArg("output", output),
@@ -462,7 +529,7 @@ proc stamp*(tool: ReproFs; output, title: string;
   ])
   let selectedActionId =
     if actionId.len > 0: actionId else: defaultBuiltinActionId("stamp", output)
-  recordCommandAction(selectedActionId, call, deps = deps,
+  recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     extraInputs = inputs, cacheable = cacheable, commandStatsId = commandStatsId,
     dependencyPolicy = declaredOnlyDependencyPolicy())
 
@@ -700,6 +767,39 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
 
 proc actionPayload*(action: BuildActionDef): string =
   fromBytes(encodeBuildActionPayload(action))
+
+proc encodeBuildTargetPayload*(target: BuildTargetDef): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeString(target.name)
+  payload.writeStringSeq(target.actions)
+  payload.writeStringSeq(target.targets)
+
+  result.add(BuildTargetPayloadMagic)
+  result.writeU16Le(BuildTargetPayloadVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef =
+  if bytes.len < 10:
+    raisePayload("truncated build target payload envelope")
+  for i in 0 ..< BuildTargetPayloadMagic.len:
+    if bytes[i] != BuildTargetPayloadMagic[i]:
+      raisePayload("unknown build target payload magic")
+  var pos = 4
+  let version = readU16Le(bytes, pos)
+  if version != BuildTargetPayloadVersion:
+    raisePayload("unsupported build target payload version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raisePayload("build target payload length mismatch")
+  result.name = readString(bytes, pos)
+  result.actions = readStringSeq(bytes, pos)
+  result.targets = readStringSeq(bytes, pos)
+  if pos != bytes.len:
+    raisePayload("trailing build target payload bytes")
+
+proc targetPayload*(target: BuildTargetDef): string =
+  fromBytes(encodeBuildTargetPayload(target))
 
 proc callIdentity*(call: PublicCliCall): string =
   var parts = @[call.packageName, call.executableName, call.subcommand,
@@ -1450,6 +1550,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       formals.add(interfaceFormal(param))
     formals.add("actionId = \"\"")
     formals.add("deps: openArray[string] = []")
+    formals.add("after: openArray[BuildActionDef] = []")
     formals.add("extraInputs: openArray[string] = []")
     formals.add("extraOutputs: openArray[string] = []")
     formals.add("depfile = \"\"")
@@ -1468,7 +1569,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     result.add("  let selectedActionId = if actionId.len > 0: actionId " &
       "else: defaultToolActionId(call)\n")
     result.add("  recordToolInvocation(selectedActionId, call, " &
-      "deps = deps, extraInputs = extraInputs, " &
+      "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, dependencyPolicy = " &
       dependencyPolicyCode(command.dependencyPolicy) & ")\n")
@@ -1582,6 +1683,9 @@ when defined(reproProviderMode):
   proc defaultBuildActionNode(namespace: string): string =
     namespace & ":metadata:default-build-action"
 
+  proc buildTargetNode(namespace, name: string): string =
+    namespace & ":metadata:build-target:" & sanitizeNodePart(name)
+
   proc addChildSpecsFromInputs(fragment: var GraphFragment) =
     for input in fragment.evaluationInputs:
       if input.kind != gevDirectoryEnumeration or
@@ -1602,6 +1706,7 @@ when defined(reproProviderMode):
                              buildProc: proc (); includeDefault = true):
       GraphFragment =
     resetBuildActionRegistry()
+    resetBuildTargetRegistry()
     resetDefaultBuildActionRegistry()
     resetProviderEvaluationInputRegistry()
     currentProviderProjectRoot = request.arguments
@@ -1611,6 +1716,7 @@ when defined(reproProviderMode):
       currentProviderProjectRoot = ""
     let actions = inferDeclaredActionDeps(
       registeredBuildActions(), request.arguments)
+    let targets = registeredBuildTargets()
     let defaultAction = registeredDefaultBuildAction()
     result = GraphFragment(
       entryPointId: request.entryPointId,
@@ -1629,6 +1735,12 @@ when defined(reproProviderMode):
         kind: gnkAction,
         stableName: action.id,
         payload: actionPayload(action)))
+    for target in targets:
+      result.nodes.add(GraphNode(
+        id: buildTargetNode(request.namespace, target.name),
+        kind: gnkMetadata,
+        stableName: "reprobuild.build-target.v1",
+        payload: targetPayload(target)))
     if includeDefault and defaultAction.len > 0:
       var found = false
       for action in actions:
@@ -1636,8 +1748,13 @@ when defined(reproProviderMode):
           found = true
           break
       if not found:
+        for target in targets:
+          if target.name == defaultAction:
+            found = true
+            break
+      if not found:
         raise newException(ValueError,
-          "default build action does not match a declared build action: " &
+          "default build action does not match a declared build action or target: " &
             defaultAction)
       result.nodes.add(GraphNode(
         id: defaultBuildActionNode(request.namespace),

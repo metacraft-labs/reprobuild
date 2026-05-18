@@ -583,6 +583,9 @@ proc sanitizeActionId(value: string): string =
   if result.len == 0:
     result = "action"
 
+proc dependencyEvidencePath*(cacheRoot, actionId: string): string =
+  cacheRoot / "dependency-evidence" / (sanitizeActionId(actionId) & ".rbar")
+
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
                      cacheRoot: string): tuple[action: BuildAction;
                                                diagnostic: string] =
@@ -927,9 +930,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               launchedAny = true
               continue
             if plan.action.cacheable:
-              discard cache.recordActionResult(cas, plan.action.weakFingerprint,
+              let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
                 ffpChecksum, evidence.evidence.evidenceInputPaths(),
                 plan.action.outputs, plan.action.cwd)
+              writeActionResultRecordFile(
+                dependencyEvidencePath(cacheRoot, plan.action.id), record)
             completeSuccess(finished.id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "builtin")
           else:
@@ -1031,8 +1036,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           continue
         if action.cacheable:
-          discard cache.recordActionResult(cas, action.weakFingerprint, ffpChecksum,
+          let record = cache.recordActionResult(cas, action.weakFingerprint, ffpChecksum,
             evidence.evidence.evidenceInputPaths(), action.outputs, action.cwd)
+          writeActionResultRecordFile(
+            dependencyEvidencePath(cacheRoot, action.id), record)
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:

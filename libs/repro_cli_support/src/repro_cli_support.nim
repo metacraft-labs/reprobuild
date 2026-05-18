@@ -375,35 +375,74 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
                            selectedActionId = ""): seq[BuildAction] =
   let profiles = profileIndex(identity)
   var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
+  var targets = initTable[string, BuildTargetDef]()
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkAction:
         actionNodes.add((
           node: node,
           payload: decodeBuildActionPayload(toBytes(node.payload))))
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        if targets.hasKey(target.name):
+          raise newException(ValueError,
+            "duplicate build target metadata: " & target.name)
+        targets[target.name] = target
   let inferredActions = inferDeclaredActionDeps(
     actionNodes.mapIt(it.payload), projectRoot)
   for i in 0 ..< actionNodes.len:
     actionNodes[i].payload = inferredActions[i]
+  var aliasForAction = initTable[string, string]()
+  for target in targets.values:
+    if target.actions.len == 1 and target.targets.len == 0:
+      let actionId = target.actions[0]
+      if aliasForAction.hasKey(actionId) and aliasForAction[actionId] !=
+          target.name:
+        raise newException(ValueError,
+          "action " & actionId & " has multiple direct target aliases: " &
+            aliasForAction[actionId] & " and " & target.name)
+      aliasForAction[actionId] = target.name
+
+  proc publicPayload(action: BuildActionDef): BuildActionDef =
+    result = action
+    if aliasForAction.hasKey(action.id):
+      result.id = aliasForAction[action.id]
+    for i in 0 ..< result.deps.len:
+      if aliasForAction.hasKey(result.deps[i]):
+        result.deps[i] = aliasForAction[result.deps[i]]
+
+  proc lowerItem(item: tuple[node: GraphNode; payload: BuildActionDef]):
+      BuildAction =
+    var node = item.node
+    node.payload = actionPayload(publicPayload(item.payload))
+    lowerGraphAction(node, profiles, projectRoot)
+
   if selectedActionId.len == 0:
     for item in actionNodes:
-      result.add(lowerGraphAction(item.node, profiles, projectRoot))
+      result.add(lowerItem(item))
     return
 
   var byId = initTable[string, BuildActionDef]()
   for item in actionNodes:
     byId[item.payload.id] = item.payload
-  if not byId.hasKey(selectedActionId):
+  if not byId.hasKey(selectedActionId) and
+      not targets.hasKey(selectedActionId):
     var available: seq[string] = @[]
     for item in actionNodes:
       available.add(item.payload.id)
+    for target in targets.values:
+      available.add(target.name)
     available.sort()
     raise newException(ValueError,
       "unknown build target/action id: " & selectedActionId &
-        (if available.len > 0: " (available: " & available.join(", ") & ")"
-         else: " (project defines no build actions)"))
+        (if available.len > 0:
+          " (available: " & available.join(", ") & ")"
+         else: " (project defines no build actions or targets)"))
 
   var selected = initHashSet[string]()
+  var visitingTargets = initHashSet[string]()
+  var expandedTargets = initHashSet[string]()
   proc includeClosure(actionId: string) =
     if selected.contains(actionId):
       return
@@ -415,10 +454,32 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
     for dep in byId[actionId].deps:
       includeClosure(dep)
 
-  includeClosure(selectedActionId)
+  proc includeTarget(targetName: string) =
+    if expandedTargets.contains(targetName):
+      return
+    if visitingTargets.contains(targetName):
+      raise newException(ValueError,
+        "cyclic build target dependency involving " & targetName)
+    if not targets.hasKey(targetName):
+      raise newException(ValueError,
+        "unknown build target " & targetName & " while selecting " &
+          selectedActionId)
+    visitingTargets.incl(targetName)
+    let target = targets[targetName]
+    for depTarget in target.targets:
+      includeTarget(depTarget)
+    for actionId in target.actions:
+      includeClosure(actionId)
+    visitingTargets.excl(targetName)
+    expandedTargets.incl(targetName)
+
+  if targets.hasKey(selectedActionId):
+    includeTarget(selectedActionId)
+  else:
+    includeClosure(selectedActionId)
   for item in actionNodes:
     if selected.contains(item.payload.id):
-      result.add(lowerGraphAction(item.node, profiles, projectRoot))
+      result.add(lowerItem(item))
 
 proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
   for fragment in snapshot.fragments:

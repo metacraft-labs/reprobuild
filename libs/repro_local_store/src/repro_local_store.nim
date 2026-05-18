@@ -341,6 +341,10 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
   if pos != payload.len:
     raiseEnvelopeError(eeMalformed, "trailing action record bytes")
 
+proc writeActionResultRecordFile*(path: string; record: ActionResultRecord) =
+  createDir(parentDir(path))
+  writeFile(path, byteString(encodeRecord(record)))
+
 proc recordTail(payload: openArray[byte]): uint32 =
   uint32(localHash(payload).value and RecordTailMask)
 
