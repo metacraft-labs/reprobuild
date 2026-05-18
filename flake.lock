@@ -1936,7 +1936,25 @@
         "nixpkgs": [
           "nixos-modules",
           "nixpkgs-unstable"
-        ]
+        ],
+        "runquota-src": "runquota-src"
+      }
+    },
+    "runquota-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779102768,
+        "narHash": "sha256-VI5pEEQ0CTd+ChFxmBB2HjdZ1FFwsGBsAvQT/OIgRpo=",
+        "owner": "metacraft-labs",
+        "repo": "runquota",
+        "rev": "b325ca05ae5855b44cd54dec377a58ad36f875d6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "ref": "main",
+        "repo": "runquota",
+        "type": "github"
       }
     },
     "rust-analyzer-src": {
