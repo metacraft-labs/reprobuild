@@ -99,8 +99,15 @@
               ];
             };
           };
+          reproApp = {
+            type = "app";
+            program = "${reprobuild}/bin/repro";
+          };
         in
         {
+          apps.default = reproApp;
+          apps.repro = reproApp;
+
           packages.default = reprobuild;
           packages.reprobuild = reprobuild;
 
