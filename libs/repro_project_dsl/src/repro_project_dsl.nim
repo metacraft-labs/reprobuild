@@ -75,11 +75,24 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  TarballProvisioningDef* = object
+    url*: string
+    mirrors*: seq[string]
+    sha256*: string
+    archiveType*: string
+    executablePath*: string
+    stripComponents*: int
+    packageId*: string
+    lockIdentity*: string
+    sourceFile*: string
+    sourceLine*: int
+
   PackageDef* = object
     packageName*: string
     executables*: seq[ExecutableDef]
     toolUses*: seq[PackageUseDef]
     nixProvisioning*: seq[NixPackageProvisioningDef]
+    tarballProvisioning*: seq[TarballProvisioningDef]
     usesImportPaths*: seq[string]
     publicSignatureDependencies*: seq[string]
     sourceFile*: string
@@ -1277,15 +1290,75 @@ proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
   if result.expressionFile.len > 0 and not result.expressionFile.isAbsolute:
     result.expressionFile = loc.file.splitPath.head / result.expressionFile
 
+proc unsafeRelativePath(value: string): bool =
+  let normalized = value.replace('\\', '/')
+  if normalized.len == 0 or normalized.startsWith("/"):
+    return true
+  for part in normalized.split('/'):
+    if part == "..":
+      return true
+
+proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
+  let loc = lineFile(node)
+  if calleeName(node).normalize != "tarball":
+    error("provisioning expects tarball url = \"...\", sha256 = \"...\", executablePath = \"bin/name\"",
+      node)
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  result.archiveType = "tar.gz"
+  result.stripComponents = 0
+  for i in 1 ..< node.len:
+    let urlValue = namedValue(node[i], "url")
+    if not urlValue.isNil:
+      result.url = stringLiteral(urlValue)
+    let mirrorValue = namedValue(node[i], "mirror")
+    if not mirrorValue.isNil:
+      result.mirrors.add(stringLiteral(mirrorValue))
+    let sha256Value = namedValue(node[i], "sha256")
+    if not sha256Value.isNil:
+      result.sha256 = stringLiteral(sha256Value)
+    let archiveTypeValue = namedValue(node[i], "archiveType")
+    if not archiveTypeValue.isNil:
+      result.archiveType = stringLiteral(archiveTypeValue)
+    let executablePathValue = namedValue(node[i], "executablePath")
+    if not executablePathValue.isNil:
+      result.executablePath = stringLiteral(executablePathValue)
+    let stripComponentsValue = namedValue(node[i], "stripComponents")
+    if not stripComponentsValue.isNil:
+      result.stripComponents = intLiteral(stripComponentsValue, 0)
+    let packageIdValue = namedValue(node[i], "packageId")
+    if not packageIdValue.isNil:
+      result.packageId = stringLiteral(packageIdValue)
+    let lockIdentityValue = namedValue(node[i], "lockIdentity")
+    if not lockIdentityValue.isNil:
+      result.lockIdentity = stringLiteral(lockIdentityValue)
+  if result.url.len == 0:
+    error("tarball requires url = \"...\"", node)
+  if result.sha256.len == 0:
+    error("tarball requires sha256 = \"...\"", node)
+  if result.executablePath.len == 0:
+    error("tarball requires executablePath = \"bin/name\"", node)
+  if result.executablePath.unsafeRelativePath:
+    error("tarball executablePath must be relative to the realized prefix", node)
+  if result.stripComponents < 0:
+    error("tarball stripComponents must not be negative", node)
+  if result.packageId.len == 0:
+    result.packageId = result.url
+  if result.lockIdentity.len == 0:
+    result.lockIdentity = "sha256:" & result.sha256
+
 proc collectProvisioning(node: NimNode;
-                         output: var seq[NixPackageProvisioningDef]) =
+                         nixOutput: var seq[NixPackageProvisioningDef];
+                         tarballOutput: var seq[TarballProvisioningDef]) =
   case node.kind
   of nnkStmtList:
     for child in node:
-      collectProvisioning(child, output)
+      collectProvisioning(child, nixOutput, tarballOutput)
   of nnkCall, nnkCommand:
     if calleeName(node).normalize == "nixpackage":
-      output.add(parseNixPackageProvisioning(node))
+      nixOutput.add(parseNixPackageProvisioning(node))
+    elif calleeName(node).normalize == "tarball":
+      tarballOutput.add(parseTarballProvisioning(node))
     else:
       error("unsupported provisioning form: " & node.repr, node)
   else:
@@ -1305,7 +1378,8 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
     elif calleeName(stmt).normalize == "provisioning":
       if stmt.len < 2:
         error("provisioning expects a body", stmt)
-      collectProvisioning(stmt[stmt.len - 1], result.nixProvisioning)
+      collectProvisioning(stmt[stmt.len - 1], result.nixProvisioning,
+        result.tarballProvisioning)
     elif calleeName(stmt).normalize == "usesimportpath":
       if stmt.len != 2:
         error("usesImportPath expects exactly one string literal", stmt)
@@ -1335,6 +1409,24 @@ proc packageLiteral(pkg: PackageDef): string =
         provisioning.selector) &
       ", executablePath: " & escForCode(provisioning.executablePath) &
       ", expressionFile: " & escForCode(provisioning.expressionFile) &
+      ", packageId: " & escForCode(provisioning.packageId) &
+      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", sourceFile: " & escForCode(provisioning.sourceFile) &
+      ", sourceLine: " & $provisioning.sourceLine & ")")
+  result.add("], tarballProvisioning: @[")
+  for provisioningIndex, provisioning in pkg.tarballProvisioning:
+    if provisioningIndex > 0:
+      result.add(", ")
+    result.add("TarballProvisioningDef(url: " & escForCode(provisioning.url) &
+      ", mirrors: @[")
+    for mirrorIndex, mirror in provisioning.mirrors:
+      if mirrorIndex > 0:
+        result.add(", ")
+      result.add(escForCode(mirror))
+    result.add("], sha256: " & escForCode(provisioning.sha256) &
+      ", archiveType: " & escForCode(provisioning.archiveType) &
+      ", executablePath: " & escForCode(provisioning.executablePath) &
+      ", stripComponents: " & $provisioning.stripComponents &
       ", packageId: " & escForCode(provisioning.packageId) &
       ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &

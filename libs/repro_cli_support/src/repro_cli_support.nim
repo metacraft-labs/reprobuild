@@ -21,9 +21,9 @@ proc renderUsage*(programName: string): string =
   if programName == "repro":
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix [--work-root=PATH]\n       " & programName &
-      " watch [target[#name]] --tool-provisioning=path|nix [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " & programName &
-      " develop <target[#name]> --tool-provisioning=nix [--work-root=PATH] -- <command> [args...]\n       " & programName &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH]\n       " & programName &
+      " watch [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " & programName &
+      " develop <target[#name]> --tool-provisioning=nix|tarball [--work-root=PATH] -- <command> [args...]\n       " & programName &
       " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]"
   elif programName == "repro-fs-snoop":
     programName & " " & versionString() & "\nusage: " & programName &
@@ -38,6 +38,8 @@ proc parseToolProvisioning(value: string): ToolProvisioningMode =
     tpmPathOnly
   of "nix":
     tpmNix
+  of "tarball":
+    tpmTarball
   else:
     raise newException(ValueError, "unsupported --tool-provisioning=" & value)
 
@@ -592,6 +594,9 @@ proc identityPaths(outDir: string; mode: ToolProvisioningMode):
   of tpmNix:
     (identityPath: outDir / "nix-tool-identities.rbtp",
       inspectionPath: outDir / "nix-tool-identities.inspect.json")
+  of tpmTarball:
+    (identityPath: outDir / "tarball-tool-identities.rbtp",
+      inspectionPath: outDir / "tarball-tool-identities.inspect.json")
   else:
     (identityPath: outDir / "path-only-tool-identities.rbtp",
       inspectionPath: outDir / "path-only-tool-identities.inspect.json")
@@ -601,7 +606,8 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
                              mode: ToolProvisioningMode):
     tuple[identity: PathOnlyBuildIdentity; identityPath: string;
       inspectionPath: string] =
-  let identity = toolBuildIdentity(artifact, mode)
+  let identity = toolBuildIdentity(artifact, mode,
+    storeRoot = outDir / "tool-store")
   let paths = identityPaths(outDir, mode)
   writePathOnlyBuildIdentity(paths.identityPath, identity)
   writeInspectionJson(paths.inspectionPath, identity)
@@ -612,6 +618,7 @@ proc modeName(mode: ToolProvisioningMode): string =
   case mode
   of tpmPathOnly: "path"
   of tpmNix: "nix"
+  of tpmTarball: "tarball"
   else: "unspecified"
 
 proc runQuotaSocketDiagnostic(): string =
@@ -670,7 +677,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
 
-  if mode in {tpmPathOnly, tpmNix}:
+  if mode in {tpmPathOnly, tpmNix, tpmTarball}:
     let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
     let identity = resolved.identity
     echo "repro build: tool provisioning active (tool-provisioning=" &
@@ -683,6 +690,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     echo "inspection: " & resolved.inspectionPath
     let portability =
       if mode == tpmNix:
+        "portable"
+      elif mode == tpmTarball:
         "portable"
       else:
         "local-only"
@@ -909,9 +918,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
   let targetWasOmitted = target.len == 0
   if targetWasOmitted:
     target = "."
-  if mode notin {tpmPathOnly, tpmNix}:
+  if mode notin {tpmPathOnly, tpmNix, tpmTarball}:
     raise newException(ValueError,
-      "repro watch requires --tool-provisioning=path|nix")
+      "repro watch requires --tool-provisioning=path|nix|tarball")
   when not defined(macosx):
     raise newException(OSError,
       "repro watch currently supports macOS kqueue only; Linux and Windows " &
@@ -973,7 +982,7 @@ proc runDevelopCommand(args: openArray[string]): int =
     elif arg == "--tool-provisioning":
       raise newException(ValueError,
         "--tool-provisioning requires an inline value, for example " &
-          "--tool-provisioning=nix")
+        "--tool-provisioning=nix")
     elif arg.startsWith("--work-root="):
       workRoot = arg.split("=", maxsplit = 1)[1]
     elif arg == "--work-root":
@@ -1006,8 +1015,8 @@ proc runDevelopCommand(args: openArray[string]): int =
   if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
     raise newException(ValueError,
       "typed tool provisioning is required for uses declarations; refusing " &
-        "implicit PATH fallback. Pass --tool-provisioning=nix to resolve a " &
-        "Nix-backed development environment.")
+        "implicit PATH fallback. Pass --tool-provisioning=nix or " &
+        "--tool-provisioning=tarball to resolve a provisioned development environment.")
 
   if mode == tpmUnspecified:
     echo "repro develop: no external tools requested"
@@ -1018,7 +1027,7 @@ proc runDevelopCommand(args: openArray[string]): int =
         interfaceFingerprint: artifact.interfaceFingerprint),
       "", "", interfacePath)
 
-  if mode notin {tpmPathOnly, tpmNix}:
+  if mode notin {tpmPathOnly, tpmNix, tpmTarball}:
     raise newException(ValueError,
       "unsupported develop tool provisioning mode: " & mode.modeName)
 

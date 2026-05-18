@@ -52,12 +52,25 @@ type
     lockIdentity*: string
     location*: SourceLocation
 
+  InterfaceTarballProvisioning* = object
+    packageName*: string
+    url*: string
+    mirrors*: seq[string]
+    sha256*: string
+    archiveType*: string
+    executablePath*: string
+    stripComponents*: int
+    packageId*: string
+    lockIdentity*: string
+    location*: SourceLocation
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
     executableName*: string
     policyPath*: seq[string]
     nixProvisioning*: seq[InterfaceNixProvisioning]
+    tarballProvisioning*: seq[InterfaceTarballProvisioning]
     location*: SourceLocation
 
   ProjectInterface* = object
@@ -94,7 +107,7 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 3'u16
+  EnvelopeVersion = 4'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -316,6 +329,32 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
   result.lockIdentity = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeTarballProvisioning(outp: var seq[byte];
+                              provisioning: InterfaceTarballProvisioning) =
+  outp.writeString(provisioning.packageName)
+  outp.writeString(provisioning.url)
+  outp.writeStringSeq(provisioning.mirrors)
+  outp.writeString(provisioning.sha256)
+  outp.writeString(provisioning.archiveType)
+  outp.writeString(provisioning.executablePath)
+  outp.writeU32Le(uint32(max(provisioning.stripComponents, 0)))
+  outp.writeString(provisioning.packageId)
+  outp.writeString(provisioning.lockIdentity)
+  outp.writeLocation(provisioning.location)
+
+proc readTarballProvisioning(bytes: openArray[byte]; pos: var int):
+    InterfaceTarballProvisioning =
+  result.packageName = readString(bytes, pos)
+  result.url = readString(bytes, pos)
+  result.mirrors = readStringSeq(bytes, pos)
+  result.sha256 = readString(bytes, pos)
+  result.archiveType = readString(bytes, pos)
+  result.executablePath = readString(bytes, pos)
+  result.stripComponents = int(readU32Le(bytes, pos))
+  result.packageId = readString(bytes, pos)
+  result.lockIdentity = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
 proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse) =
   outp.writeString(useDef.rawConstraint)
   outp.writeString(useDef.packageSelector)
@@ -324,6 +363,9 @@ proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse) =
   outp.writeU32Le(uint32(useDef.nixProvisioning.len))
   for provisioning in useDef.nixProvisioning:
     outp.writeNixProvisioning(provisioning)
+  outp.writeU32Le(uint32(useDef.tarballProvisioning.len))
+  for provisioning in useDef.tarballProvisioning:
+    outp.writeTarballProvisioning(provisioning)
   outp.writeLocation(useDef.location)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;
@@ -338,6 +380,12 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
       provisioningCount)
     for i in 0 ..< provisioningCount:
       result.nixProvisioning[i] = readNixProvisioning(bytes, pos, version)
+  if version >= 4'u16:
+    let tarballCount = int(readU32Le(bytes, pos))
+    result.tarballProvisioning = newSeq[InterfaceTarballProvisioning](
+      tarballCount)
+    for i in 0 ..< tarballCount:
+      result.tarballProvisioning[i] = readTarballProvisioning(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
@@ -525,6 +573,22 @@ proc toInterfaceNixProvisioning(packageName: string;
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
 
+proc toInterfaceTarballProvisioning(packageName: string;
+                                    provisioning: TarballProvisioningDef):
+    InterfaceTarballProvisioning =
+  InterfaceTarballProvisioning(
+    packageName: packageName,
+    url: provisioning.url,
+    mirrors: provisioning.mirrors,
+    sha256: provisioning.sha256,
+    archiveType: provisioning.archiveType,
+    executablePath: provisioning.executablePath,
+    stripComponents: provisioning.stripComponents,
+    packageId: provisioning.packageId,
+    lockIdentity: provisioning.lockIdentity,
+    location: SourceLocation(file: provisioning.sourceFile,
+      line: provisioning.sourceLine))
+
 proc toInterfaceToolUse(useDef: PackageUseDef;
                         packages: openArray[PackageDef]): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -538,6 +602,9 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
       for provisioning in pkg.nixProvisioning:
         result.nixProvisioning.add(toInterfaceNixProvisioning(pkg.packageName,
           provisioning))
+      for provisioning in pkg.tarballProvisioning:
+        result.tarballProvisioning.add(toInterfaceTarballProvisioning(
+          pkg.packageName, provisioning))
 
 proc toProjectInterface*(pkg: PackageDef;
                          packages: openArray[PackageDef] = []):

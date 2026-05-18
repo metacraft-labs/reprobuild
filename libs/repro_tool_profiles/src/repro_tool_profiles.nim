@@ -1,4 +1,4 @@
-import std/[json, os, osproc, sequtils, strutils]
+import std/[httpclient, json, os, osproc, sequtils, strutils, times]
 
 import cbor
 import repro_core
@@ -12,6 +12,7 @@ type
     tpmUnspecified
     tpmPathOnly
     tpmNix
+    tpmTarball
 
   AdapterStrength* = enum
     asWeak
@@ -41,6 +42,12 @@ type
     packageSelector*: string
     packageId*: string
     nixSelector*: string
+    tarballUrl*: string
+    tarballMirrors*: seq[string]
+    tarballSelectedUrl*: string
+    tarballSha256*: string
+    archiveType*: string
+    stripComponents*: int
     declaredExecutablePath*: string
     nixExpressionFile*: string
     realizedStorePaths*: seq[string]
@@ -61,6 +68,12 @@ type
     packageSelector*: string
     packageId*: string
     nixSelector*: string
+    tarballUrl*: string
+    tarballMirrors*: seq[string]
+    tarballSelectedUrl*: string
+    tarballSha256*: string
+    archiveType*: string
+    stripComponents*: int
     declaredExecutablePath*: string
     nixExpressionFile*: string
     realizedStorePaths*: seq[string]
@@ -90,9 +103,20 @@ type
     nixExpressionFile*: string
     lockIdentity*: string
 
+  TarballAcquisitionPlan* = object
+    packageSelector*: string
+    packageId*: string
+    url*: string
+    mirrors*: seq[string]
+    sha256*: string
+    archiveType*: string
+    declaredExecutablePath*: string
+    stripComponents*: int
+    lockIdentity*: string
+
 const
   ArtifactMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')), byte(ord('P'))]
-  ArtifactVersion = 4'u16
+  ArtifactVersion = 5'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -183,6 +207,12 @@ proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   payload.writeString(profile.packageSelector)
   payload.writeString(profile.packageId)
   payload.writeString(profile.nixSelector)
+  payload.writeString(profile.tarballUrl)
+  payload.writeStringSeq(profile.tarballMirrors)
+  payload.writeString(profile.tarballSelectedUrl)
+  payload.writeString(profile.tarballSha256)
+  payload.writeString(profile.archiveType)
+  payload.writeU32Le(uint32(max(profile.stripComponents, 0)))
   payload.writeString(profile.declaredExecutablePath)
   payload.writeString(profile.nixExpressionFile)
   payload.writeStringSeq(profile.realizedStorePaths)
@@ -210,6 +240,12 @@ proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   payload.writeString(identity.packageSelector)
   payload.writeString(identity.packageId)
   payload.writeString(identity.nixSelector)
+  payload.writeString(identity.tarballUrl)
+  payload.writeStringSeq(identity.tarballMirrors)
+  payload.writeString(identity.tarballSelectedUrl)
+  payload.writeString(identity.tarballSha256)
+  payload.writeString(identity.archiveType)
+  payload.writeU32Le(uint32(max(identity.stripComponents, 0)))
   payload.writeString(identity.declaredExecutablePath)
   payload.writeString(identity.nixExpressionFile)
   payload.writeStringSeq(identity.realizedStorePaths)
@@ -303,7 +339,33 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
     nixExpressionFile: selected.expressionFile,
     lockIdentity: lockIdentity)
 
-proc executableInStorePath(storePath, declaredExecutablePath: string): string =
+proc unsafeRelativePath(value: string): bool =
+  let normalized = value.replace('\\', '/')
+  if normalized.len == 0 or normalized.startsWith("/"):
+    return true
+  for part in normalized.split('/'):
+    if part == "..":
+      return true
+
+proc pathContainsSymlink(root, relativePath: string): bool =
+  var current = root
+  for part in relativePath.replace('\\', '/').split('/'):
+    if part.len == 0 or part == ".":
+      continue
+    current = current / part
+    try:
+      if getFileInfo(current, followSymlink = false).kind in
+          {pcLinkToFile, pcLinkToDir}:
+        return true
+    except OSError:
+      discard
+
+proc executableInStorePath(storePath, declaredExecutablePath: string;
+                           rejectSymlinks = false): string =
+  if declaredExecutablePath.unsafeRelativePath:
+    return ""
+  if rejectSymlinks and pathContainsSymlink(storePath, declaredExecutablePath):
+    return ""
   let candidate = storePath / declaredExecutablePath
   if fileExists(candidate) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
       it in getFilePermissions(candidate)):
@@ -378,6 +440,312 @@ proc resolveNixTool*(useDef: InterfaceToolUse): PathOnlyToolProfile =
 
   result.profileFingerprint = profileFingerprintFor(result)
 
+proc normalizedSha256(value: string): string =
+  result = value.strip().toLowerAscii()
+  if result.startsWith("sha256:"):
+    result = result["sha256:".len .. ^1]
+  if result.len != 64 or result.anyIt(not (it in {'0' .. '9', 'a' .. 'f'})):
+    raise newException(ValueError, "invalid sha256 digest: " & value)
+
+proc fileSha256Hex(path: string): string =
+  let sha256sum = findExe("sha256sum")
+  let shasum = findExe("shasum")
+  let openssl = findExe("openssl")
+  let command =
+    if sha256sum.len > 0:
+      shellCommand(["sha256sum", path])
+    elif shasum.len > 0:
+      shellCommand(["shasum", "-a", "256", path])
+    elif openssl.len > 0:
+      shellCommand(["openssl", "dgst", "-sha256", "-r", path])
+    else:
+      raise newException(OSError,
+        "tool-resolution failed: no sha256 verifier found (tried sha256sum, shasum, openssl)")
+  let res = execCmdEx(command)
+  if res.exitCode != 0:
+    raise newException(OSError,
+      "tool-resolution failed: sha256 verifier exited " & $res.exitCode &
+      "\n" & res.output)
+  let parts = res.output.strip().splitWhitespace()
+  if parts.len == 0:
+    raise newException(OSError, "tool-resolution failed: sha256 verifier produced no digest")
+  normalizedSha256(parts[0])
+
+proc safeStoreSegment(value, fallback: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
+        ch in {'-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = fallback
+
+proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
+  if useDef.tarballProvisioning.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: package \"" & useDef.packageSelector &
+      "\" requested by uses \"" & useDef.rawConstraint &
+      "\" does not declare provisioning: tarball metadata")
+  let selected = useDef.tarballProvisioning[0]
+  let sha256 = normalizedSha256(selected.sha256)
+  if selected.url.len == 0 or selected.executablePath.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: incomplete tarball metadata for package \"" &
+      useDef.packageSelector & "\"")
+  if selected.executablePath.unsafeRelativePath:
+    raise newException(ValueError,
+      "tool-resolution failed: unsafe tarball executablePath for package \"" &
+      useDef.packageSelector & "\": " & selected.executablePath)
+  TarballAcquisitionPlan(
+    packageSelector: useDef.packageSelector,
+    packageId: if selected.packageId.len > 0: selected.packageId else: selected.url,
+    url: selected.url,
+    mirrors: selected.mirrors,
+    sha256: sha256,
+    archiveType: if selected.archiveType.len > 0: selected.archiveType else: "tar.gz",
+    declaredExecutablePath: selected.executablePath,
+    stripComponents: selected.stripComponents,
+    lockIdentity: if selected.lockIdentity.len > 0:
+        selected.lockIdentity
+      else:
+        "sha256:" & sha256)
+
+proc downloadUrlToFile(url, destination: string) =
+  createDir(parentDir(destination))
+  if url.startsWith("file://"):
+    let source = url["file://".len .. ^1]
+    if not fileExists(source):
+      raise newException(IOError, "file URL does not exist: " & url)
+    copyFile(source, destination)
+  elif url.startsWith("http://") or url.startsWith("https://"):
+    var client = newHttpClient()
+    try:
+      client.downloadFile(url, destination)
+    finally:
+      client.close()
+  else:
+    if not fileExists(url):
+      raise newException(IOError, "unsupported archive URL or missing file: " & url)
+    copyFile(url, destination)
+
+proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
+    tuple[path: string; selectedUrl: string] =
+  let downloads = storeRoot / "downloads"
+  let tmpRoot = storeRoot / "tmp"
+  createDir(downloads)
+  createDir(tmpRoot)
+  let finalPath = downloads / (plan.sha256 & ".archive")
+  if fileExists(finalPath):
+    let actual = fileSha256Hex(finalPath)
+    if actual == plan.sha256:
+      return (path: finalPath, selectedUrl: "cache")
+    removeFile(finalPath)
+
+  var diagnostics: seq[string] = @[]
+  for url in @[plan.url] & plan.mirrors:
+    let tmpPath = tmpRoot / ("download." & $getCurrentProcessId() & "." &
+      $getTime().toUnix & "." & $diagnostics.len)
+    try:
+      downloadUrlToFile(url, tmpPath)
+      let actual = fileSha256Hex(tmpPath)
+      if actual != plan.sha256:
+        diagnostics.add(url & ": sha256 mismatch expected " & plan.sha256 &
+          " got " & actual)
+        removeFile(tmpPath)
+        continue
+      try:
+        moveFile(tmpPath, finalPath)
+      except OSError:
+        if fileExists(finalPath) and fileSha256Hex(finalPath) == plan.sha256:
+          if fileExists(tmpPath):
+            removeFile(tmpPath)
+        else:
+          raise
+      return (path: finalPath, selectedUrl: url)
+    except CatchableError as e:
+      diagnostics.add(url & ": " & e.msg)
+      if fileExists(tmpPath):
+        removeFile(tmpPath)
+  raise newException(OSError,
+    "tool-resolution failed: all tarball archive URLs failed for " &
+    plan.packageSelector & "\n" & diagnostics.join("\n"))
+
+proc validateTarEntries(archivePath, archiveType: string) =
+  let lowerType = archiveType.toLowerAscii()
+  let args =
+    case lowerType
+    of "tar.gz", "tgz":
+      @["tar", "-tzf", archivePath]
+    of "tar":
+      @["tar", "-tf", archivePath]
+    else:
+      raise newException(ValueError,
+        "tool-resolution failed: unsupported tarball archiveType " & archiveType)
+  let res = execCmdEx(shellCommand(args))
+  if res.exitCode != 0:
+    raise newException(OSError,
+      "tool-resolution failed: tar listing failed for " & archivePath &
+      "\n" & res.output)
+  for entry in res.output.splitLines:
+    let normalized = entry.replace('\\', '/')
+    if normalized.len == 0:
+      continue
+    if normalized.startsWith("/") or normalized == ".." or
+        normalized.startsWith("../") or normalized.contains("/../") or
+        normalized.endsWith("/.."):
+      raise newException(OSError,
+        "tool-resolution failed: unsafe archive entry: " & entry)
+
+proc extractTarballArchive(archivePath, destination, archiveType: string;
+                           stripComponents: int) =
+  validateTarEntries(archivePath, archiveType)
+  createDir(destination)
+  let lowerType = archiveType.toLowerAscii()
+  var args =
+    case lowerType
+    of "tar.gz", "tgz":
+      @["tar", "-xzf", archivePath, "-C", destination]
+    of "tar":
+      @["tar", "-xf", archivePath, "-C", destination]
+    else:
+      raise newException(ValueError,
+        "tool-resolution failed: unsupported tarball archiveType " & archiveType)
+  if stripComponents > 0:
+    args.add("--strip-components=" & $stripComponents)
+  let res = execCmdEx(shellCommand(args))
+  if res.exitCode != 0:
+    raise newException(OSError,
+      "tool-resolution failed: tar extraction failed for " & archivePath &
+      "\n" & res.output)
+
+proc tarballReceiptPath(prefix: string): string =
+  prefix / ".reprobuild-tarball-receipt.json"
+
+proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
+                         selectedUrl: string) =
+  let receipt = %*{
+    "installMethod": "tarball",
+    "packageSelector": plan.packageSelector,
+    "packageId": plan.packageId,
+    "url": plan.url,
+    "mirrors": plan.mirrors,
+    "selectedUrl": selectedUrl,
+    "sha256": plan.sha256,
+    "archiveType": plan.archiveType,
+    "stripComponents": plan.stripComponents,
+    "declaredExecutablePath": plan.declaredExecutablePath,
+    "lockIdentity": plan.lockIdentity,
+    "realizationBoundary": prefix
+  }
+  writeFile(tarballReceiptPath(prefix), receipt.pretty())
+
+proc selectedUrlFromReceipt(prefix: string): string =
+  let path = tarballReceiptPath(prefix)
+  if not fileExists(path):
+    return "existing"
+  try:
+    result = parseFile(path){"selectedUrl"}.getStr("existing")
+  except CatchableError:
+    result = "existing"
+
+proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
+    tuple[prefix: string; archivePath: string; selectedUrl: string] =
+  let realizations = storeRoot / "realizations"
+  let tmpRoot = storeRoot / "tmp"
+  createDir(realizations)
+  createDir(tmpRoot)
+  let prefix = realizations / (safeStoreSegment(plan.packageSelector,
+    "package") & "-" & plan.sha256[0 .. 15])
+  if dirExists(prefix):
+    if executableInStorePath(prefix, plan.declaredExecutablePath,
+        rejectSymlinks = true).len == 0:
+      raise newException(OSError,
+        "tool-resolution failed: existing tarball realization lacks " &
+        plan.declaredExecutablePath & ": " & prefix)
+    return (prefix: prefix, archivePath: "", selectedUrl: selectedUrlFromReceipt(prefix))
+
+  let downloaded = verifiedDownload(plan, storeRoot)
+  let tempPrefix = tmpRoot / ("extract." & $getCurrentProcessId() & "." &
+    $getTime().toUnix & "." & plan.sha256[0 .. 15])
+  if dirExists(tempPrefix):
+    removeDir(tempPrefix)
+  try:
+    extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
+      plan.stripComponents)
+    if executableInStorePath(tempPrefix, plan.declaredExecutablePath,
+        rejectSymlinks = true).len == 0:
+      raise newException(OSError,
+        "tool-resolution failed: extracted tarball lacks executable " &
+        plan.declaredExecutablePath)
+    writeTarballReceipt(tempPrefix, plan, downloaded.selectedUrl)
+    try:
+      moveDir(tempPrefix, prefix)
+    except OSError:
+      if dirExists(prefix):
+        removeDir(tempPrefix)
+      else:
+        raise
+    if executableInStorePath(prefix, plan.declaredExecutablePath,
+        rejectSymlinks = true).len == 0:
+      raise newException(OSError,
+        "tool-resolution failed: materialized tarball lacks executable " &
+        plan.declaredExecutablePath)
+    (prefix: prefix, archivePath: downloaded.path,
+      selectedUrl: downloaded.selectedUrl)
+  except CatchableError:
+    if dirExists(tempPrefix):
+      removeDir(tempPrefix)
+    raise
+
+proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string):
+    PathOnlyToolProfile =
+  let plan = tarballAcquisitionPlan(useDef)
+  let root =
+    if storeRoot.len > 0:
+      storeRoot
+    else:
+      getCurrentDir() / ".repro" / "tool-store"
+  let materialized = materializeTarballPrefix(plan, root)
+  let resolved = executableInStorePath(materialized.prefix,
+    plan.declaredExecutablePath, rejectSymlinks = true)
+  if resolved.len == 0:
+    raise newException(OSError,
+      "tool-resolution failed: tarball realization lacks " &
+      plan.declaredExecutablePath)
+
+  result = PathOnlyToolProfile(
+    installMethod: "tarball",
+    packageSelector: useDef.packageSelector,
+    packageId: plan.packageId,
+    tarballUrl: plan.url,
+    tarballMirrors: plan.mirrors,
+    tarballSelectedUrl: materialized.selectedUrl,
+    tarballSha256: plan.sha256,
+    archiveType: plan.archiveType,
+    stripComponents: plan.stripComponents,
+    declaredExecutablePath: plan.declaredExecutablePath,
+    realizedStorePaths: @[materialized.prefix],
+    selectedStorePath: materialized.prefix,
+    lockIdentity: plan.lockIdentity,
+    realizationBoundary: materialized.prefix,
+    executableName: useDef.executableName,
+    pathSearchList: @[parentDir(resolved)],
+    resolvedExecutablePath: resolved,
+    adapterStrength: asStrong,
+    cachePortability: cpPortable)
+
+  for probe in configuredProbes(useDef.packageSelector, useDef.executableName):
+    let probeResult = runProbe(resolved, probe)
+    if probeResult.exitCode != 0:
+      raise newException(OSError,
+        "tool-resolution failed: probe " & probe.name & " for " &
+        useDef.executableName & " from tarball " & plan.url & " exited " &
+        $probeResult.exitCode)
+    result.probes.add(probeResult)
+
+  result.profileFingerprint = profileFingerprintFor(result)
+
 proc metadataFor(identity: ToolActionIdentity): DynamicValue =
   var pathValues: seq[DynamicValue] = @[]
   for path in identity.pathSearchList:
@@ -397,6 +765,11 @@ proc metadataFor(identity: ToolActionIdentity): DynamicValue =
     entry("packageSelector", cborText(identity.packageSelector)),
     entry("packageId", cborText(identity.packageId)),
     entry("nixSelector", cborText(identity.nixSelector)),
+    entry("tarballUrl", cborText(identity.tarballUrl)),
+    entry("tarballSelectedUrl", cborText(identity.tarballSelectedUrl)),
+    entry("tarballSha256", cborText(identity.tarballSha256)),
+    entry("archiveType", cborText(identity.archiveType)),
+    entry("stripComponents", cborUInt(uint64(max(identity.stripComponents, 0)))),
     entry("declaredExecutablePath", cborText(identity.declaredExecutablePath)),
     entry("nixExpressionFile", cborText(identity.nixExpressionFile)),
     entry("selectedStorePath", cborText(identity.selectedStorePath)),
@@ -428,12 +801,14 @@ proc actionSpecFor*(identity: ToolActionIdentity): ActionSpec =
     metadata: metadataFor(identity))
 
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
-                    pathValue: string): PathOnlyToolProfile =
+                    pathValue, storeRoot: string): PathOnlyToolProfile =
   case mode
   of tpmPathOnly:
     resolvePathOnlyTool(useDef, pathValue)
   of tpmNix:
     resolveNixTool(useDef)
+  of tpmTarball:
+    resolveTarballTool(useDef, storeRoot)
   else:
     raise newException(ValueError, "tool provisioning mode is not resolved")
 
@@ -446,6 +821,12 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     packageSelector: useDef.packageSelector,
     packageId: profile.packageId,
     nixSelector: profile.nixSelector,
+    tarballUrl: profile.tarballUrl,
+    tarballMirrors: profile.tarballMirrors,
+    tarballSelectedUrl: profile.tarballSelectedUrl,
+    tarballSha256: profile.tarballSha256,
+    archiveType: profile.archiveType,
+    stripComponents: profile.stripComponents,
     declaredExecutablePath: profile.declaredExecutablePath,
     nixExpressionFile: profile.nixExpressionFile,
     realizedStorePaths: profile.realizedStorePaths,
@@ -463,12 +844,13 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
 
 proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
                         mode: ToolProvisioningMode;
-                        pathValue = getEnv("PATH")):
+                        pathValue = getEnv("PATH");
+                        storeRoot = ""):
     PathOnlyBuildIdentity =
   result.projectName = artifact.projectInterface.projectName
   result.interfaceFingerprint = artifact.interfaceFingerprint
   for useDef in artifact.projectInterface.toolUses:
-    let profile = toolProfileFor(useDef, mode, pathValue)
+    let profile = toolProfileFor(useDef, mode, pathValue, storeRoot)
     result.profiles.add(profile)
     result.actionIdentities.add(actionIdentityFor(useDef, profile))
 
@@ -479,6 +861,10 @@ proc pathOnlyBuildIdentity*(artifact: ProjectInterfaceArtifact;
 
 proc nixBuildIdentity*(artifact: ProjectInterfaceArtifact): PathOnlyBuildIdentity =
   toolBuildIdentity(artifact, tpmNix)
+
+proc tarballBuildIdentity*(artifact: ProjectInterfaceArtifact; storeRoot = ""):
+    PathOnlyBuildIdentity =
+  toolBuildIdentity(artifact, tpmTarball, storeRoot = storeRoot)
 
 proc writeProbeSpec(outp: var seq[byte]; spec: ToolProbeSpec) =
   outp.writeByte(byte(ord(spec.kind)))
@@ -521,6 +907,12 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeString(profile.packageSelector)
   outp.writeString(profile.packageId)
   outp.writeString(profile.nixSelector)
+  outp.writeString(profile.tarballUrl)
+  outp.writeStringSeq(profile.tarballMirrors)
+  outp.writeString(profile.tarballSelectedUrl)
+  outp.writeString(profile.tarballSha256)
+  outp.writeString(profile.archiveType)
+  outp.writeU32Le(uint32(max(profile.stripComponents, 0)))
   outp.writeString(profile.declaredExecutablePath)
   outp.writeString(profile.nixExpressionFile)
   outp.writeStringSeq(profile.realizedStorePaths)
@@ -542,6 +934,13 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
   if version >= 2'u16:
     result.packageId = readString(bytes, pos)
     result.nixSelector = readString(bytes, pos)
+    if version >= 5'u16:
+      result.tarballUrl = readString(bytes, pos)
+      result.tarballMirrors = readStringSeq(bytes, pos)
+      result.tarballSelectedUrl = readString(bytes, pos)
+      result.tarballSha256 = readString(bytes, pos)
+      result.archiveType = readString(bytes, pos)
+      result.stripComponents = int(readU32Le(bytes, pos))
     if version >= 3'u16:
       result.declaredExecutablePath = readString(bytes, pos)
     if version >= 4'u16:
@@ -574,6 +973,12 @@ proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeString(identity.packageSelector)
   outp.writeString(identity.packageId)
   outp.writeString(identity.nixSelector)
+  outp.writeString(identity.tarballUrl)
+  outp.writeStringSeq(identity.tarballMirrors)
+  outp.writeString(identity.tarballSelectedUrl)
+  outp.writeString(identity.tarballSha256)
+  outp.writeString(identity.archiveType)
+  outp.writeU32Le(uint32(max(identity.stripComponents, 0)))
   outp.writeString(identity.declaredExecutablePath)
   outp.writeString(identity.nixExpressionFile)
   outp.writeStringSeq(identity.realizedStorePaths)
@@ -600,6 +1005,13 @@ proc readActionIdentity(bytes: openArray[byte];
   if version >= 2'u16:
     result.packageId = readString(bytes, pos)
     result.nixSelector = readString(bytes, pos)
+    if version >= 5'u16:
+      result.tarballUrl = readString(bytes, pos)
+      result.tarballMirrors = readStringSeq(bytes, pos)
+      result.tarballSelectedUrl = readString(bytes, pos)
+      result.tarballSha256 = readString(bytes, pos)
+      result.archiveType = readString(bytes, pos)
+      result.stripComponents = int(readU32Le(bytes, pos))
     if version >= 3'u16:
       result.declaredExecutablePath = readString(bytes, pos)
     if version >= 4'u16:
@@ -699,6 +1111,12 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
     "packageSelector": profile.packageSelector,
     "packageId": profile.packageId,
     "nixSelector": profile.nixSelector,
+    "tarballUrl": profile.tarballUrl,
+    "tarballMirrors": profile.tarballMirrors,
+    "tarballSelectedUrl": profile.tarballSelectedUrl,
+    "tarballSha256": profile.tarballSha256,
+    "archiveType": profile.archiveType,
+    "stripComponents": profile.stripComponents,
     "declaredExecutablePath": profile.declaredExecutablePath,
     "nixExpressionFile": profile.nixExpressionFile,
     "realizedStorePaths": profile.realizedStorePaths,
@@ -724,6 +1142,12 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     "packageSelector": identity.packageSelector,
     "packageId": identity.packageId,
     "nixSelector": identity.nixSelector,
+    "tarballUrl": identity.tarballUrl,
+    "tarballMirrors": identity.tarballMirrors,
+    "tarballSelectedUrl": identity.tarballSelectedUrl,
+    "tarballSha256": identity.tarballSha256,
+    "archiveType": identity.archiveType,
+    "stripComponents": identity.stripComponents,
     "declaredExecutablePath": identity.declaredExecutablePath,
     "nixExpressionFile": identity.nixExpressionFile,
     "realizedStorePaths": identity.realizedStorePaths,
