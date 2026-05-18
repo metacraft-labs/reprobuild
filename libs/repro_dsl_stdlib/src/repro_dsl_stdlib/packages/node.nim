@@ -1,6 +1,9 @@
 import repro_project_dsl
 
 package node:
+  provisioning:
+    nixPackage "nixpkgs#nodejs", executablePath = "bin/node"
+
   executable node:
     cli:
       call:

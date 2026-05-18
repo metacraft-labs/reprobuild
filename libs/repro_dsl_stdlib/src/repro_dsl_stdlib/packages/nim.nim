@@ -1,6 +1,9 @@
 import repro_project_dsl
 
 package nim:
+  provisioning:
+    nixPackage "nixpkgs#nim", executablePath = "bin/nim"
+
   executable nim:
     cli:
       dependencyPolicy automaticMonitor

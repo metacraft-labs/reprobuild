@@ -1,6 +1,9 @@
 import repro_project_dsl
 
 package gcc:
+  provisioning:
+    nixPackage "nixpkgs#gcc", executablePath = "bin/gcc"
+
   executable gcc:
     cli:
       dependencyPolicy automaticMonitor

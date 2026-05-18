@@ -1,5 +1,6 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
+import repro_interface_artifacts
 import repro_tool_profiles
 
 proc q(value: string): string =
@@ -89,13 +90,14 @@ proc writeProject(path: string) =
     "test -f src/c/main.c\n" &
     "printf '%s\\n' \"$BASH\" > \"$out\"\n"
   writeFile(path,
-    "import repro_project_dsl\n\n" &
+    "import repro_dsl_stdlib\n\n" &
     "package codeTracerDevSlice:\n" &
     "  uses:\n" &
     "    \"nim >=2.0\"\n" &
     "    \"node >=20\"\n" &
     "    \"gcc >=1\"\n" &
-    "    \"sh >=1\"\n\n" &
+    "    \"sh >=1\"\n" &
+    "    \"stylus >=0\"\n\n" &
     "  executable shTool:\n" &
     "    name \"sh\"\n" &
     "    cli:\n" &
@@ -118,26 +120,61 @@ proc valueAfter(output, prefix: string): string =
   ""
 
 proc assertNixIdentity(identity: PathOnlyBuildIdentity) =
-  check identity.profiles.len == 4
+  check identity.profiles.len == 5
   check identity.profiles.allIt(it.installMethod == "nix")
   check identity.profiles.allIt(it.adapterStrength == asStrong)
   check identity.profiles.allIt(it.cachePortability == cpPortable)
-  for executableName in ["nim", "node", "gcc", "sh"]:
+  for executableName in ["nim", "node", "gcc", "sh", "stylus"]:
     check identity.profiles.anyIt(it.executableName == executableName)
   for profile in identity.profiles:
-    check profile.nixSelector.startsWith("nixpkgs#")
+    check profile.nixSelector.len > 0
+    check profile.realizedStorePaths.allIt(it.startsWith("/nix/store/"))
     check profile.realizedStorePaths.len >= 1
     check profile.selectedStorePath.startsWith("/nix/store/")
     check profile.resolvedExecutablePath.startsWith("/nix/store/")
-    check profile.resolvedExecutablePath.endsWith("/bin/" & profile.executableName)
+    check profile.declaredExecutablePath.len > 0
+    check profile.resolvedExecutablePath.endsWith("/" &
+      profile.declaredExecutablePath)
     check profile.lockIdentity.len > 0
     check profile.realizationBoundary == profile.selectedStorePath
     check profile.probes.len == 1
     check profile.probes[0].exitCode == 0
     check profile.probes[0].output.strip().len > 0
+  check identity.profiles.anyIt(it.executableName == "sh" and
+    it.nixSelector == "nixpkgs#bash" and it.declaredExecutablePath == "bin/sh")
+  check identity.profiles.anyIt(it.executableName == "stylus" and
+    it.nixSelector == "reprobuild-stdlib-stylus-0.64.0" and
+    it.declaredExecutablePath == "bin/stylus" and
+    it.nixExpressionFile.endsWith("nix/stylus-0.64.0/default.nix"))
+
+proc assertPackageProvisioningMetadata(interfacePath: string) =
+  let artifact = readInterfaceArtifact(interfacePath)
+  check artifact.projectInterface.toolUses.len == 5
+  for useDef in artifact.projectInterface.toolUses:
+    check useDef.nixProvisioning.len == 1
+    let metadata = useDef.nixProvisioning[0]
+    check metadata.packageName == useDef.packageSelector
+    check metadata.executablePath == "bin/" & useDef.executableName
+    check metadata.location.file.contains("repro_dsl_stdlib")
+    case useDef.packageSelector
+    of "nim":
+      check metadata.selector == "nixpkgs#nim"
+    of "node":
+      check metadata.selector == "nixpkgs#nodejs"
+    of "gcc":
+      check metadata.selector == "nixpkgs#gcc"
+    of "sh":
+      check metadata.selector == "nixpkgs#bash"
+      check metadata.executablePath == "bin/sh"
+    of "stylus":
+      check metadata.selector == "reprobuild-stdlib-stylus-0.64.0"
+      check metadata.executablePath == "bin/stylus"
+      check metadata.expressionFile.endsWith("nix/stylus-0.64.0/default.nix")
+    else:
+      fail()
 
 suite "e2e_codetracer_dev_environment_slice":
-  test "Nix-backed develop resolves typed CodeTracer tools and build uses the same profiles":
+  test "m53_nix_provisioning_from_package_metadata":
     let repoRoot = getCurrentDir()
     let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
     check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
@@ -175,35 +212,41 @@ suite "e2e_codetracer_dev_environment_slice":
       "test -f \"$REPRO_TOOL_PROFILE_ARTIFACT\"\n" &
       "test -f \"$REPRO_TOOL_PROFILE_INSPECTION\"\n" &
       "test \"$REPRO_PROJECT_ROOT\" = \"$PWD\"\n" &
-      "for tool in nim node gcc sh; do\n" &
+      "for tool in nim node gcc sh stylus; do\n" &
       "  path=$(command -v \"$tool\")\n" &
       "  case \"$path\" in /nix/store/*/bin/$tool) ;; *) echo \"$tool=$path\"; exit 20;; esac\n" &
       "  \"$tool\" --version >/dev/null\n" &
       "  echo \"$tool=$path\"\n" &
       "done\n" &
-      "echo M21_DEVELOP_OK\n"
+      "echo M53_DEVELOP_OK\n"
     let develop = requireSuccess(shellCommand([reproBin, "develop", target,
       "--tool-provisioning=nix", "--", "sh", "-c", checks]), repoRoot)
-    check develop.contains("M21_DEVELOP_OK")
+    check develop.contains("M53_DEVELOP_OK")
     check develop.contains("tool-provisioning=nix")
-    for executableName in ["nim", "node", "gcc", "sh"]:
+    for executableName in ["nim", "node", "gcc", "sh", "stylus"]:
       check develop.contains(executableName & "=/nix/store/")
 
     let developIdentityPath = valueAfter(develop, "toolIdentity:")
     let developInspectionPath = valueAfter(develop, "inspection:")
+    let developInterfacePath = valueAfter(develop, "interface:")
     check fileExists(developIdentityPath)
     check fileExists(developInspectionPath)
+    check fileExists(developInterfacePath)
     check readFile(developIdentityPath)[0 .. 3] == "RBTP"
     check readFile(developIdentityPath)[0] != '{'
+    assertPackageProvisioningMetadata(developInterfacePath)
     let developIdentity = readPathOnlyBuildIdentity(developIdentityPath)
     assertNixIdentity(developIdentity)
 
     let inspection = parseFile(developInspectionPath)
-    check inspection{"profiles"}.getElems().len == 4
+    check inspection{"profiles"}.getElems().len == 5
     for profile in inspection{"profiles"}:
       check profile{"installMethod"}.getStr() == "nix"
       check profile{"adapterStrength"}.getStr() == "strong"
       check profile{"cachePortability"}.getStr() == "portable"
+      check profile{"declaredExecutablePath"}.getStr().len > 0
+      check profile{"realizedStorePaths"}.getElems().allIt(
+        it.getStr().startsWith("/nix/store/"))
       check profile{"resolvedExecutablePath"}.getStr().startsWith("/nix/store/")
       check profile{"probes"}[0]{"output"}.getStr().strip().len > 0
 
@@ -213,6 +256,7 @@ suite "e2e_codetracer_dev_environment_slice":
     check summary.contains("tool: node /nix/store/")
     check summary.contains("tool: gcc /nix/store/")
     check summary.contains("tool: sh /nix/store/")
+    check summary.contains("tool: stylus /nix/store/")
 
     var daemon = ensureRunQuotaDaemon(repoRoot)
     defer:
@@ -226,7 +270,8 @@ suite "e2e_codetracer_dev_environment_slice":
       "--tool-provisioning=nix"]), repoRoot)
     check build.contains("tool-provisioning=nix")
     check build.contains("action: record-nix-sh status=asSucceeded launched=true")
-    let buildIdentity = readPathOnlyBuildIdentity(valueAfter(build, "toolIdentity:"))
+    let buildIdentity = readPathOnlyBuildIdentity(valueAfter(build,
+        "toolIdentity:"))
     assertNixIdentity(buildIdentity)
     check readFile(projectRoot / "build" / "nix-sh.txt").startsWith(
       "/nix/store/")

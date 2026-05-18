@@ -41,6 +41,8 @@ type
     packageSelector*: string
     packageId*: string
     nixSelector*: string
+    declaredExecutablePath*: string
+    nixExpressionFile*: string
     realizedStorePaths*: seq[string]
     selectedStorePath*: string
     lockIdentity*: string
@@ -59,6 +61,8 @@ type
     packageSelector*: string
     packageId*: string
     nixSelector*: string
+    declaredExecutablePath*: string
+    nixExpressionFile*: string
     realizedStorePaths*: seq[string]
     selectedStorePath*: string
     lockIdentity*: string
@@ -78,9 +82,17 @@ type
     profiles*: seq[PathOnlyToolProfile]
     actionIdentities*: seq[ToolActionIdentity]
 
+  NixAcquisitionPlan* = object
+    packageSelector*: string
+    packageId*: string
+    nixSelector*: string
+    declaredExecutablePath*: string
+    nixExpressionFile*: string
+    lockIdentity*: string
+
 const
   ArtifactMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')), byte(ord('P'))]
-  ArtifactVersion = 2'u16
+  ArtifactVersion = 4'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -166,11 +178,13 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
 
 proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.toolProfile.v2")
+  payload.writeString("reprobuild.toolProfile.v4")
   payload.writeString(profile.installMethod)
   payload.writeString(profile.packageSelector)
   payload.writeString(profile.packageId)
   payload.writeString(profile.nixSelector)
+  payload.writeString(profile.declaredExecutablePath)
+  payload.writeString(profile.nixExpressionFile)
   payload.writeStringSeq(profile.realizedStorePaths)
   payload.writeString(profile.selectedStorePath)
   payload.writeString(profile.lockIdentity)
@@ -190,12 +204,14 @@ proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
 
 proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.toolAction.v2")
+  payload.writeString("reprobuild.toolAction.v4")
   payload.writeString(identity.providerEntrypointId)
   payload.writeString(identity.installMethod)
   payload.writeString(identity.packageSelector)
   payload.writeString(identity.packageId)
   payload.writeString(identity.nixSelector)
+  payload.writeString(identity.declaredExecutablePath)
+  payload.writeString(identity.nixExpressionFile)
   payload.writeStringSeq(identity.realizedStorePaths)
   payload.writeString(identity.selectedStorePath)
   payload.writeString(identity.lockIdentity)
@@ -241,6 +257,7 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
     installMethod: "path",
     packageSelector: useDef.packageSelector,
     packageId: useDef.packageSelector,
+    declaredExecutablePath: useDef.executableName,
     executableName: useDef.executableName,
     pathSearchList: searchList,
     resolvedExecutablePath: resolved,
@@ -257,24 +274,37 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
 
   result.profileFingerprint = profileFingerprintFor(result)
 
-proc nixSelectorFor(useDef: InterfaceToolUse): string =
-  case useDef.packageSelector
-  of "nim":
-    "nixpkgs#nim"
-  of "node":
-    "nixpkgs#nodejs"
-  of "gcc":
-    "nixpkgs#gcc"
-  of "sh":
-    "nixpkgs#bash"
-  else:
-    if useDef.packageSelector.contains("#"):
-      useDef.packageSelector
+proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
+  if useDef.nixProvisioning.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: package \"" & useDef.packageSelector &
+      "\" requested by uses \"" & useDef.rawConstraint &
+      "\" does not declare provisioning: nixPackage metadata")
+  let selected = useDef.nixProvisioning[0]
+  if selected.selector.len == 0 or selected.executablePath.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: incomplete nixPackage metadata for package \"" &
+      useDef.packageSelector & "\"")
+  let packageId =
+    if selected.packageId.len > 0:
+      selected.packageId
     else:
-      "nixpkgs#" & useDef.packageSelector
+      selected.selector
+  let lockIdentity =
+    if selected.lockIdentity.len > 0:
+      selected.lockIdentity
+    else:
+      selected.selector
+  NixAcquisitionPlan(
+    packageSelector: useDef.packageSelector,
+    packageId: packageId,
+    nixSelector: selected.selector,
+    declaredExecutablePath: selected.executablePath,
+    nixExpressionFile: selected.expressionFile,
+    lockIdentity: lockIdentity)
 
-proc executableInStorePath(storePath, executableName: string): string =
-  let candidate = storePath / "bin" / executableName
+proc executableInStorePath(storePath, declaredExecutablePath: string): string =
+  let candidate = storePath / declaredExecutablePath
   if fileExists(candidate) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
       it in getFilePermissions(candidate)):
     absolutePath(candidate)
@@ -282,9 +312,15 @@ proc executableInStorePath(storePath, executableName: string): string =
     ""
 
 proc resolveNixTool*(useDef: InterfaceToolUse): PathOnlyToolProfile =
-  let selector = nixSelectorFor(useDef)
-  let res = execCmdEx(shellCommand(@["nix", "build", "--no-link",
-    "--print-out-paths", selector]))
+  let plan = nixAcquisitionPlan(useDef)
+  let selector = plan.nixSelector
+  var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
+  if plan.nixExpressionFile.len > 0:
+    nixArgs.add("--file")
+    nixArgs.add(plan.nixExpressionFile)
+  else:
+    nixArgs.add(selector)
+  let res = execCmdEx(shellCommand(nixArgs))
   if res.exitCode != 0:
     raise newException(OSError,
       "tool-resolution failed: nix build for " & selector & " exited " &
@@ -303,7 +339,8 @@ proc resolveNixTool*(useDef: InterfaceToolUse): PathOnlyToolProfile =
   var selectedStorePath = ""
   var resolved = ""
   for storePath in realized:
-    let candidate = executableInStorePath(storePath, useDef.executableName)
+    let candidate = executableInStorePath(storePath,
+      plan.declaredExecutablePath)
     if candidate.len > 0:
       selectedStorePath = storePath
       resolved = candidate
@@ -311,16 +348,18 @@ proc resolveNixTool*(useDef: InterfaceToolUse): PathOnlyToolProfile =
   if resolved.len == 0:
     raise newException(OSError,
       "tool-resolution failed: nix build for " & selector &
-      " realized outputs without bin/" & useDef.executableName)
+      " realized outputs without " & plan.declaredExecutablePath)
 
   result = PathOnlyToolProfile(
     installMethod: "nix",
     packageSelector: useDef.packageSelector,
-    packageId: selector,
+    packageId: plan.packageId,
     nixSelector: selector,
+    declaredExecutablePath: plan.declaredExecutablePath,
+    nixExpressionFile: plan.nixExpressionFile,
     realizedStorePaths: realized,
     selectedStorePath: selectedStorePath,
-    lockIdentity: selector,
+    lockIdentity: plan.lockIdentity,
     realizationBoundary: selectedStorePath,
     executableName: useDef.executableName,
     pathSearchList: @[selectedStorePath / "bin"],
@@ -358,6 +397,8 @@ proc metadataFor(identity: ToolActionIdentity): DynamicValue =
     entry("packageSelector", cborText(identity.packageSelector)),
     entry("packageId", cborText(identity.packageId)),
     entry("nixSelector", cborText(identity.nixSelector)),
+    entry("declaredExecutablePath", cborText(identity.declaredExecutablePath)),
+    entry("nixExpressionFile", cborText(identity.nixExpressionFile)),
     entry("selectedStorePath", cborText(identity.selectedStorePath)),
     entry("lockIdentity", cborText(identity.lockIdentity)),
     entry("realizationBoundary", cborText(identity.realizationBoundary)),
@@ -405,6 +446,8 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     packageSelector: useDef.packageSelector,
     packageId: profile.packageId,
     nixSelector: profile.nixSelector,
+    declaredExecutablePath: profile.declaredExecutablePath,
+    nixExpressionFile: profile.nixExpressionFile,
     realizedStorePaths: profile.realizedStorePaths,
     selectedStorePath: profile.selectedStorePath,
     lockIdentity: profile.lockIdentity,
@@ -478,6 +521,8 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeString(profile.packageSelector)
   outp.writeString(profile.packageId)
   outp.writeString(profile.nixSelector)
+  outp.writeString(profile.declaredExecutablePath)
+  outp.writeString(profile.nixExpressionFile)
   outp.writeStringSeq(profile.realizedStorePaths)
   outp.writeString(profile.selectedStorePath)
   outp.writeString(profile.lockIdentity)
@@ -497,6 +542,10 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
   if version >= 2'u16:
     result.packageId = readString(bytes, pos)
     result.nixSelector = readString(bytes, pos)
+    if version >= 3'u16:
+      result.declaredExecutablePath = readString(bytes, pos)
+    if version >= 4'u16:
+      result.nixExpressionFile = readString(bytes, pos)
     result.realizedStorePaths = readStringSeq(bytes, pos)
     result.selectedStorePath = readString(bytes, pos)
     result.lockIdentity = readString(bytes, pos)
@@ -504,6 +553,8 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
   else:
     result.packageId = result.packageSelector
   result.executableName = readString(bytes, pos)
+  if result.declaredExecutablePath.len == 0:
+    result.declaredExecutablePath = "bin/" & result.executableName
   result.pathSearchList = readStringSeq(bytes, pos)
   result.resolvedExecutablePath = readString(bytes, pos)
   result.probes = readProbeResults(bytes, pos)
@@ -523,6 +574,8 @@ proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeString(identity.packageSelector)
   outp.writeString(identity.packageId)
   outp.writeString(identity.nixSelector)
+  outp.writeString(identity.declaredExecutablePath)
+  outp.writeString(identity.nixExpressionFile)
   outp.writeStringSeq(identity.realizedStorePaths)
   outp.writeString(identity.selectedStorePath)
   outp.writeString(identity.lockIdentity)
@@ -547,6 +600,10 @@ proc readActionIdentity(bytes: openArray[byte];
   if version >= 2'u16:
     result.packageId = readString(bytes, pos)
     result.nixSelector = readString(bytes, pos)
+    if version >= 3'u16:
+      result.declaredExecutablePath = readString(bytes, pos)
+    if version >= 4'u16:
+      result.nixExpressionFile = readString(bytes, pos)
     result.realizedStorePaths = readStringSeq(bytes, pos)
     result.selectedStorePath = readString(bytes, pos)
     result.lockIdentity = readString(bytes, pos)
@@ -554,6 +611,8 @@ proc readActionIdentity(bytes: openArray[byte];
   else:
     result.packageId = result.packageSelector
   result.executableName = readString(bytes, pos)
+  if result.declaredExecutablePath.len == 0:
+    result.declaredExecutablePath = "bin/" & result.executableName
   result.subcommand = readString(bytes, pos)
   result.pathSearchList = readStringSeq(bytes, pos)
   result.resolvedExecutablePath = readString(bytes, pos)
@@ -640,6 +699,8 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
     "packageSelector": profile.packageSelector,
     "packageId": profile.packageId,
     "nixSelector": profile.nixSelector,
+    "declaredExecutablePath": profile.declaredExecutablePath,
+    "nixExpressionFile": profile.nixExpressionFile,
     "realizedStorePaths": profile.realizedStorePaths,
     "selectedStorePath": profile.selectedStorePath,
     "lockIdentity": profile.lockIdentity,
@@ -663,6 +724,8 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     "packageSelector": identity.packageSelector,
     "packageId": identity.packageId,
     "nixSelector": identity.nixSelector,
+    "declaredExecutablePath": identity.declaredExecutablePath,
+    "nixExpressionFile": identity.nixExpressionFile,
     "realizedStorePaths": identity.realizedStorePaths,
     "selectedStorePath": identity.selectedStorePath,
     "lockIdentity": identity.lockIdentity,

@@ -43,11 +43,21 @@ type
     commands*: seq[InterfaceCommand]
     location*: SourceLocation
 
+  InterfaceNixProvisioning* = object
+    packageName*: string
+    selector*: string
+    executablePath*: string
+    expressionFile*: string
+    packageId*: string
+    lockIdentity*: string
+    location*: SourceLocation
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
     executableName*: string
     policyPath*: seq[string]
+    nixProvisioning*: seq[InterfaceNixProvisioning]
     location*: SourceLocation
 
   ProjectInterface* = object
@@ -84,7 +94,7 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 1'u16
+  EnvelopeVersion = 3'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -285,18 +295,49 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
 
+proc writeNixProvisioning(outp: var seq[byte];
+                          provisioning: InterfaceNixProvisioning) =
+  outp.writeString(provisioning.packageName)
+  outp.writeString(provisioning.selector)
+  outp.writeString(provisioning.executablePath)
+  outp.writeString(provisioning.expressionFile)
+  outp.writeString(provisioning.packageId)
+  outp.writeString(provisioning.lockIdentity)
+  outp.writeLocation(provisioning.location)
+
+proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
+                         version: uint16): InterfaceNixProvisioning =
+  result.packageName = readString(bytes, pos)
+  result.selector = readString(bytes, pos)
+  result.executablePath = readString(bytes, pos)
+  if version >= 3'u16:
+    result.expressionFile = readString(bytes, pos)
+  result.packageId = readString(bytes, pos)
+  result.lockIdentity = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
 proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse) =
   outp.writeString(useDef.rawConstraint)
   outp.writeString(useDef.packageSelector)
   outp.writeString(useDef.executableName)
   outp.writeStringSeq(useDef.policyPath)
+  outp.writeU32Le(uint32(useDef.nixProvisioning.len))
+  for provisioning in useDef.nixProvisioning:
+    outp.writeNixProvisioning(provisioning)
   outp.writeLocation(useDef.location)
 
-proc readToolUse(bytes: openArray[byte]; pos: var int): InterfaceToolUse =
+proc readToolUse(bytes: openArray[byte]; pos: var int;
+                 version: uint16): InterfaceToolUse =
   result.rawConstraint = readString(bytes, pos)
   result.packageSelector = readString(bytes, pos)
   result.executableName = readString(bytes, pos)
   result.policyPath = readStringSeq(bytes, pos)
+  if version >= 2'u16:
+    let provisioningCount = int(readU32Le(bytes, pos))
+    result.nixProvisioning = newSeq[InterfaceNixProvisioning](
+      provisioningCount)
+    for i in 0 ..< provisioningCount:
+      result.nixProvisioning[i] = readNixProvisioning(bytes, pos, version)
   result.location = readLocation(bytes, pos)
 
 proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
@@ -311,7 +352,8 @@ proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
   for useDef in value.toolUses:
     result.writeToolUse(useDef)
 
-proc decodeInterfacePayload*(bytes: openArray[byte]): ProjectInterface =
+proc decodeInterfacePayload*(bytes: openArray[byte];
+                             version = EnvelopeVersion): ProjectInterface =
   var pos = 0
   result.projectName = readString(bytes, pos)
   result.packageName = readString(bytes, pos)
@@ -324,7 +366,7 @@ proc decodeInterfacePayload*(bytes: openArray[byte]): ProjectInterface =
   let useCount = int(readU32Le(bytes, pos))
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
-    result.toolUses[i] = readToolUse(bytes, pos)
+    result.toolUses[i] = readToolUse(bytes, pos, version)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing interface payload bytes")
 
@@ -358,7 +400,7 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[
       raiseEnvelopeError(eeUnknownMagic, "unknown interface artifact envelope magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != EnvelopeVersion:
+  if version < 1'u16 or version > EnvelopeVersion:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported interface envelope version")
   let typeId = readU16Le(bytes, pos)
   if typeId != uint16(ord(iekProjectInterface) + 101):
@@ -370,7 +412,8 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[
   if interfacePayloadLen < 0:
     raiseEnvelopeError(eeMalformed, "truncated interface fingerprint")
   result.projectInterface =
-    decodeInterfacePayload(bytes.toOpenArray(pos, pos + interfacePayloadLen - 1))
+    decodeInterfacePayload(bytes.toOpenArray(pos, pos + interfacePayloadLen - 1),
+      version)
   pos += interfacePayloadLen
   result.interfaceFingerprint = readDigest(bytes, pos)
   if result.interfaceFingerprint != interfaceFingerprint(
@@ -469,21 +512,42 @@ proc toInterfaceParam(param: CliParamDef): InterfaceParam =
     required: param.required,
     location: SourceLocation(file: param.sourceFile, line: param.sourceLine))
 
-proc toInterfaceToolUse(useDef: PackageUseDef): InterfaceToolUse =
-  InterfaceToolUse(
+proc toInterfaceNixProvisioning(packageName: string;
+                                provisioning: NixPackageProvisioningDef):
+    InterfaceNixProvisioning =
+  InterfaceNixProvisioning(
+    packageName: packageName,
+    selector: provisioning.selector,
+    executablePath: provisioning.executablePath,
+    expressionFile: provisioning.expressionFile,
+    packageId: provisioning.packageId,
+    lockIdentity: provisioning.lockIdentity,
+    location: SourceLocation(file: provisioning.sourceFile,
+      line: provisioning.sourceLine))
+
+proc toInterfaceToolUse(useDef: PackageUseDef;
+                        packages: openArray[PackageDef]): InterfaceToolUse =
+  result = InterfaceToolUse(
     rawConstraint: useDef.rawConstraint,
     packageSelector: useDef.packageSelector,
     executableName: useDef.executableName,
     policyPath: useDef.policyPath,
     location: SourceLocation(file: useDef.sourceFile, line: useDef.sourceLine))
+  for pkg in packages:
+    if pkg.packageName == useDef.packageSelector:
+      for provisioning in pkg.nixProvisioning:
+        result.nixProvisioning.add(toInterfaceNixProvisioning(pkg.packageName,
+          provisioning))
 
-proc toProjectInterface*(pkg: PackageDef): ProjectInterface =
+proc toProjectInterface*(pkg: PackageDef;
+                         packages: openArray[PackageDef] = []):
+    ProjectInterface =
   result.projectName = pkg.packageName
   result.packageName = pkg.packageName
   result.publicSignatureDependencies = pkg.publicSignatureDependencies
   result.location = SourceLocation(file: pkg.sourceFile, line: pkg.sourceLine)
   for useDef in pkg.toolUses:
-    result.toolUses.add(toInterfaceToolUse(useDef))
+    result.toolUses.add(toInterfaceToolUse(useDef, packages))
   for exe in pkg.executables:
     var normalizedExe = InterfaceExecutable(
       exportName: exe.exportName,
@@ -525,7 +589,7 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
       if sameSourceFile(pkg.sourceFile, rootSourceFile):
         matches.add(pkg)
     if matches.len == 1:
-      return artifactFor(toProjectInterface(matches[0]))
+      return artifactFor(toProjectInterface(matches[0], packages))
     if matches.len > 1:
       raise newException(ValueError,
         "expected one root package in " & rootSourceFile & ", got " &
@@ -533,7 +597,7 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   if packages.len != 1:
     raise newException(ValueError, "expected exactly one registered package, got " &
       $packages.len)
-  artifactFor(toProjectInterface(packages[0]))
+  artifactFor(toProjectInterface(packages[0], packages))
 
 proc nimDefault(nimType: string): string =
   case nimType.normalize

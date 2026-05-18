@@ -1,6 +1,9 @@
 import repro_project_dsl
 
 package sh:
+  provisioning:
+    nixPackage "nixpkgs#bash", executablePath = "bin/sh"
+
   executable sh:
     cli:
       call:

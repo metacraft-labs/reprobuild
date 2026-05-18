@@ -66,10 +66,20 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  NixPackageProvisioningDef* = object
+    selector*: string
+    executablePath*: string
+    expressionFile*: string
+    packageId*: string
+    lockIdentity*: string
+    sourceFile*: string
+    sourceLine*: int
+
   PackageDef* = object
     packageName*: string
     executables*: seq[ExecutableDef]
     toolUses*: seq[PackageUseDef]
+    nixProvisioning*: seq[NixPackageProvisioningDef]
     usesImportPaths*: seq[string]
     publicSignatureDependencies*: seq[string]
     sourceFile*: string
@@ -1234,6 +1244,53 @@ proc collectUses(node: NimNode; policyPath: seq[string];
   else:
     discard
 
+proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
+  let loc = lineFile(node)
+  if calleeName(node).normalize != "nixpackage" or node.len < 2:
+    error("provisioning expects nixPackage \"selector\", executablePath = \"bin/name\"",
+      node)
+  result.selector = stringLiteral(node[1])
+  result.packageId = result.selector
+  result.lockIdentity = result.selector
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  for i in 2 ..< node.len:
+    let executablePathValue = namedValue(node[i], "executablePath")
+    if not executablePathValue.isNil:
+      result.executablePath = stringLiteral(executablePathValue)
+    let expressionFileValue = namedValue(node[i], "expressionFile")
+    if not expressionFileValue.isNil:
+      result.expressionFile = stringLiteral(expressionFileValue)
+    let packageIdValue = namedValue(node[i], "packageId")
+    if not packageIdValue.isNil:
+      result.packageId = stringLiteral(packageIdValue)
+    let lockIdentityValue = namedValue(node[i], "lockIdentity")
+    if not lockIdentityValue.isNil:
+      result.lockIdentity = stringLiteral(lockIdentityValue)
+  if result.selector.len == 0:
+    error("nixPackage selector must not be empty", node)
+  if result.executablePath.len == 0:
+    error("nixPackage requires executablePath = \"bin/name\"", node)
+  if result.executablePath.isAbsolute or result.executablePath.startsWith(".."):
+    error("nixPackage executablePath must be relative to the realized output",
+      node)
+  if result.expressionFile.len > 0 and not result.expressionFile.isAbsolute:
+    result.expressionFile = loc.file.splitPath.head / result.expressionFile
+
+proc collectProvisioning(node: NimNode;
+                         output: var seq[NixPackageProvisioningDef]) =
+  case node.kind
+  of nnkStmtList:
+    for child in node:
+      collectProvisioning(child, output)
+  of nnkCall, nnkCommand:
+    if calleeName(node).normalize == "nixpackage":
+      output.add(parseNixPackageProvisioning(node))
+    else:
+      error("unsupported provisioning form: " & node.repr, node)
+  else:
+    discard
+
 proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   let loc = lineFile(name)
   result.packageName = identText(name)
@@ -1245,6 +1302,10 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
         collectUses(stmt[i], @[], result.toolUses)
+    elif calleeName(stmt).normalize == "provisioning":
+      if stmt.len < 2:
+        error("provisioning expects a body", stmt)
+      collectProvisioning(stmt[stmt.len - 1], result.nixProvisioning)
     elif calleeName(stmt).normalize == "usesimportpath":
       if stmt.len != 2:
         error("usesImportPath expects exactly one string literal", stmt)
@@ -1266,7 +1327,19 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
 
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
-    ", usesImportPaths: @["
+    ", nixProvisioning: @["
+  for provisioningIndex, provisioning in pkg.nixProvisioning:
+    if provisioningIndex > 0:
+      result.add(", ")
+    result.add("NixPackageProvisioningDef(selector: " & escForCode(
+        provisioning.selector) &
+      ", executablePath: " & escForCode(provisioning.executablePath) &
+      ", expressionFile: " & escForCode(provisioning.expressionFile) &
+      ", packageId: " & escForCode(provisioning.packageId) &
+      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", sourceFile: " & escForCode(provisioning.sourceFile) &
+      ", sourceLine: " & $provisioning.sourceLine & ")")
+  result.add("], usesImportPaths: @[")
   for pathIndex, path in pkg.usesImportPaths:
     if pathIndex > 0:
       result.add(", ")
