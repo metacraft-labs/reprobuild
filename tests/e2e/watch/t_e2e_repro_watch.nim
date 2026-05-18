@@ -918,14 +918,15 @@ when defined(macosx):
       check log.contains("repro watch: event seen path=")
       check log.contains(
         "selectedTarget: c-sudoku-object-with-generated-header")
-      check log.contains("scheduler: actions=2")
+      check log.contains("scheduler: actions=3")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: c-sudoku-object-tup")
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 2
+      check report{"actions"}.len == 3
       assertAction(report, "generate-config-header", "asCacheHit", false)
+      assertAction(report, "build-c-dir", "asUpToDate", false)
       assertAction(report, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
       let selectedC = reportAction(report, "c-sudoku-object-with-generated-header")

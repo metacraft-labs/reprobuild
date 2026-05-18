@@ -276,6 +276,53 @@ proc lowerDependencyPolicy(actionId, depfile: string;
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
   let payload = decodeBuildActionPayload(toBytes(node.payload))
+  proc argValue(name: string): string =
+    for arg in payload.call.arguments:
+      if arg.name == name:
+        return arg.encodedValue
+    ""
+
+  proc argSeqValue(name: string): seq[string] =
+    let encoded = argValue(name)
+    if encoded.len == 0:
+      return @[]
+    encoded.split("\x1f")
+
+  if payload.call.packageName == "reprobuild.builtin" and
+      payload.call.executableName == "fs":
+    let commandStatsId =
+      if payload.commandStatsId.len > 0:
+        payload.commandStatsId
+      else:
+        payload.id
+    let fingerprintText = [
+      "reprobuild.localBuiltinAction.v1",
+      payload.id,
+      payload.call.subcommand,
+      node.payload
+    ].join("\n")
+    let kind =
+      case payload.call.subcommand
+      of "copyFile": bakCopyFile
+      of "ensureDir": bakEnsureDir
+      of "writeText": bakWriteText
+      of "stamp": bakStamp
+      else:
+        raise newException(ValueError,
+          "unknown built-in fs operation: " & payload.call.subcommand)
+    return repro_build_engine.builtinAction(
+      kind,
+      payload.id,
+      cwd = projectRoot,
+      deps = payload.deps,
+      inputs = payload.inputs.mapIt(materialProjectPath(projectRoot, it)),
+      outputs = payload.outputs,
+      commandStatsId = commandStatsId,
+      cacheable = payload.cacheable,
+      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      text = argValue("text") & argValue("title"),
+      entries = argSeqValue("entries"))
+
   let executableName = payload.call.executableName
   let packageName = payload.call.packageName
   let exactKey = packageName & "|" & executableName

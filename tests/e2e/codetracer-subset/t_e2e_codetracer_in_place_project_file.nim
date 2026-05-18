@@ -537,9 +537,11 @@ when defined(macosx):
       let selected = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check selected.contains("selectedTarget: c-sudoku-object-with-generated-header")
-      check selected.contains("scheduler: actions=2")
+      check selected.contains("scheduler: actions=3")
       check selected.contains(
         "action: generate-config-header status=asSucceeded launched=true")
+      check selected.contains(
+        "action: build-c-dir status=asSucceeded launched=true")
       check selected.contains(
         "action: c-sudoku-object-with-generated-header status=asSucceeded launched=true")
       check not selected.contains("action: nim-js-ipc-registry-test")
@@ -550,10 +552,13 @@ when defined(macosx):
       check not fileExists(projectRoot / "build" / "c" / "main.tup.o")
 
       let selectedReport = parseFile(valueAfter(selected, "buildReport:"))
-      check selectedReport{"actions"}.len == 2
+      check selectedReport{"actions"}.len == 3
       assertAction(selectedReport, "generate-config-header", "asSucceeded", true)
+      assertAction(selectedReport, "build-c-dir", "asSucceeded", true)
       assertAction(selectedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
+      check reportAction(selectedReport, "build-c-dir"){"runQuotaBackend"}.
+        getStr() == "builtin"
       let selectedC = reportAction(selectedReport,
         "c-sudoku-object-with-generated-header")
       check selectedC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
@@ -1682,8 +1687,9 @@ when defined(macosx):
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=21")
+      check first.contains("scheduler: actions=22")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
+      check first.contains("action: build-c-dir status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
       check first.contains("action: frontend-ui-js status=asSucceeded launched=true")
       check first.contains("action: frontend-public-ui-js status=asSucceeded launched=true")
@@ -1723,17 +1729,18 @@ when defined(macosx):
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == 4
+      check identity.profiles.len == 3
       check identity.profiles.allIt(it.installMethod == "path")
       check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
       check identity.profiles.anyIt(it.executableName == "nim")
       check identity.profiles.anyIt(it.executableName == "node")
       check identity.profiles.anyIt(it.executableName == "gcc")
-      check identity.profiles.anyIt(it.executableName == "sh")
       check not identity.profiles.anyIt(it.executableName == "nim-js")
+      check not identity.profiles.anyIt(it.executableName == "sh")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       assertAction(firstReport, "generate-config-header", "asSucceeded", true)
+      assertAction(firstReport, "build-c-dir", "asSucceeded", true)
       assertAction(firstReport, "nim-js-ipc-registry-test", "asSucceeded", true)
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
@@ -1752,7 +1759,7 @@ when defined(macosx):
       assertAction(firstReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
       check reportAction(firstReport, "generate-config-header"){"runQuotaBackend"}.
-        getStr().len > 0
+        getStr() == "builtin"
       let tupInputs = jsonStringSet(reportAction(firstReport, "c-sudoku-object-tup"){
         "evidence"}{"declaredInputs"})
       check tupInputs.anyIt(it.endsWith("test-programs/c_sudoku_solver/main.c"))
@@ -1774,6 +1781,7 @@ when defined(macosx):
       let second = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertAction(secondReport, "generate-config-header", "asCacheHit", false)
+      assertAction(secondReport, "build-c-dir", "asUpToDate", false)
       assertAction(secondReport, "nim-js-ipc-registry-test", "asCacheHit", false)
       assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
       assertAction(secondReport, "frontend-public-ui-js", "asCacheHit", false)
@@ -1800,6 +1808,7 @@ when defined(macosx):
       let cChanged = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       let cChangedReport = parseFile(valueAfter(cChanged, "buildReport:"))
       assertAction(cChangedReport, "generate-config-header", "asCacheHit", false)
+      assertAction(cChangedReport, "build-c-dir", "asUpToDate", false)
       assertAction(cChangedReport, "nim-js-ipc-registry-test", "asCacheHit", false)
       assertAction(cChangedReport, "frontend-ui-js", "asCacheHit", false)
       assertAction(cChangedReport, "frontend-public-ui-js", "asCacheHit", false)
@@ -1827,6 +1836,7 @@ when defined(macosx):
         monitorEnv)
       let headerDeletedReport = parseFile(valueAfter(headerDeleted, "buildReport:"))
       assertAction(headerDeletedReport, "generate-config-header", "asSucceeded", true)
+      assertAction(headerDeletedReport, "build-c-dir", "asUpToDate", false)
       assertAction(headerDeletedReport, "nim-js-ipc-registry-test", "asCacheHit", false)
       assertAction(headerDeletedReport, "frontend-ui-js", "asCacheHit", false)
       assertAction(headerDeletedReport, "frontend-public-ui-js", "asCacheHit", false)

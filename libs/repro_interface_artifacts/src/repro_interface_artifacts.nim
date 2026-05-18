@@ -816,6 +816,16 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
                             workDir = getCurrentDir()): ProviderCompileArtifact =
   let sources = discoverNimSources(modulePath)
   let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint)
+  if artifactPath.len > 0 and fileExists(artifactPath) and fileExists(outputBinaryPath):
+    try:
+      let cached = readProviderCompileArtifact(artifactPath)
+      if cached.providerFingerprint == providerFingerprint and
+          cached.interfaceFingerprint == interfaceFingerprint and
+          cached.outputBinaryPath == outputBinaryPath and
+          cached.outputBinaryFingerprint == casDigest(toBytes(readFile(outputBinaryPath))):
+        return cached
+    except CatchableError:
+      discard
   createDir(parentDir(outputBinaryPath))
   let nimcache = parentDir(outputBinaryPath) / "nimcache-provider"
   var command = @[

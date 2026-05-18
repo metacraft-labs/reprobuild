@@ -118,6 +118,16 @@ proc runProviderProtocol*(config: ProviderExecutionConfig;
 
   writeProviderRequestFile(requestPath, request)
 
+  let tracePath = getEnv("REPRO_PROVIDER_TRACE")
+  if tracePath.len > 0:
+    createDir(tracePath.splitPath.head)
+    var handle = open(tracePath, fmAppend)
+    try:
+      handle.writeLine(($request.kind) & "|" & request.entryPointId & "|" &
+        request.arguments & "|" & $request.reason)
+    finally:
+      handle.close()
+
   let cwd =
     if config.workingDir.len > 0: config.workingDir
     else: getCurrentDir()
@@ -653,10 +663,39 @@ proc detectEvaluationInputChanges(manifest: ProviderManifest;
 proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
   result.persistedSnapshotPath = providerSnapshotPath(config.storeRoot)
   let provider = execConfig(config)
+  var snapshot = loadProviderGraphSnapshot(config.storeRoot)
+
+  if snapshot.fragments.len > 0 and
+      snapshot.providerArtifactId == config.providerArtifactId:
+    let manifest = snapshot.manifest
+    validateManifest(manifest, config.providerArtifactId)
+    refreshStoredBindings(snapshot, manifest)
+
+    var plans: seq[InvocationPlan] = @[]
+    var planKeys = initHashSet[string]()
+    var rootNeedsRerun = false
+
+    handleDirectoryChanges(config, manifest, snapshot, result, plans, planKeys,
+      rootNeedsRerun)
+    detectEvaluationInputChanges(manifest, snapshot, plans, planKeys)
+
+    if rootNeedsRerun:
+      runRootAndChildren(config, provider, manifest, snapshot, result,
+        girDirectoryMembershipChanged)
+    else:
+      for plan in plans:
+        discard executePlan(config, provider, manifest, snapshot, result, plan)
+
+    ensureNoDuplicateEffects(snapshot)
+    if plans.len > 0 or rootNeedsRerun or result.prunedInvocationKeys.len > 0 or
+        result.staleEffects.len > 0 or result.staleEdges.len > 0:
+      saveProviderGraphSnapshot(config.storeRoot, snapshot)
+    result.snapshot = snapshot
+    return
+
   let manifest = readProviderManifest(provider, config.providerArtifactId)
   validateManifest(manifest, config.providerArtifactId)
 
-  var snapshot = loadProviderGraphSnapshot(config.storeRoot)
   if snapshot.fragments.len == 0:
     snapshot = emptyProviderGraphSnapshot(config.providerArtifactId, manifest)
     runRootAndChildren(config, provider, manifest, snapshot, result,

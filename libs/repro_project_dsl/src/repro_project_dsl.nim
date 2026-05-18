@@ -1,12 +1,15 @@
-import std/[macros, os, strutils, tables]
+import std/[algorithm, macros, os, strutils, tables]
 
 when defined(reproProviderMode):
   import repro_provider_runtime
+  export repro_provider_runtime
 
 type
   BuildActionPayloadError* = object of CatchableError
 
   Tool*[name: static string] = object
+
+  ReproFs* = object
 
   CliParamKind* = enum
     cpkPositional
@@ -72,6 +75,11 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  ProviderForeachDef* = object
+    id*: string
+    bodyHash*: string
+    stableName*: string
+
   PublicCliArg* = object
     name*: string
     nimType*: string
@@ -119,6 +127,8 @@ type
 var registry: seq[PackageDef] = @[]
 var buildActionRegistry: seq[BuildActionDef] = @[]
 var defaultBuildActionRegistry = ""
+
+const fs* = ReproFs()
 
 when defined(reproProviderMode):
   var providerEvaluationInputRegistry: seq[GraphEvaluationInput] = @[]
@@ -170,12 +180,33 @@ when defined(reproProviderMode):
     providerEvaluationInputRegistry.add(
       directoryEnumerationInput(materialProviderPath(path), "", ""))
 
+  proc providerDirectoryInput*(path, memberEntryPointId,
+                               memberEntryPointBodyHash: string) =
+    let material = materialProviderPath(path)
+    providerEvaluationInputRegistry.add(
+      directoryEnumerationInput(material, memberEntryPointId,
+        memberEntryPointBodyHash, memberArgumentRoot = material))
+
   proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
     providerEvaluationInputRegistry
 
 else:
   proc providerDirectoryInput*(path: string) =
     discard path
+
+  proc providerDirectoryInput*(path, memberEntryPointId,
+                               memberEntryPointBodyHash: string) =
+    discard path
+    discard memberEntryPointId
+    discard memberEntryPointBodyHash
+
+proc dirListing*(path: string): seq[string] =
+  if not dirExists(path):
+    return @[]
+  for kind, child in walkDir(path):
+    if kind in {pcFile, pcDir}:
+      result.add(child)
+  result.sort(system.cmp[string])
 
 proc cliArg*(name: string; value: string; kind = cpkFlag; position = 0;
              alias = ""; format = cafSeparate;
@@ -265,6 +296,27 @@ proc automaticMonitorPolicy*(): BuildActionDependencyPolicy =
 
 proc makeDepfilePolicy*(depfile = ""): BuildActionDependencyPolicy =
   BuildActionDependencyPolicy(kind: bdpMakeDepfile, depfile: depfile)
+
+const
+  BuiltinPackageName = "reprobuild.builtin"
+  BuiltinFsExecutable = "fs"
+
+proc builtinFsCall(command: string; arguments: openArray[PublicCliArg]):
+    PublicCliCall =
+  publicCliCall(BuiltinPackageName, BuiltinFsExecutable, command,
+    BuiltinPackageName & "." & BuiltinFsExecutable & "." & command, arguments)
+
+proc builtinActionIdPart(value: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-'}:
+      result.add(ch)
+    else:
+      result.add("-" & toHex(ord(ch), 2).toLowerAscii())
+  if result.len == 0:
+    result = "value"
+
+proc defaultBuiltinActionId(command: string; key: string): string =
+  "fs-" & builtinActionIdPart(command) & "-" & builtinActionIdPart(key)
 
 proc buildAction*(id: string; call: PublicCliCall;
                   deps: openArray[string] = [];
@@ -356,6 +408,63 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
     cacheable = cacheable,
     commandStatsId = commandStatsId,
     dependencyPolicy = dependencyPolicy)
+
+proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
+               deps: openArray[string] = []; cacheable = true;
+               commandStatsId = ""): BuildActionDef {.discardable.} =
+  discard tool
+  let call = builtinFsCall("copyFile", [
+    inputArg("source", source),
+    outputArg("output", output)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("copyFile", output)
+  recordCommandAction(selectedActionId, call, deps = deps,
+    cacheable = cacheable, commandStatsId = commandStatsId,
+    dependencyPolicy = declaredOnlyDependencyPolicy())
+
+proc ensureDir*(tool: ReproFs; path: string; actionId = "";
+                deps: openArray[string] = []; commandStatsId = ""):
+    BuildActionDef {.discardable.} =
+  discard tool
+  let call = builtinFsCall("ensureDir", [
+    outputArg("path", path)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("ensureDir", path)
+  recordCommandAction(selectedActionId, call, deps = deps,
+    cacheable = false, commandStatsId = commandStatsId,
+    dependencyPolicy = declaredOnlyDependencyPolicy())
+
+proc writeText*(tool: ReproFs; output, text: string; actionId = "";
+                deps: openArray[string] = []; cacheable = true;
+                commandStatsId = ""): BuildActionDef {.discardable.} =
+  discard tool
+  let call = builtinFsCall("writeText", [
+    outputArg("output", output),
+    cliArg("text", text)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("writeText", output)
+  recordCommandAction(selectedActionId, call, deps = deps,
+    cacheable = cacheable, commandStatsId = commandStatsId,
+    dependencyPolicy = declaredOnlyDependencyPolicy())
+
+proc stamp*(tool: ReproFs; output, title: string;
+            entries: openArray[string] = []; inputs: openArray[string] = [];
+            actionId = ""; deps: openArray[string] = []; cacheable = true;
+            commandStatsId = ""): BuildActionDef {.discardable.} =
+  discard tool
+  let call = builtinFsCall("stamp", [
+    outputArg("output", output),
+    cliArg("title", title),
+    cliArgSeq("entries", @entries)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("stamp", output)
+  recordCommandAction(selectedActionId, call, deps = deps,
+    extraInputs = inputs, cacheable = cacheable, commandStatsId = commandStatsId,
+    dependencyPolicy = declaredOnlyDependencyPolicy())
 
 proc normalizedDeclaredProjectPath*(projectRoot, path: string): string =
   result = path.replace('\\', '/').strip()
@@ -1439,8 +1548,10 @@ when defined(reproProviderMode):
     if result.len == 0:
       result = "node"
 
-  proc providerManifest(pkg: PackageDef; providerArtifactId: string): ProviderManifest =
-    ProviderManifest(
+  proc providerManifest(pkg: PackageDef; providerArtifactId: string;
+                        foreachDefs: openArray[ProviderForeachDef]):
+      ProviderManifest =
+    result = ProviderManifest(
       providerArtifactId: providerArtifactId,
       protocolVersion: ProviderProtocolVersion,
       entryPoints: @[
@@ -1452,6 +1563,14 @@ when defined(reproProviderMode):
           argumentSchemaId: "reprobuild.project-root.v1",
           outputSchemaId: "reprobuild.graph-fragment.v1")
       ])
+    for def in foreachDefs:
+      result.entryPoints.add(GraphEntryPointDescriptor(
+        id: def.id,
+        kind: gpkStructuralIteratorBody,
+        stableName: def.stableName,
+        bodyHash: def.bodyHash,
+        argumentSchemaId: "reprobuild.foreach-member.v1",
+        outputSchemaId: "reprobuild.graph-fragment.v1"))
 
   proc actionNode(namespace, id: string): string =
     namespace & ":action:" & sanitizeNodePart(id)
@@ -1463,8 +1582,25 @@ when defined(reproProviderMode):
   proc defaultBuildActionNode(namespace: string): string =
     namespace & ":metadata:default-build-action"
 
-  proc buildPackageFragment(pkg: PackageDef; request: ProviderGraphRequest;
-                            buildProc: proc ()): GraphFragment =
+  proc addChildSpecsFromInputs(fragment: var GraphFragment) =
+    for input in fragment.evaluationInputs:
+      if input.kind != gevDirectoryEnumeration or
+          input.memberEntryPointId.len == 0:
+        continue
+      let root =
+        if input.memberArgumentRoot.len > 0: input.memberArgumentRoot
+        else: input.identity
+      for member in input.directoryMembers:
+        fragment.childEntryPoints.add(GraphEntryPointInvocationSpec(
+          entryPointId: input.memberEntryPointId,
+          entryPointBodyHash: input.memberEntryPointBodyHash,
+          arguments: root / member,
+          namespace: fragment.namespace,
+          stableName: input.memberEntryPointId & ":" & member))
+
+  proc buildPackageFragment*(pkg: PackageDef; request: ProviderGraphRequest;
+                             buildProc: proc (); includeDefault = true):
+      GraphFragment =
     resetBuildActionRegistry()
     resetDefaultBuildActionRegistry()
     resetProviderEvaluationInputRegistry()
@@ -1481,10 +1617,11 @@ when defined(reproProviderMode):
       entryPointBodyHash: request.entryPointBodyHash,
       arguments: request.arguments,
       namespace: request.namespace)
-    if fileExists(pkg.sourceFile):
+    if includeDefault and fileExists(pkg.sourceFile):
       result.evaluationInputs.add(fileReadInput(pkg.sourceFile))
     for input in registeredProviderEvaluationInputs():
       result.evaluationInputs.add(input)
+    result.addChildSpecsFromInputs()
     for action in actions:
       let nodeId = actionNode(request.namespace, action.id)
       result.nodes.add(GraphNode(
@@ -1492,7 +1629,7 @@ when defined(reproProviderMode):
         kind: gnkAction,
         stableName: action.id,
         payload: actionPayload(action)))
-    if defaultAction.len > 0:
+    if includeDefault and defaultAction.len > 0:
       var found = false
       for action in actions:
         if action.id == defaultAction:
@@ -1537,45 +1674,190 @@ when defined(reproProviderMode):
           payload: action.id))
     result.fragmentDigest = computeGraphFragmentDigest(result)
 
-  proc runPackageProvider*(pkg: PackageDef; buildProc: proc ()): int =
+  proc runPackageProvider*(pkg: PackageDef; buildProc: proc ();
+                           foreachDefs: openArray[ProviderForeachDef] = [];
+                           foreachDispatch: proc (
+                             request: ProviderGraphRequest): GraphFragment = nil): int =
     try:
       let paths = parseProviderProtocolArgs(commandLineParams())
       let request = readProviderRequestFile(paths.requestPath)
-      let manifest = providerManifest(pkg, request.providerArtifactId)
+      let manifest = providerManifest(pkg, request.providerArtifactId,
+        foreachDefs)
       case request.kind
       of prkManifest:
         writeProviderResponseFile(paths.responsePath, manifestResponse(manifest))
       of prkGraphInvocation:
-        if request.entryPointId != rootEntryPointId(pkg):
+        if request.entryPointId == rootEntryPointId(pkg):
+          writeProviderResponseFile(paths.responsePath,
+            graphResponse(manifest, buildPackageFragment(pkg, request, buildProc)))
+        elif foreachDispatch != nil:
+          writeProviderResponseFile(paths.responsePath,
+            graphResponse(manifest, foreachDispatch(request)))
+        else:
           stderr.writeLine("unknown provider entry point: " & request.entryPointId)
           return 2
-        writeProviderResponseFile(paths.responsePath,
-          graphResponse(manifest, buildPackageFragment(pkg, request, buildProc)))
       0
     except CatchableError as err:
       stderr.writeLine("repro project provider: error: " & err.msg)
       1
 
-proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
-  var buildBody = newStmtList()
-  for stmt in body:
+type
+  ForeachLift = object
+    id: string
+    bodyHash: string
+    stableName: string
+    procName: string
+    iteratorName: string
+    path: string
+    iterable: NimNode
+    body: NimNode
+
+proc generatedIdentPart(text: string): string =
+  for ch in text:
+    if ch.isAlphaNumeric():
+      result.add(ch)
+    else:
+      result.add("_")
+  if result.len == 0:
+    result = "generated"
+
+proc foreachParts(stmt: NimNode): tuple[matched: bool; iteratorName: string;
+                                        iterable: NimNode; path: string;
+                                        body: NimNode] =
+  if calleeName(stmt).normalize != "foreach" or stmt.len != 3:
+    return
+  let binding = stmt[1]
+  if binding.kind != nnkInfix or binding.len != 3 or
+      not binding[0].eqIdent("in"):
+    error("foreach expects the form: foreach item in dirListing(\"path\"):",
+      stmt)
+  result.iteratorName = identText(binding[1])
+  result.iterable = binding[2]
+  if calleeName(result.iterable).normalize != "dirlisting" or
+      result.iterable.len < 2:
+    error("provider foreach currently requires dirListing(\"path\")", stmt)
+  result.path = stringLiteral(result.iterable[1])
+  result.body = stmt[2]
+  result.matched = true
+
+proc collectBuildStatements(pkgBody: NimNode): NimNode =
+  result = newStmtList()
+  for stmt in pkgBody:
     if calleeName(stmt).normalize == "build":
-      buildBody.add(stmt[1])
+      for buildStmt in stmt[1]:
+        result.add(buildStmt)
     elif calleeName(stmt).normalize == "executable":
       let exeBody = stmt[2]
       for exeStmt in exeBody:
         if calleeName(exeStmt).normalize == "build":
-          buildBody.add(exeStmt[1])
+          for buildStmt in exeStmt[1]:
+            result.add(buildStmt)
+
+proc liftForeachStatements(pkg: PackageDef; buildBody: NimNode):
+    tuple[rootBody: NimNode; liftedProcs: NimNode; lifts: seq[ForeachLift]] =
+  result.rootBody = newStmtList()
+  result.liftedProcs = newStmtList()
+  var index = 0
+  for stmt in buildBody:
+    let parts = foreachParts(stmt)
+    if not parts.matched:
+      result.rootBody.add(stmt)
+      continue
+
+    let suffix = generatedIdentPart(pkg.packageName) & "_" & $index & "_" &
+      generatedIdentPart(parts.iteratorName)
+    let procName = "foreach_" & suffix
+    let entryPointId = pkg.packageName & ".foreach." & $index & "." &
+      parts.iteratorName
+    let bodyHash = stableHashHex(entryPointId & "\n" & parts.body.repr)
+    let iterIdent = ident(parts.iteratorName)
+    let procIdent = ident(procName)
+    let iterable = copyNimTree(parts.iterable)
+    let bodyCopy = copyNimTree(parts.body)
+    let lifted = quote do:
+      proc `procIdent`*(`iterIdent`: string) =
+        `bodyCopy`
+    result.liftedProcs.add(lifted)
+
+    let pathLit = newLit(parts.path)
+    let entryLit = newLit(entryPointId)
+    let hashLit = newLit(bodyHash)
+    let providerBody = quote do:
+      providerDirectoryInput(`pathLit`, `entryLit`, `hashLit`)
+    let loopBody = copyNimTree(parts.body)
+    let loopStmt = newTree(nnkForStmt, ident(parts.iteratorName), iterable,
+      loopBody)
+    result.rootBody.add(quote do:
+      when defined(reproProviderMode):
+        `providerBody`
+      else:
+        `loopStmt`)
+
+    result.lifts.add(ForeachLift(
+      id: entryPointId,
+      bodyHash: bodyHash,
+      stableName: "foreach:" & parts.iteratorName & ":" & parts.path,
+      procName: procName,
+      iteratorName: parts.iteratorName,
+      path: parts.path,
+      iterable: copyNimTree(parts.iterable),
+      body: copyNimTree(parts.body)))
+    inc index
+
+proc foreachDefsLiteral(lifts: openArray[ForeachLift]): NimNode =
+  var items: seq[string] = @[]
+  for lift in lifts:
+    items.add("ProviderForeachDef(id: " & escForCode(lift.id) &
+      ", bodyHash: " & escForCode(lift.bodyHash) &
+      ", stableName: " & escForCode(lift.stableName) & ")")
+  parseExpr("@[" & items.join(", ") & "]")
+
+proc foreachDispatchCode(pkg: PackageDef; dispatchName: string;
+                         lifts: openArray[ForeachLift]): NimNode =
+  var code = "proc " & dispatchName &
+    "(request: ProviderGraphRequest): GraphFragment =\n"
+  code.add("  case request.entryPointId\n")
+  for lift in lifts:
+    code.add("  of " & escForCode(lift.id) & ":\n")
+    code.add("    return buildPackageFragment(" & packageLiteral(pkg) &
+      ", request, proc () = " & lift.procName &
+      "(request.arguments), includeDefault = false)\n")
+  code.add("  else:\n")
+  code.add("    raise newException(ValueError, \"unknown foreach provider entry point: \" & request.entryPointId)\n")
+  parseStmt(code)
+
+proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
+  let buildBody = collectBuildStatements(body)
   if buildBody.len == 0:
     return newStmtList()
+  let lifted = liftForeachStatements(pkg, buildBody)
   let procName = ident("build" & titleIdent(pkg.packageName))
   let pkgLiteral = parseExpr(packageLiteral(pkg))
-  result = quote do:
-    when not defined(reproInterfaceMode):
-      proc `procName`*() =
-        `buildBody`
-      when defined(reproProviderMode) and isMainModule:
-        quit runPackageProvider(`pkgLiteral`, `procName`)
+  if lifted.lifts.len == 0:
+    let rootBody = lifted.rootBody
+    result = quote do:
+      when not defined(reproInterfaceMode):
+        proc `procName`*() =
+          `rootBody`
+        when defined(reproProviderMode) and isMainModule:
+          quit runPackageProvider(`pkgLiteral`, `procName`)
+  else:
+    let rootBody = lifted.rootBody
+    let liftedProcs = lifted.liftedProcs
+    let dispatchName = ident("dispatch" & titleIdent(pkg.packageName) &
+      "Foreach")
+    let dispatchProc = foreachDispatchCode(pkg, $dispatchName, lifted.lifts)
+    let defsLiteral = foreachDefsLiteral(lifted.lifts)
+    result = quote do:
+      when not defined(reproInterfaceMode):
+        `liftedProcs`
+        proc `procName`*() =
+          `rootBody`
+        when defined(reproProviderMode):
+          `dispatchProc`
+          when isMainModule:
+            quit runPackageProvider(`pkgLiteral`, `procName`, `defsLiteral`,
+              `dispatchName`)
 
 macro package*(name: untyped; body: untyped): untyped =
   let pkg = parsePackageDef(name, body)

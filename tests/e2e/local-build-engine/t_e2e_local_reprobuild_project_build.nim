@@ -574,6 +574,68 @@ proc writeM47TypedCommandProject(path: string) =
     "      includes = @[\"include/config.h\"])\n" &
     "    defaultBuildAction(\"compile-main\")\n")
 
+proc writeM52StylusFixtureTool(binDir: string) =
+  writeExecutable(binDir / "m52-stylus",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "if [ \"${1:-}\" = \"--version\" ]; then echo 'm52-stylus 1.0.0'; exit 0; fi\n" &
+    "output= source=\n" &
+    "while [ \"$#\" -gt 0 ]; do\n" &
+    "  case \"$1\" in\n" &
+    "    -o) output=$2; shift 2 ;;\n" &
+    "    -*) echo \"unknown stylus flag $1\" >&2; exit 64 ;;\n" &
+    "    *) source=$1; shift ;;\n" &
+    "  esac\n" &
+    "done\n" &
+    "test -n \"$output\"\n" &
+    "test -n \"$source\"\n" &
+    "mkdir -p \"$(dirname \"$output\")\"\n" &
+    "{ printf '/* %s */\\n' \"$source\"; cat \"$source\"; } > \"$output\"\n")
+
+proc writeM52ForeachStylusProject(path: string) =
+  let projectRoot = path.splitPath.head
+  createDir(projectRoot / "reprobuild" / "packages")
+  writeFile(projectRoot / "reprobuild" / "packages" / "m52_stylus.nim",
+    "import repro_project_dsl\n\n" &
+    "defineCliInterface stylus, \"m52-stylus\":\n" &
+    "  call:\n" &
+    "    flag output is string, alias = \"-o\", role = output, required = true\n" &
+    "    pos source is string, role = input, position = 0\n")
+  writeFile(path,
+    "import std/[os]\n" &
+    "import repro_project_dsl\n\n" &
+    "package m52Styles:\n" &
+    "  usesImportPath \"reprobuild/packages\"\n" &
+    "  uses:\n" &
+    "    \"m52-stylus >=1.0 <2.0\"\n\n" &
+    "  build:\n" &
+    "    foreach style in dirListing(\"styles\"):\n" &
+    "      let name = splitFile(style).name\n" &
+    "      stylus(actionId = \"style-\" & name,\n" &
+    "        source = style,\n" &
+    "        output = \"public/\" & name & \".css\")\n")
+
+proc writeM53BuiltinFsProject(path: string) =
+  createDir(path.splitPath.head)
+  writeFile(path,
+    "import repro_project_dsl\n\n" &
+    "package m53Fs:\n" &
+    "  build:\n" &
+    "    fs.writeText(actionId = \"write-source\",\n" &
+    "      output = \"src/input.txt\",\n" &
+    "      text = \"generated input\\n\")\n" &
+    "    let outDir = fs.ensureDir(actionId = \"ensure-out\", path = \"out\")\n" &
+    "    fs.copyFile(actionId = \"copy-file\",\n" &
+    "      source = \"src/input.txt\",\n" &
+    "      output = \"out/copy.txt\",\n" &
+    "      deps = @[outDir.id])\n" &
+    "    let stamp = fs.stamp(actionId = \"stamp\",\n" &
+    "      output = \"out/stamp.txt\",\n" &
+    "      title = \"builtin fs aggregate\",\n" &
+    "      entries = @[\"out/copy.txt\"],\n" &
+    "      inputs = @[\"out/copy.txt\"])\n" &
+    "    defaultBuildAction(stamp)\n")
+
 proc nonEmptyLines(path: string): seq[string] =
   if not fileExists(path):
     return @[]
@@ -620,6 +682,10 @@ proc reportAction(report: JsonNode; id: string): JsonNode =
     if item{"id"}.getStr() == id:
       return item
   newJNull()
+
+proc resetTrace(path: string) =
+  if fileExists(path):
+    removeFile(path)
 
 suite "e2e_local_reprobuild_project_build":
   when defined(macosx):
@@ -962,6 +1028,41 @@ suite "e2e_local_reprobuild_project_build":
     check action{"evidence"}{"declaredOutputs"}.getElems().
       anyIt(it.getStr() == "build/main.o")
 
+  test "standard filesystem operations lower to built-in build actions":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m53-builtin-fs", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = compilePublicReproTestBin(repoRoot)
+    let projectRoot = tempRoot / "project"
+    writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
+    let output = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+    check output.contains("defaultTarget: stamp")
+    check output.contains("scheduler: actions=4")
+    check output.contains("action: write-source status=asSucceeded launched=true")
+    check output.contains("action: ensure-out status=asSucceeded launched=true")
+    check output.contains("action: copy-file status=asSucceeded launched=true")
+    check output.contains("action: stamp status=asSucceeded launched=true")
+    check readFile(projectRoot / "out" / "copy.txt") == "generated input\n"
+    check readFile(projectRoot / "out" / "stamp.txt") ==
+      "builtin fs aggregate\nout/copy.txt\n"
+
+    let report = parseFile(valueAfter(output, "buildReport:"))
+    check reportAction(report, "write-source"){"runQuotaBackend"}.getStr() ==
+      "builtin"
+    check reportAction(report, "copy-file"){"evidence"}{"declaredInputs"}.
+      getElems().anyIt(it.getStr().endsWith("src/input.txt"))
+    check reportAction(report, "stamp"){"evidence"}{"declaredOutputs"}.
+      getElems().anyIt(it.getStr() == "out/stamp.txt")
+
   test "relative public CLI keeps RunQuota helper path stable across project cwd":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m35-relative-public-cli", "")
@@ -1064,6 +1165,95 @@ suite "e2e_local_reprobuild_project_build":
     check reportAction(removedReport, "copy-alpha.txt").kind != JNull
     check reportAction(removedReport, "copy-gamma.txt").kind != JNull
     check reportAction(removedReport, "copy-beta.txt").kind == JNull
+
+  test "provider foreach refreshes only changed directory members":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m52-provider-foreach", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    discard compilePublicReproTestBin(repoRoot)
+
+    let binDir = tempRoot / "bin"
+    writeM52StylusFixtureTool(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+
+    let projectRoot = tempRoot / "project"
+    createDir(projectRoot / "styles")
+    writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v1\n")
+    writeFile(projectRoot / "styles" / "beta.styl", "beta-v1\n")
+    writeM52ForeachStylusProject(projectRoot / "reprobuild.nim")
+    let tracePath = tempRoot / "provider.trace"
+    let target = projectRoot
+    let traceEnv = [("PATH", pathValue), ("REPRO_PROVIDER_TRACE", tracePath)]
+
+    let first = requireSuccess(shellCommand([
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+    ], traceEnv), repoRoot)
+    check first.contains("providerInvocations: 3")
+    check first.contains("scheduler: actions=2")
+    check first.contains("action: style-alpha status=asSucceeded launched=true")
+    check first.contains("action: style-beta status=asSucceeded launched=true")
+    let firstTrace = nonEmptyLines(tracePath)
+    check firstTrace.anyIt(it.contains("prkGraphInvocation|m52Styles.root|"))
+    check firstTrace.anyIt(it.contains("alpha.styl|girNoPriorFragment"))
+    check firstTrace.anyIt(it.contains("beta.styl|girNoPriorFragment"))
+
+    resetTrace(tracePath)
+    let second = requireSuccess(shellCommand([
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+    ], traceEnv), repoRoot)
+    check second.contains("providerInvocations: 0")
+    check second.contains("action: style-alpha status=asCacheHit launched=false")
+    check second.contains("action: style-beta status=asCacheHit launched=false")
+    check nonEmptyLines(tracePath).len == 0
+
+    writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v2\n")
+    resetTrace(tracePath)
+    let contentChanged = requireSuccess(shellCommand([
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+    ], traceEnv), repoRoot)
+    check contentChanged.contains("providerInvocations: 0")
+    check contentChanged.contains(
+      "action: style-alpha status=asSucceeded launched=true")
+    check contentChanged.contains(
+      "action: style-beta status=asCacheHit launched=false")
+    check readFile(projectRoot / "public" / "alpha.css").contains("alpha-v2")
+    check nonEmptyLines(tracePath).len == 0
+
+    writeFile(projectRoot / "styles" / "gamma.styl", "gamma-v1\n")
+    resetTrace(tracePath)
+    let added = requireSuccess(shellCommand([
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+    ], traceEnv), repoRoot)
+    check added.contains("providerInvocations: 1")
+    check added.contains("scheduler: actions=3")
+    check added.contains("action: style-gamma status=asSucceeded launched=true")
+    let addedTrace = nonEmptyLines(tracePath)
+    check addedTrace.len == 1
+    check addedTrace[0].contains("prkGraphInvocation|m52Styles.foreach.0.style|")
+    check addedTrace[0].contains("gamma.styl|girDirectoryMembershipChanged")
+
+    removeFile(projectRoot / "styles" / "beta.styl")
+    resetTrace(tracePath)
+    let removed = requireSuccess(shellCommand([
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+    ], traceEnv), repoRoot)
+    check removed.contains("providerInvocations: 0")
+    check removed.contains("scheduler: actions=2")
+    check not removed.contains("action: style-beta")
+    let removedReport = parseFile(valueAfter(removed, "buildReport:"))
+    check reportAction(removedReport, "style-alpha").kind != JNull
+    check reportAction(removedReport, "style-gamma").kind != JNull
+    check reportAction(removedReport, "style-beta").kind == JNull
+    check nonEmptyLines(tracePath).len == 0
 
   test "public CLI builds local DSL project through provider, scheduler, cache, and depfile evidence":
     let repoRoot = getCurrentDir()

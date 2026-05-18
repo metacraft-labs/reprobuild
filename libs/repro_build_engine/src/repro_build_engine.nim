@@ -26,7 +26,15 @@ type
     cdHybridCutoff
     cdRejected
 
+  BuildActionKind* = enum
+    bakProcess
+    bakCopyFile
+    bakEnsureDir
+    bakWriteText
+    bakStamp
+
   BuildAction* = object
+    kind*: BuildActionKind
     id*: string
     deps*: seq[string]
     inputs*: seq[string]
@@ -44,6 +52,8 @@ type
     depfile*: string
     monitorDepfile*: string
     dependencyPolicy*: DependencyGatheringPolicy
+    builtinText*: string
+    builtinEntries*: seq[string]
 
   BuildPool* = object
     name*: string
@@ -152,6 +162,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              dependencyPolicy = declaredOnlyPolicy();
              env: openArray[string] = []): BuildAction =
   BuildAction(
+    kind: bakProcess,
     id: id,
     deps: @deps,
     inputs: @inputs,
@@ -169,6 +180,29 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     depfile: depfile,
     monitorDepfile: monitorDepfile,
     dependencyPolicy: dependencyPolicy)
+
+proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
+                    deps: openArray[string] = [];
+                    inputs: openArray[string] = [];
+                    outputs: openArray[string] = [];
+                    commandStatsId = ""; cacheable = true;
+                    weakFingerprint = weakFingerprintFromText(id);
+                    text = ""; entries: openArray[string] = []): BuildAction =
+  if kind == bakProcess:
+    raise newException(BuildEngineError, "builtinAction requires a built-in action kind")
+  BuildAction(
+    kind: kind,
+    id: id,
+    deps: @deps,
+    inputs: @inputs,
+    outputs: @outputs,
+    cwd: cwd,
+    commandStatsId: commandStatsId,
+    cacheable: cacheable,
+    weakFingerprint: weakFingerprint,
+    dependencyPolicy: declaredOnlyPolicy(),
+    builtinText: text,
+    builtinEntries: @entries)
 
 proc pool*(name: string; capacity: uint32): BuildPool =
   BuildPool(name: name, capacity: capacity)
@@ -198,7 +232,7 @@ proc validateGraph(g: BuildGraph) =
       raiseEngine("duplicate action id: " & action.id)
     ids.incl(action.id)
     byId[action.id] = action
-    if action.argv.len == 0 and action.outputs.len == 0:
+    if action.kind == bakProcess and action.argv.len == 0 and action.outputs.len == 0:
       raiseEngine("action has neither command nor outputs: " & action.id)
     for output in action.outputs:
       if outputs.contains(output):
@@ -243,12 +277,15 @@ proc validateGraph(g: BuildGraph) =
     if p.capacity == 0'u32:
       raiseEngine("pool capacity must be positive: " & p.name)
 
+proc pathExists(path: string): bool =
+  fileExists(path) or dirExists(path)
+
 proc allOutputsExist(action: BuildAction): bool =
   if action.outputs.len == 0:
     return false
   for output in action.outputs:
     let path = if output.isAbsolute or action.cwd.len == 0: output else: action.cwd / output
-    if not fileExists(path):
+    if not path.pathExists():
       return false
   true
 
@@ -626,6 +663,56 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string): Ac
     result.exitCode = if helperExit == 0: 1 else: helperExit
     result.stderr = "runquota helper result parse failed: " & err.msg
 
+proc builtinPath(action: BuildAction; path: string): string =
+  materialPath(action.cwd, path)
+
+proc executeBuiltinAction(action: BuildAction): ActionResult =
+  result = ActionResult(
+    id: action.id,
+    launched: true,
+    runQuotaBackend: "builtin",
+    dependencyPolicyKind: action.dependencyPolicy.kind)
+  try:
+    case action.kind
+    of bakCopyFile:
+      if action.inputs.len != 1 or action.outputs.len != 1:
+        raiseEngine("copyFile action requires exactly one input and one output: " &
+          action.id)
+      let source = action.builtinPath(action.inputs[0])
+      let destination = action.builtinPath(action.outputs[0])
+      createDir(destination.splitPath.head)
+      copyFile(source, destination)
+    of bakEnsureDir:
+      if action.outputs.len != 1:
+        raiseEngine("ensureDir action requires exactly one output: " & action.id)
+      createDir(action.builtinPath(action.outputs[0]))
+    of bakWriteText:
+      if action.outputs.len != 1:
+        raiseEngine("writeText action requires exactly one output: " & action.id)
+      let destination = action.builtinPath(action.outputs[0])
+      createDir(destination.splitPath.head)
+      writeFile(destination, action.builtinText)
+    of bakStamp:
+      if action.outputs.len != 1:
+        raiseEngine("stamp action requires exactly one output: " & action.id)
+      let destination = action.builtinPath(action.outputs[0])
+      createDir(destination.splitPath.head)
+      var text = action.builtinText
+      if text.len > 0 and not text.endsWith("\n"):
+        text.add("\n")
+      for entry in action.builtinEntries:
+        text.add(entry)
+        text.add("\n")
+      writeFile(destination, text)
+    of bakProcess:
+      raiseEngine("process action cannot be executed as a built-in: " & action.id)
+    result.status = asSucceeded
+    result.exitCode = 0
+  except CatchableError as err:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = err.msg
+
 proc resultIndex(ids: Table[string, int]; id: string): int =
   if not ids.hasKey(id):
     raiseEngine("internal missing result id: " & id)
@@ -810,6 +897,45 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.trace(id, "failed", plan.diagnostic)
           blockClosure(id, id)
           completed = terminalCount()
+          launchedAny = true
+          continue
+
+        if plan.action.kind != bakProcess:
+          let finished = executeBuiltinAction(plan.action)
+          let idx = idToIndex.resultIndex(id)
+          runResult.results[idx] = finished
+          runResult.results[idx].dependencyPolicyKind =
+            plan.action.dependencyPolicy.kind
+          runResult.results[idx].cacheDecision =
+            if actionsById[finished.id].cacheable and
+                runResult.results[idx].cacheDecision == cdNotCacheable:
+              cdMiss
+            else:
+              runResult.results[idx].cacheDecision
+          statuses[id] = finished.status
+          if finished.status == asSucceeded:
+            let evidence = collectEvidence(plan.action, strict = true)
+            runResult.results[idx].evidence = evidence.evidence
+            if not evidence.publishable:
+              runResult.results[idx].status = asFailed
+              runResult.results[idx].stderr =
+                evidence.evidence.diagnostics.join("\n")
+              statuses[id] = asFailed
+              runResult.trace(finished.id, "failed", "dependency evidence invalid")
+              blockClosure(finished.id, finished.id)
+              completed = terminalCount()
+              launchedAny = true
+              continue
+            if plan.action.cacheable:
+              discard cache.recordActionResult(cas, plan.action.weakFingerprint,
+                ffpChecksum, evidence.evidence.evidenceInputPaths(),
+                plan.action.outputs, plan.action.cwd)
+            completeSuccess(finished.id, asSucceeded,
+              runResult.results[idx].cacheDecision, true, "builtin")
+          else:
+            runResult.trace(finished.id, "failed", finished.stderr)
+            blockClosure(finished.id, finished.id)
+          inc completed
           launchedAny = true
           continue
 
