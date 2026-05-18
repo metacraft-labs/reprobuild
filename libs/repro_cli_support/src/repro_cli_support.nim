@@ -409,6 +409,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     pool = payload.pool,
     poolUnits = payload.poolUnits,
     depfile = depfile,
+    dynamicDepsFile = payload.dynamicDepsFile,
     cacheable = payload.cacheable,
     weakFingerprint = weakFingerprintFromText(fingerprintText),
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,

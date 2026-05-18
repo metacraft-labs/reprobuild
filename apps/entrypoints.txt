@@ -6,3 +6,4 @@ repro-controller apps/repro-controller/repro_controller.nim
 repro-worker apps/repro-worker/repro_worker.nim
 repro-daemon apps/repro-daemon/repro_daemon.nim
 repro-provider-host apps/repro-provider-host/repro_provider_host.nim
+repro-cmake-dyndep-fragment apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim

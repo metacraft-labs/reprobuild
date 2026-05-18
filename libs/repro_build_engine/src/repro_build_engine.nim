@@ -51,6 +51,7 @@ type
     cacheable*: bool
     weakFingerprint*: ContentDigest
     depfile*: string
+    dynamicDepsFile*: string
     monitorDepfile*: string
     dependencyPolicy*: DependencyGatheringPolicy
     builtinText*: string
@@ -120,6 +121,10 @@ type
     process: Process
     resultPath: string
 
+  DynamicGraphFragment = object
+    deps: Table[string, seq[string]]
+    outputs: Table[string, seq[string]]
+
 const
   RecognizedPolicyKinds = {
     dgRecognizedFormat,
@@ -160,6 +165,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              commandStatsId = ""; cacheable = false;
              weakFingerprint = weakFingerprintFromText(id);
              depfile = ""; monitorDepfile = "";
+             dynamicDepsFile = "";
              dependencyPolicy = declaredOnlyPolicy();
              env: openArray[string] = []): BuildAction =
   BuildAction(
@@ -179,6 +185,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     cacheable: cacheable,
     weakFingerprint: weakFingerprint,
     depfile: depfile,
+    dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
     dependencyPolicy: dependencyPolicy)
 
@@ -333,6 +340,29 @@ proc materialPath(root, path: string): string =
     path
   else:
     root / path
+
+proc readDynamicGraphFragment(path: string): DynamicGraphFragment =
+  if path.len == 0 or not fileExists(path):
+    raiseEngine("dynamic dependency fragment missing: " & path)
+  let lines = readFile(path).splitLines()
+  if lines.len == 0 or lines[0] != "repro-dynamic-graph-v1":
+    raiseEngine(path & ": missing repro-dynamic-graph-v1 header")
+  for lineNo in 1 ..< lines.len:
+    let line = lines[lineNo]
+    if line.len == 0:
+      continue
+    let fields = line.split('\t')
+    if fields.len != 3:
+      raiseEngine(path & ":" & $(lineNo + 1) &
+        ": dynamic graph record must have 3 tab-separated fields")
+    case fields[0]
+    of "dep":
+      result.deps.mgetOrPut(fields[1], @[]).addUnique(fields[2])
+    of "output":
+      result.outputs.mgetOrPut(fields[1], @[]).addUnique(fields[2])
+    else:
+      raiseEngine(path & ":" & $(lineNo + 1) &
+        ": unsupported dynamic graph record kind: " & fields[0])
 
 proc expectedPath(action: BuildAction; file: ExpectedDependencyFile): string =
   materialPath(action.cwd, file.path)
@@ -804,6 +834,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var ready: seq[string] = @[]
   var actionsById = initTable[string, BuildAction]()
   var launchedSucceeded = initHashSet[string]()
+  var dynamicDepsLoaded = initHashSet[string]()
 
   poolCapacity[""] = maxParallel
   for p in buildGraph.pools:
@@ -859,6 +890,52 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         runResult.trace(dep, "blocked", blocker)
         blockClosure(dep, blocker)
 
+  proc applyDynamicDeps(id: string): bool =
+    if dynamicDepsLoaded.contains(id):
+      return true
+    var action = actionsById[id]
+    if action.dynamicDepsFile.len == 0:
+      dynamicDepsLoaded.incl(id)
+      return true
+    let fragmentPath = materialPath(action.cwd, action.dynamicDepsFile)
+    let fragment = readDynamicGraphFragment(fragmentPath)
+    var addedWaiting = 0
+    for output in fragment.outputs.getOrDefault(id):
+      action.outputs.addUnique(output)
+    for dep in fragment.deps.getOrDefault(id):
+      if not actionsById.hasKey(dep):
+        raiseEngine("dynamic dependency " & dep & " for " & id &
+          " does not name an action in the selected graph")
+      if dep == id:
+        raiseEngine("dynamic dependency cycle: " & id & " depends on itself")
+      if action.deps.find(dep) >= 0:
+        continue
+      action.deps.add(dep)
+      dependents.mgetOrPut(dep, @[]).addUnique(id)
+      case statuses[dep]
+      of asSucceeded, asCacheHit, asUpToDate:
+        discard
+      of asFailed, asBlocked:
+        statuses[id] = asBlocked
+        let idx = idToIndex.resultIndex(id)
+        runResult.results[idx].status = asBlocked
+        runResult.results[idx].blockedBy = dep
+        runResult.trace(id, "blocked", dep)
+        blockClosure(id, dep)
+        actionsById[id] = action
+        dynamicDepsLoaded.incl(id)
+        return false
+      else:
+        inc addedWaiting
+    actionsById[id] = action
+    dynamicDepsLoaded.incl(id)
+    if addedWaiting > 0:
+      remaining[id] = remaining.getOrDefault(id, 0) + addedWaiting
+      runResult.trace(id, "dynamic-deps", "waiting=" & $addedWaiting)
+      return false
+    runResult.trace(id, "dynamic-deps", "loaded")
+    true
+
   proc terminalCount(): int =
     for action in buildGraph.actions:
       if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
@@ -876,7 +953,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       var i = 0
       while i < ready.len and uint32(running.len) < maxParallel:
         let id = ready[i]
-        let action = actionsById[id]
+        var action = actionsById[id]
         let poolName = action.pool
         let cap = poolCapacity.getOrDefault(poolName, maxParallel)
         let used = poolRunning.getOrDefault(poolName, 0'u32)
@@ -886,6 +963,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           continue
 
         ready.delete(i)
+        if not applyDynamicDeps(id):
+          launchedAny = true
+          completed = terminalCount()
+          continue
+        action = actionsById[id]
         runResult.trace(id, "ready", "pool=" & poolName)
         runResult.trace(id, "dependency-policy", $action.dependencyPolicy.kind)
 

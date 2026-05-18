@@ -145,6 +145,7 @@ type
     pool*: string
     poolUnits*: uint32
     depfile*: string
+    dynamicDepsFile*: string
     cacheable*: bool
     commandStatsId*: string
     dependencyPolicy*: BuildActionDependencyPolicy
@@ -173,7 +174,7 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 7'u16
+  BuildActionPayloadVersion = 8'u16
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
   BuildTargetPayloadVersion = 1'u16
@@ -388,6 +389,7 @@ proc buildAction*(id: string; call: PublicCliCall;
                   pool = "";
                   poolUnits = 1'u32;
                   depfile = "";
+                  dynamicDepsFile = "";
                   cacheable = true;
                   commandStatsId = "";
                   dependencyPolicy = defaultDependencyPolicy()): BuildActionDef =
@@ -400,6 +402,7 @@ proc buildAction*(id: string; call: PublicCliCall;
     pool: pool,
     poolUnits: poolUnits,
     depfile: depfile,
+    dynamicDepsFile: dynamicDepsFile,
     cacheable: cacheable,
     commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
     dependencyPolicy: dependencyPolicy)
@@ -872,6 +875,7 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
   payload.writeString(action.pool)
   payload.writeU32(action.poolUnits)
   payload.writeString(action.depfile)
+  payload.writeString(action.dynamicDepsFile)
   payload.writeByte(if action.cacheable: 1'u8 else: 0'u8)
   payload.writeString(action.commandStatsId)
   payload.writeDependencyPolicy(action.dependencyPolicy)
@@ -889,7 +893,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
       raisePayload("unknown build action payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16,
+  if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16,
       BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
@@ -907,6 +911,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
   else:
     result.poolUnits = 1'u32
   result.depfile = readString(bytes, pos)
+  if version >= 8'u16:
+    result.dynamicDepsFile = readString(bytes, pos)
   result.cacheable = readByte(bytes, pos) == 1'u8
   result.commandStatsId = readString(bytes, pos)
   if version >= 3'u16:

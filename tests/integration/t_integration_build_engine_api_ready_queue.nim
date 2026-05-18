@@ -220,6 +220,89 @@ suite "integration_build_engine_api_ready_queue":
     check launchedIndex("produce") >= 0
     check launchedIndex("consume") > launchedIndex("produce")
 
+  test "runBuild applies dynamic graph fragments before launching dependent actions":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m6-api-dyndep", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot, tempRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let fragmentPath = workRoot / "deps" / "graph.rbdyn"
+    let providerOutput = workRoot / "provider" / "out.txt"
+    let consumerOutput = workRoot / "consumer" / "out.txt"
+    fixtureWrite(fragmentPath,
+      "repro-dynamic-graph-v1\n" &
+      "dep\tconsumer\tprovider\n")
+
+    let buildResult = runBuild(graph([
+      action("consumer", [app, "fixture-action", "copy", "consumer",
+        providerOutput, consumerOutput], cwd = workRoot,
+        outputs = ["consumer/out.txt"], dynamicDepsFile = "deps/graph.rbdyn",
+        commandStatsId = "m6-dyndep-consumer"),
+      action("provider", [app, "fixture-action", "wide", "provider",
+        providerOutput], cwd = workRoot, outputs = ["provider/out.txt"],
+        commandStatsId = "m6-dyndep-provider")
+    ]), BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 2'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024))
+
+    proc byId(id: string): ActionResult =
+      for item in buildResult.results:
+        if item.id == id:
+          return item
+      raise newException(ValueError, "missing result " & id)
+
+    proc traceIndex(id, event: string): int =
+      for i, item in buildResult.trace:
+        if item.actionId == id and item.event == event:
+          return i
+      -1
+
+    check byId("provider").status == asSucceeded
+    check byId("consumer").status == asSucceeded
+    check readFile(consumerOutput).contains("wide provider")
+    check traceIndex("consumer", "dynamic-deps") >= 0
+    check traceIndex("provider", "launched") >= 0
+    check traceIndex("consumer", "launched") > traceIndex("provider", "asSucceeded")
+
+  test "runBuild fails closed for malformed dynamic graph fragments":
+    let tempRoot = createTempDir("repro-m6-api-dyndep-bad", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let outputPath = workRoot / "out.txt"
+    fixtureWrite(workRoot / "deps" / "bad.rbdyn", "not-a-dynamic-fragment\n")
+
+    expect BuildEngineError:
+      discard runBuild(graph([
+        action("consumer", [app, "fixture-action", "wide", "bad", outputPath],
+          cwd = workRoot, outputs = ["out.txt"],
+          dynamicDepsFile = "deps/bad.rbdyn",
+          commandStatsId = "m6-dyndep-bad")
+      ]), BuildEngineConfig(
+        cacheRoot: cacheRoot,
+        runQuotaCliPath: app,
+        maxParallelism: 1'u32,
+        stdoutLimit: 256 * 1024,
+        stderrLimit: 256 * 1024))
+    check not fileExists(outputPath)
+
   test "normalized API schedules ready queue with RunQuota, cache, pools, failure, and evidence":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m12-build-engine", "")
