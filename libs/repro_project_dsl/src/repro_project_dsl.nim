@@ -142,6 +142,8 @@ type
     deps*: seq[string]
     inputs*: seq[string]
     outputs*: seq[string]
+    pool*: string
+    poolUnits*: uint32
     depfile*: string
     cacheable*: bool
     commandStatsId*: string
@@ -152,9 +154,14 @@ type
     actions*: seq[string]
     targets*: seq[string]
 
+  BuildPoolDef* = object
+    name*: string
+    capacity*: uint32
+
 var registry: seq[PackageDef] = @[]
 var buildActionRegistry: seq[BuildActionDef] = @[]
 var buildTargetRegistry: seq[BuildTargetDef] = @[]
+var buildPoolRegistry: seq[BuildPoolDef] = @[]
 var defaultBuildActionRegistry = ""
 
 const fs* = ReproFs()
@@ -166,10 +173,13 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 6'u16
+  BuildActionPayloadVersion = 7'u16
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
   BuildTargetPayloadVersion = 1'u16
+  BuildPoolPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('P')),
+    byte(ord('L'))]
+  BuildPoolPayloadVersion = 1'u16
 
 proc resetPackageRegistry*() =
   registry.setLen(0)
@@ -191,6 +201,12 @@ proc resetBuildTargetRegistry*() =
 
 proc registeredBuildTargets*(): seq[BuildTargetDef] =
   buildTargetRegistry
+
+proc resetBuildPoolRegistry*() =
+  buildPoolRegistry.setLen(0)
+
+proc registeredBuildPools*(): seq[BuildPoolDef] =
+  buildPoolRegistry
 
 proc resetDefaultBuildActionRegistry*() =
   defaultBuildActionRegistry = ""
@@ -369,6 +385,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   deps: openArray[string] = [];
                   inputs: openArray[string] = [];
                   outputs: openArray[string] = [];
+                  pool = "";
+                  poolUnits = 1'u32;
                   depfile = "";
                   cacheable = true;
                   commandStatsId = "";
@@ -379,11 +397,17 @@ proc buildAction*(id: string; call: PublicCliCall;
     deps: @deps,
     inputs: @inputs,
     outputs: @outputs,
+    pool: pool,
+    poolUnits: poolUnits,
     depfile: depfile,
     cacheable: cacheable,
     commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
     dependencyPolicy: dependencyPolicy)
   buildActionRegistry.add(result)
+
+proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable.} =
+  result = BuildPoolDef(name: name, capacity: capacity)
+  buildPoolRegistry.add(result)
 
 proc addUniqueValue(values: var seq[string]; value: string) =
   if value.len > 0 and values.find(value) < 0:
@@ -481,6 +505,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
                           deps: openArray[string] = [];
                           extraInputs: openArray[string] = [];
                           extraOutputs: openArray[string] = [];
+                          pool = "";
+                          poolUnits = 1'u32;
                           depfile = "";
                           cacheable = true;
                           commandStatsId = "";
@@ -498,6 +524,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
     deps = deps,
     inputs = inputs,
     outputs = outputs,
+    pool = pool,
+    poolUnits = poolUnits,
     depfile = depfile,
     cacheable = cacheable,
     commandStatsId = commandStatsId,
@@ -507,6 +535,8 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
                            deps: openArray[string] = [];
                            extraInputs: openArray[string] = [];
                            extraOutputs: openArray[string] = [];
+                           pool = "";
+                           poolUnits = 1'u32;
                            depfile = "";
                            cacheable = true;
                            commandStatsId = "";
@@ -518,6 +548,8 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
     deps = deps,
     extraInputs = extraInputs,
     extraOutputs = extraOutputs,
+    pool = pool,
+    poolUnits = poolUnits,
     depfile = depfile,
     cacheable = cacheable,
     commandStatsId = commandStatsId,
@@ -738,6 +770,9 @@ proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
   for value in values:
     outp.writeString(value)
 
+proc writeU32(outp: var seq[byte]; value: uint32) =
+  outp.writeU32Le(value)
+
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
   let count = int(readU32Le(bytes, pos))
   result = newSeq[string](count)
@@ -834,6 +869,8 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
   payload.writeStringSeq(action.deps)
   payload.writeStringSeq(action.inputs)
   payload.writeStringSeq(action.outputs)
+  payload.writeString(action.pool)
+  payload.writeU32(action.poolUnits)
   payload.writeString(action.depfile)
   payload.writeByte(if action.cacheable: 1'u8 else: 0'u8)
   payload.writeString(action.commandStatsId)
@@ -852,7 +889,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
       raisePayload("unknown build action payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16,
+  if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16,
       BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
@@ -864,6 +901,11 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
   result.deps = readStringSeq(bytes, pos)
   result.inputs = readStringSeq(bytes, pos)
   result.outputs = readStringSeq(bytes, pos)
+  if version >= 7'u16:
+    result.pool = readString(bytes, pos)
+    result.poolUnits = readU32Le(bytes, pos)
+  else:
+    result.poolUnits = 1'u32
   result.depfile = readString(bytes, pos)
   result.cacheable = readByte(bytes, pos) == 1'u8
   result.commandStatsId = readString(bytes, pos)
@@ -909,6 +951,37 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef =
 
 proc targetPayload*(target: BuildTargetDef): string =
   fromBytes(encodeBuildTargetPayload(target))
+
+proc encodeBuildPoolPayload*(pool: BuildPoolDef): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeString(pool.name)
+  payload.writeU32Le(pool.capacity)
+
+  result.add(BuildPoolPayloadMagic)
+  result.writeU16Le(BuildPoolPayloadVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeBuildPoolPayload*(bytes: openArray[byte]): BuildPoolDef =
+  if bytes.len < 10:
+    raisePayload("truncated build pool payload envelope")
+  for i in 0 ..< BuildPoolPayloadMagic.len:
+    if bytes[i] != BuildPoolPayloadMagic[i]:
+      raisePayload("unknown build pool payload magic")
+  var pos = 4
+  let version = readU16Le(bytes, pos)
+  if version != BuildPoolPayloadVersion:
+    raisePayload("unsupported build pool payload version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raisePayload("build pool payload length mismatch")
+  result.name = readString(bytes, pos)
+  result.capacity = readU32Le(bytes, pos)
+  if pos != bytes.len:
+    raisePayload("trailing build pool payload bytes")
+
+proc poolPayload*(pool: BuildPoolDef): string =
+  fromBytes(encodeBuildPoolPayload(pool))
 
 proc callIdentity*(call: PublicCliCall): string =
   var parts = @[call.packageName, call.executableName, call.subcommand,
@@ -2106,6 +2179,7 @@ when defined(reproProviderMode):
       GraphFragment =
     resetBuildActionRegistry()
     resetBuildTargetRegistry()
+    resetBuildPoolRegistry()
     resetDefaultBuildActionRegistry()
     resetProviderEvaluationInputRegistry()
     currentProviderProjectRoot = request.arguments
@@ -2116,6 +2190,7 @@ when defined(reproProviderMode):
     let actions = inferDeclaredActionDeps(
       registeredBuildActions(), request.arguments)
     let targets = registeredBuildTargets()
+    let pools = registeredBuildPools()
     let defaultAction = registeredDefaultBuildAction()
     result = GraphFragment(
       entryPointId: request.entryPointId,
@@ -2140,6 +2215,12 @@ when defined(reproProviderMode):
         kind: gnkMetadata,
         stableName: "reprobuild.build-target.v1",
         payload: targetPayload(target)))
+    for pool in pools:
+      result.nodes.add(GraphNode(
+        id: request.namespace & ":metadata:build-pool:" & sanitizeNodePart(pool.name),
+        kind: gnkMetadata,
+        stableName: "reprobuild.build-pool.v1",
+        payload: poolPayload(pool)))
     if includeDefault and defaultAction.len > 0:
       var found = false
       for action in actions:

@@ -406,6 +406,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     deps = payload.deps,
     inputs = inputs,
     outputs = outputs,
+    pool = payload.pool,
+    poolUnits = payload.poolUnits,
     depfile = depfile,
     cacheable = payload.cacheable,
     weakFingerprint = weakFingerprintFromText(fingerprintText),
@@ -416,10 +418,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
 proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
                            identity: PathOnlyBuildIdentity;
                            projectRoot: string;
-                           selectedActionId = ""): seq[BuildAction] =
+                           selectedActionId = ""):
+    tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
   let profiles = profileIndex(identity)
   var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
   var targets = initTable[string, BuildTargetDef]()
+  var pools = initTable[string, BuildPoolDef]()
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkAction:
@@ -433,6 +437,15 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
           raise newException(ValueError,
             "duplicate build target metadata: " & target.name)
         targets[target.name] = target
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-pool.v1":
+        let pool = decodeBuildPoolPayload(toBytes(node.payload))
+        if pools.hasKey(pool.name):
+          raise newException(ValueError,
+            "duplicate build pool metadata: " & pool.name)
+        pools[pool.name] = pool
+  for pool in pools.values:
+    result.pools.add(repro_build_engine.pool(pool.name, pool.capacity))
   let inferredActions = inferDeclaredActionDeps(
     actionNodes.mapIt(it.payload), projectRoot)
   for i in 0 ..< actionNodes.len:
@@ -464,7 +477,7 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
 
   if selectedActionId.len == 0:
     for item in actionNodes:
-      result.add(lowerItem(item))
+      result.actions.add(lowerItem(item))
     return
 
   var byId = initTable[string, BuildActionDef]()
@@ -523,7 +536,7 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
     includeClosure(selectedActionId)
   for item in actionNodes:
     if selected.contains(item.payload.id):
-      result.add(lowerItem(item))
+      result.actions.add(lowerItem(item))
 
 proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
   for fragment in snapshot.fragments:
@@ -730,17 +743,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if selectedActionId.len > 0:
         echo "defaultTarget: " & selectedActionId
 
-    let actions = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
+    let lowered = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
       selectedActionId)
     if parsedTarget.fragmentKind == tfkActionSelection:
       echo "selectedTarget: " & parsedTarget.selectedActionId
     elif selectDefaultAction and selectedActionId.len > 0:
       echo "selectedTarget: " & selectedActionId
-    echo "scheduler: actions=" & $actions.len
-    if actions.len == 0:
+    echo "scheduler: actions=" & $lowered.actions.len
+    if lowered.actions.len == 0:
       result.exitCode = 0
       return
-    let buildResult = runBuild(graph(actions), BuildEngineConfig(
+    let buildResult = runBuild(graph(lowered.actions, lowered.pools), BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       runQuotaCliPath: publicCliPath,
       maxParallelism: 8'u32,
