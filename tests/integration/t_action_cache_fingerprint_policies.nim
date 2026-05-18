@@ -122,6 +122,31 @@ suite "integration_action_cache_fingerprint_policies":
       cas.restoreOutputs(hit.record, root)
       check readFile(outputPath) == "fixture-output\nalpha\n"
 
+      block executableOutputPermissions:
+        let execRoot = tempRoot / "executable-output"
+        createDir(execRoot)
+        let execInput = execRoot / "input.txt"
+        let execOutput = execRoot / "tool"
+        let execPermissions = {fpUserRead, fpUserWrite, fpUserExec,
+          fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec}
+        writeFile(execInput, "alpha\n")
+        writeFile(execOutput, "#!/bin/sh\necho restored-exec\n")
+        setFilePermissions(execOutput, execPermissions)
+
+        let execRecord = cache.recordActionResult(cas,
+          weakFor("executable-output"), ffpChecksum, [execInput], ["tool"],
+          execRoot)
+        check execRecord.outputs[0].permissions == execPermissions
+
+        removeIfExists(execOutput)
+        var execReloaded = openActionCache(reproRoot / "action-cache")
+        let execHit = execReloaded.lookupActionResult(cas,
+          weakFor("executable-output"), ffpChecksum)
+        check execHit.status == aclHit
+        cas.restoreOutputs(execHit.record, execRoot)
+        check readFile(execOutput) == "#!/bin/sh\necho restored-exec\n"
+        check getFilePermissions(execOutput) == execPermissions
+
       removeIfExists(outputPath)
       rewritePreservingTimestamp(inputPath, "bravo\n")
       let miss = cache.lookupActionResult(cas, weakFor("checksum"), ffpChecksum)

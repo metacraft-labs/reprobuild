@@ -38,6 +38,7 @@ type
   OutputBlob* = object
     path*: string
     blob*: CasBlobRef
+    permissions*: set[FilePermission]
 
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
@@ -68,8 +69,11 @@ type
 
 const
   ActionRecordMagic = "RBAR"
-  ActionRecordVersion = 1'u16
+  ActionRecordVersion = 2'u16
   RecordTailMask = 0xffff_ffff'u64
+  AllFilePermissions = {fpUserExec, fpUserWrite, fpUserRead,
+    fpGroupExec, fpGroupWrite, fpGroupRead,
+    fpOthersExec, fpOthersWrite, fpOthersRead}
 
 proc byteString(bytes: openArray[byte]): string =
   result = newString(bytes.len)
@@ -135,6 +139,21 @@ proc readMetadata(data: openArray[byte]; pos: var int): FileMetadata =
   result.kind = FingerprintedFileKind(kind)
   result.sizeBytes = readU64Le(data, pos)
   result.mtimeNs = readU64Le(data, pos)
+
+proc writePermissions(outp: var seq[byte]; permissions: set[FilePermission]) =
+  var mask = 0'u16
+  for permission in permissions:
+    mask = mask or (1'u16 shl ord(permission))
+  outp.writeU16Le(mask)
+
+proc readPermissions(data: openArray[byte]; pos: var int): set[FilePermission] =
+  let mask = readU16Le(data, pos)
+  let knownMask = (1'u16 shl (ord(fpOthersRead) + 1)) - 1
+  if (mask and not knownMask) != 0:
+    raiseEnvelopeError(eeMalformed, "invalid file permission mask")
+  for permission in AllFilePermissions:
+    if (mask and (1'u16 shl ord(permission))) != 0:
+      result.incl(permission)
 
 proc writeFingerprint(outp: var seq[byte]; fp: FileFingerprint) =
   outp.writeString(fp.path)
@@ -265,9 +284,11 @@ proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
     createDir(destination.splitPath.head)
     let tmpPath = destination & ".reprotmp." & $getCurrentProcessId()
     writeFile(tmpPath, byteString(payloads[i]))
+    setFilePermissions(tmpPath, output.permissions)
     if fileExists(destination):
       removeFile(destination)
     moveFile(tmpPath, destination)
+    setFilePermissions(destination, output.permissions)
 
 proc strongIdentityPayload(weak: ContentDigest;
                            inputs: openArray[FileFingerprint]): seq[byte] =
@@ -310,6 +331,7 @@ proc encodeRecord(record: ActionResultRecord): seq[byte] =
     result.writeString(output.path)
     result.writeDigest(output.blob.digest)
     result.writeU64Le(output.blob.sizeBytes)
+    result.writePermissions(output.permissions)
 
 proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
   if payload.len < 6:
@@ -338,6 +360,7 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
     let digest = readDigest(payload, pos)
     let size = readU64Le(payload, pos)
     result.outputs[i].blob = blobRef(digest, size)
+    result.outputs[i].permissions = readPermissions(payload, pos)
   if pos != payload.len:
     raiseEnvelopeError(eeMalformed, "trailing action record bytes")
 
@@ -406,7 +429,8 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
     let data = bytes(readFile(source))
-    result.outputs.add(OutputBlob(path: path, blob: cas.storeBlob(data)))
+    result.outputs.add(OutputBlob(path: path, blob: cas.storeBlob(data),
+      permissions: getFilePermissions(source)))
   cache.appendRecord(result)
 
 proc refreshedInputs(record: ActionResultRecord;
