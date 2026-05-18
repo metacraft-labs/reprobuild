@@ -1,48 +1,62 @@
-switch("styleCheck", "hint")
-switch("path", "libs/repro_core/src")
-switch("path", "libs/repro_platform/src")
-switch("path", "libs/repro_diagnostics/src")
-switch("path", "libs/repro_cli_support/src")
-switch("path", "libs/blake3/src")
-switch("path", "libs/xxh3/src")
-switch("path", "libs/gxhash/src")
-switch("path", "libs/repro_hash/src")
-switch("path", "libs/cbor/src")
-switch("path", "libs/repro_domain_types/src")
-switch("path", "libs/repro_monitor_depfile/src")
-switch("path", "libs/repro_depfile/src")
-switch("path", "libs/repro_monitor_shim/src")
-switch("path", "libs/repro_monitor_hooks/src")
-switch("path", "libs/repro_project_dsl/src")
-switch("path", "libs/repro_dsl_stdlib/src")
-switch("path", "libs/repro_interface_artifacts/src")
-switch("path", "libs/repro_tool_profiles/src")
-switch("path", "libs/repro_local_store/src")
-switch("path", "libs/repro_runquota/src")
-switch("path", "libs/repro_build_engine/src")
-switch("path", "libs/repro_provider_runtime/src")
-switch("path", "libs/repro_hcr_linkgraph/src")
-switch("path", "libs/repro_hcr_linker/src")
-switch("path", "libs/repro_hcr_agent/src")
-switch("path", "libs/repro_hcr_test/src")
-
-switch("path", "../runquota/libs/runquota_core/src")
-switch("path", "../runquota/libs/runquota_codec/src")
-switch("path", "../runquota/libs/runquota_protocol/src")
-switch("path", "../runquota/libs/runquota_ipc/src")
-switch("path", "../runquota/libs/runquota_client/src")
-switch("path", "../runquota/libs/runquota_process/src")
-switch("path", "../runquota/libs/runquota_exec/src")
-switch("path", "../runquota/libs/runquota_admission/src")
-switch("path", "../runquota/libs/runquota_host/src")
-switch("path", "../runquota/libs/runquota_host_linux/src")
-switch("path", "../runquota/libs/runquota_host_macos/src")
-switch("path", "../runquota/libs/runquota_host_windows/src")
-switch("path", "../runquota/libs/runquota_persistence/src")
-switch("path", "../runquota/libs/runquota_daemon/src")
-switch("path", "../runquota/libs/runquota_cli_support/src")
-
 import std/[os, strutils]
+
+switch("styleCheck", "hint")
+
+for libName in [
+  "repro_core",
+  "repro_platform",
+  "repro_diagnostics",
+  "repro_cli_support",
+  "blake3",
+  "xxh3",
+  "gxhash",
+  "repro_hash",
+  "cbor",
+  "repro_domain_types",
+  "repro_monitor_depfile",
+  "repro_depfile",
+  "repro_monitor_shim",
+  "repro_monitor_hooks",
+  "repro_project_dsl",
+  "repro_dsl_stdlib",
+  "repro_interface_artifacts",
+  "repro_tool_profiles",
+  "repro_local_store",
+  "repro_runquota",
+  "repro_build_engine",
+  "repro_provider_runtime",
+  "repro_hcr_linkgraph",
+  "repro_hcr_linker",
+  "repro_hcr_agent",
+  "repro_hcr_test",
+]:
+  switch("path", "libs" / libName / "src")
+
+let runquotaRoot = block:
+  let fromEnv = getEnv("RUNQUOTA_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "runquota"
+
+for libName in [
+  "runquota_core",
+  "runquota_codec",
+  "runquota_protocol",
+  "runquota_ipc",
+  "runquota_client",
+  "runquota_process",
+  "runquota_exec",
+  "runquota_admission",
+  "runquota_host",
+  "runquota_host_linux",
+  "runquota_host_macos",
+  "runquota_host_windows",
+  "runquota_persistence",
+  "runquota_daemon",
+  "runquota_cli_support",
+]:
+  switch("path", runquotaRoot / "libs" / libName / "src")
 
 proc firstExistingPrefix(candidates: openArray[string]; header: string;
                          dylibNames: openArray[string]): string =

@@ -6,12 +6,17 @@
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
     git-hooks.follows = "nixos-modules/git-hooks-nix";
+    runquota-src = {
+      url = "github:metacraft-labs/runquota/main";
+      flake = false;
+    };
   };
 
   outputs =
     inputs@{
       flake-parts,
       git-hooks,
+      runquota-src,
       ...
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -25,6 +30,15 @@
       perSystem =
         { pkgs, system, ... }:
         let
+          version =
+            let
+              versionMatches = builtins.filter (match: match != null) (
+                map (line: builtins.match ''version = "([^"]+)"'' line) (
+                  pkgs.lib.splitString "\n" (builtins.readFile ./reprobuild.nimble)
+                )
+              );
+            in
+            builtins.elemAt (builtins.head versionMatches) 0;
           pre-commit-check = git-hooks.lib.${system}.run {
             src = ./.;
             hooks.just-lint = {
@@ -35,36 +49,73 @@
               pass_filenames = false;
             };
           };
-        in
-        {
-          packages.default = pkgs.stdenv.mkDerivation {
+          reprobuild = pkgs.stdenv.mkDerivation {
             pname = "reprobuild";
-            version = "0.1.0";
+            inherit version;
             src = ./.;
+
+            strictDeps = true;
+            dontConfigure = true;
+
             nativeBuildInputs = [
               pkgs.just
               pkgs.nim2
+            ];
+
+            buildInputs = [
               pkgs.libblake3
               pkgs.xxHash
             ];
-            buildPhase = "just build";
-            doCheck = true;
-            checkPhase = "just test";
-            installPhase = ''
-              mkdir -p $out/bin
-              cp build/bin/* $out/bin/
+
+            BLAKE3_PREFIX = pkgs.libblake3;
+            RUNQUOTA_SRC = runquota-src;
+            XXHASH_PREFIX = pkgs.xxHash;
+
+            buildPhase = ''
+              runHook preBuild
+              just build
+              runHook postBuild
             '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/bin"
+              for bin in build/bin/*; do
+                install -m755 "$bin" "$out/bin/$(basename "$bin")"
+              done
+              runHook postInstall
+            '';
+
+            meta = {
+              description = "Reprobuild build system";
+              homepage = "https://github.com/metacraft-labs/reprobuild";
+              license = pkgs.lib.licenses.mit;
+              mainProgram = "repro";
+              platforms = [
+                "x86_64-linux"
+                "aarch64-linux"
+                "x86_64-darwin"
+                "aarch64-darwin"
+              ];
+            };
           };
+        in
+        {
+          packages.default = reprobuild;
+          packages.reprobuild = reprobuild;
 
           checks = {
             inherit pre-commit-check;
-            repo-requirements = pkgs.runCommand "reprobuild-repo-requirements" { } ''
-              cp -R ${./.} source
-              chmod -R u+w source
-              cd source
-              ${pkgs.bash}/bin/bash scripts/check_repo_requirements.sh
-              mkdir -p $out
-            '';
+            package-build = reprobuild;
+            repo-requirements =
+              pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
+                ''
+                  cp -R ${./.} source
+                  chmod -R u+w source
+                  cd source
+                  ${pkgs.bash}/bin/bash scripts/check_repo_requirements.sh
+                  mkdir -p $out
+                '';
           };
 
           devShells.default = pkgs.mkShell {
