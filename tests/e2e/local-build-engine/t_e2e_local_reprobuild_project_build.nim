@@ -57,6 +57,132 @@ int main(int argc, char **argv) {
 }
 """
 
+const M52StdlibFixtureSource = r"""
+#include <errno.h>
+#include <libgen.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+static int mkdir_p(const char *path) {
+  char *copy = strdup(path);
+  if (copy == NULL) return 126;
+  for (char *p = copy + 1; *p != '\0'; p++) {
+    if (*p == '/') {
+      *p = '\0';
+      if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
+        free(copy);
+        return 1;
+      }
+      *p = '/';
+    }
+  }
+  if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
+    free(copy);
+    return 1;
+  }
+  free(copy);
+  return 0;
+}
+
+static int ensure_parent(const char *path) {
+  char *copy = strdup(path);
+  if (copy == NULL) return 126;
+  char *dir = dirname(copy);
+  int code = mkdir_p(dir);
+  free(copy);
+  return code;
+}
+
+static int copy_with_header(const char *source, const char *output) {
+  if (ensure_parent(output) != 0) return 1;
+  FILE *in = fopen(source, "r");
+  if (in == NULL) return 2;
+  FILE *out = fopen(output, "w");
+  if (out == NULL) {
+    fclose(in);
+    return 3;
+  }
+  fprintf(out, "/* %s */\n", source);
+  char buffer[4096];
+  size_t n = 0;
+  while ((n = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+    if (fwrite(buffer, 1, n, out) != n) {
+      fclose(in);
+      fclose(out);
+      return 4;
+    }
+  }
+  fclose(in);
+  fclose(out);
+  return 0;
+}
+
+static int write_text(const char *output, const char *text) {
+  if (ensure_parent(output) != 0) return 1;
+  FILE *out = fopen(output, "w");
+  if (out == NULL) return 2;
+  fputs(text, out);
+  fclose(out);
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  const char *tool = strrchr(argv[0], '/');
+  tool = tool == NULL ? argv[0] : tool + 1;
+  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+    if (strcmp(tool, "nim") == 0) puts("nim 2.2.4");
+    else if (strcmp(tool, "gcc") == 0) puts("gcc fixture 1.0.0");
+    else puts("stylus fixture 1.0.0");
+    return 0;
+  }
+
+  if (strcmp(tool, "nim") == 0) {
+    if (argc < 2 || strcmp(argv[1], "c") != 0) return 64;
+    const char *output = "";
+    const char *source = "";
+    for (int i = 2; i < argc; i++) {
+      if (strncmp(argv[i], "--out:", 6) == 0) output = argv[i] + 6;
+      else if (argv[i][0] != '-') source = argv[i];
+    }
+    if (output[0] == '\0' || source[0] == '\0') return 65;
+    char text[4096];
+    snprintf(text, sizeof(text), "nim:c:%s\n", source);
+    return write_text(output, text);
+  }
+
+  if (strcmp(tool, "gcc") == 0) {
+    const char *output = "";
+    const char *source = "";
+    const char *pic = "no";
+    const char *compile = "no";
+    for (int i = 1; i < argc; i++) {
+      if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
+      else if (strcmp(argv[i], "-fPIC") == 0) pic = "yes";
+      else if (strcmp(argv[i], "-c") == 0) compile = "yes";
+      else if (strcmp(argv[i], "-include") == 0 && i + 1 < argc) i++;
+      else if (argv[i][0] != '-') source = argv[i];
+    }
+    if (output[0] == '\0' || source[0] == '\0') return 65;
+    char text[4096];
+    snprintf(text, sizeof(text), "gcc:%s:%s:%s\n", source, pic, compile);
+    return write_text(output, text);
+  }
+
+  const char *output = "";
+  const char *source = "";
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
+    else if (argv[i][0] == '-') return 64;
+    else source = argv[i];
+  }
+  if (output[0] == '\0' || source[0] == '\0') return 65;
+  return copy_with_header(source, output);
+}
+"""
+
 proc q(value: string): string =
   quoteShell(value)
 
@@ -615,6 +741,89 @@ proc writeM52ForeachStylusProject(path: string) =
     "        source = style,\n" &
     "        output = \"public/\" & name & \".css\")\n")
 
+proc writeM52StdlibFixtureTools(binDir: string) =
+  createDir(binDir)
+  let sourcePath = binDir / "m52-stdlib-fixture.c"
+  let toolPath = binDir / "m52-stdlib-fixture"
+  writeFile(sourcePath, M52StdlibFixtureSource)
+  discard requireSuccess(shellCommand(["cc", sourcePath, "-o", toolPath]))
+  for name in ["nim", "gcc", "stylus"]:
+    copyFile(toolPath, binDir / name)
+    setFilePermissions(binDir / name, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+proc writeM52StdlibProject(path: string) =
+  let projectRoot = path.splitPath.head
+  createDir(projectRoot / "src")
+  createDir(projectRoot / "styles")
+  writeFile(path,
+    "import repro_dsl_stdlib\n\n" &
+    "package m52Stdlib:\n" &
+    "  uses:\n" &
+    "    \"nim >=1.6 <3.0\"\n" &
+    "    \"gcc >=1\"\n" &
+    "    \"stylus >=0\"\n\n" &
+    "  build:\n" &
+    "    let nimOut = nim.c(\n" &
+    "      source = \"src/main.nim\",\n" &
+    "      output = \"build/main\")\n" &
+    "    let cOut = gcc(\n" &
+    "      source = \"src/main.c\",\n" &
+    "      output = \"build/main.o\",\n" &
+    "      pic = true,\n" &
+    "      compileOnly = true)\n" &
+    "    let css = stylus(\n" &
+    "      source = \"styles/main.styl\",\n" &
+    "      output = \"public/main.css\")\n" &
+    "    let summary = fs.stamp(\n" &
+    "      actionId = \"summary\",\n" &
+    "      output = \"dist/summary.txt\",\n" &
+    "      title = \"m52 stdlib\",\n" &
+    "      entries = @[\"build/main\", \"build/main.o\", \"public/main.css\"],\n" &
+    "      inputs = @[\"build/main\", \"build/main.o\", \"public/main.css\"])\n" &
+    "    defaultBuildAction(summary)\n")
+
+when defined(macosx):
+  proc realStylusPathDir(tempRoot: string): string =
+    let existing = findExe("stylus")
+    if existing.len > 0:
+      return existing.splitPath.head
+    let npm = findExe("npm")
+    if npm.len == 0:
+      return ""
+    let npmRoot = tempRoot / "npm-stylus"
+    createDir(npmRoot)
+    let res = execCmdEx(shellCommand([
+      npm, "install", "--silent", "--no-audit", "--no-fund",
+      "--prefix", npmRoot, "stylus@0.64.0"
+    ]))
+    if res.exitCode != 0:
+      return ""
+    let candidate = npmRoot / "node_modules" / ".bin" / "stylus"
+    if fileExists(candidate):
+      candidate.splitPath.head
+    else:
+      ""
+
+  proc writeM52StylusMonitorProject(path: string) =
+    writeFile(path,
+      "import repro_dsl_stdlib\n\n" &
+      "package m52StylusMonitor:\n" &
+      "  uses:\n" &
+      "    \"stylus >=0\"\n\n" &
+      "  build:\n" &
+      "    let css = stylus(\n" &
+      "      actionId = \"style-main\",\n" &
+      "      source = \"styles/main.styl\",\n" &
+      "      output = \"public/main.css\")\n" &
+      "    let aggregate = fs.stamp(\n" &
+      "      actionId = \"style-aggregate\",\n" &
+      "      output = \"dist/styles.txt\",\n" &
+      "      title = \"styles\",\n" &
+      "      entries = @[\"public/main.css\"],\n" &
+      "      inputs = @[\"public/main.css\"])\n" &
+      "    defaultBuildAction(aggregate)\n")
+
 proc writeM53BuiltinFsProject(path: string) =
   createDir(path.splitPath.head)
   writeFile(path,
@@ -1021,7 +1230,16 @@ suite "e2e_local_reprobuild_project_build":
     check not projectText.contains("inputs =")
     check not projectText.contains("outputs =")
 
-    let output = buildCurrentProject(reproBin, projectRoot, pathValue)
+    let output =
+      when defined(macosx):
+        let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+        let monitorEnv = [
+          ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+          ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+        ]
+        buildCurrentProject(reproBin, projectRoot, pathValue, monitorEnv)
+      else:
+        buildCurrentProject(reproBin, projectRoot, pathValue)
     check output.contains("defaultTarget: compile-main")
     check output.contains("selectedTarget: compile-main")
     check output.contains("scheduler: actions=1")
@@ -1038,6 +1256,128 @@ suite "e2e_local_reprobuild_project_build":
       anyIt(it.getStr().endsWith("include/config.h"))
     check action{"evidence"}{"declaredOutputs"}.getElems().
       anyIt(it.getStr() == "build/main.o")
+
+  test "m52_stdlib_package_import_e2e":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m52-stdlib-packages", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = compilePublicReproTestBin(repoRoot)
+    when defined(macosx):
+      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+      let monitorEnv = [
+        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+      ]
+    else:
+      let monitorEnv: seq[(string, string)] = @[]
+    let binDir = tempRoot / "bin"
+    writeM52StdlibFixtureTools(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+
+    let projectRoot = tempRoot / "project"
+    writeM52StdlibProject(projectRoot / "reprobuild.nim")
+    writeFile(projectRoot / "src" / "main.nim", "echo \"m52\"\n")
+    writeFile(projectRoot / "src" / "main.c", "int main(void) { return 0; }\n")
+    writeFile(projectRoot / "styles" / "main.styl", "body\n  color #123\n")
+
+    let projectText = readFile(projectRoot / "reprobuild.nim")
+    check not projectText.contains("usesImportPath")
+    check not projectText.contains("defineCliInterface")
+    check not dirExists(projectRoot / "reprobuild" / "packages")
+
+    let output = buildCurrentProject(reproBin, projectRoot, pathValue,
+      monitorEnv)
+    check output.contains("defaultTarget: summary")
+    check output.contains("scheduler: actions=4")
+    check output.contains("action: summary status=asSucceeded launched=true")
+    check readFile(projectRoot / "build" / "main").contains("nim:c:src/main.nim")
+    check readFile(projectRoot / "build" / "main.o").contains(
+      "gcc:src/main.c:yes:yes")
+    check fileExists(projectRoot / "public" / "main.css")
+
+    let identity = readPathOnlyBuildIdentity(valueAfter(output, "toolIdentity:"))
+    check identity.profiles.len == 3
+    check identity.profiles.anyIt(it.executableName == "nim")
+    check identity.profiles.anyIt(it.executableName == "gcc")
+    check identity.profiles.anyIt(it.executableName == "stylus")
+
+    let report = parseFile(valueAfter(output, "buildReport:"))
+    check reportAction(report, "summary"){"runQuotaBackend"}.getStr() == "builtin"
+    check report{"actions"}.getElems().anyIt(
+      it{"id"}.getStr().startsWith("stylus-") and
+      it{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor")
+
+  when defined(macosx):
+    test "m52_stylus_import_monitoring_e2e":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m52-stylus-monitor", "")
+      defer: removeDir(tempRoot)
+
+      let stylusDir = realStylusPathDir(tempRoot)
+      check stylusDir.len > 0
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+      let monitorEnv = [
+        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+      ]
+      let pathValue = stylusDir & $PathSep & getEnv("PATH")
+
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "styles")
+      writeM52StylusMonitorProject(projectRoot / "reprobuild.nim")
+      writeFile(projectRoot / "styles" / "palette.styl",
+        "primary = #123456\n")
+      writeFile(projectRoot / "styles" / "main.styl",
+        "@import \"palette\"\nbody\n  color primary\n")
+
+      let first = buildCurrentProject(reproBin, projectRoot, pathValue,
+        monitorEnv)
+      check first.contains("scheduler: actions=2")
+      check first.contains("action: style-main status=asSucceeded launched=true")
+      check first.contains(
+        "action: style-aggregate status=asSucceeded launched=true")
+      let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      let styleMain = reportAction(firstReport, "style-main")
+      check styleMain{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
+      check styleMain{"evidence"}{"monitorReads"}.getElems().
+        anyIt(it.getStr().endsWith("styles/palette.styl"))
+
+      let second = buildCurrentProject(reproBin, projectRoot, pathValue,
+        monitorEnv)
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      check reportAction(secondReport, "style-main"){"status"}.getStr() ==
+        "asCacheHit"
+      check reportAction(secondReport, "style-aggregate"){"status"}.getStr() ==
+        "asCacheHit"
+
+      writeFile(projectRoot / "styles" / "palette.styl",
+        "primary = #654321\n")
+      let changed = buildCurrentProject(reproBin, projectRoot, pathValue,
+        monitorEnv)
+      let changedReport = parseFile(valueAfter(changed, "buildReport:"))
+      check reportAction(changedReport, "style-main"){"status"}.getStr() ==
+        "asSucceeded"
+      check reportAction(changedReport, "style-aggregate"){"status"}.getStr() ==
+        "asSucceeded"
 
   test "standard filesystem operations lower to built-in build actions":
     let repoRoot = getCurrentDir()

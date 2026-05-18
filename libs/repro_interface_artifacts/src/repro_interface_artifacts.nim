@@ -7,6 +7,8 @@ import repro_domain_types
 import repro_hash
 import repro_project_dsl
 
+const BuiltNimCompilerPath = staticExec("command -v nim").strip()
+
 type
   InterfaceEnvelopeKind* = enum
     iekProjectInterface
@@ -500,6 +502,11 @@ proc toProjectInterface*(pkg: PackageDef): ProjectInterface =
 proc sameSourceFile(a, b: string): bool =
   if a.len == 0 or b.len == 0:
     return false
+  try:
+    if sameFile(a, b):
+      return true
+  except CatchableError:
+    discard
   let rawA = a.replace('\\', '/')
   let rawB = b.replace('\\', '/')
   if rawA == rawB or rawA.endsWith("/" & rawB) or rawB.endsWith("/" & rawA):
@@ -666,6 +673,14 @@ proc runCommand(command: openArray[string];
     raise newException(OSError, "command failed (" & $res.exitCode & "): " &
       quoted & "\n" & res.output)
 
+proc nimCompilerPath(): string =
+  let overridePath = getEnv("REPRO_NIM_COMPILER")
+  if overridePath.len > 0:
+    return overridePath
+  if BuiltNimCompilerPath.len > 0 and fileExists(BuiltNimCompilerPath):
+    return BuiltNimCompilerPath
+  "nim"
+
 proc reproLibPathFlags(workDir: string): seq[string] =
   let libsRoot = workDir / "libs"
   if dirExists(libsRoot):
@@ -772,13 +787,12 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "import repro_interface_artifacts\n" &
     "import repro_project_dsl\n" &
     "import " & moduleName & "\n\n" &
-    "when isMainModule:\n" &
-    "  let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
-    "  writeInterfaceArtifact(paramStr(1), artifact)\n" &
-    "  writeNimInterfaceStub(paramStr(2), artifact)\n")
+    "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
+    "writeInterfaceArtifact(paramStr(1), artifact)\n" &
+    "writeNimInterfaceStub(paramStr(2), artifact)\n")
   let runnerBin = tempRoot / "extract_runner"
   var command = @[
-    "nim", "c", "-r",
+    nimCompilerPath(), "c", "-r",
     "--define:reproInterfaceMode",
     "--path:" & moduleDir,
     "--nimcache:" & (tempRoot / "nimcache"),
@@ -789,7 +803,11 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     modulePath
   ]
   command.insert(reproLibPathFlags(workDir), 4)
-  discard runCommand(command, cwd = workDir)
+  let execution = runCommand(command, cwd = workDir)
+  if not fileExists(artifactPath):
+    raise newException(IOError,
+      "interface extraction did not write artifact: " & artifactPath &
+        "\n" & execution.output)
   readInterfaceArtifact(artifactPath)
 
 proc discoverNimSources*(rootModulePath: string): seq[string] =
@@ -829,7 +847,7 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   createDir(parentDir(outputBinaryPath))
   let nimcache = parentDir(outputBinaryPath) / "nimcache-provider"
   var command = @[
-    "nim", "c",
+    nimCompilerPath(), "c",
     "--define:reproProviderMode",
     "--path:" & parentDir(modulePath),
     "--nimcache:" & nimcache,

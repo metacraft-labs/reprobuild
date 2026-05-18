@@ -7,6 +7,8 @@ import repro_domain_types
 import repro_hash
 import repro_interface_artifacts
 
+const ExpectedNimCompiler = staticExec("command -v nim").strip()
+
 type
   ThinConsumerEdge = object
     actionSpec: ActionSpec
@@ -237,10 +239,12 @@ suite "integration_project_interface_artifact_import_modes":
       repoRoot)
     check fileExists(provider1.outputBinaryPath)
     check provider1.compilerCommand.len > 0
-    check provider1.compilerCommand[0] == "nim"
+    check ExpectedNimCompiler.len > 0
+    check provider1.compilerCommand[0] == ExpectedNimCompiler
     check provider1.compilerCommand.contains("c")
     check provider1.compileEdge.actionSpec.process.kind == ckDirect
-    check provider1.compileEdge.actionSpec.process.executable.value == "nim"
+    check provider1.compileEdge.actionSpec.process.executable.value ==
+      ExpectedNimCompiler
     check provider1.compileEdge.actionSpec.process.args.contains("c")
     check provider1.compileEdge.actionSpec.process.cwd.value == repoRoot
     check provider1.compileEdge.declaredOutputs == @[provider1.outputBinaryPath]

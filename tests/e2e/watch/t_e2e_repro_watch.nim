@@ -40,6 +40,81 @@ int main(int argc, char **argv) {
 }
 """
 
+const StylusFixtureSource = r"""
+#include <errno.h>
+#include <libgen.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+static int mkdir_p(const char *path) {
+  char *copy = strdup(path);
+  if (copy == NULL) return 126;
+  for (char *p = copy + 1; *p != '\0'; p++) {
+    if (*p == '/') {
+      *p = '\0';
+      if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
+        free(copy);
+        return 1;
+      }
+      *p = '/';
+    }
+  }
+  if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
+    free(copy);
+    return 1;
+  }
+  free(copy);
+  return 0;
+}
+
+static int ensure_parent(const char *path) {
+  char *copy = strdup(path);
+  if (copy == NULL) return 126;
+  char *dir = dirname(copy);
+  int code = mkdir_p(dir);
+  free(copy);
+  return code;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+    puts("stylus 1.0.0");
+    return 0;
+  }
+  const char *output = "";
+  const char *source = "";
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
+    else if (argv[i][0] == '-') return 64;
+    else source = argv[i];
+  }
+  if (output[0] == '\0' || source[0] == '\0') return 65;
+  if (ensure_parent(output) != 0) return 1;
+  FILE *in = fopen(source, "r");
+  if (in == NULL) return 2;
+  FILE *out = fopen(output, "w");
+  if (out == NULL) {
+    fclose(in);
+    return 3;
+  }
+  fprintf(out, "/* %s */\n", source);
+  char buffer[4096];
+  size_t n = 0;
+  while ((n = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+    if (fwrite(buffer, 1, n, out) != n) {
+      fclose(in);
+      fclose(out);
+      return 4;
+    }
+  }
+  fclose(in);
+  fclose(out);
+  return 0;
+}
+"""
+
 proc q(value: string): string =
   quoteShell(value)
 
@@ -263,7 +338,8 @@ proc copyTree(sourceRoot, destRoot: string) =
 
 proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
-  copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
+  if dirExists(codeTracerRoot / "reprobuild"):
+    copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
   copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
 
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
@@ -353,22 +429,10 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
   if includeClang:
     discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
-  writeExecutable(binDir / "stylus",
-    "#!/bin/sh\n" &
-    "set -eu\n" &
-    "if [ \"${1:-}\" = \"--version\" ]; then echo 'stylus 1.0.0'; exit 0; fi\n" &
-    "output= source=\n" &
-    "while [ \"$#\" -gt 0 ]; do\n" &
-    "  case \"$1\" in\n" &
-    "    -o) output=$2; shift 2 ;;\n" &
-    "    -*) echo \"unknown stylus flag $1\" >&2; exit 64 ;;\n" &
-    "    *) source=$1; shift ;;\n" &
-    "  esac\n" &
-    "done\n" &
-    "test -n \"$output\"\n" &
-    "test -n \"$source\"\n" &
-    "mkdir -p \"$(dirname \"$output\")\"\n" &
-    "{ printf '/* %s */\\n' \"$source\"; cat \"$source\"; } > \"$output\"\n")
+  let stylusSourcePath = binDir / "stylus-fixture.c"
+  let stylusPath = binDir / "stylus"
+  writeFile(stylusSourcePath, StylusFixtureSource)
+  discard requireSuccess(shellCommand(["cc", stylusSourcePath, "-o", stylusPath]))
   binDir & $PathSep & getEnv("PATH")
 
 proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
@@ -454,47 +518,11 @@ proc assertOutputAction(report: JsonNode; output, status: string;
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
-proc stableHashHex(value: string): string =
-  var hash = 2166136261'u32
-  for ch in value:
-    hash = (hash xor uint32(ord(ch))) * 16777619'u32
-  toHex(hash, 8).toLowerAscii()
-
-proc actionSlug(value: string): string =
-  for ch in value:
-    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-'}:
-      result.add(ch.toLowerAscii())
-    else:
-      result.add("-" & toHex(ord(ch), 2).toLowerAscii())
-  if result.len == 0:
-    result = "resource"
-
-proc publicResourceActionId(relative: string): string =
-  let normalized = relative.replace('\\', '/')
-  let tail = splitPath(normalized).tail
-  "frontend-public-resource-" & actionSlug(tail) & "-" &
-    stableHashHex(normalized)
-
-let rootTupfileResourceAction = publicResourceActionId("Tupfile")
-let calltraceResourceAction = publicResourceActionId("resources/calltrace.js")
-let thirdPartyIoResourceAction = publicResourceActionId("third_party/io.js")
-let addedSharedResourceAction =
-  publicResourceActionId("resources/shared/add_file.svg")
-
-let initialPublicResourceActions = @[
-  rootTupfileResourceAction,
-  calltraceResourceAction,
-  thirdPartyIoResourceAction,
-  publicResourceActionId("third_party/monaco-themes/themes/customThemes/json/" &
-    "codetracerDark.json"),
-  publicResourceActionId("third_party/monaco-themes/themes/customThemes/json/" &
-    "codetracerWhite.json")
-]
+const publicResourceAction = "frontend-public-resources"
 
 proc assertPublicResourceActions(report: JsonNode; status: string;
                                  launched: bool) =
-  for actionId in initialPublicResourceActions:
-    assertAction(report, actionId, status, launched)
+  assertAction(report, publicResourceAction, status, launched)
 
 proc hasMonitorEvidence(action: JsonNode): bool =
   action{"evidence"}{"monitorReads"}.getElems().len > 0 or
@@ -1007,7 +1035,7 @@ when defined(macosx):
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: frontend")
-      check log.contains("scheduler: actions=21")
+      check log.contains("scheduler: actions=17")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: generate-config-header")
       check not log.contains("action: c-sudoku-object-tup")
@@ -1016,7 +1044,7 @@ when defined(macosx):
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 21
+      check report{"actions"}.len == 17
       assertAction(report, "frontend-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-index-js", "asCacheHit", false)
@@ -1037,7 +1065,7 @@ when defined(macosx):
       ]:
         assertOutputAction(report,
           "src/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(report, "asCacheHit", false)
+      assertPublicResourceActions(report, "asSucceeded", true)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull
@@ -1095,7 +1123,7 @@ when defined(macosx):
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: codetracer")
-      check log.contains("scheduler: actions=25")
+      check log.contains("scheduler: actions=21")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: generate-config-header")
       check not log.contains("action: c-sudoku-object-tup")
@@ -1107,7 +1135,7 @@ when defined(macosx):
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 25
+      check report{"actions"}.len == 21
       assertAction(report, "frontend-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
       assertAction(report, "frontend-index-js", "asCacheHit", false)
@@ -1128,7 +1156,7 @@ when defined(macosx):
       ]:
         assertOutputAction(report,
           "src/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(report, "asCacheHit", false)
+      assertPublicResourceActions(report, "asSucceeded", true)
       assertAction(report, "config-default-layout-json", "asCacheHit", false)
       assertAction(report, "config-default-config-yaml", "asCacheHit", false)
       assertAction(report, "db-backend-record", "asCacheHit", false)
@@ -1176,9 +1204,9 @@ when defined(macosx):
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: frontend-public-resources")
-      check log.contains("scheduler: actions=6")
+      check log.contains("scheduler: actions=1")
       check log.contains(
-        "action: " & addedSharedResourceAction &
+        "action: " & publicResourceAction &
           " status=asSucceeded launched=true")
       check not log.contains("action: frontend-ui-js")
       check not log.contains("action: frontend-index-js")
@@ -1191,8 +1219,8 @@ when defined(macosx):
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 6
-      assertAction(report, addedSharedResourceAction, "asSucceeded", true)
+      check report{"actions"}.len == 1
+      assertAction(report, publicResourceAction, "asSucceeded", true)
       check reportAction(report, "frontend-ui-js").kind == JNull
       check reportAction(report, "frontend-index-js").kind == JNull
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull

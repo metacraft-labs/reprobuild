@@ -1036,7 +1036,8 @@ proc parseParam(node: NimNode): CliParamDef =
       result.nimType = node[2].repr
     result.position = 0
     result.required = true
-    let optionStart = if head.matched: 2 else: 3
+    let optionStart =
+      if head.matched or kindName == "boolflag": 2 else: 3
     for i in optionStart ..< node.len:
       let value = namedValue(node[i], "position")
       if not value.isNil:
@@ -1047,13 +1048,17 @@ proc parseParam(node: NimNode): CliParamDef =
       let repeatedValue = namedValue(node[i], "repeated")
       if not repeatedValue.isNil:
         result.repeated = boolLiteral(repeatedValue, result.repeated)
-  elif kindName == "flag":
+  elif kindName == "flag" or kindName == "boolflag":
     if node.len < 2:
-      error("flag requires a parameter name", node)
-    let head = parseIsTypedHead(node[1], "flag parameter")
+      error(kindName & " requires a parameter name", node)
+    let head = parseIsTypedHead(node[1], kindName & " parameter")
     result.kind = cpkFlag
     result.name = if head.matched: head.name else: identText(node[1])
-    if head.matched:
+    if kindName == "boolflag":
+      result.nimType = if head.matched: head.nimType else: "bool"
+      if result.nimType.normalize != "bool":
+        error("boolFlag requires bool type", node[1])
+    elif head.matched:
       result.nimType = head.nimType
     else:
       if node.len < 3:
@@ -1075,6 +1080,9 @@ proc parseParam(node: NimNode): CliParamDef =
       let formatValue = namedValue(node[i], "format")
       if not formatValue.isNil:
         result.format = formatLiteral(formatValue, result.format)
+      let placementValue = namedValue(node[i], "placement")
+      if not placementValue.isNil:
+        result.placement = placementLiteral(placementValue, result.placement)
       let repeatedValue = namedValue(node[i], "repeated")
       if not repeatedValue.isNil:
         result.repeated = boolLiteral(repeatedValue, result.repeated)
@@ -1083,18 +1091,56 @@ proc parseParam(node: NimNode): CliParamDef =
   result.sourceFile = loc.file
   result.sourceLine = loc.line
 
-proc parseCommand(packageName, executableName: string;
-    node: NimNode): CliCommandDef =
+proc parseCommandDependencyPolicy(node: NimNode;
+                                  fallback = defaultDependencyPolicy()):
+    BuildActionDependencyPolicy =
+  if calleeName(node).normalize != "dependencypolicy" or node.len < 2:
+    error("dependencyPolicy expects a policy name", node)
+  let text = identText(node[1]).normalize
+  case text
+  of "default":
+    result = defaultDependencyPolicy()
+  of "declaredonly":
+    result = declaredOnlyDependencyPolicy()
+  of "automaticmonitor", "monitor":
+    result = automaticMonitorPolicy()
+  of "makedepfile":
+    result = makeDepfilePolicy()
+  else:
+    result = fallback
+  for i in 2 ..< node.len:
+    let depfileValue = namedValue(node[i], "depfile")
+    if not depfileValue.isNil:
+      result.depfile = stringLiteral(depfileValue)
+
+proc parseCommand(packageName, executableName: string; node: NimNode;
+                  defaultPolicy: BuildActionDependencyPolicy;
+                  commonParams: openArray[CliParamDef] = []): CliCommandDef =
   let loc = lineFile(node)
-  result.name = stringLiteral(node[1])
+  let head = calleeName(node).normalize
+  case head
+  of "call":
+    result.name = ""
+  of "subcmd":
+    result.name = stringLiteral(node[1])
+  else:
+    error("CLI command expects call: or subcmd \"name\":", node)
   result.providerEntrypointId =
-    packageName & "." & executableName & "." & result.name
+    if result.name.len == 0:
+      packageName & "." & executableName & ".call"
+    else:
+      packageName & "." & executableName & "." & result.name
+  result.dependencyPolicy = defaultPolicy
+  result.params = @commonParams
   result.sourceFile = loc.file
   result.sourceLine = loc.line
-  let body = node[2]
+  let body = node[node.len - 1]
   for stmt in body:
     let name = calleeName(stmt).normalize
-    if name == "pos" or name == "flag":
+    if name == "dependencypolicy":
+      result.dependencyPolicy = parseCommandDependencyPolicy(stmt,
+        result.dependencyPolicy)
+    elif name == "pos" or name == "flag" or name == "boolflag":
       result.params.add(parseParam(stmt))
 
 proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
@@ -1110,9 +1156,24 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       result.binaryName = stringLiteral(stmt[1])
     of "cli":
       let cliBody = stmt[1]
+      var defaultPolicy = defaultDependencyPolicy()
+      var commonParams: seq[CliParamDef] = @[]
       for cliStmt in cliBody:
-        if calleeName(cliStmt).normalize == "subcmd":
-          result.commands.add(parseCommand(packageName, result.exportName, cliStmt))
+        let name = calleeName(cliStmt).normalize
+        if name == "dependencypolicy":
+          defaultPolicy = parseCommandDependencyPolicy(cliStmt, defaultPolicy)
+        elif name == "flag" or name == "boolflag":
+          var param = parseParam(cliStmt)
+          param.placement = capBeforeSubcommand
+          commonParams.add(param)
+        elif name == "pos":
+          error("top-level CLI parameters before subcommands must be flags",
+            cliStmt)
+      for cliStmt in cliBody:
+        let name = calleeName(cliStmt).normalize
+        if name == "call" or name == "subcmd":
+          result.commands.add(parseCommand(packageName, result.exportName,
+            cliStmt, defaultPolicy, commonParams))
     else:
       discard
 
@@ -1333,10 +1394,87 @@ proc titleIdent(text: string): string =
   else:
     text[0].toUpperAscii() & text.substr(1) & "Package"
 
-proc wrapperCode(pkg: PackageDef): string =
+proc commandCallableName(cmdName: string): string =
+  if cmdName.len == 0:
+    "`()`"
+  else:
+    commandProcName(cmdName)
+
+proc shouldEmitArgCondition(param: CliParamDef): string =
+  if param.required:
+    return "true"
+  case param.nimType.normalize
+  of "bool":
+    param.name
+  of "int":
+    param.name & " != 0"
+  of "seq[string]":
+    param.name & ".len > 0"
+  else:
+    param.name & ".len > 0"
+
+proc toolActionFormal(param: CliParamDef): string =
+  result = param.name & ": " & param.nimType
+  if not param.required:
+    result.add(" = " & nimDefault(param.nimType))
+
+proc toolActionArgExpr(param: CliParamDef): string =
+  argBuilder(param)
+
+proc toolActionWrapperCode(pkg: PackageDef): string =
+  let typeName = titleIdent(pkg.packageName)
+  result = "{.experimental: \"callOperator\".}\n"
+  result.add("type\n  " & typeName & "* = object\n")
+  result.add("const " & pkg.packageName & "* = " & typeName & "()\n")
+  result.add("proc reprobuildPackageMarker*() = discard\n")
+  if pkg.executables.len != 1:
+    return
+  let exe = pkg.executables[0]
+  for cmd in exe.commands:
+    var formals = @["pkg: " & typeName]
+    for param in cmd.params:
+      formals.add(toolActionFormal(param))
+    formals.add("actionId = \"\"")
+    formals.add("deps: openArray[string] = []")
+    formals.add("after: openArray[BuildActionDef] = []")
+    formals.add("extraInputs: openArray[string] = []")
+    formals.add("extraOutputs: openArray[string] = []")
+    formals.add("depfile = \"\"")
+    formals.add("cacheable = true")
+    formals.add("commandStatsId = \"\"")
+    result.add("proc " & commandCallableName(cmd.name) & "*( " &
+      formals.join("; ") & "): BuildActionDef {.discardable.} =\n")
+    result.add("  discard pkg\n")
+    result.add("  var cliArgs: seq[PublicCliArg] = @[]\n")
+    for param in cmd.params:
+      result.add("  if " & shouldEmitArgCondition(param) & ":\n")
+      result.add("    cliArgs.add(" & toolActionArgExpr(param) & ")\n")
+    result.add("  let call = publicCliCall(" & escForCode(pkg.packageName) &
+      ", " & escForCode(exe.binaryName) & ", " & escForCode(cmd.name) &
+      ", " & escForCode(cmd.providerEntrypointId) & ", cliArgs)\n")
+    result.add("  let selectedActionId = if actionId.len > 0: actionId " &
+      "else: defaultToolActionId(call)\n")
+    result.add("  recordToolInvocation(selectedActionId, call, " &
+      "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
+      "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
+      "commandStatsId = commandStatsId, dependencyPolicy = " &
+      dependencyPolicyCode(cmd.dependencyPolicy) & ")\n")
+
+proc wrapperCode(pkg: PackageDef; recordActions = false): string =
+  if recordActions:
+    return toolActionWrapperCode(pkg)
   let typeName = titleIdent(pkg.packageName)
   let exeTypeName = typeName & "Executable"
-  result = "type\n  " & typeName & "* = object\n" &
+  var prefix = ""
+  block:
+    var hasCallCommand = false
+    for exe in pkg.executables:
+      for cmd in exe.commands:
+        if cmd.name.len == 0:
+          hasCallCommand = true
+    if hasCallCommand:
+      prefix = "{.experimental: \"callOperator\".}\n"
+  result = prefix & "type\n  " & typeName & "* = object\n" &
     "  " & exeTypeName & "* = object\n" &
     "    value*: SelectedExecutable\n" &
     "const " & pkg.packageName & "* = " & typeName & "()\n" &
@@ -1363,7 +1501,8 @@ proc wrapperCode(pkg: PackageDef): string =
       if selectedCommands.find(signature) >= 0:
         continue
       selectedCommands.add(signature)
-      result.add("proc " & procName & "*( " & params.join("; ") &
+      result.add("proc " & commandCallableName(cmd.name) & "*( " &
+        params.join("; ") &
         "): PublicCliCall =\n")
       result.add("  publicCliCall(exe.value.packageName, " &
         "exe.value.executableName, " & escForCode(cmd.name) &
@@ -1380,8 +1519,8 @@ proc wrapperCode(pkg: PackageDef): string =
           spec.add(" = " & nimDefault(param.nimType))
         params.add(spec)
         argCalls.add(argBuilder(param))
-      let procName = commandProcName(cmd.name)
-      result.add("proc " & procName & "*( " & params.join("; ") &
+      result.add("proc " & commandCallableName(cmd.name) & "*( " &
+        params.join("; ") &
         "): PublicCliCall =\n")
       result.add("  discard pkg\n")
       result.add("  publicCliCall(" & escForCode(pkg.packageName) & ", " &
@@ -1393,15 +1532,24 @@ proc wrapperCode(pkg: PackageDef): string =
           params[1 .. ^1].join("; ")
         else:
           ""
-      result.add("proc " & procName & "*(" & directParams &
-        "): PublicCliCall =\n")
-      result.add("  publicCliCall(" & escForCode(pkg.packageName) & ", " &
-        escForCode(exe.binaryName) & ", " & escForCode(cmd.name) & ", " &
-        escForCode(cmd.providerEntrypointId) & ", @[" & argCalls.join(", ") &
-        "])\n")
+      if cmd.name.len > 0:
+        result.add("proc " & commandCallableName(cmd.name) & "*(" & directParams &
+          "): PublicCliCall =\n")
+        result.add("  publicCliCall(" & escForCode(pkg.packageName) & ", " &
+          escForCode(exe.binaryName) & ", " & escForCode(cmd.name) & ", " &
+          escForCode(cmd.providerEntrypointId) & ", @[" & argCalls.join(", ") &
+          "])\n")
 
 proc usesImportCode(pkg: PackageDef): string =
+  proc isBundledStdlibSelector(selector: string): bool =
+    selector in ["nim", "gcc", "node", "sh", "stylus"]
   var modules: seq[string] = @[]
+  for useDef in pkg.toolUses:
+    if isBundledStdlibSelector(useDef.packageSelector):
+      let modulePath = "repro_dsl_stdlib/packages/" &
+        selectorModuleName(useDef.packageSelector)
+      if modules.find(modulePath) < 0:
+        modules.add(modulePath)
   for base in pkg.usesImportPaths:
     let normalizedBase = normalizedImportBase(base)
     if normalizedBase.len == 0:
@@ -2064,9 +2212,12 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
 
 macro package*(name: untyped; body: untyped): untyped =
   let pkg = parsePackageDef(name, body)
+  let recordActions = collectBuildStatements(body).len == 0 and
+    pkg.executables.len > 0
   let generated = parseStmt(
     usesImportCode(pkg) &
-    "registerPackageDef(" & packageLiteral(pkg) & ")\n" & wrapperCode(pkg))
+    "registerPackageDef(" & packageLiteral(pkg) & ")\n" &
+    wrapperCode(pkg, recordActions))
   result = newStmtList()
   result.add(generated)
   result.add(buildCode(pkg, body))

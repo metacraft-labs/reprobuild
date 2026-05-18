@@ -42,6 +42,81 @@ int main(int argc, char **argv) {
 }
 """
 
+const StylusFixtureSource = r"""
+#include <errno.h>
+#include <libgen.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+static int mkdir_p(const char *path) {
+  char *copy = strdup(path);
+  if (copy == NULL) return 126;
+  for (char *p = copy + 1; *p != '\0'; p++) {
+    if (*p == '/') {
+      *p = '\0';
+      if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
+        free(copy);
+        return 1;
+      }
+      *p = '/';
+    }
+  }
+  if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
+    free(copy);
+    return 1;
+  }
+  free(copy);
+  return 0;
+}
+
+static int ensure_parent(const char *path) {
+  char *copy = strdup(path);
+  if (copy == NULL) return 126;
+  char *dir = dirname(copy);
+  int code = mkdir_p(dir);
+  free(copy);
+  return code;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+    puts("stylus 1.0.0");
+    return 0;
+  }
+  const char *output = "";
+  const char *source = "";
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
+    else if (argv[i][0] == '-') return 64;
+    else source = argv[i];
+  }
+  if (output[0] == '\0' || source[0] == '\0') return 65;
+  if (ensure_parent(output) != 0) return 1;
+  FILE *in = fopen(source, "r");
+  if (in == NULL) return 2;
+  FILE *out = fopen(output, "w");
+  if (out == NULL) {
+    fclose(in);
+    return 3;
+  }
+  fprintf(out, "/* %s */\n", source);
+  char buffer[4096];
+  size_t n = 0;
+  while ((n = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+    if (fwrite(buffer, 1, n, out) != n) {
+      fclose(in);
+      fclose(out);
+      return 4;
+    }
+  }
+  fclose(in);
+  fclose(out);
+  return 0;
+}
+"""
+
 proc q(value: string): string =
   quoteShell(value)
 
@@ -170,7 +245,8 @@ proc copyTree(sourceRoot, destRoot: string) =
 
 proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
-  copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
+  if dirExists(codeTracerRoot / "reprobuild"):
+    copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
   copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
 
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
@@ -273,22 +349,10 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
   if includeClang:
     discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
-  writeExecutable(binDir / "stylus",
-    "#!/bin/sh\n" &
-    "set -eu\n" &
-    "if [ \"${1:-}\" = \"--version\" ]; then echo 'stylus 1.0.0'; exit 0; fi\n" &
-    "output= source=\n" &
-    "while [ \"$#\" -gt 0 ]; do\n" &
-    "  case \"$1\" in\n" &
-    "    -o) output=$2; shift 2 ;;\n" &
-    "    -*) echo \"unknown stylus flag $1\" >&2; exit 64 ;;\n" &
-    "    *) source=$1; shift ;;\n" &
-    "  esac\n" &
-    "done\n" &
-    "test -n \"$output\"\n" &
-    "test -n \"$source\"\n" &
-    "mkdir -p \"$(dirname \"$output\")\"\n" &
-    "{ printf '/* %s */\\n' \"$source\"; cat \"$source\"; } > \"$output\"\n")
+  let stylusSourcePath = binDir / "stylus-fixture.c"
+  let stylusPath = binDir / "stylus"
+  writeFile(stylusSourcePath, StylusFixtureSource)
+  discard requireSuccess(shellCommand(["cc", stylusSourcePath, "-o", stylusPath]))
   binDir & $PathSep & getEnv("PATH")
 
 proc codeTracerNativePathValue(codeTracerRoot, tempRoot: string): string =
@@ -1716,7 +1780,7 @@ when defined(macosx):
       check reportAction(helperChangedReport, "c-sudoku-object-tup").kind ==
         JNull
 
-    test "real committed CodeTracer reprobuild.nim builds in place through public CLI, provider, scheduler, cache, and invalidation":
+    test "m52_codetracer_uses_stdlib_packages":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
@@ -1744,8 +1808,12 @@ when defined(macosx):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      let projectText = readFile(projectRoot / "reprobuild.nim")
+      check projectText == readFile(realProjectFile)
+      check not projectText.contains("writeProject")
+      check not projectText.contains("usesImportPath")
+      check not projectText.contains("defineCliInterface")
+      check not dirExists(projectRoot / "reprobuild" / "packages")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
