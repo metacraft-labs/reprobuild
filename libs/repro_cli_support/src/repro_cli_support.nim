@@ -168,6 +168,246 @@ proc shellCommand(args: openArray[string]): string =
 proc projectRootForModule(modulePath: string): string =
   parentDir(modulePath)
 
+type
+  CmakeRegenerationMetadata = object
+    enabled: bool
+    suppressed: bool
+    metadataFile: string
+    sourceDir: string
+    binaryDir: string
+    providerRoot: string
+    cmakeCommand: string
+    checkFile: string
+    globVerifyScript: string
+    providerFile: string
+    providerStateFile: string
+    values: Table[string, string]
+
+proc readKeyValueMetadata(path: string): Table[string, string] =
+  if path.len == 0 or not fileExists(path):
+    return
+  for rawLine in readFile(path).splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    let eq = line.find('=')
+    if eq <= 0:
+      continue
+    result[line[0 ..< eq]] = line[eq + 1 .. ^1]
+
+proc metadataValue(values: Table[string, string]; key: string;
+                   fallback = ""): string =
+  values.getOrDefault(key, fallback)
+
+proc metadataFlag(values: Table[string, string]; key: string): bool =
+  case values.getOrDefault(key, "").toLowerAscii()
+  of "1", "on", "true", "yes", "enabled":
+    true
+  else:
+    false
+
+proc materializeCmakePath(meta: CmakeRegenerationMetadata;
+                          path: string): string =
+  if path.len == 0:
+    return ""
+  if path.isAbsolute:
+    os.normalizedPath(path)
+  else:
+    os.normalizedPath(meta.binaryDir / path)
+
+proc parseCmakeQuotedList(text, setName: string): seq[string] =
+  var parsed: seq[string] = @[]
+  var inSet = false
+  var token = ""
+  var inQuote = false
+  var escaping = false
+
+  proc finishToken() =
+    if token.len > 0:
+      parsed.add(token)
+      token.setLen(0)
+
+  for rawLine in text.splitLines():
+    var line = rawLine.strip()
+    if not inSet:
+      if line == "set(" & setName:
+        inSet = true
+        continue
+      if line.startsWith("set(" & setName & " "):
+        inSet = true
+        line = line.substr(("set(" & setName).len).strip()
+      else:
+        continue
+
+    var i = 0
+    while i < line.len:
+      let ch = line[i]
+      if inQuote:
+        if escaping:
+          token.add(ch)
+          escaping = false
+        elif ch == '\\':
+          escaping = true
+        elif ch == '"':
+          inQuote = false
+          finishToken()
+        else:
+          token.add(ch)
+      else:
+        case ch
+        of '"':
+          inQuote = true
+        of ')':
+          finishToken()
+          return parsed
+        of ' ', '\t':
+          finishToken()
+        else:
+          token.add(ch)
+      inc i
+    if not inQuote:
+      finishToken()
+  parsed
+
+proc parseCmakeListFromFile(path, setName: string): seq[string] =
+  if path.len == 0 or not fileExists(path):
+    return
+  parseCmakeQuotedList(readFile(path), setName)
+
+proc addUniquePath(paths: var seq[string]; path: string) =
+  if path.len == 0:
+    return
+  let normalized = os.normalizedPath(path)
+  if paths.find(normalized) < 0:
+    paths.add(normalized)
+
+proc cmakeRegenerationMetadataForModule(modulePath: string):
+    CmakeRegenerationMetadata =
+  let binaryDir = parentDir(modulePath)
+  let metadataFile = binaryDir / "CMakeFiles" / "reprobuild" / "provider.meta"
+  let values = readKeyValueMetadata(metadataFile)
+  if values.len == 0 or values.metadataValue("generator") != "Reprobuild":
+    return
+  let sourceDir = values.metadataValue("source_dir")
+  if sourceDir.len == 0:
+    return
+  result.values = values
+  result.metadataFile = metadataFile
+  result.sourceDir = os.normalizedPath(sourceDir)
+  result.binaryDir = os.normalizedPath(values.metadataValue("binary_dir",
+    binaryDir))
+  result.providerRoot = os.normalizedPath(values.metadataValue("provider_root",
+    result.binaryDir / "CMakeFiles" / "reprobuild"))
+  result.cmakeCommand = values.metadataValue("cmake_command", "cmake")
+  result.checkFile = values.metadataValue("cmake_regeneration_check_file",
+    "CMakeFiles/Makefile.cmake")
+  result.globVerifyScript = values.metadataValue(
+    "cmake_regeneration_glob_verify",
+    result.binaryDir / "CMakeFiles" / "VerifyGlobs.cmake")
+  result.providerFile = values.metadataValue("cmake_regeneration_provider_file",
+    result.binaryDir / "reprobuild.nim")
+  result.providerStateFile = values.metadataValue(
+    "cmake_regeneration_provider_state",
+    result.providerRoot / "provider.last")
+  result.suppressed = values.metadataFlag("cmake_regeneration_suppressed")
+  result.enabled =
+    not result.suppressed and
+    values.metadataValue("cmake_regeneration", "enabled") != "disabled"
+
+proc cmakeRegenerationInputs(meta: CmakeRegenerationMetadata): seq[string] =
+  result.addUniquePath(meta.metadataFile)
+  if meta.cmakeCommand.isAbsolute and fileExists(meta.cmakeCommand):
+    result.addUniquePath(meta.cmakeCommand)
+  let checkPath = meta.materializeCmakePath(meta.checkFile)
+  result.addUniquePath(checkPath)
+  result.addUniquePath(meta.binaryDir / "CMakeCache.txt")
+  result.addUniquePath(meta.binaryDir / "CMakeFiles" / "cmake.check_cache")
+  if meta.globVerifyScript.len > 0 and fileExists(meta.globVerifyScript):
+    result.addUniquePath(meta.globVerifyScript)
+  for input in parseCmakeListFromFile(checkPath, "CMAKE_MAKEFILE_DEPENDS"):
+    result.addUniquePath(meta.materializeCmakePath(input))
+
+proc cmakeRegenerationHasGlobVerification(meta: CmakeRegenerationMetadata): bool =
+  meta.globVerifyScript.len > 0 and fileExists(meta.globVerifyScript)
+
+proc cmakeRegenerationOutputs(meta: CmakeRegenerationMetadata): seq[string] =
+  result.addUniquePath(meta.providerFile)
+  result.addUniquePath(meta.providerStateFile)
+  if meta.cmakeRegenerationHasGlobVerification():
+    # CMake's VerifyGlobs.cmake detects directory membership changes by
+    # touching an empty marker. The action cache is content-based, so glob
+    # projects must execute this edge until glob membership evidence is modeled.
+    result.addUniquePath(meta.providerRoot /
+      "cmake-regeneration-glob-always-run.sentinel")
+  for key, value in meta.values:
+    if key == "clean_manifest" or key.startsWith("clean_manifest_") or
+        key == "hcr_metadata":
+      result.addUniquePath(value)
+
+proc addCmakeFingerprintField(payload: var string; value: string) =
+  payload.add($value.len)
+  payload.add(":")
+  payload.add(value)
+  payload.add("\n")
+
+proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata):
+    ContentDigest =
+  var payload = ""
+  payload.addCmakeFingerprintField("reprobuild.cmake.regeneration.v1")
+  payload.addCmakeFingerprintField(meta.cmakeCommand)
+  payload.addCmakeFingerprintField(meta.sourceDir)
+  payload.addCmakeFingerprintField(meta.binaryDir)
+  payload.addCmakeFingerprintField(meta.checkFile)
+  payload.addCmakeFingerprintField(meta.globVerifyScript)
+  payload.addCmakeFingerprintField(meta.providerFile)
+  payload.addCmakeFingerprintField(meta.providerStateFile)
+  weakFingerprintFromText(payload)
+
+proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
+                                  publicCliPath: string): BuildAction =
+  var env: seq[string] = @[]
+  if meta.providerRoot.len > 0:
+    let wrapperPath = meta.values.metadataValue("wrapper_path",
+      meta.providerRoot / "bin")
+    if wrapperPath.len > 0:
+      env.add("PATH=" & wrapperPath & $PathSep & getEnv("PATH"))
+  let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
+  if sourceRoot.len > 0:
+    env.add("REPROBUILD_SOURCE_ROOT=" & sourceRoot)
+  let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
+  action("__repro_cmake_regenerate", @[
+    publicCliPath,
+    "__repro-cmake-regenerate",
+    "--metadata", meta.metadataFile
+  ],
+    cwd = meta.binaryDir,
+    inputs = cmakeRegenerationInputs(meta),
+    outputs = cmakeRegenerationOutputs(meta),
+    commandStatsId = "repro cmake regeneration edge",
+    cacheable = not hasGlobVerification,
+    weakFingerprint = cmakeRegenerationFingerprint(meta),
+    dependencyPolicy = declaredOnlyPolicy(),
+    env = env)
+
+proc prependProcessPath(path: string) =
+  if path.len == 0:
+    return
+  let normalized = os.normalizedPath(path)
+  let current = getEnv("PATH")
+  for item in current.split(PathSep):
+    if item.len > 0 and os.normalizedPath(item) == normalized:
+      return
+  if current.len > 0:
+    putEnv("PATH", normalized & $PathSep & current)
+  else:
+    putEnv("PATH", normalized)
+
+proc applyCmakeProviderEnvironment(meta: CmakeRegenerationMetadata) =
+  if meta.values.len == 0:
+    return
+  prependProcessPath(meta.values.metadataValue("wrapper_path",
+    meta.providerRoot / "bin"))
+
 proc reprobuildLibraryWorkDir(): string =
   proc hasReprobuildLibs(root: string): bool =
     dirExists(root / "libs" / "repro_project_dsl" / "src")
@@ -220,6 +460,7 @@ proc capabilitiesJson*(): JsonNode =
     "depfile-dependency-evidence",
     "dyndep-fragment-conversion",
     "runquota-execution",
+    "cmake-regeneration-edge",
     "build-report-json-inspection"])
 
   var hcrProfile = newJObject()
@@ -731,8 +972,12 @@ proc actionResultJson(item: ActionResult): JsonNode =
 
 proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
+                      cmakeRegenerationResult,
                       providerCompileResult,
                       buildResult: BuildRunResult) =
+  var cmakeRegenerationActions = newJArray()
+  for item in cmakeRegenerationResult.results:
+    cmakeRegenerationActions.add(actionResultJson(item))
   var providerCompileActions = newJArray()
   for item in providerCompileResult.results:
     providerCompileActions.add(actionResultJson(item))
@@ -751,6 +996,7 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
     "providerBinary": provider.outputBinaryPath,
     "providerFingerprint": digestHex(provider.providerFingerprint),
     "providerCompileOutput": provider.executionResult.output,
+    "cmakeRegenerationActions": cmakeRegenerationActions,
     "providerCompileActions": providerCompileActions,
     "providerSnapshot": refresh.persistedSnapshotPath,
     "providerInvocations": refresh.invoked.len,
@@ -808,6 +1054,122 @@ proc providerCompileFailure(buildResult: BuildRunResult): string =
         parts.add(item.stdout)
       return parts.join("\n")
   "provider compile failed"
+
+proc readTextIfExists(path: string): string =
+  if path.len == 0 or not fileExists(path):
+    return ""
+  readFile(path)
+
+proc runLoggedCommand(argv: openArray[string]; cwd: string): int =
+  let command = shellCommand(argv)
+  let res = execCmdEx(command, workingDir = cwd)
+  if res.output.len > 0:
+    stdout.write(res.output)
+    stdout.flushFile()
+  res.exitCode
+
+proc removeManifestEntries(path: string) =
+  if path.len == 0 or not fileExists(path):
+    return
+  for rawLine in readFile(path).splitLines():
+    let filePath = rawLine.strip()
+    if filePath.len > 0 and fileExists(filePath):
+      removeFile(filePath)
+
+proc invalidateCmakeProviderDerivedState(meta: CmakeRegenerationMetadata) =
+  if meta.providerRoot.len > 0:
+    let pattern = meta.providerRoot / "worktrees" / "*" / "build" /
+      "reprobuild" / "provider-graph" / "provider-fragments.rbsz"
+    for fragment in walkFiles(pattern):
+      removeFile(fragment)
+  for key, value in meta.values:
+    if key == "clean_manifest" or key.startsWith("clean_manifest_"):
+      removeManifestEntries(value)
+
+proc runCmakeRegenerationHelper*(args: openArray[string]): int =
+  var metadataFile = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--metadata":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--metadata requires a value")
+      metadataFile = args[i + 1]
+      inc i, 2
+    elif arg.startsWith("--metadata="):
+      metadataFile = arg.split("=", maxsplit = 1)[1]
+      inc i
+    else:
+      raise newException(ValueError,
+        "unsupported __repro-cmake-regenerate argument: " & arg)
+  if metadataFile.len == 0:
+    raise newException(ValueError, "--metadata is required")
+
+  let values = readKeyValueMetadata(metadataFile)
+  if values.len == 0:
+    raise newException(IOError,
+      "CMake regeneration metadata is missing: " & metadataFile)
+  let sourceDir = values.metadataValue("source_dir")
+  let binaryDir = values.metadataValue("binary_dir", parentDir(parentDir(
+    parentDir(metadataFile))))
+  if sourceDir.len == 0 or binaryDir.len == 0:
+    raise newException(ValueError,
+      "CMake regeneration metadata requires source_dir and binary_dir")
+  var meta = CmakeRegenerationMetadata(
+    enabled: true,
+    suppressed: values.metadataFlag("cmake_regeneration_suppressed"),
+    metadataFile: metadataFile,
+    sourceDir: os.normalizedPath(sourceDir),
+    binaryDir: os.normalizedPath(binaryDir),
+    providerRoot: os.normalizedPath(values.metadataValue("provider_root",
+      binaryDir / "CMakeFiles" / "reprobuild")),
+    cmakeCommand: values.metadataValue("cmake_command", "cmake"),
+    checkFile: values.metadataValue("cmake_regeneration_check_file",
+      "CMakeFiles/Makefile.cmake"),
+    globVerifyScript: values.metadataValue("cmake_regeneration_glob_verify",
+      binaryDir / "CMakeFiles" / "VerifyGlobs.cmake"),
+    providerFile: values.metadataValue("cmake_regeneration_provider_file",
+      binaryDir / "reprobuild.nim"),
+    providerStateFile: values.metadataValue(
+      "cmake_regeneration_provider_state",
+      values.metadataValue("provider_root", binaryDir / "CMakeFiles" /
+        "reprobuild") / "provider.last"),
+    values: values)
+
+  if meta.suppressed:
+    echo "cmakeRegeneration: suppressed"
+    return 0
+
+  let providerBefore = readTextIfExists(meta.providerStateFile)
+  if meta.globVerifyScript.len > 0 and fileExists(meta.globVerifyScript):
+    let verifyRet = runLoggedCommand(@[
+      meta.cmakeCommand, "-P", meta.globVerifyScript
+    ], meta.binaryDir)
+    if verifyRet != 0:
+      return verifyRet
+
+  let regenRet = runLoggedCommand(@[
+    meta.cmakeCommand,
+    "-S", meta.sourceDir,
+    "-B", meta.binaryDir,
+    "--check-build-system", meta.checkFile,
+    "0"
+  ], meta.binaryDir)
+  if regenRet != 0:
+    return regenRet
+
+  let providerAfter = readTextIfExists(meta.providerFile)
+  if providerAfter.len == 0:
+    raise newException(IOError,
+      "CMake regeneration did not produce provider file: " &
+        meta.providerFile)
+  if providerBefore.len > 0 and providerBefore != providerAfter:
+    invalidateCmakeProviderDerivedState(meta)
+  createDir(parentDir(meta.providerStateFile))
+  writeFile(meta.providerStateFile, providerAfter)
+  echo "cmakeRegeneration: complete providerChanged=" &
+    $(providerBefore.len > 0 and providerBefore != providerAfter)
+  0
 
 proc identityPaths(outDir: string; mode: ToolProvisioningMode):
     tuple[identityPath: string; inspectionPath: string] =
@@ -966,6 +1328,14 @@ proc stablePublicCliPath(): string =
       return os.normalizedPath(resolved)
     return os.normalizedPath(getCurrentDir() / resolved)
   os.normalizedPath(getCurrentDir() / app)
+
+proc siblingFsSnoopPath(publicCliPath: string): string =
+  let candidate = parentDir(publicCliPath) /
+    addFileExt("repro-fs-snoop", ExeExt)
+  if fileExists(candidate):
+    os.normalizedPath(candidate)
+  else:
+    ""
 
 type
   BuildProgressMode = enum
@@ -1159,6 +1529,47 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   result.modulePath = modulePath
   result.projectRoot = projectRootForModule(modulePath)
   result.outDir = outDir
+  var bypassRunQuota = false
+  if mode in {tpmPathOnly, tpmScoop} and not isRunQuotaDaemonReachable():
+    bypassRunQuota = true
+
+  var cmakeRegenerationResult: BuildRunResult
+  let cmakeMeta = cmakeRegenerationMetadataForModule(modulePath)
+  cmakeMeta.applyCmakeProviderEnvironment()
+  if cmakeMeta.enabled:
+    echo "cmakeRegeneration: started"
+    let cmakeRegenerationStart = statStart(statsEnabled)
+    let cmakeRegenerationAction =
+      cmakeRegenerationBuildAction(cmakeMeta, publicCliPath)
+    var cmakeRegenerationConfig = BuildEngineConfig(
+      cacheRoot: outDir / "build-engine-cache",
+      runQuotaCliPath: publicCliPath,
+      monitorCliPath: siblingFsSnoopPath(publicCliPath),
+      maxParallelism: 1'u32,
+      stdoutLimit: 1024 * 1024,
+      stderrLimit: 1024 * 1024,
+      rebuildMissingOutputsOnCacheHit: true,
+      bypassRunQuota: bypassRunQuota)
+    cmakeRegenerationConfig.statsEnabled = statsEnabled
+    cmakeRegenerationResult = runBuild(graph([cmakeRegenerationAction]),
+      cmakeRegenerationConfig)
+    buildStats.mergeStats(cmakeRegenerationResult.stats)
+    finishStat(buildStats, statsEnabled, "repro cmake regeneration",
+      cmakeRegenerationStart)
+    for item in cmakeRegenerationResult.results:
+      echo "cmakeRegenerationAction: " & item.id & " status=" &
+        $item.status & " launched=" & $item.launched & " cache=" &
+        $item.cacheDecision
+      if item.stdout.len > 0:
+        stdout.write(item.stdout)
+        stdout.flushFile()
+      if item.stderr.len > 0:
+        stderr.write(item.stderr)
+        stderr.flushFile()
+    if cmakeRegenerationResult.hasFailedActions():
+      raise newException(OSError,
+        "CMake regeneration edge failed: " &
+          providerCompileFailure(cmakeRegenerationResult))
 
   let interfacePath = outDir / "project-interface.rbsz"
   let stubPath = outDir / "project-interface.nim"
@@ -1220,7 +1631,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     let providerBinaryPath = outDir / "provider" / "project-provider"
     let providerArtifactPath = outDir / "provider-compile.rbsz"
-    var bypassRunQuota = false
     if mode in {tpmPathOnly, tpmScoop} and not isRunQuotaDaemonReachable():
       bypassRunQuota = true
       echo "repro build: WARNING runquotad is not reachable; using " &
@@ -1328,8 +1738,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
     let reportPath = outDir / "build-report.json"
-    writeBuildReport(reportPath, provider, refresh, providerCompileResult,
-      buildResult)
+    writeBuildReport(reportPath, provider, refresh, cmakeRegenerationResult,
+      providerCompileResult, buildResult)
     result.buildReportPath = reportPath
     for item in buildResult.results:
       echo "action: " & item.id & " status=" & $item.status &
@@ -2258,6 +2668,17 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runProviderCompileHelper(helperArgs)
+  if args.len > 0 and args[0] == "__repro-cmake-regenerate":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    try:
+      return runCmakeRegenerationHelper(helperArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro cmake regeneration: error: " & err.msg)
+      return 1
   if programName == "repro" and args.len >= 2 and args[0] == "debug" and
       args[1] == "fs-snoop":
     let fsArgs =
