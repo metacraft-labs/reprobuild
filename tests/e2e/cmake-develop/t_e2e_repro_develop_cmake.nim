@@ -47,27 +47,64 @@ proc lastValueAfter(output, prefix: string): string =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  # Windows: build artifacts carry an .exe suffix; the binary path probe and
+  # the build fallback both need to account for it.
+  let daemonBin =
+    when defined(windows):
+      runquotaRoot / "build" / "bin" / "runquotad.exe"
+    else:
+      runquotaRoot / "build" / "bin" / "runquotad"
   if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
-  # Windows: /tmp is not present; use the platform tempdir so the socket
-  # path is valid on both POSIX and Windows hosts.
-  let socketPath = getTempDir() / "repro-m9-rq-" & $getCurrentProcessId() &
-    ".sock"
-  if fileExists(socketPath):
-    removeFile(socketPath)
+    # Windows: cmd.exe-style `cd X && Y` composition doesn't survive
+    # execCmdEx's shell-less invocation. Spawn `just` directly with the
+    # working directory set so the build runs in `runquotaRoot`.
+    when defined(windows):
+      let buildProc = startProcess("just", workingDir = runquotaRoot,
+                                   args = @["build"],
+                                   options = {poUsePath, poParentStreams})
+      let buildCode = buildProc.waitForExit()
+      buildProc.close()
+      if buildCode != 0:
+        raise newException(OSError, "`just build` in " & runquotaRoot &
+          " failed with exit code " & $buildCode)
+    else:
+      discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+  # The socket path needs platform-specific shape:
+  #   Windows: a named pipe (\\.\pipe\...); the runquota daemon's --socket
+  #            argument auto-detects this prefix and switches to pipe mode.
+  #   POSIX:   a regular file path under the platform tempdir; the daemon
+  #            uses Unix sockets there.
+  let socketPath =
+    when defined(windows):
+      "\\\\.\\pipe\\repro-m9-rq-" & $getCurrentProcessId()
+    else:
+      getTempDir() / "repro-m9-rq-" & $getCurrentProcessId() & ".sock"
+  when not defined(windows):
+    if fileExists(socketPath):
+      removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [
     "--socket", socketPath,
     "--cpu-milli", "16000",
     "--memory-bytes", "17179869184"
   ], options = {poUsePath})
   putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
-    if pathExists(socketPath):
+  # Wait for the daemon to start listening. POSIX: poll for the socket file.
+  # Windows: named pipes don't materialise on the filesystem; sleep briefly
+  # then trust the daemon (process exit would surface as a connect failure
+  # downstream, which is the appropriate error path).
+  when defined(windows):
+    sleep(500)
+    if daemon.running:
       return (process: daemon, socket: socketPath)
-    sleep(25)
-  daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
+    daemon.terminate()
+    raise newException(OSError, "runquotad exited before becoming ready")
+  else:
+    for _ in 0 ..< 200:
+      if pathExists(socketPath):
+        return (process: daemon, socket: socketPath)
+      sleep(25)
+    daemon.terminate()
+    raise newException(OSError, "runquotad socket did not appear")
 
 proc repoCMakeRoot(repoRoot: string): string =
   repoRoot.parentDir / "reprobuild-cmake"
