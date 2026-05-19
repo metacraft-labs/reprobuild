@@ -382,6 +382,60 @@ integration_provider_fragment_refresh_and_pruning:
         tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim \
         2>&1 | tee test-logs/integration_provider_fragment_refresh_and_pruning.log
 
+integration_configurable_system_basic_resolution:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_configurable_system_basic_resolution \
+        --out:build/test-bin/integration_configurable_system_basic_resolution \
+        tests/integration/t_integration_configurable_system_basic_resolution.nim \
+        2>&1 | tee test-logs/integration_configurable_system_basic_resolution.log
+
+integration_configurable_system_incremental_refinalize:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_configurable_system_incremental_refinalize \
+        --out:build/test-bin/integration_configurable_system_incremental_refinalize \
+        tests/integration/t_integration_configurable_system_incremental_refinalize.nim \
+        2>&1 | tee test-logs/integration_configurable_system_incremental_refinalize.log
+
+integration_configurable_persistent_lookup:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_configurable_persistent_lookup \
+        --out:build/test-bin/integration_configurable_persistent_lookup \
+        tests/integration/t_integration_configurable_persistent_lookup.nim \
+        2>&1 | tee test-logs/integration_configurable_persistent_lookup.log
+
+integration_configurable_staged_field_access:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_configurable_staged_field_access \
+        --out:build/test-bin/integration_configurable_staged_field_access \
+        tests/integration/t_integration_configurable_staged_field_access.nim \
+        2>&1 | tee test-logs/integration_configurable_staged_field_access.log
+
+integration_configurable_doc_comment_directives:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_configurable_doc_comment_directives \
+        --out:build/test-bin/integration_configurable_doc_comment_directives \
+        tests/integration/t_integration_configurable_doc_comment_directives.nim \
+        2>&1 | tee test-logs/integration_configurable_doc_comment_directives.log
+
+e2e_configurable_system_in_dsl:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_configurable_system_in_dsl \
+        --out:build/test-bin/e2e_configurable_system_in_dsl \
+        tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim \
+        2>&1 | tee test-logs/e2e_configurable_system_in_dsl.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \
