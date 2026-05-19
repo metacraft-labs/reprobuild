@@ -879,12 +879,15 @@ proc build(reproBin, target, repoRoot, pathValue: string;
   requireSuccess(shellCommand(args, entries), repoRoot)
 
 proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
-                         env: openArray[(string, string)] = []): string =
+                         env: openArray[(string, string)] = [];
+                         extraArgs: openArray[string] = []): string =
   var entries = @[("PATH", pathValue)]
   for item in env:
     entries.add(item)
-  requireSuccess(shellCommand([reproBin, "build", "--tool-provisioning=path"],
-    entries), projectRoot)
+  var args = @[reproBin, "build", "--tool-provisioning=path"]
+  for arg in extraArgs:
+    args.add(arg)
+  requireSuccess(shellCommand(args, entries), projectRoot)
 
 proc compilePublicReproTestBin(repoRoot: string): string =
   result = repoRoot / "build" / "test-bin" / "repro"
@@ -1416,14 +1419,14 @@ suite "e2e_local_reprobuild_project_build":
     check reportAction(report, "stamp"){"evidence"}{"declaredOutputs"}.
       getElems().anyIt(it.getStr() == "out/stamp.txt")
 
-    let progressOutput = build(reproBin, projectRoot, repoRoot, getEnv("PATH"),
-      extraArgs = ["--progress=plain"])
-    check progressOutput.contains(
+    let progressOutput = buildCurrentProject(reproBin, projectRoot,
+      getEnv("PATH"), extraArgs = ["--progress=plain"])
+    check not progressOutput.contains(
       "providerCompileAction: __repro_provider_compile")
     check progressOutput.contains("repro [")
     check progressOutput.contains("4/4 100%")
 
-    let statsOutput = build(reproBin, projectRoot, repoRoot, getEnv("PATH"),
+    let statsOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
       extraArgs = ["--stats"])
     check statsOutput.contains("metric")
     check statsOutput.contains("count")
@@ -1437,9 +1440,39 @@ suite "e2e_local_reprobuild_project_build":
     check statsReport{"stats"}{"metrics"}.getElems().anyIt(
       it{"name"}.getStr() == "repro scheduler total")
     let providerCompileActions = statsReport{"providerCompileActions"}.getElems()
-    check providerCompileActions.len == 1
-    check providerCompileActions[0]{"id"}.getStr() == "__repro_provider_compile"
-    check providerCompileActions[0]{"launched"}.getBool() == false
+    check providerCompileActions.len == 0
+
+  test "provider compile fast path skips no-op and invalidates provider sources":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m55-provider-fast-path", "")
+    defer: removeDir(tempRoot)
+
+    let reproBin = compilePublicReproTestBin(repoRoot)
+    let projectRoot = tempRoot / "project"
+    let modulePath = projectRoot / "reprobuild.nim"
+    writeM53BuiltinFsProject(modulePath)
+
+    let first = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+    check first.contains(
+      "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
+
+    let second = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+    check not second.contains(
+      "providerCompileAction: __repro_provider_compile")
+    let secondReport = parseFile(valueAfter(second, "buildReport:"))
+    check secondReport{"providerCompileActions"}.getElems().len == 0
+
+    writeFile(modulePath, readFile(modulePath) &
+      "\n# private provider implementation salt one\n")
+    let changed = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+    check changed.contains(
+      "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
+
+    writeFile(projectRoot / "provider_extra.nim",
+      "const providerExtraSalt* = \"added-source\"\n")
+    let added = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+    check added.contains(
+      "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
 
   test "public CLI work root override isolates metadata by worktree":
     let repoRoot = getCurrentDir()

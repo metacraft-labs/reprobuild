@@ -1,5 +1,5 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, terminal,
-    times]
+import std/[algorithm, json, options, os, osproc, sequtils, sets, strutils,
+    tables, terminal, times]
 import repro_core
 import repro_build_engine
 import repro_depfile
@@ -1649,41 +1649,48 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         "use the real lease coordinator."
     echo "providerCompile: started"
     let providerCompileStart = statStart(statsEnabled)
-    let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
-      artifact.interfaceFingerprint, compileWorkDir)
-    invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-    let providerCompileAction = providerCompileBuildAction(providerPlan,
-      modulePath, interfacePath, providerArtifactPath, publicCliPath,
-      compileWorkDir)
-    var providerCompileConfig = BuildEngineConfig(
-      cacheRoot: outDir / "build-engine-cache",
-      runQuotaCliPath: publicCliPath,
-      maxParallelism: 1'u32,
-      stdoutLimit: 1024 * 1024,
-      stderrLimit: 1024 * 1024,
-      rebuildMissingOutputsOnCacheHit: true,
-      bypassRunQuota: bypassRunQuota)
-    providerCompileConfig.statsEnabled = statsEnabled
-    let providerCompileResult = runBuild(graph([providerCompileAction]),
-      providerCompileConfig)
-    buildStats.mergeStats(providerCompileResult.stats)
+    var providerCompileResult: BuildRunResult
+    var provider: ProviderCompileArtifact
+    let cachedProvider = readFreshProviderCompileArtifact(providerArtifactPath,
+      modulePath, providerBinaryPath, artifact.interfaceFingerprint)
+    if cachedProvider.isSome:
+      provider = cachedProvider.get()
+    else:
+      let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
+        artifact.interfaceFingerprint, compileWorkDir)
+      invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
+      let providerCompileAction = providerCompileBuildAction(providerPlan,
+        modulePath, interfacePath, providerArtifactPath, publicCliPath,
+        compileWorkDir)
+      var providerCompileConfig = BuildEngineConfig(
+        cacheRoot: outDir / "build-engine-cache",
+        runQuotaCliPath: publicCliPath,
+        maxParallelism: 1'u32,
+        stdoutLimit: 1024 * 1024,
+        stderrLimit: 1024 * 1024,
+        rebuildMissingOutputsOnCacheHit: true,
+        bypassRunQuota: bypassRunQuota)
+      providerCompileConfig.statsEnabled = statsEnabled
+      providerCompileResult = runBuild(graph([providerCompileAction]),
+        providerCompileConfig)
+      buildStats.mergeStats(providerCompileResult.stats)
+      for item in providerCompileResult.results:
+        echo "providerCompileAction: " & item.id & " status=" & $item.status &
+          " launched=" & $item.launched & " cache=" & $item.cacheDecision
+      if providerCompileResult.hasFailedActions():
+        raise newException(OSError, providerCompileFailure(providerCompileResult))
+      if not fileExists(providerArtifactPath):
+        raise newException(IOError,
+          "provider compile edge did not write artifact: " & providerArtifactPath)
+      provider = readProviderCompileArtifact(providerArtifactPath)
+      if not providerCompileArtifactFresh(providerArtifactPath,
+          providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
+          providerPlan.providerFingerprint):
+        raise newException(IOError,
+          "provider compile artifact is stale after edge execution: " &
+            providerArtifactPath)
     finishStat(buildStats, statsEnabled, "repro provider compile",
       providerCompileStart)
-    for item in providerCompileResult.results:
-      echo "providerCompileAction: " & item.id & " status=" & $item.status &
-        " launched=" & $item.launched & " cache=" & $item.cacheDecision
-    if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailure(providerCompileResult))
-    if not fileExists(providerArtifactPath):
-      raise newException(IOError,
-        "provider compile edge did not write artifact: " & providerArtifactPath)
-    let provider = readProviderCompileArtifact(providerArtifactPath)
-    if not providerCompileArtifactFresh(providerArtifactPath,
-        providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
-        providerPlan.providerFingerprint):
-      raise newException(IOError,
-        "provider compile artifact is stale after edge execution: " &
-          providerArtifactPath)
     let providerArtifactId = digestHex(provider.providerFingerprint)
     echo "providerBinary: " & provider.outputBinaryPath
     echo "providerCompileArtifact: " & providerArtifactPath

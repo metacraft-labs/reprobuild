@@ -1,4 +1,4 @@
-import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[options, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import cbor
 import repro_core
@@ -266,6 +266,16 @@ suite "integration_project_interface_artifact_import_modes":
     check providerRead.compileEdge.actionFingerprint ==
       provider1.compileEdge.actionFingerprint
     check providerRead.compileEdge.declaredOutputs == @[provider1.outputBinaryPath]
+    check readFreshProviderCompileArtifact(providerArtifactPath, providerModule,
+      provider1.outputBinaryPath, artifact1.interfaceFingerprint).isSome
+    writeFile(providerDir / "extra_provider_source.nim",
+      "const extraProviderSalt* = \"one\"\n")
+    check readFreshProviderCompileArtifact(providerArtifactPath, providerModule,
+      provider1.outputBinaryPath, artifact1.interfaceFingerprint).isNone
+    removeFile(providerDir / "extra_provider_source.nim")
+    writeFile(provider1.outputBinaryPath, "corrupt provider binary\n")
+    check readFreshProviderCompileArtifact(providerArtifactPath, providerModule,
+      provider1.outputBinaryPath, artifact1.interfaceFingerprint).isNone
 
     writeProviderFixture(providerDir, helperSalt = "two")
     let artifactAfterPrivateEdit =

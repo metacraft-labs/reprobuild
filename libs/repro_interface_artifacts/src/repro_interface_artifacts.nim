@@ -1188,6 +1188,31 @@ proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
   except CatchableError:
     false
 
+proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
+                                       outputBinaryPath: string;
+                                       interfaceFingerprint: ContentDigest):
+    Option[ProviderCompileArtifact] =
+  let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
+  if not (fileExists(artifactPath) and fileExists(normalizedOutputPath)):
+    return none(ProviderCompileArtifact)
+  try:
+    let sources = discoverNimSources(modulePath)
+    let providerFingerprint = providerFingerprintFor(sources,
+      interfaceFingerprint)
+    let cached = readProviderCompileArtifact(artifactPath)
+    if cached.interfaceFingerprint != interfaceFingerprint:
+      return none(ProviderCompileArtifact)
+    if cached.providerFingerprint != providerFingerprint:
+      return none(ProviderCompileArtifact)
+    if cached.outputBinaryPath != normalizedOutputPath:
+      return none(ProviderCompileArtifact)
+    if cached.outputBinaryFingerprint != casDigest(toBytes(readFile(
+        normalizedOutputPath))):
+      return none(ProviderCompileArtifact)
+    return some(cached)
+  except CatchableError:
+    return none(ProviderCompileArtifact)
+
 proc compileProviderBinary*(modulePath, outputBinaryPath: string;
                             interfaceFingerprint: ContentDigest;
                             artifactPath = "";
