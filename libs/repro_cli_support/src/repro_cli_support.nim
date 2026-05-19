@@ -655,6 +655,19 @@ proc runQuotaSocketDiagnostic(): string =
   else:
     "default"
 
+proc buildMaxParallelism(): uint32 =
+  let configured = getEnv("REPROBUILD_MAX_PARALLELISM", "")
+  if configured.len == 0:
+    return 8'u32
+  try:
+    let parsed = parseInt(configured)
+    if parsed < 1:
+      return 1'u32
+    uint32(parsed)
+  except ValueError:
+    raise newException(ValueError,
+      "REPROBUILD_MAX_PARALLELISM must be a positive integer")
+
 proc stablePublicCliPath(): string =
   let app = getAppFilename()
   if app.isAbsolute:
@@ -785,7 +798,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       runQuotaCliPath: publicCliPath,
-      maxParallelism: 8'u32,
+      maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,

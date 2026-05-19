@@ -58,7 +58,7 @@ require_contains flake.nix "checks ="
 require_contains flake.nix "git-hooks.lib"
 require_contains flake.nix "shellHook = pre-commit-check.shellHook"
 
-for recipe in build test lint format fmt t bump-version bench bench-quick bench_reprobuild_core_mvp_performance e2e_reprobuild_mvp_acceptance repomix check-repo-requirements; do
+for recipe in build test lint format fmt t bump-version bench bench-quick bench_reprobuild_core_mvp_performance bench_cmake_reprobuild_vs_ninja bench_cmake_reprobuild_vs_ninja_quick bench_cmake_reprobuild_vs_ninja_medium e2e_reprobuild_mvp_acceptance repomix check-repo-requirements; do
   just --summary | tr ' ' '\n' | grep -Fxq "${recipe}" || fail "missing Justfile recipe ${recipe}"
 done
 
@@ -102,7 +102,7 @@ for suite in local-build-engine external-packages fs-snoop monitored-cache multi
   require_dir "tests/e2e/${suite}"
 done
 
-for suite in build-engine-throughput cache-consultation-latency monitor-overhead runquota-integration hcr-linker-latency; do
+for suite in build-engine-throughput cache-consultation-latency monitor-overhead runquota-integration hcr-linker-latency cmake-generator-competitiveness; do
   require_dir "benchmarks/suites/${suite}"
 done
 

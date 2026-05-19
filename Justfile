@@ -188,6 +188,30 @@ bench_reprobuild_core_mvp_performance *args:
     mkdir -p bench-results test-logs
     ./scripts/run-m23-benchmark.sh {{args}} 2> >(tee test-logs/bench_reprobuild_core_mvp_performance.log >&2)
 
+bench_cmake_reprobuild_vs_ninja *args:
+    mkdir -p bench-results test-logs
+    ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
+        --profile default \
+        --output bench-results/cmake-reprobuild-vs-ninja-default.json \
+        {{args}} \
+        2> >(tee test-logs/bench_cmake_reprobuild_vs_ninja.log >&2)
+
+bench_cmake_reprobuild_vs_ninja_quick *args:
+    mkdir -p bench-results test-logs
+    ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
+        --profile quick \
+        --output bench-results/cmake-reprobuild-vs-ninja-quick.json \
+        {{args}} \
+        2> >(tee test-logs/bench_cmake_reprobuild_vs_ninja_quick.log >&2)
+
+bench_cmake_reprobuild_vs_ninja_medium *args:
+    mkdir -p bench-results test-logs
+    ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
+        --profile medium \
+        --output bench-results/cmake-reprobuild-vs-ninja-medium.json \
+        {{args}} \
+        2> >(tee test-logs/bench_cmake_reprobuild_vs_ninja_medium.log >&2)
+
 e2e_reprobuild_mvp_acceptance:
     mkdir -p test-logs
     bash ./scripts/run-m24-acceptance.sh 2>&1 | tee test-logs/e2e_reprobuild_mvp_acceptance.log
