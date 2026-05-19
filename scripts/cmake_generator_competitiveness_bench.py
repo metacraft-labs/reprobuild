@@ -69,6 +69,48 @@ def run_command(args, cwd=None, env=None, check=True):
     return result
 
 
+def parse_ninja_stats(output):
+    metrics = []
+    in_metrics = False
+    metric_line = re.compile(
+        r"^(?P<name>.+?)\s+"
+        r"(?P<count>\d+)\s+"
+        r"(?P<avg>[-+]?(?:\d+(?:\.\d*)?|\.\d+))\s+"
+        r"(?P<total>[-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*$"
+    )
+
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if in_metrics:
+                break
+            continue
+        if re.match(r"^metric\s+count\s+avg \(us\)\s+total \(ms\)\s*$", stripped):
+            in_metrics = True
+            continue
+        if not in_metrics:
+            continue
+        match = metric_line.match(stripped)
+        if not match:
+            continue
+        metrics.append({
+            "name": match.group("name").strip(),
+            "count": int(match.group("count")),
+            "avgUs": float(match.group("avg")),
+            "totalMs": float(match.group("total")),
+        })
+
+    return {"metrics": metrics}
+
+
+def enrich_ninja_stats_result(result):
+    combined = result["stdoutTail"] + "\n" + result["stderrTail"]
+    result["ninjaDiagnostics"] = {
+        "mode": "stats",
+        **parse_ninja_stats(combined),
+    }
+
+
 class CommandFailure(Exception):
     def __init__(self, result):
         self.result = result
@@ -249,17 +291,25 @@ def configure_project(cmake, ninja, generator, source_dir, binary_dir, c_compile
     return run_command(args)
 
 
-def build_command(cmake, binary_dir, target, parallel):
+def build_command(cmake, binary_dir, target, parallel, native_args=None):
     args = [cmake, "--build", binary_dir]
     if target:
         args.extend(["--target", target])
     if parallel:
         args.extend(["--parallel", str(parallel)])
+    if native_args:
+        args.append("--")
+        args.extend(native_args)
     return args
 
 
-def run_build(cmake, binary_dir, target, parallel, env=None):
-    result = run_command(build_command(cmake, binary_dir, target, parallel), env=env)
+def run_build(cmake, binary_dir, target, parallel, env=None, ninja_diagnostics="none"):
+    native_args = []
+    if ninja_diagnostics == "stats":
+        native_args.extend(["-d", "stats"])
+    result = run_command(build_command(cmake, binary_dir, target, parallel, native_args), env=env)
+    if ninja_diagnostics == "stats":
+        enrich_ninja_stats_result(result)
     enrich_reprobuild_result(result)
     return result
 
@@ -426,17 +476,20 @@ def benchmark_project(args, context, key, source_dir, configure_args, build_targ
     rq_proc, rq_socket, rq_log = start_runquota(runquotad, project_root / "runquota")
     rb_env = repro_env(base_env, rb_bin, rq_socket, rb_bin_dir, parallel)
     try:
-        ninja_clean = run_build(cmake, ninja_bin, build_target, parallel)
+        ninja_clean = run_build(cmake, ninja_bin, build_target, parallel,
+                                ninja_diagnostics=args.ninja_diagnostics)
         rb_clean = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
         add_pair(project_report, "clean_build", ninja_clean, rb_clean)
 
-        ninja_noop = run_build(cmake, ninja_bin, build_target, parallel)
+        ninja_noop = run_build(cmake, ninja_bin, build_target, parallel,
+                               ninja_diagnostics=args.ninja_diagnostics)
         rb_noop = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
         add_pair(project_report, "noop_rebuild", ninja_noop, rb_noop)
 
-        run_build(cmake, ninja_bin, "clean", parallel)
+        run_build(cmake, ninja_bin, "clean", parallel, ninja_diagnostics=args.ninja_diagnostics)
         run_build(cmake, rb_bin_dir, "clean", parallel, env=rb_env)
-        ninja_after_clean = run_build(cmake, ninja_bin, build_target, parallel)
+        ninja_after_clean = run_build(cmake, ninja_bin, build_target, parallel,
+                                      ninja_diagnostics=args.ninja_diagnostics)
         rb_cache_hit = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
         add_pair(project_report, "post_clean_rebuild", ninja_after_clean, rb_cache_hit)
 
@@ -444,7 +497,8 @@ def benchmark_project(args, context, key, source_dir, configure_args, build_targ
             edit_source = compile_command_source(ninja_bin, source_needle)
             if edit_source and edit_source.exists():
                 append_comment(edit_source, key)
-                ninja_incremental = run_build(cmake, ninja_bin, build_target, parallel)
+                ninja_incremental = run_build(cmake, ninja_bin, build_target, parallel,
+                                              ninja_diagnostics=args.ninja_diagnostics)
                 rb_incremental = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
                 project_report["incrementalSource"] = str(edit_source)
                 add_pair(project_report, "single_source_incremental_rebuild", ninja_incremental, rb_incremental)
@@ -453,7 +507,8 @@ def benchmark_project(args, context, key, source_dir, configure_args, build_targ
 
         if custom_seed:
             append_seed(custom_seed, key)
-            ninja_generated = run_build(cmake, ninja_bin, build_target, parallel)
+            ninja_generated = run_build(cmake, ninja_bin, build_target, parallel,
+                                        ninja_diagnostics=args.ninja_diagnostics)
             rb_generated = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
             project_report["customCommandInput"] = str(custom_seed)
             add_pair(project_report, "generated_source_custom_command_rebuild", ninja_generated, rb_generated)
@@ -535,6 +590,10 @@ def build_report(args):
                 "cxxCompiler": {"path": str(cxx_compiler), "version": command_version([cxx_compiler, "--version"])},
             },
             "parallel": args.parallel,
+            "ninjaDiagnostics": {
+                "enabled": args.ninja_diagnostics != "none",
+                "mode": args.ninja_diagnostics,
+            },
             "thresholdControl": {
                 "defaultEnv": "REPROBUILD_CMAKE_BENCH_MAX_RATIO",
                 "scenarioEnvPrefix": "REPROBUILD_CMAKE_BENCH_MAX_RATIO_",
@@ -613,6 +672,8 @@ def parse_args():
     parser.add_argument("--c-compiler", default="")
     parser.add_argument("--cxx-compiler", default="")
     parser.add_argument("--parallel", type=int, default=max(1, default_parallel))
+    parser.add_argument("--ninja-diagnostics", choices=["stats", "none"], default="stats",
+                        help="collect Ninja native diagnostics for Ninja build scenarios")
     parser.add_argument("--fresh", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 

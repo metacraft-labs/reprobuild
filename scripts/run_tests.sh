@@ -6,6 +6,13 @@ mkdir -p build/test-bin build/nimcache
 found=0
 while IFS= read -r -d '' test_file; do
   found=1
+  python3 "${test_file}"
+done < <(
+  find tests -type f -name 'test_*.py' -print0
+)
+
+while IFS= read -r -d '' test_file; do
+  found=1
   test_name="$(basename "${test_file}" .nim)"
   nim c -r \
     --threads:on \
