@@ -1213,6 +1213,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
         var cacheMissInputChanged = false
         var dependencyLaunched = false
+        var outputsPresentBeforeLookup = false
+        var outputsPresentKnown = false
         for dep in action.deps:
           if launchedSucceeded.contains(dep):
             dependencyLaunched = true
@@ -1221,17 +1223,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
           runResult.trace(id, "cache-skipped", "dependency-launched")
         elif action.cacheable:
+          if config.rebuildMissingOutputsOnCacheHit:
+            let outputStatStart = statStart()
+            outputsPresentBeforeLookup = action.allOutputsExist()
+            outputsPresentKnown = true
+            finishStat("repro output stat", outputStatStart)
           let lookupStart = statStart()
           let lookup = cache.lookupActionResult(cas, action.weakFingerprint,
-            action.actionCachePolicy)
+            action.actionCachePolicy,
+            verifyOutputBlobs = not outputsPresentBeforeLookup)
           finishStat("repro cache lookup", lookupStart)
           case lookup.status
           of aclHit:
             var outputsPresent = true
             if config.rebuildMissingOutputsOnCacheHit:
-              let outputStatStart = statStart()
-              outputsPresent = action.allOutputsExist()
-              finishStat("repro output stat", outputStatStart)
+              outputsPresent = outputsPresentBeforeLookup
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 evidenceFromRecord(action, lookup.record)
@@ -1251,9 +1257,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           of aclHybridCutoff:
             var outputsPresent = true
             if config.rebuildMissingOutputsOnCacheHit:
-              let outputStatStart = statStart()
-              outputsPresent = action.allOutputsExist()
-              finishStat("repro output stat", outputStatStart)
+              outputsPresent = outputsPresentBeforeLookup
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 evidenceFromRecord(action, lookup.record)
@@ -1279,9 +1283,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           else:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
 
-        let outputStatStart = statStart()
-        let outputsPresent = action.allOutputsExist()
-        finishStat("repro output stat", outputStatStart)
+        var outputsPresent: bool
+        if outputsPresentKnown:
+          outputsPresent = outputsPresentBeforeLookup
+        else:
+          let outputStatStart = statStart()
+          outputsPresent = action.allOutputsExist()
+          finishStat("repro output stat", outputStatStart)
         if outputsPresent and not cacheMissInputChanged and
             not dependencyLaunched and
             not action.needsExecutionForPolicy():
@@ -1326,15 +1334,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let finished = executeBuiltinAction(plan.action)
           finishStat("repro builtin execute", builtinStart)
           let idx = idToIndex.resultIndex(id)
+          let previousCacheDecision = runResult.results[idx].cacheDecision
           runResult.results[idx] = finished
           runResult.results[idx].dependencyPolicyKind =
             plan.action.dependencyPolicy.kind
           runResult.results[idx].cacheDecision =
             if actionsById[finished.id].cacheable and
-                runResult.results[idx].cacheDecision == cdNotCacheable:
+                previousCacheDecision == cdNotCacheable:
               cdMiss
             else:
-              runResult.results[idx].cacheDecision
+              previousCacheDecision
           statuses[id] = finished.status
           if finished.status == asSucceeded:
             let evidenceStart = statStart()
@@ -1435,15 +1444,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       running.delete(runIndex)
 
       let idx = idToIndex.resultIndex(finished.id)
+      let previousCacheDecision = runResult.results[idx].cacheDecision
       runResult.results[idx] = finished
       runResult.results[idx].dependencyPolicyKind =
         runningItem.action.dependencyPolicy.kind
       runResult.results[idx].monitorDepfilePath = runningItem.action.monitorDepfile
       runResult.results[idx].cacheDecision =
-        if actionsById[finished.id].cacheable and runResult.results[idx].cacheDecision == cdNotCacheable:
+        if actionsById[finished.id].cacheable and previousCacheDecision == cdNotCacheable:
           cdMiss
         else:
-          runResult.results[idx].cacheDecision
+          previousCacheDecision
       statuses[finished.id] = finished.status
       if finished.status == asSucceeded:
         let action = runningItem.action

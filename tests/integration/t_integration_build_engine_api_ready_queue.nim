@@ -27,6 +27,10 @@ proc pathExists(path: string): bool =
   except OSError:
     false
 
+proc removeIfExists(path: string) =
+  if fileExists(path):
+    removeFile(path)
+
 proc ensureRunQuotaDaemon(repoRoot, tempRoot: string): tuple[process: owned(Process),
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
@@ -368,7 +372,7 @@ suite "integration_build_engine_api_ready_queue":
         stderrLimit: 256 * 1024))
     check not fileExists(outputPath)
 
-  test "cache hit with present outputs does not restore, missing output does":
+  test "cache hit skips CAS verification only when outputs are present":
     let tempRoot = createTempDir("repro-cache-hit-present-output", "")
     defer: removeDir(tempRoot)
 
@@ -386,7 +390,7 @@ suite "integration_build_engine_api_ready_queue":
       cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
       cacheable = true, weakFingerprint = weak("cache-present-output"),
       commandStatsId = "cache-present-output")
-    let cacheOnlyAction = action("cache-present-output",
+    let restoreOnlyAction = action("cache-present-output",
       [app, "fixture-action", "cache-should-not-run", markerPath, outputPath],
       cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
       cacheable = true, weakFingerprint = weak("cache-present-output"),
@@ -409,17 +413,28 @@ suite "integration_build_engine_api_ready_queue":
     check readFile(outputPath) == "seed:cache input\n"
     var actionCache = openActionCache(cacheRoot / "action-cache")
     let cas = openLocalCas(cacheRoot / "cas")
-    check actionCache.lookupActionResult(cas, weak("cache-present-output"),
-      ffpHybrid).status == aclHit
+    let seededLookup = actionCache.lookupActionResult(cas,
+      weak("cache-present-output"), ffpHybrid)
+    check seededLookup.status == aclHit
     check actionCache.lookupActionResult(cas, weak("cache-present-output"),
       ffpChecksum).status == aclMissNoRecord
+    let casObject = cas.blobPath(seededLookup.record.outputs[0].blob.digest)
+
+    removeFile(outputPath)
+    let warmMissing = runOne(restoreOnlyAction)
+    check warmMissing.status == asCacheHit
+    check warmMissing.cacheDecision == cdHit
+    check not warmMissing.launched
+    check not fileExists(markerPath)
+    check readFile(outputPath) == "seed:cache input\n"
 
     let presentContent = "local present output\n"
     writeFile(outputPath, presentContent)
     let presentMtime = fromUnix(1_700_000_100)
     setLastModificationTime(outputPath, presentMtime)
+    removeIfExists(casObject)
 
-    let warmPresent = runOne(cacheOnlyAction)
+    let warmPresent = runOne(restoreOnlyAction)
     check warmPresent.status == asCacheHit
     check warmPresent.cacheDecision == cdHit
     check not warmPresent.launched
@@ -427,13 +442,14 @@ suite "integration_build_engine_api_ready_queue":
     check readFile(outputPath) == presentContent
     check getFileInfo(outputPath).lastWriteTime == presentMtime
 
+    writeFile(casObject, "corrupted")
     removeFile(outputPath)
-    let warmMissing = runOne(cacheOnlyAction)
-    check warmMissing.status == asCacheHit
-    check warmMissing.cacheDecision == cdHit
-    check not warmMissing.launched
-    check not fileExists(markerPath)
-    check readFile(outputPath) == "seed:cache input\n"
+    let corruptMissing = runOne(restoreOnlyAction)
+    check corruptMissing.status == asSucceeded
+    check corruptMissing.cacheDecision == cdRejected
+    check corruptMissing.launched
+    check fileExists(markerPath)
+    check readFile(outputPath) == "bad uncached output\n"
 
   test "runBuild honors explicit checksum action-cache policy":
     let tempRoot = createTempDir("repro-cache-explicit-checksum", "")

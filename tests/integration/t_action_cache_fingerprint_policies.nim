@@ -221,6 +221,9 @@ suite "integration_action_cache_fingerprint_policies":
       writeFile(casObject, "corrupted")
       removeIfExists(outputPath)
 
+      let skippedLookup = cache.lookupActionResult(cas, weakFor("corrupt"),
+        ffpChecksum, verifyOutputBlobs = false)
+      check skippedLookup.status == aclHit
       let lookup = cache.lookupActionResult(cas, weakFor("corrupt"), ffpChecksum)
       check lookup.status == aclRejectedCorruptOutput
       check not fileExists(outputPath)

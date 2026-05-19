@@ -516,7 +516,8 @@ proc verifyOutputs(cas: LocalCas; record: ActionResultRecord) =
     cas.verifyBlob(output.blob)
 
 proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
-                         weak: ContentDigest; policy: FileFingerprintPolicy): ActionCacheLookup =
+                         weak: ContentDigest; policy: FileFingerprintPolicy;
+                         verifyOutputBlobs = true): ActionCacheLookup =
   let key = digestKey(weak)
   if not cache.byWeak.hasKey(key):
     return ActionCacheLookup(status: aclMissNoRecord)
@@ -536,11 +537,12 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
     if candidate.strongFingerprint != record.strongFingerprint:
       sawInputChange = true
       continue
-    try:
-      cas.verifyOutputs(candidate)
-    except CacheIntegrityError as err:
-      return ActionCacheLookup(status: aclRejectedCorruptOutput,
-        record: candidate, message: err.msg)
+    if verifyOutputBlobs:
+      try:
+        cas.verifyOutputs(candidate)
+      except CacheIntegrityError as err:
+        return ActionCacheLookup(status: aclRejectedCorruptOutput,
+          record: candidate, message: err.msg)
     if hybridCutoff:
       cache.appendRecord(candidate)
       return ActionCacheLookup(status: aclHybridCutoff, record: candidate)
