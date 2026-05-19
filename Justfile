@@ -121,6 +121,49 @@ e2e_reprobuild_generated_cmake_provider_suite:
         ctest --output-on-failure -R '^e2e_cmake_reprobuild_generated_feature_matrix$' \
         2>&1 | tee "$log"
 
+e2e_reprobuild_cmake_m11_coverage_default:
+    mkdir -p test-logs
+    log="$(pwd)/test-logs/e2e_reprobuild_cmake_m11_coverage_default.log" && \
+    cd ../reprobuild-cmake/build && \
+        ctest --output-on-failure -R '^e2e_cmake_reprobuild_(compatibility_suite|generated_feature_matrix|real_project_matrix)$' \
+        2>&1 | tee "$log"
+
+e2e_reprobuild_cmake_m11_coverage_medium:
+    mkdir -p test-logs
+    log="$(pwd)/test-logs/e2e_reprobuild_cmake_m11_coverage_medium.log" && \
+    cd ../reprobuild-cmake && \
+        build/bin/cmake \
+          -DCMAKE_COMMAND="$(pwd)/build/bin/cmake" \
+          -DTEST_MODE=real_project_matrix \
+          -DTEST_REAL_PROJECT_PROFILE=medium \
+          -DTEST_BINARY_ROOT="$(pwd)/build/Tests/RunCMake/ReprobuildGenerator/m11-real-project-matrix-medium-just" \
+          -DTEST_C_COMPILER="$$(cd build && bin/cmake -LA -N . | sed -n 's/^CMAKE_C_COMPILER:[^=]*=//p')" \
+          -DTEST_CXX_COMPILER="$$(cd build && bin/cmake -LA -N . | sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p')" \
+          -DTEST_REPROBUILD_SOURCE_ROOT="$(cd ../reprobuild && pwd)" \
+          -DTEST_REPROBUILD_REPO="$(cd ../reprobuild && pwd)" \
+          -DTEST_REPROBUILD_REPRO="$(cd ../reprobuild && pwd)/build/bin/repro" \
+          -DTEST_RUNQUOTAD="$(cd ../runquota && pwd)/build/bin/runquotad" \
+          -P Tests/RunCMake/ReprobuildGenerator/e2e.cmake \
+        2>&1 | tee "$log"
+
+e2e_reprobuild_cmake_m11_coverage_nightly:
+    mkdir -p test-logs
+    log="$(pwd)/test-logs/e2e_reprobuild_cmake_m11_coverage_nightly.log" && \
+    cd ../reprobuild-cmake && \
+        build/bin/cmake \
+          -DCMAKE_COMMAND="$(pwd)/build/bin/cmake" \
+          -DTEST_MODE=real_project_matrix \
+          -DTEST_REAL_PROJECT_PROFILE=nightly \
+          -DTEST_BINARY_ROOT="$(pwd)/build/Tests/RunCMake/ReprobuildGenerator/m11-real-project-matrix-nightly-just" \
+          -DTEST_C_COMPILER="$$(cd build && bin/cmake -LA -N . | sed -n 's/^CMAKE_C_COMPILER:[^=]*=//p')" \
+          -DTEST_CXX_COMPILER="$$(cd build && bin/cmake -LA -N . | sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p')" \
+          -DTEST_REPROBUILD_SOURCE_ROOT="$(cd ../reprobuild && pwd)" \
+          -DTEST_REPROBUILD_REPO="$(cd ../reprobuild && pwd)" \
+          -DTEST_REPROBUILD_REPRO="$(cd ../reprobuild && pwd)/build/bin/repro" \
+          -DTEST_RUNQUOTAD="$(cd ../runquota && pwd)/build/bin/runquotad" \
+          -P Tests/RunCMake/ReprobuildGenerator/e2e.cmake \
+        2>&1 | tee "$log"
+
 lint:
     mkdir -p test-logs
     ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
