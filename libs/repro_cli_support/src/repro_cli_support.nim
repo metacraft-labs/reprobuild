@@ -21,9 +21,14 @@ proc renderUsage*(programName: string): string =
   if programName == "repro":
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH]\n       " & programName &
-      " watch [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " & programName &
-      " develop <target[#name]> --tool-provisioning=nix|tarball [--work-root=PATH] -- <command> [args...]\n       " & programName &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH]\n       " &
+          programName &
+      " watch [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " &
+          programName &
+      " develop <target[#name]> --tool-provisioning=path|nix|tarball [--work-root=PATH] -- <command> [args...]\n       " &
+          programName &
+      " develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n       " &
+          programName &
       " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]"
   elif programName == "repro-fs-snoop":
     programName & " " & versionString() & "\nusage: " & programName &
@@ -139,7 +144,8 @@ proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
     hdMetadataEnvelope))
   base / "worktrees" / (safePathSegment(tail, "worktree") & "-" & hash[0 .. 15])
 
-proc outputDirForTarget(target: ParsedBuildTarget; explicitWorkRoot = ""): string =
+proc outputDirForTarget(target: ParsedBuildTarget;
+    explicitWorkRoot = ""): string =
   let scopedRoot = scopedWorktreeRoot(target.modulePath, explicitWorkRoot)
   if scopedRoot.len > 0:
     return scopedRoot / "build" / target.outputName
@@ -297,7 +303,8 @@ proc lowerDependencyPolicy(actionId, depfile: string;
         "action " & actionId & " supplies legacy depfile and " &
           "automatic monitor dependencyPolicy; remove depfile or use " &
           "makeDepfilePolicy")
-    DependencyGatheringPolicy(kind: dgAutomaticMonitor, completeness: decComplete)
+    DependencyGatheringPolicy(kind: dgAutomaticMonitor,
+        completeness: decComplete)
   of bdpMakeDepfile:
     let selectedDepfile =
       if policy.depfile.len > 0:
@@ -496,7 +503,7 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
       "unknown build target/action id: " & selectedActionId &
         (if available.len > 0:
           " (available: " & available.join(", ") & ")"
-         else: " (project defines no build actions or targets)"))
+        else: " (project defines no build actions or targets)"))
 
   var selected = initHashSet[string]()
   var visitingTargets = initHashSet[string]()
@@ -754,7 +761,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if lowered.actions.len == 0:
       result.exitCode = 0
       return
-    let buildResult = runBuild(graph(lowered.actions, lowered.pools), BuildEngineConfig(
+    let buildResult = runBuild(graph(lowered.actions, lowered.pools),
+        BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       runQuotaCliPath: publicCliPath,
       maxParallelism: 8'u32,
@@ -768,7 +776,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       echo "action: " & item.id & " status=" & $item.status &
         " launched=" & $item.launched & " cache=" & $item.cacheDecision &
         " runquota=" & item.runQuotaBackend &
-        " socket=" & (if item.runQuotaSocket.len > 0: item.runQuotaSocket else: "default") &
+        " socket=" & (if item.runQuotaSocket.len >
+            0: item.runQuotaSocket else: "default") &
         " lease=" & $item.leaseId &
         " evidence=depfile:" & $item.evidence.depfileInputs.len
     echo "buildReport: " & reportPath
@@ -857,6 +866,248 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
   if res.output.len > 0:
     stdout.write(res.output)
   res.exitCode
+
+proc sourceLocation(file: string): SourceLocation =
+  SourceLocation(file: file, line: 1)
+
+proc cmakeNixExecutable(name: string): string =
+  case name
+  of "cmake":
+    "bin/cmake"
+  of "cc":
+    "bin/cc"
+  of "c++":
+    "bin/c++"
+  else:
+    "bin/" & name
+
+proc cmakeNixSelector(name: string): string =
+  case name
+  of "cmake":
+    "nixpkgs#cmake"
+  of "cc", "c++":
+    "nixpkgs#clang"
+  else:
+    "nixpkgs#" & name
+
+proc cmakeToolUse(sourceRoot, name: string): InterfaceToolUse =
+  let loc = sourceLocation(sourceRoot / "CMakeLists.txt")
+  InterfaceToolUse(
+    rawConstraint: name & " >=1.0 <2.0",
+    packageSelector: name,
+    executableName: name,
+    nixProvisioning: @[InterfaceNixProvisioning(
+      packageName: name,
+      selector: cmakeNixSelector(name),
+      executablePath: cmakeNixExecutable(name),
+      packageId: cmakeNixSelector(name),
+      lockIdentity: cmakeNixSelector(name),
+      location: loc)],
+    location: loc)
+
+proc cmakeDevelopArtifact(sourceRoot: string): ProjectInterfaceArtifact =
+  artifactFor(ProjectInterface(
+    projectName: "cmakeDevelop",
+    packageName: "cmakeDevelop",
+    toolUses: @[
+      cmakeToolUse(sourceRoot, "cmake"),
+      cmakeToolUse(sourceRoot, "cc"),
+      cmakeToolUse(sourceRoot, "c++")
+    ],
+    location: sourceLocation(sourceRoot / "CMakeLists.txt")))
+
+proc cmakeDevelopOutDir(sourceRoot, workRoot: string): string =
+  let scopedRoot = scopedWorktreeRoot(sourceRoot / "CMakeLists.txt", workRoot)
+  if scopedRoot.len > 0:
+    scopedRoot / "develop-cmake"
+  else:
+    sourceRoot / ".repro" / "develop-cmake"
+
+proc profileFor(identity: PathOnlyBuildIdentity; executableName: string):
+    PathOnlyToolProfile =
+  for profile in identity.profiles:
+    if profile.executableName == executableName:
+      return profile
+  raise newException(ValueError,
+    "cmake develop profile did not resolve required tool: " & executableName)
+
+proc pathListJoin(values: openArray[string]; separator: char): string =
+  var filtered: seq[string] = @[]
+  for value in values:
+    if value.len > 0 and not filtered.contains(value):
+      filtered.add(value)
+  filtered.join($separator)
+
+proc profilePrefixes(identity: PathOnlyBuildIdentity): seq[string] =
+  for profile in identity.profiles:
+    if profile.selectedStorePath.len > 0 and dirExists(
+        profile.selectedStorePath):
+      if not result.contains(profile.selectedStorePath):
+        result.add(profile.selectedStorePath)
+    let binDir = parentDir(profile.resolvedExecutablePath)
+    if binDir.len > 0:
+      let prefix = parentDir(binDir)
+      if prefix.len > 0 and dirExists(prefix) and not result.contains(prefix):
+        result.add(prefix)
+
+proc pkgConfigPaths(prefixes: openArray[string]): seq[string] =
+  for prefix in prefixes:
+    for suffix in ["lib/pkgconfig", "share/pkgconfig"]:
+      let candidate = prefix / suffix
+      if dirExists(candidate) and not result.contains(candidate):
+        result.add(candidate)
+
+proc cmakeEscape(value: string): string =
+  value.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$")
+
+proc cmakeSet(name, kind, value: string; force = true): string =
+  if value.len == 0:
+    return ""
+  "set(" & name & " \"" & cmakeEscape(value) & "\" CACHE " & kind &
+    " \"Generated by repro develop --cmake\"" &
+    (if force: " FORCE" else: "") & ")\n"
+
+proc sdkRootForCMake(): string =
+  let explicit = getEnv("SDKROOT")
+  if explicit.len > 0 and dirExists(explicit):
+    return explicit
+
+proc writeCMakeToolchain(path: string; identity: PathOnlyBuildIdentity;
+                         mode: ToolProvisioningMode; identityPath,
+                         inspectionPath: string) =
+  let cProfile = identity.profileFor("cc")
+  let cxxProfile = identity.profileFor("c++")
+  let prefixes = profilePrefixes(identity)
+  let prefixValue = pathListJoin(prefixes, ';')
+  let pkgValue = pathListJoin(pkgConfigPaths(prefixes), PathSep)
+  let sdkRoot = sdkRootForCMake()
+  var content = "# Generated by repro develop --cmake. Do not edit.\n"
+  content.add(cmakeSet("CMAKE_C_COMPILER", "FILEPATH",
+    cProfile.resolvedExecutablePath))
+  content.add(cmakeSet("CMAKE_CXX_COMPILER", "FILEPATH",
+    cxxProfile.resolvedExecutablePath))
+  content.add(cmakeSet("CMAKE_PREFIX_PATH", "STRING", prefixValue))
+  when defined(macosx):
+    content.add(cmakeSet("CMAKE_OSX_SYSROOT", "PATH", sdkRoot))
+  else:
+    content.add(cmakeSet("CMAKE_SYSROOT", "PATH", sdkRoot))
+  content.add(cmakeSet("REPROBUILD_CMAKE_TOOL_PORTABILITY", "STRING",
+    mode.modeName))
+  content.add(cmakeSet("REPROBUILD_TOOL_PROFILE_ARTIFACT", "FILEPATH",
+    identityPath))
+  content.add(cmakeSet("REPROBUILD_TOOL_PROFILE_INSPECTION", "FILEPATH",
+    inspectionPath))
+  if pkgValue.len > 0:
+    content.add("set(ENV{PKG_CONFIG_PATH} \"" & cmakeEscape(pkgValue) & "\")\n")
+  createDir(parentDir(path))
+  writeFile(path, content)
+
+proc shellAssign(name, value: string): string =
+  name & "=" & q(value) & "\n"
+
+proc writeCMakeConfigureWrapper(path: string; identity: PathOnlyBuildIdentity;
+                                mode: ToolProvisioningMode; cmakeBinary,
+                                toolchainPath, identityPath, inspectionPath,
+                                sourceRoot, reproPath, sourceRepoRoot: string) =
+  let cmakeProfile = identity.profileFor("cmake")
+  let selectedCmake =
+    if cmakeBinary.len > 0:
+      absolutePath(cmakeBinary)
+    else:
+      cmakeProfile.resolvedExecutablePath
+  let prefixes = profilePrefixes(identity)
+  let prefixValue = pathListJoin(prefixes, ';')
+  let pkgValue = pathListJoin(pkgConfigPaths(prefixes), PathSep)
+  let sdkRoot = sdkRootForCMake()
+  var content = "#!/bin/sh\nset -eu\n"
+  content.add(shellAssign("cmake_bin", selectedCmake))
+  content.add(shellAssign("toolchain_file", toolchainPath))
+  content.add(shellAssign("prefix_path", prefixValue))
+  content.add(shellAssign("pkg_config_path", pkgValue))
+  content.add(shellAssign("sdk_root", sdkRoot))
+  content.add(shellAssign("repro_cli", reproPath))
+  content.add(shellAssign("repro_source_root", sourceRepoRoot))
+  content.add("export REPROBUILD_REPRO=\"$repro_cli\"\n")
+  content.add("export REPROBUILD_SOURCE_ROOT=\"$repro_source_root\"\n")
+  content.add("export REPRO_TOOL_PROFILE_ARTIFACT=" & q(identityPath) & "\n")
+  content.add("export REPRO_TOOL_PROFILE_INSPECTION=" & q(inspectionPath) & "\n")
+  content.add("export REPRO_PROJECT_ROOT=" & q(sourceRoot) & "\n")
+  content.add("if [ -n \"$pkg_config_path\" ]; then\n")
+  content.add("  if [ -n \"${PKG_CONFIG_PATH:-}\" ]; then\n")
+  content.add("    export PKG_CONFIG_PATH=\"$pkg_config_path:$PKG_CONFIG_PATH\"\n")
+  content.add("  else\n")
+  content.add("    export PKG_CONFIG_PATH=\"$pkg_config_path\"\n")
+  content.add("  fi\n")
+  content.add("fi\n")
+  content.add("extra_sysroot_args=\n")
+  content.add("if [ -n \"$sdk_root\" ]; then\n")
+  when defined(macosx):
+    content.add("  extra_sysroot_args=\"-DCMAKE_OSX_SYSROOT=$sdk_root\"\n")
+  else:
+    content.add("  extra_sysroot_args=\"-DCMAKE_SYSROOT=$sdk_root\"\n")
+  content.add("fi\n")
+  content.add("exec \"$cmake_bin\" -G Reprobuild ")
+  content.add("-DCMAKE_TOOLCHAIN_FILE=\"$toolchain_file\" ")
+  content.add("-DCMAKE_PREFIX_PATH=\"$prefix_path\" ")
+  content.add("-DREPROBUILD_CMAKE_TOOL_PORTABILITY=" & mode.modeName & " ")
+  content.add("-DREPROBUILD_TOOL_PROFILE_ARTIFACT=" & q(identityPath) & " ")
+  content.add("-DREPROBUILD_TOOL_PROFILE_INSPECTION=" & q(inspectionPath) & " ")
+  content.add("$extra_sysroot_args \"$@\"\n")
+  createDir(parentDir(path))
+  writeFile(path, content)
+  setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
+    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
+                            command: openArray[string]; workRoot,
+                            cmakeBinary: string): int =
+  if mode notin {tpmPathOnly, tpmNix}:
+    raise newException(ValueError,
+      "repro develop --cmake requires --tool-provisioning=path|nix")
+  let sourceRoot = absolutePath(target)
+  if not dirExists(sourceRoot):
+    raise newException(IOError, "cmake source directory not found: " & sourceRoot)
+  if not fileExists(sourceRoot / "CMakeLists.txt"):
+    raise newException(IOError,
+      "cmake source directory does not contain CMakeLists.txt: " & sourceRoot)
+  if cmakeBinary.len > 0 and not fileExists(cmakeBinary):
+    raise newException(IOError, "cmake binary not found: " & cmakeBinary)
+
+  let outDir = cmakeDevelopOutDir(sourceRoot, workRoot)
+  let interfacePath = outDir / "cmake-develop-interface.rbsz"
+  let artifact = cmakeDevelopArtifact(sourceRoot)
+  writeInterfaceArtifact(interfacePath, artifact)
+  let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
+  let toolchainPath = outDir / "reprobuild-cmake-toolchain.cmake"
+  let wrapperPath = outDir / "bin" / "repro-cmake-configure"
+  writeCMakeToolchain(toolchainPath, resolved.identity, mode,
+    resolved.identityPath, resolved.inspectionPath)
+  writeCMakeConfigureWrapper(wrapperPath, resolved.identity, mode, cmakeBinary,
+    toolchainPath, resolved.identityPath, resolved.inspectionPath, sourceRoot,
+    stablePublicCliPath(), reprobuildLibraryWorkDir())
+
+  echo "repro develop: cmake profile active (tool-provisioning=" &
+    mode.modeName & ")"
+  echo "project: " & artifact.projectInterface.projectName
+  echo "interface: " & interfacePath
+  echo "toolIdentity: " & resolved.identityPath
+  echo "inspection: " & resolved.inspectionPath
+  echo "toolchain: " & toolchainPath
+  echo "configureWrapper: " & wrapperPath
+  echo "cachePortability: " & (if mode == tpmNix: "portable" else: "local-only")
+  echo "binDirs: " & binDirsForDevelop(resolved.identity).join($PathSep)
+  for profile in resolved.identity.profiles:
+    echo "tool: " & profile.executableName & " " &
+      profile.resolvedExecutablePath
+
+  if command.len == 0:
+    return 0
+  var devCommand = @["sh", "-c",
+    "PATH=" & q(parentDir(wrapperPath) & $PathSep &
+      binDirsForDevelop(resolved.identity).join($PathSep) & $PathSep &
+      getEnv("PATH")) & " " & shellCommand(command)]
+  runInDevelopEnvironment(devCommand, sourceRoot, resolved.identity,
+    resolved.identityPath, resolved.inspectionPath, interfacePath)
 
 proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var target = ""
@@ -986,17 +1237,27 @@ proc runDevelopCommand(args: openArray[string]): int =
   var command: seq[string] = @[]
   var afterSeparator = false
   var workRoot = ""
+  var cmakeMode = false
+  var cmakeBinary = ""
   for arg in args:
     if afterSeparator:
       command.add(arg)
     elif arg == "--":
       afterSeparator = true
+    elif arg == "--cmake":
+      cmakeMode = true
     elif arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
     elif arg == "--tool-provisioning":
       raise newException(ValueError,
         "--tool-provisioning requires an inline value, for example " &
         "--tool-provisioning=nix")
+    elif arg.startsWith("--cmake-binary="):
+      cmakeBinary = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--cmake-binary":
+      raise newException(ValueError,
+        "--cmake-binary requires an inline value, for example " &
+          "--cmake-binary=/path/to/cmake")
     elif arg.startsWith("--work-root="):
       workRoot = arg.split("=", maxsplit = 1)[1]
     elif arg == "--work-root":
@@ -1011,6 +1272,12 @@ proc runDevelopCommand(args: openArray[string]): int =
 
   if target.len == 0:
     raise newException(ValueError, "missing develop target")
+
+  if cmakeMode:
+    if mode == tpmUnspecified:
+      raise newException(ValueError,
+        "repro develop --cmake requires --tool-provisioning=path|nix")
+    return runCMakeDevelopCommand(target, mode, command, workRoot, cmakeBinary)
 
   let modulePath = absolutePath(moduleForTarget(target))
   if not fileExists(modulePath):
@@ -1029,8 +1296,9 @@ proc runDevelopCommand(args: openArray[string]): int =
   if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
     raise newException(ValueError,
       "typed tool provisioning is required for uses declarations; refusing " &
-        "implicit PATH fallback. Pass --tool-provisioning=nix or " &
-        "--tool-provisioning=tarball to resolve a provisioned development environment.")
+        "implicit PATH fallback. Pass --tool-provisioning=path for the weak " &
+        "local profile, or --tool-provisioning=nix|tarball for a provisioned " &
+        "development environment.")
 
   if mode == tpmUnspecified:
     echo "repro develop: no external tools requested"

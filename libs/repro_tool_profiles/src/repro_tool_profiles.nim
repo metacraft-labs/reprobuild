@@ -1,4 +1,4 @@
-import std/[httpclient, json, os, osproc, sequtils, strutils, times]
+import std/[httpclient, json, os, osproc, sequtils, strutils, tables, times]
 
 import cbor
 import repro_core
@@ -279,6 +279,59 @@ proc findExecutableOnPath(executableName: string;
       return absolutePath(candidate)
   ""
 
+proc sidecarToolProfile(path: string): Table[string, string] =
+  let sidecar = path & ".repro-tool-profile"
+  if not fileExists(sidecar):
+    return
+  for line in readFile(sidecar).splitLines:
+    let stripped = line.strip()
+    if stripped.len == 0 or stripped.startsWith("#") or
+        stripped == "reprobuild-tool-profile-v1":
+      continue
+    let marker = stripped.find('=')
+    if marker <= 0:
+      continue
+    result[stripped[0 ..< marker]] = stripped[marker + 1 .. ^1]
+
+proc applySidecarProfile(profile: var PathOnlyToolProfile;
+                         sidecar: Table[string, string]) =
+  if sidecar.len == 0:
+    return
+  if sidecar.hasKey("installMethod"):
+    profile.installMethod = sidecar["installMethod"]
+  if sidecar.hasKey("packageId"):
+    profile.packageId = sidecar["packageId"]
+  if sidecar.hasKey("nixSelector"):
+    profile.nixSelector = sidecar["nixSelector"]
+  if sidecar.hasKey("declaredExecutablePath"):
+    profile.declaredExecutablePath = sidecar["declaredExecutablePath"]
+  if sidecar.hasKey("selectedStorePath"):
+    profile.selectedStorePath = sidecar["selectedStorePath"]
+  if sidecar.hasKey("lockIdentity"):
+    profile.lockIdentity = sidecar["lockIdentity"]
+  if sidecar.hasKey("realizationBoundary"):
+    profile.realizationBoundary = sidecar["realizationBoundary"]
+  if sidecar.hasKey("pathSearchList"):
+    profile.pathSearchList = splitPathList(sidecar["pathSearchList"])
+  if sidecar.hasKey("resolvedExecutablePath"):
+    profile.resolvedExecutablePath = sidecar["resolvedExecutablePath"]
+  if sidecar.hasKey("adapterStrength"):
+    case sidecar["adapterStrength"]
+    of "strong":
+      profile.adapterStrength = asStrong
+    of "weak":
+      profile.adapterStrength = asWeak
+    else:
+      discard
+  if sidecar.hasKey("cachePortability"):
+    case sidecar["cachePortability"]
+    of "portable":
+      profile.cachePortability = cpPortable
+    of "local-only":
+      profile.cachePortability = cpLocalOnly
+    else:
+      discard
+
 proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
                           pathValue = getEnv("PATH")): PathOnlyToolProfile =
   let searchList = splitPathList(pathValue)
@@ -299,6 +352,7 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
     resolvedExecutablePath: resolved,
     adapterStrength: asWeak,
     cachePortability: cpLocalOnly)
+  result.applySidecarProfile(sidecarToolProfile(resolved))
 
   for probe in configuredProbes(useDef.packageSelector, useDef.executableName):
     let probeResult = runProbe(resolved, probe)
@@ -499,11 +553,13 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
       useDef.packageSelector & "\": " & selected.executablePath)
   TarballAcquisitionPlan(
     packageSelector: useDef.packageSelector,
-    packageId: if selected.packageId.len > 0: selected.packageId else: selected.url,
+    packageId: if selected.packageId.len >
+    0: selected.packageId else: selected.url,
     url: selected.url,
     mirrors: selected.mirrors,
     sha256: sha256,
-    archiveType: if selected.archiveType.len > 0: selected.archiveType else: "tar.gz",
+    archiveType: if selected.archiveType.len >
+    0: selected.archiveType else: "tar.gz",
     declaredExecutablePath: selected.executablePath,
     stripComponents: selected.stripComponents,
     lockIdentity: if selected.lockIdentity.len > 0:
@@ -663,7 +719,8 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
       raise newException(OSError,
         "tool-resolution failed: existing tarball realization lacks " &
         plan.declaredExecutablePath & ": " & prefix)
-    return (prefix: prefix, archivePath: "", selectedUrl: selectedUrlFromReceipt(prefix))
+    return (prefix: prefix, archivePath: "",
+        selectedUrl: selectedUrlFromReceipt(prefix))
 
   let downloaded = verifiedDownload(plan, storeRoot)
   let tempPrefix = tmpRoot / ("extract." & $getCurrentProcessId() & "." &
@@ -780,7 +837,8 @@ proc metadataFor(identity: ToolActionIdentity): DynamicValue =
     entry("resolvedExecutablePath", cborText(identity.resolvedExecutablePath)),
     entry("probes", cborArray(probeValues)),
     entry("adapterStrength", cborText(strengthName(identity.adapterStrength))),
-    entry("cachePortability", cborText(portabilityName(identity.cachePortability))),
+    entry("cachePortability", cborText(portabilityName(
+        identity.cachePortability))),
     entry("actionFingerprint", cborText(digestHex(identity.actionFingerprint)))
   ])
 

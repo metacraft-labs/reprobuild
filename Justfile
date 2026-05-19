@@ -87,6 +87,33 @@ e2e_codetracer_dev_environment_slice:
         tests/e2e/codetracer-subset/t_e2e_codetracer_dev_environment_slice.nim \
         2>&1 | tee test-logs/e2e_codetracer_dev_environment_slice.log
 
+e2e_repro_develop_cmake_configure_and_build:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_develop_cmake_configure_and_build \
+        --out:build/test-bin/e2e_repro_develop_cmake_configure_and_build \
+        tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim \
+        2>&1 | tee test-logs/e2e_repro_develop_cmake_configure_and_build.log
+
+e2e_repro_develop_cmake_tool_identity_changes_cache_key:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_develop_cmake_tool_identity_changes_cache_key \
+        --out:build/test-bin/e2e_repro_develop_cmake_tool_identity_changes_cache_key \
+        tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim \
+        2>&1 | tee test-logs/e2e_repro_develop_cmake_tool_identity_changes_cache_key.log
+
+e2e_repro_develop_cmake_path_vs_nix_portability:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_develop_cmake_path_vs_nix_portability \
+        --out:build/test-bin/e2e_repro_develop_cmake_path_vs_nix_portability \
+        tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim \
+        2>&1 | tee test-logs/e2e_repro_develop_cmake_path_vs_nix_portability.log
+
 lint:
     mkdir -p test-logs
     ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
