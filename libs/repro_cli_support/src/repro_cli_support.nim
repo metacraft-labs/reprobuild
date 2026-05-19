@@ -706,28 +706,35 @@ proc statsJson(stats: BuildStats): JsonNode =
     })
   %*{"metrics": metrics}
 
+proc actionResultJson(item: ActionResult): JsonNode =
+  # Windows: include exitCode/stdout/stderr in the build report so failed
+  # actions can be diagnosed without re-running them. Without this, the JSON
+  # report only carries status/cacheDecision/etc. and failures look opaque.
+  %*{
+    "id": item.id,
+    "status": $item.status,
+    "exitCode": item.exitCode,
+    "launched": item.launched,
+    "cacheDecision": $item.cacheDecision,
+    "dependencyPolicyKind": $item.dependencyPolicyKind,
+    "runQuotaBackend": item.runQuotaBackend,
+    "runQuotaSocket": item.runQuotaSocket,
+    "leaseId": item.leaseId,
+    "stdout": item.stdout,
+    "stderr": item.stderr,
+    "evidence": evidenceJson(item.evidence)
+  }
+
 proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
+                      providerCompileResult,
                       buildResult: BuildRunResult) =
+  var providerCompileActions = newJArray()
+  for item in providerCompileResult.results:
+    providerCompileActions.add(actionResultJson(item))
   var actions = newJArray()
   for item in buildResult.results:
-    # Windows: include exitCode/stdout/stderr in the build report so failed
-    # actions can be diagnosed without re-running them. Without this, the JSON
-    # report only carries status/cacheDecision/etc. and failures look opaque.
-    actions.add(%*{
-      "id": item.id,
-      "status": $item.status,
-      "exitCode": item.exitCode,
-      "launched": item.launched,
-      "cacheDecision": $item.cacheDecision,
-      "dependencyPolicyKind": $item.dependencyPolicyKind,
-      "runQuotaBackend": item.runQuotaBackend,
-      "runQuotaSocket": item.runQuotaSocket,
-      "leaseId": item.leaseId,
-      "stdout": item.stdout,
-      "stderr": item.stderr,
-      "evidence": evidenceJson(item.evidence)
-    })
+    actions.add(actionResultJson(item))
   var trace = newJArray()
   for event in buildResult.trace:
     trace.add(%*{
@@ -740,6 +747,7 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
     "providerBinary": provider.outputBinaryPath,
     "providerFingerprint": digestHex(provider.providerFingerprint),
     "providerCompileOutput": provider.executionResult.output,
+    "providerCompileActions": providerCompileActions,
     "providerSnapshot": refresh.persistedSnapshotPath,
     "providerInvocations": refresh.invoked.len,
     "actions": actions,
@@ -754,6 +762,49 @@ proc hasFailedActions(buildResult: BuildRunResult): bool =
     if item.status in {asFailed, asBlocked}:
       return true
 
+proc providerCompileBuildAction(plan: ProviderCompilePlan;
+                                modulePath, interfacePath, artifactPath,
+                                publicCliPath, workDir: string): BuildAction =
+  var inputs = plan.inputSources
+  if not inputs.contains(interfacePath):
+    inputs.add(interfacePath)
+  action("__repro_provider_compile", @[
+    publicCliPath,
+    "__repro-compile-provider",
+    "--module", modulePath,
+    "--out", plan.outputBinaryPath,
+    "--artifact", artifactPath,
+    "--interface", interfacePath,
+    "--work-dir", workDir
+  ],
+    cwd = workDir,
+    inputs = inputs,
+    outputs = @[plan.outputBinaryPath, artifactPath],
+    commandStatsId = "repro provider compile edge",
+    cacheable = true,
+    weakFingerprint = plan.compileEdge.actionFingerprint,
+    dependencyPolicy = declaredOnlyPolicy())
+
+proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
+                                            artifactPath: string) =
+  if artifactPath.len == 0 or not fileExists(artifactPath):
+    return
+  if providerCompileArtifactFresh(artifactPath, plan.outputBinaryPath,
+      plan.interfaceFingerprint, plan.providerFingerprint):
+    return
+  removeFile(artifactPath)
+
+proc providerCompileFailure(buildResult: BuildRunResult): string =
+  for item in buildResult.results:
+    if item.status in {asFailed, asBlocked}:
+      var parts = @[item.id & " " & $item.status]
+      if item.stderr.len > 0:
+        parts.add(item.stderr)
+      if item.stdout.len > 0:
+        parts.add(item.stdout)
+      return parts.join("\n")
+  "provider compile failed"
+
 proc identityPaths(outDir: string; mode: ToolProvisioningMode):
     tuple[identityPath: string; inspectionPath: string] =
   case mode
@@ -767,25 +818,102 @@ proc identityPaths(outDir: string; mode: ToolProvisioningMode):
     (identityPath: outDir / "path-only-tool-identities.rbtp",
       inspectionPath: outDir / "path-only-tool-identities.inspect.json")
 
-proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
-                             outDir: string;
-                             mode: ToolProvisioningMode):
-    tuple[identity: PathOnlyBuildIdentity; identityPath: string;
-      inspectionPath: string] =
-  let identity = toolBuildIdentity(artifact, mode,
-    storeRoot = outDir / "tool-store")
-  let paths = identityPaths(outDir, mode)
-  writePathOnlyBuildIdentity(paths.identityPath, identity)
-  writeInspectionJson(paths.inspectionPath, identity)
-  (identity: identity, identityPath: paths.identityPath,
-    inspectionPath: paths.inspectionPath)
-
 proc modeName(mode: ToolProvisioningMode): string =
   case mode
   of tpmPathOnly: "path"
   of tpmNix: "nix"
   of tpmTarball: "tarball"
   else: "unspecified"
+
+proc addCacheField(payload: var string; value: string) =
+  payload.add($value.len)
+  payload.add(":")
+  payload.add(value)
+  payload.add("\n")
+
+proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
+                          mode: ToolProvisioningMode): string =
+  var payload = ""
+  payload.addCacheField("reprobuild.toolIdentityCache.v1")
+  payload.addCacheField(mode.modeName)
+  payload.addCacheField(artifact.projectInterface.projectName)
+  payload.addCacheField(artifact.projectInterface.packageName)
+  payload.addCacheField(digestHex(artifact.interfaceFingerprint))
+  if mode == tpmPathOnly:
+    payload.addCacheField(getEnv("PATH"))
+  for useDef in artifact.projectInterface.toolUses:
+    payload.addCacheField(useDef.rawConstraint)
+    payload.addCacheField(useDef.packageSelector)
+    payload.addCacheField(useDef.executableName)
+    payload.addCacheField(useDef.policyPath.join("/"))
+    for nix in useDef.nixProvisioning:
+      payload.addCacheField(nix.selector)
+      payload.addCacheField(nix.executablePath)
+      payload.addCacheField(nix.expressionFile)
+      payload.addCacheField(nix.packageId)
+      payload.addCacheField(nix.lockIdentity)
+    for tarball in useDef.tarballProvisioning:
+      payload.addCacheField(tarball.url)
+      payload.addCacheField(tarball.mirrors.join("\n"))
+      payload.addCacheField(tarball.sha256)
+      payload.addCacheField(tarball.archiveType)
+      payload.addCacheField($tarball.stripComponents)
+      payload.addCacheField(tarball.executablePath)
+      payload.addCacheField(tarball.packageId)
+      payload.addCacheField(tarball.lockIdentity)
+  digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
+
+proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
+                        artifact: ProjectInterfaceArtifact;
+                        stableIdentityPath,
+                        stableInspectionPath: string):
+    tuple[hit: bool; identity: PathOnlyBuildIdentity] =
+  let key = toolIdentityCacheKey(artifact, mode)
+  let cacheDir = outDir / "tool-identity-cache"
+  let cacheIdentityPath = cacheDir / (key & ".rbtp")
+  let cacheInspectionPath = cacheDir / (key & ".inspect.json")
+  if not fileExists(cacheIdentityPath):
+    return
+  try:
+    let identity = readPathOnlyBuildIdentity(cacheIdentityPath)
+    if identity.interfaceFingerprint != artifact.interfaceFingerprint:
+      return
+    writePathOnlyBuildIdentity(stableIdentityPath, identity)
+    if fileExists(cacheInspectionPath):
+      createDir(parentDir(stableInspectionPath))
+      copyFile(cacheInspectionPath, stableInspectionPath)
+    else:
+      writeInspectionJson(stableInspectionPath, identity)
+    return (hit: true, identity: identity)
+  except CatchableError:
+    return (hit: false, identity: PathOnlyBuildIdentity())
+
+proc writeToolIdentityCache(outDir: string; mode: ToolProvisioningMode;
+                            artifact: ProjectInterfaceArtifact;
+                            identity: PathOnlyBuildIdentity) =
+  let key = toolIdentityCacheKey(artifact, mode)
+  let cacheDir = outDir / "tool-identity-cache"
+  writePathOnlyBuildIdentity(cacheDir / (key & ".rbtp"), identity)
+  writeInspectionJson(cacheDir / (key & ".inspect.json"), identity)
+
+proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
+                             outDir: string;
+                             mode: ToolProvisioningMode):
+    tuple[identity: PathOnlyBuildIdentity; identityPath: string;
+      inspectionPath: string] =
+  let paths = identityPaths(outDir, mode)
+  let cached = cachedToolIdentity(outDir, mode, artifact,
+    paths.identityPath, paths.inspectionPath)
+  if cached.hit:
+    return (identity: cached.identity, identityPath: paths.identityPath,
+      inspectionPath: paths.inspectionPath)
+  let identity = toolBuildIdentity(artifact, mode,
+    storeRoot = outDir / "tool-store")
+  writePathOnlyBuildIdentity(paths.identityPath, identity)
+  writeInspectionJson(paths.inspectionPath, identity)
+  writeToolIdentityCache(outDir, mode, artifact, identity)
+  (identity: identity, identityPath: paths.identityPath,
+    inspectionPath: paths.inspectionPath)
 
 proc runQuotaSocketDiagnostic(): string =
   let socket = getEnv("RUNQUOTA_SOCKET", "")
@@ -1056,12 +1184,49 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     let providerBinaryPath = outDir / "provider" / "project-provider"
     let providerArtifactPath = outDir / "provider-compile.rbsz"
+    var bypassRunQuota = false
+    if mode == tpmPathOnly and not isRunQuotaDaemonReachable():
+      bypassRunQuota = true
+      echo "repro build: WARNING runquotad is not reachable; using " &
+        "path-mode RunQuota bypass (no quotas/leases enforced). Start " &
+        "`runquotad` and rerun to use the real lease coordinator."
     echo "providerCompile: started"
     let providerCompileStart = statStart(statsEnabled)
-    let provider = compileProviderBinary(modulePath, providerBinaryPath,
-      artifact.interfaceFingerprint, providerArtifactPath, compileWorkDir)
+    let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
+      artifact.interfaceFingerprint, compileWorkDir)
+    invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
+    let providerCompileAction = providerCompileBuildAction(providerPlan,
+      modulePath, interfacePath, providerArtifactPath, publicCliPath,
+      compileWorkDir)
+    var providerCompileConfig = BuildEngineConfig(
+      cacheRoot: outDir / "build-engine-cache",
+      runQuotaCliPath: publicCliPath,
+      maxParallelism: 1'u32,
+      stdoutLimit: 1024 * 1024,
+      stderrLimit: 1024 * 1024,
+      rebuildMissingOutputsOnCacheHit: true,
+      bypassRunQuota: bypassRunQuota)
+    providerCompileConfig.statsEnabled = statsEnabled
+    let providerCompileResult = runBuild(graph([providerCompileAction]),
+      providerCompileConfig)
+    buildStats.mergeStats(providerCompileResult.stats)
     finishStat(buildStats, statsEnabled, "repro provider compile",
       providerCompileStart)
+    for item in providerCompileResult.results:
+      echo "providerCompileAction: " & item.id & " status=" & $item.status &
+        " launched=" & $item.launched & " cache=" & $item.cacheDecision
+    if providerCompileResult.hasFailedActions():
+      raise newException(OSError, providerCompileFailure(providerCompileResult))
+    if not fileExists(providerArtifactPath):
+      raise newException(IOError,
+        "provider compile edge did not write artifact: " & providerArtifactPath)
+    let provider = readProviderCompileArtifact(providerArtifactPath)
+    if not providerCompileArtifactFresh(providerArtifactPath,
+        providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
+        providerPlan.providerFingerprint):
+      raise newException(IOError,
+        "provider compile artifact is stale after edge execution: " &
+          providerArtifactPath)
     let providerArtifactId = digestHex(provider.providerFingerprint)
     echo "providerBinary: " & provider.outputBinaryPath
     echo "providerCompileArtifact: " & providerArtifactPath
@@ -1102,20 +1267,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if lowered.actions.len == 0:
       result.exitCode = 0
       return
-    # Path-mode escape hatch: when the local RunQuota daemon is not reachable
-    # (e.g. nothing started runquotad and `--tool-provisioning=path` is being
-    # used in a smoke test), fall back to spawning actions directly with
-    # osproc so the build can still finish. The bypass is only allowed in
-    # path-only mode; full provisioning still requires a real daemon.
-    # Windows: pre-port checkouts used to gate this purely on
-    # `defined(windows)`. Now that runquota supports named pipes, the gate is
-    # platform-agnostic and reflects actual daemon availability.
-    var bypassRunQuota = false
-    if mode == tpmPathOnly and not isRunQuotaDaemonReachable():
-      bypassRunQuota = true
-      echo "repro build: WARNING runquotad is not reachable; using " &
-        "path-mode RunQuota bypass (no quotas/leases enforced). Start " &
-        "`runquotad` and rerun to use the real lease coordinator."
     var progressRenderer = newBuildProgressRenderer(progressMode)
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
@@ -1140,7 +1291,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
     let reportPath = outDir / "build-report.json"
-    writeBuildReport(reportPath, provider, refresh, buildResult)
+    writeBuildReport(reportPath, provider, refresh, providerCompileResult,
+      buildResult)
     result.buildReportPath = reportPath
     for item in buildResult.results:
       echo "action: " & item.id & " status=" & $item.status &
@@ -1239,6 +1391,41 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
   if res.output.len > 0:
     stdout.write(res.output)
   res.exitCode
+
+proc valueAfterFlag(args: openArray[string]; flag: string): string =
+  var i = 0
+  while i < args.len:
+    if args[i] == flag and i + 1 < args.len:
+      return args[i + 1]
+    inc i
+  ""
+
+proc runProviderCompileHelper(args: openArray[string]): int =
+  let modulePath = valueAfterFlag(args, "--module")
+  let outputPath = valueAfterFlag(args, "--out")
+  let artifactPath = valueAfterFlag(args, "--artifact")
+  let interfacePath = valueAfterFlag(args, "--interface")
+  let workDir = valueAfterFlag(args, "--work-dir")
+  for (name, value) in [
+    ("--module", modulePath),
+    ("--out", outputPath),
+    ("--artifact", artifactPath),
+    ("--interface", interfacePath),
+    ("--work-dir", workDir)
+  ]:
+    if value.len == 0:
+      stderr.writeLine("repro provider compile: missing " & name)
+      return 2
+  try:
+    let interfaceArtifact = readInterfaceArtifact(interfacePath)
+    let provider = compileProviderBinary(modulePath, outputPath,
+      interfaceArtifact.interfaceFingerprint, artifactPath, workDir)
+    echo "providerBinary: " & provider.outputBinaryPath
+    echo "providerArtifact: " & digestHex(provider.providerFingerprint)
+    return 0
+  except CatchableError as err:
+    stderr.writeLine("repro provider compile: error: " & err.msg)
+    return 1
 
 proc sourceLocation(file: string): SourceLocation =
   SourceLocation(file: file, line: 1)
@@ -1865,6 +2052,13 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runRunQuotaHelperCli(helperArgs)
+  if args.len > 0 and args[0] == "__repro-compile-provider":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runProviderCompileHelper(helperArgs)
   if programName == "repro" and args.len >= 2 and args[0] == "debug" and
       args[1] == "fs-snoop":
     let fsArgs =

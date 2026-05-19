@@ -1397,6 +1397,8 @@ suite "e2e_local_reprobuild_project_build":
     writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
     let output = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
     check output.contains("defaultTarget: stamp")
+    check output.contains(
+      "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
     check output.contains("scheduler: actions=4")
     check output.contains("action: write-source status=asSucceeded launched=true")
     check output.contains("action: ensure-out status=asSucceeded launched=true")
@@ -1416,6 +1418,8 @@ suite "e2e_local_reprobuild_project_build":
 
     let progressOutput = build(reproBin, projectRoot, repoRoot, getEnv("PATH"),
       extraArgs = ["--progress=plain"])
+    check progressOutput.contains(
+      "providerCompileAction: __repro_provider_compile")
     check progressOutput.contains("repro [")
     check progressOutput.contains("4/4 100%")
 
@@ -1432,6 +1436,10 @@ suite "e2e_local_reprobuild_project_build":
       it{"name"}.getStr() == "repro build total")
     check statsReport{"stats"}{"metrics"}.getElems().anyIt(
       it{"name"}.getStr() == "repro scheduler total")
+    let providerCompileActions = statsReport{"providerCompileActions"}.getElems()
+    check providerCompileActions.len == 1
+    check providerCompileActions[0]{"id"}.getStr() == "__repro_provider_compile"
+    check providerCompileActions[0]{"launched"}.getBool() == false
 
   test "public CLI work root override isolates metadata by worktree":
     let repoRoot = getCurrentDir()

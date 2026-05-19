@@ -37,6 +37,7 @@ proc writeFixtureTool(binDir: string) =
   writeFile(toolPath,
     "#!/bin/sh\n" &
     "if [ \"${1:-}\" = \"--version\" ]; then\n" &
+    "  echo probe >> \"$0.probes\"\n" &
     "  echo 'm8-fixture-tool 1.0.0'\n" &
     "  exit 0\n" &
     "fi\n" &
@@ -91,6 +92,8 @@ suite "e2e_path_only_tool_interfaces":
     check identity.profiles[0].probes.len == 1
     check identity.profiles[0].probes[0].spec.name == "version"
     check identity.profiles[0].probes[0].output.contains("m8-fixture-tool 1.0.0")
+    check readFile(binDir / "m8-fixture-tool.probes").splitLines.
+      filterIt(it.len > 0).len == 1
     check identity.actionIdentities[0].pathSearchList == identity.profiles[0].
       pathSearchList
     check identity.actionIdentities[0].resolvedExecutablePath ==
@@ -99,6 +102,15 @@ suite "e2e_path_only_tool_interfaces":
     check readFile(inspectionPath).contains("\"installMethod\": \"path\"")
     check readFile(inspectionPath).contains("\"adapterStrength\": \"weak\"")
     check readFile(inspectionPath).contains("\"cachePortability\": \"local-only\"")
+
+    let cachedOutput = requireSuccess(@[reproBin, "build", target,
+      "--tool-provisioning=path"], repoRoot, pathValue)
+    let cachedIdentity = readPathOnlyBuildIdentity(
+      valueAfter(cachedOutput, "toolIdentity:"))
+    check cachedIdentity.actionIdentities[0].actionFingerprint ==
+      identity.actionIdentities[0].actionFingerprint
+    check readFile(binDir / "m8-fixture-tool.probes").splitLines.
+      filterIt(it.len > 0).len == 1
 
     let extraDir = tempRoot / "extra-path-entry"
     createDir(extraDir)
@@ -111,6 +123,8 @@ suite "e2e_path_only_tool_interfaces":
       identity.profiles[0].resolvedExecutablePath
     check changedIdentity.actionIdentities[0].actionFingerprint !=
       identity.actionIdentities[0].actionFingerprint
+    check readFile(binDir / "m8-fixture-tool.probes").splitLines.
+      filterIt(it.len > 0).len == 2
 
     let noFlagOutput = requireFailure(@[reproBin, "build", target], repoRoot,
       pathValue)

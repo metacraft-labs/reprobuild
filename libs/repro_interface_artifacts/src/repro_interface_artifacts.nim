@@ -95,6 +95,14 @@ type
     declaredOutputs*: seq[string]
     actionFingerprint*: ContentDigest
 
+  ProviderCompilePlan* = object
+    inputSources*: seq[string]
+    outputBinaryPath*: string
+    compilerCommand*: seq[string]
+    compileEdge*: ProviderCompileEdge
+    interfaceFingerprint*: ContentDigest
+    providerFingerprint*: ContentDigest
+
   ProviderCompileArtifact* = object
     inputSources*: seq[string]
     outputBinaryPath*: string
@@ -836,6 +844,56 @@ proc reproLibPathFlags(workDir: string): seq[string] =
           result.add("--path:" & src)
   result.sort(system.cmp[string])
 
+proc discoverNimSources*(rootModulePath: string): seq[string] =
+  let root = parentDir(rootModulePath)
+  var dirs = @[root]
+  while dirs.len > 0:
+    let dir = dirs.pop()
+    for kind, path in walkDir(dir):
+      let tail = splitPath(path).tail
+      case kind
+      of pcDir:
+        if tail notin [".git", ".repro", "CMakeFiles", "nimcache-provider"]:
+          dirs.add(path)
+      of pcFile:
+        if path.endsWith(".nim"):
+          result.add(path)
+      else:
+        discard
+  result.sort(system.cmp[string])
+
+proc interfaceExtractionFingerprint*(modulePath: string;
+                                     workDir = getCurrentDir()): ContentDigest =
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.interfaceExtract.v1")
+  payload.writeString(os.normalizedPath(modulePath))
+  payload.writeString(os.normalizedPath(workDir))
+  payload.writeString(nimCompilerPath())
+  payload.writeStringSeq(reproLibPathFlags(workDir))
+  for path in discoverNimSources(modulePath):
+    payload.writeString(os.normalizedPath(path))
+    let content = toBytes(readFile(path))
+    payload.writeU64Le(uint64(content.len))
+    payload.add(content)
+  blake3DomainDigest(payload, hdActionFingerprint)
+
+proc interfaceExtractionCachePath(artifactPath: string): string =
+  artifactPath & ".inputs"
+
+proc cachedInterfaceArtifact(artifactPath, stubPath: string;
+                             fingerprint: ContentDigest):
+    Option[ProjectInterfaceArtifact] =
+  let cachePath = interfaceExtractionCachePath(artifactPath)
+  if not (fileExists(artifactPath) and fileExists(stubPath) and
+      fileExists(cachePath)):
+    return none(ProjectInterfaceArtifact)
+  if readFile(cachePath).strip() != toHex(fingerprint.bytes):
+    return none(ProjectInterfaceArtifact)
+  try:
+    return some(readInterfaceArtifact(artifactPath))
+  except CatchableError:
+    return none(ProjectInterfaceArtifact)
+
 proc firstExistingPrefix(candidates: openArray[string]; header: string;
                          libraryNames: openArray[string]): string =
   proc hasLibrary(prefix, libraryName: string): bool =
@@ -942,6 +1000,11 @@ proc externalHashFlags(workDir = ""): seq[string] =
 
 proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  workDir = getCurrentDir()): ProjectInterfaceArtifact =
+  let inputFingerprint = interfaceExtractionFingerprint(modulePath, workDir)
+  let cached = cachedInterfaceArtifact(artifactPath, stubPath, inputFingerprint)
+  if cached.isSome:
+    return cached.get()
+
   let moduleDir = parentDir(modulePath)
   let moduleName = splitFile(modulePath).name
   let tempParent = workDir / "build" / "m7-temp"
@@ -975,14 +1038,9 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
         "\n" & execution.output)
-  readInterfaceArtifact(artifactPath)
-
-proc discoverNimSources*(rootModulePath: string): seq[string] =
-  let root = parentDir(rootModulePath)
-  for path in walkDirRec(root):
-    if path.endsWith(".nim"):
-      result.add(path)
-  result.sort(system.cmp[string])
+  result = readInterfaceArtifact(artifactPath)
+  writeFile(interfaceExtractionCachePath(artifactPath), toHex(
+      inputFingerprint.bytes))
 
 proc providerFingerprintFor*(inputSources: openArray[string];
                              interfaceFingerprint: ContentDigest): ContentDigest =
@@ -995,37 +1053,23 @@ proc providerFingerprintFor*(inputSources: openArray[string];
     payload.add(content)
   blake3DomainDigest(payload, hdActionFingerprint)
 
-proc compileProviderBinary*(modulePath, outputBinaryPath: string;
-                            interfaceFingerprint: ContentDigest;
-                            artifactPath = "";
-                            workDir = getCurrentDir()): ProviderCompileArtifact =
+proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
   # On Windows, the Nim compiler emits executables with a .exe suffix even
   # when `--out:` is given without one. Normalize the requested path so the
   # rest of the pipeline (cache lookup, startProcess) sees the real artifact
   # location. ExeExt is "" on POSIX so this is a no-op there.
-  let outputBinaryPath =
-    when defined(windows):
-      if outputBinaryPath.endsWith("." & ExeExt) or ExeExt.len == 0:
-        outputBinaryPath
-      else:
-        outputBinaryPath & "." & ExeExt
-    else:
+  when defined(windows):
+    if outputBinaryPath.endsWith("." & ExeExt) or ExeExt.len == 0:
       outputBinaryPath
-  let sources = discoverNimSources(modulePath)
-  let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint)
-  if artifactPath.len > 0 and fileExists(artifactPath) and fileExists(outputBinaryPath):
-    try:
-      let cached = readProviderCompileArtifact(artifactPath)
-      if cached.providerFingerprint == providerFingerprint and
-          cached.interfaceFingerprint == interfaceFingerprint and
-          cached.outputBinaryPath == outputBinaryPath and
-          cached.outputBinaryFingerprint == casDigest(toBytes(readFile(outputBinaryPath))):
-        return cached
-    except CatchableError:
-      discard
-  createDir(parentDir(outputBinaryPath))
+    else:
+      outputBinaryPath & "." & ExeExt
+  else:
+    outputBinaryPath
+
+proc providerCompileCommand*(modulePath, outputBinaryPath: string;
+                             workDir = getCurrentDir()): seq[string] =
   let nimcache = parentDir(outputBinaryPath) / "nimcache-provider"
-  var command = @[
+  result = @[
     nimCompilerPath(), "c",
     "--define:reproProviderMode",
     "--path:" & parentDir(modulePath),
@@ -1033,21 +1077,66 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     "--out:" & outputBinaryPath,
     modulePath
   ]
-  # Windows: pass workDir so externalHashFlags can locate the vendored
-  # blake3/xxhash headers under workDir/references/mold/...
-  command.insert(externalHashFlags(workDir), 2)
-  command.insert(reproLibPathFlags(workDir), 2)
-  let edge = providerCompileEdge(sources, outputBinaryPath, command,
+  result.insert(externalHashFlags(workDir), 2)
+  result.insert(reproLibPathFlags(workDir), 2)
+
+proc providerCompilePlan*(modulePath, outputBinaryPath: string;
+                          interfaceFingerprint: ContentDigest;
+                          workDir = getCurrentDir()): ProviderCompilePlan =
+  let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
+  let sources = discoverNimSources(modulePath)
+  let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint)
+  let command = providerCompileCommand(modulePath, normalizedOutputPath, workDir)
+  let edge = providerCompileEdge(sources, normalizedOutputPath, command,
     interfaceFingerprint, providerFingerprint, workDir = workDir)
-  let execution = runCommand(command, cwd = workDir)
-  result = ProviderCompileArtifact(
+  ProviderCompilePlan(
     inputSources: sources,
-    outputBinaryPath: outputBinaryPath,
+    outputBinaryPath: normalizedOutputPath,
     compilerCommand: command,
     compileEdge: edge,
     interfaceFingerprint: interfaceFingerprint,
-    providerFingerprint: providerFingerprint,
-    outputBinaryFingerprint: casDigest(toBytes(readFile(outputBinaryPath))),
+    providerFingerprint: providerFingerprint)
+
+proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
+                                   interfaceFingerprint,
+                                   providerFingerprint: ContentDigest): bool =
+  let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
+  if not (fileExists(artifactPath) and fileExists(normalizedOutputPath)):
+    return false
+  try:
+    let cached = readProviderCompileArtifact(artifactPath)
+    cached.providerFingerprint == providerFingerprint and
+      cached.interfaceFingerprint == interfaceFingerprint and
+      cached.outputBinaryPath == normalizedOutputPath and
+      cached.outputBinaryFingerprint == casDigest(toBytes(readFile(
+          normalizedOutputPath)))
+  except CatchableError:
+    false
+
+proc compileProviderBinary*(modulePath, outputBinaryPath: string;
+                            interfaceFingerprint: ContentDigest;
+                            artifactPath = "";
+                            workDir = getCurrentDir()): ProviderCompileArtifact =
+  let plan = providerCompilePlan(modulePath, outputBinaryPath,
+    interfaceFingerprint, workDir)
+  if artifactPath.len > 0 and providerCompileArtifactFresh(artifactPath,
+      plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint):
+    return readProviderCompileArtifact(artifactPath)
+  createDir(parentDir(plan.outputBinaryPath))
+  let execution = runCommand(plan.compilerCommand, cwd = workDir)
+  if not fileExists(plan.outputBinaryPath):
+    raise newException(IOError,
+      "provider compilation did not write binary: " & plan.outputBinaryPath &
+        "\n" & execution.output)
+  result = ProviderCompileArtifact(
+    inputSources: plan.inputSources,
+    outputBinaryPath: plan.outputBinaryPath,
+    compilerCommand: plan.compilerCommand,
+    compileEdge: plan.compileEdge,
+    interfaceFingerprint: interfaceFingerprint,
+    providerFingerprint: plan.providerFingerprint,
+    outputBinaryFingerprint: casDigest(toBytes(readFile(
+        plan.outputBinaryPath))),
     executionResult: execution)
   if artifactPath.len > 0:
     writeProviderCompileArtifact(artifactPath, result)
