@@ -21,6 +21,7 @@ for libName in [
   "repro_dsl_stdlib",
   "repro_home_intent",
   "repro_home_generations",
+  "repro_home_apply",
   "repro_interface_artifacts",
   "repro_tool_profiles",
   "repro_local_store",

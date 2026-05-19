@@ -110,7 +110,7 @@ suite "M61 repro home intent commands":
   test "1. `repro home add fd` writes fd into activity default:":
     let dir = tmpDir("add-default")
     let path = copyFixture("cli_seed.nim", dir)
-    let (code, output, _) = runRepro(dir, "dev-laptop", ["add", "fd"])
+    let (code, output, _) = runRepro(dir, "dev-laptop", ["add", "fd", "--no-apply"])
     check code == 0
     let body = readFile(path)
     # `fd` lives in the activity default body at indent 4.
@@ -126,7 +126,7 @@ suite "M61 repro home intent commands":
     let dir = tmpDir("add-named-activity")
     let path = copyFixture("cli_seed.nim", dir)
     let (code, output, _) = runRepro(dir, "dev-laptop",
-      ["add", "darktable", "--activity", "photography"])
+      ["add", "darktable", "--activity", "photography", "--no-apply"])
     check code == 0
     let body = readFile(path)
     let actIdx = body.find("  activity photography:")
@@ -138,7 +138,7 @@ suite "M61 repro home intent commands":
     let dir = tmpDir("add-when-create")
     let path = copyFixture("cli_seed.nim", dir)
     let (code, output, _) = runRepro(dir, "dev-laptop",
-      ["add", "windows-terminal", "--when", "windows"])
+      ["add", "windows-terminal", "--when", "windows", "--no-apply"])
     check code == 0
     let body = readFile(path)
     # The when block lives inside activity default at indent 4; the body
@@ -154,7 +154,7 @@ suite "M61 repro home intent commands":
     let dir = tmpDir("add-if-create")
     let path = copyFixture("cli_seed.nim", dir)
     let (code, output, _) = runRepro(dir, "dev-laptop",
-      ["add", "raspi-tools", "--if", "linux and arm64"])
+      ["add", "raspi-tools", "--if", "linux and arm64", "--no-apply"])
     check code == 0
     let body = readFile(path)
     # `--if` keyword preserved when CREATING a new block. Canonical
@@ -170,9 +170,9 @@ suite "M61 repro home intent commands":
     let dir = tmpDir("add-when-finds-if")
     let path = copyFixture("cli_seed.nim", dir)
     discard runRepro(dir, "dev-laptop",
-      ["add", "raspi-tools", "--if", "linux and arm64"])
+      ["add", "raspi-tools", "--if", "linux and arm64", "--no-apply"])
     let (code, output, _) = runRepro(dir, "dev-laptop",
-      ["add", "another-pkg", "--when", "arm64 and linux"])
+      ["add", "another-pkg", "--when", "arm64 and linux", "--no-apply"])
     check code == 0
     let body = readFile(path)
     # Exactly ONE block exists for this normalized predicate, and the
@@ -190,10 +190,10 @@ suite "M61 repro home intent commands":
   test "6. `repro home remove fd` removes the line":
     let dir = tmpDir("remove-default")
     let path = copyFixture("cli_seed.nim", dir)
-    discard runRepro(dir, "dev-laptop", ["add", "fd"])
+    discard runRepro(dir, "dev-laptop", ["add", "fd", "--no-apply"])
     let before = readFile(path)
     check "    fd" in before
-    let (code, output, _) = runRepro(dir, "dev-laptop", ["remove", "fd"])
+    let (code, output, _) = runRepro(dir, "dev-laptop", ["remove", "fd", "--no-apply"])
     check code == 0
     let after = readFile(path)
     check "    fd" notin after
@@ -206,14 +206,14 @@ suite "M61 repro home intent commands":
     let dir = tmpDir("remove-scoped-activity")
     let path = copyFixture("cli_seed.nim", dir)
     # Add `fd` to two activities.
-    discard runRepro(dir, "dev-laptop", ["add", "fd"])
+    discard runRepro(dir, "dev-laptop", ["add", "fd", "--no-apply"])
     discard runRepro(dir, "dev-laptop",
-      ["add", "fd", "--activity", "photography"])
+      ["add", "fd", "--activity", "photography", "--no-apply"])
     let after1 = readFile(path)
     check after1.count("    fd") == 2
     # Remove only from `photography`.
     let (code, output, _) = runRepro(dir, "dev-laptop",
-      ["remove", "fd", "--activity", "photography"])
+      ["remove", "fd", "--activity", "photography", "--no-apply"])
     check code == 0
     let after2 = readFile(path)
     # `fd` still in default; not in photography.
@@ -229,15 +229,15 @@ suite "M61 repro home intent commands":
     let dir = tmpDir("remove-scoped-pred")
     let path = copyFixture("cli_seed.nim", dir)
     discard runRepro(dir, "dev-laptop",
-      ["add", "raspi-tools", "--if", "linux and arm64"])
-    discard runRepro(dir, "dev-laptop", ["add", "raspi-tools"])
+      ["add", "raspi-tools", "--if", "linux and arm64", "--no-apply"])
+    discard runRepro(dir, "dev-laptop", ["add", "raspi-tools", "--no-apply"])
     let beforeRm = readFile(path)
     # `raspi-tools` appears in both the bare default body and inside the
     # conditional.
     check beforeRm.count("raspi-tools") == 2
     # Scoped remove via `--when` against the IF block (normalized match):
     let (code, output, _) = runRepro(dir, "dev-laptop",
-      ["remove", "raspi-tools", "--when", "arm64 and linux"])
+      ["remove", "raspi-tools", "--when", "arm64 and linux", "--no-apply"])
     check code == 0
     let after = readFile(path)
     # Only the conditional-scoped occurrence was removed; the bare one
@@ -252,7 +252,7 @@ suite "M61 repro home intent commands":
     let dir = tmpDir("enable-current-host")
     let path = copyFixture("cli_seed.nim", dir)
     let (code, output, _) = runRepro(dir, "dev-laptop",
-      ["enable", "develop_software"])
+      ["enable", "develop_software", "--no-apply"])
     check code == 0
     let body = readFile(path)
     # dev-laptop already has [photography]; develop_software is appended.
@@ -265,7 +265,7 @@ suite "M61 repro home intent commands":
     let path = copyFixture("cli_seed.nim", dir)
     let before = readFile(path)
     let (code, output, _) = runRepro(dir, "dev-laptop",
-      ["enable", "develop_software", "--host", "other-machine"])
+      ["enable", "develop_software", "--host", "other-machine", "--no-apply"])
     check code == 0
     let after = readFile(path)
     # other-machine flipped from [] to [develop_software]; dev-laptop
@@ -310,9 +310,9 @@ suite "M61 repro home intent commands":
   test "11. `repro home why fd` traces activity, predicate, host assignment":
     let dir = tmpDir("why-fd")
     let path = copyFixture("cli_seed.nim", dir)
-    discard runRepro(dir, "dev-laptop", ["add", "fd"])
+    discard runRepro(dir, "dev-laptop", ["add", "fd", "--no-apply"])
     discard runRepro(dir, "dev-laptop",
-      ["add", "fd", "--when", "windows"])
+      ["add", "fd", "--when", "windows", "--no-apply"])
     let (code, output, _) = runRepro(dir, "dev-laptop", ["why", "fd"])
     check code == 0
     # Must mention the activity name `default` and the predicate
@@ -356,21 +356,26 @@ suite "M61 repro home intent commands":
     check "exiftool" in output
     check "dev-laptop" in output
 
-  test "14. `--now` on enable is accepted, reports deferred, intent edit still happens":
+  test "14. `--now` on enable is implicit in M63; with --no-apply the intent edit still happens":
     let dir = tmpDir("now-deferred")
     let path = copyFixture("cli_seed.nim", dir)
-    let (code, output, _) = runRepro(dir, "dev-laptop",
-      ["enable", "develop_software", "--now"])
+    # M63 contract: `--now` is the default behavior (run apply locally
+    # after the intent edit). With `--no-apply` the apply pipeline is
+    # skipped so this regression test continues to exercise the edit-
+    # only branch the M61 spec mandated.
+    let (code, ignoredOutput, _) = runRepro(dir, "dev-laptop",
+      ["enable", "develop_software", "--now", "--no-apply"])
+    discard ignoredOutput
     check code == 0
-    check "deferred" in output or "M63" in output
     let body = readFile(path)
     check "develop_software" in body
 
-  test "15. `--no-apply` is accepted-but-ignored at M61":
+  test "15. `--no-apply` defers the apply step on add/remove (M63 contract)":
     let dir = tmpDir("no-apply-flag")
     let path = copyFixture("cli_seed.nim", dir)
-    let (code, output, _) = runRepro(dir, "dev-laptop",
+    let (code, ignoredOutput, _) = runRepro(dir, "dev-laptop",
       ["add", "fd", "--no-apply"])
+    discard ignoredOutput
     check code == 0
     let body = readFile(path)
     check "    fd" in body

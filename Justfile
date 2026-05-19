@@ -553,6 +553,96 @@ integration_apply_lock_serializes:
         tests/e2e/home-generations/t_integration_apply_lock_serializes.nim \
         2>&1 | tee test-logs/integration_apply_lock_serializes.log
 
+e2e_repro_home_apply_fresh_install:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_apply_fresh_install.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_home_apply_fresh_install \
+        --out:build/test-bin/e2e_repro_home_apply_fresh_install \
+        tests/e2e/home-apply/t_e2e_repro_home_apply_fresh_install.nim \
+        2>&1 | tee test-logs/e2e_repro_home_apply_fresh_install.log
+
+e2e_repro_home_apply_noop:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_apply_noop.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_home_apply_noop \
+        --out:build/test-bin/e2e_repro_home_apply_noop \
+        tests/e2e/home-apply/t_e2e_repro_home_apply_noop.nim \
+        2>&1 | tee test-logs/e2e_repro_home_apply_noop.log
+
+e2e_repro_home_apply_partial_recovery:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_apply_partial_recovery.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_home_apply_partial_recovery \
+        --out:build/test-bin/e2e_repro_home_apply_partial_recovery \
+        tests/e2e/home-apply/t_e2e_repro_home_apply_partial_recovery.nim \
+        2>&1 | tee test-logs/e2e_repro_home_apply_partial_recovery.log
+
+e2e_repro_home_add_remove_immediate:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_add_remove_immediate.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_home_add_remove_immediate \
+        --out:build/test-bin/e2e_repro_home_add_remove_immediate \
+        tests/e2e/home-apply/t_e2e_repro_home_add_remove_immediate.nim \
+        2>&1 | tee test-logs/e2e_repro_home_add_remove_immediate.log
+
+e2e_stow_auto_discovery_and_materialization:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_stow_auto_discovery_and_materialization.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_stow_auto_discovery_and_materialization \
+        --out:build/test-bin/e2e_stow_auto_discovery_and_materialization \
+        tests/e2e/home-apply/t_e2e_stow_auto_discovery_and_materialization.nim \
+        2>&1 | tee test-logs/e2e_stow_auto_discovery_and_materialization.log
+
+e2e_stow_suppression_and_warnings:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_stow_suppression_and_warnings.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_stow_suppression_and_warnings \
+        --out:build/test-bin/e2e_stow_suppression_and_warnings \
+        tests/e2e/home-apply/t_e2e_stow_suppression_and_warnings.nim \
+        2>&1 | tee test-logs/e2e_stow_suppression_and_warnings.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

@@ -141,6 +141,12 @@ type
     quarantinedPaths*: seq[string]
     reclaimed*: seq[string]
     graceSeconds*: int
+    ranAt*: int64
+      ## Unix seconds when `gc` was invoked. Zero means "not invoked,"
+      ## non-zero means the eager GC ran (and the per-record sequences
+      ## are authoritative). The apply pipeline forwards this into
+      ## `ApplyOutcome.gcResult` so callers (and gate 1) can verify
+      ## the eager-GC step actually executed.
 
   StoreReceiptHint* = object
     ## Hint passed to `realizePrefix` so the adapter does not have to
@@ -917,6 +923,7 @@ proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
   ## `gc/pending-deletion/`, audit row, plus a sweep of the
   ## pending-deletion area for entries older than `graceSeconds`.
   result.graceSeconds = graceSeconds
+  result.ranAt = getTime().toUnix
   let dead = s.deadSet()
   for row in dead:
     let absPath = s.absolutePrefixPath(row.realizedPath)

@@ -1,18 +1,17 @@
-## `repro home` subcommands (M61).
+## `repro home` subcommands (M61 + M63).
 ##
-## Edit-only CLI surface over the M60 structural editor in
-## `libs/repro_home_intent`. Every edit goes through the library's
+## CLI surface over the M60 structural editor in
+## `libs/repro_home_intent`. Every edit goes through the editor library's
 ## public API (`addPackageReference`, `removePackageReference`,
 ## `setHostActivities`, etc.); this module does NOT bypass the editor.
 ##
-## M61 is edit-only:
-##   - `--no-apply` is accepted but ignored at this milestone (it gains
-##     meaning in M63 as the opt-out from auto-apply).
-##   - `--now` is accepted on `enable`/`disable` but currently reports a
-##     "deferred" diagnostic instead of applying anything. The intent
-##     edit still happens, so the command exits 0 — the deferred
-##     message is informational, not an error.
-##   - There is no `repro home apply` subcommand; M63 owns that.
+## M63 wires the apply pipeline:
+##   - A new `repro home apply` subcommand runs the pipeline directly.
+##   - `add`, `remove`, `enable`, `disable` run the apply pipeline
+##     inline after a successful edit unless `--no-apply` was passed.
+##   - `--now` on `enable`/`disable` is now the default behaviour (no
+##     extra effect); combining it with `--host <name>` is rejected
+##     because remote apply is deferred to M71.
 ##
 ## ## Package-catalog lookup seam
 ##
@@ -38,6 +37,7 @@ import std/[options, os, sets, strutils, tables, times]
 
 import repro_home_intent
 import repro_home_generations
+import repro_home_apply
 
 type
   PackageCatalogLookup* = proc(package: string): bool {.gcsafe.}
@@ -151,6 +151,98 @@ proc parseFlagValue(args: openArray[string]; i: var int;
   raise newException(ValueError, "internal: parseFlagValue called for " & flag)
 
 # ---------------------------------------------------------------------------
+# Apply-pipeline plumbing (M63).
+# ---------------------------------------------------------------------------
+
+proc renderStowDiagnostic(d: StowDiagnostic): string =
+  let tag =
+    case d.severity
+    of dsInfo: "info"
+    of dsWarning: "warning"
+  "repro home apply: " & tag & ": " & d.message
+
+proc renderRecovered(rec: AbortedGenerationRecord): string =
+  "repro home apply: recovered partial generation at " & rec.originalPath &
+    " -> quarantined to " & rec.quarantinedPath &
+    " (reason: " & rec.reason & ")"
+
+proc runApplyInline*(commandName: string): int =
+  ## Shared apply-pipeline runner used by `repro home apply` and by
+  ## the inline path of `add`/`remove`/`enable`/`disable`. Reports
+  ## the new generation id on stdout and any diagnostics on stderr.
+  try:
+    var opts: ApplyOptions
+    let outcome = runApply(opts)
+    for r in outcome.abortedRecovered:
+      stderr.writeLine(renderRecovered(r))
+    for d in outcome.diagnostics:
+      stderr.writeLine(renderStowDiagnostic(d))
+    case outcome.kind
+    of aokFreshApplied:
+      # Stable log line that exposes step 11 eager-GC execution to
+      # subprocess-spawning gates (e.g. gate 1). `ranAt` is zero only
+      # on the no-op branch; on the fresh-applied branch the GC ran
+      # and `reclaimed` is the list of pending-deletion entries that
+      # were unlinked (zero on a fresh apply with no prior generations).
+      echo "apply: eager gc reclaimed " & $outcome.gcResult.reclaimed.len &
+        " prefixes (ranAt " & $outcome.gcResult.ranAt & ")"
+      echo "repro home " & commandName &
+        ": applied generation " & outcome.generationIdHex
+    of aokNoOpVerified:
+      echo "repro home " & commandName &
+        ": no-op (current generation " & outcome.generationIdHex &
+        " already matches the live state)"
+    return 0
+  except EApplyIntentLoad as err:
+    stderr.writeLine("repro home " & commandName &
+      ": step 1 (load intent) failed: " & err.msg)
+    return 1
+  except EApplyRealizeFailed as err:
+    stderr.writeLine("repro home " & commandName &
+      ": step 7 (realize package " & err.packageId & " via " &
+      err.adapter & ") failed: " & err.msg)
+    return 1
+  except EApplyMaterializeFailed as err:
+    stderr.writeLine("repro home " & commandName &
+      ": step 8 (materialize " & err.absoluteOutputPath & ") failed: " &
+      err.msg)
+    return 1
+  except EApplyLauncherFailed as err:
+    stderr.writeLine("repro home " & commandName &
+      ": step 9 (launcher for command " & err.commandName &
+      ") failed: " & err.msg)
+    return 1
+  except EApplyCurrentRotationFailed as err:
+    stderr.writeLine("repro home " & commandName &
+      ": step 10 (rotate current to " & err.targetPath &
+      ") failed: " & err.msg)
+    return 1
+  except EApplyManifestCommit as err:
+    stderr.writeLine("repro home " & commandName &
+      ": step 11 (commit manifest) failed: " & err.msg)
+    return 1
+  except EApplyKilledByTestHook as err:
+    stderr.writeLine("repro home " & commandName &
+      ": aborted after step " & $err.killStep &
+      " by REPRO_TEST_APPLY_KILL_AFTER_STEP hook; the partial " &
+      "generation will be quarantined on the next apply.")
+    return 1
+  except EApplyBusy as err:
+    stderr.writeLine("repro home " & commandName &
+      ": another apply is in progress (lock " & err.lockPath &
+      " held; waited " & $err.waitedSeconds & "s).")
+    return 1
+  except EHomeApply as err:
+    stderr.writeLine("repro home " & commandName &
+      ": apply failed at step " & $err.step & " (" & err.stepName &
+      "): " & err.msg)
+    return 1
+  except CatchableError as err:
+    stderr.writeLine("repro home " & commandName &
+      ": apply failed with unexpected error: " & err.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
 # `repro home add`.
 # ---------------------------------------------------------------------------
 
@@ -162,6 +254,7 @@ proc runHomeAdd(args: openArray[string]): int =
   var pkg = ""
   var activity = "default"
   var pred = emptyPredicate()
+  var noApply = false
   var i = 0
   while i < args.len:
     let a = args[i]
@@ -176,7 +269,7 @@ proc runHomeAdd(args: openArray[string]): int =
       pred.keyword = ckIf
       pred.given = true
     elif a == "--no-apply":
-      discard # accepted-but-ignored at M61
+      noApply = true
     elif a == "--catalog" or a.startsWith("--catalog="):
       loadCatalogFromFlag(parseFlagValue(args, i, "--catalog"))
     elif a.startsWith("--"):
@@ -199,7 +292,6 @@ proc runHomeAdd(args: openArray[string]): int =
     addPackageReference(profilePath, pkg, activity = activity,
                         predicate = pred.text,
                         predicateKeyword = pred.keyword)
-    return 0
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnknownPredicate as e:
@@ -209,6 +301,9 @@ proc runHomeAdd(args: openArray[string]): int =
   except CatchableError as e:
     stderr.writeLine("repro home add: error: " & e.msg)
     return 1
+  if noApply:
+    return 0
+  return runApplyInline("add")
 
 # ---------------------------------------------------------------------------
 # `repro home remove`.
@@ -222,12 +317,13 @@ proc activityNames(p: Profile): seq[string] =
 proc runHomeRemove(args: openArray[string]): int =
   if args.len == 0:
     stderr.writeLine("usage: repro home remove <package> [--activity NAME] " &
-      "[--when PRED | --if PRED]")
+      "[--when PRED | --if PRED] [--no-apply]")
     return 2
   var pkg = ""
   var activitySpec = ""
   var activityGiven = false
   var pred = emptyPredicate()
+  var noApply = false
   var i = 0
   while i < args.len:
     let a = args[i]
@@ -243,7 +339,7 @@ proc runHomeRemove(args: openArray[string]): int =
       pred.keyword = ckIf
       pred.given = true
     elif a == "--no-apply":
-      discard # accepted-but-ignored at M61
+      noApply = true
     elif a.startsWith("--"):
       stderr.writeLine("repro home remove: unknown flag: " & a)
       return 2
@@ -291,16 +387,15 @@ proc runHomeRemove(args: openArray[string]): int =
           if removedAny: break
         if not removedAny:
           break
-      return 0
-    # Scoped removal: --activity and/or --when/--if applied.
-    let targetActivity =
-      if activityGiven: activitySpec else: "default"
-    if pred.given:
-      removePackageReference(profilePath, pkg, activity = targetActivity,
-        predicate = pred.text)
     else:
-      removePackageReference(profilePath, pkg, activity = targetActivity)
-    return 0
+      # Scoped removal: --activity and/or --when/--if applied.
+      let targetActivity =
+        if activityGiven: activitySpec else: "default"
+      if pred.given:
+        removePackageReference(profilePath, pkg, activity = targetActivity,
+          predicate = pred.text)
+      else:
+        removePackageReference(profilePath, pkg, activity = targetActivity)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnknownPredicate as e:
@@ -310,6 +405,9 @@ proc runHomeRemove(args: openArray[string]): int =
   except CatchableError as e:
     stderr.writeLine("repro home remove: error: " & e.msg)
     return 1
+  if noApply:
+    return 0
+  return runApplyInline("remove")
 
 # ---------------------------------------------------------------------------
 # `repro home enable` / `disable`.
@@ -328,8 +426,11 @@ proc currentHostActivities(prof: Profile; host: string): seq[string] =
   @[]
 
 proc parseEnableDisableFlags(name: string; args: openArray[string]):
-    tuple[activity, host: string; now, ok: bool; exitCode: int] =
+    tuple[activity, host: string; now, noApply, hostGiven, ok: bool;
+          exitCode: int] =
   result.now = false
+  result.noApply = false
+  result.hostGiven = false
   result.ok = false
   result.exitCode = 2
   var positional = ""
@@ -339,10 +440,11 @@ proc parseEnableDisableFlags(name: string; args: openArray[string]):
     let a = args[i]
     if a == "--host" or a.startsWith("--host="):
       hostOverride = parseFlagValue(args, i, "--host")
+      result.hostGiven = true
     elif a == "--now":
       result.now = true
     elif a == "--no-apply":
-      discard
+      result.noApply = true
     elif a.startsWith("--"):
       stderr.writeLine("repro home " & name & ": unknown flag: " & a)
       return
@@ -354,7 +456,7 @@ proc parseEnableDisableFlags(name: string; args: openArray[string]):
     inc i
   if positional.len == 0:
     stderr.writeLine("usage: repro home " & name &
-      " <activity> [--host NAME] [--now]")
+      " <activity> [--host NAME] [--now] [--no-apply]")
     return
   result.activity = positional
   result.host = if hostOverride.len > 0: hostOverride else: currentHost()
@@ -378,6 +480,14 @@ proc runHomeEnable(args: openArray[string]): int =
     return parsed.exitCode
   if refuseDefaultGuard("enable", parsed.activity):
     return 1
+  # M63: `--now` + `--host <name>` requests remote apply. Remote apply
+  # is deferred to M71; reject the combination with a clear pointer.
+  if parsed.hostGiven and parsed.now and parsed.host != currentHost():
+    stderr.writeLine("repro home enable: --now combined with --host '" &
+      parsed.host & "' requests remote apply, which is deferred to M71. " &
+      "Run the command on '" & parsed.host & "' directly, or omit --host " &
+      "to apply locally.")
+    return 1
   try:
     let profilePath = loadProfilePath()
     let prof = loadProfile(profilePath)
@@ -385,10 +495,6 @@ proc runHomeEnable(args: openArray[string]): int =
     if parsed.activity notin acts:
       acts.add parsed.activity
     setHostActivities(profilePath, parsed.host, acts)
-    if parsed.now:
-      stderr.writeLine("repro home enable: --now is deferred to M63 " &
-        "(local apply) / M71 (remote apply); the intent edit completed.")
-    return 0
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnstructured as e:
@@ -396,12 +502,22 @@ proc runHomeEnable(args: openArray[string]): int =
   except CatchableError as e:
     stderr.writeLine("repro home enable: error: " & e.msg)
     return 1
+  if parsed.noApply:
+    return 0
+  # M63: apply runs by default after a successful intent edit.
+  return runApplyInline("enable")
 
 proc runHomeDisable(args: openArray[string]): int =
   let parsed = parseEnableDisableFlags("disable", args)
   if not parsed.ok:
     return parsed.exitCode
   if refuseDefaultGuard("disable", parsed.activity):
+    return 1
+  if parsed.hostGiven and parsed.now and parsed.host != currentHost():
+    stderr.writeLine("repro home disable: --now combined with --host '" &
+      parsed.host & "' requests remote apply, which is deferred to M71. " &
+      "Run the command on '" & parsed.host & "' directly, or omit --host " &
+      "to apply locally.")
     return 1
   try:
     let profilePath = loadProfilePath()
@@ -412,10 +528,6 @@ proc runHomeDisable(args: openArray[string]): int =
       if a != parsed.activity:
         newActs.add a
     setHostActivities(profilePath, parsed.host, newActs)
-    if parsed.now:
-      stderr.writeLine("repro home disable: --now is deferred to M63 " &
-        "(local apply) / M71 (remote apply); the intent edit completed.")
-    return 0
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnstructured as e:
@@ -423,6 +535,9 @@ proc runHomeDisable(args: openArray[string]): int =
   except CatchableError as e:
     stderr.writeLine("repro home disable: error: " & e.msg)
     return 1
+  if parsed.noApply:
+    return 0
+  return runApplyInline("disable")
 
 # ---------------------------------------------------------------------------
 # `repro home list`.
@@ -640,6 +755,34 @@ proc runHomeHistory(args: openArray[string]): int =
     return 1
 
 # ---------------------------------------------------------------------------
+# `repro home apply` (M63).
+# ---------------------------------------------------------------------------
+
+proc runHomeApply(args: openArray[string]): int =
+  ## Standalone apply: runs the M63 pipeline against the currently
+  ## resolved profile, host, state dir, and store. `--no-apply` is
+  ## rejected because apply IS the action.
+  for a in args:
+    if a == "--help" or a == "-h":
+      echo "usage: repro home apply"
+      echo ""
+      echo "Run the home-profile apply pipeline against the current"
+      echo "intent (`home.nim`), producing a new generation and"
+      echo "rotating the `current` pointer."
+      return 0
+    if a == "--no-apply":
+      stderr.writeLine("repro home apply: --no-apply is meaningless on " &
+        "this subcommand (apply IS the action). --no-apply belongs on " &
+        "intent-mutating commands (add, remove, enable, disable).")
+      return 2
+    if a.startsWith("--"):
+      stderr.writeLine("repro home apply: unknown flag: " & a)
+      return 2
+    stderr.writeLine("repro home apply: unexpected positional: " & a)
+    return 2
+  return runApplyInline("apply")
+
+# ---------------------------------------------------------------------------
 # Top-level dispatch.
 # ---------------------------------------------------------------------------
 
@@ -682,6 +825,7 @@ proc runHomeCommand*(args: seq[string]): int =
   of "list": return runHomeList(subArgs)
   of "why": return runHomeWhy(subArgs)
   of "history": return runHomeHistory(subArgs)
+  of "apply": return runHomeApply(subArgs)
   else:
     stderr.writeLine("repro home: unknown subcommand: " & sub)
     return 2
