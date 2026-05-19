@@ -63,6 +63,45 @@ repro scheduler total                    1   25100.0        25.1
             ["cmake", "--build", "build-dir", "--target", "all", "--parallel", "4", "--", "-d", "stats"],
         )
 
+    def test_direct_ninja_build_command_uses_native_tool_shape(self):
+        command = bench.direct_ninja_build_command(
+            "ninja", "build-dir", "all", 4, ["-d", "stats"])
+
+        self.assertEqual(
+            command,
+            ["ninja", "-C", "build-dir", "-j", "4", "-d", "stats", "all"],
+        )
+
+    def test_direct_reprobuild_build_command_targets_generated_provider(self):
+        command = bench.direct_reprobuild_build_command(
+            "repro", "build-dir", "genbench", "stats")
+
+        self.assertEqual(
+            command,
+            [
+                "repro",
+                "build",
+                "build-dir#genbench",
+                "--tool-provisioning=path",
+                "--work-root=build-dir/CMakeFiles/reprobuild",
+                "--stats",
+            ],
+        )
+
+    def test_ratio_records_execution_mode(self):
+        record = bench.ratio_record(
+            "demo", "noop_rebuild", "direct",
+            {"wallMs": 10.0}, {"wallMs": 25.0})
+
+        self.assertEqual(record["executionMode"], "direct")
+        self.assertEqual(record["ratioReprobuildToNinja"], 2.5)
+
+    def test_selected_execution_modes_expands_both(self):
+        self.assertEqual(
+            bench.selected_execution_modes("both"),
+            ["cmake-driver", "direct"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

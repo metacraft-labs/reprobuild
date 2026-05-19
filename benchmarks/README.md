@@ -18,7 +18,10 @@ from the CMake M11 lock file plus a generated-source fixture. Use
 `just bench_cmake_reprobuild_vs_ninja_medium` to add the pinned `libuv` medium
 project. These benchmarks record timing ratios by default; set
 `REPROBUILD_CMAKE_BENCH_MAX_RATIO` or a scenario-specific ratio environment
-variable to make timing thresholds enforced.
+variable to make timing thresholds enforced. By default the CMake generator
+benchmark measures both `cmake --build` driver executions and direct native
+tool executions after generation; pass `--execution-mode=cmake-driver` or
+`--execution-mode=direct` to narrow a run.
 
 Outputs:
 

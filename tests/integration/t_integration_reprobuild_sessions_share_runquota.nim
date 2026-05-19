@@ -351,5 +351,8 @@ suite "integration_reprobuild_sessions_share_runquota":
     check status{"active_sessions"}.getInt() == 0
     check status{"active_leases"}.getInt() == 0
     check status{"queued_leases"}.getInt() == 0
-    check status{"total_granted"}.getInt() == 2
-    check status{"total_finished"}.getInt() == 2
+    # Each build session runs its provider compilation through the build engine
+    # before the public test action, so the shared daemon observes two
+    # bootstrap leases and two action leases.
+    check status{"total_granted"}.getInt() == 4
+    check status{"total_finished"}.getInt() == 4

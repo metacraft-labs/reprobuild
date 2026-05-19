@@ -336,7 +336,17 @@ proc copyTree(sourceRoot, destRoot: string) =
       createDir(destPath.splitPath.head)
       copyFile(sourcePath, destPath)
 
+proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
+  for dep in ["isonim", "nim-everywhere"]:
+    let sourcePath = codeTracerRoot.parentDir / dep
+    let destPath = projectRoot.parentDir / dep
+    if dirExists(sourcePath) and not pathExists(destPath):
+      discard requireSuccess(shellCommand([
+        "ln", "-s", sourcePath, destPath
+      ]))
+
 proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
+  linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot)
   copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
   if dirExists(codeTracerRoot / "reprobuild"):
     copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
