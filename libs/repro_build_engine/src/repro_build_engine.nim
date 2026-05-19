@@ -26,6 +26,10 @@ type
     cdHybridCutoff
     cdRejected
 
+  BuildProgressKind* = enum
+    bpkActionStarted
+    bpkActionCompleted
+
   BuildActionKind* = enum
     bakProcess
     bakCopyFile
@@ -82,6 +86,7 @@ type
     # can drive a smoke test on Windows. Callers SHOULD only set this on
     # platforms where the real RunQuota daemon/helper is not yet available.
     bypassRunQuota*: bool
+    progressCallback*: BuildProgressCallback
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -122,6 +127,19 @@ type
     results*: seq[ActionResult]
     trace*: seq[SchedulerTraceEvent]
 
+  BuildProgressEvent* = object
+    kind*: BuildProgressKind
+    actionId*: string
+    status*: ActionStatus
+    cacheDecision*: CacheDecision
+    launched*: bool
+    total*: int
+    completed*: int
+    running*: int
+    ready*: int
+
+  BuildProgressCallback* = proc(event: BuildProgressEvent)
+
   RunningAction = object
     id: string
     pool: string
@@ -159,7 +177,8 @@ proc defaultBuildEngineConfig*(cacheRoot: string): BuildEngineConfig =
     stdoutLimit: 1_048_576,
     stderrLimit: 1_048_576,
     rebuildMissingOutputsOnCacheHit: false,
-    bypassRunQuota: false)
+    bypassRunQuota: false,
+    progressCallback: nil)
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -1007,6 +1026,28 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc readyCmp(a, b: string): int =
     cmp(idToIndex[a], idToIndex[b])
 
+  var running: seq[RunningAction] = @[]
+
+  proc terminalCount(): int =
+    for action in buildGraph.actions:
+      if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
+        inc result
+
+  proc emitProgress(kind: BuildProgressKind; id: string) =
+    if config.progressCallback == nil:
+      return
+    let idx = idToIndex.resultIndex(id)
+    config.progressCallback(BuildProgressEvent(
+      kind: kind,
+      actionId: id,
+      status: runResult.results[idx].status,
+      cacheDecision: runResult.results[idx].cacheDecision,
+      launched: runResult.results[idx].launched,
+      total: buildGraph.actions.len,
+      completed: terminalCount(),
+      running: running.len,
+      ready: ready.len))
+
   proc completeSuccess(id: string; status: ActionStatus; cacheDecision: CacheDecision;
                        launched: bool; detail = "") =
     let idx = idToIndex.resultIndex(id)
@@ -1023,6 +1064,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if remaining[dep] == 0:
           ready.add(dep)
     ready.sort(readyCmp)
+    emitProgress(bpkActionCompleted, id)
 
   proc blockClosure(id, blocker: string) =
     for dep in dependents.getOrDefault(id):
@@ -1032,6 +1074,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         runResult.results[idx].status = asBlocked
         runResult.results[idx].blockedBy = blocker
         runResult.trace(dep, "blocked", blocker)
+        emitProgress(bpkActionCompleted, dep)
         blockClosure(dep, blocker)
 
   proc applyDynamicDeps(id: string): bool =
@@ -1065,6 +1108,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         runResult.results[idx].status = asBlocked
         runResult.results[idx].blockedBy = dep
         runResult.trace(id, "blocked", dep)
+        emitProgress(bpkActionCompleted, id)
         blockClosure(id, dep)
         actionsById[id] = action
         dynamicDepsLoaded.incl(id)
@@ -1080,13 +1124,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     runResult.trace(id, "dynamic-deps", "loaded")
     true
 
-  proc terminalCount(): int =
-    for action in buildGraph.actions:
-      if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
-        inc result
-
   var completed = 0
-  var running: seq[RunningAction] = @[]
   let runQuotaResultRoot = cacheRoot / "runquota-results"
   createDir(runQuotaResultRoot)
   var launchSeq = 0
@@ -1169,6 +1207,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               evidence.evidence.diagnostics.join("\n")
             runResult.trace(id, "failed", "dependency evidence invalid")
             blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
             completed = terminalCount()
             launchedAny = true
             continue
@@ -1186,6 +1225,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.results[idx].stderr = plan.diagnostic
           runResult.trace(id, "failed", plan.diagnostic)
           blockClosure(id, id)
+          emitProgress(bpkActionCompleted, id)
           completed = terminalCount()
           launchedAny = true
           continue
@@ -1213,6 +1253,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               statuses[id] = asFailed
               runResult.trace(finished.id, "failed", "dependency evidence invalid")
               blockClosure(finished.id, finished.id)
+              emitProgress(bpkActionCompleted, finished.id)
               completed = terminalCount()
               launchedAny = true
               continue
@@ -1227,14 +1268,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           else:
             runResult.trace(finished.id, "failed", finished.stderr)
             blockClosure(finished.id, finished.id)
+            emitProgress(bpkActionCompleted, finished.id)
           inc completed
           launchedAny = true
           continue
 
         statuses[id] = asRunning
-        runResult.results[idToIndex.resultIndex(id)].status = asRunning
-        runResult.results[idToIndex.resultIndex(id)].monitorDepfilePath =
-          plan.action.monitorDepfile
+        let runningIdx = idToIndex.resultIndex(id)
+        runResult.results[runningIdx].status = asRunning
+        runResult.results[runningIdx].launched = true
+        runResult.results[runningIdx].monitorDepfilePath = plan.action.monitorDepfile
         poolRunning[poolName] = used + units
         inc launchSeq
         let resultPath = runQuotaResultRoot / ($launchSeq & ".json")
@@ -1248,6 +1291,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           resultPath: resultPath,
           bypassRunQuota: config.bypassRunQuota))
         runResult.trace(id, "launched", "pool=" & poolName)
+        emitProgress(bpkActionStarted, id)
         launchedAny = true
 
       if completed >= buildGraph.actions.len:
@@ -1311,6 +1355,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           statuses[finished.id] = asFailed
           runResult.trace(finished.id, "failed", "dependency converter failed")
           blockClosure(finished.id, finished.id)
+          emitProgress(bpkActionCompleted, finished.id)
           completed = terminalCount()
           continue
         let evidence = collectEvidence(action, strict = true)
@@ -1322,6 +1367,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           statuses[finished.id] = asFailed
           runResult.trace(finished.id, "failed", "dependency evidence invalid")
           blockClosure(finished.id, finished.id)
+          emitProgress(bpkActionCompleted, finished.id)
           completed = terminalCount()
           continue
         if action.cacheable:
@@ -1334,6 +1380,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       else:
         runResult.trace(finished.id, "failed", "exit=" & $finished.exitCode)
         blockClosure(finished.id, finished.id)
+        emitProgress(bpkActionCompleted, finished.id)
       inc completed
 
       completed = 0

@@ -165,6 +165,57 @@ suite "integration_build_engine_api_ready_queue":
     expect BuildEngineError:
       discard runBuild(buildGraph, defaultBuildEngineConfig(tempRoot))
 
+  test "runBuild emits progress callbacks for process action lifecycle":
+    let tempRoot = createTempDir("repro-progress-api", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let inputPath = workRoot / "src" / "input.txt"
+    let outputPath = workRoot / "out" / "progress.txt"
+    fixtureWrite(inputPath, "progress input\n")
+
+    var events: seq[BuildProgressEvent] = @[]
+    var config = BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 1'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      bypassRunQuota: true)
+    config.progressCallback = proc(event: BuildProgressEvent) =
+      events.add(event)
+
+    let buildResult = runBuild(graph([
+      action("copy-progress", [app, "fixture-action", "copy", "progress",
+        inputPath, outputPath], cwd = workRoot, inputs = [inputPath],
+        outputs = ["out/progress.txt"], commandStatsId = "progress-copy")
+    ]), config)
+
+    check buildResult.results.len == 1
+    check buildResult.results[0].status == asSucceeded
+    check readFile(outputPath).contains("progress:progress input")
+
+    var sawStarted = false
+    var sawCompleted = false
+    for event in events:
+      if event.kind == bpkActionStarted and event.actionId == "copy-progress":
+        sawStarted = true
+        check event.status == asRunning
+        check event.launched
+        check event.total == 1
+        check event.running == 1
+      if event.kind == bpkActionCompleted and event.actionId == "copy-progress":
+        sawCompleted = true
+        check event.status == asSucceeded
+        check event.completed == 1
+        check event.total == 1
+        check event.running == 0
+    check sawStarted
+    check sawCompleted
+
   test "runBuild infers declared output to input dependencies before scheduling":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m46-api-inferred-deps", "")

@@ -1414,6 +1414,11 @@ suite "e2e_local_reprobuild_project_build":
     check reportAction(report, "stamp"){"evidence"}{"declaredOutputs"}.
       getElems().anyIt(it.getStr() == "out/stamp.txt")
 
+    let progressOutput = build(reproBin, projectRoot, repoRoot, getEnv("PATH"),
+      extraArgs = ["--progress=plain"])
+    check progressOutput.contains("repro [")
+    check progressOutput.contains("4/4 100%")
+
   test "public CLI work root override isolates metadata by worktree":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m54-work-root", "")

@@ -4,3 +4,4 @@ This directory contains public user and implementation documentation for the
 Reprobuild repository.
 
 - [Capabilities](capabilities.md)
+- [Build Progress](progress.md)

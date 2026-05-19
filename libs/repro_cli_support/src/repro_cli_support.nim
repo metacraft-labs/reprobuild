@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables]
+import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, terminal]
 import repro_core
 import repro_build_engine
 import repro_depfile
@@ -22,7 +22,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--progress=auto|plain|none]\n       " &
           programName &
       " watch [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " &
           programName &
@@ -803,6 +803,15 @@ proc stablePublicCliPath(): string =
   os.normalizedPath(getCurrentDir() / app)
 
 type
+  BuildProgressMode = enum
+    bpmAuto
+    bpmPlain
+    bpmNone
+
+  BuildProgressRenderer = object
+    enabled: bool
+    lastLen: int
+
   BuildCommandOutcome = object
     exitCode: int
     modulePath: string
@@ -810,10 +819,114 @@ type
     outDir: string
     buildReportPath: string
 
+proc parseBuildProgressMode(value: string): BuildProgressMode =
+  case value.toLowerAscii()
+  of "auto":
+    bpmAuto
+  of "plain", "line":
+    bpmPlain
+  of "none", "off":
+    bpmNone
+  else:
+    raise newException(ValueError,
+      "unsupported --progress=" & value & " (expected auto, plain, or none)")
+
+proc configuredBuildProgressMode(): BuildProgressMode =
+  let configured = getEnv("REPROBUILD_PROGRESS", "")
+  if configured.len == 0:
+    return bpmAuto
+  parseBuildProgressMode(configured)
+
+proc newBuildProgressRenderer(mode: BuildProgressMode): BuildProgressRenderer =
+  BuildProgressRenderer(
+    enabled:
+      case mode
+      of bpmAuto:
+        isatty(stderr)
+      of bpmPlain:
+        true
+      of bpmNone:
+        false,
+    lastLen: 0)
+
+proc progressBar(completed, total, width: int): string =
+  let safeWidth = max(width, 1)
+  let clampedCompleted =
+    if total <= 0:
+      0
+    else:
+      min(max(completed, 0), total)
+  let filled =
+    if total <= 0:
+      0
+    else:
+      min(safeWidth, (clampedCompleted * safeWidth) div total)
+  result = "["
+  for i in 0 ..< safeWidth:
+    result.add(if i < filled: '#' else: '.')
+  result.add("]")
+
+proc fitProgressLine(line: string; width: int): string =
+  if width <= 0 or line.len <= width:
+    return line
+  if width <= 3:
+    return line[0 ..< width]
+  line[0 ..< width - 3] & "..."
+
+proc statusLabel(event: BuildProgressEvent): string =
+  case event.kind
+  of bpkActionStarted:
+    "started"
+  of bpkActionCompleted:
+    case event.status
+    of asSucceeded:
+      "done"
+    of asCacheHit:
+      "cache"
+    of asUpToDate:
+      "up-to-date"
+    of asFailed:
+      "failed"
+    of asBlocked:
+      "blocked"
+    else:
+      $event.status
+
+proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80): string =
+  let percent =
+    if event.total <= 0:
+      100
+    else:
+      min(100, (max(event.completed, 0) * 100) div event.total)
+  let prefix = "repro " & progressBar(event.completed, event.total, 20) & " " &
+    $event.completed & "/" & $event.total & " " & $percent & "%"
+  let counters = " running=" & $event.running & " ready=" & $event.ready
+  let tail = " " & statusLabel(event) & " " & event.actionId
+  fitProgressLine(prefix & counters & tail, max(width, 20))
+
+proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEvent) =
+  if not renderer.enabled:
+    return
+  let width = min(max(terminalWidth(), 40), 120)
+  var line = formatBuildProgressLine(event, width)
+  let visibleLen = line.len
+  if visibleLen < renderer.lastLen:
+    line.add(repeat(' ', renderer.lastLen - visibleLen))
+  stderr.write("\r" & line)
+  stderr.flushFile()
+  renderer.lastLen = visibleLen
+
+proc finishProgress(renderer: var BuildProgressRenderer) =
+  if renderer.enabled and renderer.lastLen > 0:
+    stderr.write("\n")
+    stderr.flushFile()
+    renderer.lastLen = 0
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
-                        workRoot = ""):
+                        workRoot = "";
+                        progressMode = bpmAuto):
     BuildCommandOutcome =
   var parsedTarget = parseBuildTarget(target)
   parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
@@ -915,15 +1028,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       echo "repro build: WARNING runquotad is not reachable; using " &
         "path-mode RunQuota bypass (no quotas/leases enforced). Start " &
         "`runquotad` and rerun to use the real lease coordinator."
-    let buildResult = runBuild(graph(lowered.actions, lowered.pools),
-        BuildEngineConfig(
+    var progressRenderer = newBuildProgressRenderer(progressMode)
+    var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       runQuotaCliPath: publicCliPath,
       maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
-      bypassRunQuota: bypassRunQuota))
+      bypassRunQuota: bypassRunQuota)
+    if progressRenderer.enabled:
+      engineConfig.progressCallback = proc(event: BuildProgressEvent) =
+        progressRenderer.renderProgress(event)
+    var buildResult: BuildRunResult
+    try:
+      buildResult = runBuild(graph(lowered.actions, lowered.pools), engineConfig)
+    finally:
+      progressRenderer.finishProgress()
     let reportPath = outDir / "build-report.json"
     writeBuildReport(reportPath, provider, refresh, buildResult)
     result.buildReportPath = reportPath
@@ -1401,6 +1522,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var target = ""
   var mode = tpmUnspecified
   var workRoot = ""
+  var progressMode = configuredBuildProgressMode()
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
@@ -1413,6 +1535,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     elif arg == "--work-root":
       raise newException(ValueError,
         "--work-root requires an inline value, for example --work-root=.repro")
+    elif arg.startsWith("--progress="):
+      progressMode = parseBuildProgressMode(arg.split("=", maxsplit = 1)[1])
+    elif arg == "--progress":
+      raise newException(ValueError,
+        "--progress requires an inline value, for example --progress=auto")
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported build flag: " & arg)
     elif target.len == 0:
@@ -1426,7 +1553,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
 
   executeBuildTarget(target, mode, publicCliPath,
     selectDefaultAction = targetWasOmitted,
-    workRoot = workRoot).exitCode
+    workRoot = workRoot,
+    progressMode = progressMode).exitCode
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:
