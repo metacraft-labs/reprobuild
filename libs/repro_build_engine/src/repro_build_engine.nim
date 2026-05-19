@@ -1226,36 +1226,45 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               let outputStatStart = statStart()
               outputsPresent = action.allOutputsExist()
               finishStat("repro output stat", outputStatStart)
-            if not config.rebuildMissingOutputsOnCacheHit or outputsPresent:
-              let restoreStart = statStart()
-              cas.restoreOutputs(lookup.record, action.cwd)
-              finishStat("repro cache restore", restoreStart)
+            if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 evidenceFromRecord(action, lookup.record)
-              completeSuccess(id, asCacheHit, cdHit, false, "restored")
+              completeSuccess(id, asCacheHit, cdHit, false, "outputs-present")
               inc completed
               launchedAny = true
               continue
-            runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
-            runResult.trace(id, "cache-restore-skipped", "missing-output")
+            let restoreStart = statStart()
+            cas.restoreOutputs(lookup.record, action.cwd)
+            finishStat("repro cache restore", restoreStart)
+            runResult.results[idToIndex.resultIndex(id)].evidence =
+              evidenceFromRecord(action, lookup.record)
+            completeSuccess(id, asCacheHit, cdHit, false, "restored")
+            inc completed
+            launchedAny = true
+            continue
           of aclHybridCutoff:
             var outputsPresent = true
             if config.rebuildMissingOutputsOnCacheHit:
               let outputStatStart = statStart()
               outputsPresent = action.allOutputsExist()
               finishStat("repro output stat", outputStatStart)
-            if not config.rebuildMissingOutputsOnCacheHit or outputsPresent:
-              let restoreStart = statStart()
-              cas.restoreOutputs(lookup.record, action.cwd)
-              finishStat("repro cache restore", restoreStart)
+            if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 evidenceFromRecord(action, lookup.record)
-              completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
+              completeSuccess(id, asCacheHit, cdHybridCutoff, false,
+                "outputs-present")
               inc completed
               launchedAny = true
               continue
-            runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
-            runResult.trace(id, "cache-restore-skipped", "missing-output")
+            let restoreStart = statStart()
+            cas.restoreOutputs(lookup.record, action.cwd)
+            finishStat("repro cache restore", restoreStart)
+            runResult.results[idToIndex.resultIndex(id)].evidence =
+              evidenceFromRecord(action, lookup.record)
+            completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
+            inc completed
+            launchedAny = true
+            continue
           of aclRejectedCorruptOutput:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdRejected
           of aclMissInputChanged:

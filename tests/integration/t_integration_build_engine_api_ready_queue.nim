@@ -368,6 +368,67 @@ suite "integration_build_engine_api_ready_queue":
         stderrLimit: 256 * 1024))
     check not fileExists(outputPath)
 
+  test "cache hit with present outputs does not restore, missing output does":
+    let tempRoot = createTempDir("repro-cache-hit-present-output", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let inputPath = workRoot / "src" / "input.txt"
+    let outputPath = workRoot / "out" / "cached.txt"
+    let markerPath = workRoot / "out" / "marker.txt"
+    fixtureWrite(inputPath, "cache input\n")
+
+    let cacheAction = action("cache-present-output",
+      [app, "fixture-action", "copy", "seed", inputPath, outputPath],
+      cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
+      cacheable = true, weakFingerprint = weak("cache-present-output"),
+      commandStatsId = "cache-present-output")
+    let cacheOnlyAction = action("cache-present-output",
+      [app, "fixture-action", "cache-should-not-run", markerPath, outputPath],
+      cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
+      cacheable = true, weakFingerprint = weak("cache-present-output"),
+      commandStatsId = "cache-present-output")
+
+    proc runOne(buildAction: BuildAction): ActionResult =
+      let buildResult = runBuild(graph([buildAction]), BuildEngineConfig(
+        cacheRoot: cacheRoot,
+        runQuotaCliPath: app,
+        maxParallelism: 1'u32,
+        stdoutLimit: 256 * 1024,
+        stderrLimit: 256 * 1024,
+        rebuildMissingOutputsOnCacheHit: true,
+        bypassRunQuota: true))
+      check buildResult.results.len == 1
+      buildResult.results[0]
+
+    let cold = runOne(cacheAction)
+    check cold.status == asSucceeded
+    check readFile(outputPath) == "seed:cache input\n"
+
+    let presentContent = "local present output\n"
+    writeFile(outputPath, presentContent)
+    let presentMtime = fromUnix(1_700_000_100)
+    setLastModificationTime(outputPath, presentMtime)
+
+    let warmPresent = runOne(cacheOnlyAction)
+    check warmPresent.status == asCacheHit
+    check warmPresent.cacheDecision == cdHit
+    check not warmPresent.launched
+    check not fileExists(markerPath)
+    check readFile(outputPath) == presentContent
+    check getFileInfo(outputPath).lastWriteTime == presentMtime
+
+    removeFile(outputPath)
+    let warmMissing = runOne(cacheOnlyAction)
+    check warmMissing.status == asCacheHit
+    check warmMissing.cacheDecision == cdHit
+    check not warmMissing.launched
+    check not fileExists(markerPath)
+    check readFile(outputPath) == "seed:cache input\n"
+
   test "normalized API schedules ready queue with RunQuota, cache, pools, failure, and evidence":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m12-build-engine", "")
