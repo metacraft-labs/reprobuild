@@ -21,6 +21,7 @@ proc renderUsage*(programName: string): string =
   if programName == "repro":
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
+      " capabilities [--format=json|text]\n       " & programName &
       " build [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH]\n       " &
           programName &
       " watch [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " &
@@ -194,6 +195,126 @@ proc jsonStringSeq(values: openArray[string]): JsonNode =
   result = newJArray()
   for value in values:
     result.add(%value)
+
+proc capabilitiesJson*(): JsonNode =
+  var query = newJObject()
+  query["command"] = %"repro capabilities"
+  query["defaultFormat"] = %"json"
+  query["formats"] = jsonStringSeq(["json", "text"])
+  query["schemaId"] = %"reprobuild.capabilities.v1"
+
+  var provider = newJObject()
+  provider["metadataVersion"] = %3
+  provider["generatedProviderKind"] = %"nim-source"
+  provider["features"] = jsonStringSeq([
+    "public-target-aliases",
+    "default-target-metadata",
+    "build-pool-metadata",
+    "compile-commands",
+    "declared-inputs-and-outputs",
+    "depfile-dependency-evidence",
+    "dyndep-fragment-conversion",
+    "runquota-execution",
+    "build-report-json-inspection"])
+
+  var hcrProfile = newJObject()
+  hcrProfile["id"] = %"clang-gcc-debug-patchable-no-lto-v1"
+  hcrProfile["status"] = %"prototype"
+  hcrProfile["languages"] = jsonStringSeq(["C", "CXX"])
+  hcrProfile["requires"] = jsonStringSeq([
+    "debug-info",
+    "patchable-function-entry",
+    "relocatable-object-inputs",
+    "source-object-link-relations",
+    "linkgraph-evidence"])
+  hcrProfile["rejects"] = jsonStringSeq([
+    "lto",
+    "interprocedural-optimization",
+    "unsupported-asm-sources",
+    "missing-debug-info"])
+  var hcrProfiles = newJArray()
+  hcrProfiles.add(hcrProfile)
+
+  var hcr = newJObject()
+  hcr["decisionAuthority"] = %"reprobuild"
+  hcr["buildSystemRole"] = %(
+    "annotate candidate targets and static source/object/link relations")
+  hcr["runtimeDecisions"] = jsonStringSeq([
+    "rebuilt-actions",
+    "changed-outputs",
+    "affected-link-targets",
+    "patchability",
+    "reload-vs-restart"])
+  hcr["candidateAnnotations"] = jsonStringSeq([
+    "target-identity",
+    "source-to-object-action",
+    "object-to-link-action",
+    "link-output",
+    "linkgraph-action",
+    "support-profile"])
+  hcr["profiles"] = hcrProfiles
+
+  var execution = newJObject()
+  execution["scheduler"] = %"local"
+  execution["runQuota"] = %"supported"
+  execution["reports"] = jsonStringSeq(["build-report.json"])
+
+  var interfaces = newJObject()
+  interfaces["capabilityQuery"] = query
+  interfaces["provider"] = provider
+  interfaces["execution"] = execution
+  interfaces["hcr"] = hcr
+
+  result = newJObject()
+  result["schemaId"] = %"reprobuild.capabilities.v1"
+  result["reprobuildVersion"] = %versionString()
+  result["host"] = %*{
+    "os": hostOS,
+    "cpu": hostCPU
+  }
+  result["interfaces"] = interfaces
+
+proc renderCapabilitiesJson*(): string =
+  capabilitiesJson().pretty()
+
+proc renderCapabilitiesText*(): string =
+  let caps = capabilitiesJson()
+  "schemaId: " & caps["schemaId"].getStr() & "\n" &
+    "reprobuildVersion: " & caps["reprobuildVersion"].getStr() & "\n" &
+    "capabilityQuery: " &
+      caps["interfaces"]["capabilityQuery"]["command"].getStr() & "\n" &
+    "providerMetadataVersion: " &
+      $caps["interfaces"]["provider"]["metadataVersion"].getInt() & "\n" &
+    "hcrDecisionAuthority: " &
+      caps["interfaces"]["hcr"]["decisionAuthority"].getStr()
+
+proc runCapabilitiesCommand(args: openArray[string]): int =
+  var format = "json"
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--help" or arg == "-h":
+      echo "usage: repro capabilities [--format=json|text]"
+      return 0
+    elif arg == "--format":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--format requires json or text")
+      format = args[i + 1]
+      inc i
+    elif arg.startsWith("--format="):
+      format = arg["--format=".len .. ^1]
+    else:
+      raise newException(ValueError, "unsupported capabilities argument: " & arg)
+    inc i
+
+  case format
+  of "json":
+    echo renderCapabilitiesJson()
+  of "text":
+    echo renderCapabilitiesText()
+  else:
+    raise newException(ValueError, "unsupported --format=" & format)
+  0
 
 proc profileIndex(identity: PathOnlyBuildIdentity):
     Table[string, PathOnlyToolProfile] =
@@ -1521,6 +1642,17 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runFsSnoopCli("repro debug fs-snoop", fsArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "capabilities":
+    try:
+      let capabilityArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runCapabilitiesCommand(capabilityArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro capabilities: error: " & err.msg)
+      return 1
   if programName == "repro" and args.len > 0 and args[0] == "build":
     try:
       let buildArgs =
