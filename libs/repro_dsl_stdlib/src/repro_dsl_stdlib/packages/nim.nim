@@ -37,6 +37,13 @@ package nim:
           alias = "--dynlibOverride:",
           format = concat,
           repeated = true
+        # Windows: project files (e.g. codetracer/reprobuild.nim) need to pass
+        # -I/-L/-Wno-* flags to the C backend so the bundled libzip C sources
+        # compile under MinGW UCRT (getpid implicit decl + missing system zlib).
+        flag passC is seq[string],
+          alias = "--passC:",
+          format = concat,
+          repeated = true
         flag passL is seq[string],
           alias = "--passL:",
           format = concat,

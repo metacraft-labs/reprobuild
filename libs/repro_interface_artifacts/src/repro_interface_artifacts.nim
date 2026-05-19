@@ -885,7 +885,29 @@ proc nixPrefix(namePattern, header: string;
       if firstExistingPrefix([path], header, [libraryName]).len > 0:
         return path
 
-proc externalHashFlags(): seq[string] =
+proc externalHashFlags(workDir = ""): seq[string] =
+  # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
+  # The reprobuild repo vendors portable C sources for both under
+  # references/mold/third-party/, and config.nims wires the include paths +
+  # `{.compile:.}` pragmas accordingly. When repro is run as a CLI against an
+  # arbitrary project, the project's nim invocation does NOT pick up
+  # reprobuild's config.nims (different working directory), so we have to
+  # propagate the same -I flags here. The vendored sources live alongside the
+  # reprobuild library tree, so resolve the include dirs relative to workDir
+  # (which is the reprobuildLibraryWorkDir) — there is no system-wide install
+  # to discover.
+  when defined(windows):
+    if workDir.len > 0:
+      let blake3Inc = workDir / "references" / "mold" / "third-party" /
+        "blake3" / "c"
+      let xxhashInc = workDir / "references" / "mold" / "third-party" /
+        "xxhash"
+      if fileExists(blake3Inc / "blake3.h"):
+        result.add("--passC:-I" & blake3Inc)
+      if fileExists(xxhashInc / "xxhash.h"):
+        result.add("--passC:-I" & xxhashInc)
+    return
+
   let blake3Prefix = block:
     let direct = firstExistingPrefix(
       [getEnv("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
@@ -1011,7 +1033,9 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     "--out:" & outputBinaryPath,
     modulePath
   ]
-  command.insert(externalHashFlags(), 2)
+  # Windows: pass workDir so externalHashFlags can locate the vendored
+  # blake3/xxhash headers under workDir/references/mold/...
+  command.insert(externalHashFlags(workDir), 2)
   command.insert(reproLibPathFlags(workDir), 2)
   let edge = providerCompileEdge(sources, outputBinaryPath, command,
     interfaceFingerprint, providerFingerprint, workDir = workDir)

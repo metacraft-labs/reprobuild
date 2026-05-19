@@ -611,7 +611,11 @@ proc monitorCliPath(config: BuildEngineConfig): string =
   let configured = getEnv("REPRO_FS_SNOOP")
   if configured.len > 0:
     return configured
-  let repoBuild = getCurrentDir() / "build" / "bin" / "repro-fs-snoop"
+  # Windows: the fs-snoop binary is `repro-fs-snoop.exe` (ExeExt expansion).
+  # Without the suffix the fileExists check below misses it. Use addFileExt
+  # so the same logic works cross-platform.
+  let repoBuild = getCurrentDir() / "build" / "bin" /
+    addFileExt("repro-fs-snoop", ExeExt)
   if fileExists(repoBuild):
     return repoBuild
   ""
@@ -646,10 +650,30 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # libs/repro_monitor_depfile/src/repro_monitor_depfile/windows_injector.nim).
   # The same `repro-fs-snoop` driver is used as on macOS — only the underlying
   # injection mechanism differs.
+  #
+  # Windows escape hatch: REPRO_MONITOR_BYPASS=1 disables the injection for
+  # the current build run. The Windows IAT-patching shim is stable for short
+  # commands but currently deadlocks the Nim compiler on very large native
+  # codetracer builds (ct.exe — thousands of generated .c files; nim spends
+  # most of its time invoking gcc under the shim and the synchronization
+  # cost compounds). With bypass on, the engine runs the action directly,
+  # uses only declared/inputs evidence, and the build still completes
+  # correctly for caching purposes — the cost is that monitor-derived
+  # evidence is empty.
   when not (defined(macosx) or defined(windows)):
     result.diagnostic =
       "automatic monitor dependency gathering is unsupported on this platform"
   else:
+    when defined(windows):
+      if getEnv("REPRO_MONITOR_BYPASS") == "1":
+        # Windows: downgrade the action to declared-only when the bypass is
+        # active. Without this, the engine's evidence validator later
+        # complains that monitor evidence is required but no depfile is set,
+        # and the action is marked asFailed even though it ran successfully.
+        # Declared inputs + outputs are enough for caching correctness; we
+        # just lose the auto-discovered read/write set.
+        result.action.dependencyPolicy = declaredOnlyPolicy()
+        return
     let monitorCli = monitorCliPath(config)
     if monitorCli.len == 0:
       result.diagnostic =
@@ -686,11 +710,30 @@ proc startBypassRunQuotaProcess(action: BuildAction): Process =
     raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
   let env = envTableFromArgvStyle(action.env)
   let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()
-  startProcess(action.argv[0],
-    args = action.argv[1 .. ^1],
-    env = env,
-    workingDir = cwd,
-    options = {poUsePath, poStdErrToStdOut})
+  # Windows: use poParentStreams (child inherits the parent's stdio handles)
+  # instead of the pipe-based capture path. With pipes, large native Nim
+  # builds (ct.exe — the full CodeTracer entrypoint) deadlock at startup
+  # before producing any output: the nim compiler appears to interact with
+  # its stdin/stdout handles in ways that block when those are the osproc
+  # pipe pair, even with stdin closed. Falling back to inherited handles
+  # lets the child write directly to repro's own console/file descriptors,
+  # which the caller (`repro build`) is already capturing via shell-level
+  # redirection. The downside: we cannot return per-action stdout/stderr in
+  # the build report. That trade-off is acceptable for the path-mode escape
+  # hatch (no RunQuota means no per-action output capture anyway from
+  # downstream's perspective).
+  when defined(windows):
+    result = startProcess(action.argv[0],
+      args = action.argv[1 .. ^1],
+      env = env,
+      workingDir = cwd,
+      options = {poUsePath, poParentStreams})
+  else:
+    result = startProcess(action.argv[0],
+      args = action.argv[1 .. ^1],
+      env = env,
+      workingDir = cwd,
+      options = {poUsePath, poStdErrToStdOut})
 
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
                           resultPath: string): Process =
@@ -743,10 +786,18 @@ proc finishBypassRunQuotaProcess(id: string; process: Process;
   ## the result JSON the standard parser expects. Returns nothing — the caller
   ## proceeds to the same ``parseFile(resultPath)`` codepath the RunQuota
   ## helper would have written.
-  let exitCode = process.waitForExit()
+  #
+  # Windows: with poParentStreams the child wrote directly to repro's own
+  # stdout/stderr — there is no captured stream to read, and calling
+  # outputStream asserts. Outside Windows we keep the pipe-capture path
+  # (read first, then waitForExit) so the action result JSON carries the
+  # combined output. The platform gate matches startBypassRunQuotaProcess's
+  # poParentStreams branch above.
   var combinedOutput = ""
-  if process.outputStream != nil:
-    combinedOutput = process.outputStream.readAll()
+  when not defined(windows):
+    if process.outputStream != nil:
+      combinedOutput = process.outputStream.readAll()
+  let exitCode = process.waitForExit()
   writeBypassResultJson(resultPath, exitCode, combinedOutput)
 
 proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;

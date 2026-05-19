@@ -573,15 +573,21 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       buildResult: BuildRunResult) =
   var actions = newJArray()
   for item in buildResult.results:
+    # Windows: include exitCode/stdout/stderr in the build report so failed
+    # actions can be diagnosed without re-running them. Without this, the JSON
+    # report only carries status/cacheDecision/etc. and failures look opaque.
     actions.add(%*{
       "id": item.id,
       "status": $item.status,
+      "exitCode": item.exitCode,
       "launched": item.launched,
       "cacheDecision": $item.cacheDecision,
       "dependencyPolicyKind": $item.dependencyPolicyKind,
       "runQuotaBackend": item.runQuotaBackend,
       "runQuotaSocket": item.runQuotaSocket,
       "leaseId": item.leaseId,
+      "stdout": item.stdout,
+      "stderr": item.stderr,
       "evidence": evidenceJson(item.evidence)
     })
   var trace = newJArray()
@@ -1201,10 +1207,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
   if mode notin {tpmPathOnly, tpmNix, tpmTarball}:
     raise newException(ValueError,
       "repro watch requires --tool-provisioning=path|nix|tarball")
-  when not defined(macosx):
-    raise newException(OSError,
-      "repro watch currently supports macOS kqueue only; Linux and Windows " &
-        "filesystem watch backends are deferred")
+  # Windows: kqueue gate dropped — Windows now reaches the live watch loop
+  # via ReadDirectoryChangesW in repro_cli_support/watch. Linux still
+  # surfaces the deferred-backend OSError from openFilesystemWatcher.
 
   echo "repro watch: target=" & target & " tool-provisioning=" &
     mode.modeName & " debounceMs=" & $debounceMs &
