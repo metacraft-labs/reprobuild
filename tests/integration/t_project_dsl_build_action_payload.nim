@@ -74,7 +74,8 @@ proc encodeLegacyBuildActionPayload(action: BuildActionDef;
   result.writeU32Le(uint32(payload.len))
   result.add(payload)
 
-proc sampleAction(policy = defaultDependencyPolicy(); depfile = ""):
+proc sampleAction(policy = defaultDependencyPolicy(); depfile = "";
+                  actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef =
   buildAction(
     "compile",
@@ -92,13 +93,14 @@ proc sampleAction(policy = defaultDependencyPolicy(); depfile = ""):
     depfile = depfile,
     cacheable = false,
     commandStatsId = "compile-stats",
-    dependencyPolicy = policy)
+    dependencyPolicy = policy,
+    actionCachePolicy = actionCachePolicy)
 
 suite "project DSL build action payload":
   setup:
     resetBuildActionRegistry()
 
-  test "version 6 round-trips CLI argument roles, formats, placements, and explicit dependency policies":
+  test "current version round-trips CLI arguments, dependency policy, and cache policy":
     let automatic = decodeBuildActionPayload(encodeBuildActionPayload(
       sampleAction(automaticMonitorPolicy())))
     check automatic.id == "compile"
@@ -111,13 +113,16 @@ suite "project DSL build action payload":
     check automatic.call.arguments[3].repeated
     check automatic.dependencyPolicy.kind == bdpAutomaticMonitor
     check automatic.dependencyPolicy.depfile == ""
+    check automatic.actionCachePolicy == acfpHybrid
 
     let makeDepfile = decodeBuildActionPayload(encodeBuildActionPayload(
-      sampleAction(makeDepfilePolicy("deps/generated.d"))))
+      sampleAction(makeDepfilePolicy("deps/generated.d"),
+        actionCachePolicy = acfpChecksum)))
     check makeDepfile.dependencyPolicy.kind == bdpMakeDepfile
     check makeDepfile.dependencyPolicy.depfile == "deps/generated.d"
     check makeDepfile.cacheable == false
     check makeDepfile.commandStatsId == "compile-stats"
+    check makeDepfile.actionCachePolicy == acfpChecksum
 
   test "version 3 payloads decode with ordinary CLI argument roles":
     let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
@@ -127,6 +132,7 @@ suite "project DSL build action payload":
     check decoded.call.arguments[0].role == carOrdinary
     check decoded.dependencyPolicy.kind == bdpMakeDepfile
     check decoded.dependencyPolicy.depfile == "deps/generated.d"
+    check decoded.actionCachePolicy == acfpHybrid
 
   test "version 2 payloads decode with default dependency policy":
     let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
@@ -136,11 +142,19 @@ suite "project DSL build action payload":
     check decoded.call.arguments[0].role == carOrdinary
     check decoded.dependencyPolicy.kind == bdpDefault
     check decoded.dependencyPolicy.depfile == ""
+    check decoded.actionCachePolicy == acfpHybrid
 
   test "invalid dependency policy kind fails closed":
     var encoded = encodeBuildActionPayload(sampleAction(
       automaticMonitorPolicy()))
-    encoded[encoded.len - 5] = 255'u8
+    encoded[encoded.len - 6] = 255'u8
+
+    expect BuildActionPayloadError:
+      discard decodeBuildActionPayload(encoded)
+
+  test "invalid action cache policy fails closed":
+    var encoded = encodeBuildActionPayload(sampleAction())
+    encoded[encoded.len - 1] = 255'u8
 
     expect BuildActionPayloadError:
       discard decodeBuildActionPayload(encoded)

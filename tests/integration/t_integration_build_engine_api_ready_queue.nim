@@ -118,7 +118,7 @@ proc prepopulateCache(cacheRoot, workRoot, markerPath, outputPath: string) =
   fixtureWrite(outputPath, "restored cached output\n")
   let cas = openLocalCas(cacheRoot / "cas")
   var cache = openActionCache(cacheRoot / "action-cache")
-  discard cache.recordActionResult(cas, weak("cache-hit"), ffpChecksum,
+  discard cache.recordActionResult(cas, weak("cache-hit"), ffpHybrid,
     [inputPath], ["cache/out.txt"], workRoot)
   removeFile(outputPath)
   if fileExists(markerPath):
@@ -407,6 +407,12 @@ suite "integration_build_engine_api_ready_queue":
     let cold = runOne(cacheAction)
     check cold.status == asSucceeded
     check readFile(outputPath) == "seed:cache input\n"
+    var actionCache = openActionCache(cacheRoot / "action-cache")
+    let cas = openLocalCas(cacheRoot / "cas")
+    check actionCache.lookupActionResult(cas, weak("cache-present-output"),
+      ffpHybrid).status == aclHit
+    check actionCache.lookupActionResult(cas, weak("cache-present-output"),
+      ffpChecksum).status == aclMissNoRecord
 
     let presentContent = "local present output\n"
     writeFile(outputPath, presentContent)
@@ -428,6 +434,50 @@ suite "integration_build_engine_api_ready_queue":
     check not warmMissing.launched
     check not fileExists(markerPath)
     check readFile(outputPath) == "seed:cache input\n"
+
+  test "runBuild honors explicit checksum action-cache policy":
+    let tempRoot = createTempDir("repro-cache-explicit-checksum", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let inputPath = workRoot / "src" / "input.txt"
+    let outputPath = workRoot / "out" / "cached.txt"
+    let markerPath = workRoot / "out" / "marker.txt"
+    fixtureWrite(inputPath, "checksum input\n")
+    fixtureWrite(outputPath, "checksum cached output\n")
+
+    let cas = openLocalCas(cacheRoot / "cas")
+    var actionCache = openActionCache(cacheRoot / "action-cache")
+    discard actionCache.recordActionResult(cas, weak("explicit-checksum"),
+      ffpChecksum, [inputPath], ["out/cached.txt"], workRoot)
+    removeFile(outputPath)
+
+    let buildResult = runBuild(graph([
+      action("explicit-checksum",
+        [app, "fixture-action", "cache-should-not-run", markerPath, outputPath],
+        cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
+        cacheable = true, weakFingerprint = weak("explicit-checksum"),
+        actionCachePolicy = ffpChecksum,
+        commandStatsId = "explicit-checksum")
+    ]), BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 1'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      bypassRunQuota: true))
+
+    check buildResult.results.len == 1
+    check buildResult.results[0].status == asCacheHit
+    check buildResult.results[0].cacheDecision == cdHit
+    check not buildResult.results[0].launched
+    check not fileExists(markerPath)
+    check readFile(outputPath) == "checksum cached output\n"
+    check actionCache.lookupActionResult(cas, weak("explicit-checksum"),
+      ffpHybrid).status == aclMissNoRecord
 
   test "normalized API schedules ready queue with RunQuota, cache, pools, failure, and evidence":
     let repoRoot = getCurrentDir()
@@ -559,6 +609,7 @@ suite "integration_build_engine_api_ready_queue":
     check maxPoolConcurrency(tempRoot, "link-log", 8) <= 2
 
     check byId("cache-hit").status == asCacheHit
+    check byId("cache-hit").cacheDecision == cdHit
     check not byId("cache-hit").launched
     check readFile(cacheOutput) == "restored cached output\n"
     check not fileExists(cacheMarker)

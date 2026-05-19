@@ -5,11 +5,12 @@ export BuildActionDef
 proc copyFile*(source, output: string; actionId = "";
                deps: openArray[string] = [];
                after: openArray[BuildActionDef] = [];
-               cacheable = true; commandStatsId = ""):
+               cacheable = true; commandStatsId = "";
+               actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable.} =
   repro_project_dsl.fs.copyFile(source, output, actionId = actionId,
     deps = deps, after = after, cacheable = cacheable,
-    commandStatsId = commandStatsId)
+    commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy)
 
 proc ensureDir*(path: string; actionId = "";
                 deps: openArray[string] = [];
@@ -22,21 +23,23 @@ proc ensureDir*(path: string; actionId = "";
 proc writeText*(output, text: string; actionId = "";
                 deps: openArray[string] = [];
                 after: openArray[BuildActionDef] = [];
-                cacheable = true; commandStatsId = ""):
+                cacheable = true; commandStatsId = "";
+                actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable.} =
   repro_project_dsl.fs.writeText(output, text, actionId = actionId,
     deps = deps, after = after, cacheable = cacheable,
-    commandStatsId = commandStatsId)
+    commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy)
 
 proc stamp*(output, title: string; entries: openArray[string] = [];
             inputs: openArray[string] = []; actionId = "";
             deps: openArray[string] = [];
             after: openArray[BuildActionDef] = [];
-            cacheable = true; commandStatsId = ""):
+            cacheable = true; commandStatsId = "";
+            actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable.} =
   repro_project_dsl.fs.stamp(output, title, entries = entries, inputs = inputs,
     actionId = actionId, deps = deps, after = after, cacheable = cacheable,
-    commandStatsId = commandStatsId)
+    commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy)
 
 proc preserveTree*(sourceRoot, outputRoot: string; actionId = "";
                    deps: openArray[string] = [];

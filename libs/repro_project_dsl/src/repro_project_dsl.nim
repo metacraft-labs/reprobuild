@@ -147,6 +147,11 @@ type
     kind*: BuildActionDependencyPolicyKind
     depfile*: string
 
+  ActionCacheFingerprintPolicy* = enum
+    acfpTimestamp
+    acfpChecksum
+    acfpHybrid
+
   SelectedExecutable* = object
     packageName*: string
     executableName*: string
@@ -164,6 +169,7 @@ type
     cacheable*: bool
     commandStatsId*: string
     dependencyPolicy*: BuildActionDependencyPolicy
+    actionCachePolicy*: ActionCacheFingerprintPolicy
 
   BuildTargetDef* = object
     name*: string
@@ -189,7 +195,7 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 8'u16
+  BuildActionPayloadVersion = 9'u16
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
   BuildTargetPayloadVersion = 1'u16
@@ -376,6 +382,9 @@ proc automaticMonitorPolicy*(): BuildActionDependencyPolicy =
 proc makeDepfilePolicy*(depfile = ""): BuildActionDependencyPolicy =
   BuildActionDependencyPolicy(kind: bdpMakeDepfile, depfile: depfile)
 
+proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy =
+  acfpHybrid
+
 const
   BuiltinPackageName = "reprobuild.builtin"
   BuiltinFsExecutable = "fs"
@@ -407,7 +416,9 @@ proc buildAction*(id: string; call: PublicCliCall;
                   dynamicDepsFile = "";
                   cacheable = true;
                   commandStatsId = "";
-                  dependencyPolicy = defaultDependencyPolicy()): BuildActionDef =
+                  dependencyPolicy = defaultDependencyPolicy();
+                  actionCachePolicy = defaultActionCachePolicy()):
+    BuildActionDef =
   result = BuildActionDef(
     id: id,
     call: call,
@@ -420,7 +431,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     dynamicDepsFile: dynamicDepsFile,
     cacheable: cacheable,
     commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
-    dependencyPolicy: dependencyPolicy)
+    dependencyPolicy: dependencyPolicy,
+    actionCachePolicy: actionCachePolicy)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable.} =
@@ -528,7 +540,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
                           depfile = "";
                           cacheable = true;
                           commandStatsId = "";
-                          dependencyPolicy = defaultDependencyPolicy()):
+                          dependencyPolicy = defaultDependencyPolicy();
+                          actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef =
   var inputs = declaredInputPaths(call)
   var outputs = declaredOutputPaths(call)
@@ -547,7 +560,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
     depfile = depfile,
     cacheable = cacheable,
     commandStatsId = commandStatsId,
-    dependencyPolicy = dependencyPolicy)
+    dependencyPolicy = dependencyPolicy,
+    actionCachePolicy = actionCachePolicy)
 
 proc recordToolInvocation*(id: string; call: PublicCliCall;
                            deps: openArray[string] = [];
@@ -558,7 +572,8 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
                            depfile = "";
                            cacheable = true;
                            commandStatsId = "";
-                           dependencyPolicy = defaultDependencyPolicy()):
+                           dependencyPolicy = defaultDependencyPolicy();
+                           actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef =
   recordCommandAction(
     id,
@@ -571,12 +586,14 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
     depfile = depfile,
     cacheable = cacheable,
     commandStatsId = commandStatsId,
-    dependencyPolicy = dependencyPolicy)
+    dependencyPolicy = dependencyPolicy,
+    actionCachePolicy = actionCachePolicy)
 
 proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
                deps: openArray[string] = [];
                after: openArray[BuildActionDef] = [];
-               cacheable = true; commandStatsId = ""):
+               cacheable = true; commandStatsId = "";
+               actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable.} =
   discard tool
   let call = builtinFsCall("copyFile", [
@@ -587,7 +604,8 @@ proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
     if actionId.len > 0: actionId else: defaultBuiltinActionId("copyFile", output)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     cacheable = cacheable, commandStatsId = commandStatsId,
-    dependencyPolicy = declaredOnlyDependencyPolicy())
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    actionCachePolicy = actionCachePolicy)
 
 proc ensureDir*(tool: ReproFs; path: string; actionId = "";
                 deps: openArray[string] = [];
@@ -607,7 +625,8 @@ proc ensureDir*(tool: ReproFs; path: string; actionId = "";
 proc writeText*(tool: ReproFs; output, text: string; actionId = "";
                 deps: openArray[string] = [];
                 after: openArray[BuildActionDef] = [];
-                cacheable = true; commandStatsId = ""):
+                cacheable = true; commandStatsId = "";
+                actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable.} =
   discard tool
   let call = builtinFsCall("writeText", [
@@ -618,13 +637,15 @@ proc writeText*(tool: ReproFs; output, text: string; actionId = "";
     if actionId.len > 0: actionId else: defaultBuiltinActionId("writeText", output)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     cacheable = cacheable, commandStatsId = commandStatsId,
-    dependencyPolicy = declaredOnlyDependencyPolicy())
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    actionCachePolicy = actionCachePolicy)
 
 proc stamp*(tool: ReproFs; output, title: string;
             entries: openArray[string] = []; inputs: openArray[string] = [];
             actionId = ""; deps: openArray[string] = [];
             after: openArray[BuildActionDef] = [];
-            cacheable = true; commandStatsId = ""):
+            cacheable = true; commandStatsId = "";
+            actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable.} =
   discard tool
   let call = builtinFsCall("stamp", [
@@ -636,7 +657,8 @@ proc stamp*(tool: ReproFs; output, title: string;
     if actionId.len > 0: actionId else: defaultBuiltinActionId("stamp", output)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     extraInputs = inputs, cacheable = cacheable, commandStatsId = commandStatsId,
-    dependencyPolicy = declaredOnlyDependencyPolicy())
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    actionCachePolicy = actionCachePolicy)
 
 proc normalizedRelPath(path: string): string =
   path.replace('\\', '/')
@@ -880,6 +902,17 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
   result.kind = BuildActionDependencyPolicyKind(kind)
   result.depfile = readString(bytes, pos)
 
+proc writeActionCachePolicy(outp: var seq[byte];
+                            policy: ActionCacheFingerprintPolicy) =
+  outp.writeByte(byte(ord(policy)))
+
+proc readActionCachePolicy(bytes: openArray[byte]; pos: var int):
+    ActionCacheFingerprintPolicy =
+  let policy = readByte(bytes, pos)
+  if policy > byte(ord(acfpHybrid)):
+    raisePayload("invalid action cache policy in build action payload")
+  ActionCacheFingerprintPolicy(policy)
+
 proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
   var payload: seq[byte] = @[]
   payload.writeString(action.id)
@@ -894,6 +927,7 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
   payload.writeByte(if action.cacheable: 1'u8 else: 0'u8)
   payload.writeString(action.commandStatsId)
   payload.writeDependencyPolicy(action.dependencyPolicy)
+  payload.writeActionCachePolicy(action.actionCachePolicy)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -908,7 +942,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
       raisePayload("unknown build action payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16,
+  if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
       BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
@@ -934,6 +968,10 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
     result.dependencyPolicy = readDependencyPolicy(bytes, pos)
   else:
     result.dependencyPolicy = defaultDependencyPolicy()
+  if version >= 9'u16:
+    result.actionCachePolicy = readActionCachePolicy(bytes, pos)
+  else:
+    result.actionCachePolicy = defaultActionCachePolicy()
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
@@ -1792,6 +1830,7 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     formals.add("extraOutputs: openArray[string] = []")
     formals.add("depfile = \"\"")
     formals.add("cacheable = true")
+    formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
     result.add("proc " & commandCallableName(cmd.name) & "*( " &
       formals.join("; ") & "): BuildActionDef {.discardable.} =\n")
@@ -1808,7 +1847,8 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     result.add("  recordToolInvocation(selectedActionId, call, " &
       "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
-      "commandStatsId = commandStatsId, dependencyPolicy = " &
+      "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
+      "dependencyPolicy = " &
       dependencyPolicyCode(cmd.dependencyPolicy) & ")\n")
 
 proc wrapperCode(pkg: PackageDef; recordActions = false): string =
@@ -2140,6 +2180,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     formals.add("extraOutputs: openArray[string] = []")
     formals.add("depfile = \"\"")
     formals.add("cacheable = true")
+    formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
     result.add("proc " & interfaceProcName(command) & "*( " &
       formals.join("; ") & "): BuildActionDef {.discardable.} =\n")
@@ -2156,7 +2197,8 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     result.add("  recordToolInvocation(selectedActionId, call, " &
       "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
-      "commandStatsId = commandStatsId, dependencyPolicy = " &
+      "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
+      "dependencyPolicy = " &
       dependencyPolicyCode(command.dependencyPolicy) & ")\n")
 
 macro defineCliInterface*(toolSymbol: untyped;

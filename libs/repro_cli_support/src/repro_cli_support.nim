@@ -690,6 +690,14 @@ proc lowerDependencyPolicy(actionId, depfile: string;
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
   let payload = decodeBuildActionPayload(toBytes(node.payload))
+  let actionCachePolicy =
+    case payload.actionCachePolicy
+    of acfpTimestamp:
+      ffpTimestamp
+    of acfpChecksum:
+      ffpChecksum
+    of acfpHybrid:
+      ffpHybrid
   proc argValue(name: string): string =
     for arg in payload.call.arguments:
       if arg.name == name:
@@ -735,6 +743,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       commandStatsId = commandStatsId,
       cacheable = payload.cacheable,
       weakFingerprint = weakFingerprintFromText(fingerprintText),
+      actionCachePolicy = actionCachePolicy,
       text = if payload.call.subcommand == "preserveTree":
           argValue("sourceRoot") & "\n" & argValue("outputRoot")
         else:
@@ -786,6 +795,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     dynamicDepsFile = payload.dynamicDepsFile,
     cacheable = payload.cacheable,
     weakFingerprint = weakFingerprintFromText(fingerprintText),
+    actionCachePolicy = actionCachePolicy,
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
     commandStatsId = commandStatsId)

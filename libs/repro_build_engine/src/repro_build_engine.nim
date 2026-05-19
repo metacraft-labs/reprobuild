@@ -55,6 +55,7 @@ type
     commandStatsId*: string
     cacheable*: bool
     weakFingerprint*: ContentDigest
+    actionCachePolicy*: FileFingerprintPolicy
     depfile*: string
     dynamicDepsFile*: string
     monitorDepfile*: string
@@ -228,6 +229,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              cpuMilli = 1000'u32; memoryBytes = 0'u64;
              commandStatsId = ""; cacheable = false;
              weakFingerprint = weakFingerprintFromText(id);
+             actionCachePolicy = ffpHybrid;
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
              dependencyPolicy = declaredOnlyPolicy();
@@ -248,6 +250,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     commandStatsId: commandStatsId,
     cacheable: cacheable,
     weakFingerprint: weakFingerprint,
+    actionCachePolicy: actionCachePolicy,
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
@@ -259,6 +262,7 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
                     outputs: openArray[string] = [];
                     commandStatsId = ""; cacheable = true;
                     weakFingerprint = weakFingerprintFromText(id);
+                    actionCachePolicy = ffpHybrid;
                     text = ""; entries: openArray[string] = []): BuildAction =
   if kind == bakProcess:
     raise newException(BuildEngineError, "builtinAction requires a built-in action kind")
@@ -272,6 +276,7 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     commandStatsId: commandStatsId,
     cacheable: cacheable,
     weakFingerprint: weakFingerprint,
+    actionCachePolicy: actionCachePolicy,
     dependencyPolicy: declaredOnlyPolicy(),
     builtinText: text,
     builtinEntries: @entries)
@@ -1217,7 +1222,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.trace(id, "cache-skipped", "dependency-launched")
         elif action.cacheable:
           let lookupStart = statStart()
-          let lookup = cache.lookupActionResult(cas, action.weakFingerprint, ffpChecksum)
+          let lookup = cache.lookupActionResult(cas, action.weakFingerprint,
+            action.actionCachePolicy)
           finishStat("repro cache lookup", lookupStart)
           case lookup.status
           of aclHit:
@@ -1349,7 +1355,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if plan.action.cacheable:
               let recordStart = statStart()
               let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
-                ffpChecksum, evidence.evidence.evidenceInputPaths(),
+                plan.action.actionCachePolicy, evidence.evidence.evidenceInputPaths(),
                 plan.action.outputs, plan.action.cwd)
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
@@ -1473,8 +1479,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           continue
         if action.cacheable:
           let recordStart = statStart()
-          let record = cache.recordActionResult(cas, action.weakFingerprint, ffpChecksum,
-            evidence.evidence.evidenceInputPaths(), action.outputs, action.cwd)
+          let record = cache.recordActionResult(cas, action.weakFingerprint,
+            action.actionCachePolicy, evidence.evidence.evidenceInputPaths(),
+            action.outputs, action.cwd)
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)
