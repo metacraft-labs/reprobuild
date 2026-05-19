@@ -761,6 +761,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if lowered.actions.len == 0:
       result.exitCode = 0
       return
+    # Path-mode escape hatch: when the local RunQuota daemon is not reachable
+    # (e.g. nothing started runquotad and `--tool-provisioning=path` is being
+    # used in a smoke test), fall back to spawning actions directly with
+    # osproc so the build can still finish. The bypass is only allowed in
+    # path-only mode; full provisioning still requires a real daemon.
+    # Windows: pre-port checkouts used to gate this purely on
+    # `defined(windows)`. Now that runquota supports named pipes, the gate is
+    # platform-agnostic and reflects actual daemon availability.
+    var bypassRunQuota = false
+    if mode == tpmPathOnly and not isRunQuotaDaemonReachable():
+      bypassRunQuota = true
+      echo "repro build: WARNING runquotad is not reachable; using " &
+        "path-mode RunQuota bypass (no quotas/leases enforced). Start " &
+        "`runquotad` and rerun to use the real lease coordinator."
     let buildResult = runBuild(graph(lowered.actions, lowered.pools),
         BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
@@ -768,7 +782,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       maxParallelism: 8'u32,
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
-      rebuildMissingOutputsOnCacheHit: true))
+      rebuildMissingOutputsOnCacheHit: true,
+      bypassRunQuota: bypassRunQuota))
     let reportPath = outDir / "build-report.json"
     writeBuildReport(reportPath, provider, refresh, buildResult)
     result.buildReportPath = reportPath

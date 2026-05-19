@@ -73,6 +73,15 @@ type
     stdoutLimit*: int
     stderrLimit*: int
     rebuildMissingOutputsOnCacheHit*: bool
+    # Path-mode escape hatch (stop-gap until the RunQuota Windows port lands).
+    # When true, the engine spawns each `bakProcess` action directly via
+    # `osproc.startProcess` instead of going through the RunQuota helper, and
+    # synthesizes a result JSON in the same on-disk schema the helper would
+    # produce. This bypasses ALL resource quotas, named-pool leases, and
+    # backend selection — it exists only so `repro build --tool-provisioning=path`
+    # can drive a smoke test on Windows. Callers SHOULD only set this on
+    # platforms where the real RunQuota daemon/helper is not yet available.
+    bypassRunQuota*: bool
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -120,6 +129,7 @@ type
     action: BuildAction
     process: Process
     resultPath: string
+    bypassRunQuota: bool
 
   DynamicGraphFragment = object
     deps: Table[string, seq[string]]
@@ -148,7 +158,8 @@ proc defaultBuildEngineConfig*(cacheRoot: string): BuildEngineConfig =
     maxParallelism: 8'u32,
     stdoutLimit: 1_048_576,
     stderrLimit: 1_048_576,
-    rebuildMissingOutputsOnCacheHit: false)
+    rebuildMissingOutputsOnCacheHit: false,
+    bypassRunQuota: false)
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -629,7 +640,13 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   result.action = action
   if action.dependencyPolicy.kind notin MonitorPolicyKinds:
     return
-  when not defined(macosx):
+  # Windows: automatic monitor dependency gathering now works on Windows via
+  # the IAT-patching shim + CreateRemoteThread injection (see
+  # libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim and
+  # libs/repro_monitor_depfile/src/repro_monitor_depfile/windows_injector.nim).
+  # The same `repro-fs-snoop` driver is used as on macOS — only the underlying
+  # injection mechanism differs.
+  when not (defined(macosx) or defined(windows)):
     result.diagnostic =
       "automatic monitor dependency gathering is unsupported on this platform"
   else:
@@ -643,8 +660,42 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
     result.action.monitorDepfile = depfile
     result.action.argv = @[monitorCli, "--depfile", depfile, "--"] & action.argv
 
+proc envTableFromArgvStyle(env: openArray[string]): StringTableRef =
+  ## Convert the ``"NAME=VALUE"`` argv-style env (carried on BuildAction.env)
+  ## into the StringTableRef shape that ``osproc.startProcess`` expects.
+  ## Returns ``nil`` when no overrides are provided so the child inherits the
+  ## parent process environment.
+  if env.len == 0:
+    return nil
+  result = newStringTable(modeCaseSensitive)
+  for entry in env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    result[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+
+proc startBypassRunQuotaProcess(action: BuildAction): Process =
+  ## Path-mode escape hatch: spawn the action's argv directly via osproc,
+  ## bypassing the RunQuota helper. Only used when
+  ## ``BuildEngineConfig.bypassRunQuota`` is true (currently set only on
+  ## Windows under ``--tool-provisioning=path``). All resource accounting,
+  ## named-pool leases, and quota enforcement are skipped — the engine still
+  ## honours its own ``poolRunning`` capacity tracking so action graphs that
+  ## declare pools stay sequenced, but no daemon-side enforcement happens.
+  if action.argv.len == 0:
+    raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
+  let env = envTableFromArgvStyle(action.env)
+  let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()
+  startProcess(action.argv[0],
+    args = action.argv[1 .. ^1],
+    env = env,
+    workingDir = cwd,
+    options = {poUsePath, poStdErrToStdOut})
+
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
                           resultPath: string): Process =
+  if config.bypassRunQuota:
+    return startBypassRunQuotaProcess(action)
   let rq = ReproResourceRequest(
     label: action.id,
     commandStatsId: action.commandStatsId,
@@ -663,11 +714,53 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   startProcess(helper, args = helperCliArgs(rq, command, resultPath),
     options = {poUsePath, poStdErrToStdOut})
 
-proc finishRunQuotaProcess(id: string; process: Process; resultPath: string): ActionResult =
-  result = ActionResult(id: id, launched: true, runQuotaBackend: "runquota-helper")
-  let helperExit = process.waitForExit()
-  var helperOutput = ""
+proc writeBypassResultJson(resultPath: string; exitCode: int;
+                           combinedOutput: string) =
+  ## Synthesize the same result-JSON schema the RunQuota helper writes, so the
+  ## downstream parser in ``finishRunQuotaProcess`` can consume it unchanged.
+  ## Keep field names and types byte-for-byte aligned with
+  ## ``repro_runquota.executionJson``.
+  let payload = %*{
+    "runner_error": "",
+    "lease_id": 0,
+    "exit_code": exitCode,
+    "exited": true,
+    "signaled": false,
+    "signal": 0,
+    "stdout": combinedOutput,
+    "stderr": "",
+    "backend_name": "windows-path-mode-bypass",
+    "runquota_socket": "",
+    "lease_finished_sent": false,
+    "lease_released": false
+  }
+  createDir(parentDir(resultPath))
+  writeFile(resultPath, $payload)
+
+proc finishBypassRunQuotaProcess(id: string; process: Process;
+                                 resultPath: string) =
+  ## Path-mode escape hatch: drain the directly-spawned process and synthesize
+  ## the result JSON the standard parser expects. Returns nothing — the caller
+  ## proceeds to the same ``parseFile(resultPath)`` codepath the RunQuota
+  ## helper would have written.
+  let exitCode = process.waitForExit()
+  var combinedOutput = ""
   if process.outputStream != nil:
+    combinedOutput = process.outputStream.readAll()
+  writeBypassResultJson(resultPath, exitCode, combinedOutput)
+
+proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
+                           bypassRunQuota: bool): ActionResult =
+  let backendLabel =
+    if bypassRunQuota: "windows-path-mode-bypass" else: "runquota-helper"
+  result = ActionResult(id: id, launched: true, runQuotaBackend: backendLabel)
+  if bypassRunQuota:
+    finishBypassRunQuotaProcess(id, process, resultPath)
+  let helperExit =
+    if bypassRunQuota: 0
+    else: process.waitForExit()
+  var helperOutput = ""
+  if not bypassRunQuota and process.outputStream != nil:
     helperOutput = process.outputStream.readAll()
   if not fileExists(resultPath):
     result.status = asFailed
@@ -1101,7 +1194,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           poolUnits: units,
           action: plan.action,
           process: process,
-          resultPath: resultPath))
+          resultPath: resultPath,
+          bypassRunQuota: config.bypassRunQuota))
         runResult.trace(id, "launched", "pool=" & poolName)
         launchedAny = true
 
@@ -1129,7 +1223,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let finished = finishRunQuotaProcess(
         runningItem.id,
         runningItem.process,
-        runningItem.resultPath)
+        runningItem.resultPath,
+        runningItem.bypassRunQuota)
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
       runningItem.process.close()

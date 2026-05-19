@@ -1,5 +1,8 @@
 import std/[json, os, strutils]
 
+# Windows: the sibling runquota repository now ships a Windows port
+# (named-pipe transport + Job-Object-based process spawning), so the real
+# runquota_* libraries link cleanly on every platform we target.
 import runquota_client
 import runquota_codec
 import runquota_core
@@ -48,6 +51,9 @@ proc effectiveMemory(request: ReproResourceRequest): uint64 =
   if request.memoryBytes == 0'u64: 128'u64 * 1024'u64 * 1024'u64
   else: request.memoryBytes
 
+# Windows: now that the runquota Windows port is live, these helpers compile
+# unconditionally; the daemon and host backend take care of the platform
+# differences underneath the public API.
 proc toRunQuotaRequest*(request: ReproResourceRequest): ResourceRequest =
   let cpu = request.effectiveCpu()
   var resources = resourceVector(milliCpu(cpu), bytes(request.effectiveMemory()))
@@ -139,6 +145,17 @@ proc helperCliArgs*(request: ReproResourceRequest;
     result.add(entry)
   result.add("--")
   result.add(command.argv)
+
+proc isRunQuotaDaemonReachable*(): bool =
+  ## Cheap probe used by the CLI to decide whether to fall back to the
+  ## path-mode bypass. Returns true iff a Hello/HelloOk round-trip with the
+  ## default endpoint succeeded.
+  try:
+    var client = connectDefault()
+    client.close()
+    true
+  except CatchableError:
+    false
 
 proc runWithRunQuota*(request: ReproResourceRequest;
                       command: ReproCommandSpec): ReproRunQuotaExecution =
