@@ -86,30 +86,45 @@ proc nixPrefix(namePattern, header: string; dylibNames: openArray[string]): stri
           return prefix
   ""
 
-let blake3Prefix = block:
-  let direct = firstExistingPrefix(
-    [getEnv("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3", "/usr/local/opt/blake3"],
-    "include/blake3.h",
-    ["libblake3.dylib", "libblake3.so", "libblake3.a"])
-  if direct.len > 0: direct
-  else: nixPrefix("*-libblake3-*", "include/blake3.h",
-                  ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+# Windows: no homebrew/nix prefix is available, so feed the C wrappers the
+# vendored blake3 / xxhash sources we already ship under references/mold/.
+# `blake3.nim` and `xxh3.nim` compile the vendored portable .c implementations
+# directly when defined(windows); we just need their headers on the include
+# path.
+when defined(windows):
+  let vendoredBlake3Inc = thisDir() / "references" / "mold" / "third-party" /
+    "blake3" / "c"
+  let vendoredXxhashInc = thisDir() / "references" / "mold" / "third-party" /
+    "xxhash"
+  if fileExists(vendoredBlake3Inc / "blake3.h"):
+    switch("passC", "-I" & vendoredBlake3Inc)
+  if fileExists(vendoredXxhashInc / "xxhash.h"):
+    switch("passC", "-I" & vendoredXxhashInc)
+else:
+  let blake3Prefix = block:
+    let direct = firstExistingPrefix(
+      [getEnv("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3", "/usr/local/opt/blake3"],
+      "include/blake3.h",
+      ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+    if direct.len > 0: direct
+    else: nixPrefix("*-libblake3-*", "include/blake3.h",
+                    ["libblake3.dylib", "libblake3.so", "libblake3.a"])
 
-if blake3Prefix.len > 0:
-  switch("passC", "-I" & blake3Prefix / "include")
-  switch("passL", "-L" & blake3Prefix / "lib")
-  switch("passL", "-lblake3")
+  if blake3Prefix.len > 0:
+    switch("passC", "-I" & blake3Prefix / "include")
+    switch("passL", "-L" & blake3Prefix / "lib")
+    switch("passL", "-lblake3")
 
-let xxhashPrefix = block:
-  let direct = firstExistingPrefix(
-    [getEnv("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash", "/usr/local/opt/xxhash"],
-    "include/xxhash.h",
-    ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
-  if direct.len > 0: direct
-  else: nixPrefix("*-xxHash-*", "include/xxhash.h",
-                  ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+  let xxhashPrefix = block:
+    let direct = firstExistingPrefix(
+      [getEnv("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash", "/usr/local/opt/xxhash"],
+      "include/xxhash.h",
+      ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+    if direct.len > 0: direct
+    else: nixPrefix("*-xxHash-*", "include/xxhash.h",
+                    ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
 
-if xxhashPrefix.len > 0:
-  switch("passC", "-I" & xxhashPrefix / "include")
-  switch("passL", "-L" & xxhashPrefix / "lib")
-  switch("passL", "-lxxhash")
+  if xxhashPrefix.len > 0:
+    switch("passC", "-I" & xxhashPrefix / "include")
+    switch("passL", "-L" & xxhashPrefix / "lib")
+    switch("passL", "-lxxhash")

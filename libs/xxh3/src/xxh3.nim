@@ -1,5 +1,13 @@
 {.compile: "xxh3/capi.c".}
 
+# Windows: no system libxxhash; compile the vendored xxhash.c directly. The
+# upstream xxhash.c is a single translation unit and uses only stddef/stdint.
+when defined(windows):
+  # Windows: relative path is anchored at libs/xxh3/src/; three levels up
+  # reaches the repo root.
+  const xxh3Root = "../../../references/mold/third-party/xxhash"
+  {.compile: xxh3Root & "/xxhash.c".}
+
 import std/strutils
 
 type Xxh3Digest* = distinct uint64
