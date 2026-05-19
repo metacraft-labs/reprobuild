@@ -114,6 +114,13 @@ e2e_repro_develop_cmake_path_vs_nix_portability:
         tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim \
         2>&1 | tee test-logs/e2e_repro_develop_cmake_path_vs_nix_portability.log
 
+e2e_reprobuild_generated_cmake_provider_suite:
+    mkdir -p test-logs
+    log="$(pwd)/test-logs/e2e_reprobuild_generated_cmake_provider_suite.log" && \
+    cd ../reprobuild-cmake/build && \
+        ctest --output-on-failure -R '^e2e_cmake_reprobuild_generated_feature_matrix$' \
+        2>&1 | tee "$log"
+
 lint:
     mkdir -p test-logs
     ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
