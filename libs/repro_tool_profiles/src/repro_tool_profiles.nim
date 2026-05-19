@@ -270,14 +270,46 @@ proc findExecutableOnPath(executableName: string;
                           pathSearchList: openArray[string]): string =
   if executableName.len == 0:
     return ""
-  for dir in pathSearchList:
-    if dir.len == 0:
-      continue
-    let candidate = dir / executableName
-    if fileExists(candidate) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
-          it in getFilePermissions(candidate)):
-      return absolutePath(candidate)
-  ""
+  when defined(windows):
+    # Windows: executables have extensions (.exe, .cmd, .bat, .com) and
+    # there is no POSIX execute-permission bit. Probe each PATH entry for the
+    # standard executable suffixes from PATHEXT, falling back to common defaults
+    # when PATHEXT is unset. Try extensioned candidates first so we never
+    # accidentally pick up a POSIX shell-script shim with no extension (those
+    # cannot be CreateProcess'd as Win32 apps). Only fall back to the bare name
+    # if the caller already supplied an extension in the name itself.
+    var suffixes: seq[string] = @[]
+    let pathExt = getEnv("PATHEXT")
+    if pathExt.len > 0:
+      for ext in pathExt.split(';'):
+        let lowered = ext.strip().toLowerAscii()
+        if lowered.len > 0:
+          suffixes.add(lowered)
+    else:
+      suffixes.add(".exe")
+      suffixes.add(".cmd")
+      suffixes.add(".bat")
+      suffixes.add(".com")
+    let nameHasExt = executableName.splitFile.ext.len > 0
+    if nameHasExt:
+      suffixes.insert("", 0)
+    for dir in pathSearchList:
+      if dir.len == 0:
+        continue
+      for suffix in suffixes:
+        let candidate = dir / (executableName & suffix)
+        if fileExists(candidate):
+          return absolutePath(candidate)
+    return ""
+  else:
+    for dir in pathSearchList:
+      if dir.len == 0:
+        continue
+      let candidate = dir / executableName
+      if fileExists(candidate) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
+            it in getFilePermissions(candidate)):
+        return absolutePath(candidate)
+    ""
 
 proc sidecarToolProfile(path: string): Table[string, string] =
   let sidecar = path & ".repro-tool-profile"

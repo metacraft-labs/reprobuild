@@ -1,4 +1,4 @@
-import std/[algorithm, options, os, osproc, sequtils, strutils, tempfiles]
+import std/[algorithm, options, os, osproc, sequtils, streams, strutils, tempfiles]
 
 import cbor
 import repro_core
@@ -795,14 +795,28 @@ proc shellQuote(value: string): string =
 
 proc runCommand(command: openArray[string];
     cwd = ""): ProviderCompileExecutionResult =
-  let quoted = command.mapIt(shellQuote(it)).join(" ")
-  let res = execCmdEx(quoted, workingDir = cwd)
+  if command.len == 0:
+    raise newException(OSError, "runCommand requires a non-empty argv")
+  # Use startProcess(argv) directly instead of execCmdEx(quoted) so this works
+  # on Windows where the POSIX single-quote shell-quoting in shellQuote is not
+  # understood by cmd.exe. The behaviour on POSIX hosts is preserved: same
+  # workingDir, stdout+stderr merged, single combined-output string returned.
+  let process = startProcess(command[0],
+    args = command[1 .. ^1],
+    workingDir = cwd,
+    options = {poUsePath, poStdErrToStdOut})
+  var output = ""
+  if process.outputStream != nil:
+    output = process.outputStream.readAll()
+  let exitCode = process.waitForExit()
+  process.close()
   result = ProviderCompileExecutionResult(
-    exitCode: res.exitCode,
-    output: res.output)
-  if res.exitCode != 0:
-    raise newException(OSError, "command failed (" & $res.exitCode & "): " &
-      quoted & "\n" & res.output)
+    exitCode: exitCode,
+    output: output)
+  if exitCode != 0:
+    let quoted = command.mapIt(shellQuote(it)).join(" ")
+    raise newException(OSError, "command failed (" & $exitCode & "): " &
+      quoted & "\n" & output)
 
 proc nimCompilerPath(): string =
   let overridePath = getEnv("REPRO_NIM_COMPILER")
@@ -963,6 +977,18 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
                             interfaceFingerprint: ContentDigest;
                             artifactPath = "";
                             workDir = getCurrentDir()): ProviderCompileArtifact =
+  # On Windows, the Nim compiler emits executables with a .exe suffix even
+  # when `--out:` is given without one. Normalize the requested path so the
+  # rest of the pipeline (cache lookup, startProcess) sees the real artifact
+  # location. ExeExt is "" on POSIX so this is a no-op there.
+  let outputBinaryPath =
+    when defined(windows):
+      if outputBinaryPath.endsWith("." & ExeExt) or ExeExt.len == 0:
+        outputBinaryPath
+      else:
+        outputBinaryPath & "." & ExeExt
+    else:
+      outputBinaryPath
   let sources = discoverNimSources(modulePath)
   let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint)
   if artifactPath.len > 0 and fileExists(artifactPath) and fileExists(outputBinaryPath):
