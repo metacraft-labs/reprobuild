@@ -892,15 +892,30 @@ proc sourceLocation(file: string): SourceLocation =
   SourceLocation(file: file, line: 1)
 
 proc cmakeNixExecutable(name: string): string =
-  case name
-  of "cmake":
-    "bin/cmake"
-  of "cc":
-    "bin/cc"
-  of "c++":
-    "bin/c++"
+  # Windows: Nix store binaries have a `.exe` suffix. The forked CMake build
+  # tree from `metacraft-labs/reprobuild-cmake` also produces `cmake.exe`,
+  # `cc.exe`, etc. Emit relative paths with `.exe` on Windows so the path-only
+  # / Nix executablePath actually points at a runnable file.
+  when defined(windows):
+    case name
+    of "cmake":
+      "bin/cmake.exe"
+    of "cc":
+      "bin/cc.exe"
+    of "c++":
+      "bin/c++.exe"
+    else:
+      "bin/" & name & ".exe"
   else:
-    "bin/" & name
+    case name
+    of "cmake":
+      "bin/cmake"
+    of "cc":
+      "bin/cc"
+    of "c++":
+      "bin/c++"
+    else:
+      "bin/" & name
 
 proc cmakeNixSelector(name: string): string =
   case name
@@ -1010,6 +1025,12 @@ proc writeCMakeToolchain(path: string; identity: PathOnlyBuildIdentity;
   content.add(cmakeSet("CMAKE_PREFIX_PATH", "STRING", prefixValue))
   when defined(macosx):
     content.add(cmakeSet("CMAKE_OSX_SYSROOT", "PATH", sdkRoot))
+  elif defined(windows):
+    # Windows: MSVC has no sysroot concept; the Windows SDK is selected
+    # implicitly via the toolchain (vcvars / VS install), so we deliberately
+    # omit both CMAKE_SYSROOT and CMAKE_OSX_SYSROOT here. Proper Windows SDK
+    # pinning is a follow-up.
+    discard
   else:
     content.add(cmakeSet("CMAKE_SYSROOT", "PATH", sdkRoot))
   content.add(cmakeSet("REPROBUILD_CMAKE_TOOL_PORTABILITY", "STRING",
@@ -1026,20 +1047,36 @@ proc writeCMakeToolchain(path: string; identity: PathOnlyBuildIdentity;
 proc shellAssign(name, value: string): string =
   name & "=" & q(value) & "\n"
 
-proc writeCMakeConfigureWrapper(path: string; identity: PathOnlyBuildIdentity;
-                                mode: ToolProvisioningMode; cmakeBinary,
-                                toolchainPath, identityPath, inspectionPath,
-                                sourceRoot, reproPath, sourceRepoRoot: string) =
-  let cmakeProfile = identity.profileFor("cmake")
-  let selectedCmake =
-    if cmakeBinary.len > 0:
-      absolutePath(cmakeBinary)
-    else:
-      cmakeProfile.resolvedExecutablePath
-  let prefixes = profilePrefixes(identity)
-  let prefixValue = pathListJoin(prefixes, ';')
-  let pkgValue = pathListJoin(pkgConfigPaths(prefixes), PathSep)
-  let sdkRoot = sdkRootForCMake()
+proc resolveCMakeExecutable(candidate: string): string =
+  # Windows: the resolved executable path may be recorded without the .exe
+  # suffix (for example when it came from a Nix-style "bin/cmake" entry).
+  # Probe for a .exe variant first so the wrapper actually points at a
+  # runnable file. POSIX paths are returned unchanged.
+  when defined(windows):
+    if candidate.len == 0:
+      return candidate
+    if fileExists(candidate):
+      return candidate
+    if not candidate.endsWith(".exe"):
+      let withExe = candidate & ".exe"
+      if fileExists(withExe):
+        return withExe
+    candidate
+  else:
+    candidate
+
+proc ps1SingleQuote(value: string): string =
+  # Windows: emit a PowerShell single-quoted literal. PS single-quoted strings
+  # do not expand variables and only escape the single quote itself by
+  # doubling it.
+  "'" & value.replace("'", "''") & "'"
+
+proc writeCMakeConfigureWrapperPosix(path: string;
+                                     selectedCmake, toolchainPath,
+                                     identityPath, inspectionPath, sourceRoot,
+                                     reproPath, sourceRepoRoot, prefixValue,
+                                     pkgValue, sdkRoot,
+                                     modeName: string) =
   var content = "#!/bin/sh\nset -eu\n"
   content.add(shellAssign("cmake_bin", selectedCmake))
   content.add(shellAssign("toolchain_file", toolchainPath))
@@ -1070,7 +1107,7 @@ proc writeCMakeConfigureWrapper(path: string; identity: PathOnlyBuildIdentity;
   content.add("exec \"$cmake_bin\" -G Reprobuild ")
   content.add("-DCMAKE_TOOLCHAIN_FILE=\"$toolchain_file\" ")
   content.add("-DCMAKE_PREFIX_PATH=\"$prefix_path\" ")
-  content.add("-DREPROBUILD_CMAKE_TOOL_PORTABILITY=" & mode.modeName & " ")
+  content.add("-DREPROBUILD_CMAKE_TOOL_PORTABILITY=" & modeName & " ")
   content.add("-DREPROBUILD_TOOL_PROFILE_ARTIFACT=" & q(identityPath) & " ")
   content.add("-DREPROBUILD_TOOL_PROFILE_INSPECTION=" & q(inspectionPath) & " ")
   content.add("$extra_sysroot_args \"$@\"\n")
@@ -1078,6 +1115,101 @@ proc writeCMakeConfigureWrapper(path: string; identity: PathOnlyBuildIdentity;
   writeFile(path, content)
   setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+proc writeCMakeConfigureWrapperWindows(path: string;
+                                       selectedCmake, toolchainPath,
+                                       identityPath, inspectionPath, sourceRoot,
+                                       reproPath, sourceRepoRoot, prefixValue,
+                                       pkgValue,
+                                       modeName: string) =
+  # Windows: emit a PowerShell wrapper instead of a POSIX `sh` script. The
+  # script behaviour mirrors the POSIX wrapper: define the same variables,
+  # export the same REPRO_* environment, prepend PKG_CONFIG_PATH if any, and
+  # invoke the forked cmake.exe with -G Reprobuild plus any caller args.
+  # CMAKE_(OSX_)SYSROOT is intentionally omitted: MSVC has no sysroot concept
+  # and the Windows SDK is selected implicitly by the active toolchain.
+  var content = "# Generated by repro develop --cmake. Do not edit.\n"
+  content.add("$ErrorActionPreference = 'Stop'\n")
+  content.add("$cmake_bin = " & ps1SingleQuote(selectedCmake) & "\n")
+  content.add("$toolchain_file = " & ps1SingleQuote(toolchainPath) & "\n")
+  content.add("$prefix_path = " & ps1SingleQuote(prefixValue) & "\n")
+  content.add("$pkg_config_path = " & ps1SingleQuote(pkgValue) & "\n")
+  content.add("$repro_cli = " & ps1SingleQuote(reproPath) & "\n")
+  content.add("$repro_source_root = " & ps1SingleQuote(sourceRepoRoot) & "\n")
+  content.add("$env:REPROBUILD_REPRO = $repro_cli\n")
+  content.add("$env:REPROBUILD_SOURCE_ROOT = $repro_source_root\n")
+  content.add("$env:REPRO_TOOL_PROFILE_ARTIFACT = " &
+    ps1SingleQuote(identityPath) & "\n")
+  content.add("$env:REPRO_TOOL_PROFILE_INSPECTION = " &
+    ps1SingleQuote(inspectionPath) & "\n")
+  content.add("$env:REPRO_PROJECT_ROOT = " & ps1SingleQuote(sourceRoot) & "\n")
+  # Windows: $env:PATH uses ';' as separator; use [IO.Path]::PathSeparator
+  # so the wrapper stays correct even if cross-shelled later.
+  content.add("if ($pkg_config_path) {\n")
+  content.add("  $sep = [IO.Path]::PathSeparator\n")
+  content.add("  if ($env:PKG_CONFIG_PATH) {\n")
+  content.add("    $env:PKG_CONFIG_PATH = \"$pkg_config_path$sep$($env:PKG_CONFIG_PATH)\"\n")
+  content.add("  } else {\n")
+  content.add("    $env:PKG_CONFIG_PATH = $pkg_config_path\n")
+  content.add("  }\n")
+  content.add("}\n")
+  # Build the cmake argv as a PowerShell array. We store the identity and
+  # inspection paths in $env:... already and re-reference them here via
+  # PowerShell variables so each array element is a single value PS-side
+  # (avoids `+` concatenation surprises that CMake mis-parsed as extra
+  # source-dir paths).
+  content.add("$tool_profile_artifact = " &
+    ps1SingleQuote(identityPath) & "\n")
+  content.add("$tool_profile_inspection = " &
+    ps1SingleQuote(inspectionPath) & "\n")
+  content.add("$cmake_args = @(\n")
+  content.add("  '-G', 'Reprobuild',\n")
+  content.add("  \"-DCMAKE_TOOLCHAIN_FILE=$toolchain_file\",\n")
+  content.add("  \"-DCMAKE_PREFIX_PATH=$prefix_path\",\n")
+  content.add("  '-DREPROBUILD_CMAKE_TOOL_PORTABILITY=" & modeName & "',\n")
+  content.add("  \"-DREPROBUILD_TOOL_PROFILE_ARTIFACT=$tool_profile_artifact\",\n")
+  content.add("  \"-DREPROBUILD_TOOL_PROFILE_INSPECTION=$tool_profile_inspection\"\n")
+  content.add(")\n")
+  content.add("& $cmake_bin @cmake_args @args\n")
+  content.add("exit $LASTEXITCODE\n")
+  createDir(parentDir(path))
+  writeFile(path, content)
+
+proc cmakeConfigureWrapperBaseName(): string =
+  # Windows: emit a `.ps1` wrapper instead of an extensionless shell script so
+  # PowerShell (and the develop runner) picks the right interpreter.
+  when defined(windows):
+    "repro-cmake-configure.ps1"
+  else:
+    "repro-cmake-configure"
+
+proc writeCMakeConfigureWrapper(path: string; identity: PathOnlyBuildIdentity;
+                                mode: ToolProvisioningMode; cmakeBinary,
+                                toolchainPath, identityPath, inspectionPath,
+                                sourceRoot, reproPath, sourceRepoRoot: string) =
+  let cmakeProfile = identity.profileFor("cmake")
+  let rawSelected =
+    if cmakeBinary.len > 0:
+      absolutePath(cmakeBinary)
+    else:
+      cmakeProfile.resolvedExecutablePath
+  let selectedCmake = resolveCMakeExecutable(rawSelected)
+  let prefixes = profilePrefixes(identity)
+  # CMake list values (CMAKE_PREFIX_PATH and friends) ALWAYS use ';' as the
+  # separator, independent of host platform. PKG_CONFIG_PATH uses the host
+  # shell's PATH separator (`PathSep` is ';' on Windows, ':' on POSIX).
+  let prefixValue = pathListJoin(prefixes, ';')
+  let pkgValue = pathListJoin(pkgConfigPaths(prefixes), PathSep)
+  when defined(windows):
+    # Windows: the SDK / sysroot concept does not apply to MSVC.
+    writeCMakeConfigureWrapperWindows(path, selectedCmake, toolchainPath,
+      identityPath, inspectionPath, sourceRoot, reproPath, sourceRepoRoot,
+      prefixValue, pkgValue, mode.modeName)
+  else:
+    let sdkRoot = sdkRootForCMake()
+    writeCMakeConfigureWrapperPosix(path, selectedCmake, toolchainPath,
+      identityPath, inspectionPath, sourceRoot, reproPath, sourceRepoRoot,
+      prefixValue, pkgValue, sdkRoot, mode.modeName)
 
 proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
                             command: openArray[string]; workRoot,
@@ -1100,7 +1232,8 @@ proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
   writeInterfaceArtifact(interfacePath, artifact)
   let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
   let toolchainPath = outDir / "reprobuild-cmake-toolchain.cmake"
-  let wrapperPath = outDir / "bin" / "repro-cmake-configure"
+  # Windows: filename includes .ps1 so PowerShell will execute it directly.
+  let wrapperPath = outDir / "bin" / cmakeConfigureWrapperBaseName()
   writeCMakeToolchain(toolchainPath, resolved.identity, mode,
     resolved.identityPath, resolved.inspectionPath)
   writeCMakeConfigureWrapper(wrapperPath, resolved.identity, mode, cmakeBinary,

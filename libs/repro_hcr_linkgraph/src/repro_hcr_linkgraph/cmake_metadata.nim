@@ -1,4 +1,4 @@
-import std/[json, os]
+import std/[json, os, strutils]
 
 type
   CMakeHcrMetadataError* = object of CatchableError
@@ -40,10 +40,18 @@ proc requiredString(node: JsonNode; key, context: string): string =
 proc normalizeForLookup(path: string): string =
   if path.len == 0:
     return ""
+  # Windows: Nim's `normalizedPath` converts to the platform-native form
+  # (backslashes on Windows). The JSON written by CMake uses POSIX `/`
+  # separators, so a backslash-normalized key would never match. Mirror the
+  # dyndep fragment's approach: collapse `.`/`..` ourselves and force
+  # forward-slash output everywhere, so reprobuild's lookups are
+  # platform-agnostic.
+  var canonical = path
   try:
-    result = normalizedPath(path)
+    canonical = normalizedPath(path)
   except OSError:
-    result = path
+    canonical = path
+  result = canonical.replace('\\', '/')
 
 proc readCMakeHcrMetadata*(path: string): CMakeHcrMetadata =
   if not fileExists(path):

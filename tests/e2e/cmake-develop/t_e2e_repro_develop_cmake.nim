@@ -50,7 +50,10 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
   if not fileExists(daemonBin):
     discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
-  let socketPath = "/tmp/repro-m9-rq-" & $getCurrentProcessId() & ".sock"
+  # Windows: /tmp is not present; use the platform tempdir so the socket
+  # path is valid on both POSIX and Windows hosts.
+  let socketPath = getTempDir() / "repro-m9-rq-" & $getCurrentProcessId() &
+    ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [
@@ -74,10 +77,22 @@ proc findForkedCMake(repoRoot: string): string =
   if explicit.len > 0 and fileExists(explicit):
     return explicit
   let cmakeRoot = repoCMakeRoot(repoRoot)
-  for candidate in [
+  # Windows: the fork may be built either by MSVC (multi-config layout with
+  # Release/Debug under bin/) or by MinGW (single-config layout). Probe the
+  # MSVC Release path first, then plain bin/, and try both with and without
+  # the .exe suffix so a POSIX layout still resolves.
+  var candidates: seq[string] = @[
     cmakeRoot / "build" / "bin" / "cmake",
     cmakeRoot / "_build" / "bin" / "cmake"
-  ]:
+  ]
+  when defined(windows):
+    candidates = @[
+      cmakeRoot / "build" / "bin" / "Release" / "cmake.exe",
+      cmakeRoot / "build" / "bin" / "cmake.exe",
+      cmakeRoot / "_build" / "bin" / "Release" / "cmake.exe",
+      cmakeRoot / "_build" / "bin" / "cmake.exe"
+    ] & candidates
+  for candidate in candidates:
     if fileExists(candidate):
       return candidate
   ""

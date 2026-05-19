@@ -71,9 +71,11 @@ const
   ActionRecordMagic = "RBAR"
   ActionRecordVersion = 2'u16
   RecordTailMask = 0xffff_ffff'u64
-  AllFilePermissions = {fpUserExec, fpUserWrite, fpUserRead,
+  AllFilePermissions {.used.} = {fpUserExec, fpUserWrite, fpUserRead,
     fpGroupExec, fpGroupWrite, fpGroupRead,
     fpOthersExec, fpOthersWrite, fpOthersRead}
+    # Windows: marked {.used.} because readPermissions only iterates this set
+    # on POSIX hosts; on Windows we discard the recorded mask entirely.
 
 proc byteString(bytes: openArray[byte]): string =
   result = newString(bytes.len)
@@ -141,19 +143,34 @@ proc readMetadata(data: openArray[byte]; pos: var int): FileMetadata =
   result.mtimeNs = readU64Le(data, pos)
 
 proc writePermissions(outp: var seq[byte]; permissions: set[FilePermission]) =
-  var mask = 0'u16
-  for permission in permissions:
-    mask = mask or (1'u16 shl ord(permission))
-  outp.writeU16Le(mask)
+  # Windows: the POSIX rwx model does not apply to NTFS (NTFS uses ACLs).
+  # For the first round of the Windows port, serialize 0 so cached records
+  # round-trip without applying nonsensical permissions on restore. Proper
+  # ACL / SetFileAttributes preservation is a follow-up.
+  when defined(windows):
+    outp.writeU16Le(0'u16)
+  else:
+    var mask = 0'u16
+    for permission in permissions:
+      mask = mask or (1'u16 shl ord(permission))
+    outp.writeU16Le(mask)
 
 proc readPermissions(data: openArray[byte]; pos: var int): set[FilePermission] =
   let mask = readU16Le(data, pos)
   let knownMask = (1'u16 shl (ord(fpOthersRead) + 1)) - 1
   if (mask and not knownMask) != 0:
     raiseEnvelopeError(eeMalformed, "invalid file permission mask")
-  for permission in AllFilePermissions:
-    if (mask and (1'u16 shl ord(permission))) != 0:
-      result.incl(permission)
+  # Windows: any mask we encounter (whether 0 from a Windows writer or
+  # a non-zero mask from a POSIX writer) is intentionally discarded — the
+  # rwx bits have no Windows equivalent and we don't try to translate them
+  # onto NTFS ACLs yet.
+  when defined(windows):
+    discard mask
+    result = {}
+  else:
+    for permission in AllFilePermissions:
+      if (mask and (1'u16 shl ord(permission))) != 0:
+        result.incl(permission)
 
 proc writeFingerprint(outp: var seq[byte]; fp: FileFingerprint) =
   outp.writeString(fp.path)
@@ -284,11 +301,17 @@ proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
     createDir(destination.splitPath.head)
     let tmpPath = destination & ".reprotmp." & $getCurrentProcessId()
     writeFile(tmpPath, byteString(payloads[i]))
-    setFilePermissions(tmpPath, output.permissions)
+    # Windows: rwx permissions are not preserved (see writePermissions);
+    # applying setFilePermissions with an empty set would clobber the file's
+    # NTFS ACLs in unhelpful ways, so we skip it entirely. Follow-up:
+    # preserve ACLs / read-only attribute via icacls / SetFileAttributes.
+    when not defined(windows):
+      setFilePermissions(tmpPath, output.permissions)
     if fileExists(destination):
       removeFile(destination)
     moveFile(tmpPath, destination)
-    setFilePermissions(destination, output.permissions)
+    when not defined(windows):
+      setFilePermissions(destination, output.permissions)
 
 proc strongIdentityPayload(weak: ContentDigest;
                            inputs: openArray[FileFingerprint]): seq[byte] =
@@ -429,8 +452,15 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
     let data = bytes(readFile(source))
+    # Windows: getFilePermissions returns a synthetic POSIX set derived from
+    # the read-only attribute; we don't preserve it (see writePermissions),
+    # so emit an empty set here. The cache record still round-trips cleanly.
+    when defined(windows):
+      let perms: set[FilePermission] = {}
+    else:
+      let perms = getFilePermissions(source)
     result.outputs.add(OutputBlob(path: path, blob: cas.storeBlob(data),
-      permissions: getFilePermissions(source)))
+      permissions: perms))
   cache.appendRecord(result)
 
 proc refreshedInputs(record: ActionResultRecord;

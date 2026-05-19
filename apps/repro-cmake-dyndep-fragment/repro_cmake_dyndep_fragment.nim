@@ -7,6 +7,14 @@ type
     provides: seq[tuple[name: string; modulePath: string]]
     requires: seq[string]
 
+proc forwardSlash(p: string): string =
+  # Windows: CMake emits path strings with `\\` separators in the dyndep
+  # output JSON, but the rest of reprobuild's downstream lookups (action
+  # map, dynamic graph) treat paths as forward-slash strings so the format
+  # is platform-agnostic. Normalize at every read-time boundary so that
+  # both writers and readers agree on a single canonical form.
+  p.replace('\\', '/')
+
 proc fail(message: string) {.noreturn.} =
   stderr.writeLine("repro-cmake-dyndep-fragment: " & message)
   quit 1
@@ -26,7 +34,9 @@ proc parseMap(path: string): Table[string, string] =
     if fields.len != 2:
       fail(path & ":" & $(lineNo + 1) &
         ": expected '<primary-output>\\t<action-id>'")
-    result[fields[0]] = fields[1]
+    # Windows: normalize the lookup key so map writers on Windows and dyndep
+    # readers using POSIX-style paths agree.
+    result[forwardSlash(fields[0])] = fields[1]
 
 proc stringField(node: JsonNode; name, path: string; required = true): string =
   if not node.hasKey(name):
@@ -67,7 +77,10 @@ proc parseDdi(path: string; actionForOutput: Table[string, string]): ScanInfo =
   let rule = rules[0]
   if rule.kind != JObject:
     fail(path & ": scanner rule must be an object")
-  result.primaryOutput = stringField(rule, "primary-output", path)
+  # Windows: CMake emits paths with backslashes in dyndep JSON. Normalize
+  # primaryOutput and compiled-module-path strings to forward-slash form so
+  # the output dynamic graph is platform-agnostic and matches the action map.
+  result.primaryOutput = forwardSlash(stringField(rule, "primary-output", path))
   if not actionForOutput.hasKey(result.primaryOutput):
     fail(path & ": primary output is absent from action map: " &
       result.primaryOutput)
@@ -77,7 +90,8 @@ proc parseDdi(path: string; actionForOutput: Table[string, string]): ScanInfo =
       fail(path & ": provides item must be an object")
     result.provides.add((
       name: stringField(item, "logical-name", path),
-      modulePath: stringField(item, "compiled-module-path", path, required = false)))
+      modulePath: forwardSlash(
+        stringField(item, "compiled-module-path", path, required = false))))
   for item in arrayField(rule, "requires", path):
     if item.kind != JObject:
       fail(path & ": requires item must be an object")
