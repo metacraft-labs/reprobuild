@@ -1539,8 +1539,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   result.modulePath = modulePath
   result.projectRoot = projectRootForModule(modulePath)
   result.outDir = outDir
+  var runQuotaDaemonReachable: Option[bool]
+  proc probeRunQuotaDaemon(): bool =
+    if runQuotaDaemonReachable.isNone:
+      let runQuotaProbeStart = statStart(statsEnabled)
+      runQuotaDaemonReachable = some(isRunQuotaDaemonReachable())
+      finishStat(buildStats, statsEnabled, "repro runquota probe",
+        runQuotaProbeStart)
+    runQuotaDaemonReachable.get()
+
   var bypassRunQuota = false
-  if mode in {tpmPathOnly, tpmScoop} and not isRunQuotaDaemonReachable():
+  if mode in {tpmPathOnly, tpmScoop} and not probeRunQuotaDaemon():
     bypassRunQuota = true
 
   var cmakeRegenerationResult: BuildRunResult
@@ -1641,7 +1650,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     let providerBinaryPath = outDir / "provider" / "project-provider"
     let providerArtifactPath = outDir / "provider-compile.rbsz"
-    if mode in {tpmPathOnly, tpmScoop} and not isRunQuotaDaemonReachable():
+    if mode in {tpmPathOnly, tpmScoop} and not probeRunQuotaDaemon():
       bypassRunQuota = true
       echo "repro build: WARNING runquotad is not reachable; using " &
         "RunQuota bypass for tool-provisioning=" & mode.modeName &

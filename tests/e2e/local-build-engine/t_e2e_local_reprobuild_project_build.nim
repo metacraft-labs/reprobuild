@@ -1434,11 +1434,14 @@ suite "e2e_local_reprobuild_project_build":
     check statsOutput.contains("total (ms)")
     check statsOutput.contains("repro build total")
     check statsOutput.contains("repro scheduler total")
+    check statsOutput.contains("repro runquota probe")
     let statsReport = parseFile(valueAfter(statsOutput, "buildReport:"))
     check statsReport{"stats"}{"metrics"}.getElems().anyIt(
       it{"name"}.getStr() == "repro build total")
     check statsReport{"stats"}{"metrics"}.getElems().anyIt(
       it{"name"}.getStr() == "repro scheduler total")
+    check statsReport{"stats"}{"metrics"}.getElems().anyIt(
+      it{"name"}.getStr() == "repro runquota probe")
     let providerCompileActions = statsReport{"providerCompileActions"}.getElems()
     check providerCompileActions.len == 0
 
