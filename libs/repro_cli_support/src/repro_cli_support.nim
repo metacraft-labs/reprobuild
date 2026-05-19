@@ -1,4 +1,5 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, terminal]
+import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, terminal,
+    times]
 import repro_core
 import repro_build_engine
 import repro_depfile
@@ -22,7 +23,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--progress=auto|plain|none]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]]\n       " &
           programName &
       " watch [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " &
           programName &
@@ -689,6 +690,22 @@ proc evidenceJson(evidence: PathSetEvidence): JsonNode =
     "diagnostics": jsonStringSeq(evidence.diagnostics)
   }
 
+proc statsJson(stats: BuildStats): JsonNode =
+  var metrics = newJArray()
+  for metric in stats.metrics:
+    let avgUs =
+      if metric.count > 0:
+        metric.totalUs / float(metric.count)
+      else:
+        0.0
+    metrics.add(%*{
+      "name": metric.name,
+      "count": metric.count,
+      "avgUs": avgUs,
+      "totalMs": metric.totalUs / 1000.0
+    })
+  %*{"metrics": metrics}
+
 proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
                       buildResult: BuildRunResult) =
@@ -726,7 +743,8 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
     "providerSnapshot": refresh.persistedSnapshotPath,
     "providerInvocations": refresh.invoked.len,
     "actions": actions,
-    "trace": trace
+    "trace": trace,
+    "stats": statsJson(buildResult.stats)
   }
   createDir(parentDir(path))
   writeFile(path, root.pretty())
@@ -808,6 +826,10 @@ type
     bpmPlain
     bpmNone
 
+  BuildStatsMode = enum
+    bsmNone
+    bsmText
+
   BuildProgressRenderer = object
     enabled: bool
     lastLen: int
@@ -836,6 +858,22 @@ proc configuredBuildProgressMode(): BuildProgressMode =
   if configured.len == 0:
     return bpmAuto
   parseBuildProgressMode(configured)
+
+proc parseBuildStatsMode(value: string): BuildStatsMode =
+  case value.toLowerAscii()
+  of "1", "true", "yes", "on", "text", "stats":
+    bsmText
+  of "0", "false", "no", "off", "none":
+    bsmNone
+  else:
+    raise newException(ValueError,
+      "unsupported --stats=" & value & " (expected text or none)")
+
+proc configuredBuildStatsMode(): BuildStatsMode =
+  let configured = getEnv("REPROBUILD_STATS", "")
+  if configured.len == 0:
+    return bsmNone
+  parseBuildStatsMode(configured)
 
 proc newBuildProgressRenderer(mode: BuildProgressMode): BuildProgressRenderer =
   BuildProgressRenderer(
@@ -922,12 +960,48 @@ proc finishProgress(renderer: var BuildProgressRenderer) =
     stderr.flushFile()
     renderer.lastLen = 0
 
+proc statStart(enabled: bool): float =
+  if enabled:
+    epochTime()
+  else:
+    0.0
+
+proc finishStat(stats: var BuildStats; enabled: bool; name: string;
+                started: float) =
+  if enabled:
+    stats.addMetric(name, (epochTime() - started) * 1_000_000.0)
+
+proc renderBuildStats*(stats: BuildStats): string =
+  let nameWidth = 36
+  result = "metric" & repeat(' ', nameWidth - "metric".len) &
+    " count   avg (us)        total (ms)\n"
+  for metric in stats.metrics:
+    let avgUs =
+      if metric.count > 0:
+        metric.totalUs / float(metric.count)
+      else:
+        0.0
+    let totalMs = metric.totalUs / 1000.0
+    let paddedName =
+      if metric.name.len < nameWidth:
+        metric.name & repeat(' ', nameWidth - metric.name.len)
+      else:
+        metric.name & " "
+    result.add(paddedName & " " &
+      align($metric.count, 5) & "   " &
+      align(formatFloat(avgUs, ffDecimal, 1), 8) & "        " &
+      formatFloat(totalMs, ffDecimal, 1) & "\n")
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
                         workRoot = "";
-                        progressMode = bpmAuto):
+                        progressMode = bpmAuto;
+                        statsMode = bsmNone):
     BuildCommandOutcome =
+  let statsEnabled = statsMode == bsmText
+  var buildStats: BuildStats
+  let buildTotalStart = statStart(statsEnabled)
   var parsedTarget = parseBuildTarget(target)
   parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
   let modulePath = parsedTarget.modulePath
@@ -942,8 +1016,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let interfacePath = outDir / "project-interface.rbsz"
   let stubPath = outDir / "project-interface.nim"
   let compileWorkDir = reprobuildLibraryWorkDir()
+  let interfaceStart = statStart(statsEnabled)
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
     compileWorkDir)
+  finishStat(buildStats, statsEnabled, "repro interface extract",
+    interfaceStart)
 
   if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
     raise newException(ValueError,
@@ -952,7 +1029,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         "explicit weak local profile.")
 
   if mode in {tpmPathOnly, tpmNix, tpmTarball}:
+    let identityStart = statStart(statsEnabled)
     let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
+    finishStat(buildStats, statsEnabled, "repro tool identity resolve",
+      identityStart)
     let identity = resolved.identity
     echo "repro build: tool provisioning active (tool-provisioning=" &
       mode.modeName & ")"
@@ -977,14 +1057,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let providerBinaryPath = outDir / "provider" / "project-provider"
     let providerArtifactPath = outDir / "provider-compile.rbsz"
     echo "providerCompile: started"
+    let providerCompileStart = statStart(statsEnabled)
     let provider = compileProviderBinary(modulePath, providerBinaryPath,
       artifact.interfaceFingerprint, providerArtifactPath, compileWorkDir)
+    finishStat(buildStats, statsEnabled, "repro provider compile",
+      providerCompileStart)
     let providerArtifactId = digestHex(provider.providerFingerprint)
     echo "providerBinary: " & provider.outputBinaryPath
     echo "providerCompileArtifact: " & providerArtifactPath
     echo "providerArtifact: " & providerArtifactId
 
     let projectRoot = result.projectRoot
+    let providerGraphStart = statStart(statsEnabled)
     let refresh = refreshProviderGraph(RefreshConfig(
       storeRoot: outDir / "provider-graph",
       providerBinaryPath: provider.outputBinaryPath,
@@ -995,6 +1079,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       lockSliceId: digestHex(artifact.interfaceFingerprint),
       activity: "build",
       providerWorkingDir: projectRoot))
+    finishStat(buildStats, statsEnabled, "repro provider graph refresh",
+      providerGraphStart)
     echo "providerGraphSnapshot: " & refresh.persistedSnapshotPath
     echo "providerInvocations: " & $refresh.invoked.len
 
@@ -1004,8 +1090,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if selectedActionId.len > 0:
         echo "defaultTarget: " & selectedActionId
 
+    let graphLowerStart = statStart(statsEnabled)
     let lowered = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
       selectedActionId)
+    finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
     if parsedTarget.fragmentKind == tfkActionSelection:
       echo "selectedTarget: " & parsedTarget.selectedActionId
     elif selectDefaultAction and selectedActionId.len > 0:
@@ -1037,14 +1125,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
       bypassRunQuota: bypassRunQuota)
+    engineConfig.statsEnabled = statsEnabled
     if progressRenderer.enabled:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
+    let engineStart = statStart(statsEnabled)
     try:
       buildResult = runBuild(graph(lowered.actions, lowered.pools), engineConfig)
     finally:
       progressRenderer.finishProgress()
+    finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
+    buildStats.mergeStats(buildResult.stats)
+    finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
+    buildResult.stats = buildStats
     let reportPath = outDir / "build-report.json"
     writeBuildReport(reportPath, provider, refresh, buildResult)
     result.buildReportPath = reportPath
@@ -1057,6 +1151,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         " lease=" & $item.leaseId &
         " evidence=depfile:" & $item.evidence.depfileInputs.len
     echo "buildReport: " & reportPath
+    if statsEnabled:
+      stderr.write(renderBuildStats(buildResult.stats))
+      stderr.flushFile()
     result.exitCode =
       if buildResult.hasFailedActions():
         1
@@ -1523,6 +1620,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var mode = tpmUnspecified
   var workRoot = ""
   var progressMode = configuredBuildProgressMode()
+  var statsMode = configuredBuildStatsMode()
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
@@ -1540,6 +1638,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     elif arg == "--progress":
       raise newException(ValueError,
         "--progress requires an inline value, for example --progress=auto")
+    elif arg.startsWith("--stats="):
+      statsMode = parseBuildStatsMode(arg.split("=", maxsplit = 1)[1])
+    elif arg == "--stats":
+      statsMode = bsmText
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported build flag: " & arg)
     elif target.len == 0:
@@ -1554,7 +1656,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   executeBuildTarget(target, mode, publicCliPath,
     selectDefaultAction = targetWasOmitted,
     workRoot = workRoot,
-    progressMode = progressMode).exitCode
+    progressMode = progressMode,
+    statsMode = statsMode).exitCode
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:

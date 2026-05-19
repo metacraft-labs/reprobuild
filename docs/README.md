@@ -5,3 +5,4 @@ Reprobuild repository.
 
 - [Capabilities](capabilities.md)
 - [Build Progress](progress.md)
+- [Build Stats](stats.md)

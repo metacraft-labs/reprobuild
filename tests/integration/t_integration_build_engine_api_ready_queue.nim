@@ -185,6 +185,7 @@ suite "integration_build_engine_api_ready_queue":
       stdoutLimit: 256 * 1024,
       stderrLimit: 256 * 1024,
       bypassRunQuota: true)
+    config.statsEnabled = true
     config.progressCallback = proc(event: BuildProgressEvent) =
       events.add(event)
 
@@ -197,6 +198,19 @@ suite "integration_build_engine_api_ready_queue":
     check buildResult.results.len == 1
     check buildResult.results[0].status == asSucceeded
     check readFile(outputPath).contains("progress:progress input")
+    var sawSchedulerTotalStat = false
+    var sawProcessWaitStat = false
+    for metric in buildResult.stats.metrics:
+      if metric.name == "repro scheduler total":
+        sawSchedulerTotalStat = true
+        check metric.count == 1
+        check metric.totalUs > 0.0
+      if metric.name == "repro process wait":
+        sawProcessWaitStat = true
+        check metric.count == 1
+        check metric.totalUs >= 0.0
+    check sawSchedulerTotalStat
+    check sawProcessWaitStat
 
     var sawStarted = false
     var sawCompleted = false

@@ -35,11 +35,16 @@ multi-core competitiveness runs.
 
 Ninja build scenarios collect Ninja's native `-d stats` diagnostics by default.
 The benchmark passes these through CMake as native build-tool arguments:
-`cmake --build <dir> ... -- -d stats`. Reprobuild scenario command lines are
-left unchanged. The report metadata records the selected diagnostics mode, and
-each Ninja build scenario includes parsed `ninjaDiagnostics.metrics` entries
-with Ninja's metric name, count, average microseconds, and total milliseconds.
-These internal timings help separate CMake/Ninja scheduling and dependency
-work from Reprobuild-specific overhead when a Reprobuild/Ninja wall-clock ratio
-regresses. Pass `--ninja-diagnostics=none` to disable collection for comparing
-against Ninja versions with different diagnostic output.
+`cmake --build <dir> ... -- -d stats`. Reprobuild build scenarios collect
+`repro build --stats` diagnostics by default via `REPROBUILD_STATS=1`, so the
+CMake generator command lines stay unchanged. The report metadata records the
+selected diagnostics modes, and each build scenario includes parsed
+`ninjaDiagnostics.metrics` or `reprobuildDiagnostics.metrics` entries with the
+metric name, count, average microseconds, and total milliseconds.
+
+The benchmark wrapper rebuilds `build/bin/repro` with
+`REPROBUILD_BUILD_MODE=release` before running measurements. These internal
+timings help separate CMake/Ninja scheduling and dependency work from
+Reprobuild-specific overhead when a Reprobuild/Ninja wall-clock ratio
+regresses. Pass `--ninja-diagnostics=none` or
+`--reprobuild-diagnostics=none` to disable collection.

@@ -69,7 +69,7 @@ def run_command(args, cwd=None, env=None, check=True):
     return result
 
 
-def parse_ninja_stats(output):
+def parse_stats_table(output):
     metrics = []
     in_metrics = False
     metric_line = re.compile(
@@ -103,11 +103,27 @@ def parse_ninja_stats(output):
     return {"metrics": metrics}
 
 
+def parse_ninja_stats(output):
+    return parse_stats_table(output)
+
+
+def parse_reprobuild_stats(output):
+    return parse_stats_table(output)
+
+
 def enrich_ninja_stats_result(result):
     combined = result["stdoutTail"] + "\n" + result["stderrTail"]
     result["ninjaDiagnostics"] = {
         "mode": "stats",
         **parse_ninja_stats(combined),
+    }
+
+
+def enrich_reprobuild_stats_result(result):
+    combined = result["stdoutTail"] + "\n" + result["stderrTail"]
+    result["reprobuildDiagnostics"] = {
+        "mode": "stats",
+        **parse_reprobuild_stats(combined),
     }
 
 
@@ -303,13 +319,16 @@ def build_command(cmake, binary_dir, target, parallel, native_args=None):
     return args
 
 
-def run_build(cmake, binary_dir, target, parallel, env=None, ninja_diagnostics="none"):
+def run_build(cmake, binary_dir, target, parallel, env=None,
+              ninja_diagnostics="none", reprobuild_diagnostics="none"):
     native_args = []
     if ninja_diagnostics == "stats":
         native_args.extend(["-d", "stats"])
     result = run_command(build_command(cmake, binary_dir, target, parallel, native_args), env=env)
     if ninja_diagnostics == "stats":
         enrich_ninja_stats_result(result)
+    if reprobuild_diagnostics == "stats":
+        enrich_reprobuild_stats_result(result)
     enrich_reprobuild_result(result)
     return result
 
@@ -370,7 +389,8 @@ def stop_runquota(proc, log):
     log.close()
 
 
-def repro_env(base_env, rb_bin, runquota_socket, binary_dir, parallel):
+def repro_env(base_env, rb_bin, runquota_socket, binary_dir, parallel,
+              reprobuild_diagnostics):
     env = dict(base_env)
     env.update({
         "RUNQUOTA_SOCKET": str(runquota_socket),
@@ -378,6 +398,7 @@ def repro_env(base_env, rb_bin, runquota_socket, binary_dir, parallel):
         "REPROBUILD_REPRO": str(rb_bin),
         "REPROBUILD_SOURCE_ROOT": str(ROOT),
         "REPROBUILD_MAX_PARALLELISM": str(max(1, parallel)),
+        "REPROBUILD_STATS": "1" if reprobuild_diagnostics == "stats" else "0",
     })
     return env
 
@@ -474,23 +495,28 @@ def benchmark_project(args, context, key, source_dir, configure_args, build_targ
     add_pair(project_report, "configure", ninja_configure, rb_configure)
 
     rq_proc, rq_socket, rq_log = start_runquota(runquotad, project_root / "runquota")
-    rb_env = repro_env(base_env, rb_bin, rq_socket, rb_bin_dir, parallel)
+    rb_env = repro_env(base_env, rb_bin, rq_socket, rb_bin_dir, parallel,
+                       args.reprobuild_diagnostics)
     try:
         ninja_clean = run_build(cmake, ninja_bin, build_target, parallel,
                                 ninja_diagnostics=args.ninja_diagnostics)
-        rb_clean = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
+        rb_clean = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env,
+                             reprobuild_diagnostics=args.reprobuild_diagnostics)
         add_pair(project_report, "clean_build", ninja_clean, rb_clean)
 
         ninja_noop = run_build(cmake, ninja_bin, build_target, parallel,
                                ninja_diagnostics=args.ninja_diagnostics)
-        rb_noop = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
+        rb_noop = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env,
+                            reprobuild_diagnostics=args.reprobuild_diagnostics)
         add_pair(project_report, "noop_rebuild", ninja_noop, rb_noop)
 
         run_build(cmake, ninja_bin, "clean", parallel, ninja_diagnostics=args.ninja_diagnostics)
-        run_build(cmake, rb_bin_dir, "clean", parallel, env=rb_env)
+        run_build(cmake, rb_bin_dir, "clean", parallel, env=rb_env,
+                  reprobuild_diagnostics=args.reprobuild_diagnostics)
         ninja_after_clean = run_build(cmake, ninja_bin, build_target, parallel,
                                       ninja_diagnostics=args.ninja_diagnostics)
-        rb_cache_hit = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
+        rb_cache_hit = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env,
+                                 reprobuild_diagnostics=args.reprobuild_diagnostics)
         add_pair(project_report, "post_clean_rebuild", ninja_after_clean, rb_cache_hit)
 
         if compiled:
@@ -499,7 +525,9 @@ def benchmark_project(args, context, key, source_dir, configure_args, build_targ
                 append_comment(edit_source, key)
                 ninja_incremental = run_build(cmake, ninja_bin, build_target, parallel,
                                               ninja_diagnostics=args.ninja_diagnostics)
-                rb_incremental = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
+                rb_incremental = run_build(cmake, rb_bin_dir, build_target, parallel,
+                                           env=rb_env,
+                                           reprobuild_diagnostics=args.reprobuild_diagnostics)
                 project_report["incrementalSource"] = str(edit_source)
                 add_pair(project_report, "single_source_incremental_rebuild", ninja_incremental, rb_incremental)
             else:
@@ -509,7 +537,9 @@ def benchmark_project(args, context, key, source_dir, configure_args, build_targ
             append_seed(custom_seed, key)
             ninja_generated = run_build(cmake, ninja_bin, build_target, parallel,
                                         ninja_diagnostics=args.ninja_diagnostics)
-            rb_generated = run_build(cmake, rb_bin_dir, build_target, parallel, env=rb_env)
+            rb_generated = run_build(cmake, rb_bin_dir, build_target, parallel,
+                                     env=rb_env,
+                                     reprobuild_diagnostics=args.reprobuild_diagnostics)
             project_report["customCommandInput"] = str(custom_seed)
             add_pair(project_report, "generated_source_custom_command_rebuild", ninja_generated, rb_generated)
     finally:
@@ -594,6 +624,11 @@ def build_report(args):
                 "enabled": args.ninja_diagnostics != "none",
                 "mode": args.ninja_diagnostics,
             },
+            "reprobuildDiagnostics": {
+                "enabled": args.reprobuild_diagnostics != "none",
+                "mode": args.reprobuild_diagnostics,
+            },
+            "reproBuildMode": os.environ.get("REPROBUILD_BUILD_MODE", ""),
             "thresholdControl": {
                 "defaultEnv": "REPROBUILD_CMAKE_BENCH_MAX_RATIO",
                 "scenarioEnvPrefix": "REPROBUILD_CMAKE_BENCH_MAX_RATIO_",
@@ -674,6 +709,8 @@ def parse_args():
     parser.add_argument("--parallel", type=int, default=max(1, default_parallel))
     parser.add_argument("--ninja-diagnostics", choices=["stats", "none"], default="stats",
                         help="collect Ninja native diagnostics for Ninja build scenarios")
+    parser.add_argument("--reprobuild-diagnostics", choices=["stats", "none"], default="stats",
+                        help="collect Reprobuild diagnostics for Reprobuild build scenarios")
     parser.add_argument("--fresh", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 

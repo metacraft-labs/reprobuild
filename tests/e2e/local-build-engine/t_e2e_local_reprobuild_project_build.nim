@@ -1419,6 +1419,20 @@ suite "e2e_local_reprobuild_project_build":
     check progressOutput.contains("repro [")
     check progressOutput.contains("4/4 100%")
 
+    let statsOutput = build(reproBin, projectRoot, repoRoot, getEnv("PATH"),
+      extraArgs = ["--stats"])
+    check statsOutput.contains("metric")
+    check statsOutput.contains("count")
+    check statsOutput.contains("avg (us)")
+    check statsOutput.contains("total (ms)")
+    check statsOutput.contains("repro build total")
+    check statsOutput.contains("repro scheduler total")
+    let statsReport = parseFile(valueAfter(statsOutput, "buildReport:"))
+    check statsReport{"stats"}{"metrics"}.getElems().anyIt(
+      it{"name"}.getStr() == "repro build total")
+    check statsReport{"stats"}{"metrics"}.getElems().anyIt(
+      it{"name"}.getStr() == "repro scheduler total")
+
   test "public CLI work root override isolates metadata by worktree":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m54-work-root", "")

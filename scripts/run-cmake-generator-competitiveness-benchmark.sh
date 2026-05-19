@@ -7,9 +7,8 @@ cd "${repo_root}"
 
 mkdir -p bench-results test-logs build
 
-if [ ! -x build/bin/repro ]; then
-  ./scripts/build_apps.sh >/dev/null
-fi
+export REPROBUILD_BUILD_MODE=release
+./scripts/build_apps.sh >/dev/null
 
 if [ ! -x ../runquota/build/bin/runquotad ]; then
   (cd ../runquota && just build >/dev/null)

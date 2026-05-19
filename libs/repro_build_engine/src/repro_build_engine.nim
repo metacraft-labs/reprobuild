@@ -1,4 +1,5 @@
-import std/[algorithm, json, os, osproc, sets, streams, strtabs, strutils, tables]
+import std/[algorithm, json, os, osproc, sets, streams, strtabs, strutils, tables,
+    times]
 
 import repro_core
 import repro_depfile
@@ -87,6 +88,7 @@ type
     # platforms where the real RunQuota daemon/helper is not yet available.
     bypassRunQuota*: bool
     progressCallback*: BuildProgressCallback
+    statsEnabled*: bool
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -123,9 +125,18 @@ type
     event*: string
     detail*: string
 
+  BuildStatsMetric* = object
+    name*: string
+    count*: int
+    totalUs*: float
+
+  BuildStats* = object
+    metrics*: seq[BuildStatsMetric]
+
   BuildRunResult* = object
     results*: seq[ActionResult]
     trace*: seq[SchedulerTraceEvent]
+    stats*: BuildStats
 
   BuildProgressEvent* = object
     kind*: BuildProgressKind
@@ -178,7 +189,30 @@ proc defaultBuildEngineConfig*(cacheRoot: string): BuildEngineConfig =
     stderrLimit: 1_048_576,
     rebuildMissingOutputsOnCacheHit: false,
     bypassRunQuota: false,
-    progressCallback: nil)
+    progressCallback: nil,
+    statsEnabled: false)
+
+proc addMetric*(stats: var BuildStats; name: string; elapsedUs: float) =
+  for metric in stats.metrics.mitems:
+    if metric.name == name:
+      inc metric.count
+      metric.totalUs += elapsedUs
+      return
+  stats.metrics.add(BuildStatsMetric(name: name, count: 1, totalUs: elapsedUs))
+
+proc mergeStats*(stats: var BuildStats; other: BuildStats) =
+  for metric in other.metrics:
+    if metric.count <= 0:
+      continue
+    var merged = false
+    for existing in stats.metrics.mitems:
+      if existing.name == metric.name:
+        existing.count += metric.count
+        existing.totalUs += metric.totalUs
+        merged = true
+        break
+    if not merged:
+      stats.metrics.add(metric)
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -976,11 +1010,27 @@ proc resultIndex(ids: Table[string, int]; id: string): int =
   ids[id]
 
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
+  var stats: BuildStats
+  proc statStart(): float =
+    if config.statsEnabled:
+      epochTime()
+    else:
+      0.0
+  proc finishStat(name: string; started: float) =
+    if config.statsEnabled:
+      stats.addMetric(name, (epochTime() - started) * 1_000_000.0)
+
+  let totalStart = statStart()
+  let inferStart = statStart()
   let buildGraph = inferDeclaredActionDeps(g)
+  finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
+  let validateStart = statStart()
   validateGraph(buildGraph)
+  finishStat("repro graph validate", validateStart)
 
   let maxParallel = if config.maxParallelism == 0'u32: 1'u32 else: config.maxParallelism
+  let initStart = statStart()
   let cacheRoot = if config.cacheRoot.len == 0:
       getCurrentDir() / ".repro" / "build-engine-cache"
     else:
@@ -1022,6 +1072,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       status: asPending,
       dependencyPolicyKind: action.dependencyPolicy.kind,
       cacheDecision: if action.cacheable: cdMiss else: cdNotCacheable))
+  finishStat("repro scheduler initialize", initStart)
 
   proc readyCmp(a, b: string): int =
     cmp(idToIndex[a], idToIndex[b])
@@ -1085,7 +1136,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       dynamicDepsLoaded.incl(id)
       return true
     let fragmentPath = materialPath(action.cwd, action.dynamicDepsFile)
+    let dyndepStart = statStart()
     let fragment = readDynamicGraphFragment(fragmentPath)
+    finishStat("repro dynamic deps load", dyndepStart)
     var addedWaiting = 0
     for output in fragment.outputs.getOrDefault(id):
       action.outputs.addUnique(output)
@@ -1163,11 +1216,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
           runResult.trace(id, "cache-skipped", "dependency-launched")
         elif action.cacheable:
+          let lookupStart = statStart()
           let lookup = cache.lookupActionResult(cas, action.weakFingerprint, ffpChecksum)
+          finishStat("repro cache lookup", lookupStart)
           case lookup.status
           of aclHit:
-            if not config.rebuildMissingOutputsOnCacheHit or action.allOutputsExist():
+            var outputsPresent = true
+            if config.rebuildMissingOutputsOnCacheHit:
+              let outputStatStart = statStart()
+              outputsPresent = action.allOutputsExist()
+              finishStat("repro output stat", outputStatStart)
+            if not config.rebuildMissingOutputsOnCacheHit or outputsPresent:
+              let restoreStart = statStart()
               cas.restoreOutputs(lookup.record, action.cwd)
+              finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 evidenceFromRecord(action, lookup.record)
               completeSuccess(id, asCacheHit, cdHit, false, "restored")
@@ -1177,8 +1239,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.trace(id, "cache-restore-skipped", "missing-output")
           of aclHybridCutoff:
-            if not config.rebuildMissingOutputsOnCacheHit or action.allOutputsExist():
+            var outputsPresent = true
+            if config.rebuildMissingOutputsOnCacheHit:
+              let outputStatStart = statStart()
+              outputsPresent = action.allOutputsExist()
+              finishStat("repro output stat", outputStatStart)
+            if not config.rebuildMissingOutputsOnCacheHit or outputsPresent:
+              let restoreStart = statStart()
               cas.restoreOutputs(lookup.record, action.cwd)
+              finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 evidenceFromRecord(action, lookup.record)
               completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
@@ -1195,10 +1264,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           else:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
 
-        if action.allOutputsExist() and not cacheMissInputChanged and
+        let outputStatStart = statStart()
+        let outputsPresent = action.allOutputsExist()
+        finishStat("repro output stat", outputStatStart)
+        if outputsPresent and not cacheMissInputChanged and
             not dependencyLaunched and
             not action.needsExecutionForPolicy():
+          let evidenceStart = statStart()
           let evidence = collectEvidence(action, strict = true)
+          finishStat("repro evidence collect", evidenceStart)
           runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence
           if not evidence.publishable:
             statuses[id] = asFailed
@@ -1217,7 +1291,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           launchedAny = true
           continue
 
+        let monitorPlanStart = statStart()
         let plan = monitoredAction(action, config, cacheRoot)
+        finishStat("repro monitor plan", monitorPlanStart)
         if plan.diagnostic.len > 0:
           statuses[id] = asFailed
           let idx = idToIndex.resultIndex(id)
@@ -1231,7 +1307,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           continue
 
         if plan.action.kind != bakProcess:
+          let builtinStart = statStart()
           let finished = executeBuiltinAction(plan.action)
+          finishStat("repro builtin execute", builtinStart)
           let idx = idToIndex.resultIndex(id)
           runResult.results[idx] = finished
           runResult.results[idx].dependencyPolicyKind =
@@ -1244,7 +1322,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runResult.results[idx].cacheDecision
           statuses[id] = finished.status
           if finished.status == asSucceeded:
+            let evidenceStart = statStart()
             let evidence = collectEvidence(plan.action, strict = true)
+            finishStat("repro evidence collect", evidenceStart)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
               runResult.results[idx].status = asFailed
@@ -1258,9 +1338,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               launchedAny = true
               continue
             if plan.action.cacheable:
+              let recordStart = statStart()
               let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
                 ffpChecksum, evidence.evidence.evidenceInputPaths(),
                 plan.action.outputs, plan.action.cwd)
+              finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
             completeSuccess(finished.id, asSucceeded,
@@ -1281,7 +1363,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         poolRunning[poolName] = used + units
         inc launchSeq
         let resultPath = runQuotaResultRoot / ($launchSeq & ".json")
+        let launchStart = statStart()
         let process = startRunQuotaProcess(plan.action, config, resultPath)
+        finishStat("repro runquota launch", launchStart)
         running.add(RunningAction(
           id: id,
           pool: poolName,
@@ -1307,6 +1391,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         raiseEngine("build graph made no progress; pending actions: " & pending.join(", "))
 
       var runIndex = -1
+      let waitStart = statStart()
       while runIndex < 0:
         for j in 0 ..< running.len:
           if running[j].process.peekExitCode() != -1:
@@ -1314,12 +1399,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             break
         if runIndex < 0:
           sleep(10)
+      finishStat("repro process wait", waitStart)
       let runningItem = running[runIndex]
+      let finishStart = statStart()
       let finished = finishRunQuotaProcess(
         runningItem.id,
         runningItem.process,
         runningItem.resultPath,
         runningItem.bypassRunQuota)
+      finishStat("repro runquota finish", finishStart)
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
       runningItem.process.close()
@@ -1344,7 +1432,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       statuses[finished.id] = finished.status
       if finished.status == asSucceeded:
         let action = runningItem.action
+        let converterStart = statStart()
         let converterResult = action.runConverters(action.converterSpecsForPolicy())
+        finishStat("repro dependency convert", converterStart)
         if not converterResult.ok:
           runResult.results[idx].status = asFailed
           var diagnostics: seq[string] = @[]
@@ -1358,7 +1448,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           emitProgress(bpkActionCompleted, finished.id)
           completed = terminalCount()
           continue
+        let evidenceStart = statStart()
         let evidence = collectEvidence(action, strict = true)
+        finishStat("repro evidence collect", evidenceStart)
         runResult.results[idx].evidence = evidence.evidence
         if not evidence.publishable:
           runResult.results[idx].status = asFailed
@@ -1371,8 +1463,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           continue
         if action.cacheable:
+          let recordStart = statStart()
           let record = cache.recordActionResult(cas, action.weakFingerprint, ffpChecksum,
             evidence.evidence.evidenceInputPaths(), action.outputs, action.cwd)
+          finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
@@ -1392,4 +1486,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if item.process.running():
         item.process.terminate()
       item.process.close()
+  finishStat("repro scheduler total", totalStart)
+  runResult.stats = stats
   result = runResult

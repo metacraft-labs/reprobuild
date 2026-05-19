@@ -3,10 +3,24 @@ set -euo pipefail
 
 mkdir -p build/bin build/nimcache
 
+nim_mode_flags=()
+case "${REPROBUILD_BUILD_MODE:-debug}" in
+  debug)
+    ;;
+  release)
+    nim_mode_flags+=("-d:release")
+    ;;
+  *)
+    echo "unsupported REPROBUILD_BUILD_MODE=${REPROBUILD_BUILD_MODE}; expected debug or release" >&2
+    exit 2
+    ;;
+esac
+
 if [ "$(uname -s)" = "Darwin" ]; then
   mkdir -p build/lib
   if [ -d /Users/zahary/metacraft/ct_interpose/src ]; then
     nim c \
+      "${nim_mode_flags[@]}" \
       --app:lib \
       --threads:on \
       --path:/Users/zahary/metacraft/ct_interpose/src \
@@ -24,6 +38,7 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     mkdir -p build/lib
     nim c \
+      "${nim_mode_flags[@]}" \
       --app:lib \
       --threads:on \
       --mm:orc \
@@ -44,6 +59,7 @@ while read -r name path _; do
     ""|\#*) continue ;;
   esac
   nim c \
+    "${nim_mode_flags[@]}" \
     --nimcache:"build/nimcache/${name}" \
     --out:"build/bin/${name}" \
     "${path}"
