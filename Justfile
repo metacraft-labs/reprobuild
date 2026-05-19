@@ -499,6 +499,21 @@ integration_intent_layer_config_section:
         tests/e2e/home-intent/t_integration_intent_layer_config_section.nim \
         2>&1 | tee test-logs/integration_intent_layer_config_section.log
 
+e2e_repro_home_intent_commands:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_intent_commands.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_home_intent_commands \
+        --out:build/test-bin/e2e_repro_home_intent_commands \
+        tests/e2e/home-intent/t_e2e_repro_home_intent_commands.nim \
+        2>&1 | tee test-logs/e2e_repro_home_intent_commands.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

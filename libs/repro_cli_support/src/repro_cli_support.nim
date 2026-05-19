@@ -13,6 +13,10 @@ import repro_tool_profiles
 import repro_local_store
 import repro_launch_plan
 import repro_cli_support/watch
+import repro_cli_support/home
+
+export home.runHomeCommand, home.setPackageCatalogLookup,
+       home.PackageCatalogLookup, home.CatalogEnvVar
 
 proc wantsVersion*(args: openArray[string]): bool =
   args.len == 1 and args[0] in ["--version", "-V"]
@@ -3411,5 +3415,12 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runLaunchPlanCommand(lpArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "home":
+    let homeArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runHomeCommand(homeArgs)
   stderr.writeLine(renderUsage(programName))
   2
