@@ -436,6 +436,51 @@ e2e_configurable_system_in_dsl:
         tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim \
         2>&1 | tee test-logs/e2e_configurable_system_in_dsl.log
 
+e2e_generated_config_file_block_macro:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_generated_config_file_block_macro \
+        --out:build/test-bin/e2e_generated_config_file_block_macro \
+        tests/e2e/generated-config/t_e2e_generated_config_file_block_macro.nim \
+        2>&1 | tee test-logs/e2e_generated_config_file_block_macro.log
+
+e2e_generated_config_file_json_value:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_generated_config_file_json_value \
+        --out:build/test-bin/e2e_generated_config_file_json_value \
+        tests/e2e/generated-config/t_e2e_generated_config_file_json_value.nim \
+        2>&1 | tee test-logs/e2e_generated_config_file_json_value.log
+
+e2e_generated_config_file_external_template:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_generated_config_file_external_template \
+        --out:build/test-bin/e2e_generated_config_file_external_template \
+        tests/e2e/generated-config/t_e2e_generated_config_file_external_template.nim \
+        2>&1 | tee test-logs/e2e_generated_config_file_external_template.log
+
+e2e_generated_config_file_managed_block:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_generated_config_file_managed_block \
+        --out:build/test-bin/e2e_generated_config_file_managed_block \
+        tests/e2e/generated-config/t_e2e_generated_config_file_managed_block.nim \
+        2>&1 | tee test-logs/e2e_generated_config_file_managed_block.log
+
+e2e_managed_block_cache_key_isolation:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_managed_block_cache_key_isolation \
+        --out:build/test-bin/e2e_managed_block_cache_key_isolation \
+        tests/e2e/generated-config/t_e2e_managed_block_cache_key_isolation.nim \
+        2>&1 | tee test-logs/e2e_managed_block_cache_key_isolation.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \
