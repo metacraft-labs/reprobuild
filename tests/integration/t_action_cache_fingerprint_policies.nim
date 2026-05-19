@@ -175,6 +175,12 @@ suite "integration_action_cache_fingerprint_policies":
       check cutoff.record.inputs[0].metadata == observeFile(inputPath, ffpHybrid).metadata
       cas.restoreOutputs(cutoff.record, root)
       check readFile(outputPath) == "fixture-output\nalpha\n"
+      let recordsSizeAfterCutoff = getFileInfo(reproRoot / "action-cache" /
+        "action-results.records").size
+      let refreshedHit = cache.lookupActionResult(cas, weakFor("hybrid"), ffpHybrid)
+      check refreshedHit.status == aclHit
+      check getFileInfo(reproRoot / "action-cache" /
+        "action-results.records").size == recordsSizeAfterCutoff
 
       block noHashFastPath:
         let fastRoot = tempRoot / "hybrid-fast-path"
@@ -230,3 +236,52 @@ suite "integration_action_cache_fingerprint_policies":
       expect CacheIntegrityError:
         cas.restoreOutputs(record, root)
       check not fileExists(outputPath)
+
+    block newestMismatchedRecordFallsBackToOlderHit:
+      let weak = weakFor("newest-mismatch-fallback")
+      let oldRoot = tempRoot / "newest-mismatch-old"
+      createDir(oldRoot)
+      let oldInput = oldRoot / "input.txt"
+      let oldOutput = oldRoot / "out.txt"
+      writeFile(oldInput, "alpha\n")
+      writeFile(oldOutput, "older-valid-output\n")
+      let oldRecord = cache.recordActionResult(cas, weak, ffpChecksum,
+        [oldInput], ["out.txt"], oldRoot)
+
+      let newRoot = tempRoot / "newest-mismatch-new"
+      createDir(newRoot)
+      let newInput = newRoot / "input.txt"
+      let newOutput = newRoot / "out.txt"
+      writeFile(newInput, "bravo\n")
+      writeFile(newOutput, "newer-stale-output\n")
+      discard cache.recordActionResult(cas, weak, ffpChecksum,
+        [newInput], ["out.txt"], newRoot)
+      writeFile(newInput, "charlie\n")
+
+      let lookup = cache.lookupActionResult(cas, weak, ffpChecksum)
+      check lookup.status == aclHit
+      check lookup.record.strongFingerprint == oldRecord.strongFingerprint
+
+    block newestCorruptOtherwiseMatchingRecordRejectsImmediately:
+      let weak = weakFor("newest-corrupt-rejects")
+      let oldRoot = tempRoot / "newest-corrupt-old"
+      createDir(oldRoot)
+      let oldInput = oldRoot / "input.txt"
+      let oldOutput = oldRoot / "out.txt"
+      writeFile(oldInput, "alpha\n")
+      writeFile(oldOutput, "older-valid-output-for-corrupt-test\n")
+      discard cache.recordActionResult(cas, weak, ffpChecksum,
+        [oldInput], ["out.txt"], oldRoot)
+
+      let newRoot = tempRoot / "newest-corrupt-new"
+      createDir(newRoot)
+      let newInput = newRoot / "input.txt"
+      let newOutput = newRoot / "out.txt"
+      writeFile(newInput, "alpha\n")
+      writeFile(newOutput, "newer-output\n")
+      let newRecord = cache.recordActionResult(cas, weak, ffpChecksum,
+        [newInput], ["out.txt"], newRoot)
+      writeFile(cas.blobPath(newRecord.outputs[0].blob.digest), "corrupted")
+
+      let lookup = cache.lookupActionResult(cas, weak, ffpChecksum)
+      check lookup.status == aclRejectedCorruptOutput

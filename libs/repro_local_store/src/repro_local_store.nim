@@ -522,7 +522,9 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
   if not cache.byWeak.hasKey(key):
     return ActionCacheLookup(status: aclMissNoRecord)
   var sawInputChange = false
-  for record in cache.byWeak[key]:
+  let records = cache.byWeak[key]
+  for i in countdown(records.high, 0):
+    let record = records[i]
     if record.policy != policy:
       continue
     var changed = false
