@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild home generation registry and binary state files"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

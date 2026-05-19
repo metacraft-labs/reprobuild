@@ -514,6 +514,45 @@ e2e_repro_home_intent_commands:
         tests/e2e/home-intent/t_e2e_repro_home_intent_commands.nim \
         2>&1 | tee test-logs/e2e_repro_home_intent_commands.log
 
+integration_pointer_envelope_and_history_enumeration:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_pointer_envelope_and_history_enumeration.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_pointer_envelope_and_history_enumeration \
+        --out:build/test-bin/integration_pointer_envelope_and_history_enumeration \
+        tests/e2e/home-generations/t_integration_pointer_envelope_and_history_enumeration.nim \
+        2>&1 | tee test-logs/integration_pointer_envelope_and_history_enumeration.log
+
+integration_activation_manifest_dedup_in_cas:
+    mkdir -p test-logs build/test-bin build/nimcache build/test-tmp
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_activation_manifest_dedup_in_cas \
+        --out:build/test-bin/integration_activation_manifest_dedup_in_cas \
+        tests/e2e/home-generations/t_integration_activation_manifest_dedup_in_cas.nim \
+        2>&1 | tee test-logs/integration_activation_manifest_dedup_in_cas.log
+
+integration_apply_lock_serializes:
+    mkdir -p test-logs build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/harness_apply_lock_holder \
+        --out:build/test-bin/harness_apply_lock_holder \
+        tests/e2e/home-generations/harness_apply_lock_holder.nim \
+        2>&1 | tee test-logs/integration_apply_lock_serializes.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_apply_lock_serializes \
+        --out:build/test-bin/integration_apply_lock_serializes \
+        tests/e2e/home-generations/t_integration_apply_lock_serializes.nim \
+        2>&1 | tee test-logs/integration_apply_lock_serializes.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

@@ -34,9 +34,10 @@
 ## matches the spec's "do NOT load packages at runtime" rule for M61
 ## while still letting the gate exercise the error path.
 
-import std/[options, os, sets, strutils, tables]
+import std/[options, os, sets, strutils, tables, times]
 
 import repro_home_intent
+import repro_home_generations
 
 type
   PackageCatalogLookup* = proc(package: string): bool {.gcsafe.}
@@ -580,6 +581,65 @@ proc runHomeWhy(args: openArray[string]): int =
     return 1
 
 # ---------------------------------------------------------------------------
+# `repro home history` (M62).
+# ---------------------------------------------------------------------------
+
+proc formatTimestamp(unix: int64): string =
+  ## Format a unix epoch second as a UTC RFC-3339-ish marker. We avoid
+  ## std/times' localization for stable, machine-readable output.
+  let t = fromUnix(unix).utc()
+  t.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+
+proc shortGenerationId(idHex: string): string =
+  if idHex.len <= 12: idHex
+  else: idHex[0 ..< 12]
+
+proc runHomeHistory(args: openArray[string]): int =
+  ## Walks `<state-dir>/generations/` and prints one line per
+  ## generation in chronological order (oldest -> newest). No history
+  ## file is consulted; the only on-disk source of truth is the set
+  ## of pointer envelopes the directory enumeration finds.
+  for a in args:
+    if a == "--help" or a == "-h":
+      echo "usage: repro home history"
+      echo ""
+      echo "List home-profile generations in chronological order."
+      echo "Reads `$REPRO_HOME_STATE_DIR` (or the OS default) and"
+      echo "walks `generations/` directly; no separate history file"
+      echo "is consulted."
+      return 0
+    stderr.writeLine("repro home history: unexpected argument: " & a)
+    return 2
+  try:
+    let stateDir = resolveStateDir()
+    let records = enumerateGenerations(stateDir)
+    if records.len == 0:
+      echo "repro home history: no generations yet at " & stateDir
+      return 0
+    echo "repro home history: state-dir=" & stateDir
+    for rec in records:
+      let marker = if rec.isActive: "  [active]" else: "          "
+      echo "  " & shortGenerationId(rec.generationId) & "  " &
+        formatTimestamp(rec.activationTimestamp) & "  host=" &
+        rec.envelope.hostIdentity & marker
+    return 0
+  except EStateDirInvalid as e:
+    stderr.writeLine("repro home history: " & e.msg)
+    return 1
+  except EPointerCorrupt as e:
+    stderr.writeLine("repro home history: corrupt pointer at " &
+      e.pointerPath & " (field: " & e.field & "); quarantine the " &
+      "generation directory and retry")
+    return 1
+  except EGenerationDirInvalid as e:
+    stderr.writeLine("repro home history: invalid generation directory " &
+      e.generationPath & " (" & e.msg & ")")
+    return 1
+  except CatchableError as e:
+    stderr.writeLine("repro home history: error: " & e.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
 # Top-level dispatch.
 # ---------------------------------------------------------------------------
 
@@ -612,7 +672,7 @@ proc runHomeCommand*(args: seq[string]): int =
     inc i
   if sub.len == 0:
     stderr.writeLine("usage: repro home {add | remove | enable | disable | " &
-      "list | why} ...")
+      "list | why | history} ...")
     return 2
   case sub
   of "add": return runHomeAdd(subArgs)
@@ -621,6 +681,7 @@ proc runHomeCommand*(args: seq[string]): int =
   of "disable": return runHomeDisable(subArgs)
   of "list": return runHomeList(subArgs)
   of "why": return runHomeWhy(subArgs)
+  of "history": return runHomeHistory(subArgs)
   else:
     stderr.writeLine("repro home: unknown subcommand: " & sub)
     return 2
