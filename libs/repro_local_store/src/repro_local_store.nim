@@ -3,6 +3,16 @@ import std/[os, tables, times]
 import repro_core
 import repro_hash
 
+# Re-export the new M56 content-addressed local store API. The pre-M56
+# `LocalCas` and `ActionCache` types below remain for the action-cache
+# code path the M9 build engine still consumes; the M56 entry points
+# live in `repro_local_store/store.nim` and
+# `repro_local_store/sqlite3_binding.nim`.
+import ./repro_local_store/sqlite3_binding
+import ./repro_local_store/store
+export sqlite3_binding
+export store
+
 type
   LocalStoreError* = object of CatchableError
   CacheIntegrityError* = object of LocalStoreError

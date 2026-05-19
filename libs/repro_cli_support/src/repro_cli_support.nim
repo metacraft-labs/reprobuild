@@ -10,6 +10,7 @@ import repro_project_dsl
 import repro_runquota
 import repro_hash
 import repro_tool_profiles
+import repro_local_store
 import repro_cli_support/watch
 
 proc wantsVersion*(args: openArray[string]): bool =
@@ -2072,6 +2073,91 @@ proc runDevelopCommand(args: openArray[string]): int =
     resolved.identity, resolved.identityPath, resolved.inspectionPath,
     interfacePath)
 
+proc runStoreCommand*(args: seq[string]): int =
+  ## Implements `repro store <subcommand>` for the M56 unified local
+  ## content-addressed store. Supported subcommands:
+  ##
+  ##   gc       — eager garbage collection (SQL dead-set query plus a
+  ##              filesystem move into `gc/pending-deletion/` and a
+  ##              post-grace unlink sweep).
+  ##   recover  — `PRAGMA quick_check`, sweep `tmp/`, and reconcile
+  ##              on-disk `prefixes/...` directories against the
+  ##              SQLite index.
+  ##   roots    — list the currently-registered roots.
+  ##   list     — list every realized prefix recorded in the index.
+  ##
+  ## Each subcommand accepts an optional `--store-root=PATH` to
+  ## override the per-user default; the `$REPRO_STORE_ROOT` env var
+  ## is honoured otherwise.
+  if args.len == 0:
+    echo "usage: repro store {gc | recover | roots | list} " &
+      "[--store-root=PATH] [--grace-seconds=N]"
+    return 2
+  var storeRootOverride = ""
+  var graceSeconds = DefaultGcGraceSeconds
+  var sub = ""
+  for raw in args:
+    if raw.startsWith("--store-root="):
+      storeRootOverride = raw[len("--store-root=") .. ^1]
+    elif raw.startsWith("--grace-seconds="):
+      graceSeconds = parseInt(raw[len("--grace-seconds=") .. ^1])
+    elif raw.startsWith("--"):
+      stderr.writeLine("repro store: unknown flag: " & raw)
+      return 2
+    elif sub.len == 0:
+      sub = raw
+    else:
+      stderr.writeLine("repro store: unexpected argument: " & raw)
+      return 2
+  if sub.len == 0:
+    stderr.writeLine("repro store: missing subcommand")
+    return 2
+
+  let root = resolveStoreRoot(storeRootOverride)
+  try:
+    var store = openStore(root)
+    defer: store.close()
+    case sub
+    of "gc":
+      let report = store.gc(graceSeconds = graceSeconds)
+      echo "repro store gc: store-root=" & root
+      echo "quarantined: " & $report.quarantined.len
+      for row in report.quarantined:
+        echo "  - " & row.adapter & " " & row.packageName & " " &
+          row.version
+      echo "reclaimed: " & $report.reclaimed.len
+      for path in report.reclaimed:
+        echo "  - " & path
+      return 0
+    of "recover":
+      let report = store.recover()
+      echo "repro store recover: store-root=" & root
+      echo "quick_check: " & report.quickCheck
+      echo "swept staging dirs: " & $report.sweptStagingDirs.len
+      for path in report.sweptStagingDirs: echo "  - " & path
+      echo "reinserted prefixes: " & $report.reinsertedPrefixes.len
+      for path in report.reinsertedPrefixes: echo "  - " & path
+      echo "quarantined prefixes: " & $report.quarantinedPrefixes.len
+      for path in report.quarantinedPrefixes: echo "  - " & path
+      return 0
+    of "roots":
+      echo "repro store roots: store-root=" & root
+      for row in store.listRoots():
+        echo "  - " & row.rootId & " (" & row.kind & ")"
+      return 0
+    of "list":
+      echo "repro store list: store-root=" & root
+      for row in store.listPrefixes():
+        echo "  - " & row.adapter & " " & row.packageName & " " &
+          row.version & " " & row.realizedPath
+      return 0
+    else:
+      stderr.writeLine("repro store: unknown subcommand: " & sub)
+      return 2
+  except CatchableError as err:
+    stderr.writeLine("repro store " & sub & ": error: " & err.msg)
+    return 1
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -2146,5 +2232,12 @@ proc runThinApp*(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro develop: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len > 0 and args[0] == "store":
+    let storeArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runStoreCommand(storeArgs)
   echo renderUsage(programName)
   0

@@ -8,6 +8,12 @@ import repro_core/paths as corepaths
 import repro_domain_types
 import repro_hash
 import repro_interface_artifacts
+import repro_local_store
+# repro_local_store provides the M56 unified store. Every adapter
+# (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
+# out its realized prefix on disk so the same SQLite-backed
+# `index.db` records every prefix the system has materialized
+# regardless of which adapter produced it.
 
 type
   ToolProvisioningMode* = enum
@@ -544,7 +550,121 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
   else:
     ""
 
-proc resolveNixTool*(useDef: InterfaceToolUse): PathOnlyToolProfile =
+proc safeStoreSegment(value, fallback: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
+        ch in {'-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = fallback
+
+proc versionFromPackageSelector(packageSelector: string): string =
+  ## Best-effort extraction of a version component out of a package
+  ## selector like `foo@1.0.0` or `foo-1.0.0`. The tarball metadata
+  ## does not always carry a separate version field, so the realized
+  ## prefix's `<version>` segment falls back to a synthesized name.
+  for sep in ['@', '#']:
+    let idx = packageSelector.rfind(sep)
+    if idx > 0 and idx + 1 < packageSelector.len:
+      return packageSelector[idx + 1 .. ^1]
+  ""
+
+# ---------------------------------------------------------------------------
+# M56 — Unified store registration.
+#
+# Every adapter (Nix / tarball / Scoop) calls `registerInUnifiedStore` after
+# it has materialized its realized prefix at the canonical
+# `<store-root>/prefixes/<package>/<version>-<hash>/` location. The helper
+# opens the M56 SQLite-backed store index, computes the realization hash
+# the store records, seals a typed `.repro-receipt` binary envelope at the
+# prefix root, and inserts the row idempotently.
+#
+# The function deliberately accepts the on-disk prefix path the adapter
+# has already prepared (it does NOT move bytes around). Adapters are
+# expected to choose the prefix path with `unifiedPrefixPath` so a
+# subsequent `repro store gc` finds the directory through the standard
+# layout.
+# ---------------------------------------------------------------------------
+
+proc unifiedStoreRoot*(explicit: string): string =
+  ## Resolves the unified store root. Empty `explicit` falls through
+  ## to the M56 `defaultUserStoreRoot()` (per-user OS XDG path).
+  if explicit.len > 0: explicit
+  else: defaultUserStoreRoot()
+
+proc unifiedPrefixPath*(storeRoot, packageName, version, adapter,
+                       lockIdentity, declaredExecutablePath: string;
+                       provenanceUrl = ""; provenanceChecksum = "";
+                       extra: openArray[string] = []):
+    tuple[absolutePath: string; relativePath: string;
+          prefixId: PrefixIdBytes] =
+  ## Returns the canonical M56 prefix path the adapter must materialize
+  ## into. The path is `<store-root>/prefixes/<safe-package>/<version>-
+  ## <realization-hash-prefix>/`. `relativePath` is store-rooted with
+  ## forward slashes — the same form persisted in the `prefixes`
+  ## index column.
+  let prefixId = computeRealizationHash(packageName, version, adapter,
+    lockIdentity, declaredExecutablePath, provenanceUrl,
+    provenanceChecksum, extra)
+  let rel = prefixRelativePath(packageName, version, prefixId)
+  (absolutePath: storeRoot / rel.replace('/', DirSep),
+   relativePath: rel,
+   prefixId: prefixId)
+
+proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
+                            lockIdentity, declaredExecutablePath,
+                            provenanceUrl, provenanceChecksum,
+                            materializationMechanism: string;
+                            extra: openArray[string];
+                            absoluteRealizedPath: string;
+                            exportedExecutables: openArray[string] = []):
+    tuple[prefixId: PrefixIdBytes; inserted: bool] =
+  ## Records the materialized prefix in the unified store and seals the
+  ## binary `.repro-receipt` envelope at its root.
+  let prefixId = computeRealizationHash(packageName, version, adapter,
+    lockIdentity, declaredExecutablePath, provenanceUrl,
+    provenanceChecksum, extra)
+  let rel = prefixRelativePath(packageName, version, prefixId)
+  let receipt = RealizationReceipt(
+    schemaVersion: 1'u16,
+    adapter: adapter,
+    packageName: packageName,
+    version: version,
+    realizationHash: prefixId,
+    realizedPath: rel,
+    declaredExecutablePath: declaredExecutablePath,
+    exportedExecutables: @exportedExecutables,
+    lockIdentity: lockIdentity,
+    provenanceUrl: provenanceUrl,
+    provenanceChecksum: provenanceChecksum,
+    materializationMechanism: materializationMechanism,
+    createdAtUnix: getTime().toUnix,
+    writerProcessId: int64(getCurrentProcessId()),
+    writerMode: "direct")
+  let receiptBytes = encodeReceipt(receipt)
+  var receiptText = newString(receiptBytes.len)
+  for i, b in receiptBytes:
+    receiptText[i] = char(b)
+  createDir(absoluteRealizedPath)
+  writeFile(absoluteRealizedPath / ".repro-receipt", receiptText)
+
+  let row = PrefixRow(
+    prefixId: prefixId,
+    packageName: packageName,
+    version: version,
+    realizedPath: rel,
+    adapter: adapter,
+    receiptDigest: receiptDigest(receipt),
+    createdAtUnix: receipt.createdAtUnix)
+  var store = openStore(storeRoot)
+  defer: store.close()
+  let inserted = store.insertPrefixOrIgnore(row)
+  (prefixId: prefixId, inserted: inserted)
+
+proc resolveNixTool*(useDef: InterfaceToolUse;
+                     storeRoot = ""): PathOnlyToolProfile =
   let plan = nixAcquisitionPlan(useDef)
   let selector = plan.nixSelector
   var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
@@ -609,6 +729,43 @@ proc resolveNixTool*(useDef: InterfaceToolUse): PathOnlyToolProfile =
         $probeResult.exitCode)
     result.probes.add(probeResult)
 
+  if storeRoot.len > 0:
+    # M56 — record the Nix realization in the unified index. The Nix
+    # store keeps the actual files at `/nix/store/...`; the unified
+    # prefix is a small marker directory whose receipt records the
+    # /nix/store path as adapter-specific provenance so a subsequent
+    # `repro store gc` knows which Nix outputs the user holds live.
+    let nixPackageName = safeStoreSegment("nix." & plan.packageId,
+      "nix-package")
+    let nixVersion =
+      if versionFromPackageSelector(plan.packageSelector).len > 0:
+        versionFromPackageSelector(plan.packageSelector)
+      else:
+        # Use the last path segment of the /nix/store derivation as
+        # version; it usually carries the upstream version string.
+        let segment = selectedStorePath.extractFilename
+        let dash = segment.find('-')
+        if dash >= 0 and dash + 1 < segment.len:
+          segment[dash + 1 .. ^1]
+        else:
+          segment
+    let unified = unifiedPrefixPath(storeRoot, nixPackageName,
+      nixVersion, "nix", plan.lockIdentity,
+      plan.declaredExecutablePath, "nix://" & plan.nixSelector,
+      selectedStorePath, realized)
+    createDir(unified.absolutePath)
+    writeFile(unified.absolutePath / "nix-store-path.txt",
+      selectedStorePath & "\n")
+    discard registerInUnifiedStore(storeRoot, nixPackageName,
+      nixVersion, "nix", plan.lockIdentity,
+      plan.declaredExecutablePath, "nix://" & plan.nixSelector,
+      selectedStorePath, "nix-store-pointer", realized,
+      unified.absolutePath, [plan.declaredExecutablePath])
+    # Update the path-only profile to advertise the unified store
+    # path alongside the /nix/store realization so callers can record
+    # both for downstream tooling.
+    result.realizedStorePaths.add(unified.absolutePath)
+
   result.profileFingerprint = profileFingerprintFor(result)
 
 proc normalizedSha256(value: string): string =
@@ -618,39 +775,69 @@ proc normalizedSha256(value: string): string =
   if result.len != 64 or result.anyIt(not (it in {'0' .. '9', 'a' .. 'f'})):
     raise newException(ValueError, "invalid sha256 digest: " & value)
 
+proc parseHexLine(output: string): string =
+  ## Scans `output` line by line for the first 64-hex-digit token. Used
+  ## to robustly parse the SHA-256 verifier's output regardless of
+  ## whether it was sha256sum/shasum/openssl/certutil's idiosyncratic
+  ## prefixing.  Also handles sha256sum's `\<digest> *<path>` form
+  ## (the leading literal backslash signals a path that itself
+  ## contains backslashes, common on Windows paths).
+  proc clean(s: string): string =
+    result = s
+    if result.startsWith("\\"):
+      result = result[1 .. ^1]
+    if result.startsWith("*"):
+      result = result[1 .. ^1]
+    result = result.replace(" ", "").toLowerAscii()
+  for line in output.splitLines:
+    let stripped = line.strip()
+    if stripped.len == 0:
+      continue
+    for token in stripped.splitWhitespace():
+      let candidate = clean(token)
+      if candidate.len == 64 and candidate.allCharsInSet(HexDigits):
+        return candidate
+    let collapsed = clean(stripped)
+    if collapsed.len == 64 and collapsed.allCharsInSet(HexDigits):
+      return collapsed
+  ""
+
 proc fileSha256Hex(path: string): string =
+  ## Compute the SHA-256 hex digest of `path` using whichever tool the
+  ## host provides. Windows ships `certutil -hashfile <path> SHA256` as
+  ## a built-in; macOS and Linux ship one of sha256sum / shasum /
+  ## openssl. We prefer in this order:
+  ##   sha256sum → shasum → certutil (Windows) → openssl.
   let sha256sum = findExe("sha256sum")
   let shasum = findExe("shasum")
   let openssl = findExe("openssl")
+  when defined(windows):
+    let certutil = findExe("certutil")
+  else:
+    let certutil = ""
   let command =
     if sha256sum.len > 0:
       shellCommand(["sha256sum", path])
     elif shasum.len > 0:
       shellCommand(["shasum", "-a", "256", path])
+    elif certutil.len > 0:
+      shellCommand(["certutil", "-hashfile", path, "SHA256"])
     elif openssl.len > 0:
       shellCommand(["openssl", "dgst", "-sha256", "-r", path])
     else:
       raise newException(OSError,
-        "tool-resolution failed: no sha256 verifier found (tried sha256sum, shasum, openssl)")
+        "tool-resolution failed: no sha256 verifier found (tried " &
+        "sha256sum, shasum, certutil, openssl)")
   let res = execCmdEx(command)
   if res.exitCode != 0:
     raise newException(OSError,
       "tool-resolution failed: sha256 verifier exited " & $res.exitCode &
       "\n" & res.output)
-  let parts = res.output.strip().splitWhitespace()
-  if parts.len == 0:
-    raise newException(OSError, "tool-resolution failed: sha256 verifier produced no digest")
-  normalizedSha256(parts[0])
-
-proc safeStoreSegment(value, fallback: string): string =
-  for ch in value:
-    if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
-        ch in {'-', '_', '.'}:
-      result.add(ch)
-    else:
-      result.add('_')
-  if result.len == 0:
-    result = fallback
+  let parsed = parseHexLine(res.output)
+  if parsed.len == 0:
+    raise newException(OSError, "tool-resolution failed: sha256 verifier " &
+      "produced no recognizable digest in:\n" & res.output)
+  normalizedSha256(parsed)
 
 proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
   if useDef.tarballProvisioning.len == 0:
@@ -824,12 +1011,20 @@ proc selectedUrlFromReceipt(prefix: string): string =
 
 proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
     tuple[prefix: string; archivePath: string; selectedUrl: string] =
-  let realizations = storeRoot / "realizations"
+  ## Materializes a tarball realization into the unified M56 layout
+  ## (`<store-root>/prefixes/<package>/<version>-<hash>/`).
   let tmpRoot = storeRoot / "tmp"
-  createDir(realizations)
   createDir(tmpRoot)
-  let prefix = realizations / (safeStoreSegment(plan.packageSelector,
-    "package") & "-" & plan.sha256[0 .. 15])
+  let packageName = safeStoreSegment(plan.packageSelector, "package")
+  let resolvedVersion =
+    if versionFromPackageSelector(plan.packageSelector).len > 0:
+      versionFromPackageSelector(plan.packageSelector)
+    else:
+      plan.sha256[0 .. 15]
+  let unified = unifiedPrefixPath(storeRoot, packageName, resolvedVersion,
+    "tarball", plan.lockIdentity, plan.declaredExecutablePath,
+    plan.url, plan.sha256, [plan.archiveType, $plan.stripComponents])
+  let prefix = unified.absolutePath
   if dirExists(prefix):
     if executableInStorePath(prefix, plan.declaredExecutablePath,
         rejectSymlinks = true).len == 0:
@@ -853,6 +1048,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
         "tool-resolution failed: extracted tarball lacks executable " &
         plan.declaredExecutablePath)
     writeTarballReceipt(tempPrefix, plan, downloaded.selectedUrl)
+    createDir(prefix.parentDir)
     try:
       moveDir(tempPrefix, prefix)
     except OSError:
@@ -865,6 +1061,15 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
       raise newException(OSError,
         "tool-resolution failed: materialized tarball lacks executable " &
         plan.declaredExecutablePath)
+    # Register in the unified M56 index and seal the typed binary
+    # `.repro-receipt` envelope (the JSON receipt already written by
+    # writeTarballReceipt is adapter-specific provenance and stays
+    # alongside the binary receipt).
+    discard registerInUnifiedStore(storeRoot, packageName,
+      resolvedVersion, "tarball", plan.lockIdentity,
+      plan.declaredExecutablePath, plan.url, plan.sha256, "directory",
+      [plan.archiveType, $plan.stripComponents], prefix,
+      [plan.declaredExecutablePath])
     (prefix: prefix, archivePath: downloaded.path,
       selectedUrl: downloaded.selectedUrl)
   except CatchableError:
@@ -1345,11 +1550,19 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
       raise newException(EScoopInstallFailed,
         "EScoopInstallFailed: post-install directory missing: " & versionDir)
 
-  let realizations = storeRoot / "prefixes" / ("scoop_" & plan.app)
-  createDir(realizations)
-  let realizationKey = blake3HexText(plan.bucket & "|" & plan.app & "|" &
-    resolvedVersion & "|" & manifestChecksum)
-  let prefix = realizations / (resolvedVersion & "-" & realizationKey[0 .. 15])
+  # Compute the canonical M56 prefix path. The realization hash is
+  # derived from (bucket, app, resolvedVersion, manifestChecksum) so
+  # the first 16 hex chars match the legacy `realizationKey[0 .. 15]`
+  # value in spirit while now living in the standard
+  # `prefixes/<package>/<version>-<hash>/` shape.
+  let scoopPackageName = safeStoreSegment("scoop." & plan.bucket & "." &
+    plan.app, "scoop-app")
+  let unified = unifiedPrefixPath(storeRoot, scoopPackageName,
+    resolvedVersion, "scoop", plan.lockIdentity,
+    plan.declaredExecutablePath, "scoop://" & plan.bucket & "/" &
+    plan.app & "@" & resolvedVersion, manifestChecksum,
+    [plan.bucket, plan.app])
+  let prefix = unified.absolutePath
   let junctionTarget = prefix / "bin"
 
   if dirExists(prefix):
@@ -1376,6 +1589,14 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
   writeScoopReceipt(prefix, plan, resolvedVersion, manifestChecksum,
     executionProfile, scoopRoot, versionDir, resolvedExecutable,
     practicalHardening)
+  # Seal the unified M56 typed binary receipt and insert the SQLite
+  # index row. The adapter-specific JSON receipt above remains for
+  # tools that inspect Scoop provenance directly.
+  discard registerInUnifiedStore(storeRoot, scoopPackageName,
+    resolvedVersion, "scoop", plan.lockIdentity,
+    plan.declaredExecutablePath, "scoop://" & plan.bucket & "/" &
+    plan.app & "@" & resolvedVersion, manifestChecksum, "junction",
+    [plan.bucket, plan.app], prefix, [plan.declaredExecutablePath])
 
   let portability =
     if practicalHardening == phPinnedAndProfileVerified:
@@ -1534,7 +1755,7 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
   of tpmPathOnly:
     resolvePathOnlyTool(useDef, pathValue)
   of tpmNix:
-    resolveNixTool(useDef)
+    resolveNixTool(useDef, storeRoot)
   of tpmTarball:
     resolveTarballTool(useDef, storeRoot)
   of tpmScoop:
@@ -1599,8 +1820,9 @@ proc pathOnlyBuildIdentity*(artifact: ProjectInterfaceArtifact;
     PathOnlyBuildIdentity =
   toolBuildIdentity(artifact, tpmPathOnly, pathValue)
 
-proc nixBuildIdentity*(artifact: ProjectInterfaceArtifact): PathOnlyBuildIdentity =
-  toolBuildIdentity(artifact, tpmNix)
+proc nixBuildIdentity*(artifact: ProjectInterfaceArtifact;
+                       storeRoot = ""): PathOnlyBuildIdentity =
+  toolBuildIdentity(artifact, tpmNix, storeRoot = storeRoot)
 
 proc tarballBuildIdentity*(artifact: ProjectInterfaceArtifact; storeRoot = ""):
     PathOnlyBuildIdentity =

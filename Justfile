@@ -319,6 +319,33 @@ e2e_scoop_practical_hardening:
         tests/e2e/scoop/t_e2e_scoop_practical_hardening.nim \
         2>&1 | tee test-logs/e2e_scoop_practical_hardening.log
 
+integration_local_store_layout_and_atomic_writes:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_local_store_layout_and_atomic_writes \
+        --out:build/test-bin/integration_local_store_layout_and_atomic_writes \
+        tests/integration/t_integration_local_store_layout_and_atomic_writes.nim \
+        2>&1 | tee test-logs/integration_local_store_layout_and_atomic_writes.log
+
+integration_local_store_gc:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_local_store_gc \
+        --out:build/test-bin/integration_local_store_gc \
+        tests/integration/t_integration_local_store_gc.nim \
+        2>&1 | tee test-logs/integration_local_store_gc.log
+
+e2e_local_store_unified_across_adapters:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_local_store_unified_across_adapters \
+        --out:build/test-bin/e2e_local_store_unified_across_adapters \
+        tests/e2e/external-packages/t_e2e_local_store_unified_across_adapters.nim \
+        2>&1 | tee test-logs/e2e_local_store_unified_across_adapters.log
+
 integration_provider_fragment_refresh_and_pruning:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
