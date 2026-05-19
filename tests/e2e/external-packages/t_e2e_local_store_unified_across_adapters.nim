@@ -18,8 +18,7 @@
 ## Honest platform-availability gates are NOT weakening; they record
 ## the platform reality and continue the rest of the suite.
 
-import std/[json, os, osproc, sequtils, strutils, tables, tempfiles,
-    unittest]
+import std/[os, osproc, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_interface_artifacts
 import repro_local_store
@@ -36,38 +35,6 @@ proc q(value: string): string = quoteShell(value)
 
 proc shellCommand(args: openArray[string]): string =
   args.mapIt(q(it)).join(" ")
-
-proc runShell(command: string): tuple[code: int; output: string] =
-  let res = execCmdEx(command)
-  (code: res.exitCode, output: res.output)
-
-proc sha256Hex(path: string): string =
-  ## Hash file using the host's available SHA-256 tool. On Windows we
-  ## prefer `certutil`; on POSIX `sha256sum`/`shasum`.
-  when defined(windows):
-    let res = execCmdEx("certutil -hashfile " & quoteShell(path) & " SHA256")
-    doAssert res.exitCode == 0
-    for line in res.output.splitLines:
-      var stripped = line.strip()
-      if stripped.len == 0 or stripped.toLowerAscii().startsWith("sha256") or
-          stripped.startsWith("CertUtil:"):
-        continue
-      if stripped.startsWith("\\"): stripped = stripped[1 .. ^1]
-      let candidate = stripped.replace(" ", "").toLowerAscii()
-      if candidate.len == 64 and candidate.allCharsInSet(HexDigits):
-        return candidate
-    raise newException(OSError, "could not parse certutil output\n" & res.output)
-  else:
-    let exe =
-      if findExe("sha256sum").len > 0:
-        findExe("sha256sum") & " " & quoteShell(path)
-      else:
-        findExe("shasum") & " -a 256 " & quoteShell(path)
-    let res = execCmdEx(exe)
-    doAssert res.exitCode == 0
-    var first = res.output.strip().splitWhitespace()[0]
-    if first.startsWith("\\"): first = first[1 .. ^1]
-    first.toLowerAscii()
 
 proc buildTarballFixture(tempRoot: string): tuple[archivePath: string;
     sha256: string; url: string] =
@@ -110,7 +77,7 @@ proc buildTarballFixture(tempRoot: string): tuple[archivePath: string;
     let res = execCmdEx(shellCommand(["tar", "-czf", archivePath, "-C",
       payloadRoot, "m56tarball-1.0.0"]))
     doAssert res.exitCode == 0
-  let sha = sha256Hex(archivePath)
+  let sha = fileSha256Hex(archivePath)
   # Build a `file://` URL the M54 tarball adapter understands. On
   # Windows the absolute path starts with a drive letter, so we use
   # `file://<drive>:/...` (two slashes after `file:`) — the adapter

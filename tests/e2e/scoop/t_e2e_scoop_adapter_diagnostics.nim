@@ -11,6 +11,12 @@
 ## Each failure must be a CatchableError of the documented subtype,
 ## not a generic OSError or ValueError.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+  echo "[platform N/A] e2e_scoop_adapter_diagnostics: " &
+    "this gate requires Windows and a real Scoop install"
+  quit(0)
+
 import std/[os, tempfiles, unittest]
 
 import repro_tool_profiles

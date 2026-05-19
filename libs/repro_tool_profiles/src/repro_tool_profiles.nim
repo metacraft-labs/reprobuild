@@ -802,7 +802,7 @@ proc parseHexLine(output: string): string =
       return collapsed
   ""
 
-proc fileSha256Hex(path: string): string =
+proc fileSha256Hex*(path: string): string =
   ## Compute the SHA-256 hex digest of `path` using whichever tool the
   ## host provides. Windows ships `certutil -hashfile <path> SHA256` as
   ## a built-in; macOS and Linux ship one of sha256sum / shasum /

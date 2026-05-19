@@ -23,6 +23,12 @@
 ##     receipt's practicalHardening is pinned (exact) or ranged
 ##     (range), still cache-local.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+  echo "[platform N/A] e2e_scoop_practical_hardening: " &
+    "this gate requires Windows and a real Scoop install"
+  quit(0)
+
 import std/[json, os, tempfiles, unittest]
 
 import repro_tool_profiles
