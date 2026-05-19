@@ -346,6 +346,33 @@ e2e_local_store_unified_across_adapters:
         tests/e2e/external-packages/t_e2e_local_store_unified_across_adapters.nim \
         2>&1 | tee test-logs/e2e_local_store_unified_across_adapters.log
 
+integration_launch_plan_binding_strategies:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_launch_plan_binding_strategies \
+        --out:build/test-bin/integration_launch_plan_binding_strategies \
+        tests/integration/t_integration_launch_plan_binding_strategies.nim \
+        2>&1 | tee test-logs/integration_launch_plan_binding_strategies.log
+
+e2e_windows_launcher_isolation:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_windows_launcher_isolation \
+        --out:build/test-bin/e2e_windows_launcher_isolation \
+        tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim \
+        2>&1 | tee test-logs/e2e_windows_launcher_isolation.log
+
+repro_launcher_binary:
+    mkdir -p test-logs build/nimcache
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro-launcher \
+        --out:build/repro-launcher.exe \
+        apps/repro-launcher/repro_launcher.nim \
+        2>&1 | tee test-logs/repro_launcher_binary.log
+
 integration_provider_fragment_refresh_and_pruning:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

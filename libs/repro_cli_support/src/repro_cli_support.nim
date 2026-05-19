@@ -11,6 +11,7 @@ import repro_runquota
 import repro_hash
 import repro_tool_profiles
 import repro_local_store
+import repro_launch_plan
 import repro_cli_support/watch
 
 proc wantsVersion*(args: openArray[string]): bool =
@@ -2158,6 +2159,83 @@ proc runStoreCommand*(args: seq[string]): int =
     stderr.writeLine("repro store " & sub & ": error: " & err.msg)
     return 1
 
+proc runLaunchPlanCommand*(args: seq[string]): int =
+  ## Implements `repro launch-plan <subcommand>`. v1 subcommands:
+  ##
+  ##   show <hex-id>      Render the LaunchPlan stored in the local M56
+  ##                      CAS as a JSON inspection view. The JSON form
+  ##                      is debug output only — the canonical record is
+  ##                      the binary RBLP envelope.
+  ##   id <path>          Compute the BLAKE3-256 launchPlanId of a
+  ##                      LaunchPlan envelope on disk without opening
+  ##                      the store. Useful when verifying activation
+  ##                      artifacts.
+  ##
+  ## Both subcommands accept `--store-root=PATH` and honour
+  ## `$REPRO_STORE_ROOT` exactly as `repro store ...` does.
+  if args.len == 0:
+    echo "usage: repro launch-plan {show <hex-id> | id <path>} " &
+      "[--store-root=PATH]"
+    return 2
+  var storeRootOverride = ""
+  var positional: seq[string] = @[]
+  for raw in args:
+    if raw.startsWith("--store-root="):
+      storeRootOverride = raw[len("--store-root=") .. ^1]
+    elif raw.startsWith("--"):
+      stderr.writeLine("repro launch-plan: unknown flag: " & raw)
+      return 2
+    else:
+      positional.add(raw)
+  if positional.len == 0:
+    stderr.writeLine("repro launch-plan: missing subcommand")
+    return 2
+  let sub = positional[0]
+  case sub
+  of "show":
+    if positional.len < 2:
+      stderr.writeLine("repro launch-plan show: missing <hex-id>")
+      return 2
+    let hex = positional[1].toLowerAscii
+    if hex.len != 64:
+      stderr.writeLine(
+        "repro launch-plan show: expected 64-char hex digest, got " &
+        $hex.len & " chars")
+      return 2
+    let root = resolveStoreRoot(storeRootOverride)
+    try:
+      var store = openStore(root)
+      defer: store.close()
+      var id: PrefixIdBytes
+      for i in 0 ..< 32:
+        let hi = parseHexInt($hex[i * 2])
+        let lo = parseHexInt($hex[i * 2 + 1])
+        id[i] = byte((hi shl 4) or lo)
+      let plan = store.loadLaunchPlan(id)
+      echo launchPlanToJson(plan)
+      return 0
+    except CatchableError as err:
+      stderr.writeLine("repro launch-plan show: error: " & err.msg)
+      return 1
+  of "id":
+    if positional.len < 2:
+      stderr.writeLine("repro launch-plan id: missing <path>")
+      return 2
+    let path = positional[1]
+    try:
+      let raw = readFile(path)
+      var buf = newSeq[byte](raw.len)
+      for i, ch in raw: buf[i] = byte(ord(ch))
+      let plan = decodeLaunchPlan(buf)
+      echo launchPlanIdHex(plan)
+      return 0
+    except CatchableError as err:
+      stderr.writeLine("repro launch-plan id: error: " & err.msg)
+      return 1
+  else:
+    stderr.writeLine("repro launch-plan: unknown subcommand: " & sub)
+    return 2
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -2239,5 +2317,12 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runStoreCommand(storeArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "launch-plan":
+    let lpArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runLaunchPlanCommand(lpArgs)
   echo renderUsage(programName)
   0

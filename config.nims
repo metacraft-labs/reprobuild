@@ -22,6 +22,7 @@ for libName in [
   "repro_interface_artifacts",
   "repro_tool_profiles",
   "repro_local_store",
+  "repro_launch_plan",
   "repro_runquota",
   "repro_build_engine",
   "repro_provider_runtime",
