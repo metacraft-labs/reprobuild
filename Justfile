@@ -643,6 +643,36 @@ e2e_stow_suppression_and_warnings:
         tests/e2e/home-apply/t_e2e_stow_suppression_and_warnings.nim \
         2>&1 | tee test-logs/e2e_stow_suppression_and_warnings.log
 
+e2e_repro_home_rollback_round_trip:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_rollback_round_trip.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_home_rollback_round_trip \
+        --out:build/test-bin/e2e_repro_home_rollback_round_trip \
+        tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim \
+        2>&1 | tee test-logs/e2e_repro_home_rollback_round_trip.log
+
+e2e_repro_home_rollback_user_edit_protection:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_rollback_user_edit_protection.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_home_rollback_user_edit_protection \
+        --out:build/test-bin/e2e_repro_home_rollback_user_edit_protection \
+        tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim \
+        2>&1 | tee test-logs/e2e_repro_home_rollback_user_edit_protection.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

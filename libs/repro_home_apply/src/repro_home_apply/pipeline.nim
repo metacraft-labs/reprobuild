@@ -47,6 +47,13 @@ const
     ## `git-config` package that would write `~/.gitconfig` so the
     ## stow-suppression code path is exercised end-to-end without
     ## requiring the full M59 stdlib.
+  PackageManagedBlocksEnvVar* = "REPRO_TEST_PACKAGE_MANAGED_BLOCKS"
+    ## M64 test hook: semicolon-separated
+    ## `<pkg>=<home-rel-host>#<block-id>:<content>` entries. Each entry
+    ## asks the pipeline to materialize a managed block in the named
+    ## host file with the named id and content. Used by the M64
+    ## rollback gates to populate managed blocks in `~/.bashrc` without
+    ## requiring the full M59 `fs.managedBlock` stdlib hook.
   NoOpLogPrefix* = "no-op: generation matches; verified "
     ## Stable rendering used by gate 2's assertion.
 
@@ -154,6 +161,44 @@ proc parseSyntheticPackageGenerates(homeDir: string;
       contributingPackage: pkg,
       stowSourcePath: "",
       contentBytes: contentBytes))
+
+proc parseSyntheticPackageManagedBlocks(homeDir: string;
+                                        declaredPackages: seq[string]):
+    seq[PlannedManagedBlock] =
+  ## Read `REPRO_TEST_PACKAGE_MANAGED_BLOCKS` and synthesize one
+  ## `PlannedManagedBlock` per declared
+  ## `<pkg>=<rel-host>#<block-id>:<content>` entry whose package is
+  ## in `declaredPackages`. The M64 rollback gates use this to stage
+  ## a managed block in `~/.bashrc` without needing the full M59
+  ## `fs.managedBlock` stdlib hook wired in.
+  let raw = getEnv(PackageManagedBlocksEnvVar)
+  if raw.len == 0:
+    return
+  for piece in raw.split(';'):
+    let trimmed = piece.strip()
+    if trimmed.len == 0:
+      continue
+    let eq = trimmed.find('=')
+    if eq <= 0:
+      continue
+    let pkg = trimmed[0 ..< eq].strip()
+    if pkg notin declaredPackages:
+      continue
+    let rest = trimmed[eq + 1 .. ^1]
+    let hash = rest.find('#')
+    if hash <= 0:
+      continue
+    let relHost = rest[0 ..< hash].strip()
+    let afterHash = rest[hash + 1 .. ^1]
+    let colon = afterHash.find(':')
+    if colon <= 0:
+      continue
+    let blockId = afterHash[0 ..< colon].strip()
+    let content = afterHash[colon + 1 .. ^1]
+    result.add(PlannedManagedBlock(
+      hostFilePath: homeDir / relHost,
+      blockId: blockId,
+      blockBytes: content))
 
 # ---------------------------------------------------------------------------
 # Plan derivation
@@ -414,6 +459,92 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         if g.sourceKind != pgfsPackageOutput:
           continue
         stagedFiles.add(materializePackageOutput(g))
+      # Seal every staged file's content bytes into CAS keyed by the
+      # post-write digest. This is what enables M64 rollback to restore
+      # files whose live target is being overwritten: the target
+      # generation's manifest carries `storeContentHash = postWriteDigest`
+      # and the bytes are reachable via `readCasBlob`. M63 only RECORDS
+      # the digest; M64 needs the bytes too.
+      proc readFileBytes(path: string): seq[byte] =
+        let raw = readFile(path)
+        result = newSeq[byte](raw.len)
+        for i, ch in raw:
+          result[i] = byte(ord(ch))
+      for g in applyPlan.generatedFiles:
+        if g.sourceKind == pgfsPackageOutput:
+          discard storeCasBlob(store, g.contentBytes)
+      for entry in stowEntries:
+        if fileExists(entry.sourceAbsolutePath):
+          let bytes = readFileBytes(entry.sourceAbsolutePath)
+          discard storeCasBlob(store, bytes)
+      # Materialize synthetic managed blocks from the M64 test hook.
+      # In production, M65 wires the M59 `fs.managedBlock` stdlib hook
+      # to populate this list; for now the gates use the env-var seam.
+      var appliedManagedBlocks: seq[AppliedManagedBlockRecord]
+      let syntheticBlocks = parseSyntheticPackageManagedBlocks(opts.homeDir,
+        packageIds)
+      for mb in syntheticBlocks:
+        appliedManagedBlocks.add(applyManagedBlock(mb))
+      # Diff against the previous generation's manifest: any file or
+      # managed block it owned that the new generation does NOT own
+      # is removed before we commit. Without this, files that A's plan
+      # generated but B's plan no longer mentions would persist on
+      # disk across the A -> B transition (and would block M64 rollback's
+      # symmetric "remove + restore" plan). The drift here matches the
+      # apply pipeline's documented "Step 5: Plan diff against current"
+      # spec line; M63 deferred the actual deletion work to a later
+      # milestone, and we land it under M64 because rollback's
+      # symmetry assumes apply already cleaned up.
+      if activeGenIdHex.len > 0:
+        let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
+        if fileExists(prevPointerFile):
+          var newPaths: seq[string]
+          for sf in stagedFiles:
+            newPaths.add(sf.absoluteOutputPath)
+          let prevEnv = readPointerFile(prevPointerFile)
+          var prevManifestKey: PrefixIdBytes
+          for i in 0 ..< 32:
+            prevManifestKey[i] = prevEnv.activationManifestDigest[i]
+          try:
+            let prevManifestBytes = readCasBlob(store, prevManifestKey)
+            let prevManifest = decodeManifestBytes(prevManifestBytes)
+            for gf in prevManifest.generatedFiles:
+              if gf.absoluteOutputPath notin newPaths:
+                deleteRemovedFile(gf.absoluteOutputPath)
+            # Same for managed blocks.
+            var newBlockKeys: seq[string]
+            for mb in appliedManagedBlocks:
+              newBlockKeys.add(mb.hostFilePath & "\x1a" & mb.blockId)
+            for mb in prevManifest.managedBlocks:
+              let k = mb.hostFilePath & "\x1a" & mb.blockId
+              if k notin newBlockKeys:
+                # Strip the sentinel-delimited region from the host file.
+                if fileExists(mb.hostFilePath):
+                  let existing = readFile(mb.hostFilePath)
+                  let openS = OpenSentinelPrefix & mb.blockId &
+                    OpenSentinelSuffix
+                  let closeS = CloseSentinelPrefix & mb.blockId &
+                    CloseSentinelSuffix
+                  let openIdx = existing.find(openS)
+                  let closeIdx = existing.find(closeS)
+                  if openIdx >= 0 and closeIdx >= 0 and closeIdx > openIdx:
+                    var openLineStart = openIdx
+                    while openLineStart > 0 and
+                        existing[openLineStart - 1] != '\n':
+                      dec openLineStart
+                    var closeLineEnd = closeIdx + closeS.len
+                    if closeLineEnd < existing.len and
+                        existing[closeLineEnd] == '\n':
+                      inc closeLineEnd
+                    let rewritten = existing[0 ..< openLineStart] &
+                      existing[closeLineEnd .. ^1]
+                    writeFile(mb.hostFilePath, rewritten)
+          except CatchableError:
+            # The previous manifest may be unreadable in pathological
+            # cases (manifest in CAS was GC'd by another tool, etc.).
+            # The apply still proceeds; rollback would surface the
+            # missing-blob diagnostic later.
+            discard
       if shouldKillAfter(8):
         raiseKilledByTestHook(8)
 
@@ -454,9 +585,15 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         gf.postWriteDigest = sf.postWriteDigest
         gf.stowSource = sf.stowSource
         manifest.generatedFiles.add(gf)
-      # Resource bindings reserved for M68; managed blocks not used
-      # in Phase A's gates.
-      manifest.managedBlocks = @[]
+      # Resource bindings reserved for M68; managed blocks come from
+      # the test-hook synthesizer in Phase A.
+      for mb in appliedManagedBlocks:
+        manifest.managedBlocks.add(ManagedBlock(
+          hostFilePath: mb.hostFilePath,
+          blockId: mb.blockId,
+          preWriteFileDigest: mb.preWriteFileDigest,
+          postWriteBlockBytes: mb.postWriteBlockBytes,
+          postWriteFileDigest: mb.postWriteFileDigest))
       manifest.resourceBindings = @[]
       let manifestBytes = encodeManifest(manifest)
 

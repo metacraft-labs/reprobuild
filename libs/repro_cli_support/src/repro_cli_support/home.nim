@@ -38,6 +38,7 @@ import std/[options, os, sets, strutils, tables, times]
 import repro_home_intent
 import repro_home_generations
 import repro_home_apply
+import repro_home_rollback
 
 type
   PackageCatalogLookup* = proc(package: string): bool {.gcsafe.}
@@ -783,6 +784,97 @@ proc runHomeApply(args: openArray[string]): int =
   return runApplyInline("apply")
 
 # ---------------------------------------------------------------------------
+# `repro home rollback` (M64).
+# ---------------------------------------------------------------------------
+
+proc runHomeRollback(args: openArray[string]): int =
+  ## `repro home rollback [<generation-id>] [--accept-overwrite]` —
+  ## revert the filesystem state to a past generation. Without an
+  ## explicit id, rolls back to the immediately previous generation.
+  ## Refuses to clobber user-edited managed files unless
+  ## `--accept-overwrite` is passed.
+  var generationId = ""
+  var acceptOverwrite = false
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--accept-overwrite":
+      acceptOverwrite = true
+    elif a == "--help" or a == "-h":
+      echo "usage: repro home rollback [<generation-id>] [--accept-overwrite]"
+      echo ""
+      echo "Revert filesystem state to a past generation. Without an"
+      echo "explicit id, rolls back to the immediately previous"
+      echo "generation by activation timestamp. Refuses to clobber"
+      echo "user-edited managed files unless --accept-overwrite."
+      return 0
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home rollback: unknown flag: " & a)
+      return 2
+    elif generationId.len == 0:
+      generationId = a
+    else:
+      stderr.writeLine("repro home rollback: unexpected positional: " & a)
+      return 2
+    inc i
+
+  var opts: RollbackOptions
+  opts.targetGenerationId = generationId
+  opts.acceptOverwrite = acceptOverwrite
+  try:
+    let outcome = runRollback(opts)
+    if outcome.driftedPaths.len > 0:
+      for p in outcome.driftedPaths:
+        stderr.writeLine("repro home rollback: drift detected at " & p &
+          " (clobbered under --accept-overwrite).")
+    echo "repro home rollback: rolled back from " &
+      outcome.fromGenerationIdHex & " to " & outcome.toGenerationIdHex &
+      " (" & $outcome.fileOpsApplied & " file op(s), " &
+      $outcome.blockOpsApplied & " block op(s), " &
+      $outcome.launcherOpsApplied & " launcher op(s))"
+    return 0
+  except EUserEditDetected as err:
+    stderr.writeLine("repro home rollback: user edit detected at " &
+      err.path & " (" & err.recordKind & "): expected " &
+      err.expectedDigestHex[0 ..< min(12, err.expectedDigestHex.len)] &
+      " but observed " &
+      err.observedDigestHex[0 ..< min(12, err.observedDigestHex.len)] &
+      ". Pass --accept-overwrite to clobber the user's edit.")
+    return 1
+  except EUnknownGeneration as err:
+    stderr.writeLine("repro home rollback: no generation matching '" &
+      err.requestedId & "'. Available: " & err.candidates.join(", "))
+    return 1
+  except EAmbiguousGeneration as err:
+    stderr.writeLine("repro home rollback: prefix '" & err.requestedPrefix &
+      "' is ambiguous. Candidates:")
+    for m in err.matches:
+      stderr.writeLine("  " & m)
+    return 1
+  except ENoPreviousGeneration as err:
+    stderr.writeLine("repro home rollback: " & err.msg)
+    return 1
+  except ENoActiveGeneration as err:
+    stderr.writeLine("repro home rollback: " & err.msg)
+    return 1
+  except ERollbackContentMissing as err:
+    stderr.writeLine("repro home rollback: missing CAS blob " &
+      err.digestHex & " for " & err.absoluteOutputPath & ". Refusing " &
+      "to restore unknown content.")
+    return 1
+  except EApplyBusy as err:
+    stderr.writeLine("repro home rollback: another apply/rollback is in " &
+      "progress (lock " & err.lockPath & " held; waited " &
+      $err.waitedSeconds & "s).")
+    return 1
+  except EHomeRollback as err:
+    stderr.writeLine("repro home rollback: " & err.msg)
+    return 1
+  except CatchableError as err:
+    stderr.writeLine("repro home rollback: unexpected error: " & err.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
 # Top-level dispatch.
 # ---------------------------------------------------------------------------
 
@@ -815,7 +907,7 @@ proc runHomeCommand*(args: seq[string]): int =
     inc i
   if sub.len == 0:
     stderr.writeLine("usage: repro home {add | remove | enable | disable | " &
-      "list | why | history} ...")
+      "list | why | history | apply | rollback} ...")
     return 2
   case sub
   of "add": return runHomeAdd(subArgs)
@@ -826,6 +918,7 @@ proc runHomeCommand*(args: seq[string]): int =
   of "why": return runHomeWhy(subArgs)
   of "history": return runHomeHistory(subArgs)
   of "apply": return runHomeApply(subArgs)
+  of "rollback": return runHomeRollback(subArgs)
   else:
     stderr.writeLine("repro home: unknown subcommand: " & sub)
     return 2
