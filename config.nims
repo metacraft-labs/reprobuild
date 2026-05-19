@@ -19,6 +19,7 @@ for libName in [
   "repro_monitor_hooks",
   "repro_project_dsl",
   "repro_dsl_stdlib",
+  "repro_home_intent",
   "repro_interface_artifacts",
   "repro_tool_profiles",
   "repro_local_store",

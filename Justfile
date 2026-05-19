@@ -481,6 +481,24 @@ e2e_managed_block_cache_key_isolation:
         tests/e2e/generated-config/t_e2e_managed_block_cache_key_isolation.nim \
         2>&1 | tee test-logs/e2e_managed_block_cache_key_isolation.log
 
+integration_intent_layer_round_trip:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_intent_layer_round_trip \
+        --out:build/test-bin/integration_intent_layer_round_trip \
+        tests/e2e/home-intent/t_integration_intent_layer_round_trip.nim \
+        2>&1 | tee test-logs/integration_intent_layer_round_trip.log
+
+integration_intent_layer_config_section:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_intent_layer_config_section \
+        --out:build/test-bin/integration_intent_layer_config_section \
+        tests/e2e/home-intent/t_integration_intent_layer_config_section.nim \
+        2>&1 | tee test-logs/integration_intent_layer_config_section.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \
