@@ -87,12 +87,27 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  ScoopProvisioningDef* = object
+    bucket*: string
+    app*: string
+    version*: string
+    preferredVersion*: string
+    manifestChecksum*: string
+    manifestUrl*: string
+    executablePath*: string
+    requiresExecutionProfileChecksum*: bool
+    packageId*: string
+    lockIdentity*: string
+    sourceFile*: string
+    sourceLine*: int
+
   PackageDef* = object
     packageName*: string
     executables*: seq[ExecutableDef]
     toolUses*: seq[PackageUseDef]
     nixProvisioning*: seq[NixPackageProvisioningDef]
     tarballProvisioning*: seq[TarballProvisioningDef]
+    scoopProvisioning*: seq[ScoopProvisioningDef]
     usesImportPaths*: seq[string]
     publicSignatureDependencies*: seq[string]
     sourceFile*: string
@@ -1426,18 +1441,93 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   if result.lockIdentity.len == 0:
     result.lockIdentity = "sha256:" & result.sha256
 
+proc parseScoopProvisioning(node: NimNode): ScoopProvisioningDef =
+  let loc = lineFile(node)
+  if calleeName(node).normalize != "scoopapp":
+    error("provisioning expects scoopApp bucket = \"main\", app = \"ripgrep\", " &
+      "version = \"14.1.0\", executablePath = \"<exe>\"", node)
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  result.requiresExecutionProfileChecksum = true
+  for i in 1 ..< node.len:
+    let bucketValue = namedValue(node[i], "bucket")
+    if not bucketValue.isNil:
+      result.bucket = stringLiteral(bucketValue)
+    let appValue = namedValue(node[i], "app")
+    if not appValue.isNil:
+      result.app = stringLiteral(appValue)
+    let versionValue = namedValue(node[i], "version")
+    if not versionValue.isNil:
+      result.version = stringLiteral(versionValue)
+    let preferredVersionValue = namedValue(node[i], "preferredVersion")
+    if not preferredVersionValue.isNil:
+      result.preferredVersion = stringLiteral(preferredVersionValue)
+    let manifestChecksumValue = namedValue(node[i], "manifestChecksum")
+    if not manifestChecksumValue.isNil:
+      result.manifestChecksum = stringLiteral(manifestChecksumValue)
+    let manifestUrlValue = namedValue(node[i], "manifestUrl")
+    if not manifestUrlValue.isNil:
+      result.manifestUrl = stringLiteral(manifestUrlValue)
+    let executablePathValue = namedValue(node[i], "executablePath")
+    if not executablePathValue.isNil:
+      result.executablePath = stringLiteral(executablePathValue)
+    let requiresExecProfileValue = namedValue(node[i],
+      "requiresExecutionProfileChecksum")
+    if not requiresExecProfileValue.isNil:
+      result.requiresExecutionProfileChecksum = boolLiteral(
+        requiresExecProfileValue, true)
+    let packageIdValue = namedValue(node[i], "packageId")
+    if not packageIdValue.isNil:
+      result.packageId = stringLiteral(packageIdValue)
+    let lockIdentityValue = namedValue(node[i], "lockIdentity")
+    if not lockIdentityValue.isNil:
+      result.lockIdentity = stringLiteral(lockIdentityValue)
+  if result.bucket.len == 0:
+    error("scoopApp requires bucket = \"<name>\"", node)
+  if result.app.len == 0:
+    error("scoopApp requires app = \"<name>\"", node)
+  if result.version.len > 0 and result.preferredVersion.len > 0:
+    error("scoopApp accepts version OR preferredVersion, not both", node)
+  if result.version.len == 0 and result.preferredVersion.len == 0:
+    error("scoopApp requires version = \"<exact>\" or preferredVersion = " &
+      "\"<range>\"", node)
+  if result.executablePath.len == 0:
+    error("scoopApp requires executablePath = \"<relative-path>\"", node)
+  if result.executablePath.unsafeRelativePath:
+    error("scoopApp executablePath must be a relative path inside the " &
+      "Scoop app prefix", node)
+  if result.packageId.len == 0:
+    result.packageId =
+      if result.version.len > 0:
+        result.bucket & "/" & result.app & "@" & result.version
+      else:
+        result.bucket & "/" & result.app & "@" & result.preferredVersion
+  if result.lockIdentity.len == 0:
+    result.lockIdentity =
+      if result.manifestChecksum.len > 0:
+        "scoop:" & result.bucket & "/" & result.app & ":" &
+          result.manifestChecksum
+      elif result.version.len > 0:
+        "scoop:" & result.bucket & "/" & result.app & "@" & result.version
+      else:
+        "scoop:" & result.bucket & "/" & result.app & "@" &
+          result.preferredVersion
+
 proc collectProvisioning(node: NimNode;
                          nixOutput: var seq[NixPackageProvisioningDef];
-                         tarballOutput: var seq[TarballProvisioningDef]) =
+                         tarballOutput: var seq[TarballProvisioningDef];
+                         scoopOutput: var seq[ScoopProvisioningDef]) =
   case node.kind
   of nnkStmtList:
     for child in node:
-      collectProvisioning(child, nixOutput, tarballOutput)
+      collectProvisioning(child, nixOutput, tarballOutput, scoopOutput)
   of nnkCall, nnkCommand:
     if calleeName(node).normalize == "nixpackage":
       nixOutput.add(parseNixPackageProvisioning(node))
     elif calleeName(node).normalize == "tarball":
       tarballOutput.add(parseTarballProvisioning(node))
+    elif calleeName(node).normalize == "scoopapp":
+      scoopOutput.add(parseScoopProvisioning(node))
     else:
       error("unsupported provisioning form: " & node.repr, node)
   else:
@@ -1458,7 +1548,7 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       if stmt.len < 2:
         error("provisioning expects a body", stmt)
       collectProvisioning(stmt[stmt.len - 1], result.nixProvisioning,
-        result.tarballProvisioning)
+        result.tarballProvisioning, result.scoopProvisioning)
     elif calleeName(stmt).normalize == "usesimportpath":
       if stmt.len != 2:
         error("usesImportPath expects exactly one string literal", stmt)
@@ -1506,6 +1596,23 @@ proc packageLiteral(pkg: PackageDef): string =
       ", archiveType: " & escForCode(provisioning.archiveType) &
       ", executablePath: " & escForCode(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &
+      ", packageId: " & escForCode(provisioning.packageId) &
+      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", sourceFile: " & escForCode(provisioning.sourceFile) &
+      ", sourceLine: " & $provisioning.sourceLine & ")")
+  result.add("], scoopProvisioning: @[")
+  for provisioningIndex, provisioning in pkg.scoopProvisioning:
+    if provisioningIndex > 0:
+      result.add(", ")
+    result.add("ScoopProvisioningDef(bucket: " & escForCode(provisioning.bucket) &
+      ", app: " & escForCode(provisioning.app) &
+      ", version: " & escForCode(provisioning.version) &
+      ", preferredVersion: " & escForCode(provisioning.preferredVersion) &
+      ", manifestChecksum: " & escForCode(provisioning.manifestChecksum) &
+      ", manifestUrl: " & escForCode(provisioning.manifestUrl) &
+      ", executablePath: " & escForCode(provisioning.executablePath) &
+      ", requiresExecutionProfileChecksum: " &
+        $provisioning.requiresExecutionProfileChecksum &
       ", packageId: " & escForCode(provisioning.packageId) &
       ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &

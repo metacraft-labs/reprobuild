@@ -23,11 +23,11 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]]\n       " &
           programName &
-      " watch [target[#name]] --tool-provisioning=path|nix|tarball [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " &
+      " watch [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " &
           programName &
-      " develop <target[#name]> --tool-provisioning=path|nix|tarball [--work-root=PATH] -- <command> [args...]\n       " &
+      " develop <target[#name]> --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] -- <command> [args...]\n       " &
           programName &
       " develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n       " &
           programName &
@@ -47,6 +47,8 @@ proc parseToolProvisioning(value: string): ToolProvisioningMode =
     tpmNix
   of "tarball":
     tpmTarball
+  of "scoop":
+    tpmScoop
   else:
     raise newException(ValueError, "unsupported --tool-provisioning=" & value)
 
@@ -814,6 +816,9 @@ proc identityPaths(outDir: string; mode: ToolProvisioningMode):
   of tpmTarball:
     (identityPath: outDir / "tarball-tool-identities.rbtp",
       inspectionPath: outDir / "tarball-tool-identities.inspect.json")
+  of tpmScoop:
+    (identityPath: outDir / "scoop-tool-identities.rbtp",
+      inspectionPath: outDir / "scoop-tool-identities.inspect.json")
   else:
     (identityPath: outDir / "path-only-tool-identities.rbtp",
       inspectionPath: outDir / "path-only-tool-identities.inspect.json")
@@ -823,6 +828,7 @@ proc modeName(mode: ToolProvisioningMode): string =
   of tpmPathOnly: "path"
   of tpmNix: "nix"
   of tpmTarball: "tarball"
+  of tpmScoop: "scoop"
   else: "unspecified"
 
 proc addCacheField(payload: var string; value: string) =
@@ -861,6 +867,17 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
       payload.addCacheField(tarball.executablePath)
       payload.addCacheField(tarball.packageId)
       payload.addCacheField(tarball.lockIdentity)
+    for scoop in useDef.scoopProvisioning:
+      payload.addCacheField(scoop.bucket)
+      payload.addCacheField(scoop.app)
+      payload.addCacheField(scoop.version)
+      payload.addCacheField(scoop.preferredVersion)
+      payload.addCacheField(scoop.manifestChecksum)
+      payload.addCacheField(scoop.manifestUrl)
+      payload.addCacheField(scoop.executablePath)
+      payload.addCacheField($scoop.requiresExecutionProfileChecksum)
+      payload.addCacheField(scoop.packageId)
+      payload.addCacheField(scoop.lockIdentity)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
 proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
@@ -1156,7 +1173,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
 
-  if mode in {tpmPathOnly, tpmNix, tpmTarball}:
+  if mode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     let identityStart = statStart(statsEnabled)
     let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
@@ -1175,6 +1192,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         "portable"
       elif mode == tpmTarball:
         "portable"
+      elif mode == tpmScoop:
+        # Scoop receipts may be cache-portable or cache-local depending on
+        # the practical hardening tier. Read the resolved identity to find
+        # out, defaulting to local-only when no profiles are present.
+        var anyLocal = false
+        var anyPortable = false
+        for profile in identity.profiles:
+          if profile.cachePortability == cpPortable:
+            anyPortable = true
+          else:
+            anyLocal = true
+        if anyPortable and not anyLocal:
+          "portable"
+        elif anyPortable and anyLocal:
+          "mixed"
+        else:
+          "local-only"
       else:
         "local-only"
     echo "cachePortability: " & portability
@@ -1185,11 +1219,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let providerBinaryPath = outDir / "provider" / "project-provider"
     let providerArtifactPath = outDir / "provider-compile.rbsz"
     var bypassRunQuota = false
-    if mode == tpmPathOnly and not isRunQuotaDaemonReachable():
+    if mode in {tpmPathOnly, tpmScoop} and not isRunQuotaDaemonReachable():
       bypassRunQuota = true
       echo "repro build: WARNING runquotad is not reachable; using " &
-        "path-mode RunQuota bypass (no quotas/leases enforced). Start " &
-        "`runquotad` and rerun to use the real lease coordinator."
+        "RunQuota bypass for tool-provisioning=" & mode.modeName &
+        " (no quotas/leases enforced). Start `runquotad` and rerun to " &
+        "use the real lease coordinator."
     echo "providerCompile: started"
     let providerCompileStart = statStart(statsEnabled)
     let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
@@ -1889,9 +1924,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
   let targetWasOmitted = target.len == 0
   if targetWasOmitted:
     target = "."
-  if mode notin {tpmPathOnly, tpmNix, tpmTarball}:
+  if mode notin {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     raise newException(ValueError,
-      "repro watch requires --tool-provisioning=path|nix|tarball")
+      "repro watch requires --tool-provisioning=path|nix|tarball|scoop")
   # Windows: kqueue gate dropped — Windows now reaches the live watch loop
   # via ReadDirectoryChangesW in repro_cli_support/watch. Linux still
   # surfaces the deferred-backend OSError from openFilesystemWatcher.
@@ -2014,7 +2049,7 @@ proc runDevelopCommand(args: openArray[string]): int =
         interfaceFingerprint: artifact.interfaceFingerprint),
       "", "", interfacePath)
 
-  if mode notin {tpmPathOnly, tpmNix, tpmTarball}:
+  if mode notin {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     raise newException(ValueError,
       "unsupported develop tool provisioning mode: " & mode.modeName)
 

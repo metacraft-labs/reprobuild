@@ -1,5 +1,7 @@
-import std/[httpclient, json, os, osproc, sequtils, strutils, tables, times]
+import std/[algorithm, httpclient, json, os, osproc, sequtils, strutils,
+    tables, times]
 
+import blake3
 import cbor
 import repro_core
 import repro_core/paths as corepaths
@@ -13,6 +15,7 @@ type
     tpmPathOnly
     tpmNix
     tpmTarball
+    tpmScoop
 
   AdapterStrength* = enum
     asWeak
@@ -21,6 +24,23 @@ type
   CachePortability* = enum
     cpLocalOnly
     cpPortable
+
+  PracticalHardening* = enum
+    phNone                       # adapter not applicable (path/nix/tarball)
+    phPinned                     # exact version, no execution profile
+    phPinnedAndProfileVerified   # exact version + manifest + exec profile
+    phRanged                     # range pin, no execution profile
+    phRangedAndProfileVerified   # range pin + manifest + exec profile
+
+  EScoopMissing* = object of CatchableError
+  EScoopBucketMissing* = object of CatchableError
+  EScoopVersionMismatch* = object of CatchableError
+  EScoopVersionDrift* = object of CatchableError
+  EScoopManifestUnreadable* = object of CatchableError
+  EScoopManifestChecksumMismatch* = object of CatchableError
+  EScoopInstallFailed* = object of CatchableError
+  EScoopProfileChecksumMismatch* = object of CatchableError
+  EScoopJunctionFailed* = object of CatchableError
 
   ToolProbeKind* = enum
     tpkVersion
@@ -60,6 +80,18 @@ type
     probes*: seq[ToolProbeResult]
     adapterStrength*: AdapterStrength
     cachePortability*: CachePortability
+    practicalHardening*: PracticalHardening
+    scoopBucket*: string
+    scoopApp*: string
+    scoopPinnedVersion*: string
+    scoopPreferredVersion*: string
+    scoopResolvedVersion*: string
+    scoopManifestChecksum*: string
+    scoopDeclaredManifestChecksum*: string
+    scoopExecutionProfileChecksum*: string
+    scoopRequiresExecutionProfile*: bool
+    scoopRoot*: string
+    scoopJunctionTarget*: string
     profileFingerprint*: ContentDigest
 
   ToolActionIdentity* = object
@@ -88,6 +120,16 @@ type
     actionFingerprint*: ContentDigest
     adapterStrength*: AdapterStrength
     cachePortability*: CachePortability
+    practicalHardening*: PracticalHardening
+    scoopBucket*: string
+    scoopApp*: string
+    scoopPinnedVersion*: string
+    scoopPreferredVersion*: string
+    scoopResolvedVersion*: string
+    scoopManifestChecksum*: string
+    scoopExecutionProfileChecksum*: string
+    scoopRoot*: string
+    scoopJunctionTarget*: string
 
   PathOnlyBuildIdentity* = object
     projectName*: string
@@ -114,9 +156,22 @@ type
     stripComponents*: int
     lockIdentity*: string
 
+  ScoopAcquisitionPlan* = object
+    packageSelector*: string
+    packageId*: string
+    bucket*: string
+    app*: string
+    version*: string
+    preferredVersion*: string
+    manifestChecksum*: string
+    manifestUrl*: string
+    declaredExecutablePath*: string
+    requiresExecutionProfileChecksum*: bool
+    lockIdentity*: string
+
 const
   ArtifactMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')), byte(ord('P'))]
-  ArtifactVersion = 5'u16
+  ArtifactVersion = 6'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -181,6 +236,14 @@ proc portabilityName(portability: CachePortability): string =
   of cpLocalOnly: "local-only"
   of cpPortable: "portable"
 
+proc practicalHardeningName*(value: PracticalHardening): string =
+  case value
+  of phNone: "none"
+  of phPinned: "pinned"
+  of phPinnedAndProfileVerified: "pinned-and-profile-verified"
+  of phRanged: "ranged"
+  of phRangedAndProfileVerified: "ranged-and-profile-verified"
+
 proc splitPathList(pathValue: string): seq[string] =
   if pathValue.len == 0:
     return @[]
@@ -202,7 +265,7 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
 
 proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.toolProfile.v4")
+  payload.writeString("reprobuild.toolProfile.v5")
   payload.writeString(profile.installMethod)
   payload.writeString(profile.packageSelector)
   payload.writeString(profile.packageId)
@@ -230,11 +293,23 @@ proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
     payload.writeString(probe.output)
   payload.writeByte(byte(ord(profile.adapterStrength)))
   payload.writeByte(byte(ord(profile.cachePortability)))
+  payload.writeByte(byte(ord(profile.practicalHardening)))
+  payload.writeString(profile.scoopBucket)
+  payload.writeString(profile.scoopApp)
+  payload.writeString(profile.scoopPinnedVersion)
+  payload.writeString(profile.scoopPreferredVersion)
+  payload.writeString(profile.scoopResolvedVersion)
+  payload.writeString(profile.scoopManifestChecksum)
+  payload.writeString(profile.scoopDeclaredManifestChecksum)
+  payload.writeString(profile.scoopExecutionProfileChecksum)
+  payload.writeByte(byte(ord(profile.scoopRequiresExecutionProfile)))
+  payload.writeString(profile.scoopRoot)
+  payload.writeString(profile.scoopJunctionTarget)
   blake3DomainDigest(payload, hdActionFingerprint)
 
 proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.toolAction.v4")
+  payload.writeString("reprobuild.toolAction.v5")
   payload.writeString(identity.providerEntrypointId)
   payload.writeString(identity.installMethod)
   payload.writeString(identity.packageSelector)
@@ -264,6 +339,16 @@ proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
     payload.writeString(probe.output)
   payload.writeByte(byte(ord(identity.adapterStrength)))
   payload.writeByte(byte(ord(identity.cachePortability)))
+  payload.writeByte(byte(ord(identity.practicalHardening)))
+  payload.writeString(identity.scoopBucket)
+  payload.writeString(identity.scoopApp)
+  payload.writeString(identity.scoopPinnedVersion)
+  payload.writeString(identity.scoopPreferredVersion)
+  payload.writeString(identity.scoopResolvedVersion)
+  payload.writeString(identity.scoopManifestChecksum)
+  payload.writeString(identity.scoopExecutionProfileChecksum)
+  payload.writeString(identity.scoopRoot)
+  payload.writeString(identity.scoopJunctionTarget)
   blake3DomainDigest(payload, hdActionFingerprint)
 
 proc findExecutableOnPath(executableName: string;
@@ -835,6 +920,547 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string):
 
   result.profileFingerprint = profileFingerprintFor(result)
 
+proc blake3HexBytes*(bytes: openArray[byte]): string =
+  blake3.toHex(blake3.digest(bytes))
+
+proc blake3HexText*(value: string): string =
+  blake3.toHex(blake3.digest(value))
+
+proc blake3HexFile*(path: string): string =
+  blake3.toHex(blake3.digest(readFile(path)))
+
+proc normalizeScoopVersionTag(value: string): string =
+  result = value.strip()
+  if result.startsWith("v") and result.len > 1 and result[1].isDigit():
+    result = result[1 .. ^1]
+
+proc parsePreferredVersionConstraint(spec: string):
+    tuple[minInclusive, minExclusive, maxInclusive, maxExclusive, equality:
+      string] =
+  for raw in spec.split(','):
+    var token = raw.strip()
+    if token.len == 0:
+      continue
+    if token.startsWith(">="):
+      result.minInclusive = token[2 .. ^1].strip()
+    elif token.startsWith(">"):
+      result.minExclusive = token[1 .. ^1].strip()
+    elif token.startsWith("<="):
+      result.maxInclusive = token[2 .. ^1].strip()
+    elif token.startsWith("<"):
+      result.maxExclusive = token[1 .. ^1].strip()
+    elif token.startsWith("=="):
+      result.equality = token[2 .. ^1].strip()
+    elif token.startsWith("="):
+      result.equality = token[1 .. ^1].strip()
+    else:
+      result.equality = token
+
+proc parseVersionTokens(value: string): seq[int] =
+  for chunk in value.split({'.', '-', '+'}):
+    if chunk.len == 0:
+      continue
+    var n = 0
+    var ok = true
+    for ch in chunk:
+      if not ch.isDigit():
+        ok = false
+        break
+      n = n * 10 + (ord(ch) - ord('0'))
+    if ok:
+      result.add(n)
+
+proc compareVersions(a, b: string): int =
+  let ta = parseVersionTokens(a)
+  let tb = parseVersionTokens(b)
+  let n = max(ta.len, tb.len)
+  for i in 0 ..< n:
+    let va = if i < ta.len: ta[i] else: 0
+    let vb = if i < tb.len: tb[i] else: 0
+    if va < vb: return -1
+    if va > vb: return 1
+  cmp(a, b)
+
+proc versionSatisfiesRange(version, constraint: string): bool =
+  if constraint.len == 0:
+    return true
+  let parts = parsePreferredVersionConstraint(constraint)
+  if parts.equality.len > 0:
+    return compareVersions(version, parts.equality) == 0
+  if parts.minInclusive.len > 0 and compareVersions(version,
+      parts.minInclusive) < 0:
+    return false
+  if parts.minExclusive.len > 0 and compareVersions(version,
+      parts.minExclusive) <= 0:
+    return false
+  if parts.maxInclusive.len > 0 and compareVersions(version,
+      parts.maxInclusive) > 0:
+    return false
+  if parts.maxExclusive.len > 0 and compareVersions(version,
+      parts.maxExclusive) >= 0:
+    return false
+  true
+
+proc scoopExecutableName(): string =
+  when defined(windows):
+    "scoop.cmd"
+  else:
+    "scoop"
+
+proc resolveScoopExecutable(scoopOverride: string): string =
+  if scoopOverride.len > 0 and fileExists(scoopOverride):
+    return scoopOverride
+  let envOverride = getEnv("REPROBUILD_SCOOP_BINARY")
+  if envOverride.len > 0 and fileExists(envOverride):
+    return envOverride
+  # scoop.exe is just a CLI launcher around the PowerShell entry point,
+  # but on Windows hosts the typical install ships scoop.cmd / scoop.ps1
+  # under <scoopRoot>/shims. Walk PATH explicitly to surface
+  # EScoopMissing when the user removed it.
+  for candidate in @["scoop.cmd", "scoop.exe", "scoop.ps1", "scoop"]:
+    let resolved = findExe(candidate)
+    if resolved.len > 0:
+      return resolved
+  ""
+
+proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
+  if useDef.scoopProvisioning.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: package \"" & useDef.packageSelector &
+      "\" requested by uses \"" & useDef.rawConstraint &
+      "\" does not declare provisioning: scoopApp metadata")
+  let selected = useDef.scoopProvisioning[0]
+  if selected.bucket.len == 0 or selected.app.len == 0 or
+      selected.executablePath.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: incomplete scoopApp metadata for package \"" &
+      useDef.packageSelector & "\"")
+  if selected.version.len == 0 and selected.preferredVersion.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: scoopApp for \"" & useDef.packageSelector &
+      "\" must declare version or preferredVersion")
+  let packageId =
+    if selected.packageId.len > 0:
+      selected.packageId
+    else:
+      selected.bucket & "/" & selected.app
+  let lockIdentity =
+    if selected.lockIdentity.len > 0:
+      selected.lockIdentity
+    else:
+      "scoop:" & selected.bucket & "/" & selected.app
+  ScoopAcquisitionPlan(
+    packageSelector: useDef.packageSelector,
+    packageId: packageId,
+    bucket: selected.bucket,
+    app: selected.app,
+    version: selected.version,
+    preferredVersion: selected.preferredVersion,
+    manifestChecksum: selected.manifestChecksum,
+    manifestUrl: selected.manifestUrl,
+    declaredExecutablePath: selected.executablePath,
+    requiresExecutionProfileChecksum:
+      selected.requiresExecutionProfileChecksum,
+    lockIdentity: lockIdentity)
+
+proc resolveScoopRoot(scoopOverride: string): string =
+  let explicit = getEnv("SCOOP")
+  if explicit.len > 0:
+    return explicit
+  if scoopOverride.len > 0:
+    let parent = scoopOverride.parentDir.parentDir
+    if dirExists(parent / "apps"):
+      return parent
+  let home = getEnv("USERPROFILE", getEnv("HOME"))
+  if home.len > 0:
+    return home / "scoop"
+  ""
+
+proc readScoopManifest(scoopRoot, bucket, app: string): tuple[
+    raw: string; version: string; checksum: string; path: string] =
+  let manifestPath = scoopRoot / "buckets" / bucket / "bucket" / (app & ".json")
+  if not fileExists(manifestPath):
+    raise newException(EScoopBucketMissing,
+      "EScoopBucketMissing: bucket manifest not present at " & manifestPath)
+  var raw: string
+  try:
+    raw = readFile(manifestPath)
+  except CatchableError as err:
+    raise newException(EScoopManifestUnreadable,
+      "EScoopManifestUnreadable: " & manifestPath & ": " & err.msg)
+  var parsed: JsonNode
+  try:
+    parsed = parseJson(raw)
+  except CatchableError as err:
+    raise newException(EScoopManifestUnreadable,
+      "EScoopManifestUnreadable: " & manifestPath & ": " & err.msg)
+  if parsed.kind != JObject:
+    raise newException(EScoopManifestUnreadable,
+      "EScoopManifestUnreadable: " & manifestPath & ": top-level JSON is not an object")
+  if not parsed.hasKey("version"):
+    raise newException(EScoopManifestUnreadable,
+      "EScoopManifestUnreadable: " & manifestPath & ": missing version field")
+  let version = parsed["version"].getStr()
+  if version.len == 0:
+    raise newException(EScoopManifestUnreadable,
+      "EScoopManifestUnreadable: " & manifestPath & ": empty version field")
+  result = (raw: raw, version: version, checksum: blake3HexText(raw),
+    path: manifestPath)
+
+proc deleteJunctionDir(target: string) =
+  if not dirExists(target):
+    return
+  when defined(windows):
+    # Use cmd's rmdir which removes the junction reparse point without
+    # following into the target directory.
+    let res = execCmdEx("cmd /c rmdir " & quoteShell(target))
+    if res.exitCode != 0 and dirExists(target):
+      removeDir(target)
+  else:
+    removeDir(target)
+
+proc createScoopJunction(target, source: string) =
+  ## Creates an NTFS junction (or symlink on POSIX) from `target` to `source`.
+  if not dirExists(source):
+    raise newException(EScoopJunctionFailed,
+      "EScoopJunctionFailed: junction source missing: " & source)
+  createDir(target.parentDir)
+  deleteJunctionDir(target)
+  when defined(windows):
+    let res = execCmdEx("cmd /c mklink /J " & quoteShell(target) & " " &
+      quoteShell(source))
+    if res.exitCode != 0 or not dirExists(target):
+      raise newException(EScoopJunctionFailed,
+        "EScoopJunctionFailed: mklink /J " & target & " -> " & source &
+        " exited " & $res.exitCode & "\n" & res.output)
+  else:
+    try:
+      createSymlink(source, target)
+    except OSError as err:
+      raise newException(EScoopJunctionFailed,
+        "EScoopJunctionFailed: createSymlink " & target & " -> " &
+        source & ": " & err.msg)
+
+proc readJunctionTarget*(junctionPath: string): string =
+  ## Returns the resolved target of a junction/symlink, or "" if not found.
+  when defined(windows):
+    let res = execCmdEx("cmd /c dir /AL " &
+      quoteShell(junctionPath.parentDir))
+    if res.exitCode != 0:
+      return ""
+    let leaf = junctionPath.extractFilename
+    for line in res.output.splitLines:
+      if line.contains("<JUNCTION>") and line.contains(leaf):
+        let openBracket = line.find('[')
+        let closeBracket = line.rfind(']')
+        if openBracket > 0 and closeBracket > openBracket:
+          return line[openBracket + 1 ..< closeBracket].strip()
+    ""
+  else:
+    try:
+      expandSymlink(junctionPath)
+    except OSError:
+      ""
+
+proc fileTreeListing(root: string): seq[string] =
+  if not dirExists(root):
+    return
+  for path in walkDirRec(root, yieldFilter = {pcFile, pcLinkToFile},
+      relative = true):
+    result.add(path.replace('\\', '/'))
+  result.sort()
+
+proc executionProfilePayload*(prefix: string;
+                              relativeExecutablePath: string): string =
+  ## Deterministic serialization of the post-install file tree at `prefix`,
+  ## anchored on the declared executable. The serialization is:
+  ##   reprobuild.scoop.executionProfile.v1\n
+  ##   exe:<relative-path>\n
+  ##   blake3:<hex of declared executable bytes>\n
+  ##   files:<count>\n
+  ##   <relative-path>\t<size>\t<blake3>\n  (sorted by path)
+  ## A user-installed antivirus or a `scoop update` that rewrites any byte
+  ## in the install tree will change this serialization, and therefore the
+  ## stored execution-profile checksum.
+  let normalizedExe = relativeExecutablePath.replace('\\', '/')
+  result.add("reprobuild.scoop.executionProfile.v1\n")
+  result.add("exe:" & normalizedExe & "\n")
+  let executable = prefix / relativeExecutablePath
+  if fileExists(executable):
+    result.add("blake3:" & blake3HexFile(executable) & "\n")
+  else:
+    result.add("blake3:missing\n")
+  let entries = fileTreeListing(prefix)
+  result.add("files:" & $entries.len & "\n")
+  for entry in entries:
+    let absolute = prefix / entry
+    if fileExists(absolute):
+      let size = getFileSize(absolute)
+      let digest = blake3HexFile(absolute)
+      result.add(entry & "\t" & $size & "\t" & digest & "\n")
+    else:
+      result.add(entry & "\t0\tmissing\n")
+
+proc executionProfileChecksum*(prefix: string;
+                               relativeExecutablePath: string): string =
+  ## Stable BLAKE3-256 over the deterministic execution-profile serialization
+  ## from `executionProfilePayload`.
+  blake3HexText(executionProfilePayload(prefix, relativeExecutablePath))
+
+proc scoopReceiptPath(prefix: string): string =
+  prefix / ".repro-receipt.json"
+
+proc writeScoopReceipt(prefix: string; plan: ScoopAcquisitionPlan;
+                       resolvedVersion, manifestChecksum,
+                       executionProfileChecksum, scoopRoot, junctionTarget,
+                       resolvedExecutablePath: string;
+                       practicalHardening: PracticalHardening) =
+  let receipt = %*{
+    "adapter": "scoop",
+    "adapterStrength": "weak",
+    "practicalHardening": practicalHardeningName(practicalHardening),
+    "packageSelector": plan.packageSelector,
+    "packageId": plan.packageId,
+    "bucket": plan.bucket,
+    "app": plan.app,
+    "pinnedVersion": plan.version,
+    "preferredVersion": plan.preferredVersion,
+    "resolvedVersion": resolvedVersion,
+    "manifestChecksum": manifestChecksum,
+    "declaredManifestChecksum": plan.manifestChecksum,
+    "executionProfileChecksum": executionProfileChecksum,
+    "requiresExecutionProfileChecksum":
+      plan.requiresExecutionProfileChecksum,
+    "scoopRoot": scoopRoot,
+    "junctionTarget": junctionTarget,
+    "declaredExecutablePath": plan.declaredExecutablePath,
+    "resolvedExecutablePath": resolvedExecutablePath,
+    "lockIdentity": plan.lockIdentity,
+    "realizationBoundary": prefix
+  }
+  createDir(prefix)
+  writeFile(scoopReceiptPath(prefix), receipt.pretty())
+
+proc safeScoopSegment(value, fallback: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
+        ch in {'-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = fallback
+
+proc scoopAppsDir(scoopRoot, app: string): string =
+  scoopRoot / "apps" / app
+
+proc runScoopInstall(scoopExecutable, scoopRoot, bucket, app: string;
+                     version: string) =
+  var args: seq[string] = @[]
+  let isPowerShell = scoopExecutable.endsWith(".ps1")
+  let appRef = bucket & "/" & app &
+    (if version.len > 0: "@" & version else: "")
+  # `--no-update-scoop` skips Scoop's "is_scoop_outdated → scoop-update"
+  # branch. We don't want unrelated upstream bucket updates running as
+  # a side effect of acquisition; the package author already pinned
+  # what we resolve against (the bucket head + manifestChecksum).
+  let invocation: seq[string] =
+    if isPowerShell:
+      @["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        scoopExecutable, "install", "--no-update-scoop", appRef]
+    else:
+      @[scoopExecutable, "install", "--no-update-scoop", appRef]
+  let command = invocation.mapIt(quoteShell(it)).join(" ")
+  putEnv("SCOOP", scoopRoot)
+  let res = execCmdEx(command)
+  if res.exitCode != 0:
+    raise newException(EScoopInstallFailed,
+      "EScoopInstallFailed: scoop install " & appRef &
+      " (root=" & scoopRoot & ") exited " & $res.exitCode & "\n" & res.output)
+
+proc determinePracticalHardening(plan: ScoopAcquisitionPlan;
+                                 executionProfileCaptured: bool):
+    PracticalHardening =
+  let pinned = plan.version.len > 0
+  if pinned:
+    if executionProfileCaptured: phPinnedAndProfileVerified else: phPinned
+  else:
+    if executionProfileCaptured: phRangedAndProfileVerified else: phRanged
+
+proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
+                       scoopOverride = ""): PathOnlyToolProfile =
+  let plan = scoopAcquisitionPlan(useDef)
+  let scoopExe = resolveScoopExecutable(scoopOverride)
+  if scoopExe.len == 0:
+    raise newException(EScoopMissing,
+      "EScoopMissing: scoop is not installed or not on PATH. " &
+      "Install Scoop from https://scoop.sh/ before running --tool-provisioning=scoop.")
+
+  let scoopRoot = resolveScoopRoot(scoopExe)
+  if scoopRoot.len == 0:
+    raise newException(EScoopMissing,
+      "EScoopMissing: could not determine Scoop root (SCOOP env var unset and " &
+      "no USERPROFILE/HOME available)")
+
+  if not dirExists(scoopRoot / "buckets" / plan.bucket):
+    raise newException(EScoopBucketMissing,
+      "EScoopBucketMissing: bucket directory not present at " &
+      (scoopRoot / "buckets" / plan.bucket) &
+      ". The test fixture or operator must run `scoop bucket add " &
+      plan.bucket & " <url>` before --tool-provisioning=scoop.")
+
+  let manifest = readScoopManifest(scoopRoot, plan.bucket, plan.app)
+  let manifestVersion = normalizeScoopVersionTag(manifest.version)
+  let manifestChecksum = manifest.checksum
+  if plan.manifestChecksum.len > 0 and
+      manifestChecksum != plan.manifestChecksum:
+    raise newException(EScoopManifestChecksumMismatch,
+      "EScoopManifestChecksumMismatch: bucket manifest " & manifest.path &
+      " has blake3 " & manifestChecksum & " but the package declared " &
+      plan.manifestChecksum)
+
+  let resolvedVersion =
+    if plan.version.len > 0:
+      let pinned = normalizeScoopVersionTag(plan.version)
+      if manifestVersion != pinned:
+        raise newException(EScoopVersionMismatch,
+          "EScoopVersionMismatch: package pinned " & pinned &
+          " but bucket head is " & manifestVersion &
+          " (manifest=" & manifest.path & ")")
+      pinned
+    else:
+      if not versionSatisfiesRange(manifestVersion, plan.preferredVersion):
+        raise newException(EScoopVersionMismatch,
+          "EScoopVersionMismatch: bucket head " & manifestVersion &
+          " does not satisfy preferredVersion " & plan.preferredVersion &
+          " (manifest=" & manifest.path & ")")
+      manifestVersion
+
+  let appsDir = scoopAppsDir(scoopRoot, plan.app)
+  let versionDir = appsDir / resolvedVersion
+  if not dirExists(versionDir):
+    runScoopInstall(scoopExe, scoopRoot, plan.bucket, plan.app,
+      resolvedVersion)
+    if not dirExists(versionDir):
+      raise newException(EScoopInstallFailed,
+        "EScoopInstallFailed: post-install directory missing: " & versionDir)
+
+  let realizations = storeRoot / "prefixes" / ("scoop_" & plan.app)
+  createDir(realizations)
+  let realizationKey = blake3HexText(plan.bucket & "|" & plan.app & "|" &
+    resolvedVersion & "|" & manifestChecksum)
+  let prefix = realizations / (resolvedVersion & "-" & realizationKey[0 .. 15])
+  let junctionTarget = prefix / "bin"
+
+  if dirExists(prefix):
+    deleteJunctionDir(junctionTarget)
+  else:
+    createDir(prefix)
+  createScoopJunction(junctionTarget, versionDir)
+
+  let resolvedExecutable = junctionTarget /
+    plan.declaredExecutablePath.replace('/', DirSep).replace('\\', DirSep)
+  if not fileExists(resolvedExecutable):
+    raise newException(EScoopInstallFailed,
+      "EScoopInstallFailed: executable not present after install: " &
+      resolvedExecutable)
+
+  var executionProfile = ""
+  if plan.requiresExecutionProfileChecksum:
+    executionProfile = executionProfileChecksum(versionDir,
+      plan.declaredExecutablePath)
+
+  let practicalHardening = determinePracticalHardening(plan,
+    plan.requiresExecutionProfileChecksum)
+
+  writeScoopReceipt(prefix, plan, resolvedVersion, manifestChecksum,
+    executionProfile, scoopRoot, versionDir, resolvedExecutable,
+    practicalHardening)
+
+  let portability =
+    if practicalHardening == phPinnedAndProfileVerified:
+      cpPortable
+    else:
+      cpLocalOnly
+
+  result = PathOnlyToolProfile(
+    installMethod: "scoop",
+    packageSelector: useDef.packageSelector,
+    packageId: plan.packageId,
+    declaredExecutablePath: plan.declaredExecutablePath,
+    realizedStorePaths: @[prefix],
+    selectedStorePath: prefix,
+    lockIdentity: plan.lockIdentity,
+    realizationBoundary: prefix,
+    executableName: useDef.executableName,
+    pathSearchList: @[junctionTarget.parentDir / "bin"],
+    resolvedExecutablePath: resolvedExecutable,
+    adapterStrength: asWeak,
+    cachePortability: portability,
+    practicalHardening: practicalHardening,
+    scoopBucket: plan.bucket,
+    scoopApp: plan.app,
+    scoopPinnedVersion: plan.version,
+    scoopPreferredVersion: plan.preferredVersion,
+    scoopResolvedVersion: resolvedVersion,
+    scoopManifestChecksum: manifestChecksum,
+    scoopDeclaredManifestChecksum: plan.manifestChecksum,
+    scoopExecutionProfileChecksum: executionProfile,
+    scoopRequiresExecutionProfile: plan.requiresExecutionProfileChecksum,
+    scoopRoot: scoopRoot,
+    scoopJunctionTarget: versionDir)
+  result.pathSearchList = @[junctionTarget]
+
+  for probe in configuredProbes(useDef.packageSelector, useDef.executableName):
+    let probeResult = runProbe(resolvedExecutable, probe)
+    if probeResult.exitCode != 0:
+      raise newException(EScoopInstallFailed,
+        "EScoopInstallFailed: probe " & probe.name & " for " &
+        useDef.executableName & " (scoop " & plan.bucket & "/" & plan.app &
+        ") exited " & $probeResult.exitCode & "\n" & probeResult.output)
+    result.probes.add(probeResult)
+
+  result.profileFingerprint = profileFingerprintFor(result)
+
+proc verifyScoopExecutionProfile*(prefix: string) =
+  ## Reads the receipt at `prefix` and recomputes the execution profile
+  ## checksum against the live junction target. Raises
+  ## `EScoopProfileChecksumMismatch` if the recorded checksum differs.
+  let receiptPath = scoopReceiptPath(prefix)
+  if not fileExists(receiptPath):
+    raise newException(EScoopProfileChecksumMismatch,
+      "EScoopProfileChecksumMismatch: receipt not present at " & receiptPath)
+  let receipt = parseFile(receiptPath)
+  let requires = receipt{"requiresExecutionProfileChecksum"}.getBool(false)
+  if not requires:
+    return
+  let recorded = receipt{"executionProfileChecksum"}.getStr("")
+  let junctionTarget = receipt{"junctionTarget"}.getStr("")
+  let declared = receipt{"declaredExecutablePath"}.getStr("")
+  if recorded.len == 0:
+    raise newException(EScoopProfileChecksumMismatch,
+      "EScoopProfileChecksumMismatch: receipt at " & receiptPath &
+      " lacks executionProfileChecksum")
+  let live = executionProfileChecksum(junctionTarget, declared)
+  if live != recorded:
+    raise newException(EScoopProfileChecksumMismatch,
+      "EScoopProfileChecksumMismatch: prefix " & prefix &
+      " recorded " & recorded & " but live profile is " & live)
+
+proc launchScoopExecutable*(prefix: string; args: openArray[string]):
+    tuple[exitCode: int; output: string] =
+  ## Verifies the execution-profile checksum recorded in the prefix's
+  ## receipt, then runs the resolved executable with the supplied args.
+  verifyScoopExecutionProfile(prefix)
+  let receipt = parseFile(scoopReceiptPath(prefix))
+  let resolved = receipt{"resolvedExecutablePath"}.getStr("")
+  if resolved.len == 0 or not fileExists(resolved):
+    raise newException(EScoopInstallFailed,
+      "EScoopInstallFailed: resolved executable missing for " & prefix)
+  let cmd = (@[resolved] & @args).mapIt(quoteShell(it)).join(" ")
+  let res = execCmdEx(cmd)
+  (exitCode: res.exitCode, output: res.output)
+
 proc metadataFor(identity: ToolActionIdentity): DynamicValue =
   var pathValues: seq[DynamicValue] = @[]
   for path in identity.pathSearchList:
@@ -871,6 +1497,18 @@ proc metadataFor(identity: ToolActionIdentity): DynamicValue =
     entry("adapterStrength", cborText(strengthName(identity.adapterStrength))),
     entry("cachePortability", cborText(portabilityName(
         identity.cachePortability))),
+    entry("practicalHardening", cborText(practicalHardeningName(
+        identity.practicalHardening))),
+    entry("scoopBucket", cborText(identity.scoopBucket)),
+    entry("scoopApp", cborText(identity.scoopApp)),
+    entry("scoopPinnedVersion", cborText(identity.scoopPinnedVersion)),
+    entry("scoopPreferredVersion", cborText(identity.scoopPreferredVersion)),
+    entry("scoopResolvedVersion", cborText(identity.scoopResolvedVersion)),
+    entry("scoopManifestChecksum", cborText(identity.scoopManifestChecksum)),
+    entry("scoopExecutionProfileChecksum",
+      cborText(identity.scoopExecutionProfileChecksum)),
+    entry("scoopRoot", cborText(identity.scoopRoot)),
+    entry("scoopJunctionTarget", cborText(identity.scoopJunctionTarget)),
     entry("actionFingerprint", cborText(digestHex(identity.actionFingerprint)))
   ])
 
@@ -899,6 +1537,8 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     resolveNixTool(useDef)
   of tpmTarball:
     resolveTarballTool(useDef, storeRoot)
+  of tpmScoop:
+    resolveScoopTool(useDef, storeRoot)
   else:
     raise newException(ValueError, "tool provisioning mode is not resolved")
 
@@ -929,7 +1569,17 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     resolvedExecutablePath: profile.resolvedExecutablePath,
     probes: profile.probes,
     adapterStrength: profile.adapterStrength,
-    cachePortability: profile.cachePortability)
+    cachePortability: profile.cachePortability,
+    practicalHardening: profile.practicalHardening,
+    scoopBucket: profile.scoopBucket,
+    scoopApp: profile.scoopApp,
+    scoopPinnedVersion: profile.scoopPinnedVersion,
+    scoopPreferredVersion: profile.scoopPreferredVersion,
+    scoopResolvedVersion: profile.scoopResolvedVersion,
+    scoopManifestChecksum: profile.scoopManifestChecksum,
+    scoopExecutionProfileChecksum: profile.scoopExecutionProfileChecksum,
+    scoopRoot: profile.scoopRoot,
+    scoopJunctionTarget: profile.scoopJunctionTarget)
   result.actionFingerprint = actionFingerprintFor(result)
 
 proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
@@ -955,6 +1605,10 @@ proc nixBuildIdentity*(artifact: ProjectInterfaceArtifact): PathOnlyBuildIdentit
 proc tarballBuildIdentity*(artifact: ProjectInterfaceArtifact; storeRoot = ""):
     PathOnlyBuildIdentity =
   toolBuildIdentity(artifact, tpmTarball, storeRoot = storeRoot)
+
+proc scoopBuildIdentity*(artifact: ProjectInterfaceArtifact; storeRoot = ""):
+    PathOnlyBuildIdentity =
+  toolBuildIdentity(artifact, tpmScoop, storeRoot = storeRoot)
 
 proc writeProbeSpec(outp: var seq[byte]; spec: ToolProbeSpec) =
   outp.writeByte(byte(ord(spec.kind)))
@@ -1015,6 +1669,18 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeProbeResults(profile.probes)
   outp.writeByte(byte(ord(profile.adapterStrength)))
   outp.writeByte(byte(ord(profile.cachePortability)))
+  outp.writeByte(byte(ord(profile.practicalHardening)))
+  outp.writeString(profile.scoopBucket)
+  outp.writeString(profile.scoopApp)
+  outp.writeString(profile.scoopPinnedVersion)
+  outp.writeString(profile.scoopPreferredVersion)
+  outp.writeString(profile.scoopResolvedVersion)
+  outp.writeString(profile.scoopManifestChecksum)
+  outp.writeString(profile.scoopDeclaredManifestChecksum)
+  outp.writeString(profile.scoopExecutionProfileChecksum)
+  outp.writeByte(byte(ord(profile.scoopRequiresExecutionProfile)))
+  outp.writeString(profile.scoopRoot)
+  outp.writeString(profile.scoopJunctionTarget)
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -1055,6 +1721,22 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
   if portability > byte(ord(cpPortable)):
     raiseEnvelopeError(eeMalformed, "invalid cache portability")
   result.cachePortability = CachePortability(portability)
+  if version >= 6'u16:
+    let hardening = readByte(bytes, pos)
+    if hardening > byte(ord(phRangedAndProfileVerified)):
+      raiseEnvelopeError(eeMalformed, "invalid practical hardening tier")
+    result.practicalHardening = PracticalHardening(hardening)
+    result.scoopBucket = readString(bytes, pos)
+    result.scoopApp = readString(bytes, pos)
+    result.scoopPinnedVersion = readString(bytes, pos)
+    result.scoopPreferredVersion = readString(bytes, pos)
+    result.scoopResolvedVersion = readString(bytes, pos)
+    result.scoopManifestChecksum = readString(bytes, pos)
+    result.scoopDeclaredManifestChecksum = readString(bytes, pos)
+    result.scoopExecutionProfileChecksum = readString(bytes, pos)
+    result.scoopRequiresExecutionProfile = readByte(bytes, pos) != 0
+    result.scoopRoot = readString(bytes, pos)
+    result.scoopJunctionTarget = readString(bytes, pos)
   result.profileFingerprint = readDigest(bytes, pos)
 
 proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
@@ -1083,6 +1765,16 @@ proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeDigest(identity.actionFingerprint)
   outp.writeByte(byte(ord(identity.adapterStrength)))
   outp.writeByte(byte(ord(identity.cachePortability)))
+  outp.writeByte(byte(ord(identity.practicalHardening)))
+  outp.writeString(identity.scoopBucket)
+  outp.writeString(identity.scoopApp)
+  outp.writeString(identity.scoopPinnedVersion)
+  outp.writeString(identity.scoopPreferredVersion)
+  outp.writeString(identity.scoopResolvedVersion)
+  outp.writeString(identity.scoopManifestChecksum)
+  outp.writeString(identity.scoopExecutionProfileChecksum)
+  outp.writeString(identity.scoopRoot)
+  outp.writeString(identity.scoopJunctionTarget)
 
 proc readActionIdentity(bytes: openArray[byte];
     pos: var int; version: uint16): ToolActionIdentity =
@@ -1131,6 +1823,20 @@ proc readActionIdentity(bytes: openArray[byte];
   if portability > byte(ord(cpPortable)):
     raiseEnvelopeError(eeMalformed, "invalid cache portability")
   result.cachePortability = CachePortability(portability)
+  if version >= 6'u16:
+    let hardening = readByte(bytes, pos)
+    if hardening > byte(ord(phRangedAndProfileVerified)):
+      raiseEnvelopeError(eeMalformed, "invalid practical hardening tier")
+    result.practicalHardening = PracticalHardening(hardening)
+    result.scoopBucket = readString(bytes, pos)
+    result.scoopApp = readString(bytes, pos)
+    result.scoopPinnedVersion = readString(bytes, pos)
+    result.scoopPreferredVersion = readString(bytes, pos)
+    result.scoopResolvedVersion = readString(bytes, pos)
+    result.scoopManifestChecksum = readString(bytes, pos)
+    result.scoopExecutionProfileChecksum = readString(bytes, pos)
+    result.scoopRoot = readString(bytes, pos)
+    result.scoopJunctionTarget = readString(bytes, pos)
 
 proc encodePathOnlyBuildIdentity*(identity: PathOnlyBuildIdentity): seq[byte] =
   var payload: seq[byte] = @[]
@@ -1219,6 +1925,18 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
     "probes": probes,
     "adapterStrength": strengthName(profile.adapterStrength),
     "cachePortability": portabilityName(profile.cachePortability),
+    "practicalHardening": practicalHardeningName(profile.practicalHardening),
+    "scoopBucket": profile.scoopBucket,
+    "scoopApp": profile.scoopApp,
+    "scoopPinnedVersion": profile.scoopPinnedVersion,
+    "scoopPreferredVersion": profile.scoopPreferredVersion,
+    "scoopResolvedVersion": profile.scoopResolvedVersion,
+    "scoopManifestChecksum": profile.scoopManifestChecksum,
+    "scoopDeclaredManifestChecksum": profile.scoopDeclaredManifestChecksum,
+    "scoopExecutionProfileChecksum": profile.scoopExecutionProfileChecksum,
+    "scoopRequiresExecutionProfile": profile.scoopRequiresExecutionProfile,
+    "scoopRoot": profile.scoopRoot,
+    "scoopJunctionTarget": profile.scoopJunctionTarget,
     "profileFingerprint": digestHex(profile.profileFingerprint)
   }
 
@@ -1251,6 +1969,16 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     "probes": probes,
     "adapterStrength": strengthName(identity.adapterStrength),
     "cachePortability": portabilityName(identity.cachePortability),
+    "practicalHardening": practicalHardeningName(identity.practicalHardening),
+    "scoopBucket": identity.scoopBucket,
+    "scoopApp": identity.scoopApp,
+    "scoopPinnedVersion": identity.scoopPinnedVersion,
+    "scoopPreferredVersion": identity.scoopPreferredVersion,
+    "scoopResolvedVersion": identity.scoopResolvedVersion,
+    "scoopManifestChecksum": identity.scoopManifestChecksum,
+    "scoopExecutionProfileChecksum": identity.scoopExecutionProfileChecksum,
+    "scoopRoot": identity.scoopRoot,
+    "scoopJunctionTarget": identity.scoopJunctionTarget,
     "actionFingerprint": digestHex(identity.actionFingerprint)
   }
 

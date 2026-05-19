@@ -292,6 +292,33 @@ e2e_hcr_direct_patch_debug_unwind_replay:
         tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim \
         2>&1 | tee test-logs/e2e_hcr_direct_patch_debug_unwind_replay.log
 
+e2e_scoop_adapter_realize_and_launch:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_scoop_adapter_realize_and_launch \
+        --out:build/test-bin/e2e_scoop_adapter_realize_and_launch \
+        tests/e2e/scoop/t_e2e_scoop_adapter_realize_and_launch.nim \
+        2>&1 | tee test-logs/e2e_scoop_adapter_realize_and_launch.log
+
+e2e_scoop_adapter_diagnostics:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_scoop_adapter_diagnostics \
+        --out:build/test-bin/e2e_scoop_adapter_diagnostics \
+        tests/e2e/scoop/t_e2e_scoop_adapter_diagnostics.nim \
+        2>&1 | tee test-logs/e2e_scoop_adapter_diagnostics.log
+
+e2e_scoop_practical_hardening:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_scoop_practical_hardening \
+        --out:build/test-bin/e2e_scoop_practical_hardening \
+        tests/e2e/scoop/t_e2e_scoop_practical_hardening.nim \
+        2>&1 | tee test-logs/e2e_scoop_practical_hardening.log
+
 integration_provider_fragment_refresh_and_pruning:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

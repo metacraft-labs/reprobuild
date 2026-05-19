@@ -64,6 +64,20 @@ type
     lockIdentity*: string
     location*: SourceLocation
 
+  InterfaceScoopProvisioning* = object
+    packageName*: string
+    bucket*: string
+    app*: string
+    version*: string
+    preferredVersion*: string
+    manifestChecksum*: string
+    manifestUrl*: string
+    executablePath*: string
+    requiresExecutionProfileChecksum*: bool
+    packageId*: string
+    lockIdentity*: string
+    location*: SourceLocation
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
@@ -71,6 +85,7 @@ type
     policyPath*: seq[string]
     nixProvisioning*: seq[InterfaceNixProvisioning]
     tarballProvisioning*: seq[InterfaceTarballProvisioning]
+    scoopProvisioning*: seq[InterfaceScoopProvisioning]
     location*: SourceLocation
 
   ProjectInterface* = object
@@ -115,7 +130,7 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 4'u16
+  EnvelopeVersion = 5'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -363,6 +378,36 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int):
   result.lockIdentity = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeScoopProvisioning(outp: var seq[byte];
+                            provisioning: InterfaceScoopProvisioning) =
+  outp.writeString(provisioning.packageName)
+  outp.writeString(provisioning.bucket)
+  outp.writeString(provisioning.app)
+  outp.writeString(provisioning.version)
+  outp.writeString(provisioning.preferredVersion)
+  outp.writeString(provisioning.manifestChecksum)
+  outp.writeString(provisioning.manifestUrl)
+  outp.writeString(provisioning.executablePath)
+  outp.writeByte(byte(ord(provisioning.requiresExecutionProfileChecksum)))
+  outp.writeString(provisioning.packageId)
+  outp.writeString(provisioning.lockIdentity)
+  outp.writeLocation(provisioning.location)
+
+proc readScoopProvisioning(bytes: openArray[byte]; pos: var int):
+    InterfaceScoopProvisioning =
+  result.packageName = readString(bytes, pos)
+  result.bucket = readString(bytes, pos)
+  result.app = readString(bytes, pos)
+  result.version = readString(bytes, pos)
+  result.preferredVersion = readString(bytes, pos)
+  result.manifestChecksum = readString(bytes, pos)
+  result.manifestUrl = readString(bytes, pos)
+  result.executablePath = readString(bytes, pos)
+  result.requiresExecutionProfileChecksum = readByte(bytes, pos) != 0
+  result.packageId = readString(bytes, pos)
+  result.lockIdentity = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
 proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse) =
   outp.writeString(useDef.rawConstraint)
   outp.writeString(useDef.packageSelector)
@@ -374,6 +419,9 @@ proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse) =
   outp.writeU32Le(uint32(useDef.tarballProvisioning.len))
   for provisioning in useDef.tarballProvisioning:
     outp.writeTarballProvisioning(provisioning)
+  outp.writeU32Le(uint32(useDef.scoopProvisioning.len))
+  for provisioning in useDef.scoopProvisioning:
+    outp.writeScoopProvisioning(provisioning)
   outp.writeLocation(useDef.location)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;
@@ -394,6 +442,11 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
       tarballCount)
     for i in 0 ..< tarballCount:
       result.tarballProvisioning[i] = readTarballProvisioning(bytes, pos)
+  if version >= 5'u16:
+    let scoopCount = int(readU32Le(bytes, pos))
+    result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
+    for i in 0 ..< scoopCount:
+      result.scoopProvisioning[i] = readScoopProvisioning(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
@@ -597,6 +650,25 @@ proc toInterfaceTarballProvisioning(packageName: string;
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
 
+proc toInterfaceScoopProvisioning(packageName: string;
+                                  provisioning: ScoopProvisioningDef):
+    InterfaceScoopProvisioning =
+  InterfaceScoopProvisioning(
+    packageName: packageName,
+    bucket: provisioning.bucket,
+    app: provisioning.app,
+    version: provisioning.version,
+    preferredVersion: provisioning.preferredVersion,
+    manifestChecksum: provisioning.manifestChecksum,
+    manifestUrl: provisioning.manifestUrl,
+    executablePath: provisioning.executablePath,
+    requiresExecutionProfileChecksum:
+      provisioning.requiresExecutionProfileChecksum,
+    packageId: provisioning.packageId,
+    lockIdentity: provisioning.lockIdentity,
+    location: SourceLocation(file: provisioning.sourceFile,
+      line: provisioning.sourceLine))
+
 proc toInterfaceToolUse(useDef: PackageUseDef;
                         packages: openArray[PackageDef]): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -612,6 +684,9 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
           provisioning))
       for provisioning in pkg.tarballProvisioning:
         result.tarballProvisioning.add(toInterfaceTarballProvisioning(
+          pkg.packageName, provisioning))
+      for provisioning in pkg.scoopProvisioning:
+        result.scoopProvisioning.add(toInterfaceScoopProvisioning(
           pkg.packageName, provisioning))
 
 proc toProjectInterface*(pkg: PackageDef;
