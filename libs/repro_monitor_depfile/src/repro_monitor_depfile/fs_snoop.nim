@@ -5,6 +5,11 @@ import repro_monitor_depfile/render
 import repro_monitor_depfile/types
 import repro_monitor_depfile/writer
 
+# Windows: pull in the CreateRemoteThread+LoadLibraryW injector that
+# substitutes for the macOS DYLD_INSERT_LIBRARIES env-var injection.
+when defined(windows):
+  import repro_monitor_depfile/windows_injector
+
 type
   ParsedFsSnoopCommand = object
     inspectMode: bool
@@ -119,11 +124,22 @@ proc ensureParentDir(path: string) =
 
 proc candidateShimLibraries(): seq[string] =
   let appDir = getAppDir()
-  result = @[
-    getEnv("REPRO_MONITOR_SHIM_LIB"),
-    appDir / ".." / "lib" / "librepro_monitor_shim.dylib",
-    getCurrentDir() / "build" / "lib" / "librepro_monitor_shim.dylib"
-  ]
+  # Windows: the shim builds as a .dll instead of a .dylib; probe both so the
+  # same lookup logic works on either platform without runtime branching at
+  # every call site. The explicit env override is still honoured first.
+  when defined(windows):
+    result = @[
+      getEnv("REPRO_MONITOR_SHIM_LIB"),
+      appDir / ".." / "lib" / "librepro_monitor_shim.dll",
+      appDir / "librepro_monitor_shim.dll",
+      getCurrentDir() / "build" / "lib" / "librepro_monitor_shim.dll"
+    ]
+  else:
+    result = @[
+      getEnv("REPRO_MONITOR_SHIM_LIB"),
+      appDir / ".." / "lib" / "librepro_monitor_shim.dylib",
+      getCurrentDir() / "build" / "lib" / "librepro_monitor_shim.dylib"
+    ]
 
 proc findShimLibrary(): string =
   for candidate in candidateShimLibraries():
@@ -176,10 +192,7 @@ proc renderStreamToPath(depfilePath: string; mode: FsSnoopOutputMode;
         stderr.writeLine(line)
 
 proc runMonitoredCommand(request: FsSnoopRequest): int =
-  when not defined(macosx):
-    raise newException(OSError,
-      "fs-snoop hooks backend is currently macOS-only")
-  else:
+  when defined(macosx):
     let shimLib = findShimLibrary()
     if shimLib.len == 0:
       raise newException(IOError,
@@ -212,6 +225,39 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
     discard readMonitorDepFile(request.depFilePath)
     renderStreamToPath(request.depFilePath, request.streamMode,
       request.eventStreamPath)
+  elif defined(windows):
+    # Windows: same end-to-end flow as macOS, but the injection uses
+    # CreateProcess(CREATE_SUSPENDED) + CreateRemoteThread(LoadLibraryW)
+    # instead of the DYLD_INSERT_LIBRARIES env var. Fragment-dir + output
+    # path env vars are still set so the in-DLL hook bodies know where to
+    # append RMDF fragments.
+    let shimLib = findShimLibrary()
+    if shimLib.len == 0:
+      raise newException(IOError,
+        "cannot find librepro_monitor_shim.dll; run just build or set " &
+          "REPRO_MONITOR_SHIM_LIB")
+
+    let fragmentDir = createTempDir("repro-fs-snoop-fragments", "")
+    defer: removeDir(fragmentDir)
+    ensureParentDir(request.depFilePath)
+
+    var oldEnv: seq[(string, string, bool)] = @[]
+    setEnvVar("REPRO_MONITOR_FRAGMENT_DIR", fragmentDir, oldEnv)
+    setEnvVar("REPRO_MONITOR_OUTPUT", request.depFilePath, oldEnv)
+    setEnvVar("REPRO_MONITOR_SESSION", $epochTime(), oldEnv)
+    setEnvVar("REPRO_MONITOR_SHIM_LIB", shimLib, oldEnv)
+    defer: restoreEnv(oldEnv)
+
+    let injection = runWithMonitorShim(request.command, shimLib)
+    result = injection.exitCode
+
+    discard mergeFragments(fragmentDir, request.depFilePath)
+    discard readMonitorDepFile(request.depFilePath)
+    renderStreamToPath(request.depFilePath, request.streamMode,
+      request.eventStreamPath)
+  else:
+    raise newException(OSError,
+      "fs-snoop hooks backend currently supports macOS and Windows only")
 
 proc runFsSnoopCli*(programName: string; args: seq[string]): int =
   try:
