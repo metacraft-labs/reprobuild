@@ -875,6 +875,17 @@ integration_stow_gnu_package_layout:
         tests/e2e/m73/t_integration_stow_gnu_package_layout.nim \
         2>&1 | tee test-logs/integration_stow_gnu_package_layout.log
 
+integration_scoop_manifest_bin_resolution:
+    mkdir -p test-logs build/test-bin build/nimcache build/test-tmp
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/integration_scoop_manifest_bin_resolution \
+        --out:build/test-bin/integration_scoop_manifest_bin_resolution \
+        tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim \
+        2>&1 | tee test-logs/integration_scoop_manifest_bin_resolution.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

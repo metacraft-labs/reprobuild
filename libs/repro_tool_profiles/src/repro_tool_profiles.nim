@@ -1319,6 +1319,130 @@ proc readScoopManifest(scoopRoot, bucket, app: string): tuple[
   result = (raw: raw, version: version, checksum: blake3HexText(raw),
     path: manifestPath)
 
+# ---------------------------------------------------------------------------
+# M74: Scoop manifest `bin`-field parser.
+#
+# A Scoop app's manifest declares which executables it exposes via the
+# `bin` field. The authoritative on-disk executable layout VARIES per
+# app — `gh` keeps its executable at `<versionDir>/bin/gh.exe`, others
+# place it at the version root — so the adapter MUST resolve executable
+# paths from the manifest rather than assume a fixed `bin/` layout.
+#
+# `bin` takes these forms (all handled here):
+#   * a single string:   "bin": "gh.exe"  /  "bin": "bin\\gh.exe"
+#   * an array of strings: "bin": ["a.exe", "sub\\b.exe"]
+#   * an array whose entries may themselves be [path, alias, args]
+#     arrays: "bin": [["bin\\app.exe", "app", "--flag"]] — the FIRST
+#     element is the executable path (the 2nd/3rd are shim alias/args).
+#   * mixed arrays (some entries strings, some arrays) are allowed.
+# Every path is relative to the app's version directory and may use
+# `\` or `/`; both are normalized to the host `DirSep`.
+#
+# A manifest with NO `bin` field is valid — some apps are libraries or
+# `env_add_path`-only. The parser returns an empty seq in that case;
+# the realize step treats that as "no executable, no launcher" and
+# does NOT raise.
+proc normalizeScoopBinPath(raw: string): string =
+  ## Normalize a manifest `bin` path: trim, collapse separators to the
+  ## host `DirSep`. The path stays relative to the version directory.
+  raw.strip().replace('/', DirSep).replace('\\', DirSep)
+
+proc parseScoopManifestBin*(manifestNode: JsonNode; manifestPath: string):
+    seq[string] =
+  ## Parse the `bin` field of an already-parsed Scoop manifest JSON node
+  ## into a list of executable paths relative to the version directory.
+  ## Handles the string / array-of-strings / array-of-`[path,alias,args]`
+  ## forms (and mixtures). Returns an empty seq when there is no `bin`
+  ## field. Raises `EScoopManifestUnreadable` for a structurally invalid
+  ## `bin` field (e.g. a number, or an array entry that is neither a
+  ## string nor a non-empty array whose first element is a string).
+  if manifestNode.isNil or manifestNode.kind != JObject:
+    return @[]
+  let binNode = manifestNode{"bin"}
+  if binNode.isNil:
+    return @[]
+  case binNode.kind
+  of JString:
+    let p = normalizeScoopBinPath(binNode.getStr(""))
+    if p.len > 0:
+      result.add(p)
+  of JArray:
+    for entry in binNode:
+      case entry.kind
+      of JString:
+        let p = normalizeScoopBinPath(entry.getStr(""))
+        if p.len > 0:
+          result.add(p)
+      of JArray:
+        # `[path, alias, args]` — only the first element is the path.
+        if entry.len == 0 or entry[0].kind != JString:
+          raise newException(EScoopManifestUnreadable,
+            "EScoopManifestUnreadable: " & manifestPath &
+            ": bin array entry is not a [path, ...] array with a " &
+            "string first element")
+        let p = normalizeScoopBinPath(entry[0].getStr(""))
+        if p.len > 0:
+          result.add(p)
+      else:
+        raise newException(EScoopManifestUnreadable,
+          "EScoopManifestUnreadable: " & manifestPath &
+          ": bin array entry is neither a string nor a [path, ...] array")
+  else:
+    raise newException(EScoopManifestUnreadable,
+      "EScoopManifestUnreadable: " & manifestPath &
+      ": bin field is neither a string nor an array")
+
+proc readInstalledManifestBin*(versionDir: string):
+    tuple[binPaths: seq[string]; manifestPath: string; present: bool] =
+  ## Read the installed app's `manifest.json` (Scoop copies the bucket
+  ## manifest into `<versionDir>/manifest.json` on install) and parse
+  ## its `bin` field. `present` is false when no `manifest.json` exists
+  ## in the version directory — the caller decides whether that is an
+  ## error (it is not for M74: the realize step then has no manifest
+  ## `bin` to honor and falls back to the package-declared path).
+  let manifestPath = versionDir / "manifest.json"
+  result.manifestPath = manifestPath
+  if not fileExists(manifestPath):
+    result.present = false
+    return
+  result.present = true
+  var parsed: JsonNode
+  try:
+    parsed = parseJson(readFile(manifestPath))
+  except CatchableError as err:
+    raise newException(EScoopManifestUnreadable,
+      "EScoopManifestUnreadable: " & manifestPath & ": " & err.msg)
+  if parsed.kind != JObject:
+    raise newException(EScoopManifestUnreadable,
+      "EScoopManifestUnreadable: " & manifestPath &
+      ": installed manifest top-level JSON is not an object")
+  result.binPaths = parseScoopManifestBin(parsed, manifestPath)
+
+proc selectPrimaryScoopExecutable*(binPaths: seq[string];
+                                   preferredLeaf, appName: string): string =
+  ## Pick the primary executable from the manifest-declared `bin` paths.
+  ## The home-apply launcher model exports ONE command per package, so
+  ## the adapter records one primary executable. Selection order:
+  ##   1. the `bin` entry whose leaf name matches `preferredLeaf` (the
+  ##      package-declared executable path's leaf — e.g. `gh.exe`);
+  ##   2. the `bin` entry whose leaf matches `<appName>.exe` / `appName`;
+  ##   3. the first declared `bin` entry.
+  ## Returns "" when `binPaths` is empty (a manifest with no `bin`).
+  if binPaths.len == 0:
+    return ""
+  let wantLeaf = extractFilename(preferredLeaf).toLowerAscii()
+  if wantLeaf.len > 0:
+    for p in binPaths:
+      if extractFilename(p).toLowerAscii() == wantLeaf:
+        return p
+  let appLeafExe = (appName & ".exe").toLowerAscii()
+  let appLeaf = appName.toLowerAscii()
+  for p in binPaths:
+    let leaf = extractFilename(p).toLowerAscii()
+    if leaf == appLeafExe or leaf == appLeaf:
+      return p
+  binPaths[0]
+
 proc deleteJunctionDir(target: string) =
   if not dirExists(target):
     return
@@ -1426,7 +1550,18 @@ proc writeScoopReceipt(prefix: string; plan: ScoopAcquisitionPlan;
                        resolvedVersion, manifestChecksum,
                        executionProfileChecksum, scoopRoot, junctionTarget,
                        resolvedExecutablePath: string;
-                       practicalHardening: PracticalHardening) =
+                       practicalHardening: PracticalHardening;
+                       relativeExecutablePath: string;
+                       manifestBinPaths: seq[string]) =
+  ## M74: `relativeExecutablePath` is the manifest-resolved primary
+  ## executable path relative to the version dir (the junction target);
+  ## it is written as `declaredExecutablePath` so the launch-time
+  ## `verifyScoopExecutionProfile` recomputes the execution profile
+  ## against the SAME path the realize step used. `manifestBinPaths`
+  ## records every manifest-declared `bin` entry for provenance.
+  let binPathsJson = newJArray()
+  for p in manifestBinPaths:
+    binPathsJson.add(newJString(p))
   let receipt = %*{
     "adapter": "scoop",
     "adapterStrength": "weak",
@@ -1445,7 +1580,11 @@ proc writeScoopReceipt(prefix: string; plan: ScoopAcquisitionPlan;
       plan.requiresExecutionProfileChecksum,
     "scoopRoot": scoopRoot,
     "junctionTarget": junctionTarget,
-    "declaredExecutablePath": plan.declaredExecutablePath,
+    "declaredExecutablePath":
+      (if relativeExecutablePath.len > 0: relativeExecutablePath
+       else: plan.declaredExecutablePath),
+    "packageDeclaredExecutablePath": plan.declaredExecutablePath,
+    "manifestBin": binPathsJson,
     "resolvedExecutablePath": resolvedExecutablePath,
     "lockIdentity": plan.lockIdentity,
     "realizationBoundary": prefix
@@ -1570,6 +1709,11 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
     plan.app & "@" & resolvedVersion, manifestChecksum,
     [plan.bucket, plan.app])
   let prefix = unified.absolutePath
+  # The store prefix junctions the WHOLE Scoop app version directory at
+  # `<prefix>/bin` (the junction target is the version ROOT, not an
+  # assumed `bin/` subdir). The manifest-declared `bin` paths are then
+  # resolved RELATIVE to this junction, so `<prefix>/bin/<bin-path>`
+  # reaches the real executable wherever the app actually places it.
   let junctionTarget = prefix / "bin"
 
   if dirExists(prefix):
@@ -1578,32 +1722,97 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
     createDir(prefix)
   createScoopJunction(junctionTarget, versionDir)
 
-  let resolvedExecutable = junctionTarget /
-    plan.declaredExecutablePath.replace('/', DirSep).replace('\\', DirSep)
-  if not fileExists(resolvedExecutable):
-    raise newException(EScoopInstallFailed,
-      "EScoopInstallFailed: executable not present after install: " &
-      resolvedExecutable)
+  # M74: resolve the executable(s) from the installed app's Scoop
+  # manifest `bin` field rather than assuming a fixed on-disk layout.
+  # Scoop copies the bucket manifest into `<versionDir>/manifest.json`
+  # on install; we read that version-dir copy.
+  let installedManifest = readInstalledManifestBin(versionDir)
+  let manifestBinPaths = installedManifest.binPaths
+  # `manifestHasBin` means the installed manifest authoritatively
+  # declares one or more executables via its `bin` field. When true,
+  # the manifest `bin` paths are the authoritative executable layout.
+  let manifestHasBin = manifestBinPaths.len > 0
+  # The package itself also declares an executable path — the
+  # `executables:` `exportedExecutable(path = ...)` value carried in
+  # `plan.declaredExecutablePath` (and, for a `home apply`, the
+  # `#<exe>` of a Scoop binding). The normalized form:
+  let packageDeclaredPath = normalizeScoopBinPath(plan.declaredExecutablePath)
+
+  # Resolution policy:
+  #   * manifest `bin` present  -> AUTHORITATIVE; pick the primary
+  #     entry and presence-check EVERY declared entry strictly.
+  #   * manifest `bin` absent   -> fall back to the package-declared
+  #     path IF it resolves to a real file on disk under the junction
+  #     (a library/`env_add_path` app such as `gnupg` ships its
+  #     executables but declares no manifest `bin`; the package author
+  #     still names the exported executable). If the package-declared
+  #     path also does not resolve to a real file, the app genuinely
+  #     exposes no executable — no executable, no launcher, NOT an
+  #     error (M74 deliverable point 5).
+  let relativeExecutablePath =
+    if manifestHasBin:
+      selectPrimaryScoopExecutable(manifestBinPaths,
+        plan.declaredExecutablePath, plan.app)
+    elif packageDeclaredPath.len > 0 and
+        fileExists(junctionTarget / packageDeclaredPath):
+      packageDeclaredPath
+    else:
+      ""
+
+  # M74: the post-install executable-presence check stays STRICT — it
+  # is just now correct. When the manifest is authoritative, check
+  # EVERY manifest-declared `bin` path at its real resolved location
+  # under the junction. A genuinely absent declared executable still
+  # raises the structured EScoopInstallFailed naming the expected path.
+  if manifestHasBin:
+    for binPath in manifestBinPaths:
+      let resolved = junctionTarget / binPath
+      if not fileExists(resolved):
+        raise newException(EScoopInstallFailed,
+          "EScoopInstallFailed: executable not present after install: " &
+          resolved & " (declared by " & installedManifest.manifestPath &
+          " bin field)")
+  # else: the manifest declares no `bin`. `relativeExecutablePath` was
+  # only set above when the package-declared path already resolves to
+  # a real file, so there is nothing further to presence-check; an
+  # unresolvable package-declared path is a no-executable library, not
+  # an error.
+
+  let resolvedExecutable =
+    if relativeExecutablePath.len > 0:
+      junctionTarget / relativeExecutablePath
+    else:
+      ""
 
   var executionProfile = ""
-  if plan.requiresExecutionProfileChecksum:
+  if plan.requiresExecutionProfileChecksum and relativeExecutablePath.len > 0:
     executionProfile = executionProfileChecksum(versionDir,
-      plan.declaredExecutablePath)
+      relativeExecutablePath)
 
   let practicalHardening = determinePracticalHardening(plan,
     plan.requiresExecutionProfileChecksum)
 
   writeScoopReceipt(prefix, plan, resolvedVersion, manifestChecksum,
     executionProfile, scoopRoot, versionDir, resolvedExecutable,
-    practicalHardening)
+    practicalHardening, relativeExecutablePath, manifestBinPaths)
   # Seal the unified M56 typed binary receipt and insert the SQLite
   # index row. The adapter-specific JSON receipt above remains for
-  # tools that inspect Scoop provenance directly.
+  # tools that inspect Scoop provenance directly. M74: the exported
+  # executable paths recorded in the index are the manifest-declared
+  # `bin` paths (every declared executable) when the manifest is
+  # authoritative; otherwise the package-declared path.
+  let indexDeclaredExe =
+    if relativeExecutablePath.len > 0: relativeExecutablePath
+    else: plan.declaredExecutablePath
+  let indexExportedExes =
+    if manifestBinPaths.len > 0: manifestBinPaths
+    elif relativeExecutablePath.len > 0: @[relativeExecutablePath]
+    else: @[]
   discard registerInUnifiedStore(storeRoot, scoopPackageName,
     resolvedVersion, "scoop", plan.lockIdentity,
-    plan.declaredExecutablePath, "scoop://" & plan.bucket & "/" &
+    indexDeclaredExe, "scoop://" & plan.bucket & "/" &
     plan.app & "@" & resolvedVersion, manifestChecksum, "junction",
-    [plan.bucket, plan.app], prefix, [plan.declaredExecutablePath])
+    [plan.bucket, plan.app], prefix, indexExportedExes)
 
   let portability =
     if practicalHardening == phPinnedAndProfileVerified:
@@ -1615,7 +1824,13 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
     installMethod: "scoop",
     packageSelector: useDef.packageSelector,
     packageId: plan.packageId,
-    declaredExecutablePath: plan.declaredExecutablePath,
+    # M74: the declared executable path is the manifest-resolved primary
+    # `bin` path (relative to the version dir) when the installed
+    # manifest is authoritative; the package-declared path otherwise;
+    # "" for a manifest with no `bin` field.
+    declaredExecutablePath:
+      (if relativeExecutablePath.len > 0: relativeExecutablePath
+       else: ""),
     realizedStorePaths: @[prefix],
     selectedStorePath: prefix,
     lockIdentity: plan.lockIdentity,
@@ -1639,7 +1854,15 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
     scoopJunctionTarget: versionDir)
   result.pathSearchList = @[junctionTarget]
 
-  for probe in configuredProbes(useDef.packageSelector, useDef.executableName):
+  # M74: a manifest with no `bin` field exposes no executable, so there
+  # is nothing to probe — `configuredProbes` is consulted only when an
+  # executable was resolved.
+  let probes =
+    if resolvedExecutable.len > 0:
+      configuredProbes(useDef.packageSelector, useDef.executableName)
+    else:
+      newSeq[ToolProbeSpec]()
+  for probe in probes:
     let probeResult = runProbe(resolvedExecutable, probe)
     if probeResult.exitCode != 0:
       raise newException(EScoopInstallFailed,
@@ -1665,6 +1888,11 @@ proc verifyScoopExecutionProfile*(prefix: string) =
   let recorded = receipt{"executionProfileChecksum"}.getStr("")
   let junctionTarget = receipt{"junctionTarget"}.getStr("")
   let declared = receipt{"declaredExecutablePath"}.getStr("")
+  if declared.len == 0:
+    # M74: a manifest with no `bin` field — a library / env_add_path-only
+    # app. There is no executable to profile-verify, and no launcher
+    # exists for it, so this is not an error.
+    return
   if recorded.len == 0:
     raise newException(EScoopProfileChecksumMismatch,
       "EScoopProfileChecksumMismatch: receipt at " & receiptPath &

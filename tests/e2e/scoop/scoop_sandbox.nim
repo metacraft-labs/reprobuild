@@ -142,7 +142,18 @@ proc populateScoopApp*(sandbox: ScoopSandbox; app, version, executableName,
     "bucket": sandbox.bucketName
   }
   writeFile(versionDir / "install.json", installJson.pretty())
-  writeFile(versionDir / "manifest.json", "{}")
+  # M74: Scoop copies the bucket manifest into the version dir on
+  # install; the M74 adapter resolves the executable from this
+  # version-dir `manifest.json` `bin` field. A realistic fixture
+  # therefore writes a real manifest whose `bin` points at where the
+  # fixture executable actually is — here the version ROOT, since
+  # `populateScoopApp` places the exe at `<versionDir>/<executableName>`.
+  let versionManifest = %*{
+    "version": version,
+    "description": "Reprobuild M55 fixture app",
+    "bin": executableName
+  }
+  writeFile(versionDir / "manifest.json", versionManifest.pretty())
 
   # The `current` symlink/junction is what Scoop uses for shims; the
   # M55 adapter must NOT bind through this — it must bind through the

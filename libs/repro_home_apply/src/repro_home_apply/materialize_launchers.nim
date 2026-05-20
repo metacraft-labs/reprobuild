@@ -155,6 +155,12 @@ proc materializeLaunchers*(store: var Store; binDir: string;
   let launcherBinary = locateLauncherBinary()
   for l in launchers:
     let rec = lookup(l.fromPackageId)
+    # M74: a Scoop package whose manifest declares no `bin` field (a
+    # library / `env_add_path`-only app) realizes a prefix but exposes
+    # no executable — `resolvedExecutablePath` is empty. Such a package
+    # gets NO launcher: skip it gracefully, it is not an error.
+    if rec.resolvedExecutablePath.len == 0:
+      continue
     let plan = buildLaunchPlan(rec, l.commandName)
     let key = storeLaunchPlan(store, plan)
     let digest = digestFromKey(key)
