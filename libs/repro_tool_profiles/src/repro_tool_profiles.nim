@@ -1922,24 +1922,74 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
       " has blake3 " & manifestChecksum & " but the package declared " &
       plan.manifestChecksum)
 
+  let appsDir = scoopAppsDir(scoopRoot, plan.app)
+
+  # M77: the bucket-head equality check (pinned path) and the
+  # `preferredVersion` range check (unpinned path) only matter when an
+  # install FROM THE BUCKET is actually required. When the wanted
+  # version is already installed under `appsDir`, `resolveScoopTool`
+  # uses the on-disk version directory as a cache-hit and performs no
+  # `scoop install`, so the current bucket head is irrelevant — a
+  # `scoop update` that moved the bucket head past the installed
+  # version must not fail a non-destructive home realization. The
+  # checks are kept verbatim for the genuine install-required case (the
+  # bucket cannot supply a version it does not currently publish).
+  proc installedScoopVersions(): seq[string] =
+    ## The exact-version directories present under `appsDir` (Scoop's
+    ## per-app install tree). `current` is a junction, not a version.
+    if not dirExists(appsDir):
+      return @[]
+    for kind, path in walkDir(appsDir, relative = true):
+      if kind in {pcDir, pcLinkToDir}:
+        let leaf = path.extractFilename
+        if leaf.len > 0 and leaf != "current":
+          result.add(leaf)
+
   let resolvedVersion =
     if plan.version.len > 0:
       let pinned = normalizeScoopVersionTag(plan.version)
-      if manifestVersion != pinned:
+      # Cache-hit: the pinned version's install tree is already on disk.
+      # No install is performed, so the bucket head does not matter.
+      if dirExists(appsDir / pinned):
+        pinned
+      elif manifestVersion != pinned:
+        # An install is required and the bucket cannot supply `pinned`.
         raise newException(EScoopVersionMismatch,
           "EScoopVersionMismatch: package pinned " & pinned &
           " but bucket head is " & manifestVersion &
           " (manifest=" & manifest.path & ")")
-      pinned
+      else:
+        pinned
     else:
-      if not versionSatisfiesRange(manifestVersion, plan.preferredVersion):
-        raise newException(EScoopVersionMismatch,
-          "EScoopVersionMismatch: bucket head " & manifestVersion &
-          " does not satisfy preferredVersion " & plan.preferredVersion &
-          " (manifest=" & manifest.path & ")")
-      manifestVersion
+      # Unpinned: when the bucket head satisfies the range, resolve to
+      # it exactly as before (the M55 contract — a ranged plan follows
+      # the bucket head, and if that version is already installed it is
+      # reused below, otherwise it is installed). M77 relaxes ONLY the
+      # failure case: when the bucket head does NOT satisfy the range,
+      # an already-installed version that DOES satisfy it is resolved as
+      # a cache-hit instead of raising — because no install from the
+      # bucket is performed and the bucket head is then irrelevant.
+      if versionSatisfiesRange(manifestVersion, plan.preferredVersion):
+        manifestVersion
+      else:
+        var installedSatisfying = ""
+        for installed in installedScoopVersions():
+          if versionSatisfiesRange(normalizeScoopVersionTag(installed),
+              plan.preferredVersion):
+            if installedSatisfying.len == 0 or
+                compareVersions(normalizeScoopVersionTag(installed),
+                  normalizeScoopVersionTag(installedSatisfying)) > 0:
+              installedSatisfying = installed
+        if installedSatisfying.len > 0:
+          installedSatisfying
+        else:
+          # Nothing satisfying is installed and the bucket head cannot
+          # supply the range — an install is required and unsatisfiable.
+          raise newException(EScoopVersionMismatch,
+            "EScoopVersionMismatch: bucket head " & manifestVersion &
+            " does not satisfy preferredVersion " & plan.preferredVersion &
+            " (manifest=" & manifest.path & ")")
 
-  let appsDir = scoopAppsDir(scoopRoot, plan.app)
   let versionDir = appsDir / resolvedVersion
   if not dirExists(versionDir):
     runScoopInstall(scoopExe, scoopRoot, plan.bucket, plan.app,

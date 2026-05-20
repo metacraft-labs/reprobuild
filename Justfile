@@ -914,6 +914,24 @@ integration_stow_byte_identical_target_is_cache_hit:
         tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim \
         2>&1 | tee test-logs/integration_stow_byte_identical_target_is_cache_hit.log
 
+integration_scoop_installed_version_survives_bucket_drift:
+    mkdir -p test-logs build/test-bin build/nimcache build/test-tmp
+    # NOTE: the `--out` binary is deliberately named `m77_scoop_bucket_drift`
+    # rather than after the gate. Windows' installer-detection heuristic
+    # auto-elevates any executable whose filename contains the substring
+    # "install" (the gate name has "installed"), and an elevation prompt
+    # fails closed in a non-interactive CI shell with "The requested
+    # operation requires elevation." The gate / recipe / log names stay
+    # the spec name; only the on-disk binary leaf is detoxed.
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/m77_scoop_bucket_drift \
+        --out:build/test-bin/m77_scoop_bucket_drift \
+        tests/e2e/m77/t_integration_scoop_installed_version_survives_bucket_drift.nim \
+        2>&1 | tee test-logs/integration_scoop_installed_version_survives_bucket_drift.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \
