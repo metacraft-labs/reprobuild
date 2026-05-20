@@ -29,6 +29,22 @@ type
     resourceAddress*: string
     reason*: string
 
+  EAdoptUndeclared* = object of EHomeResource
+    ## `repro home adopt <resource>` was asked to adopt a resource
+    ## address that the profile's intent does NOT declare. Adopt
+    ## claims an EXISTING out-of-band object into management for a
+    ## resource the profile WANTS — adopting an undeclared address
+    ## would create a binding with no desired state behind it. The
+    ## user must add the resource declaration to `home.nim` first.
+    resourceAddress*: string
+
+  EUnknownResource* = object of EHomeResource
+    ## `repro home resource move <old> <new>` (or another
+    ## resource-scoped command) named an `<old>` resource address
+    ## that is not a known binding in the active generation's
+    ## manifest. There is nothing to carry forward.
+    resourceAddress*: string
+
   EUnsupportedDomain* = object of EHomeResource
     ## A `macos.userDefault` driver cannot reach the sandboxed-app
     ## container plist from the current process. Phase B raises this
@@ -104,6 +120,23 @@ proc raiseAdoptFailed*(address, reason: string) {.noreturn.} =
     "repro home adopt: " & address & ": " & reason)
   e.resourceAddress = address
   e.reason = reason
+  raise e
+
+proc raiseAdoptUndeclared*(address: string) {.noreturn.} =
+  var e = newException(EAdoptUndeclared,
+    "repro home adopt: '" & address & "' is not declared in the " &
+    "profile's intent. Adopt claims an existing object into " &
+    "management for a resource the profile WANTS — declare the " &
+    "resource in home.nim first, then re-run `repro home adopt " &
+    address & "`.")
+  e.resourceAddress = address
+  raise e
+
+proc raiseUnknownResource*(address: string) {.noreturn.} =
+  var e = newException(EUnknownResource,
+    "repro home: '" & address & "' is not a known resource in the " &
+    "active generation's manifest.")
+  e.resourceAddress = address
   raise e
 
 proc raiseUnsupportedDomain*(domain, reason: string) {.noreturn.} =

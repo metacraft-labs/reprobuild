@@ -739,6 +739,57 @@ e2e_home_resource_rollback_preserves_unrelated:
         tests/e2e/home-resources/t_e2e_home_resource_rollback_preserves_unrelated.nim \
         2>&1 | tee test-logs/e2e_home_resource_rollback_preserves_unrelated.log
 
+e2e_macos_user_default_restart_target:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_macos_user_default_restart_target.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_macos_user_default_restart_target \
+        --out:build/test-bin/e2e_macos_user_default_restart_target \
+        tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim \
+        2>&1 | tee test-logs/e2e_macos_user_default_restart_target.log
+
+integration_resource_move:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_resource_move.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/integration_resource_move \
+        --out:build/test-bin/integration_resource_move \
+        tests/e2e/home-resources/t_integration_resource_move.nim \
+        2>&1 | tee test-logs/integration_resource_move.log
+
+integration_prevent_destroy:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_prevent_destroy.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/integration_prevent_destroy \
+        --out:build/test-bin/integration_prevent_destroy \
+        tests/e2e/home-resources/t_integration_prevent_destroy.nim \
+        2>&1 | tee test-logs/integration_prevent_destroy.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

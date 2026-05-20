@@ -34,6 +34,7 @@ import repro_home_apply/partial_recovery
 import repro_home_apply/stow
 import repro_home_apply/suppression
 import repro_home_apply/pipeline
+import repro_home_apply/resource_move
 
 export errors
 export plan
@@ -45,4 +46,5 @@ export current_rotation
 export partial_recovery
 export stow
 export suppression
+export resource_move
 export pipeline

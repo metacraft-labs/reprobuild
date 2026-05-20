@@ -205,18 +205,23 @@ proc renderRecovered(rec: AbortedGenerationRecord): string =
 
 proc runApplyInline*(commandName: string;
                      mode: ApplyMode = amFull;
-                     setOverrideKey: string = ""): int =
+                     setOverrideKey: string = "";
+                     adoptAddresses: seq[string] = @[]): int =
   ## Shared apply-pipeline runner used by `repro home apply` and by
   ## the inline path of `add`/`remove`/`enable`/`disable`/`set`.
   ## Reports the new generation id on stdout and any diagnostics on
   ## stderr. M65: callers from `set` pass `mode = amSet` with
   ## `setOverrideKey = "<pkg>.<key>"`; the pipeline takes the
   ## incremental refinalize fast path and emits cache-hit-vs-rebuilt
-  ## counts in the apply log.
+  ## counts in the apply log. M68 Phase B: `repro home adopt` passes
+  ## `adoptAddresses` so the resource step records the named
+  ## resources from their live observed bytes instead of running
+  ## the driver create / update.
   try:
     var opts: ApplyOptions
     opts.applyMode = mode
     opts.setOverrideKey = setOverrideKey
+    opts.adoptAddresses = adoptAddresses
     let outcome = runApply(opts)
     for r in outcome.abortedRecovered:
       stderr.writeLine(renderRecovered(r))
@@ -281,6 +286,29 @@ proc runApplyInline*(commandName: string;
     stderr.writeLine("repro home " & commandName &
       ": another apply is in progress (lock " & err.lockPath &
       " held; waited " & $err.waitedSeconds & "s).")
+    return 1
+  except EPreventDestroy as err:
+    # M68 Phase B: a resource with `lifecyclePolicy = preventDestroy`
+    # was removed from `home.nim` (or otherwise scheduled for
+    # destroy). `preventDestroy` is absolute — it is NOT bypassable
+    # by `--reconcile-drift` / `--accept-overwrite`. The escape
+    # hatch is restoring the declaration or `repro home resource
+    # forget <id>` (a separate command, out of M68 scope).
+    stderr.writeLine("repro home " & commandName &
+      ": " & err.msg)
+    stderr.writeLine("  hint: restore the resource's declaration in " &
+      "home.nim, or run `repro home resource forget " &
+      err.resourceAddress & "` to drop the binding without destroying " &
+      "the underlying object.")
+    return 1
+  except EDrift as err:
+    stderr.writeLine("repro home " & commandName & ": " & err.msg)
+    return 1
+  except EAdoptUndeclared as err:
+    stderr.writeLine("repro home " & commandName & ": " & err.msg)
+    return 1
+  except EAdoptFailed as err:
+    stderr.writeLine("repro home " & commandName & ": " & err.msg)
     return 1
   except EHomeApply as err:
     stderr.writeLine("repro home " & commandName &
@@ -1199,13 +1227,21 @@ proc runHomePlan(args: openArray[string]): int =
     let policy =
       if reconcileFlag: rpReconcileDrift
       else: rpFailClosed
+    # M68 Phase B: `preventDestroy` enforcement is active in the
+    # planner too — `repro home plan` previews exactly what apply
+    # would do, so a `preventDestroy` resource scheduled for
+    # destroy surfaces here as `EPreventDestroy` rather than as a
+    # silent `destroy` line.
     let opts = DecisionOptions(reconcile: policy,
-      enforcePreventDestroy: false)
+      enforcePreventDestroy: true)
     let report = composePlan(desired, recorded, opts)
     stdout.write(renderPlan(report))
     if report.driftCount > 0 and not allowDrift and not reconcileFlag:
       return 1
     return 0
+  except EPreventDestroy as err:
+    stderr.writeLine("repro home plan: " & err.msg)
+    return 1
   except CatchableError as err:
     stderr.writeLine("repro home plan: error: " & err.msg)
     return 1
@@ -1215,52 +1251,111 @@ proc runHomePlan(args: openArray[string]): int =
 # ---------------------------------------------------------------------------
 
 proc runHomeAdopt(args: openArray[string]): int =
-  ## `repro home adopt <resource-address>` — claim an
-  ## existing real-world object into management. Phase A ships
-  ## the skeleton; full adoption (rewriting `home.nim` to reflect
-  ## the observed bytes) lands in Phase B alongside `repro home
-  ## resource move`. Phase A emits the diagnostic so the CLI
-  ## surface is testable but the action is a no-op edit.
+  ## `repro home adopt <resource-address>` — claim an EXISTING
+  ## real-world object into management WITHOUT modifying it.
+  ##
+  ## Adopt is for a resource the profile WANTS (the address is
+  ## declared in `home.nim`) but that already exists out-of-band
+  ## (the user created it manually, or Reprobuild lost track of
+  ## it). The apply pipeline observes the live state and records a
+  ## `ResourceBinding` whose `preWriteDigest == postWriteDigest ==
+  ## digest(observedState)` — no driver write happens. A subsequent
+  ## `repro home apply` then sees the resource as a cache-hit (the
+  ## recorded post-write digest matches the live state).
+  ##
+  ## If the address is NOT declared in the profile's intent, the
+  ## pipeline raises `EAdoptUndeclared`. Adopt runs apply inline
+  ## (M63 wiring) so the adopted binding lands in a new generation.
   if args.len == 0:
     stderr.writeLine("usage: repro home adopt <resource-address>")
     return 2
+  var address = ""
   for a in args:
     if a == "--help" or a == "-h":
       echo "usage: repro home adopt <resource-address>"
       echo ""
-      echo "Claim an existing real-world resource into management."
-      echo "Phase A: skeleton only; the full home.nim rewrite"
-      echo "lands in Phase B."
+      echo "Claim an existing real-world resource into management"
+      echo "without modifying it. The resource must be declared in"
+      echo "home.nim; adopt records the live observed state so the"
+      echo "next apply treats it as a cache-hit. Runs apply inline."
       return 0
-  let address = args[0]
-  stderr.writeLine("repro home adopt: " & address &
-    ": adoption is a Phase B feature; Phase A only ships the " &
-    "CLI surface + the drift-detection / --reconcile-drift path. " &
-    "Run `repro home plan` to see what the apply pipeline " &
-    "currently sees for this address.")
-  return 0
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home adopt: unknown flag: " & a)
+      return 2
+    elif address.len == 0:
+      address = a
+    else:
+      stderr.writeLine("repro home adopt: unexpected positional: " & a)
+      return 2
+  if address.len == 0:
+    stderr.writeLine("repro home adopt: missing <resource-address>")
+    return 2
+  # Adopt runs the apply pipeline inline with the named address in
+  # `adoptAddresses`; the pipeline validates the address is declared
+  # and records its observed bytes as-is.
+  return runApplyInline("adopt", amFull, "", @[address])
 
 # ---------------------------------------------------------------------------
 # `repro home resource move <old> <new>` (M68; Phase A skeleton).
 # ---------------------------------------------------------------------------
 
 proc runHomeResourceMove(args: openArray[string]): int =
-  if args.len < 2:
-    stderr.writeLine("usage: repro home resource move <old-address> <new-address>")
-    return 2
+  ## `repro home resource move <old> <new>` — rename a resource
+  ## record WITHOUT re-applying. The resource's underlying state
+  ## (registry value, file, managed block, ...) is unchanged; only
+  ## the resource's IDENTITY in the manifest moves from `<old>` to
+  ## `<new>`. This is a metadata operation — no driver apply /
+  ## destroy runs. Produces a new generation reflecting the rename.
+  var positional: seq[string]
   for a in args:
     if a == "--help" or a == "-h":
       echo "usage: repro home resource move <old-address> <new-address>"
       echo ""
-      echo "Rename a resource record without re-applying. Phase A:"
-      echo "skeleton only; the full rename lands in Phase B."
+      echo "Rename a resource record without re-applying. Carries the"
+      echo "existing binding forward under the new id instead of"
+      echo "destroy-old + create-new. Metadata-only: no driver runs."
       return 0
-  let oldAddr = args[0]
-  let newAddr = args[1]
-  stderr.writeLine("repro home resource move: " & oldAddr & " -> " &
-    newAddr & ": resource move is a Phase B feature; Phase A only " &
-    "ships the CLI surface.")
-  return 0
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home resource move: unknown flag: " & a)
+      return 2
+    else:
+      positional.add a
+  if positional.len < 2:
+    stderr.writeLine("usage: repro home resource move <old-address> " &
+      "<new-address>")
+    return 2
+  if positional.len > 2:
+    stderr.writeLine("repro home resource move: unexpected positional: " &
+      positional[2])
+    return 2
+  let oldAddr = positional[0]
+  let newAddr = positional[1]
+  try:
+    let outcome = runResourceMove(oldAddr, newAddr)
+    echo "repro home resource move: renamed " & outcome.oldAddress &
+      " -> " & outcome.newAddress & " (generation " &
+      shortGenerationId(outcome.fromGenerationIdHex) & " -> " &
+      shortGenerationId(outcome.toGenerationIdHex) & ")"
+    return 0
+  except EUnknownResource as err:
+    stderr.writeLine("repro home resource move: " & err.msg)
+    return 1
+  except EResourceConflict as err:
+    stderr.writeLine("repro home resource move: '" & err.address2 &
+      "' already exists as a resource (real-world identity '" &
+      err.realWorldIdentity & "'); pick a free name.")
+    return 1
+  except EResourceMove as err:
+    stderr.writeLine(err.msg)
+    return 1
+  except EApplyBusy as err:
+    stderr.writeLine("repro home resource move: another apply/rollback " &
+      "is in progress (lock " & err.lockPath & " held; waited " &
+      $err.waitedSeconds & "s).")
+    return 1
+  except CatchableError as err:
+    stderr.writeLine("repro home resource move: error: " & err.msg)
+    return 1
 
 proc runHomeResource(args: openArray[string]): int =
   if args.len == 0:

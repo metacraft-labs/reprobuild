@@ -19,7 +19,7 @@
 ## intentionally left in place so the next apply's recovery sweep
 ## can quarantine the partial generation.
 
-import std/[os, sequtils, strutils, tables, times]
+import std/[os, sequtils, sets, strutils, tables, times]
 
 import blake3
 import repro_home_generations
@@ -141,6 +141,19 @@ type
                                         ## refinalize so callers (and
                                         ## gates) can observe which seam
                                         ## was used.
+    adoptAddresses*: seq[string]        ## M68 Phase B: resource
+                                        ## addresses `repro home adopt`
+                                        ## asked the apply pipeline to
+                                        ## CLAIM rather than create /
+                                        ## update. For an adopt address
+                                        ## the resource step skips the
+                                        ## driver write and records the
+                                        ## live observed bytes as both
+                                        ## the pre- and post-write
+                                        ## digest. The address MUST be
+                                        ## in the desired set or the
+                                        ## pipeline raises
+                                        ## `EAdoptUndeclared`.
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -312,8 +325,24 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
     let addrColon = restAfterKind.find(':')
     if addrColon <= 0:
       continue
-    let address = restAfterKind[0 ..< addrColon].strip()
+    var address = restAfterKind[0 ..< addrColon].strip()
     let payload = restAfterKind[addrColon + 1 .. ^1]
+    # M68 Phase B: an optional `@<policy>` suffix on the address
+    # carries the per-resource `lifecyclePolicy`. The production
+    # M59 stdlib emitter will route the resource constructor's
+    # `lifecyclePolicy = preventDestroy` attribute through here once
+    # the typed `home.nim` resource constructors land; until then
+    # this seam lets the gates exercise `preventDestroy` enforcement.
+    var resourcePolicy = lpDefault
+    let atIdx = address.rfind('@')
+    if atIdx > 0:
+      let policyTag = address[atIdx + 1 .. ^1].strip()
+      try:
+        resourcePolicy = lifecyclePolicyFromString(policyTag)
+        address = address[0 ..< atIdx].strip()
+      except ValueError:
+        # Not a recognized policy tag — leave the `@` in the address.
+        discard
     case kindStr
     of "registry":
       let parts = payload.split(';')
@@ -325,7 +354,7 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
       let value = parts[3]
       let broadcast = parts.len > 4 and parts[4] == "broadcast"
       var r = Resource(kind: rkWindowsRegistryValue, address: address,
-        lifecyclePolicy: lpDefault,
+        lifecyclePolicy: resourcePolicy,
         registryKey: subkey,
         registryName: name,
         registryBroadcastChange: broadcast)
@@ -364,7 +393,7 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
       if parts.len < 3:
         continue
       var r = Resource(kind: rkEnvUserVariable, address: address,
-        lifecyclePolicy: lpDefault,
+        lifecyclePolicy: resourcePolicy,
         envVarName: parts[0])
       try:
         let rvk = registryValueKindFromString(parts[1])
@@ -383,14 +412,14 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
         let t = e.strip()
         if t.len > 0: clean.add(t)
       let r = Resource(kind: rkEnvUserPath, address: address,
-        lifecyclePolicy: lpDefault,
+        lifecyclePolicy: resourcePolicy,
         pathEntries: clean)
       result.add(r)
     of "startup":
       let parts = payload.split(';')
       if parts.len < 2: continue
       let r = Resource(kind: rkWindowsStartup, address: address,
-        lifecyclePolicy: lpDefault,
+        lifecyclePolicy: resourcePolicy,
         startupName: parts[0],
         startupCommand: parts[1])
       result.add(r)
@@ -402,7 +431,7 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
       if hostFile.startsWith("~"):
         hostFile = homeDir & hostFile[1 .. ^1]
       let r = Resource(kind: rkShellIntegration, address: address,
-        lifecyclePolicy: lpDefault,
+        lifecyclePolicy: resourcePolicy,
         shellHostFilePath: hostFile,
         shellBlockId: parts[1],
         shellBlockContent: parts[2])
@@ -414,10 +443,58 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
       if hostFile.startsWith("~"):
         hostFile = homeDir & hostFile[1 .. ^1]
       let r = Resource(kind: rkFsManagedBlock, address: address,
-        lifecyclePolicy: lpDefault,
+        lifecyclePolicy: resourcePolicy,
         hostFilePath: hostFile,
         managedBlockId: parts[1],
         managedBlockContent: parts[2])
+      result.add(r)
+    of "gsettings":
+      # gsettings:<address>:<schema>;<path>;<key>;<gvariant-literal>
+      # `<path>` is empty for non-relocatable schemas. The Phase B
+      # driver only runs on Linux; off-Linux the apply step raises
+      # ENotImplementedPlatform when this resource is reconciled.
+      let parts = payload.split(';')
+      if parts.len < 4: continue
+      let r = Resource(kind: rkLinuxGsettings, address: address,
+        lifecyclePolicy: resourcePolicy,
+        gsettingsSchema: parts[0],
+        gsettingsPath: parts[1],
+        gsettingsKey: parts[2],
+        gsettingsValueLiteral: parts[3])
+      result.add(r)
+    of "userdefault":
+      # userdefault:<address>:<domain>;<key>;<value-literal>;<restartTarget>
+      # `<restartTarget>` is empty when no killall is wanted. The
+      # Phase B driver only runs on macOS.
+      let parts = payload.split(';')
+      if parts.len < 3: continue
+      let restartTarget = if parts.len > 3: parts[3] else: ""
+      let r = Resource(kind: rkMacosUserDefault, address: address,
+        lifecyclePolicy: resourcePolicy,
+        defaultsDomain: parts[0],
+        defaultsKey: parts[1],
+        defaultsValueLiteral: parts[2],
+        defaultsRestartTarget: restartTarget)
+      result.add(r)
+    of "systemdunit":
+      # systemdunit:<address>:<name>;<enabled 0|1>;<unit-content>
+      let parts = payload.split(';')
+      if parts.len < 3: continue
+      let r = Resource(kind: rkSystemdUserUnit, address: address,
+        lifecyclePolicy: resourcePolicy,
+        unitName: parts[0],
+        unitEnabled: parts[1] == "1",
+        unitContent: parts[2])
+      result.add(r)
+    of "launchagent":
+      # launchagent:<address>:<label>;<runAtLoad 0|1>;<plist-content>
+      let parts = payload.split(';')
+      if parts.len < 3: continue
+      let r = Resource(kind: rkLaunchdUserAgent, address: address,
+        lifecyclePolicy: resourcePolicy,
+        launchdLabel: parts[0],
+        launchdRunAtLoad: parts[1] == "1",
+        launchdPlistContent: parts[2])
       result.add(r)
     else: discard
 
@@ -690,8 +767,18 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         files: defaultWalkProfileFiles(opts.profileDir))
       let snapshotBytes = encodeSnapshot(intentSnapshot)
       let snapshotDig = digestOf(snapshotBytes)
+      # M68 Phase B: an adopt run contributes its adopt-address set
+      # to the generation-id seed so the adopted binding lands in a
+      # genuinely new generation (distinct id) rather than colliding
+      # with the unchanged active generation's id.
+      var resourcesSeed = getEnv(ResourcesEnvVar)
+      if opts.adoptAddresses.len > 0:
+        resourcesSeed.add("\x00adopt:")
+        for a in opts.adoptAddresses:
+          resourcesSeed.add(a)
+          resourcesSeed.add(",")
       let candidateId = deriveGenerationId(applyPlan, snapshotDig,
-        getEnv(ResourcesEnvVar))
+        resourcesSeed)
       # No-op detection (spec §"No-Op Detection"): a re-apply is a
       # no-op iff the planner's content id matches the active
       # generation's recorded id AND all of the active generation's
@@ -701,7 +788,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # apply rewrites the bin dir, because the active generation's
       # files are still on disk.
       var verifyCount = 0
-      if activeGenIdHex.len > 0:
+      # M68 Phase B: `repro home adopt` MUST run the resource step
+      # (it observes + records the named binding) — so it never
+      # takes the no-op short-circuit even when the intent / plan
+      # is otherwise unchanged. An adopt with `adoptAddresses` set
+      # always falls through to step 9b.
+      if activeGenIdHex.len > 0 and opts.adoptAddresses.len == 0:
         # The pointer's `generationId` IS the content id (we set it
         # to `deriveGenerationId` which the writer copies in verbatim
         # — the writer leaves the id slot alone and only fills the
@@ -982,12 +1074,71 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         reconcilePolicy = rpReconcileDrift
       elif getEnv(AcceptOverwriteEnvVar) == "1":
         reconcilePolicy = rpAcceptOverwrite
+      # M68 Phase B: `lifecyclePolicy = preventDestroy` enforcement
+      # is now active in the apply executor. The lifecycle algorithm
+      # raises `EPreventDestroy` for any resource that would be
+      # destroyed while carrying `lpPreventDestroy` — `preventDestroy`
+      # is absolute at home scope: it is NOT bypassable by
+      # `--reconcile-drift` or `--accept-overwrite` (the enforcement
+      # branch in `decideAction` fires before the destroy action is
+      # ever produced, regardless of `reconcile`).
       var decisionOpts = DecisionOptions(reconcile: reconcilePolicy,
-        enforcePreventDestroy: false)
+        enforcePreventDestroy: true)
       let planReport = composePlan(desiredResources, recordedBindings,
         decisionOpts)
+      # M68 Phase B: `repro home adopt` passes one or more resource
+      # addresses through `opts.adoptAddresses`. Adopt CLAIMS an
+      # existing out-of-band object: the resource MUST be declared
+      # in the profile's intent (the desired set), and the apply
+      # step records its live observed bytes as both the pre- and
+      # post-write digest WITHOUT running the driver's create /
+      # update. A subsequent apply then sees the resource as a
+      # cache-hit because the recorded post-write digest matches
+      # the live state.
+      var adoptSet = initHashSet[string]()
+      for a in opts.adoptAddresses:
+        if a notin desiredResources.resources:
+          raiseAdoptUndeclared(a)
+        adoptSet.incl(a)
       var appliedResourceBindings: seq[ResourceBinding]
       for action in planReport.actions:
+        # Adopt override: regardless of what the lifecycle decided
+        # (create / update / drift), an adopt address is recorded
+        # as-is from the live observation.
+        if action.address in adoptSet:
+          let desired = desiredResources.resources[action.address]
+          let identity = realWorldIdentity(desired)
+          let observed = observeResource(desired)
+          var rb: ResourceBinding
+          if observed.present:
+            # Adopt the live bytes verbatim: preWrite == postWrite
+            # == digest(observed). No driver write happened.
+            let adoptPayloadKind =
+              case desired.kind
+              of rkWindowsRegistryValue: $desired.registryPayload.kind
+              of rkEnvUserVariable: $desired.envVarPayload.kind
+              of rkEnvUserPath: "joined-entries"
+              of rkWindowsStartup: "string"
+              of rkShellIntegration: "shell-block"
+              of rkFsManagedBlock: "managed-block"
+              of rkLinuxGsettings: "gvariant-literal"
+              of rkSystemdUserUnit: "unit-content"
+              of rkMacosUserDefault: "defaults-literal"
+              of rkLaunchdUserAgent: "plist-content"
+            rb = toResourceBinding(action.address, desired.kind,
+              identity, observed, observed.rawBytes,
+              adoptPayloadKind, desired.lifecyclePolicy)
+            # `toResourceBinding` sets preWriteDigest from the
+            # observed state when present — for adopt the pre- and
+            # post-write digests are intentionally equal.
+          else:
+            # Nothing to adopt at this address — the object does
+            # not exist out-of-band. Surface a clear failure.
+            raiseAdoptFailed(action.address,
+              "no existing object found to adopt; `repro home apply` " &
+              "would CREATE this resource — run apply instead of adopt")
+          appliedResourceBindings.add(rb)
+          continue
         case action.kind
         of rakDriftBlocked:
           raiseIfDriftBlocked(action)

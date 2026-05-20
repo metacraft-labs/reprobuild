@@ -7,6 +7,10 @@ nimcache/
 htmldocs/
 *.nimble-link
 
+# Stray in-place `nim c` build artifacts (smoke tests / apps compiled
+# outside build/ during local iteration).
+*.exe
+
 test-logs/
 repomix/
 bench-results/

@@ -204,8 +204,29 @@ suite "M68 gate 1: e2e_home_resource_lifecycle_create_update_destroy":
     check postReconcileShell.contains(ShellBlockContent)
     check not postReconcileShell.contains("USER EDIT IN BLOCK")
 
-    # --- `repro home adopt` skeleton emits the diagnostic ---
+    # --- `repro home adopt` claims a declared, already-live resource
+    # (M68 Phase B: real adopt, not the Phase A skeleton diagnostic).
+    # `fs.gitconfig` is declared in REPRO_TEST_RESOURCES AND already
+    # exists on disk (created by apply 1 + restored by reconcile).
+    # Adopt observes the live bytes and records them as-is; the
+    # command runs the apply pipeline inline so the adopted binding
+    # lands in a new generation. A subsequent apply then takes the
+    # cache-hit path because the recorded post-write digest matches.
+    let genBeforeAdopt = readCurrentGenerationId(stateDir)
     let adoptRes = runRepro(envBase, ["home", "adopt", "fs.gitconfig"])
     check adoptRes.exitCode == 0
-    check adoptRes.output.contains("adoption is a Phase B feature") or
-      adoptRes.output.contains("Phase B")
+    check adoptRes.output.contains("applied generation ") or
+      adoptRes.output.contains("no-op")
+    let genAfterAdopt = readCurrentGenerationId(stateDir)
+    check genAfterAdopt.len > 0
+    # The adopt did NOT modify the underlying file — the managed
+    # block content is byte-identical to the pre-adopt state.
+    check readFile(homeDir / GitConfigPath).contains(GitConfigContent.strip)
+    check readFile(homeDir / GitConfigPath).contains("repro-managed:gitcfg")
+    discard genBeforeAdopt
+
+    # Adopting an UNDECLARED address fails with EAdoptUndeclared.
+    let adoptBad = runRepro(envBase,
+      ["home", "adopt", "fs.not-declared-anywhere"])
+    check adoptBad.exitCode != 0
+    check adoptBad.output.contains("not declared in the profile's intent")

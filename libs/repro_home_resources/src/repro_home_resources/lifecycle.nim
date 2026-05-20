@@ -27,6 +27,7 @@ import std/[strutils]
 
 import repro_home_generations
 
+import ./drivers/defaults
 import ./errors
 import ./manifest_record
 import ./types
@@ -108,8 +109,15 @@ proc digestOfResource*(desired: Resource): Digest256 =
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
   of rkMacosUserDefault:
-    var buf = newSeq[byte](desired.defaultsValueLiteral.len)
-    for i, ch in desired.defaultsValueLiteral:
+    # Structural canonicalization (NOT a text compare): the
+    # `macos.userDefault` driver records and observes the
+    # structurally-canonicalized value, so the desired digest must
+    # be over the same canonical form. A dict with reordered keys
+    # or a value that differs only in quote style / whitespace
+    # therefore digests identically and does NOT register as drift.
+    let canonical = canonicalizeDefaultsValue(desired.defaultsValueLiteral)
+    var buf = newSeq[byte](canonical.len)
+    for i, ch in canonical:
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
   of rkLaunchdUserAgent:

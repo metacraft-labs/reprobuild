@@ -81,6 +81,13 @@ type
     ## Raised when `repro home apply --no-apply` is invoked: apply is
     ## the action; `--no-apply` belongs on intent-mutating commands.
 
+  EResourceMove* = object of EHomeApply
+    ## M68 Phase B: `repro home resource move <old> <new>` could not
+    ## complete — e.g. there is no active generation to carry the
+    ## binding forward from, or the active generation's pointer is
+    ## missing. Distinct from `EUnknownResource` / `EResourceConflict`
+    ## (which the resource layer raises for the move's own pre-checks).
+
 # ---------------------------------------------------------------------------
 # Warning / informational diagnostic records
 # ---------------------------------------------------------------------------
@@ -203,4 +210,10 @@ proc raiseNoApplyOnApply*() {.noreturn.} =
     "repro home apply: --no-apply is meaningless on this subcommand " &
     "(apply IS the action). --no-apply belongs on intent-mutating " &
     "commands (add, remove, enable, disable).")
+  raise e
+
+proc raiseResourceMove*(msg: string) {.noreturn.} =
+  var e = newException(EResourceMove, msg)
+  e.step = 0
+  e.stepName = "resource_move"
   raise e

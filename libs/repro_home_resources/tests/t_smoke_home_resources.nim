@@ -237,3 +237,137 @@ suite "M68 smoke: home resource lifecycle":
         check e.requiredPlatform == "macosx"
     else:
       skip()
+
+  # ----------------------------------------------------------------
+  # Phase B pure-function unit tests. The Linux/macOS drivers'
+  # shell-out to gsettings / defaults / systemctl / launchctl can
+  # only run on the target OS, but the GVariant encode/parse, the
+  # macOS structural comparison, and the launchd plist generation
+  # are pure — they run on Windows and are pinned here.
+  # ----------------------------------------------------------------
+
+  test "gsettings: GVariant encoder covers the common types":
+    check encodeGVariant(GVariantValue(kind: gvkString,
+      strVal: "prefer-dark")) == "'prefer-dark'"
+    check encodeGVariant(GVariantValue(kind: gvkBool,
+      boolVal: true)) == "true"
+    check encodeGVariant(GVariantValue(kind: gvkBool,
+      boolVal: false)) == "false"
+    check encodeGVariant(GVariantValue(kind: gvkInt32,
+      intVal: 42'i32)) == "42"
+    check encodeGVariant(GVariantValue(kind: gvkStringArray,
+      arrVal: @["a", "b"])) == "['a', 'b']"
+    # Embedded quote / backslash are escaped.
+    check encodeGVariant(GVariantValue(kind: gvkString,
+      strVal: "it's")) == "'it\\'s'"
+    # Double always carries a decimal point.
+    let dbl = encodeGVariant(GVariantValue(kind: gvkDouble, dblVal: 1.0))
+    check '.' in dbl
+
+  test "gsettings: GVariant parser round-trips the encoder":
+    for v in [
+        GVariantValue(kind: gvkString, strVal: "prefer-dark"),
+        GVariantValue(kind: gvkString, strVal: "has 'quote'"),
+        GVariantValue(kind: gvkBool, boolVal: true),
+        GVariantValue(kind: gvkBool, boolVal: false),
+        GVariantValue(kind: gvkInt32, intVal: -7'i32),
+        GVariantValue(kind: gvkStringArray, arrVal: @["x", "y", "z"]),
+        GVariantValue(kind: gvkStringArray, arrVal: @[])]:
+      let parsed = parseGVariant(encodeGVariant(v))
+      check parsed.kind == v.kind
+      case v.kind
+      of gvkString: check parsed.strVal == v.strVal
+      of gvkBool: check parsed.boolVal == v.boolVal
+      of gvkInt32: check parsed.intVal == v.intVal
+      of gvkDouble: check parsed.dblVal == v.dblVal
+      of gvkStringArray: check parsed.arrVal == v.arrVal
+
+  test "gsettings: relocatable schema spec uses the path form":
+    check gsettingsSchemaSpec("org.gnome.desktop.interface", "") ==
+      "org.gnome.desktop.interface"
+    check gsettingsSchemaSpec("org.gnome.x.custom-keybinding",
+      "/org/gnome/x/custom-keybindings/custom0/") ==
+      "org.gnome.x.custom-keybinding:" &
+      "/org/gnome/x/custom-keybindings/custom0/"
+
+  test "defaults: structural comparison ignores dict key order":
+    # A dict with reordered keys is structurally equal.
+    check defaultsValuesEqual(
+      "{ a = 1; b = 2; }", "{ b = 2; a = 1; }")
+    # Whitespace variation does not matter.
+    check defaultsValuesEqual(
+      "{a=1;b=2;}", "{  a = 1 ;\n  b = 2 ;\n}")
+    # A genuinely different value is NOT equal.
+    check not defaultsValuesEqual(
+      "{ a = 1; b = 2; }", "{ a = 1; b = 3; }")
+    # Scalars compare by value.
+    check defaultsValuesEqual("  true ", "true")
+
+  test "defaults: structural comparison keeps array order significant":
+    # Arrays are ordered — reordering elements IS a real change.
+    check not defaultsValuesEqual("( 1, 2, 3 )", "( 3, 2, 1 )")
+    check defaultsValuesEqual("( 1, 2, 3 )", "(1,2,3)")
+    # Nested dict inside an array, key-reordered, still equal.
+    check defaultsValuesEqual(
+      "( { x = 1; y = 2; } )", "( { y = 2; x = 1; } )")
+
+  test "defaults: container-domain detection":
+    check isContainerDomain(
+      "/Users/me/Library/Containers/com.app/Data/Library/" &
+      "Preferences/com.app.plist")
+    check not isContainerDomain("com.apple.dock")
+
+  test "launchd: plist generator emits a valid-shaped plist":
+    let plist = buildLaunchAgentPlist("com.example.repro-dev",
+      @["/usr/bin/true", "--flag"], runAtLoad = true)
+    check plist.contains("<key>Label</key>")
+    check plist.contains("<string>com.example.repro-dev</string>")
+    check plist.contains("<key>ProgramArguments</key>")
+    check plist.contains("<string>/usr/bin/true</string>")
+    check plist.contains("<string>--flag</string>")
+    check plist.contains("<key>RunAtLoad</key>")
+    check plist.contains("<true/>")
+    check plist.startsWith("<?xml version=\"1.0\"")
+    # XML-significant characters in args are escaped.
+    let escaped = buildLaunchAgentPlist("com.x",
+      @["a & b <c>"], runAtLoad = false)
+    check escaped.contains("a &amp; b &lt;c&gt;")
+    check escaped.contains("<false/>")
+
+  test "launchd: agent plist path derivation":
+    check agentPlistPath("/home/user", "com.x") ==
+      "/home/user/Library/LaunchAgents/com.x.plist"
+    # Trailing slash on the home dir is normalized away.
+    check agentPlistPath("/home/user/", "com.x") ==
+      "/home/user/Library/LaunchAgents/com.x.plist"
+
+  test "systemd: user-unit path derivation":
+    check userUnitPath("/home/user", "repro-dev.service") ==
+      "/home/user/.config/systemd/user/repro-dev.service"
+    check userUnitPath("/home/user/", "repro-dev.service") ==
+      "/home/user/.config/systemd/user/repro-dev.service"
+
+  test "lifecycle: preventDestroy refuses the destroy (absolute)":
+    # A recorded resource carrying lpPreventDestroy that is no
+    # longer desired must raise EPreventDestroy when enforcement is
+    # on — even under rpAcceptOverwrite.
+    var state: ResourceState
+    state.address = "test:prevent-destroy"
+    state.hasDesired = false
+    state.observed.present = true
+    state.observed.digest = digestOfBytes(@[byte('z')])
+    state.hasRecorded = true
+    state.recorded.kind = rkWindowsRegistryValue
+    state.recorded.postWriteDigest = state.observed.digest
+    state.recorded.lifecyclePolicy = lpPreventDestroy
+    # Enforcement off (Phase A behaviour): produces a plain destroy.
+    let off = decideAction(state, DecisionOptions(reconcile: rpFailClosed,
+      enforcePreventDestroy: false))
+    check off.kind == rakDestroy
+    # Enforcement on: raises regardless of reconcile policy.
+    expect EPreventDestroy:
+      discard decideAction(state, DecisionOptions(reconcile: rpFailClosed,
+        enforcePreventDestroy: true))
+    expect EPreventDestroy:
+      discard decideAction(state, DecisionOptions(
+        reconcile: rpAcceptOverwrite, enforcePreventDestroy: true))
