@@ -290,6 +290,42 @@ suite "integration_build_engine_api_ready_queue":
     check not second.hasMetric("repro runquota probe")
     check second.trace.len == 0
 
+  test "runBuild materializes relative declared inputs before cache checks":
+    let tempRoot = createTempDir("repro-relative-input-cache", "")
+    defer: removeDir(tempRoot)
+
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    let inputPath = workRoot / "src" / "input.txt"
+    let outputPath = workRoot / "out" / "copied.txt"
+    fixtureWrite(inputPath, "one\n")
+
+    var config = defaultBuildEngineConfig(cacheRoot)
+    config.rebuildMissingOutputsOnCacheHit = true
+    config.suppressTrace = true
+
+    let copyAction = builtinAction(bakCopyFile, "relative-copy",
+      cwd = workRoot,
+      inputs = ["src/input.txt"],
+      outputs = ["out/copied.txt"],
+      cacheable = true,
+      weakFingerprint = weak("relative-copy"))
+
+    let first = runBuild(graph([copyAction]), config)
+    check first.results.len == 1
+    check first.results[0].status == asSucceeded
+    check first.results[0].launched
+    check readFile(outputPath) == "one\n"
+
+    fixtureWrite(inputPath, "two changed\n")
+
+    let second = runBuild(graph([copyAction]), config)
+    check second.results.len == 1
+    check second.results[0].status == asSucceeded
+    check second.results[0].cacheDecision == cdMiss
+    check second.results[0].launched
+    check readFile(outputPath) == "two changed\n"
+
   test "runBuild fast no-op ignores stale unrelated hot cache inputs":
     let tempRoot = createTempDir("repro-fast-noop-scoped", "")
     defer: removeDir(tempRoot)

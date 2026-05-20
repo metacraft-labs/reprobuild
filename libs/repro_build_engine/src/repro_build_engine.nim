@@ -592,11 +592,18 @@ proc evidenceInputPaths(evidence: PathSetEvidence): seq[string] =
   for probe in evidence.monitorProbes:
     result.addUnique(probe)
 
+proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string] =
+  for input in evidence.evidenceInputPaths():
+    result.addUnique(materialPath(action.cwd, input))
+
 proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSetEvidence =
   result.declaredInputs = action.inputs
   result.declaredOutputs = action.outputs
+  var declaredInputPaths = initHashSet[string]()
+  for input in action.inputs:
+    declaredInputPaths.incl(materialPath(action.cwd, input))
   for input in record.inputs:
-    if result.declaredInputs.find(input.path) < 0:
+    if not declaredInputPaths.contains(input.path):
       if action.dependencyPolicy.kind in MonitorPolicyKinds:
         result.monitorReads.addUnique(input.path)
       else:
@@ -1586,7 +1593,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if plan.action.cacheable:
               let recordStart = statStart()
               let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
-                plan.action.actionCachePolicy, evidence.evidence.evidenceInputPaths(),
+                plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd)
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
@@ -1815,7 +1822,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if action.cacheable:
           let recordStart = statStart()
           let record = cache.recordActionResult(cas, action.weakFingerprint,
-            action.actionCachePolicy, evidence.evidence.evidenceInputPaths(),
+            action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd)
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
