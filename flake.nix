@@ -129,6 +129,9 @@
             packages = [
               pkgs.just
               pkgs.nim2
+              pkgs.cmake
+              pkgs.ninja
+              pkgs.clang
               pkgs.libblake3
               pkgs.xxHash
               pkgs.nixfmt-rfc-style

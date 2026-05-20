@@ -6,7 +6,12 @@
 - Test: `just test`
 - Lint: `just lint`
 - Format: `just format`
-- Quick benchmark smoke: `just bench-quick`
+- Full benchmark suite: `just bench`
+- Quick benchmark suite: `just bench --quick` or `just bench-quick`
+- Core Reprobuild/RunQuota production benchmark: `just bench_reprobuild_core_mvp_performance`
+- CMake Reprobuild vs Ninja benchmark: `just bench_cmake_reprobuild_vs_ninja`
+- CMake Reprobuild vs Ninja quick benchmark: `just bench_cmake_reprobuild_vs_ninja_quick`
+- CMake Reprobuild vs Ninja medium benchmark: `just bench_cmake_reprobuild_vs_ninja_medium`
 - Repository contract check: `just check-repo-requirements`
 
 ## Structure
@@ -19,6 +24,18 @@
   library once implementation starts.
 - `benchmarks/` contains repeatable benchmark suites and reporting helpers.
 - `docs/` contains public documentation for contributors and users.
+
+## Benchmarks
+
+- `just bench` writes github-action-benchmark JSON to
+  `bench-results/benchmark_results.json` and the self-contained HTML report to
+  `bench-results/report.html`.
+- `just bench --quick` is the CI/local abbreviated policy suite. It runs the M0
+  smoke metrics and the Reprobuild/RunQuota production benchmark; it also runs
+  the CMake Reprobuild-vs-Ninja quick benchmark when
+  `../reprobuild-cmake/build/bin/cmake` is available.
+- CMake benchmark targets require sibling checkouts of `../runquota` and
+  `../reprobuild-cmake`; benchmark CI checks out and builds those siblings.
 
 ## Boundaries
 

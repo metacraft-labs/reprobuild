@@ -43,6 +43,7 @@ done
 require_symlink CLAUDE.md AGENTS.md
 require_symlink .github/copilot-instructions.md ../AGENTS.md
 require_file .github/workflows/ci.yml
+require_file .github/workflows/benchmark.yml
 
 require_contains .envrc "use flake"
 require_contains flake.nix 'nixos-modules.url = "github:metacraft-labs/nixos-modules"'
@@ -67,6 +68,30 @@ require_contains .github/workflows/ci.yml "run: nix develop --command just test"
 require_contains .github/workflows/ci.yml "run: nix build .#default"
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
+require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "benchmark"]'\'''
+require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macos"]'\'''
+require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
+require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
+require_contains .github/workflows/benchmark.yml "ref: reprobuild"
+require_contains .github/workflows/benchmark.yml "cmake --build build --target cmake"
+require_contains .github/workflows/benchmark.yml "run: nix develop --command just bench --quick"
+require_contains .github/workflows/benchmark.yml "actions/upload-artifact@v4"
+require_contains .github/workflows/benchmark.yml "benchmark-action/github-action-benchmark@v1"
+require_contains .github/workflows/benchmark.yml "issues: write"
+require_contains .github/workflows/benchmark.yml "max-parallel: 1"
+require_contains .github/workflows/benchmark.yml "tool: customSmallerIsBetter"
+require_contains .github/workflows/benchmark.yml "auto-push: false"
+require_contains .github/workflows/benchmark.yml "save-data-file: false"
+require_contains .github/workflows/benchmark.yml "comment-always: true"
+require_contains .github/workflows/benchmark.yml "auto-push: true"
+require_contains .github/workflows/benchmark.yml "gh-pages-branch: gh-pages"
+require_contains .github/workflows/benchmark.yml "benchmark-data-dir-path: perf/bench/"
+require_contains .github/workflows/benchmark.yml "alert-threshold: '120%'"
+require_contains scripts/collect-benchmark-metrics.sh "REPROBUILD_BENCH_SUITES"
+require_contains scripts/collect-benchmark-metrics.sh "run-m23-benchmark.sh"
+require_contains scripts/collect-benchmark-metrics.sh "run-cmake-generator-competitiveness-benchmark.sh"
+require_contains scripts/collect-benchmark-metrics.sh "bench-results/report.html"
+require_contains scripts/collect-benchmark-metrics.sh "ratioSummary"
 
 for pattern in "repomix/" "bench-results/" "nimcache/" "result"; do
   require_contains .gitignore "${pattern}"

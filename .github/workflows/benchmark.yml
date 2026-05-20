@@ -1,0 +1,101 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Benchmark (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: linux
+            runner: '["self-hosted", "benchmark"]'
+          - platform: macos
+            runner: '["self-hosted", "macos"]'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    steps:
+      - name: Checkout Reprobuild
+        uses: actions/checkout@v4
+        with:
+          path: reprobuild
+
+      - name: Checkout RunQuota
+        uses: actions/checkout@v4
+        with:
+          repository: metacraft-labs/runquota
+          path: runquota
+          token: ${{ secrets.METACRAFT_CI_TOKEN || github.token }}
+
+      - name: Checkout Reprobuild CMake fork
+        uses: actions/checkout@v4
+        with:
+          repository: metacraft-labs/reprobuild-cmake
+          ref: reprobuild
+          path: reprobuild-cmake
+          token: ${{ secrets.METACRAFT_CI_TOKEN || github.token }}
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build Reprobuild CMake fork
+        run: |
+          nix develop ./reprobuild --command bash -lc '
+            set -euo pipefail
+            jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+            cd reprobuild-cmake
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            cmake --build build --target cmake --parallel "${jobs}"
+          '
+
+      - name: Run quick benchmark suite
+        working-directory: reprobuild
+        run: nix develop --command just bench --quick
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.platform }}
+          path: reprobuild/bench-results/
+          retention-days: 30
+
+      - name: Compare pull request benchmarks
+        if: github.event_name == 'pull_request'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: customSmallerIsBetter
+          output-file-path: reprobuild/bench-results/benchmark_results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: false
+          save-data-file: false
+          comment-always: true
+          alert-threshold: '120%'
+
+      - name: Publish main benchmark history
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: customSmallerIsBetter
+          output-file-path: reprobuild/bench-results/benchmark_results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: perf/bench/${{ matrix.platform }}
+          alert-threshold: '120%'

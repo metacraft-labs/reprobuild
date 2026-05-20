@@ -18,13 +18,19 @@ nimcache="build/nimcache/reprobuild_m23_bench"
 output="bench-results/reprobuild-core-mvp-performance.json"
 history="bench-results/history/reprobuild-core-mvp-performance.latest.json"
 
-nim c \
-  --threads:on \
-  --verbosity:0 \
-  --hints:off \
-  --nimcache:"${nimcache}" \
-  --out:"${bench_bin}" \
-  benchmarks/lib/reprobuild_m23_bench.nim >/dev/null
+nim_flags=(
+  --threads:on
+  --verbosity:0
+  --hints:off
+  --nimcache:"${nimcache}"
+  --out:"${bench_bin}"
+)
+
+if [ "${REPROBUILD_BUILD_MODE:-debug}" = "release" ]; then
+  nim_flags+=(-d:release --opt:speed)
+fi
+
+nim c "${nim_flags[@]}" benchmarks/lib/reprobuild_m23_bench.nim >/dev/null
 
 echo "running Reprobuild M23 production benchmark gate" >&2
 "${bench_bin}" \
