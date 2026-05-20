@@ -42,17 +42,30 @@
 ##
 ## M72 Deliverable 3 — non-destructive materialization:
 ##   The materializer NEVER blindly `removeFile`s a pre-existing
-##   target. Three cases:
+##   target. Cases:
 ##     * target absent              → create the link.
 ##     * target is ALREADY the correct symlink/junction to the stow
 ##       source → no-op CACHE-HIT (the link is not deleted+recreated).
-##     * target is a regular file, OR a link to a DIFFERENT source →
+##     * target is a regular file, OR a link to a DIFFERENT source,
+##       whose content is BYTE-IDENTICAL to the stow source → no-op
+##       CACHE-HIT (M76): the target is left exactly as is — not
+##       deleted, not recreated. This was never a real conflict.
+##     * target is a regular file, OR a link to a DIFFERENT source,
+##       whose content GENUINELY DIFFERS from the stow source →
 ##       CONFLICT: the target is left byte-identical and
 ##       `EStowConflict` is raised, unless the caller passes a
 ##       reconcile-drift policy (then the prior content is recorded
 ##       and the target is replaced).
 ##   The copy fallback obeys the same rule: a pre-existing differing
 ##   file is never overwritten without the drift gate.
+##
+## M76 — plan/apply consistency:
+##   `stowTargetMatchesSource` is the SINGLE byte-identical predicate.
+##   `tryCreateSymlink`, the copy fallback, AND the apply planner's
+##   `previewStowItem` all consult it, so a plan that previews a
+##   cache-hit never fails at apply with `EStowConflict`. The
+##   comparison is raw bytes via `readFile` (which follows links, so a
+##   wrong-link target's *resolved* content is what is compared).
 
 import std/[os, strutils]
 
@@ -229,6 +242,34 @@ proc readLinkTargetBestEffort(linkPath: string): string =
   except OSError, IOError:
     result = ""
 
+proc stowTargetMatchesSource*(target, desiredSource: string): bool =
+  ## M76: the ONE byte-identical predicate shared by the apply path.
+  ##
+  ## Decide whether whatever currently lives at `target` (a regular
+  ## file, OR a symlink/junction to some — possibly different — source)
+  ## has content byte-identical to the desired stow source. When true,
+  ## a target that `inspectTarget` classifies as `tsRegularFile` or
+  ## `tsWrongLink` is NOT a real conflict: it is a no-op cache-hit.
+  ##
+  ## The comparison is RAW BYTES via `readFile`, exactly the mechanism
+  ## `previewStowItem` (the plan path) uses — so the plan's cache-hit
+  ## verdict and the apply's cache-hit verdict are always identical.
+  ## `readFile` follows symlinks/junctions, so a wrong-link target's
+  ## *resolved* content is what gets compared (a wrong link whose
+  ## resolved bytes equal the source's is still a cache-hit, per the
+  ## M76 deliverable). NEVER mutates the filesystem.
+  try:
+    if not fileExists(desiredSource):
+      return false
+    if not fileExists(target):
+      # `fileExists` follows links; false here means there is no
+      # readable file content at the target (absent, dangling link,
+      # or a directory) — nothing byte-identical to compare against.
+      return false
+    readFile(target) == readFile(desiredSource)
+  except OSError, IOError:
+    false
+
 proc inspectTarget(target, desiredSource: string): TargetInspection =
   ## Classify what currently lives at `target` relative to the desired
   ## stow link. NEVER mutates the filesystem — this is the read the
@@ -264,10 +305,17 @@ proc tryCreateSymlink(target, source: string;
   ##   * target absent                       → create the link.
   ##   * target already the correct symlink  → no-op CACHE-HIT
   ##     (the link is NOT deleted and recreated).
-  ##   * target is a regular file / wrong link → CONFLICT: raise
-  ##     `EStowConflict` (fail-closed) unless `reconcile` is
-  ##     `srpReconcileDrift`, in which case the prior content is
-  ##     recorded by the caller and the target is replaced.
+  ##   * target is a regular file / wrong link whose content is
+  ##     BYTE-IDENTICAL to the stow source → no-op CACHE-HIT (M76).
+  ##     The file/link was never a real conflict — the plan path
+  ##     (`previewStowItem`) already classifies it as a cache-hit, so
+  ##     apply must agree. The target is left exactly as is: not
+  ##     deleted, not recreated.
+  ##   * target is a regular file / wrong link whose content GENUINELY
+  ##     DIFFERS from the source → CONFLICT: raise `EStowConflict`
+  ##     (fail-closed) unless `reconcile` is `srpReconcileDrift`, in
+  ##     which case the prior content is recorded by the caller and
+  ##     the target is replaced.
   ##
   ## Early-returns when the test hook disables symlinks WITHOUT
   ## mutating the filesystem — pre-creating the target's parent dir
@@ -284,6 +332,13 @@ proc tryCreateSymlink(target, source: string;
     outCacheHit = true
     return true
   of tsRegularFile, tsWrongLink:
+    # M76: a regular file or a wrong-source link whose (resolved)
+    # content is byte-identical to the stow source is NOT a conflict —
+    # it is a no-op cache-hit, exactly as `previewStowItem` previews
+    # it. Leave the target untouched: do not delete, do not recreate.
+    if stowTargetMatchesSource(target, source):
+      outCacheHit = true
+      return true
     if reconcile != srpReconcileDrift:
       raiseStowConflict(target, inspection.existingKind, source)
     # Reconcile: the caller already captured the prior content
@@ -409,7 +464,8 @@ proc materializeStowEntry*(profileDir, homeDir: string;
       return
   # Copy fallback — same non-destructive rule. A target that already
   # exists is inspected before any write:
-  #   * byte-identical regular file  → no-op cache-hit.
+  #   * byte-identical regular file / wrong link → no-op cache-hit
+  #     (M76: one shared `stowTargetMatchesSource` predicate).
   #   * differing regular file / wrong link → conflict (fail-closed)
   #     unless reconcile-drift is in effect.
   let parent = parentDir(entry.targetAbsolutePath)
@@ -423,9 +479,13 @@ proc materializeStowEntry*(profileDir, homeDir: string;
     result.mode = smCopy
     result.wasCacheHit = true
     return
-  of tsRegularFile:
-    if preDigest.has and preDigest.digest == result.postWriteDigest:
-      # Byte-identical content already in place — no-op cache-hit.
+  of tsRegularFile, tsWrongLink:
+    # M76: byte-identical (resolved) content already in place — no-op
+    # cache-hit. Leave the target untouched. This is the SAME
+    # `stowTargetMatchesSource` predicate `tryCreateSymlink` and
+    # `previewStowItem` use, so plan and apply always agree.
+    if stowTargetMatchesSource(entry.targetAbsolutePath,
+        entry.sourceAbsolutePath):
       result.mode = smCopy
       result.wasCacheHit = true
       return
@@ -436,12 +496,6 @@ proc materializeStowEntry*(profileDir, homeDir: string;
     try: removeFile(entry.targetAbsolutePath)
     except OSError:
       try: removeDir(entry.targetAbsolutePath) except OSError: discard
-  of tsWrongLink:
-    if reconcile != srpReconcileDrift:
-      raiseStowConflict(entry.targetAbsolutePath, inspection.existingKind,
-        entry.sourceAbsolutePath)
-    result.wasReconciled = true
-    try: removeFile(entry.targetAbsolutePath) except OSError: discard
   of tsAbsent:
     discard
   if parent.len > 0:

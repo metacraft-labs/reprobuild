@@ -897,6 +897,23 @@ integration_scoop_probe_gui_and_timeout:
         tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim \
         2>&1 | tee test-logs/integration_scoop_probe_gui_and_timeout.log
 
+integration_stow_byte_identical_target_is_cache_hit:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_stow_byte_identical_target_is_cache_hit.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/integration_stow_byte_identical_target_is_cache_hit \
+        --out:build/test-bin/integration_stow_byte_identical_target_is_cache_hit \
+        tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim \
+        2>&1 | tee test-logs/integration_stow_byte_identical_target_is_cache_hit.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

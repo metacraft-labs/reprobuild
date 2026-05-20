@@ -741,6 +741,14 @@ proc previewStowItem(profileDir, homeDir: string;
     if pointsAtSource:
       result.action = piaCacheHit
       result.detail = "already correct link"
+    elif stowTargetMatchesSource(target, source):
+      # M76: a symlink/junction to a DIFFERENT source whose resolved
+      # content is nonetheless byte-identical to the desired source is
+      # a cache-hit — the apply path agrees (`tryCreateSymlink` /
+      # copy fallback use the same `stowTargetMatchesSource` predicate).
+      result.action = piaCacheHit
+      result.detail = "existing link's resolved content is byte-identical " &
+        "to the stow source"
     else:
       var resolved = ""
       try: resolved = expandSymlink(target)
@@ -751,9 +759,10 @@ proc previewStowItem(profileDir, homeDir: string;
     return
   # A regular file (or directory) at the target path.
   if fileExists(target):
-    let liveRaw = readFile(target)
-    let srcRaw = readFile(source)
-    if liveRaw == srcRaw:
+    # M76: the ONE byte-identical predicate, shared with the apply
+    # path (`tryCreateSymlink` and the stow copy fallback) — so a
+    # plan that previews a cache-hit never fails at apply.
+    if stowTargetMatchesSource(target, source):
       result.action = piaCacheHit
       result.detail = "regular file already byte-identical to source"
     else:
