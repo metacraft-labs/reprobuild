@@ -3,7 +3,8 @@
 ##
 ## Two responsibilities:
 ##
-##   1. **Discovery**: walk `<profile-dir>/stow/` and synthesize one
+##   1. **Discovery**: walk `<profile-dir>/stow/` following the GNU
+##      `stow` *package* convention and synthesize one
 ##      `PlannedGeneratedFile` per regular file, with
 ##      `sourceKind = pgfsStowFile` and `stowSourcePath` set. The
 ##      planner appends these to its `generatedFiles` list before
@@ -12,6 +13,20 @@
 ##      (symlink → junction → copy). The chosen mode is recorded as
 ##      `stow-symlink`, `stow-junction`, or `stow-copy` on the
 ##      manifest record.
+##
+## M73 — GNU `stow` package layout:
+##   Each immediate SUBDIRECTORY of `<profile-dir>/stow/` is a GNU
+##   `stow` *package*. A file at `stow/<package>/<rel>` materializes
+##   at `$HOME/<rel>` — the `<package>` segment is STRIPPED and the
+##   within-package relative path (`<rel>`, including any nested
+##   directories and dotfile names) is preserved verbatim. For
+##   example `stow/git/.gitconfig` -> `$HOME/.gitconfig` and
+##   `stow/vim/.config/nvim/init.lua` -> `$HOME/.config/nvim/init.lua`.
+##   A file located DIRECTLY under `stow/` (not inside any package
+##   directory) is not valid GNU `stow` layout: it is reported as a
+##   loose file via the `IStowLooseFile` informational diagnostic and
+##   NOT materialized. There is no flat-mapping fallback — the
+##   immediate subdirectories of `stow/` are packages, period.
 ##
 ## The decision tree is observable through two test hooks:
 ##
@@ -91,18 +106,50 @@ type
 # Discovery
 # ---------------------------------------------------------------------------
 
-proc discoverStowEntries*(profileDir, homeDir: string): seq[StowEntry] =
+type
+  StowDiscovery* = object
+    ## Result of a GNU `stow` package-layout discovery walk.
+    entries*: seq[StowEntry]
+      ## One per regular file inside a package directory. The
+      ## `homeRelativePath` / `targetAbsolutePath` have the package
+      ## level stripped.
+    looseFiles*: seq[string]
+      ## Files found DIRECTLY under `stow/` (not inside any package
+      ## directory). These are NOT valid GNU `stow` layout — the
+      ## caller emits an `IStowLooseFile` diagnostic per entry and
+      ## materializes none of them. Paths are relative to `stow/`.
+
+proc discoverStowEntries*(profileDir, homeDir: string): StowDiscovery =
+  ## Walk `<profile-dir>/stow/` following the GNU `stow` package
+  ## convention. Each immediate subdirectory of `stow/` is a package;
+  ## a file at `stow/<package>/<rel>` produces a `StowEntry` whose
+  ## target is `$HOME/<rel>` — the `<package>` level stripped. A file
+  ## directly under `stow/` is not valid GNU `stow` layout and is
+  ## returned in `looseFiles` for the caller to diagnose; it is never
+  ## materialized. An empty package directory contributes nothing.
   let stowRoot = profileDir / StowSubdirName
   if not dirExists(stowRoot):
-    return @[]
-  for path in walkDirRec(stowRoot, yieldFilter = {pcFile, pcLinkToFile},
-      relative = true):
-    let normalized = path.replace('\\', '/')
-    var entry: StowEntry
-    entry.sourceAbsolutePath = stowRoot / path
-    entry.homeRelativePath = normalized
-    entry.targetAbsolutePath = homeDir / path
-    result.add entry
+    return StowDiscovery()
+  # Loose files: regular files sitting directly under `stow/`.
+  for kind, path in walkDir(stowRoot, relative = true):
+    if kind in {pcFile, pcLinkToFile}:
+      result.looseFiles.add path.replace('\\', '/')
+  # Packages: each immediate subdirectory of `stow/`. The package
+  # name is the directory name; it is STRIPPED on materialization.
+  for kind, pkgPath in walkDir(stowRoot, relative = true):
+    if kind notin {pcDir, pcLinkToDir}:
+      continue
+    let packageDir = stowRoot / pkgPath
+    for filePath in walkDirRec(packageDir, yieldFilter = {pcFile, pcLinkToFile},
+        relative = true):
+      # `filePath` is the within-package relative path — the path
+      # that maps verbatim under `$HOME` with the package stripped.
+      let withinPackage = filePath.replace('\\', '/')
+      var entry: StowEntry
+      entry.sourceAbsolutePath = packageDir / filePath
+      entry.homeRelativePath = withinPackage
+      entry.targetAbsolutePath = homeDir / filePath
+      result.entries.add entry
 
 proc stowEntriesToPlanned*(entries: seq[StowEntry]): seq[PlannedGeneratedFile] =
   for e in entries:
@@ -259,27 +306,35 @@ proc tryCreateSymlink(target, source: string;
   except OSError, IOError:
     false
 
-proc tryCreateJunctionAtAncestor(profileStowRoot, homeDir, homeRel: string;
+proc tryCreateJunctionAtAncestor(homeDir, homeRel: string;
                                  sourceFile: string;
                                  actualTarget: var string): bool =
   ## Windows-only junction fallback. The spec mandates "deepest
   ## stow-exclusive ancestor". For Phase B's first cut we pick the
   ## immediate parent directory of the target file (if that directory
-  ## does not yet exist on disk). Files at the root of the stow tree
-  ## (e.g. `stow/.gitconfig`) cannot be junctioned because $HOME
-  ## itself can never be replaced.
+  ## does not yet exist on disk). A file whose package-stripped
+  ## `$HOME` path has no parent directory (e.g. `stow/<pkg>/.gitconfig`
+  ## materializing at `$HOME/.gitconfig`) cannot be junctioned because
+  ## `$HOME` itself can never be replaced.
+  ##
+  ## M73: `homeRel` is the PACKAGE-STRIPPED relative path; the junction
+  ## links `$HOME/<relParent>` to the stow source's parent directory,
+  ## which is taken directly from `sourceFile`'s absolute path — NOT
+  ## reconstructed from `homeRel` (the package level is absent there).
   when defined(windows):
     if getEnv(DisableJunctionEnvVar) == "1":
       return false
     let relPath = homeRel
     let slash = relPath.rfind('/')
     if slash <= 0:
-      return false  # at stow root; not junctionable
+      return false  # at $HOME root; not junctionable
     let relParent = relPath[0 ..< slash]
     let homeParent = homeDir / relParent.replace('/', DirSep)
     if dirExists(homeParent):
       return false  # ancestor already populated; would clobber
-    let stowParent = profileStowRoot / relParent.replace('/', DirSep)
+    # The stow-side junction target is the real source file's parent
+    # directory inside `stow/<package>/...`.
+    let stowParent = parentDir(sourceFile)
     if not dirExists(stowParent):
       return false
     try:
@@ -347,9 +402,8 @@ proc materializeStowEntry*(profileDir, homeDir: string;
     result.wasReconciled = reconciled
     return
   when defined(windows):
-    let stowRoot = profileDir / StowSubdirName
     var junctioned: string
-    if tryCreateJunctionAtAncestor(stowRoot, homeDir, entry.homeRelativePath,
+    if tryCreateJunctionAtAncestor(homeDir, entry.homeRelativePath,
         entry.sourceAbsolutePath, junctioned):
       result.mode = smJunction
       return

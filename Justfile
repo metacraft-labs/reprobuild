@@ -858,6 +858,23 @@ integration_stow_non_destructive_over_existing:
         tests/e2e/m72/t_integration_stow_non_destructive_over_existing.nim \
         2>&1 | tee test-logs/integration_stow_non_destructive_over_existing.log
 
+integration_stow_gnu_package_layout:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_stow_gnu_package_layout.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/integration_stow_gnu_package_layout \
+        --out:build/test-bin/integration_stow_gnu_package_layout \
+        tests/e2e/m73/t_integration_stow_gnu_package_layout.nim \
+        2>&1 | tee test-logs/integration_stow_gnu_package_layout.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

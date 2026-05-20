@@ -1,0 +1,1 @@
+this file is directly under stow/ and is not a GNU stow package

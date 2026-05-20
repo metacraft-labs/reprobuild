@@ -98,6 +98,7 @@ type
     piaUpdate = "update"              ## resource: would be updated
     piaDestroy = "destroy"            ## resource: would be destroyed
     piaNoOp = "no-op"                 ## resource / item: nothing to do
+    piaSkip = "skip"                  ## stow: loose file, not materialized
 
   PlanItem* = object
     ## One previewed operation in a `repro home apply --plan` run.
@@ -798,7 +799,8 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
     applyPlan.configContributions)
   for s in synthetic:
     applyPlan.generatedFiles.add(s)
-  let stowEntries = discoverStowEntries(opts.profileDir, opts.homeDir)
+  let stowDiscovery = discoverStowEntries(opts.profileDir, opts.homeDir)
+  let stowEntries = stowDiscovery.entries
   if stowEntries.len > 0:
     let stowPlanned = stowEntriesToPlanned(stowEntries)
     for sp in stowPlanned:
@@ -839,6 +841,14 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
     if item.action == piaConflictDrift:
       inc result.driftCount
     result.items.add(item)
+  # M73: a file directly under `stow/` is not valid GNU `stow` layout
+  # — report it as a skipped stow item; it is not materialized.
+  for loose in stowDiscovery.looseFiles:
+    result.items.add(PlanItem(category: "stow",
+      name: StowSubdirName & "/" & loose,
+      action: piaSkip,
+      detail: "loose file directly under stow/ — not a GNU stow " &
+        "package; skipped (IStowLooseFile)"))
 
   # ---- Generated files / managed blocks / launchers preview -------------
   var prevFileDigests = initTable[string, Digest256]()
@@ -1024,11 +1034,26 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       applyPlan.configContributions)
     for s in synthetic:
       applyPlan.generatedFiles.add(s)
-    let stowEntries = discoverStowEntries(opts.profileDir, opts.homeDir)
+    let stowDiscovery = discoverStowEntries(opts.profileDir, opts.homeDir)
+    let stowEntries = stowDiscovery.entries
     if stowEntries.len > 0:
       let stowPlanned = stowEntriesToPlanned(stowEntries)
       for sp in stowPlanned:
         applyPlan.generatedFiles.add(sp)
+    # M73: a file located directly under `stow/` (not inside a GNU
+    # `stow` package directory) is not valid GNU `stow` layout. Emit
+    # an informational `IStowLooseFile` diagnostic per loose file and
+    # do NOT materialize it — apply continues normally.
+    for loose in stowDiscovery.looseFiles:
+      applyPlan.diagnostics.add(StowDiagnostic(
+        severity: dsInfo,
+        code: sdIStowLooseFile,
+        path: StowSubdirName & "/" & loose,
+        message: "IStowLooseFile: '" & StowSubdirName & "/" & loose &
+          "' sits directly under stow/ and is not inside a GNU stow " &
+          "package directory; it was skipped and not materialized. " &
+          "Move it into a package subdirectory (e.g. stow/<package>/" &
+          loose & ") for it to be applied."))
     # Suppression deduplicates by `relativeHomePath`. The stow entry
     # wins where it overlaps a package output; diagnostics are emitted
     # for shadowed package outputs and dead config: contributions.

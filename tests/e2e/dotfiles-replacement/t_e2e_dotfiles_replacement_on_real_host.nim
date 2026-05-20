@@ -418,10 +418,17 @@ suite "M70 gate: e2e_dotfiles_replacement_on_real_host":
       check (fileExists(stableBin / (b.app & ".exe")) or
              fileExists(stableBin / (b.app & ".cmd")))
 
-    # The stow tree materialized: 47 dotfiles mirrored into the
-    # isolated $HOME (the real stow/ tree is read-only input).
-    check fileExists(homeDir / "git" / ".gitconfig")
-    check dirExists(homeDir / "nvim-lazyvim-vanilla")
+    # The stow tree materialized into the isolated $HOME (the real
+    # stow/ tree is read-only input). M73: the user's `~/dotfiles/stow/`
+    # follows the GNU `stow` package convention — the immediate
+    # subdirectories (`git/`, `nvim-lazyvim-vanilla/`, ...) are
+    # PACKAGE names and are STRIPPED on materialization. So
+    # `stow/git/.gitconfig` materializes at `$HOME/.gitconfig` (not
+    # `$HOME/git/.gitconfig`), and `stow/nvim-lazyvim-vanilla/.config/
+    # nvim-lazyvim-vanilla/init.lua` materializes at
+    # `$HOME/.config/nvim-lazyvim-vanilla/init.lua`.
+    check fileExists(homeDir / ".gitconfig")
+    check dirExists(homeDir / ".config" / "nvim-lazyvim-vanilla")
 
     # -------------------------------------------------------------------
     # STEP 3: no-op re-apply.

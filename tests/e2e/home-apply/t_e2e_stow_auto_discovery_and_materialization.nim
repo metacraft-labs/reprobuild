@@ -152,11 +152,14 @@ suite "M63 gate 5: e2e_stow_auto_discovery_and_materialization":
         writeFile(f.absoluteOutputPath, "edited-via-link")
         let reread = readFile(f.stowSource)
         check reread == "edited-via-link"
-    # Restore the source file for the no-op re-apply.
+    # Restore the source file for the no-op re-apply. M73: the
+    # fixture uses GNU `stow` package layout — the sources live
+    # under package directories (`gitpkg/`, `confpkg/`).
     if anySymlink:
-      writeFile(fixture.profileDir / "stow" / ".gitconfig",
+      writeFile(fixture.profileDir / "stow" / "gitpkg" / ".gitconfig",
         "[user]\n  email = stow-basic@example.com\n")
-      writeFile(fixture.profileDir / "stow" / ".config" / "foo" / "bar.toml",
+      writeFile(fixture.profileDir / "stow" / "confpkg" / ".config" / "foo" /
+        "bar.toml",
         "[a]\nvalue = \"stow-basic\"\n")
 
     let noop = runRepro(fixture.baseEnv, ["home", "apply"])

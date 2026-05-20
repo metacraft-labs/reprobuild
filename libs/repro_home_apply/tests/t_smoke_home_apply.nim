@@ -26,21 +26,36 @@ suite "Home-apply smoke":
     let cleared = readMarker(SmokeDir)
     check (not cleared.present)
 
-  test "stow discovery walks profile-dir/stow/ only":
+  test "stow discovery strips GNU stow package level":
+    # M73: each immediate subdirectory of `stow/` is a GNU `stow`
+    # package; the package name is STRIPPED on materialization. A
+    # file directly under `stow/` is a loose file, not materialized.
     let profileDir = SmokeDir / "profile"
     let homeDir = SmokeDir / "home"
     resetDir(profileDir)
     resetDir(homeDir)
-    createDir(profileDir / "stow" / ".config" / "foo")
-    writeFile(profileDir / "stow" / ".gitconfig", "[user]\n  email = test@example.com\n")
-    writeFile(profileDir / "stow" / ".config" / "foo" / "bar.toml", "[a]\n")
-    let entries = discoverStowEntries(profileDir, homeDir)
-    check entries.len == 2
+    createDir(profileDir / "stow" / "gitpkg")
+    createDir(profileDir / "stow" / "confpkg" / ".config" / "foo")
+    writeFile(profileDir / "stow" / "gitpkg" / ".gitconfig",
+      "[user]\n  email = test@example.com\n")
+    writeFile(profileDir / "stow" / "confpkg" / ".config" / "foo" / "bar.toml",
+      "[a]\n")
+    # A loose file directly under stow/ — not valid GNU stow layout.
+    writeFile(profileDir / "stow" / "loose.txt", "loose\n")
+    let discovery = discoverStowEntries(profileDir, homeDir)
+    check discovery.entries.len == 2
     var rels: seq[string]
-    for e in entries:
+    var targets: seq[string]
+    for e in discovery.entries:
       rels.add e.homeRelativePath
+      targets.add e.targetAbsolutePath
+    # Package level stripped: `gitpkg`/`confpkg` do NOT appear.
     check ".gitconfig" in rels
     check ".config/foo/bar.toml" in rels
+    check (homeDir / ".gitconfig") in targets
+    check (homeDir / ".config" / "foo" / "bar.toml") in targets
+    # The loose file is reported, not turned into an entry.
+    check discovery.looseFiles == @["loose.txt"]
 
   test "suppression layer pairs stow file with package output":
     var pkgOutput = PlannedGeneratedFile(

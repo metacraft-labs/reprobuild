@@ -114,6 +114,7 @@ type
   StowDiagnosticCode* = enum
     ## Spec-named diagnostic codes for the M63 Phase B stow surface.
     sdIStowFellBack = "IStowFellBack"
+    sdIStowLooseFile = "IStowLooseFile"
     sdWStowOverridesShadowed = "WStowOverridesShadowed"
     sdWStowAmbiguousSuppression = "WStowAmbiguousSuppression"
 

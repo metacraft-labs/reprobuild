@@ -83,7 +83,10 @@ proc setup(tempRoot: string): tuple[stateDir, storeRoot, homeDir,
   createDir(result.storeRoot)
   createDir(result.homeDir)
   copyTree(FixtureSrc, result.profileDir)
-  result.stowSource = result.profileDir / "stow" / ".m72stowrc"
+  # M73: the fixture's `stow/` follows the GNU `stow` package
+  # convention — the source lives inside package directory `m72pkg/`
+  # and materializes at `$HOME/.m72stowrc` (package level stripped).
+  result.stowSource = result.profileDir / "stow" / "m72pkg" / ".m72stowrc"
   result.baseEnv = @[
     (k: "REPRO_HOME_PROFILE_DIR", v: result.profileDir),
     (k: "REPRO_HOME_STATE_DIR", v: result.stateDir),
