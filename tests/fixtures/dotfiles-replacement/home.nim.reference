@@ -1,0 +1,85 @@
+# nim-check: skip
+#
+# Reprobuild home profile for the zahary Windows development host.
+# ---------------------------------------------------------------------------
+# This file is the Reprobuild "intent layer": a declarative description of
+# the elevation-free portion of this machine's environment. It is added
+# ALONGSIDE the existing Nix-flake dotfiles and `bin/home-switch.ps1`
+# Windows workflow -- nothing else in this repository is moved, deleted, or
+# rewritten. `repro home apply` reads this file, realizes the packages
+# through Scoop, materializes the `stow/` tree, and writes the managed
+# blocks / registry contributions declared below.
+#
+# Authored for milestone M70 (Real ~/dotfiles Replacement E2E). It is the
+# ONLY file Reprobuild authors inside this repository; the structural
+# editor (`repro home set` / `repro home add`) edits this file in place.
+#
+# DELIBERATELY OUT OF SCOPE (left for a later milestone):
+#   * OpenSSH server install + sshd service config  -> system scope (M69)
+#   * GPG secret decryption / age-secrets bootstrap  -> system scope / future
+#   * 7zip is a transitive Scoop dependency, not a user-chosen package, so
+#     it is intentionally NOT listed below (see the activity comment).
+# `home-switch.ps1` continues to own those concerns until they are ported.
+
+import repro/profile
+
+profile "zahary":
+
+  # The `default` activity is always enabled on every host. It carries the
+  # user-facing Scoop packages that `home-switch.ps1` installs. They are
+  # guarded by `when windows:` because this profile currently only
+  # describes the Windows host; the same package set on Linux/macOS is
+  # still owned by the Nix flake.
+  activity default:
+    when windows:
+      # --- secrets / crypto tooling ---
+      age              # extras bucket -- age encryption CLI
+      gnupg            # main bucket   -- GnuPG
+
+      # --- version control ---
+      git              # main bucket
+      gh               # main bucket   -- GitHub CLI
+
+      # --- terminal / editor ---
+      windows-terminal # extras bucket
+      vscode           # extras bucket
+      neovim           # main bucket
+
+      # --- shells / environment ---
+      pwsh             # main bucket   -- PowerShell 7
+      direnv           # main bucket   -- per-directory env loader
+
+      # --- search ---
+      ripgrep          # main bucket   -- fast grep
+
+      # --- browsers ---
+      firefox          # extras bucket
+      googlechrome     # extras bucket
+
+      # --- AI dev tooling ---
+      codex            # main bucket   -- OpenAI Codex CLI
+      claude-code      # main bucket   -- Anthropic Claude Code CLI
+
+  # Per-package configuration overrides. These feed the Configurable
+  # system at priority `prSet`. The git identity values are mirrored from
+  # the user's live `~/.gitconfig` (`stow/git/.gitconfig`).
+  config:
+    git:
+      userName = "Zahary Karadjov"
+      userEmail = "zahary@gmail.com"
+
+  # Host -> activity map. `default` is always enabled regardless of this
+  # block; the entry below documents the mapping for the real development
+  # host explicitly (resolved host identity: `eli-pc`).
+  hosts:
+    "eli-pc": [default]
+
+# ---------------------------------------------------------------------------
+# stow/ auto-discovery
+# ---------------------------------------------------------------------------
+# This profile directory contains a `stow/` subtree (git, ssh, vim, nvim,
+# jj, kitty, ghostty, zsh, tmux, zellij, windows-terminal, ai-agents,
+# shell-helpers, hammerspoon, nix). Reprobuild's apply planner walks
+# `stow/` automatically and materializes every regular file at the
+# corresponding path under $HOME -- no hand-listing is required here. The
+# `stow/` tree is hand-authored and is NOT modified by Reprobuild.
