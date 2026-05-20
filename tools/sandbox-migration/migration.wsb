@@ -1,0 +1,102 @@
+<Configuration>
+  <!--
+    M70 dotfiles-migration test harness - Windows Sandbox config.
+
+    Launches a disposable, fully-isolated Windows desktop, maps in the
+    inputs the in-sandbox provisioning+test script needs, and runs that
+    script at logon. Results are written to the one READ-WRITE mapped
+    folder (D:\metacraft\sandbox-migration-out) so the host can read them
+    after the sandbox is torn down.
+
+    Everything mapped in is READ-ONLY except the OUTPUT folder. The
+    in-sandbox script copies the read-only inputs (dotfiles, repro.exe)
+    to writable sandbox paths before touching them. NOTHING the sandbox
+    does can affect the host filesystem outside the OUTPUT folder.
+  -->
+  <VGpu>Disable</VGpu>
+  <Networking>Enable</Networking>
+  <MemoryInMB>8192</MemoryInMB>
+  <MappedFolders>
+    <!-- The built `repro` binary directory (repro.exe + sqlite3_64.dll
+         + repro-launcher.exe). Read-only; the script copies repro.exe
+         and the DLL/launcher to a writable sandbox path. -->
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\build\bin</HostFolder>
+      <SandboxFolder>C:\harness\repro-bin</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- The real user dotfiles repo. Read-only; the script copies it to
+         C:\Users\WDAGUtilityAccount\dotfiles (writable) and runs the
+         migration against the copy. The real repo is never written. -->
+    <MappedFolder>
+      <HostFolder>C:\Users\zahary\dotfiles</HostFolder>
+      <SandboxFolder>C:\harness\dotfiles-src</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- The host Scoop download cache. Read-only; the script copies it
+         into the sandbox Scoop's cache dir so `scoop install` is a fast
+         local extract (no network downloads for cached apps). -->
+    <MappedFolder>
+      <HostFolder>C:\Users\zahary\scoop\cache</HostFolder>
+      <SandboxFolder>C:\harness\scoop-cache</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- The host Scoop bucket directories (main + extras). Read-only;
+         the script copies buckets\main and buckets\extras into the
+         sandbox Scoop's buckets\ dir DIRECTLY, instead of running
+         `scoop bucket add` over the network. The manifests are small
+         JSON files - a fast, deterministic copy - so EVERY manifest the
+         host has is guaranteed present in the sandbox (this is the M75
+         fidelity fix: the prior `scoop bucket add extras` over the
+         network was flaky and left the extras-bucket apps unresolvable). -->
+    <MappedFolder>
+      <HostFolder>C:\Users\zahary\scoop\buckets</HostFolder>
+      <SandboxFolder>C:\harness\scoop-buckets</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- The host Scoop apps trees. Read-only; used by the ALTERNATIVE
+         install path - if a `scoop install` of a large GUI app proves
+         too slow/flaky, the script copies the host's already-installed
+         apps\<app>\<version>\ tree in (junction-aware: robocopy /E /XJ)
+         and recreates the `current` junction + `scoop reset`. -->
+    <MappedFolder>
+      <HostFolder>C:\Users\zahary\scoop\apps</HostFolder>
+      <SandboxFolder>C:\harness\scoop-apps</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- The in-sandbox provisioning+test script. -->
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\tools\sandbox-migration</HostFolder>
+      <SandboxFolder>C:\harness\scripts</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- OUTPUT directory - the ONLY read-write mapped folder. All
+         artifacts + the DONE sentinel land here for the host to read. -->
+    <MappedFolder>
+      <HostFolder>D:\metacraft\sandbox-migration-out</HostFolder>
+      <SandboxFolder>C:\harness\out</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+
+  <LogonCommand>
+    <!--
+      The LogonCommand is a `cmd` one-liner, NOT a direct PowerShell -File
+      call. Rationale: a bare `powershell.exe -File <mapped-path>` LogonCommand
+      can fail SILENTLY in Windows Sandbox (mapped-folder mount race / shell
+      not ready) with no output anywhere. Routing through `cmd /c` lets us:
+        1. write an immediate heartbeat into the host-visible OUTPUT folder,
+           proving the LogonCommand fired at all;
+        2. copy the script to a writable LOCAL path before running it;
+        3. capture PowerShell's own stdout/stderr (even a startup failure)
+           to a host-visible log via cmd-level redirection.
+    -->
+    <Command>cmd.exe /c "echo logon-fired %DATE% %TIME% &gt; C:\harness\out\_logon-heartbeat.txt &amp; copy /Y C:\harness\scripts\provision-and-migrate.ps1 C:\provision-and-migrate.ps1 &gt;&gt; C:\harness\out\_logon-heartbeat.txt 2&gt;&amp;1 &amp; powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\provision-and-migrate.ps1 &gt; C:\harness\out\_logon-powershell.log 2&gt;&amp;1"</Command>
+  </LogonCommand>
+</Configuration>
