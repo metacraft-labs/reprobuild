@@ -886,6 +886,17 @@ integration_scoop_manifest_bin_resolution:
         tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim \
         2>&1 | tee test-logs/integration_scoop_manifest_bin_resolution.log
 
+integration_scoop_probe_gui_and_timeout:
+    mkdir -p test-logs build/test-bin build/nimcache build/test-tmp
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/integration_scoop_probe_gui_and_timeout \
+        --out:build/test-bin/integration_scoop_probe_gui_and_timeout \
+        tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim \
+        2>&1 | tee test-logs/integration_scoop_probe_gui_and_timeout.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

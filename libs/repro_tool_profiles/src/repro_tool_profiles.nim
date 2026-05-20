@@ -61,6 +61,12 @@ type
     spec*: ToolProbeSpec
     exitCode*: int
     output*: string
+    timedOut*: bool
+      ## M75: true when the probe was killed by the wall-clock timeout
+      ## (`probeTimeoutSeconds`) rather than exiting on its own. A
+      ## timed-out probe is a STRUCTURED outcome — never an infinite
+      ## block — and carries the sentinel `exitCode`
+      ## `probeTimeoutExitCode`.
 
   PathOnlyToolProfile* = object
     installMethod*: string
@@ -263,10 +269,126 @@ proc configuredProbes*(packageSelector, executableName: string): seq[
 proc shellCommand(args: openArray[string]): string =
   args.mapIt(quoteShell(it)).join(" ")
 
+# ---------------------------------------------------------------------------
+# M75: probe timeout + process-tree kill.
+#
+# Any executable probe that IS run (an `--version`-style invocation) is
+# bounded by a hard wall-clock timeout. A misbehaving probe — a GUI
+# binary that launches the full application and never exits, or a
+# console tool stuck in an infinite loop — can therefore NEVER hang
+# `repro home apply`. On timeout the probe process AND its entire child
+# process tree are killed (a GUI app spawns helper children — Chrome's
+# GPU / renderer processes — that outlive a bare parent-kill), and the
+# probe result is recorded as a structured `timedOut` outcome.
+const
+  probeTimeoutSeconds* = 10
+    ## Hard wall-clock bound on every executable probe. 10s is generous
+    ## for an `--version` print by a legitimate console tool yet short
+    ## enough that a hung probe surfaces quickly.
+  probeTimeoutExitCode* = 124
+    ## Sentinel exit code recorded for a probe killed by the timeout —
+    ## the conventional `timeout(1)` exit status. Distinguishes a
+    ## timed-out probe from a probe that genuinely exited 0 or non-zero.
+
+proc killProcessTree(pid: int) =
+  ## Kill the process `pid` AND its entire descendant process tree. A
+  ## bare parent-kill is not enough: a GUI application spawns helper
+  ## children that keep running (and keep the apply effectively
+  ## blocked / leave orphans) after the parent dies.
+  when defined(windows):
+    # `taskkill /T` walks the child process tree; `/F` forces
+    # termination. This reaps the whole tree, not just the root.
+    discard execCmdEx("taskkill /T /F /PID " & $pid)
+  else:
+    # POSIX: signal the process group. The child is started in its own
+    # session/group below, so a negative-pid kill hits the whole tree.
+    discard execCmdEx("kill -KILL -" & $pid & " 2>/dev/null")
+    discard execCmdEx("kill -KILL " & $pid & " 2>/dev/null")
+
 proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
-  let command = @[executablePath] & spec.args
-  let res = execCmdEx(shellCommand(command))
-  ToolProbeResult(spec: spec, exitCode: res.exitCode, output: res.output)
+  ## Run an executable probe under a hard wall-clock timeout.
+  ##
+  ## The probe is launched with `startProcess` (NOT a blocking
+  ## `execCmdEx`/`execProcess`) so the wait is bounded: the parent polls
+  ## `peekExitCode` against a deadline `probeTimeoutSeconds` in the
+  ## future, and on expiry kills the probe's whole process tree. The
+  ## probe's stdout+stderr are redirected to a temp file rather than an
+  ## OS pipe — a process that fills a pipe buffer while the parent is
+  ## blocked in a wait would deadlock; a file sink cannot back-pressure.
+  result.spec = spec
+  let tmpDir = getTempDir()
+  let outPath = tmpDir / ("repro-probe-" & $getCurrentProcessId() & "-" &
+    spec.name & "-" & $epochTime().int & ".log")
+  # The probe command line: the executable plus the probe args, each
+  # `quoteShell`-quoted, with stdout+stderr redirected to a temp FILE.
+  # A file sink (not an OS pipe) is deliberate — a chatty probe that
+  # fills a pipe buffer while the parent is in a bounded wait could
+  # DEADLOCK; a file cannot back-pressure.
+  #
+  # The shell is invoked via the explicit `args` form
+  # (`startProcess(shell, args = @["/c"|"-c", cmdLine])`), NOT
+  # `poEvalCommand`: `poEvalCommand` mangles a `>` redirection operator
+  # embedded in the command (it is passed to the probe as a literal
+  # argument instead of being interpreted by the shell), whereas the
+  # `args` form hands `cmd`/`sh` one quoted blob it parses itself —
+  # redirection and all.
+  let inner = (@[executablePath] & spec.args).mapIt(quoteShell(it)).join(" ")
+  var process: Process
+  try:
+    when defined(windows):
+      let cmdLine = inner & " > " & quoteShell(outPath) & " 2>&1"
+      process = startProcess("cmd.exe", args = @["/c", cmdLine],
+        options = {})
+    else:
+      # `setsid` puts the probe in its own session/process group so a
+      # negative-pid kill on timeout reaches the whole tree.
+      let cmdLine = "setsid " & inner & " > " &
+        quoteShell(outPath) & " 2>&1"
+      process = startProcess("/bin/sh", args = @["-c", cmdLine],
+        options = {})
+  except OSError as err:
+    result.exitCode = -1
+    result.output = "probe failed to start: " & err.msg
+    return
+
+  let deadline = epochTime() + probeTimeoutSeconds.float
+  var exitCode = -1
+  var timedOut = false
+  try:
+    while true:
+      let code = process.peekExitCode()
+      if code != -1:
+        exitCode = code
+        break
+      if epochTime() >= deadline:
+        timedOut = true
+        # Kill the WHOLE tree — the launched `cmd.exe`/`sh` plus the
+        # probe binary plus any GUI helper children it spawned.
+        killProcessTree(process.processID)
+        # Reap the now-killed parent so no zombie/handle leaks.
+        discard process.waitForExit()
+        break
+      sleep(50)
+  finally:
+    process.close()
+
+  var captured = ""
+  if fileExists(outPath):
+    try: captured = readFile(outPath)
+    except CatchableError: discard
+    try: removeFile(outPath)
+    except CatchableError: discard
+
+  if timedOut:
+    result.timedOut = true
+    result.exitCode = probeTimeoutExitCode
+    result.output =
+      "probe '" & spec.name & "' timed out after " &
+      $probeTimeoutSeconds & "s and was killed (process tree reaped)\n" &
+      captured
+  else:
+    result.exitCode = exitCode
+    result.output = captured
 
 proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   var payload: seq[byte] = @[]
@@ -1392,14 +1514,32 @@ proc parseScoopManifestBin*(manifestNode: JsonNode; manifestPath: string):
       "EScoopManifestUnreadable: " & manifestPath &
       ": bin field is neither a string nor an array")
 
+proc manifestDeclaresShortcuts*(manifestNode: JsonNode): bool =
+  ## M75: a Scoop manifest's `shortcuts` field is the reliable signal
+  ## that the app is a GUI application with a Start Menu entry. Its mere
+  ## PRESENCE (as a non-empty JSON array) is what matters — Reprobuild
+  ## never creates the shortcut, it only reads the field to decide that
+  ## the app must NOT be exec-probed (a GUI app launched with
+  ## `--version` opens the full application and never exits).
+  if manifestNode.isNil or manifestNode.kind != JObject:
+    return false
+  let node = manifestNode{"shortcuts"}
+  if node.isNil:
+    return false
+  # Scoop's `shortcuts` is an array of `[target, name, ...]` entries.
+  result = node.kind == JArray and node.len > 0
+
 proc readInstalledManifestBin*(versionDir: string):
-    tuple[binPaths: seq[string]; manifestPath: string; present: bool] =
+    tuple[binPaths: seq[string]; manifestPath: string; present: bool;
+          hasShortcuts: bool] =
   ## Read the installed app's `manifest.json` (Scoop copies the bucket
   ## manifest into `<versionDir>/manifest.json` on install) and parse
   ## its `bin` field. `present` is false when no `manifest.json` exists
   ## in the version directory — the caller decides whether that is an
   ## error (it is not for M74: the realize step then has no manifest
   ## `bin` to honor and falls back to the package-declared path).
+  ## M75: `hasShortcuts` reports whether the manifest declares a
+  ## `shortcuts` field — the GUI-app signal that suppresses exec-probing.
   let manifestPath = versionDir / "manifest.json"
   result.manifestPath = manifestPath
   if not fileExists(manifestPath):
@@ -1417,6 +1557,7 @@ proc readInstalledManifestBin*(versionDir: string):
       "EScoopManifestUnreadable: " & manifestPath &
       ": installed manifest top-level JSON is not an object")
   result.binPaths = parseScoopManifestBin(parsed, manifestPath)
+  result.hasShortcuts = manifestDeclaresShortcuts(parsed)
 
 proc selectPrimaryScoopExecutable*(binPaths: seq[string];
                                    preferredLeaf, appName: string): string =
@@ -1442,6 +1583,117 @@ proc selectPrimaryScoopExecutable*(binPaths: seq[string];
     if leaf == appLeafExe or leaf == appLeaf:
       return p
   binPaths[0]
+
+# ---------------------------------------------------------------------------
+# M75: GUI-application detection — PE subsystem inspection.
+#
+# The second GUI signal (after the manifest `shortcuts` field) is the
+# primary executable's PE subsystem. A Windows PE Optional header
+# carries a `Subsystem` field:
+#   * IMAGE_SUBSYSTEM_WINDOWS_GUI (2) — a windowed GUI application; an
+#     `--version` exec-probe launches the full app, which never exits.
+#   * IMAGE_SUBSYSTEM_WINDOWS_CUI (3) — a console application; an
+#     `--version` probe prints and exits — safe (and useful) to probe.
+#
+# PE layout walked here (all offsets bounds-checked):
+#   offset 0x00  : DOS header — must start with the `MZ` magic.
+#   offset 0x3C  : `e_lfanew`, a uint32 LE pointing at the PE header.
+#   <pe>+0x00    : the 4-byte PE signature `PE\0\0`.
+#   <pe>+0x04    : the 20-byte COFF file header.
+#   <pe>+0x18    : the Optional header begins (PE-sig 4 + COFF 20).
+#   <opt>+0x44   : the `Subsystem` field, a uint16 LE — i.e. at
+#                  `<pe> + 4 + 20 + 0x44` = `<pe> + 0x5C` from the PE
+#                  signature start.
+# A file too small, not a PE, or otherwise malformed yields the
+# `unknown` result and the caller falls back to the `shortcuts` signal.
+type
+  PeSubsystem* = enum
+    pssUnknown   ## not a PE / too small / malformed — undetermined
+    pssConsole   ## IMAGE_SUBSYSTEM_WINDOWS_CUI (3)
+    pssGui       ## IMAGE_SUBSYSTEM_WINDOWS_GUI (2)
+
+const
+  imageSubsystemWindowsGui = 2'u16
+  imageSubsystemWindowsCui = 3'u16
+
+proc readU16LeAt(data: openArray[byte]; offset: int): tuple[ok: bool;
+    value: uint16] =
+  ## Bounds-checked little-endian uint16 read.
+  if offset < 0 or offset + 1 >= data.len:
+    return (ok: false, value: 0'u16)
+  (ok: true, value: uint16(data[offset]) or
+    (uint16(data[offset + 1]) shl 8))
+
+proc readU32LeAt(data: openArray[byte]; offset: int): tuple[ok: bool;
+    value: uint32] =
+  ## Bounds-checked little-endian uint32 read.
+  if offset < 0 or offset + 3 >= data.len:
+    return (ok: false, value: 0'u32)
+  (ok: true, value: uint32(data[offset]) or
+    (uint32(data[offset + 1]) shl 8) or
+    (uint32(data[offset + 2]) shl 16) or
+    (uint32(data[offset + 3]) shl 24))
+
+proc peExecutableSubsystem*(path: string): PeSubsystem =
+  ## Inspect the PE Optional header `Subsystem` field of the executable
+  ## at `path`. Returns `pssUnknown` for anything that is not a
+  ## well-formed PE — including a `.cmd`/`.bat`/`.ps1` script, which is
+  ## a console script and is handled by the caller as console.
+  ##
+  ## Every offset is bounds-checked; a truncated or malformed file
+  ## degrades gracefully to `pssUnknown` rather than reading OOB.
+  let ext = path.splitFile.ext.toLowerAscii()
+  if ext in [".cmd", ".bat", ".ps1"]:
+    # A script "executable" — not a PE; the caller treats it as console.
+    return pssUnknown
+  if not fileExists(path):
+    return pssUnknown
+  var data: string
+  try:
+    data = readFile(path)
+  except CatchableError:
+    return pssUnknown
+  let bytes = cast[seq[byte]](data)
+  # DOS header: `MZ` magic at offset 0.
+  if bytes.len < 0x40 or bytes[0] != byte('M') or bytes[1] != byte('Z'):
+    return pssUnknown
+  # `e_lfanew` (uint32 LE) at offset 0x3C points at the PE header.
+  let lfanew = readU32LeAt(bytes, 0x3C)
+  if not lfanew.ok:
+    return pssUnknown
+  let peOffset = int(lfanew.value)
+  # PE signature `PE\0\0` (4 bytes) at peOffset.
+  if peOffset < 0 or peOffset + 4 > bytes.len:
+    return pssUnknown
+  if bytes[peOffset] != byte('P') or bytes[peOffset + 1] != byte('E') or
+     bytes[peOffset + 2] != 0'u8 or bytes[peOffset + 3] != 0'u8:
+    return pssUnknown
+  # Optional header `Subsystem` (uint16 LE) at PE-sig(4) + COFF(20) +
+  # 0x44 = peOffset + 0x5C.
+  let subsystem = readU16LeAt(bytes, peOffset + 0x5C)
+  if not subsystem.ok:
+    return pssUnknown
+  case subsystem.value
+  of imageSubsystemWindowsGui: pssGui
+  of imageSubsystemWindowsCui: pssConsole
+  else: pssUnknown
+
+proc scoopAppIsGuiApplication*(manifestHasShortcuts: bool;
+                               primaryExecutablePath: string): bool =
+  ## M75 GUI-application decision. A realized Scoop app is treated as a
+  ## GUI / non-exec-probeable app when EITHER:
+  ##   * its installed manifest declares a `shortcuts` field (the
+  ##     reliable Scoop GUI signal), OR
+  ##   * its primary executable's PE subsystem is the GUI subsystem.
+  ## A `.cmd`/`.bat`/`.ps1` script, or any non-PE / undetermined file,
+  ## is NOT GUI on the PE signal — it falls through to the `shortcuts`
+  ## result. For a GUI app the post-realize verification is
+  ## presence-on-disk only and the binary is never executed.
+  if manifestHasShortcuts:
+    return true
+  if primaryExecutablePath.len > 0:
+    return peExecutableSubsystem(primaryExecutablePath) == pssGui
+  false
 
 proc deleteJunctionDir(target: string) =
   if not dirExists(target):
@@ -1854,22 +2106,58 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
     scoopJunctionTarget: versionDir)
   result.pathSearchList = @[junctionTarget]
 
+  # M75: GUI-application probe suppression.
+  #
+  # A realized Scoop app is treated as a GUI / non-exec-probeable app
+  # when EITHER its installed manifest declares a `shortcuts` field OR
+  # its primary executable's PE subsystem is the GUI subsystem. For such
+  # an app the post-realize verification checks executable PRESENCE ON
+  # DISK only and does NOT execute the binary — exec-probing a GUI app
+  # (`chrome.exe --version`, etc.) launches the full application, which
+  # never exits and hangs `repro home apply` indefinitely.
+  let isGuiApp =
+    scoopAppIsGuiApplication(installedManifest.hasShortcuts,
+                             resolvedExecutable)
   # M74: a manifest with no `bin` field exposes no executable, so there
   # is nothing to probe — `configuredProbes` is consulted only when an
   # executable was resolved.
-  let probes =
-    if resolvedExecutable.len > 0:
-      configuredProbes(useDef.packageSelector, useDef.executableName)
+  if resolvedExecutable.len > 0:
+    if isGuiApp:
+      # GUI app: presence-on-disk verification ONLY — never execute the
+      # binary. The strict presence walk above already failed closed on
+      # a genuinely absent manifest-declared executable; for a no-`bin`
+      # app whose package-declared path was used, re-confirm presence
+      # here so a GUI app still receives a real presence check.
+      if not fileExists(resolvedExecutable):
+        raise newException(EScoopInstallFailed,
+          "EScoopInstallFailed: GUI app executable not present after " &
+          "install: " & resolvedExecutable & " (scoop " & plan.bucket &
+          "/" & plan.app & ")")
     else:
-      newSeq[ToolProbeSpec]()
-  for probe in probes:
-    let probeResult = runProbe(resolvedExecutable, probe)
-    if probeResult.exitCode != 0:
-      raise newException(EScoopInstallFailed,
-        "EScoopInstallFailed: probe " & probe.name & " for " &
-        useDef.executableName & " (scoop " & plan.bucket & "/" & plan.app &
-        ") exited " & $probeResult.exitCode & "\n" & probeResult.output)
-    result.probes.add(probeResult)
+      # Console app: keep exec-probing — but every probe is now bounded
+      # by the M75 wall-clock timeout + process-tree kill, so even a
+      # misclassified or misbehaving console binary cannot hang the
+      # apply.
+      for probe in configuredProbes(useDef.packageSelector,
+          useDef.executableName):
+        let probeResult = runProbe(resolvedExecutable, probe)
+        if probeResult.timedOut:
+          # A console tool that timed out is a STRUCTURED diagnostic —
+          # the apply did not hang. The adapter's verification contract
+          # still treats a non-passing probe as an install failure, but
+          # via a clean error rather than an infinite block.
+          raise newException(EScoopInstallFailed,
+            "EScoopInstallFailed: probe " & probe.name & " for " &
+            useDef.executableName & " (scoop " & plan.bucket & "/" &
+            plan.app & ") timed out after " & $probeTimeoutSeconds &
+            "s and its process tree was killed\n" & probeResult.output)
+        if probeResult.exitCode != 0:
+          raise newException(EScoopInstallFailed,
+            "EScoopInstallFailed: probe " & probe.name & " for " &
+            useDef.executableName & " (scoop " & plan.bucket & "/" &
+            plan.app & ") exited " & $probeResult.exitCode & "\n" &
+            probeResult.output)
+        result.probes.add(probeResult)
 
   result.profileFingerprint = profileFingerprintFor(result)
 
@@ -1927,7 +2215,8 @@ proc metadataFor(identity: ToolActionIdentity): DynamicValue =
       entry("kind", cborText($probe.spec.kind)),
       entry("name", cborText(probe.spec.name)),
       entry("exitCode", cborUInt(uint64(max(probe.exitCode, 0)))),
-      entry("output", cborText(probe.output))
+      entry("output", cborText(probe.output)),
+      entry("timedOut", cborBool(probe.timedOut))
     ]))
   cborMap([
     entry("kind", cborText("pathOnlyToolAction")),
@@ -2082,13 +2371,17 @@ proc readProbeSpec(bytes: openArray[byte]; pos: var int): ToolProbeSpec =
 
 proc writeProbeResult(outp: var seq[byte]; probe: ToolProbeResult) =
   outp.writeProbeSpec(probe.spec)
+  # M75: a timed-out probe carries the negative-clamped sentinel
+  # `probeTimeoutExitCode`; serialize the raw int so it round-trips.
   outp.writeU32Le(uint32(max(probe.exitCode, 0)))
   outp.writeString(probe.output)
+  outp.writeByte(if probe.timedOut: 1'u8 else: 0'u8)
 
 proc readProbeResult(bytes: openArray[byte]; pos: var int): ToolProbeResult =
   result.spec = readProbeSpec(bytes, pos)
   result.exitCode = int(readU32Le(bytes, pos))
   result.output = readString(bytes, pos)
+  result.timedOut = readByte(bytes, pos) != 0'u8
 
 proc writeProbeResults(outp: var seq[byte]; probes: openArray[
     ToolProbeResult]) =
@@ -2352,7 +2645,8 @@ proc jsonProbe(probe: ToolProbeResult): JsonNode =
     "name": probe.spec.name,
     "args": probe.spec.args,
     "exitCode": probe.exitCode,
-    "output": probe.output
+    "output": probe.output,
+    "timedOut": probe.timedOut
   }
 
 proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
