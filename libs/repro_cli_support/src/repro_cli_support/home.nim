@@ -38,6 +38,7 @@ import std/[options, os, sets, strutils, tables, times]
 import repro_home_intent
 import repro_home_generations
 import repro_home_apply
+import repro_home_resources
 import repro_home_rollback
 import repro_local_store
 
@@ -1138,6 +1139,141 @@ proc runHomeGet(args: openArray[string]): int =
     return 1
 
 # ---------------------------------------------------------------------------
+# `repro home plan` (M68).
+# ---------------------------------------------------------------------------
+
+proc runHomePlan(args: openArray[string]): int =
+  ## `repro home plan [--allow-drift]` — non-mutating preview of
+  ## what the next apply would do. Walks the same DesiredSet the
+  ## apply pipeline composes (Phase A: fed by REPRO_TEST_RESOURCES
+  ## for gates; production will be fed by the M59 stdlib's
+  ## resource emitter), observes the live state, and prints one
+  ## line per resource. Exits non-zero when drift is detected
+  ## unless `--allow-drift` was passed.
+  var allowDrift = false
+  var reconcileFlag = false
+  for a in args:
+    if a == "--help" or a == "-h":
+      echo "usage: repro home plan [--allow-drift] [--reconcile-drift]"
+      echo ""
+      echo "Show what `repro home apply` would do without making"
+      echo "any changes. Lists per-resource create / update /"
+      echo "destroy / no-op decisions plus any drift detected."
+      echo "Exits non-zero on drift unless --allow-drift."
+      return 0
+    elif a == "--allow-drift":
+      allowDrift = true
+    elif a == "--reconcile-drift":
+      reconcileFlag = true
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home plan: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home plan: unexpected positional: " & a)
+      return 2
+  try:
+    let homeDir = getHomeDir()
+    let desired = parseSyntheticResources(homeDir)
+    # Load recorded bindings from the active generation's manifest.
+    var recorded = initOrderedTable[string, RecordedBinding]()
+    let stateDir = resolveStateDir()
+    let activeId = readCurrentGenerationId(stateDir)
+    if activeId.len > 0:
+      let pointerFile = pointerPath(stateDir, activeId)
+      if fileExists(pointerFile):
+        try:
+          let env = readPointerFile(pointerFile)
+          var manifestKey: PrefixIdBytes
+          for i in 0 ..< 32:
+            manifestKey[i] = env.activationManifestDigest[i]
+          var store = openStore(resolveStoreRoot())
+          defer:
+            try: store.close() except CatchableError: discard
+          let manifestBytes = readCasBlob(store, manifestKey)
+          let manifest = decodeManifestBytes(manifestBytes)
+          for rb in manifest.resourceBindings:
+            if rb.resourceKind.len == 0: continue
+            recorded[rb.resourceAddress] = toRecorded(rb)
+        except CatchableError:
+          discard
+    let policy =
+      if reconcileFlag: rpReconcileDrift
+      else: rpFailClosed
+    let opts = DecisionOptions(reconcile: policy,
+      enforcePreventDestroy: false)
+    let report = composePlan(desired, recorded, opts)
+    stdout.write(renderPlan(report))
+    if report.driftCount > 0 and not allowDrift and not reconcileFlag:
+      return 1
+    return 0
+  except CatchableError as err:
+    stderr.writeLine("repro home plan: error: " & err.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
+# `repro home adopt <resource>` (M68; Phase A skeleton).
+# ---------------------------------------------------------------------------
+
+proc runHomeAdopt(args: openArray[string]): int =
+  ## `repro home adopt <resource-address>` — claim an
+  ## existing real-world object into management. Phase A ships
+  ## the skeleton; full adoption (rewriting `home.nim` to reflect
+  ## the observed bytes) lands in Phase B alongside `repro home
+  ## resource move`. Phase A emits the diagnostic so the CLI
+  ## surface is testable but the action is a no-op edit.
+  if args.len == 0:
+    stderr.writeLine("usage: repro home adopt <resource-address>")
+    return 2
+  for a in args:
+    if a == "--help" or a == "-h":
+      echo "usage: repro home adopt <resource-address>"
+      echo ""
+      echo "Claim an existing real-world resource into management."
+      echo "Phase A: skeleton only; the full home.nim rewrite"
+      echo "lands in Phase B."
+      return 0
+  let address = args[0]
+  stderr.writeLine("repro home adopt: " & address &
+    ": adoption is a Phase B feature; Phase A only ships the " &
+    "CLI surface + the drift-detection / --reconcile-drift path. " &
+    "Run `repro home plan` to see what the apply pipeline " &
+    "currently sees for this address.")
+  return 0
+
+# ---------------------------------------------------------------------------
+# `repro home resource move <old> <new>` (M68; Phase A skeleton).
+# ---------------------------------------------------------------------------
+
+proc runHomeResourceMove(args: openArray[string]): int =
+  if args.len < 2:
+    stderr.writeLine("usage: repro home resource move <old-address> <new-address>")
+    return 2
+  for a in args:
+    if a == "--help" or a == "-h":
+      echo "usage: repro home resource move <old-address> <new-address>"
+      echo ""
+      echo "Rename a resource record without re-applying. Phase A:"
+      echo "skeleton only; the full rename lands in Phase B."
+      return 0
+  let oldAddr = args[0]
+  let newAddr = args[1]
+  stderr.writeLine("repro home resource move: " & oldAddr & " -> " &
+    newAddr & ": resource move is a Phase B feature; Phase A only " &
+    "ships the CLI surface.")
+  return 0
+
+proc runHomeResource(args: openArray[string]): int =
+  if args.len == 0:
+    stderr.writeLine("usage: repro home resource {move} ...")
+    return 2
+  case args[0]
+  of "move":
+    return runHomeResourceMove(args[1 .. ^1])
+  else:
+    stderr.writeLine("repro home resource: unknown subcommand: " & args[0])
+    return 2
+
+# ---------------------------------------------------------------------------
 # `repro home rollback` (M64).
 # ---------------------------------------------------------------------------
 
@@ -1261,7 +1397,8 @@ proc runHomeCommand*(args: seq[string]): int =
     inc i
   if sub.len == 0:
     stderr.writeLine("usage: repro home {add | remove | enable | disable | " &
-      "list | why | history | apply | rollback | set | get} ...")
+      "list | why | history | apply | plan | rollback | set | get | " &
+      "adopt | resource} ...")
     return 2
   case sub
   of "add": return runHomeAdd(subArgs)
@@ -1272,9 +1409,12 @@ proc runHomeCommand*(args: seq[string]): int =
   of "why": return runHomeWhy(subArgs)
   of "history": return runHomeHistory(subArgs)
   of "apply": return runHomeApply(subArgs)
+  of "plan": return runHomePlan(subArgs)
   of "rollback": return runHomeRollback(subArgs)
   of "set": return runHomeSet(subArgs)
   of "get": return runHomeGet(subArgs)
+  of "adopt": return runHomeAdopt(subArgs)
+  of "resource": return runHomeResource(subArgs)
   else:
     stderr.writeLine("repro home: unknown subcommand: " & sub)
     return 2

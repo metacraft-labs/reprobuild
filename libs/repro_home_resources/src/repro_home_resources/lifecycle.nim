@@ -1,0 +1,238 @@
+## M68 lifecycle decision algorithm.
+##
+## Per Home-Profile-Resource-Lifecycle.md "Lifecycle Decision
+## Algorithm", per resource per apply:
+##
+##   1. Lookup recorded binding in the previous generation's
+##      `resourceBindings` for the same resource address.
+##   2. Observe the current real-world state via the resource
+##      driver.
+##   3. Decide:
+##      - desired absent + observed absent              -> no_op
+##      - desired present + observed absent             -> create
+##      - desired present + observed matches desired    -> no_op (cache-hit)
+##      - desired present + observed differs:
+##          recorded postWrite == observed              -> update (safe)
+##          recorded postWrite != observed              -> drift_blocked
+##      - desired absent + observed present:
+##          recorded postWrite == observed              -> destroy (safe)
+##          recorded postWrite != observed              -> drift_blocked
+##      - lifecyclePolicy = preventDestroy:             -> EPreventDestroy
+##
+## `--reconcile-drift` collapses `drift_blocked` -> `update`
+## (overwrite the drift with the desired bytes). `--accept-overwrite`
+## permits destroys that would otherwise be refused for drift.
+
+import std/[strutils]
+
+import repro_home_generations
+
+import ./errors
+import ./manifest_record
+import ./types
+
+type
+  ReconcilePolicy* = enum
+    ## What to do when drift is detected.
+    rpFailClosed = "fail-closed"
+      ## Default: emit `drift_blocked`, the executor raises `EDrift`.
+    rpReconcileDrift = "reconcile-drift"
+      ## `--reconcile-drift`: overwrite the drift with the desired
+      ## bytes; the action becomes `update`.
+    rpAcceptOverwrite = "accept-overwrite"
+      ## `--accept-overwrite`: tolerate drift even for destroys.
+
+  DecisionOptions* = object
+    reconcile*: ReconcilePolicy
+    enforcePreventDestroy*: bool
+      ## Phase B activates this. Phase A leaves it false so
+      ## `lifecyclePolicy = preventDestroy` decisions still record
+      ## an action (the gate verifies the policy enum round-trips
+      ## through the manifest), but the executor does not refuse
+      ## yet. Set to true once the Phase B `lifecyclePolicy`
+      ## enforcement is on.
+
+# ---------------------------------------------------------------------------
+# Helpers.
+# ---------------------------------------------------------------------------
+
+proc digestOfResource*(desired: Resource): Digest256 =
+  ## Canonical content digest for a desired resource. The bytes
+  ## fed into the BLAKE3 hash are exactly the bytes the apply
+  ## executor would record in `ResourceBinding.payloadBytes`,
+  ## so cache-hit comparison is byte-for-byte with the previous
+  ## generation's recorded `postWriteDigest`.
+  case desired.kind
+  of rkFsManagedBlock:
+    # The driver normalizes the on-disk block body by ensuring a
+    # trailing `\n` (so the close sentinel sits on its own line).
+    # Mirror that normalization here so cache-hit comparison
+    # (desired digest == observed digest) holds when the content
+    # the user passed already ends with `\n` AND when it doesn't.
+    var normalized = desired.managedBlockContent
+    if normalized.len > 0 and normalized[^1] != '\n':
+      normalized.add('\n')
+    var buf = newSeq[byte](normalized.len)
+    for i, ch in normalized:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+  of rkWindowsRegistryValue:
+    return digestOfBytes(desired.registryPayload.bytes)
+  of rkEnvUserVariable:
+    return digestOfBytes(desired.envVarPayload.bytes)
+  of rkEnvUserPath:
+    # The recorded payload is the joined entries; preserves order.
+    let joined = desired.pathEntries.join(";")
+    var buf = newSeq[byte](joined.len)
+    for i, ch in joined:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+  of rkWindowsStartup:
+    var buf = newSeq[byte](desired.startupCommand.len)
+    for i, ch in desired.startupCommand:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+  of rkShellIntegration:
+    var buf = newSeq[byte](desired.shellBlockContent.len)
+    for i, ch in desired.shellBlockContent:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+  of rkLinuxGsettings:
+    var buf = newSeq[byte](desired.gsettingsValueLiteral.len)
+    for i, ch in desired.gsettingsValueLiteral:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+  of rkSystemdUserUnit:
+    var buf = newSeq[byte](desired.unitContent.len)
+    for i, ch in desired.unitContent:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+  of rkMacosUserDefault:
+    var buf = newSeq[byte](desired.defaultsValueLiteral.len)
+    for i, ch in desired.defaultsValueLiteral:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+  of rkLaunchdUserAgent:
+    var buf = newSeq[byte](desired.launchdPlistContent.len)
+    for i, ch in desired.launchdPlistContent:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+
+proc summarize*(action: ResourceActionKind; address: string;
+                kind: ResourceKind): string =
+  case action
+  of rakNoOp: "no-op    " & address & " (" & $kind & ")"
+  of rakCreate: "create   " & address & " (" & $kind & ")"
+  of rakUpdate: "update   " & address & " (" & $kind & ")"
+  of rakReplace: "replace  " & address & " (" & $kind & ")"
+  of rakDestroy: "destroy  " & address & " (" & $kind & ")"
+  of rakAdopt: "adopt    " & address & " (" & $kind & ")"
+  of rakDriftBlocked: "DRIFT    " & address & " (" & $kind & ")"
+
+# ---------------------------------------------------------------------------
+# Decision.
+# ---------------------------------------------------------------------------
+
+proc decideAction*(state: ResourceState;
+                  options: DecisionOptions = DecisionOptions(
+                    reconcile: rpFailClosed,
+                    enforcePreventDestroy: false)): ResourceAction =
+  ## Pure decision: given the composite state (desired + observed +
+  ## recorded), return the typed action. Does NOT mutate anything;
+  ## the executor consumes the action and performs the I/O.
+  result.address = state.address
+  result.driftExpectedHex = ""
+  result.driftObservedHex = ""
+
+  # Branch 1: nothing desired, nothing observed.
+  if not state.hasDesired and not state.observed.present:
+    result.kind = rakNoOp
+    if state.hasRecorded:
+      result.resourceKind = state.recorded.kind
+    else:
+      result.resourceKind = rkFsManagedBlock  # unused
+    result.summary = summarize(rakNoOp, state.address, result.resourceKind)
+    return
+
+  # Branch 2: desired present.
+  if state.hasDesired:
+    result.resourceKind = state.desired.kind
+    let desiredDigest = digestOfResource(state.desired)
+    if not state.observed.present:
+      # Create.
+      result.kind = rakCreate
+      result.summary = summarize(rakCreate, state.address, result.resourceKind)
+      return
+    if state.observed.digest == desiredDigest:
+      # Cache-hit: live state already matches what we want.
+      result.kind = rakNoOp
+      result.summary = summarize(rakNoOp, state.address, result.resourceKind)
+      return
+    # Observed != desired. Decide between update (safe, we wrote
+    # it last) and drift_blocked (user mutated since our write).
+    if state.hasRecorded and not isZeroDigest(state.recorded.postWriteDigest) and
+       state.recorded.postWriteDigest == state.observed.digest:
+      # Safe update.
+      result.kind = rakUpdate
+      result.summary = summarize(rakUpdate, state.address, result.resourceKind)
+      return
+    # Drift.
+    let expectedHex =
+      if state.hasRecorded: digestHex(state.recorded.postWriteDigest)
+      else: ""
+    let observedHex = digestHex(state.observed.digest)
+    if options.reconcile == rpReconcileDrift or
+       options.reconcile == rpAcceptOverwrite:
+      result.kind = rakUpdate
+      result.driftExpectedHex = expectedHex
+      result.driftObservedHex = observedHex
+      result.summary = summarize(rakUpdate, state.address, result.resourceKind) &
+        " [drift reconciled]"
+      return
+    result.kind = rakDriftBlocked
+    result.driftExpectedHex = expectedHex
+    result.driftObservedHex = observedHex
+    result.summary = summarize(rakDriftBlocked, state.address,
+      result.resourceKind)
+    return
+
+  # Branch 3: desired absent, observed present.
+  if state.hasRecorded:
+    result.resourceKind = state.recorded.kind
+  else:
+    # No prior record + nothing desired but something exists in
+    # the world. Phase A: leave it alone (no_op). The user can
+    # explicitly `repro home adopt` to claim it.
+    result.kind = rakNoOp
+    result.resourceKind = rkFsManagedBlock
+    result.summary = summarize(rakNoOp, state.address, result.resourceKind) &
+      " [unmanaged, leaving as-is]"
+    return
+  # We have a recorded binding; the desired set no longer
+  # references this address; the world still has the bytes.
+  # Safe destroy iff observed matches recorded postWrite.
+  if state.recorded.postWriteDigest == state.observed.digest or
+     options.reconcile == rpAcceptOverwrite:
+    if options.enforcePreventDestroy and
+       state.recorded.lifecyclePolicy == lpPreventDestroy:
+      raisePreventDestroy(state.address)
+    result.kind = rakDestroy
+    result.summary = summarize(rakDestroy, state.address, result.resourceKind)
+    return
+  # Drift on destroy.
+  result.kind = rakDriftBlocked
+  result.driftExpectedHex = digestHex(state.recorded.postWriteDigest)
+  result.driftObservedHex = digestHex(state.observed.digest)
+  result.summary = summarize(rakDriftBlocked, state.address,
+    result.resourceKind) & " [drift on destroy]"
+
+# ---------------------------------------------------------------------------
+# Drift assertion.
+# ---------------------------------------------------------------------------
+
+proc raiseIfDriftBlocked*(action: ResourceAction) =
+  ## Convenience: the apply executor calls this once per action to
+  ## fail-closed on drift without `--reconcile-drift`.
+  if action.kind == rakDriftBlocked:
+    raiseDrift(action.address, $action.resourceKind,
+      action.driftExpectedHex, action.driftObservedHex)

@@ -44,6 +44,9 @@ type
     rokRemoveLauncher = "remove-launcher"
     rokRestoreLauncher = "restore-launcher"
     rokUpdateLauncher = "update-launcher"
+    rokRemoveResource = "remove-resource"
+    rokRestoreResource = "restore-resource"
+    rokUpdateResource = "update-resource"
 
   FileOp* = object
     kind*: RollbackOpKind              ## rokRemove/Restore/UpdateFile
@@ -74,6 +77,18 @@ type
     targetRecord*: ExportedCommand
     hasTargetRecord*: bool
 
+  ResourceOp* = object
+    ## M68 resource lifecycle op for rollback. Mirrors the file /
+    ## block / launcher shape: kind drives the action, current/
+    ## target records drive the digest check and the restore
+    ## content.
+    kind*: RollbackOpKind              ## rokRemove/Restore/UpdateResource
+    address*: string
+    currentRecord*: ResourceBinding
+    hasCurrentRecord*: bool
+    targetRecord*: ResourceBinding
+    hasTargetRecord*: bool
+
   RollbackPlan* = object
     ## The full ordered list of revert operations.
     ##
@@ -84,6 +99,10 @@ type
     fileOps*: seq[FileOp]
     blockOps*: seq[BlockOp]
     launcherOps*: seq[LauncherOp]
+    resourceOps*: seq[ResourceOp]
+      ## M68: per-resource revert operations. Same remove ->
+      ## restore -> update ordering as the file / block / launcher
+      ## lists.
     ## `targetRealizedPrefixIds` is copied from the target pointer
     ## envelope verbatim and re-installed by the executor when it
     ## writes the new pointer. Rollback never uninstalls packages, so
@@ -114,6 +133,18 @@ proc launchersByName(manifest: ActivationManifest):
   result = initTable[string, ExportedCommand]()
   for ec in manifest.exportedCommands:
     result[ec.commandName] = ec
+
+proc resourcesByAddress(manifest: ActivationManifest):
+    Table[string, ResourceBinding] =
+  result = initTable[string, ResourceBinding]()
+  for rb in manifest.resourceBindings:
+    # Only consider records carrying the M68 typed fields (V2);
+    # V1 records (M62 reserved-empty stubs) have an empty kind tag
+    # and are skipped here so rollback doesn't synthesize ops for
+    # them.
+    if rb.resourceKind.len == 0:
+      continue
+    result[rb.resourceAddress] = rb
 
 # ---------------------------------------------------------------------------
 # Build the plan.
@@ -225,6 +256,41 @@ proc buildRollbackPlan*(currentManifest, targetManifest: ActivationManifest;
   lUpdates.sort(proc(a, b: LauncherOp): int = cmp(a.commandName, b.commandName))
   result.launcherOps = lRemoves & lRestores & lUpdates
 
+  # M68: Resources.
+  let curResources = resourcesByAddress(currentManifest)
+  let tgtResources = resourcesByAddress(targetManifest)
+  var rRemoves, rRestores, rUpdates: seq[ResourceOp]
+  proc resourceContentDiffers(a, b: ResourceBinding): bool =
+    if a.payloadBytes.len != b.payloadBytes.len: return true
+    for i in 0 ..< a.payloadBytes.len:
+      if a.payloadBytes[i] != b.payloadBytes[i]: return true
+    if digestsDiffer(a.postWriteDigest, b.postWriteDigest): return true
+    if a.resourceKind != b.resourceKind: return true
+    false
+  for addr1, rec in curResources:
+    if addr1 notin tgtResources:
+      rRemoves.add(ResourceOp(kind: rokRemoveResource,
+        address: addr1,
+        currentRecord: rec, hasCurrentRecord: true,
+        hasTargetRecord: false))
+  for addr1, rec in tgtResources:
+    if addr1 notin curResources:
+      rRestores.add(ResourceOp(kind: rokRestoreResource,
+        address: addr1,
+        hasCurrentRecord: false,
+        targetRecord: rec, hasTargetRecord: true))
+    else:
+      let cur = curResources[addr1]
+      if resourceContentDiffers(cur, rec):
+        rUpdates.add(ResourceOp(kind: rokUpdateResource,
+          address: addr1,
+          currentRecord: cur, hasCurrentRecord: true,
+          targetRecord: rec, hasTargetRecord: true))
+  rRemoves.sort(proc(a, b: ResourceOp): int = cmp(a.address, b.address))
+  rRestores.sort(proc(a, b: ResourceOp): int = cmp(a.address, b.address))
+  rUpdates.sort(proc(a, b: ResourceOp): int = cmp(a.address, b.address))
+  result.resourceOps = rRemoves & rRestores & rUpdates
+
   # Realized prefix ids come from the target pointer verbatim.
   result.targetRealizedPrefixIds = targetEnvelope.realizedPrefixIds
 
@@ -234,4 +300,4 @@ proc buildRollbackPlan*(currentManifest, targetManifest: ActivationManifest;
 
 proc isEmpty*(plan: RollbackPlan): bool =
   plan.fileOps.len == 0 and plan.blockOps.len == 0 and
-    plan.launcherOps.len == 0
+    plan.launcherOps.len == 0 and plan.resourceOps.len == 0

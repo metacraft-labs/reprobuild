@@ -40,7 +40,23 @@ import ./pointer
 
 const
   ManifestMagic* = "RBAM"
-  ManifestSchemaVersion*: uint16 = 1
+  ManifestSchemaVersionV1*: uint16 = 1
+    ## M62-M67 writer. ResourceBinding records carry only the
+    ## reserved-for-M68 fields (resourceAddress, providerIdentity,
+    ## realWorldIdentity, recordedAttributes, lifecyclePolicy).
+  ManifestSchemaVersionV2*: uint16 = 2
+    ## M68 writer. Adds resourceKind, pre/post-write digests, the
+    ## typed payloadKind, and payloadBytes (bounded to 64KB per
+    ## resource).
+  ManifestSchemaVersion*: uint16 = ManifestSchemaVersionV2
+    ## Current writer version. The decoder accepts both V1 (treats
+    ## resourceBindings as the reserved tuple) and V2 (full M68
+    ## record). Encoder always writes V2 because the additional
+    ## fields are zero-cost when no resources are present.
+  ManifestResourcePayloadMaxBytes* = 65536
+    ## Per-resource payloadBytes cap. Beyond this, the writer
+    ## raises `EManifestCorrupt` rather than silently writing a
+    ## blob that would balloon the manifest.
   ManifestHeaderSize = 4 + 2 + 4
   ManifestTrailerSize = 32
 
@@ -92,12 +108,50 @@ type
     postWriteFileDigest*: Digest256
 
   ResourceBinding* = object
-    ## Reserved for M68. M62 fixtures always serialize an empty list.
+    ## M68 extension of the M62-reserved record. M62 fixtures
+    ## always serialized empty values; M68 populates the typed
+    ## fields below for every applied resource so rollback can
+    ## reconstruct the pre/post-write state.
+    ##
+    ## Per Home-Profile-Resource-Lifecycle.md "Binding Records",
+    ## the record carries enough information to detect drift on
+    ## next apply, destroy the resource on rollback, and adopt the
+    ## resource into a new home generation. It does NOT carry the
+    ## resource's full desired content; that lives in the
+    ## configurable graph and is re-evaluated each apply.
     resourceAddress*: string
+      ## Stable call-site identifier per the spec's "Resource
+      ## Addresses" rule (e.g.
+      ## `profile("zahary").env.userVariable["PATH"]`).
     providerIdentity*: string
+      ## Reserved for the M70 third-party-driver opening.
     realWorldIdentity*: string
+      ## The real-world handle (registry path, file path,
+      ## gsettings schema:key, etc.) used to refresh observation
+      ## without re-evaluating the intent graph.
     recordedAttributes*: seq[byte]
+      ## Free-form attribute blob. M68 uses it for the typed
+      ## payload bytes; the per-kind layout is documented in
+      ## `repro_home_resources/manifest_record.nim`.
     lifecyclePolicy*: string
+      ## "default" | "preventDestroy" | "preventRecreate".
+    resourceKind*: string
+      ## M68: the variant tag (e.g. "windows.registryValue"). The
+      ## decoder consults this to interpret `payloadBytes`.
+    preWriteDigest*: Digest256
+      ## BLAKE3-256 over the pre-apply observed bytes. All-zeros
+      ## when the resource was absent before this apply (`create`).
+    hasPreWriteDigest*: bool
+    postWriteDigest*: Digest256
+      ## BLAKE3-256 over the post-apply observed bytes — the value
+      ## drift detection compares against on next apply.
+    payloadKind*: string
+      ## The typed sub-kind (e.g. "dword" / "expandString"). Empty
+      ## for resources without a sub-kind (managed blocks).
+    payloadBytes*: seq[byte]
+      ## Raw bytes the driver wrote. Bounded to 64KB per resource
+      ## (the decoder rejects larger blobs); larger state belongs
+      ## in CAS, not the manifest.
 
   ActivationManifest* = object
     schemaVersion*: uint16
@@ -151,11 +205,27 @@ proc writeManagedBlock(outp: var seq[byte]; rec: ManagedBlock) =
   outp.writeDigest(rec.postWriteFileDigest)
 
 proc writeResourceBinding(outp: var seq[byte]; rec: ResourceBinding) =
+  ## V2 layout (M68): the original five M62 fields followed by the
+  ## new typed fields. V1 (M62) callers only set the first five;
+  ## the M68 additions serialize as empty bytes / zero digests when
+  ## absent, keeping byte-for-byte equality for the
+  ## CAS-dedup invariant (gate 2 of M62).
   outp.writeString(rec.resourceAddress)
   outp.writeString(rec.providerIdentity)
   outp.writeString(rec.realWorldIdentity)
   outp.writeBlob(rec.recordedAttributes)
   outp.writeString(rec.lifecyclePolicy)
+  outp.writeString(rec.resourceKind)
+  outp.add(if rec.hasPreWriteDigest: 1'u8 else: 0'u8)
+  if rec.hasPreWriteDigest:
+    outp.writeDigest(rec.preWriteDigest)
+  outp.writeDigest(rec.postWriteDigest)
+  outp.writeString(rec.payloadKind)
+  if rec.payloadBytes.len > ManifestResourcePayloadMaxBytes:
+    raiseManifestCorrupt("<encode>", "resourceBindings.payloadBytes",
+      "payload size " & $rec.payloadBytes.len & " exceeds " &
+      $ManifestResourcePayloadMaxBytes & "-byte cap")
+  outp.writeBlob(rec.payloadBytes)
 
 proc encodeBody(manifest: ActivationManifest): seq[byte] =
   result.writeU32Le(uint32(manifest.realizedPackages.len))
@@ -244,7 +314,8 @@ proc decodeManifestBytes*(bytes: openArray[byte];
         "expected '" & ManifestMagic & "' magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != ManifestSchemaVersion:
+  if version != ManifestSchemaVersionV1 and
+     version != ManifestSchemaVersionV2:
     raiseManifestCorrupt(filePath, "schemaVersion",
       "unsupported manifest schema version " & $version)
   let bodyLen = int(readU32Le(bytes, pos))
@@ -327,6 +398,27 @@ proc decodeManifestBytes*(bytes: openArray[byte];
     rec.recordedAttributes = readBlob(bytes, pos, filePath,
       "resourceBindings[" & $i & "].recordedAttributes")
     rec.lifecyclePolicy = readString(bytes, pos)
+    if version >= ManifestSchemaVersionV2:
+      rec.resourceKind = readString(bytes, pos)
+      if pos >= bytes.len:
+        raiseManifestCorrupt(filePath,
+          "resourceBindings[" & $i & "].hasPreWriteDigest",
+          "truncated bool")
+      let hasPre = bytes[pos]; inc pos
+      rec.hasPreWriteDigest = hasPre == 1
+      if rec.hasPreWriteDigest:
+        rec.preWriteDigest = readDigest(bytes, pos, filePath,
+          "resourceBindings[" & $i & "].preWriteDigest")
+      rec.postWriteDigest = readDigest(bytes, pos, filePath,
+        "resourceBindings[" & $i & "].postWriteDigest")
+      rec.payloadKind = readString(bytes, pos)
+      rec.payloadBytes = readBlob(bytes, pos, filePath,
+        "resourceBindings[" & $i & "].payloadBytes")
+      if rec.payloadBytes.len > ManifestResourcePayloadMaxBytes:
+        raiseManifestCorrupt(filePath,
+          "resourceBindings[" & $i & "].payloadBytes",
+          "payload size " & $rec.payloadBytes.len & " exceeds " &
+          $ManifestResourcePayloadMaxBytes & "-byte cap")
     result.resourceBindings[i] = rec
   if pos != bodyEnd:
     raiseManifestCorrupt(filePath, "body",

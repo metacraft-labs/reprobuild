@@ -688,6 +688,57 @@ e2e_repro_home_set_triggers_focused_rebuild:
         tests/e2e/home-set-get/t_e2e_repro_home_set_triggers_focused_rebuild.nim \
         2>&1 | tee test-logs/e2e_repro_home_set_triggers_focused_rebuild.log
 
+e2e_home_resource_lifecycle_create_update_destroy:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_home_resource_lifecycle_create_update_destroy.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_home_resource_lifecycle_create_update_destroy \
+        --out:build/test-bin/e2e_home_resource_lifecycle_create_update_destroy \
+        tests/e2e/home-resources/t_e2e_home_resource_lifecycle.nim \
+        2>&1 | tee test-logs/e2e_home_resource_lifecycle_create_update_destroy.log
+
+e2e_home_registry_typed_value_kinds:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_home_registry_typed_value_kinds.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_home_registry_typed_value_kinds \
+        --out:build/test-bin/e2e_home_registry_typed_value_kinds \
+        tests/e2e/home-resources/t_e2e_home_registry_typed_value_kinds.nim \
+        2>&1 | tee test-logs/e2e_home_registry_typed_value_kinds.log
+
+e2e_home_resource_rollback_preserves_unrelated:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_home_resource_rollback_preserves_unrelated.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_home_resource_rollback_preserves_unrelated \
+        --out:build/test-bin/e2e_home_resource_rollback_preserves_unrelated \
+        tests/e2e/home-resources/t_e2e_home_resource_rollback_preserves_unrelated.nim \
+        2>&1 | tee test-logs/e2e_home_resource_rollback_preserves_unrelated.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

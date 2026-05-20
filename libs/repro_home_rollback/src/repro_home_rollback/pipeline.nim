@@ -23,6 +23,7 @@ import std/[algorithm, os, strutils, times]
 import repro_home_apply
 import repro_home_generations
 import repro_home_intent
+import repro_home_resources
 import repro_local_store
 
 import ./diff_plan
@@ -51,6 +52,7 @@ type
     fileOpsApplied*: int
     blockOpsApplied*: int
     launcherOpsApplied*: int
+    resourceOpsApplied*: int           ## M68 resource ops
     driftedPaths*: seq[string]         ## drift surface; populated only
                                        ## when --accept-overwrite was
                                        ## passed and the executor
@@ -502,6 +504,115 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
             op.targetRecord)
         else: discard
         inc result.launcherOpsApplied
+      # M68 resources.
+      for op in plan.resourceOps:
+        let rec =
+          case op.kind
+          of rokRemoveResource: op.currentRecord
+          of rokRestoreResource, rokUpdateResource: op.targetRecord
+          else: continue
+        let kindEnum =
+          try: resourceKindFromString(rec.resourceKind)
+          except ValueError: rkFsManagedBlock
+        case op.kind
+        of rokRemoveResource:
+          # The current generation had this resource; the target
+          # didn't. Reverse the write: delete the value / strip
+          # the managed block / etc.
+          case kindEnum
+          of rkWindowsRegistryValue:
+            when defined(windows):
+              let bs = rec.realWorldIdentity.rfind('\\')
+              if bs > 0:
+                let subkey = stripHkcuPrefix(
+                  rec.realWorldIdentity[0 ..< bs])
+                deleteRegistryValue(subkey,
+                  rec.realWorldIdentity[bs + 1 .. ^1])
+          of rkEnvUserVariable:
+            when defined(windows):
+              let bs = rec.realWorldIdentity.rfind('\\')
+              if bs > 0:
+                applyUserVariableDestroy(
+                  rec.realWorldIdentity[bs + 1 .. ^1])
+          of rkEnvUserPath:
+            when defined(windows):
+              let entries = parseRecordedPathEntries(rec.payloadBytes)
+              removeUserPathContribution(entries)
+          of rkWindowsStartup:
+            when defined(windows):
+              let bs = rec.realWorldIdentity.rfind('\\')
+              if bs > 0:
+                destroyStartup(rec.realWorldIdentity[bs + 1 .. ^1])
+          of rkShellIntegration, rkFsManagedBlock:
+            let hash = rec.realWorldIdentity.rfind('#')
+            if hash > 0:
+              destroyManagedBlockResource(
+                rec.realWorldIdentity[0 ..< hash],
+                rec.realWorldIdentity[hash + 1 .. ^1])
+          else: discard
+        of rokRestoreResource, rokUpdateResource:
+          # Re-apply the target generation's recorded bytes.
+          case kindEnum
+          of rkWindowsRegistryValue:
+            when defined(windows):
+              let bs = rec.realWorldIdentity.rfind('\\')
+              if bs > 0:
+                let subkey = stripHkcuPrefix(
+                  rec.realWorldIdentity[0 ..< bs])
+                let name = rec.realWorldIdentity[bs + 1 .. ^1]
+                # Recover the regType from payloadKind.
+                let kindStr = rec.payloadKind
+                var regType: uint32 = 1'u32
+                if kindStr.len > 0:
+                  try:
+                    regType = registryValueKindToRegType(
+                      registryValueKindFromString(kindStr))
+                  except ValueError:
+                    regType = 1'u32
+                writeRegistryValue(subkey, name, regType,
+                  rec.payloadBytes)
+          of rkEnvUserVariable:
+            when defined(windows):
+              let bs = rec.realWorldIdentity.rfind('\\')
+              if bs > 0:
+                let name = rec.realWorldIdentity[bs + 1 .. ^1]
+                let regType =
+                  if rec.payloadKind == "expandString": 2'u32
+                  else: 1'u32
+                writeRegistryValue(EnvironmentSubkey, name, regType,
+                  rec.payloadBytes)
+                broadcastEnvironmentChange()
+          of rkEnvUserPath:
+            when defined(windows):
+              let entries = parseRecordedPathEntries(rec.payloadBytes)
+              # Subtract the CURRENT generation's contribution first
+              # so the merged value is computed against the live
+              # PATH minus the entries we just rolled away from.
+              var priorContribution: seq[string] = @[]
+              if op.hasCurrentRecord:
+                priorContribution = parseRecordedPathEntries(
+                  op.currentRecord.payloadBytes)
+              discard applyUserPath(entries, priorContribution)
+          of rkWindowsStartup:
+            when defined(windows):
+              let bs = rec.realWorldIdentity.rfind('\\')
+              if bs > 0:
+                let name = rec.realWorldIdentity[bs + 1 .. ^1]
+                writeRegistryValue(RunSubkey, name, 1'u32,
+                  rec.payloadBytes)
+          of rkShellIntegration, rkFsManagedBlock:
+            let hash = rec.realWorldIdentity.rfind('#')
+            if hash > 0:
+              # Re-decode the payload bytes to UTF-8 content.
+              var content = newString(rec.payloadBytes.len)
+              for i, b in rec.payloadBytes:
+                content[i] = char(b)
+              discard applyManagedBlockResource(
+                rec.realWorldIdentity[0 ..< hash],
+                rec.realWorldIdentity[hash + 1 .. ^1], content)
+          else: discard
+        else: discard
+        inc result.resourceOpsApplied
 
       # ---- Step 8: rotate `current` ----
       rotateCurrent(opts.stateDir, targetIdHex)

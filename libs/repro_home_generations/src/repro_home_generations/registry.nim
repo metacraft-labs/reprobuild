@@ -20,7 +20,7 @@
 ##     state-dir `current` writer for callers that already have a
 ##     `Store` open.
 
-import std/[algorithm, os]
+import std/[algorithm, os, strutils]
 
 import repro_local_store
 
@@ -120,6 +120,12 @@ proc enumerateGenerations*(stateDir: string): seq[GenerationRecord] =
     if kind notin {pcDir, pcLinkToDir}:
       continue
     let id = extractFilename(entry)
+    # `.aborted/` is M63's quarantine bucket for partial-apply
+    # generations; it never holds a pointer.bin and isn't a real
+    # generation. Skip it (the apply pipeline's
+    # `recoverPartialApply` already iterates the bucket itself).
+    if id.startsWith("."):
+      continue
     let pointerFile = entry / PointerFileName
     if not fileExists(pointerFile):
       # Treat as a partial-apply leftover. M62 reports it; the

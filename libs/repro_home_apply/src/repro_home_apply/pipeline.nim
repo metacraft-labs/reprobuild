@@ -24,6 +24,7 @@ import std/[os, sequtils, strutils, tables, times]
 import blake3
 import repro_home_generations
 import repro_home_intent
+import repro_home_resources
 import repro_local_store
 
 import ./errors
@@ -54,6 +55,29 @@ const
     ## host file with the named id and content. Used by the M64
     ## rollback gates to populate managed blocks in `~/.bashrc` without
     ## requiring the full M59 `fs.managedBlock` stdlib hook.
+  ResourcesEnvVar* = "REPRO_TEST_RESOURCES"
+    ## M68 test hook: pipe-separated resource declarations. Each
+    ## entry is `<kind>:<address>:<resource-specific-payload>`.
+    ## Supported in Phase A:
+    ##   - `registry:<address>:<HKCU-subkey>;<name>;<valuekind>;<value>[;broadcast]`
+    ##       e.g. `registry:test:r:Software\Reprobuild-Tests\T1;Hello;string;world`
+    ##   - `envvar:<address>:<name>;<valuekind>;<value>`
+    ##       e.g. `envvar:test:e:MY_VAR;expandString;%USERPROFILE%\bin`
+    ##   - `userpath:<address>:<entry>[,<entry>...]`
+    ##       e.g. `userpath:test:p:C:\foo,C:\bar`
+    ##   - `startup:<address>:<name>;<command>`
+    ##   - `shellint:<address>:<host-file>;<block-id>;<content>`
+    ##   - `managedblock:<address>:<host-file>;<block-id>;<content>`
+    ## Multiple entries are separated by `|`. The gate uses this seam
+    ## to drive the resource lifecycle without a full M59 stdlib
+    ## resource emitter.
+  ReconcileDriftEnvVar* = "REPRO_HOME_APPLY_RECONCILE_DRIFT"
+    ## M68: when set to `1`, the apply pipeline uses
+    ## `rpReconcileDrift` for the lifecycle decision; equivalent
+    ## to the CLI's `--reconcile-drift` flag.
+  AcceptOverwriteEnvVar* = "REPRO_HOME_APPLY_ACCEPT_OVERWRITE"
+    ## M68: when set to `1`, the apply pipeline uses
+    ## `rpAcceptOverwrite`; equivalent to `--accept-overwrite`.
   NoOpLogPrefix* = "no-op: generation matches; verified "
     ## Stable rendering used by gate 2's assertion.
 
@@ -265,6 +289,138 @@ proc parseSyntheticPackageGenerates(homeDir: string;
       stowSourcePath: "",
       contentBytes: contentBytes))
 
+proc parseSyntheticResources*(homeDir: string): DesiredSet =
+  ## Parse `REPRO_TEST_RESOURCES` into a `DesiredSet`. This is the
+  ## fixture-level seam used by the M68 gates to drive the resource
+  ## lifecycle without a full M59 stdlib emitter. Entries are
+  ## pipe-separated.
+  result = initDesiredSet()
+  let raw = getEnv(ResourcesEnvVar)
+  if raw.len == 0:
+    return
+  for piece in raw.split('|'):
+    if piece.len == 0:
+      continue
+    let firstColon = piece.find(':')
+    if firstColon <= 0:
+      continue
+    # Strip only the kind tag, not the payload — managed-block /
+    # shell-integration content can legitimately include trailing
+    # newlines that are byte-significant for drift comparison.
+    let kindStr = piece[0 ..< firstColon].strip()
+    let restAfterKind = piece[firstColon + 1 .. ^1]
+    let addrColon = restAfterKind.find(':')
+    if addrColon <= 0:
+      continue
+    let address = restAfterKind[0 ..< addrColon].strip()
+    let payload = restAfterKind[addrColon + 1 .. ^1]
+    case kindStr
+    of "registry":
+      let parts = payload.split(';')
+      if parts.len < 4:
+        continue
+      let subkey = parts[0]
+      let name = parts[1]
+      let valKind = parts[2]
+      let value = parts[3]
+      let broadcast = parts.len > 4 and parts[4] == "broadcast"
+      var r = Resource(kind: rkWindowsRegistryValue, address: address,
+        lifecyclePolicy: lpDefault,
+        registryKey: subkey,
+        registryName: name,
+        registryBroadcastChange: broadcast)
+      try:
+        let rvk = registryValueKindFromString(valKind)
+        r.registryPayload.kind = rvk
+        case rvk
+        of rvkString:
+          r.registryPayload.bytes = encodeString(value)
+        of rvkExpandString:
+          r.registryPayload.bytes = encodeString(value)
+        of rvkDword:
+          r.registryPayload.bytes = encodeDword(uint32(parseBiggestUInt(value)))
+        of rvkQword:
+          r.registryPayload.bytes = encodeQword(uint64(parseBiggestUInt(value)))
+        of rvkBinary:
+          var hexClean = value
+          if hexClean.startsWith("0x"): hexClean = hexClean[2 .. ^1]
+          var bytes: seq[byte] = @[]
+          var i = 0
+          while i + 1 < hexClean.len:
+            try:
+              bytes.add(byte(parseHexInt(hexClean[i ..< i + 2])))
+            except ValueError:
+              break
+            i += 2
+          r.registryPayload.bytes = bytes
+        of rvkMultiString:
+          let items = value.split(',')
+          r.registryPayload.bytes = encodeMultiString(items)
+        result.add(r)
+      except ValueError:
+        discard
+    of "envvar":
+      let parts = payload.split(';')
+      if parts.len < 3:
+        continue
+      var r = Resource(kind: rkEnvUserVariable, address: address,
+        lifecyclePolicy: lpDefault,
+        envVarName: parts[0])
+      try:
+        let rvk = registryValueKindFromString(parts[1])
+        r.envVarPayload.kind = rvk
+        case rvk
+        of rvkString, rvkExpandString:
+          r.envVarPayload.bytes = encodeString(parts[2])
+        else: continue
+        result.add(r)
+      except ValueError:
+        discard
+    of "userpath":
+      let entries = payload.split(',')
+      var clean: seq[string] = @[]
+      for e in entries:
+        let t = e.strip()
+        if t.len > 0: clean.add(t)
+      let r = Resource(kind: rkEnvUserPath, address: address,
+        lifecyclePolicy: lpDefault,
+        pathEntries: clean)
+      result.add(r)
+    of "startup":
+      let parts = payload.split(';')
+      if parts.len < 2: continue
+      let r = Resource(kind: rkWindowsStartup, address: address,
+        lifecyclePolicy: lpDefault,
+        startupName: parts[0],
+        startupCommand: parts[1])
+      result.add(r)
+    of "shellint":
+      let parts = payload.split(';')
+      if parts.len < 3: continue
+      var hostFile = parts[0]
+      # Resolve $PROFILE-relative hints.
+      if hostFile.startsWith("~"):
+        hostFile = homeDir & hostFile[1 .. ^1]
+      let r = Resource(kind: rkShellIntegration, address: address,
+        lifecyclePolicy: lpDefault,
+        shellHostFilePath: hostFile,
+        shellBlockId: parts[1],
+        shellBlockContent: parts[2])
+      result.add(r)
+    of "managedblock":
+      let parts = payload.split(';')
+      if parts.len < 3: continue
+      var hostFile = parts[0]
+      if hostFile.startsWith("~"):
+        hostFile = homeDir & hostFile[1 .. ^1]
+      let r = Resource(kind: rkFsManagedBlock, address: address,
+        lifecyclePolicy: lpDefault,
+        hostFilePath: hostFile,
+        managedBlockId: parts[1],
+        managedBlockContent: parts[2])
+      result.add(r)
+    else: discard
+
 proc parseSyntheticPackageManagedBlocks(homeDir: string;
                                         declaredPackages: seq[string]):
     seq[PlannedManagedBlock] =
@@ -314,7 +470,8 @@ proc loadProfileOrRaise(profilePath: string): Profile =
     raiseIntentLoad(profilePath, err.msg)
 
 proc deriveGenerationId(plan: ApplyPlan;
-                        intentSnapshotDigest: Digest256): GenerationId =
+                        intentSnapshotDigest: Digest256;
+                        resourcesSeed: string = ""): GenerationId =
   ## Per the spec ("Generation Identity") the generation id is
   ## content-addressed over the resolved plan + intent snapshot +
   ## host identity. It explicitly does NOT include the activation
@@ -322,9 +479,18 @@ proc deriveGenerationId(plan: ApplyPlan;
   ## environment fact: two identical applies (back to back on the
   ## same machine, hours apart, on two machines) produce the same
   ## id. This is what makes the no-op short-circuit possible.
+  ##
+  ## M68: the resources emitter contributes its content bytes to
+  ## the generation id so two applies whose resources differ
+  ## produce different generation ids (and therefore don't take
+  ## the no-op short-circuit). At Phase A the contribution is the
+  ## raw `REPRO_TEST_RESOURCES` env-var string; production wiring
+  ## will route the M59 stdlib resource emitter's structural
+  ## bytes through this seam.
   var buf = canonicalPlanBytes(plan)
   for b in intentSnapshotDigest: buf.add(b)
   for ch in plan.hostIdentity: buf.add(byte(ord(ch)))
+  for ch in resourcesSeed: buf.add(byte(ord(ch)))
   let full = blake3.digest(buf)
   for i in 0 ..< GenerationIdSize:
     result[i] = full[i]
@@ -382,6 +548,50 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
       let cmdScript = binDir / ec.commandName
       if not fileExists(cmdScript):
         return false
+    inc outVerified
+  # M68: verify recorded resource bindings still match the live
+  # state. Drift on any resource breaks the no-op short-circuit so
+  # the apply re-enters the full pipeline and decides per the
+  # lifecycle algorithm (which raises EDrift unless
+  # --reconcile-drift was passed).
+  for rb in manifest.resourceBindings:
+    if rb.resourceKind.len == 0:
+      continue
+    let recordedDigest = rb.postWriteDigest
+    var live: ObservedState
+    try:
+      let kindEnum = resourceKindFromString(rb.resourceKind)
+      case kindEnum
+      of rkWindowsRegistryValue:
+        let bs = rb.realWorldIdentity.rfind('\\')
+        if bs > 0:
+          live = observeRegistryValue(
+            rb.realWorldIdentity[0 ..< bs],
+            rb.realWorldIdentity[bs + 1 .. ^1])
+      of rkEnvUserVariable:
+        let bs = rb.realWorldIdentity.rfind('\\')
+        if bs > 0:
+          live = observeUserVariable(rb.realWorldIdentity[bs + 1 .. ^1])
+      of rkEnvUserPath:
+        let entries = parseRecordedPathEntries(rb.payloadBytes)
+        live = observeUserPath(entries)
+      of rkWindowsStartup:
+        let bs = rb.realWorldIdentity.rfind('\\')
+        if bs > 0:
+          live = observeStartup(rb.realWorldIdentity[bs + 1 .. ^1])
+      of rkShellIntegration, rkFsManagedBlock:
+        let hash = rb.realWorldIdentity.rfind('#')
+        if hash > 0:
+          live = observeManagedBlock(
+            rb.realWorldIdentity[0 ..< hash],
+            rb.realWorldIdentity[hash + 1 .. ^1])
+      else: discard
+    except CatchableError:
+      return false
+    if not live.present:
+      return false
+    if live.digest != recordedDigest:
+      return false
     inc outVerified
   true
 
@@ -480,7 +690,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         files: defaultWalkProfileFiles(opts.profileDir))
       let snapshotBytes = encodeSnapshot(intentSnapshot)
       let snapshotDig = digestOf(snapshotBytes)
-      let candidateId = deriveGenerationId(applyPlan, snapshotDig)
+      let candidateId = deriveGenerationId(applyPlan, snapshotDig,
+        getEnv(ResourcesEnvVar))
       # No-op detection (spec §"No-Op Detection"): a re-apply is a
       # no-op iff the planner's content id matches the active
       # generation's recorded id AND all of the active generation's
@@ -737,11 +948,230 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       if shouldKillAfter(9):
         raiseKilledByTestHook(9)
 
+      # ---- Step 9b: reconcile typed resources (M68) ---------------------
+      # Compose the M68 DesiredSet from the synthesized resources
+      # hook (Phase A) — production wiring will populate this from
+      # the M59 stdlib's resource emitter once the resource-typed
+      # `home.nim` constructors land. For each desired resource +
+      # any recorded binding from the previous generation, decide
+      # the action via the lifecycle algorithm and execute it via
+      # the appropriate driver. Each applied action produces a
+      # `ResourceBinding` record for the manifest.
+      let desiredResources = parseSyntheticResources(opts.homeDir)
+      var recordedBindings = initOrderedTable[string, RecordedBinding]()
+      if activeGenIdHex.len > 0:
+        let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
+        if fileExists(prevPointerFile):
+          try:
+            let prevEnv = readPointerFile(prevPointerFile)
+            var prevKey: PrefixIdBytes
+            for i in 0 ..< 32:
+              prevKey[i] = prevEnv.activationManifestDigest[i]
+            let prevBytes = readCasBlob(store, prevKey)
+            let prevManifest = decodeManifestBytes(prevBytes)
+            for rb in prevManifest.resourceBindings:
+              # Only consider V2 records (with resourceKind set);
+              # V1 records may have empty kind which we skip.
+              if rb.resourceKind.len == 0: continue
+              # Skip destroyed records (postWriteDigest is zero).
+              recordedBindings[rb.resourceAddress] = toRecorded(rb)
+          except CatchableError:
+            discard
+      var reconcilePolicy = rpFailClosed
+      if getEnv(ReconcileDriftEnvVar) == "1":
+        reconcilePolicy = rpReconcileDrift
+      elif getEnv(AcceptOverwriteEnvVar) == "1":
+        reconcilePolicy = rpAcceptOverwrite
+      var decisionOpts = DecisionOptions(reconcile: reconcilePolicy,
+        enforcePreventDestroy: false)
+      let planReport = composePlan(desiredResources, recordedBindings,
+        decisionOpts)
+      var appliedResourceBindings: seq[ResourceBinding]
+      for action in planReport.actions:
+        case action.kind
+        of rakDriftBlocked:
+          raiseIfDriftBlocked(action)
+        of rakNoOp:
+          # Cache-hit: re-record the previous binding's bytes so
+          # rollback diffs cleanly.
+          if action.address in recordedBindings:
+            let prev = recordedBindings[action.address]
+            var rb = ResourceBinding(
+              resourceAddress: prev.address,
+              providerIdentity: "repro.builtin",
+              realWorldIdentity: prev.resourceId,
+              lifecyclePolicy: $prev.lifecyclePolicy,
+              resourceKind: $prev.kind,
+              hasPreWriteDigest: prev.hasPreWriteDigest,
+              preWriteDigest: prev.preWriteDigest,
+              postWriteDigest: prev.postWriteDigest,
+              payloadKind: prev.payloadKind,
+              payloadBytes: prev.payloadBytes)
+            appliedResourceBindings.add(rb)
+        of rakCreate, rakUpdate, rakReplace:
+          let desired = desiredResources.resources[action.address]
+          let identity = realWorldIdentity(desired)
+          var preWrite = observeResource(desired)
+          # Drive the driver per kind.
+          var postWriteBytes: seq[byte]
+          var payloadKindStr = ""
+          case desired.kind
+          of rkWindowsRegistryValue:
+            when defined(windows):
+              let subkey = stripHkcuPrefix(desired.registryKey)
+              let regType = registryValueKindToRegType(
+                desired.registryPayload.kind)
+              writeRegistryValue(subkey, desired.registryName, regType,
+                desired.registryPayload.bytes)
+              if desired.registryBroadcastChange:
+                broadcastEnvironmentChange()
+            postWriteBytes = desired.registryPayload.bytes
+            payloadKindStr = $desired.registryPayload.kind
+          of rkEnvUserVariable:
+            postWriteBytes = applyUserVariableCreate(desired.envVarName,
+              desired.envVarPayload)
+            payloadKindStr = $desired.envVarPayload.kind
+          of rkEnvUserPath:
+            var priorEntries: seq[string] = @[]
+            if action.address in recordedBindings:
+              priorEntries = parseRecordedPathEntries(
+                recordedBindings[action.address].payloadBytes)
+            postWriteBytes = applyUserPath(desired.pathEntries,
+              priorEntries)
+            payloadKindStr = "joined-entries"
+          of rkWindowsStartup:
+            postWriteBytes = applyStartup(desired.startupName,
+              desired.startupCommand)
+            payloadKindStr = "string"
+          of rkShellIntegration:
+            postWriteBytes = applyShellIntegration(desired.shellHostFilePath,
+              desired.shellBlockId, desired.shellBlockContent)
+            payloadKindStr = "shell-block"
+          of rkFsManagedBlock:
+            postWriteBytes = applyManagedBlockResource(desired.hostFilePath,
+              desired.managedBlockId, desired.managedBlockContent)
+            payloadKindStr = "managed-block"
+          of rkLinuxGsettings:
+            # Phase B driver: re-raises ENotImplementedPlatform off-Linux.
+            postWriteBytes = applyGsettings(desired.gsettingsSchema,
+              desired.gsettingsPath, desired.gsettingsKey,
+              desired.gsettingsValueLiteral)
+            payloadKindStr = "gvariant-literal"
+          of rkSystemdUserUnit:
+            # Phase B driver: re-raises ENotImplementedPlatform off-Linux.
+            postWriteBytes = applyUserUnit(getHomeDir(), desired.unitName,
+              desired.unitContent, desired.unitEnabled)
+            payloadKindStr = "unit-content"
+          of rkMacosUserDefault:
+            # Phase B driver: re-raises ENotImplementedPlatform off-macOS.
+            postWriteBytes = applyUserDefault(desired.defaultsDomain,
+              desired.defaultsKey, desired.defaultsValueLiteral,
+              desired.defaultsRestartTarget, valueChanged = true)
+            payloadKindStr = "defaults-literal"
+          of rkLaunchdUserAgent:
+            # Phase B driver: re-raises ENotImplementedPlatform off-macOS.
+            postWriteBytes = applyLaunchAgent(getHomeDir(),
+              desired.launchdLabel, desired.launchdPlistContent,
+              desired.launchdRunAtLoad)
+            payloadKindStr = "plist-content"
+          let rb = toResourceBinding(action.address, desired.kind,
+            identity, preWrite, postWriteBytes, payloadKindStr,
+            desired.lifecyclePolicy)
+          appliedResourceBindings.add(rb)
+        of rakDestroy:
+          let prev = recordedBindings[action.address]
+          var preWrite: ObservedState
+          # Drive driver-specific destroy.
+          case prev.kind
+          of rkWindowsRegistryValue:
+            preWrite = observeRecorded(action.address, prev)
+            when defined(windows):
+              let bs = prev.resourceId.rfind('\\')
+              if bs > 0:
+                let subkey = stripHkcuPrefix(prev.resourceId[0 ..< bs])
+                let name = prev.resourceId[bs + 1 .. ^1]
+                deleteRegistryValue(subkey, name)
+          of rkEnvUserVariable:
+            preWrite = observeRecorded(action.address, prev)
+            let bs = prev.resourceId.rfind('\\')
+            if bs > 0:
+              applyUserVariableDestroy(prev.resourceId[bs + 1 .. ^1])
+          of rkEnvUserPath:
+            let priorEntries = parseRecordedPathEntries(prev.payloadBytes)
+            preWrite = observeUserPath(priorEntries)
+            removeUserPathContribution(priorEntries)
+          of rkWindowsStartup:
+            preWrite = observeRecorded(action.address, prev)
+            let bs = prev.resourceId.rfind('\\')
+            if bs > 0:
+              destroyStartup(prev.resourceId[bs + 1 .. ^1])
+          of rkShellIntegration, rkFsManagedBlock:
+            preWrite = observeRecorded(action.address, prev)
+            let hash = prev.resourceId.rfind('#')
+            if hash > 0:
+              destroyManagedBlockResource(prev.resourceId[0 ..< hash],
+                prev.resourceId[hash + 1 .. ^1])
+          of rkLinuxGsettings:
+            # Phase B driver: re-raises ENotImplementedPlatform off-Linux.
+            preWrite = observeRecorded(action.address, prev)
+            # resourceId = "gsettings:<schemaPath>:<key>"
+            let body = prev.resourceId
+            if body.startsWith("gsettings:"):
+              let rest = body[len("gsettings:") .. ^1]
+              let colon = rest.rfind(':')
+              if colon > 0:
+                destroyGsettings(rest[0 ..< colon], "", rest[colon + 1 .. ^1])
+          of rkSystemdUserUnit:
+            # Phase B driver: re-raises ENotImplementedPlatform off-Linux.
+            preWrite = observeRecorded(action.address, prev)
+            # resourceId = "systemd:user:<unitName>"
+            const sysPrefix = "systemd:user:"
+            if prev.resourceId.startsWith(sysPrefix):
+              destroyUserUnit(getHomeDir(),
+                prev.resourceId[sysPrefix.len .. ^1])
+          of rkMacosUserDefault:
+            # Phase B driver: re-raises ENotImplementedPlatform off-macOS.
+            preWrite = observeRecorded(action.address, prev)
+            # resourceId = "defaults:<domain>:<key>"
+            let body = prev.resourceId
+            if body.startsWith("defaults:"):
+              let rest = body[len("defaults:") .. ^1]
+              let colon = rest.rfind(':')
+              if colon > 0:
+                destroyUserDefault(rest[0 ..< colon],
+                  rest[colon + 1 .. ^1], "")
+          of rkLaunchdUserAgent:
+            # Phase B driver: re-raises ENotImplementedPlatform off-macOS.
+            preWrite = observeRecorded(action.address, prev)
+            # resourceId = "launchd:user:<label>"
+            const lcPrefix = "launchd:user:"
+            if prev.resourceId.startsWith(lcPrefix):
+              destroyLaunchAgent(getHomeDir(),
+                prev.resourceId[lcPrefix.len .. ^1])
+          let rb = toDestroyBinding(action.address, prev.kind,
+            prev.resourceId, preWrite, prev.payloadKind,
+            prev.lifecyclePolicy)
+          appliedResourceBindings.add(rb)
+        of rakAdopt:
+          # Phase B: claim an existing resource into management.
+          # Phase A skeleton: just record the observation.
+          let prev = recordedBindings.getOrDefault(action.address)
+          let rb = ResourceBinding(
+            resourceAddress: action.address,
+            providerIdentity: "repro.builtin",
+            realWorldIdentity: prev.resourceId,
+            lifecyclePolicy: $prev.lifecyclePolicy,
+            resourceKind: $prev.kind,
+            postWriteDigest: prev.postWriteDigest,
+            payloadKind: prev.payloadKind,
+            payloadBytes: prev.payloadBytes)
+          appliedResourceBindings.add(rb)
+
       # ---- Step 10: atomic switch of `current` --------------------------
       # Compose the activation manifest before rotation (rotation is
       # the point of no return). The manifest still needs to be sealed
       # into CAS in step 11.
-      var manifest = ActivationManifest(schemaVersion: 1'u16)
+      var manifest = ActivationManifest(schemaVersion: ManifestSchemaVersion)
       for r in realized:
         manifest.realizedPackages.add(RealizedPackage(
           packageId: r.packageId,
@@ -765,8 +1195,10 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         gf.postWriteDigest = sf.postWriteDigest
         gf.stowSource = sf.stowSource
         manifest.generatedFiles.add(gf)
-      # Resource bindings reserved for M68; managed blocks come from
-      # the test-hook synthesizer in Phase A.
+      # Managed blocks come from the test-hook synthesizer in
+      # Phase A. M68: ResourceBinding records come from the
+      # resource lifecycle layer's `appliedResourceBindings`
+      # sequence built above.
       for mb in appliedManagedBlocks:
         manifest.managedBlocks.add(ManagedBlock(
           hostFilePath: mb.hostFilePath,
@@ -774,7 +1206,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           preWriteFileDigest: mb.preWriteFileDigest,
           postWriteBlockBytes: mb.postWriteBlockBytes,
           postWriteFileDigest: mb.postWriteFileDigest))
-      manifest.resourceBindings = @[]
+      manifest.resourceBindings = appliedResourceBindings
       let manifestBytes = encodeManifest(manifest)
 
       # Build the envelope before rotation; writeGeneration also
