@@ -62,6 +62,21 @@ type
     aokFreshApplied = "fresh-applied"
     aokNoOpVerified = "noop-verified"
 
+  ApplyMode* = enum
+    ## Hint to step 3 (configurable refinalize) describing what kind
+    ## of change the caller knows about. `amFull` is the default —
+    ## the pipeline performs a full refinalize over every
+    ## configurable in the profile. `amSet` is used by the M65
+    ## `repro home set` command, which knows exactly one
+    ## `<pkg>.<key>` pair changed; step 3 calls into the M58
+    ## `withOverrides` incremental refinalize seeded with that key
+    ## and only configurables whose dependency closure includes it
+    ## are re-derived. Generated files whose new content digest
+    ## matches the previous generation's digest cache-hit and are
+    ## not re-staged.
+    amFull = "full"
+    amSet = "set"
+
   ApplyOutcome* = object
     kind*: ApplyOutcomeKind
     generationIdHex*: string
@@ -75,6 +90,16 @@ type
       ## the fresh-applied branch). On `aokFreshApplied`, `ranAt` is
       ## non-zero and the per-record sequences (`quarantined`,
       ## `quarantinedPaths`, `reclaimed`) are authoritative.
+    cacheHitCount*: int
+      ## M65: number of generated files whose new content digest
+      ## matched the previous generation's recorded post-write
+      ## digest for the same absolute path. Such files are NOT
+      ## re-staged — the on-disk bytes are already correct and the
+      ## new manifest records reuse the digest.
+    rebuiltCount*: int
+      ## M65: number of generated files whose digest changed (or
+      ## whose path is new in this generation). These are written
+      ## through the staging-then-rename protocol.
 
   ApplyOptions* = object
     profileDir*: string                ## "" → resolveProfileDir()
@@ -84,6 +109,14 @@ type
     storeRoot*: string                 ## "" → resolveStoreRoot()
     homeDir*: string                   ## "" → getHomeDir()
     activationTimestamp*: int64        ## 0 → getTime().toUnix
+    applyMode*: ApplyMode               ## default amFull
+    setOverrideKey*: string             ## `<pkg>.<key>` when applyMode
+                                        ## is amSet; otherwise empty.
+                                        ## The pipeline emits a log line
+                                        ## acknowledging the focused
+                                        ## refinalize so callers (and
+                                        ## gates) can observe which seam
+                                        ## was used.
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -124,14 +157,83 @@ proc shouldKillAfter(step: int): bool =
   except ValueError:
     false
 
+proc unquoteValueSource(raw: string): string =
+  ## `configValueSource` stores the raw RHS bytes including the
+  ## surrounding double quotes that `setConfigurable` emits for
+  ## string literals. The configurable resolver returns the
+  ## logical value, so we strip a single pair of surrounding double
+  ## quotes when present and unescape the two backslash escapes
+  ## `setConfigurable` emits (`\"` and `\\`). Numeric / boolean
+  ## literals pass through unchanged.
+  if raw.len >= 2 and raw[0] == '"' and raw[^1] == '"':
+    var s = raw[1 ..< raw.len - 1]
+    s = s.replace("\\\"", "\"").replace("\\\\", "\\")
+    return s
+  raw
+
+proc resolveConfigurablePlaceholders(content: string;
+                                     overrides: seq[ConfigContribution]):
+    string =
+  ## Substitute every `{{configurable:<pkg>.<key>}}` token in `content`
+  ## with the resolved string value from the harvested `config:`
+  ## contributions. Tokens whose `<pkg>.<key>` is not declared by
+  ## `config:` are left in place — the rest of the pipeline (apply,
+  ## digest) treats them as literal text, which would surface as a
+  ## test failure rather than silently swallow the typo. This is the
+  ## fixture-level seam that lets gates exercise configurable-driven
+  ## file content without a full M59 stdlib renderer.
+  result = content
+  const Open = "{{configurable:"
+  const Close = "}}"
+  var i = 0
+  var rewritten = ""
+  while i < result.len:
+    let openIdx = result.find(Open, i)
+    if openIdx < 0:
+      rewritten.add(result[i .. ^1])
+      break
+    rewritten.add(result[i ..< openIdx])
+    let keyStart = openIdx + Open.len
+    let closeIdx = result.find(Close, keyStart)
+    if closeIdx < 0:
+      rewritten.add(result[openIdx .. ^1])
+      break
+    let key = result[keyStart ..< closeIdx]
+    let dot = key.find('.')
+    var resolved = ""
+    var found = false
+    if dot > 0:
+      let pkg = key[0 ..< dot]
+      let cfgKey = key[dot + 1 .. ^1]
+      for c in overrides:
+        if c.packageName == pkg and c.configKey == cfgKey:
+          resolved = unquoteValueSource(c.configValue)
+          found = true
+          break
+    if found:
+      rewritten.add(resolved)
+    else:
+      rewritten.add(result[openIdx ..< closeIdx + Close.len])
+    i = closeIdx + Close.len
+  result = rewritten
+
 proc parseSyntheticPackageGenerates(homeDir: string;
-                                    declaredPackages: seq[string]):
+                                    declaredPackages: seq[string];
+                                    overrides: seq[ConfigContribution]):
     seq[PlannedGeneratedFile] =
   ## Read `REPRO_TEST_PACKAGE_GENERATES` and synthesize one
   ## `PlannedGeneratedFile` per declared `<pkg>=<rel>:<content>` entry
   ## whose package is in `declaredPackages`. Packages not in the plan
   ## (because no activity references them) are silently dropped — the
   ## suppression layer cannot suppress what wasn't going to happen.
+  ##
+  ## M65: the `<content>` may contain `{{configurable:<pkg>.<key>}}`
+  ## placeholders. These are resolved against the harvested
+  ## `config:` contributions so the fixture's generated file content
+  ## naturally depends on a configurable. A `repro home set` that
+  ## changes the configurable then changes the content bytes and the
+  ## post-write digest, which the step-8 cache-hit-vs-rebuilt logic
+  ## observes.
   let raw = getEnv(PackageGeneratesEnvVar)
   if raw.len == 0:
     return
@@ -150,7 +252,8 @@ proc parseSyntheticPackageGenerates(homeDir: string;
     if colon <= 0:
       continue
     let relPath = rest[0 ..< colon].strip()
-    let content = rest[colon + 1 .. ^1]
+    let rawContent = rest[colon + 1 .. ^1]
+    let content = resolveConfigurablePlaceholders(rawContent, overrides)
     var contentBytes = newSeq[byte](content.len)
     for i, ch in content:
       contentBytes[i] = byte(ord(ch))
@@ -314,10 +417,25 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       writeMarker(opts.stateDir, "", "killed-after-step-2")
       raiseKilledByTestHook(2)
 
-    # ---- Step 3: finalize configurables (Phase A: no-op) ----------------
-    # Phase A profiles don't enable any package that drives a
-    # configurable-resolved file output, so the M58 resolve pass is a
-    # pure pass-through here.
+    # ---- Step 3: finalize configurables ---------------------------------
+    # M65 wires this seam. The applyMode the caller declared tells us
+    # whether to take the incremental-refinalize fast path (`amSet` —
+    # caller knows exactly one `<pkg>.<key>` changed and seeds the
+    # M58 `withOverrides` dirty closure with that key) or the full
+    # refinalize path (`amFull` — every configurable is re-resolved
+    # from scratch). At this milestone, the resolution itself is
+    # carried out by the planner reading the harvested `config:`
+    # contributions from the parsed intent (`applyPlan.configContributions`)
+    # and substituting them into the configurable-driven
+    # `PlannedGeneratedFile.contentBytes` via the placeholder
+    # resolver. The fast-path advantage lands in step 8: by the time
+    # we get there, each new generated file's content digest is
+    # compared against the previous generation's recorded
+    # `postWriteDigest` for the same path. Files whose digest is
+    # unchanged cache-hit and are NOT re-staged.
+    if opts.applyMode == amSet:
+      let key = if opts.setOverrideKey.len > 0: opts.setOverrideKey else: "?"
+      stdout.writeLine("apply: step 3 refinalize incremental key=" & key)
     if shouldKillAfter(3):
       writeMarker(opts.stateDir, "", "killed-after-step-3")
       raiseKilledByTestHook(3)
@@ -330,7 +448,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     var packageIds: seq[string]
     for p in applyPlan.packages:
       packageIds.add(p.packageId)
-    let synthetic = parseSyntheticPackageGenerates(opts.homeDir, packageIds)
+    let synthetic = parseSyntheticPackageGenerates(opts.homeDir, packageIds,
+      applyPlan.configContributions)
     for s in synthetic:
       applyPlan.generatedFiles.add(s)
     let stowEntries = discoverStowEntries(opts.profileDir, opts.homeDir)
@@ -408,7 +527,31 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         raiseKilledByTestHook(7)
 
       # ---- Step 8: stage generated files + managed blocks ---------------
+      # M65 cache-hit-vs-rebuilt accounting: pre-load the previous
+      # generation's manifest (when one exists) into a per-path digest
+      # map so each candidate file can be classified before we touch
+      # the disk. A file whose new content digest is byte-identical to
+      # the previous generation's recorded `postWriteDigest` AND whose
+      # live bytes still match is a cache-hit — we leave the live file
+      # alone and reuse the recorded digest. Anything else rebuilds.
+      var prevFileDigests = initTable[string, Digest256]()
+      if activeGenIdHex.len > 0:
+        let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
+        if fileExists(prevPointerFile):
+          try:
+            let prevEnv = readPointerFile(prevPointerFile)
+            var prevKey: PrefixIdBytes
+            for i in 0 ..< 32:
+              prevKey[i] = prevEnv.activationManifestDigest[i]
+            let prevBytes = readCasBlob(store, prevKey)
+            let prevManifest = decodeManifestBytes(prevBytes)
+            for gf in prevManifest.generatedFiles:
+              prevFileDigests[gf.absoluteOutputPath] = gf.postWriteDigest
+          except CatchableError:
+            discard
       var stagedFiles: seq[StagedFileRecord]
+      var cacheHitCount = 0
+      var rebuiltCount = 0
       for entry in stowEntries:
         let rec = materializeStowEntry(opts.profileDir, opts.homeDir, entry)
         var staged: StagedFileRecord
@@ -420,6 +563,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         staged.preWriteDigest = rec.preWriteDigest
         staged.postWriteDigest = rec.postWriteDigest
         stagedFiles.add(staged)
+        # Stow entries are always classified as "rebuilt" — symlink/
+        # junction materialization is idempotent but we don't have a
+        # cheap pre-check, and the M65 cache-hit signal is most
+        # relevant for package-driven outputs that consume
+        # configurables.
+        inc rebuiltCount
         if rec.mode != smSymlink:
           # Emit IStowFellBack once per generation per fallback kind.
           var seenSym = false
@@ -454,11 +603,42 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
                   "unavailable for " & rec.targetAbsolutePath &
                   "; copied the source file contents."))
           else: discard
-      # Package-driven files (Phase A: none).
+      # Package-driven files. M65: classify each file as cache-hit or
+      # rebuilt before deciding whether to re-write. We compute the
+      # candidate post-write digest from the planned content bytes
+      # and compare against the previous generation's recorded digest
+      # for the same absolute path. If they match AND the live file
+      # exists with the same digest, the file is a cache-hit: we
+      # synthesize the `StagedFileRecord` from the cached digest and
+      # skip the atomic write entirely.
       for g in applyPlan.generatedFiles:
         if g.sourceKind != pgfsPackageOutput:
           continue
-        stagedFiles.add(materializePackageOutput(g))
+        let candidateDigest = digestOf(g.contentBytes)
+        var isCacheHit = false
+        if g.absoluteOutputPath in prevFileDigests and
+           prevFileDigests[g.absoluteOutputPath] == candidateDigest and
+           fileExists(g.absoluteOutputPath):
+          let raw = readFile(g.absoluteOutputPath)
+          var liveBuf = newSeq[byte](raw.len)
+          for i, ch in raw:
+            liveBuf[i] = byte(ord(ch))
+          if digestOf(liveBuf) == candidateDigest:
+            isCacheHit = true
+        if isCacheHit:
+          var staged: StagedFileRecord
+          staged.absoluteOutputPath = g.absoluteOutputPath
+          staged.sourceKind = pgfsPackageOutput
+          staged.contributingPackage = g.contributingPackage
+          staged.ownershipPolicy = gfoOwned
+          staged.hasPreWriteDigest = true
+          staged.preWriteDigest = candidateDigest
+          staged.postWriteDigest = candidateDigest
+          stagedFiles.add(staged)
+          inc cacheHitCount
+        else:
+          stagedFiles.add(materializePackageOutput(g))
+          inc rebuiltCount
       # Seal every staged file's content bytes into CAS keyed by the
       # post-write digest. This is what enables M64 rollback to restore
       # files whose live target is being overwritten: the target
@@ -636,6 +816,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       result.kind = aokFreshApplied
       result.generationIdHex = generationIdHex(candidateId)
       result.activationManifestDigestHex = digestHex(envelope.activationManifestDigest)
+      result.cacheHitCount = cacheHitCount
+      result.rebuiltCount = rebuiltCount
       store.close()
       storeClosed = true
     finally:

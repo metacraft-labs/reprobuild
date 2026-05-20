@@ -16,7 +16,8 @@ import repro_cli_support/watch
 import repro_cli_support/home
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
-       home.PackageCatalogLookup, home.CatalogEnvVar
+       home.PackageCatalogLookup, home.CatalogEnvVar,
+       home.ConfigurableSchemaEnvVar
 
 proc wantsVersion*(args: openArray[string]): bool =
   args.len == 1 and args[0] in ["--version", "-V"]

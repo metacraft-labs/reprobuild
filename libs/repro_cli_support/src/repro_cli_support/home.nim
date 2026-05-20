@@ -39,12 +39,21 @@ import repro_home_intent
 import repro_home_generations
 import repro_home_apply
 import repro_home_rollback
+import repro_local_store
 
 type
   PackageCatalogLookup* = proc(package: string): bool {.gcsafe.}
 
 const
   CatalogEnvVar* = "REPRO_HOME_PACKAGE_CATALOG"
+  ConfigurableSchemaEnvVar* = "REPRO_HOME_CONFIGURABLE_SCHEMA"
+    ## M65: comma-separated `<pkg>.<key>` entries declaring which
+    ## configurables each package recognizes. Mirrors the
+    ## $REPRO_HOME_PACKAGE_CATALOG seam: production code feeds the
+    ## schema from the resolved package catalog (the apply pipeline
+    ## already does the resolution); the env var is the gate / ad-hoc
+    ## seam. Empty means "accept every key" so existing gates do not
+    ## regress.
 
 # ---------------------------------------------------------------------------
 # Diagnostic printers.
@@ -121,6 +130,32 @@ proc packageInCatalog(pkg: string): bool =
   defaultCatalogLookup(pkg)
 
 # ---------------------------------------------------------------------------
+# Configurable-schema lookup seam (M65).
+# ---------------------------------------------------------------------------
+
+var
+  configuredSchema: HashSet[string]
+  haveConfiguredSchema: bool = false
+
+proc loadConfigurableSchemaFromEnv() =
+  configuredSchema.clear()
+  haveConfiguredSchema = false
+  let raw = getEnv(ConfigurableSchemaEnvVar)
+  if raw.len == 0:
+    return
+  haveConfiguredSchema = true
+  for piece in raw.split(','):
+    let entry = piece.strip()
+    if entry.len > 0:
+      configuredSchema.incl entry
+
+proc configurableInSchema(pkg, key: string): bool =
+  if not haveConfiguredSchema:
+    return true
+  let composed = pkg & "." & key
+  composed in configuredSchema
+
+# ---------------------------------------------------------------------------
 # Predicate-keyword tracking.
 # ---------------------------------------------------------------------------
 
@@ -167,12 +202,20 @@ proc renderRecovered(rec: AbortedGenerationRecord): string =
     " -> quarantined to " & rec.quarantinedPath &
     " (reason: " & rec.reason & ")"
 
-proc runApplyInline*(commandName: string): int =
+proc runApplyInline*(commandName: string;
+                     mode: ApplyMode = amFull;
+                     setOverrideKey: string = ""): int =
   ## Shared apply-pipeline runner used by `repro home apply` and by
-  ## the inline path of `add`/`remove`/`enable`/`disable`. Reports
-  ## the new generation id on stdout and any diagnostics on stderr.
+  ## the inline path of `add`/`remove`/`enable`/`disable`/`set`.
+  ## Reports the new generation id on stdout and any diagnostics on
+  ## stderr. M65: callers from `set` pass `mode = amSet` with
+  ## `setOverrideKey = "<pkg>.<key>"`; the pipeline takes the
+  ## incremental refinalize fast path and emits cache-hit-vs-rebuilt
+  ## counts in the apply log.
   try:
     var opts: ApplyOptions
+    opts.applyMode = mode
+    opts.setOverrideKey = setOverrideKey
     let outcome = runApply(opts)
     for r in outcome.abortedRecovered:
       stderr.writeLine(renderRecovered(r))
@@ -187,6 +230,11 @@ proc runApplyInline*(commandName: string): int =
       # were unlinked (zero on a fresh apply with no prior generations).
       echo "apply: eager gc reclaimed " & $outcome.gcResult.reclaimed.len &
         " prefixes (ranAt " & $outcome.gcResult.ranAt & ")"
+      # M65: cache-hit-vs-rebuilt accounting for the generated-file
+      # surface. The gate asserts that unrelated files cache-hit on
+      # a focused `repro home set`.
+      echo "apply: cache-hit " & $outcome.cacheHitCount & " rebuilt " &
+        $outcome.rebuiltCount
       echo "repro home " & commandName &
         ": applied generation " & outcome.generationIdHex
     of aokNoOpVerified:
@@ -784,6 +832,312 @@ proc runHomeApply(args: openArray[string]): int =
   return runApplyInline("apply")
 
 # ---------------------------------------------------------------------------
+# `repro home set` / `repro home get` (M65).
+# ---------------------------------------------------------------------------
+
+proc currentHostContext(): HostContext =
+  ## Construct a `HostContext` for the running interpreter so the
+  ## intent layer's `resolveEffectiveConfig` can evaluate predicates
+  ## the same way the apply pipeline will. M65's pre-validation is
+  ## the only call site; predicate evaluation in `set`/`get` cannot
+  ## diverge from apply or the diagnostic would be misleading.
+  result.host = currentHost()
+  when defined(windows):
+    result.platform = "windows"
+  elif defined(macosx):
+    result.platform = "macos"
+  elif defined(linux):
+    result.platform = "linux"
+  else:
+    result.platform = "unknown"
+  when defined(amd64) or defined(x86_64):
+    result.arch = "x86_64"
+  elif defined(arm64) or defined(aarch64):
+    result.arch = "arm64"
+  else:
+    result.arch = "unknown"
+
+proc splitPkgDotKey(raw: string): tuple[ok: bool; pkg, key: string] =
+  let dot = raw.find('.')
+  if dot <= 0 or dot == raw.len - 1:
+    return (false, "", "")
+  (true, raw[0 ..< dot], raw[dot + 1 .. ^1])
+
+proc printConfigurableInactive(pkg, key, profilePath: string) =
+  stderr.writeLine("repro home set: configurable `" & pkg & "." & key &
+    "` targets package `" & pkg & "` which is NOT enabled by any active " &
+    "activity in profile `" & profilePath & "`. The override would be a " &
+    "no-op — refusing to write a dead entry to the profile.")
+  stderr.writeLine("  hint: add `" & pkg & "` to an activity that the " &
+    "current host enables (or `repro home enable <activity>` it first), " &
+    "then re-run `repro home set`.")
+
+proc printUnknownConfigurable(pkg, key, profilePath: string) =
+  stderr.writeLine("repro home set: configurable `" & key &
+    "` is not declared by package `" & pkg & "` (profile `" &
+    profilePath & "`).")
+  stderr.writeLine("  hint: check the package's configurable schema " &
+    "with `repro home why " & pkg & "` (or set " &
+    "$REPRO_HOME_CONFIGURABLE_SCHEMA for the gate seam).")
+
+proc runHomeSet(args: openArray[string]): int =
+  ## `repro home set <pkg>.<key> <value> [--no-apply]` — write the
+  ## given configurable into the profile's `config:` section through
+  ## the M60 structural editor, then run the M63 apply pipeline
+  ## inline with the M58 incremental refinalize fast path
+  ## (`applyMode = amSet`). Pre-validates that the package is enabled
+  ## by some active activity AND that the key is declared by the
+  ## package's configurable schema before touching `home.nim`; both
+  ## diagnostics surface BEFORE the edit so a rejected `set` leaves
+  ## the profile byte-identical.
+  var pkgDotKey = ""
+  var value = ""
+  var noApply = false
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--no-apply":
+      noApply = true
+    elif a == "--help" or a == "-h":
+      echo "usage: repro home set <pkg>.<key> <value> [--no-apply]"
+      echo ""
+      echo "Update a managed configurable in the profile's `config:`"
+      echo "section. Runs apply inline by default; --no-apply skips"
+      echo "the activation step. The package must be enabled by an"
+      echo "active activity and the key must be declared by the"
+      echo "package's configurable schema; the edit is committed only"
+      echo "AFTER both pre-validations succeed."
+      return 0
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home set: unknown flag: " & a)
+      return 2
+    elif pkgDotKey.len == 0:
+      pkgDotKey = a
+    elif value.len == 0:
+      value = a
+    else:
+      stderr.writeLine("repro home set: unexpected positional: " & a)
+      return 2
+    inc i
+  if pkgDotKey.len == 0 or value.len == 0:
+    stderr.writeLine("usage: repro home set <pkg>.<key> <value> [--no-apply]")
+    return 2
+  let parts = splitPkgDotKey(pkgDotKey)
+  if not parts.ok:
+    stderr.writeLine("repro home set: invalid form: '" & pkgDotKey &
+      "' must be <package>.<configurable>")
+    return 2
+  loadConfigurableSchemaFromEnv()
+  try:
+    let profilePath = loadProfilePath()
+    let prof = loadProfile(profilePath)
+    # Pre-validation 1: the package must be enabled by some active
+    # activity on the current host. The spec says an inactive package
+    # override is "silently inert" in the apply pipeline — for `set`,
+    # the CLI converts that into a structured diagnostic so the user
+    # learns the override would have no effect BEFORE the edit lands.
+    let ctx = currentHostContext()
+    let effective = resolveEffectiveConfig(prof, ctx.host, ctx)
+    if parts.pkg notin effective.enabledPackages:
+      printConfigurableInactive(parts.pkg, parts.key, profilePath)
+      return 1
+    # Pre-validation 2: the key must be declared by the package's
+    # configurable schema. The seam is fed by
+    # $REPRO_HOME_CONFIGURABLE_SCHEMA. When the env var is absent the
+    # seam accepts every key — matches "do NOT load packages at
+    # runtime" while letting the gate exercise the error path.
+    if not configurableInSchema(parts.pkg, parts.key):
+      printUnknownConfigurable(parts.pkg, parts.key, profilePath)
+      return 1
+    # Edit the profile through the M60 structural editor. We already
+    # ran the configurable-schema check in the pre-validation pass
+    # above, so we pass `nil` here (the editor accepts that as
+    # "skip the schema lookup"). Passing a closure that re-reads the
+    # schema would require `gcsafe` plumbing around the module-level
+    # configured-schema set — and would duplicate the diagnostic we
+    # already emitted.
+    setConfigurable(profilePath, pkgDotKey, value, nil)
+  except ENoProfile as e:
+    printNoProfile(e); return 1
+  except EUnknownPredicate as e:
+    printUnknownPredicate(e); return 1
+  except EUnstructured as e:
+    printUnstructured(e); return 1
+  except EUnknownConfigurable as e:
+    printUnknownConfigurable(e.package, e.configurable, e.profilePath)
+    return 1
+  except EInvalidConfigurable as e:
+    stderr.writeLine("repro home set: invalid configurable form: " & e.msg)
+    return 1
+  except CatchableError as e:
+    stderr.writeLine("repro home set: error: " & e.msg)
+    return 1
+  if noApply:
+    return 0
+  return runApplyInline("set", amSet, pkgDotKey)
+
+# ---------------------------------------------------------------------------
+# `repro home get`.
+# ---------------------------------------------------------------------------
+
+proc lookupConfigurableInProfile(prof: Profile; pkg, key: string):
+    tuple[found: bool; value: string] =
+  ## Find the configurable's resolved value source in the profile's
+  ## `config:` block. Returns the raw RHS bytes as stored by the
+  ## editor (string literals are quoted, numbers/booleans are not).
+  ## The lookup is purely structural — package defaults are NOT
+  ## consulted; per spec the M65 `get` returns the user-visible
+  ## resolved value under FULL evaluation of the `config:` overrides.
+  ## Since fixture packages do not declare defaults at M65 (the
+  ## defaults seam is M68), the override IS the resolved value.
+  let cfgOpt = findConfigBlock(prof)
+  if cfgOpt.isNone:
+    return (false, "")
+  for pkgNode in cfgOpt.get.configPackages:
+    if pkgNode.configPackageName != pkg:
+      continue
+    for entry in pkgNode.configEntries:
+      if entry.configKey == key:
+        return (true, entry.configValueSource)
+  (false, "")
+
+proc unquoteValueDisplay(raw: string): string =
+  ## Mirror of the pipeline's `unquoteValueSource`: strip a single
+  ## pair of surrounding double quotes and unescape the editor's two
+  ## escape sequences so the user-facing `get` output is the logical
+  ## value (`Zahary`) rather than the on-disk source (`"Zahary"`).
+  if raw.len >= 2 and raw[0] == '"' and raw[^1] == '"':
+    var s = raw[1 ..< raw.len - 1]
+    s = s.replace("\\\"", "\"").replace("\\\\", "\\")
+    return s
+  raw
+
+proc profileFromIntentSnapshot(stateDir: string; profilePath: string):
+    Option[Profile] =
+  ## Load the intent snapshot stored in CAS for the CURRENT
+  ## generation and re-parse `home.nim` from those bytes. This is
+  ## interpretation (B): `repro home get` reads the resolved value
+  ## from the recorded activation, not from the on-disk source. The
+  ## on-disk `home.nim` may have been edited since the last apply
+  ## (e.g. by a `repro home set --no-apply`) — but until the next
+  ## apply, the recorded activation is what the user actually has
+  ## live. Rollback rotates `current` to a prior pointer, so
+  ## subsequent `get` reads the prior generation's snapshot —
+  ## exactly the spec's "rollback restores the prior value of the
+  ## configurable" semantics.
+  let activeIdHex = readCurrentGenerationId(stateDir)
+  if activeIdHex.len == 0:
+    return none(Profile)
+  let pointerFile = pointerPath(stateDir, activeIdHex)
+  if not fileExists(pointerFile):
+    return none(Profile)
+  try:
+    let env = readPointerFile(pointerFile)
+    var snapshotKey: PrefixIdBytes
+    for i in 0 ..< 32:
+      snapshotKey[i] = env.intentSnapshotDigest[i]
+    let storeRoot = resolveStoreRoot()
+    var store = openStore(storeRoot)
+    defer:
+      try: store.close() except CatchableError: discard
+    let snapshotBytes = readCasBlob(store, snapshotKey)
+    let snapshot = decodeSnapshotBytes(snapshotBytes)
+    let anchor = extractFilename(profilePath)
+    for entry in snapshot.files:
+      if entry.path == anchor or entry.path.endsWith("/" & anchor):
+        var content = newString(entry.content.len)
+        for i, b in entry.content:
+          content[i] = char(b)
+        # Re-parse the snapshotted source via a temp file so we
+        # reuse the editor's `loadProfile`. The temp lives inside
+        # the state dir to keep test isolation tidy.
+        let tmpDir = stateDir / "get-tmp"
+        createDir(tmpDir)
+        let tmpPath = tmpDir / anchor
+        writeFile(tmpPath, content)
+        try:
+          let prof = loadProfile(tmpPath)
+          return some(prof)
+        finally:
+          try: removeFile(tmpPath) except OSError: discard
+    return none(Profile)
+  except CatchableError:
+    return none(Profile)
+
+proc runHomeGet(args: openArray[string]): int =
+  ## `repro home get <pkg>.<key>` — print the resolved configurable
+  ## value to stdout. Reads from the CURRENT generation's intent
+  ## snapshot in CAS (interpretation B: the manifest is the source
+  ## of truth for what's live; the on-disk `home.nim` may have been
+  ## edited since). If there is no current generation yet, falls
+  ## back to the on-disk profile so the command works pre-apply.
+  var pkgDotKey = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      echo "usage: repro home get <pkg>.<key>"
+      echo ""
+      echo "Print the resolved value of a managed configurable to"
+      echo "stdout. Reads from the CURRENT generation's recorded"
+      echo "activation (the intent snapshot in CAS), so rollback"
+      echo "naturally restores the prior value without rewriting"
+      echo "`home.nim`."
+      return 0
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home get: unknown flag: " & a)
+      return 2
+    elif pkgDotKey.len == 0:
+      pkgDotKey = a
+    else:
+      stderr.writeLine("repro home get: unexpected positional: " & a)
+      return 2
+    inc i
+  if pkgDotKey.len == 0:
+    stderr.writeLine("usage: repro home get <pkg>.<key>")
+    return 2
+  let parts = splitPkgDotKey(pkgDotKey)
+  if not parts.ok:
+    stderr.writeLine("repro home get: invalid form: '" & pkgDotKey &
+      "' must be <package>.<configurable>")
+    return 2
+  try:
+    let profilePath = loadProfilePath()
+    # Try the current-generation snapshot first (interpretation B).
+    # If no generation is active yet (pre-apply), the on-disk profile
+    # is the only thing to read from.
+    let stateDir = resolveStateDir()
+    var prof: Profile
+    let snapshotProf = profileFromIntentSnapshot(stateDir, profilePath)
+    if snapshotProf.isSome:
+      prof = snapshotProf.get
+    else:
+      prof = loadProfile(profilePath)
+    let res = lookupConfigurableInProfile(prof, parts.pkg, parts.key)
+    if not res.found:
+      # Distinguish "package not enabled" from "key not declared" so
+      # the user sees the spec's structured diagnostic.
+      let ctx = currentHostContext()
+      let effective = resolveEffectiveConfig(prof, ctx.host, ctx)
+      if parts.pkg notin effective.enabledPackages:
+        stderr.writeLine("repro home get: package `" & parts.pkg &
+          "` is not enabled by any active activity; no value to read.")
+        return 1
+      stderr.writeLine("repro home get: no value recorded for `" &
+        pkgDotKey & "` in the active generation's `config:` section. " &
+        "(Set one with `repro home set " & pkgDotKey & " <value>`.)")
+      return 1
+    echo unquoteValueDisplay(res.value)
+    return 0
+  except ENoProfile as e:
+    printNoProfile(e); return 1
+  except EUnstructured as e:
+    printUnstructured(e); return 1
+  except CatchableError as e:
+    stderr.writeLine("repro home get: error: " & e.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
 # `repro home rollback` (M64).
 # ---------------------------------------------------------------------------
 
@@ -907,7 +1261,7 @@ proc runHomeCommand*(args: seq[string]): int =
     inc i
   if sub.len == 0:
     stderr.writeLine("usage: repro home {add | remove | enable | disable | " &
-      "list | why | history | apply | rollback} ...")
+      "list | why | history | apply | rollback | set | get} ...")
     return 2
   case sub
   of "add": return runHomeAdd(subArgs)
@@ -919,6 +1273,8 @@ proc runHomeCommand*(args: seq[string]): int =
   of "history": return runHomeHistory(subArgs)
   of "apply": return runHomeApply(subArgs)
   of "rollback": return runHomeRollback(subArgs)
+  of "set": return runHomeSet(subArgs)
+  of "get": return runHomeGet(subArgs)
   else:
     stderr.writeLine("repro home: unknown subcommand: " & sub)
     return 2

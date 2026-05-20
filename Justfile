@@ -673,6 +673,21 @@ e2e_repro_home_rollback_user_edit_protection:
         tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim \
         2>&1 | tee test-logs/e2e_repro_home_rollback_user_edit_protection.log
 
+e2e_repro_home_set_triggers_focused_rebuild:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_set_triggers_focused_rebuild.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_home_set_triggers_focused_rebuild \
+        --out:build/test-bin/e2e_repro_home_set_triggers_focused_rebuild \
+        tests/e2e/home-set-get/t_e2e_repro_home_set_triggers_focused_rebuild.nim \
+        2>&1 | tee test-logs/e2e_repro_home_set_triggers_focused_rebuild.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \
