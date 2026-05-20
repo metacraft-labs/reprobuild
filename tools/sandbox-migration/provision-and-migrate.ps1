@@ -534,7 +534,15 @@ try {
     try {
       $p = Start-Process -FilePath $ReproExe -ArgumentList $full -NoNewWindow -PassThru `
              -RedirectStandardOutput $stdoutF -RedirectStandardError $stderrF
+      # Windows PowerShell 5.1 quirk: Start-Process -PassThru with redirected
+      # streams returns a Process object whose OS handle is released once the
+      # process exits, leaving .ExitCode $null. Touching .Handle here forces
+      # .NET to cache the handle so .ExitCode stays valid after WaitForExit.
+      $null = $p.Handle
       if ($p.WaitForExit($timeoutSec * 1000)) {
+        # No-arg WaitForExit() ensures the redirected stdout/stderr async
+        # readers have fully drained and the exit code is materialized.
+        $p.WaitForExit()
         $exit = $p.ExitCode
       } else {
         Log "  TIMEOUT after $timeoutSec s - killing repro process tree"

@@ -95,9 +95,11 @@ foreach ($dll in ($vcRequired + $vcOptional)) {
   }
 }
 Info "  VC++ DLLs copied: $($vcCopied -join ', ')"
-if ($vcMissing.Count -gt 0) { Info "  VC++ DLLs not on host (skipped): $($vcMissing -join ', ')" }
+# Force array context with @(...) so .Count is StrictMode-safe even when the
+# collection is empty or $null (the dev shell enables Set-StrictMode).
+if (@($vcMissing).Count -gt 0) { Info "  VC++ DLLs not on host (skipped): $($vcMissing -join ', ')" }
 # The three mandatory DLLs must be present or the in-sandbox MSVC tools fail.
-$vcMandatoryMissing = $vcRequired | Where-Object { $_ -notin $vcCopied }
+$vcMandatoryMissing = @($vcRequired | Where-Object { $_ -notin $vcCopied })
 if ($vcMandatoryMissing.Count -gt 0) {
   Fail "mandatory VC++ runtime DLL(s) not found in ${vcSys32}: $($vcMandatoryMissing -join ', ')"
   Fail "the sandbox migration's MSVC-linked tools (codex, neovim) will fail without these."
