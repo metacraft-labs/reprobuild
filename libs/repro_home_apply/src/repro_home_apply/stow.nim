@@ -24,6 +24,20 @@
 ## These hooks exist so the gates can drive each branch without
 ## requiring administrator privileges (or the lack thereof) on the
 ## CI host.
+##
+## M72 Deliverable 3 — non-destructive materialization:
+##   The materializer NEVER blindly `removeFile`s a pre-existing
+##   target. Three cases:
+##     * target absent              → create the link.
+##     * target is ALREADY the correct symlink/junction to the stow
+##       source → no-op CACHE-HIT (the link is not deleted+recreated).
+##     * target is a regular file, OR a link to a DIFFERENT source →
+##       CONFLICT: the target is left byte-identical and
+##       `EStowConflict` is raised, unless the caller passes a
+##       reconcile-drift policy (then the prior content is recorded
+##       and the target is replaced).
+##   The copy fallback obeys the same rule: a pre-existing differing
+##   file is never overwritten without the drift gate.
 
 import std/[os, strutils]
 
@@ -44,6 +58,12 @@ type
     smJunction
     smCopy
 
+  StowReconcilePolicy* = enum
+    ## M72 Deliverable 3: how the materializer treats a pre-existing
+    ## target that conflicts with the desired stow link.
+    srpFailClosed                     ## conflict → raise EStowConflict
+    srpReconcileDrift                  ## conflict → record prior, replace
+
   StowEntry* = object
     ## One stow file the discovery pass surfaced.
     sourceAbsolutePath*: string
@@ -58,6 +78,14 @@ type
     postWriteDigest*: Digest256       ## blake3 of the source content
     hasPreWriteDigest*: bool
     preWriteDigest*: Digest256
+    wasCacheHit*: bool
+      ## M72: true when the target already existed as the correct
+      ## symlink/junction to the stow source — materialized as a
+      ## no-op (the existing link was NOT deleted and recreated).
+    wasReconciled*: bool
+      ## M72: true when a conflicting target was replaced under a
+      ## reconcile-drift policy. `preWriteDigest` then carries the
+      ## prior content digest so rollback can restore it.
 
 # ---------------------------------------------------------------------------
 # Discovery
@@ -110,16 +138,119 @@ proc readPreWriteDigest(dst: string): tuple[has: bool; digest: Digest256] =
     buf[i] = byte(ord(ch))
   (true, digestBytes(buf))
 
-proc tryCreateSymlink(target, source: string): bool =
-  ## Attempt a symlink. Early-returns when the test hook disables
-  ## symlinks WITHOUT mutating the filesystem — pre-creating the
-  ## target's parent dir would defeat the junction fallback below,
-  ## which keys off "ancestor does not yet exist on disk."
+# ---------------------------------------------------------------------------
+# M72 Deliverable 3: non-destructive target inspection
+# ---------------------------------------------------------------------------
+
+type
+  TargetState = enum
+    tsAbsent                          ## nothing at the target path
+    tsCorrectLink                     ## already the right symlink/junction
+    tsWrongLink                       ## a link, but to a different source
+    tsRegularFile                     ## a plain file (or dir) — conflict
+
+  TargetInspection = object
+    state: TargetState
+    existingKind: string              ## human label for the diagnostic
+    existingTarget: string            ## resolved link target, if a link
+
+proc linkPointsAtSource(linkPath, desiredSource: string): bool =
+  ## Decide whether the link at `linkPath` resolves to the SAME file
+  ## as `desiredSource`. Uses `os.sameFile` (file-identity comparison
+  ## by volume serial + file index on Windows, inode on POSIX) — a
+  ## symlink resolves to its target's identity, so this is true iff
+  ## the link points at the stow source. This is robust where
+  ## `expandSymlink` is not: `GetFinalPathNameByHandle` on Windows
+  ## can return the link's own canonical path rather than the
+  ## reparse-point target, which would misclassify a correct link as
+  ## a wrong link.
+  try:
+    if not fileExists(desiredSource):
+      return false
+    # `sameFile` follows the link on both arguments. If `linkPath`'s
+    # target was deleted it will raise; treat that as "not the same".
+    sameFile(linkPath, desiredSource)
+  except OSError, IOError:
+    false
+
+proc readLinkTargetBestEffort(linkPath: string): string =
+  ## Best-effort resolution of a link's target, only for the
+  ## human-readable diagnostic. `sameFile` already drives the
+  ## decision; this is purely cosmetic.
+  try:
+    result = expandSymlink(linkPath)
+  except OSError, IOError:
+    result = ""
+
+proc inspectTarget(target, desiredSource: string): TargetInspection =
+  ## Classify what currently lives at `target` relative to the desired
+  ## stow link. NEVER mutates the filesystem — this is the read the
+  ## non-destructive decision tree branches on.
+  if not fileExists(target) and not symlinkExists(target) and
+     not dirExists(target):
+    return TargetInspection(state: tsAbsent)
+  if symlinkExists(target):
+    # A symlink (file or dir). Compare by file identity — robust
+    # across Windows reparse-point resolution quirks.
+    if linkPointsAtSource(target, desiredSource):
+      return TargetInspection(state: tsCorrectLink,
+        existingKind: "symlink",
+        existingTarget: readLinkTargetBestEffort(target))
+    return TargetInspection(state: tsWrongLink,
+      existingKind: "symlink",
+      existingTarget: readLinkTargetBestEffort(target))
+  # A regular file (or a real directory). On Windows a junction to a
+  # directory reports via `dirExists` but not `symlinkExists`; the
+  # stow files this module materializes are always FILES, so a
+  # directory at a file's target path is itself a conflict.
+  if dirExists(target):
+    return TargetInspection(state: tsRegularFile,
+      existingKind: "directory")
+  return TargetInspection(state: tsRegularFile,
+    existingKind: "regular-file")
+
+proc tryCreateSymlink(target, source: string;
+                      reconcile: StowReconcilePolicy;
+                      outCacheHit, outReconciled: var bool): bool =
+  ## M72 Deliverable 3: non-destructive symlink materialization.
+  ##
+  ##   * target absent                       → create the link.
+  ##   * target already the correct symlink  → no-op CACHE-HIT
+  ##     (the link is NOT deleted and recreated).
+  ##   * target is a regular file / wrong link → CONFLICT: raise
+  ##     `EStowConflict` (fail-closed) unless `reconcile` is
+  ##     `srpReconcileDrift`, in which case the prior content is
+  ##     recorded by the caller and the target is replaced.
+  ##
+  ## Early-returns when the test hook disables symlinks WITHOUT
+  ## mutating the filesystem — pre-creating the target's parent dir
+  ## would defeat the junction fallback, which keys off "ancestor
+  ## does not yet exist on disk."
+  outCacheHit = false
+  outReconciled = false
   if getEnv(DisableSymlinkEnvVar) == "1":
     return false
-  try:
-    if fileExists(target) or symlinkExists(target):
+  let inspection = inspectTarget(target, source)
+  case inspection.state
+  of tsCorrectLink:
+    # Already correct — no-op cache-hit. Do NOT delete-and-recreate.
+    outCacheHit = true
+    return true
+  of tsRegularFile, tsWrongLink:
+    if reconcile != srpReconcileDrift:
+      raiseStowConflict(target, inspection.existingKind, source)
+    # Reconcile: the caller already captured the prior content
+    # digest via `readPreWriteDigest`. Remove the conflicting target
+    # so the link can be created in its place.
+    outReconciled = true
+    try:
       removeFile(target)
+    except OSError, IOError:
+      # A directory cannot be removed with removeFile.
+      try: removeDir(target) except OSError: discard
+  of tsAbsent:
+    discard
+  try:
     let parent = parentDir(target)
     if parent.len > 0:
       createDir(parent)
@@ -170,13 +301,26 @@ proc tryCreateJunctionAtAncestor(profileStowRoot, homeDir, homeRel: string;
     return false
 
 proc materializeStowEntry*(profileDir, homeDir: string;
-                          entry: StowEntry): AppliedStowRecord =
+                           entry: StowEntry;
+                           reconcile: StowReconcilePolicy = srpFailClosed):
+    AppliedStowRecord =
   ## Apply one stow entry through the symlink → junction → copy
   ## decision tree. The selected mode is returned so the pipeline
   ## emits `IStowFellBack` on the first fallback within a generation.
+  ##
+  ## M72 Deliverable 3: the materializer is non-destructive. A target
+  ## that already exists as the correct link is a no-op cache-hit
+  ## (`result.wasCacheHit = true`). A target that pre-exists as a
+  ## regular file or a link to a different source is a CONFLICT —
+  ## `EStowConflict` is raised under `srpFailClosed`, leaving the
+  ## target byte-identical; under `srpReconcileDrift` the prior
+  ## content is recorded (`preWriteDigest`) and the target replaced.
   result.sourceAbsolutePath = entry.sourceAbsolutePath
   result.homeRelativePath = entry.homeRelativePath
   result.targetAbsolutePath = entry.targetAbsolutePath
+  # Capture the prior content BEFORE any mutation. For a correct
+  # symlink this reads the (identical) source bytes; for a conflicting
+  # regular file / wrong link it captures the bytes rollback restores.
   let preDigest = readPreWriteDigest(entry.targetAbsolutePath)
   result.hasPreWriteDigest = preDigest.has
   if preDigest.has:
@@ -194,8 +338,13 @@ proc materializeStowEntry*(profileDir, homeDir: string;
   # ancestor to NOT yet exist on disk; eager parent creation would
   # foreclose the junction option. Each branch creates the parent
   # itself when (and only when) it needs it.
-  if tryCreateSymlink(entry.targetAbsolutePath, entry.sourceAbsolutePath):
+  var cacheHit = false
+  var reconciled = false
+  if tryCreateSymlink(entry.targetAbsolutePath, entry.sourceAbsolutePath,
+      reconcile, cacheHit, reconciled):
     result.mode = smSymlink
+    result.wasCacheHit = cacheHit
+    result.wasReconciled = reconciled
     return
   when defined(windows):
     let stowRoot = profileDir / StowSubdirName
@@ -204,12 +353,45 @@ proc materializeStowEntry*(profileDir, homeDir: string;
         entry.sourceAbsolutePath, junctioned):
       result.mode = smJunction
       return
-  # Copy fallback.
+  # Copy fallback — same non-destructive rule. A target that already
+  # exists is inspected before any write:
+  #   * byte-identical regular file  → no-op cache-hit.
+  #   * differing regular file / wrong link → conflict (fail-closed)
+  #     unless reconcile-drift is in effect.
   let parent = parentDir(entry.targetAbsolutePath)
+  let inspection = inspectTarget(entry.targetAbsolutePath,
+    entry.sourceAbsolutePath)
+  case inspection.state
+  of tsCorrectLink:
+    # A surviving correct link reached the copy fallback (symlink was
+    # disabled by the test hook but the link was already present).
+    # Leave it — it already resolves to the source.
+    result.mode = smCopy
+    result.wasCacheHit = true
+    return
+  of tsRegularFile:
+    if preDigest.has and preDigest.digest == result.postWriteDigest:
+      # Byte-identical content already in place — no-op cache-hit.
+      result.mode = smCopy
+      result.wasCacheHit = true
+      return
+    if reconcile != srpReconcileDrift:
+      raiseStowConflict(entry.targetAbsolutePath, inspection.existingKind,
+        entry.sourceAbsolutePath)
+    result.wasReconciled = true
+    try: removeFile(entry.targetAbsolutePath)
+    except OSError:
+      try: removeDir(entry.targetAbsolutePath) except OSError: discard
+  of tsWrongLink:
+    if reconcile != srpReconcileDrift:
+      raiseStowConflict(entry.targetAbsolutePath, inspection.existingKind,
+        entry.sourceAbsolutePath)
+    result.wasReconciled = true
+    try: removeFile(entry.targetAbsolutePath) except OSError: discard
+  of tsAbsent:
+    discard
   if parent.len > 0:
     createDir(parent)
-  if fileExists(entry.targetAbsolutePath):
-    try: removeFile(entry.targetAbsolutePath) except OSError: discard
   copyFile(entry.sourceAbsolutePath, entry.targetAbsolutePath)
   result.mode = smCopy
 

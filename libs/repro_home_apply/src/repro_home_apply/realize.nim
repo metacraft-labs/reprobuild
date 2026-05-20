@@ -30,6 +30,19 @@
 ## through the real store + the real Scoop adapter; the env vars
 ## only carry per-package binding instructions a future package
 ## catalog (M65+) will provide.
+##
+## M72 Deliverable 1 — production package catalog:
+##   When a package has NO `REPRO_TEST_PACKAGE_*` seam binding, the
+##   dispatcher falls back to `package_catalog.resolvePackage`, which
+##   resolves the reference against the REAL host adapter catalog (on
+##   Windows: installed Scoop apps + configured Scoop buckets) and
+##   dispatches the package to the M55 Scoop adapter. An app already
+##   installed at a satisfying version is recorded as a CACHE-HIT and
+##   is NOT reinstalled. An unknown package raises `EUnknownPackage`
+##   (a structured diagnostic naming the package + the catalogs
+##   searched), surfaced by the pipeline as `EApplyRealizeFailed`.
+##   Resolution precedence: the test seams win over the production
+##   catalog so the M63/M68/M70 gates do not regress.
 
 import std/[os, strutils, tables]
 
@@ -42,6 +55,7 @@ when defined(windows):
 
 import ./errors
 import ./plan
+import ./package_catalog
 
 const
   PackageSourceEnvVar* = "REPRO_TEST_PACKAGE_SOURCE"
@@ -65,6 +79,17 @@ type
     prefixAbsolutePath*: string
     resolvedExecutablePath*: string
     provenance*: seq[byte]
+    fromProductionCatalog*: bool
+      ## M72: true when this record was resolved by the production
+      ## catalog (no `REPRO_TEST_PACKAGE_*` seam). Used by the apply
+      ## log and `--plan` preview to distinguish a real catalog
+      ## dispatch from a test-seam binding.
+    cacheHit*: bool
+      ## M72: true when the package was already installed at a
+      ## version satisfying the profile — recorded as realized, NOT
+      ## reinstalled. False for a genuine fresh realization.
+    resolvedVersion*: string
+      ## M72: the version the catalog resolved (Scoop app version).
 
 # ---------------------------------------------------------------------------
 # Env-driven catalog
@@ -246,6 +271,105 @@ when defined(windows):
       result.provenance[i] = byte(ord(ch))
 
 # ---------------------------------------------------------------------------
+# M72 production catalog dispatch
+# ---------------------------------------------------------------------------
+
+when defined(windows):
+  proc realizeViaProductionCatalog(store: var Store;
+                                   cat: var ProductionCatalog;
+                                   packageId: string): RealizedRecord =
+    ## M72 Deliverable 1: resolve `packageId` against the real host
+    ## adapter catalog and dispatch through the M55 Scoop adapter. An
+    ## already-installed app at a satisfying version is a cache-hit:
+    ## the M55 adapter reuses the existing `apps/<app>/<version>/`
+    ## directory and does NOT run `scoop install` (its install path is
+    ## guarded by `if not dirExists(versionDir)`), so dispatching a
+    ## cache-hit through the adapter is safe and reinstall-free. We
+    ## classify the outcome here so the apply log / `--plan` preview
+    ## can report `cache-hit` vs `realize`.
+    let resolution =
+      try:
+        resolvePackage(cat, packageId)
+      except EUnknownPackage as err:
+        raiseRealizeFailed(packageId, "<none>", err.msg)
+    let spec = ScoopPackageSpec(
+      bucket: resolution.bucket,
+      app: resolution.app,
+      version: resolution.resolvedVersion,
+      executableName: resolution.executableName)
+    result = realizeScoopAdapter(store, packageId, spec)
+    result.fromProductionCatalog = true
+    result.cacheHit = resolution.cacheHit
+    result.resolvedVersion = resolution.resolvedVersion
+
+# ---------------------------------------------------------------------------
+# M72 Deliverable 2: read-only package preview for `--plan`
+# ---------------------------------------------------------------------------
+
+type
+  PackagePreviewKind* = enum
+    ppkRealize = "realize"            ## genuine fresh realization
+    ppkCacheHit = "cache-hit"         ## already installed & satisfying
+    ppkMissing = "missing"            ## unknown to all catalogs
+
+  PackagePreview* = object
+    ## Read-only verdict for one `PlannedPackage` — what a real apply
+    ## WOULD do, computed without realizing anything.
+    packageId*: string
+    kind*: PackagePreviewKind
+    detail*: string
+
+proc previewPackageResolutions*(packages: seq[PlannedPackage]):
+    seq[PackagePreview] =
+  ## M72 Deliverable 2: classify each planned package WITHOUT
+  ## realizing it. The production catalog query (`scoop list`, bucket
+  ## manifests) is a READ; no `scoop install` runs. Resolution
+  ## precedence matches `realizePlannedPackages` — test seams first,
+  ## then the production catalog.
+  let pathCatalog = parsePathCatalog()
+  let scoopCatalog = parseScoopCatalog()
+  when defined(windows):
+    var prodCatalog = openProductionCatalog()
+  for p in packages:
+    var preview = PackagePreview(packageId: p.packageId)
+    if p.packageId in pathCatalog:
+      let src = pathCatalog[p.packageId].sourcePath
+      if fileExists(src):
+        preview.kind = ppkRealize
+        preview.detail = "path adapter (test seam) -> " & src
+      else:
+        preview.kind = ppkMissing
+        preview.detail = "path-adapter source missing: " & src
+    elif p.packageId in scoopCatalog:
+      preview.kind = ppkRealize
+      let s = scoopCatalog[p.packageId]
+      preview.detail = "scoop adapter (test seam) -> " & s.bucket & "/" & s.app
+    else:
+      when defined(windows):
+        try:
+          let resolution = resolvePackage(prodCatalog, p.packageId)
+          if resolution.cacheHit:
+            preview.kind = ppkCacheHit
+            preview.detail = "scoop " & resolution.bucket & "/" &
+              resolution.app & "@" & resolution.resolvedVersion &
+              " already installed (no reinstall)"
+          else:
+            preview.kind = ppkRealize
+            preview.detail = "scoop " & resolution.bucket & "/" &
+              resolution.app &
+              (if resolution.resolvedVersion.len > 0:
+                 "@" & resolution.resolvedVersion else: "") &
+              " would be installed"
+        except EUnknownPackage as err:
+          preview.kind = ppkMissing
+          preview.detail = "unknown package; searched catalogs: " &
+            err.searchedCatalogs.join(", ")
+      else:
+        preview.kind = ppkMissing
+        preview.detail = "no production adapter on this platform"
+    result.add(preview)
+
+# ---------------------------------------------------------------------------
 # Public dispatcher
 # ---------------------------------------------------------------------------
 
@@ -253,8 +377,15 @@ proc realizePlannedPackages*(store: var Store;
                              packages: seq[PlannedPackage]):
     seq[RealizedRecord] =
   ## Realize every planned package through its declared adapter.
+  ##
+  ## Resolution precedence (M72): the `REPRO_TEST_PACKAGE_*` seams are
+  ## TEST-ONLY overrides and win over the production catalog. A package
+  ## with no seam binding falls through to the production catalog
+  ## (`package_catalog.resolvePackage`) — the M72 production path.
   let pathCatalog = parsePathCatalog()
   let scoopCatalog = parseScoopCatalog()
+  when defined(windows):
+    var prodCatalog = openProductionCatalog()
   for p in packages:
     if p.packageId in pathCatalog:
       result.add(realizePathAdapter(store, p.packageId,
@@ -268,8 +399,15 @@ proc realizePlannedPackages*(store: var Store;
           "the scoop adapter is Windows-only; this build runs on a " &
           "non-Windows platform")
     else:
-      raiseRealizeFailed(p.packageId, "<none>",
-        "no adapter binding declared. Set " & PackageSourceEnvVar &
-        "=<pkg>=<absolute-path> for a path-adapter binding, or " &
-        PackageScoopEnvVar & "=<pkg>=<bucket>/<app>@<version> for " &
-        "a Scoop-adapter binding.")
+      # M72: no test-seam binding — resolve through the production
+      # adapter catalog of the real host environment.
+      when defined(windows):
+        result.add(realizeViaProductionCatalog(store, prodCatalog,
+          p.packageId))
+      else:
+        raiseRealizeFailed(p.packageId, "<none>",
+          "no adapter binding declared and no production adapter " &
+          "catalog is available on this platform. Set " &
+          PackageSourceEnvVar & "=<pkg>=<absolute-path> for a " &
+          "path-adapter binding, or " & PackageScoopEnvVar &
+          "=<pkg>=<bucket>/<app>@<version> for a Scoop-adapter binding.")

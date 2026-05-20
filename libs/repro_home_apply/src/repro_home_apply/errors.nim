@@ -88,6 +88,20 @@ type
     ## missing. Distinct from `EUnknownResource` / `EResourceConflict`
     ## (which the resource layer raises for the move's own pre-checks).
 
+  EStowConflict* = object of EHomeApply
+    ## M72 Deliverable 3: the stow materializer found a target that
+    ## already exists as something OTHER than the correct symlink /
+    ## junction to the stow source — a regular file, or a link to a
+    ## DIFFERENT source. The materializer does NOT clobber it; the
+    ## apply pipeline reports the conflict as drift and leaves the
+    ## target byte-identical. `--reconcile-drift` / `--accept-overwrite`
+    ## is required to replace it, per the home-scope drift contract.
+    targetPath*: string
+    existingKind*: string             ## "regular-file" | "symlink" |
+                                      ## "junction"
+    desiredSource*: string            ## the stow source the target
+                                      ## should point at
+
 # ---------------------------------------------------------------------------
 # Warning / informational diagnostic records
 # ---------------------------------------------------------------------------
@@ -216,4 +230,23 @@ proc raiseResourceMove*(msg: string) {.noreturn.} =
   var e = newException(EResourceMove, msg)
   e.step = 0
   e.stepName = "resource_move"
+  raise e
+
+proc raiseStowConflict*(targetPath, existingKind, desiredSource: string)
+    {.noreturn.} =
+  ## M72 Deliverable 3: a stow target pre-exists as something other
+  ## than the correct link. The materializer leaves the target
+  ## byte-identical; the apply must surface this as drift.
+  var e = newException(EStowConflict,
+    "repro home apply: step 8 (stow materialization) refused to " &
+    "clobber pre-existing target '" & targetPath & "' (existing kind: " &
+    existingKind & "). It is NOT the correct stow link for source '" &
+    desiredSource & "'. The target was left byte-identical. Pass " &
+    "--reconcile-drift / --accept-overwrite to replace it (the prior " &
+    "content is recorded so rollback can restore it).")
+  e.step = 8
+  e.stepName = "stow_materialization"
+  e.targetPath = targetPath
+  e.existingKind = existingKind
+  e.desiredSource = desiredSource
   raise e

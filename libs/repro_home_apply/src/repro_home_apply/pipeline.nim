@@ -86,6 +86,38 @@ type
     aokFreshApplied = "fresh-applied"
     aokNoOpVerified = "noop-verified"
 
+  PlanItemAction* = enum
+    ## M72 Deliverable 2: the per-item verdict in a `--plan` preview.
+    piaRealize = "realize"            ## package: genuine fresh realize
+    piaCacheHit = "cache-hit"         ## package/stow: already satisfied
+    piaMissing = "missing"            ## package: unknown to all catalogs
+    piaLink = "link"                  ## stow file: would create a link
+    piaConflictDrift = "conflict-drift" ## stow file / resource: drift
+    piaWrite = "write"                ## generated file / block / launcher
+    piaCreate = "create"              ## resource: would be created
+    piaUpdate = "update"              ## resource: would be updated
+    piaDestroy = "destroy"            ## resource: would be destroyed
+    piaNoOp = "no-op"                 ## resource / item: nothing to do
+
+  PlanItem* = object
+    ## One previewed operation in a `repro home apply --plan` run.
+    category*: string                 ## "package" | "stow" | "generated-file"
+                                       ## | "managed-block" | "launcher"
+                                       ## | "resource"
+    name*: string                     ## package id / target path / address
+    action*: PlanItemAction
+    detail*: string                   ## human-readable extra context
+
+  PlanPreview* = object
+    ## M72 Deliverable 2: the result of `repro home apply --plan`.
+    ## A non-mutating preview of the full apply.
+    items*: seq[PlanItem]
+    driftCount*: int                   ## items whose action is a drift
+    generationIdHex*: string           ## the generation id this plan
+                                       ## would produce
+    isNoOp*: bool                      ## true when the plan matches the
+                                       ## active generation exactly
+
   ApplyMode* = enum
     ## Hint to step 3 (configurable refinalize) describing what kind
     ## of change the caller knows about. `amFull` is the default —
@@ -154,6 +186,12 @@ type
                                         ## in the desired set or the
                                         ## pipeline raises
                                         ## `EAdoptUndeclared`.
+    reconcileStowDrift*: bool           ## M72: when true, the stow
+                                        ## materializer replaces a
+                                        ## conflicting target instead
+                                        ## of raising `EStowConflict`
+                                        ## (the `--reconcile-drift` /
+                                        ## `--accept-overwrite` gate).
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -673,6 +711,253 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
   true
 
 # ---------------------------------------------------------------------------
+# M72 Deliverable 2: `repro home apply --plan` dry-run
+# ---------------------------------------------------------------------------
+
+proc previewStowItem(profileDir, homeDir: string;
+                     entry: StowEntry): PlanItem =
+  ## Read-only classification of one stow entry: would it create a
+  ## link, cache-hit (target already correct), or hit a conflict
+  ## (target exists as a regular file / wrong link)? Performs ONLY
+  ## reads — never touches the filesystem.
+  result.category = "stow"
+  result.name = entry.targetAbsolutePath
+  let target = entry.targetAbsolutePath
+  let source = entry.sourceAbsolutePath
+  if not fileExists(target) and not symlinkExists(target) and
+     not dirExists(target):
+    result.action = piaLink
+    result.detail = "would link -> " & source
+    return
+  if symlinkExists(target):
+    # Compare by file identity (robust across Windows reparse-point
+    # resolution quirks) — the same check the materializer uses.
+    var pointsAtSource = false
+    try:
+      pointsAtSource = fileExists(source) and sameFile(target, source)
+    except OSError, IOError:
+      pointsAtSource = false
+    if pointsAtSource:
+      result.action = piaCacheHit
+      result.detail = "already correct link"
+    else:
+      var resolved = ""
+      try: resolved = expandSymlink(target)
+      except OSError: resolved = ""
+      result.action = piaConflictDrift
+      result.detail = "existing symlink points at a different source (" &
+        resolved & ")"
+    return
+  # A regular file (or directory) at the target path.
+  if fileExists(target):
+    let liveRaw = readFile(target)
+    let srcRaw = readFile(source)
+    if liveRaw == srcRaw:
+      result.action = piaCacheHit
+      result.detail = "regular file already byte-identical to source"
+    else:
+      result.action = piaConflictDrift
+      result.detail = "existing regular file differs from the stow source"
+  else:
+    result.action = piaConflictDrift
+    result.detail = "a directory occupies the stow file's target path"
+
+proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
+  ## M72 Deliverable 2: `repro home apply --plan`. A NON-MUTATING
+  ## preview of the FULL apply. Runs the planning half of the pipeline
+  ## — load intent (step 2), finalize (step 3), build plan (step 4),
+  ## generation-id derivation + no-op detection (step 6), production
+  ## package-catalog resolution, stow discovery, and the
+  ## generated-file / managed-block / launcher / resource planning —
+  ## but does NOT execute steps 7-11 (no realize, no stage, no
+  ## materialize, no rotate, no commit).
+  ##
+  ## Mutates NOTHING: no store writes, no generation written, no
+  ## `current` rotation, no file/registry writes, no `scoop install`.
+  ## The package-catalog query (`scoop list`, bucket-manifest reads)
+  ## is a READ and is allowed; `scoop install` is not — the planner
+  ## calls `resolvePackage` (a pure query), never `realizeScoopAdapter`.
+  ##
+  ## The apply lock is intentionally NOT acquired: a read-only plan
+  ## must never block a concurrent real apply.
+  let opts = resolveOptions(rawOpts)
+  ensureStateDir(opts.stateDir)
+
+  # ---- Step 2: load intent ----------------------------------------------
+  if not fileExists(opts.profilePath):
+    raiseIntentLoad(opts.profilePath,
+      "no home.nim at expected path (profile-dir: " & opts.profileDir & ")")
+  let profile = loadProfileOrRaise(opts.profilePath)
+
+  # ---- Step 4: build plan + synthetic seams + stow discovery ------------
+  var applyPlan = buildPlan(profile, opts.profileDir, opts.host)
+  var packageIds: seq[string]
+  for p in applyPlan.packages:
+    packageIds.add(p.packageId)
+  let synthetic = parseSyntheticPackageGenerates(opts.homeDir, packageIds,
+    applyPlan.configContributions)
+  for s in synthetic:
+    applyPlan.generatedFiles.add(s)
+  let stowEntries = discoverStowEntries(opts.profileDir, opts.homeDir)
+  if stowEntries.len > 0:
+    let stowPlanned = stowEntriesToPlanned(stowEntries)
+    for sp in stowPlanned:
+      applyPlan.generatedFiles.add(sp)
+  let suppressed = suppressStowShadowed(applyPlan.generatedFiles,
+    applyPlan.configContributions)
+  applyPlan.generatedFiles = suppressed.files
+
+  # ---- Step 6: derive generation id + no-op detection -------------------
+  let intentSnapshot = IntentSnapshot(schemaVersion: 1'u16,
+    files: defaultWalkProfileFiles(opts.profileDir))
+  let snapshotBytes = encodeSnapshot(intentSnapshot)
+  let snapshotDig = digestOf(snapshotBytes)
+  let resourcesSeed = getEnv(ResourcesEnvVar)
+  let candidateId = deriveGenerationId(applyPlan, snapshotDig, resourcesSeed)
+  result.generationIdHex = generationIdHex(candidateId)
+  let activeGenIdHex = readCurrentGenerationId(opts.stateDir)
+
+  # ---- Package preview: production catalog resolution (READ ONLY) -------
+  # The catalog query (scoop list / bucket manifests) is a read; the
+  # preview never calls `realizeScoopAdapter`, so no `scoop install`
+  # runs. `previewPackageResolutions` lives in `realize.nim` so the
+  # preview and the real dispatch share one resolution path.
+  for pp in previewPackageResolutions(applyPlan.packages):
+    var item = PlanItem(category: "package", name: pp.packageId,
+      detail: pp.detail)
+    case pp.kind
+    of ppkRealize: item.action = piaRealize
+    of ppkCacheHit: item.action = piaCacheHit
+    of ppkMissing:
+      item.action = piaMissing
+      inc result.driftCount
+    result.items.add(item)
+
+  # ---- Stow preview -----------------------------------------------------
+  for entry in stowEntries:
+    let item = previewStowItem(opts.profileDir, opts.homeDir, entry)
+    if item.action == piaConflictDrift:
+      inc result.driftCount
+    result.items.add(item)
+
+  # ---- Generated files / managed blocks / launchers preview -------------
+  var prevFileDigests = initTable[string, Digest256]()
+  if activeGenIdHex.len > 0:
+    let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
+    if fileExists(prevPointerFile):
+      try:
+        let prevEnv = readPointerFile(prevPointerFile)
+        var prevKey: PrefixIdBytes
+        for i in 0 ..< 32:
+          prevKey[i] = prevEnv.activationManifestDigest[i]
+        var store = openStore(opts.storeRoot)
+        defer:
+          try: store.close() except CatchableError: discard
+        let prevBytes = readCasBlob(store, prevKey)
+        let prevManifest = decodeManifestBytes(prevBytes)
+        for gf in prevManifest.generatedFiles:
+          prevFileDigests[gf.absoluteOutputPath] = gf.postWriteDigest
+      except CatchableError:
+        discard
+  for g in applyPlan.generatedFiles:
+    if g.sourceKind != pgfsPackageOutput:
+      continue
+    var item = PlanItem(category: "generated-file",
+      name: g.absoluteOutputPath)
+    let candidateDigest = digestOf(g.contentBytes)
+    if g.absoluteOutputPath in prevFileDigests and
+       prevFileDigests[g.absoluteOutputPath] == candidateDigest and
+       fileExists(g.absoluteOutputPath):
+      item.action = piaCacheHit
+      item.detail = "content unchanged from the active generation"
+    else:
+      item.action = piaWrite
+      item.detail = "would write " & $g.contentBytes.len & " bytes"
+    result.items.add(item)
+  let syntheticBlocks = parseSyntheticPackageManagedBlocks(opts.homeDir,
+    packageIds)
+  for mb in syntheticBlocks:
+    result.items.add(PlanItem(category: "managed-block",
+      name: mb.hostFilePath & "#" & mb.blockId,
+      action: piaWrite,
+      detail: "would materialize managed block"))
+  for l in applyPlan.launchers:
+    result.items.add(PlanItem(category: "launcher",
+      name: l.commandName,
+      action: piaWrite,
+      detail: "launcher for package " & l.fromPackageId))
+
+  # ---- Resource preview (reuses the M68 read-only planner) --------------
+  let desiredResources = parseSyntheticResources(opts.homeDir)
+  var recordedBindings = initOrderedTable[string, RecordedBinding]()
+  if activeGenIdHex.len > 0:
+    let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
+    if fileExists(prevPointerFile):
+      try:
+        let prevEnv = readPointerFile(prevPointerFile)
+        var prevKey: PrefixIdBytes
+        for i in 0 ..< 32:
+          prevKey[i] = prevEnv.activationManifestDigest[i]
+        var store = openStore(opts.storeRoot)
+        defer:
+          try: store.close() except CatchableError: discard
+        let prevBytes = readCasBlob(store, prevKey)
+        let prevManifest = decodeManifestBytes(prevBytes)
+        for rb in prevManifest.resourceBindings:
+          if rb.resourceKind.len == 0: continue
+          recordedBindings[rb.resourceAddress] = toRecorded(rb)
+      except CatchableError:
+        discard
+  let reconcilePolicy =
+    if opts.reconcileStowDrift or getEnv(ReconcileDriftEnvVar) == "1" or
+       getEnv(AcceptOverwriteEnvVar) == "1":
+      rpReconcileDrift
+    else:
+      rpFailClosed
+  let resourcePlan = composePlan(desiredResources, recordedBindings,
+    DecisionOptions(reconcile: reconcilePolicy, enforcePreventDestroy: true))
+  for a in resourcePlan.actions:
+    var item = PlanItem(category: "resource", name: a.address)
+    case a.kind
+    of rakCreate: item.action = piaCreate
+    of rakUpdate: item.action = piaUpdate
+    of rakReplace: item.action = piaUpdate
+    of rakDestroy: item.action = piaDestroy
+    of rakNoOp: item.action = piaNoOp
+    of rakAdopt: item.action = piaNoOp
+    of rakDriftBlocked:
+      item.action = piaConflictDrift
+      inc result.driftCount
+    item.detail = a.summary
+    result.items.add(item)
+
+  # ---- No-op classification ---------------------------------------------
+  result.isNoOp = activeGenIdHex.len > 0 and
+    result.generationIdHex == activeGenIdHex and result.driftCount == 0
+
+proc renderPlanPreview*(preview: PlanPreview): string =
+  ## Stable, line-oriented rendering of a `--plan` preview. The gate
+  ## asserts on the category headers and the per-item action verbs.
+  result = "repro home apply --plan: " & $preview.items.len &
+    " operation(s) previewed, " & $preview.driftCount & " drift(s)\n"
+  result.add("  target generation: " & preview.generationIdHex & "\n")
+  if preview.isNoOp:
+    result.add("  plan status: no-op (matches the active generation)\n")
+  var categories = @["package", "stow", "generated-file", "managed-block",
+    "launcher", "resource"]
+  for cat in categories:
+    var any = false
+    for item in preview.items:
+      if item.category == cat:
+        if not any:
+          result.add("  [" & cat & "]\n")
+          any = true
+        result.add("    " & $item.action & "  " & item.name)
+        if item.detail.len > 0:
+          result.add("  (" & item.detail & ")")
+        result.add("\n")
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -855,8 +1140,22 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       var stagedFiles: seq[StagedFileRecord]
       var cacheHitCount = 0
       var rebuiltCount = 0
+      # M72 Deliverable 3: the stow materializer is non-destructive. A
+      # conflicting pre-existing target raises `EStowConflict` unless a
+      # reconcile-drift policy is in effect. The policy is sourced from
+      # the CLI flag (`opts.reconcileStowDrift`) OR the env seams the
+      # M68/M70 gates already use (`REPRO_HOME_APPLY_RECONCILE_DRIFT` /
+      # `REPRO_HOME_APPLY_ACCEPT_OVERWRITE`).
+      let stowReconcile =
+        if opts.reconcileStowDrift or
+           getEnv(ReconcileDriftEnvVar) == "1" or
+           getEnv(AcceptOverwriteEnvVar) == "1":
+          srpReconcileDrift
+        else:
+          srpFailClosed
       for entry in stowEntries:
-        let rec = materializeStowEntry(opts.profileDir, opts.homeDir, entry)
+        let rec = materializeStowEntry(opts.profileDir, opts.homeDir, entry,
+          stowReconcile)
         var staged: StagedFileRecord
         staged.absoluteOutputPath = rec.targetAbsolutePath
         staged.sourceKind = pgfsStowFile

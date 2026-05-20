@@ -25,6 +25,7 @@
 
 import repro_home_apply/errors
 import repro_home_apply/plan
+import repro_home_apply/package_catalog
 import repro_home_apply/realize
 import repro_home_apply/materialize_files
 import repro_home_apply/materialize_managed_blocks
@@ -38,6 +39,7 @@ import repro_home_apply/resource_move
 
 export errors
 export plan
+export package_catalog
 export realize
 export materialize_files
 export materialize_managed_blocks

@@ -304,6 +304,16 @@ proc runApplyInline*(commandName: string;
   except EDrift as err:
     stderr.writeLine("repro home " & commandName & ": " & err.msg)
     return 1
+  except EStowConflict as err:
+    # M72 Deliverable 3: a stow target pre-existed as a regular file
+    # or a link to a different source. The materializer left it
+    # byte-identical; surface it as drift.
+    stderr.writeLine("repro home " & commandName & ": stow drift: " &
+      err.msg)
+    stderr.writeLine("  hint: pass --reconcile-drift (or " &
+      "--accept-overwrite) to replace the target — the prior content " &
+      "is recorded so `repro home rollback` can restore it.")
+    return 1
   except EAdoptUndeclared as err:
     stderr.writeLine("repro home " & commandName & ": " & err.msg)
     return 1
@@ -836,28 +846,93 @@ proc runHomeHistory(args: openArray[string]): int =
 # `repro home apply` (M63).
 # ---------------------------------------------------------------------------
 
+proc runHomeApplyPlan(allowDrift, reconcileDrift: bool): int =
+  ## M72 Deliverable 2: `repro home apply --plan` — a non-mutating
+  ## preview of the FULL apply (packages, stow, generated files,
+  ## managed blocks, launchers, resources). Runs the planning half of
+  ## the pipeline through `runApplyPlan`, which executes NO mutating
+  ## step (no realize, no stage, no rotate, no commit, no `scoop
+  ## install`). Exit 0 on a clean / no-op plan; non-zero when drift is
+  ## detected unless `--allow-drift` was passed.
+  try:
+    var opts: ApplyOptions
+    opts.reconcileStowDrift = reconcileDrift
+    let preview = runApplyPlan(opts)
+    stdout.write(renderPlanPreview(preview))
+    if preview.driftCount > 0 and not allowDrift and not reconcileDrift:
+      stderr.writeLine("repro home apply --plan: " & $preview.driftCount &
+        " drift item(s) detected. Pass --allow-drift to exit 0 anyway, " &
+        "or --reconcile-drift to plan the reconciling apply.")
+      return 1
+    return 0
+  except EApplyIntentLoad as err:
+    stderr.writeLine("repro home apply --plan: step 1 (load intent) " &
+      "failed: " & err.msg)
+    return 1
+  except EHomeApply as err:
+    stderr.writeLine("repro home apply --plan: planning failed at step " &
+      $err.step & " (" & err.stepName & "): " & err.msg)
+    return 1
+  except CatchableError as err:
+    stderr.writeLine("repro home apply --plan: planning failed with " &
+      "unexpected error: " & err.msg)
+    return 1
+
 proc runHomeApply(args: openArray[string]): int =
   ## Standalone apply: runs the M63 pipeline against the currently
   ## resolved profile, host, state dir, and store. `--no-apply` is
   ## rejected because apply IS the action.
+  ##
+  ## M72: `--plan` runs a non-mutating preview instead of the real
+  ## apply. `--reconcile-drift` / `--accept-overwrite` let the real
+  ## apply replace a drifted stow target (per the home-scope drift
+  ## contract). `--allow-drift` makes `--plan` exit 0 despite drift.
+  var planMode = false
+  var allowDrift = false
+  var reconcileDrift = false
   for a in args:
     if a == "--help" or a == "-h":
-      echo "usage: repro home apply"
+      echo "usage: repro home apply [--plan] [--allow-drift] " &
+        "[--reconcile-drift | --accept-overwrite]"
       echo ""
       echo "Run the home-profile apply pipeline against the current"
       echo "intent (`home.nim`), producing a new generation and"
       echo "rotating the `current` pointer."
+      echo ""
+      echo "  --plan             Non-mutating preview of the full apply"
+      echo "                     (packages, stow, generated files,"
+      echo "                     managed blocks, launchers, resources)."
+      echo "                     Mutates nothing; runs no `scoop install`."
+      echo "  --allow-drift      With --plan: exit 0 even when drift is"
+      echo "                     detected."
+      echo "  --reconcile-drift  Replace a drifted stow target / resource"
+      echo "  --accept-overwrite (alias of --reconcile-drift) instead of"
+      echo "                     failing closed; records the prior"
+      echo "                     content so rollback can restore it."
       return 0
     if a == "--no-apply":
       stderr.writeLine("repro home apply: --no-apply is meaningless on " &
         "this subcommand (apply IS the action). --no-apply belongs on " &
         "intent-mutating commands (add, remove, enable, disable).")
       return 2
-    if a.startsWith("--"):
+    if a == "--plan":
+      planMode = true
+    elif a == "--allow-drift":
+      allowDrift = true
+    elif a == "--reconcile-drift" or a == "--accept-overwrite":
+      reconcileDrift = true
+    elif a.startsWith("--"):
       stderr.writeLine("repro home apply: unknown flag: " & a)
       return 2
-    stderr.writeLine("repro home apply: unexpected positional: " & a)
-    return 2
+    else:
+      stderr.writeLine("repro home apply: unexpected positional: " & a)
+      return 2
+  if planMode:
+    return runHomeApplyPlan(allowDrift, reconcileDrift)
+  # A real apply with --reconcile-drift threads the policy through the
+  # apply pipeline so a drifted stow target can be replaced.
+  if reconcileDrift:
+    putEnv("REPRO_HOME_APPLY_RECONCILE_DRIFT", "1")
   return runApplyInline("apply")
 
 # ---------------------------------------------------------------------------
