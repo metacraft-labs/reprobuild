@@ -89,6 +89,10 @@ type
     # launch and uses the bypass path only if the daemon is unavailable. No-op
     # builds therefore do not pay a daemon round trip.
     fallbackToRunQuotaBypass*: bool
+    # When true, the engine keeps one RunQuota client session for the build and
+    # launches child processes directly under leases instead of spawning a
+    # `repro __repro-runquota-helper` process for every action.
+    inlineRunQuota*: bool
     progressCallback*: BuildProgressCallback
     statsEnabled*: bool
     suppressTrace*: bool
@@ -156,14 +160,24 @@ type
 
   BuildProgressCallback* = proc(event: BuildProgressEvent)
 
+  RunningProcessKind = enum
+    rpkHelperProcess
+    rpkBypassProcess
+    rpkInlineRunQuotaPending
+    rpkInlineRunQuota
+    rpkInlineRunQuotaFailed
+
   RunningAction = object
     id: string
     pool: string
     poolUnits: uint32
     action: BuildAction
+    processKind: RunningProcessKind
     process: Process
+    runQuotaProcess: ReproRunQuotaRunningProcess
+    queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
+    inlineFailure: ActionResult
     resultPath: string
-    bypassRunQuota: bool
 
   DynamicGraphFragment = object
     deps: Table[string, seq[string]]
@@ -195,6 +209,7 @@ proc defaultBuildEngineConfig*(cacheRoot: string): BuildEngineConfig =
     rebuildMissingOutputsOnCacheHit: false,
     bypassRunQuota: false,
     fallbackToRunQuotaBypass: false,
+    inlineRunQuota: false,
     progressCallback: nil,
     statsEnabled: false,
     suppressTrace: false)
@@ -823,6 +838,24 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   startProcess(helper, args = helperCliArgs(rq, command, resultPath),
     options = {poUsePath, poStdErrToStdOut})
 
+proc runQuotaRequest(action: BuildAction): ReproResourceRequest =
+  ReproResourceRequest(
+    label: action.id,
+    commandStatsId: action.commandStatsId,
+    cpuMilli: action.cpuMilli,
+    memoryBytes: action.memoryBytes,
+    namedPool: action.pool,
+    namedPoolUnits: action.poolUnits)
+
+proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
+    ReproCommandSpec =
+  ReproCommandSpec(
+    argv: action.argv,
+    cwd: action.cwd,
+    env: action.env,
+    stdoutLimit: config.stdoutLimit,
+    stderrLimit: config.stderrLimit)
+
 proc writeBypassResultJson(resultPath: string; exitCode: int;
                            combinedOutput: string) =
   ## Synthesize the same result-JSON schema the RunQuota helper writes, so the
@@ -912,6 +945,40 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     result.status = asFailed
     result.exitCode = if helperExit == 0: 1 else: helperExit
     result.stderr = "runquota helper result parse failed: " & err.msg
+
+proc finishInlineRunQuotaProcess(id: string;
+                                 process: var ReproRunQuotaRunningProcess):
+    ActionResult =
+  result = ActionResult(id: id, launched: true)
+  try:
+    let execution = process.finishCompleted()
+    result.leaseId = execution.leaseId
+    result.exitCode = execution.exitCode
+    result.stdout = execution.stdout
+    result.stderr = execution.stderr
+    result.runQuotaBackend = execution.backendName
+    result.runQuotaSocket = getEnv("RUNQUOTA_SOCKET", "")
+    result.status =
+      if execution.exitCode == 0:
+        asSucceeded
+      else:
+        asFailed
+  except CatchableError as err:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = "runquota inline process failed: " & err.msg
+    result.runQuotaBackend = "runquota-inline"
+    result.runQuotaSocket = getEnv("RUNQUOTA_SOCKET", "")
+
+proc inlineRunQuotaFailureResult(id, message: string): ActionResult =
+  ActionResult(
+    id: id,
+    status: asFailed,
+    exitCode: 1,
+    launched: true,
+    stderr: message,
+    runQuotaBackend: "runquota-inline",
+    runQuotaSocket: getEnv("RUNQUOTA_SOCKET", ""))
 
 proc builtinPath(action: BuildAction; path: string): string =
   materialPath(action.cwd, path)
@@ -1084,7 +1151,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return none(BuildRunResult)
       hotRecords.add(hotRecord.get())
     let lookupStart = statStart()
-    let inputsUnchanged = cache.hotMetadataInputsUnchanged(addr metadataCache)
+    let inputsUnchanged =
+      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
     finishStat("repro cache lookup", lookupStart)
     if not inputsUnchanged:
       return none(BuildRunResult)
@@ -1118,6 +1186,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var launchedSucceeded = initHashSet[string]()
   var dynamicDepsLoaded = initHashSet[string]()
   var fileMetadataCache = initFileMetadataCache()
+  var inlineRunQuotaSession: ReproRunQuotaSession
+  var inlineRunQuotaSessionOpen = false
 
   poolCapacity[""] = maxParallel
   for p in buildGraph.pools:
@@ -1161,6 +1231,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       finishStat("repro runquota probe", probeStart)
     not runQuotaDaemonReachable.get()
 
+  proc tryEnsureInlineRunQuotaSession(): bool =
+    if inlineRunQuotaSessionOpen:
+      return true
+    let sessionStart = statStart()
+    try:
+      inlineRunQuotaSession = openRunQuotaSession()
+      inlineRunQuotaSessionOpen = true
+      runQuotaDaemonReachable = some(true)
+      result = true
+    except CatchableError as err:
+      runQuotaDaemonReachable = some(false)
+      if config.fallbackToRunQuotaBypass:
+        result = false
+      else:
+        raise err
+    finally:
+      finishStat("repro runquota session open", sessionStart)
+
   proc terminalCount(): int =
     for action in buildGraph.actions:
       if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
@@ -1180,6 +1268,50 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       completed: terminalCount(),
       running: running.len,
       ready: ready.len))
+
+  proc hasPendingInlineRunQuota(): bool =
+    for item in running:
+      if item.processKind == rpkInlineRunQuotaPending:
+        return true
+    false
+
+  proc failRunningAction(index: int; message: string) =
+    running[index].inlineFailure = inlineRunQuotaFailureResult(
+      running[index].id, message)
+    running[index].processKind = rpkInlineRunQuotaFailed
+
+  proc pollInlineRunQuotaGrants(): int =
+    result = -1
+    if not inlineRunQuotaSessionOpen or not hasPendingInlineRunQuota():
+      return
+    try:
+      for grant in pollRunQuotaGrants(inlineRunQuotaSession):
+        for j in 0 ..< running.len:
+          if running[j].processKind != rpkInlineRunQuotaPending:
+            continue
+          if running[j].queuedRunQuotaProcess.candidateId != grant.candidateId:
+            continue
+          if not grant.active or grant.queued:
+            failRunningAction(j, "runquota denied queued lease: " &
+              grant.diagnostic)
+            return j
+          try:
+            var queued = running[j].queuedRunQuotaProcess
+            running[j].runQuotaProcess = startGrantedWithRunQuota(
+              inlineRunQuotaSession, queued, grant)
+            running[j].queuedRunQuotaProcess = queued
+            running[j].processKind = rpkInlineRunQuota
+            runResult.trace(running[j].id, "launched", "runquota-grant")
+          except CatchableError as err:
+            failRunningAction(j, "runquota inline process failed: " & err.msg)
+            return j
+          break
+    except CatchableError as err:
+      for j in 0 ..< running.len:
+        if running[j].processKind == rpkInlineRunQuotaPending:
+          failRunningAction(j, "runquota inline grant polling failed: " &
+            err.msg)
+          return j
 
   proc completeSuccess(id: string; status: ActionStatus; cacheDecision: CacheDecision;
                        launched: bool; detail = "") =
@@ -1309,7 +1441,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let lookup = cache.lookupActionResult(cas, action.weakFingerprint,
             action.actionCachePolicy,
             verifyOutputBlobs = not outputsPresentBeforeLookup,
-            allowMetadataOnlyHit = outputsPresentBeforeLookup,
+            allowMetadataOnlyHit = false,
             metadataCache = addr fileMetadataCache)
           finishStat("repro cache lookup", lookupStart)
           case lookup.status
@@ -1324,16 +1456,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               inc completed
               launchedAny = true
               continue
-            let restoreStart = statStart()
-            cas.restoreOutputs(lookup.record, action.cwd)
-            fileMetadataCache.clear()
-            finishStat("repro cache restore", restoreStart)
-            runResult.results[idToIndex.resultIndex(id)].evidence =
-              cacheHitEvidence(action, lookup.record)
-            completeSuccess(id, asCacheHit, cdHit, false, "restored")
-            inc completed
-            launchedAny = true
-            continue
+            if config.rebuildMissingOutputsOnCacheHit:
+              runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+              runResult.trace(id, "cache-skipped", "missing-output")
+            else:
+              let restoreStart = statStart()
+              cas.restoreOutputs(lookup.record, action.cwd)
+              fileMetadataCache.clear()
+              finishStat("repro cache restore", restoreStart)
+              runResult.results[idToIndex.resultIndex(id)].evidence =
+                cacheHitEvidence(action, lookup.record)
+              completeSuccess(id, asCacheHit, cdHit, false, "restored")
+              inc completed
+              launchedAny = true
+              continue
           of aclHybridCutoff:
             var outputsPresent = true
             if config.rebuildMissingOutputsOnCacheHit:
@@ -1346,16 +1482,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               inc completed
               launchedAny = true
               continue
-            let restoreStart = statStart()
-            cas.restoreOutputs(lookup.record, action.cwd)
-            fileMetadataCache.clear()
-            finishStat("repro cache restore", restoreStart)
-            runResult.results[idToIndex.resultIndex(id)].evidence =
-              cacheHitEvidence(action, lookup.record)
-            completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
-            inc completed
-            launchedAny = true
-            continue
+            if config.rebuildMissingOutputsOnCacheHit:
+              runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+              runResult.trace(id, "cache-skipped", "missing-output")
+            else:
+              let restoreStart = statStart()
+              cas.restoreOutputs(lookup.record, action.cwd)
+              fileMetadataCache.clear()
+              finishStat("repro cache restore", restoreStart)
+              runResult.results[idToIndex.resultIndex(id)].evidence =
+                cacheHitEvidence(action, lookup.record)
+              completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
+              inc completed
+              launchedAny = true
+              continue
           of aclRejectedCorruptOutput:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdRejected
           of aclMissInputChanged:
@@ -1469,20 +1609,83 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         poolRunning[poolName] = used + units
         inc launchSeq
         let resultPath = runQuotaResultRoot / ($launchSeq & ".json")
-        let bypassRunQuota = launchBypassesRunQuota()
+        var bypassRunQuota = false
+        var inlineRunQuota = false
+        if config.inlineRunQuota and not config.bypassRunQuota:
+          inlineRunQuota = tryEnsureInlineRunQuotaSession()
+          bypassRunQuota = not inlineRunQuota
+        else:
+          bypassRunQuota = launchBypassesRunQuota()
         let launchStart = statStart()
-        let process = startRunQuotaProcess(plan.action, config, resultPath,
-          bypassRunQuota)
+        var process: Process
+        var runQuotaProcess: ReproRunQuotaRunningProcess
+        var queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
+        var processKind =
+          if inlineRunQuota: rpkInlineRunQuota
+          elif bypassRunQuota: rpkBypassProcess
+          else: rpkHelperProcess
+        var startEvent = "launched"
+        var startDetail = "pool=" & poolName
+        var launchFailure = ""
+        try:
+          if inlineRunQuota:
+            let offer = offerWithRunQuota(
+              inlineRunQuotaSession,
+              plan.action.runQuotaRequest(),
+              plan.action.runQuotaCommand(config))
+            case offer.kind
+            of rqokStarted:
+              runQuotaProcess = offer.running
+              processKind = rpkInlineRunQuota
+            of rqokQueued:
+              queuedRunQuotaProcess = offer.queued
+              processKind = rpkInlineRunQuotaPending
+              startEvent = "queued"
+              startDetail = "pool=" & poolName & " runquota=pending"
+          else:
+            process = startRunQuotaProcess(plan.action, config, resultPath,
+              bypassRunQuota)
+        except CatchableError as err:
+          launchFailure = err.msg
         finishStat("repro runquota launch", launchStart)
+        if launchFailure.len > 0:
+          let previousCacheDecision = runResult.results[runningIdx].cacheDecision
+          runResult.results[runningIdx] = ActionResult(
+            id: id,
+            status: asFailed,
+            exitCode: 1,
+            launched: true,
+            cacheDecision: previousCacheDecision,
+            dependencyPolicyKind: plan.action.dependencyPolicy.kind,
+            monitorDepfilePath: plan.action.monitorDepfile,
+            stderr: "process launch failed: " & launchFailure,
+            runQuotaBackend:
+              if inlineRunQuota: "runquota-inline"
+              elif bypassRunQuota: "runquota-bypass"
+              else: "runquota-helper",
+            runQuotaSocket: getEnv("RUNQUOTA_SOCKET", ""))
+          statuses[id] = asFailed
+          let failedUsed = poolRunning.getOrDefault(poolName, 0'u32)
+          poolRunning[poolName] =
+            if failedUsed > units: failedUsed - units else: 0'u32
+          runResult.trace(id, "failed", "launch")
+          blockClosure(id, id)
+          emitProgress(bpkActionCompleted, id)
+          completed = terminalCount()
+          launchedAny = true
+          continue
         running.add(RunningAction(
           id: id,
           pool: poolName,
           poolUnits: units,
           action: plan.action,
+          processKind: processKind,
           process: process,
-          resultPath: resultPath,
-          bypassRunQuota: bypassRunQuota))
-        runResult.trace(id, "launched", "pool=" & poolName)
+          runQuotaProcess: runQuotaProcess,
+          queuedRunQuotaProcess: queuedRunQuotaProcess,
+          resultPath: resultPath
+        ))
+        runResult.trace(id, startEvent, startDetail)
         emitProgress(bpkActionStarted, id)
         launchedAny = true
 
@@ -1500,25 +1703,62 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
       var runIndex = -1
       let waitStart = statStart()
+      var nextGrantPoll = 0.0
       while runIndex < 0:
+        if hasPendingInlineRunQuota() and epochTime() >= nextGrantPoll:
+          runIndex = pollInlineRunQuotaGrants()
+          nextGrantPoll = epochTime() + 0.025
+          if runIndex >= 0:
+            break
         for j in 0 ..< running.len:
-          if running[j].process.peekExitCode() != -1:
+          case running[j].processKind
+          of rpkInlineRunQuotaPending:
+            discard
+          of rpkInlineRunQuota:
+            if running[j].runQuotaProcess.pollCompletion():
+              runIndex = j
+              break
+          of rpkInlineRunQuotaFailed:
             runIndex = j
             break
+          of rpkHelperProcess, rpkBypassProcess:
+            if running[j].process.peekExitCode() != -1:
+              runIndex = j
+              break
         if runIndex < 0:
-          sleep(10)
+          sleep(1)
       finishStat("repro process wait", waitStart)
-      let runningItem = running[runIndex]
+      var runningItem = running[runIndex]
       let finishStart = statStart()
-      let finished = finishRunQuotaProcess(
-        runningItem.id,
-        runningItem.process,
-        runningItem.resultPath,
-        runningItem.bypassRunQuota)
+      let finished =
+        case runningItem.processKind
+        of rpkInlineRunQuotaPending:
+          inlineRunQuotaFailureResult(
+            runningItem.id,
+            "runquota inline process failed: queued action selected before grant")
+        of rpkInlineRunQuota:
+          finishInlineRunQuotaProcess(
+            runningItem.id,
+            runningItem.runQuotaProcess)
+        of rpkInlineRunQuotaFailed:
+          runningItem.inlineFailure
+        of rpkBypassProcess:
+          finishRunQuotaProcess(
+            runningItem.id,
+            runningItem.process,
+            runningItem.resultPath,
+            true)
+        of rpkHelperProcess:
+          finishRunQuotaProcess(
+            runningItem.id,
+            runningItem.process,
+            runningItem.resultPath,
+            false)
       finishStat("repro runquota finish", finishStart)
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
-      runningItem.process.close()
+      if runningItem.processKind in {rpkHelperProcess, rpkBypassProcess}:
+        runningItem.process.close()
       let finishedUsed = poolRunning.getOrDefault(runningItem.pool, 0'u32)
       poolRunning[runningItem.pool] =
         if finishedUsed > runningItem.poolUnits:
@@ -1594,9 +1834,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           inc completed
   finally:
     for item in running.mitems:
-      if item.process.running():
-        item.process.terminate()
-      item.process.close()
+      case item.processKind
+      of rpkInlineRunQuotaPending:
+        if item.queuedRunQuotaProcess.active:
+          item.queuedRunQuotaProcess.cancelQueued()
+      of rpkInlineRunQuota:
+        if item.runQuotaProcess.active and not item.runQuotaProcess.completed:
+          discard item.runQuotaProcess.cancelAndWait()
+      of rpkInlineRunQuotaFailed:
+        discard
+      of rpkHelperProcess, rpkBypassProcess:
+        if item.process.running():
+          item.process.terminate()
+        item.process.close()
+    if inlineRunQuotaSessionOpen:
+      inlineRunQuotaSession.close()
   finishStat("repro scheduler total", totalStart)
   runResult.stats = stats
   result = runResult

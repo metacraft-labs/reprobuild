@@ -5,7 +5,7 @@ import repro_tool_profiles
 const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
   NimSubcmdProc = "subcmd_2d_d_3a_asyncBackend_3d_asyncdispatch"
-  NimJsSemanticsHash = "d5c1d7e48d376403"
+  NimJsSemanticsHash = "02d964fa722450c1"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
 
 type

@@ -522,14 +522,17 @@ proc appendHotRecord(cache: var ActionCache; record: ActionResultRecord) =
   cache.hotByWeak[digestKey(record.weakFingerprint)] = hot
   cache.hotIndexDirty = true
 
+proc hotInputKey(input: FileFingerprint): string =
+  input.path & "\0" & $ord(input.policy) & "\0" &
+    $ord(input.metadata.kind) & "\0" & $input.metadata.sizeBytes & "\0" &
+    $input.metadata.mtimeNs
+
 proc rebuildHotInputs(cache: var ActionCache) =
   var seen = initHashSet[string]()
   cache.hotInputs.setLen(0)
   for key in cache.hotByWeak.keys:
     for input in cache.hotByWeak[key].inputs:
-      let inputKey = input.path & "\0" & $ord(input.policy) & "\0" &
-        $ord(input.metadata.kind) & "\0" & $input.metadata.sizeBytes & "\0" &
-        $input.metadata.mtimeNs
+      let inputKey = hotInputKey(input)
       if seen.contains(inputKey):
         continue
       seen.incl(inputKey)
@@ -547,9 +550,7 @@ proc encodeHotIndex(records: Table[string, ActionResultRecord]): seq[byte] =
   for key in records.keys:
     var ids: seq[uint32] = @[]
     for input in records[key].inputs:
-      let inputKey = input.path & "\0" & $ord(input.policy) & "\0" &
-        $ord(input.metadata.kind) & "\0" & $input.metadata.sizeBytes & "\0" &
-        $input.metadata.mtimeNs
+      let inputKey = hotInputKey(input)
       if not inputIds.hasKey(inputKey):
         inputIds[inputKey] = uint32(inputs.len)
         inputs.add(InputKey(path: input.path, policy: input.policy,
@@ -795,6 +796,19 @@ proc hotMetadataInputsUnchanged*(cache: ActionCache;
   for input in cache.hotInputs:
     if fingerprintMetadata(input.path, metadataCache) != input.metadata:
       return false
+  true
+
+proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
+                                       metadataCache: ptr FileMetadataCache = nil): bool =
+  var seen = initHashSet[string]()
+  for record in records:
+    for input in record.inputs:
+      let inputKey = hotInputKey(input)
+      if seen.contains(inputKey):
+        continue
+      seen.incl(inputKey)
+      if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+        return false
   true
 
 proc ensureLoadedRecords(cache: var ActionCache) =

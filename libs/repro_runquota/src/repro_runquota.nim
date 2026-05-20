@@ -12,6 +12,12 @@ import runquota_protocol
 type
   ReproRunQuotaError* = object of CatchableError
 
+  ReproRunQuotaSession* = ref object
+    client: RunQuotaClient
+    session: RunQuotaSession
+    nextCandidateId: uint64
+    active*: bool
+
   ReproResourceRequest* = object
     label*: string
     commandStatsId*: string
@@ -43,6 +49,35 @@ type
     backendName*: string
     leaseFinishedSent*: bool
     leaseReleased*: bool
+
+  ReproRunQuotaRunningProcess* = object
+    lease: RunQuotaLease
+    child: LaunchedProcess
+    active*: bool
+    completed*: bool
+    execution*: ReproRunQuotaExecution
+
+  ReproRunQuotaQueuedProcess* = object
+    candidateId*: uint64
+    lease: RunQuotaLease
+    command: ReproCommandSpec
+    active*: bool
+
+  ReproRunQuotaGrant* = object
+    candidateId*: uint64
+    queued*: bool
+    active*: bool
+    diagnostic*: string
+    lease: RunQuotaLease
+
+  ReproRunQuotaOfferKind* = enum
+    rqokStarted
+    rqokQueued
+
+  ReproRunQuotaOffer* = object
+    kind*: ReproRunQuotaOfferKind
+    running*: ReproRunQuotaRunningProcess
+    queued*: ReproRunQuotaQueuedProcess
 
 proc effectiveCpu(request: ReproResourceRequest): uint32 =
   if request.cpuMilli == 0'u32: 1000'u32 else: request.cpuMilli
@@ -214,6 +249,238 @@ proc runWithRunQuota*(request: ReproResourceRequest;
     raise newException(ReproRunQuotaError, err.msg)
   finally:
     client.close()
+
+proc executionFromCompletion(leaseId: uint64; completion: ProcessCompletion;
+                             backendName: string; leaseFinishedSent,
+                             leaseReleased: bool): ReproRunQuotaExecution =
+  ReproRunQuotaExecution(
+    leaseId: leaseId,
+    exitCode: completion.exitCode,
+    exited: completion.exited,
+    signaled: completion.signaled,
+    signal: completion.signal,
+    stdout: completion.stdout,
+    stderr: completion.stderr,
+    stdoutBytes: completion.stdoutBytes,
+    stderrBytes: completion.stderrBytes,
+    elapsedMillis: completion.elapsedMillis,
+    peakResidentMemoryBytes: completion.peakResidentMemoryBytes,
+    processCount: completion.processCount,
+    backendName: backendName,
+    leaseFinishedSent: leaseFinishedSent,
+    leaseReleased: leaseReleased)
+
+proc openRunQuotaSession*(name = "reprobuild action";
+                          version = "0.1.0"): ReproRunQuotaSession =
+  result = ReproRunQuotaSession()
+  try:
+    result.client = connectDefault()
+    result.session = result.client.registerSession(name, version)
+    result.nextCandidateId = 1'u64
+    result.active = true
+  except CatchableError as err:
+    result.client.close()
+    raise newException(ReproRunQuotaError, err.msg)
+
+proc close*(session: ReproRunQuotaSession) =
+  if session.isNil:
+    return
+  try:
+    if session.active and session.session.active:
+      session.session.closeSession()
+  finally:
+    session.client.close()
+    session.active = false
+
+proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
+                              lease: RunQuotaLease;
+                              command: ReproCommandSpec):
+    ReproRunQuotaRunningProcess =
+  if not session.active:
+    raise newException(ReproRunQuotaError, "runquota session is not active")
+  var lease = lease
+  try:
+    lease.markStarting()
+    var child = launchProcess(commandSpec(
+      command.argv,
+      cwd = command.cwd,
+      env = command.env,
+      stdoutLimit = command.stdoutLimit,
+      stderrLimit = command.stderrLimit))
+    lease.markRunning(
+      childProcessId = child.info.processId,
+      processGroupId = child.info.processGroupId,
+      cleanupRegistered = true)
+    return ReproRunQuotaRunningProcess(
+      lease: lease,
+      child: child,
+      active: true,
+      completed: false)
+  except CatchableError:
+    if lease.active and lease.state == leaseClientStarting:
+      lease.finish(outcome = leaseFinishLaunchFailed)
+    if lease.active:
+      lease.release()
+    raise
+
+proc startWithRunQuota*(session: ReproRunQuotaSession;
+                        request: ReproResourceRequest;
+                        command: ReproCommandSpec):
+    ReproRunQuotaRunningProcess =
+  if not session.active:
+    raise newException(ReproRunQuotaError, "runquota session is not active")
+  try:
+    let lease = session.session.waitForQueuedGrant(request.toRunQuotaRequest())
+    return session.startGrantedWithRunQuota(lease, command)
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
+
+proc offerWithRunQuota*(session: ReproRunQuotaSession;
+                        request: ReproResourceRequest;
+                        command: ReproCommandSpec): ReproRunQuotaOffer =
+  if not session.active:
+    raise newException(ReproRunQuotaError, "runquota session is not active")
+  try:
+    let candidateId = session.nextCandidateId
+    inc session.nextCandidateId
+    let decisions = session.session.offerCandidates(
+      [toCandidate(candidateId, request.toRunQuotaRequest())])
+    for decision in decisions:
+      if decision.clientCandidateId != candidateId:
+        continue
+      if decision.lease.active and not decision.queued:
+        return ReproRunQuotaOffer(
+          kind: rqokStarted,
+          running: session.startGrantedWithRunQuota(decision.lease, command))
+      if decision.lease.active and decision.queued:
+        return ReproRunQuotaOffer(
+          kind: rqokQueued,
+          queued: ReproRunQuotaQueuedProcess(
+            candidateId: candidateId,
+            lease: decision.lease,
+            command: command,
+            active: true))
+      raise newException(ReproRunQuotaError,
+        "runquota denied lease: " & decision.diagnostic.diagnosticText())
+    raise newException(ReproRunQuotaError,
+      "runquota did not return a decision for the offered lease")
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
+
+proc pollRunQuotaGrants*(session: ReproRunQuotaSession):
+    seq[ReproRunQuotaGrant] =
+  if not session.active:
+    raise newException(ReproRunQuotaError, "runquota session is not active")
+  try:
+    for decision in session.session.pollNextGrant():
+      result.add(ReproRunQuotaGrant(
+        candidateId: decision.clientCandidateId,
+        queued: decision.queued,
+        active: decision.lease.active,
+        diagnostic: decision.diagnostic.diagnosticText(),
+        lease: decision.lease))
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
+
+proc startGrantedWithRunQuota*(session: ReproRunQuotaSession;
+                               queued: var ReproRunQuotaQueuedProcess;
+                               grant: ReproRunQuotaGrant):
+    ReproRunQuotaRunningProcess =
+  if not queued.active:
+    raise newException(ReproRunQuotaError, "runquota queued process is not active")
+  if grant.candidateId != queued.candidateId:
+    raise newException(ReproRunQuotaError, "runquota grant candidate mismatch")
+  if not grant.active or grant.queued:
+    raise newException(ReproRunQuotaError,
+      "runquota denied queued lease: " & grant.diagnostic)
+  queued.active = false
+  session.startGrantedWithRunQuota(grant.lease, queued.command)
+
+proc cancelQueued*(queued: var ReproRunQuotaQueuedProcess) =
+  if not queued.active:
+    return
+  if queued.lease.active:
+    queued.lease.release()
+  queued.active = false
+
+proc pollCompletion*(running: var ReproRunQuotaRunningProcess): bool =
+  if running.completed:
+    return true
+  if not running.active:
+    return false
+  running.child.pollCompletion()
+
+proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
+    ReproRunQuotaExecution =
+  if running.completed:
+    return running.execution
+  if not running.active:
+    raise newException(ReproRunQuotaError, "runquota process is not active")
+  try:
+    if not running.child.pollCompletion():
+      discard running.child.waitForCompletion()
+    let completion = running.child.completion
+    running.child.close()
+    var leaseFinishedSent = false
+    var leaseReleased = false
+    try:
+      running.lease.finish(
+        outcome = finishOutcome(completion),
+        exitCode = if completion.exited: uint32(max(completion.exitCode, 0)) else: 0'u32,
+        signal = if completion.signaled: uint32(max(completion.signal, 0)) else: 0'u32,
+        peakMemoryBytes = completion.peakResidentMemoryBytes,
+        processCount = completion.processCount)
+      leaseFinishedSent = true
+    finally:
+      if running.lease.active:
+        running.lease.release()
+        leaseReleased = true
+    running.execution = executionFromCompletion(
+      running.lease.id.value,
+      completion,
+      running.child.info.backend.name,
+      leaseFinishedSent,
+      leaseReleased)
+    running.completed = true
+    running.active = false
+    running.execution
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
+
+proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
+    ReproRunQuotaExecution =
+  if running.completed:
+    return running.execution
+  if not running.active:
+    raise newException(ReproRunQuotaError, "runquota process is not active")
+  try:
+    let completion = running.child.cancelAndWait()
+    running.child.close()
+    var leaseFinishedSent = false
+    var leaseReleased = false
+    try:
+      running.lease.finish(
+        outcome = finishOutcome(completion),
+        exitCode = if completion.exited: uint32(max(completion.exitCode, 0)) else: 0'u32,
+        signal = if completion.signaled: uint32(max(completion.signal, 0)) else: 0'u32,
+        peakMemoryBytes = completion.peakResidentMemoryBytes,
+        processCount = completion.processCount)
+      leaseFinishedSent = true
+    finally:
+      if running.lease.active:
+        running.lease.release()
+        leaseReleased = true
+    running.execution = executionFromCompletion(
+      running.lease.id.value,
+      completion,
+      running.child.info.backend.name,
+      leaseFinishedSent,
+      leaseReleased)
+    running.completed = true
+    running.active = false
+    running.execution
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
 
 proc executionJson(execution: ReproRunQuotaExecution; runnerError = ""): JsonNode =
   %*{

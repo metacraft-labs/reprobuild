@@ -119,6 +119,18 @@ proc valueAfter(output, prefix: string): string =
       return line[prefix.len .. ^1].strip()
   ""
 
+proc isNixStorePath(path: string): bool =
+  path.startsWith("/nix/store/")
+
+proc isUnifiedStorePrefix(path: string): bool =
+  path.contains(DirSep & "prefixes" & DirSep) and
+    fileExists(path / "nix-store-path.txt")
+
+proc assertRealizedStorePaths(paths: openArray[string]) =
+  check paths.len >= 1
+  check paths.anyIt(isNixStorePath(it))
+  check paths.allIt(isNixStorePath(it) or isUnifiedStorePrefix(it))
+
 proc assertNixIdentity(identity: PathOnlyBuildIdentity) =
   check identity.profiles.len == 5
   check identity.profiles.allIt(it.installMethod == "nix")
@@ -128,8 +140,7 @@ proc assertNixIdentity(identity: PathOnlyBuildIdentity) =
     check identity.profiles.anyIt(it.executableName == executableName)
   for profile in identity.profiles:
     check profile.nixSelector.len > 0
-    check profile.realizedStorePaths.allIt(it.startsWith("/nix/store/"))
-    check profile.realizedStorePaths.len >= 1
+    assertRealizedStorePaths(profile.realizedStorePaths)
     check profile.selectedStorePath.startsWith("/nix/store/")
     check profile.resolvedExecutablePath.startsWith("/nix/store/")
     check profile.declaredExecutablePath.len > 0
@@ -245,8 +256,8 @@ suite "e2e_codetracer_dev_environment_slice":
       check profile{"adapterStrength"}.getStr() == "strong"
       check profile{"cachePortability"}.getStr() == "portable"
       check profile{"declaredExecutablePath"}.getStr().len > 0
-      check profile{"realizedStorePaths"}.getElems().allIt(
-        it.getStr().startsWith("/nix/store/"))
+      assertRealizedStorePaths(profile{"realizedStorePaths"}.getElems().
+        mapIt(it.getStr()))
       check profile{"resolvedExecutablePath"}.getStr().startsWith("/nix/store/")
       check profile{"probes"}[0]{"output"}.getStr().strip().len > 0
 

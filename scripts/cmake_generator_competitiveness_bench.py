@@ -317,7 +317,7 @@ def copy_source_tree(source_dir, dest):
 
 def configure_project(cmake, ninja, generator, source_dir, binary_dir,
                       c_compiler, cxx_compiler, install_prefix,
-                      configure_args):
+                      configure_args, env=None):
     if binary_dir.exists():
         shutil.rmtree(binary_dir)
     args = [
@@ -334,7 +334,7 @@ def configure_project(cmake, ninja, generator, source_dir, binary_dir,
     if generator == "Ninja":
         args.append(f"-DCMAKE_MAKE_PROGRAM={ninja}")
     args.extend(configure_args)
-    return run_command(args)
+    return run_command(args, env=env)
 
 
 def build_command(cmake, binary_dir, target, parallel, native_args=None):
@@ -658,9 +658,15 @@ def benchmark_project_mode(args, context, project_report, key, source_dir,
     ninja_configure = configure_project(
         cmake, ninja, "Ninja", mode_source, ninja_bin, c_compiler,
         cxx_compiler, mode_root / "ninja-install", configure_args)
+    configure_repro_env = dict(base_env)
+    configure_repro_env.update({
+        "REPROBUILD_REPRO": str(repro),
+        "REPROBUILD_SOURCE_ROOT": str(ROOT),
+    })
     rb_configure = configure_project(
         cmake, ninja, "Reprobuild", mode_source, rb_bin_dir, c_compiler,
-        cxx_compiler, mode_root / "reprobuild-install", configure_args)
+        cxx_compiler, mode_root / "reprobuild-install", configure_args,
+        env=configure_repro_env)
     add_pair(project_report, "configure", execution_mode, ninja_configure,
              rb_configure)
 

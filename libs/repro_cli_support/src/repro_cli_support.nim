@@ -25,7 +25,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [--prepare-only]\n       " &
           programName &
       " watch [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " &
           programName &
@@ -466,6 +466,7 @@ proc capabilitiesJson*(): JsonNode =
     "dyndep-fragment-conversion",
     "runquota-execution",
     "cmake-regeneration-edge",
+    "provider-cache-priming",
     "build-report-json-inspection"])
 
   var hcrProfile = newJObject()
@@ -1908,6 +1909,40 @@ proc actionOutputsPresent(action: BuildAction): bool =
       return false
   true
 
+proc cmakeGeneratedStateFresh(meta: CmakeRegenerationMetadata;
+                              publicCliPath: string): bool =
+  if meta.providerFile.len == 0 or meta.providerStateFile.len == 0:
+    return false
+  if not fileExists(meta.providerFile) or not fileExists(meta.providerStateFile):
+    return false
+  if readFile(meta.providerFile) != readFile(meta.providerStateFile):
+    return false
+  let stamp = getLastModificationTime(meta.providerStateFile)
+  for input in cmakeRegenerationInputs(meta, publicCliPath):
+    if (fileExists(input) or dirExists(input)) and
+        getLastModificationTime(input) > stamp:
+      return false
+  true
+
+proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
+                                publicCliPath, outDir: string): bool =
+  let regenerationAction = cmakeRegenerationBuildAction(meta, publicCliPath)
+  if not regenerationAction.cacheable:
+    return false
+  if not regenerationAction.actionOutputsPresent():
+    return false
+  let cmakeCacheRoot = outDir / "cmake-regeneration-cache"
+  let cas = openLocalCas(cmakeCacheRoot / "cas")
+  var cache = openActionCache(cmakeCacheRoot / "action-cache")
+  defer:
+    cache.flushHotIndex()
+  let record = cache.recordActionResult(cas, regenerationAction.weakFingerprint,
+    regenerationAction.actionCachePolicy, regenerationAction.inputs,
+    regenerationAction.outputs, regenerationAction.cwd)
+  writeActionResultRecordFile(
+    dependencyEvidencePath(cmakeCacheRoot, regenerationAction.id), record)
+  true
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
@@ -1915,7 +1950,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         progressMode = bpmAuto;
                         statsMode = bsmNone;
                         reportMode = brmFull;
-                        logMode = blmActions):
+                        logMode = blmActions;
+                        prepareOnly = false;
+                        skipCmakeRegeneration = false):
     BuildCommandOutcome =
   let statsEnabled = statsMode == bsmText
   var buildStats: BuildStats
@@ -1978,6 +2015,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       rebuildMissingOutputsOnCacheHit: true,
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
+      inlineRunQuota: true,
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
     engineConfig.statsEnabled = statsEnabled
@@ -2022,7 +2060,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let cmakeMeta = cmakeRegenerationMetadataForModule(modulePath)
   cmakeMeta.applyCmakeProviderEnvironment()
   var cmakeRegenerated = false
-  if cmakeMeta.enabled:
+  if cmakeMeta.enabled and not skipCmakeRegeneration:
     logSummary("cmakeRegeneration: started")
     let cmakeRegenerationStart = statStart(statsEnabled)
     let cmakeRegenerationAction =
@@ -2051,6 +2089,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             dependencyPolicyKind: cmakeRegenerationAction.dependencyPolicy.kind))
         finishStat(buildStats, statsEnabled, "repro cache lookup", lookupStart)
     if not cmakeFastHit:
+      let stateStart = statStart(statsEnabled)
+      let stateFresh = cmakeGeneratedStateFresh(cmakeMeta, publicCliPath)
+      finishStat(buildStats, statsEnabled, "repro cmake state check",
+        stateStart)
+      if stateFresh:
+        discard seedCmakeRegenerationCache(cmakeMeta, publicCliPath, outDir)
+        cmakeFastHit = true
+        cmakeRegenerationResult.results.add(ActionResult(
+          id: cmakeRegenerationAction.id,
+          status: asCacheHit,
+          launched: false,
+          cacheDecision: cdHit,
+          dependencyPolicyKind: cmakeRegenerationAction.dependencyPolicy.kind))
+    if not cmakeFastHit:
       var cmakeRegenerationConfig = BuildEngineConfig(
         cacheRoot: cmakeCacheRoot,
         runQuotaCliPath: publicCliPath,
@@ -2061,6 +2113,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         rebuildMissingOutputsOnCacheHit: true,
         bypassRunQuota: bypassRunQuota,
         fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
+        inlineRunQuota: true,
         suppressTrace: reportMode == brmNone,
         skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
       cmakeRegenerationConfig.statsEnabled = statsEnabled
@@ -2096,8 +2149,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       ""
     else:
       "\0"
-  if cmakeMeta.enabled and not cmakeRegenerated and mode == tpmPathOnly and
-      reportMode == brmNone and cacheSelectedActionId != "\0":
+  if cmakeMeta.enabled and not cmakeRegenerated and not prepareOnly and
+      mode == tpmPathOnly and reportMode == brmNone and
+      cacheSelectedActionId != "\0":
     let loweredCacheStart = statStart(statsEnabled)
     let loweredCache = readFreshLoweredGraphCache(
       loweredGraphCachePath(outDir, cacheSelectedActionId), modulePath,
@@ -2194,6 +2248,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         rebuildMissingOutputsOnCacheHit: true,
         bypassRunQuota: bypassRunQuota,
         fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
+        inlineRunQuota: true,
         suppressTrace: reportMode == brmNone,
         skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
       providerCompileConfig.statsEnabled = statsEnabled
@@ -2260,6 +2315,24 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           projectRoot, "", pathEnv, lowered)
       finishStat(buildStats, statsEnabled, "repro lowered graph cache write",
         cacheWriteStart)
+    if prepareOnly:
+      if cmakeMeta.enabled:
+        createDir(parentDir(cmakeMeta.providerStateFile))
+        writeFile(cmakeMeta.providerStateFile, readFile(modulePath))
+        let seedStart = statStart(statsEnabled)
+        discard seedCmakeRegenerationCache(cmakeMeta, publicCliPath, outDir)
+        finishStat(buildStats, statsEnabled,
+          "repro cmake regeneration cache seed", seedStart)
+      finishStat(buildStats, statsEnabled, "repro build total",
+        buildTotalStart)
+      if statsEnabled:
+        let statsRenderStart = statStart(statsEnabled)
+        stderr.write(renderBuildStats(buildStats))
+        stderr.flushFile()
+        finishStat(buildStats, statsEnabled, "repro stats render",
+          statsRenderStart)
+      result.exitCode = 0
+      return
     if parsedTarget.fragmentKind == tfkActionSelection:
       logSummary("selectedTarget: " & parsedTarget.selectedActionId)
     elif selectDefaultAction and selectedActionId.len > 0:
@@ -2278,6 +2351,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       rebuildMissingOutputsOnCacheHit: true,
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
+      inlineRunQuota: true,
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
     engineConfig.statsEnabled = statsEnabled
@@ -2827,6 +2901,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var statsMode = configuredBuildStatsMode()
   var reportMode = configuredBuildReportMode()
   var logMode = configuredBuildLogMode()
+  var prepareOnly = false
+  var skipCmakeRegeneration = false
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
@@ -2858,6 +2934,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     elif arg == "--log":
       raise newException(ValueError,
         "--log requires an inline value, for example --log=summary")
+    elif arg == "--prepare-only":
+      prepareOnly = true
+    elif arg == "--skip-cmake-regeneration":
+      skipCmakeRegeneration = true
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported build flag: " & arg)
     elif target.len == 0:
@@ -2875,7 +2955,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     progressMode = progressMode,
     statsMode = statsMode,
     reportMode = reportMode,
-    logMode = logMode).exitCode
+    logMode = logMode,
+    prepareOnly = prepareOnly,
+    skipCmakeRegeneration = skipCmakeRegeneration).exitCode
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:
@@ -3329,5 +3411,5 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runLaunchPlanCommand(lpArgs)
-  echo renderUsage(programName)
-  0
+  stderr.writeLine(renderUsage(programName))
+  2

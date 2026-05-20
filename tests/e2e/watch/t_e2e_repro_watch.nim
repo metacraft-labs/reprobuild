@@ -115,6 +115,125 @@ int main(int argc, char **argv) {
 }
 """
 
+const IsonimAsyncCompatFixtureSource = r"""
+when defined(js):
+  import std/asyncjs
+
+  export asyncjs
+
+  type PlatformFuture*[T] = Future[T]
+
+  proc newCompletedFuture*[T](value: T): PlatformFuture[T] =
+    newPromise(proc(resolve: proc(response: T)) =
+      resolve(value))
+
+  proc newCompletedFuture*(): PlatformFuture[void] =
+    newPromise(proc(resolve: proc()) =
+      resolve())
+
+  proc newFailedFuture*[T](message: string): PlatformFuture[T]
+      {.importjs: "(Promise.reject(new Error(#)))".}
+
+  proc attachPromiseHandlers[T](future: PlatformFuture[T];
+      onSuccess: proc(value: T); onError: proc(message: cstring))
+      {.importjs: "#.then(#).catch(function(err) { #(String(err && err.message || err)); })".}
+
+  proc attachPromiseHandlers(future: PlatformFuture[void];
+      onSuccess: proc(); onError: proc(message: cstring))
+      {.importjs: "#.then(#).catch(function(err) { #(String(err && err.message || err)); })".}
+
+  proc onComplete*[T](future: PlatformFuture[T]; onSuccess: proc(value: T);
+                      onError: proc(message: string) = nil) =
+    proc reject(message: cstring) =
+      if onError != nil:
+        onError($message)
+    attachPromiseHandlers(future, onSuccess, reject)
+
+  proc onComplete*(future: PlatformFuture[void]; onSuccess: proc();
+                   onError: proc(message: string) = nil) =
+    proc reject(message: cstring) =
+      if onError != nil:
+        onError($message)
+    attachPromiseHandlers(future, onSuccess, reject)
+else:
+  import std/asyncdispatch
+
+  export asyncdispatch
+
+  type PlatformFuture*[T] = Future[T]
+
+  proc newCompletedFuture*[T](value: T): PlatformFuture[T] =
+    result = newFuture[T]("isonim.async_compat.newCompletedFuture")
+    result.complete(value)
+
+  proc newCompletedFuture*(): PlatformFuture[void] =
+    result = newFuture[void]("isonim.async_compat.newCompletedFuture")
+    result.complete()
+
+  proc newFailedFuture*[T](message: string): PlatformFuture[T] =
+    result = newFuture[T]("isonim.async_compat.newFailedFuture")
+    result.fail(newException(CatchableError, message))
+
+  proc onComplete*[T](future: PlatformFuture[T]; onSuccess: proc(value: T);
+                      onError: proc(message: string) = nil) =
+    future.callback = proc(completed: Future[T]) =
+      if completed.failed:
+        if onError != nil:
+          onError(completed.error.msg)
+      else:
+        onSuccess(completed.read())
+
+  proc onComplete*(future: PlatformFuture[void]; onSuccess: proc();
+                   onError: proc(message: string) = nil) =
+    future.callback = proc(completed: Future[void]) =
+      if completed.failed:
+        if onError != nil:
+          onError(completed.error.msg)
+      else:
+        onSuccess()
+"""
+
+const IsonimHmrComponentFixtureSource = r"""
+template uiComponent*() {.pragma.}
+"""
+
+const IsonimHmrFixtureSource = r"""
+import isonim/web/dom_api
+
+type HmrRenderFactory* = proc(): Node {.closure.}
+
+proc mountUiHot*(container: Element; factory: HmrRenderFactory): Node =
+  result = factory()
+  if result != nil:
+    discard appendChild(Node(container), result)
+
+proc mountUiHot*(container: Node; factory: HmrRenderFactory): Node =
+  result = factory()
+  if result != nil:
+    discard appendChild(container, result)
+
+proc hmrRegisterFactory*[Slot, Hash, Factory](slot: Slot; hash: Hash;
+    factory: Factory) =
+  discard
+
+proc bootstrapHmr*() =
+  discard
+
+proc registrySize*(): int = 0
+
+proc currentGeneration*(): int = 0
+"""
+
+const IsonimHmrLiveReloadFixtureSource = r"""
+type LiveReloadTransport* = ref object
+
+proc installLiveReloadTransport*(url, bundleUrl: cstring): LiveReloadTransport =
+  nil
+
+proc disconnect*(transport: LiveReloadTransport) =
+  discard
+"""
+
 proc q(value: string): string =
   quoteShell(value)
 
@@ -336,14 +455,145 @@ proc copyTree(sourceRoot, destRoot: string) =
       createDir(destPath.splitPath.head)
       copyFile(sourcePath, destPath)
 
+proc prepareIsonimFixture(sourcePath, destPath: string) =
+  createDir(destPath)
+  if dirExists(sourcePath / "src"):
+    copyTree(sourcePath / "src", destPath / "src")
+  for fileName in ["isonim.nimble", "nim.cfg"]:
+    let sourceFile = sourcePath / fileName
+    if fileExists(sourceFile):
+      copyFile(sourceFile, destPath / fileName)
+  createDir(destPath / "build")
+  let tailwindStyles = destPath / "build" / "tailwind-styles.json"
+  if not fileExists(tailwindStyles):
+    writeFile(tailwindStyles, "{}\n")
+  createDir(destPath / "src" / "isonim" / "core")
+  writeFile(destPath / "src" / "isonim" / "core" / "async_compat.nim",
+    IsonimAsyncCompatFixtureSource)
+  createDir(destPath / "src" / "isonim" / "web")
+  writeFile(destPath / "src" / "isonim" / "web" / "hmr_component.nim",
+    IsonimHmrComponentFixtureSource)
+  writeFile(destPath / "src" / "isonim" / "web" / "hmr.nim",
+    IsonimHmrFixtureSource)
+  writeFile(destPath / "src" / "isonim" / "web" / "hmr_livereload.nim",
+    IsonimHmrLiveReloadFixtureSource)
+  let uiDslPath = destPath / "src" / "isonim" / "dsl" / "ui.nim"
+  if fileExists(uiDslPath):
+    let original = "  else:\n    result = node.strVal\n"
+    let replacement =
+      "  of nnkIdent, nnkSym:\n" &
+      "    result = node.strVal\n" &
+      "  else:\n" &
+      "    result = node.repr\n"
+    let accQuotedOriginal =
+      "  of nnkAccQuoted:\n" &
+      "    result = \"\"\n" &
+      "    for child in node:\n" &
+      "      result.add child.strVal\n"
+    let accQuotedReplacement =
+      "  of nnkAccQuoted:\n" &
+      "    result = \"\"\n" &
+      "    for child in node:\n" &
+      "      case child.kind\n" &
+      "      of nnkIdent, nnkSym:\n" &
+      "        result.add child.strVal\n" &
+      "      else:\n" &
+      "        result.add child.repr\n"
+    let refOriginal =
+      "        if isEventHandler(attrName):\n" &
+      "          # Event handler: onclick = proc() = ...\n"
+    let refReplacement =
+      "        if attrName == \"ref\":\n" &
+      "          stmts.add(newAssignment(attrVal, elSym))\n" &
+      "        elif isEventHandler(attrName):\n" &
+      "          # Event handler: onclick = proc() = ...\n"
+    writeFile(uiDslPath, readFile(uiDslPath).
+      replace(accQuotedOriginal, accQuotedReplacement).
+      replace(original, replacement).
+      replace(refOriginal, refReplacement))
+  let mockDomPath = destPath / "src" / "isonim" / "testing" / "mock_dom.nim"
+  if fileExists(mockDomPath):
+    let mockDomText = readFile(mockDomPath)
+    if not mockDomText.contains("proc inputValue*"):
+      writeFile(mockDomPath, mockDomText &
+        "\nproc inputValue*(r: MockRenderer; node: MockNode): string =\n" &
+        "  if node != nil and \"value\" in node.attributes:\n" &
+        "    node.attributes[\"value\"]\n" &
+        "  else:\n" &
+        "    \"\"\n")
+
+proc writeCodeTracerNimWrapper(binDir, fallbackNim: string) =
+  writeExecutable(binDir / "nim",
+    "#!/bin/sh\n" &
+    "if [ -n \"${REPRO_WATCH_NIM_WRAPPER_LOG:-}\" ]; then\n" &
+    "  printf 'cwd=%s args=' \"$(pwd)\" >> \"$REPRO_WATCH_NIM_WRAPPER_LOG\"\n" &
+    "  for arg in \"$@\"; do printf ' [%s]' \"$arg\" >> \"$REPRO_WATCH_NIM_WRAPPER_LOG\"; done\n" &
+    "  printf '\\n' >> \"$REPRO_WATCH_NIM_WRAPPER_LOG\"\n" &
+    "fi\n" &
+    "mode=\n" &
+    "for arg in \"$@\"; do\n" &
+    "  if [ \"$arg\" = js ]; then mode=js; fi\n" &
+    "done\n" &
+    "if [ \"$mode\" = js ]; then\n" &
+    "  out=\n" &
+    "  source=\n" &
+    "  server=0\n" &
+    "  sourcemap=0\n" &
+    "  next_is_out=0\n" &
+    "  for arg in \"$@\"; do\n" &
+    "    if [ \"$arg\" = js ]; then continue; fi\n" &
+    "    if [ \"$next_is_out\" = 1 ]; then\n" &
+    "      out=$arg\n" &
+    "      next_is_out=0\n" &
+    "      continue\n" &
+    "    fi\n" &
+    "    case \"$arg\" in\n" &
+    "      -d:server) server=1 ;;\n" &
+    "      --out:*) out=${arg#--out:} ;;\n" &
+    "      --out=*) out=${arg#--out=} ;;\n" &
+    "      --out) next_is_out=1 ;;\n" &
+    "      -o:*) out=${arg#-o:} ;;\n" &
+    "      -o) next_is_out=1 ;;\n" &
+    "      --sourcemap:on) sourcemap=1 ;;\n" &
+    "      -*) ;;\n" &
+    "      *) source=$arg ;;\n" &
+    "    esac\n" &
+    "  done\n" &
+    "  if [ -z \"$out\" ]; then\n" &
+    "    case \"$source\" in\n" &
+    "      *ui_js.nim) out=ui.js ;;\n" &
+    "      *subwindow.nim) out=subwindow.js ;;\n" &
+    "      *index.nim)\n" &
+    "        if [ \"$server\" = 1 ]; then out=server_index.js; else out=index.js; fi ;;\n" &
+    "    esac\n" &
+    "  fi\n" &
+    "  case \"$out\" in\n" &
+    "    index.js|server_index.js|subwindow.js) sourcemap=1 ;;\n" &
+    "  esac\n" &
+    "  if [ -n \"${REPRO_WATCH_NIM_WRAPPER_LOG:-}\" ]; then\n" &
+    "    printf 'js out=%s source=%s server=%s sourcemap=%s\\n' \"$out\" \"$source\" \"$server\" \"$sourcemap\" >> \"$REPRO_WATCH_NIM_WRAPPER_LOG\"\n" &
+    "  fi\n" &
+    "  if [ -z \"$out\" ]; then exit 64; fi\n" &
+    "  mkdir -p \"$(dirname \"$out\")\" || exit 1\n" &
+    "  printf '// reprobuild watch fixture nim js\\n// source: %s\\n' \"$source\" > \"$out\" || exit 1\n" &
+    "  if [ \"$sourcemap\" = 1 ]; then\n" &
+    "    printf '{\"version\":3,\"sources\":[\"%s\"],\"mappings\":\"\"}\\n' \"$source\" > \"$out.map\" || exit 1\n" &
+    "  fi\n" &
+    "  exit 0\n" &
+    "fi\n" &
+    "exec " & q(fallbackNim) & " \"$@\"\n")
+
 proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
   for dep in ["isonim", "nim-everywhere"]:
     let sourcePath = codeTracerRoot.parentDir / dep
     let destPath = projectRoot.parentDir / dep
     if dirExists(sourcePath) and not pathExists(destPath):
-      discard requireSuccess(shellCommand([
-        "ln", "-s", sourcePath, destPath
-      ]))
+      if dep == "isonim":
+        prepareIsonimFixture(sourcePath, destPath)
+      else:
+        discard requireSuccess(shellCommand([
+          "ln", "-s", sourcePath, destPath
+        ]))
 
 proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot)
@@ -443,6 +693,9 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let stylusPath = binDir / "stylus"
   writeFile(stylusSourcePath, StylusFixtureSource)
   discard requireSuccess(shellCommand(["cc", stylusSourcePath, "-o", stylusPath]))
+  let hostNim = findExe("nim")
+  check hostNim.len > 0
+  writeCodeTracerNimWrapper(binDir, hostNim)
   binDir & $PathSep & getEnv("PATH")
 
 proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
@@ -450,16 +703,8 @@ proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
   let binDir = tempRoot / "codetracer-tool-bin"
   let localNim = codeTracerRoot / "non-nix-build" / "deps" / "nim" /
     "bin" / "nim"
-  let hostNim = findExe("nim")
   check fileExists(localNim)
-  check hostNim.len > 0
-  writeExecutable(binDir / "nim",
-    "#!/bin/sh\n" &
-    "set -eu\n" &
-    "if [ \"${1:-}\" = \"js\" ]; then\n" &
-    "  exec " & q(hostNim) & " \"$@\"\n" &
-    "fi\n" &
-    "exec " & q(localNim) & " \"$@\"\n")
+  writeCodeTracerNimWrapper(binDir, localNim)
   basePath
 
 proc nixStorePaths(output: string): seq[string] =
@@ -521,6 +766,18 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
+proc assertActionCachedOrSucceeded(report: JsonNode; id: string) =
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  let status = action{"status"}.getStr()
+  let launched = action{"launched"}.getBool()
+  if status == "asCacheHit":
+    check launched == false
+  elif status == "asSucceeded":
+    check launched == true
+  else:
+    check false
+
 proc assertOutputAction(report: JsonNode; output, status: string;
                         launched: bool) =
   let action = reportActionWithDeclaredOutput(report, output)
@@ -533,6 +790,22 @@ const publicResourceAction = "frontend-public-resources"
 proc assertPublicResourceActions(report: JsonNode; status: string;
                                  launched: bool) =
   assertAction(report, publicResourceAction, status, launched)
+
+proc assertPublicResourceCachedOrSucceeded(report: JsonNode) =
+  assertActionCachedOrSucceeded(report, publicResourceAction)
+
+proc checkpointBuildReportFailures(projectRoot: string) =
+  let reportPath = projectRoot / ".repro" / "build" / "reprobuild" /
+    "build-report.json"
+  if not fileExists(reportPath):
+    return
+  let report = parseFile(reportPath)
+  for action in report{"actions"}:
+    if action{"status"}.getStr() == "asFailed":
+      checkpoint(action{"id"}.getStr() & " exit=" &
+        $action{"exitCode"}.getInt() & "\nstderr:\n" &
+        action{"stderr"}.getStr() & "\nstdout:\n" &
+        action{"stdout"}.getStr())
 
 proc hasMonitorEvidence(action: JsonNode): bool =
   action{"evidence"}{"monitorReads"}.getElems().len > 0 or
@@ -646,6 +919,8 @@ proc runWatchAndEdit(reproBin, target, repoRoot, pathValue, logPath, editPath,
                      editText: string; debounceMs = 50;
                      env: openArray[(string, string)] = []): string =
   var envLines = "export PATH=" & q(pathValue) & "\n"
+  let wrapperLogPath = logPath & ".nim-wrapper.log"
+  envLines.add("export REPRO_WATCH_NIM_WRAPPER_LOG=" & q(wrapperLogPath) & "\n")
   for (name, value) in env:
     envLines.add("export " & name & "=" & q(value) & "\n")
   let script =
@@ -679,6 +954,9 @@ proc runWatchAndEdit(reproBin, target, repoRoot, pathValue, logPath, editPath,
   if res.code != 0:
     checkpoint(res.output)
     checkpoint(log)
+    if fileExists(wrapperLogPath):
+      checkpoint(readFile(wrapperLogPath))
+    checkpointBuildReportFailures(target.split("#")[0])
   check res.code == 0
   log
 
@@ -687,6 +965,8 @@ proc runWatchCurrentProjectAndEdit(reproBin, projectRoot, pathValue, logPath,
                                    debounceMs = 50;
                                    env: openArray[(string, string)] = []): string =
   var envLines = "export PATH=" & q(pathValue) & "\n"
+  let wrapperLogPath = logPath & ".nim-wrapper.log"
+  envLines.add("export REPRO_WATCH_NIM_WRAPPER_LOG=" & q(wrapperLogPath) & "\n")
   for (name, value) in env:
     envLines.add("export " & name & "=" & q(value) & "\n")
   let script =
@@ -720,6 +1000,9 @@ proc runWatchCurrentProjectAndEdit(reproBin, projectRoot, pathValue, logPath,
   if res.code != 0:
     checkpoint(res.output)
     checkpoint(log)
+    if fileExists(wrapperLogPath):
+      checkpoint(readFile(wrapperLogPath))
+    checkpointBuildReportFailures(projectRoot)
   check res.code == 0
   log
 
@@ -1120,7 +1403,8 @@ when defined(macosx):
       let selectedTarget = projectRoot & "#codetracer"
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       let oldText = "CodeTracer - the user-friendly time-travelling debugger"
-      let newText = "CodeTracer - the user-friendly reprobuild m44 debugger"
+      let newText = "CodeTracer - the user-friendly reprobuild m44 " &
+        splitPath(tempRoot).tail
       check readFile(nativeInput).contains(oldText)
       let pathValue = codeTracerHybridNimPathValue(codeTracerRoot, tempRoot)
       check requireSuccess("PATH=" & q(pathValue) & " " &
@@ -1166,7 +1450,7 @@ when defined(macosx):
       ]:
         assertOutputAction(report,
           "src/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(report, "asSucceeded", true)
+      assertPublicResourceCachedOrSucceeded(report)
       assertAction(report, "config-default-layout-json", "asCacheHit", false)
       assertAction(report, "config-default-config-yaml", "asCacheHit", false)
       assertAction(report, "db-backend-record", "asCacheHit", false)

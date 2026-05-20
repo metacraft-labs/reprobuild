@@ -13,6 +13,12 @@ suite "repro capabilities":
       "reprobuild"
     check caps["interfaces"]["hcr"]["buildSystemRole"].getStr().contains(
       "annotate candidate targets")
+    block:
+      var hasPriming = false
+      for feature in caps["interfaces"]["provider"]["features"].getElems():
+        if feature.getStr() == "provider-cache-priming":
+          hasPriming = true
+      check hasPriming
 
   test "JSON rendering round-trips":
     let caps = parseJson(renderCapabilitiesJson())

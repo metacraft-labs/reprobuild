@@ -31,8 +31,8 @@ proc removeIfExists(path: string) =
   if fileExists(path):
     removeFile(path)
 
-proc ensureRunQuotaDaemon(repoRoot, tempRoot: string): tuple[process: owned(Process),
-    socket: string] =
+proc ensureRunQuotaDaemon(repoRoot, tempRoot: string; cpuMilli = "32000"):
+    tuple[process: owned(Process), socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
   let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
   if not fileExists(daemonBin):
@@ -42,7 +42,7 @@ proc ensureRunQuotaDaemon(repoRoot, tempRoot: string): tuple[process: owned(Proc
     removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [
     "--socket", socketPath,
-    "--cpu-milli", "32000",
+    "--cpu-milli", cpuMilli,
     "--memory-bytes", "34359738368",
     "--pool", "link=2"
   ], options = {poUsePath})
@@ -290,6 +290,152 @@ suite "integration_build_engine_api_ready_queue":
     check not second.hasMetric("repro runquota probe")
     check second.trace.len == 0
 
+  test "runBuild fast no-op ignores stale unrelated hot cache inputs":
+    let tempRoot = createTempDir("repro-fast-noop-scoped", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let selectedInput = workRoot / "src" / "selected.txt"
+    let selectedOutput = workRoot / "out" / "selected.txt"
+    let staleInput = workRoot / "src" / "stale.txt"
+    let staleOutput = workRoot / "out" / "stale.txt"
+    fixtureWrite(selectedInput, "selected input\n")
+    fixtureWrite(selectedOutput, "selected cached output\n")
+    fixtureWrite(staleInput, "stale input before\n")
+    fixtureWrite(staleOutput, "stale cached output\n")
+
+    let selectedAction = action("selected", [app, "fixture-action", "copy",
+      "selected", selectedInput, selectedOutput], cwd = workRoot,
+      inputs = [selectedInput], outputs = ["out/selected.txt"],
+      cacheable = true, weakFingerprint = weak("fast-noop-selected"))
+    let staleAction = action("stale", [app, "fixture-action", "copy",
+      "stale", staleInput, staleOutput], cwd = workRoot,
+      inputs = [staleInput], outputs = ["out/stale.txt"],
+      cacheable = true, weakFingerprint = weak("fast-noop-stale"))
+
+    let cas = openLocalCas(cacheRoot / "cas")
+    var cache = openActionCache(cacheRoot / "action-cache")
+    discard cache.recordActionResult(cas, selectedAction.weakFingerprint,
+      selectedAction.actionCachePolicy, selectedAction.inputs,
+      selectedAction.outputs, workRoot)
+    discard cache.recordActionResult(cas, staleAction.weakFingerprint,
+      staleAction.actionCachePolicy, staleAction.inputs, staleAction.outputs,
+      workRoot)
+    cache.flushHotIndex()
+    fixtureWrite(staleInput, "stale input after\n")
+
+    var config = BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 1'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      rebuildMissingOutputsOnCacheHit: true,
+      suppressTrace: true,
+      skipCacheHitEvidence: true)
+    config.statsEnabled = true
+
+    let buildResult = runBuild(graph([selectedAction]), config)
+    check buildResult.results.len == 1
+    check buildResult.results[0].status == asCacheHit
+    check not buildResult.results[0].launched
+    check buildResult.hasMetric("repro fast noop scan")
+    check not buildResult.hasMetric("repro scheduler initialize")
+
+  test "inline RunQuota queued leases do not block scheduler completion":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-inline-rq-queued", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = "1000")
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+
+    let buildResult = runBuild(graph([
+      action("inline-a", [app, "fixture-action", "pool", "0",
+        tempRoot / "inline-log", workRoot / "inline" / "a.txt"],
+        cwd = workRoot, outputs = ["inline/a.txt"], cpuMilli = 1000'u32,
+        commandStatsId = "inline-a"),
+      action("inline-b", [app, "fixture-action", "pool", "1",
+        tempRoot / "inline-log", workRoot / "inline" / "b.txt"],
+        cwd = workRoot, outputs = ["inline/b.txt"], cpuMilli = 1000'u32,
+        commandStatsId = "inline-b")
+    ]), BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 2'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      inlineRunQuota: true))
+
+    proc byId(id: string): ActionResult =
+      for item in buildResult.results:
+        if item.id == id:
+          return item
+      raise newException(ValueError, "missing result " & id)
+
+    check byId("inline-a").status == asSucceeded
+    check byId("inline-b").status == asSucceeded
+    check maxPoolConcurrency(tempRoot, "inline-log", 2) == 1
+    var sawQueued = false
+    var sawGrantedLaunch = false
+    for event in buildResult.trace:
+      if event.event == "queued":
+        sawQueued = true
+      if event.event == "launched" and event.detail == "runquota-grant":
+        sawGrantedLaunch = true
+    check sawQueued
+    check sawGrantedLaunch
+
+  test "inline RunQuota denied leases are action failures":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-inline-rq-denied", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = "1000")
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let outputPath = workRoot / "denied" / "out.txt"
+
+    let buildResult = runBuild(graph([
+      action("inline-denied", [app, "fixture-action", "wide", "denied",
+        outputPath], cwd = workRoot, outputs = ["denied/out.txt"],
+        cpuMilli = 2000'u32, commandStatsId = "inline-denied")
+    ]), BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 1'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      inlineRunQuota: true))
+
+    check buildResult.results.len == 1
+    check buildResult.results[0].status == asFailed
+    check buildResult.results[0].stderr.contains("denied")
+    check buildResult.results[0].runQuotaBackend == "runquota-inline"
+    check not fileExists(outputPath)
+
   test "runBuild infers declared output to input dependencies before scheduling":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m46-api-inferred-deps", "")
@@ -437,20 +583,34 @@ suite "integration_build_engine_api_ready_queue":
     let cacheRoot = tempRoot / ".repro-cache"
     createDir(workRoot)
     let inputPath = workRoot / "src" / "input.txt"
-    let outputPath = workRoot / "out" / "cached.txt"
-    let markerPath = workRoot / "out" / "marker.txt"
+    let presentOutputPath = workRoot / "out" / "present.txt"
+    let presentMarkerPath = workRoot / "out" / "present-marker.txt"
+    let missingOutputPath = workRoot / "out" / "missing.txt"
+    let missingMarkerPath = workRoot / "out" / "missing-marker.txt"
     fixtureWrite(inputPath, "cache input\n")
 
-    let cacheAction = action("cache-present-output",
-      [app, "fixture-action", "copy", "seed", inputPath, outputPath],
-      cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
+    let presentCacheAction = action("cache-present-output",
+      [app, "fixture-action", "copy", "seed", inputPath, presentOutputPath],
+      cwd = workRoot, inputs = [inputPath], outputs = ["out/present.txt"],
       cacheable = true, weakFingerprint = weak("cache-present-output"),
       commandStatsId = "cache-present-output")
-    let restoreOnlyAction = action("cache-present-output",
-      [app, "fixture-action", "cache-should-not-run", markerPath, outputPath],
-      cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
+    let presentRestoreOnlyAction = action("cache-present-output",
+      [app, "fixture-action", "cache-should-not-run", presentMarkerPath,
+        presentOutputPath],
+      cwd = workRoot, inputs = [inputPath], outputs = ["out/present.txt"],
       cacheable = true, weakFingerprint = weak("cache-present-output"),
       commandStatsId = "cache-present-output")
+    let missingCacheAction = action("cache-missing-output",
+      [app, "fixture-action", "copy", "seed", inputPath, missingOutputPath],
+      cwd = workRoot, inputs = [inputPath], outputs = ["out/missing.txt"],
+      cacheable = true, weakFingerprint = weak("cache-missing-output"),
+      commandStatsId = "cache-missing-output")
+    let missingRestoreOnlyAction = action("cache-missing-output",
+      [app, "fixture-action", "cache-should-not-run", missingMarkerPath,
+        missingOutputPath],
+      cwd = workRoot, inputs = [inputPath], outputs = ["out/missing.txt"],
+      cacheable = true, weakFingerprint = weak("cache-missing-output"),
+      commandStatsId = "cache-missing-output")
 
     proc runOne(buildAction: BuildAction): ActionResult =
       let buildResult = runBuild(graph([buildAction]), BuildEngineConfig(
@@ -464,9 +624,9 @@ suite "integration_build_engine_api_ready_queue":
       check buildResult.results.len == 1
       buildResult.results[0]
 
-    let cold = runOne(cacheAction)
+    let cold = runOne(presentCacheAction)
     check cold.status == asSucceeded
-    check readFile(outputPath) == "seed:cache input\n"
+    check readFile(presentOutputPath) == "seed:cache input\n"
     var actionCache = openActionCache(cacheRoot / "action-cache")
     let cas = openLocalCas(cacheRoot / "cas")
     let seededLookup = actionCache.lookupActionResult(cas,
@@ -476,36 +636,38 @@ suite "integration_build_engine_api_ready_queue":
       ffpChecksum).status == aclMissNoRecord
     let casObject = cas.blobPath(seededLookup.record.outputs[0].blob.digest)
 
-    removeFile(outputPath)
-    let warmMissing = runOne(restoreOnlyAction)
-    check warmMissing.status == asCacheHit
-    check warmMissing.cacheDecision == cdHit
-    check not warmMissing.launched
-    check not fileExists(markerPath)
-    check readFile(outputPath) == "seed:cache input\n"
-
     let presentContent = "local present output\n"
-    writeFile(outputPath, presentContent)
+    writeFile(presentOutputPath, presentContent)
     let presentMtime = fromUnix(1_700_000_100)
-    setLastModificationTime(outputPath, presentMtime)
+    setLastModificationTime(presentOutputPath, presentMtime)
     removeIfExists(casObject)
 
-    let warmPresent = runOne(restoreOnlyAction)
+    let warmPresent = runOne(presentRestoreOnlyAction)
     check warmPresent.status == asCacheHit
     check warmPresent.cacheDecision == cdHit
     check not warmPresent.launched
-    check not fileExists(markerPath)
-    check readFile(outputPath) == presentContent
-    check getFileInfo(outputPath).lastWriteTime == presentMtime
+    check not fileExists(presentMarkerPath)
+    check readFile(presentOutputPath) == presentContent
+    check getFileInfo(presentOutputPath).lastWriteTime == presentMtime
 
-    writeFile(casObject, "corrupted")
-    removeFile(outputPath)
-    let corruptMissing = runOne(restoreOnlyAction)
-    check corruptMissing.status == asSucceeded
-    check corruptMissing.cacheDecision == cdRejected
-    check corruptMissing.launched
-    check fileExists(markerPath)
-    check readFile(outputPath) == "bad uncached output\n"
+    fixtureWrite(inputPath, "changed cache input\n")
+    let warmChangedInput = runOne(presentRestoreOnlyAction)
+    check warmChangedInput.status == asSucceeded
+    check warmChangedInput.cacheDecision == cdMiss
+    check warmChangedInput.launched
+    check fileExists(presentMarkerPath)
+    check readFile(presentOutputPath) == "bad uncached output\n"
+
+    let coldMissing = runOne(missingCacheAction)
+    check coldMissing.status == asSucceeded
+    check readFile(missingOutputPath) == "seed:changed cache input\n"
+    removeFile(missingOutputPath)
+    let warmMissing = runOne(missingRestoreOnlyAction)
+    check warmMissing.status == asSucceeded
+    check warmMissing.cacheDecision == cdMiss
+    check warmMissing.launched
+    check fileExists(missingMarkerPath)
+    check readFile(missingOutputPath) == "bad uncached output\n"
 
   test "runBuild honors explicit checksum action-cache policy":
     let tempRoot = createTempDir("repro-cache-explicit-checksum", "")

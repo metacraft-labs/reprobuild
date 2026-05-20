@@ -10,8 +10,8 @@ mkdir -p bench-results test-logs build
 export REPROBUILD_BUILD_MODE=release
 ./scripts/build_apps.sh >/dev/null
 
-if [ ! -x ../runquota/build/bin/runquotad ]; then
-  (cd ../runquota && just build >/dev/null)
+if [ ! -x ../runquota/build/bin/runquotad ] || [ "${REPROBUILD_BUILD_MODE:-}" = "release" ]; then
+  (cd ../runquota && RUNQUOTA_BUILD_MODE="${REPROBUILD_BUILD_MODE:-release}" just build >/dev/null)
 fi
 
 if [ ! -x ../reprobuild-cmake/build/bin/cmake ]; then
