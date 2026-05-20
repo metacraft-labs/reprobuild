@@ -44,7 +44,23 @@
             hooks.just-lint = {
               enable = true;
               name = "just lint";
-              entry = "just lint";
+              entry = "${
+                pkgs.writeShellScript "reprobuild-just-lint" ''
+                  export PATH=${
+                    pkgs.lib.makeBinPath [
+                      pkgs.bash
+                      pkgs.coreutils
+                      pkgs.just
+                      pkgs.nim2
+                    ]
+                  }:$PATH
+                  export BLAKE3_PREFIX=${pkgs.libblake3}
+                  export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
+                  export RUNQUOTA_SRC=${runquota-src}
+                  export XXHASH_PREFIX=${pkgs.xxHash}
+                  exec ${pkgs.just}/bin/just lint
+                ''
+              }";
               language = "system";
               pass_filenames = false;
             };
@@ -68,6 +84,7 @@
             ];
 
             BLAKE3_PREFIX = pkgs.libblake3;
+            REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             XXHASH_PREFIX = pkgs.xxHash;
 
@@ -126,14 +143,19 @@
           };
 
           devShells.default = pkgs.mkShell {
+            BLAKE3_PREFIX = pkgs.libblake3;
+            REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
+            XXHASH_PREFIX = pkgs.xxHash;
             packages = [
               pkgs.just
               pkgs.nim2
               pkgs.cmake
               pkgs.ninja
               pkgs.clang
+              pkgs.curl
               pkgs.libblake3
               pkgs.xxHash
+              pkgs.zlib
               pkgs.nixfmt-rfc-style
               pkgs.repomix
               pkgs.pre-commit

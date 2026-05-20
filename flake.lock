@@ -1943,11 +1943,11 @@
     "runquota-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1779102768,
-        "narHash": "sha256-VI5pEEQ0CTd+ChFxmBB2HjdZ1FFwsGBsAvQT/OIgRpo=",
+        "lastModified": 1779276001,
+        "narHash": "sha256-LXsc9ZC1MloTk0qcwnwRGFh0MjfiYVSpg1s4nE8wVcg=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "b325ca05ae5855b44cd54dec377a58ad36f875d6",
+        "rev": "cd7bf7a718730578a214745dc82bf93cb9707462",
         "type": "github"
       },
       "original": {

@@ -7,11 +7,11 @@ default:
 
 build:
     mkdir -p test-logs
-    ./scripts/build_apps.sh 2>&1 | tee test-logs/build.log
+    bash ./scripts/build_apps.sh 2>&1 | tee test-logs/build.log
 
 test:
     mkdir -p test-logs
-    ./scripts/run_tests.sh 2>&1 | tee test-logs/test.log
+    bash ./scripts/run_tests.sh 2>&1 | tee test-logs/test.log
 
 t: test
 
@@ -166,31 +166,31 @@ e2e_reprobuild_cmake_m11_coverage_nightly:
 
 lint:
     mkdir -p test-logs
-    ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
-    ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
+    bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
 
 format:
-    ./scripts/format_sources.sh
+    bash ./scripts/format_sources.sh
 
 fmt: format
 
 bump-version version:
-    ./scripts/bump_version.sh {{version}}
+    bash ./scripts/bump_version.sh {{version}}
 
 bench *args:
     mkdir -p bench-results test-logs
-    ./scripts/collect-benchmark-metrics.sh {{args}} > bench-results/benchmark_results.json 2> >(tee test-logs/bench.log >&2)
+    bash ./scripts/collect-benchmark-metrics.sh {{args}} > bench-results/benchmark_results.json 2> >(tee test-logs/bench.log >&2)
 
 bench-quick:
     just bench --quick
 
 bench_reprobuild_core_mvp_performance *args:
     mkdir -p bench-results test-logs
-    ./scripts/run-m23-benchmark.sh {{args}} 2> >(tee test-logs/bench_reprobuild_core_mvp_performance.log >&2)
+    bash ./scripts/run-m23-benchmark.sh {{args}} 2> >(tee test-logs/bench_reprobuild_core_mvp_performance.log >&2)
 
 bench_cmake_reprobuild_vs_ninja *args:
     mkdir -p bench-results test-logs
-    ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
+    bash ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
         --profile default \
         --output bench-results/cmake-reprobuild-vs-ninja-default.json \
         {{args}} \
@@ -198,7 +198,7 @@ bench_cmake_reprobuild_vs_ninja *args:
 
 bench_cmake_reprobuild_vs_ninja_quick *args:
     mkdir -p bench-results test-logs
-    ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
+    bash ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
         --profile quick \
         --output bench-results/cmake-reprobuild-vs-ninja-quick.json \
         {{args}} \
@@ -206,7 +206,7 @@ bench_cmake_reprobuild_vs_ninja_quick *args:
 
 bench_cmake_reprobuild_vs_ninja_medium *args:
     mkdir -p bench-results test-logs
-    ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
+    bash ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
         --profile medium \
         --output bench-results/cmake-reprobuild-vs-ninja-medium.json \
         {{args}} \
@@ -447,4 +447,4 @@ repomix *args:
         {{args}}
 
 check-repo-requirements:
-    ./scripts/check_repo_requirements.sh
+    bash ./scripts/check_repo_requirements.sh
