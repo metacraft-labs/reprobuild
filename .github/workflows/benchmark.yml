@@ -56,7 +56,7 @@ jobs:
 
       - name: Build Reprobuild CMake fork
         run: |
-          nix develop ./reprobuild --command bash -lc '
+          nix develop ./reprobuild --command bash -c '
             set -euo pipefail
             jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
             cd reprobuild-cmake
