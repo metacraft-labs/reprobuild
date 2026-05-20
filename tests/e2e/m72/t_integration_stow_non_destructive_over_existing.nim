@@ -113,147 +113,153 @@ proc stowOwnership(stateDir, storeRoot, targetPath: string):
       return gf.ownershipPolicy
   doAssert false, "no manifest record for stow target " & targetPath
 
-suite "M72 gate 3: integration_stow_non_destructive_over_existing":
-
-  test "pre-existing correct symlink is a no-op cache-hit (not recreated)":
-    when not defined(windows):
-      checkpoint "platform-skip: M72 stow gate is Windows-specific"
+when not defined(windows):
+  suite "M72 gate 3: integration_stow_non_destructive_over_existing":
+    test "platform N/A":
+      echo "[platform N/A] t_integration_stow_non_destructive_over_existing: currently exercises the Windows stow gate"
       check true
-      return
-    let tempRoot = createTempDir("repro-m72-stow-cachehit-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let f = setup(tempRoot)
-    let target = f.homeDir / ".m72stowrc"
+else:
+  suite "M72 gate 3: integration_stow_non_destructive_over_existing":
 
-    # Pre-create the target as the CORRECT symlink to the stow source.
-    var symlinkOk = true
-    try:
-      createSymlink(f.stowSource, target)
-    except OSError:
-      symlinkOk = false
-    if not symlinkOk:
-      checkpoint "platform-skip: host cannot create symlinks " &
-        "(developer mode off); the cache-hit assertion needs a symlink"
-      check true
-    else:
-      check symlinkExists(target)
-      # Record the link's creation time. A delete + recreate would
-      # reset it; a true no-op cache-hit leaves it untouched.
-      let creationBefore = getCreationTime(target)
-      let resolvedBefore = expandSymlink(target)
+    test "pre-existing correct symlink is a no-op cache-hit (not recreated)":
+      when not defined(windows):
+        checkpoint "platform-skip: M72 stow gate is Windows-specific"
+        check true
+        return
+      let tempRoot = createTempDir("repro-m72-stow-cachehit-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let f = setup(tempRoot)
+      let target = f.homeDir / ".m72stowrc"
 
-      let res = runRepro(f.baseEnv, ["home", "apply"])
-      check res.exitCode == 0
-      check res.output.contains("applied generation ")
+      # Pre-create the target as the CORRECT symlink to the stow source.
+      var symlinkOk = true
+      try:
+        createSymlink(f.stowSource, target)
+      except OSError:
+        symlinkOk = false
+      if not symlinkOk:
+        checkpoint "platform-skip: host cannot create symlinks " &
+          "(developer mode off); the cache-hit assertion needs a symlink"
+        check true
+      else:
+        check symlinkExists(target)
+        # Record the link's creation time. A delete + recreate would
+        # reset it; a true no-op cache-hit leaves it untouched.
+        let creationBefore = getCreationTime(target)
+        let resolvedBefore = expandSymlink(target)
 
-      # The link still exists and still points at the stow source.
-      check symlinkExists(target)
-      check expandSymlink(target) == resolvedBefore
-      # The link was NOT deleted-and-recreated: creation time unchanged.
-      check getCreationTime(target) == creationBefore
-      # The manifest records it as a stow link (cache-hit
-      # materialization records the same ownership policy).
-      check stowOwnership(f.stateDir, f.storeRoot, target) == gfoStowSymlink
+        let res = runRepro(f.baseEnv, ["home", "apply"])
+        check res.exitCode == 0
+        check res.output.contains("applied generation ")
 
-  test "pre-existing regular file is NOT clobbered; --reconcile-drift " &
-       "replaces it and records prior content":
-    when not defined(windows):
-      check true
-      return
-    let tempRoot = createTempDir("repro-m72-stow-regfile-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let f = setup(tempRoot)
-    let target = f.homeDir / ".m72stowrc"
+        # The link still exists and still points at the stow source.
+        check symlinkExists(target)
+        check expandSymlink(target) == resolvedBefore
+        # The link was NOT deleted-and-recreated: creation time unchanged.
+        check getCreationTime(target) == creationBefore
+        # The manifest records it as a stow link (cache-hit
+        # materialization records the same ownership policy).
+        check stowOwnership(f.stateDir, f.storeRoot, target) == gfoStowSymlink
 
-    # Pre-create the target as a REGULAR FILE with distinct content.
-    let preExistingContent = "user's own pre-existing .m72stowrc\n" &
-      "value = \"hand-written-not-from-stow\"\n"
-    writeFile(target, preExistingContent)
-    check fileExists(target)
-    check not symlinkExists(target)
+    test "pre-existing regular file is NOT clobbered; --reconcile-drift " &
+         "replaces it and records prior content":
+      when not defined(windows):
+        check true
+        return
+      let tempRoot = createTempDir("repro-m72-stow-regfile-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let f = setup(tempRoot)
+      let target = f.homeDir / ".m72stowrc"
 
-    # Apply must report drift and NOT clobber the file.
-    let res = runRepro(f.baseEnv, ["home", "apply"])
-    check res.exitCode != 0
-    check (res.output.contains("drift") or
-           res.output.contains("conflict"))
-    check res.output.contains(".m72stowrc")
-    # The file is BYTE-IDENTICAL — the materializer did not overwrite.
-    check fileExists(target)
-    check readFile(target) == preExistingContent
-    # No generation was committed (the apply failed closed).
-    check readCurrentGenerationId(f.stateDir).len == 0
+      # Pre-create the target as a REGULAR FILE with distinct content.
+      let preExistingContent = "user's own pre-existing .m72stowrc\n" &
+        "value = \"hand-written-not-from-stow\"\n"
+      writeFile(target, preExistingContent)
+      check fileExists(target)
+      check not symlinkExists(target)
 
-    # `--reconcile-drift` replaces the conflicting file.
-    let recon = runRepro(f.baseEnv,
-      ["home", "apply", "--reconcile-drift"])
-    check recon.exitCode == 0
-    check recon.output.contains("applied generation ")
-    # The target now carries the stow source content.
-    let stowContent = readFile(f.stowSource)
-    # The materialized target is either a link resolving to the source
-    # or a copy with the source content.
-    let liveContent =
-      if symlinkExists(target): readFile(expandSymlink(target))
-      else: readFile(target)
-    check liveContent == stowContent
-    # The prior (user) content was recorded: the manifest's stow
-    # record carries a pre-write digest, and the bytes are sealed in
-    # CAS so `repro home rollback` could restore them.
-    block:
-      let activeId = readCurrentGenerationId(f.stateDir)
-      let env = readPointerFile(pointerPath(f.stateDir, activeId))
-      var store = openStore(f.storeRoot)
-      defer: store.close()
-      var mkey: PrefixIdBytes
-      for i in 0 ..< 32:
-        mkey[i] = env.activationManifestDigest[i]
-      let manifest = decodeManifestBytes(readCasBlob(store, mkey))
-      var sawStow = false
-      for gf in manifest.generatedFiles:
-        if gf.absoluteOutputPath == target:
-          sawStow = true
-          # The reconciled record carries the prior content's digest.
-          check gf.hasPreWriteDigest
-      check sawStow
-
-  test "pre-existing symlink to a DIFFERENT source is reported as drift":
-    when not defined(windows):
-      check true
-      return
-    let tempRoot = createTempDir("repro-m72-stow-wronglink-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let f = setup(tempRoot)
-    let target = f.homeDir / ".m72stowrc"
-
-    # An unrelated file the wrong-source symlink will point at.
-    let otherSource = tempRoot / "some-other-source.txt"
-    writeFile(otherSource, "content of a DIFFERENT source\n")
-    var symlinkOk = true
-    try:
-      createSymlink(otherSource, target)
-    except OSError:
-      symlinkOk = false
-    if not symlinkOk:
-      checkpoint "platform-skip: host cannot create symlinks"
-      check true
-    else:
-      check symlinkExists(target)
-      let resolvedBefore = expandSymlink(target)
-
-      # Apply must report drift; the wrong-source link is NOT silently
-      # replaced.
+      # Apply must report drift and NOT clobber the file.
       let res = runRepro(f.baseEnv, ["home", "apply"])
       check res.exitCode != 0
       check (res.output.contains("drift") or
              res.output.contains("conflict"))
       check res.output.contains(".m72stowrc")
-      # The link is untouched — still pointing at the different source.
-      check symlinkExists(target)
-      check expandSymlink(target) == resolvedBefore
-      check readFile(expandSymlink(target)) ==
-        "content of a DIFFERENT source\n"
+      # The file is BYTE-IDENTICAL — the materializer did not overwrite.
+      check fileExists(target)
+      check readFile(target) == preExistingContent
+      # No generation was committed (the apply failed closed).
       check readCurrentGenerationId(f.stateDir).len == 0
+
+      # `--reconcile-drift` replaces the conflicting file.
+      let recon = runRepro(f.baseEnv,
+        ["home", "apply", "--reconcile-drift"])
+      check recon.exitCode == 0
+      check recon.output.contains("applied generation ")
+      # The target now carries the stow source content.
+      let stowContent = readFile(f.stowSource)
+      # The materialized target is either a link resolving to the source
+      # or a copy with the source content.
+      let liveContent =
+        if symlinkExists(target): readFile(expandSymlink(target))
+        else: readFile(target)
+      check liveContent == stowContent
+      # The prior (user) content was recorded: the manifest's stow
+      # record carries a pre-write digest, and the bytes are sealed in
+      # CAS so `repro home rollback` could restore them.
+      block:
+        let activeId = readCurrentGenerationId(f.stateDir)
+        let env = readPointerFile(pointerPath(f.stateDir, activeId))
+        var store = openStore(f.storeRoot)
+        defer: store.close()
+        var mkey: PrefixIdBytes
+        for i in 0 ..< 32:
+          mkey[i] = env.activationManifestDigest[i]
+        let manifest = decodeManifestBytes(readCasBlob(store, mkey))
+        var sawStow = false
+        for gf in manifest.generatedFiles:
+          if gf.absoluteOutputPath == target:
+            sawStow = true
+            # The reconciled record carries the prior content's digest.
+            check gf.hasPreWriteDigest
+        check sawStow
+
+    test "pre-existing symlink to a DIFFERENT source is reported as drift":
+      when not defined(windows):
+        check true
+        return
+      let tempRoot = createTempDir("repro-m72-stow-wronglink-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let f = setup(tempRoot)
+      let target = f.homeDir / ".m72stowrc"
+
+      # An unrelated file the wrong-source symlink will point at.
+      let otherSource = tempRoot / "some-other-source.txt"
+      writeFile(otherSource, "content of a DIFFERENT source\n")
+      var symlinkOk = true
+      try:
+        createSymlink(otherSource, target)
+      except OSError:
+        symlinkOk = false
+      if not symlinkOk:
+        checkpoint "platform-skip: host cannot create symlinks"
+        check true
+      else:
+        check symlinkExists(target)
+        let resolvedBefore = expandSymlink(target)
+
+        # Apply must report drift; the wrong-source link is NOT silently
+        # replaced.
+        let res = runRepro(f.baseEnv, ["home", "apply"])
+        check res.exitCode != 0
+        check (res.output.contains("drift") or
+               res.output.contains("conflict"))
+        check res.output.contains(".m72stowrc")
+        # The link is untouched — still pointing at the different source.
+        check symlinkExists(target)
+        check expandSymlink(target) == resolvedBefore
+        check readFile(expandSymlink(target)) ==
+          "content of a DIFFERENT source\n"
+        check readCurrentGenerationId(f.stateDir).len == 0

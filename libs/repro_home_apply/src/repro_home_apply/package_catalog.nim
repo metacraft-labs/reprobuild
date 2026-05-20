@@ -5,13 +5,18 @@
 ## `PlannedPackage` reference against the REAL adapter catalog of the
 ## host environment.
 ##
-## On Windows the only production adapter wired here is Scoop: a
-## package is a Scoop package if it is installed (`scoop list`) OR
-## available in a configured Scoop bucket (the bucket directory holds
-## an `<app>.json` manifest). The M55 Scoop adapter
+## On Windows the preferred production adapter is Scoop: a package is a
+## Scoop package if it is installed (`scoop list`) OR available in a
+## configured Scoop bucket (the bucket directory holds an `<app>.json`
+## manifest). The M55 Scoop adapter
 ## (`repro_tool_profiles.resolveScoopTool`) performs the actual
 ## realization; this module only decides the binding and computes the
 ## cache-hit determination.
+##
+## On macOS/Linux the first production adapter is PATH: a package whose
+## executable name is already discoverable on PATH is recorded through
+## the universal path adapter. This prepares the non-Windows home apply
+## path without pretending to have a full package-manager catalog yet.
 ##
 ## Cache-hit rule (per the M72 deliverable text): an app already
 ## installed at a version satisfying the profile is a cache-hit — it is
@@ -42,6 +47,7 @@ const
 
 type
   CatalogAdapterKind* = enum
+    cakPath = "path"
     cakScoop = "scoop"
 
   CatalogResolution* = object
@@ -52,6 +58,7 @@ type
     app*: string
     resolvedVersion*: string         ## the version the catalog resolved
     executableName*: string
+    sourcePath*: string              ## path-adapter executable source
     installed*: bool                 ## already present in the Scoop tree
     cacheHit*: bool                  ## installed AND version-satisfying
     searchedCatalogs*: seq[string]   ## buckets / sources searched
@@ -80,10 +87,10 @@ proc raiseUnknownPackage*(packageId: string;
     "no production adapter catalog knows package '" & packageId &
     "'. Searched: " &
     (if searched.len > 0: searched.join(", ") else: "<no catalogs configured>") &
-    ". On Windows declare the package in a configured Scoop bucket " &
-    "(`scoop bucket add ...`) or install it (`scoop install ...`), or " &
-    "set REPRO_TEST_PACKAGE_SOURCE / REPRO_TEST_PACKAGE_SCOOP for a " &
-    "test-only adapter binding.")
+    ". Make the executable available on PATH, declare the package in a " &
+    "configured platform catalog (Scoop on Windows), or set " &
+    "REPRO_TEST_PACKAGE_SOURCE / REPRO_TEST_PACKAGE_SCOOP for a test-only " &
+    "adapter binding.")
   e.packageId = packageId
   e.searchedCatalogs = searched
   raise e
@@ -305,6 +312,23 @@ proc satisfiesProfile(installedVersion, wantedVersion: string): bool =
     return installedVersion.len > 0
   installedVersion == wantedVersion
 
+proc resolvePathPackage(packageId: string; searched: var seq[string]):
+    tuple[found: bool; resolution: CatalogResolution] =
+  searched.add("path:" & getEnv("PATH"))
+  let exe = findExe(packageId)
+  if exe.len == 0:
+    return (false, CatalogResolution())
+  var r = CatalogResolution(
+    packageId: packageId,
+    adapter: cakPath,
+    app: packageId,
+    executableName: extractFilename(exe),
+    sourcePath: exe,
+    installed: true,
+    cacheHit: true,
+    searchedCatalogs: searched)
+  (true, r)
+
 proc resolvePackage*(cat: var ProductionCatalog; packageId: string):
     CatalogResolution =
   ## Resolve one `PlannedPackage` reference against the production
@@ -315,7 +339,7 @@ proc resolvePackage*(cat: var ProductionCatalog; packageId: string):
   ##   1. installed Scoop app (`scoop list`) — cache-hit candidate.
   ##   2. available in a configured Scoop bucket — realize via Scoop.
   result.packageId = packageId
-  result.adapter = cakScoop
+  result.adapter = cakPath
   result.app = packageId
   result.executableName = packageId
   var searched: seq[string]
@@ -328,11 +352,13 @@ proc resolvePackage*(cat: var ProductionCatalog; packageId: string):
     # declared executable leaf name.
     let manifest = findBucketManifest(cat, packageId)
     if manifest.found:
+      result.adapter = cakScoop
       searched.add("scoop:bucket:" & manifest.bucket)
       result.bucket = manifest.bucket
       if manifest.binName.len > 0:
         result.executableName = manifest.binName
     if inst.installed:
+      result.adapter = cakScoop
       result.installed = true
       # When a bucket manifest is present, the profile-wanted version
       # is the manifest head; otherwise the installed version is the
@@ -368,16 +394,19 @@ proc resolvePackage*(cat: var ProductionCatalog; packageId: string):
     if manifest.found:
       # Available but not installed → a genuine realize (the M55
       # adapter will run `scoop install`).
+      result.adapter = cakScoop
       result.installed = false
       result.cacheHit = false
       result.resolvedVersion = manifest.version
       return result
+    let pathResolution = resolvePathPackage(packageId, searched)
+    if pathResolution.found:
+      return pathResolution.resolution
     result.searchedCatalogs = searched
     raiseUnknownPackage(packageId, searched)
   else:
-    # No production adapter is wired off-Windows (the Scoop adapter is
-    # Windows-only). Off-Windows production realization is out of M72
-    # scope; the env seams remain the only binding.
-    searched.add("(no production adapter on this platform)")
+    let pathResolution = resolvePathPackage(packageId, searched)
+    if pathResolution.found:
+      return pathResolution.resolution
     result.searchedCatalogs = searched
     raiseUnknownPackage(packageId, searched)

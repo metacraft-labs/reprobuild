@@ -83,7 +83,11 @@ proc digestOfResource*(desired: Resource): Digest256 =
     return digestOfBytes(desired.envVarPayload.bytes)
   of rkEnvUserPath:
     # The recorded payload is the joined entries; preserves order.
-    let joined = desired.pathEntries.join(";")
+    when defined(windows):
+      let sep = ";"
+    else:
+      let sep = ":"
+    let joined = desired.pathEntries.join(sep)
     var buf = newSeq[byte](joined.len)
     for i, ch in joined:
       buf[i] = byte(ord(ch))

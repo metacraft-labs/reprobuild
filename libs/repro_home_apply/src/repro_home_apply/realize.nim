@@ -274,33 +274,34 @@ when defined(windows):
 # M72 production catalog dispatch
 # ---------------------------------------------------------------------------
 
-when defined(windows):
-  proc realizeViaProductionCatalog(store: var Store;
-                                   cat: var ProductionCatalog;
-                                   packageId: string): RealizedRecord =
-    ## M72 Deliverable 1: resolve `packageId` against the real host
-    ## adapter catalog and dispatch through the M55 Scoop adapter. An
-    ## already-installed app at a satisfying version is a cache-hit:
-    ## the M55 adapter reuses the existing `apps/<app>/<version>/`
-    ## directory and does NOT run `scoop install` (its install path is
-    ## guarded by `if not dirExists(versionDir)`), so dispatching a
-    ## cache-hit through the adapter is safe and reinstall-free. We
-    ## classify the outcome here so the apply log / `--plan` preview
-    ## can report `cache-hit` vs `realize`.
-    let resolution =
-      try:
-        resolvePackage(cat, packageId)
-      except EUnknownPackage as err:
-        raiseRealizeFailed(packageId, "<none>", err.msg)
-    let spec = ScoopPackageSpec(
-      bucket: resolution.bucket,
-      app: resolution.app,
-      version: resolution.resolvedVersion,
-      executableName: resolution.executableName)
-    result = realizeScoopAdapter(store, packageId, spec)
-    result.fromProductionCatalog = true
-    result.cacheHit = resolution.cacheHit
-    result.resolvedVersion = resolution.resolvedVersion
+proc realizeViaProductionCatalog(store: var Store;
+                                 cat: var ProductionCatalog;
+                                 packageId: string): RealizedRecord =
+  ## M72+ production dispatch. Windows prefers Scoop; macOS/Linux can
+  ## realize PATH-discovered tools through the universal path adapter.
+  let resolution =
+    try:
+      resolvePackage(cat, packageId)
+    except EUnknownPackage as err:
+      raiseRealizeFailed(packageId, "<none>", err.msg)
+  case resolution.adapter
+  of cakPath:
+    result = realizePathAdapter(store, packageId, resolution.sourcePath)
+  of cakScoop:
+    when defined(windows):
+      let spec = ScoopPackageSpec(
+        bucket: resolution.bucket,
+        app: resolution.app,
+        version: resolution.resolvedVersion,
+        executableName: resolution.executableName)
+      result = realizeScoopAdapter(store, packageId, spec)
+    else:
+      raiseRealizeFailed(packageId, "scoop",
+        "the scoop adapter is Windows-only; this build runs on a " &
+        "non-Windows platform")
+  result.fromProductionCatalog = true
+  result.cacheHit = resolution.cacheHit
+  result.resolvedVersion = resolution.resolvedVersion
 
 # ---------------------------------------------------------------------------
 # M72 Deliverable 2: read-only package preview for `--plan`
@@ -328,8 +329,7 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
   ## then the production catalog.
   let pathCatalog = parsePathCatalog()
   let scoopCatalog = parseScoopCatalog()
-  when defined(windows):
-    var prodCatalog = openProductionCatalog()
+  var prodCatalog = openProductionCatalog()
   for p in packages:
     var preview = PackagePreview(packageId: p.packageId)
     if p.packageId in pathCatalog:
@@ -348,7 +348,11 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
       when defined(windows):
         try:
           let resolution = resolvePackage(prodCatalog, p.packageId)
-          if resolution.cacheHit:
+          if resolution.adapter == cakPath:
+            preview.kind = ppkCacheHit
+            preview.detail = "path " & resolution.sourcePath &
+              " already available"
+          elif resolution.cacheHit:
             preview.kind = ppkCacheHit
             preview.detail = "scoop " & resolution.bucket & "/" &
               resolution.app & "@" & resolution.resolvedVersion &
@@ -365,8 +369,19 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
           preview.detail = "unknown package; searched catalogs: " &
             err.searchedCatalogs.join(", ")
       else:
-        preview.kind = ppkMissing
-        preview.detail = "no production adapter on this platform"
+        try:
+          let resolution = resolvePackage(prodCatalog, p.packageId)
+          if resolution.adapter == cakPath:
+            preview.kind = ppkCacheHit
+            preview.detail = "path " & resolution.sourcePath &
+              " already available"
+          else:
+            preview.kind = ppkRealize
+            preview.detail = $resolution.adapter
+        except EUnknownPackage as err:
+          preview.kind = ppkMissing
+          preview.detail = "unknown package; searched catalogs: " &
+            err.searchedCatalogs.join(", ")
     result.add(preview)
 
 # ---------------------------------------------------------------------------
@@ -384,8 +399,7 @@ proc realizePlannedPackages*(store: var Store;
   ## (`package_catalog.resolvePackage`) — the M72 production path.
   let pathCatalog = parsePathCatalog()
   let scoopCatalog = parseScoopCatalog()
-  when defined(windows):
-    var prodCatalog = openProductionCatalog()
+  var prodCatalog = openProductionCatalog()
   for p in packages:
     if p.packageId in pathCatalog:
       result.add(realizePathAdapter(store, p.packageId,
@@ -401,13 +415,4 @@ proc realizePlannedPackages*(store: var Store;
     else:
       # M72: no test-seam binding — resolve through the production
       # adapter catalog of the real host environment.
-      when defined(windows):
-        result.add(realizeViaProductionCatalog(store, prodCatalog,
-          p.packageId))
-      else:
-        raiseRealizeFailed(p.packageId, "<none>",
-          "no adapter binding declared and no production adapter " &
-          "catalog is available on this platform. Set " &
-          PackageSourceEnvVar & "=<pkg>=<absolute-path> for a " &
-          "path-adapter binding, or " & PackageScoopEnvVar &
-          "=<pkg>=<bucket>/<app>@<version> for a Scoop-adapter binding.")
+      result.add(realizeViaProductionCatalog(store, prodCatalog, p.packageId))

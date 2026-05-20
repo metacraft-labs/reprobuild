@@ -58,6 +58,16 @@ proc locateLauncherBinary(): string =
       return c
   ""
 
+proc hostArch(): string =
+  when defined(amd64) or defined(x86_64):
+    "x86_64"
+  elif defined(arm64) or defined(aarch64):
+    "arm64"
+  elif defined(arm):
+    "arm32"
+  else:
+    "unknown"
+
 proc buildLaunchPlan(rec: RealizedRecord; commandName: string): LaunchPlan =
   ## Synthesize a minimal LaunchPlan for the phase-A case: no
   ## environment shaping, no executable bindings, no runtime library
@@ -76,13 +86,13 @@ proc buildLaunchPlan(rec: RealizedRecord; commandName: string): LaunchPlan =
   result.projectedRuntimeImage = ProjectedRuntimeImage(present: false)
   result.executionProfile = ExecutionProfileChecksum(present: false)
   when defined(windows):
-    result.supportProfile = newSupportProfile("windows", "x86_64", "msvc", "")
+    result.supportProfile = newSupportProfile("windows", hostArch(), "msvc", "")
     result.binding = lbkWindowsLauncher
   elif defined(macosx):
-    result.supportProfile = newSupportProfile("macos", "x86_64", "darwin", "")
+    result.supportProfile = newSupportProfile("macos", hostArch(), "darwin", "")
     result.binding = lbkMacosScript
   else:
-    result.supportProfile = newSupportProfile("linux", "x86_64", "gnu", "")
+    result.supportProfile = newSupportProfile("linux", hostArch(), "gnu", "")
     result.binding = lbkLinuxScript
   result.provenance = LaunchPlanProvenance(
     adapter: $rec.adapter,

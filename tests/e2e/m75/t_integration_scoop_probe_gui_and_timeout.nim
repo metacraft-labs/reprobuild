@@ -106,204 +106,210 @@ proc pidIsAlive(pid: int): bool =
     let res = execCmdEx("kill -0 " & $pid & " 2>/dev/null")
     result = res.exitCode == 0
 
-suite "integration_scoop_probe_gui_and_timeout":
-  test "integration_scoop_probe_gui_and_timeout":
-    let scoopBinary = resolveScoopBinary()
-    if scoopBinary.len == 0:
-      raise newException(OSError,
-        "M75 gate requires a real scoop binary on PATH (none found). " &
-        "Install Scoop from https://scoop.sh/ before running this test.")
+when not defined(windows):
+  suite "integration_scoop_probe_gui_and_timeout":
+    test "platform N/A":
+      echo "[platform N/A] t_integration_scoop_probe_gui_and_timeout: requires Windows and a real Scoop install"
+      check true
+else:
+  suite "integration_scoop_probe_gui_and_timeout":
+    test "integration_scoop_probe_gui_and_timeout":
+      let scoopBinary = resolveScoopBinary()
+      if scoopBinary.len == 0:
+        raise newException(OSError,
+          "M75 gate requires a real scoop binary on PATH (none found). " &
+          "Install Scoop from https://scoop.sh/ before running this test.")
 
-    let tempRoot = createTempDir("repro-m75-probe-", "")
-    defer: safeRemoveTempRoot(tempRoot)
-    let sandbox = setupScoopSandbox(tempRoot, "main")
-    let storeRoot = tempRoot / "tool-store"
+      let tempRoot = createTempDir("repro-m75-probe-", "")
+      defer: safeRemoveTempRoot(tempRoot)
+      let sandbox = setupScoopSandbox(tempRoot, "main")
+      let storeRoot = tempRoot / "tool-store"
 
-    # =================================================================
-    # Case GUI/shortcuts: a Scoop app whose manifest declares a
-    # `shortcuts` field — the reliable Scoop GUI signal. Its on-disk
-    # "executable" would HANG FOREVER and write a marker file if run.
-    # Realization must succeed WITHOUT executing the binary (presence-
-    # on-disk verification only); the marker file must never appear.
-    # =================================================================
-    block guiShortcutsApp:
-      # Marker the fixture exe writes IF it is ever executed. Living
-      # outside the sandboxed app dir so realization does not touch it.
-      let guiMarker = tempRoot / "gui-probe-was-executed.marker"
-      # A `.cmd` that, if executed at all, writes the marker and then
-      # blocks forever (the GUI-app failure mode the adapter must NOT
-      # trigger). If the adapter exec-probed this, the gate would hang.
-      let hangingBody =
-        "@echo off\r\n" &
-        "echo executed > " & quoteShell(guiMarker) & "\r\n" &
-        ":loop\r\n" &
-        "ping -n 60 127.0.0.1 >nul\r\n" &
-        "goto loop\r\n"
-      let fixture = stageScoopApp(sandbox,
-        app = "m75-gui-app", version = "1.0.0",
-        binField = %"m75gui.cmd",
-        manifestExtra = %*{
-          "shortcuts": [["m75gui.cmd", "M75 GUI App"]]},
-        exeRel = "m75gui.cmd", exeBody = hangingBody)
-      let useDef = fixtureUseDef(
-        packageSelector = "m75-gui",
-        executableName = "m75gui",
-        bucket = sandbox.bucketName,
-        app = fixture.name,
-        version = fixture.version,
-        preferredVersion = "",
-        manifestChecksum = "",
-        executablePath = "m75gui.cmd",
-        requiresExecutionProfileChecksum = true)
+      # =================================================================
+      # Case GUI/shortcuts: a Scoop app whose manifest declares a
+      # `shortcuts` field — the reliable Scoop GUI signal. Its on-disk
+      # "executable" would HANG FOREVER and write a marker file if run.
+      # Realization must succeed WITHOUT executing the binary (presence-
+      # on-disk verification only); the marker file must never appear.
+      # =================================================================
+      block guiShortcutsApp:
+        # Marker the fixture exe writes IF it is ever executed. Living
+        # outside the sandboxed app dir so realization does not touch it.
+        let guiMarker = tempRoot / "gui-probe-was-executed.marker"
+        # A `.cmd` that, if executed at all, writes the marker and then
+        # blocks forever (the GUI-app failure mode the adapter must NOT
+        # trigger). If the adapter exec-probed this, the gate would hang.
+        let hangingBody =
+          "@echo off\r\n" &
+          "echo executed > " & quoteShell(guiMarker) & "\r\n" &
+          ":loop\r\n" &
+          "ping -n 60 127.0.0.1 >nul\r\n" &
+          "goto loop\r\n"
+        let fixture = stageScoopApp(sandbox,
+          app = "m75-gui-app", version = "1.0.0",
+          binField = %"m75gui.cmd",
+          manifestExtra = %*{
+            "shortcuts": [["m75gui.cmd", "M75 GUI App"]]},
+          exeRel = "m75gui.cmd", exeBody = hangingBody)
+        let useDef = fixtureUseDef(
+          packageSelector = "m75-gui",
+          executableName = "m75gui",
+          bucket = sandbox.bucketName,
+          app = fixture.name,
+          version = fixture.version,
+          preferredVersion = "",
+          manifestChecksum = "",
+          executablePath = "m75gui.cmd",
+          requiresExecutionProfileChecksum = true)
 
-      # If the adapter exec-probed a GUI app this call would block
-      # forever; that it returns at all is the core M75 invariant.
-      let started = epochTime()
-      let profile = resolveScoopTool(useDef, storeRoot)
-      let elapsed = epochTime() - started
+        # If the adapter exec-probed a GUI app this call would block
+        # forever; that it returns at all is the core M75 invariant.
+        let started = epochTime()
+        let profile = resolveScoopTool(useDef, storeRoot)
+        let elapsed = epochTime() - started
 
-      # Realization completed near-instantly — no exec-probe occurred.
-      check elapsed < probeTimeoutSeconds.float
-      # Presence-on-disk verification: the executable resolves and exists.
-      check profile.resolvedExecutablePath.len > 0
-      check fileExists(profile.resolvedExecutablePath)
-      # The binary was NEVER executed — its side-effect marker is absent.
-      check not fileExists(guiMarker)
-      # The receipt records no probe was run (presence-only path).
-      let receipt = parseFile(
-        profile.selectedStorePath / ".repro-receipt.json")
-      check receipt{"declaredExecutablePath"}.getStr().len > 0
-      check profile.probes.len == 0
+        # Realization completed near-instantly — no exec-probe occurred.
+        check elapsed < probeTimeoutSeconds.float
+        # Presence-on-disk verification: the executable resolves and exists.
+        check profile.resolvedExecutablePath.len > 0
+        check fileExists(profile.resolvedExecutablePath)
+        # The binary was NEVER executed — its side-effect marker is absent.
+        check not fileExists(guiMarker)
+        # The receipt records no probe was run (presence-only path).
+        let receipt = parseFile(
+          profile.selectedStorePath / ".repro-receipt.json")
+        check receipt{"declaredExecutablePath"}.getStr().len > 0
+        check profile.probes.len == 0
 
-    # =================================================================
-    # Case timeout/hang: a Scoop app that is NOT a GUI app (no
-    # `shortcuts`, a `.cmd` script primary so the PE signal is
-    # unknown) whose probe binary deliberately blocks forever AND
-    # spawns a long-lived child process. The adapter exec-probes it;
-    # the M75 wall-clock timeout must kill the probe AND its child
-    # process tree, the apply must not hang, and the recorded child
-    # PID must be dead afterwards (no orphan).
-    # =================================================================
-    block timeoutHangApp:
-      # The probe `.cmd` records its spawned child's PID here.
-      let childPidFile = tempRoot / "m75-timeout-child.pid"
-      # A `.cmd` that on `--version`:
-      #   1. starts a detached PowerShell child that records its own
-      #      PID and then sleeps for 10 minutes (the "GUI helper
-      #      process" stand-in: a child that outlives a bare
-      #      parent-kill);
-      #   2. then blocks FOREVER itself.
-      # The M75 timeout must reap the whole tree — cmd.exe, this
-      # script, and the PowerShell grandchild.
-      let psChild =
-        "$pid | Out-File -Encoding ascii " &
-        quoteShell(childPidFile) & "; Start-Sleep -Seconds 600"
-      let hangingProbeBody =
-        "@echo off\r\n" &
-        "if /I \"%1\"==\"--version\" (\r\n" &
-        "  start \"\" /b powershell -NoProfile -Command " &
-        quoteShell(psChild) & "\r\n" &
-        "  :hang\r\n" &
-        "  ping -n 600 127.0.0.1 >nul\r\n" &
-        "  goto hang\r\n" &
-        ")\r\n" &
-        "echo m75-timeout 1.0.0\r\n" &
-        "exit /b 0\r\n"
-      let fixture = stageScoopApp(sandbox,
-        app = "m75-timeout-app", version = "1.0.0",
-        binField = %"m75hang.cmd",
-        manifestExtra = nil,
-        exeRel = "m75hang.cmd", exeBody = hangingProbeBody)
-      let useDef = fixtureUseDef(
-        packageSelector = "m75-timeout",
-        executableName = "m75hang",
-        bucket = sandbox.bucketName,
-        app = fixture.name,
-        version = fixture.version,
-        preferredVersion = "",
-        manifestChecksum = "",
-        executablePath = "m75hang.cmd",
-        requiresExecutionProfileChecksum = true)
+      # =================================================================
+      # Case timeout/hang: a Scoop app that is NOT a GUI app (no
+      # `shortcuts`, a `.cmd` script primary so the PE signal is
+      # unknown) whose probe binary deliberately blocks forever AND
+      # spawns a long-lived child process. The adapter exec-probes it;
+      # the M75 wall-clock timeout must kill the probe AND its child
+      # process tree, the apply must not hang, and the recorded child
+      # PID must be dead afterwards (no orphan).
+      # =================================================================
+      block timeoutHangApp:
+        # The probe `.cmd` records its spawned child's PID here.
+        let childPidFile = tempRoot / "m75-timeout-child.pid"
+        # A `.cmd` that on `--version`:
+        #   1. starts a detached PowerShell child that records its own
+        #      PID and then sleeps for 10 minutes (the "GUI helper
+        #      process" stand-in: a child that outlives a bare
+        #      parent-kill);
+        #   2. then blocks FOREVER itself.
+        # The M75 timeout must reap the whole tree — cmd.exe, this
+        # script, and the PowerShell grandchild.
+        let psChild =
+          "$pid | Out-File -Encoding ascii " &
+          quoteShell(childPidFile) & "; Start-Sleep -Seconds 600"
+        let hangingProbeBody =
+          "@echo off\r\n" &
+          "if /I \"%1\"==\"--version\" (\r\n" &
+          "  start \"\" /b powershell -NoProfile -Command " &
+          quoteShell(psChild) & "\r\n" &
+          "  :hang\r\n" &
+          "  ping -n 600 127.0.0.1 >nul\r\n" &
+          "  goto hang\r\n" &
+          ")\r\n" &
+          "echo m75-timeout 1.0.0\r\n" &
+          "exit /b 0\r\n"
+        let fixture = stageScoopApp(sandbox,
+          app = "m75-timeout-app", version = "1.0.0",
+          binField = %"m75hang.cmd",
+          manifestExtra = nil,
+          exeRel = "m75hang.cmd", exeBody = hangingProbeBody)
+        let useDef = fixtureUseDef(
+          packageSelector = "m75-timeout",
+          executableName = "m75hang",
+          bucket = sandbox.bucketName,
+          app = fixture.name,
+          version = fixture.version,
+          preferredVersion = "",
+          manifestChecksum = "",
+          executablePath = "m75hang.cmd",
+          requiresExecutionProfileChecksum = true)
 
-      var raised = false
-      var diagnostic = ""
-      let started = epochTime()
-      try:
-        discard resolveScoopTool(useDef, storeRoot)
-      except EScoopInstallFailed as err:
-        raised = true
-        diagnostic = err.msg
-      let elapsed = epochTime() - started
+        var raised = false
+        var diagnostic = ""
+        let started = epochTime()
+        try:
+          discard resolveScoopTool(useDef, storeRoot)
+        except EScoopInstallFailed as err:
+          raised = true
+          diagnostic = err.msg
+        let elapsed = epochTime() - started
 
-      # The probe was bounded: a structured failure, NOT a hang.
-      check raised
-      # Wall-clock bound: the timeout fired and the apply did not hang.
-      # `probeTimeoutSeconds` + a generous margin for process spawn /
-      # tree-kill / scoop sandbox overhead.
-      check elapsed < (probeTimeoutSeconds + 30).float
-      # The structured diagnostic names the timeout, not a crash.
-      check diagnostic.contains("timed out")
-      check diagnostic.contains($probeTimeoutSeconds & "s")
+        # The probe was bounded: a structured failure, NOT a hang.
+        check raised
+        # Wall-clock bound: the timeout fired and the apply did not hang.
+        # `probeTimeoutSeconds` + a generous margin for process spawn /
+        # tree-kill / scoop sandbox overhead.
+        check elapsed < (probeTimeoutSeconds + 30).float
+        # The structured diagnostic names the timeout, not a crash.
+        check diagnostic.contains("timed out")
+        check diagnostic.contains($probeTimeoutSeconds & "s")
 
-      # The probe's child process tree was reaped — no orphan. Give the
-      # async `taskkill /T` a brief grace window to land, then assert
-      # the recorded child PID is dead.
-      check fileExists(childPidFile)
-      let childPid = readFile(childPidFile).strip().splitWhitespace()[0]
-        .parseInt()
-      var childDead = false
-      let killDeadline = epochTime() + 15.0
-      while epochTime() < killDeadline:
-        if not pidIsAlive(childPid):
-          childDead = true
-          break
-        sleep(200)
-      check childDead
+        # The probe's child process tree was reaped — no orphan. Give the
+        # async `taskkill /T` a brief grace window to land, then assert
+        # the recorded child PID is dead.
+        check fileExists(childPidFile)
+        let childPid = readFile(childPidFile).strip().splitWhitespace()[0]
+          .parseInt()
+        var childDead = false
+        let killDeadline = epochTime() + 15.0
+        while epochTime() < killDeadline:
+          if not pidIsAlive(childPid):
+            childDead = true
+            break
+          sleep(200)
+        check childDead
 
-    # =================================================================
-    # Case console/normal: a normal console fixture app — no
-    # `shortcuts`, a probe that prints `--version` and exits 0. It
-    # still probes and verifies exactly as before M75.
-    # =================================================================
-    block normalConsoleApp:
-      let normalBody =
-        "@echo off\r\n" &
-        "if /I \"%1\"==\"--version\" ( echo m75-console 2.0.0 & exit /b 0 )\r\n" &
-        "echo m75-console args=%*\r\n" &
-        "exit /b 0\r\n"
-      let fixture = stageScoopApp(sandbox,
-        app = "m75-console-app", version = "2.0.0",
-        binField = %"m75con.cmd",
-        manifestExtra = nil,
-        exeRel = "m75con.cmd", exeBody = normalBody)
-      let useDef = fixtureUseDef(
-        packageSelector = "m75-console",
-        executableName = "m75con",
-        bucket = sandbox.bucketName,
-        app = fixture.name,
-        version = fixture.version,
-        preferredVersion = "",
-        manifestChecksum = "",
-        executablePath = "m75con.cmd",
-        requiresExecutionProfileChecksum = true)
+      # =================================================================
+      # Case console/normal: a normal console fixture app — no
+      # `shortcuts`, a probe that prints `--version` and exits 0. It
+      # still probes and verifies exactly as before M75.
+      # =================================================================
+      block normalConsoleApp:
+        let normalBody =
+          "@echo off\r\n" &
+          "if /I \"%1\"==\"--version\" ( echo m75-console 2.0.0 & exit /b 0 )\r\n" &
+          "echo m75-console args=%*\r\n" &
+          "exit /b 0\r\n"
+        let fixture = stageScoopApp(sandbox,
+          app = "m75-console-app", version = "2.0.0",
+          binField = %"m75con.cmd",
+          manifestExtra = nil,
+          exeRel = "m75con.cmd", exeBody = normalBody)
+        let useDef = fixtureUseDef(
+          packageSelector = "m75-console",
+          executableName = "m75con",
+          bucket = sandbox.bucketName,
+          app = fixture.name,
+          version = fixture.version,
+          preferredVersion = "",
+          manifestChecksum = "",
+          executablePath = "m75con.cmd",
+          requiresExecutionProfileChecksum = true)
 
-      let started = epochTime()
-      let profile = resolveScoopTool(useDef, storeRoot)
-      let elapsed = epochTime() - started
+        let started = epochTime()
+        let profile = resolveScoopTool(useDef, storeRoot)
+        let elapsed = epochTime() - started
 
-      # A fast, legitimate console probe completes well inside the bound.
-      check elapsed < probeTimeoutSeconds.float
-      check profile.resolvedExecutablePath.len > 0
-      check fileExists(profile.resolvedExecutablePath)
-      # The console app WAS probed — a probe result is recorded and it
-      # passed (exit 0, not timed out).
-      check profile.probes.len == 1
-      check profile.probes[0].exitCode == 0
-      check not profile.probes[0].timedOut
-      check profile.probes[0].output.contains("m75-console 2.0.0")
+        # A fast, legitimate console probe completes well inside the bound.
+        check elapsed < probeTimeoutSeconds.float
+        check profile.resolvedExecutablePath.len > 0
+        check fileExists(profile.resolvedExecutablePath)
+        # The console app WAS probed — a probe result is recorded and it
+        # passed (exit 0, not timed out).
+        check profile.probes.len == 1
+        check profile.probes[0].exitCode == 0
+        check not profile.probes[0].timedOut
+        check profile.probes[0].output.contains("m75-console 2.0.0")
 
-      # The executable still runs through the typed launch wrapper.
-      let launched = launchScoopExecutable(profile.selectedStorePath,
-        ["--version"])
-      check launched.exitCode == 0
-      check launched.output.contains("m75-console 2.0.0")
+        # The executable still runs through the typed launch wrapper.
+        let launched = launchScoopExecutable(profile.selectedStorePath,
+          ["--version"])
+        check launched.exitCode == 0
+        check launched.output.contains("m75-console 2.0.0")

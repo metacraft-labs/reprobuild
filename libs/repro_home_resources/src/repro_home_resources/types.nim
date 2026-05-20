@@ -96,6 +96,9 @@ type
         ## Directories the resource contributes to the user's PATH.
         ## Pre-existing entries OUTSIDE this list are preserved on
         ## rollback per gate 4's invariant.
+      pathHostFilePath*: string
+        ## POSIX host rc file that receives the managed PATH block.
+        ## Empty on Windows, where the target is HKCU\Environment\Path.
     of rkWindowsStartup:
       startupName*: string              ## Run-key value name.
       startupCommand*: string           ## launch command.
@@ -287,19 +290,18 @@ proc realWorldIdentity*(r: Resource): string =
   of rkEnvUserVariable:
     return "HKCU\\Environment\\" & r.envVarName
   of rkEnvUserPath:
-    return "HKCU\\Environment\\Path"
+    when defined(windows):
+      return "HKCU\\Environment\\Path"
+    else:
+      return r.pathHostFilePath & "#repro-home-userpath"
   of rkWindowsStartup:
     return "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\" &
       r.startupName
   of rkShellIntegration:
     return r.shellHostFilePath & "#" & r.shellBlockId
   of rkLinuxGsettings:
-    let schemaPath =
-      if r.gsettingsPath.len > 0:
-        r.gsettingsPath
-      else:
-        r.gsettingsSchema
-    return "gsettings:" & schemaPath & ":" & r.gsettingsKey
+    return "gsettings:" & r.gsettingsSchema & "|" & r.gsettingsPath & "|" &
+      r.gsettingsKey
   of rkSystemdUserUnit:
     return "systemd:user:" & r.unitName
   of rkMacosUserDefault:

@@ -91,240 +91,246 @@ proc stageManifestBinApp(sandbox: ScoopSandbox; app, version: string;
   ManifestBinFixture(name: app, version: version, versionDir: versionDir,
     bucketManifestPath: bucketManifestPath)
 
-suite "integration_scoop_manifest_bin_resolution":
-  test "integration_scoop_manifest_bin_resolution":
-    let scoopBinary = resolveScoopBinary()
-    if scoopBinary.len == 0:
-      raise newException(OSError,
-        "M74 gate requires a real scoop binary on PATH (none found). " &
-        "Install Scoop from https://scoop.sh/ before running this test.")
+when not defined(windows):
+  suite "integration_scoop_manifest_bin_resolution":
+    test "platform N/A":
+      echo "[platform N/A] t_integration_scoop_manifest_bin_resolution: requires Windows and a real Scoop install"
+      check true
+else:
+  suite "integration_scoop_manifest_bin_resolution":
+    test "integration_scoop_manifest_bin_resolution":
+      let scoopBinary = resolveScoopBinary()
+      if scoopBinary.len == 0:
+        raise newException(OSError,
+          "M74 gate requires a real scoop binary on PATH (none found). " &
+          "Install Scoop from https://scoop.sh/ before running this test.")
 
-    let tempRoot = createTempDir("repro-m74-manifest-bin-", "")
-    defer: safeRemoveTempRoot(tempRoot)
-    let sandbox = setupScoopSandbox(tempRoot, "main")
-    let storeRoot = tempRoot / "tool-store"
+      let tempRoot = createTempDir("repro-m74-manifest-bin-", "")
+      defer: safeRemoveTempRoot(tempRoot)
+      let sandbox = setupScoopSandbox(tempRoot, "main")
+      let storeRoot = tempRoot / "tool-store"
 
-    # -----------------------------------------------------------------
-    # Case 1: `bin` as a `bin\<exe>` SUBDIRECTORY path (the `gh` shape).
-    # The adapter must resolve `<versionDir>/bin/<exe>`, not
-    # `<versionDir>/<exe>`.
-    # -----------------------------------------------------------------
-    block subdirBin:
-      let fixture = stageManifestBinApp(sandbox,
-        app = "m74-subdir-app", version = "2.0.0",
-        binField = %"bin\\m74cli.cmd",
-        exesOnDisk = @["bin/m74cli.cmd"])
-      let useDef = fixtureUseDef(
-        packageSelector = "m74-subdir",
-        executableName = "m74cli",
-        bucket = sandbox.bucketName,
-        app = fixture.name,
-        version = fixture.version,
-        preferredVersion = "",
-        manifestChecksum = "",
-        # The package-declared executable path is the bare leaf — the
-        # OLD behavior would resolve `<prefix>/bin/m74cli.cmd` (the
-        # version root) and fail. The manifest `bin` is authoritative.
-        executablePath = "m74cli.cmd",
-        requiresExecutionProfileChecksum = true)
+      # -----------------------------------------------------------------
+      # Case 1: `bin` as a `bin\<exe>` SUBDIRECTORY path (the `gh` shape).
+      # The adapter must resolve `<versionDir>/bin/<exe>`, not
+      # `<versionDir>/<exe>`.
+      # -----------------------------------------------------------------
+      block subdirBin:
+        let fixture = stageManifestBinApp(sandbox,
+          app = "m74-subdir-app", version = "2.0.0",
+          binField = %"bin\\m74cli.cmd",
+          exesOnDisk = @["bin/m74cli.cmd"])
+        let useDef = fixtureUseDef(
+          packageSelector = "m74-subdir",
+          executableName = "m74cli",
+          bucket = sandbox.bucketName,
+          app = fixture.name,
+          version = fixture.version,
+          preferredVersion = "",
+          manifestChecksum = "",
+          # The package-declared executable path is the bare leaf — the
+          # OLD behavior would resolve `<prefix>/bin/m74cli.cmd` (the
+          # version root) and fail. The manifest `bin` is authoritative.
+          executablePath = "m74cli.cmd",
+          requiresExecutionProfileChecksum = true)
 
-      let profile = resolveScoopTool(useDef, storeRoot)
+        let profile = resolveScoopTool(useDef, storeRoot)
 
-      # The realized executable resolves through the junction to the
-      # real `<versionDir>/bin/m74cli.cmd`.
-      let expected = profile.selectedStorePath / "bin" / "bin" / "m74cli.cmd"
-      check profile.resolvedExecutablePath == expected
-      check fileExists(profile.resolvedExecutablePath)
-      check sameFile(profile.resolvedExecutablePath,
-        fixture.versionDir / "bin" / "m74cli.cmd")
-      # The launcher consumes `resolvedExecutablePath` verbatim — assert
-      # it points into the manifest-declared `bin\` subdir.
-      check profile.resolvedExecutablePath.replace('\\', '/')
-        .endsWith("/bin/m74cli.cmd")
-      # `declaredExecutablePath` records the manifest-resolved path
-      # (relative to the version dir / junction), NOT the bare leaf.
-      check profile.declaredExecutablePath.replace('\\', '/') ==
-        "bin/m74cli.cmd"
+        # The realized executable resolves through the junction to the
+        # real `<versionDir>/bin/m74cli.cmd`.
+        let expected = profile.selectedStorePath / "bin" / "bin" / "m74cli.cmd"
+        check profile.resolvedExecutablePath == expected
+        check fileExists(profile.resolvedExecutablePath)
+        check sameFile(profile.resolvedExecutablePath,
+          fixture.versionDir / "bin" / "m74cli.cmd")
+        # The launcher consumes `resolvedExecutablePath` verbatim — assert
+        # it points into the manifest-declared `bin\` subdir.
+        check profile.resolvedExecutablePath.replace('\\', '/')
+          .endsWith("/bin/m74cli.cmd")
+        # `declaredExecutablePath` records the manifest-resolved path
+        # (relative to the version dir / junction), NOT the bare leaf.
+        check profile.declaredExecutablePath.replace('\\', '/') ==
+          "bin/m74cli.cmd"
 
-      # The receipt records the manifest-resolved path and the full
-      # manifest `bin` list.
-      let receipt = parseFile(
-        profile.selectedStorePath / ".repro-receipt.json")
-      check receipt{"declaredExecutablePath"}.getStr().replace('\\', '/') ==
-        "bin/m74cli.cmd"
-      check receipt{"manifestBin"}.kind == JArray
-      check receipt{"manifestBin"}.len == 1
-      check receipt{"manifestBin"}[0].getStr().replace('\\', '/') ==
-        "bin/m74cli.cmd"
+        # The receipt records the manifest-resolved path and the full
+        # manifest `bin` list.
+        let receipt = parseFile(
+          profile.selectedStorePath / ".repro-receipt.json")
+        check receipt{"declaredExecutablePath"}.getStr().replace('\\', '/') ==
+          "bin/m74cli.cmd"
+        check receipt{"manifestBin"}.kind == JArray
+        check receipt{"manifestBin"}.len == 1
+        check receipt{"manifestBin"}[0].getStr().replace('\\', '/') ==
+          "bin/m74cli.cmd"
 
-      # The executable actually runs through the typed launch wrapper.
-      let launched = launchScoopExecutable(profile.selectedStorePath,
-        ["--version"])
-      check launched.exitCode == 0
-      check launched.output.contains("m74-subdir-app 2.0.0")
+        # The executable actually runs through the typed launch wrapper.
+        let launched = launchScoopExecutable(profile.selectedStorePath,
+          ["--version"])
+        check launched.exitCode == 0
+        check launched.output.contains("m74-subdir-app 2.0.0")
 
-    # -----------------------------------------------------------------
-    # Case 2: `bin` at the version ROOT — also realizes. This proves
-    # the fix is manifest-driven, not a blind swap of `bin/` for the
-    # version root.
-    # -----------------------------------------------------------------
-    block rootBin:
-      let fixture = stageManifestBinApp(sandbox,
-        app = "m74-root-app", version = "1.5.0",
-        binField = %"m74root.cmd",
-        exesOnDisk = @["m74root.cmd"])
-      let useDef = fixtureUseDef(
-        packageSelector = "m74-root",
-        executableName = "m74root",
-        bucket = sandbox.bucketName,
-        app = fixture.name,
-        version = fixture.version,
-        preferredVersion = "",
-        manifestChecksum = "",
-        executablePath = "m74root.cmd",
-        requiresExecutionProfileChecksum = true)
+      # -----------------------------------------------------------------
+      # Case 2: `bin` at the version ROOT — also realizes. This proves
+      # the fix is manifest-driven, not a blind swap of `bin/` for the
+      # version root.
+      # -----------------------------------------------------------------
+      block rootBin:
+        let fixture = stageManifestBinApp(sandbox,
+          app = "m74-root-app", version = "1.5.0",
+          binField = %"m74root.cmd",
+          exesOnDisk = @["m74root.cmd"])
+        let useDef = fixtureUseDef(
+          packageSelector = "m74-root",
+          executableName = "m74root",
+          bucket = sandbox.bucketName,
+          app = fixture.name,
+          version = fixture.version,
+          preferredVersion = "",
+          manifestChecksum = "",
+          executablePath = "m74root.cmd",
+          requiresExecutionProfileChecksum = true)
 
-      let profile = resolveScoopTool(useDef, storeRoot)
-      let expected = profile.selectedStorePath / "bin" / "m74root.cmd"
-      check profile.resolvedExecutablePath == expected
-      check fileExists(profile.resolvedExecutablePath)
-      check sameFile(profile.resolvedExecutablePath,
-        fixture.versionDir / "m74root.cmd")
-      check profile.declaredExecutablePath == "m74root.cmd"
+        let profile = resolveScoopTool(useDef, storeRoot)
+        let expected = profile.selectedStorePath / "bin" / "m74root.cmd"
+        check profile.resolvedExecutablePath == expected
+        check fileExists(profile.resolvedExecutablePath)
+        check sameFile(profile.resolvedExecutablePath,
+          fixture.versionDir / "m74root.cmd")
+        check profile.declaredExecutablePath == "m74root.cmd"
 
-      let launched = launchScoopExecutable(profile.selectedStorePath,
-        ["--version"])
-      check launched.exitCode == 0
-      check launched.output.contains("m74-root-app 1.5.0")
+        let launched = launchScoopExecutable(profile.selectedStorePath,
+          ["--version"])
+        check launched.exitCode == 0
+        check launched.output.contains("m74-root-app 1.5.0")
 
-    # -----------------------------------------------------------------
-    # Case 3: `bin` as an ARRAY mixing a plain string and a
-    # `[path, alias, args]` entry — every declared executable resolves.
-    # -----------------------------------------------------------------
-    block arrayBin:
-      let binArray = %* [
-        "tool-a.cmd",
-        ["bin\\tool-b.cmd", "tb", "--quiet"]]
-      let fixture = stageManifestBinApp(sandbox,
-        app = "m74-array-app", version = "3.1.0",
-        binField = binArray,
-        exesOnDisk = @["tool-a.cmd", "bin/tool-b.cmd"])
-      let useDef = fixtureUseDef(
-        packageSelector = "m74-array",
-        executableName = "tool-a",
-        bucket = sandbox.bucketName,
-        app = fixture.name,
-        version = fixture.version,
-        preferredVersion = "",
-        manifestChecksum = "",
-        executablePath = "tool-a.cmd",
-        requiresExecutionProfileChecksum = true)
+      # -----------------------------------------------------------------
+      # Case 3: `bin` as an ARRAY mixing a plain string and a
+      # `[path, alias, args]` entry — every declared executable resolves.
+      # -----------------------------------------------------------------
+      block arrayBin:
+        let binArray = %* [
+          "tool-a.cmd",
+          ["bin\\tool-b.cmd", "tb", "--quiet"]]
+        let fixture = stageManifestBinApp(sandbox,
+          app = "m74-array-app", version = "3.1.0",
+          binField = binArray,
+          exesOnDisk = @["tool-a.cmd", "bin/tool-b.cmd"])
+        let useDef = fixtureUseDef(
+          packageSelector = "m74-array",
+          executableName = "tool-a",
+          bucket = sandbox.bucketName,
+          app = fixture.name,
+          version = fixture.version,
+          preferredVersion = "",
+          manifestChecksum = "",
+          executablePath = "tool-a.cmd",
+          requiresExecutionProfileChecksum = true)
 
-      let profile = resolveScoopTool(useDef, storeRoot)
-      # The realize step's presence check walked EVERY declared `bin`
-      # entry — a missing one of them would have raised. Both files
-      # actually exist under the junction:
-      let junction = profile.selectedStorePath / "bin"
-      check fileExists(junction / "tool-a.cmd")
-      check fileExists(junction / "bin" / "tool-b.cmd")
-      # `executableName = tool-a` makes `tool-a.cmd` the primary.
-      check profile.resolvedExecutablePath == junction / "tool-a.cmd"
-      check profile.declaredExecutablePath == "tool-a.cmd"
+        let profile = resolveScoopTool(useDef, storeRoot)
+        # The realize step's presence check walked EVERY declared `bin`
+        # entry — a missing one of them would have raised. Both files
+        # actually exist under the junction:
+        let junction = profile.selectedStorePath / "bin"
+        check fileExists(junction / "tool-a.cmd")
+        check fileExists(junction / "bin" / "tool-b.cmd")
+        # `executableName = tool-a` makes `tool-a.cmd` the primary.
+        check profile.resolvedExecutablePath == junction / "tool-a.cmd"
+        check profile.declaredExecutablePath == "tool-a.cmd"
 
-      # The receipt records BOTH declared `bin` entries.
-      let receipt = parseFile(
-        profile.selectedStorePath / ".repro-receipt.json")
-      check receipt{"manifestBin"}.len == 2
-      var recordedBins: seq[string]
-      for n in receipt{"manifestBin"}:
-        recordedBins.add(n.getStr().replace('\\', '/'))
-      check "tool-a.cmd" in recordedBins
-      check "bin/tool-b.cmd" in recordedBins
+        # The receipt records BOTH declared `bin` entries.
+        let receipt = parseFile(
+          profile.selectedStorePath / ".repro-receipt.json")
+        check receipt{"manifestBin"}.len == 2
+        var recordedBins: seq[string]
+        for n in receipt{"manifestBin"}:
+          recordedBins.add(n.getStr().replace('\\', '/'))
+        check "tool-a.cmd" in recordedBins
+        check "bin/tool-b.cmd" in recordedBins
 
-      # The `[path, alias, args]` entry's first element is taken as the
-      # primary when the package selects it by leaf name.
-      let useDefB = fixtureUseDef(
-        packageSelector = "m74-array-b",
-        executableName = "tool-b",
-        bucket = sandbox.bucketName,
-        app = fixture.name,
-        version = fixture.version,
-        preferredVersion = "",
-        manifestChecksum = "",
-        executablePath = "tool-b.cmd",
-        requiresExecutionProfileChecksum = true)
-      let profileB = resolveScoopTool(useDefB, storeRoot)
-      check profileB.resolvedExecutablePath ==
-        profileB.selectedStorePath / "bin" / "bin" / "tool-b.cmd"
-      check profileB.declaredExecutablePath.replace('\\', '/') ==
-        "bin/tool-b.cmd"
+        # The `[path, alias, args]` entry's first element is taken as the
+        # primary when the package selects it by leaf name.
+        let useDefB = fixtureUseDef(
+          packageSelector = "m74-array-b",
+          executableName = "tool-b",
+          bucket = sandbox.bucketName,
+          app = fixture.name,
+          version = fixture.version,
+          preferredVersion = "",
+          manifestChecksum = "",
+          executablePath = "tool-b.cmd",
+          requiresExecutionProfileChecksum = true)
+        let profileB = resolveScoopTool(useDefB, storeRoot)
+        check profileB.resolvedExecutablePath ==
+          profileB.selectedStorePath / "bin" / "bin" / "tool-b.cmd"
+        check profileB.declaredExecutablePath.replace('\\', '/') ==
+          "bin/tool-b.cmd"
 
-    # -----------------------------------------------------------------
-    # Case 4: a `bin` entry that names a file GENUINELY ABSENT on disk
-    # — the post-install presence check stays STRICT and raises a
-    # structured `EScoopInstallFailed` naming the expected path.
-    # -----------------------------------------------------------------
-    block missingBin:
-      # Manifest declares `bin\ghost.cmd`; the install staged NOTHING
-      # there (exesOnDisk is empty for that path).
-      let fixture = stageManifestBinApp(sandbox,
-        app = "m74-missing-app", version = "0.9.0",
-        binField = %"bin\\ghost.cmd",
-        exesOnDisk = @[])
-      discard fixture
-      let useDef = fixtureUseDef(
-        packageSelector = "m74-missing",
-        executableName = "ghost",
-        bucket = sandbox.bucketName,
-        app = "m74-missing-app",
-        version = "0.9.0",
-        preferredVersion = "",
-        manifestChecksum = "",
-        executablePath = "ghost.cmd",
-        requiresExecutionProfileChecksum = true)
+      # -----------------------------------------------------------------
+      # Case 4: a `bin` entry that names a file GENUINELY ABSENT on disk
+      # — the post-install presence check stays STRICT and raises a
+      # structured `EScoopInstallFailed` naming the expected path.
+      # -----------------------------------------------------------------
+      block missingBin:
+        # Manifest declares `bin\ghost.cmd`; the install staged NOTHING
+        # there (exesOnDisk is empty for that path).
+        let fixture = stageManifestBinApp(sandbox,
+          app = "m74-missing-app", version = "0.9.0",
+          binField = %"bin\\ghost.cmd",
+          exesOnDisk = @[])
+        discard fixture
+        let useDef = fixtureUseDef(
+          packageSelector = "m74-missing",
+          executableName = "ghost",
+          bucket = sandbox.bucketName,
+          app = "m74-missing-app",
+          version = "0.9.0",
+          preferredVersion = "",
+          manifestChecksum = "",
+          executablePath = "ghost.cmd",
+          requiresExecutionProfileChecksum = true)
 
-      var raised = false
-      try:
-        discard resolveScoopTool(useDef, storeRoot)
-      except EScoopInstallFailed as err:
-        raised = true
-        # The diagnostic must NAME the expected path — the
-        # manifest-declared `bin\ghost.cmd` location under the junction.
-        check err.msg.contains("executable not present after install")
-        check err.msg.replace('\\', '/').contains("/bin/ghost.cmd")
-      check raised
+        var raised = false
+        try:
+          discard resolveScoopTool(useDef, storeRoot)
+        except EScoopInstallFailed as err:
+          raised = true
+          # The diagnostic must NAME the expected path — the
+          # manifest-declared `bin\ghost.cmd` location under the junction.
+          check err.msg.contains("executable not present after install")
+          check err.msg.replace('\\', '/').contains("/bin/ghost.cmd")
+        check raised
 
-    # -----------------------------------------------------------------
-    # Case 5: a manifest with NO `bin` field — a library / env-add-path
-    # app. Realizes gracefully: no executable, no error.
-    # -----------------------------------------------------------------
-    block noBin:
-      let versionDir = sandbox.appsDir / "m74-lib-app" / "1.0.0"
-      createDir(versionDir)
-      writeFile(versionDir / "install.json",
-        ($ %*{"architecture": "64bit", "bucket": sandbox.bucketName}))
-      # Manifest deliberately omits `bin`.
-      writeFile(versionDir / "manifest.json",
-        ($ %*{"version": "1.0.0", "description": "library, no bin"}))
-      writeFile(sandbox.bucketManifestDir / "m74-lib-app.json",
-        ($ %*{"version": "1.0.0", "description": "library, no bin"}))
-      let useDef = fixtureUseDef(
-        packageSelector = "m74-lib",
-        executableName = "m74lib",
-        bucket = sandbox.bucketName,
-        app = "m74-lib-app",
-        version = "1.0.0",
-        preferredVersion = "",
-        manifestChecksum = "",
-        executablePath = "m74lib.exe",
-        requiresExecutionProfileChecksum = true)
+      # -----------------------------------------------------------------
+      # Case 5: a manifest with NO `bin` field — a library / env-add-path
+      # app. Realizes gracefully: no executable, no error.
+      # -----------------------------------------------------------------
+      block noBin:
+        let versionDir = sandbox.appsDir / "m74-lib-app" / "1.0.0"
+        createDir(versionDir)
+        writeFile(versionDir / "install.json",
+          ($ %*{"architecture": "64bit", "bucket": sandbox.bucketName}))
+        # Manifest deliberately omits `bin`.
+        writeFile(versionDir / "manifest.json",
+          ($ %*{"version": "1.0.0", "description": "library, no bin"}))
+        writeFile(sandbox.bucketManifestDir / "m74-lib-app.json",
+          ($ %*{"version": "1.0.0", "description": "library, no bin"}))
+        let useDef = fixtureUseDef(
+          packageSelector = "m74-lib",
+          executableName = "m74lib",
+          bucket = sandbox.bucketName,
+          app = "m74-lib-app",
+          version = "1.0.0",
+          preferredVersion = "",
+          manifestChecksum = "",
+          executablePath = "m74lib.exe",
+          requiresExecutionProfileChecksum = true)
 
-      # No `bin` → no executable, no error.
-      let profile = resolveScoopTool(useDef, storeRoot)
-      check profile.resolvedExecutablePath == ""
-      check profile.declaredExecutablePath == ""
-      check dirExists(profile.selectedStorePath)
-      let receipt = parseFile(
-        profile.selectedStorePath / ".repro-receipt.json")
-      check receipt{"manifestBin"}.kind == JArray
-      check receipt{"manifestBin"}.len == 0
+        # No `bin` → no executable, no error.
+        let profile = resolveScoopTool(useDef, storeRoot)
+        check profile.resolvedExecutablePath == ""
+        check profile.declaredExecutablePath == ""
+        check dirExists(profile.selectedStorePath)
+        let receipt = parseFile(
+          profile.selectedStorePath / ".repro-receipt.json")
+        check receipt{"manifestBin"}.kind == JArray
+        check receipt{"manifestBin"}.len == 0

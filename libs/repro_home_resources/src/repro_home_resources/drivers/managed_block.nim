@@ -114,7 +114,8 @@ proc applyManagedBlockResource*(hostFile, blockId, content: string):
     if not open(f, tmp, fmWrite):
       raise newException(IOError, "cannot open " & tmp)
     try:
-      discard f.writeBuffer(unsafeAddr rewritten[0], rewritten.len)
+      if rewritten.len > 0:
+        discard f.writeBuffer(unsafeAddr rewritten[0], rewritten.len)
     finally:
       close(f)
   if fileExists(hostFile):

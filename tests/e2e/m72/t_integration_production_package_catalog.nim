@@ -98,135 +98,141 @@ proc dirFingerprint(root: string): string =
   lines.sort()
   lines.join("\n")
 
-suite "M72 gate 1: integration_production_package_catalog":
-  test "apply realizes via the production catalog; cache-hit not reinstalled":
-    when not defined(windows):
-      checkpoint "platform-skip: M72 production catalog gate is " &
-        "Windows-specific (the Scoop adapter is Windows-only)"
+when not defined(windows):
+  suite "M72 gate 1: integration_production_package_catalog":
+    test "platform N/A":
+      echo "[platform N/A] t_integration_production_package_catalog: requires Windows and the Scoop production adapter"
       check true
-      return
+else:
+  suite "M72 gate 1: integration_production_package_catalog":
+    test "apply realizes via the production catalog; cache-hit not reinstalled":
+      when not defined(windows):
+        checkpoint "platform-skip: M72 production catalog gate is " &
+          "Windows-specific (the Scoop adapter is Windows-only)"
+        check true
+        return
 
-    let scoopBinary = resolveScoopBinary()
-    doAssert scoopBinary.len > 0,
-      "M72 gate 1 requires a real scoop binary on PATH; the milestone " &
-      "forbids mocking Scoop."
+      let scoopBinary = resolveScoopBinary()
+      doAssert scoopBinary.len > 0,
+        "M72 gate 1 requires a real scoop binary on PATH; the milestone " &
+        "forbids mocking Scoop."
 
-    let tempRoot = createTempDir("repro-m72-catalog-", "")
-    defer: safeRemoveTempRoot(tempRoot)
-    let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let profileDir = tempRoot / "profile"
-    let homeDir = tempRoot / "home"
-    createDir(stateDir)
-    createDir(storeRoot)
-    createDir(homeDir)
-    createDir(profileDir)
-    copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
+      let tempRoot = createTempDir("repro-m72-catalog-", "")
+      defer: safeRemoveTempRoot(tempRoot)
+      let stateDir = tempRoot / "state"
+      let storeRoot = tempRoot / "store"
+      let profileDir = tempRoot / "profile"
+      let homeDir = tempRoot / "home"
+      createDir(stateDir)
+      createDir(storeRoot)
+      createDir(homeDir)
+      createDir(profileDir)
+      copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
 
-    let sandbox = setupScoopSandbox(tempRoot, "main")
+      let sandbox = setupScoopSandbox(tempRoot, "main")
 
-    # --- Cache-hit fixture: already installed in the sandboxed root. ---
-    let installed = populateScoopApp(sandbox,
-      app = "m72-installed-fixture",
-      version = "2.0.0",
-      executableName = "m72-installed-fixture.cmd",
-      executablePayload = fixtureExecutablePayload(
-        "m72-installed-fixture 2.0.0 M72"))
-    # Fingerprint the install tree BEFORE apply — a cache-hit must
-    # leave it byte-identical (no reinstall).
-    let installedDir = sandbox.appsDir / installed.name / installed.version
-    let beforeFingerprint = dirFingerprint(installedDir)
+      # --- Cache-hit fixture: already installed in the sandboxed root. ---
+      let installed = populateScoopApp(sandbox,
+        app = "m72-installed-fixture",
+        version = "2.0.0",
+        executableName = "m72-installed-fixture.cmd",
+        executablePayload = fixtureExecutablePayload(
+          "m72-installed-fixture 2.0.0 M72"))
+      # Fingerprint the install tree BEFORE apply — a cache-hit must
+      # leave it byte-identical (no reinstall).
+      let installedDir = sandbox.appsDir / installed.name / installed.version
+      let beforeFingerprint = dirFingerprint(installedDir)
 
-    # --- Available-in-bucket fixture: NOT installed; the M55 adapter
-    # must shell out to real `scoop install` to realize it. ---
-    let bucketApp = setupInstallableScoopApp(sandbox, tempRoot,
-      app = "m72-bucket-fixture",
-      version = "1.5.0",
-      executableName = "m72-bucket-fixture.cmd",
-      executablePayload = fixtureBuildActionPayload(
-        "m72-bucket-fixture 1.5.0 M72"))
-    doAssert not dirExists(bucketApp.versionDir),
-      "fixture invariant: the bucket app must NOT be pre-installed"
+      # --- Available-in-bucket fixture: NOT installed; the M55 adapter
+      # must shell out to real `scoop install` to realize it. ---
+      let bucketApp = setupInstallableScoopApp(sandbox, tempRoot,
+        app = "m72-bucket-fixture",
+        version = "1.5.0",
+        executableName = "m72-bucket-fixture.cmd",
+        executablePayload = fixtureBuildActionPayload(
+          "m72-bucket-fixture 1.5.0 M72"))
+      doAssert not dirExists(bucketApp.versionDir),
+        "fixture invariant: the bucket app must NOT be pre-installed"
 
-    let baseEnv = @[
-      (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "m72-gate1-host"),
-      (k: "REPRO_HOME_PACKAGE_CATALOG",
-       v: "m72-installed-fixture,m72-bucket-fixture"),
-      (k: "SCOOP", v: sandbox.root)]
+      let baseEnv = @[
+        (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+        (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+        (k: "REPRO_STORE_ROOT", v: storeRoot),
+        (k: "HOME", v: homeDir),
+        (k: "USERPROFILE", v: homeDir),
+        (k: "REPRO_HOST", v: "m72-gate1-host"),
+        (k: "REPRO_HOME_PACKAGE_CATALOG",
+         v: "m72-installed-fixture,m72-bucket-fixture"),
+        (k: "SCOOP", v: sandbox.root)]
 
-    # --- Apply: NO REPRO_TEST_PACKAGE_* env. ---
-    let res = runRepro(baseEnv, ["home", "apply"])
-    if res.exitCode != 0:
-      checkpoint "apply output:\n" & res.output
-    check res.exitCode == 0
-    check res.output.contains("applied generation ")
+      # --- Apply: NO REPRO_TEST_PACKAGE_* env. ---
+      let res = runRepro(baseEnv, ["home", "apply"])
+      if res.exitCode != 0:
+        checkpoint "apply output:\n" & res.output
+      check res.exitCode == 0
+      check res.output.contains("applied generation ")
 
-    # Both packages realized through the real Scoop adapter dispatch.
-    let manifest = loadManifest(stateDir, storeRoot)
-    check manifest.realizedPackages.len == 2
-    var sawInstalled, sawBucket = false
-    for rp in manifest.realizedPackages:
-      check rp.adapter == "scoop"
-      if rp.packageId == "m72-installed-fixture":
-        sawInstalled = true
-      if rp.packageId == "m72-bucket-fixture":
-        sawBucket = true
-    check sawInstalled
-    check sawBucket
+      # Both packages realized through the real Scoop adapter dispatch.
+      let manifest = loadManifest(stateDir, storeRoot)
+      check manifest.realizedPackages.len == 2
+      var sawInstalled, sawBucket = false
+      for rp in manifest.realizedPackages:
+        check rp.adapter == "scoop"
+        if rp.packageId == "m72-installed-fixture":
+          sawInstalled = true
+        if rp.packageId == "m72-bucket-fixture":
+          sawBucket = true
+      check sawInstalled
+      check sawBucket
 
-    # CACHE-HIT proof: the already-installed fixture's `apps/<app>/
-    # <version>/` tree is byte-identical after apply — `scoop install`
-    # never ran for it (a reinstall would rewrite the tree).
-    check dirExists(installedDir)
-    check dirFingerprint(installedDir) == beforeFingerprint
+      # CACHE-HIT proof: the already-installed fixture's `apps/<app>/
+      # <version>/` tree is byte-identical after apply — `scoop install`
+      # never ran for it (a reinstall would rewrite the tree).
+      check dirExists(installedDir)
+      check dirFingerprint(installedDir) == beforeFingerprint
 
-    # REALIZE proof: the bucket fixture's `apps/<app>/<version>/` tree
-    # now exists — real `scoop install` was driven by the adapter.
-    check dirExists(bucketApp.versionDir)
-    check fileExists(bucketApp.expectedInstalledExecutable)
+      # REALIZE proof: the bucket fixture's `apps/<app>/<version>/` tree
+      # now exists — real `scoop install` was driven by the adapter.
+      check dirExists(bucketApp.versionDir)
+      check fileExists(bucketApp.expectedInstalledExecutable)
 
-    # Both realized prefixes are present in the M56 store.
-    var verifyStore = openStore(storeRoot)
-    defer: verifyStore.close()
-    for rp in manifest.realizedPackages:
-      var prefixId: PrefixIdBytes
-      for i in 0 ..< 32:
-        prefixId[i] = rp.realizedPrefixId[i]
-      let lookup = lookupPrefix(verifyStore, prefixId)
-      check lookup.found
+      # Both realized prefixes are present in the M56 store.
+      var verifyStore = openStore(storeRoot)
+      defer: verifyStore.close()
+      for rp in manifest.realizedPackages:
+        var prefixId: PrefixIdBytes
+        for i in 0 ..< 32:
+          prefixId[i] = rp.realizedPrefixId[i]
+        let lookup = lookupPrefix(verifyStore, prefixId)
+        check lookup.found
 
-    # --- Unknown-package diagnostic. ---
-    # A profile that names a package absent from the install tree and
-    # every configured bucket. Apply must fail with a structured
-    # diagnostic naming the package and the catalogs searched.
-    let unknownProfileDir = tempRoot / "unknown-profile"
-    createDir(unknownProfileDir)
-    writeFile(unknownProfileDir / "home.nim",
-      "import repro/profile\n\n" &
-      "profile \"m72-unknown-pkg-gate\":\n" &
-      "  activity default:\n" &
-      "    m72-this-package-does-not-exist\n")
-    let unknownState = tempRoot / "unknown-state"
-    createDir(unknownState)
-    let unknownEnv = @[
-      (k: "REPRO_HOME_PROFILE_DIR", v: unknownProfileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: unknownState),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "m72-gate1-host"),
-      (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m72-this-package-does-not-exist"),
-      (k: "SCOOP", v: sandbox.root)]
-    let unknownRes = runRepro(unknownEnv, ["home", "apply"])
-    check unknownRes.exitCode != 0
-    # The diagnostic names the package...
-    check unknownRes.output.contains("m72-this-package-does-not-exist")
-    # ...and the catalogs that were searched.
-    check (unknownRes.output.contains("no production adapter catalog") and
-           unknownRes.output.contains("Searched"))
-    check unknownRes.output.contains("scoop:")
+      # --- Unknown-package diagnostic. ---
+      # A profile that names a package absent from the install tree and
+      # every configured bucket. Apply must fail with a structured
+      # diagnostic naming the package and the catalogs searched.
+      let unknownProfileDir = tempRoot / "unknown-profile"
+      createDir(unknownProfileDir)
+      writeFile(unknownProfileDir / "home.nim",
+        "import repro/profile\n\n" &
+        "profile \"m72-unknown-pkg-gate\":\n" &
+        "  activity default:\n" &
+        "    m72-this-package-does-not-exist\n")
+      let unknownState = tempRoot / "unknown-state"
+      createDir(unknownState)
+      let unknownEnv = @[
+        (k: "REPRO_HOME_PROFILE_DIR", v: unknownProfileDir),
+        (k: "REPRO_HOME_STATE_DIR", v: unknownState),
+        (k: "REPRO_STORE_ROOT", v: storeRoot),
+        (k: "HOME", v: homeDir),
+        (k: "USERPROFILE", v: homeDir),
+        (k: "REPRO_HOST", v: "m72-gate1-host"),
+        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m72-this-package-does-not-exist"),
+        (k: "SCOOP", v: sandbox.root)]
+      let unknownRes = runRepro(unknownEnv, ["home", "apply"])
+      check unknownRes.exitCode != 0
+      # The diagnostic names the package...
+      check unknownRes.output.contains("m72-this-package-does-not-exist")
+      # ...and the catalogs that were searched.
+      check (unknownRes.output.contains("no production adapter catalog") and
+             unknownRes.output.contains("Searched"))
+      check unknownRes.output.contains("scoop:")

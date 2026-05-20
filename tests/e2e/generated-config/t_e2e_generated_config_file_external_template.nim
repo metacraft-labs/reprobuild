@@ -15,9 +15,11 @@
 ##     temp directory using `pip install --target=<dir>` (equivalent to
 ##     a venv's `site-packages`, and works on Python distributions that
 ##     ship without the `venv` module — including the Windows
-##     embeddable distribution we use in CI). The pinned version is
-##     part of the `JinjaSpec.toolIdentity` string, so bumping it
-##     changes the cache key.
+##     embeddable distribution we use in CI). If the host Python has no
+##     pip (common in Nix shells), the test falls back to a Nix-provided
+##     Python with real Jinja installed. The pinned version is part of
+##     the `JinjaSpec.toolIdentity` string, so bumping it changes the
+##     cache key.
 ##   - The driver Python is invoked with `PYTHONPATH=<dir>` so the
 ##     pinned Jinja install is found before any system-wide install.
 ##   - The version-bump sub-step re-installs into a different target
@@ -46,17 +48,69 @@ type
     pythonExe: string
     sitePackages: string
 
+proc pythonHasModule(pythonExe, moduleName: string): bool =
+  execCmdEx(quoteShell(pythonExe) & " -c " &
+    quoteShell("import " & moduleName)).exitCode == 0
+
+proc nixPythonWithJinja(): string =
+  let override = getEnv("REPRO_TEST_JINJA_PYTHON")
+  if override.len > 0:
+    if not pythonHasModule(override, "jinja2"):
+      raise newException(IOError,
+        "REPRO_TEST_JINJA_PYTHON does not provide jinja2: " & override)
+    return override
+
+  let nix = findExe("nix")
+  if nix.len == 0:
+    raise newException(IOError,
+      "host Python has no pip and nix is not available to provide Jinja")
+
+  let expr = "with import <nixpkgs> {}; " &
+    "python3.withPackages (ps: [ ps.jinja2 ])"
+  let built = execCmdEx(quoteShell(nix) &
+    " build --no-link --print-out-paths --impure --expr " &
+    quoteShell(expr))
+  if built.exitCode != 0:
+    raise newException(IOError,
+      "nix failed to provide a Python with Jinja: " & built.output)
+
+  var outPath = ""
+  for line in built.output.splitLines:
+    let stripped = line.strip()
+    if stripped.startsWith("/nix/store/"):
+      outPath = stripped
+  if outPath.len == 0:
+    raise newException(IOError,
+      "nix did not report an output path for Python with Jinja: " &
+      built.output)
+
+  for exe in [outPath / "bin" / "python3", outPath / "bin" / "python"]:
+    if fileExists(exe) and pythonHasModule(exe, "jinja2"):
+      return exe
+  raise newException(IOError,
+    "nix Python output does not contain a python executable with jinja2: " &
+    outPath)
+
 proc createJinjaEnv(envDir, pinned: string): JinjaInstall =
   ## Build a per-test Python environment with the requested Jinja
   ## version installed at the target directory. Returns the python
   ## executable plus the directory we must set on PYTHONPATH.
   let basePython = findPython3()
+  if pythonHasModule(basePython, "jinja2"):
+    result.pythonExe = basePython
+    result.sitePackages = ""
+    return
+  if execCmdEx(quoteShell(basePython) & " -m pip --version").exitCode != 0:
+    result.pythonExe = nixPythonWithJinja()
+    result.sitePackages = ""
+    return
+
   if dirExists(envDir):
     removeDir(envDir)
   createDir(envDir)
-  let pipInstall = execCmdEx("\"" & basePython & "\" -m pip install " &
+  let pipInstall = execCmdEx(quoteShell(basePython) & " -m pip install " &
     "--disable-pip-version-check --no-warn-script-location " &
-    "--target=\"" & envDir & "\" --quiet --upgrade " &
+    "--target=" & quoteShell(envDir) & " --quiet --upgrade " &
     "jinja2==" & pinned)
   if pipInstall.exitCode != 0:
     raise newException(IOError, "pip install jinja2==" & pinned &

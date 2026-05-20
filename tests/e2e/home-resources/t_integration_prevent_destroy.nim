@@ -66,131 +66,137 @@ proc runRepro(envOverrides: openArray[tuple[k, v: string]];
   p.close()
   result = (exitCode: code, output: combined)
 
-suite "M68 Phase B: integration_prevent_destroy":
-  test "preventDestroy blocks the destroy; --accept-overwrite cannot bypass":
-    when not defined(windows):
-      checkpoint "platform-skip: Windows registry resource is the subject"
+when not defined(windows):
+  suite "M68 Phase B: integration_prevent_destroy":
+    test "platform N/A":
+      echo "[platform N/A] t_integration_prevent_destroy: requires Windows registry resources"
       check true
-      return
+else:
+  suite "M68 Phase B: integration_prevent_destroy":
+    test "preventDestroy blocks the destroy; --accept-overwrite cannot bypass":
+      when not defined(windows):
+        checkpoint "platform-skip: Windows registry resource is the subject"
+        check true
+        return
 
-    let testSubkey = "Software\\Reprobuild-Tests\\m68-pd-" &
-      $epochTime()
-    defer:
-      when defined(windows):
-        try: deleteRegistryValue(testSubkey, "Guarded")
-        except CatchableError: discard
+      let testSubkey = "Software\\Reprobuild-Tests\\m68-pd-" &
+        $epochTime()
+      defer:
+        when defined(windows):
+          try: deleteRegistryValue(testSubkey, "Guarded")
+          except CatchableError: discard
 
-    let tempRoot = createTempDir("repro-m68-pd-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let profileDir = tempRoot / "profile"
-    let homeDir = tempRoot / "home"
-    let fixtureDir = tempRoot / "fixtures"
-    createDir(stateDir); createDir(storeRoot); createDir(homeDir)
-    createDir(profileDir); createDir(fixtureDir)
-    copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
-    let exe = fixtureDir / "m68-base-fixture.cmd"
-    writeFixtureExe(exe)
+      let tempRoot = createTempDir("repro-m68-pd-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let stateDir = tempRoot / "state"
+      let storeRoot = tempRoot / "store"
+      let profileDir = tempRoot / "profile"
+      let homeDir = tempRoot / "home"
+      let fixtureDir = tempRoot / "fixtures"
+      createDir(stateDir); createDir(storeRoot); createDir(homeDir)
+      createDir(profileDir); createDir(fixtureDir)
+      copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
+      let exe = fixtureDir / "m68-base-fixture.cmd"
+      writeFixtureExe(exe)
 
-    proc envWith(resources: string;
-                 extra: openArray[tuple[k, v: string]] = []):
-        seq[tuple[k, v: string]] =
-      result = @[
+      proc envWith(resources: string;
+                   extra: openArray[tuple[k, v: string]] = []):
+          seq[tuple[k, v: string]] =
+        result = @[
+          (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+          (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+          (k: "REPRO_STORE_ROOT", v: storeRoot),
+          (k: "HOME", v: homeDir),
+          (k: "USERPROFILE", v: homeDir),
+          (k: "REPRO_HOST", v: "pd-host"),
+          (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m68-base-fixture=" & exe),
+          (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m68-base-fixture"),
+          (k: "REPRO_TEST_RESOURCES", v: resources)]
+        for kv in extra:
+          result.add (k: kv.k, v: kv.v)
+
+      # --- Apply 1: create a registry resource carrying preventDestroy.
+      # The `@preventDestroy` suffix on the address sets the resource's
+      # lifecyclePolicy; it is persisted in the manifest binding.
+      let withResource = "registry:reg.guarded@preventDestroy:" &
+        testSubkey & ";Guarded;string;protected-value"
+      let r1 = runRepro(envWith(withResource), ["home", "apply"])
+      check r1.exitCode == 0
+      let liveAfterCreate = readRegistryValue(testSubkey, "Guarded")
+      check liveAfterCreate.present
+
+      # --- Apply 2: the resource is GONE from the desired set. The
+      # lifecycle would produce a `destroy` — but the recorded
+      # binding carries lifecyclePolicy=preventDestroy, so apply
+      # fails with EPreventDestroy.
+      let r2 = runRepro(envWith(""), ["home", "apply"])
+      check r2.exitCode != 0
+      check r2.output.contains("preventDestroy")
+      check r2.output.contains("reg.guarded")
+      # The value was NOT destroyed.
+      let liveAfterBlock = readRegistryValue(testSubkey, "Guarded")
+      check liveAfterBlock.present
+      check liveAfterBlock.bytes == liveAfterCreate.bytes
+
+      # --- Apply 3: same removal, but with --accept-overwrite
+      # (the REPRO_HOME_APPLY_ACCEPT_OVERWRITE=1 seam). preventDestroy
+      # is ABSOLUTE — the destroy is STILL refused.
+      let r3 = runRepro(
+        envWith("", [(k: "REPRO_HOME_APPLY_ACCEPT_OVERWRITE", v: "1")]),
+        ["home", "apply"])
+      check r3.exitCode != 0
+      check r3.output.contains("preventDestroy")
+      let liveAfterAccept = readRegistryValue(testSubkey, "Guarded")
+      check liveAfterAccept.present
+      check liveAfterAccept.bytes == liveAfterCreate.bytes
+
+    test "control: a plain (lpDefault) resource IS destroyed on removal":
+      when not defined(windows):
+        checkpoint "platform-skip"
+        check true
+        return
+
+      let testSubkey = "Software\\Reprobuild-Tests\\m68-pd-ctl-" &
+        $epochTime()
+      defer:
+        when defined(windows):
+          try: deleteRegistryValue(testSubkey, "Plain")
+          except CatchableError: discard
+
+      let tempRoot = createTempDir("repro-m68-pd-ctl-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let stateDir = tempRoot / "state"
+      let storeRoot = tempRoot / "store"
+      let profileDir = tempRoot / "profile"
+      let homeDir = tempRoot / "home"
+      let fixtureDir = tempRoot / "fixtures"
+      createDir(stateDir); createDir(storeRoot); createDir(homeDir)
+      createDir(profileDir); createDir(fixtureDir)
+      copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
+      let exe = fixtureDir / "m68-base-fixture.cmd"
+      writeFixtureExe(exe)
+
+      let envBase = @[
         (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
         (k: "REPRO_HOME_STATE_DIR", v: stateDir),
         (k: "REPRO_STORE_ROOT", v: storeRoot),
         (k: "HOME", v: homeDir),
         (k: "USERPROFILE", v: homeDir),
-        (k: "REPRO_HOST", v: "pd-host"),
+        (k: "REPRO_HOST", v: "pd-ctl-host"),
         (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m68-base-fixture=" & exe),
-        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m68-base-fixture"),
-        (k: "REPRO_TEST_RESOURCES", v: resources)]
-      for kv in extra:
-        result.add (k: kv.k, v: kv.v)
+        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m68-base-fixture")]
 
-    # --- Apply 1: create a registry resource carrying preventDestroy.
-    # The `@preventDestroy` suffix on the address sets the resource's
-    # lifecyclePolicy; it is persisted in the manifest binding.
-    let withResource = "registry:reg.guarded@preventDestroy:" &
-      testSubkey & ";Guarded;string;protected-value"
-    let r1 = runRepro(envWith(withResource), ["home", "apply"])
-    check r1.exitCode == 0
-    let liveAfterCreate = readRegistryValue(testSubkey, "Guarded")
-    check liveAfterCreate.present
+      # Apply 1: create a PLAIN registry resource (no preventDestroy).
+      let r1 = runRepro(envBase & @[(k: "REPRO_TEST_RESOURCES",
+        v: "registry:reg.plain:" & testSubkey & ";Plain;string;disposable")],
+        ["home", "apply"])
+      check r1.exitCode == 0
+      check readRegistryValue(testSubkey, "Plain").present
 
-    # --- Apply 2: the resource is GONE from the desired set. The
-    # lifecycle would produce a `destroy` — but the recorded
-    # binding carries lifecyclePolicy=preventDestroy, so apply
-    # fails with EPreventDestroy.
-    let r2 = runRepro(envWith(""), ["home", "apply"])
-    check r2.exitCode != 0
-    check r2.output.contains("preventDestroy")
-    check r2.output.contains("reg.guarded")
-    # The value was NOT destroyed.
-    let liveAfterBlock = readRegistryValue(testSubkey, "Guarded")
-    check liveAfterBlock.present
-    check liveAfterBlock.bytes == liveAfterCreate.bytes
-
-    # --- Apply 3: same removal, but with --accept-overwrite
-    # (the REPRO_HOME_APPLY_ACCEPT_OVERWRITE=1 seam). preventDestroy
-    # is ABSOLUTE — the destroy is STILL refused.
-    let r3 = runRepro(
-      envWith("", [(k: "REPRO_HOME_APPLY_ACCEPT_OVERWRITE", v: "1")]),
-      ["home", "apply"])
-    check r3.exitCode != 0
-    check r3.output.contains("preventDestroy")
-    let liveAfterAccept = readRegistryValue(testSubkey, "Guarded")
-    check liveAfterAccept.present
-    check liveAfterAccept.bytes == liveAfterCreate.bytes
-
-  test "control: a plain (lpDefault) resource IS destroyed on removal":
-    when not defined(windows):
-      checkpoint "platform-skip"
-      check true
-      return
-
-    let testSubkey = "Software\\Reprobuild-Tests\\m68-pd-ctl-" &
-      $epochTime()
-    defer:
-      when defined(windows):
-        try: deleteRegistryValue(testSubkey, "Plain")
-        except CatchableError: discard
-
-    let tempRoot = createTempDir("repro-m68-pd-ctl-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let profileDir = tempRoot / "profile"
-    let homeDir = tempRoot / "home"
-    let fixtureDir = tempRoot / "fixtures"
-    createDir(stateDir); createDir(storeRoot); createDir(homeDir)
-    createDir(profileDir); createDir(fixtureDir)
-    copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
-    let exe = fixtureDir / "m68-base-fixture.cmd"
-    writeFixtureExe(exe)
-
-    let envBase = @[
-      (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "pd-ctl-host"),
-      (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m68-base-fixture=" & exe),
-      (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m68-base-fixture")]
-
-    # Apply 1: create a PLAIN registry resource (no preventDestroy).
-    let r1 = runRepro(envBase & @[(k: "REPRO_TEST_RESOURCES",
-      v: "registry:reg.plain:" & testSubkey & ";Plain;string;disposable")],
-      ["home", "apply"])
-    check r1.exitCode == 0
-    check readRegistryValue(testSubkey, "Plain").present
-
-    # Apply 2: removed from the desired set -> destroyed cleanly.
-    let r2 = runRepro(envBase & @[(k: "REPRO_TEST_RESOURCES", v: "")],
-      ["home", "apply"])
-    check r2.exitCode == 0
-    check not readRegistryValue(testSubkey, "Plain").present
+      # Apply 2: removed from the desired set -> destroyed cleanly.
+      let r2 = runRepro(envBase & @[(k: "REPRO_TEST_RESOURCES", v: "")],
+        ["home", "apply"])
+      check r2.exitCode == 0
+      check not readRegistryValue(testSubkey, "Plain").present

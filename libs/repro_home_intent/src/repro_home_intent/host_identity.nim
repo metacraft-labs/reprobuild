@@ -10,7 +10,7 @@
 ##   - Host identity: `$REPRO_HOST` > `--host <name>` (CLI override) >
 ##     lowercased OS hostname.
 
-import std/[os, strutils]
+import std/[os, osproc, strutils]
 
 import ./errors
 
@@ -117,10 +117,16 @@ proc systemHostname*(): string =
       return ($buf).toLowerAscii()
     return ""
   else:
+    let env = getEnv("HOSTNAME")
+    if env.len > 0:
+      return env.toLowerAscii()
     try:
-      result = getHostname().toLowerAscii()
+      let (output, exitCode) = execCmdEx("hostname")
+      if exitCode == 0:
+        return output.strip().toLowerAscii()
     except OSError:
-      result = ""
+      discard
+    result = ""
 
 proc currentHost*(): string =
   ## Resolve the current host identity per the documented precedence:

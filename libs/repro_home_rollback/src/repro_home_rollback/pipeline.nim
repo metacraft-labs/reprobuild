@@ -24,6 +24,7 @@ import repro_home_apply
 import repro_home_generations
 import repro_home_intent
 import repro_home_resources
+import repro_launch_plan
 import repro_local_store
 
 import ./diff_plan
@@ -74,6 +75,16 @@ proc resolveOptions(opts: RollbackOptions): RollbackOptions =
     result.homeDir = getHomeDir()
   if result.activationTimestamp == 0:
     result.activationTimestamp = getTime().toUnix
+
+proc userPathHostFromIdentity(resourceId: string): string =
+  when defined(windows):
+    ""
+  else:
+    let hash = resourceId.rfind('#')
+    if hash > 0:
+      resourceId[0 ..< hash]
+    else:
+      ""
 
 # ---------------------------------------------------------------------------
 # Generation-id resolution.
@@ -392,10 +403,17 @@ proc removeLauncherArtifact(stateDir, currentGenIdHex: string;
     if fileExists(sidecar): removeFile(sidecar)
     if fileExists(cmdShim): removeFile(cmdShim)
   else:
-    let scriptPath = stateDir / "generations" / currentGenIdHex / "bin" /
-      rec.commandName
-    if fileExists(scriptPath):
-      removeFile(scriptPath)
+    # POSIX launchers live inside immutable per-generation bin dirs.
+    # Rolling away from a generation is just a `current` pointer move;
+    # deleting from the source generation would corrupt it for a later
+    # rollback-forward.
+    discard stateDir
+    discard currentGenIdHex
+    discard rec
+
+proc launchPlanDigestToKey(digest: Digest256): PrefixIdBytes =
+  for i in 0 ..< 32:
+    result[i] = digest[i]
 
 proc materializeLauncherFromTarget(stateDir, targetGenIdHex: string;
                                    store: var Store;
@@ -420,8 +438,21 @@ proc materializeLauncherFromTarget(stateDir, targetGenIdHex: string;
     elif fileExists(cmdShim):
       copyFile(cmdShim, stable / (rec.commandName & ".cmd"))
   else:
-    discard targetGenIdHex
-    discard store
+    let scriptPath = perGenBin / rec.commandName
+    if fileExists(scriptPath):
+      return
+    createDir(perGenBin)
+    var plan = loadLaunchPlan(store, launchPlanDigestToKey(
+      rec.launchPlanDigest))
+    plan.binding = when defined(macosx): lbkMacosScript else: lbkLinuxScript
+    let scriptBody = generatePosixLauncherScript(plan,
+      when defined(macosx): "DYLD_LIBRARY_PATH" else: "LD_LIBRARY_PATH")
+    writeFile(scriptPath, scriptBody)
+    try:
+      setFilePermissions(scriptPath, {fpUserExec, fpUserWrite, fpUserRead,
+        fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
+    except OSError:
+      discard
 
 # ---------------------------------------------------------------------------
 # Public entry point.
@@ -535,9 +566,9 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
                 applyUserVariableDestroy(
                   rec.realWorldIdentity[bs + 1 .. ^1])
           of rkEnvUserPath:
-            when defined(windows):
-              let entries = parseRecordedPathEntries(rec.payloadBytes)
-              removeUserPathContribution(entries)
+            let entries = parseRecordedPathEntries(rec.payloadBytes)
+            removeUserPathContribution(entries,
+              userPathHostFromIdentity(rec.realWorldIdentity))
           of rkWindowsStartup:
             when defined(windows):
               let bs = rec.realWorldIdentity.rfind('\\')
@@ -583,16 +614,16 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
                   rec.payloadBytes)
                 broadcastEnvironmentChange()
           of rkEnvUserPath:
-            when defined(windows):
-              let entries = parseRecordedPathEntries(rec.payloadBytes)
-              # Subtract the CURRENT generation's contribution first
-              # so the merged value is computed against the live
-              # PATH minus the entries we just rolled away from.
-              var priorContribution: seq[string] = @[]
-              if op.hasCurrentRecord:
-                priorContribution = parseRecordedPathEntries(
-                  op.currentRecord.payloadBytes)
-              discard applyUserPath(entries, priorContribution)
+            let entries = parseRecordedPathEntries(rec.payloadBytes)
+            # Subtract the CURRENT generation's contribution first
+            # so the merged value is computed against the live PATH
+            # minus the entries we just rolled away from.
+            var priorContribution: seq[string] = @[]
+            if op.hasCurrentRecord:
+              priorContribution = parseRecordedPathEntries(
+                op.currentRecord.payloadBytes)
+            discard applyUserPath(entries, priorContribution,
+              userPathHostFromIdentity(rec.realWorldIdentity))
           of rkWindowsStartup:
             when defined(windows):
               let bs = rec.realWorldIdentity.rfind('\\')

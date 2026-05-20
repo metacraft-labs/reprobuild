@@ -20,12 +20,16 @@
 ## 0 if changes; non-zero if drift detected and `--allow-drift` was
 ## not passed.
 
-import std/[strutils, tables]
+import std/[os, strutils, tables]
 
+import ./drivers/defaults
 import ./drivers/env_user
+import ./drivers/gsettings
+import ./drivers/launchd_user
 import ./drivers/managed_block
 import ./drivers/registry
 import ./drivers/shell_integration
+import ./drivers/systemd_user
 import ./drivers/windows_startup
 import ./lifecycle
 import ./manifest_record
@@ -37,6 +41,40 @@ type
     changedCount*: int       ## create + update + destroy + replace + adopt
     noOpCount*: int
     driftCount*: int
+
+proc userPathHostFromIdentity(resourceId: string): string =
+  when defined(windows):
+    ""
+  else:
+    let hash = resourceId.rfind('#')
+    if hash > 0:
+      resourceId[0 ..< hash]
+    else:
+      ""
+
+proc parseGsettingsIdentity(resourceId: string): tuple[schema, path, key: string] =
+  const prefix = "gsettings:"
+  if not resourceId.startsWith(prefix):
+    return ("", "", "")
+  let body = resourceId[prefix.len .. ^1]
+  if '|' in body:
+    let parts = body.split('|')
+    if parts.len >= 3:
+      return (parts[0], parts[1], parts[2])
+  let colon = body.rfind(':')
+  if colon > 0:
+    return (body[0 ..< colon], "", body[colon + 1 .. ^1])
+  ("", "", "")
+
+proc parseTwoPartIdentity(resourceId, prefix: string): tuple[a, b: string] =
+  if not resourceId.startsWith(prefix):
+    return ("", "")
+  let body = resourceId[prefix.len .. ^1]
+  let colon = body.rfind(':')
+  if colon > 0:
+    (body[0 ..< colon], body[colon + 1 .. ^1])
+  else:
+    ("", "")
 
 # ---------------------------------------------------------------------------
 # Observation: ask each driver about the current real-world state.
@@ -51,19 +89,19 @@ proc observeResource*(r: Resource): ObservedState =
   of rkEnvUserVariable:
     return observeUserVariable(r.envVarName)
   of rkEnvUserPath:
-    return observeUserPath(r.pathEntries)
+    return observeUserPath(r.pathEntries, r.pathHostFilePath)
   of rkWindowsStartup:
     return observeStartup(r.startupName)
   of rkShellIntegration:
     return observeManagedBlock(r.shellHostFilePath, r.shellBlockId)
   of rkLinuxGsettings:
-    # Phase B observation; the Phase A planner platform-skips the
-    # Linux resources upstream. The stub returns "absent".
-    result.present = false
-    result.digest = zeroDigest()
-  of rkSystemdUserUnit, rkMacosUserDefault, rkLaunchdUserAgent:
-    result.present = false
-    result.digest = zeroDigest()
+    return observeGsettings(r.gsettingsSchema, r.gsettingsPath, r.gsettingsKey)
+  of rkSystemdUserUnit:
+    return observeUserUnit(getHomeDir(), r.unitName)
+  of rkMacosUserDefault:
+    return observeUserDefault(r.defaultsDomain, r.defaultsKey)
+  of rkLaunchdUserAgent:
+    return observeLaunchAgent(getHomeDir(), r.launchdLabel)
 
 proc observeRecorded*(address: string; binding: RecordedBinding):
     ObservedState =
@@ -94,11 +132,8 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
       return
     return observeUserVariable(binding.resourceId[bs + 1 .. ^1])
   of rkEnvUserPath:
-    # Without a desired contribution we can't compute "the
-    # entries we added"; treat as absent (observation will fail
-    # gracefully).
-    result.present = false
-    result.digest = zeroDigest()
+    let entries = parseRecordedPathEntries(binding.payloadBytes)
+    return observeUserPath(entries, userPathHostFromIdentity(binding.resourceId))
   of rkWindowsStartup:
     let bs = binding.resourceId.rfind('\\')
     if bs <= 0:
@@ -112,7 +147,28 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
       return
     return observeManagedBlock(binding.resourceId[0 ..< hash],
       binding.resourceId[hash + 1 .. ^1])
-  else:
+  of rkLinuxGsettings:
+    let parsed = parseGsettingsIdentity(binding.resourceId)
+    if parsed.schema.len > 0 and parsed.key.len > 0:
+      return observeGsettings(parsed.schema, parsed.path, parsed.key)
+    result.present = false
+    result.digest = zeroDigest()
+  of rkSystemdUserUnit:
+    const prefix = "systemd:user:"
+    if binding.resourceId.startsWith(prefix):
+      return observeUserUnit(getHomeDir(), binding.resourceId[prefix.len .. ^1])
+    result.present = false
+    result.digest = zeroDigest()
+  of rkMacosUserDefault:
+    let parsed = parseTwoPartIdentity(binding.resourceId, "defaults:")
+    if parsed.a.len > 0 and parsed.b.len > 0:
+      return observeUserDefault(parsed.a, parsed.b)
+    result.present = false
+    result.digest = zeroDigest()
+  of rkLaunchdUserAgent:
+    const prefix = "launchd:user:"
+    if binding.resourceId.startsWith(prefix):
+      return observeLaunchAgent(getHomeDir(), binding.resourceId[prefix.len .. ^1])
     result.present = false
     result.digest = zeroDigest()
   discard address

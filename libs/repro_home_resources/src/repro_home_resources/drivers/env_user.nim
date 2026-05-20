@@ -13,16 +13,28 @@
 ## contributes)`. Gate 4 verifies that user-added entries (outside
 ## the recorded contribution) are preserved on rollback.
 
-import std/[sequtils, strutils]
+import std/[os, strutils]
 
 import ./../errors
 import ./../manifest_record
 import ./../types
+import ./managed_block
 import ./registry
 
 const
   EnvironmentSubkey* = "Environment"
-  PathSeparator* = ";"
+  UserPathBlockId* = "repro-home-userpath"
+  UserPathRcEnvVar* = "REPRO_HOME_POSIX_PATH_RC"
+
+when defined(windows):
+  const PathSeparator* = ";"
+else:
+  const PathSeparator* = ":"
+
+proc bytesOf(s: string): seq[byte] =
+  result = newSeq[byte](s.len)
+  for i, ch in s:
+    result[i] = byte(ord(ch))
 
 # ---------------------------------------------------------------------------
 # `env.userVariable` driver.
@@ -61,15 +73,55 @@ proc applyUserVariableDestroy*(name: string) =
 # ---------------------------------------------------------------------------
 
 proc splitPathEntries*(raw: string): seq[string] =
-  ## Split a Windows-style PATH value on `;`. Empty entries are
-  ## dropped (consistent with the OS's loader behavior).
+  ## Split a user PATH contribution using the host platform's path-list
+  ## separator. Empty entries are dropped, consistent with loader behavior.
   result = @[]
-  for piece in raw.split(';'):
+  for piece in raw.split(PathSeparator):
     if piece.len > 0:
       result.add(piece)
 
 proc joinPathEntries*(entries: openArray[string]): string =
-  entries.join(";")
+  entries.join(PathSeparator)
+
+proc shellSingleQuote(s: string): string =
+  "'" & s.replace("'", "'\"'\"'") & "'"
+
+proc defaultUserPathHostFile*(homeDir = ""): string =
+  ## POSIX fallback for `env.userPath`: write a managed block into the
+  ## current user's shell rc. Tests may pin the exact host file with
+  ## `REPRO_HOME_POSIX_PATH_RC`.
+  when defined(windows):
+    ""
+  else:
+    let explicit = getEnv(UserPathRcEnvVar)
+    if explicit.len > 0:
+      return explicit
+    let home =
+      if homeDir.len > 0: homeDir
+      else: getHomeDir()
+    let shellName = extractFilename(getEnv("SHELL")).toLowerAscii()
+    case shellName
+    of "zsh":
+      home / ".zshrc"
+    of "bash":
+      home / ".bashrc"
+    of "fish":
+      home / ".config" / "fish" / "config.fish"
+    else:
+      home / ".profile"
+
+proc posixPathBlockContent*(entries: openArray[string]): string =
+  ## Shell fragment used by POSIX `env.userPath`. It prepends the
+  ## contributed directories while preserving the user's existing PATH.
+  if entries.len == 0:
+    return ""
+  var quoted: seq[string] = @[]
+  for entry in entries:
+    if entry.len > 0:
+      quoted.add(shellSingleQuote(entry))
+  if quoted.len == 0:
+    return ""
+  "export PATH=" & quoted.join(":") & "${PATH:+:$PATH}\n"
 
 proc readUserPathRaw*(): tuple[present: bool; raw: string; regType: uint32] =
   ## Read `HKCU\Environment\Path` (or `PATH`) as UTF-8. Returns
@@ -141,7 +193,8 @@ proc computeMergedPath*(existing, contributed: openArray[string]):
   joinPathEntries(merged)
 
 proc applyUserPath*(contributed: openArray[string];
-                   priorContribution: openArray[string]): seq[byte] =
+                   priorContribution: openArray[string];
+                   hostFilePath = ""): seq[byte] =
   ## Write the merged PATH back. Returns the bytes the executor
   ## should record as `payloadBytes` — the JOINED CONTRIBUTION
   ## (not the full PATH), so rollback knows exactly which entries
@@ -166,13 +219,19 @@ proc applyUserPath*(contributed: openArray[string];
     writeRegistryValue(EnvironmentSubkey, "Path",
       regType, encodeString(mergedRaw))
     broadcastEnvironmentChange()
+  else:
+    let hostFile =
+      if hostFilePath.len > 0: hostFilePath
+      else: defaultUserPathHostFile()
+    if hostFile.len > 0:
+      discard applyManagedBlockResource(hostFile, UserPathBlockId,
+        posixPathBlockContent(contributed))
   # Recorded payload: the JOINED CONTRIBUTION bytes (UTF-8).
   let joined = joinPathEntries(contributed)
-  result = newSeq[byte](joined.len)
-  for i, ch in joined:
-    result[i] = byte(ord(ch))
+  result = bytesOf(joined)
 
-proc removeUserPathContribution*(contribution: openArray[string]) =
+proc removeUserPathContribution*(contribution: openArray[string];
+                                 hostFilePath = "") =
   ## Destroy: remove only the recorded contribution entries from
   ## the live PATH. User-added entries (anything not in
   ## `contribution`) remain byte-identical.
@@ -197,8 +256,15 @@ proc removeUserPathContribution*(contribution: openArray[string]) =
       writeRegistryValue(EnvironmentSubkey, "Path",
         regType, encodeString(mergedRaw))
     broadcastEnvironmentChange()
+  else:
+    let hostFile =
+      if hostFilePath.len > 0: hostFilePath
+      else: defaultUserPathHostFile()
+    if hostFile.len > 0:
+      destroyManagedBlockResource(hostFile, UserPathBlockId)
 
-proc observeUserPath*(contribution: openArray[string]): ObservedState =
+proc observeUserPath*(contribution: openArray[string];
+                      hostFilePath = ""): ObservedState =
   ## Observe the live PATH and reduce to the recorded form for
   ## drift comparison. The "observed digest" is computed over the
   ## subset of the desired contribution that's currently in PATH;
@@ -236,5 +302,25 @@ proc observeUserPath*(contribution: openArray[string]): ObservedState =
     result.rawBytes = raw
     result.digest = digestOfBytes(raw)
   else:
-    result.present = false
-    result.digest = zeroDigest()
+    let hostFile =
+      if hostFilePath.len > 0: hostFilePath
+      else: defaultUserPathHostFile()
+    if hostFile.len == 0:
+      result.present = false
+      result.digest = zeroDigest()
+      return
+    let observed = observeManagedBlock(hostFile, UserPathBlockId)
+    if not observed.present:
+      result.present = false
+      result.digest = zeroDigest()
+      return
+    let expected = posixPathBlockContent(contribution)
+    let expectedBytes = bytesOf(expected)
+    let joined = bytesOf(joinPathEntries(contribution))
+    result.present = true
+    if observed.rawBytes == expectedBytes:
+      result.rawBytes = joined
+      result.digest = digestOfBytes(joined)
+    else:
+      result.rawBytes = observed.rawBytes
+      result.digest = observed.digest

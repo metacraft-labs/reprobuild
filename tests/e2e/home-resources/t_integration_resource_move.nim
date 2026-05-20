@@ -85,154 +85,160 @@ proc loadResourceBindings(stateDir, storeRoot: string):
   let manifest = decodeManifestBytes(manifestBytes)
   result = manifest.resourceBindings
 
-suite "M68 Phase B: integration_resource_move":
-  test "resource move carries the binding forward; no driver runs":
-    when not defined(windows):
-      checkpoint "platform-skip: Windows registry resource is the subject"
+when not defined(windows):
+  suite "M68 Phase B: integration_resource_move":
+    test "platform N/A":
+      echo "[platform N/A] t_integration_resource_move: requires Windows registry resources"
       check true
-      return
+else:
+  suite "M68 Phase B: integration_resource_move":
+    test "resource move carries the binding forward; no driver runs":
+      when not defined(windows):
+        checkpoint "platform-skip: Windows registry resource is the subject"
+        check true
+        return
 
-    let testSubkey = "Software\\Reprobuild-Tests\\m68-move-" &
-      $epochTime()
-    defer:
-      when defined(windows):
-        try: deleteRegistryValue(testSubkey, "Marker")
-        except CatchableError: discard
+      let testSubkey = "Software\\Reprobuild-Tests\\m68-move-" &
+        $epochTime()
+      defer:
+        when defined(windows):
+          try: deleteRegistryValue(testSubkey, "Marker")
+          except CatchableError: discard
 
-    let tempRoot = createTempDir("repro-m68-move-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let profileDir = tempRoot / "profile"
-    let homeDir = tempRoot / "home"
-    let fixtureDir = tempRoot / "fixtures"
-    createDir(stateDir); createDir(storeRoot); createDir(homeDir)
-    createDir(profileDir); createDir(fixtureDir)
-    copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
-    let exe = fixtureDir / "m68-base-fixture.cmd"
-    writeFixtureExe(exe)
+      let tempRoot = createTempDir("repro-m68-move-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let stateDir = tempRoot / "state"
+      let storeRoot = tempRoot / "store"
+      let profileDir = tempRoot / "profile"
+      let homeDir = tempRoot / "home"
+      let fixtureDir = tempRoot / "fixtures"
+      createDir(stateDir); createDir(storeRoot); createDir(homeDir)
+      createDir(profileDir); createDir(fixtureDir)
+      copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
+      let exe = fixtureDir / "m68-base-fixture.cmd"
+      writeFixtureExe(exe)
 
-    # Apply a registry resource addressed `reg.old`.
-    let envBase = @[
-      (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "move-host"),
-      (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m68-base-fixture=" & exe),
-      (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m68-base-fixture"),
-      (k: "REPRO_TEST_RESOURCES",
-        v: "registry:reg.old:" & testSubkey & ";Marker;string;move-me")]
+      # Apply a registry resource addressed `reg.old`.
+      let envBase = @[
+        (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+        (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+        (k: "REPRO_STORE_ROOT", v: storeRoot),
+        (k: "HOME", v: homeDir),
+        (k: "USERPROFILE", v: homeDir),
+        (k: "REPRO_HOST", v: "move-host"),
+        (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m68-base-fixture=" & exe),
+        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m68-base-fixture"),
+        (k: "REPRO_TEST_RESOURCES",
+          v: "registry:reg.old:" & testSubkey & ";Marker;string;move-me")]
 
-    let rApply = runRepro(envBase, ["home", "apply"])
-    check rApply.exitCode == 0
-    let genA = readCurrentGenerationId(stateDir)
-    check genA.len > 0
+      let rApply = runRepro(envBase, ["home", "apply"])
+      check rApply.exitCode == 0
+      let genA = readCurrentGenerationId(stateDir)
+      check genA.len > 0
 
-    # The registry value is live and the binding is recorded.
-    let valBefore = readRegistryValue(testSubkey, "Marker")
-    check valBefore.present
-    let bindingsA = loadResourceBindings(stateDir, storeRoot)
-    var oldBinding: ResourceBinding
-    var foundOld = false
-    for rb in bindingsA:
-      if rb.resourceAddress == "reg.old":
-        oldBinding = rb
-        foundOld = true
-    check foundOld
+      # The registry value is live and the binding is recorded.
+      let valBefore = readRegistryValue(testSubkey, "Marker")
+      check valBefore.present
+      let bindingsA = loadResourceBindings(stateDir, storeRoot)
+      var oldBinding: ResourceBinding
+      var foundOld = false
+      for rb in bindingsA:
+        if rb.resourceAddress == "reg.old":
+          oldBinding = rb
+          foundOld = true
+      check foundOld
 
-    # --- resource move reg.old -> reg.new ---
-    let rMove = runRepro(envBase,
-      ["home", "resource", "move", "reg.old", "reg.new"])
-    check rMove.exitCode == 0
-    check rMove.output.contains("renamed reg.old -> reg.new")
-    let genB = readCurrentGenerationId(stateDir)
-    check genB.len > 0
-    check genB != genA  # a new generation reflects the rename
+      # --- resource move reg.old -> reg.new ---
+      let rMove = runRepro(envBase,
+        ["home", "resource", "move", "reg.old", "reg.new"])
+      check rMove.exitCode == 0
+      check rMove.output.contains("renamed reg.old -> reg.new")
+      let genB = readCurrentGenerationId(stateDir)
+      check genB.len > 0
+      check genB != genA  # a new generation reflects the rename
 
-    # The new generation's manifest carries the binding forward
-    # under the NEW address — same identity, same payload, same
-    # digest. The OLD address is gone.
-    let bindingsB = loadResourceBindings(stateDir, storeRoot)
-    var newBinding: ResourceBinding
-    var foundNew = false
-    var foundOldStill = false
-    for rb in bindingsB:
-      if rb.resourceAddress == "reg.new":
-        newBinding = rb
-        foundNew = true
-      if rb.resourceAddress == "reg.old":
-        foundOldStill = true
-    check foundNew
-    check not foundOldStill
-    # Identity / payload / digest are preserved verbatim — the move
-    # is metadata-only.
-    check newBinding.realWorldIdentity == oldBinding.realWorldIdentity
-    check newBinding.payloadBytes == oldBinding.payloadBytes
-    check newBinding.postWriteDigest == oldBinding.postWriteDigest
-    check newBinding.resourceKind == oldBinding.resourceKind
+      # The new generation's manifest carries the binding forward
+      # under the NEW address — same identity, same payload, same
+      # digest. The OLD address is gone.
+      let bindingsB = loadResourceBindings(stateDir, storeRoot)
+      var newBinding: ResourceBinding
+      var foundNew = false
+      var foundOldStill = false
+      for rb in bindingsB:
+        if rb.resourceAddress == "reg.new":
+          newBinding = rb
+          foundNew = true
+        if rb.resourceAddress == "reg.old":
+          foundOldStill = true
+      check foundNew
+      check not foundOldStill
+      # Identity / payload / digest are preserved verbatim — the move
+      # is metadata-only.
+      check newBinding.realWorldIdentity == oldBinding.realWorldIdentity
+      check newBinding.payloadBytes == oldBinding.payloadBytes
+      check newBinding.postWriteDigest == oldBinding.postWriteDigest
+      check newBinding.resourceKind == oldBinding.resourceKind
 
-    # The underlying registry value is byte-identical: NO driver
-    # apply / destroy ran during the move.
-    let valAfter = readRegistryValue(testSubkey, "Marker")
-    check valAfter.present
-    check valAfter.bytes == valBefore.bytes
+      # The underlying registry value is byte-identical: NO driver
+      # apply / destroy ran during the move.
+      let valAfter = readRegistryValue(testSubkey, "Marker")
+      check valAfter.present
+      check valAfter.bytes == valBefore.bytes
 
-  test "resource move rejects unknown <old> and conflicting <new>":
-    when not defined(windows):
-      checkpoint "platform-skip"
-      check true
-      return
+    test "resource move rejects unknown <old> and conflicting <new>":
+      when not defined(windows):
+        checkpoint "platform-skip"
+        check true
+        return
 
-    let testSubkey = "Software\\Reprobuild-Tests\\m68-move-err-" &
-      $epochTime()
-    defer:
-      when defined(windows):
-        try: deleteRegistryValue(testSubkey, "A")
-        except CatchableError: discard
-        try: deleteRegistryValue(testSubkey, "B")
-        except CatchableError: discard
+      let testSubkey = "Software\\Reprobuild-Tests\\m68-move-err-" &
+        $epochTime()
+      defer:
+        when defined(windows):
+          try: deleteRegistryValue(testSubkey, "A")
+          except CatchableError: discard
+          try: deleteRegistryValue(testSubkey, "B")
+          except CatchableError: discard
 
-    let tempRoot = createTempDir("repro-m68-move-err-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let profileDir = tempRoot / "profile"
-    let homeDir = tempRoot / "home"
-    let fixtureDir = tempRoot / "fixtures"
-    createDir(stateDir); createDir(storeRoot); createDir(homeDir)
-    createDir(profileDir); createDir(fixtureDir)
-    copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
-    let exe = fixtureDir / "m68-base-fixture.cmd"
-    writeFixtureExe(exe)
+      let tempRoot = createTempDir("repro-m68-move-err-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let stateDir = tempRoot / "state"
+      let storeRoot = tempRoot / "store"
+      let profileDir = tempRoot / "profile"
+      let homeDir = tempRoot / "home"
+      let fixtureDir = tempRoot / "fixtures"
+      createDir(stateDir); createDir(storeRoot); createDir(homeDir)
+      createDir(profileDir); createDir(fixtureDir)
+      copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
+      let exe = fixtureDir / "m68-base-fixture.cmd"
+      writeFixtureExe(exe)
 
-    # Apply two registry resources: `reg.a` and `reg.b`.
-    let envBase = @[
-      (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "move-err-host"),
-      (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m68-base-fixture=" & exe),
-      (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m68-base-fixture"),
-      (k: "REPRO_TEST_RESOURCES",
-        v: "registry:reg.a:" & testSubkey & ";A;string;val-a" & "|" &
-           "registry:reg.b:" & testSubkey & ";B;string;val-b")]
-    let rApply = runRepro(envBase, ["home", "apply"])
-    check rApply.exitCode == 0
+      # Apply two registry resources: `reg.a` and `reg.b`.
+      let envBase = @[
+        (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+        (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+        (k: "REPRO_STORE_ROOT", v: storeRoot),
+        (k: "HOME", v: homeDir),
+        (k: "USERPROFILE", v: homeDir),
+        (k: "REPRO_HOST", v: "move-err-host"),
+        (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m68-base-fixture=" & exe),
+        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m68-base-fixture"),
+        (k: "REPRO_TEST_RESOURCES",
+          v: "registry:reg.a:" & testSubkey & ";A;string;val-a" & "|" &
+             "registry:reg.b:" & testSubkey & ";B;string;val-b")]
+      let rApply = runRepro(envBase, ["home", "apply"])
+      check rApply.exitCode == 0
 
-    # Unknown <old> -> EUnknownResource.
-    let rUnknown = runRepro(envBase,
-      ["home", "resource", "move", "reg.does-not-exist", "reg.c"])
-    check rUnknown.exitCode != 0
-    check rUnknown.output.contains("not a known resource")
+      # Unknown <old> -> EUnknownResource.
+      let rUnknown = runRepro(envBase,
+        ["home", "resource", "move", "reg.does-not-exist", "reg.c"])
+      check rUnknown.exitCode != 0
+      check rUnknown.output.contains("not a known resource")
 
-    # <new> already exists -> EResourceConflict.
-    let rConflict = runRepro(envBase,
-      ["home", "resource", "move", "reg.a", "reg.b"])
-    check rConflict.exitCode != 0
-    check rConflict.output.contains("already exists")
+      # <new> already exists -> EResourceConflict.
+      let rConflict = runRepro(envBase,
+        ["home", "resource", "move", "reg.a", "reg.b"])
+      check rConflict.exitCode != 0
+      check rConflict.output.contains("already exists")

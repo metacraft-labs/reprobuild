@@ -96,124 +96,130 @@ proc treeChecksum(roots: openArray[string]): string =
     joinedBytes[i] = byte(ord(c))
   blake3.digest(joinedBytes).toHex()
 
-suite "M72 gate 2: e2e_apply_plan_dry_run":
-  test "apply --plan previews every category and mutates nothing":
-    when not defined(windows):
-      checkpoint "platform-skip: M72 plan dry-run gate is Windows-specific"
+when not defined(windows):
+  suite "M72 gate 2: e2e_apply_plan_dry_run":
+    test "platform N/A":
+      echo "[platform N/A] t_e2e_apply_plan_dry_run: currently exercises the Windows home-apply dry-run gate"
       check true
-      return
+else:
+  suite "M72 gate 2: e2e_apply_plan_dry_run":
+    test "apply --plan previews every category and mutates nothing":
+      when not defined(windows):
+        checkpoint "platform-skip: M72 plan dry-run gate is Windows-specific"
+        check true
+        return
 
-    let tempRoot = createTempDir("repro-m72-plan-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let homeDir = tempRoot / "home"
-    let profileDir = tempRoot / "profile"
-    createDir(stateDir)
-    createDir(storeRoot)
-    createDir(homeDir)
-    copyTree(FixtureSrc, profileDir)
+      let tempRoot = createTempDir("repro-m72-plan-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let stateDir = tempRoot / "state"
+      let storeRoot = tempRoot / "store"
+      let homeDir = tempRoot / "home"
+      let profileDir = tempRoot / "profile"
+      createDir(stateDir)
+      createDir(storeRoot)
+      createDir(homeDir)
+      copyTree(FixtureSrc, profileDir)
 
-    # `path`-adapter fixture executable for the single package.
-    let fixtureExe = tempRoot / "m72-plan-fixture.cmd"
-    writeFile(fixtureExe,
-      "@echo off\r\n" &
-      "if /I \"%1\"==\"--version\" ( echo m72-plan-fixture 1.0.0 & " &
-      "exit /b 0 )\r\n" &
-      "exit /b 0\r\n")
+      # `path`-adapter fixture executable for the single package.
+      let fixtureExe = tempRoot / "m72-plan-fixture.cmd"
+      writeFile(fixtureExe,
+        "@echo off\r\n" &
+        "if /I \"%1\"==\"--version\" ( echo m72-plan-fixture 1.0.0 & " &
+        "exit /b 0 )\r\n" &
+        "exit /b 0\r\n")
 
-    # Drive generated files + managed blocks + resources through the
-    # test seams so the `--plan` preview can cover every category.
-    # The resource is an `fs.managedBlock` in an ISOLATED `$HOME` file
-    # (never the real registry) so the gate can drift it out-of-band
-    # without perturbing the live environment.
-    let genSeam = "m72-plan-fixture=.m72-generated:m72 generated content"
-    let blockSeam = "m72-plan-fixture=.m72-bashrc#m72.block:export M72=1"
-    let resourceFile = homeDir / ".m72-resource"
-    let resourceSeam = "managedblock:m72.res:~/.m72-resource;" &
-      "m72.resblock;m72 resource block body"
+      # Drive generated files + managed blocks + resources through the
+      # test seams so the `--plan` preview can cover every category.
+      # The resource is an `fs.managedBlock` in an ISOLATED `$HOME` file
+      # (never the real registry) so the gate can drift it out-of-band
+      # without perturbing the live environment.
+      let genSeam = "m72-plan-fixture=.m72-generated:m72 generated content"
+      let blockSeam = "m72-plan-fixture=.m72-bashrc#m72.block:export M72=1"
+      let resourceFile = homeDir / ".m72-resource"
+      let resourceSeam = "managedblock:m72.res:~/.m72-resource;" &
+        "m72.resblock;m72 resource block body"
 
-    let baseEnv = @[
-      (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "m72-gate2-host"),
-      (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m72-plan-fixture"),
-      (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m72-plan-fixture=" & fixtureExe),
-      (k: "REPRO_TEST_PACKAGE_GENERATES", v: genSeam),
-      (k: "REPRO_TEST_PACKAGE_MANAGED_BLOCKS", v: blockSeam),
-      (k: "REPRO_TEST_RESOURCES", v: resourceSeam)]
+      let baseEnv = @[
+        (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+        (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+        (k: "REPRO_STORE_ROOT", v: storeRoot),
+        (k: "HOME", v: homeDir),
+        (k: "USERPROFILE", v: homeDir),
+        (k: "REPRO_HOST", v: "m72-gate2-host"),
+        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m72-plan-fixture"),
+        (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m72-plan-fixture=" & fixtureExe),
+        (k: "REPRO_TEST_PACKAGE_GENERATES", v: genSeam),
+        (k: "REPRO_TEST_PACKAGE_MANAGED_BLOCKS", v: blockSeam),
+        (k: "REPRO_TEST_RESOURCES", v: resourceSeam)]
 
-    # ----- Dry run on a fresh (never-applied) profile. -----
-    let beforeChecksum = treeChecksum([stateDir, storeRoot, homeDir])
+      # ----- Dry run on a fresh (never-applied) profile. -----
+      let beforeChecksum = treeChecksum([stateDir, storeRoot, homeDir])
 
-    let plan = runRepro(baseEnv, ["home", "apply", "--plan"])
-    check plan.exitCode == 0
-    # Per-item preview covers EVERY category.
-    check plan.output.contains("[package]")
-    check plan.output.contains("[stow]")
-    check plan.output.contains("[generated-file]")
-    check plan.output.contains("[managed-block]")
-    check plan.output.contains("[launcher]")
-    check plan.output.contains("[resource]")
-    # Per-item action verbs are present.
-    check plan.output.contains("m72-plan-fixture")
-    check plan.output.contains("realize")        # package
-    check plan.output.contains("link")           # stow file
-    check plan.output.contains("write")          # generated file / block
-    check plan.output.contains("create")         # resource
+      let plan = runRepro(baseEnv, ["home", "apply", "--plan"])
+      check plan.exitCode == 0
+      # Per-item preview covers EVERY category.
+      check plan.output.contains("[package]")
+      check plan.output.contains("[stow]")
+      check plan.output.contains("[generated-file]")
+      check plan.output.contains("[managed-block]")
+      check plan.output.contains("[launcher]")
+      check plan.output.contains("[resource]")
+      # Per-item action verbs are present.
+      check plan.output.contains("m72-plan-fixture")
+      check plan.output.contains("realize")        # package
+      check plan.output.contains("link")           # stow file
+      check plan.output.contains("write")          # generated file / block
+      check plan.output.contains("create")         # resource
 
-    # NOTHING was mutated by the dry run.
-    let afterChecksum = treeChecksum([stateDir, storeRoot, homeDir])
-    check beforeChecksum == afterChecksum
-    # No generation was written.
-    check not dirExists(stateDir / "generations") or
-          walkDirRec(stateDir / "generations").toSeq().len == 0
-    # The dry run never wrote the stow target / generated file.
-    check not fileExists(homeDir / ".gitconfig")
-    check not fileExists(homeDir / ".m72-generated")
+      # NOTHING was mutated by the dry run.
+      let afterChecksum = treeChecksum([stateDir, storeRoot, homeDir])
+      check beforeChecksum == afterChecksum
+      # No generation was written.
+      check not dirExists(stateDir / "generations") or
+            walkDirRec(stateDir / "generations").toSeq().len == 0
+      # The dry run never wrote the stow target / generated file.
+      check not fileExists(homeDir / ".gitconfig")
+      check not fileExists(homeDir / ".m72-generated")
 
-    # ----- A real apply, then a no-op dry run. -----
-    let realApply = runRepro(baseEnv, ["home", "apply"])
-    check realApply.exitCode == 0
-    check realApply.output.contains("applied generation ")
+      # ----- A real apply, then a no-op dry run. -----
+      let realApply = runRepro(baseEnv, ["home", "apply"])
+      check realApply.exitCode == 0
+      check realApply.output.contains("applied generation ")
 
-    let postApplyChecksum = treeChecksum([stateDir, storeRoot, homeDir])
-    let noopPlan = runRepro(baseEnv, ["home", "apply", "--plan"])
-    # Exit 0 on a clean / no-op plan.
-    check noopPlan.exitCode == 0
-    check noopPlan.output.contains("no-op")
-    # The no-op dry run also mutated nothing.
-    check treeChecksum([stateDir, storeRoot, homeDir]) == postApplyChecksum
+      let postApplyChecksum = treeChecksum([stateDir, storeRoot, homeDir])
+      let noopPlan = runRepro(baseEnv, ["home", "apply", "--plan"])
+      # Exit 0 on a clean / no-op plan.
+      check noopPlan.exitCode == 0
+      check noopPlan.output.contains("no-op")
+      # The no-op dry run also mutated nothing.
+      check treeChecksum([stateDir, storeRoot, homeDir]) == postApplyChecksum
 
-    # ----- Drift: edit the managed file out-of-band, re-plan. -----
-    # The real apply created the `fs.managedBlock` resource in
-    # `~/.m72-resource`. Editing the block body out-of-band makes the
-    # live observed state diverge from the recorded binding — genuine
-    # drift the planner must surface.
-    doAssert fileExists(resourceFile),
-      "fixture invariant: the real apply must have created the " &
-      "managed-block resource file"
-    let resourceBefore = readFile(resourceFile)
-    let driftedContent = resourceBefore.replace(
-      "m72 resource block body", "m72 resource block body EDITED")
-    writeFile(resourceFile, driftedContent)
-    let postDriftEditChecksum = treeChecksum([stateDir, storeRoot, homeDir])
+      # ----- Drift: edit the managed file out-of-band, re-plan. -----
+      # The real apply created the `fs.managedBlock` resource in
+      # `~/.m72-resource`. Editing the block body out-of-band makes the
+      # live observed state diverge from the recorded binding — genuine
+      # drift the planner must surface.
+      doAssert fileExists(resourceFile),
+        "fixture invariant: the real apply must have created the " &
+        "managed-block resource file"
+      let resourceBefore = readFile(resourceFile)
+      let driftedContent = resourceBefore.replace(
+        "m72 resource block body", "m72 resource block body EDITED")
+      writeFile(resourceFile, driftedContent)
+      let postDriftEditChecksum = treeChecksum([stateDir, storeRoot, homeDir])
 
-    let driftPlan = runRepro(baseEnv, ["home", "apply", "--plan"])
-    # The plan reports drift; exit non-zero without --allow-drift.
-    check driftPlan.exitCode != 0
-    check (driftPlan.output.contains("drift") or
-           driftPlan.output.contains("conflict-drift"))
-    # --allow-drift makes the same drifted plan exit 0.
-    let driftAllowed = runRepro(baseEnv,
-      ["home", "apply", "--plan", "--allow-drift"])
-    check driftAllowed.exitCode == 0
-    check (driftAllowed.output.contains("drift") or
-           driftAllowed.output.contains("conflict-drift"))
-    # The drift re-plans mutated nothing either (the out-of-band edit
-    # is the only change; the dry runs added nothing on top).
-    check treeChecksum([stateDir, storeRoot, homeDir]) == postDriftEditChecksum
+      let driftPlan = runRepro(baseEnv, ["home", "apply", "--plan"])
+      # The plan reports drift; exit non-zero without --allow-drift.
+      check driftPlan.exitCode != 0
+      check (driftPlan.output.contains("drift") or
+             driftPlan.output.contains("conflict-drift"))
+      # --allow-drift makes the same drifted plan exit 0.
+      let driftAllowed = runRepro(baseEnv,
+        ["home", "apply", "--plan", "--allow-drift"])
+      check driftAllowed.exitCode == 0
+      check (driftAllowed.output.contains("drift") or
+             driftAllowed.output.contains("conflict-drift"))
+      # The drift re-plans mutated nothing either (the out-of-band edit
+      # is the only change; the dry runs added nothing on top).
+      check treeChecksum([stateDir, storeRoot, homeDir]) == postDriftEditChecksum

@@ -83,16 +83,30 @@ proc runRepro(envOverrides: openArray[tuple[k, v: string]];
   result = (exitCode: code, output: combined)
 
 when defined(macosx):
-  proc placeholderAlive(pidStr: string): bool =
-    ## True while the benign placeholder process is still running.
-    execCmd("kill -0 " & pidStr & " 2>/dev/null") == 0
+  proc waitForExitWithin(p: Process; timeoutMs: int): bool =
+    let deadline = epochTime() + (timeoutMs.float / 1000.0)
+    while epochTime() < deadline:
+      if p.peekExitCode() != -1:
+        return true
+      sleep(50)
+    p.peekExitCode() != -1
+
+  proc terminateIfRunning(p: Process) =
+    try:
+      if p.peekExitCode() == -1:
+        discard execCmd("kill " & $p.processID & " 2>/dev/null")
+    except CatchableError:
+      discard
+    try: p.close()
+    except CatchableError: discard
 
   proc runGate3() =
     # The test domain lives under ~/Library/Preferences/ — NOT
     # com.apple.dock — so the gate never disturbs a real system
     # preference. `defaults` resolves a bare reverse-DNS domain to
     # ~/Library/Preferences/<domain>.plist.
-    let testDomain = "com.reprobuild.m68-gate3-" & $int(epochTime())
+    let testDomain = "com.reprobuild.m68-gate3-" &
+      $getCurrentProcessId() & "-" & $int(epochTime())
     defer:
       discard execCmd("defaults delete " & testDomain & " 2>/dev/null")
 
@@ -127,16 +141,14 @@ when defined(macosx):
     # observe whether the driver's `killall` reached it.
     let ph1 = startProcess("/bin/sleep", args = @["600"],
       options = {poUsePath})
-    let ph1Pid = $ph1.processID
+    defer: terminateIfRunning(ph1)
     let resources1 = "userdefault:macos.theme:" & testDomain &
       ";AppleInterfaceStyle;'Dark';sleep"
     let r1 = runRepro(envFor(resources1), ["home", "apply"])
     check r1.exitCode == 0
     # The value was created (a real change) -> killall sleep fired
     # -> the placeholder process is gone.
-    sleep(500)
-    check not placeholderAlive(ph1Pid)
-    try: ph1.close() except CatchableError: discard
+    check waitForExitWithin(ph1, 5000)
     # The value really landed in the test domain.
     let (readOut, readCode) = execCmdEx(
       "defaults read " & testDomain & " AppleInterfaceStyle")
@@ -146,18 +158,14 @@ when defined(macosx):
     # --- Apply 2: identical value -> cache-hit -> NO killall ---
     let ph2 = startProcess("/bin/sleep", args = @["600"],
       options = {poUsePath})
-    let ph2Pid = $ph2.processID
+    defer: terminateIfRunning(ph2)
     let r2 = runRepro(envFor(resources1), ["home", "apply"])
     check r2.exitCode == 0
     # The lifecycle algorithm sees observed.digest == desired.digest
     # -> rakNoOp -> the driver's apply (and therefore killall) is
     # never reached. The placeholder must STILL be alive.
     sleep(500)
-    check placeholderAlive(ph2Pid)
-    try:
-      discard execCmd("kill " & ph2Pid)
-      ph2.close()
-    except CatchableError: discard
+    check ph2.peekExitCode() == -1
 
 suite "M68 gate 3: e2e_macos_user_default_restart_target":
   test "restartTarget killall fires on change, not on a cache-hit":

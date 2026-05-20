@@ -10,7 +10,7 @@
 ## interface lives here so the lifecycle layer doesn't need to
 ## branch.
 
-import std/[os]
+import std/[os, strutils]
 
 import ./managed_block
 import ./../types
@@ -42,14 +42,24 @@ proc legacyPowerShellProfilePath*(homeDir: string): string =
     "Microsoft.PowerShell_profile.ps1"
 
 proc resolveShellIntegrationHost*(homeDir: string): string =
-  ## Pick the PowerShell profile path to use. Prefers the
-  ## PowerShell 7+ location; falls back to the 5.1 location if
-  ## that's where an existing profile lives.
-  let modern = defaultPowerShellProfilePath(homeDir)
-  if fileExists(modern):
-    return modern
-  let legacy = legacyPowerShellProfilePath(homeDir)
-  if fileExists(legacy):
-    return legacy
-  # Neither exists yet — create the modern one.
-  modern
+  ## Pick the shell startup file for managed shell integration.
+  when defined(windows):
+    let modern = defaultPowerShellProfilePath(homeDir)
+    if fileExists(modern):
+      return modern
+    let legacy = legacyPowerShellProfilePath(homeDir)
+    if fileExists(legacy):
+      return legacy
+    # Neither exists yet — create the modern one.
+    modern
+  else:
+    let shellName = extractFilename(getEnv("SHELL")).toLowerAscii()
+    case shellName
+    of "zsh":
+      homeDir / ".zshrc"
+    of "bash":
+      homeDir / ".bashrc"
+    of "fish":
+      homeDir / ".config" / "fish" / "config.fish"
+    else:
+      homeDir / ".profile"

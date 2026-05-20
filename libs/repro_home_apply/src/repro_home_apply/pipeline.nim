@@ -452,7 +452,8 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
         if t.len > 0: clean.add(t)
       let r = Resource(kind: rkEnvUserPath, address: address,
         lifecyclePolicy: resourcePolicy,
-        pathEntries: clean)
+        pathEntries: clean,
+        pathHostFilePath: defaultUserPathHostFile(homeDir))
       result.add(r)
     of "startup":
       let parts = payload.split(';')
@@ -611,12 +612,46 @@ proc deriveGenerationId(plan: ApplyPlan;
   for i in 0 ..< GenerationIdSize:
     result[i] = full[i]
 
+proc userPathHostFromIdentity(resourceId: string): string =
+  when defined(windows):
+    ""
+  else:
+    let hash = resourceId.rfind('#')
+    if hash > 0:
+      resourceId[0 ..< hash]
+    else:
+      ""
+
+proc parseGsettingsIdentity(resourceId: string): tuple[schema, path, key: string] =
+  const prefix = "gsettings:"
+  if not resourceId.startsWith(prefix):
+    return ("", "", "")
+  let body = resourceId[prefix.len .. ^1]
+  if '|' in body:
+    let parts = body.split('|')
+    if parts.len >= 3:
+      return (parts[0], parts[1], parts[2])
+  let colon = body.rfind(':')
+  if colon > 0:
+    return (body[0 ..< colon], "", body[colon + 1 .. ^1])
+  ("", "", "")
+
+proc parseTwoPartIdentity(resourceId, prefix: string): tuple[a, b: string] =
+  if not resourceId.startsWith(prefix):
+    return ("", "")
+  let body = resourceId[prefix.len .. ^1]
+  let colon = body.rfind(':')
+  if colon > 0:
+    (body[0 ..< colon], body[colon + 1 .. ^1])
+  else:
+    ("", "")
+
 # ---------------------------------------------------------------------------
 # No-op verification
 # ---------------------------------------------------------------------------
 
 proc verifyManifestDigests(stateDir: string; store: var Store;
-                           activeGenIdHex: string;
+                           activeGenIdHex, homeDir: string;
                            outVerified: var int): bool =
   ## Apply pipeline step 6: load the active generation's pointer +
   ## manifest, then verify every recorded post-write digest against
@@ -690,7 +725,8 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
           live = observeUserVariable(rb.realWorldIdentity[bs + 1 .. ^1])
       of rkEnvUserPath:
         let entries = parseRecordedPathEntries(rb.payloadBytes)
-        live = observeUserPath(entries)
+        live = observeUserPath(entries, userPathHostFromIdentity(
+          rb.realWorldIdentity))
       of rkWindowsStartup:
         let bs = rb.realWorldIdentity.rfind('\\')
         if bs > 0:
@@ -701,7 +737,24 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
           live = observeManagedBlock(
             rb.realWorldIdentity[0 ..< hash],
             rb.realWorldIdentity[hash + 1 .. ^1])
-      else: discard
+      of rkLinuxGsettings:
+        let parsed = parseGsettingsIdentity(rb.realWorldIdentity)
+        if parsed.schema.len > 0 and parsed.key.len > 0:
+          live = observeGsettings(parsed.schema, parsed.path, parsed.key)
+      of rkSystemdUserUnit:
+        const sysPrefix = "systemd:user:"
+        if rb.realWorldIdentity.startsWith(sysPrefix):
+          live = observeUserUnit(homeDir,
+            rb.realWorldIdentity[sysPrefix.len .. ^1])
+      of rkMacosUserDefault:
+        let parsed = parseTwoPartIdentity(rb.realWorldIdentity, "defaults:")
+        if parsed.a.len > 0 and parsed.b.len > 0:
+          live = observeUserDefault(parsed.a, parsed.b)
+      of rkLaunchdUserAgent:
+        const lcPrefix = "launchd:user:"
+        if rb.realWorldIdentity.startsWith(lcPrefix):
+          live = observeLaunchAgent(homeDir,
+            rb.realWorldIdentity[lcPrefix.len .. ^1])
     except CatchableError:
       return false
     if not live.present:
@@ -1120,7 +1173,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         let candidateIdHex = generationIdHex(candidateId)
         if candidateIdHex == activeGenIdHex and
            verifyManifestDigests(opts.stateDir, store, activeGenIdHex,
-             verifyCount):
+             opts.homeDir, verifyCount):
           result.kind = aokNoOpVerified
           result.generationIdHex = activeGenIdHex
           result.verifiedDigestCount = verifyCount
@@ -1521,7 +1574,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               priorEntries = parseRecordedPathEntries(
                 recordedBindings[action.address].payloadBytes)
             postWriteBytes = applyUserPath(desired.pathEntries,
-              priorEntries)
+              priorEntries, desired.pathHostFilePath)
             payloadKindStr = "joined-entries"
           of rkWindowsStartup:
             postWriteBytes = applyStartup(desired.startupName,
@@ -1543,7 +1596,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             payloadKindStr = "gvariant-literal"
           of rkSystemdUserUnit:
             # Phase B driver: re-raises ENotImplementedPlatform off-Linux.
-            postWriteBytes = applyUserUnit(getHomeDir(), desired.unitName,
+            postWriteBytes = applyUserUnit(opts.homeDir, desired.unitName,
               desired.unitContent, desired.unitEnabled)
             payloadKindStr = "unit-content"
           of rkMacosUserDefault:
@@ -1554,7 +1607,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             payloadKindStr = "defaults-literal"
           of rkLaunchdUserAgent:
             # Phase B driver: re-raises ENotImplementedPlatform off-macOS.
-            postWriteBytes = applyLaunchAgent(getHomeDir(),
+            postWriteBytes = applyLaunchAgent(opts.homeDir,
               desired.launchdLabel, desired.launchdPlistContent,
               desired.launchdRunAtLoad)
             payloadKindStr = "plist-content"
@@ -1582,8 +1635,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               applyUserVariableDestroy(prev.resourceId[bs + 1 .. ^1])
           of rkEnvUserPath:
             let priorEntries = parseRecordedPathEntries(prev.payloadBytes)
-            preWrite = observeUserPath(priorEntries)
-            removeUserPathContribution(priorEntries)
+            let hostFile = userPathHostFromIdentity(prev.resourceId)
+            preWrite = observeUserPath(priorEntries, hostFile)
+            removeUserPathContribution(priorEntries, hostFile)
           of rkWindowsStartup:
             preWrite = observeRecorded(action.address, prev)
             let bs = prev.resourceId.rfind('\\')
@@ -1598,20 +1652,16 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           of rkLinuxGsettings:
             # Phase B driver: re-raises ENotImplementedPlatform off-Linux.
             preWrite = observeRecorded(action.address, prev)
-            # resourceId = "gsettings:<schemaPath>:<key>"
-            let body = prev.resourceId
-            if body.startsWith("gsettings:"):
-              let rest = body[len("gsettings:") .. ^1]
-              let colon = rest.rfind(':')
-              if colon > 0:
-                destroyGsettings(rest[0 ..< colon], "", rest[colon + 1 .. ^1])
+            let parsed = parseGsettingsIdentity(prev.resourceId)
+            if parsed.schema.len > 0 and parsed.key.len > 0:
+              destroyGsettings(parsed.schema, parsed.path, parsed.key)
           of rkSystemdUserUnit:
             # Phase B driver: re-raises ENotImplementedPlatform off-Linux.
             preWrite = observeRecorded(action.address, prev)
             # resourceId = "systemd:user:<unitName>"
             const sysPrefix = "systemd:user:"
             if prev.resourceId.startsWith(sysPrefix):
-              destroyUserUnit(getHomeDir(),
+              destroyUserUnit(opts.homeDir,
                 prev.resourceId[sysPrefix.len .. ^1])
           of rkMacosUserDefault:
             # Phase B driver: re-raises ENotImplementedPlatform off-macOS.
@@ -1630,7 +1680,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             # resourceId = "launchd:user:<label>"
             const lcPrefix = "launchd:user:"
             if prev.resourceId.startsWith(lcPrefix):
-              destroyLaunchAgent(getHomeDir(),
+              destroyLaunchAgent(opts.homeDir,
                 prev.resourceId[lcPrefix.len .. ^1])
           let rb = toDestroyBinding(action.address, prev.kind,
             prev.resourceId, preWrite, prev.payloadKind,

@@ -57,117 +57,123 @@ proc runReproApply(envOverrides: openArray[tuple[k, v: string]];
   p.close()
   result = (exitCode: code, output: combined)
 
-suite "M63 gate 1: e2e_repro_home_apply_fresh_install":
-  test "fresh apply realizes a Scoop package end-to-end":
-    when not defined(windows):
-      checkpoint "skipping on non-Windows"
+when not defined(windows):
+  suite "M63 gate 1: e2e_repro_home_apply_fresh_install":
+    test "platform N/A":
+      echo "[platform N/A] t_e2e_repro_home_apply_fresh_install: requires Windows and a real Scoop install"
       check true
-      return
-    let scoopBinary = resolveScoopBinary()
-    doAssert scoopBinary.len > 0,
-      "M63 gate 1 requires real scoop.exe on PATH; the milestone " &
-      "forbids mocking it"
+else:
+  suite "M63 gate 1: e2e_repro_home_apply_fresh_install":
+    test "fresh apply realizes a Scoop package end-to-end":
+      when not defined(windows):
+        checkpoint "skipping on non-Windows"
+        check true
+        return
+      let scoopBinary = resolveScoopBinary()
+      doAssert scoopBinary.len > 0,
+        "M63 gate 1 requires real scoop.exe on PATH; the milestone " &
+        "forbids mocking it"
 
-    let tempRoot = createTempDir("repro-m63-fresh-", "")
-    defer: safeRemoveTempRoot(tempRoot)
-    let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let profileDir = tempRoot / "profile"
-    let homeDir = tempRoot / "home"
-    createDir(stateDir)
-    createDir(storeRoot)
-    createDir(homeDir)
-    copyFixture(profileDir)
+      let tempRoot = createTempDir("repro-m63-fresh-", "")
+      defer: safeRemoveTempRoot(tempRoot)
+      let stateDir = tempRoot / "state"
+      let storeRoot = tempRoot / "store"
+      let profileDir = tempRoot / "profile"
+      let homeDir = tempRoot / "home"
+      createDir(stateDir)
+      createDir(storeRoot)
+      createDir(homeDir)
+      copyFixture(profileDir)
 
-    let sandbox = setupScoopSandbox(tempRoot, "main")
-    let fixture = populateScoopApp(sandbox,
-      app = "fresh-install-fixture",
-      version = "1.0.0",
-      executableName = "fresh-install-fixture.cmd",
-      executablePayload = fixtureExecutablePayload(
-        "fresh-install-fixture 1.0.0 M63"))
+      let sandbox = setupScoopSandbox(tempRoot, "main")
+      let fixture = populateScoopApp(sandbox,
+        app = "fresh-install-fixture",
+        version = "1.0.0",
+        executableName = "fresh-install-fixture.cmd",
+        executablePayload = fixtureExecutablePayload(
+          "fresh-install-fixture 1.0.0 M63"))
 
-    let scoopMap = "fresh-install-fixture=" & sandbox.bucketName & "/" &
-      fixture.name & "@" & fixture.version & "#" & fixture.executableName
+      let scoopMap = "fresh-install-fixture=" & sandbox.bucketName & "/" &
+        fixture.name & "@" & fixture.version & "#" & fixture.executableName
 
-    let (code, output) = runReproApply([
-      (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "gate1-host"),
-      (k: "REPRO_TEST_PACKAGE_SCOOP", v: scoopMap),
-      (k: "REPRO_HOME_PACKAGE_CATALOG", v: "fresh-install-fixture"),
-      (k: "SCOOP", v: sandbox.root)],
-      ["home", "apply"])
-    check code == 0
-    check output.contains("applied generation ")
+      let (code, output) = runReproApply([
+        (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+        (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+        (k: "REPRO_STORE_ROOT", v: storeRoot),
+        (k: "HOME", v: homeDir),
+        (k: "USERPROFILE", v: homeDir),
+        (k: "REPRO_HOST", v: "gate1-host"),
+        (k: "REPRO_TEST_PACKAGE_SCOOP", v: scoopMap),
+        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "fresh-install-fixture"),
+        (k: "SCOOP", v: sandbox.root)],
+        ["home", "apply"])
+      check code == 0
+      check output.contains("applied generation ")
 
-    # Pointer exists for the new generation.
-    let records = enumerateGenerations(stateDir)
-    check records.len == 1
-    let activeId = readCurrentGenerationId(stateDir)
-    check activeId == records[0].generationId
+      # Pointer exists for the new generation.
+      let records = enumerateGenerations(stateDir)
+      check records.len == 1
+      let activeId = readCurrentGenerationId(stateDir)
+      check activeId == records[0].generationId
 
-    # Pointer file exists and is parseable.
-    let pointerFile = pointerPath(stateDir, activeId)
-    check fileExists(pointerFile)
-    let envelope = readPointerFile(pointerFile)
-    check envelope.realizedPrefixIds.len == 1
+      # Pointer file exists and is parseable.
+      let pointerFile = pointerPath(stateDir, activeId)
+      check fileExists(pointerFile)
+      let envelope = readPointerFile(pointerFile)
+      check envelope.realizedPrefixIds.len == 1
 
-    # Manifest reachable via the pointer's digest.
-    var verifyStore = openStore(storeRoot)
-    defer: verifyStore.close()
-    var manifestKey: PrefixIdBytes
-    for i in 0 ..< 32:
-      manifestKey[i] = envelope.activationManifestDigest[i]
-    let manifestBytes = readCasBlob(verifyStore, manifestKey)
-    let manifest = decodeManifestBytes(manifestBytes)
-    check manifest.realizedPackages.len == 1
-    check manifest.realizedPackages[0].packageId == "fresh-install-fixture"
-    check manifest.realizedPackages[0].adapter == "scoop"
-    check manifest.exportedCommands.len == 1
-    check manifest.exportedCommands[0].commandName == "fresh-install-fixture"
+      # Manifest reachable via the pointer's digest.
+      var verifyStore = openStore(storeRoot)
+      defer: verifyStore.close()
+      var manifestKey: PrefixIdBytes
+      for i in 0 ..< 32:
+        manifestKey[i] = envelope.activationManifestDigest[i]
+      let manifestBytes = readCasBlob(verifyStore, manifestKey)
+      let manifest = decodeManifestBytes(manifestBytes)
+      check manifest.realizedPackages.len == 1
+      check manifest.realizedPackages[0].packageId == "fresh-install-fixture"
+      check manifest.realizedPackages[0].adapter == "scoop"
+      check manifest.exportedCommands.len == 1
+      check manifest.exportedCommands[0].commandName == "fresh-install-fixture"
 
-    # Realized prefix exists under the store. lookupPrefix() confirms
-    # the SQLite row is also present.
-    var prefixId: PrefixIdBytes
-    for i in 0 ..< 32:
-      prefixId[i] = manifest.realizedPackages[0].realizedPrefixId[i]
-    let lookup = lookupPrefix(verifyStore, prefixId)
-    check lookup.found
-    let absPrefix = absolutePrefixPath(verifyStore, lookup.row.realizedPath)
-    check dirExists(absPrefix)
+      # Realized prefix exists under the store. lookupPrefix() confirms
+      # the SQLite row is also present.
+      var prefixId: PrefixIdBytes
+      for i in 0 ..< 32:
+        prefixId[i] = manifest.realizedPackages[0].realizedPrefixId[i]
+      let lookup = lookupPrefix(verifyStore, prefixId)
+      check lookup.found
+      let absPrefix = absolutePrefixPath(verifyStore, lookup.row.realizedPath)
+      check dirExists(absPrefix)
 
-    # The store has a `profile`-kind root with the new generation id.
-    let roots = listRoots(verifyStore)
-    var hasGenRoot = false
-    for r in roots:
-      if r.rootId == activeId and r.kind == "profile":
-        hasGenRoot = true
-        break
-    check hasGenRoot
+      # The store has a `profile`-kind root with the new generation id.
+      let roots = listRoots(verifyStore)
+      var hasGenRoot = false
+      for r in roots:
+        if r.rootId == activeId and r.kind == "profile":
+          hasGenRoot = true
+          break
+      check hasGenRoot
 
-    # The stable Windows bin dir has the launcher (.exe or .cmd shim).
-    let stableBin = stateDir / "bin"
-    check dirExists(stableBin)
-    let cmdExe = stableBin / "fresh-install-fixture.exe"
-    let cmdShim = stableBin / "fresh-install-fixture.cmd"
-    let cmdLauncher = stableBin / "fresh-install-fixture.repro-launch"
-    check fileExists(cmdExe) or fileExists(cmdShim)
-    # Per-generation bin dir also exists.
-    let perGenBin = generationDir(stateDir, activeId) / "bin"
-    check dirExists(perGenBin)
+      # The stable Windows bin dir has the launcher (.exe or .cmd shim).
+      let stableBin = stateDir / "bin"
+      check dirExists(stableBin)
+      let cmdExe = stableBin / "fresh-install-fixture.exe"
+      let cmdShim = stableBin / "fresh-install-fixture.cmd"
+      let cmdLauncher = stableBin / "fresh-install-fixture.repro-launch"
+      check fileExists(cmdExe) or fileExists(cmdShim)
+      # Per-generation bin dir also exists.
+      let perGenBin = generationDir(stateDir, activeId) / "bin"
+      check dirExists(perGenBin)
 
-    # Eager GC ran: assert on the stable subprocess-visible log line
-    # the CLI emits from the fresh-applied branch. The line is fed by
-    # `ApplyOutcome.gcResult` (sourced from `repro_local_store.gc`),
-    # so its presence proves the pipeline actually invoked step 11 —
-    # not merely that `openStore` created the `gc/pending-deletion/`
-    # directory. On a fresh apply with no prior generations nothing
-    # is reclaimed, so the line shows zero.
-    check output.contains("apply: eager gc reclaimed 0 prefixes (ranAt ")
-    check dirExists(storeRoot / "gc" / "pending-deletion")
+      # Eager GC ran: assert on the stable subprocess-visible log line
+      # the CLI emits from the fresh-applied branch. The line is fed by
+      # `ApplyOutcome.gcResult` (sourced from `repro_local_store.gc`),
+      # so its presence proves the pipeline actually invoked step 11 —
+      # not merely that `openStore` created the `gc/pending-deletion/`
+      # directory. On a fresh apply with no prior generations nothing
+      # is reclaimed, so the line shows zero.
+      check output.contains("apply: eager gc reclaimed 0 prefixes (ranAt ")
+      check dirExists(storeRoot / "gc" / "pending-deletion")
 
-    discard cmdLauncher  # silence unused-binding on copy-fallback hosts
+      discard cmdLauncher  # silence unused-binding on copy-fallback hosts

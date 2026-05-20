@@ -340,12 +340,13 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
       process = startProcess("cmd.exe", args = @["/c", cmdLine],
         options = {})
     else:
-      # `setsid` puts the probe in its own session/process group so a
-      # negative-pid kill on timeout reaches the whole tree.
-      let cmdLine = "setsid " & inner & " > " &
-        quoteShell(outPath) & " 2>&1"
+      # `poDaemon` asks Nim's POSIX process launcher to put the child in
+      # its own process group. That gives `killProcessTree` a portable
+      # negative-pid target without depending on a `setsid(1)` binary
+      # being present (macOS does not ship one by default).
+      let cmdLine = inner & " > " & quoteShell(outPath) & " 2>&1"
       process = startProcess("/bin/sh", args = @["-c", cmdLine],
-        options = {})
+        options = {poDaemon})
   except OSError as err:
     result.exitCode = -1
     result.output = "probe failed to start: " & err.msg
