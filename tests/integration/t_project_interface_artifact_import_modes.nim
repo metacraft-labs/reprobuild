@@ -163,6 +163,8 @@ suite "integration_project_interface_artifact_import_modes":
 
     check fileExists(artifactPath)
     check fileExists(stubPath)
+    check fileExists(artifactPath & ".inputs")
+    check fileExists(artifactPath & ".inputs.meta")
     let raw = readFile(artifactPath)
     check raw.len > 12
     check raw[0 .. 3] == "RBSZ"
@@ -261,13 +263,16 @@ suite "integration_project_interface_artifact_import_modes":
     check provider1.compileEdge.actionFingerprint.algorithm == haBlake3_256
     check provider1.outputBinaryFingerprint.algorithm == haBlake3_256
     check provider1.executionResult.exitCode == 0
+    check fileExists(providerArtifactPath & ".inputs")
     let providerRead = readProviderCompileArtifact(providerArtifactPath)
     check providerRead.providerFingerprint == provider1.providerFingerprint
     check providerRead.compileEdge.actionFingerprint ==
       provider1.compileEdge.actionFingerprint
     check providerRead.compileEdge.declaredOutputs == @[provider1.outputBinaryPath]
-    check readFreshProviderCompileArtifact(providerArtifactPath, providerModule,
-      provider1.outputBinaryPath, artifact1.interfaceFingerprint).isSome
+    let freshProvider = readFreshProviderCompileArtifact(providerArtifactPath,
+      providerModule, provider1.outputBinaryPath, artifact1.interfaceFingerprint)
+    check freshProvider.isSome
+    check fileExists(providerArtifactPath & ".inputs")
     writeFile(providerDir / "extra_provider_source.nim",
       "const extraProviderSalt* = \"one\"\n")
     check readFreshProviderCompileArtifact(providerArtifactPath, providerModule,

@@ -1,4 +1,4 @@
-import std/[os, osproc, strutils, tempfiles, times]
+import std/[os, osproc, strutils, times]
 
 import repro_monitor_depfile/reader
 import repro_monitor_depfile/render
@@ -17,6 +17,15 @@ type
     inspectFormat: string
     request: FsSnoopRequest
     depfileWasExplicit: bool
+
+var tempDirNonce = uint64(getCurrentProcessId())
+
+proc createLocalTempDir(prefix: string): string =
+  inc tempDirNonce
+  let now = getTime()
+  result = getTempDir() / (prefix & "-" & $getCurrentProcessId() & "-" &
+    $now.toUnix & "-" & $now.nanosecond & "-" & $tempDirNonce)
+  createDir(result)
 
 proc parseOutputMode(value: string): FsSnoopOutputMode =
   case value
@@ -199,7 +208,7 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
         "cannot find librepro_monitor_shim.dylib; run just build or set " &
           "REPRO_MONITOR_SHIM_LIB")
 
-    let fragmentDir = createTempDir("repro-fs-snoop-fragments", "")
+    let fragmentDir = createLocalTempDir("repro-fs-snoop-fragments")
     defer: removeDir(fragmentDir)
     ensureParentDir(request.depFilePath)
 
@@ -237,7 +246,7 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
         "cannot find librepro_monitor_shim.dll; run just build or set " &
           "REPRO_MONITOR_SHIM_LIB")
 
-    let fragmentDir = createTempDir("repro-fs-snoop-fragments", "")
+    let fragmentDir = createLocalTempDir("repro-fs-snoop-fragments")
     defer: removeDir(fragmentDir)
     ensureParentDir(request.depFilePath)
 
@@ -268,7 +277,7 @@ proc runFsSnoopCli*(programName: string; args: seq[string]): int =
 
     var tempRoot = ""
     if parsed.request.depFilePath.len == 0:
-      tempRoot = createTempDir("repro-fs-snoop", "")
+      tempRoot = createLocalTempDir("repro-fs-snoop")
       parsed.request.depFilePath = tempRoot / "evidence.rdep"
     try:
       result = runMonitoredCommand(parsed.request)

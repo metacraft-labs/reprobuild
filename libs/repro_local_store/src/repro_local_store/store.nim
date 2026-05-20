@@ -21,7 +21,7 @@
 ## requested key before returning to the caller — the hash-on-read
 ## contract from the spec is enforced by `readCasBlob` / `materializeBlob`.
 
-import std/[os, random, strutils, times]
+import std/[os, strutils, times]
 
 import blake3
 import repro_core
@@ -164,7 +164,7 @@ type
     gcPendingRoot*: string
     indexPath*: string
     db*: Database
-    rng*: Rand
+    nonce*: uint64
 
   RecoverReport* = object
     sweptStagingDirs*: seq[string]
@@ -502,8 +502,7 @@ proc openStore*(root: string): Store =
     var e = newException(EStoreIndexCorrupt,
       "PRAGMA quick_check returned: " & check)
     raise e
-  result.rng = initRand(int64(getTime().toUnix * 1_000_000_000 +
-    int64(getTime().nanosecond)) xor int64(getCurrentProcessId()))
+  result.nonce = uint64(getCurrentProcessId())
 
 proc close*(s: var Store) =
   s.db.close()
@@ -515,10 +514,14 @@ proc close*(s: var Store) =
 proc casPath*(s: Store; digest: PrefixIdBytes): string =
   s.root / casBlobRelative(digest)
 
+proc uniqueStoreToken(s: var Store): string =
+  inc s.nonce
+  let now = getTime()
+  $getCurrentProcessId() & "-" & $now.toUnix & "-" & $now.nanosecond & "-" &
+    $s.nonce
+
 proc casStageDir(s: var Store): string =
-  let token = $getCurrentProcessId() & "-" & $getTime().toUnixFloat() & "-" &
-    $s.rng.rand(int64(1 shl 30))
-  s.tmpRoot / ("cas." & token)
+  s.tmpRoot / ("cas." & s.uniqueStoreToken())
 
 proc bytesOf(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -633,9 +636,7 @@ proc insertPrefixOrIgnore*(s: Store; row: PrefixRow): bool =
 # ---------------------------------------------------------------------------
 
 proc allocateStagingDir*(s: var Store): string =
-  let token = $getCurrentProcessId() & "-" & $getTime().toUnixFloat() & "-" &
-    $s.rng.rand(int64(1 shl 30))
-  result = s.tmpRoot / ("stage." & token)
+  result = s.tmpRoot / ("stage." & s.uniqueStoreToken())
   createDir(result)
 
 proc absolutePrefixPath*(s: Store; relative: string): string =
@@ -906,7 +907,7 @@ proc quarantineUnique(s: var Store; absolutePath: string): string =
   ## name so two GC passes never collide and so we can defer the final
   ## unlink for the grace period.
   let leaf = absolutePath.extractFilename
-  let token = $getTime().toUnix & "-" & $s.rng.rand(int64(1 shl 30))
+  let token = s.uniqueStoreToken()
   result = s.gcPendingRoot / (leaf & "." & token)
   createDir(s.gcPendingRoot)
   moveDir(absolutePath, result)

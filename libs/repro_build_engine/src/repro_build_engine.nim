@@ -1,5 +1,5 @@
-import std/[algorithm, json, os, osproc, sets, streams, strtabs, strutils, tables,
-    times]
+import std/[algorithm, json, options, os, osproc, sets, streams, strtabs,
+    strutils, tables, times]
 
 import repro_core
 import repro_depfile
@@ -79,17 +79,20 @@ type
     stdoutLimit*: int
     stderrLimit*: int
     rebuildMissingOutputsOnCacheHit*: bool
-    # Path-mode escape hatch (stop-gap until the RunQuota Windows port lands).
     # When true, the engine spawns each `bakProcess` action directly via
     # `osproc.startProcess` instead of going through the RunQuota helper, and
     # synthesizes a result JSON in the same on-disk schema the helper would
     # produce. This bypasses ALL resource quotas, named-pool leases, and
-    # backend selection — it exists only so `repro build --tool-provisioning=path`
-    # can drive a smoke test on Windows. Callers SHOULD only set this on
-    # platforms where the real RunQuota daemon/helper is not yet available.
+    # backend selection.
     bypassRunQuota*: bool
+    # When true, the engine probes RunQuota lazily just before the first process
+    # launch and uses the bypass path only if the daemon is unavailable. No-op
+    # builds therefore do not pay a daemon round trip.
+    fallbackToRunQuotaBypass*: bool
     progressCallback*: BuildProgressCallback
     statsEnabled*: bool
+    suppressTrace*: bool
+    skipCacheHitEvidence*: bool
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -138,6 +141,7 @@ type
     results*: seq[ActionResult]
     trace*: seq[SchedulerTraceEvent]
     stats*: BuildStats
+    traceEnabled: bool
 
   BuildProgressEvent* = object
     kind*: BuildProgressKind
@@ -190,8 +194,10 @@ proc defaultBuildEngineConfig*(cacheRoot: string): BuildEngineConfig =
     stderrLimit: 1_048_576,
     rebuildMissingOutputsOnCacheHit: false,
     bypassRunQuota: false,
+    fallbackToRunQuotaBypass: false,
     progressCallback: nil,
-    statsEnabled: false)
+    statsEnabled: false,
+    suppressTrace: false)
 
 proc addMetric*(stats: var BuildStats; name: string; elapsedUs: float) =
   for metric in stats.metrics.mitems:
@@ -289,6 +295,8 @@ proc graph*(actions: openArray[BuildAction];
   BuildGraph(actions: @actions, pools: @pools)
 
 proc trace(result: var BuildRunResult; actionId, event, detail: string) =
+  if not result.traceEnabled:
+    return
   result.trace.add SchedulerTraceEvent(
     seq: uint64(result.trace.len + 1),
     actionId: actionId,
@@ -794,8 +802,8 @@ proc startBypassRunQuotaProcess(action: BuildAction): Process =
       options = {poUsePath, poStdErrToStdOut})
 
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
-                          resultPath: string): Process =
-  if config.bypassRunQuota:
+                          resultPath: string; bypassRunQuota: bool): Process =
+  if bypassRunQuota:
     return startBypassRunQuotaProcess(action)
   let rq = ReproResourceRequest(
     label: action.id,
@@ -830,7 +838,7 @@ proc writeBypassResultJson(resultPath: string; exitCode: int;
     "signal": 0,
     "stdout": combinedOutput,
     "stderr": "",
-    "backend_name": "windows-path-mode-bypass",
+    "backend_name": "runquota-bypass",
     "runquota_socket": "",
     "lease_finished_sent": false,
     "lease_released": false
@@ -861,7 +869,7 @@ proc finishBypassRunQuotaProcess(id: string; process: Process;
 proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
                            bypassRunQuota: bool): ActionResult =
   let backendLabel =
-    if bypassRunQuota: "windows-path-mode-bypass" else: "runquota-helper"
+    if bypassRunQuota: "runquota-bypass" else: "runquota-helper"
   result = ActionResult(id: id, launched: true, runQuotaBackend: backendLabel)
   if bypassRunQuota:
     finishBypassRunQuotaProcess(id, process, resultPath)
@@ -1030,6 +1038,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   let buildGraph = inferDeclaredActionDeps(g)
   finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
+  runResult.traceEnabled = not config.suppressTrace
   let validateStart = statStart()
   validateGraph(buildGraph)
   finishStat("repro graph validate", validateStart)
@@ -1042,6 +1051,61 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       config.cacheRoot
   let cas = openLocalCas(cacheRoot / "cas")
   var cache = openActionCache(cacheRoot / "action-cache")
+  defer:
+    cache.flushHotIndex()
+
+  proc cacheHitEvidence(action: BuildAction;
+                        record: ActionResultRecord): PathSetEvidence =
+    if config.skipCacheHitEvidence:
+      PathSetEvidence()
+    else:
+      evidenceFromRecord(action, record)
+
+  proc tryFastNoopCacheHits(): Option[BuildRunResult] =
+    if not config.rebuildMissingOutputsOnCacheHit:
+      return none(BuildRunResult)
+    if config.progressCallback != nil:
+      return none(BuildRunResult)
+    var fastResult: BuildRunResult
+    fastResult.traceEnabled = not config.suppressTrace
+    var metadataCache = initFileMetadataCache()
+    var hotRecords: seq[ActionResultRecord] = @[]
+    for action in buildGraph.actions:
+      if (not action.cacheable) or action.dynamicDepsFile.len > 0:
+        return none(BuildRunResult)
+      let outputStatStart = statStart()
+      let outputsPresent = action.allOutputsExist()
+      finishStat("repro output stat", outputStatStart)
+      if not outputsPresent:
+        return none(BuildRunResult)
+      let hotRecord = cache.lookupHotMetadataRecord(action.weakFingerprint,
+        action.actionCachePolicy)
+      if hotRecord.isNone:
+        return none(BuildRunResult)
+      hotRecords.add(hotRecord.get())
+    let lookupStart = statStart()
+    let inputsUnchanged = cache.hotMetadataInputsUnchanged(addr metadataCache)
+    finishStat("repro cache lookup", lookupStart)
+    if not inputsUnchanged:
+      return none(BuildRunResult)
+    for i, action in buildGraph.actions:
+      fastResult.results.add(ActionResult(
+        id: action.id,
+        status: asCacheHit,
+        cacheDecision: cdHit,
+        dependencyPolicyKind: action.dependencyPolicy.kind,
+        evidence: cacheHitEvidence(action, hotRecords[i])))
+    fastResult.stats = stats
+    some(fastResult)
+
+  let fastNoopStart = statStart()
+  let fastNoop = tryFastNoopCacheHits()
+  finishStat("repro fast noop scan", fastNoopStart)
+  if fastNoop.isSome:
+    runResult = fastNoop.get()
+    finishStat("repro scheduler total", totalStart)
+    runResult.stats = stats
+    return runResult
 
   var idToIndex = initTable[string, int]()
   var dependents = initTable[string, seq[string]]()
@@ -1053,6 +1117,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var actionsById = initTable[string, BuildAction]()
   var launchedSucceeded = initHashSet[string]()
   var dynamicDepsLoaded = initHashSet[string]()
+  var fileMetadataCache = initFileMetadataCache()
 
   poolCapacity[""] = maxParallel
   for p in buildGraph.pools:
@@ -1083,6 +1148,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     cmp(idToIndex[a], idToIndex[b])
 
   var running: seq[RunningAction] = @[]
+  var runQuotaDaemonReachable: Option[bool]
+
+  proc launchBypassesRunQuota(): bool =
+    if config.bypassRunQuota:
+      return true
+    if not config.fallbackToRunQuotaBypass:
+      return false
+    if runQuotaDaemonReachable.isNone:
+      let probeStart = statStart()
+      runQuotaDaemonReachable = some(isRunQuotaDaemonReachable())
+      finishStat("repro runquota probe", probeStart)
+    not runQuotaDaemonReachable.get()
 
   proc terminalCount(): int =
     for action in buildGraph.actions:
@@ -1231,7 +1308,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let lookupStart = statStart()
           let lookup = cache.lookupActionResult(cas, action.weakFingerprint,
             action.actionCachePolicy,
-            verifyOutputBlobs = not outputsPresentBeforeLookup)
+            verifyOutputBlobs = not outputsPresentBeforeLookup,
+            allowMetadataOnlyHit = outputsPresentBeforeLookup,
+            metadataCache = addr fileMetadataCache)
           finishStat("repro cache lookup", lookupStart)
           case lookup.status
           of aclHit:
@@ -1240,16 +1319,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               outputsPresent = outputsPresentBeforeLookup
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
-                evidenceFromRecord(action, lookup.record)
+                cacheHitEvidence(action, lookup.record)
               completeSuccess(id, asCacheHit, cdHit, false, "outputs-present")
               inc completed
               launchedAny = true
               continue
             let restoreStart = statStart()
             cas.restoreOutputs(lookup.record, action.cwd)
+            fileMetadataCache.clear()
             finishStat("repro cache restore", restoreStart)
             runResult.results[idToIndex.resultIndex(id)].evidence =
-              evidenceFromRecord(action, lookup.record)
+              cacheHitEvidence(action, lookup.record)
             completeSuccess(id, asCacheHit, cdHit, false, "restored")
             inc completed
             launchedAny = true
@@ -1260,7 +1340,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               outputsPresent = outputsPresentBeforeLookup
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
-                evidenceFromRecord(action, lookup.record)
+                cacheHitEvidence(action, lookup.record)
               completeSuccess(id, asCacheHit, cdHybridCutoff, false,
                 "outputs-present")
               inc completed
@@ -1268,9 +1348,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
             let restoreStart = statStart()
             cas.restoreOutputs(lookup.record, action.cwd)
+            fileMetadataCache.clear()
             finishStat("repro cache restore", restoreStart)
             runResult.results[idToIndex.resultIndex(id)].evidence =
-              evidenceFromRecord(action, lookup.record)
+              cacheHitEvidence(action, lookup.record)
             completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
             inc completed
             launchedAny = true
@@ -1346,6 +1427,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               previousCacheDecision
           statuses[id] = finished.status
           if finished.status == asSucceeded:
+            fileMetadataCache.clear()
             let evidenceStart = statStart()
             let evidence = collectEvidence(plan.action, strict = true)
             finishStat("repro evidence collect", evidenceStart)
@@ -1387,8 +1469,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         poolRunning[poolName] = used + units
         inc launchSeq
         let resultPath = runQuotaResultRoot / ($launchSeq & ".json")
+        let bypassRunQuota = launchBypassesRunQuota()
         let launchStart = statStart()
-        let process = startRunQuotaProcess(plan.action, config, resultPath)
+        let process = startRunQuotaProcess(plan.action, config, resultPath,
+          bypassRunQuota)
         finishStat("repro runquota launch", launchStart)
         running.add(RunningAction(
           id: id,
@@ -1397,7 +1481,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           action: plan.action,
           process: process,
           resultPath: resultPath,
-          bypassRunQuota: config.bypassRunQuota))
+          bypassRunQuota: bypassRunQuota))
         runResult.trace(id, "launched", "pool=" & poolName)
         emitProgress(bpkActionStarted, id)
         launchedAny = true
@@ -1456,6 +1540,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           previousCacheDecision
       statuses[finished.id] = finished.status
       if finished.status == asSucceeded:
+        fileMetadataCache.clear()
         let action = runningItem.action
         let converterStart = statStart()
         let converterResult = action.runConverters(action.converterSpecsForPolicy())

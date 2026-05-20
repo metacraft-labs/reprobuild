@@ -1,4 +1,4 @@
-import std/[algorithm, options, os, osproc, sequtils, streams, strutils, tempfiles]
+import std/[algorithm, options, os, osproc, sequtils, streams, strutils, times]
 
 import cbor
 import repro_core
@@ -8,6 +8,8 @@ import repro_hash
 import repro_project_dsl
 
 const BuiltNimCompilerPath = staticExec("command -v nim").strip()
+
+var interfaceTempNonce = uint64(getCurrentProcessId())
 
 type
   InterfaceEnvelopeKind* = enum
@@ -128,9 +130,46 @@ type
     outputBinaryFingerprint*: ContentDigest
     executionResult*: ProviderCompileExecutionResult
 
+  FileStampKind = enum
+    fskMissing
+    fskRegular
+    fskDirectory
+    fskOther
+
+  FileStamp = object
+    path: string
+    kind: FileStampKind
+    sizeBytes: uint64
+    mtimeNs: uint64
+
+  InterfaceExtractionContext = object
+    modulePath: string
+    workDir: string
+    nimCompiler: string
+    libPathFlags: seq[string]
+    sources: seq[string]
+
+  InterfaceExtractionCacheRecord = object
+    context: InterfaceExtractionContext
+    sourceStamps: seq[FileStamp]
+    inputFingerprint: ContentDigest
+
+  ProviderFreshnessCacheRecord = object
+    modulePath: string
+    outputBinaryPath: string
+    sourceStamps: seq[FileStamp]
+    outputBinaryStamp: FileStamp
+    interfaceFingerprint: ContentDigest
+    providerFingerprint: ContentDigest
+    outputBinaryFingerprint: ContentDigest
+
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
   EnvelopeVersion = 5'u16
+  InterfaceExtractionCacheRecordMagic =
+    "reprobuild.interfaceExtractionCache.v1"
+  ProviderFreshnessCacheRecordMagic =
+    "reprobuild.providerFreshnessCache.v1"
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -611,6 +650,95 @@ proc writeProviderCompileArtifact*(path: string;
 proc readProviderCompileArtifact*(path: string): ProviderCompileArtifact =
   decodeProviderCompileArtifact(fromByteString(readFile(path)))
 
+proc writeFileStamp(outp: var seq[byte]; stamp: FileStamp) =
+  outp.writeString(stamp.path)
+  outp.writeByte(byte(ord(stamp.kind)))
+  outp.writeU64Le(stamp.sizeBytes)
+  outp.writeU64Le(stamp.mtimeNs)
+
+proc readFileStamp(bytes: openArray[byte]; pos: var int): FileStamp =
+  result.path = readString(bytes, pos)
+  let kind = readByte(bytes, pos)
+  if kind > byte(ord(fskOther)):
+    raiseEnvelopeError(eeMalformed, "invalid file stamp kind")
+  result.kind = FileStampKind(kind)
+  result.sizeBytes = readU64Le(bytes, pos)
+  result.mtimeNs = readU64Le(bytes, pos)
+
+proc writeFileStamps(outp: var seq[byte]; stamps: openArray[FileStamp]) =
+  outp.writeU32Le(uint32(stamps.len))
+  for stamp in stamps:
+    outp.writeFileStamp(stamp)
+
+proc readFileStamps(bytes: openArray[byte]; pos: var int): seq[FileStamp] =
+  let count = int(readU32Le(bytes, pos))
+  result = newSeq[FileStamp](count)
+  for i in 0 ..< count:
+    result[i] = readFileStamp(bytes, pos)
+
+proc writeInterfaceContext(outp: var seq[byte];
+                           context: InterfaceExtractionContext) =
+  outp.writeString(context.modulePath)
+  outp.writeString(context.workDir)
+  outp.writeString(context.nimCompiler)
+  outp.writeStringSeq(context.libPathFlags)
+  outp.writeStringSeq(context.sources)
+
+proc readInterfaceContext(bytes: openArray[byte]; pos: var int):
+    InterfaceExtractionContext =
+  result.modulePath = readString(bytes, pos)
+  result.workDir = readString(bytes, pos)
+  result.nimCompiler = readString(bytes, pos)
+  result.libPathFlags = readStringSeq(bytes, pos)
+  result.sources = readStringSeq(bytes, pos)
+
+proc encodeInterfaceExtractionCacheRecord(
+    record: InterfaceExtractionCacheRecord): seq[byte] =
+  result.writeString(InterfaceExtractionCacheRecordMagic)
+  result.writeInterfaceContext(record.context)
+  result.writeFileStamps(record.sourceStamps)
+  result.writeDigest(record.inputFingerprint)
+
+proc decodeInterfaceExtractionCacheRecord(bytes: openArray[byte]):
+    InterfaceExtractionCacheRecord =
+  var pos = 0
+  let magic = readString(bytes, pos)
+  if magic != InterfaceExtractionCacheRecordMagic:
+    raiseEnvelopeError(eeUnknownType, "not an interface extraction cache record")
+  result.context = readInterfaceContext(bytes, pos)
+  result.sourceStamps = readFileStamps(bytes, pos)
+  result.inputFingerprint = readDigest(bytes, pos)
+  if pos != bytes.len:
+    raiseEnvelopeError(eeMalformed,
+      "trailing interface extraction cache bytes")
+
+proc encodeProviderFreshnessCacheRecord(
+    record: ProviderFreshnessCacheRecord): seq[byte] =
+  result.writeString(ProviderFreshnessCacheRecordMagic)
+  result.writeString(record.modulePath)
+  result.writeString(record.outputBinaryPath)
+  result.writeFileStamps(record.sourceStamps)
+  result.writeFileStamp(record.outputBinaryStamp)
+  result.writeDigest(record.interfaceFingerprint)
+  result.writeDigest(record.providerFingerprint)
+  result.writeDigest(record.outputBinaryFingerprint)
+
+proc decodeProviderFreshnessCacheRecord(bytes: openArray[byte]):
+    ProviderFreshnessCacheRecord =
+  var pos = 0
+  let magic = readString(bytes, pos)
+  if magic != ProviderFreshnessCacheRecordMagic:
+    raiseEnvelopeError(eeUnknownType, "not a provider freshness cache record")
+  result.modulePath = readString(bytes, pos)
+  result.outputBinaryPath = readString(bytes, pos)
+  result.sourceStamps = readFileStamps(bytes, pos)
+  result.outputBinaryStamp = readFileStamp(bytes, pos)
+  result.interfaceFingerprint = readDigest(bytes, pos)
+  result.providerFingerprint = readDigest(bytes, pos)
+  result.outputBinaryFingerprint = readDigest(bytes, pos)
+  if pos != bytes.len:
+    raiseEnvelopeError(eeMalformed, "trailing provider freshness cache bytes")
+
 proc toInterfaceParam(param: CliParamDef): InterfaceParam =
   InterfaceParam(
     name: param.name,
@@ -937,26 +1065,113 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
         discard
   result.sort(system.cmp[string])
 
-proc interfaceExtractionFingerprint*(modulePath: string;
-                                     workDir = getCurrentDir()): ContentDigest =
+proc normalizedStampPath(path: string): string =
+  os.normalizedPath(path).replace('\\', '/')
+
+proc fileStamp(path: string): FileStamp =
+  result.path = normalizedStampPath(path)
+  if not fileExists(path) and not dirExists(path):
+    result.kind = fskMissing
+    return
+  let info = getFileInfo(path, followSymlink = false)
+  result.kind =
+    case info.kind
+    of pcFile, pcLinkToFile:
+      fskRegular
+    of pcDir, pcLinkToDir:
+      fskDirectory
+  result.sizeBytes = uint64(max(info.size, 0))
+  let mtime = info.lastWriteTime
+  result.mtimeNs = uint64(mtime.toUnix) * 1_000_000_000'u64 +
+    uint64(mtime.nanosecond)
+
+proc fileStamps(paths: openArray[string]): seq[FileStamp] =
+  for path in paths:
+    result.add(fileStamp(path))
+  result.sort do (a, b: FileStamp) -> int:
+    cmp(a.path, b.path)
+
+proc interfaceExtractionContext(modulePath: string;
+                                workDir = getCurrentDir()):
+    InterfaceExtractionContext =
+  let sources = discoverNimSources(modulePath).mapIt(normalizedStampPath(it))
+  InterfaceExtractionContext(
+    modulePath: normalizedStampPath(modulePath),
+    workDir: normalizedStampPath(workDir),
+    nimCompiler: nimCompilerPath(),
+    libPathFlags: reproLibPathFlags(workDir),
+    sources: sources)
+
+proc interfaceExtractionFingerprint(context: InterfaceExtractionContext):
+    ContentDigest =
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.interfaceExtract.v1")
-  payload.writeString(os.normalizedPath(modulePath))
-  payload.writeString(os.normalizedPath(workDir))
-  payload.writeString(nimCompilerPath())
-  payload.writeStringSeq(reproLibPathFlags(workDir))
-  for path in discoverNimSources(modulePath):
-    payload.writeString(os.normalizedPath(path))
+  payload.writeString(context.modulePath)
+  payload.writeString(context.workDir)
+  payload.writeString(context.nimCompiler)
+  payload.writeStringSeq(context.libPathFlags)
+  for path in context.sources:
+    payload.writeString(path)
     let content = toBytes(readFile(path))
     payload.writeU64Le(uint64(content.len))
     payload.add(content)
   blake3DomainDigest(payload, hdActionFingerprint)
 
+proc interfaceExtractionFingerprint*(modulePath: string;
+                                     workDir = getCurrentDir()): ContentDigest =
+  interfaceExtractionFingerprint(interfaceExtractionContext(modulePath, workDir))
+
 proc interfaceExtractionCachePath(artifactPath: string): string =
   artifactPath & ".inputs"
 
-proc cachedInterfaceArtifact(artifactPath, stubPath: string;
-                             fingerprint: ContentDigest):
+proc interfaceExtractionMetadataPath(artifactPath: string): string =
+  artifactPath & ".inputs.meta"
+
+proc writeInterfaceExtractionCacheRecord(artifactPath: string;
+    context: InterfaceExtractionContext; fingerprint: ContentDigest) =
+  let record = InterfaceExtractionCacheRecord(
+    context: context,
+    sourceStamps: fileStamps(context.sources),
+    inputFingerprint: fingerprint)
+  try:
+    writeFile(interfaceExtractionMetadataPath(artifactPath),
+      toByteString(encodeInterfaceExtractionCacheRecord(record)))
+  except CatchableError:
+    discard
+
+proc readInterfaceExtractionCacheRecord(path: string):
+    Option[InterfaceExtractionCacheRecord] =
+  if not fileExists(path):
+    return none(InterfaceExtractionCacheRecord)
+  try:
+    return some(decodeInterfaceExtractionCacheRecord(fromByteString(readFile(path))))
+  except CatchableError:
+    return none(InterfaceExtractionCacheRecord)
+
+proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
+                                       context: InterfaceExtractionContext):
+    Option[ProjectInterfaceArtifact] =
+  if not (fileExists(artifactPath) and fileExists(stubPath)):
+    return none(ProjectInterfaceArtifact)
+  let record = readInterfaceExtractionCacheRecord(
+    interfaceExtractionMetadataPath(artifactPath))
+  if record.isNone:
+    return none(ProjectInterfaceArtifact)
+  let cached = record.get()
+  if cached.context != context:
+    return none(ProjectInterfaceArtifact)
+  if cached.sourceStamps != fileStamps(context.sources):
+    return none(ProjectInterfaceArtifact)
+  try:
+    let artifact = readInterfaceArtifact(artifactPath)
+    if artifact.interfaceFingerprint != cached.inputFingerprint:
+      return none(ProjectInterfaceArtifact)
+    return some(artifact)
+  except CatchableError:
+    return none(ProjectInterfaceArtifact)
+
+proc cachedInterfaceArtifactByFingerprint(artifactPath, stubPath: string;
+                                          fingerprint: ContentDigest):
     Option[ProjectInterfaceArtifact] =
   let cachePath = interfaceExtractionCachePath(artifactPath)
   if not (fileExists(artifactPath) and fileExists(stubPath) and
@@ -1075,16 +1290,30 @@ proc externalHashFlags(workDir = ""): seq[string] =
 
 proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  workDir = getCurrentDir()): ProjectInterfaceArtifact =
-  let inputFingerprint = interfaceExtractionFingerprint(modulePath, workDir)
-  let cached = cachedInterfaceArtifact(artifactPath, stubPath, inputFingerprint)
+  let extractionContext = interfaceExtractionContext(modulePath, workDir)
+  let metadataCached = cachedInterfaceArtifactByMetadata(artifactPath,
+    stubPath, extractionContext)
+  if metadataCached.isSome:
+    return metadataCached.get()
+
+  let inputFingerprint = interfaceExtractionFingerprint(extractionContext)
+  let cached = cachedInterfaceArtifactByFingerprint(artifactPath, stubPath,
+    inputFingerprint)
   if cached.isSome:
+    writeInterfaceExtractionCacheRecord(artifactPath, extractionContext,
+      inputFingerprint)
     return cached.get()
 
   let moduleDir = parentDir(modulePath)
   let moduleName = splitFile(modulePath).name
   let tempParent = workDir / "build" / "m7-temp"
   createDir(tempParent)
-  let tempRoot = createTempDir("repro-interface-extract", "", tempParent)
+  inc interfaceTempNonce
+  let now = getTime()
+  let tempRoot = tempParent / ("repro-interface-extract-" &
+    $getCurrentProcessId() & "-" & $now.toUnix & "-" & $now.nanosecond &
+    "-" & $interfaceTempNonce)
+  createDir(tempRoot)
   defer: removeDir(tempRoot)
   let runnerPath = tempRoot / "extract_runner.nim"
   writeFile(runnerPath,
@@ -1116,6 +1345,8 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   result = readInterfaceArtifact(artifactPath)
   writeFile(interfaceExtractionCachePath(artifactPath), toHex(
       inputFingerprint.bytes))
+  writeInterfaceExtractionCacheRecord(artifactPath, extractionContext,
+    inputFingerprint)
 
 proc providerFingerprintFor*(inputSources: openArray[string];
                              interfaceFingerprint: ContentDigest): ContentDigest =
@@ -1127,6 +1358,61 @@ proc providerFingerprintFor*(inputSources: openArray[string];
     payload.writeU64Le(uint64(content.len))
     payload.add(content)
   blake3DomainDigest(payload, hdActionFingerprint)
+
+proc providerFreshnessCachePath(artifactPath: string): string =
+  artifactPath & ".inputs"
+
+proc writeProviderFreshnessCacheRecord(artifactPath, modulePath: string;
+                                       artifact: ProviderCompileArtifact) =
+  let record = ProviderFreshnessCacheRecord(
+    modulePath: normalizedStampPath(modulePath),
+    outputBinaryPath: normalizedStampPath(artifact.outputBinaryPath),
+    sourceStamps: fileStamps(artifact.inputSources),
+    outputBinaryStamp: fileStamp(artifact.outputBinaryPath),
+    interfaceFingerprint: artifact.interfaceFingerprint,
+    providerFingerprint: artifact.providerFingerprint,
+    outputBinaryFingerprint: artifact.outputBinaryFingerprint)
+  try:
+    writeFile(providerFreshnessCachePath(artifactPath),
+      toByteString(encodeProviderFreshnessCacheRecord(record)))
+  except CatchableError:
+    discard
+
+proc readProviderFreshnessCacheRecord(path: string):
+    Option[ProviderFreshnessCacheRecord] =
+  if not fileExists(path):
+    return none(ProviderFreshnessCacheRecord)
+  try:
+    return some(decodeProviderFreshnessCacheRecord(fromByteString(readFile(path))))
+  except CatchableError:
+    return none(ProviderFreshnessCacheRecord)
+
+proc providerFreshnessRecordMatches(record: ProviderFreshnessCacheRecord;
+                                    modulePath, outputBinaryPath: string;
+                                    inputSources: openArray[string];
+                                    interfaceFingerprint,
+                                    providerFingerprint,
+                                    outputBinaryFingerprint: ContentDigest): bool =
+  (modulePath.len == 0 or record.modulePath == normalizedStampPath(modulePath)) and
+    record.outputBinaryPath == normalizedStampPath(outputBinaryPath) and
+    record.interfaceFingerprint == interfaceFingerprint and
+    record.providerFingerprint == providerFingerprint and
+    record.outputBinaryFingerprint == outputBinaryFingerprint and
+    record.sourceStamps == fileStamps(inputSources) and
+    record.outputBinaryStamp == fileStamp(outputBinaryPath)
+
+proc cachedProviderFreshnessByMetadata(artifactPath, modulePath,
+                                       outputBinaryPath: string;
+                                       inputSources: openArray[string];
+                                       cached: ProviderCompileArtifact):
+    bool =
+  let record = readProviderFreshnessCacheRecord(
+    providerFreshnessCachePath(artifactPath))
+  if record.isNone:
+    return false
+  providerFreshnessRecordMatches(record.get(), modulePath, outputBinaryPath,
+    inputSources, cached.interfaceFingerprint, cached.providerFingerprint,
+    cached.outputBinaryFingerprint)
 
 proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
   # On Windows, the Nim compiler emits executables with a .exe suffix even
@@ -1180,11 +1466,19 @@ proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
     return false
   try:
     let cached = readProviderCompileArtifact(artifactPath)
-    cached.providerFingerprint == providerFingerprint and
-      cached.interfaceFingerprint == interfaceFingerprint and
-      cached.outputBinaryPath == normalizedOutputPath and
-      cached.outputBinaryFingerprint == casDigest(toBytes(readFile(
-          normalizedOutputPath)))
+    if cached.providerFingerprint != providerFingerprint:
+      return false
+    if cached.interfaceFingerprint != interfaceFingerprint:
+      return false
+    if cached.outputBinaryPath != normalizedOutputPath:
+      return false
+    if cachedProviderFreshnessByMetadata(artifactPath, "", normalizedOutputPath,
+        cached.inputSources, cached):
+      return true
+    if cached.outputBinaryFingerprint != casDigest(toBytes(readFile(
+        normalizedOutputPath))):
+      return false
+    return true
   except CatchableError:
     false
 
@@ -1196,19 +1490,23 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
   if not (fileExists(artifactPath) and fileExists(normalizedOutputPath)):
     return none(ProviderCompileArtifact)
   try:
-    let sources = discoverNimSources(modulePath)
-    let providerFingerprint = providerFingerprintFor(sources,
-      interfaceFingerprint)
     let cached = readProviderCompileArtifact(artifactPath)
     if cached.interfaceFingerprint != interfaceFingerprint:
       return none(ProviderCompileArtifact)
-    if cached.providerFingerprint != providerFingerprint:
-      return none(ProviderCompileArtifact)
     if cached.outputBinaryPath != normalizedOutputPath:
+      return none(ProviderCompileArtifact)
+    let sources = discoverNimSources(modulePath)
+    if cachedProviderFreshnessByMetadata(artifactPath, modulePath,
+        normalizedOutputPath, sources, cached):
+      return some(cached)
+    let providerFingerprint = providerFingerprintFor(sources,
+      interfaceFingerprint)
+    if cached.providerFingerprint != providerFingerprint:
       return none(ProviderCompileArtifact)
     if cached.outputBinaryFingerprint != casDigest(toBytes(readFile(
         normalizedOutputPath))):
       return none(ProviderCompileArtifact)
+    writeProviderFreshnessCacheRecord(artifactPath, modulePath, cached)
     return some(cached)
   except CatchableError:
     return none(ProviderCompileArtifact)
@@ -1240,3 +1538,4 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     executionResult: execution)
   if artifactPath.len > 0:
     writeProviderCompileArtifact(artifactPath, result)
+    writeProviderFreshnessCacheRecord(artifactPath, modulePath, result)

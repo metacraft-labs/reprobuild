@@ -25,7 +25,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet]\n       " &
           programName &
       " watch [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " &
           programName &
@@ -314,8 +314,11 @@ proc cmakeRegenerationMetadataForModule(modulePath: string):
     not result.suppressed and
     values.metadataValue("cmake_regeneration", "enabled") != "disabled"
 
-proc cmakeRegenerationInputs(meta: CmakeRegenerationMetadata): seq[string] =
+proc cmakeRegenerationInputs(meta: CmakeRegenerationMetadata;
+                             publicCliPath: string): seq[string] =
   result.addUniquePath(meta.metadataFile)
+  if publicCliPath.len > 0 and fileExists(publicCliPath):
+    result.addUniquePath(publicCliPath)
   if meta.cmakeCommand.isAbsolute and fileExists(meta.cmakeCommand):
     result.addUniquePath(meta.cmakeCommand)
   let checkPath = meta.materializeCmakePath(meta.checkFile)
@@ -350,10 +353,12 @@ proc addCmakeFingerprintField(payload: var string; value: string) =
   payload.add(value)
   payload.add("\n")
 
-proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata):
+proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata;
+                                  publicCliPath: string):
     ContentDigest =
   var payload = ""
   payload.addCmakeFingerprintField("reprobuild.cmake.regeneration.v1")
+  payload.addCmakeFingerprintField(publicCliPath)
   payload.addCmakeFingerprintField(meta.cmakeCommand)
   payload.addCmakeFingerprintField(meta.sourceDir)
   payload.addCmakeFingerprintField(meta.binaryDir)
@@ -381,11 +386,11 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     "--metadata", meta.metadataFile
   ],
     cwd = meta.binaryDir,
-    inputs = cmakeRegenerationInputs(meta),
+    inputs = cmakeRegenerationInputs(meta, publicCliPath),
     outputs = cmakeRegenerationOutputs(meta),
     commandStatsId = "repro cmake regeneration edge",
     cacheable = not hasGlobVerification,
-    weakFingerprint = cmakeRegenerationFingerprint(meta),
+    weakFingerprint = cmakeRegenerationFingerprint(meta, publicCliPath),
     dependencyPolicy = declaredOnlyPolicy(),
     env = env)
 
@@ -934,6 +939,310 @@ proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
               " and " & node.payload)
         result = node.payload
 
+const
+  LoweredGraphCacheMagic = "RBLG"
+  LoweredGraphCacheVersion = 1'u16
+
+type
+  LoweredGraphCacheRecord = object
+    modulePath: string
+    projectRoot: string
+    selectedActionId: string
+    pathEnv: string
+    actions: seq[BuildAction]
+    pools: seq[BuildPool]
+
+proc readByteValue(bytes: openArray[byte]; pos: var int): byte =
+  if pos >= bytes.len:
+    raiseEnvelopeError(eeMalformed, "truncated byte")
+  result = bytes[pos]
+  inc pos
+
+proc writeDigestPayload(outp: var seq[byte]; digest: ContentDigest) =
+  outp.add(byte(ord(digest.algorithm)))
+  outp.add(byte(ord(digest.domain)))
+  outp.add(digest.bytes)
+
+proc readDigestPayload(bytes: openArray[byte]; pos: var int): ContentDigest =
+  let algorithm = readByteValue(bytes, pos)
+  let domain = readByteValue(bytes, pos)
+  if algorithm > byte(ord(haXxh3_64)):
+    raiseEnvelopeError(eeMalformed, "invalid digest algorithm")
+  if domain > byte(ord(hdMetadataEnvelope)):
+    raiseEnvelopeError(eeMalformed, "invalid digest domain")
+  if pos + 32 > bytes.len:
+    raiseEnvelopeError(eeMalformed, "truncated digest bytes")
+  result.algorithm = HashAlgorithm(algorithm)
+  result.domain = HashDomain(domain)
+  for i in 0 ..< 32:
+    result.bytes[i] = bytes[pos + i]
+  pos += 32
+
+proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
+  outp.writeU32Le(uint32(values.len))
+  for value in values:
+    outp.writeString(value)
+
+proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
+  let count = int(readU32Le(bytes, pos))
+  result = newSeq[string](count)
+  for i in 0 ..< count:
+    result[i] = readString(bytes, pos)
+
+proc writeExpectedDependencyFile(outp: var seq[byte];
+                                 value: ExpectedDependencyFile) =
+  outp.writeString(value.logicalName)
+  outp.writeString(value.path)
+  outp.add(if value.required: 1'u8 else: 0'u8)
+
+proc readExpectedDependencyFile(bytes: openArray[byte]; pos: var int):
+    ExpectedDependencyFile =
+  result.logicalName = readString(bytes, pos)
+  result.path = readString(bytes, pos)
+  result.required = readByteValue(bytes, pos) != 0
+
+proc writeProcessSpec(outp: var seq[byte]; process: ProcessSpec) =
+  outp.add(byte(ord(process.kind)))
+  outp.writeString(process.executable.value)
+  outp.writeStringSeq(process.args)
+  outp.writeU32Le(uint32(process.env.len))
+  for item in process.env:
+    outp.writeString(item.name)
+    outp.writeString(item.value)
+  outp.writeString(process.cwd.value)
+  outp.add(byte(ord(process.stdinPolicy)))
+  outp.add(byte(ord(process.stdoutPolicy)))
+  outp.add(byte(ord(process.stderrPolicy)))
+
+proc readProcessSpec(bytes: openArray[byte]; pos: var int): ProcessSpec =
+  let kind = readByteValue(bytes, pos)
+  if kind > byte(ord(ckShell)):
+    raiseEnvelopeError(eeMalformed, "invalid process kind")
+  result.kind = CommandKind(kind)
+  result.executable = NormalizedPath(kind: npRelative, value: readString(bytes, pos))
+  result.args = readStringSeq(bytes, pos)
+  let envCount = int(readU32Le(bytes, pos))
+  result.env = newSeq[EnvVar](envCount)
+  for i in 0 ..< envCount:
+    result.env[i].name = readString(bytes, pos)
+    result.env[i].value = readString(bytes, pos)
+  result.cwd = NormalizedPath(kind: npRelative, value: readString(bytes, pos))
+  let stdinPolicy = readByteValue(bytes, pos)
+  let stdoutPolicy = readByteValue(bytes, pos)
+  let stderrPolicy = readByteValue(bytes, pos)
+  if stdinPolicy > byte(ord(spCapture)) or stdoutPolicy > byte(ord(spCapture)) or
+      stderrPolicy > byte(ord(spCapture)):
+    raiseEnvelopeError(eeMalformed, "invalid stdio policy")
+  result.stdinPolicy = StdioPolicy(stdinPolicy)
+  result.stdoutPolicy = StdioPolicy(stdoutPolicy)
+  result.stderrPolicy = StdioPolicy(stderrPolicy)
+
+proc writeDependencyPolicy(outp: var seq[byte];
+                           policy: DependencyGatheringPolicy) =
+  outp.add(byte(ord(policy.kind)))
+  outp.add(byte(ord(policy.completeness)))
+  outp.writeU32Le(uint32(policy.recognizedReports.len))
+  for report in policy.recognizedReports:
+    outp.writeString($report.formatName)
+    outp.writeU32Le(uint32(report.outputs.len))
+    for output in report.outputs:
+      outp.writeExpectedDependencyFile(output)
+    outp.add(byte(ord(report.completeness)))
+  outp.writeU32Le(uint32(policy.postBuildConverters.len))
+  for converterSpec in policy.postBuildConverters:
+    outp.writeProcessSpec(converterSpec.converterProcess)
+    outp.writeU32Le(uint32(converterSpec.inputs.len))
+    for input in converterSpec.inputs:
+      outp.writeExpectedDependencyFile(input)
+    outp.writeU32Le(uint32(converterSpec.outputs.len))
+    for output in converterSpec.outputs:
+      outp.writeExpectedDependencyFile(output)
+    outp.add(byte(ord(converterSpec.outputKind)))
+    outp.writeString($converterSpec.outputFormatName)
+    outp.add(byte(ord(converterSpec.completeness)))
+
+proc readCompleteness(bytes: openArray[byte]; pos: var int):
+    DependencyEvidenceCompleteness =
+  let value = readByteValue(bytes, pos)
+  if value > byte(ord(decDiagnosticOnly)):
+    raiseEnvelopeError(eeMalformed, "invalid dependency completeness")
+  DependencyEvidenceCompleteness(value)
+
+proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
+    DependencyGatheringPolicy =
+  let kind = readByteValue(bytes, pos)
+  if kind > byte(ord(dgNoRuntimeDependencies)):
+    raiseEnvelopeError(eeMalformed, "invalid dependency gathering kind")
+  result.kind = DependencyGatheringKind(kind)
+  result.completeness = readCompleteness(bytes, pos)
+  let reportCount = int(readU32Le(bytes, pos))
+  result.recognizedReports = newSeq[RecognizedDependencyReportSpec](reportCount)
+  for i in 0 ..< reportCount:
+    result.recognizedReports[i].formatName =
+      DependencyFormatName(readString(bytes, pos))
+    let outputCount = int(readU32Le(bytes, pos))
+    result.recognizedReports[i].outputs = newSeq[ExpectedDependencyFile](outputCount)
+    for j in 0 ..< outputCount:
+      result.recognizedReports[i].outputs[j] =
+        readExpectedDependencyFile(bytes, pos)
+    result.recognizedReports[i].completeness = readCompleteness(bytes, pos)
+  let converterCount = int(readU32Le(bytes, pos))
+  result.postBuildConverters =
+    newSeq[PostBuildDependencyConverterSpec](converterCount)
+  for i in 0 ..< converterCount:
+    result.postBuildConverters[i].converterProcess = readProcessSpec(bytes, pos)
+    let inputCount = int(readU32Le(bytes, pos))
+    result.postBuildConverters[i].inputs =
+      newSeq[ExpectedDependencyFile](inputCount)
+    for j in 0 ..< inputCount:
+      result.postBuildConverters[i].inputs[j] =
+        readExpectedDependencyFile(bytes, pos)
+    let outputCount = int(readU32Le(bytes, pos))
+    result.postBuildConverters[i].outputs =
+      newSeq[ExpectedDependencyFile](outputCount)
+    for j in 0 ..< outputCount:
+      result.postBuildConverters[i].outputs[j] =
+        readExpectedDependencyFile(bytes, pos)
+    let outputKind = readByteValue(bytes, pos)
+    if outputKind > byte(ord(dcoRecognizedFormat)):
+      raiseEnvelopeError(eeMalformed, "invalid converter output kind")
+    result.postBuildConverters[i].outputKind =
+      DependencyConverterOutputKind(outputKind)
+    result.postBuildConverters[i].outputFormatName =
+      DependencyFormatName(readString(bytes, pos))
+    result.postBuildConverters[i].completeness = readCompleteness(bytes, pos)
+
+proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
+  outp.add(byte(ord(action.kind)))
+  outp.writeString(action.id)
+  outp.writeStringSeq(action.deps)
+  outp.writeStringSeq(action.inputs)
+  outp.writeStringSeq(action.outputs)
+  outp.writeStringSeq(action.argv)
+  outp.writeString(action.cwd)
+  outp.writeStringSeq(action.env)
+  outp.writeString(action.pool)
+  outp.writeU32Le(action.poolUnits)
+  outp.writeU32Le(action.cpuMilli)
+  outp.writeU64Le(action.memoryBytes)
+  outp.writeString(action.commandStatsId)
+  outp.add(if action.cacheable: 1'u8 else: 0'u8)
+  outp.writeDigestPayload(action.weakFingerprint)
+  outp.add(byte(ord(action.actionCachePolicy)))
+  outp.writeString(action.depfile)
+  outp.writeString(action.dynamicDepsFile)
+  outp.writeString(action.monitorDepfile)
+  outp.writeDependencyPolicy(action.dependencyPolicy)
+  outp.writeString(action.builtinText)
+  outp.writeStringSeq(action.builtinEntries)
+
+proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
+  let kind = readByteValue(bytes, pos)
+  if kind > byte(ord(bakPreserveTree)):
+    raiseEnvelopeError(eeMalformed, "invalid build action kind")
+  result.kind = BuildActionKind(kind)
+  result.id = readString(bytes, pos)
+  result.deps = readStringSeq(bytes, pos)
+  result.inputs = readStringSeq(bytes, pos)
+  result.outputs = readStringSeq(bytes, pos)
+  result.argv = readStringSeq(bytes, pos)
+  result.cwd = readString(bytes, pos)
+  result.env = readStringSeq(bytes, pos)
+  result.pool = readString(bytes, pos)
+  result.poolUnits = readU32Le(bytes, pos)
+  result.cpuMilli = readU32Le(bytes, pos)
+  result.memoryBytes = readU64Le(bytes, pos)
+  result.commandStatsId = readString(bytes, pos)
+  result.cacheable = readByteValue(bytes, pos) != 0
+  result.weakFingerprint = readDigestPayload(bytes, pos)
+  let policy = readByteValue(bytes, pos)
+  if policy > byte(ord(ffpHybrid)):
+    raiseEnvelopeError(eeMalformed, "invalid action cache policy")
+  result.actionCachePolicy = FileFingerprintPolicy(policy)
+  result.depfile = readString(bytes, pos)
+  result.dynamicDepsFile = readString(bytes, pos)
+  result.monitorDepfile = readString(bytes, pos)
+  result.dependencyPolicy = readDependencyPolicy(bytes, pos)
+  result.builtinText = readString(bytes, pos)
+  result.builtinEntries = readStringSeq(bytes, pos)
+
+proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
+  result.writeString(LoweredGraphCacheMagic)
+  result.writeU16Le(LoweredGraphCacheVersion)
+  result.writeString(record.modulePath)
+  result.writeString(record.projectRoot)
+  result.writeString(record.selectedActionId)
+  result.writeString(record.pathEnv)
+  result.writeU32Le(uint32(record.pools.len))
+  for pool in record.pools:
+    result.writeString(pool.name)
+    result.writeU32Le(pool.capacity)
+  result.writeU32Le(uint32(record.actions.len))
+  for action in record.actions:
+    result.writeBuildAction(action)
+
+proc decodeLoweredGraphCache(bytes: openArray[byte]): LoweredGraphCacheRecord =
+  var pos = 0
+  if readString(bytes, pos) != LoweredGraphCacheMagic:
+    raiseEnvelopeError(eeUnknownMagic, "unknown lowered graph cache magic")
+  let version = readU16Le(bytes, pos)
+  if version != LoweredGraphCacheVersion:
+    raiseEnvelopeError(eeUnsupportedVersion,
+      "unsupported lowered graph cache version")
+  result.modulePath = readString(bytes, pos)
+  result.projectRoot = readString(bytes, pos)
+  result.selectedActionId = readString(bytes, pos)
+  result.pathEnv = readString(bytes, pos)
+  let poolCount = int(readU32Le(bytes, pos))
+  result.pools = newSeq[BuildPool](poolCount)
+  for i in 0 ..< poolCount:
+    result.pools[i].name = readString(bytes, pos)
+    result.pools[i].capacity = readU32Le(bytes, pos)
+  let actionCount = int(readU32Le(bytes, pos))
+  result.actions = newSeq[BuildAction](actionCount)
+  for i in 0 ..< actionCount:
+    result.actions[i] = readBuildAction(bytes, pos)
+  if pos != bytes.len:
+    raiseEnvelopeError(eeMalformed, "trailing lowered graph cache bytes")
+
+proc loweredGraphCachePath(outDir, selectedActionId: string): string =
+  let label =
+    if selectedActionId.len > 0:
+      selectedActionId
+    else:
+      "__omitted_default__"
+  outDir / "lowered-graph-cache" /
+    (safePathSegment(label, "default") & "-" &
+      toHex(weakFingerprintFromText(label).bytes)[0 .. 15] & ".rbbg")
+
+proc readFreshLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
+                                pathEnv: string):
+    Option[tuple[actions: seq[BuildAction]; pools: seq[BuildPool]]] =
+  if not fileExists(path):
+    return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
+  try:
+    let record = decodeLoweredGraphCache(toBytes(readFile(path)))
+    if record.modulePath != modulePath or record.projectRoot != projectRoot or
+        record.selectedActionId != selectedActionId or record.pathEnv != pathEnv:
+      return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
+    return some((actions: record.actions, pools: record.pools))
+  except CatchableError:
+    return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
+
+proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
+                            pathEnv: string;
+                            lowered: tuple[actions: seq[BuildAction];
+                                           pools: seq[BuildPool]]) =
+  createDir(parentDir(path))
+  let record = LoweredGraphCacheRecord(
+    modulePath: modulePath,
+    projectRoot: projectRoot,
+    selectedActionId: selectedActionId,
+    pathEnv: pathEnv,
+    actions: lowered.actions,
+    pools: lowered.pools)
+  writeFile(path, fromBytes(encodeLoweredGraphCache(record)))
+
 proc evidenceJson(evidence: PathSetEvidence): JsonNode =
   %*{
     "declaredInputs": jsonStringSeq(evidence.declaredInputs),
@@ -1015,7 +1324,7 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
     "stats": statsJson(buildResult.stats)
   }
   createDir(parentDir(path))
-  writeFile(path, root.pretty())
+  writeFile(path, $root)
 
 proc hasFailedActions(buildResult: BuildRunResult): bool =
   for item in buildResult.results:
@@ -1263,6 +1572,22 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
   let cacheDir = outDir / "tool-identity-cache"
   let cacheIdentityPath = cacheDir / (key & ".rbtp")
   let cacheInspectionPath = cacheDir / (key & ".inspect.json")
+  let stableKeyPath = cacheDir / (mode.modeName & ".current-key")
+  if fileExists(stableIdentityPath) and fileExists(stableKeyPath) and
+      readFile(stableKeyPath).strip() == key:
+    try:
+      let identity = readPathOnlyBuildIdentity(stableIdentityPath)
+      if identity.interfaceFingerprint != artifact.interfaceFingerprint:
+        return
+      if not fileExists(stableInspectionPath):
+        if fileExists(cacheInspectionPath):
+          createDir(parentDir(stableInspectionPath))
+          copyFile(cacheInspectionPath, stableInspectionPath)
+        else:
+          writeInspectionJson(stableInspectionPath, identity)
+      return (hit: true, identity: identity)
+    except CatchableError:
+      discard
   if not fileExists(cacheIdentityPath):
     return
   try:
@@ -1275,6 +1600,8 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
       copyFile(cacheInspectionPath, stableInspectionPath)
     else:
       writeInspectionJson(stableInspectionPath, identity)
+    createDir(cacheDir)
+    writeFile(stableKeyPath, key & "\n")
     return (hit: true, identity: identity)
   except CatchableError:
     return (hit: false, identity: PathOnlyBuildIdentity())
@@ -1303,6 +1630,9 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   writePathOnlyBuildIdentity(paths.identityPath, identity)
   writeInspectionJson(paths.inspectionPath, identity)
   writeToolIdentityCache(outDir, mode, artifact, identity)
+  createDir(outDir / "tool-identity-cache")
+  writeFile(outDir / "tool-identity-cache" / (mode.modeName & ".current-key"),
+    toolIdentityCacheKey(artifact, mode) & "\n")
   (identity: identity, identityPath: paths.identityPath,
     inspectionPath: paths.inspectionPath)
 
@@ -1357,6 +1687,15 @@ type
     bsmNone
     bsmText
 
+  BuildReportMode = enum
+    brmFull
+    brmNone
+
+  BuildLogMode = enum
+    blmActions
+    blmSummary
+    blmQuiet
+
   BuildProgressRenderer = object
     enabled: bool
     lastLen: int
@@ -1401,6 +1740,40 @@ proc configuredBuildStatsMode(): BuildStatsMode =
   if configured.len == 0:
     return bsmNone
   parseBuildStatsMode(configured)
+
+proc parseBuildReportMode(value: string): BuildReportMode =
+  case value.toLowerAscii()
+  of "1", "true", "yes", "on", "full":
+    brmFull
+  of "0", "false", "no", "off", "none":
+    brmNone
+  else:
+    raise newException(ValueError,
+      "unsupported --report=" & value & " (expected full or none)")
+
+proc configuredBuildReportMode(): BuildReportMode =
+  let configured = getEnv("REPROBUILD_REPORT", "")
+  if configured.len == 0:
+    return brmFull
+  parseBuildReportMode(configured)
+
+proc parseBuildLogMode(value: string): BuildLogMode =
+  case value.toLowerAscii()
+  of "actions", "verbose":
+    blmActions
+  of "summary", "normal":
+    blmSummary
+  of "quiet", "none", "off":
+    blmQuiet
+  else:
+    raise newException(ValueError,
+      "unsupported --log=" & value & " (expected actions, summary, or quiet)")
+
+proc configuredBuildLogMode(): BuildLogMode =
+  let configured = getEnv("REPROBUILD_LOG", "")
+  if configured.len == 0:
+    return blmActions
+  parseBuildLogMode(configured)
 
 proc newBuildProgressRenderer(mode: BuildProgressMode): BuildProgressRenderer =
   BuildProgressRenderer(
@@ -1519,12 +1892,30 @@ proc renderBuildStats*(stats: BuildStats): string =
       align(formatFloat(avgUs, ffDecimal, 1), 8) & "        " &
       formatFloat(totalMs, ffDecimal, 1) & "\n")
 
+proc cliPathExists(path: string): bool =
+  fileExists(path) or dirExists(path)
+
+proc actionOutputsPresent(action: BuildAction): bool =
+  if action.outputs.len == 0:
+    return false
+  for output in action.outputs:
+    let path =
+      if output.isAbsolute or action.cwd.len == 0:
+        output
+      else:
+        action.cwd / output
+    if not path.cliPathExists():
+      return false
+  true
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
                         workRoot = "";
                         progressMode = bpmAuto;
-                        statsMode = bsmNone):
+                        statsMode = bsmNone;
+                        reportMode = brmFull;
+                        logMode = blmActions):
     BuildCommandOutcome =
   let statsEnabled = statsMode == bsmText
   var buildStats: BuildStats
@@ -1539,56 +1930,185 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   result.modulePath = modulePath
   result.projectRoot = projectRootForModule(modulePath)
   result.outDir = outDir
-  var runQuotaDaemonReachable: Option[bool]
-  proc probeRunQuotaDaemon(): bool =
-    if runQuotaDaemonReachable.isNone:
-      let runQuotaProbeStart = statStart(statsEnabled)
-      runQuotaDaemonReachable = some(isRunQuotaDaemonReachable())
-      finishStat(buildStats, statsEnabled, "repro runquota probe",
-        runQuotaProbeStart)
-    runQuotaDaemonReachable.get()
+  let bypassRunQuota = false
+  let fallbackToRunQuotaBypass = mode in {tpmPathOnly, tpmScoop}
+  var warnedRunQuotaBypass = false
 
-  var bypassRunQuota = false
-  if mode in {tpmPathOnly, tpmScoop} and not probeRunQuotaDaemon():
-    bypassRunQuota = true
+  template logSummary(line: string) =
+    if logMode != blmQuiet:
+      echo line
+
+  template logAction(line: string) =
+    if logMode == blmActions:
+      echo line
+
+  proc usesRunQuotaBypass(runResult: BuildRunResult): bool =
+    for item in runResult.results:
+      if item.launched and item.runQuotaBackend == "runquota-bypass":
+        return true
+
+  proc warnRunQuotaBypassIfUsed(runResult: BuildRunResult) =
+    if warnedRunQuotaBypass or not fallbackToRunQuotaBypass:
+      return
+    if not usesRunQuotaBypass(runResult):
+      return
+    warnedRunQuotaBypass = true
+    logSummary("repro build: WARNING runquotad is not reachable; using " &
+      "RunQuota bypass for tool-provisioning=" & mode.modeName &
+      " (no quotas/leases enforced). Start `runquotad` and rerun to " &
+      "use the real lease coordinator.")
+
+  proc runLoweredGraphBuild(lowered: tuple[actions: seq[BuildAction];
+                                          pools: seq[BuildPool]];
+                            selectedActionId: string): int =
+    if parsedTarget.fragmentKind == tfkActionSelection:
+      logSummary("selectedTarget: " & parsedTarget.selectedActionId)
+    elif selectDefaultAction and selectedActionId.len > 0:
+      logSummary("selectedTarget: " & selectedActionId)
+    logSummary("scheduler: actions=" & $lowered.actions.len)
+    if lowered.actions.len == 0:
+      return 0
+    var progressRenderer = newBuildProgressRenderer(progressMode)
+    var engineConfig = BuildEngineConfig(
+      cacheRoot: outDir / "build-engine-cache",
+      runQuotaCliPath: publicCliPath,
+      maxParallelism: buildMaxParallelism(),
+      stdoutLimit: 1024 * 1024,
+      stderrLimit: 1024 * 1024,
+      rebuildMissingOutputsOnCacheHit: true,
+      bypassRunQuota: bypassRunQuota,
+      fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
+      suppressTrace: reportMode == brmNone,
+      skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
+    engineConfig.statsEnabled = statsEnabled
+    if progressRenderer.enabled:
+      engineConfig.progressCallback = proc(event: BuildProgressEvent) =
+        progressRenderer.renderProgress(event)
+    var buildResult: BuildRunResult
+    let engineStart = statStart(statsEnabled)
+    try:
+      buildResult = runBuild(graph(lowered.actions, lowered.pools), engineConfig)
+    finally:
+      progressRenderer.finishProgress()
+    finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
+    buildStats.mergeStats(buildResult.stats)
+    warnRunQuotaBypassIfUsed(buildResult)
+    finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
+    buildResult.stats = buildStats
+    let actionLogStart = statStart(statsEnabled)
+    for item in buildResult.results:
+      logAction("action: " & item.id & " status=" & $item.status &
+        " launched=" & $item.launched & " cache=" & $item.cacheDecision &
+        " runquota=" & item.runQuotaBackend &
+        " socket=" & (if item.runQuotaSocket.len >
+            0: item.runQuotaSocket else: "default") &
+        " lease=" & $item.leaseId &
+        " evidence=depfile:" & $item.evidence.depfileInputs.len)
+    finishStat(buildStats, statsEnabled, "repro action log render",
+      actionLogStart)
+    buildResult.stats = buildStats
+    if statsEnabled:
+      let statsRenderStart = statStart(statsEnabled)
+      stderr.write(renderBuildStats(buildResult.stats))
+      stderr.flushFile()
+      finishStat(buildStats, statsEnabled, "repro stats render",
+        statsRenderStart)
+    if buildResult.hasFailedActions():
+      1
+    else:
+      0
 
   var cmakeRegenerationResult: BuildRunResult
   let cmakeMeta = cmakeRegenerationMetadataForModule(modulePath)
   cmakeMeta.applyCmakeProviderEnvironment()
+  var cmakeRegenerated = false
   if cmakeMeta.enabled:
-    echo "cmakeRegeneration: started"
+    logSummary("cmakeRegeneration: started")
     let cmakeRegenerationStart = statStart(statsEnabled)
     let cmakeRegenerationAction =
       cmakeRegenerationBuildAction(cmakeMeta, publicCliPath)
-    var cmakeRegenerationConfig = BuildEngineConfig(
-      cacheRoot: outDir / "build-engine-cache",
-      runQuotaCliPath: publicCliPath,
-      monitorCliPath: siblingFsSnoopPath(publicCliPath),
-      maxParallelism: 1'u32,
-      stdoutLimit: 1024 * 1024,
-      stderrLimit: 1024 * 1024,
-      rebuildMissingOutputsOnCacheHit: true,
-      bypassRunQuota: bypassRunQuota)
-    cmakeRegenerationConfig.statsEnabled = statsEnabled
-    cmakeRegenerationResult = runBuild(graph([cmakeRegenerationAction]),
-      cmakeRegenerationConfig)
-    buildStats.mergeStats(cmakeRegenerationResult.stats)
+    let cmakeCacheRoot = outDir / "cmake-regeneration-cache"
+    var cmakeFastHit = false
+    if reportMode == brmNone and logMode == blmQuiet:
+      var cmakeCache = openActionCache(cmakeCacheRoot / "action-cache")
+      defer:
+        cmakeCache.flushHotIndex()
+      let outputStatStart = statStart(statsEnabled)
+      let outputsPresent = cmakeRegenerationAction.actionOutputsPresent()
+      finishStat(buildStats, statsEnabled, "repro output stat", outputStatStart)
+      if outputsPresent:
+        let lookupStart = statStart(statsEnabled)
+        let hot = cmakeCache.lookupHotMetadataRecord(
+          cmakeRegenerationAction.weakFingerprint,
+          cmakeRegenerationAction.actionCachePolicy)
+        if hot.isSome and cmakeCache.hotMetadataInputsUnchanged():
+          cmakeFastHit = true
+          cmakeRegenerationResult.results.add(ActionResult(
+            id: cmakeRegenerationAction.id,
+            status: asCacheHit,
+            launched: false,
+            cacheDecision: cdHit,
+            dependencyPolicyKind: cmakeRegenerationAction.dependencyPolicy.kind))
+        finishStat(buildStats, statsEnabled, "repro cache lookup", lookupStart)
+    if not cmakeFastHit:
+      var cmakeRegenerationConfig = BuildEngineConfig(
+        cacheRoot: cmakeCacheRoot,
+        runQuotaCliPath: publicCliPath,
+        monitorCliPath: siblingFsSnoopPath(publicCliPath),
+        maxParallelism: 1'u32,
+        stdoutLimit: 1024 * 1024,
+        stderrLimit: 1024 * 1024,
+        rebuildMissingOutputsOnCacheHit: true,
+        bypassRunQuota: bypassRunQuota,
+        fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
+        suppressTrace: reportMode == brmNone,
+        skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
+      cmakeRegenerationConfig.statsEnabled = statsEnabled
+      cmakeRegenerationResult = runBuild(graph([cmakeRegenerationAction]),
+        cmakeRegenerationConfig)
+      buildStats.mergeStats(cmakeRegenerationResult.stats)
     finishStat(buildStats, statsEnabled, "repro cmake regeneration",
       cmakeRegenerationStart)
+    warnRunQuotaBypassIfUsed(cmakeRegenerationResult)
     for item in cmakeRegenerationResult.results:
-      echo "cmakeRegenerationAction: " & item.id & " status=" &
+      logAction("cmakeRegenerationAction: " & item.id & " status=" &
         $item.status & " launched=" & $item.launched & " cache=" &
-        $item.cacheDecision
-      if item.stdout.len > 0:
+        $item.cacheDecision)
+      if logMode != blmQuiet and item.stdout.len > 0:
         stdout.write(item.stdout)
         stdout.flushFile()
-      if item.stderr.len > 0:
+      if logMode != blmQuiet and item.stderr.len > 0:
         stderr.write(item.stderr)
         stderr.flushFile()
     if cmakeRegenerationResult.hasFailedActions():
       raise newException(OSError,
         "CMake regeneration edge failed: " &
           providerCompileFailure(cmakeRegenerationResult))
+    for item in cmakeRegenerationResult.results:
+      if item.launched and item.status == asSucceeded:
+        cmakeRegenerated = true
+
+  let pathEnv = getEnv("PATH")
+  let cacheSelectedActionId =
+    if parsedTarget.selectedActionId.len > 0:
+      parsedTarget.selectedActionId
+    elif selectDefaultAction and logMode == blmQuiet:
+      ""
+    else:
+      "\0"
+  if cmakeMeta.enabled and not cmakeRegenerated and mode == tpmPathOnly and
+      reportMode == brmNone and cacheSelectedActionId != "\0":
+    let loweredCacheStart = statStart(statsEnabled)
+    let loweredCache = readFreshLoweredGraphCache(
+      loweredGraphCachePath(outDir, cacheSelectedActionId), modulePath,
+      result.projectRoot, cacheSelectedActionId, pathEnv)
+    finishStat(buildStats, statsEnabled, "repro lowered graph cache read",
+      loweredCacheStart)
+    if loweredCache.isSome:
+      logSummary("loweredGraphCache: hit")
+      result.exitCode = runLoweredGraphBuild(loweredCache.get(),
+        cacheSelectedActionId)
+      return
 
   let interfacePath = outDir / "project-interface.rbsz"
   let stubPath = outDir / "project-interface.nim"
@@ -1611,14 +2131,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
-    echo "repro build: tool provisioning active (tool-provisioning=" &
-      mode.modeName & ")"
+    logSummary("repro build: tool provisioning active (tool-provisioning=" &
+      mode.modeName & ")")
     if mode == tpmPathOnly:
-      echo "repro build: provisioning-disabled mode active (tool-provisioning=path)"
-    echo "project: " & artifact.projectInterface.projectName
-    echo "interface: " & interfacePath
-    echo "toolIdentity: " & resolved.identityPath
-    echo "inspection: " & resolved.inspectionPath
+      logSummary("repro build: provisioning-disabled mode active (tool-provisioning=path)")
+    logSummary("project: " & artifact.projectInterface.projectName)
+    logSummary("interface: " & interfacePath)
+    logSummary("toolIdentity: " & resolved.identityPath)
+    logSummary("inspection: " & resolved.inspectionPath)
     let portability =
       if mode == tpmNix:
         "portable"
@@ -1643,20 +2163,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "local-only"
       else:
         "local-only"
-    echo "cachePortability: " & portability
-    echo "runQuotaSocket: " & runQuotaSocketDiagnostic()
+    logSummary("cachePortability: " & portability)
+    logSummary("runQuotaSocket: " & runQuotaSocketDiagnostic())
     if not moduleHasBuildBlock(modulePath):
       result.exitCode = 0
       return
     let providerBinaryPath = outDir / "provider" / "project-provider"
     let providerArtifactPath = outDir / "provider-compile.rbsz"
-    if mode in {tpmPathOnly, tpmScoop} and not probeRunQuotaDaemon():
-      bypassRunQuota = true
-      echo "repro build: WARNING runquotad is not reachable; using " &
-        "RunQuota bypass for tool-provisioning=" & mode.modeName &
-        " (no quotas/leases enforced). Start `runquotad` and rerun to " &
-        "use the real lease coordinator."
-    echo "providerCompile: started"
+    logSummary("providerCompile: started")
     let providerCompileStart = statStart(statsEnabled)
     var providerCompileResult: BuildRunResult
     var provider: ProviderCompileArtifact
@@ -1678,14 +2192,19 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         stdoutLimit: 1024 * 1024,
         stderrLimit: 1024 * 1024,
         rebuildMissingOutputsOnCacheHit: true,
-        bypassRunQuota: bypassRunQuota)
+        bypassRunQuota: bypassRunQuota,
+        fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
+        suppressTrace: reportMode == brmNone,
+        skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
       providerCompileConfig.statsEnabled = statsEnabled
       providerCompileResult = runBuild(graph([providerCompileAction]),
         providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
+      warnRunQuotaBypassIfUsed(providerCompileResult)
       for item in providerCompileResult.results:
-        echo "providerCompileAction: " & item.id & " status=" & $item.status &
-          " launched=" & $item.launched & " cache=" & $item.cacheDecision
+        logAction("providerCompileAction: " & item.id & " status=" &
+          $item.status & " launched=" & $item.launched & " cache=" &
+          $item.cacheDecision)
       if providerCompileResult.hasFailedActions():
         raise newException(OSError, providerCompileFailure(providerCompileResult))
       if not fileExists(providerArtifactPath):
@@ -1701,9 +2220,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro provider compile",
       providerCompileStart)
     let providerArtifactId = digestHex(provider.providerFingerprint)
-    echo "providerBinary: " & provider.outputBinaryPath
-    echo "providerCompileArtifact: " & providerArtifactPath
-    echo "providerArtifact: " & providerArtifactId
+    logSummary("providerBinary: " & provider.outputBinaryPath)
+    logSummary("providerCompileArtifact: " & providerArtifactPath)
+    logSummary("providerArtifact: " & providerArtifactId)
 
     let projectRoot = result.projectRoot
     let providerGraphStart = statStart(statsEnabled)
@@ -1719,24 +2238,33 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       providerWorkingDir: projectRoot))
     finishStat(buildStats, statsEnabled, "repro provider graph refresh",
       providerGraphStart)
-    echo "providerGraphSnapshot: " & refresh.persistedSnapshotPath
-    echo "providerInvocations: " & $refresh.invoked.len
+    logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
+    logSummary("providerInvocations: " & $refresh.invoked.len)
 
     var selectedActionId = parsedTarget.selectedActionId
     if selectDefaultAction and selectedActionId.len == 0:
       selectedActionId = defaultBuildActionId(refresh.snapshot)
       if selectedActionId.len > 0:
-        echo "defaultTarget: " & selectedActionId
+        logSummary("defaultTarget: " & selectedActionId)
 
     let graphLowerStart = statStart(statsEnabled)
     let lowered = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
       selectedActionId)
     finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
+    if cmakeMeta.enabled and mode == tpmPathOnly and selectedActionId.len > 0:
+      let cacheWriteStart = statStart(statsEnabled)
+      writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
+        modulePath, projectRoot, selectedActionId, pathEnv, lowered)
+      if selectDefaultAction and parsedTarget.selectedActionId.len == 0:
+        writeLoweredGraphCache(loweredGraphCachePath(outDir, ""), modulePath,
+          projectRoot, "", pathEnv, lowered)
+      finishStat(buildStats, statsEnabled, "repro lowered graph cache write",
+        cacheWriteStart)
     if parsedTarget.fragmentKind == tfkActionSelection:
-      echo "selectedTarget: " & parsedTarget.selectedActionId
+      logSummary("selectedTarget: " & parsedTarget.selectedActionId)
     elif selectDefaultAction and selectedActionId.len > 0:
-      echo "selectedTarget: " & selectedActionId
-    echo "scheduler: actions=" & $lowered.actions.len
+      logSummary("selectedTarget: " & selectedActionId)
+    logSummary("scheduler: actions=" & $lowered.actions.len)
     if lowered.actions.len == 0:
       result.exitCode = 0
       return
@@ -1748,7 +2276,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
-      bypassRunQuota: bypassRunQuota)
+      bypassRunQuota: bypassRunQuota,
+      fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
+      suppressTrace: reportMode == brmNone,
+      skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
     engineConfig.statsEnabled = statsEnabled
     if progressRenderer.enabled:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
@@ -1761,24 +2292,37 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.finishProgress()
     finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
     buildStats.mergeStats(buildResult.stats)
+    warnRunQuotaBypassIfUsed(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
     let reportPath = outDir / "build-report.json"
-    writeBuildReport(reportPath, provider, refresh, cmakeRegenerationResult,
-      providerCompileResult, buildResult)
-    result.buildReportPath = reportPath
+    if reportMode == brmFull:
+      let reportStart = statStart(statsEnabled)
+      writeBuildReport(reportPath, provider, refresh, cmakeRegenerationResult,
+        providerCompileResult, buildResult)
+      finishStat(buildStats, statsEnabled, "repro report write", reportStart)
+      buildResult.stats = buildStats
+      result.buildReportPath = reportPath
+    let actionLogStart = statStart(statsEnabled)
     for item in buildResult.results:
-      echo "action: " & item.id & " status=" & $item.status &
+      logAction("action: " & item.id & " status=" & $item.status &
         " launched=" & $item.launched & " cache=" & $item.cacheDecision &
         " runquota=" & item.runQuotaBackend &
         " socket=" & (if item.runQuotaSocket.len >
             0: item.runQuotaSocket else: "default") &
         " lease=" & $item.leaseId &
-        " evidence=depfile:" & $item.evidence.depfileInputs.len
-    echo "buildReport: " & reportPath
+        " evidence=depfile:" & $item.evidence.depfileInputs.len)
+    if reportMode == brmFull:
+      logSummary("buildReport: " & reportPath)
+    finishStat(buildStats, statsEnabled, "repro action log render",
+      actionLogStart)
+    buildResult.stats = buildStats
     if statsEnabled:
+      let statsRenderStart = statStart(statsEnabled)
       stderr.write(renderBuildStats(buildResult.stats))
       stderr.flushFile()
+      finishStat(buildStats, statsEnabled, "repro stats render",
+        statsRenderStart)
     result.exitCode =
       if buildResult.hasFailedActions():
         1
@@ -2281,6 +2825,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var workRoot = ""
   var progressMode = configuredBuildProgressMode()
   var statsMode = configuredBuildStatsMode()
+  var reportMode = configuredBuildReportMode()
+  var logMode = configuredBuildLogMode()
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
@@ -2302,6 +2848,16 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       statsMode = parseBuildStatsMode(arg.split("=", maxsplit = 1)[1])
     elif arg == "--stats":
       statsMode = bsmText
+    elif arg.startsWith("--report="):
+      reportMode = parseBuildReportMode(arg.split("=", maxsplit = 1)[1])
+    elif arg == "--report":
+      raise newException(ValueError,
+        "--report requires an inline value, for example --report=full")
+    elif arg.startsWith("--log="):
+      logMode = parseBuildLogMode(arg.split("=", maxsplit = 1)[1])
+    elif arg == "--log":
+      raise newException(ValueError,
+        "--log requires an inline value, for example --log=summary")
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported build flag: " & arg)
     elif target.len == 0:
@@ -2317,7 +2873,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     selectDefaultAction = targetWasOmitted,
     workRoot = workRoot,
     progressMode = progressMode,
-    statsMode = statsMode).exitCode
+    statsMode = statsMode,
+    reportMode = reportMode,
+    logMode = logMode).exitCode
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:

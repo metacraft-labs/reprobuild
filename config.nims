@@ -87,12 +87,17 @@ proc nixPrefix(namePattern, header: string; dylibNames: openArray[string]): stri
           return prefix
   ""
 
-# Windows: no homebrew/nix prefix is available, so feed the C wrappers the
-# vendored blake3 / xxhash sources we already ship under references/mold/.
-# `blake3.nim` and `xxh3.nim` compile the vendored portable .c implementations
-# directly when defined(windows); we just need their headers on the include
-# path.
-when defined(windows):
+let useSystemHashLibs = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
+  ["1", "true", "yes", "on"]
+
+if not useSystemHashLibs:
+  switch("define", "reproVendoredHash")
+
+# Windows and the default local build use the vendored blake3 / xxhash sources
+# we already ship under references/mold/. `blake3.nim` and `xxh3.nim` compile
+# the portable .c implementations directly when `reproVendoredHash` is defined;
+# we just need their headers on the include path.
+if not useSystemHashLibs:
   let vendoredBlake3Inc = thisDir() / "references" / "mold" / "third-party" /
     "blake3" / "c"
   let vendoredXxhashInc = thisDir() / "references" / "mold" / "third-party" /

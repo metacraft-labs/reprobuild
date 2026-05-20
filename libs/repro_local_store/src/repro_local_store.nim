@@ -1,4 +1,4 @@
-import std/[os, tables, times]
+import std/[options, os, sets, tables, times]
 
 import repro_core
 import repro_hash
@@ -63,7 +63,17 @@ type
   ActionCache* = object
     root*: string
     recordsPath*: string
+    hotRoot: string
+    hotRecordsPath: string
+    hotIndexPath: string
+    loadedAllRecords: bool
+    hotIndexDirty: bool
     byWeak: Table[string, seq[ActionResultRecord]]
+    hotByWeak: Table[string, ActionResultRecord]
+    hotInputs: seq[FileFingerprint]
+
+  FileMetadataCache* = object
+    entries: Table[string, FileMetadata]
 
   ActionCacheLookupStatus* = enum
     aclMissNoRecord
@@ -77,10 +87,20 @@ type
     record*: ActionResultRecord
     message*: string
 
+  HotIndexDecode = object
+    records: Table[string, ActionResultRecord]
+    inputs: seq[FileFingerprint]
+
 const
   ActionRecordMagic = "RBAR"
   ActionRecordVersion = 2'u16
+  ActionHotRecordMagic = "RBAH"
+  ActionHotRecordVersion = 1'u16
+  ActionHotIndexMagic = "RBHI"
+  ActionHotIndexVersion = 1'u16
   RecordTailMask = 0xffff_ffff'u64
+  ActionCacheCompactThreshold = 256 * 1024
+  MaxRecordsPerWeakFingerprint = 2
   AllFilePermissions {.used.} = {fpUserExec, fpUserWrite, fpUserRead,
     fpGroupExec, fpGroupWrite, fpGroupRead,
     fpOthersExec, fpOthersWrite, fpOthersRead}
@@ -209,6 +229,10 @@ proc readFingerprint(data: openArray[byte]; pos: var int): FileFingerprint =
 proc digestKey(digest: ContentDigest): string =
   $ord(digest.algorithm) & ":" & $ord(digest.domain) & ":" & toHex(digest.bytes)
 
+proc digestFileName(digest: ContentDigest): string =
+  $ord(digest.algorithm) & "-" & $ord(digest.domain) & "-" &
+    toHex(digest.bytes) & ".rbar"
+
 proc fingerprintMetadata(path: string): FileMetadata =
   if not fileExists(path) and not dirExists(path):
     return FileMetadata(kind: ffkMissing)
@@ -223,6 +247,21 @@ proc fingerprintMetadata(path: string): FileMetadata =
   let mtime = info.lastWriteTime
   result.mtimeNs = uint64(mtime.toUnix) * 1_000_000_000'u64 +
     uint64(mtime.nanosecond)
+
+proc initFileMetadataCache*(): FileMetadataCache =
+  FileMetadataCache(entries: initTable[string, FileMetadata]())
+
+proc clear*(cache: var FileMetadataCache) =
+  cache.entries.clear()
+
+proc fingerprintMetadata(path: string;
+                         cache: ptr FileMetadataCache): FileMetadata =
+  if cache.isNil:
+    return fingerprintMetadata(path)
+  if cache[].entries.hasKey(path):
+    return cache[].entries[path]
+  result = fingerprintMetadata(path)
+  cache[].entries[path] = result
 
 proc fileBytesForHash(path: string; metadata: FileMetadata): seq[byte] =
   if metadata.kind != ffkRegular:
@@ -401,8 +440,247 @@ proc writeActionResultRecordFile*(path: string; record: ActionResultRecord) =
   createDir(parentDir(path))
   writeFile(path, byteString(encodeRecord(record)))
 
+proc metadataOnly(input: FileFingerprint): FileFingerprint =
+  FileFingerprint(
+    path: input.path,
+    policy: input.policy,
+    metadata: input.metadata,
+    hasLocalHash: false)
+
+proc encodeHotRecord(record: ActionResultRecord): seq[byte] =
+  result.add(byte(ord(ActionHotRecordMagic[0])))
+  result.add(byte(ord(ActionHotRecordMagic[1])))
+  result.add(byte(ord(ActionHotRecordMagic[2])))
+  result.add(byte(ord(ActionHotRecordMagic[3])))
+  result.writeU16Le(ActionHotRecordVersion)
+  result.writeDigest(record.weakFingerprint)
+  result.add(byte(ord(record.policy)))
+  result.writeU32Le(uint32(record.inputs.len))
+  for input in record.inputs:
+    result.writeString(input.path)
+    result.add(byte(ord(input.policy)))
+    result.writeMetadata(input.metadata)
+
+proc decodeHotRecord(payload: openArray[byte]): ActionResultRecord =
+  if payload.len < 6:
+    raiseEnvelopeError(eeMalformed, "truncated action hot record")
+  for i in 0 ..< 4:
+    if payload[i] != byte(ord(ActionHotRecordMagic[i])):
+      raiseEnvelopeError(eeUnknownMagic, "unknown action hot record magic")
+  var pos = 4
+  let version = readU16Le(payload, pos)
+  if version != ActionHotRecordVersion:
+    raiseEnvelopeError(eeUnsupportedVersion, "unsupported action hot record version")
+  result.weakFingerprint = readDigest(payload, pos)
+  let policy = readByte(payload, pos)
+  if policy > byte(ord(ffpHybrid)):
+    raiseEnvelopeError(eeMalformed, "invalid hot record policy")
+  result.policy = FileFingerprintPolicy(policy)
+  let inputCount = int(readU32Le(payload, pos))
+  result.inputs = newSeq[FileFingerprint](inputCount)
+  for i in 0 ..< inputCount:
+    result.inputs[i].path = readString(payload, pos)
+    let inputPolicy = readByte(payload, pos)
+    if inputPolicy > byte(ord(ffpHybrid)):
+      raiseEnvelopeError(eeMalformed, "invalid hot input policy")
+    result.inputs[i].policy = FileFingerprintPolicy(inputPolicy)
+    result.inputs[i].metadata = readMetadata(payload, pos)
+    result.inputs[i].hasLocalHash = false
+  if pos != payload.len:
+    raiseEnvelopeError(eeMalformed, "trailing action hot record bytes")
+
+proc hotRecordPath(cache: ActionCache; weak: ContentDigest): string =
+  cache.hotRoot / digestFileName(weak)
+
+proc hotMetadataRecord(record: ActionResultRecord): ActionResultRecord =
+  result = record
+  result.inputs.setLen(0)
+  for input in record.inputs:
+    result.inputs.add(metadataOnly(input))
+  result.outputs.setLen(0)
+  result.strongFingerprint = ContentDigest()
+
 proc recordTail(payload: openArray[byte]): uint32 =
   uint32(localHash(payload).value and RecordTailMask)
+
+proc appendFramedPayload(path: string; payload: openArray[byte]) =
+  var frame: seq[byte] = @[]
+  frame.writeU32Le(uint32(payload.len))
+  frame.add(payload)
+  frame.writeU32Le(recordTail(payload))
+  var handle = open(path, fmAppend)
+  try:
+    handle.write(byteString(frame))
+  finally:
+    handle.close()
+
+proc appendHotRecord(cache: var ActionCache; record: ActionResultRecord) =
+  var hot = record
+  hot = hotMetadataRecord(record)
+  let payload = encodeHotRecord(hot)
+  appendFramedPayload(cache.hotRecordsPath, payload)
+  cache.hotByWeak[digestKey(record.weakFingerprint)] = hot
+  cache.hotIndexDirty = true
+
+proc rebuildHotInputs(cache: var ActionCache) =
+  var seen = initHashSet[string]()
+  cache.hotInputs.setLen(0)
+  for key in cache.hotByWeak.keys:
+    for input in cache.hotByWeak[key].inputs:
+      let inputKey = input.path & "\0" & $ord(input.policy) & "\0" &
+        $ord(input.metadata.kind) & "\0" & $input.metadata.sizeBytes & "\0" &
+        $input.metadata.mtimeNs
+      if seen.contains(inputKey):
+        continue
+      seen.incl(inputKey)
+      cache.hotInputs.add(input)
+
+proc encodeHotIndex(records: Table[string, ActionResultRecord]): seq[byte] =
+  type
+    InputKey = object
+      path: string
+      policy: FileFingerprintPolicy
+      metadata: FileMetadata
+  var inputIds = initTable[string, uint32]()
+  var inputs: seq[InputKey] = @[]
+  var recordInputIds = initTable[string, seq[uint32]]()
+  for key in records.keys:
+    var ids: seq[uint32] = @[]
+    for input in records[key].inputs:
+      let inputKey = input.path & "\0" & $ord(input.policy) & "\0" &
+        $ord(input.metadata.kind) & "\0" & $input.metadata.sizeBytes & "\0" &
+        $input.metadata.mtimeNs
+      if not inputIds.hasKey(inputKey):
+        inputIds[inputKey] = uint32(inputs.len)
+        inputs.add(InputKey(path: input.path, policy: input.policy,
+          metadata: input.metadata))
+      ids.add(inputIds[inputKey])
+    recordInputIds[key] = ids
+
+  result.add(byte(ord(ActionHotIndexMagic[0])))
+  result.add(byte(ord(ActionHotIndexMagic[1])))
+  result.add(byte(ord(ActionHotIndexMagic[2])))
+  result.add(byte(ord(ActionHotIndexMagic[3])))
+  result.writeU16Le(ActionHotIndexVersion)
+  result.writeU32Le(uint32(inputs.len))
+  for input in inputs:
+    result.writeString(input.path)
+    result.add(byte(ord(input.policy)))
+    result.writeMetadata(input.metadata)
+  result.writeU32Le(uint32(records.len))
+  for key in records.keys:
+    let record = records[key]
+    result.writeDigest(record.weakFingerprint)
+    result.add(byte(ord(record.policy)))
+    let ids = recordInputIds[key]
+    result.writeU32Le(uint32(ids.len))
+    for id in ids:
+      result.writeU32Le(id)
+
+proc decodeHotIndex(payload: openArray[byte]): HotIndexDecode =
+  result.records = initTable[string, ActionResultRecord]()
+  if payload.len < 6:
+    raiseEnvelopeError(eeMalformed, "truncated action hot index")
+  for i in 0 ..< 4:
+    if payload[i] != byte(ord(ActionHotIndexMagic[i])):
+      raiseEnvelopeError(eeUnknownMagic, "unknown action hot index magic")
+  var pos = 4
+  let version = readU16Le(payload, pos)
+  if version != ActionHotIndexVersion:
+    raiseEnvelopeError(eeUnsupportedVersion, "unsupported action hot index version")
+  let inputCount = int(readU32Le(payload, pos))
+  var inputs = newSeq[FileFingerprint](inputCount)
+  for i in 0 ..< inputCount:
+    inputs[i].path = readString(payload, pos)
+    let policy = readByte(payload, pos)
+    if policy > byte(ord(ffpHybrid)):
+      raiseEnvelopeError(eeMalformed, "invalid hot index input policy")
+    inputs[i].policy = FileFingerprintPolicy(policy)
+    inputs[i].metadata = readMetadata(payload, pos)
+    inputs[i].hasLocalHash = false
+  let recordCount = int(readU32Le(payload, pos))
+  for _ in 0 ..< recordCount:
+    var record: ActionResultRecord
+    record.weakFingerprint = readDigest(payload, pos)
+    let policy = readByte(payload, pos)
+    if policy > byte(ord(ffpHybrid)):
+      raiseEnvelopeError(eeMalformed, "invalid hot index record policy")
+    record.policy = FileFingerprintPolicy(policy)
+    let recordInputCount = int(readU32Le(payload, pos))
+    record.inputs = newSeq[FileFingerprint](recordInputCount)
+    for i in 0 ..< recordInputCount:
+      let inputId = int(readU32Le(payload, pos))
+      if inputId < 0 or inputId >= inputs.len:
+        raiseEnvelopeError(eeMalformed, "invalid hot index input reference")
+      record.inputs[i] = inputs[inputId]
+    result.records[digestKey(record.weakFingerprint)] = record
+  result.inputs = inputs
+  if pos != payload.len:
+    raiseEnvelopeError(eeMalformed, "trailing action hot index bytes")
+
+proc writeHotIndex(cache: ActionCache) =
+  writeFile(cache.hotIndexPath, byteString(encodeHotIndex(cache.hotByWeak)))
+
+proc sourceNewerThanIndex(sourcePath, indexPath: string): bool =
+  if not fileExists(sourcePath):
+    return false
+  if not fileExists(indexPath):
+    return true
+  getLastModificationTime(sourcePath) > getLastModificationTime(indexPath)
+
+proc loadHotRecords(cache: var ActionCache) =
+  cache.hotByWeak.clear()
+  if fileExists(cache.hotIndexPath) and
+      not sourceNewerThanIndex(cache.hotRecordsPath, cache.hotIndexPath):
+    try:
+      let decoded = decodeHotIndex(bytes(readFile(cache.hotIndexPath)))
+      cache.hotByWeak = decoded.records
+      cache.hotInputs = decoded.inputs
+      return
+    except EnvelopeError:
+      cache.hotByWeak.clear()
+      cache.hotInputs.setLen(0)
+  if not fileExists(cache.hotRecordsPath):
+    return
+  let raw = bytes(readFile(cache.hotRecordsPath))
+  var pos = 0
+  while pos + 8 <= raw.len:
+    let length = int(readU32Le(raw, pos))
+    if length < 0 or pos + length + 4 > raw.len:
+      break
+    let payloadStart = pos
+    let payloadEnd = pos + length - 1
+    let payload = raw[payloadStart .. payloadEnd]
+    pos += length
+    let tail = readU32Le(raw, pos)
+    if tail != recordTail(payload):
+      break
+    try:
+      let record = decodeHotRecord(payload)
+      cache.hotByWeak[digestKey(record.weakFingerprint)] = record
+    except EnvelopeError:
+      discard
+  if getFileSize(cache.hotRecordsPath) >= ActionCacheCompactThreshold:
+    cache.rebuildHotInputs()
+    cache.writeHotIndex()
+    cache.hotIndexDirty = false
+  else:
+    cache.rebuildHotInputs()
+
+proc readHotRecord(cache: ActionCache; weak: ContentDigest):
+    tuple[found: bool; record: ActionResultRecord] =
+  let key = digestKey(weak)
+  if cache.hotByWeak.hasKey(key):
+    return (found: true, record: cache.hotByWeak[key])
+  let path = cache.hotRecordPath(weak)
+  if not fileExists(path):
+    return
+  try:
+    result.record = decodeHotRecord(bytes(readFile(path)))
+    if result.record.weakFingerprint == weak:
+      result.found = true
+  except EnvelopeError:
+    discard
 
 proc appendRecord(cache: var ActionCache; record: ActionResultRecord) =
   let payload = encodeRecord(record)
@@ -416,10 +694,16 @@ proc appendRecord(cache: var ActionCache; record: ActionResultRecord) =
   finally:
     handle.close()
   let key = digestKey(record.weakFingerprint)
-  cache.byWeak.mgetOrPut(key, @[]).add(record)
+  var records = cache.byWeak.mgetOrPut(key, @[])
+  records.add(record)
+  if records.len > MaxRecordsPerWeakFingerprint:
+    records = records[records.len - MaxRecordsPerWeakFingerprint .. ^1]
+  cache.byWeak[key] = records
+  cache.appendHotRecord(record)
 
 proc loadRecords(cache: var ActionCache) =
   cache.byWeak.clear()
+  cache.loadedAllRecords = true
   if not fileExists(cache.recordsPath):
     return
   let raw = bytes(readFile(cache.recordsPath))
@@ -442,13 +726,82 @@ proc loadRecords(cache: var ActionCache) =
     except EnvelopeError:
       discard
 
+proc compactLoadedRecords(cache: var ActionCache) =
+  var frameBytes: seq[byte] = @[]
+  for key in cache.byWeak.keys:
+    var records = cache.byWeak[key]
+    if records.len > MaxRecordsPerWeakFingerprint:
+      records = records[records.len - MaxRecordsPerWeakFingerprint .. ^1]
+      cache.byWeak[key] = records
+    for record in records:
+      let payload = encodeRecord(record)
+      frameBytes.writeU32Le(uint32(payload.len))
+      frameBytes.add(payload)
+      frameBytes.writeU32Le(recordTail(payload))
+    if records.len > 0:
+      cache.hotByWeak[digestKey(records[^1].weakFingerprint)] =
+        hotMetadataRecord(records[^1])
+  writeFile(cache.recordsPath, byteString(frameBytes))
+  cache.writeHotIndex()
+
+proc maybeCompactRecords(cache: var ActionCache) =
+  if not fileExists(cache.recordsPath):
+    return
+  if getFileSize(cache.recordsPath) < ActionCacheCompactThreshold:
+    return
+  compactLoadedRecords(cache)
+
 proc openActionCache*(root: string): ActionCache =
   result.root = root
   result.recordsPath = root / "action-results.records"
+  result.hotRoot = root / "hot-records"
+  result.hotRecordsPath = root / "action-results.hot.records"
+  result.hotIndexPath = root / "action-results.hot.index"
+  result.loadedAllRecords = false
+  result.hotIndexDirty = false
+  result.byWeak = initTable[string, seq[ActionResultRecord]]()
+  result.hotByWeak = initTable[string, ActionResultRecord]()
+  result.hotInputs = @[]
   createDir(result.root)
+  createDir(result.hotRoot)
   if not fileExists(result.recordsPath):
     writeFile(result.recordsPath, "")
-  result.loadRecords()
+  if not fileExists(result.hotRecordsPath):
+    writeFile(result.hotRecordsPath, "")
+  result.loadHotRecords()
+
+proc flushHotIndex*(cache: var ActionCache) =
+  if not cache.hotIndexDirty:
+    return
+  cache.rebuildHotInputs()
+  cache.writeHotIndex()
+  cache.hotIndexDirty = false
+
+proc lookupHotMetadataRecord*(cache: ActionCache; weak: ContentDigest;
+                              policy: FileFingerprintPolicy):
+    Option[ActionResultRecord] =
+  if policy notin {ffpTimestamp, ffpHybrid}:
+    return none(ActionResultRecord)
+  let key = digestKey(weak)
+  if not cache.hotByWeak.hasKey(key):
+    return none(ActionResultRecord)
+  let record = cache.hotByWeak[key]
+  if record.policy != policy:
+    return none(ActionResultRecord)
+  some(record)
+
+proc hotMetadataInputsUnchanged*(cache: ActionCache;
+                                 metadataCache: ptr FileMetadataCache = nil): bool =
+  for input in cache.hotInputs:
+    if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+      return false
+  true
+
+proc ensureLoadedRecords(cache: var ActionCache) =
+  if cache.loadedAllRecords:
+    return
+  cache.loadRecords()
+  cache.maybeCompactRecords()
 
 proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
@@ -473,17 +826,21 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
       permissions: perms))
   cache.appendRecord(result)
 
-proc refreshedInputs(record: ActionResultRecord;
-                     changed: var bool; hybridCutoff: var bool): seq[FileFingerprint] =
-  result = newSeq[FileFingerprint](record.inputs.len)
+proc refreshedInputs(record: ActionResultRecord; changed: var bool;
+                     hybridCutoff: var bool;
+                     metadataCache: ptr FileMetadataCache):
+                     tuple[inputs: seq[FileFingerprint],
+                           reusedRecordedInputs: bool] =
+  result.reusedRecordedInputs = true
   for i, recorded in record.inputs:
-    let currentMetadata = fingerprintMetadata(recorded.path)
+    let currentMetadata = fingerprintMetadata(recorded.path, metadataCache)
     case recorded.policy
     of ffpTimestamp:
       if currentMetadata != recorded.metadata:
         changed = true
         return
-      result[i] = recorded
+      if not result.reusedRecordedInputs:
+        result.inputs[i] = recorded
     of ffpChecksum:
       let current = observeFileWithMetadata(recorded.path, recorded.policy,
         currentMetadata)
@@ -491,10 +848,12 @@ proc refreshedInputs(record: ActionResultRecord;
           current.localHash != recorded.localHash:
         changed = true
         return
-      result[i] = recorded
+      if not result.reusedRecordedInputs:
+        result.inputs[i] = recorded
     of ffpHybrid:
       if currentMetadata == recorded.metadata:
-        result[i] = recorded
+        if not result.reusedRecordedInputs:
+          result.inputs[i] = recorded
         continue
       if not recorded.hasLocalHash:
         changed = true
@@ -505,7 +864,12 @@ proc refreshedInputs(record: ActionResultRecord;
         changed = true
         return
       if current.localHash == recorded.localHash:
-        result[i] = current
+        if result.reusedRecordedInputs:
+          result.inputs = newSeq[FileFingerprint](record.inputs.len)
+          for prior in 0 ..< i:
+            result.inputs[prior] = record.inputs[prior]
+          result.reusedRecordedInputs = false
+        result.inputs[i] = current
         hybridCutoff = true
       else:
         changed = true
@@ -517,8 +881,22 @@ proc verifyOutputs(cas: LocalCas; record: ActionResultRecord) =
 
 proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
-                         verifyOutputBlobs = true): ActionCacheLookup =
+                         verifyOutputBlobs = true;
+                         allowMetadataOnlyHit = false;
+                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
   let key = digestKey(weak)
+  if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
+    let hot = cache.readHotRecord(weak)
+    if hot.found and hot.record.policy == policy:
+      var changed = false
+      for input in hot.record.inputs:
+        if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+          changed = true
+          break
+      if not changed:
+        return ActionCacheLookup(status: aclHit, record: hot.record)
+
+  cache.ensureLoadedRecords()
   if not cache.byWeak.hasKey(key):
     return ActionCacheLookup(status: aclMissNoRecord)
   var sawInputChange = false
@@ -529,16 +907,19 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
       continue
     var changed = false
     var hybridCutoff = false
-    let inputs = refreshedInputs(record, changed, hybridCutoff)
+    let refreshed = refreshedInputs(record, changed, hybridCutoff,
+      metadataCache)
     if changed:
       sawInputChange = true
       continue
     var candidate = record
-    candidate.inputs = inputs
-    candidate.strongFingerprint = computeStrongFingerprint(weak, candidate.inputs)
-    if candidate.strongFingerprint != record.strongFingerprint:
-      sawInputChange = true
-      continue
+    if not refreshed.reusedRecordedInputs:
+      candidate.inputs = refreshed.inputs
+      candidate.strongFingerprint = computeStrongFingerprint(weak,
+        candidate.inputs)
+      if candidate.strongFingerprint != record.strongFingerprint:
+        sawInputChange = true
+        continue
     if verifyOutputBlobs:
       try:
         cas.verifyOutputs(candidate)

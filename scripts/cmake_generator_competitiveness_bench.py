@@ -69,6 +69,28 @@ def run_command(args, cwd=None, env=None, check=True):
     return result
 
 
+def repeated_result(run_once, runs):
+    if runs <= 1:
+        return run_once()
+    samples = []
+    for _ in range(runs):
+        samples.append(run_once())
+    ordered = sorted(samples, key=lambda item: item["wallMs"])
+    median = ordered[len(ordered) // 2]
+    result = dict(median)
+    wall_values = [sample["wallMs"] for sample in samples]
+    result["timingSamples"] = wall_values
+    result["timingSummary"] = {
+        "runs": runs,
+        "firstWallMs": wall_values[0],
+        "bestWallMs": min(wall_values),
+        "medianWallMs": median["wallMs"],
+        "worstWallMs": max(wall_values),
+        "meanWallMs": round(sum(wall_values) / len(wall_values), 3),
+    }
+    return result
+
+
 def parse_stats_table(output):
     metrics = []
     in_metrics = False
@@ -523,6 +545,8 @@ def repro_env(base_env, rb_bin, runquota_socket, binary_dir, parallel,
         "REPROBUILD_SOURCE_ROOT": str(ROOT),
         "REPROBUILD_MAX_PARALLELISM": str(max(1, parallel)),
         "REPROBUILD_STATS": "1" if reprobuild_diagnostics == "stats" else "0",
+        "REPROBUILD_REPORT": "none",
+        "REPROBUILD_LOG": "quiet",
     })
     return env
 
@@ -673,8 +697,10 @@ def benchmark_project_mode(args, context, project_report, key, source_dir,
         add_pair(project_report, "clean_build", execution_mode,
                  ninja_clean_build, rb_clean_build)
 
-        ninja_noop = ninja_build(build_target)
-        rb_noop = rb_build(build_target)
+        ninja_noop = repeated_result(lambda: ninja_build(build_target),
+                                     args.noop_runs)
+        rb_noop = repeated_result(lambda: rb_build(build_target),
+                                  args.noop_runs)
         add_pair(project_report, "noop_rebuild", execution_mode,
                  ninja_noop, rb_noop)
 
@@ -803,6 +829,7 @@ def build_report(args):
             },
             "parallel": args.parallel,
             "executionModes": selected_execution_modes(args.execution_mode),
+            "noopRuns": args.noop_runs,
             "ninjaDiagnostics": {
                 "enabled": args.ninja_diagnostics != "none",
                 "mode": args.ninja_diagnostics,
@@ -899,8 +926,15 @@ def parse_args():
                         help="collect Ninja native diagnostics for Ninja build scenarios")
     parser.add_argument("--reprobuild-diagnostics", choices=["stats", "none"], default="stats",
                         help="collect Reprobuild diagnostics for Reprobuild build scenarios")
+    parser.add_argument("--noop-runs", type=int,
+                        default=int(os.environ.get(
+                            "REPROBUILD_CMAKE_BENCH_NOOP_RUNS", "5")),
+                        help="repeat no-op rebuild scenarios and report the median wall time")
     parser.add_argument("--fresh", action=argparse.BooleanOptionalAction, default=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.noop_runs <= 0:
+        fail("--noop-runs must be greater than zero")
+    return args
 
 
 def main():

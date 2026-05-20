@@ -1,10 +1,8 @@
 {.compile: "xxh3/capi.c".}
 
-# Windows: no system libxxhash; compile the vendored xxhash.c directly. The
+# Windows and vendored-hash builds compile the vendored xxhash.c directly. The
 # upstream xxhash.c is a single translation unit and uses only stddef/stdint.
-when defined(windows):
-  # Windows: relative path is anchored at libs/xxh3/src/; three levels up
-  # reaches the repo root.
+when defined(windows) or defined(reproVendoredHash):
   const xxh3Root = "../../../references/mold/third-party/xxhash"
   {.compile: xxh3Root & "/xxhash.c".}
 

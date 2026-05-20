@@ -96,6 +96,30 @@ repro scheduler total                    1   25100.0        25.1
         self.assertEqual(record["executionMode"], "direct")
         self.assertEqual(record["ratioReprobuildToNinja"], 2.5)
 
+    def test_repeated_result_uses_median_wall_time_and_summary(self):
+        samples = iter([
+            {"wallMs": 30.0, "label": "slow"},
+            {"wallMs": 10.0, "label": "fast"},
+            {"wallMs": 20.0, "label": "median"},
+        ])
+
+        result = bench.repeated_result(lambda: next(samples), 3)
+
+        self.assertEqual(result["label"], "median")
+        self.assertEqual(result["wallMs"], 20.0)
+        self.assertEqual(result["timingSamples"], [30.0, 10.0, 20.0])
+        self.assertEqual(
+            result["timingSummary"],
+            {
+                "runs": 3,
+                "firstWallMs": 30.0,
+                "bestWallMs": 10.0,
+                "medianWallMs": 20.0,
+                "worstWallMs": 30.0,
+                "meanWallMs": 20.0,
+            },
+        )
+
     def test_selected_execution_modes_expands_both(self):
         self.assertEqual(
             bench.selected_execution_modes("both"),

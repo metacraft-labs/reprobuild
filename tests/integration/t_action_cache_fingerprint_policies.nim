@@ -213,6 +213,39 @@ suite "integration_action_cache_fingerprint_policies":
       check miss.status == aclMissInputChanged
       check not fileExists(outputPath)
 
+    block sharedMetadataCache:
+      let root = tempRoot / "shared-metadata-cache"
+      createDir(root)
+      let sharedInput = root / "shared.h"
+      let outputA = root / "a.o"
+      let outputB = root / "b.o"
+      writeFile(sharedInput, "alpha\n")
+      writeFile(outputA, "a\n")
+      writeFile(outputB, "b\n")
+
+      discard cache.recordActionResult(cas, weakFor("shared-metadata-a"),
+        ffpHybrid, [sharedInput], ["a.o"], root)
+      discard cache.recordActionResult(cas, weakFor("shared-metadata-b"),
+        ffpHybrid, [sharedInput], ["b.o"], root)
+
+      var metadataMemo = initFileMetadataCache()
+      let hitA = cache.lookupActionResult(cas, weakFor("shared-metadata-a"),
+        ffpHybrid, metadataCache = addr metadataMemo)
+      let hitB = cache.lookupActionResult(cas, weakFor("shared-metadata-b"),
+        ffpHybrid, metadataCache = addr metadataMemo)
+      check hitA.status == aclHit
+      check hitB.status == aclHit
+
+      writeFile(sharedInput, "bravo\n")
+      setDifferentTimestamp(sharedInput)
+      metadataMemo.clear()
+      let missA = cache.lookupActionResult(cas, weakFor("shared-metadata-a"),
+        ffpHybrid, metadataCache = addr metadataMemo)
+      let missB = cache.lookupActionResult(cas, weakFor("shared-metadata-b"),
+        ffpHybrid, metadataCache = addr metadataMemo)
+      check missA.status == aclMissInputChanged
+      check missB.status == aclMissInputChanged
+
     block corruptCasObject:
       let root = tempRoot / "corrupt"
       createDir(root)
@@ -236,6 +269,35 @@ suite "integration_action_cache_fingerprint_policies":
       expect CacheIntegrityError:
         cas.restoreOutputs(record, root)
       check not fileExists(outputPath)
+
+    block hotMetadataRecordSurvivesAppendLogDamage:
+      let hotRoot = tempRoot / "hot-metadata"
+      let hotReproRoot = hotRoot / ".repro"
+      let hotActionRoot = hotRoot / "action"
+      createDir(hotActionRoot)
+      let hotCas = openLocalCas(hotReproRoot / "cas")
+      var hotCache = openActionCache(hotReproRoot / "action-cache")
+      let inputPath = hotActionRoot / "input.txt"
+      let outputPath = hotActionRoot / "out.txt"
+      writeFile(inputPath, "alpha\n")
+      runFixtureAction(inputPath, outputPath)
+      discard hotCache.recordActionResult(hotCas, weakFor("hot-metadata-record"),
+        ffpHybrid, [inputPath], ["out.txt"], hotActionRoot)
+      hotCache.flushHotIndex()
+      check fileExists(hotReproRoot / "action-cache" / "action-results.hot.index")
+
+      writeFile(hotReproRoot / "action-cache" / "action-results.records",
+        "truncated full action cache")
+      var hotReloaded = openActionCache(hotReproRoot / "action-cache")
+      let defaultMiss = hotReloaded.lookupActionResult(hotCas,
+        weakFor("hot-metadata-record"), ffpHybrid, verifyOutputBlobs = false)
+      check defaultMiss.status == aclMissNoRecord
+      let hotHit = hotReloaded.lookupActionResult(hotCas,
+        weakFor("hot-metadata-record"), ffpHybrid, verifyOutputBlobs = false,
+        allowMetadataOnlyHit = true)
+      check hotHit.status == aclHit
+      check hotHit.record.inputs.len == 1
+      check hotHit.record.inputs[0].path == inputPath
 
     block newestMismatchedRecordFallsBackToOlderHit:
       let weak = weakFor("newest-mismatch-fallback")

@@ -1,5 +1,4 @@
-import std/[algorithm, httpclient, json, os, osproc, sequtils, strutils,
-    tables, times]
+import std/[algorithm, json, os, osproc, sequtils, strutils, tables, times]
 
 import blake3
 import cbor
@@ -879,11 +878,19 @@ proc downloadUrlToFile(url, destination: string) =
       raise newException(IOError, "file URL does not exist: " & url)
     copyFile(source, destination)
   elif url.startsWith("http://") or url.startsWith("https://"):
-    var client = newHttpClient()
-    try:
-      client.downloadFile(url, destination)
-    finally:
-      client.close()
+    let curl = findExe("curl")
+    if curl.len == 0:
+      raise newException(IOError,
+        "curl is required to download archive URL: " & url)
+    let process = startProcess(curl,
+      args = ["-L", "--fail", "--silent", "--show-error", "-o",
+        destination, url],
+      options = {poUsePath, poParentStreams})
+    let exitCode = waitForExit(process)
+    close(process)
+    if exitCode != 0:
+      raise newException(IOError,
+        "curl failed while downloading archive URL: " & url)
   else:
     if not fileExists(url):
       raise newException(IOError, "unsupported archive URL or missing file: " & url)

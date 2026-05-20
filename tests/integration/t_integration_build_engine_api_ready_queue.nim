@@ -150,6 +150,12 @@ proc maxPoolConcurrency(tempRoot, prefix: string; count: int): int =
     current += event.delta
     result = max(result, current)
 
+proc hasMetric(buildResult: BuildRunResult; name: string): bool =
+  for metric in buildResult.stats.metrics:
+    if metric.name == name:
+      return true
+  false
+
 when isMainModule:
   let params = commandLineParams()
   if params.len > 0 and params[0] == "fixture-action":
@@ -233,6 +239,56 @@ suite "integration_build_engine_api_ready_queue":
         check event.running == 0
     check sawStarted
     check sawCompleted
+
+  test "runBuild fast no-op cache hit skips process launch and RunQuota probe":
+    let tempRoot = createTempDir("repro-fast-noop-api", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let inputPath = workRoot / "src" / "input.txt"
+    let outputPath = workRoot / "out" / "fast-noop.txt"
+    fixtureWrite(inputPath, "fast noop input\n")
+
+    let oldSocket = getEnv("RUNQUOTA_SOCKET", "")
+    putEnv("RUNQUOTA_SOCKET", tempRoot / "missing-runquota.sock")
+    defer:
+      putEnv("RUNQUOTA_SOCKET", oldSocket)
+
+    var config = BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 1'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      rebuildMissingOutputsOnCacheHit: true,
+      fallbackToRunQuotaBypass: true,
+      suppressTrace: true,
+      skipCacheHitEvidence: true)
+    config.statsEnabled = true
+
+    let buildAction = action("copy-fast-noop", [app, "fixture-action", "copy",
+      "fast-noop", inputPath, outputPath], cwd = workRoot,
+      inputs = [inputPath], outputs = ["out/fast-noop.txt"],
+      cacheable = true, weakFingerprint = weak("fast-noop"))
+
+    let first = runBuild(graph([buildAction]), config)
+    check first.results.len == 1
+    check first.results[0].status == asSucceeded
+    check first.results[0].launched
+    check first.hasMetric("repro runquota probe")
+    check readFile(outputPath).contains("fast-noop:fast noop input")
+
+    let second = runBuild(graph([buildAction]), config)
+    check second.results.len == 1
+    check second.results[0].status == asCacheHit
+    check second.results[0].cacheDecision == cdHit
+    check not second.results[0].launched
+    check second.hasMetric("repro fast noop scan")
+    check not second.hasMetric("repro runquota probe")
+    check second.trace.len == 0
 
   test "runBuild infers declared output to input dependencies before scheduling":
     let repoRoot = getCurrentDir()
