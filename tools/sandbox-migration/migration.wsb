@@ -69,6 +69,19 @@
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
 
+    <!-- The Visual C++ 2015-2022 x64 runtime DLLs, copied from the HOST's
+         own C:\Windows\System32 by run-sandbox-migration.ps1 before launch.
+         Read-only; provision-and-migrate.ps1 Stage B copies them into the
+         sandbox's C:\Windows\System32. A pristine Windows Sandbox image
+         lacks the MSVC runtime, but the real host has it system-wide, so
+         this faithfully replicates the host (fast: ~5 small DLLs, seconds -
+         it replaces the slow `scoop install vcredist` that timed out). -->
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\tools\sandbox-migration\vcruntime</HostFolder>
+      <SandboxFolder>C:\harness\vcruntime</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
     <!-- The in-sandbox provisioning+test script. -->
     <MappedFolder>
       <HostFolder>D:\metacraft\reprobuild\tools\sandbox-migration</HostFolder>

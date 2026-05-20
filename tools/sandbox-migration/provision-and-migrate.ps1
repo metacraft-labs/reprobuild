@@ -37,6 +37,7 @@ $DotfilesSrc  = 'C:\harness\dotfiles-src'
 $ScoopCacheSrc= 'C:\harness\scoop-cache'
 $ScoopBktSrc  = 'C:\harness\scoop-buckets'             # host buckets (main+extras), RO
 $ScoopAppsSrc = 'C:\harness\scoop-apps'                # host apps trees, RO (fallback)
+$VcRuntimeSrc = 'C:\harness\vcruntime'                 # host VC++ runtime DLLs, RO
 $Home_        = $env:USERPROFILE                       # C:\Users\WDAGUtilityAccount
 $DotfilesDst  = Join-Path $Home_ 'dotfiles'            # writable copy
 $ReproDir     = 'C:\harness\repro'                     # writable repro.exe location
@@ -268,84 +269,66 @@ try {
         Record 'stageB_cache_seeded' 0
       }
 
-      # M76 FIDELITY FIX: install the Visual C++ Redistributable runtime.
-      # A pristine Windows Sandbox image ships WITHOUT the MSVC runtime
-      # (vcruntime140.dll, vcruntime140_1.dll, msvcp140.dll). The user's
-      # real host HAS it, so MSVC-linked Scoop apps - notably `codex.exe` -
-      # run there. In the bare sandbox the Scoop adapter's post-install
-      # probe `codex --version` aborts with exit -1073741515
-      # (0xC0000135 = STATUS_DLL_NOT_FOUND), failing `repro home apply`
-      # step 7. Installing `vcredist` (from the `extras` bucket, copied in
-      # above) downloads and runs the OFFICIAL Microsoft redistributable
-      # installers, placing the runtime DLLs in System32 - exactly the
-      # host's state. This is a sandbox-fidelity gap, not a Reprobuild bug.
-      $vcOk = $false
-      try {
-        # Already present? (e.g. a future sandbox image ships it.)
-        $sys32 = Join-Path $env:WINDIR 'System32'
-        if (Test-Path (Join-Path $sys32 'vcruntime140.dll')) {
-          Log "vcruntime140.dll already present in System32 - VC++ runtime OK"
-          $vcOk = $true
-        }
-        if (-not $vcOk) {
-          $vcLog = Join-Path $Out 'scoop-vcredist.log'
-          # `vcredist` can download the official installer over the
-          # network and run it; give it a generous 10-min ceiling and
-          # retry once. Bounded by a background job so a stuck installer
-          # cannot wedge the run.
-          function Install-VcRedist($timeoutSec) {
-            "==== scoop install vcredist (timeout ${timeoutSec}s) ====" |
-              Add-Content $vcLog -Encoding utf8
-            $job = Start-Job -ScriptBlock {
-              param($scoopRoot)
-              $env:SCOOP = $scoopRoot
-              $env:Path  = "$scoopRoot\shims;$env:Path"
-              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-              & scoop install vcredist *>&1
-            } -ArgumentList $env:SCOOP
-            if (Wait-Job $job -Timeout $timeoutSec) {
-              Receive-Job $job *>&1 | Tee-Object -FilePath $vcLog -Append | Out-Null
-            } else {
-              "  TIMEOUT after ${timeoutSec}s installing vcredist" |
-                Add-Content $vcLog -Encoding utf8
-              Stop-Job $job -ErrorAction SilentlyContinue
-            }
-            Remove-Job $job -Force -ErrorAction SilentlyContinue
-          }
-          Log "installing vcredist (Visual C++ Redistributable runtime) ..."
-          Install-VcRedist 600
-          # The redistributable installer drops the runtime into System32.
-          if (-not (Test-Path (Join-Path $sys32 'vcruntime140.dll'))) {
-            Log "vcruntime140.dll not present after first vcredist install - retrying once ..."
-            Install-VcRedist 600
-          }
-          # Verify the runtime is resolvable.
-          $vcDll = Join-Path $sys32 'vcruntime140.dll'
-          if (Test-Path $vcDll) {
-            $vcOk = $true
-            Log "vcruntime140.dll present in System32 - VC++ runtime OK"
-          } else {
-            # Fallback: some vcredist manifests place the DLLs inside the
-            # scoop app dir instead. Probe there too.
-            $vcAppDir = Join-Path $env:SCOOP 'apps\vcredist'
-            $foundInApp = $false
-            if (Test-Path $vcAppDir) {
-              $foundInApp = [bool](Get-ChildItem $vcAppDir -Recurse -Filter 'vcruntime140.dll' `
-                              -File -ErrorAction SilentlyContinue | Select-Object -First 1)
-            }
-            if ($foundInApp) {
-              Log "vcruntime140.dll found under scoop apps\vcredist (not System32)"
-              $vcOk = $true
-            } else {
-              Log "vcruntime140.dll NOT found after vcredist install"
-            }
-          }
-        }
-      } catch {
-        Log "vcredist install EXCEPTION: $_"
-      }
-      Record 'stageB_vcredist' ($(if ($vcOk) { 'OK' } else { 'FAIL' }))
     }
+
+    # M76 FIDELITY FIX: deliver the Visual C++ 2015-2022 runtime DLLs.
+    # A pristine Windows Sandbox image ships WITHOUT the MSVC runtime
+    # (vcruntime140.dll, vcruntime140_1.dll, msvcp140.dll, ...). The user's
+    # REAL host HAS those DLLs system-wide in C:\Windows\System32 (every
+    # developer machine does), so MSVC-linked Scoop apps - notably codex.exe
+    # and nvim.exe - run there. In the bare sandbox the Scoop adapter's
+    # post-install probe (`<tool> --version`) aborts with exit -1073741515
+    # (0xC0000135 = STATUS_DLL_NOT_FOUND), failing `repro home apply` step 7.
+    #
+    # The PRIOR fix ran `scoop install vcredist`, which downloads and runs
+    # Microsoft's official redistributable installers - it timed out at 600s
+    # (x2 attempts). This fix instead copies the HOST's own runtime DLLs
+    # (mapped read-only at C:\harness\vcruntime by migration.wsb, populated
+    # from the host's System32 by run-sandbox-migration.ps1) directly into
+    # the sandbox's C:\Windows\System32. The sandbox user (WDAGUtilityAccount)
+    # is an admin, so System32 is writable. This is a copy of ~5 small DLLs -
+    # seconds, not minutes - and it faithfully replicates the host's existing
+    # system-wide runtime. This is a sandbox-fidelity gap, NOT a Reprobuild
+    # bug: the real host already has these DLLs; the sandbox just lacked them.
+    $vcOk = $false
+    try {
+      $sys32 = Join-Path $env:WINDIR 'System32'
+      # Already present? (e.g. a future sandbox image ships the runtime.)
+      if (Test-Path (Join-Path $sys32 'vcruntime140.dll')) {
+        Log "vcruntime140.dll already present in System32 - VC++ runtime OK"
+        $vcOk = $true
+      }
+      if (-not $vcOk) {
+        if (-not (Test-Path $VcRuntimeSrc)) {
+          Log "mapped VC++ runtime dir missing: $VcRuntimeSrc"
+        } else {
+          $vcDlls = Get-ChildItem $VcRuntimeSrc -Filter '*.dll' -File -ErrorAction SilentlyContinue
+          Log ("copying {0} VC++ runtime DLL(s) from {1} into {2} ..." -f `
+               $vcDlls.Count, $VcRuntimeSrc, $sys32)
+          $vcN = 0
+          foreach ($d in $vcDlls) {
+            try {
+              Copy-Item $d.FullName (Join-Path $sys32 $d.Name) -Force -ErrorAction Stop
+              $vcN++
+              Log ("  copied {0} ({1} bytes)" -f $d.Name, $d.Length)
+            } catch {
+              Log ("  FAILED to copy {0}: {1}" -f $d.Name, $_)
+            }
+          }
+          Log "copied $vcN VC++ runtime DLL(s) into System32"
+        }
+        # Verify the mandatory runtime DLL is now resolvable in System32.
+        if (Test-Path (Join-Path $sys32 'vcruntime140.dll')) {
+          $vcOk = $true
+          Log "vcruntime140.dll present in System32 - VC++ runtime OK"
+        } else {
+          Log "vcruntime140.dll NOT present in System32 after copy - VC++ runtime FAIL"
+        }
+      }
+    } catch {
+      Log "VC++ runtime delivery EXCEPTION: $_"
+    }
+    Record 'stageB_vcredist' ($(if ($vcOk) { 'OK' } else { 'FAIL' }))
     $scoopState = if ($scoopOk) { 'OK' } else { 'FAILED' }
     Record 'stageB_scoop_install' $scoopState
   } catch {

@@ -74,8 +74,14 @@ All mappings are **read-only** except the OUTPUT folder.
 | `C:\Users\zahary\scoop\cache` | `C:\harness\scoop-cache` | RO | Scoop download cache (fast installs) |
 | `C:\Users\zahary\scoop\buckets` | `C:\harness\scoop-buckets` | RO | Scoop bucket dirs (main + extras) |
 | `C:\Users\zahary\scoop\apps` | `C:\harness\scoop-apps` | RO | Scoop installed-app trees (fallback) |
+| `tools\sandbox-migration\vcruntime` | `C:\harness\vcruntime` | RO | host VC++ 2015-2022 runtime DLLs |
 | `D:\metacraft\reprobuild\tools\sandbox-migration` | `C:\harness\scripts` | RO | this harness |
 | `D:\metacraft\sandbox-migration-out` | `C:\harness\out` | **RW** | result artifacts + `DONE` |
+
+The `vcruntime\` directory is **created and populated by the host runner**
+(`run-sandbox-migration.ps1`) before each launch - it copies the Visual C++
+2015-2022 x64 runtime DLLs from the host's own `C:\Windows\System32`. See the
+VC++ runtime fidelity note below.
 
 The in-sandbox script copies the read-only `dotfiles` and `repro.exe` to
 **writable** sandbox paths before touching them, so the read-only mappings
@@ -91,6 +97,10 @@ are never written.
    flaky and left the extras-bucket apps unresolvable (M75 fidelity
    fix). Then register the buckets with `scoop bucket add <name>
    <localdir>` and seed the Scoop cache from the mapped host cache.
+   Finally, deliver the **Visual C++ 2015-2022 runtime** by copying the
+   host's runtime DLLs (mapped read-only at `C:\harness\vcruntime`) into
+   the sandbox's `C:\Windows\System32` - see the VC++ fidelity note below
+   (M76 fidelity fix).
 3. **Stage C** - install the 14 packages the migration profile
    (`home.nim`) declares. Primary: `scoop install` (each under a bounded
    per-app timeout, retried once). Fallback for any app that still does
@@ -113,6 +123,38 @@ are never written.
 The very first thing the script does (before any heavy work) is write the
 `_script-started.txt` checkpoint, so a parse-failure (no checkpoint) is
 cleanly distinguishable from a slow-but-running script.
+
+## VC++ runtime fidelity (M76)
+
+A pristine **Windows Sandbox** image ships **without** the Visual C++
+2015-2022 redistributable runtime (`vcruntime140.dll`, `vcruntime140_1.dll`,
+`msvcp140.dll`, ...). The user's **real host has these DLLs system-wide** in
+`C:\Windows\System32` - every developer machine does - so MSVC-linked tools
+installed by Scoop (`codex.exe`, `nvim.exe`) run there. In the bare sandbox
+the Scoop adapter's post-install probe (`<tool> --version`) aborts with exit
+`-1073741515` (`0xC0000135` = `STATUS_DLL_NOT_FOUND`), failing `repro home
+apply` at step 7. **This is a sandbox-fidelity gap, not a Reprobuild bug** -
+the real host already has the runtime; the sandbox just lacked it.
+
+The fix is a **fast, deterministic copy of the host's own runtime DLLs**
+(it replaces a prior `scoop install vcredist` that ran Microsoft's official
+installers and timed out at 600s):
+
+1. `run-sandbox-migration.ps1` (host) copies the VC++ 2015-2022 x64 runtime
+   DLLs from the host's `C:\Windows\System32` into
+   `tools\sandbox-migration\vcruntime\` before launching the sandbox. The
+   set: `vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll` (mandatory
+   - `codex.exe`/`nvim.exe` need them), plus `msvcp140_1.dll`,
+   `msvcp140_2.dll`, `concrt140.dll`, `vccorlib140.dll` if present.
+2. `migration.wsb` maps `vcruntime\` into the sandbox read-only at
+   `C:\harness\vcruntime`.
+3. `provision-and-migrate.ps1` Stage B copies those DLLs into the sandbox's
+   `C:\Windows\System32` (the sandbox account is an admin, so System32 is
+   writable) and verifies `vcruntime140.dll` is present. Logged as
+   `RESULT stageB_vcredist = OK/FAIL`.
+
+Copying ~5 small DLLs takes seconds, not minutes, and it faithfully
+replicates the host's existing system-wide runtime.
 
 ## Output artifacts
 

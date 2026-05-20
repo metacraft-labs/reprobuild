@@ -57,6 +57,53 @@ foreach ($need in @('repro.exe','sqlite3_64.dll','repro-launcher.exe')) {
   }
 }
 
+# --- VC++ runtime fidelity prep -------------------------------------------
+# A pristine Windows Sandbox image ships WITHOUT the Visual C++ 2015-2022
+# redistributable runtime DLLs. The user's REAL host has them system-wide in
+# C:\Windows\System32 (every developer machine with VS / the redistributable
+# does), so MSVC-linked tools like codex.exe / nvim.exe run there. To make the
+# sandbox faithfully replicate the host we copy the host's own runtime DLLs
+# into tools\sandbox-migration\vcruntime\; migration.wsb maps that directory
+# into the sandbox read-only, and provision-and-migrate.ps1 Stage B copies the
+# DLLs into the sandbox's C:\Windows\System32 (a few small DLLs - seconds, not
+# the 600s the prior `scoop install vcredist` took).
+#
+# This is a legitimate fidelity step: it reproduces the host's existing
+# system-wide runtime, it is NOT installing anything the host lacks.
+$vcDstDir = Join-Path $ScriptDir 'vcruntime'
+# VC++ 2015-2022 x64 runtime set. The first three are mandatory (codex.exe /
+# nvim.exe need them); the rest are copied if present for completeness.
+$vcRequired = @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll')
+$vcOptional = @('msvcp140_1.dll','msvcp140_2.dll','concrt140.dll','vccorlib140.dll')
+$vcSys32    = Join-Path $env:WINDIR 'System32'
+Info "preparing VC++ runtime DLLs for sandbox fidelity -> $vcDstDir"
+if (-not (Test-Path $vcDstDir)) { New-Item -ItemType Directory -Path $vcDstDir -Force | Out-Null }
+$vcCopied  = @()
+$vcMissing = @()
+foreach ($dll in ($vcRequired + $vcOptional)) {
+  $src = Join-Path $vcSys32 $dll
+  if (Test-Path $src) {
+    try {
+      Copy-Item -LiteralPath $src -Destination (Join-Path $vcDstDir $dll) -Force
+      $vcCopied += $dll
+    } catch {
+      Warn "failed to copy VC++ DLL ${dll}: $_"
+      $vcMissing += $dll
+    }
+  } else {
+    $vcMissing += $dll
+  }
+}
+Info "  VC++ DLLs copied: $($vcCopied -join ', ')"
+if ($vcMissing.Count -gt 0) { Info "  VC++ DLLs not on host (skipped): $($vcMissing -join ', ')" }
+# The three mandatory DLLs must be present or the in-sandbox MSVC tools fail.
+$vcMandatoryMissing = $vcRequired | Where-Object { $_ -notin $vcCopied }
+if ($vcMandatoryMissing.Count -gt 0) {
+  Fail "mandatory VC++ runtime DLL(s) not found in ${vcSys32}: $($vcMandatoryMissing -join ', ')"
+  Fail "the sandbox migration's MSVC-linked tools (codex, neovim) will fail without these."
+  exit 1
+}
+
 # --- Clear the OUTPUT directory -------------------------------------------
 # Scoped strictly to $OutDir. Created fresh if absent.
 if (Test-Path $OutDir) {
