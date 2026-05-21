@@ -41,6 +41,7 @@ type
     mbfMacosHooks
     mbfMacosEndpointSecurity
     mbfMacosHybrid
+    mbfLinuxPreloadHooks
     mbfUnknown
 
   MonitorCapability* = enum

@@ -143,6 +143,13 @@ proc candidateShimLibraries(): seq[string] =
       appDir / "librepro_monitor_shim.dll",
       getCurrentDir() / "build" / "lib" / "librepro_monitor_shim.dll"
     ]
+  elif defined(linux):
+    result = @[
+      getEnv("REPRO_MONITOR_SHIM_LIB"),
+      appDir / ".." / "lib" / "librepro_monitor_shim.so",
+      appDir / "librepro_monitor_shim.so",
+      getCurrentDir() / "build" / "lib" / "librepro_monitor_shim.so"
+    ]
   else:
     result = @[
       getEnv("REPRO_MONITOR_SHIM_LIB"),
@@ -169,7 +176,11 @@ proc restoreEnv(oldValues: seq[(string, string, bool)]) =
       delEnv(name)
 
 proc injectionValue(shimLib: string): string =
-  let existing = getEnv("DYLD_INSERT_LIBRARIES")
+  when defined(linux):
+    const injectionEnv = "LD_PRELOAD"
+  else:
+    const injectionEnv = "DYLD_INSERT_LIBRARIES"
+  let existing = getEnv(injectionEnv)
   if existing.len == 0:
     shimLib
   else:
@@ -234,6 +245,40 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
     discard readMonitorDepFile(request.depFilePath)
     renderStreamToPath(request.depFilePath, request.streamMode,
       request.eventStreamPath)
+  elif defined(linux):
+    let shimLib = findShimLibrary()
+    if shimLib.len == 0:
+      raise newException(IOError,
+        "cannot find librepro_monitor_shim.so; run just build or set " &
+          "REPRO_MONITOR_SHIM_LIB")
+
+    let fragmentDir = createLocalTempDir("repro-fs-snoop-fragments")
+    defer: removeDir(fragmentDir)
+    ensureParentDir(request.depFilePath)
+
+    var oldEnv: seq[(string, string, bool)] = @[]
+    setEnvVar("LD_PRELOAD", injectionValue(shimLib), oldEnv)
+    setEnvVar("REPRO_MONITOR_FRAGMENT_DIR", fragmentDir, oldEnv)
+    setEnvVar("REPRO_MONITOR_OUTPUT", request.depFilePath, oldEnv)
+    setEnvVar("REPRO_MONITOR_SESSION", $epochTime(), oldEnv)
+    setEnvVar("REPRO_MONITOR_SHIM_LIB", shimLib, oldEnv)
+    defer: restoreEnv(oldEnv)
+
+    let childArgs =
+      if request.command.len > 1:
+        request.command[1 .. ^1]
+      else:
+        @[]
+    let process = startProcess(request.command[0],
+      args = childArgs,
+      options = {poUsePath, poParentStreams})
+    result = waitForExit(process)
+    close(process)
+
+    discard mergeFragments(fragmentDir, request.depFilePath)
+    discard readMonitorDepFile(request.depFilePath)
+    renderStreamToPath(request.depFilePath, request.streamMode,
+      request.eventStreamPath)
   elif defined(windows):
     # Windows: same end-to-end flow as macOS, but the injection uses
     # CreateProcess(CREATE_SUSPENDED) + CreateRemoteThread(LoadLibraryW)
@@ -266,7 +311,7 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
       request.eventStreamPath)
   else:
     raise newException(OSError,
-      "fs-snoop hooks backend currently supports macOS and Windows only")
+      "fs-snoop hooks backend currently supports macOS, Linux, and Windows only")
 
 proc runFsSnoopCli*(programName: string; args: seq[string]): int =
   try:

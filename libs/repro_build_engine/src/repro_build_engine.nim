@@ -741,7 +741,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # uses only declared/inputs evidence, and the build still completes
   # correctly for caching purposes — the cost is that monitor-derived
   # evidence is empty.
-  when not (defined(macosx) or defined(windows)):
+  when not (defined(macosx) or defined(linux) or defined(windows)):
     result.diagnostic =
       "automatic monitor dependency gathering is unsupported on this platform"
   else:

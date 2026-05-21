@@ -3,6 +3,14 @@ set -euo pipefail
 
 mkdir -p build/test-bin build/nimcache
 
+bash ./scripts/build_apps.sh
+
+nim c \
+  --threads:on \
+  --nimcache:build/nimcache/harness_apply_lock_holder \
+  --out:build/test-bin/harness_apply_lock_holder \
+  tests/e2e/home-generations/harness_apply_lock_holder.nim
+
 found=0
 while IFS= read -r -d '' test_file; do
   found=1

@@ -68,9 +68,13 @@ when defined(windows):
 
 else:
   import std/posix
-  # POSIX brings `flock` constants and the syscall in on Linux + macOS
-  # via `std/posix`. The fcntl form would also work; we use flock for
-  # readability.
+
+  const
+    LockEx = 2.cint
+    LockNb = 4.cint
+
+  proc cFlock(fd: cint; operation: cint): cint {.
+    importc: "flock", header: "<sys/file.h>".}
 
 type
   ApplyLock* = object
@@ -114,7 +118,7 @@ proc tryAcquireOnce(lockPath: string): tuple[ok: bool; lock: ApplyLock] =
     if fd < 0:
       raise newException(IOError,
         "open(" & lockPath & ") failed, errno=" & $errno)
-    let rc = posix.flock(fd, LOCK_EX or LOCK_NB)
+    let rc = cFlock(fd, LockEx or LockNb)
     if rc == 0:
       return (true, ApplyLock(held: true, lockPath: lockPath, fd: fd))
     let lockErr = errno

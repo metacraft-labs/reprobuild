@@ -180,16 +180,21 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
     sourcePath
   ]), repoRoot)
 
-when defined(macosx):
+when defined(macosx) or defined(linux):
   proc compileShim(repoRoot, outputPath: string) =
-    discard requireSuccess(shellCommand([
+    var args = @[
       "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--path:/Users/zahary/metacraft/ct_interpose/src",
       "--nimcache:" & repoRoot / "build" / "nimcache" / "m17-shim",
-      "--out:" & outputPath,
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "macos_interpose.nim"
-    ]), repoRoot)
+      "--out:" & outputPath
+    ]
+    when defined(macosx):
+      args.add("--path:/Users/zahary/metacraft/ct_interpose/src")
+      args.add(repoRoot / "libs" / "repro_monitor_shim" / "src" /
+        "repro_monitor_shim" / "macos_interpose.nim")
+    else:
+      args.add(repoRoot / "libs" / "repro_monitor_shim" / "src" /
+        "repro_monitor_shim" / "linux_preload.nim")
+    discard requireSuccess(shellCommand(args), repoRoot)
 
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
       shim: string] =
@@ -198,7 +203,11 @@ when defined(macosx):
     createDir(binDir)
     createDir(libDir)
     result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim = libDir / "librepro_monitor_shim.dylib"
+    result.shim =
+      when defined(linux):
+        libDir / "librepro_monitor_shim.so"
+      else:
+        libDir / "librepro_monitor_shim.dylib"
     compileShim(repoRoot, result.shim)
     compileNim(repoRoot,
       repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
@@ -505,7 +514,7 @@ suite "integration_scheduler_dependency_gathering_policies":
       commandStatsId = "m17-converter-malformed"), failRoot, app,
       "converted dependency report invalid")
 
-  when defined(macosx):
+  when defined(macosx) or defined(linux):
     test "automatic and hybrid monitor policies use real fs-snoop evidence":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m17-policy-monitor", "")
@@ -573,5 +582,5 @@ suite "integration_scheduler_dependency_gathering_policies":
         commandStatsId = "m17-corrupt-monitor"), failRoot, app,
         "", monitorTools.fsSnoop)
   else:
-    test "automatic monitor policies are unsupported on non-macOS":
+    test "automatic monitor policies are unsupported on this platform":
       skip()

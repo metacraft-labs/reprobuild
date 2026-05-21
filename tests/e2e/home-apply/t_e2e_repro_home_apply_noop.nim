@@ -5,6 +5,9 @@
 ## no-op: same generation id, the stable "no-op: generation matches"
 ## log line, exit code 0.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_home_generations
@@ -47,7 +50,7 @@ suite "M63 gate 2: e2e_repro_home_apply_noop":
     when not defined(windows):
       checkpoint "skipping on non-Windows"
       check true
-      return
+      quit(0)
     let scoopBinary = resolveScoopBinary()
     doAssert scoopBinary.len > 0,
       "M63 gate 2 requires real scoop.exe"

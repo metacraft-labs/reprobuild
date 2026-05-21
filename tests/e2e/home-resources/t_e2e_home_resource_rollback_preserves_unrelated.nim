@@ -16,6 +16,9 @@
 ## `HKCU\Environment\Path` value through the same driver functions
 ## and restores the original at teardown.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_home_generations
@@ -69,7 +72,7 @@ suite "M68 gate 4: e2e_home_resource_rollback_preserves_unrelated":
     when not defined(windows):
       checkpoint "platform-skip: Windows env.userPath path is the gate"
       check true
-      return
+      quit(0)
 
     # Snapshot the real HKCU\Environment\Path so we can restore it.
     let preGate = readUserPathRaw()

@@ -14,6 +14,9 @@
 ##   * eager GC ran (the audit log shows entries even when nothing
 ##     is reclaimed — we check `gc/pending-deletion/` exists at most)
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_home_generations
@@ -62,7 +65,7 @@ suite "M63 gate 1: e2e_repro_home_apply_fresh_install":
     when not defined(windows):
       checkpoint "skipping on non-Windows"
       check true
-      return
+      quit(0)
     let scoopBinary = resolveScoopBinary()
     doAssert scoopBinary.len > 0,
       "M63 gate 1 requires real scoop.exe on PATH; the milestone " &

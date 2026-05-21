@@ -21,6 +21,9 @@
 ##   3. Target pre-exists as a symlink to a DIFFERENT source → apply
 ##      reports drift; the link is NOT silently replaced.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[os, osproc, streams, strtabs, strutils, tempfiles,
   times, unittest]
 
@@ -119,7 +122,7 @@ suite "M72 gate 3: integration_stow_non_destructive_over_existing":
     when not defined(windows):
       checkpoint "platform-skip: M72 stow gate is Windows-specific"
       check true
-      return
+      quit(0)
     let tempRoot = createTempDir("repro-m72-stow-cachehit-", "")
     defer:
       try: removeDir(tempRoot) except OSError: discard
@@ -160,7 +163,7 @@ suite "M72 gate 3: integration_stow_non_destructive_over_existing":
        "replaces it and records prior content":
     when not defined(windows):
       check true
-      return
+      quit(0)
     let tempRoot = createTempDir("repro-m72-stow-regfile-", "")
     defer:
       try: removeDir(tempRoot) except OSError: discard
@@ -222,7 +225,7 @@ suite "M72 gate 3: integration_stow_non_destructive_over_existing":
   test "pre-existing symlink to a DIFFERENT source is reported as drift":
     when not defined(windows):
       check true
-      return
+      quit(0)
     let tempRoot = createTempDir("repro-m72-stow-wronglink-", "")
     defer:
       try: removeDir(tempRoot) except OSError: discard

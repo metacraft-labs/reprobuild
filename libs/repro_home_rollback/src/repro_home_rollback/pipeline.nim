@@ -380,9 +380,11 @@ proc removeManagedBlock(hostFilePath, blockId: string) =
 
 proc removeLauncherArtifact(stateDir, currentGenIdHex: string;
                            rec: ExportedCommand) =
-  ## Drop the launcher artifact. On Windows: drop the .exe + sidecar
-  ## AND the .cmd shim from the stable bin dir. On POSIX: drop the
-  ## script from `<state-dir>/generations/<gen-id>/bin/`.
+  ## Drop the user-visible launcher artifact. On Windows that artifact
+  ## lives in the stable bin dir, so remove the .exe + sidecar and the
+  ## .cmd shim. On POSIX visibility comes from `<state-dir>/current`,
+  ## and generation directories are historical state, so rotation alone
+  ## hides launchers that are not in the target generation.
   when defined(windows):
     let stable = stateDir / "bin"
     let cmdExe = stable / (rec.commandName & ".exe")
@@ -392,10 +394,9 @@ proc removeLauncherArtifact(stateDir, currentGenIdHex: string;
     if fileExists(sidecar): removeFile(sidecar)
     if fileExists(cmdShim): removeFile(cmdShim)
   else:
-    let scriptPath = stateDir / "generations" / currentGenIdHex / "bin" /
-      rec.commandName
-    if fileExists(scriptPath):
-      removeFile(scriptPath)
+    discard stateDir
+    discard currentGenIdHex
+    discard rec
 
 proc materializeLauncherFromTarget(stateDir, targetGenIdHex: string;
                                    store: var Store;

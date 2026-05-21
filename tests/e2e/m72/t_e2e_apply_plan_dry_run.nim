@@ -20,6 +20,9 @@
 ## the M72 deliverable text allows "fixture profile and fixture
 ## tools only" for this gate.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[algorithm, os, osproc, sequtils, streams, strtabs, strutils,
   tempfiles, unittest]
 
@@ -101,7 +104,7 @@ suite "M72 gate 2: e2e_apply_plan_dry_run":
     when not defined(windows):
       checkpoint "platform-skip: M72 plan dry-run gate is Windows-specific"
       check true
-      return
+      quit(0)
 
     let tempRoot = createTempDir("repro-m72-plan-", "")
     defer:

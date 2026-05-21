@@ -43,6 +43,31 @@ const
     mcapFileAppend
   }
 
+  LinuxPreloadSupportedCapabilities* = {
+    mcapProcess,
+    mcapFileRead,
+    mcapFileWrite,
+    mcapPathProbe,
+    mcapDirectoryEnumerate,
+    mcapEventLoss,
+    mcapProcessTree,
+    mcapProcessExec,
+    mcapBackendProvenance,
+    mcapFileCreate,
+    mcapFileTruncate,
+    mcapFileAppend
+  }
+
+  LinuxPreloadKnownUnsupportedCapabilities* = {
+    mcapEndpointSecurity,
+    mcapHybrid,
+    mcapRename,
+    mcapSymlink,
+    mcapLibraryLoad,
+    mcapAuthorizationEnforcement,
+    mcapPathMutation
+  }
+
 proc backendFamilyId*(family: MonitorBackendFamily): string =
   case family
   of mbfMacosHooks:
@@ -51,6 +76,8 @@ proc backendFamilyId*(family: MonitorBackendFamily): string =
     "macos-endpoint-security"
   of mbfMacosHybrid:
     "macos-hybrid"
+  of mbfLinuxPreloadHooks:
+    "linux-preload-hooks"
   of mbfUnknown:
     "unknown"
 
@@ -132,6 +159,25 @@ proc unsupportedReason(capability: MonitorCapability): string =
     "macOS interpose shim does not cover the full mutation surface yet"
   else:
     "capability is not advertised by the selected macOS interpose profile"
+
+proc linuxUnsupportedReason(capability: MonitorCapability): string =
+  case capability
+  of mcapEndpointSecurity:
+    "EndpointSecurity is macOS-only; Linux native backend is future eBPF work"
+  of mcapHybrid:
+    "hybrid native plus preload profile is not implemented"
+  of mcapRename:
+    "Linux preload shim does not yet normalize rename/renameat as path mutations"
+  of mcapSymlink:
+    "Linux preload shim does not yet normalize symlink/readlink as path mutations"
+  of mcapLibraryLoad:
+    "Linux preload shim does not yet emit library-load records"
+  of mcapAuthorizationEnforcement:
+    "Linux preload shim observes only and cannot authorize or deny operations"
+  of mcapPathMutation:
+    "Linux preload shim does not cover the full mutation surface yet"
+  else:
+    "capability is not advertised by the selected Linux preload profile"
 
 proc gapDetail*(gap: MonitorCapabilityGap): string =
   "backend=" & backendFamilyId(gap.backendFamily) &
@@ -222,6 +268,46 @@ proc macosInterposeMonitorProfile*(
           backendFamilyId(result.backendFamily) & ": " &
           capabilityId(capability))
 
+proc linuxPreloadMonitorProfile*(
+    required: set[MonitorCapability] = {}): MonitorBackendProfile =
+  result.profileName = "linux-preload-hooks-m14"
+  result.backendFamily = mbfLinuxPreloadHooks
+  result.supportedCapabilities = LinuxPreloadSupportedCapabilities
+  result.requiredCapabilities = required
+  result.evidenceComplete = true
+  result.diagnostics.add MonitorDiagnostic(
+    level: mdlInfo,
+    message: "selected Linux LD_PRELOAD/hooks backend; future native eBPF " &
+      "backend is unavailable in M14")
+
+  var gapCapabilities = LinuxPreloadKnownUnsupportedCapabilities
+  for capability in required:
+    if capability notin result.supportedCapabilities:
+      gapCapabilities.incl capability
+      result.evidenceComplete = false
+
+  for capability in gapCapabilities:
+    let requiredGap = capability in required and
+      capability notin result.supportedCapabilities
+    result.gaps.add MonitorCapabilityGap(
+      backendFamily: result.backendFamily,
+      capability: capability,
+      required: requiredGap,
+      reason: linuxUnsupportedReason(capability))
+    if requiredGap:
+      result.diagnostics.add MonitorDiagnostic(
+        level: mdlError,
+        message: "required monitor capability is unsupported by " &
+          backendFamilyId(result.backendFamily) & ": " &
+          capabilityId(capability))
+
+proc defaultHooksMonitorProfile*(
+    required: set[MonitorCapability] = {}): MonitorBackendProfile =
+  when defined(linux):
+    linuxPreloadMonitorProfile(required)
+  else:
+    macosInterposeMonitorProfile(required)
+
 proc profileRecords*(profile: MonitorBackendProfile): seq[MonitorRecord] =
   result.add backendProfileRecord(profile)
   for gap in profile.gaps:
@@ -230,7 +316,7 @@ proc profileRecords*(profile: MonitorBackendProfile): seq[MonitorRecord] =
 proc profileFromRecords*(records: openArray[MonitorRecord];
                          required: set[MonitorCapability] = {}):
                          MonitorBackendProfile =
-  result = macosInterposeMonitorProfile(required)
+  result = defaultHooksMonitorProfile(required)
   var sawProfile = false
   var gaps: seq[MonitorCapabilityGap] = @[]
   for record in records:
@@ -283,7 +369,10 @@ proc profileFromRecords*(records: openArray[MonitorRecord];
           backendFamily: result.backendFamily,
           capability: capability,
           required: true,
-          reason: unsupportedReason(capability))
+          reason: if result.backendFamily == mbfLinuxPreloadHooks:
+              linuxUnsupportedReason(capability)
+            else:
+              unsupportedReason(capability))
 
 proc evaluateMonitorEvidence*(dep: MonitorDepFile;
                               required: set[MonitorCapability]):

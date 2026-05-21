@@ -10,7 +10,7 @@
 ##   - Host identity: `$REPRO_HOST` > `--host <name>` (CLI override) >
 ##     lowercased OS hostname.
 
-import std/[os, strutils]
+import std/[nativesockets, os, strutils]
 
 import ./errors
 
@@ -106,7 +106,7 @@ proc loadProfilePath*(): string =
 proc systemHostname*(): string =
   ## OS hostname, lowercased. On Windows uses `COMPUTERNAME` (or
   ## `GetComputerNameW` as a fallback); on POSIX uses `gethostname()`
-  ## via `std/os.getHostname`.
+  ## via `std/nativesockets.getHostname`.
   when defined(windows):
     let env = getEnv("COMPUTERNAME")
     if env.len > 0:

@@ -29,6 +29,9 @@
 ## configured bucket): apply must fail with a structured diagnostic
 ## naming the package and the catalogs searched.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[algorithm, json, os, osproc, streams, strtabs, strutils,
   tempfiles, unittest]
 
@@ -104,7 +107,7 @@ suite "M72 gate 1: integration_production_package_catalog":
       checkpoint "platform-skip: M72 production catalog gate is " &
         "Windows-specific (the Scoop adapter is Windows-only)"
       check true
-      return
+      quit(0)
 
     let scoopBinary = resolveScoopBinary()
     doAssert scoopBinary.len > 0,

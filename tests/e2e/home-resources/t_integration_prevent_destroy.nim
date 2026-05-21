@@ -18,6 +18,9 @@
 ##
 ## Windows-focused: registry resources are testable on the dev host.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times,
   unittest]
 
@@ -71,7 +74,7 @@ suite "M68 Phase B: integration_prevent_destroy":
     when not defined(windows):
       checkpoint "platform-skip: Windows registry resource is the subject"
       check true
-      return
+      quit(0)
 
     let testSubkey = "Software\\Reprobuild-Tests\\m68-pd-" &
       $epochTime()
@@ -149,7 +152,7 @@ suite "M68 Phase B: integration_prevent_destroy":
     when not defined(windows):
       checkpoint "platform-skip"
       check true
-      return
+      quit(0)
 
     let testSubkey = "Software\\Reprobuild-Tests\\m68-pd-ctl-" &
       $epochTime()

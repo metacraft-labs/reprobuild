@@ -34,6 +34,9 @@
 ## isolated environment back to the captured baseline generation and
 ## stops — it never pushes forward through a failure.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[algorithm, os, osproc, sequtils, streams, strtabs,
   strutils, tables, tempfiles, times, unittest]
 
@@ -231,7 +234,7 @@ suite "M70 gate: e2e_dotfiles_replacement_on_real_host":
     when not defined(windows):
       checkpoint "platform-skip: M70 gate is Windows-host-specific"
       check true
-      return
+      quit(0)
 
     # -------------------------------------------------------------------
     # PRE-FLIGHT (mandatory, abort-on-failure).

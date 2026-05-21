@@ -255,30 +255,39 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
     sourcePath
   ]), repoRoot)
 
-when defined(macosx):
+when defined(macosx) or defined(linux):
   proc compileShim(repoRoot, outputPath: string) =
-    let arm64Path = outputPath & ".arm64"
-    let arm64ePath = outputPath & ".arm64e"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--path:/Users/zahary/metacraft/ct_interpose/src",
-      "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-local-shim",
-      "--out:" & arm64Path,
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "macos_interpose.nim"
-    ]), repoRoot)
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--passC:-arch arm64e", "--passL:-arch arm64e",
-      "--path:/Users/zahary/metacraft/ct_interpose/src",
-      "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-local-shim-arm64e",
-      "--out:" & arm64ePath,
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "macos_interpose.nim"
-    ]), repoRoot)
-    discard requireSuccess(shellCommand([
-      "lipo", "-create", "-output", outputPath, arm64Path, arm64ePath
-    ]), repoRoot)
+    when defined(macosx):
+      let arm64Path = outputPath & ".arm64"
+      let arm64ePath = outputPath & ".arm64e"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
+        "--path:/Users/zahary/metacraft/ct_interpose/src",
+        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-local-shim",
+        "--out:" & arm64Path,
+        repoRoot / "libs" / "repro_monitor_shim" / "src" /
+          "repro_monitor_shim" / "macos_interpose.nim"
+      ]), repoRoot)
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
+        "--passC:-arch arm64e", "--passL:-arch arm64e",
+        "--path:/Users/zahary/metacraft/ct_interpose/src",
+        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-local-shim-arm64e",
+        "--out:" & arm64ePath,
+        repoRoot / "libs" / "repro_monitor_shim" / "src" /
+          "repro_monitor_shim" / "macos_interpose.nim"
+      ]), repoRoot)
+      discard requireSuccess(shellCommand([
+        "lipo", "-create", "-output", outputPath, arm64Path, arm64ePath
+      ]), repoRoot)
+    else:
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
+        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-local-shim",
+        "--out:" & outputPath,
+        repoRoot / "libs" / "repro_monitor_shim" / "src" /
+          "repro_monitor_shim" / "linux_preload.nim"
+      ]), repoRoot)
 
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
       shim: string] =
@@ -287,7 +296,11 @@ when defined(macosx):
     createDir(binDir)
     createDir(libDir)
     result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim = libDir / "librepro_monitor_shim.dylib"
+    result.shim =
+      when defined(linux):
+        libDir / "librepro_monitor_shim.so"
+      else:
+        libDir / "librepro_monitor_shim.dylib"
     compileShim(repoRoot, result.shim)
     compileNim(repoRoot,
       repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
@@ -783,14 +796,45 @@ proc writeM52StdlibProject(path: string) =
     "      inputs = @[\"build/main\", \"build/main.o\", \"public/main.css\"])\n" &
     "    defaultBuildAction(summary)\n")
 
-when defined(macosx):
+when defined(macosx) or defined(linux):
+  proc writeStylusImportMonitorFixture(binDir: string) =
+    writeExecutable(binDir / "stylus",
+      "#!/bin/sh\n" &
+      "set -eu\n" &
+      "if [ \"${1:-}\" = \"--version\" ]; then echo 'stylus fixture 1.0.0'; exit 0; fi\n" &
+      "output= source=\n" &
+      "while [ \"$#\" -gt 0 ]; do\n" &
+      "  case \"$1\" in\n" &
+      "    -o) output=$2; shift 2 ;;\n" &
+      "    -*) shift ;;\n" &
+      "    *) source=$1; shift ;;\n" &
+      "  esac\n" &
+      "done\n" &
+      "test -n \"$output\"\n" &
+      "test -n \"$source\"\n" &
+      "src_dir=$(dirname \"$source\")\n" &
+      "while IFS= read -r line; do\n" &
+      "  case \"$line\" in\n" &
+      "    '@import \"'*'\"')\n" &
+      "      import_name=${line#'@import \"'}\n" &
+      "      import_name=${import_name%'\"'}\n" &
+      "      cat \"$src_dir/$import_name.styl\" >/dev/null\n" &
+      "      ;;\n" &
+      "  esac\n" &
+      "done < \"$source\"\n" &
+      "mkdir -p \"$(dirname \"$output\")\"\n" &
+      "{ printf '/* stylus fixture */\\n'; cat \"$source\"; } > \"$output\"\n")
+
   proc realStylusPathDir(tempRoot: string): string =
     let existing = findExe("stylus")
     if existing.len > 0:
       return existing.splitPath.head
     let npm = findExe("npm")
     if npm.len == 0:
-      return ""
+      result = tempRoot / "stylus-fixture-bin"
+      createDir(result)
+      writeStylusImportMonitorFixture(result)
+      return
     let npmRoot = tempRoot / "npm-stylus"
     createDir(npmRoot)
     let res = execCmdEx(shellCommand([
@@ -801,9 +845,11 @@ when defined(macosx):
       return ""
     let candidate = npmRoot / "node_modules" / ".bin" / "stylus"
     if fileExists(candidate):
-      candidate.splitPath.head
+      return candidate.splitPath.head
     else:
-      ""
+      result = tempRoot / "stylus-fixture-bin"
+      createDir(result)
+      writeStylusImportMonitorFixture(result)
 
   proc writeM52StylusMonitorProject(path: string) =
     writeFile(path,
@@ -911,7 +957,7 @@ proc resetTrace(path: string) =
     removeFile(path)
 
 suite "e2e_local_reprobuild_project_build":
-  when defined(macosx):
+  when defined(macosx) or defined(linux):
     test "public CLI automatic monitor policy records hidden inputs and invalidates cache":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m32-local-monitor", "")
@@ -978,8 +1024,8 @@ suite "e2e_local_reprobuild_project_build":
         "hidden=hidden v2")
 
   else:
-    test "automatic monitor project CLI E2E is macOS-only":
-      echo "SKIP: automatic monitor dependency gathering currently requires macOS"
+    test "automatic monitor project CLI E2E is skipped on this platform":
+      echo "SKIP: automatic monitor dependency gathering requires preload hooks"
 
   test "public CLI lowers explicit make depfile policy and rejects incompatible monitor depfile":
     let repoRoot = getCurrentDir()
@@ -1234,7 +1280,7 @@ suite "e2e_local_reprobuild_project_build":
     check not projectText.contains("outputs =")
 
     let output =
-      when defined(macosx):
+      when defined(macosx) or defined(linux):
         let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
         let monitorEnv = [
           ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
@@ -1274,7 +1320,7 @@ suite "e2e_local_reprobuild_project_build":
         removeFile(daemon.socket)
 
     let reproBin = compilePublicReproTestBin(repoRoot)
-    when defined(macosx):
+    when defined(macosx) or defined(linux):
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
         ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
@@ -1315,11 +1361,16 @@ suite "e2e_local_reprobuild_project_build":
 
     let report = parseFile(valueAfter(output, "buildReport:"))
     check reportAction(report, "summary"){"runQuotaBackend"}.getStr() == "builtin"
+    let expectedStylusPolicy =
+      when defined(macosx) or defined(linux) or defined(windows):
+        "dgAutomaticMonitor"
+      else:
+        "dgDeclaredOnly"
     check report{"actions"}.getElems().anyIt(
       it{"id"}.getStr().startsWith("stylus-") and
-      it{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor")
+      it{"dependencyPolicyKind"}.getStr() == expectedStylusPolicy)
 
-  when defined(macosx):
+  when defined(macosx) or defined(linux):
     test "m52_stylus_import_monitoring_e2e":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m52-stylus-monitor", "")

@@ -42,6 +42,34 @@ proc requireFailure(command: string; cwd = getCurrentDir()): string =
   check res.code != 0
   res.output
 
+proc pathHasExecutable(name, pathValue: string): bool =
+  when defined(windows):
+    findExe(name).len > 0
+  else:
+    execCmdEx("PATH=" & q(pathValue) & " command -v " & q(name)).exitCode == 0
+
+proc nixBuildOutPath(selector: string): string =
+  let res = execCmdEx(shellCommand([
+    "nix", "build", "--no-link", "--print-out-paths", selector
+  ]))
+  if res.exitCode != 0:
+    checkpoint(res.output)
+    return ""
+  for line in res.output.splitLines:
+    let path = line.strip()
+    if path.startsWith("/nix/store/"):
+      return path
+  checkpoint(res.output)
+  ""
+
+proc pathWithNixFallbackTools(pathValue: string): string =
+  result = pathValue
+  when not defined(windows):
+    if not pathHasExecutable("node", result):
+      let nodePath = nixBuildOutPath("nixpkgs#nodejs")
+      if nodePath.len > 0:
+        result = nodePath / "bin" & $PathSep & result
+
 proc pathExists(path: string): bool =
   try:
     discard getFileInfo(path, followSymlink = false)
@@ -323,12 +351,15 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
-proc runNode(path: string; cwd = getCurrentDir()): string =
-  requireSuccess(shellCommand(["node", path]), cwd)
+proc runNode(path, cwd, pathValue: string): string =
+  requireSuccess("PATH=" & q(pathValue) & " " & shellCommand(["node", path]),
+    cwd)
 
-proc directOracle(projectRoot, outputPath: string; command: openArray[string]) =
+proc directOracle(projectRoot, outputPath: string; command: openArray[string];
+                  pathValue: string) =
   createDir(projectRoot / outputPath.splitPath.head)
-  discard requireSuccess(shellCommand(command), projectRoot)
+  discard requireSuccess("PATH=" & q(pathValue) & " " & shellCommand(command),
+    projectRoot)
 
 proc mainSymbol(path, cwd: string): string =
   let output = requireSuccess(shellCommand(["nm", "-g", path]), cwd)
@@ -390,7 +421,7 @@ suite "e2e_codetracer_build_subset_without_tup":
     writeProject(projectRoot / "reprobuild.nim", nimJsActionCommand,
       traceObjectActionCommand, generatedHeaderCommand)
     let target = projectRoot
-    let pathValue = getEnv("PATH")
+    let pathValue = pathWithNixFallbackTools(getEnv("PATH"))
 
     let first = build(reproBin, target, repoRoot, pathValue)
     check first.contains("provisioning-disabled mode active")
@@ -434,13 +465,14 @@ suite "e2e_codetracer_build_subset_without_tup":
     check generatedHeaderCInputs.anyIt(it.endsWith("build/generated/ct_config.h"))
 
     directOracle(projectRoot, "oracle/ipc_registry_test.js",
-      nimJsOracleCommand)
-    check runNode("tests/ipc_registry_test.js", projectRoot) ==
-      runNode("oracle/ipc_registry_test.js", projectRoot)
-    check runNode("tests/ipc_registry_test.js", projectRoot).contains(
+      nimJsOracleCommand, pathValue)
+    check runNode("tests/ipc_registry_test.js", projectRoot, pathValue) ==
+      runNode("oracle/ipc_registry_test.js", projectRoot, pathValue)
+    check runNode("tests/ipc_registry_test.js", projectRoot, pathValue).contains(
       "[OK] handlers still invoked after reconnect")
 
-    directOracle(projectRoot, "oracle/main.o", traceObjectOracleCommand)
+    directOracle(projectRoot, "oracle/main.o", traceObjectOracleCommand,
+      pathValue)
     check mainSymbol("build/c/main.tup.o", projectRoot) ==
       mainSymbol("oracle/main.o", projectRoot)
     check mainSymbol("build/c/main.with-header.o", projectRoot) ==

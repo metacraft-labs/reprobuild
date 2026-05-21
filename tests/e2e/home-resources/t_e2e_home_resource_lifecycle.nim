@@ -11,6 +11,9 @@
 ## Phase A scope: ships the Windows leg + the `--reconcile-drift`
 ## path + the `repro home adopt` CLI skeleton.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times, unittest]
 
 import repro_home_generations
@@ -71,7 +74,7 @@ suite "M68 gate 1: e2e_home_resource_lifecycle_create_update_destroy":
     when not defined(windows):
       checkpoint "platform-skip: Windows-focused Phase A coverage"
       check true
-      return
+      quit(0)
     let testSubkey = "Software\\Reprobuild-Tests\\m68-gate1-" &
       $epochTime()
     defer:

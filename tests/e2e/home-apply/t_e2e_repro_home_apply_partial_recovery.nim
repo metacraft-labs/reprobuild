@@ -10,6 +10,9 @@
 ##   2. A new generation has been produced.
 ##   3. `current` points at the new generation.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_home_generations
@@ -51,7 +54,7 @@ suite "M63 gate 3: e2e_repro_home_apply_partial_recovery":
     when not defined(windows):
       checkpoint "skipping on non-Windows"
       check true
-      return
+      quit(0)
     let scoopBinary = resolveScoopBinary()
     doAssert scoopBinary.len > 0
 

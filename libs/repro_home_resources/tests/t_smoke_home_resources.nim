@@ -361,9 +361,9 @@ suite "M68 smoke: home resource lifecycle":
     state.recorded.postWriteDigest = state.observed.digest
     state.recorded.lifecyclePolicy = lpPreventDestroy
     # Enforcement off (Phase A behaviour): produces a plain destroy.
-    let off = decideAction(state, DecisionOptions(reconcile: rpFailClosed,
+    let enforcementOff = decideAction(state, DecisionOptions(reconcile: rpFailClosed,
       enforcePreventDestroy: false))
-    check off.kind == rakDestroy
+    check enforcementOff.kind == rakDestroy
     # Enforcement on: raises regardless of reconcile policy.
     expect EPreventDestroy:
       discard decideAction(state, DecisionOptions(reconcile: rpFailClosed,

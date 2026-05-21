@@ -57,6 +57,7 @@
                   export BLAKE3_PREFIX=${pkgs.libblake3}
                   export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                   export RUNQUOTA_SRC=${runquota-src}
+                  export SQLITE_PREFIX=${pkgs.lib.getLib pkgs.sqlite}
                   export XXHASH_PREFIX=${pkgs.xxHash}
                   exec ${pkgs.just}/bin/just lint
                 ''
@@ -80,12 +81,14 @@
 
             buildInputs = [
               pkgs.libblake3
+              (pkgs.lib.getLib pkgs.sqlite)
               pkgs.xxHash
             ];
 
             BLAKE3_PREFIX = pkgs.libblake3;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
+            SQLITE_PREFIX = pkgs.lib.getLib pkgs.sqlite;
             XXHASH_PREFIX = pkgs.xxHash;
 
             buildPhase = ''
@@ -145,6 +148,7 @@
           devShells.default = pkgs.mkShell {
             BLAKE3_PREFIX = pkgs.libblake3;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
+            SQLITE_PREFIX = pkgs.lib.getLib pkgs.sqlite;
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [
               pkgs.just
@@ -154,6 +158,7 @@
               pkgs.clang
               pkgs.curl
               pkgs.libblake3
+              pkgs.sqlite
               pkgs.xxHash
               pkgs.zlib
               pkgs.nixfmt-rfc-style

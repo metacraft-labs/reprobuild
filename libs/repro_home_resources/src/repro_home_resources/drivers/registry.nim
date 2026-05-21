@@ -27,6 +27,137 @@ proc stripHkcuPrefix*(key: string): string =
     return key[18 ..< key.len]
   return key
 
+# ---------------------------------------------------------------------------
+# UTF-16LE payload codec.
+# ---------------------------------------------------------------------------
+
+proc toUtf16Z(s: string): seq[uint16] =
+  ## UTF-8 -> UTF-16LE code units with a trailing NUL.
+  result = @[]
+  var i = 0
+  while i < s.len:
+    let b0 = uint32(byte(s[i]))
+    var cp: uint32
+    var advance: int
+    if b0 < 0x80:
+      cp = b0; advance = 1
+    elif (b0 and 0xE0) == 0xC0 and i + 1 < s.len:
+      cp = ((b0 and 0x1F) shl 6) or (uint32(byte(s[i+1])) and 0x3F)
+      advance = 2
+    elif (b0 and 0xF0) == 0xE0 and i + 2 < s.len:
+      cp = ((b0 and 0x0F) shl 12) or
+           ((uint32(byte(s[i+1])) and 0x3F) shl 6) or
+           (uint32(byte(s[i+2])) and 0x3F)
+      advance = 3
+    elif (b0 and 0xF8) == 0xF0 and i + 3 < s.len:
+      cp = ((b0 and 0x07) shl 18) or
+           ((uint32(byte(s[i+1])) and 0x3F) shl 12) or
+           ((uint32(byte(s[i+2])) and 0x3F) shl 6) or
+           (uint32(byte(s[i+3])) and 0x3F)
+      advance = 4
+    else:
+      cp = b0; advance = 1
+    if cp <= 0xFFFF:
+      result.add(uint16(cp))
+    else:
+      let c = cp - 0x10000
+      result.add(uint16(0xD800 + (c shr 10)))
+      result.add(uint16(0xDC00 + (c and 0x3FF)))
+    i += advance
+  result.add(0'u16)
+
+proc fromUtf16Bytes(bytes: openArray[byte]; trimTrailingNul = true): string =
+  ## UTF-16LE bytes -> UTF-8.
+  var units: seq[uint16] = @[]
+  var i = 0
+  while i + 1 < bytes.len:
+    units.add(uint16(bytes[i]) or (uint16(bytes[i+1]) shl 8))
+    i += 2
+  if trimTrailingNul:
+    while units.len > 0 and units[^1] == 0'u16:
+      units.setLen(units.len - 1)
+  result = ""
+  var j = 0
+  while j < units.len:
+    var cp: uint32
+    let u = uint32(units[j])
+    if u >= 0xD800 and u <= 0xDBFF and j + 1 < units.len:
+      let lo = uint32(units[j+1])
+      cp = 0x10000 + ((u - 0xD800) shl 10) + (lo - 0xDC00)
+      inc j
+    else:
+      cp = u
+    inc j
+    if cp < 0x80:
+      result.add(char(cp))
+    elif cp < 0x800:
+      result.add(char(0xC0 or (cp shr 6)))
+      result.add(char(0x80 or (cp and 0x3F)))
+    elif cp < 0x10000:
+      result.add(char(0xE0 or (cp shr 12)))
+      result.add(char(0x80 or ((cp shr 6) and 0x3F)))
+      result.add(char(0x80 or (cp and 0x3F)))
+    else:
+      result.add(char(0xF0 or (cp shr 18)))
+      result.add(char(0x80 or ((cp shr 12) and 0x3F)))
+      result.add(char(0x80 or ((cp shr 6) and 0x3F)))
+      result.add(char(0x80 or (cp and 0x3F)))
+
+proc utf16Bytes(units: seq[uint16]): seq[byte] =
+  result = newSeq[byte](units.len * 2)
+  for i, u in units:
+    result[i*2] = byte(u and 0xff)
+    result[i*2 + 1] = byte((u shr 8) and 0xff)
+
+# ---------------------------------------------------------------------------
+# Payload encoding per typed value kind.
+# ---------------------------------------------------------------------------
+
+proc encodeString*(s: string): seq[byte] =
+  utf16Bytes(toUtf16Z(s))
+
+proc encodeDword*(v: uint32): seq[byte] =
+  result = newSeq[byte](4)
+  result[0] = byte(v and 0xff)
+  result[1] = byte((v shr 8) and 0xff)
+  result[2] = byte((v shr 16) and 0xff)
+  result[3] = byte((v shr 24) and 0xff)
+
+proc encodeQword*(v: uint64): seq[byte] =
+  result = newSeq[byte](8)
+  for i in 0 ..< 8:
+    result[i] = byte((v shr (i*8)) and 0xff)
+
+proc encodeBinary*(b: openArray[byte]): seq[byte] =
+  result = newSeq[byte](b.len)
+  for i, v in b:
+    result[i] = v
+
+proc encodeMultiString*(items: openArray[string]): seq[byte] =
+  ## REG_MULTI_SZ: each entry is UTF-16LE terminated by U+0000;
+  ## the whole sequence ends with an extra U+0000.
+  var units: seq[uint16] = @[]
+  for item in items:
+    units.add(toUtf16Z(item))
+  units.add(0'u16)
+  utf16Bytes(units)
+
+proc decodeMultiString*(bytes: openArray[byte]): seq[string] =
+  ## Reverse of encodeMultiString. Stops at the double-zero terminator.
+  var itemBytes: seq[byte] = @[]
+  var i = 0
+  while i + 1 < bytes.len:
+    let u = uint16(bytes[i]) or (uint16(bytes[i+1]) shl 8)
+    if u == 0:
+      if itemBytes.len == 0:
+        break
+      result.add(fromUtf16Bytes(itemBytes, trimTrailingNul = false))
+      itemBytes.setLen(0)
+    else:
+      itemBytes.add(bytes[i])
+      itemBytes.add(bytes[i+1])
+    i += 2
+
 when defined(windows):
   # -------------------------------------------------------------------------
   # Win32 binding (hand-rolled — small stable surface).
@@ -93,154 +224,6 @@ when defined(windows):
                           lParam: LPARAM; fuFlags: uint; uTimeout: uint;
                           lpdwResult: ptr uint): int
     {.importc, stdcall, dynlib: "user32".}
-
-  # -------------------------------------------------------------------------
-  # UTF-16LE conversion.
-  # -------------------------------------------------------------------------
-
-  proc toUtf16Z(s: string): seq[uint16] =
-    ## UTF-8 -> UTF-16LE with a trailing NUL. Surrogate pairs are
-    ## decoded via std/unicode's runes; we keep this hand-rolled to
-    ## avoid pulling unicode just for one call.
-    result = @[]
-    var i = 0
-    while i < s.len:
-      let b0 = uint32(byte(s[i]))
-      var cp: uint32
-      var advance: int
-      if b0 < 0x80:
-        cp = b0; advance = 1
-      elif (b0 and 0xE0) == 0xC0 and i + 1 < s.len:
-        cp = ((b0 and 0x1F) shl 6) or (uint32(byte(s[i+1])) and 0x3F)
-        advance = 2
-      elif (b0 and 0xF0) == 0xE0 and i + 2 < s.len:
-        cp = ((b0 and 0x0F) shl 12) or
-             ((uint32(byte(s[i+1])) and 0x3F) shl 6) or
-             (uint32(byte(s[i+2])) and 0x3F)
-        advance = 3
-      elif (b0 and 0xF8) == 0xF0 and i + 3 < s.len:
-        cp = ((b0 and 0x07) shl 18) or
-             ((uint32(byte(s[i+1])) and 0x3F) shl 12) or
-             ((uint32(byte(s[i+2])) and 0x3F) shl 6) or
-             (uint32(byte(s[i+3])) and 0x3F)
-        advance = 4
-      else:
-        cp = b0; advance = 1
-      if cp <= 0xFFFF:
-        result.add(uint16(cp))
-      else:
-        let c = cp - 0x10000
-        result.add(uint16(0xD800 + (c shr 10)))
-        result.add(uint16(0xDC00 + (c and 0x3FF)))
-      i += advance
-    result.add(0'u16)
-
-  proc fromUtf16Bytes(bytes: openArray[byte]; trimTrailingNul = true): string =
-    ## UTF-16LE bytes -> UTF-8. If `trimTrailingNul`, any trailing
-    ## U+0000 code units are dropped.
-    var units: seq[uint16] = @[]
-    var i = 0
-    while i + 1 < bytes.len:
-      units.add(uint16(bytes[i]) or (uint16(bytes[i+1]) shl 8))
-      i += 2
-    if trimTrailingNul:
-      while units.len > 0 and units[^1] == 0'u16:
-        units.setLen(units.len - 1)
-    result = ""
-    var j = 0
-    while j < units.len:
-      var cp: uint32
-      let u = uint32(units[j])
-      if u >= 0xD800 and u <= 0xDBFF and j + 1 < units.len:
-        let lo = uint32(units[j+1])
-        cp = 0x10000 + ((u - 0xD800) shl 10) + (lo - 0xDC00)
-        inc j
-      else:
-        cp = u
-      inc j
-      if cp < 0x80:
-        result.add(char(cp))
-      elif cp < 0x800:
-        result.add(char(0xC0 or (cp shr 6)))
-        result.add(char(0x80 or (cp and 0x3F)))
-      elif cp < 0x10000:
-        result.add(char(0xE0 or (cp shr 12)))
-        result.add(char(0x80 or ((cp shr 6) and 0x3F)))
-        result.add(char(0x80 or (cp and 0x3F)))
-      else:
-        result.add(char(0xF0 or (cp shr 18)))
-        result.add(char(0x80 or ((cp shr 12) and 0x3F)))
-        result.add(char(0x80 or ((cp shr 6) and 0x3F)))
-        result.add(char(0x80 or (cp and 0x3F)))
-
-  proc utf16Bytes(units: seq[uint16]): seq[byte] =
-    result = newSeq[byte](units.len * 2)
-    for i, u in units:
-      result[i*2] = byte(u and 0xff)
-      result[i*2 + 1] = byte((u shr 8) and 0xff)
-
-  # -------------------------------------------------------------------------
-  # Payload encoding per typed value kind.
-  # -------------------------------------------------------------------------
-
-  proc encodeString*(s: string): seq[byte] =
-    let units = toUtf16Z(s)
-    utf16Bytes(units)
-
-  proc encodeDword*(v: uint32): seq[byte] =
-    result = newSeq[byte](4)
-    result[0] = byte(v and 0xff)
-    result[1] = byte((v shr 8) and 0xff)
-    result[2] = byte((v shr 16) and 0xff)
-    result[3] = byte((v shr 24) and 0xff)
-
-  proc encodeQword*(v: uint64): seq[byte] =
-    result = newSeq[byte](8)
-    for i in 0 ..< 8:
-      result[i] = byte((v shr (i*8)) and 0xff)
-
-  proc encodeBinary*(b: openArray[byte]): seq[byte] =
-    result = newSeq[byte](b.len)
-    for i, v in b:
-      result[i] = v
-
-  proc encodeMultiString*(items: openArray[string]): seq[byte] =
-    ## REG_MULTI_SZ: each entry is UTF-16LE terminated by U+0000;
-    ## the whole sequence ends with an extra U+0000.
-    var units: seq[uint16] = @[]
-    for item in items:
-      let z = toUtf16Z(item)
-      # z already has trailing 0; keep it.
-      units.add(z)
-    # Final terminator
-    units.add(0'u16)
-    utf16Bytes(units)
-
-  proc decodeMultiString*(bytes: openArray[byte]): seq[string] =
-    ## Reverse of encodeMultiString. Stops at the double-zero
-    ## terminator; tolerates a trailing single zero (legacy
-    ## writers).
-    var s = ""
-    var i = 0
-    while i + 1 < bytes.len:
-      let u = uint16(bytes[i]) or (uint16(bytes[i+1]) shl 8)
-      i += 2
-      if u == 0:
-        if s.len == 0:
-          break
-        result.add(s)
-        s = ""
-      else:
-        # Re-encode this UTF-16 code unit into the building string.
-        if u < 0x80:
-          s.add(char(u))
-        elif u < 0x800:
-          s.add(char(0xC0 or (u shr 6)))
-          s.add(char(0x80 or (u and 0x3F)))
-        else:
-          s.add(char(0xE0 or (u shr 12)))
-          s.add(char(0x80 or ((u shr 6) and 0x3F)))
-          s.add(char(0x80 or (u and 0x3F)))
 
   # -------------------------------------------------------------------------
   # Core read/write/delete operations.
@@ -418,40 +401,6 @@ else:
       "platform", "registry driver is Windows-only")
 
   proc broadcastEnvironmentChange*() = discard
-
-  proc encodeString*(s: string): seq[byte] =
-    var buf = newSeq[byte](s.len * 2 + 2)
-    for i, ch in s:
-      buf[i*2] = byte(ord(ch))
-    buf
-
-  proc encodeDword*(v: uint32): seq[byte] =
-    result = newSeq[byte](4)
-    result[0] = byte(v and 0xff)
-    result[1] = byte((v shr 8) and 0xff)
-    result[2] = byte((v shr 16) and 0xff)
-    result[3] = byte((v shr 24) and 0xff)
-
-  proc encodeQword*(v: uint64): seq[byte] =
-    result = newSeq[byte](8)
-    for i in 0 ..< 8:
-      result[i] = byte((v shr (i*8)) and 0xff)
-
-  proc encodeBinary*(b: openArray[byte]): seq[byte] =
-    result = newSeq[byte](b.len)
-    for i, v in b: result[i] = v
-
-  proc encodeMultiString*(items: openArray[string]): seq[byte] =
-    var buf: seq[byte] = @[]
-    for item in items:
-      for ch in item:
-        buf.add(byte(ord(ch)))
-        buf.add(0'u8)
-      buf.add(0'u8); buf.add(0'u8)
-    buf.add(0'u8); buf.add(0'u8)
-    buf
-
-  proc decodeMultiString*(bytes: openArray[byte]): seq[string] = @[]
 
   proc observeRegistryValue*(key, name: string): ObservedState =
     result.present = false

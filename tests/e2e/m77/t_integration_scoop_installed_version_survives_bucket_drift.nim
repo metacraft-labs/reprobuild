@@ -37,10 +37,15 @@
 ## The adapter is exercised through the real `resolveScoopTool` entry
 ## point against a sandboxed Scoop root.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+  echo "[platform N/A] integration_scoop_installed_version_survives_bucket_drift: " &
+    "this gate requires Windows and a real Scoop install"
+  quit(0)
+
 import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_tool_profiles
-import repro_interface_artifacts
 
 import ../scoop/scoop_sandbox
 

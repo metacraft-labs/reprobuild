@@ -12,6 +12,9 @@
 ## driver's `Reg*` API path; mocking the registry is explicitly
 ## forbidden by the M68 anti-patterns list.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times, unittest]
 
 import repro_home_generations
@@ -73,7 +76,7 @@ suite "M68 gate 2: e2e_home_registry_typed_value_kinds":
     when not defined(windows):
       checkpoint "platform-skip: Windows-only gate"
       check true
-      return
+      quit(0)
     # Per-test subkey: timestamp keeps parallel CI runs collision-free.
     let testSubkey = "Software\\Reprobuild-Tests\\m68-gate2-" &
       $epochTime()

@@ -18,6 +18,9 @@
 ##     embeddable distribution we use in CI). The pinned version is
 ##     part of the `JinjaSpec.toolIdentity` string, so bumping it
 ##     changes the cache key.
+##     On Python builds that ship `venv` but no ambient `pip` (common in
+##     Nix shells), the helper first creates a private pip bootstrap venv
+##     and still installs Jinja into the target directory.
 ##   - The driver Python is invoked with `PYTHONPATH=<dir>` so the
 ##     pinned Jinja install is found before any system-wide install.
 ##   - The version-bump sub-step re-installs into a different target
@@ -25,7 +28,6 @@
 
 import std/[os, osproc, strutils, tables, unittest]
 
-import repro_dsl_stdlib/configurables
 import repro_dsl_stdlib/generated_config
 import repro_local_store
 
@@ -46,6 +48,35 @@ type
     pythonExe: string
     sitePackages: string
 
+proc pipInstallPython(basePython, envDir: string): string =
+  ## Return a Python executable with `pip` available. Prefer the selected
+  ## interpreter directly; fall back to a small venv when the base Python
+  ## intentionally omits pip (for example Nix's python wrapper).
+  let pipProbe = execCmdEx(quoteShell(basePython) & " -m pip --version")
+  if pipProbe.exitCode == 0:
+    return basePython
+
+  let pipVenv = envDir & "-pip-venv"
+  if dirExists(pipVenv):
+    removeDir(pipVenv)
+  let venvCreate = execCmdEx(quoteShell(basePython) & " -m venv " &
+    quoteShell(pipVenv))
+  if venvCreate.exitCode != 0:
+    raise newException(IOError,
+      "python has no pip, and creating a pip bootstrap venv at " & pipVenv &
+      " failed: " & venvCreate.output)
+
+  result =
+    when defined(windows):
+      pipVenv / "Scripts" / "python.exe"
+    else:
+      pipVenv / "bin" / "python"
+  let venvPipProbe = execCmdEx(quoteShell(result) & " -m pip --version")
+  if venvPipProbe.exitCode != 0:
+    raise newException(IOError,
+      "pip bootstrap venv at " & pipVenv &
+      " did not provide pip: " & venvPipProbe.output)
+
 proc createJinjaEnv(envDir, pinned: string): JinjaInstall =
   ## Build a per-test Python environment with the requested Jinja
   ## version installed at the target directory. Returns the python
@@ -54,13 +85,15 @@ proc createJinjaEnv(envDir, pinned: string): JinjaInstall =
   if dirExists(envDir):
     removeDir(envDir)
   createDir(envDir)
-  let pipInstall = execCmdEx("\"" & basePython & "\" -m pip install " &
-    "--disable-pip-version-check --no-warn-script-location " &
-    "--target=\"" & envDir & "\" --quiet --upgrade " &
+  let installerPython = pipInstallPython(basePython, envDir)
+  let pipInstall = execCmdEx(quoteShell(installerPython) & " -m pip install " &
+    "--disable-pip-version-check --no-warn-script-location --target=" &
+    quoteShell(envDir) & " --quiet --upgrade " &
     "jinja2==" & pinned)
   if pipInstall.exitCode != 0:
     raise newException(IOError, "pip install jinja2==" & pinned &
-      " into " & envDir & " failed: " & pipInstall.output)
+      " into " & envDir & " using " & installerPython &
+      " failed: " & pipInstall.output)
   result.pythonExe = basePython
   result.sitePackages = envDir
 

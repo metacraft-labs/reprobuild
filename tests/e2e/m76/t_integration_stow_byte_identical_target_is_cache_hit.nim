@@ -43,6 +43,9 @@
 ##      trivially byte-identical. Apply must materialize it cleanly as
 ##      a cache-hit, not raise `EStowConflict`.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+
 import std/[os, osproc, streams, strtabs, strutils, tempfiles,
   times, unittest]
 
@@ -139,7 +142,7 @@ suite "M76 gate: integration_stow_byte_identical_target_is_cache_hit":
     when not defined(windows):
       checkpoint "platform-skip: M76 stow gate is Windows-specific"
       check true
-      return
+      quit(0)
     let tempRoot = createTempDir("repro-m76-byteident-", "")
     defer:
       try: removeDir(tempRoot) except OSError: discard
@@ -184,7 +187,7 @@ suite "M76 gate: integration_stow_byte_identical_target_is_cache_hit":
        "to the stow source is a cache-hit":
     when not defined(windows):
       check true
-      return
+      quit(0)
     let tempRoot = createTempDir("repro-m76-wronglink-ident-", "")
     defer:
       try: removeDir(tempRoot) except OSError: discard
@@ -228,7 +231,7 @@ suite "M76 gate: integration_stow_byte_identical_target_is_cache_hit":
        "EStowConflict; --reconcile-drift required (M72 contract)":
     when not defined(windows):
       check true
-      return
+      quit(0)
     let tempRoot = createTempDir("repro-m76-differs-", "")
     defer:
       try: removeDir(tempRoot) except OSError: discard
@@ -293,7 +296,7 @@ suite "M76 gate: integration_stow_byte_identical_target_is_cache_hit":
        "the stow tree materializes cleanly as a cache-hit":
     when not defined(windows):
       check true
-      return
+      quit(0)
     let tempRoot = createTempDir("repro-m76-parentjunction-", "")
     defer:
       try: removeDir(tempRoot) except OSError: discard
