@@ -104,7 +104,8 @@ proc applyDirectPatchRequest*(runtime: HcrAgentRuntimeOps;
 
   if registerDebugUnwind:
     result.jitRegistration =
-      some(registerJitDebugObject(request.debugObjectPayload.bytes))
+      some(registerJitDebugObject(request.debugObjectPayload.bytes,
+        result.transactionEvidence.patchAddress))
     result.unwindRegistration =
       some(registerDynamicEhFrame(request.unwindMetadataPayload.bytes,
         result.transactionEvidence.patchAddress,

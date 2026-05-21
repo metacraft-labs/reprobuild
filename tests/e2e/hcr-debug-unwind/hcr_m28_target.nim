@@ -76,7 +76,8 @@ when defined(macosx) and defined(arm64):
     let evidence = applyPatchTransaction(target.targetOps(), tx)
     lifecycle.add "patch-transaction-applied"
 
-    let jitEvidence = registerJitDebugObject(packet.debugObjectBytes)
+    let jitEvidence = registerJitDebugObject(packet.debugObjectBytes,
+      target.patchAddress)
     lifecycle.add "jit-debug-registered"
 
     let unwindEvidence = registerDynamicEhFrame(packet.unwindTemplateBytes,

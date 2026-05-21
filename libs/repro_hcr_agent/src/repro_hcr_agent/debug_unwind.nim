@@ -65,6 +65,9 @@ when defined(macosx) and defined(arm64):
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <mach-o/arm64/reloc.h>
+#include <mach-o/loader.h>
+#include <mach-o/reloc.h>
 
 enum {
   REPRO_HCR_JIT_NOACTION = 0,
@@ -161,9 +164,119 @@ static void repro_hcr_fill_jit_evidence(
   out->success = 1;
 }
 
+static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
+                                               uint64_t code_address) {
+  if (bytes == 0 || size < sizeof(struct mach_header_64) || code_address == 0) {
+    return 0;
+  }
+
+  struct mach_header_64 *header = (struct mach_header_64 *)bytes;
+  if (header->magic != MH_MAGIC_64 || header->filetype != MH_OBJECT) {
+    return 0;
+  }
+  if (header->sizeofcmds > size - sizeof(*header)) {
+    return -1;
+  }
+
+  uint8_t *cursor = bytes + sizeof(*header);
+  uint8_t *end = cursor + header->sizeofcmds;
+  uint32_t hcr_text_section = 0;
+  uint32_t section_ordinal = 0;
+  for (uint32_t i = 0; i < header->ncmds; ++i) {
+    if ((size_t)(end - cursor) < sizeof(struct load_command)) {
+      return -1;
+    }
+    struct load_command *command = (struct load_command *)cursor;
+    if (command->cmdsize < sizeof(*command) || cursor + command->cmdsize > end) {
+      return -1;
+    }
+    if (command->cmd == LC_SEGMENT_64) {
+      if (command->cmdsize < sizeof(struct segment_command_64)) {
+        return -1;
+      }
+      struct segment_command_64 *segment =
+          (struct segment_command_64 *)cursor;
+      size_t required_size = sizeof(*segment) +
+                             (size_t)segment->nsects * sizeof(struct section_64);
+      if (command->cmdsize < required_size) {
+        return -1;
+      }
+      struct section_64 *section =
+          (struct section_64 *)(cursor + sizeof(*segment));
+      for (uint32_t section_index = 0; section_index < segment->nsects;
+           ++section_index) {
+        ++section_ordinal;
+        if (strncmp(section[section_index].sectname, "__text",
+                    sizeof(section[section_index].sectname)) == 0 &&
+            strncmp(section[section_index].segname, "__HCR",
+                    sizeof(section[section_index].segname)) == 0 &&
+            section[section_index].size != 0) {
+          section[section_index].addr = code_address;
+          hcr_text_section = section_ordinal;
+        }
+      }
+    }
+    cursor += command->cmdsize;
+  }
+  if (hcr_text_section == 0) {
+    return 0;
+  }
+
+  cursor = bytes + sizeof(*header);
+  int applied_relocations = 0;
+  for (uint32_t i = 0; i < header->ncmds; ++i) {
+    struct load_command *command = (struct load_command *)cursor;
+    if (command->cmd == LC_SEGMENT_64) {
+      struct segment_command_64 *segment =
+          (struct segment_command_64 *)cursor;
+      struct section_64 *section =
+          (struct section_64 *)(cursor + sizeof(*segment));
+      for (uint32_t section_index = 0; section_index < segment->nsects;
+           ++section_index) {
+        struct section_64 *current = &section[section_index];
+        if (current->nreloc == 0) {
+          continue;
+        }
+        uint64_t reloc_bytes =
+            (uint64_t)current->nreloc * sizeof(struct relocation_info);
+        if (current->reloff > size || reloc_bytes > size - current->reloff) {
+          return -1;
+        }
+        struct relocation_info *relocations =
+            (struct relocation_info *)(bytes + current->reloff);
+        for (uint32_t relocation_index = 0;
+             relocation_index < current->nreloc; ++relocation_index) {
+          struct relocation_info *relocation = &relocations[relocation_index];
+          if (relocation->r_extern || relocation->r_pcrel ||
+              relocation->r_symbolnum != hcr_text_section ||
+              relocation->r_length != 3 ||
+              relocation->r_type != ARM64_RELOC_UNSIGNED ||
+              relocation->r_address < 0) {
+            continue;
+          }
+          uint64_t patch_offset = (uint64_t)current->offset +
+                                  (uint64_t)relocation->r_address;
+          if (patch_offset > size || sizeof(uint64_t) > size - patch_offset) {
+            return -1;
+          }
+          uint64_t value = 0;
+          memcpy(&value, bytes + patch_offset, sizeof(value));
+          value += code_address;
+          memcpy(bytes + patch_offset, &value, sizeof(value));
+          ++applied_relocations;
+        }
+      }
+    }
+    cursor += command->cmdsize;
+  }
+
+  return applied_relocations;
+}
+
 int repro_hcr_register_jit_debug_object(
     const uint8_t *bytes,
     uint64_t size,
+    uint64_t code_address,
     CJitRegistrationEvidence *out) {
   if (bytes == 0 || size == 0 || out == 0) {
     return -1;
@@ -181,6 +294,12 @@ int repro_hcr_register_jit_debug_object(
     return -3;
   }
   memcpy(record->debug_bytes, bytes, (size_t)size);
+  if (repro_hcr_rebase_macho_debug_object(record->debug_bytes, size,
+                                          code_address) < 0) {
+    free(record->debug_bytes);
+    free(record);
+    return -4;
+  }
   record->debug_size = size;
   record->entry.symfile_addr = (const char *)record->debug_bytes;
   record->entry.symfile_size = size;
@@ -258,6 +377,7 @@ int repro_hcr_register_dynamic_eh_frame(
 """.}
 
   proc cRegisterJitDebugObject(bytes: ptr UncheckedArray[byte]; size: uint64;
+                               codeAddress: uint64;
                                outEvidence: ptr CJitRegistrationEvidence):
                                cint {.
     importc: "repro_hcr_register_jit_debug_object", nodecl.}
@@ -272,14 +392,15 @@ proc hexPrefix(bytes: openArray[byte]; maxBytes: int): string =
   let count = min(bytes.len, maxBytes)
   bytesHex(bytes.toOpenArray(0, count - 1))
 
-proc registerJitDebugObject*(bytes: openArray[byte]): JitRegistrationEvidence =
+proc registerJitDebugObject*(bytes: openArray[byte];
+                             codeAddress: uint64): JitRegistrationEvidence =
   if bytes.len == 0:
     raise newException(ValueError, "JIT debug object payload is empty")
   when defined(macosx) and defined(arm64):
     var c: CJitRegistrationEvidence
     let rc = cRegisterJitDebugObject(
       cast[ptr UncheckedArray[byte]](unsafeAddr bytes[0]),
-      uint64(bytes.len), addr c)
+      uint64(bytes.len), codeAddress, addr c)
     if rc != 0:
       raise newException(ValueError, "JIT debug registration failed: " & $rc)
     result = JitRegistrationEvidence(
