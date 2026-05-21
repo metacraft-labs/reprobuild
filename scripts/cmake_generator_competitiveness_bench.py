@@ -224,9 +224,23 @@ def many(project, name):
 
 def resolve_executable(path, label):
     path = Path(path)
+    # Windows: the benchmark's default paths are extensionless (cmake, repro,
+    # runquotad) but the built binaries carry a .exe suffix.
+    if not path.exists() and os.name == "nt" and path.suffix == "":
+        exe = path.with_suffix(".exe")
+        if exe.exists():
+            path = exe
     if not path.exists() or not os.access(path, os.X_OK):
         fail(f"missing executable for {label}: {path}")
     return path
+
+
+def which_first(*names):
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
 
 
 def find_ninja():
@@ -240,14 +254,18 @@ def find_ninja():
 
 
 def cache_value(cmake, build_dir, name):
-    if not build_dir.exists():
+    # Read CMakeCache.txt directly. `cmake -LA -N` output can exceed the
+    # captured stdout tail (the cache is large), which silently dropped
+    # early entries such as CMAKE_C_COMPILER.
+    cache_file = Path(build_dir) / "CMakeCache.txt"
+    if not cache_file.exists():
         return ""
-    result = run_command([cmake, "-LA", "-N", build_dir], check=False)
-    if result["exitCode"] != 0:
-        return ""
-    pattern = re.compile(rf"^{re.escape(name)}:[^=]*=(.*)$", re.MULTILINE)
-    match = pattern.search(result["stdoutTail"])
-    return match.group(1).strip() if match else ""
+    pattern = re.compile(rf"^{re.escape(name)}:[^=]*=(.*)$")
+    for line in cache_file.read_text(errors="replace").splitlines():
+        match = pattern.match(line)
+        if match:
+            return match.group(1).strip()
+    return ""
 
 
 def command_version(args):
@@ -786,8 +804,8 @@ def build_report(args):
     runquotad = resolve_executable(args.runquotad, "runquotad")
     ninja = find_ninja()
 
-    c_compiler = args.c_compiler or cache_value(cmake, cmake_root / "build", "CMAKE_C_COMPILER") or shutil.which("cc")
-    cxx_compiler = args.cxx_compiler or cache_value(cmake, cmake_root / "build", "CMAKE_CXX_COMPILER") or shutil.which("c++")
+    c_compiler = args.c_compiler or cache_value(cmake, cmake_root / "build", "CMAKE_C_COMPILER") or which_first("cc", "gcc", "clang")
+    cxx_compiler = args.cxx_compiler or cache_value(cmake, cmake_root / "build", "CMAKE_CXX_COMPILER") or which_first("c++", "g++", "clang++")
     if not c_compiler or not cxx_compiler:
         fail("could not resolve C and CXX compilers")
 
