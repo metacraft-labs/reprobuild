@@ -1,5 +1,25 @@
+import repro_hcr_agent/coordinator
 import repro_hcr_agent/debug_unwind
+import repro_hcr_agent/endpoint
+import repro_hcr_agent/ipc
+import repro_hcr_agent/json_view
 import repro_hcr_agent/minimal_target
+import repro_hcr_agent/process_target
+import repro_hcr_agent/protocol
+import repro_hcr_agent/runtime
+import repro_hcr_agent/session
+import repro_hcr_agent/transport
+import repro_hcr_linker
 
+export coordinator
 export debug_unwind
+export endpoint
+export ipc
+export json_view
 export minimal_target
+export process_target
+export protocol
+export repro_hcr_linker
+export runtime
+export session
+export transport

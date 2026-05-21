@@ -56,7 +56,7 @@ proc sectionKind(segmentName, sectionName: string; flags: uint32): SectionKind =
     return skDebug
   if sectionName in ["__compact_unwind", "__eh_frame"]:
     return skUnwind
-  if segmentName == "__TEXT" and
+  if sectionName == "__text" and
       (flags and (0x8000_0000'u32 or 0x0000_0400'u32)) != 0'u32:
     return skCode
   if segmentName in ["__DATA", "__DATA_CONST"]:

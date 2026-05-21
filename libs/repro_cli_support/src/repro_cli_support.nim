@@ -12,6 +12,8 @@ import repro_hash
 import repro_tool_profiles
 import repro_local_store
 import repro_launch_plan
+import repro_hcr_agent
+import repro_hcr_linkgraph
 import repro_cli_support/watch
 import repro_cli_support/home
 
@@ -32,7 +34,9 @@ proc renderUsage*(programName: string): string =
       " capabilities [--format=json|text]\n       " & programName &
       " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [--prepare-only]\n       " &
           programName &
-      " watch [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N]\n       " &
+      " watch [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--hcr-agent-socket=PATH --hcr-artifacts=PATH --hcr-metadata=PATH]\n       " &
+          programName &
+      " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
           programName &
       " develop <target[#name]> --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] -- <command> [args...]\n       " &
           programName &
@@ -491,6 +495,38 @@ proc capabilitiesJson*(): JsonNode =
     "missing-debug-info"])
   var hcrProfiles = newJArray()
   hcrProfiles.add(hcrProfile)
+  var codetracerProfile = newJObject()
+  codetracerProfile["id"] = %"macos-arm64-direct-hcr-in-codetracer-v1"
+  codetracerProfile["status"] = %"prototype"
+  codetracerProfile["languages"] = jsonStringSeq(["C", "CXX"])
+  codetracerProfile["requires"] = jsonStringSeq([
+    "hcr-agent-protocol",
+    "coordinator-agent-negotiation",
+    "direct-patch-injection",
+    "debug-object-payloads",
+    "unwind-metadata-payloads",
+    "source-generation-metadata",
+    "codetracer-owned-launch",
+    "mcr-recorded-agent-ipc"])
+  codetracerProfile["features"] = jsonStringSeq([
+    "hcr-agent-content-length-framing",
+    "coordinator-agent-session-validation",
+    "coordinator-direct-patch-request-packaging",
+    "unix-domain-agent-ipc",
+    "agent-socket-env-contract",
+    "coordinator-report-json",
+    "target-linked-c-agent-startup",
+    "repro-hcr-coordinate-command",
+    "codetracer-mcr-launch-bridge"])
+  codetracerProfile["missingComponents"] = jsonStringSeq([])
+  codetracerProfile["rejects"] = jsonStringSeq([
+    "post-launch-attach",
+    "same-process-direct-transaction-shortcut",
+    "stdin-pipe-patch-substitute",
+    "shared-library-positive-path",
+    "coordinator-resend-during-replay",
+    "disassembly-only-debugging"])
+  hcrProfiles.add(codetracerProfile)
 
   var hcr = newJObject()
   hcr["decisionAuthority"] = %"reprobuild"
@@ -2972,12 +3008,271 @@ proc parsePositiveIntFlag(flagName, value: string): int =
   if result <= 0:
     raise newException(ValueError, flagName & " must be greater than zero")
 
+const CodetracerHcrSupportProfile =
+  "macos-arm64-direct-hcr-in-codetracer-v1"
+
+type
+  HcrWatchConfig = object
+    socketPath: string
+    artifacts: string
+    metadataPath: string
+
+  HcrWatchPatchMetadata = object
+    functionName: string
+    targetSymbol: string
+    objectSymbol: string
+    objectPath: string
+    sourcePath: string
+
+  HcrWatchSession = object
+    enabled: bool
+    config: HcrWatchConfig
+    metadata: HcrWatchPatchMetadata
+    listener: HcrAgentUnixListener
+    connection: HcrAgentSocketConnection
+    client: HcrCoordinatorClient
+    connected: bool
+    oldObject: string
+    newObject: string
+
+proc writeJsonFile(path: string; node: JsonNode) =
+  createDir(parentDir(path))
+  writeFile(path, pretty(node))
+
+proc hcrSourceDigest(path: string): string =
+  byteDigest(readFile(path).bytesOf())
+
+proc objectFunctionBytes(objectPath, symbolName: string): seq[byte] =
+  let graph = parseMachOArm64Object(objectPath)
+  let symbol = graph.findSymbol(symbolName)
+  result = graph.functionBytes(symbol)
+  if result.len == 0:
+    raise newException(ValueError,
+      "could not extract function bytes for " & symbolName & " from " &
+        objectPath)
+
+proc hcrWatchEnabled(config: HcrWatchConfig): bool =
+  config.socketPath.len > 0 or config.artifacts.len > 0 or
+    config.metadataPath.len > 0
+
+proc validateHcrWatchConfig(config: HcrWatchConfig) =
+  if not config.hcrWatchEnabled:
+    return
+  if config.socketPath.len == 0:
+    raise newException(ValueError,
+      "--hcr-agent-socket is required when HCR watch mode is enabled")
+  if config.artifacts.len == 0:
+    raise newException(ValueError,
+      "--hcr-artifacts is required when HCR watch mode is enabled")
+  if config.metadataPath.len == 0:
+    raise newException(ValueError,
+      "--hcr-metadata is required when HCR watch mode is enabled")
+
+proc resolveProjectPath(projectRoot, path: string): string =
+  if path.len == 0:
+    return ""
+  result =
+    if path.isAbsolute:
+      path
+    else:
+      projectRoot / path
+  result = os.normalizedPath(result)
+
+proc requiredJsonString(node: JsonNode; key, context: string): string =
+  if node.kind != JObject or not node.hasKey(key):
+    raise newException(ValueError, context & " missing required field " & key)
+  result = node[key].getStr()
+  if result.len == 0:
+    raise newException(ValueError, context & " field " & key &
+      " must not be empty")
+
+proc optionalJsonString(node: JsonNode; key: string): string =
+  if node.kind == JObject and node.hasKey(key):
+    result = node[key].getStr()
+
+proc defaultObjectSymbol(functionName: string): string =
+  when defined(macosx):
+    "_" & functionName
+  else:
+    functionName
+
+proc readHcrWatchPatchMetadata(projectRoot, metadataPath: string):
+    HcrWatchPatchMetadata =
+  let resolvedMetadataPath = resolveProjectPath(projectRoot, metadataPath)
+  if not fileExists(resolvedMetadataPath):
+    raise newException(ValueError,
+      "HCR watch metadata does not exist: " & resolvedMetadataPath)
+  let root = parseFile(resolvedMetadataPath)
+  var patch: JsonNode = nil
+  if root.kind == JObject and root.hasKey("patches") and
+      root["patches"].kind == JArray and root["patches"].len > 0:
+    patch = root["patches"][0]
+  else:
+    patch = root
+
+  result.functionName = patch.requiredJsonString("function", "HCR patch metadata")
+  result.targetSymbol = patch.optionalJsonString("targetSymbol")
+  if result.targetSymbol.len == 0:
+    result.targetSymbol = result.functionName
+  result.objectSymbol = patch.optionalJsonString("objectSymbol")
+  if result.objectSymbol.len == 0:
+    result.objectSymbol = defaultObjectSymbol(result.functionName)
+  result.objectPath = resolveProjectPath(
+    projectRoot, patch.requiredJsonString("object", "HCR patch metadata"))
+  result.sourcePath = resolveProjectPath(
+    projectRoot, patch.requiredJsonString("source", "HCR patch metadata"))
+
+proc initHcrWatchSession(config: HcrWatchConfig): HcrWatchSession =
+  config.validateHcrWatchConfig()
+  result.enabled = config.hcrWatchEnabled
+  result.config = config
+  if result.enabled:
+    createDir(config.artifacts)
+    result.listener = listenHcrAgentUnixSocket(config.socketPath)
+    result.client = initHcrCoordinatorClient(CodetracerHcrSupportProfile)
+
+proc closeHcrWatchSession(session: var HcrWatchSession) =
+  if session.enabled:
+    if session.connected:
+      session.connection.close()
+      session.connected = false
+    session.listener.close()
+
+proc captureHcrWatchBaseline(session: var HcrWatchSession;
+                             outcome: BuildCommandOutcome) =
+  if not session.enabled:
+    return
+  session.metadata = readHcrWatchPatchMetadata(
+    outcome.projectRoot, session.config.metadataPath)
+  if not fileExists(session.metadata.objectPath):
+    raise newException(ValueError,
+      "HCR watch object does not exist after initial build: " &
+        session.metadata.objectPath)
+  session.oldObject = session.config.artifacts /
+    (safePathSegment(session.metadata.functionName, "patch") & "-generation0.o")
+  copyFile(session.metadata.objectPath, session.oldObject)
+  writeJsonFile(session.config.artifacts / "hcr-watch-baseline.json", %*{
+    "schemaId": "reprobuild.hcr.watch-baseline.v1",
+    "supportProfile": CodetracerHcrSupportProfile,
+    "function": session.metadata.functionName,
+    "targetSymbol": session.metadata.targetSymbol,
+    "objectSymbol": session.metadata.objectSymbol,
+    "object": session.metadata.objectPath,
+    "source": session.metadata.sourcePath,
+    "generation0Object": session.oldObject
+  })
+  echo "repro watch: hcr baseline captured object=" &
+    session.metadata.objectPath
+  echo "repro watch: hcr waiting for agent socket=" & session.config.socketPath
+  flushStdout()
+  session.connection = acceptHcrAgentConnection(session.listener)
+  session.connected = true
+  discard session.client.receiveAgentMessage(session.connection)
+  session.client.sendCoordinatorMessage(
+    session.connection, session.client.coordinatorHelloAckMessage())
+  echo "repro watch: hcr agent connected"
+  flushStdout()
+
+proc deliverHcrWatchPatch(session: var HcrWatchSession;
+                          outcome: BuildCommandOutcome; cycle: int) =
+  if not session.enabled:
+    return
+  if not session.connected:
+    raise newException(ValueError,
+      "HCR watch cannot deliver a patch before the target agent connects")
+  session.metadata = readHcrWatchPatchMetadata(
+    outcome.projectRoot, session.config.metadataPath)
+  if not fileExists(session.metadata.objectPath):
+    raise newException(ValueError,
+      "HCR watch object does not exist after rebuild: " &
+        session.metadata.objectPath)
+  if not fileExists(session.metadata.sourcePath):
+    raise newException(ValueError,
+      "HCR watch source does not exist after rebuild: " &
+        session.metadata.sourcePath)
+
+  session.newObject = session.config.artifacts /
+    (safePathSegment(session.metadata.functionName, "patch") & "-generation" &
+      $(cycle - 1) & ".o")
+  copyFile(session.metadata.objectPath, session.newObject)
+
+  let patchBytes = objectFunctionBytes(session.newObject,
+    session.metadata.objectSymbol)
+  let sourceGeneration = HcrSourceGenerationEntry(
+    sourcePath: session.metadata.sourcePath,
+    generation: uint32(cycle - 1),
+    snapshotDigest: hcrSourceDigest(session.metadata.sourcePath),
+    lineTableDigest: byteDigest(patchBytes))
+  let objectBytes = readFile(session.newObject).bytesOf()
+  let plan = directPatchPlanFromBytes(
+    session.metadata.functionName, patchBytes,
+    supportProfile = CodetracerHcrSupportProfile,
+    snapshotId = "repro-watch-hcr-generation-" & $(cycle - 1))
+  let request = directPatchRequest(
+    patchId = "repro-watch-hcr-patch-" & align($(cycle - 1), 4, '0'),
+    supportProfile = CodetracerHcrSupportProfile,
+    changedFunctions = [session.metadata.functionName],
+    targetSymbols = [session.metadata.targetSymbol],
+    directPatchBytes = patchBytes,
+    debugObjectBytes = objectBytes,
+    unwindMetadataBytes = minimalAarch64EhFrameTemplate(),
+    sourceGenerationMap = [sourceGeneration])
+  session.client.sendCoordinatorMessage(
+    session.connection, session.client.coordinatorPatchRequestMessage(request))
+  while session.client.session.state == hssPatchRequested:
+    discard session.client.receiveAgentMessage(session.connection)
+
+  let delivery = HcrCoordinatorDelivery(
+    session: session.client.session,
+    transcript: session.client.transcript,
+    patchApplied: session.client.patchApplied,
+    patchFailed: session.client.patchFailed)
+  writeJsonFile(session.config.artifacts / "hcr-coordinator-report.json",
+    coordinatorDeliveryJson(delivery))
+  writeJsonFile(session.config.artifacts / "agent-protocol-transcript.json",
+    transcriptJson(session.client.transcript))
+  writeJsonFile(session.config.artifacts / "patch-bundle-metadata.json", %*{
+    "schemaId": "reprobuild.hcr.codetracer-patch-bundle-metadata.v1",
+    "supportProfile": CodetracerHcrSupportProfile,
+    "patchId": request.patchId,
+    "changedFunction": session.metadata.functionName,
+    "targetSymbol": session.metadata.targetSymbol,
+    "objectSymbol": session.metadata.objectSymbol,
+    "oldObject": session.oldObject,
+    "newObject": session.newObject,
+    "patchByteCount": patchBytes.len,
+    "patchDigest": byteDigest(patchBytes),
+    "debugObjectDigest": request.debugObjectPayload.digest,
+    "unwindMetadataDigest": request.unwindMetadataPayload.digest,
+    "sourceGeneration": %*{
+      "sourcePath": sourceGeneration.sourcePath,
+      "generation": sourceGeneration.generation,
+      "snapshotDigest": sourceGeneration.snapshotDigest,
+      "lineTableDigest": sourceGeneration.lineTableDigest
+    },
+    "patchPlan": patchPlanJson(plan),
+    "watch": {
+      "cycle": cycle,
+      "sourceEditObservedByFilesystemWatcher": true
+    }
+  })
+
+  if session.client.patchFailed.isSome:
+    raise newException(ValueError,
+      "HCR watch patch failed: " & session.client.patchFailed.get().message)
+  if session.client.patchApplied.isNone:
+    raise newException(ValueError,
+      "HCR watch did not receive a patchApplied response")
+  echo "repro watch: hcr patch applied patchId=" & request.patchId
+  flushStdout()
+
 proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
   var target = ""
   var mode = tpmUnspecified
   var maxCycles = 0
   var debounceMs = 250
   var workRoot = ""
+  var hcrConfig: HcrWatchConfig
 
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
@@ -2997,6 +3292,24 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
     elif arg.startsWith("--debounce-ms="):
       debounceMs = parsePositiveIntFlag("--debounce-ms",
         arg.split("=", maxsplit = 1)[1])
+    elif arg.startsWith("--hcr-agent-socket="):
+      hcrConfig.socketPath = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--hcr-agent-socket":
+      raise newException(ValueError,
+        "--hcr-agent-socket requires an inline value, for example " &
+          "--hcr-agent-socket=/tmp/repro-hcr.sock")
+    elif arg.startsWith("--hcr-artifacts="):
+      hcrConfig.artifacts = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--hcr-artifacts":
+      raise newException(ValueError,
+        "--hcr-artifacts requires an inline value, for example " &
+          "--hcr-artifacts=.repro/hcr")
+    elif arg.startsWith("--hcr-metadata="):
+      hcrConfig.metadataPath = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--hcr-metadata":
+      raise newException(ValueError,
+        "--hcr-metadata requires an inline value, for example " &
+          "--hcr-metadata=build/hcr-metadata.json")
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported watch flag: " & arg)
     elif target.len == 0:
@@ -3016,8 +3329,13 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
 
   echo "repro watch: target=" & target & " tool-provisioning=" &
     mode.modeName & " debounceMs=" & $debounceMs &
-    (if maxCycles > 0: " maxCycles=" & $maxCycles else: " maxCycles=unbounded")
+    (if maxCycles > 0: " maxCycles=" & $maxCycles else: " maxCycles=unbounded") &
+    (if hcrConfig.hcrWatchEnabled: " hcr=enabled" else: " hcr=disabled")
   flushStdout()
+
+  var hcrSession = initHcrWatchSession(hcrConfig)
+  defer:
+    hcrSession.closeHcrWatchSession()
 
   var cycle = 0
   while true:
@@ -3033,6 +3351,11 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
     flushStdout()
     if outcome.exitCode != 0:
       return outcome.exitCode
+    if hcrSession.enabled:
+      if cycle == 1:
+        hcrSession.captureHcrWatchBaseline(outcome)
+      else:
+        hcrSession.deliverHcrWatchPatch(outcome, cycle)
     if maxCycles > 0 and cycle >= maxCycles:
       echo "repro watch: max cycles reached"
       flushStdout()
@@ -3317,6 +3640,190 @@ proc runLaunchPlanCommand*(args: seq[string]): int =
     stderr.writeLine("repro launch-plan: unknown subcommand: " & sub)
     return 2
 
+type
+  HcrCoordinateArgs = object
+    project: string
+    target: string
+    socketPath: string
+    sourceEditDriver: string
+    artifacts: string
+    patchFunction: string
+
+proc parseHcrCoordinateArgs(args: seq[string]): HcrCoordinateArgs =
+  result.patchFunction = "reprobuild_hcr_patchable_value"
+  var index = 0
+  while index < args.len:
+    let arg = args[index]
+    proc valueFor(flag: string): string =
+      let prefix = flag & "="
+      if arg.startsWith(prefix):
+        return arg[prefix.len .. ^1]
+      if arg == flag:
+        if index + 1 >= args.len:
+          raise newException(ValueError, flag & " requires a value")
+        index.inc
+        return args[index]
+      raise newException(ValueError, "internal HCR argument parse error")
+
+    if arg == "--project" or arg.startsWith("--project="):
+      result.project = valueFor("--project")
+    elif arg == "--target" or arg.startsWith("--target="):
+      result.target = valueFor("--target")
+    elif arg == "--socket" or arg.startsWith("--socket="):
+      result.socketPath = valueFor("--socket")
+    elif arg == "--source-edit-driver" or
+        arg.startsWith("--source-edit-driver="):
+      result.sourceEditDriver = valueFor("--source-edit-driver")
+    elif arg == "--artifacts" or arg.startsWith("--artifacts="):
+      result.artifacts = valueFor("--artifacts")
+    elif arg == "--patch-function" or arg.startsWith("--patch-function="):
+      result.patchFunction = valueFor("--patch-function")
+    else:
+      raise newException(ValueError, "unsupported HCR coordinate flag: " & arg)
+    index.inc
+
+proc requireHcrArg(value, name: string) =
+  if value.len == 0:
+    raise newException(ValueError, name & " is required")
+
+proc requireHcrFile(path, name: string) =
+  requireHcrArg(path, name)
+  if not fileExists(path):
+    raise newException(ValueError, name & " does not exist: " & path)
+
+proc requireHcrDir(path, name: string) =
+  requireHcrArg(path, name)
+  if not dirExists(path):
+    raise newException(ValueError, name & " does not exist: " & path)
+
+proc runHcrBuildCycle(project, target, logPath: string): string =
+  let targetArg = project & "#" & target
+  let command = shellCommand([
+    getAppFilename(), "build", targetArg,
+    "--tool-provisioning=path",
+    "--progress=none",
+    "--log=actions"])
+  let res = execCmdEx(command, workingDir = project)
+  result = res.output
+  createDir(parentDir(logPath))
+  writeFile(logPath, res.output)
+  if res.exitCode != 0:
+    raise newException(ValueError,
+      "repro build failed during HCR coordination with exit code " &
+        $res.exitCode & "\n" & res.output)
+
+proc runHcrCoordinateCommand(args: seq[string]): int =
+  if args.len == 0:
+    stderr.writeLine(
+      "repro hcr coordinate --project PATH --target NAME --socket PATH " &
+      "--source-edit-driver PATH --artifacts PATH")
+    return 2
+  if args[0] != "coordinate":
+    stderr.writeLine("repro hcr: unknown subcommand: " & args[0])
+    return 2
+
+  var parsed = parseHcrCoordinateArgs(args[1 .. ^1])
+  requireHcrDir(parsed.project, "--project")
+  requireHcrArg(parsed.target, "--target")
+  requireHcrArg(parsed.socketPath, "--socket")
+  requireHcrFile(parsed.sourceEditDriver, "--source-edit-driver")
+  requireHcrArg(parsed.artifacts, "--artifacts")
+  createDir(parsed.artifacts)
+
+  let patchObject = parsed.project / "build" / "patchable.o"
+  requireHcrFile(patchObject, "initial patchable object")
+  let oldObject = parsed.artifacts / "patchable-generation0.o"
+  copyFile(patchObject, oldObject)
+
+  var listener = listenHcrAgentUnixSocket(parsed.socketPath)
+  defer: listener.close()
+  var connection = acceptHcrAgentConnection(listener)
+  defer: connection.close()
+
+  var client = initHcrCoordinatorClient(CodetracerHcrSupportProfile)
+  discard client.receiveAgentMessage(connection)
+  client.sendCoordinatorMessage(connection, client.coordinatorHelloAckMessage())
+
+  let edit = execCmdEx(shellCommand([parsed.sourceEditDriver, parsed.project]),
+    workingDir = parsed.project)
+  writeFile(parsed.artifacts / "source-edit-driver.log", edit.output)
+  if edit.exitCode != 0:
+    raise newException(ValueError,
+      "source edit driver failed with exit code " & $edit.exitCode &
+        "\n" & edit.output)
+
+  discard runHcrBuildCycle(parsed.project, parsed.target,
+    parsed.artifacts / "reprobuild-build-report.txt")
+  requireHcrFile(patchObject, "rebuilt patchable object")
+  let newObject = parsed.artifacts / "patchable-generation1.o"
+  copyFile(patchObject, newObject)
+
+  let symbolName = "_" & parsed.patchFunction
+  let patchBytes = objectFunctionBytes(newObject, symbolName)
+  let sourcePath = parsed.project / "src" / "patchable.c"
+  let sourceGeneration = HcrSourceGenerationEntry(
+    sourcePath: sourcePath,
+    generation: 1'u32,
+    snapshotDigest: hcrSourceDigest(sourcePath),
+    lineTableDigest: byteDigest(patchBytes))
+  let objectBytes = readFile(newObject).bytesOf()
+  let plan = directPatchPlanFromBytes(parsed.patchFunction, patchBytes,
+    supportProfile = CodetracerHcrSupportProfile,
+    snapshotId = "codetracer-hcr-generation-1")
+  let request = directPatchRequest(
+    patchId = "codetracer-hcr-patch-0001",
+    supportProfile = CodetracerHcrSupportProfile,
+    changedFunctions = [parsed.patchFunction],
+    targetSymbols = [parsed.patchFunction],
+    directPatchBytes = patchBytes,
+    debugObjectBytes = objectBytes,
+    unwindMetadataBytes = minimalAarch64EhFrameTemplate(),
+    sourceGenerationMap = [sourceGeneration])
+  client.sendCoordinatorMessage(connection,
+    client.coordinatorPatchRequestMessage(request))
+  while client.session.state == hssPatchRequested:
+    discard client.receiveAgentMessage(connection)
+
+  let delivery = HcrCoordinatorDelivery(
+    session: client.session,
+    transcript: client.transcript,
+    patchApplied: client.patchApplied,
+    patchFailed: client.patchFailed)
+  writeJsonFile(parsed.artifacts / "hcr-coordinator-report.json",
+    coordinatorDeliveryJson(delivery))
+  writeJsonFile(parsed.artifacts / "agent-protocol-transcript.json",
+    transcriptJson(client.transcript))
+  writeJsonFile(parsed.artifacts / "patch-bundle-metadata.json", %*{
+    "schemaId": "reprobuild.hcr.codetracer-patch-bundle-metadata.v1",
+    "supportProfile": CodetracerHcrSupportProfile,
+    "patchId": request.patchId,
+    "changedFunction": parsed.patchFunction,
+    "targetSymbol": parsed.patchFunction,
+    "objectSymbol": symbolName,
+    "oldObject": oldObject,
+    "newObject": newObject,
+    "patchByteCount": patchBytes.len,
+    "patchDigest": byteDigest(patchBytes),
+    "debugObjectDigest": request.debugObjectPayload.digest,
+    "unwindMetadataDigest": request.unwindMetadataPayload.digest,
+    "sourceGeneration": %*{
+      "sourcePath": sourceGeneration.sourcePath,
+      "generation": sourceGeneration.generation,
+      "snapshotDigest": sourceGeneration.snapshotDigest,
+      "lineTableDigest": sourceGeneration.lineTableDigest
+    },
+    "patchPlan": patchPlanJson(plan)
+  })
+
+  if client.patchFailed.isSome:
+    stderr.writeLine("repro hcr coordinate: agent patch failed: " &
+      client.patchFailed.get().message)
+    return 1
+  if client.patchApplied.isNone:
+    stderr.writeLine("repro hcr coordinate: no patchApplied response")
+    return 1
+  0
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -3390,6 +3897,17 @@ proc runThinApp*(programName: string): int =
       return runWatchCommand(watchArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro watch: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "hcr":
+    try:
+      let hcrArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runHcrCoordinateCommand(hcrArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro hcr: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "develop":
     try:

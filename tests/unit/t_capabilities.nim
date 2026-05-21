@@ -1,6 +1,12 @@
-import std/[json, strutils, unittest]
+import std/[json, sequtils, strutils, unittest]
 
 import repro_cli_support
+
+proc profileById(caps: JsonNode; id: string): JsonNode =
+  for profile in caps["interfaces"]["hcr"]["profiles"].getElems():
+    if profile["id"].getStr() == id:
+      return profile
+  raise newException(ValueError, "missing HCR profile: " & id)
 
 suite "repro capabilities":
   test "public capability query is build-system neutral":
@@ -26,5 +32,17 @@ suite "repro capabilities":
     check caps["interfaces"]["capabilityQuery"]["defaultFormat"].getStr() ==
       "json"
     check caps["interfaces"]["provider"]["metadataVersion"].getInt() == 3
-    check caps["interfaces"]["hcr"]["profiles"][0]["id"].getStr() ==
-      "clang-gcc-debug-patchable-no-lto-v1"
+    check profileById(caps, "clang-gcc-debug-patchable-no-lto-v1")[
+      "status"].getStr() == "prototype"
+    let codetracerProfile =
+      profileById(caps, "macos-arm64-direct-hcr-in-codetracer-v1")
+    check codetracerProfile["status"].getStr() == "prototype"
+    check codetracerProfile["requires"].getElems().anyIt(
+      it.getStr() == "hcr-agent-protocol")
+    check codetracerProfile["features"].getElems().anyIt(
+      it.getStr() == "unix-domain-agent-ipc")
+    check codetracerProfile["features"].getElems().anyIt(
+      it.getStr() == "coordinator-report-json")
+    check codetracerProfile["features"].getElems().anyIt(
+      it.getStr() == "repro-hcr-coordinate-command")
+    check codetracerProfile["missingComponents"].getElems().len == 0

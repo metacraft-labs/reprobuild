@@ -25,8 +25,18 @@ done < <(
 while IFS= read -r -d '' test_file; do
   found=1
   test_name="$(basename "${test_file}" .nim)"
+  extra_flags=()
+  if [[ "${test_name}" == "t_hcr_agent_process_target" ]] &&
+      [[ "$(uname -s)" == "Darwin" ]] &&
+      [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then
+    extra_flags+=(
+      "--passC:-fpatchable-function-entry=16,0"
+      "--passL:-Wl,-segprot,__HCR,rwx,rwx"
+    )
+  fi
   nim c -r \
     --threads:on \
+    "${extra_flags[@]}" \
     --nimcache:"build/nimcache/${test_name}" \
     --out:"build/test-bin/${test_name}" \
     "${test_file}"
