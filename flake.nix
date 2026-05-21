@@ -39,28 +39,36 @@
               );
             in
             builtins.elemAt (builtins.head versionMatches) 0;
+          # libblake3 has split `out`/`dev` outputs (dev has include/blake3.h,
+          # out has lib/libblake3.so). config.nims's prefix-lookup expects a
+          # single tree containing both, so join them with symlinkJoin.
+          blake3Prefix = pkgs.symlinkJoin {
+            name = "libblake3-prefix";
+            paths = [
+              pkgs.libblake3.dev
+              pkgs.libblake3.out
+            ];
+          };
           pre-commit-check = git-hooks.lib.${system}.run {
             src = ./.;
             hooks.just-lint = {
               enable = true;
               name = "just lint";
-              entry = "${
-                pkgs.writeShellScript "reprobuild-just-lint" ''
-                  export PATH=${
-                    pkgs.lib.makeBinPath [
-                      pkgs.bash
-                      pkgs.coreutils
-                      pkgs.just
-                      pkgs.nim2
-                    ]
-                  }:$PATH
-                  export BLAKE3_PREFIX=${pkgs.libblake3}
-                  export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
-                  export RUNQUOTA_SRC=${runquota-src}
-                  export XXHASH_PREFIX=${pkgs.xxHash}
-                  exec ${pkgs.just}/bin/just lint
-                ''
-              }";
+              entry = "${pkgs.writeShellScript "reprobuild-just-lint" ''
+                export PATH=${
+                  pkgs.lib.makeBinPath [
+                    pkgs.bash
+                    pkgs.coreutils
+                    pkgs.just
+                    pkgs.nim2
+                  ]
+                }:$PATH
+                export BLAKE3_PREFIX=${blake3Prefix}
+                export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
+                export RUNQUOTA_SRC=${runquota-src}
+                export XXHASH_PREFIX=${pkgs.xxHash}
+                exec ${pkgs.just}/bin/just lint
+              ''}";
               language = "system";
               pass_filenames = false;
             };
@@ -83,7 +91,7 @@
               pkgs.xxHash
             ];
 
-            BLAKE3_PREFIX = pkgs.libblake3;
+            BLAKE3_PREFIX = blake3Prefix;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             XXHASH_PREFIX = pkgs.xxHash;
@@ -143,7 +151,7 @@
           };
 
           devShells.default = pkgs.mkShell {
-            BLAKE3_PREFIX = pkgs.libblake3;
+            BLAKE3_PREFIX = blake3Prefix;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [
