@@ -57,6 +57,26 @@ type
 # Helpers.
 # ---------------------------------------------------------------------------
 
+proc managedBlockBodyDigest(content: string): Digest256 =
+  ## Digest of a managed-block body exactly as the shared
+  ## managed-block writer (`drivers/managed_block.nim:spliceManagedBlock`)
+  ## lays it on disk between the sentinels: a non-empty body is
+  ## normalized to end with a single trailing `\n` (so the close
+  ## sentinel sits on its own line), an empty body is left empty.
+  ##
+  ## Both the `fs.managedBlock` and `shell.integration` resources
+  ## are written by that same writer (`shell.integration` reuses it
+  ## via `drivers/shell_integration.nim:applyShellIntegration` ->
+  ## `applyManagedBlockResource`), so both digest branches MUST use
+  ## this one helper — keeping them from drifting apart again.
+  var normalized = content
+  if normalized.len > 0 and normalized[^1] != '\n':
+    normalized.add('\n')
+  var buf = newSeq[byte](normalized.len)
+  for i, ch in normalized:
+    buf[i] = byte(ord(ch))
+  return digestOfBytes(buf)
+
 proc digestOfResource*(desired: Resource): Digest256 =
   ## Canonical content digest for a desired resource. The bytes
   ## fed into the BLAKE3 hash are exactly the bytes the apply
@@ -70,13 +90,7 @@ proc digestOfResource*(desired: Resource): Digest256 =
     # Mirror that normalization here so cache-hit comparison
     # (desired digest == observed digest) holds when the content
     # the user passed already ends with `\n` AND when it doesn't.
-    var normalized = desired.managedBlockContent
-    if normalized.len > 0 and normalized[^1] != '\n':
-      normalized.add('\n')
-    var buf = newSeq[byte](normalized.len)
-    for i, ch in normalized:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
+    return managedBlockBodyDigest(desired.managedBlockContent)
   of rkWindowsRegistryValue:
     return digestOfBytes(desired.registryPayload.bytes)
   of rkEnvUserVariable:
@@ -98,10 +112,14 @@ proc digestOfResource*(desired: Resource): Digest256 =
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
   of rkShellIntegration:
-    var buf = newSeq[byte](desired.shellBlockContent.len)
-    for i, ch in desired.shellBlockContent:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
+    # `shell.integration` is written by the SAME managed-block writer
+    # as `rkFsManagedBlock` (via `applyShellIntegration` ->
+    # `applyManagedBlockResource`), which appends a trailing `\n` to a
+    # non-empty body. The desired digest must therefore apply the
+    # identical trailing-newline normalization, otherwise an unchanged
+    # `shell.integration` resource re-plans as `update` instead of
+    # `no-op`. Genuine content drift still produces a differing digest.
+    return managedBlockBodyDigest(desired.shellBlockContent)
   of rkLinuxGsettings:
     var buf = newSeq[byte](desired.gsettingsValueLiteral.len)
     for i, ch in desired.gsettingsValueLiteral:
