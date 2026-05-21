@@ -966,6 +966,23 @@ integration_shell_integration_replan_idempotent:
         tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim \
         2>&1 | tee test-logs/integration_shell_integration_replan_idempotent.log
 
+integration_plan_classifier_bucket_drift_is_cache_hit:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_plan_classifier_bucket_drift_is_cache_hit.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/integration_plan_classifier_bucket_drift_is_cache_hit \
+        --out:build/test-bin/integration_plan_classifier_bucket_drift_is_cache_hit \
+        tests/e2e/m80/t_integration_plan_classifier_bucket_drift_is_cache_hit.nim \
+        2>&1 | tee test-logs/integration_plan_classifier_bucket_drift_is_cache_hit.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

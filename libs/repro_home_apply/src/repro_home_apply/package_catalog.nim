@@ -38,6 +38,15 @@
 
 import std/[json, os, osproc, strutils, tables]
 
+# M80: the plan classifier and the apply-time Scoop adapter
+# (`repro_tool_profiles.resolveScoopTool`) share ONE installed-version
+# cache-hit predicate — `installedVersionSatisfies` — so a
+# `repro home apply --plan` dry run and the real `repro home apply`
+# can never disagree on whether an installed-but-bucket-drifted package
+# is a cache-hit.
+when defined(windows):
+  import repro_tool_profiles
+
 const
   ScoopRootEnvVar = "SCOOP"
   ScoopOverrideEnvVar = "REPRO_TEST_SCOOP_OVERRIDE"
@@ -302,15 +311,33 @@ proc installedExecutableName(scoopRoot, app, version: string): string =
 # Resolution entry point
 # ---------------------------------------------------------------------------
 
-proc satisfiesProfile(installedVersion, wantedVersion: string): bool =
-  ## A cache-hit requires the installed version to satisfy the profile.
-  ## When the profile pins no version (`wantedVersion` empty), any
-  ## installed version satisfies it. When a version is pinned, an exact
-  ## match is required (the M55 adapter refuses to follow a bucket-head
-  ## move away from a pinned version).
-  if wantedVersion.len == 0:
-    return installedVersion.len > 0
-  installedVersion == wantedVersion
+proc satisfiesProfile(installedVersion, pinnedVersion,
+                      preferredVersion: string): bool =
+  ## M80: a cache-hit requires an already-installed version that
+  ## satisfies the package's version reference — and the bucket head
+  ## is NEVER consulted here. This delegates to the SAME
+  ## `installedVersionSatisfies` predicate that M77's apply-time
+  ## `resolveScoopTool` uses, so the `--plan` classifier and the real
+  ## apply cannot diverge.
+  ##
+  ## A `home.nim` package reference is always a bare/unpinned reference
+  ## (`PlannedPackage` carries only a `packageId`, no version), so
+  ## `pinnedVersion` and `preferredVersion` are both empty here and ANY
+  ## installed version satisfies it — exactly what `resolveScoopTool`
+  ## does (it cache-hits the installed version and runs no
+  ## `scoop install`, leaving the drifted bucket head irrelevant). The
+  ## pinned / ranged parameters are threaded through so a future
+  ## version-pinned package reference resolves identically on both
+  ## paths.
+  if installedVersion.len == 0:
+    return false
+  when defined(windows):
+    installedVersionSatisfies([installedVersion], pinnedVersion,
+      preferredVersion).satisfied
+  else:
+    # Non-Windows path adapter has no version reference; an installed
+    # executable is a cache-hit.
+    pinnedVersion.len == 0 and preferredVersion.len == 0
 
 proc resolvePathPackage(packageId: string; searched: var seq[string]):
     tuple[found: bool; resolution: CatalogResolution] =
@@ -360,14 +387,21 @@ proc resolvePackage*(cat: var ProductionCatalog; packageId: string):
     if inst.installed:
       result.adapter = cakScoop
       result.installed = true
-      # When a bucket manifest is present, the profile-wanted version
-      # is the manifest head; otherwise the installed version is the
-      # only thing to satisfy against.
-      let wanted =
-        if manifest.found and manifest.version.len > 0: manifest.version
-        else: inst.version
+      # M80: an already-installed package is a cache-hit independent of
+      # whether the Scoop bucket head has drifted ahead of it. A
+      # `home.nim` package reference is a bare/unpinned reference, so
+      # ANY installed version satisfies it — and `satisfiesProfile`
+      # delegates to the SAME `installedVersionSatisfies` predicate
+      # that M77's apply-time `resolveScoopTool` consults. The previous
+      # M72 code required the installed version to EQUAL the bucket
+      # head (`manifest.version`); that made `--plan` report an
+      # installed-but-bucket-drifted package as `realize` while the
+      # actual apply correctly cache-hit it. The bucket head is NOT
+      # consulted here — exactly as `resolveScoopTool` does not consult
+      # it for an installed app.
       result.resolvedVersion = inst.version
-      result.cacheHit = satisfiesProfile(inst.version, wanted)
+      result.cacheHit = satisfiesProfile(inst.version,
+        pinnedVersion = "", preferredVersion = "")
       # Prefer the executable name the installed app's own manifest
       # declares (Scoop copies the bucket manifest into the version
       # dir on install; the M55 sandbox fixture writes it too).

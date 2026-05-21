@@ -1336,6 +1336,51 @@ proc versionSatisfiesRange(version, constraint: string): bool =
     return false
   true
 
+proc installedVersionSatisfies*(installedVersions: openArray[string];
+                                pinnedVersion, preferredVersion: string):
+    tuple[satisfied: bool; version: string] =
+  ## M80 shared predicate: given the set of Scoop versions already
+  ## installed on disk for an app (the exact-version directory leaves
+  ## under `apps/<app>/`, `current` excluded), decide whether an
+  ## already-installed version satisfies the package's version
+  ## reference — independent of the current bucket head.
+  ##
+  ## This is the SINGLE decision both the apply-time adapter
+  ## (`resolveScoopTool`, M77) and the plan-time package classifier
+  ## (`repro_home_apply/package_catalog.resolvePackage`, M80) consult,
+  ## so the dry-run plan and the real apply can never disagree on
+  ## whether an installed package is a cache-hit.
+  ##
+  ## Semantics — mirrors M77's `resolveScoopTool`:
+  ##   * pinned (`pinnedVersion` non-empty): satisfied iff that exact
+  ##     version is installed. `resolveScoopTool` treats the pinned
+  ##     version's on-disk install tree as a cache-hit and performs no
+  ##     install, so the bucket head is irrelevant.
+  ##   * ranged (`preferredVersion` non-empty): satisfied iff some
+  ##     installed version satisfies the range; the highest such
+  ##     version is returned (matching `resolveScoopTool`'s
+  ##     `installedSatisfying` pick).
+  ##   * bare reference (both empty — the shape a `home.nim` package
+  ##     reference always has): satisfied by ANY installed version.
+  ##
+  ## A NOT-installed reference is never satisfied here — the caller
+  ## then classifies it as a genuine install/`realize`.
+  let pinned = normalizeScoopVersionTag(pinnedVersion)
+  if pinned.len > 0:
+    for installed in installedVersions:
+      if normalizeScoopVersionTag(installed) == pinned:
+        return (true, installed)
+    return (false, "")
+  var best = ""
+  for installed in installedVersions:
+    let norm = normalizeScoopVersionTag(installed)
+    if preferredVersion.len == 0 or versionSatisfiesRange(norm,
+        preferredVersion):
+      if best.len == 0 or compareVersions(norm,
+          normalizeScoopVersionTag(best)) > 0:
+        best = installed
+  (best.len > 0, best)
+
 proc scoopExecutableName(): string =
   when defined(windows):
     "scoop.cmd"
@@ -1946,13 +1991,21 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
         if leaf.len > 0 and leaf != "current":
           result.add(leaf)
 
+  # M80: the installed-version cache-hit decision is the shared
+  # `installedVersionSatisfies` predicate — the SAME predicate the
+  # plan-time package classifier (`repro_home_apply/package_catalog.
+  # resolvePackage`) consults, so a `repro home apply --plan` dry run
+  # and the real `repro home apply` can never disagree on whether an
+  # installed-but-bucket-drifted package is a cache-hit.
+  let installedHit = installedVersionSatisfies(installedScoopVersions(),
+    plan.version, plan.preferredVersion)
   let resolvedVersion =
     if plan.version.len > 0:
       let pinned = normalizeScoopVersionTag(plan.version)
       # Cache-hit: the pinned version's install tree is already on disk.
       # No install is performed, so the bucket head does not matter.
-      if dirExists(appsDir / pinned):
-        pinned
+      if installedHit.satisfied:
+        normalizeScoopVersionTag(installedHit.version)
       elif manifestVersion != pinned:
         # An install is required and the bucket cannot supply `pinned`.
         raise newException(EScoopVersionMismatch,
@@ -1972,24 +2025,15 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
       # bucket is performed and the bucket head is then irrelevant.
       if versionSatisfiesRange(manifestVersion, plan.preferredVersion):
         manifestVersion
+      elif installedHit.satisfied:
+        installedHit.version
       else:
-        var installedSatisfying = ""
-        for installed in installedScoopVersions():
-          if versionSatisfiesRange(normalizeScoopVersionTag(installed),
-              plan.preferredVersion):
-            if installedSatisfying.len == 0 or
-                compareVersions(normalizeScoopVersionTag(installed),
-                  normalizeScoopVersionTag(installedSatisfying)) > 0:
-              installedSatisfying = installed
-        if installedSatisfying.len > 0:
-          installedSatisfying
-        else:
-          # Nothing satisfying is installed and the bucket head cannot
-          # supply the range — an install is required and unsatisfiable.
-          raise newException(EScoopVersionMismatch,
-            "EScoopVersionMismatch: bucket head " & manifestVersion &
-            " does not satisfy preferredVersion " & plan.preferredVersion &
-            " (manifest=" & manifest.path & ")")
+        # Nothing satisfying is installed and the bucket head cannot
+        # supply the range — an install is required and unsatisfiable.
+        raise newException(EScoopVersionMismatch,
+          "EScoopVersionMismatch: bucket head " & manifestVersion &
+          " does not satisfy preferredVersion " & plan.preferredVersion &
+          " (manifest=" & manifest.path & ")")
 
   let versionDir = appsDir / resolvedVersion
   if not dirExists(versionDir):
