@@ -113,156 +113,156 @@ suite "M78 gate: e2e_profile_declared_resources_apply":
   test "a profile `resources:` block materializes through `repro home apply`":
     when not defined(windows):
       checkpoint "platform-skip: M78 gate exercises the Windows leg"
-      check true
-      return
+      skip()
+    else:
 
-    # Snapshot the real HKCU\Environment\Path so the gate never
-    # mutates the dev host's environment (M68 gate-4 pattern).
-    let preGate = readUserPathRaw()
-    defer:
-      when defined(windows):
-        if preGate.present:
-          writeRegistryValue("Environment", "Path", preGate.regType,
-            encodeString(preGate.raw))
-        else:
-          try: deleteRegistryValue("Environment", "Path")
-          except CatchableError: discard
+      # Snapshot the real HKCU\Environment\Path so the gate never
+      # mutates the dev host's environment (M68 gate-4 pattern).
+      let preGate = readUserPathRaw()
+      defer:
+        when defined(windows):
+          if preGate.present:
+            writeRegistryValue("Environment", "Path", preGate.regType,
+              encodeString(preGate.raw))
+          else:
+            try: deleteRegistryValue("Environment", "Path")
+            except CatchableError: discard
 
-    # Seed a user-only PATH entry that must survive the apply
-    # (the env.userPath non-destructive invariant).
-    let userOnlyEntry = "C:\\repro-m78-user-only-entry"
-    var initialEntries: seq[string] = @[]
-    if preGate.present:
-      initialEntries = splitPathEntries(preGate.raw)
-    initialEntries.add(userOnlyEntry)
-    writeRegistryValue("Environment", "Path", 1'u32,
-      encodeString(joinPathEntries(initialEntries)))
+      # Seed a user-only PATH entry that must survive the apply
+      # (the env.userPath non-destructive invariant).
+      let userOnlyEntry = "C:\\repro-m78-user-only-entry"
+      var initialEntries: seq[string] = @[]
+      if preGate.present:
+        initialEntries = splitPathEntries(preGate.raw)
+      initialEntries.add(userOnlyEntry)
+      writeRegistryValue("Environment", "Path", 1'u32,
+        encodeString(joinPathEntries(initialEntries)))
 
-    let tempRoot = createTempDir("repro-m78-gate-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let profileDir = tempRoot / "profile"
-    let homeDir = tempRoot / "home"
-    let fixtureDir = tempRoot / "fixtures"
-    createDir(stateDir); createDir(storeRoot); createDir(homeDir)
-    createDir(profileDir); createDir(fixtureDir)
-    copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
-    let exe = fixtureDir / "m78-fixture.cmd"
-    writeFixtureExe(exe)
+      let tempRoot = createTempDir("repro-m78-gate-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let stateDir = tempRoot / "state"
+      let storeRoot = tempRoot / "store"
+      let profileDir = tempRoot / "profile"
+      let homeDir = tempRoot / "home"
+      let fixtureDir = tempRoot / "fixtures"
+      createDir(stateDir); createDir(storeRoot); createDir(homeDir)
+      createDir(profileDir); createDir(fixtureDir)
+      copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
+      let exe = fixtureDir / "m78-fixture.cmd"
+      writeFixtureExe(exe)
 
-    # NOTE: REPRO_TEST_RESOURCES is deliberately NOT set — the
-    # `resources:` block in the fixture profile is the sole source.
-    let baseEnv = @[
-      (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "m78-gate-host"),
-      (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m78-fixture"),
-      (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m78-fixture=" & exe)]
+      # NOTE: REPRO_TEST_RESOURCES is deliberately NOT set — the
+      # `resources:` block in the fixture profile is the sole source.
+      let baseEnv = @[
+        (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+        (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+        (k: "REPRO_STORE_ROOT", v: storeRoot),
+        (k: "HOME", v: homeDir),
+        (k: "USERPROFILE", v: homeDir),
+        (k: "REPRO_HOST", v: "m78-gate-host"),
+        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m78-fixture"),
+        (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m78-fixture=" & exe)]
 
-    let profileRc = homeDir / ProfileRcRel
-    let windowsRc = homeDir / WindowsRcRel
-    let linuxRc = homeDir / LinuxRcRel
+      let profileRc = homeDir / ProfileRcRel
+      let windowsRc = homeDir / WindowsRcRel
+      let linuxRc = homeDir / LinuxRcRel
 
-    # ---- `repro home plan` lists the profile-declared resources ----
-    let plan = runRepro(baseEnv, ["home", "plan"])
-    check plan.exitCode == 0
-    check plan.output.contains("launcherDir")
-    check plan.output.contains("env.userPath")
-    check plan.output.contains("shellRc")
-    check plan.output.contains("windowsOnly")
-    check plan.output.contains("fs.managedBlock")
-    # The `when linux:`-guarded resource is NOT planned on Windows.
-    check not plan.output.contains("linuxOnly")
+      # ---- `repro home plan` lists the profile-declared resources ----
+      let plan = runRepro(baseEnv, ["home", "plan"])
+      check plan.exitCode == 0
+      check plan.output.contains("launcherDir")
+      check plan.output.contains("env.userPath")
+      check plan.output.contains("shellRc")
+      check plan.output.contains("windowsOnly")
+      check plan.output.contains("fs.managedBlock")
+      # The `when linux:`-guarded resource is NOT planned on Windows.
+      check not plan.output.contains("linuxOnly")
 
-    # ---- Apply 1: materializes every reachable resource ----
-    let r1 = runRepro(baseEnv, ["home", "apply"])
-    check r1.exitCode == 0
-    check r1.output.contains("applied generation ")
+      # ---- Apply 1: materializes every reachable resource ----
+      let r1 = runRepro(baseEnv, ["home", "apply"])
+      check r1.exitCode == 0
+      check r1.output.contains("applied generation ")
 
-    # The managed block is written with its repro-managed sentinels.
-    check fileExists(profileRc)
-    let profileRcContent = readFile(profileRc)
-    check profileRcContent.contains("repro-managed:" & ProfileBlockId)
-    check profileRcContent.contains(ProfileBlockBody)
+      # The managed block is written with its repro-managed sentinels.
+      check fileExists(profileRc)
+      let profileRcContent = readFile(profileRc)
+      check profileRcContent.contains("repro-managed:" & ProfileBlockId)
+      check profileRcContent.contains(ProfileBlockBody)
 
-    # The `when windows:` resource materialized on this Windows host.
-    check fileExists(windowsRc)
-    let windowsRcContent = readFile(windowsRc)
-    check windowsRcContent.contains("repro-managed:" & WindowsBlockId)
-    check windowsRcContent.contains(WindowsBlockBody)
+      # The `when windows:` resource materialized on this Windows host.
+      check fileExists(windowsRc)
+      let windowsRcContent = readFile(windowsRc)
+      check windowsRcContent.contains("repro-managed:" & WindowsBlockId)
+      check windowsRcContent.contains(WindowsBlockBody)
 
-    # The `when linux:` resource is absent under the non-matching
-    # predicate.
-    check not fileExists(linuxRc)
+      # The `when linux:` resource is absent under the non-matching
+      # predicate.
+      check not fileExists(linuxRc)
 
-    # The PATH entry was added; the pre-existing user entry survives
-    # (the env.userPath non-destructive invariant).
-    let pathAfterApply = readUserPathRaw()
-    check pathAfterApply.present
-    let entriesAfterApply = splitPathEntries(pathAfterApply.raw)
-    check PathEntry in entriesAfterApply
-    check userOnlyEntry in entriesAfterApply
+      # The PATH entry was added; the pre-existing user entry survives
+      # (the env.userPath non-destructive invariant).
+      let pathAfterApply = readUserPathRaw()
+      check pathAfterApply.present
+      let entriesAfterApply = splitPathEntries(pathAfterApply.raw)
+      check PathEntry in entriesAfterApply
+      check userOnlyEntry in entriesAfterApply
 
-    # The activation manifest records a ResourceBinding per declared,
-    # reachable resource — and NOT for the unreachable `when linux:`
-    # resource.
-    let bindings1 = loadResourceBindings(stateDir, storeRoot)
-    check bindings1.len == 3
-    let pathBinding = bindingFor(bindings1, "launcherDir")
-    check pathBinding.resourceKind == "env.userPath"
-    # The PATH binding records the contribution bytes (the entry the
-    # resource added), not the full variable — joined-entries form.
-    check pathBinding.payloadKind == "joined-entries"
-    check ($cast[string](pathBinding.payloadBytes)).contains(PathEntry)
-    let rcBinding = bindingFor(bindings1, "shellRc")
-    check rcBinding.resourceKind == "fs.managedBlock"
-    let winBinding = bindingFor(bindings1, "windowsOnly")
-    check winBinding.resourceKind == "fs.managedBlock"
-    for b in bindings1:
-      check b.resourceAddress != "linuxOnly"
+      # The activation manifest records a ResourceBinding per declared,
+      # reachable resource — and NOT for the unreachable `when linux:`
+      # resource.
+      let bindings1 = loadResourceBindings(stateDir, storeRoot)
+      check bindings1.len == 3
+      let pathBinding = bindingFor(bindings1, "launcherDir")
+      check pathBinding.resourceKind == "env.userPath"
+      # The PATH binding records the contribution bytes (the entry the
+      # resource added), not the full variable — joined-entries form.
+      check pathBinding.payloadKind == "joined-entries"
+      check ($cast[string](pathBinding.payloadBytes)).contains(PathEntry)
+      let rcBinding = bindingFor(bindings1, "shellRc")
+      check rcBinding.resourceKind == "fs.managedBlock"
+      let winBinding = bindingFor(bindings1, "windowsOnly")
+      check winBinding.resourceKind == "fs.managedBlock"
+      for b in bindings1:
+        check b.resourceAddress != "linuxOnly"
 
-    # ---- Apply 2: a no-op re-apply is a clean cache-hit ----
-    let r2 = runRepro(baseEnv, ["home", "apply"])
-    check r2.exitCode == 0
-    check r2.output.contains("no-op")
-    # Live state is unchanged.
-    check readFile(profileRc).contains(ProfileBlockBody)
-    check readFile(windowsRc).contains(WindowsBlockBody)
-    check PathEntry in splitPathEntries(readUserPathRaw().raw)
+      # ---- Apply 2: a no-op re-apply is a clean cache-hit ----
+      let r2 = runRepro(baseEnv, ["home", "apply"])
+      check r2.exitCode == 0
+      check r2.output.contains("no-op")
+      # Live state is unchanged.
+      check readFile(profileRc).contains(ProfileBlockBody)
+      check readFile(windowsRc).contains(WindowsBlockBody)
+      check PathEntry in splitPathEntries(readUserPathRaw().raw)
 
-    # ---- Deliberate drift on a declared resource -> EDrift ----
-    # Edit the managed block BODY (between sentinels) out-of-band.
-    let driftOrig = readFile(profileRc)
-    let openS = "# >>> repro-managed:" & ProfileBlockId & " >>>"
-    let closeS = "# <<< repro-managed:" & ProfileBlockId & " <<<"
-    let openIdx = driftOrig.find(openS)
-    let closeIdx = driftOrig.find(closeS)
-    check openIdx >= 0
-    check closeIdx > openIdx
-    let lineEnd = driftOrig.find('\n', openIdx)
-    let edited = driftOrig[0 .. lineEnd] &
-      "USER MUTATED INSIDE BLOCK\n" & driftOrig[closeIdx .. ^1]
-    writeFile(profileRc, edited)
+      # ---- Deliberate drift on a declared resource -> EDrift ----
+      # Edit the managed block BODY (between sentinels) out-of-band.
+      let driftOrig = readFile(profileRc)
+      let openS = "# >>> repro-managed:" & ProfileBlockId & " >>>"
+      let closeS = "# <<< repro-managed:" & ProfileBlockId & " <<<"
+      let openIdx = driftOrig.find(openS)
+      let closeIdx = driftOrig.find(closeS)
+      check openIdx >= 0
+      check closeIdx > openIdx
+      let lineEnd = driftOrig.find('\n', openIdx)
+      let edited = driftOrig[0 .. lineEnd] &
+        "USER MUTATED INSIDE BLOCK\n" & driftOrig[closeIdx .. ^1]
+      writeFile(profileRc, edited)
 
-    let r3 = runRepro(baseEnv, ["home", "apply"])
-    check r3.exitCode != 0
-    check (r3.output.contains("drift detected") or
-           r3.output.contains("DRIFT") or
-           r3.output.contains("drift"))
+      let r3 = runRepro(baseEnv, ["home", "apply"])
+      check r3.exitCode != 0
+      check (r3.output.contains("drift detected") or
+             r3.output.contains("DRIFT") or
+             r3.output.contains("drift"))
 
-    # ---- `repro home plan` surfaces the drift ----
-    let driftPlan = runRepro(baseEnv, ["home", "plan"])
-    check driftPlan.exitCode != 0
-    check driftPlan.output.contains("drift")
+      # ---- `repro home plan` surfaces the drift ----
+      let driftPlan = runRepro(baseEnv, ["home", "plan"])
+      check driftPlan.exitCode != 0
+      check driftPlan.output.contains("drift")
 
-    # ---- --reconcile-drift collapses the drift back to managed state
-    let r4 = runRepro(baseEnv & @[
-      (k: "REPRO_HOME_APPLY_RECONCILE_DRIFT", v: "1")], ["home", "apply"])
-    check r4.exitCode == 0
-    check readFile(profileRc).contains(ProfileBlockBody)
-    check not readFile(profileRc).contains("USER MUTATED INSIDE BLOCK")
+      # ---- --reconcile-drift collapses the drift back to managed state
+      let r4 = runRepro(baseEnv & @[
+        (k: "REPRO_HOME_APPLY_RECONCILE_DRIFT", v: "1")], ["home", "apply"])
+      check r4.exitCode == 0
+      check readFile(profileRc).contains(ProfileBlockBody)
+      check not readFile(profileRc).contains("USER MUTATED INSIDE BLOCK")

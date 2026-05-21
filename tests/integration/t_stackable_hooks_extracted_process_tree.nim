@@ -3,7 +3,7 @@ import std/[algorithm, os, osproc, streams, strutils, tables, tempfiles, unittes
 import repro_monitor_hooks
 import repro_monitor_depfile
 
-when defined(macosx):
+when defined(macosx) or defined(linux):
   const ParentSource = r"""
 #include <fcntl.h>
 #include <pthread.h>
@@ -16,6 +16,12 @@ when defined(macosx):
 #include <unistd.h>
 
 extern char **environ;
+
+#if defined(__APPLE__)
+#define REPRO_PRELOAD_ENV "DYLD_INSERT_LIBRARIES"
+#else
+#define REPRO_PRELOAD_ENV "LD_PRELOAD"
+#endif
 
 struct thread_arg {
   const char *out_dir;
@@ -57,21 +63,21 @@ static int child_work(const char *child_input, const char *out_dir) {
   return 0;
 }
 
-static int is_dyld_env(const char *entry) {
-  const char *name = "DYLD_INSERT_LIBRARIES=";
+static int is_preload_env(const char *entry) {
+  const char *name = REPRO_PRELOAD_ENV "=";
   return strncmp(entry, name, strlen(name)) == 0;
 }
 
-static char **child_env_without_dyld(void) {
+static char **child_env_without_preload(void) {
   int count = 0;
   for (char **env = environ; *env != NULL; env++) {
-    if (!is_dyld_env(*env)) count++;
+    if (!is_preload_env(*env)) count++;
   }
   char **result = calloc((size_t)count + 1, sizeof(char *));
   if (result == NULL) return environ;
   int index = 0;
   for (char **env = environ; *env != NULL; env++) {
-    if (!is_dyld_env(*env)) result[index++] = *env;
+    if (!is_preload_env(*env)) result[index++] = *env;
   }
   result[index] = NULL;
   return result;
@@ -105,7 +111,7 @@ int main(int argc, char **argv) {
   }
 
   char *child_argv[] = {(char *)child, (char *)child_input, (char *)out_dir, NULL};
-  char **child_env = child_env_without_dyld();
+  char **child_env = child_env_without_preload();
   pid_t pid = 0;
   int spawn_result = posix_spawn(&pid, child, NULL, NULL, child_argv, child_env);
   if (spawn_result != 0) return 67;
@@ -131,6 +137,12 @@ struct thread_arg {
   int index;
 };
 
+#if defined(__APPLE__)
+#define REPRO_PRELOAD_ENV "DYLD_INSERT_LIBRARIES"
+#else
+#define REPRO_PRELOAD_ENV "LD_PRELOAD"
+#endif
+
 static void *thread_main(void *raw) {
   struct thread_arg *arg = (struct thread_arg *)raw;
   char path[1024];
@@ -145,7 +157,7 @@ static void *thread_main(void *raw) {
 
 int main(int argc, char **argv) {
   if (argc != 3) return 74;
-  if (getenv("DYLD_INSERT_LIBRARIES") == NULL) return 77;
+  if (getenv(REPRO_PRELOAD_ENV) == NULL) return 77;
   const char *child_input = argv[1];
   const char *out_dir = argv[2];
 
@@ -172,6 +184,65 @@ int main(int argc, char **argv) {
 }
 """
 
+  when defined(linux):
+    const StackableShimSource = r"""
+import std/[os, strutils]
+
+import repro_monitor_hooks/linux_preload_runtime
+
+proc appendLine(line: string) {.raises: [].} =
+  try:
+    let logPath = getEnv("REPRO_STACKABLE_HOOK_LOG")
+    if logPath.len == 0:
+      return
+    var file = open(logPath, fmAppend)
+    try:
+      file.writeLine(line)
+    finally:
+      close(file)
+  except CatchableError:
+    discard
+
+proc isTarget(path: cstring): bool {.raises: [].} =
+  path != nil and ($path).contains("stack-target.txt")
+
+proc firstOpen(ctx: var OpenContext) {.raises: [].} =
+  let target = isTarget(ctx.path)
+  if target:
+    appendLine("first-before")
+  callNext(ctx)
+  if target:
+    appendLine("first-after")
+
+proc secondOpen(ctx: var OpenContext) {.raises: [].} =
+  let target = isTarget(ctx.path)
+  if target:
+    appendLine("second-before")
+  callNext(ctx)
+  if target:
+    appendLine("second-after")
+
+registerOpenHook(firstOpen, priority = 10)
+registerOpenHook(secondOpen, priority = 20)
+registerOpen64Hook(firstOpen, priority = 10)
+registerOpen64Hook(secondOpen, priority = 20)
+"""
+
+    const StackableFixtureSource = r"""
+#include <fcntl.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+  if (argc != 2) return 64;
+  int fd = open(argv[1], O_RDONLY);
+  if (fd < 0) return 65;
+  char buffer[16];
+  if (read(fd, buffer, sizeof(buffer)) < 0) return 66;
+  close(fd);
+  return 0;
+}
+"""
+
   proc runCommand(command: string) =
     let result = execCmdEx(command)
     check result.exitCode == 0
@@ -179,13 +250,29 @@ int main(int argc, char **argv) {
       echo result.output
 
   proc compileShim(root, outPath: string) =
-    runCommand(
+    var command =
       "nim c --app:lib --threads:on " &
-      "--path:" & quoteShell(root / "libs/repro_monitor_shim/src") & " " &
-      "--path:" & quoteShell("/Users/zahary/metacraft/ct_interpose/src") & " " &
+      "--path:" & quoteShell(root / "libs/repro_monitor_shim/src") & " "
+    when defined(macosx):
+      command.add("--path:" & quoteShell("/Users/zahary/metacraft/ct_interpose/src") & " ")
+    command.add(
       "--nimcache:" & quoteShell(root / "build/nimcache/integration-repro-monitor-shim") & " " &
-      "--out:" & quoteShell(outPath) & " " &
-      quoteShell(root / "libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim"))
+      "--out:" & quoteShell(outPath) & " ")
+    when defined(macosx):
+      command.add(quoteShell(root / "libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim"))
+    else:
+      command.add(quoteShell(root / "libs/repro_monitor_shim/src/repro_monitor_shim/linux_preload.nim"))
+    runCommand(command)
+
+  when defined(linux):
+    proc compileStackableShim(root, sourcePath, outPath: string) =
+      let command =
+        "nim c --app:lib --threads:on " &
+        "--path:" & quoteShell(root / "libs/repro_monitor_hooks/src") & " " &
+        "--nimcache:" & quoteShell(root / "build/nimcache/integration-linux-stackable-runtime") & " " &
+        "--out:" & quoteShell(outPath) & " " &
+        quoteShell(sourcePath)
+      runCommand(command)
 
   proc compileFixture(sourcePath, outputPath: string) =
     runCommand("cc -pthread " & quoteShell(sourcePath) & " -o " & quoteShell(outputPath))
@@ -208,7 +295,7 @@ int main(int argc, char **argv) {
         delEnv(name)
 
   suite "integration_stackable_hooks_extracted_process_tree":
-    test "macOS DYLD shim records process tree and threaded file evidence":
+    test "preload shim records process tree and threaded file evidence":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-monitor-m10", "")
       defer: removeDir(tempRoot)
@@ -224,7 +311,11 @@ int main(int argc, char **argv) {
       let childSource = buildDir / "fixture_child.c"
       let parentExe = buildDir / "fixture_parent"
       let childExe = buildDir / "fixture_child"
-      let shimDylib = buildDir / "librepro_monitor_shim.dylib"
+      let shimDylib =
+        when defined(linux):
+          buildDir / "librepro_monitor_shim.so"
+        else:
+          buildDir / "librepro_monitor_shim.dylib"
       let depfile = tempRoot / "evidence.rdep"
       let parentInput = tempRoot / "parent-input.txt"
       let childInput = tempRoot / "child-input.txt"
@@ -239,7 +330,11 @@ int main(int argc, char **argv) {
       compileFixture(childSource, childExe)
 
       var oldEnv: seq[(string, string, bool)] = @[]
-      setEnvVar("DYLD_INSERT_LIBRARIES", shimDylib, oldEnv)
+      when defined(linux):
+        setEnvVar("LD_PRELOAD", shimDylib, oldEnv)
+        setEnvVar("REPRO_MONITOR_SHIM_LIB", shimDylib, oldEnv)
+      else:
+        setEnvVar("DYLD_INSERT_LIBRARIES", shimDylib, oldEnv)
       setEnvVar("REPRO_MONITOR_FRAGMENT_DIR", fragmentDir, oldEnv)
       setEnvVar("REPRO_MONITOR_SESSION", "m10-test-session", oldEnv)
       defer: restoreEnv(oldEnv)
@@ -294,7 +389,52 @@ int main(int argc, char **argv) {
           lastThreadId = id
       check uniqueThreadCount >= 2
 
-when not defined(macosx):
+    when defined(linux):
+      test "linux preload runtime dispatches registered hooks in priority order":
+        let repoRoot = getCurrentDir()
+        let tempRoot = createTempDir("repro-linux-stackable-hooks", "")
+        defer: removeDir(tempRoot)
+
+        let buildDir = tempRoot / "build"
+        createDir(buildDir)
+        let shimSource = buildDir / "stackable_shim.nim"
+        let fixtureSource = buildDir / "stackable_fixture.c"
+        let shimSo = buildDir / "libstackable_shim.so"
+        let fixtureExe = buildDir / "stackable_fixture"
+        let targetPath = tempRoot / "stack-target.txt"
+        let logPath = tempRoot / "hook-order.log"
+
+        writeFile(shimSource, StackableShimSource)
+        writeFile(fixtureSource, StackableFixtureSource)
+        writeFile(targetPath, "target\n")
+        writeFile(logPath, "")
+
+        compileStackableShim(repoRoot, shimSource, shimSo)
+        compileFixture(fixtureSource, fixtureExe)
+
+        var oldEnv: seq[(string, string, bool)] = @[]
+        setEnvVar("LD_PRELOAD", shimSo, oldEnv)
+        setEnvVar("REPRO_STACKABLE_HOOK_LOG", logPath, oldEnv)
+        defer: restoreEnv(oldEnv)
+
+        let process = startProcess(fixtureExe,
+          args = [targetPath],
+          env = nil,
+          options = {poStdErrToStdOut})
+        let processOutput = process.outputStream.readAll()
+        let exitCode = waitForExit(process)
+        close(process)
+        if exitCode != 0:
+          echo processOutput
+        check exitCode == 0
+
+        check readFile(logPath).strip.splitLines == @[
+          "first-before",
+          "second-before",
+          "second-after",
+          "first-after"]
+
+when not (defined(macosx) or defined(linux)):
   suite "integration_stackable_hooks_extracted_process_tree":
-    test "macOS-only DYLD gate is skipped on this platform":
+    test "preload hook gate is skipped on this platform":
       check true

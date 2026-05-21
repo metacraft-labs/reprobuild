@@ -114,144 +114,144 @@ suite "M79 gate: integration_shell_integration_replan_idempotent":
       checkpoint "platform-skip: M79 gate exercises the Windows leg " &
         "(the shell.integration driver uses the PowerShell-profile " &
         "managed-block writer on Windows)"
-      check true
-      return
+      skip()
+    else:
 
-    let tempRoot = createTempDir("repro-m79-gate-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-    let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let profileDir = tempRoot / "profile"
-    let homeDir = tempRoot / "home"
-    let fixtureDir = tempRoot / "fixtures"
-    createDir(stateDir); createDir(storeRoot); createDir(homeDir)
-    createDir(profileDir); createDir(fixtureDir)
-    copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
-    let exe = fixtureDir / "m79-fixture.cmd"
-    writeFixtureExe(exe)
+      let tempRoot = createTempDir("repro-m79-gate-", "")
+      defer:
+        try: removeDir(tempRoot) except OSError: discard
+      let stateDir = tempRoot / "state"
+      let storeRoot = tempRoot / "store"
+      let profileDir = tempRoot / "profile"
+      let homeDir = tempRoot / "home"
+      let fixtureDir = tempRoot / "fixtures"
+      createDir(stateDir); createDir(storeRoot); createDir(homeDir)
+      createDir(profileDir); createDir(fixtureDir)
+      copyFile(FixtureSrc / "home.nim", profileDir / "home.nim")
+      let exe = fixtureDir / "m79-fixture.cmd"
+      writeFixtureExe(exe)
 
-    # NOTE: REPRO_TEST_RESOURCES is deliberately NOT set — the
-    # `resources:` block in the fixture profile is the sole source
-    # of the `shell.integration` resource (M78 production path).
-    let baseEnv = @[
-      (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "m79-gate-host"),
-      (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m79-fixture"),
-      (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m79-fixture=" & exe)]
+      # NOTE: REPRO_TEST_RESOURCES is deliberately NOT set — the
+      # `resources:` block in the fixture profile is the sole source
+      # of the `shell.integration` resource (M78 production path).
+      let baseEnv = @[
+        (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+        (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+        (k: "REPRO_STORE_ROOT", v: storeRoot),
+        (k: "HOME", v: homeDir),
+        (k: "USERPROFILE", v: homeDir),
+        (k: "REPRO_HOST", v: "m79-gate-host"),
+        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m79-fixture"),
+        (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m79-fixture=" & exe)]
 
-    let shellRc = homeDir / ShellRcRel
+      let shellRc = homeDir / ShellRcRel
 
-    # ---- Apply 1: materializes the shell.integration resource ----
-    let r1 = runRepro(baseEnv, ["home", "apply"])
-    check r1.exitCode == 0
-    check r1.output.contains("applied generation ")
+      # ---- Apply 1: materializes the shell.integration resource ----
+      let r1 = runRepro(baseEnv, ["home", "apply"])
+      check r1.exitCode == 0
+      check r1.output.contains("applied generation ")
 
-    # The shell-integration managed block is written with its
-    # repro-managed sentinels and its body.
-    check fileExists(shellRc)
-    let rcContent = readFile(shellRc)
-    check rcContent.contains("repro-managed:" & ShellBlockId)
-    check rcContent.contains(ShellBlockBody)
-    # The writer normalizes the body to end with a single `\n`; the
-    # fixture content deliberately lacks one, so the on-disk body
-    # is content + "\n" — exactly the bytes M79 makes the digest
-    # hash. (Confirms the writer/digest symmetry the gate verifies.)
-    let openS = "# >>> repro-managed:" & ShellBlockId & " >>>"
-    let closeS = "# <<< repro-managed:" & ShellBlockId & " <<<"
-    block confirmTrailingNewline:
-      let openIdx = rcContent.find(openS)
-      let closeIdx = rcContent.find(closeS)
-      check openIdx >= 0
-      check closeIdx > openIdx
-      let lineEnd = rcContent.find('\n', openIdx)
-      check lineEnd >= 0
-      var closeLineStart = closeIdx
-      while closeLineStart > 0 and rcContent[closeLineStart - 1] != '\n':
-        dec closeLineStart
-      let onDiskBody = rcContent[lineEnd + 1 ..< closeLineStart]
-      check onDiskBody == ShellBlockBody & "\n"
+      # The shell-integration managed block is written with its
+      # repro-managed sentinels and its body.
+      check fileExists(shellRc)
+      let rcContent = readFile(shellRc)
+      check rcContent.contains("repro-managed:" & ShellBlockId)
+      check rcContent.contains(ShellBlockBody)
+      # The writer normalizes the body to end with a single `\n`; the
+      # fixture content deliberately lacks one, so the on-disk body
+      # is content + "\n" — exactly the bytes M79 makes the digest
+      # hash. (Confirms the writer/digest symmetry the gate verifies.)
+      let openS = "# >>> repro-managed:" & ShellBlockId & " >>>"
+      let closeS = "# <<< repro-managed:" & ShellBlockId & " <<<"
+      block confirmTrailingNewline:
+        let openIdx = rcContent.find(openS)
+        let closeIdx = rcContent.find(closeS)
+        check openIdx >= 0
+        check closeIdx > openIdx
+        let lineEnd = rcContent.find('\n', openIdx)
+        check lineEnd >= 0
+        var closeLineStart = closeIdx
+        while closeLineStart > 0 and rcContent[closeLineStart - 1] != '\n':
+          dec closeLineStart
+        let onDiskBody = rcContent[lineEnd + 1 ..< closeLineStart]
+        check onDiskBody == ShellBlockBody & "\n"
 
-    # ---- Re-plan with NO change: the resource is a clean no-op ----
-    # `repro home plan` renders one line per resource with the EXACT
-    # action verb (from `lifecycle.summarize`). The M79 fix makes this
-    # `no-op`; before the fix the verbatim-content digest mismatched
-    # the on-disk (content + `\n`) digest and this line read `update`
-    # instead — so this assertion genuinely fails on the unfixed code.
-    let planNoChange = runRepro(baseEnv, ["home", "plan"])
-    check planNoChange.exitCode == 0
-    let noChangeLine = resourcePlanLine(planNoChange.output, ShellAddress)
-    check noChangeLine.len > 0
-    # STRONG assertion on the exact action — not just "exits 0".
-    check noChangeLine.startsWith("no-op")
-    check not noChangeLine.startsWith("update")
-    check not noChangeLine.startsWith("DRIFT")
-    # The whole plan settles to zero drift.
-    check planNoChange.output.contains("0 drift(s)")
+      # ---- Re-plan with NO change: the resource is a clean no-op ----
+      # `repro home plan` renders one line per resource with the EXACT
+      # action verb (from `lifecycle.summarize`). The M79 fix makes this
+      # `no-op`; before the fix the verbatim-content digest mismatched
+      # the on-disk (content + `\n`) digest and this line read `update`
+      # instead — so this assertion genuinely fails on the unfixed code.
+      let planNoChange = runRepro(baseEnv, ["home", "plan"])
+      check planNoChange.exitCode == 0
+      let noChangeLine = resourcePlanLine(planNoChange.output, ShellAddress)
+      check noChangeLine.len > 0
+      # STRONG assertion on the exact action — not just "exits 0".
+      check noChangeLine.startsWith("no-op")
+      check not noChangeLine.startsWith("update")
+      check not noChangeLine.startsWith("DRIFT")
+      # The whole plan settles to zero drift.
+      check planNoChange.output.contains("0 drift(s)")
 
-    # ---- Re-apply with NO change: a clean cache-hit no-op ----
-    let r2 = runRepro(baseEnv, ["home", "apply"])
-    check r2.exitCode == 0
-    check r2.output.contains("no-op")
-    # The live block is byte-identical to apply 1's output.
-    check readFile(shellRc) == rcContent
+      # ---- Re-apply with NO change: a clean cache-hit no-op ----
+      let r2 = runRepro(baseEnv, ["home", "apply"])
+      check r2.exitCode == 0
+      check r2.output.contains("no-op")
+      # The live block is byte-identical to apply 1's output.
+      check readFile(shellRc) == rcContent
 
-    # ---- Deliberate edit of the managed block content -> drift ----
-    # Edit the managed-block BODY (between the sentinels) out-of-band.
-    # This is a genuine content change: the digests must differ and
-    # the resource must be detected as drift (M72/M68 drift contract
-    # unchanged — M79 must NOT weaken drift detection).
-    let driftOrig = readFile(shellRc)
-    let driftOpenIdx = driftOrig.find(openS)
-    let driftCloseIdx = driftOrig.find(closeS)
-    check driftOpenIdx >= 0
-    check driftCloseIdx > driftOpenIdx
-    let driftLineEnd = driftOrig.find('\n', driftOpenIdx)
-    let edited = driftOrig[0 .. driftLineEnd] &
-      "USER MUTATED THE SHELL HOOK\n" & driftOrig[driftCloseIdx .. ^1]
-    writeFile(shellRc, edited)
+      # ---- Deliberate edit of the managed block content -> drift ----
+      # Edit the managed-block BODY (between the sentinels) out-of-band.
+      # This is a genuine content change: the digests must differ and
+      # the resource must be detected as drift (M72/M68 drift contract
+      # unchanged — M79 must NOT weaken drift detection).
+      let driftOrig = readFile(shellRc)
+      let driftOpenIdx = driftOrig.find(openS)
+      let driftCloseIdx = driftOrig.find(closeS)
+      check driftOpenIdx >= 0
+      check driftCloseIdx > driftOpenIdx
+      let driftLineEnd = driftOrig.find('\n', driftOpenIdx)
+      let edited = driftOrig[0 .. driftLineEnd] &
+        "USER MUTATED THE SHELL HOOK\n" & driftOrig[driftCloseIdx .. ^1]
+      writeFile(shellRc, edited)
 
-    # `repro home plan` surfaces the drift on the shell.integration
-    # resource — EXACT action assertion (`DRIFT`), not a generic
-    # "non-zero exit". A genuine content change MUST still drift; the
-    # M79 fix does not weaken the M72/M68 drift contract.
-    let driftPlan = runRepro(baseEnv, ["home", "plan"])
-    check driftPlan.exitCode != 0
-    let driftLine = resourcePlanLine(driftPlan.output, ShellAddress)
-    check driftLine.len > 0
-    check driftLine.startsWith("DRIFT")
-    check not driftLine.startsWith("no-op")
-    check not driftLine.startsWith("update")
-    check driftPlan.output.contains("1 drift(s)")
+      # `repro home plan` surfaces the drift on the shell.integration
+      # resource — EXACT action assertion (`DRIFT`), not a generic
+      # "non-zero exit". A genuine content change MUST still drift; the
+      # M79 fix does not weaken the M72/M68 drift contract.
+      let driftPlan = runRepro(baseEnv, ["home", "plan"])
+      check driftPlan.exitCode != 0
+      let driftLine = resourcePlanLine(driftPlan.output, ShellAddress)
+      check driftLine.len > 0
+      check driftLine.startsWith("DRIFT")
+      check not driftLine.startsWith("no-op")
+      check not driftLine.startsWith("update")
+      check driftPlan.output.contains("1 drift(s)")
 
-    # `repro home apply` fails closed on the drift (does NOT silently
-    # overwrite the user's edit).
-    let r3 = runRepro(baseEnv, ["home", "apply"])
-    check r3.exitCode != 0
-    check (r3.output.contains("drift detected") or
-           r3.output.contains("DRIFT") or
-           r3.output.contains("drift"))
-    # The user's out-of-band edit is left intact (fail-closed).
-    check readFile(shellRc).contains("USER MUTATED THE SHELL HOOK")
+      # `repro home apply` fails closed on the drift (does NOT silently
+      # overwrite the user's edit).
+      let r3 = runRepro(baseEnv, ["home", "apply"])
+      check r3.exitCode != 0
+      check (r3.output.contains("drift detected") or
+             r3.output.contains("DRIFT") or
+             r3.output.contains("drift"))
+      # The user's out-of-band edit is left intact (fail-closed).
+      check readFile(shellRc).contains("USER MUTATED THE SHELL HOOK")
 
-    # ---- --reconcile-drift collapses the drift back to managed state
-    let r4 = runRepro(baseEnv & @[
-      (k: "REPRO_HOME_APPLY_RECONCILE_DRIFT", v: "1")], ["home", "apply"])
-    check r4.exitCode == 0
-    check readFile(shellRc).contains(ShellBlockBody)
-    check not readFile(shellRc).contains("USER MUTATED THE SHELL HOOK")
+      # ---- --reconcile-drift collapses the drift back to managed state
+      let r4 = runRepro(baseEnv & @[
+        (k: "REPRO_HOME_APPLY_RECONCILE_DRIFT", v: "1")], ["home", "apply"])
+      check r4.exitCode == 0
+      check readFile(shellRc).contains(ShellBlockBody)
+      check not readFile(shellRc).contains("USER MUTATED THE SHELL HOOK")
 
-    # ---- Re-plan after reconcile: back to a clean no-op ----
-    # Proves idempotency holds again after the reconcile write — the
-    # reconciled on-disk bytes digest-match the desired state.
-    let planAfterReconcile = runRepro(baseEnv, ["home", "plan"])
-    check planAfterReconcile.exitCode == 0
-    let reconciledLine = resourcePlanLine(
-      planAfterReconcile.output, ShellAddress)
-    check reconciledLine.len > 0
-    check reconciledLine.startsWith("no-op")
-    check not reconciledLine.startsWith("update")
+      # ---- Re-plan after reconcile: back to a clean no-op ----
+      # Proves idempotency holds again after the reconcile write — the
+      # reconciled on-disk bytes digest-match the desired state.
+      let planAfterReconcile = runRepro(baseEnv, ["home", "plan"])
+      check planAfterReconcile.exitCode == 0
+      let reconciledLine = resourcePlanLine(
+        planAfterReconcile.output, ShellAddress)
+      check reconciledLine.len > 0
+      check reconciledLine.startsWith("no-op")
+      check not reconciledLine.startsWith("update")

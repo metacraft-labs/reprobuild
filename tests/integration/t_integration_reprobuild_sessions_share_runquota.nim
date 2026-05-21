@@ -302,7 +302,9 @@ suite "integration_reprobuild_sessions_share_runquota":
 
     var lastLeases = ""
     var observedQueue = false
-    for _ in 0 ..< 400:
+    # Cold provider compilation can hold the only RunQuota slot before these
+    # public action leases become visible during a full-suite run.
+    for _ in 0 ..< 2400:
       if hasQueuedAndRunningBuildLeases(daemon.cli, CodeAction, FixtureAction,
           lastLeases):
         observedQueue = true
