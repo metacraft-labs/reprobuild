@@ -19,6 +19,9 @@ type
     nkConfigEntry      ## `<key> = <value>` line
     nkHostsBlock       ## the `hosts:` block
     nkHostsEntry       ## `<host>: [<acts>]` line
+    nkResourcesBlock   ## the `resources:` block (M78)
+    nkResourceEntry    ## `<kind> <address>:` resource declaration (M78)
+    nkResourceAttr     ## `<key> = <value>` line inside a resource entry
 
   CondKeyword* = enum
     ckWhen, ckIf
@@ -69,6 +72,28 @@ type
       hostName*: string
       hostActivities*: seq[string]
       hostEntryLine*: int
+    of nkResourcesBlock:
+      ## The single `resources:` block. Direct children are
+      ## `nkResourceEntry` declarations and `nkCondBlock` predicate
+      ## blocks that nest further `nkResourceEntry` declarations
+      ## (a `when windows:`-guarded resource).
+      resourcesHeaderLine*: int
+      resourcesEntries*: seq[IntentNode]
+    of nkResourceEntry:
+      ## One `<kind> <address>:` resource declaration. `resourceKind`
+      ## is the typed home-scope kind tag (`env.userPath`,
+      ## `fs.managedBlock`, `shell.integration`, `env.userVariable`,
+      ## `windows.registryValue`, `windows.startup`); `resourceAddress`
+      ## is the stable id used downstream as the `Resource.address`.
+      resourceKind*: string
+      resourceAddress*: string
+      resourceHeaderLine*: int
+      resourceAttrs*: seq[IntentNode]
+    of nkResourceAttr:
+      ## A `<key> = <value>` payload line inside a resource entry.
+      resourceAttrKey*: string
+      resourceAttrValueSource*: string  ## raw RHS bytes, no leading `=`
+      resourceAttrLine*: int
 
   Profile* = ref object
     ## Parsed and validated profile. `lines` is the source split on
@@ -100,5 +125,12 @@ proc findConfigBlock*(p: Profile): Option[IntentNode] =
 proc findHostsBlock*(p: Profile): Option[IntentNode] =
   for ch in p.root.children:
     if ch.kind == nkHostsBlock:
+      return some(ch)
+  none(IntentNode)
+
+proc findResourcesBlock*(p: Profile): Option[IntentNode] =
+  ## Locate the unique `resources:` block (M78), if present.
+  for ch in p.root.children:
+    if ch.kind == nkResourcesBlock:
       return some(ch)
   none(IntentNode)

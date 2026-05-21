@@ -1248,11 +1248,11 @@ proc runHomeGet(args: openArray[string]): int =
 proc runHomePlan(args: openArray[string]): int =
   ## `repro home plan [--allow-drift]` — non-mutating preview of
   ## what the next apply would do. Walks the same DesiredSet the
-  ## apply pipeline composes (Phase A: fed by REPRO_TEST_RESOURCES
-  ## for gates; production will be fed by the M59 stdlib's
-  ## resource emitter), observes the live state, and prints one
-  ## line per resource. Exits non-zero when drift is detected
-  ## unless `--allow-drift` was passed.
+  ## apply pipeline composes: M78 makes that the profile's
+  ## `resources:` block (the production source) with
+  ## `REPRO_TEST_RESOURCES` merged over it as a test-only override.
+  ## Observes the live state and prints one line per resource. Exits
+  ## non-zero when drift is detected unless `--allow-drift` was passed.
   var allowDrift = false
   var reconcileFlag = false
   for a in args:
@@ -1276,7 +1276,11 @@ proc runHomePlan(args: openArray[string]): int =
       return 2
   try:
     let homeDir = getHomeDir()
-    let desired = parseSyntheticResources(homeDir)
+    # M78: the desired set is the profile's `resources:` block, with
+    # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
+    let profilePath = loadProfilePath()
+    let prof = loadProfile(profilePath)
+    let desired = composeDesiredResources(prof, homeDir, currentHost())
     # Load recorded bindings from the active generation's manifest.
     var recorded = initOrderedTable[string, RecordedBinding]()
     let stateDir = resolveStateDir()

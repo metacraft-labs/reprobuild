@@ -110,6 +110,14 @@ proc insertLine(p: Profile; atIdx: int; line: string) =
       for ch in node.hostsEntries: shift(ch, from1)
     of nkHostsEntry:
       if node.hostEntryLine >= from1: inc node.hostEntryLine
+    of nkResourcesBlock:
+      if node.resourcesHeaderLine >= from1: inc node.resourcesHeaderLine
+      for ch in node.resourcesEntries: shift(ch, from1)
+    of nkResourceEntry:
+      if node.resourceHeaderLine >= from1: inc node.resourceHeaderLine
+      for ch in node.resourceAttrs: shift(ch, from1)
+    of nkResourceAttr:
+      if node.resourceAttrLine >= from1: inc node.resourceAttrLine
   shift(p.root, atIdx + 1)
 
 proc deleteLine(p: Profile; atIdx: int) =
@@ -146,6 +154,14 @@ proc deleteLine(p: Profile; atIdx: int) =
       for ch in node.hostsEntries: shift(ch, from1)
     of nkHostsEntry:
       if node.hostEntryLine > from1: dec node.hostEntryLine
+    of nkResourcesBlock:
+      if node.resourcesHeaderLine > from1: dec node.resourcesHeaderLine
+      for ch in node.resourcesEntries: shift(ch, from1)
+    of nkResourceEntry:
+      if node.resourceHeaderLine > from1: dec node.resourceHeaderLine
+      for ch in node.resourceAttrs: shift(ch, from1)
+    of nkResourceAttr:
+      if node.resourceAttrLine > from1: dec node.resourceAttrLine
   shift(p.root, atIdx + 1)
 
 # ---------------------------------------------------------------------------
@@ -590,6 +606,105 @@ proc setHostActivities*(profilePath, host: string;
     hostsBlk.hostsEntries.add entry
     if hostsBlk.endLine < insertAt + 1:
       hostsBlk.endLine = insertAt + 1
+    if prof.root.endLine < insertAt + 1:
+      prof.root.endLine = insertAt + 1
+  writeProfile(prof)
+
+# ---------------------------------------------------------------------------
+# setResource (M78).
+# ---------------------------------------------------------------------------
+#
+# Formatting-preserving insert/update of a `resources:` entry, exactly
+# parallel to `setConfigurable`'s find-or-create-block / find-or-create-
+# entry / add-or-update-attribute structure. New entries are appended at
+# the end of the `resources:` block; attributes are appended at the end
+# of the entry in insertion order, and an existing key is updated in
+# place. The editor writes resource entries at the profile top level
+# (not nested under a `when`/`if`); a predicate-guarded resource is
+# hand-authored.
+
+proc createResourcesBlock(p: Profile): IntentNode =
+  let parentIndent = p.root.indent + p.indentStep
+  let header = indentStr(parentIndent) & "resources:"
+  let insertAt = p.root.endLine
+  insertLine(p, insertAt, header)
+  result = IntentNode(kind: nkResourcesBlock,
+    startLine: insertAt + 1, endLine: insertAt + 1,
+    indent: parentIndent, resourcesHeaderLine: insertAt + 1,
+    resourcesEntries: @[])
+  p.root.children.add result
+  if p.root.endLine < insertAt + 1:
+    p.root.endLine = insertAt + 1
+
+proc createResourceEntry(p: Profile; resBlk: IntentNode;
+                         kind, address: string): IntentNode =
+  let parentIndent = resBlk.indent + p.indentStep
+  let header = indentStr(parentIndent) & kind & " " & address & ":"
+  let insertAt = insertionIndex(p, resBlk, resBlk.resourcesHeaderLine)
+  insertLine(p, insertAt, header)
+  result = IntentNode(kind: nkResourceEntry,
+    startLine: insertAt + 1, endLine: insertAt + 1,
+    indent: parentIndent, resourceKind: kind, resourceAddress: address,
+    resourceHeaderLine: insertAt + 1, resourceAttrs: @[])
+  resBlk.resourcesEntries.add result
+  if resBlk.endLine < insertAt + 1:
+    resBlk.endLine = insertAt + 1
+  if p.root.endLine < insertAt + 1:
+    p.root.endLine = insertAt + 1
+
+proc findResourceEntry(resBlk: IntentNode; address: string):
+    Option[IntentNode] =
+  for ch in resBlk.resourcesEntries:
+    if ch.kind == nkResourceEntry and ch.resourceAddress == address:
+      return some(ch)
+  none(IntentNode)
+
+proc findResourceAttr(entry: IntentNode; key: string): int =
+  for i, ch in entry.resourceAttrs:
+    if ch.kind == nkResourceAttr and ch.resourceAttrKey == key:
+      return i
+  -1
+
+proc setResource*(profilePath, kind, address, attrKey: string;
+                  value: string) =
+  ## Write or update `<attrKey> = <value>` inside the `resources:`
+  ## entry identified by `<kind> <address>:`. Creates the `resources:`
+  ## block and the `<kind> <address>:` entry on demand. `value` is
+  ## quoted as a string literal unless it is already a bool / numeric
+  ## literal (same rule as `setConfigurable`).
+  let prof = loadProfile(profilePath)
+  var resBlk: IntentNode
+  let resOpt = findResourcesBlock(prof)
+  if resOpt.isSome:
+    resBlk = resOpt.get
+  else:
+    resBlk = createResourcesBlock(prof)
+  var entry: IntentNode
+  let entryOpt = findResourceEntry(resBlk, address)
+  if entryOpt.isSome:
+    entry = entryOpt.get
+  else:
+    entry = createResourceEntry(prof, resBlk, kind, address)
+  let attrIndent = entry.indent + prof.indentStep
+  let rhs = renderConfigValue(value)
+  let newLine = indentStr(attrIndent) & attrKey & " = " & rhs
+  let existingIdx = findResourceAttr(entry, attrKey)
+  if existingIdx >= 0:
+    let attr = entry.resourceAttrs[existingIdx]
+    prof.lines[attr.resourceAttrLine - 1] = newLine
+    attr.resourceAttrValueSource = rhs
+  else:
+    let insertAt = insertionIndex(prof, entry, entry.resourceHeaderLine)
+    insertLine(prof, insertAt, newLine)
+    let attrNode = IntentNode(kind: nkResourceAttr,
+      startLine: insertAt + 1, endLine: insertAt + 1, indent: attrIndent,
+      resourceAttrKey: attrKey, resourceAttrValueSource: rhs,
+      resourceAttrLine: insertAt + 1)
+    entry.resourceAttrs.add attrNode
+    if entry.endLine < insertAt + 1:
+      entry.endLine = insertAt + 1
+    if resBlk.endLine < insertAt + 1:
+      resBlk.endLine = insertAt + 1
     if prof.root.endLine < insertAt + 1:
       prof.root.endLine = insertAt + 1
   writeProfile(prof)

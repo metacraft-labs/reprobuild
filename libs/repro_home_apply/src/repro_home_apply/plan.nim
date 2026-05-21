@@ -103,7 +103,7 @@ proc enabledActivitiesFor(profile: Profile; host: string): HashSet[string] =
       for a in entry.hostActivities:
         result.incl a
 
-proc evaluateHostPredicate(predicateAst: PredNode; host: string): bool =
+proc evaluateHostPredicate*(predicateAst: PredNode; host: string): bool =
   ## Minimal predicate evaluator for M63 Phase A: only inspects the
   ## predicate's referenced identifiers and compares them against the
   ## supplied `host` name. The full predicate language (M60) supports

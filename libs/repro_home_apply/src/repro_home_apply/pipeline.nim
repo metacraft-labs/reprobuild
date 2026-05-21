@@ -19,7 +19,7 @@
 ## intentionally left in place so the next apply's recovery sweep
 ## can quarantine the partial generation.
 
-import std/[os, sequtils, sets, strutils, tables, times]
+import std/[options, os, sequtils, sets, strutils, tables, times]
 
 import blake3
 import repro_home_generations
@@ -538,6 +538,259 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
       result.add(r)
     else: discard
 
+# ---------------------------------------------------------------------------
+# M78: profile-declared resources.
+# ---------------------------------------------------------------------------
+#
+# The `home.nim` `resources:` block (parsed by the M60 intent layer
+# into `nkResourcesBlock` / `nkResourceEntry` / `nkResourceAttr`
+# nodes) is materialized into the SAME `DesiredSet` / `Resource`
+# objects that `parseSyntheticResources` produces, so profile-declared
+# and `REPRO_TEST_RESOURCES` test-seam resources are interchangeable
+# downstream through `composePlan`.
+
+proc resourceAttrValue(raw: string): string =
+  ## Decode a resource-attribute RHS into its logical string value.
+  ## Handles `"..."` and `r"..."` Nim literals; bare tokens pass
+  ## through. Mirrors `unquoteValueSource` plus raw-string support
+  ## (registry keys read naturally as `r"HKCU\\..."`).
+  if raw.len >= 3 and (raw[0] == 'r' or raw[0] == 'R') and
+     raw[1] == '"' and raw[^1] == '"':
+    # Raw string: backslashes are literal, no escape processing.
+    return raw[2 ..< raw.len - 1]
+  unquoteValueSource(raw)
+
+proc resourceProfileError(profilePath: string; line: int;
+                          msg: string) {.noreturn.} =
+  ## A malformed `resources:` entry surfaces as `EUnstructured` with
+  ## file/line, exactly as the intent parser's other rejections do.
+  raiseUnstructured(profilePath, line, 1, msg,
+    "a well-formed `resources:` entry")
+
+proc attrOf(entry: IntentNode; key: string): string =
+  for a in entry.resourceAttrs:
+    if a.kind == nkResourceAttr and a.resourceAttrKey == key:
+      return resourceAttrValue(a.resourceAttrValueSource)
+  ""
+
+proc hasAttr(entry: IntentNode; key: string): bool =
+  for a in entry.resourceAttrs:
+    if a.kind == nkResourceAttr and a.resourceAttrKey == key:
+      return true
+  false
+
+proc requireAttr(profilePath: string; entry: IntentNode;
+                 key: string): string =
+  if not hasAttr(entry, key):
+    resourceProfileError(profilePath, entry.resourceHeaderLine,
+      "resource `" & entry.resourceKind & " " & entry.resourceAddress &
+      "` is missing the required `" & key & "` attribute")
+  attrOf(entry, key)
+
+proc resourceFromEntry(profilePath, homeDir: string;
+                       entry: IntentNode): Resource =
+  ## Build one `Resource` from a parsed `nkResourceEntry`. The payload
+  ## shapes match `parseSyntheticResources` exactly. A `host-file`
+  ## path starting with `~` is resolved against `homeDir`.
+  let address = entry.resourceAddress
+  case entry.resourceKind
+  of "env.userPath":
+    let raw = requireAttr(profilePath, entry, "entries")
+    var clean: seq[string] = @[]
+    for e in raw.split(','):
+      let t = e.strip()
+      if t.len > 0: clean.add(t)
+    result = Resource(kind: rkEnvUserPath, address: address,
+      lifecyclePolicy: lpDefault, pathEntries: clean)
+  of "fs.managedBlock":
+    var hostFile = requireAttr(profilePath, entry, "hostFile")
+    if hostFile.startsWith("~"):
+      hostFile = homeDir & hostFile[1 .. ^1]
+    result = Resource(kind: rkFsManagedBlock, address: address,
+      lifecyclePolicy: lpDefault,
+      hostFilePath: hostFile,
+      managedBlockId: requireAttr(profilePath, entry, "blockId"),
+      managedBlockContent: requireAttr(profilePath, entry, "content"))
+  of "shell.integration":
+    var hostFile = requireAttr(profilePath, entry, "hostFile")
+    if hostFile.startsWith("~"):
+      hostFile = homeDir & hostFile[1 .. ^1]
+    result = Resource(kind: rkShellIntegration, address: address,
+      lifecyclePolicy: lpDefault,
+      shellHostFilePath: hostFile,
+      shellBlockId: requireAttr(profilePath, entry, "blockId"),
+      shellBlockContent: requireAttr(profilePath, entry, "content"))
+  of "env.userVariable":
+    let valueKindStr =
+      if hasAttr(entry, "valueKind"): attrOf(entry, "valueKind")
+      else: "string"
+    var r = Resource(kind: rkEnvUserVariable, address: address,
+      lifecyclePolicy: lpDefault,
+      envVarName: requireAttr(profilePath, entry, "name"))
+    var rvk: RegistryValueKind
+    try:
+      rvk = registryValueKindFromString(valueKindStr)
+    except ValueError:
+      resourceProfileError(profilePath, entry.resourceHeaderLine,
+        "resource `env.userVariable " & address &
+        "` has an unknown valueKind `" & valueKindStr & "`")
+    if rvk notin {rvkString, rvkExpandString}:
+      resourceProfileError(profilePath, entry.resourceHeaderLine,
+        "resource `env.userVariable " & address &
+        "` valueKind must be `string` or `expandString`")
+    r.envVarPayload.kind = rvk
+    r.envVarPayload.bytes = encodeString(
+      requireAttr(profilePath, entry, "value"))
+    result = r
+  of "windows.registryValue":
+    let valueKindStr = requireAttr(profilePath, entry, "valueKind")
+    var r = Resource(kind: rkWindowsRegistryValue, address: address,
+      lifecyclePolicy: lpDefault,
+      registryKey: requireAttr(profilePath, entry, "key"),
+      registryName: requireAttr(profilePath, entry, "name"),
+      registryBroadcastChange:
+        hasAttr(entry, "broadcastChange") and
+        attrOf(entry, "broadcastChange") == "true")
+    let value = requireAttr(profilePath, entry, "value")
+    var rvk: RegistryValueKind
+    try:
+      rvk = registryValueKindFromString(valueKindStr)
+    except ValueError:
+      resourceProfileError(profilePath, entry.resourceHeaderLine,
+        "resource `windows.registryValue " & address &
+        "` has an unknown valueKind `" & valueKindStr & "`")
+    r.registryPayload.kind = rvk
+    try:
+      case rvk
+      of rvkString, rvkExpandString:
+        r.registryPayload.bytes = encodeString(value)
+      of rvkDword:
+        r.registryPayload.bytes = encodeDword(
+          uint32(parseBiggestUInt(value)))
+      of rvkQword:
+        r.registryPayload.bytes = encodeQword(
+          uint64(parseBiggestUInt(value)))
+      of rvkMultiString:
+        r.registryPayload.bytes = encodeMultiString(value.split(','))
+      of rvkBinary:
+        var hexClean = value
+        if hexClean.startsWith("0x"): hexClean = hexClean[2 .. ^1]
+        var bytes: seq[byte] = @[]
+        var i = 0
+        while i + 1 < hexClean.len:
+          bytes.add(byte(parseHexInt(hexClean[i ..< i + 2])))
+          i += 2
+        r.registryPayload.bytes = bytes
+    except ValueError:
+      resourceProfileError(profilePath, entry.resourceHeaderLine,
+        "resource `windows.registryValue " & address &
+        "` has a value that is not valid for valueKind `" &
+        valueKindStr & "`")
+    result = r
+  of "windows.startup":
+    result = Resource(kind: rkWindowsStartup, address: address,
+      lifecyclePolicy: lpDefault,
+      startupName: requireAttr(profilePath, entry, "name"),
+      startupCommand: requireAttr(profilePath, entry, "command"))
+  else:
+    # The parser already rejects unknown kinds; this is a defensive
+    # guard for any kind added to the model but not wired here.
+    resourceProfileError(profilePath, entry.resourceHeaderLine,
+      "resource kind `" & entry.resourceKind &
+      "` is not materializable by the apply pipeline")
+
+proc collectProfileResources(profilePath, homeDir, host: string;
+                             nodes: seq[IntentNode];
+                             into: var DesiredSet) =
+  ## Walk a `resources:` block body, emitting one `Resource` per
+  ## reachable `nkResourceEntry`. A `nkCondBlock` is recursed into
+  ## only when its predicate evaluates true against the host —
+  ## reusing the planner's `evaluateHostPredicate` so a
+  ## `when windows:`-guarded resource is materialized on Windows and
+  ## absent under a non-matching predicate.
+  for node in nodes:
+    case node.kind
+    of nkResourceEntry:
+      let r = resourceFromEntry(profilePath, homeDir, node)
+      if r.address in into.resources:
+        resourceProfileError(profilePath, node.resourceHeaderLine,
+          "duplicate resource address `" & r.address &
+          "` in the profile's `resources:` block")
+      into.add(r)
+    of nkCondBlock:
+      if evaluateHostPredicate(node.predicateAst, host):
+        collectProfileResources(profilePath, homeDir, host,
+          node.condChildren, into)
+    else:
+      discard
+
+proc parseProfileResources*(profile: Profile; homeDir, host: string):
+    DesiredSet =
+  ## M78: build a `DesiredSet` from the parsed profile's `resources:`
+  ## block. Predicates are resolved against `host`. Raises
+  ## `EUnstructured` on a malformed entry.
+  result = initDesiredSet()
+  let blkOpt = findResourcesBlock(profile)
+  if blkOpt.isNone:
+    return
+  collectProfileResources(profile.path, homeDir, host,
+    blkOpt.get.resourcesEntries, result)
+
+proc resourceSeedString*(desired: DesiredSet): string =
+  ## A deterministic textual rendering of a `DesiredSet`, fed into the
+  ## generation-id BLAKE3 derivation. Two applies whose composed
+  ## resource sets differ (whether the difference came from the
+  ## profile's `resources:` block or from `REPRO_TEST_RESOURCES`)
+  ## produce different generation ids and therefore do not take the
+  ## no-op short-circuit. `OrderedTable` preserves insertion order, so
+  ## the rendering is stable for a fixed input.
+  for address, r in desired.resources:
+    result.add(address)
+    result.add('\x1f')
+    result.add($r.kind)
+    result.add('\x1f')
+    result.add(realWorldIdentity(r))
+    result.add('\x1f')
+    case r.kind
+    of rkFsManagedBlock:
+      result.add(r.managedBlockId & "\x1e" & r.managedBlockContent)
+    of rkShellIntegration:
+      result.add(r.shellBlockId & "\x1e" & r.shellBlockContent)
+    of rkEnvUserPath:
+      result.add(r.pathEntries.join(","))
+    of rkEnvUserVariable:
+      result.add($r.envVarPayload.kind & "\x1e")
+      for b in r.envVarPayload.bytes: result.add(char(b))
+    of rkWindowsRegistryValue:
+      result.add($r.registryPayload.kind & "\x1e")
+      for b in r.registryPayload.bytes: result.add(char(b))
+      result.add('\x1e')
+      result.add(if r.registryBroadcastChange: "1" else: "0")
+    of rkWindowsStartup:
+      result.add(r.startupName & "\x1e" & r.startupCommand)
+    of rkLinuxGsettings:
+      result.add(r.gsettingsValueLiteral)
+    of rkSystemdUserUnit:
+      result.add(r.unitContent)
+    of rkMacosUserDefault:
+      result.add(r.defaultsValueLiteral)
+    of rkLaunchdUserAgent:
+      result.add(r.launchdPlistContent)
+    result.add('\x1d')
+
+proc composeDesiredResources*(profile: Profile; homeDir, host: string):
+    DesiredSet =
+  ## M78: the resource step's source of truth. The profile's
+  ## `resources:` block is the production source; `REPRO_TEST_RESOURCES`
+  ## remains a TEST-ONLY override — when set, its entries merge OVER /
+  ## replace the profile-declared entries by address, so existing
+  ## M68/M70 gates that drive the test seam keep working. When the
+  ## env var is unset, the profile is the sole source.
+  result = parseProfileResources(profile, homeDir, host)
+  let seam = parseSyntheticResources(homeDir)
+  for addr0, r in seam.resources:
+    result.resources[addr0] = r
+
 proc parseSyntheticPackageManagedBlocks(homeDir: string;
                                         declaredPackages: seq[string]):
     seq[PlannedManagedBlock] =
@@ -876,7 +1129,11 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
     files: defaultWalkProfileFiles(opts.profileDir))
   let snapshotBytes = encodeSnapshot(intentSnapshot)
   let snapshotDig = digestOf(snapshotBytes)
-  let resourcesSeed = getEnv(ResourcesEnvVar)
+  # M78: the generation-id resource seed is the composed desired set
+  # (profile `resources:` block + `REPRO_TEST_RESOURCES` override),
+  # so a change to a profile-declared resource produces a distinct id.
+  let resourcesSeed = resourceSeedString(
+    composeDesiredResources(profile, opts.homeDir, opts.host))
   let candidateId = deriveGenerationId(applyPlan, snapshotDig, resourcesSeed)
   result.generationIdHex = generationIdHex(candidateId)
   let activeGenIdHex = readCurrentGenerationId(opts.stateDir)
@@ -960,7 +1217,10 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
       detail: "launcher for package " & l.fromPackageId))
 
   # ---- Resource preview (reuses the M68 read-only planner) --------------
-  let desiredResources = parseSyntheticResources(opts.homeDir)
+  # M78: the desired set is the profile's `resources:` block, with
+  # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
+  let desiredResources = composeDesiredResources(profile, opts.homeDir,
+    opts.host)
   var recordedBindings = initOrderedTable[string, RecordedBinding]()
   if activeGenIdHex.len > 0:
     let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
@@ -1139,11 +1399,14 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         files: defaultWalkProfileFiles(opts.profileDir))
       let snapshotBytes = encodeSnapshot(intentSnapshot)
       let snapshotDig = digestOf(snapshotBytes)
-      # M68 Phase B: an adopt run contributes its adopt-address set
-      # to the generation-id seed so the adopted binding lands in a
-      # genuinely new generation (distinct id) rather than colliding
-      # with the unchanged active generation's id.
-      var resourcesSeed = getEnv(ResourcesEnvVar)
+      # M78: the generation-id resource seed is the composed desired
+      # set (profile `resources:` block + `REPRO_TEST_RESOURCES`
+      # override). A change to a profile-declared resource therefore
+      # produces a distinct generation id (the no-op short-circuit is
+      # not taken). M68 Phase B: an adopt run also contributes its
+      # adopt-address set so the adopted binding lands in a new id.
+      var resourcesSeed = resourceSeedString(
+        composeDesiredResources(profile, opts.homeDir, opts.host))
       if opts.adoptAddresses.len > 0:
         resourcesSeed.add("\x00adopt:")
         for a in opts.adoptAddresses:
@@ -1426,16 +1689,17 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       if shouldKillAfter(9):
         raiseKilledByTestHook(9)
 
-      # ---- Step 9b: reconcile typed resources (M68) ---------------------
-      # Compose the M68 DesiredSet from the synthesized resources
-      # hook (Phase A) — production wiring will populate this from
-      # the M59 stdlib's resource emitter once the resource-typed
-      # `home.nim` constructors land. For each desired resource +
-      # any recorded binding from the previous generation, decide
-      # the action via the lifecycle algorithm and execute it via
-      # the appropriate driver. Each applied action produces a
-      # `ResourceBinding` record for the manifest.
-      let desiredResources = parseSyntheticResources(opts.homeDir)
+      # ---- Step 9b: reconcile typed resources (M68 / M78) ---------------
+      # M78: the M68 DesiredSet is composed from the profile's
+      # `resources:` block (the production source). For each desired
+      # resource + any recorded binding from the previous generation,
+      # decide the action via the lifecycle algorithm and execute it
+      # via the appropriate M68 driver. Each applied action produces a
+      # `ResourceBinding` record for the manifest. `REPRO_TEST_RESOURCES`
+      # remains as a TEST-ONLY override merged over the profile entries
+      # by address (so existing M68/M70 gates keep working).
+      let desiredResources = composeDesiredResources(profile, opts.homeDir,
+        opts.host)
       var recordedBindings = initOrderedTable[string, RecordedBinding]()
       if activeGenIdHex.len > 0:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)

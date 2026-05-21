@@ -31,8 +31,17 @@ const
   ActivityHeader = "activity"
   ConfigHeader = "config"
   HostsHeader = "hosts"
+  ResourcesHeader = "resources"
   WhenHeader = "when"
   IfHeader = "if"
+
+  KnownResourceKinds* = ["env.userPath", "fs.managedBlock",
+    "shell.integration", "env.userVariable", "windows.registryValue",
+    "windows.startup"]
+    ## M78: the home-scope, elevation-free resource kinds whose M68
+    ## drivers exist and that a `home.nim` `resources:` block may
+    ## declare. An unrecognized kind is rejected with `EUnstructured`
+    ## (the parser MUST NOT silently skip it).
 
 type
   ParseCtx = object
@@ -115,7 +124,7 @@ proc matchAnyHeader(line: string): tuple[ok: bool; keyword, rest: string;
   ## match-first is unnecessary because the keywords are all unique
   ## prefixes of distinct identifiers).
   for kw in [ProfileHeader, ActivityHeader, WhenHeader, IfHeader,
-             ConfigHeader, HostsHeader]:
+             ConfigHeader, HostsHeader, ResourcesHeader]:
     let m = matchHeader(line, kw)
     if m.matched:
       return (true, m.keyword, m.rest, m.indent)
@@ -549,6 +558,196 @@ proc parseHostsBlock(ctx: ParseCtx; idx, parentIndent,
     hostsEntries: entries)
 
 # ---------------------------------------------------------------------------
+# Resources block parsing (M78).
+# ---------------------------------------------------------------------------
+#
+# Surface syntax (line-oriented, consistent with `config:`):
+#
+#   resources:
+#     env.userPath launcherDir:
+#       entries = "~/.repro/bin"
+#     fs.managedBlock shellRc:
+#       hostFile = "~/.bashrc"
+#       blockId = "repro-home"
+#       content = "export EDITOR=nvim"
+#     when windows:
+#       windows.registryValue hideExt:
+#         key = r"HKCU\Software\..."
+#         name = "HideFileExt"
+#         valueKind = "dword"
+#         value = "0"
+#
+# An entry header is `<kind> <address>:` — `<kind>` is one of
+# `KnownResourceKinds`, `<address>` is a stable id. The body is
+# `<key> = <value>` attribute lines. Entries may nest inside
+# `when`/`if` predicate blocks.
+
+proc parseResourceAttr(ctx: ParseCtx; idx, attrIndent: int): IntentNode =
+  ## Parse a `<key> = <value>` payload line inside a resource entry.
+  ## The RHS bytes are preserved verbatim (no leading `=`).
+  let raw = ctx.lines[idx]
+  let trimmed = trimTrailing(raw)
+  let indent = countLeadingSpaces(trimmed)
+  var i = indent
+  while i < trimmed.len and (trimmed[i].isAlphaAscii() or
+                             trimmed[i].isDigit() or trimmed[i] == '_'):
+    inc i
+  let key = trimmed[indent ..< i]
+  if key.len == 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "'" & trimmed[indent .. ^1] & "'",
+      "a `<key> = <value>` resource attribute")
+  while i < trimmed.len and trimmed[i] in {' ', '\t'}:
+    inc i
+  if i >= trimmed.len or trimmed[i] != '=':
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "'" & trimmed[indent .. ^1] & "'",
+      "a `<key> = <value>` resource attribute")
+  inc i
+  while i < trimmed.len and trimmed[i] in {' ', '\t'}:
+    inc i
+  let rhs = trimmed[i .. ^1]
+  if rhs.len == 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, i + 1,
+      "missing value", "a value expression after `=`")
+  result = IntentNode(kind: nkResourceAttr,
+    startLine: idx + 1, endLine: idx + 1, indent: attrIndent,
+    resourceAttrKey: key, resourceAttrValueSource: rhs,
+    resourceAttrLine: idx + 1)
+
+proc parseResourceEntry(ctx: ParseCtx; idx, entryIndent,
+                        attrIndent: int): IntentNode =
+  ## Parse a `<kind> <address>:` resource declaration and its
+  ## `<key> = <value>` payload lines. An unrecognized kind or a
+  ## malformed header is rejected with `EUnstructured` (NOT skipped).
+  let raw = ctx.lines[idx]
+  let trimmed = stripInlineComment(raw).trimTrailing()
+  let body = trimmed[entryIndent .. ^1]
+  if not body.endsWith(":"):
+    raiseUnstructured(ctx.profilePath, idx + 1, entryIndent + 1,
+      "'" & body & "'",
+      "a `<kind> <address>:` resource header inside `resources:`")
+  let inner = body[0 ..< body.len - 1].strip()
+  # Split off the kind: it is the first whitespace-delimited token.
+  var sp = 0
+  while sp < inner.len and inner[sp] notin {' ', '\t'}:
+    inc sp
+  let kind = inner[0 ..< sp]
+  let address = inner[sp .. ^1].strip()
+  if kind.len == 0 or address.len == 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, entryIndent + 1,
+      "'" & inner & "'",
+      "a `<kind> <address>:` resource header (kind + address)")
+  if kind notin KnownResourceKinds:
+    raiseUnstructured(ctx.profilePath, idx + 1, entryIndent + 1,
+      "'" & kind & "' as a resource kind",
+      "one of: " & KnownResourceKinds.join(", "))
+  for c in address:
+    if not (c.isAlphaAscii() or c.isDigit() or c in {'_', '-', '.'}):
+      raiseUnstructured(ctx.profilePath, idx + 1, entryIndent + 1,
+        "'" & address & "' as a resource address",
+        "a stable id of letters, digits, `_`, `-`, `.`")
+  let endIdx = lastStructuralIdx(ctx.lines, idx + 1, attrIndent)
+  var attrs: seq[IntentNode]
+  var i = idx + 1
+  while i <= endIdx:
+    let line = ctx.lines[i]
+    if isBlankOrComment(line):
+      inc i; continue
+    let ind = countLeadingSpaces(line)
+    if ind != attrIndent:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "'" & line.strip() & "' at indent " & $ind,
+        "content at indent " & $attrIndent)
+    attrs.add parseResourceAttr(ctx, i, attrIndent)
+    inc i
+  result = IntentNode(kind: nkResourceEntry,
+    startLine: idx + 1, endLine: max(endIdx + 1, idx + 1),
+    indent: entryIndent, resourceKind: kind, resourceAddress: address,
+    resourceHeaderLine: idx + 1, resourceAttrs: attrs)
+
+proc parseResourceConditional(ctx: ParseCtx; startIdx, indent: int;
+                              keyword: CondKeyword;
+                              childIndent: int): IntentNode
+
+proc parseResourceChildren(ctx: ParseCtx; startIdx, endIdxExclusive,
+                           childIndent: int): seq[IntentNode] =
+  ## Parse lines [startIdx, endIdxExclusive) as children of a
+  ## `resources:` block (or of a nested `when`/`if` block inside it).
+  ## Children are `<kind> <address>:` resource entries OR conditional
+  ## blocks.
+  var i = startIdx
+  while i < endIdxExclusive:
+    let raw = ctx.lines[i]
+    if isBlankOrComment(raw):
+      inc i; continue
+    let lineIndent = countLeadingSpaces(raw)
+    if lineIndent != childIndent:
+      raiseUnstructured(ctx.profilePath, i + 1, lineIndent + 1,
+        "'" & raw.strip() & "' at indent " & $lineIndent,
+        "content at indent " & $childIndent)
+    let m = matchAnyHeader(raw)
+    if m.ok and m.keyword == WhenHeader:
+      let blk = parseResourceConditional(ctx, i, childIndent, ckWhen,
+        childIndent + ctx.indentStep)
+      result.add blk
+      i = blk.endLine
+    elif m.ok and m.keyword == IfHeader:
+      let blk = parseResourceConditional(ctx, i, childIndent, ckIf,
+        childIndent + ctx.indentStep)
+      result.add blk
+      i = blk.endLine
+    else:
+      let entry = parseResourceEntry(ctx, i, childIndent,
+        childIndent + ctx.indentStep)
+      result.add entry
+      i = entry.endLine
+
+proc parseResourceConditional(ctx: ParseCtx; startIdx, indent: int;
+                              keyword: CondKeyword;
+                              childIndent: int): IntentNode =
+  ## Parse a `when <pred>:` / `if <pred>:` block whose body holds
+  ## resource entries. The predicate is parsed and normalized just
+  ## like an activity-body conditional.
+  let raw = ctx.lines[startIdx]
+  let m = matchHeader(raw, if keyword == ckWhen: WhenHeader else: IfHeader)
+  if not m.matched:
+    raiseUnstructured(ctx.profilePath, startIdx + 1, indent + 1,
+      "'" & raw.strip() & "'",
+      "a `when <pred>:` or `if <pred>:` header")
+  if m.rest.len == 0:
+    raiseUnstructured(ctx.profilePath, startIdx + 1, indent + 1,
+      "an empty predicate",
+      "a predicate expression after `" & m.keyword & "`")
+  let predAst = parsePredicate(ctx.profilePath, m.rest, startIdx + 1)
+  let canon = renderPredicate(normalizeAst(predAst))
+  let endIdx = lastStructuralIdx(ctx.lines, startIdx + 1, childIndent)
+  let bodyChildren =
+    if endIdx >= startIdx + 1:
+      parseResourceChildren(ctx, startIdx + 1, endIdx + 1, childIndent)
+    else:
+      @[]
+  result = IntentNode(kind: nkCondBlock,
+    startLine: startIdx + 1, endLine: max(endIdx + 1, startIdx + 1),
+    indent: indent, keyword: keyword,
+    predicateSource: m.rest, predicateAst: predAst,
+    canonicalPredicate: canon, condHeaderLine: startIdx + 1,
+    condChildren: bodyChildren)
+
+proc parseResourcesBlock(ctx: ParseCtx; idx, parentIndent,
+                         entryIndent: int): IntentNode =
+  let endIdx = lastStructuralIdx(ctx.lines, idx + 1, entryIndent)
+  let entries =
+    if endIdx >= idx + 1:
+      parseResourceChildren(ctx, idx + 1, endIdx + 1, entryIndent)
+    else:
+      @[]
+  result = IntentNode(kind: nkResourcesBlock,
+    startLine: idx + 1, endLine: max(endIdx + 1, idx + 1),
+    indent: parentIndent, resourcesHeaderLine: idx + 1,
+    resourcesEntries: entries)
+
+# ---------------------------------------------------------------------------
 # Profile body.
 # ---------------------------------------------------------------------------
 
@@ -568,6 +767,7 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int): IntentNode =
   var lastBodyIdx = profileHeaderIdx
   var sawConfig = false
   var sawHosts = false
+  var sawResources = false
   while i <= ctx.lines.high:
     let line = ctx.lines[i]
     if isBlankOrComment(line):
@@ -593,7 +793,7 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int): IntentNode =
     if not hm.ok:
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "'" & line.strip() & "'",
-        "one of `activity <name>:`, `config:`, or `hosts:`")
+        "one of `activity <name>:`, `config:`, `hosts:`, or `resources:`")
     case hm.keyword
     of ActivityHeader:
       let blk = parseActivity(ctx, i, childIndent,
@@ -623,10 +823,21 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int): IntentNode =
       result.children.add blk
       lastBodyIdx = blk.endLine - 1
       i = blk.endLine
+    of ResourcesHeader:
+      if sawResources:
+        raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+          "a second `resources:` block",
+          "exactly one `resources:` block per profile")
+      sawResources = true
+      let blk = parseResourcesBlock(ctx, i, childIndent,
+        childIndent + ctx.indentStep)
+      result.children.add blk
+      lastBodyIdx = blk.endLine - 1
+      i = blk.endLine
     else:
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "`" & hm.keyword & "` at the profile top level",
-        "one of `activity <name>:`, `config:`, or `hosts:`")
+        "one of `activity <name>:`, `config:`, `hosts:`, or `resources:`")
   result.endLine = lastBodyIdx + 1
 
 # ---------------------------------------------------------------------------

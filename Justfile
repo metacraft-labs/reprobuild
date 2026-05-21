@@ -932,6 +932,23 @@ integration_scoop_installed_version_survives_bucket_drift:
         tests/e2e/m77/t_integration_scoop_installed_version_survives_bucket_drift.nim \
         2>&1 | tee test-logs/integration_scoop_installed_version_survives_bucket_drift.log
 
+e2e_profile_declared_resources_apply:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_profile_declared_resources_apply.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_profile_declared_resources_apply \
+        --out:build/test-bin/e2e_profile_declared_resources_apply \
+        tests/e2e/m78/t_e2e_profile_declared_resources_apply.nim \
+        2>&1 | tee test-logs/e2e_profile_declared_resources_apply.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \
