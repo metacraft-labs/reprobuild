@@ -68,6 +68,43 @@ proc toUtf16Z(s: string): seq[uint16] =
     i += advance
   result.add(0'u16)
 
+proc fromUtf16Bytes(bytes: openArray[byte]; trimTrailingNul = true): string =
+  ## UTF-16LE bytes -> UTF-8.
+  var units: seq[uint16] = @[]
+  var i = 0
+  while i + 1 < bytes.len:
+    units.add(uint16(bytes[i]) or (uint16(bytes[i+1]) shl 8))
+    i += 2
+  if trimTrailingNul:
+    while units.len > 0 and units[^1] == 0'u16:
+      units.setLen(units.len - 1)
+  result = ""
+  var j = 0
+  while j < units.len:
+    var cp: uint32
+    let u = uint32(units[j])
+    if u >= 0xD800 and u <= 0xDBFF and j + 1 < units.len:
+      let lo = uint32(units[j+1])
+      cp = 0x10000 + ((u - 0xD800) shl 10) + (lo - 0xDC00)
+      inc j
+    else:
+      cp = u
+    inc j
+    if cp < 0x80:
+      result.add(char(cp))
+    elif cp < 0x800:
+      result.add(char(0xC0 or (cp shr 6)))
+      result.add(char(0x80 or (cp and 0x3F)))
+    elif cp < 0x10000:
+      result.add(char(0xE0 or (cp shr 12)))
+      result.add(char(0x80 or ((cp shr 6) and 0x3F)))
+      result.add(char(0x80 or (cp and 0x3F)))
+    else:
+      result.add(char(0xF0 or (cp shr 18)))
+      result.add(char(0x80 or ((cp shr 12) and 0x3F)))
+      result.add(char(0x80 or ((cp shr 6) and 0x3F)))
+      result.add(char(0x80 or (cp and 0x3F)))
+
 proc utf16Bytes(units: seq[uint16]): seq[byte] =
   result = newSeq[byte](units.len * 2)
   for i, u in units:
@@ -75,8 +112,7 @@ proc utf16Bytes(units: seq[uint16]): seq[byte] =
     result[i*2 + 1] = byte((u shr 8) and 0xff)
 
 proc encodeString*(s: string): seq[byte] =
-  let units = toUtf16Z(s)
-  utf16Bytes(units)
+  utf16Bytes(toUtf16Z(s))
 
 proc encodeDword*(v: uint32): seq[byte] =
   result = newSeq[byte](4)
@@ -106,29 +142,20 @@ proc encodeMultiString*(items: openArray[string]): seq[byte] =
   utf16Bytes(units)
 
 proc decodeMultiString*(bytes: openArray[byte]): seq[string] =
-  ## Reverse of encodeMultiString. Stops at the double-zero terminator;
-  ## tolerates a trailing single zero from legacy writers.
-  var s = ""
+  ## Reverse of encodeMultiString. Stops at the double-zero terminator.
+  var itemBytes: seq[byte] = @[]
   var i = 0
   while i + 1 < bytes.len:
     let u = uint16(bytes[i]) or (uint16(bytes[i+1]) shl 8)
-    i += 2
     if u == 0:
-      if s.len == 0:
+      if itemBytes.len == 0:
         break
-      result.add(s)
-      s = ""
+      result.add(fromUtf16Bytes(itemBytes, trimTrailingNul = false))
+      itemBytes.setLen(0)
     else:
-      # Re-encode this UTF-16 code unit into the building string.
-      if u < 0x80:
-        s.add(char(u))
-      elif u < 0x800:
-        s.add(char(0xC0 or (u shr 6)))
-        s.add(char(0x80 or (u and 0x3F)))
-      else:
-        s.add(char(0xE0 or (u shr 12)))
-        s.add(char(0x80 or ((u shr 6) and 0x3F)))
-        s.add(char(0x80 or (u and 0x3F)))
+      itemBytes.add(bytes[i])
+      itemBytes.add(bytes[i+1])
+    i += 2
 
 when defined(windows):
   # -------------------------------------------------------------------------

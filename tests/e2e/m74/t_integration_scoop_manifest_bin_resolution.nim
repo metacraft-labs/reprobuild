@@ -27,6 +27,12 @@
 ## `LaunchPlan.executablePath = rec.resolvedExecutablePath`), so a
 ## strong assertion on that field is a strong assertion on the launcher.
 
+when not defined(windows):
+  {.warning[UnreachableCode]: off.}
+  echo "[platform N/A] integration_scoop_manifest_bin_resolution: " &
+    "this gate requires Windows and a real Scoop install"
+  quit(0)
+
 import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_tool_profiles

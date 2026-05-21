@@ -132,8 +132,8 @@ suite "integration_hcr_reference_corpus_and_object_inputs":
 
     let fileOld = requireSuccess(shellCommand(["file", oldObj]))
     let fileNew = requireSuccess(shellCommand(["file", newObj]))
-    check fileOld.toLowerAscii().contains("object")
-    check fileNew.toLowerAscii().contains("object")
+    check fileOld.toLowerAscii().containsAny(["object", "relocatable"])
+    check fileNew.toLowerAscii().containsAny(["object", "relocatable"])
     check not fileOld.toLowerAscii().containsAny([
       "shared library",
       "dynamically linked shared library",

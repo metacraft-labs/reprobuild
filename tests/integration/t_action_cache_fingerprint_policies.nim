@@ -30,9 +30,12 @@ proc readable(path: string): bool =
   except CatchableError:
     false
 
+var timestampBump = 0
+
 proc setDifferentTimestamp(path: string) =
+  inc timestampBump
   let prior = getFileInfo(path).lastWriteTime
-  setLastModificationTime(path, prior + initDuration(seconds = 10))
+  setLastModificationTime(path, prior + initDuration(seconds = 10 + timestampBump))
 
 proc removeIfExists(path: string) =
   if fileExists(path):

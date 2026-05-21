@@ -1258,7 +1258,10 @@ proc parseCommandDependencyPolicy(node: NimNode;
   of "declaredonly":
     result = declaredOnlyDependencyPolicy()
   of "automaticmonitor", "monitor":
-    result = automaticMonitorPolicy()
+    when defined(macosx) or defined(linux) or defined(windows):
+      result = automaticMonitorPolicy()
+    else:
+      result = declaredOnlyDependencyPolicy()
   of "makedepfile":
     result = makeDepfilePolicy()
   else:
@@ -2033,7 +2036,10 @@ proc dependencyPolicyLiteral(node: NimNode;
   of "declaredonly":
     declaredOnlyDependencyPolicy()
   of "automaticmonitor", "monitor":
-    automaticMonitorPolicy()
+    when defined(macosx) or defined(linux) or defined(windows):
+      automaticMonitorPolicy()
+    else:
+      declaredOnlyDependencyPolicy()
   of "makedepfile":
     makeDepfilePolicy()
   else:

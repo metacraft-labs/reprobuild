@@ -334,7 +334,6 @@ proc reusableIndex(snapshot: ProviderGraphSnapshot;
     if existing.entryPointId == fragment.entryPointId and
         existing.arguments == fragment.arguments and
         existing.namespace == fragment.namespace and
-        existing.lockSliceId == fragment.lockSliceId and
         existing.activity == fragment.activity:
       return i
   -1

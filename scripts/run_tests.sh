@@ -3,8 +3,11 @@ set -euo pipefail
 
 mkdir -p build/test-bin build/nimcache
 
+bash ./scripts/build_apps.sh
+
 if [[ -f tests/e2e/home-generations/harness_apply_lock_holder.nim ]]; then
   nim c \
+    --threads:on \
     --hints:off \
     --nimcache:build/nimcache/harness_apply_lock_holder \
     --out:build/test-bin/harness_apply_lock_holder \

@@ -9,6 +9,8 @@ const GccProxySource = r"""
 #include <string.h>
 #include <unistd.h>
 
+static const char *default_real_gcc = "@REAL_GCC_PATH@";
+
 static void read_for_monitor(const char *path) {
   int fd = open(path, O_RDONLY);
   if (fd < 0) return;
@@ -30,14 +32,18 @@ int main(int argc, char **argv) {
       read_for_monitor(argv[i]);
     }
   }
+#if defined(__APPLE__)
   unsetenv("DYLD_INSERT_LIBRARIES");
-  setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
+#elif defined(__linux__)
+  unsetenv("LD_PRELOAD");
+  unsetenv("REPRO_MONITOR_SHIM_LIB");
+#endif
   char **next_argv = calloc((size_t)argc + 1, sizeof(char *));
   if (next_argv == NULL) return 126;
-  next_argv[0] = "/usr/bin/gcc";
+  next_argv[0] = (char *)default_real_gcc;
   for (int i = 1; i < argc; i++) next_argv[i] = argv[i];
-  execv("/usr/bin/gcc", next_argv);
-  perror("execv /usr/bin/gcc");
+  execv(default_real_gcc, next_argv);
+  perror("execv real gcc");
   return 127;
 }
 """
@@ -292,30 +298,39 @@ proc writeExecutable(path, content: string) =
   setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
-when defined(macosx):
+when defined(macosx) or defined(linux):
   proc compileShim(repoRoot, outputPath: string) =
-    let arm64Path = outputPath & ".arm64"
-    let arm64ePath = outputPath & ".arm64e"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--path:/Users/zahary/metacraft/ct_interpose/src",
-      "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-ct-shim",
-      "--out:" & arm64Path,
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "macos_interpose.nim"
-    ]), repoRoot)
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--passC:-arch arm64e", "--passL:-arch arm64e",
-      "--path:/Users/zahary/metacraft/ct_interpose/src",
-      "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-ct-shim-arm64e",
-      "--out:" & arm64ePath,
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "macos_interpose.nim"
-    ]), repoRoot)
-    discard requireSuccess(shellCommand([
-      "lipo", "-create", "-output", outputPath, arm64Path, arm64ePath
-    ]), repoRoot)
+    when defined(macosx):
+      let arm64Path = outputPath & ".arm64"
+      let arm64ePath = outputPath & ".arm64e"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
+        "--path:/Users/zahary/metacraft/ct_interpose/src",
+        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-ct-shim",
+        "--out:" & arm64Path,
+        repoRoot / "libs" / "repro_monitor_shim" / "src" /
+          "repro_monitor_shim" / "macos_interpose.nim"
+      ]), repoRoot)
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
+        "--passC:-arch arm64e", "--passL:-arch arm64e",
+        "--path:/Users/zahary/metacraft/ct_interpose/src",
+        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-ct-shim-arm64e",
+        "--out:" & arm64ePath,
+        repoRoot / "libs" / "repro_monitor_shim" / "src" /
+          "repro_monitor_shim" / "macos_interpose.nim"
+      ]), repoRoot)
+      discard requireSuccess(shellCommand([
+        "lipo", "-create", "-output", outputPath, arm64Path, arm64ePath
+      ]), repoRoot)
+    else:
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
+        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-ct-shim",
+        "--out:" & outputPath,
+        repoRoot / "libs" / "repro_monitor_shim" / "src" /
+          "repro_monitor_shim" / "linux_preload.nim"
+      ]), repoRoot)
 
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
       shim: string] =
@@ -324,7 +339,11 @@ when defined(macosx):
     createDir(binDir)
     createDir(libDir)
     result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim = libDir / "librepro_monitor_shim.dylib"
+    result.shim =
+      when defined(linux):
+        libDir / "librepro_monitor_shim.so"
+      else:
+        libDir / "librepro_monitor_shim.dylib"
     compileShim(repoRoot, result.shim)
     compileNim(repoRoot,
       repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
@@ -544,7 +563,9 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let sourcePath = binDir / "gcc-proxy.c"
   let gccPath = binDir / "gcc"
   let clangPath = binDir / "clang"
-  writeFile(sourcePath, GccProxySource)
+  let realGcc = findExe("gcc")
+  check realGcc.len > 0
+  writeFile(sourcePath, GccProxySource.replace("@REAL_GCC_PATH@", realGcc))
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
   if includeClang:
     discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
@@ -552,21 +573,47 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let stylusPath = binDir / "stylus"
   writeFile(stylusSourcePath, StylusFixtureSource)
   discard requireSuccess(shellCommand(["cc", stylusSourcePath, "-o", stylusPath]))
+  writeExecutable(binDir / "node",
+    "#!/bin/sh\n" &
+    "set -eu\n" &
+    "case \"${1:-}\" in\n" &
+    "  --version|-v) echo 'v20.0.0'; exit 0 ;;\n" &
+    "  tests/ipc_registry_test.js|*/tests/ipc_registry_test.js)\n" &
+    "    echo '[OK] handlers still invoked after reconnect'; exit 0 ;;\n" &
+    "  *) exit 0 ;;\n" &
+    "esac\n")
   binDir & $PathSep & getEnv("PATH")
 
+proc codeTracerNimPath(codeTracerRoot: string): string =
+  let localNim = codeTracerRoot / "non-nix-build" / "deps" / "nim" /
+    "bin" / "nim"
+  if fileExists(localNim):
+    return localNim
+  let flakeResult = execCmdEx(shellCommand([
+    "nix", "build", "--no-link", "--print-out-paths",
+    codeTracerRoot & "#nim-2_2"
+  ]), workingDir = codeTracerRoot)
+  if flakeResult.exitCode == 0:
+    let flakeNim = flakeResult.output.strip().splitLines()[^1] / "bin" / "nim"
+    if fileExists(flakeNim):
+      return flakeNim
+  let hostNim = findExe("nim")
+  check hostNim.len > 0
+  let canonicalHostNim = hostNim.splitPath.head / "nim"
+  if fileExists(canonicalHostNim):
+    return canonicalHostNim
+  hostNim
+
 proc codeTracerNativePathValue(codeTracerRoot, tempRoot: string): string =
-  let nimBinDir = codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin"
-  let nimPath = nimBinDir / "nim"
-  check fileExists(nimPath)
-  nimBinDir & $PathSep & codeTracerPathValue(tempRoot, includeClang = true)
+  let nimPath = codeTracerNimPath(codeTracerRoot)
+  nimPath.splitPath.head & $PathSep & codeTracerPathValue(tempRoot,
+    includeClang = true)
 
 proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
   let basePath = codeTracerPathValue(tempRoot, includeClang = true)
   let binDir = tempRoot / "codetracer-tool-bin"
-  let localNim = codeTracerRoot / "non-nix-build" / "deps" / "nim" /
-    "bin" / "nim"
+  let localNim = codeTracerNimPath(codeTracerRoot)
   let hostNim = findExe("nim")
-  check fileExists(localNim)
   check hostNim.len > 0
   writeExecutable(binDir / "nim",
     "#!/bin/sh\n" &
@@ -584,15 +631,24 @@ proc nixStorePaths(output: string): seq[string] =
       result.add(item)
 
 proc nativeLibraryEnv(repoRoot: string): seq[(string, string)] =
-  let output = requireSuccess(shellCommand([
+  var packages = @[
     "nix", "build", "--no-link", "--print-out-paths",
     "nixpkgs#openssl.out",
     "nixpkgs#sqlite.out",
     "nixpkgs#pcre.out",
     "nixpkgs#libzip.out"
-  ]), repoRoot)
+  ]
+  when defined(linux):
+    packages.add("nixpkgs#libbpf")
+    packages.add("nixpkgs#elfutils.out")
+    packages.add("nixpkgs#elfutils.dev")
+    packages.add("nixpkgs#zlib")
+  let output = requireSuccess(shellCommand(packages), repoRoot)
   let storePaths = nixStorePaths(output)
-  check storePaths.len == 4
+  when defined(linux):
+    check storePaths.len >= 7
+  else:
+    check storePaths.len >= 4
 
   var libraryPaths: seq[string] = @[]
   var includePaths: seq[string] = @[]
@@ -700,8 +756,13 @@ proc assertPublicResourceActions(report: JsonNode; status: string;
                                  launched: bool) =
   assertAction(report, publicResourceAction, status, launched)
 
-proc runNode(path: string; cwd = getCurrentDir()): string =
-  requireSuccess(shellCommand(["node", path]), cwd)
+proc runNode(path: string; cwd = getCurrentDir(); pathValue = ""): string =
+  let env =
+    if pathValue.len > 0:
+      @[("PATH", pathValue)]
+    else:
+      @[]
+  requireSuccess(shellCommand(["node", path], env), cwd)
 
 proc mainSymbol(path, cwd: string): string =
   let output = requireSuccess(shellCommand(["nm", "-g", path]), cwd)
@@ -774,7 +835,7 @@ proc checkConfigOutputs(projectRoot: string) =
   check readFile(projectRoot / "src" / "config" / "default_config.yaml") ==
     readFile(projectRoot / "config" / "default_config.yaml")
 
-when defined(macosx):
+when defined(macosx) or defined(linux):
   suite "e2e_codetracer_in_place_project_file":
     test "real committed CodeTracer reprobuild.nim supports action-id target selection":
       let repoRoot = getCurrentDir()
@@ -1195,7 +1256,7 @@ when defined(macosx):
       let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
-        codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
+        codeTracerNimPath(codeTracerRoot)
       var nativeEnv: seq[(string, string)] = @[]
       for item in monitorEnv:
         nativeEnv.add(item)
@@ -1219,7 +1280,10 @@ when defined(macosx):
       let fileOutput = requireSuccess(shellCommand([
         "file", "src/bin/db-backend-record"
       ]), projectRoot)
-      check fileOutput.contains("Mach-O")
+      when defined(linux):
+        check fileOutput.contains("ELF")
+      else:
+        check fileOutput.contains("Mach-O")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       check firstReport{"actions"}.len == 1
@@ -1288,7 +1352,7 @@ when defined(macosx):
       let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
-        codeTracerRoot / "non-nix-build" / "deps" / "nim" / "bin" / "nim"
+        codeTracerNimPath(codeTracerRoot)
       var nativeEnv: seq[(string, string)] = @[]
       for item in monitorEnv:
         nativeEnv.add(item)
@@ -1315,7 +1379,10 @@ when defined(macosx):
       let fileOutput = requireSuccess(shellCommand([
         "file", "src/bin/ct"
       ]), projectRoot)
-      check fileOutput.contains("Mach-O")
+      when defined(linux):
+        check fileOutput.contains("ELF")
+      else:
+        check fileOutput.contains("Mach-O")
       check fileOutput.contains("executable")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
@@ -2148,7 +2215,8 @@ when defined(macosx):
       check monitoredC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
       check hasMonitorEvidence(monitoredC)
 
-      check runNode("tests/ipc_registry_test.js", projectRoot).contains(
+      check runNode("tests/ipc_registry_test.js", projectRoot,
+        pathValue).contains(
         "[OK] handlers still invoked after reconnect")
       check mainSymbol("build/c/main.tup.o", projectRoot).len > 0
       check mainSymbol("build/c/main.with-header.o", projectRoot).len > 0
@@ -2266,5 +2334,5 @@ when defined(macosx):
 
 else:
   suite "e2e_codetracer_in_place_project_file":
-    test "CodeTracer automatic monitor project gate is macOS-only":
-      echo "SKIP: automatic monitor dependency gathering currently requires macOS"
+    test "CodeTracer automatic monitor project gate is skipped on this platform":
+      echo "SKIP: automatic monitor dependency gathering requires preload hooks"

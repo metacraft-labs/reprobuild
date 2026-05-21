@@ -748,7 +748,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # uses only declared/inputs evidence, and the build still completes
   # correctly for caching purposes — the cost is that monitor-derived
   # evidence is empty.
-  when not (defined(macosx) or defined(windows)):
+  when not (defined(macosx) or defined(linux) or defined(windows)):
     result.diagnostic =
       "automatic monitor dependency gathering is unsupported on this platform"
   else:
@@ -798,30 +798,15 @@ proc startBypassRunQuotaProcess(action: BuildAction): Process =
     raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
   let env = envTableFromArgvStyle(action.env)
   let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()
-  # Windows: use poParentStreams (child inherits the parent's stdio handles)
-  # instead of the pipe-based capture path. With pipes, large native Nim
-  # builds (ct.exe — the full CodeTracer entrypoint) deadlock at startup
-  # before producing any output: the nim compiler appears to interact with
-  # its stdin/stdout handles in ways that block when those are the osproc
-  # pipe pair, even with stdin closed. Falling back to inherited handles
-  # lets the child write directly to repro's own console/file descriptors,
-  # which the caller (`repro build`) is already capturing via shell-level
-  # redirection. The downside: we cannot return per-action stdout/stderr in
-  # the build report. That trade-off is acceptable for the path-mode escape
-  # hatch (no RunQuota means no per-action output capture anyway from
-  # downstream's perspective).
-  when defined(windows):
-    result = startProcess(action.argv[0],
-      args = action.argv[1 .. ^1],
-      env = env,
-      workingDir = cwd,
-      options = {poUsePath, poParentStreams})
-  else:
-    result = startProcess(action.argv[0],
-      args = action.argv[1 .. ^1],
-      env = env,
-      workingDir = cwd,
-      options = {poUsePath, poStdErrToStdOut})
+  # Use inherited stdio instead of pipe-based capture. Path-mode bypass is a
+  # RunQuota escape hatch, and waiting for direct children before draining their
+  # pipe can deadlock on verbose compiler probes that fill the kernel buffer.
+  # The caller (`repro build`) still sees the output through its own stdio.
+  result = startProcess(action.argv[0],
+    args = action.argv[1 .. ^1],
+    env = env,
+    workingDir = cwd,
+    options = {poUsePath, poParentStreams})
 
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
                           resultPath: string; bypassRunQuota: bool): Process =
@@ -893,16 +878,7 @@ proc finishBypassRunQuotaProcess(id: string; process: Process;
   ## proceeds to the same ``parseFile(resultPath)`` codepath the RunQuota
   ## helper would have written.
   #
-  # Windows: with poParentStreams the child wrote directly to repro's own
-  # stdout/stderr — there is no captured stream to read, and calling
-  # outputStream asserts. Outside Windows we keep the pipe-capture path
-  # (read first, then waitForExit) so the action result JSON carries the
-  # combined output. The platform gate matches startBypassRunQuotaProcess's
-  # poParentStreams branch above.
   var combinedOutput = ""
-  when not defined(windows):
-    if process.outputStream != nil:
-      combinedOutput = process.outputStream.readAll()
   let exitCode = process.waitForExit()
   writeBypassResultJson(resultPath, exitCode, combinedOutput)
 

@@ -2,8 +2,13 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_monitor_depfile
 
-when defined(macosx):
-  const FixtureSource = r"""
+when not (defined(macosx) or defined(linux)):
+  {.warning[UnreachableCode]: off.}
+  echo "[platform N/A] e2e_debug_fs_snoop_reads_monitor_depfile: " &
+    "this gate requires the preload hooks backend"
+  quit(0)
+
+const FixtureSource = r"""
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -16,6 +21,12 @@ when defined(macosx):
 #include <unistd.h>
 
 extern char **environ;
+
+#if defined(__APPLE__)
+#define REPRO_PRELOAD_ENV "DYLD_INSERT_LIBRARIES"
+#else
+#define REPRO_PRELOAD_ENV "LD_PRELOAD"
+#endif
 
 struct thread_arg {
   const char *input;
@@ -52,7 +63,7 @@ static void *thread_main(void *raw) {
 }
 
 static int child_mode(const char *child_input) {
-  if (getenv("DYLD_INSERT_LIBRARIES") == NULL) return 90;
+  if (getenv(REPRO_PRELOAD_ENV) == NULL) return 90;
   puts("fixture-child-stdout");
   fflush(stdout);
   fputs("fixture-child-stderr\n", stderr);
@@ -152,14 +163,19 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
   ]), repoRoot)
 
 proc compileShim(repoRoot, outputPath: string) =
-  discard requireSuccess(shellCommand([
+  var args = @[
     "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-    "--path:/Users/zahary/metacraft/ct_interpose/src",
     "--nimcache:" & repoRoot / "build" / "nimcache" / "e2e-fs-snoop-shim",
-    "--out:" & outputPath,
-    repoRoot / "libs" / "repro_monitor_shim" / "src" / "repro_monitor_shim" /
-      "macos_interpose.nim"
-  ]), repoRoot)
+    "--out:" & outputPath
+  ]
+  when defined(macosx):
+    args.add("--path:/Users/zahary/metacraft/ct_interpose/src")
+    args.add(repoRoot / "libs" / "repro_monitor_shim" / "src" /
+      "repro_monitor_shim" / "macos_interpose.nim")
+  else:
+    args.add(repoRoot / "libs" / "repro_monitor_shim" / "src" /
+      "repro_monitor_shim" / "linux_preload.nim")
+  discard requireSuccess(shellCommand(args), repoRoot)
 
 proc compileFixture(sourcePath, outputPath: string) =
   discard requireSuccess(shellCommand(["cc", "-pthread", sourcePath, "-o", outputPath]))
@@ -186,7 +202,11 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
     createDir(binDir)
     createDir(outDir)
 
-    let shimDylib = binDir / "librepro_monitor_shim.dylib"
+    let shimDylib =
+      when defined(linux):
+        binDir / "librepro_monitor_shim.so"
+      else:
+        binDir / "librepro_monitor_shim.dylib"
     let fsSnoopBin = binDir / "repro-fs-snoop"
     let reproBin = binDir / "repro"
     let fixtureSource = tempRoot / "fs_snoop_fixture.c"
@@ -269,8 +289,3 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
     let debugDep = readMonitorDepFile(debugDepfile)
     check debugDep.records.len > 0
     check readFile(debugEventsPath).contains("summary records=")
-
-when not defined(macosx):
-  suite "e2e_debug_fs_snoop_reads_monitor_depfile":
-    test "macOS hooks backend is not available on this platform":
-      check true

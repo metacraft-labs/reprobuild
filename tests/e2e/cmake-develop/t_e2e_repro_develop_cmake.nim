@@ -144,6 +144,37 @@ proc findExeInPath(name, pathValue: string): string =
       return candidate
   ""
 
+proc nixBuildBinDir(selector, executableName: string): string =
+  let res = execCmdEx(shellCommand([
+    "nix", "build", "--no-link", "--print-out-paths", selector
+  ]))
+  if res.exitCode != 0:
+    checkpoint(res.output)
+    return ""
+  for line in res.output.splitLines:
+    let outPath = line.strip()
+    if outPath.startsWith("/nix/store/") and
+        fileExists(outPath / "bin" / executableName):
+      return outPath / "bin"
+  checkpoint(res.output)
+  ""
+
+proc findAlternateCc(currentCc: string): string =
+  for candidatePath in [
+    "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+  ]:
+    let candidate = findExeInPath("cc", candidatePath)
+    if candidate.len > 0 and candidate != currentCc:
+      return candidate
+
+  when not defined(windows):
+    let clangBin = nixBuildBinDir("nixpkgs#clang", "cc")
+    if clangBin.len > 0:
+      let candidate = findExeInPath("cc", clangBin)
+      if candidate.len > 0 and candidate != currentCc:
+        return candidate
+  ""
+
 proc buildRepro(repoRoot, tempRoot: string): string =
   let reproBin = tempRoot / "repro"
   discard requireSuccess(shellCommand([
@@ -250,12 +281,11 @@ suite "e2e_repro_develop_cmake":
     if forkedCMake.len == 0:
       checkpoint("forked CMake with Reprobuild generator is unavailable")
     else:
-      let usrPath = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
-      let usrCc = findExeInPath("cc", usrPath)
       let nixCc = findExe("cc")
-      check usrCc.len > 0
       check nixCc.len > 0
-      check usrCc != nixCc
+      let alternateCc = findAlternateCc(nixCc)
+      check alternateCc.len > 0
+      check alternateCc != nixCc
 
       let tempRoot = createTempDir("repro-m9-cmake-identity", "")
       defer: removeDir(tempRoot)
@@ -271,8 +301,8 @@ suite "e2e_repro_develop_cmake":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let pathA = parentDir(forkedCMake) & $PathSep & parentDir(usrCc) &
-        $PathSep & usrPath
+      let pathA = parentDir(forkedCMake) & $PathSep & parentDir(alternateCc) &
+        $PathSep & getEnv("PATH")
       let pathB = parentDir(forkedCMake) & $PathSep & parentDir(nixCc) &
         $PathSep & getEnv("PATH")
       let first = developConfigureBuild(reproBin, forkedCMake, projectRoot,

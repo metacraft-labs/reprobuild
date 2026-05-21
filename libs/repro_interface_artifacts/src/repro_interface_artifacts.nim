@@ -8,6 +8,8 @@ import repro_hash
 import repro_project_dsl
 
 const BuiltNimCompilerPath = staticExec("command -v nim").strip()
+const BuiltCCompilerPath =
+  staticExec("command -v cc || command -v gcc || true").strip()
 
 var interfaceTempNonce = uint64(getCurrentProcessId())
 
@@ -170,6 +172,8 @@ const
     "reprobuild.interfaceExtractionCache.v1"
   ProviderFreshnessCacheRecordMagic =
     "reprobuild.providerFreshnessCache.v1"
+
+var cachedNimCompilerPath = ""
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -1030,12 +1034,79 @@ proc runCommand(command: openArray[string];
       quoted & "\n" & output)
 
 proc nimCompilerPath(): string =
+  if cachedNimCompilerPath.len > 0:
+    return cachedNimCompilerPath
   let overridePath = getEnv("REPRO_NIM_COMPILER")
   if overridePath.len > 0:
+    cachedNimCompilerPath = overridePath
     return overridePath
+  proc addUnique(paths: var seq[string]; path: string) =
+    if path.len == 0:
+      return
+    for existing in paths:
+      if existing == path:
+        return
+    paths.add(path)
+  proc looksLikeNimCompiler(path: string): bool =
+    try:
+      let probe = runCommand(@[path, "--version"])
+      probe.output.contains("Nim Compiler")
+    except CatchableError:
+      false
+  let exeName = addFileExt("nim", ExeExt)
+  var candidates: seq[string] = @[]
+  for dir in getEnv("PATH").split(PathSep):
+    if dir.len == 0:
+      continue
+    let candidate = dir / exeName
+    if fileExists(candidate):
+      candidates.addUnique(candidate)
   if BuiltNimCompilerPath.len > 0 and fileExists(BuiltNimCompilerPath):
-    return BuiltNimCompilerPath
-  "nim"
+    candidates.addUnique(BuiltNimCompilerPath)
+  candidates.addUnique("nim")
+  for candidate in candidates:
+    if looksLikeNimCompiler(candidate):
+      cachedNimCompilerPath = candidate
+      return candidate
+  cachedNimCompilerPath =
+    if BuiltNimCompilerPath.len > 0 and fileExists(BuiltNimCompilerPath):
+      BuiltNimCompilerPath
+    else:
+      "nim"
+  cachedNimCompilerPath
+
+proc compiledExecutablePath(outputPath: string): string =
+  when defined(windows):
+    if ExeExt.len == 0 or outputPath.endsWith("." & ExeExt):
+      outputPath
+    else:
+      outputPath & "." & ExeExt
+  else:
+    outputPath
+
+proc ensureExecutable(path: string) =
+  when defined(windows):
+    discard path
+  else:
+    setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+proc hostCCompilerPath(): string =
+  let ccEnv = getEnv("CC")
+  if ccEnv.len > 0 and isAbsolute(ccEnv):
+    return ccEnv
+  if BuiltCCompilerPath.len > 0 and fileExists(BuiltCCompilerPath):
+    return BuiltCCompilerPath
+  ""
+
+proc hostCCompilerFlags(): seq[string] =
+  let cc = hostCCompilerPath()
+  if cc.len == 0:
+    return
+  result.add("--gcc.exe:" & cc)
+  result.add("--gcc.linkerexe:" & cc)
+  result.add("--clang.exe:" & cc)
+  result.add("--clang.linkerexe:" & cc)
 
 proc reproLibPathFlags(workDir: string): seq[string] =
   let libsRoot = workDir / "libs"
@@ -1227,8 +1298,6 @@ proc nixPrefix(namePattern, header: string;
       continue
     if not fileExists(path / header):
       continue
-    if dirExists(path / "lib"):
-      return path
     for libraryName in libraryNames:
       if firstExistingPrefix([path], header, [libraryName]).len > 0:
         return path
@@ -1326,18 +1395,24 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "writeNimInterfaceStub(paramStr(2), artifact)\n")
   let runnerBin = tempRoot / "extract_runner"
   var command = @[
-    nimCompilerPath(), "c", "-r",
+    nimCompilerPath(), "c",
     "--define:reproInterfaceMode",
     "--path:" & moduleDir,
     "--nimcache:" & (tempRoot / "nimcache"),
     "--out:" & runnerBin,
-    runnerPath,
-    artifactPath,
-    stubPath,
-    modulePath
+    runnerPath
   ]
+  command.insert(hostCCompilerFlags(), 2)
   command.insert(reproLibPathFlags(workDir), 4)
-  let execution = runCommand(command, cwd = workDir)
+  let compileExecution = runCommand(command, cwd = workDir)
+  let runnerExe = compiledExecutablePath(runnerBin)
+  if not fileExists(runnerExe):
+    raise newException(IOError,
+      "interface extraction runner was not compiled: " & runnerExe &
+        "\n" & compileExecution.output)
+  ensureExecutable(runnerExe)
+  let execution = runCommand(@[runnerExe, artifactPath, stubPath, modulePath],
+    cwd = workDir)
   if not fileExists(artifactPath):
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
@@ -1438,6 +1513,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     "--out:" & outputBinaryPath,
     modulePath
   ]
+  result.insert(hostCCompilerFlags(), 2)
   result.insert(externalHashFlags(workDir), 2)
   result.insert(reproLibPathFlags(workDir), 2)
 

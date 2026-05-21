@@ -167,7 +167,7 @@ proc mergeFragments*(fragmentDir, outputPath: string): MonitorDepFile =
     for kind, path in walkDir(fragmentDir):
       if kind == pcFile and path.endsWith(".rmdf-frag"):
         records.add readFragmentRecords(path)
-  records.add profileRecords(macosInterposeMonitorProfile(
+  records.add profileRecords(defaultHooksMonitorProfile(
     MacosMonitorShimTaxonomyCapabilities))
 
   let canonical = encodeCanonical(records)

@@ -15,8 +15,9 @@
 ##     temp directory using `pip install --target=<dir>` (equivalent to
 ##     a venv's `site-packages`, and works on Python distributions that
 ##     ship without the `venv` module — including the Windows
-##     embeddable distribution we use in CI). If the host Python has no
-##     pip (common in Nix shells), the test falls back to a Nix-provided
+##     embeddable distribution we use in CI). If the selected Python
+##     has no pip (common in Nix shells), the helper first tries a
+##     private pip bootstrap venv, then falls back to a Nix-provided
 ##     Python with real Jinja installed. The pinned version is part of
 ##     the `JinjaSpec.toolIdentity` string, so bumping it changes the
 ##     cache key.
@@ -49,8 +50,16 @@ type
     sitePackages: string
 
 proc pythonHasModule(pythonExe, moduleName: string): bool =
-  execCmdEx(quoteShell(pythonExe) & " -c " &
-    quoteShell("import " & moduleName)).exitCode == 0
+  let hadPythonPath = existsEnv("PYTHONPATH")
+  let oldPythonPath = getEnv("PYTHONPATH")
+  if hadPythonPath:
+    delEnv("PYTHONPATH")
+  try:
+    result = execCmdEx(quoteShell(pythonExe) & " -c " &
+      quoteShell("import " & moduleName)).exitCode == 0
+  finally:
+    if hadPythonPath:
+      putEnv("PYTHONPATH", oldPythonPath)
 
 proc nixPythonWithJinja(): string =
   let override = getEnv("REPRO_TEST_JINJA_PYTHON")
@@ -91,6 +100,35 @@ proc nixPythonWithJinja(): string =
     "nix Python output does not contain a python executable with jinja2: " &
     outPath)
 
+proc pipInstallPython(basePython, envDir: string): string =
+  ## Return a Python executable with `pip` available. Prefer the
+  ## selected interpreter directly; fall back to a small venv when
+  ## the base Python intentionally omits pip.
+  let pipProbe = execCmdEx(quoteShell(basePython) & " -m pip --version")
+  if pipProbe.exitCode == 0:
+    return basePython
+
+  let pipVenv = envDir & "-pip-venv"
+  if dirExists(pipVenv):
+    removeDir(pipVenv)
+  let venvCreate = execCmdEx(quoteShell(basePython) & " -m venv " &
+    quoteShell(pipVenv))
+  if venvCreate.exitCode != 0:
+    raise newException(IOError,
+      "python has no pip, and creating a pip bootstrap venv at " &
+      pipVenv & " failed: " & venvCreate.output)
+
+  result =
+    when defined(windows):
+      pipVenv / "Scripts" / "python.exe"
+    else:
+      pipVenv / "bin" / "python"
+  let venvPipProbe = execCmdEx(quoteShell(result) & " -m pip --version")
+  if venvPipProbe.exitCode != 0:
+    raise newException(IOError,
+      "pip bootstrap venv at " & pipVenv &
+      " did not provide pip: " & venvPipProbe.output)
+
 proc createJinjaEnv(envDir, pinned: string): JinjaInstall =
   ## Build a per-test Python environment with the requested Jinja
   ## version installed at the target directory. Returns the python
@@ -100,21 +138,26 @@ proc createJinjaEnv(envDir, pinned: string): JinjaInstall =
     result.pythonExe = basePython
     result.sitePackages = ""
     return
+  var installerPython = basePython
   if execCmdEx(quoteShell(basePython) & " -m pip --version").exitCode != 0:
-    result.pythonExe = nixPythonWithJinja()
-    result.sitePackages = ""
-    return
+    try:
+      installerPython = pipInstallPython(basePython, envDir)
+    except IOError:
+      result.pythonExe = nixPythonWithJinja()
+      result.sitePackages = ""
+      return
 
   if dirExists(envDir):
     removeDir(envDir)
   createDir(envDir)
-  let pipInstall = execCmdEx(quoteShell(basePython) & " -m pip install " &
+  let pipInstall = execCmdEx(quoteShell(installerPython) & " -m pip install " &
     "--disable-pip-version-check --no-warn-script-location " &
     "--target=" & quoteShell(envDir) & " --quiet --upgrade " &
     "jinja2==" & pinned)
   if pipInstall.exitCode != 0:
     raise newException(IOError, "pip install jinja2==" & pinned &
-      " into " & envDir & " failed: " & pipInstall.output)
+      " into " & envDir & " using " & installerPython &
+      " failed: " & pipInstall.output)
   result.pythonExe = basePython
   result.sitePackages = envDir
 
@@ -154,20 +197,31 @@ suite "M59 external-template gate":
 
     proc apply(port: int; serverName, upstream, toolIdentity: string;
                install: JinjaInstall): TemplateApplyResult =
-      putEnv("PYTHONPATH", install.sitePackages)
-      let vars = newTable[string, string]()
-      vars["port"] = $port
-      vars["server_name"] = serverName
-      vars["upstream"] = upstream
-      let spec = JinjaSpec(
-        pythonExe: install.pythonExe,
-        templateFile: templateDir / "nginx.conf.j2",
-        output: "~/.config/nginx/nginx.conf",
-        vars: vars,
-        declaredInputs: @[templateDir / "nginx.conf.j2"],
-        workingDir: templateDir,
-        toolIdentity: toolIdentity)
-      runJinja(state, store, scope, spec)
+      let hadPythonPath = existsEnv("PYTHONPATH")
+      let oldPythonPath = getEnv("PYTHONPATH")
+      if install.sitePackages.len > 0:
+        putEnv("PYTHONPATH", install.sitePackages)
+      elif hadPythonPath:
+        delEnv("PYTHONPATH")
+      try:
+        let vars = newTable[string, string]()
+        vars["port"] = $port
+        vars["server_name"] = serverName
+        vars["upstream"] = upstream
+        let spec = JinjaSpec(
+          pythonExe: install.pythonExe,
+          templateFile: templateDir / "nginx.conf.j2",
+          output: "~/.config/nginx/nginx.conf",
+          vars: vars,
+          declaredInputs: @[templateDir / "nginx.conf.j2"],
+          workingDir: templateDir,
+          toolIdentity: toolIdentity)
+        result = runJinja(state, store, scope, spec)
+      finally:
+        if hadPythonPath:
+          putEnv("PYTHONPATH", oldPythonPath)
+        elif existsEnv("PYTHONPATH"):
+          delEnv("PYTHONPATH")
 
     # First build: cache miss, output written.
     let r1 = apply(8080, "example.com", "127.0.0.1:9000",

@@ -1,11 +1,10 @@
 ## Minimal `sqlite3` binding for the Reprobuild content-addressed local
 ## store (M56). Only the procs the store actually uses are bound.
 ##
-## The binding loads the system SQLite shared library at runtime via Nim's
-## `dynlib` machinery, which makes the build hermetic with respect to the
-## Nim distribution shipped in this workspace (the Windows Nim 2.2.8
-## bundle includes `sqlite3_64.dll` in its `bin/` directory, which is on
-## `PATH` after `env.ps1`).
+## Windows and macOS load the system SQLite shared library at runtime via
+## Nim's `dynlib` machinery. Linux links against `libsqlite3`, allowing
+## Nix-style rpaths from `config.nims` to make CLI binaries runnable without
+## ambient `LD_LIBRARY_PATH`.
 ##
 ## This file deliberately keeps the surface tiny so the rest of
 ## `repro_local_store` operates through a small, well-typed Nim wrapper
@@ -22,8 +21,6 @@ when defined(windows):
   const SqliteLibName = "(sqlite3_64|sqlite3|sqlite3_32).dll"
 elif defined(macosx):
   const SqliteLibName = "libsqlite3(|.0).dylib"
-else:
-  const SqliteLibName = "libsqlite3.so(|.0|.0.8.6)"
 
 const
   SqliteOk* = 0
@@ -61,7 +58,11 @@ type
 # and grep finds across libraries hit consistent terms.
 # ---------------------------------------------------------------------------
 
-{.push cdecl, dynlib: SqliteLibName, importc.}
+when defined(windows) or defined(macosx):
+  {.push cdecl, dynlib: SqliteLibName, importc.}
+else:
+  {.passL: "-lsqlite3".}
+  {.push cdecl, importc.}
 
 proc sqlite3_open_v2(filename: cstring; ppDb: ptr Sqlite3; flags: cint;
                      zVfs: cstring): cint

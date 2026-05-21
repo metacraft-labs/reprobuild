@@ -221,7 +221,7 @@ suite "integration_provider_fragment_refresh_and_pruning":
       tempRoot / "nimcache-provider-v1")
 
     proc refresh(providerPath, artifactId: string; malformed = false;
-                 store = storeRoot): ProviderRefreshReport =
+                 store = storeRoot; lockSlice = "lock-v1"): ProviderRefreshReport =
       var extraArgs = @["--fixture-counts", countsPath]
       if malformed:
         extraArgs.add("--malformed-response")
@@ -232,7 +232,7 @@ suite "integration_provider_fragment_refresh_and_pruning":
         rootEntryPointId: RootEntryPoint,
         rootArguments: srcDir,
         namespace: "workspace",
-        lockSliceId: "lock-v1",
+        lockSliceId: lockSlice,
         activity: "build",
         providerExtraArgs: extraArgs,
         providerWorkingDir: repoRoot))
@@ -275,6 +275,20 @@ suite "integration_provider_fragment_refresh_and_pruning":
 
     let providerV2 = compileProvider(providerSource, binDir / "provider-v2",
       tempRoot / "nimcache-provider-v2", ["memberBodyV2"])
+
+    let lockStore = tempRoot / "lock-store"
+    createDir(lockStore)
+    resetCounts(countsPath)
+    discard refresh(providerV1, ArtifactV1, store = lockStore,
+      lockSlice = "lock-v1")
+    resetCounts(countsPath)
+    let lockChanged = refresh(providerV2, ArtifactV2, store = lockStore,
+      lockSlice = "lock-v2")
+    check nonEmptyLines(countsPath) == @["member:a.txt", "member:c.txt"]
+    check lockChanged.invoked.len == 2
+    check lockChanged.invoked.allIt(it.reason == girEntryPointBodyChanged)
+    check memberFragmentCount(lockChanged.snapshot) == 2
+
     resetCounts(countsPath)
     let bodyChanged = refresh(providerV2, ArtifactV2)
     check nonEmptyLines(countsPath) == @["member:a.txt", "member:c.txt"]

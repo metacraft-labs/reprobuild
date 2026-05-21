@@ -92,6 +92,33 @@ proc nixPrefix(namePattern, header: string; dylibNames: openArray[string]): stri
           return prefix
   ""
 
+proc firstExistingLibDir(candidates: openArray[string];
+                         dylibNames: openArray[string]): string =
+  for candidate in candidates:
+    let path = candidate.strip()
+    if path.len == 0:
+      continue
+    for libDir in [path, path / "lib"]:
+      for dylibName in dylibNames:
+        if fileExists(libDir / dylibName):
+          return libDir
+  ""
+
+proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
+  let cmd = "find /nix/store -maxdepth 1 -type d -name '" & namePattern &
+    "' 2>/dev/null | sort"
+  let result = gorgeEx(cmd)
+  if result.exitCode != 0:
+    return ""
+  for line in result.output.splitLines:
+    let prefix = line.strip()
+    if prefix.len == 0:
+      continue
+    let libDir = firstExistingLibDir([prefix], dylibNames)
+    if libDir.len > 0:
+      return libDir
+  ""
+
 let useSystemHashLibs = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
   ["1", "true", "yes", "on"]
 
@@ -139,3 +166,25 @@ else:
     switch("passC", "-I" & xxhashPrefix / "include")
     switch("passL", "-L" & xxhashPrefix / "lib")
     switch("passL", "-lxxhash")
+
+when not defined(windows) and not defined(macosx):
+  let sqliteLibDir = block:
+    let direct = firstExistingLibDir(
+      [
+        getEnv("SQLITE_LIBDIR"),
+        getEnv("SQLITE_PREFIX"),
+        "/usr",
+        "/usr/local",
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/lib/x86_64-linux-gnu",
+      ],
+      ["libsqlite3.so", "libsqlite3.a"])
+    if direct.len > 0:
+      direct
+    else:
+      nixLibDir("*-sqlite-*", ["libsqlite3.so", "libsqlite3.a"])
+
+  if sqliteLibDir.len > 0:
+    switch("passL", "-L" & sqliteLibDir)
+    switch("passL", "-Wl,-rpath," & sqliteLibDir)
