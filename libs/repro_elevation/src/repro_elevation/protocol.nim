@@ -272,6 +272,18 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.serviceName)
     body.writeString(op.serviceStartType)
     body.writeBool(op.serviceRunning)
+  of pokWindowsVsInstaller:
+    body.writeString(op.vsEdition)
+    body.writeString(op.vsChannel)
+    body.writeString(op.vsInstallPath)
+    body.writeU32Le(uint32(op.vsWorkloads.len))
+    for w in op.vsWorkloads:
+      body.writeString(w)
+    body.writeU32Le(uint32(op.vsComponents.len))
+    for c in op.vsComponents:
+      body.writeString(c)
+    body.writeBool(op.vsStrict)
+    body.writeBool(op.vsDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -330,6 +342,24 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.serviceName = readString(body, pos)
     result.operation.serviceStartType = readString(body, pos)
     result.operation.serviceRunning = readBool(body, pos, "serviceRunning")
+  of pokWindowsVsInstaller:
+    result.operation = PrivilegedOperation(kind: pokWindowsVsInstaller,
+      address: address)
+    result.operation.vsEdition = readString(body, pos)
+    result.operation.vsChannel = readString(body, pos)
+    result.operation.vsInstallPath = readString(body, pos)
+    let wCount = int(readU32Le(body, pos))
+    if wCount < 0 or pos + wCount > body.len:
+      raiseProtocol("windows.vsInstaller frame: implausible workload count")
+    for _ in 0 ..< wCount:
+      result.operation.vsWorkloads.add(readString(body, pos))
+    let cCount = int(readU32Le(body, pos))
+    if cCount < 0 or pos + cCount > body.len:
+      raiseProtocol("windows.vsInstaller frame: implausible component count")
+    for _ in 0 ..< cCount:
+      result.operation.vsComponents.add(readString(body, pos))
+    result.operation.vsStrict = readBool(body, pos, "vsStrict")
+    result.operation.vsDestroy = readBool(body, pos, "vsDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

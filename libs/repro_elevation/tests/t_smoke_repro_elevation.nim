@@ -235,3 +235,77 @@ suite "repro_elevation: broker-mode arg parsing":
   test "forceBrokerRequested is a pure predicate over the env value":
     check forceBrokerRequested("1")
     check not forceBrokerRequested("")
+
+# ===========================================================================
+# M69 Phase B — windows.vsInstaller: the vswhere parser, the
+# membership diff, the drift classification, and the typed-operation
+# wiring into the closed set. All platform-pure.
+# ===========================================================================
+
+const SmokeVsWhereJson = """
+[
+  { "instanceId": "i1",
+    "installationPath": "C:\\VS\\BuildTools",
+    "productId": "Microsoft.VisualStudio.Product.BuildTools",
+    "channelId": "VisualStudio.17.Release",
+    "packages": [
+      { "id": "Microsoft.VisualStudio.Workload.VCTools", "type": "Workload" },
+      { "id": "Microsoft.VisualStudio.Workload.MSBuildTools", "type": "Workload" },
+      { "id": "Microsoft.VisualStudio.Component.Git", "type": "Component" }
+    ] }
+]
+"""
+
+suite "repro_elevation: windows.vsInstaller pure logic (Phase B)":
+
+  test "requiresElevation + the closed set include the vsInstaller kind":
+    check requiresElevation(pokWindowsVsInstaller)
+    check isKnownPrivilegedOperationKind("windows.vsInstaller")
+
+  test "parseVsWhereOutput reads products + workload/component packages":
+    let products = parseVsWhereOutput(SmokeVsWhereJson)
+    check products.len == 1
+    check installedWorkloadIds(products[0]).len == 2
+    check installedComponentIds(products[0]) ==
+      @["Microsoft.VisualStudio.Component.Git"]
+    check parseVsWhereOutput("[]").len == 0
+    expect VsWhereParseError:
+      discard parseVsWhereOutput("{ bad")
+
+  test "diffMembership: missing workload => needs-modify":
+    let products = parseVsWhereOutput(SmokeVsWhereJson)
+    let desired = VsInstallerDesiredState(edition: "BuildTools",
+      channel: "VisualStudio.17.Release", installPath: r"C:\VS\BuildTools",
+      workloads: @["Microsoft.VisualStudio.Workload.VCTools",
+                   "Microsoft.VisualStudio.Workload.MSBuildTools",
+                   "Microsoft.VisualStudio.Workload.NativeDesktop"],
+      components: @["Microsoft.VisualStudio.Component.Git"])
+    let diff = diffMembership(desired, products)
+    check classifyDrift(diff) == vsdNeedsModify
+    check requiresMutation(diff, strict = false)
+
+  test "an out-of-spec workload: leave-alone by default, removed when strict":
+    let products = parseVsWhereOutput(SmokeVsWhereJson)
+    var desired = VsInstallerDesiredState(edition: "BuildTools",
+      channel: "VisualStudio.17.Release", installPath: r"C:\VS\BuildTools",
+      workloads: @["Microsoft.VisualStudio.Workload.VCTools"],
+      components: @["Microsoft.VisualStudio.Component.Git"])
+    let diff = diffMembership(desired, products)
+    check classifyDrift(diff) == vsdMembershipDrift
+    check not requiresMutation(diff, strict = false)   # leave-alone
+    desired.strict = true
+    check requiresMutation(diffMembership(desired, products), strict = true)
+
+  test "Operation frame round-trips the vsInstaller op":
+    let op = PrivilegedOperation(kind: pokWindowsVsInstaller,
+      address: "vs", vsEdition: "BuildTools", vsChannel: "Release",
+      vsInstallPath: r"C:\VS",
+      vsWorkloads: @["A", "B"], vsComponents: @["C"],
+      vsStrict: true, vsDestroy: false)
+    check operationValidationError(op) == ""
+    let dec = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: op, baselineDigestHex: ""))).body)
+    check dec.operation.kind == pokWindowsVsInstaller
+    check dec.operation.vsWorkloads == @["A", "B"]
+    check dec.operation.vsComponents == @["C"]
+    check dec.operation.vsStrict

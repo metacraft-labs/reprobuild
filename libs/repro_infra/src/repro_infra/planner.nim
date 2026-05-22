@@ -58,6 +58,17 @@ proc digestProfileText*(profileText: string): string =
 # entry points (the SAME drivers the broker uses).
 # ---------------------------------------------------------------------------
 
+proc desiredDigestForKind*(op: PrivilegedOperation): string =
+  ## The desired-state digest for any M69 system-scope operation. The
+  ## four Phase-A kinds use `windows_system_driver.systemDesired
+  ## DigestHex`; the Phase-B `windows.vsInstaller` kind uses
+  ## `windows_vs_installer_driver.vsInstallerDesiredDigestHex`.
+  case op.kind
+  of pokWindowsVsInstaller:
+    vsInstallerDesiredDigestHex(op)
+  else:
+    systemDesiredDigestHex(op)
+
 proc observeResource*(r: SystemResource): ResourceObservation =
   ## Re-observe a declared resource's live state. Read-only.
   result.address = r.address
@@ -68,6 +79,7 @@ proc observeResource*(r: SystemResource): ResourceObservation =
     of srkWindowsOptionalFeature: observeWindowsOptionalFeature(op)
     of srkWindowsCapability: observeWindowsCapability(op)
     of srkWindowsService: observeWindowsService(op)
+    of srkWindowsVsInstaller: observeWindowsVsInstaller(op)
   result.present = obs.present
   result.observedDigestHex =
     if obs.present: obs.digestHex else: ZeroDigestHex
@@ -112,6 +124,10 @@ proc summaryLine(r: SystemResource; action: string): string =
     action & " service " & r.serviceName & " startType=" &
       r.serviceStartType & " state=" &
       (if r.serviceRunning: "Running" else: "Stopped")
+  of srkWindowsVsInstaller:
+    action & " vs-installer " & r.vsEdition & " (" &
+      $r.vsWorkloads.len & " workload(s), " & $r.vsComponents.len &
+      " component(s)" & (if r.vsStrict: ", strict" else: "") & ")"
 
 # ---------------------------------------------------------------------------
 # The planner.
@@ -135,7 +151,7 @@ proc producePlan*(profileText: string; hostIdentity: string;
     let obs = observeResource(r)
     result.observations.add(obs)
     let op = toPrivilegedOperation(r)
-    let desired = systemDesiredDigestHex(op)
+    let desired = desiredDigestForKind(op)
     let action = decideAction(obs, desired, destroy = false)
     env.operations.add(PlannedOperationRecord(
       address: r.address,

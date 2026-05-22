@@ -29,6 +29,7 @@ import repro_elevation
 
 import ./audit_log
 import ./errors
+import ./gen_envelope
 import ./plan_envelope
 import ./planner
 import ./profile
@@ -48,6 +49,13 @@ type
     elevationMode*: ElevationMode
     forceBroker*: bool                ## REPRO_FORCE_BROKER test seam
     noPreview*: bool                  ## scripted: converge without preview
+    extraDestroyResources*: seq[SystemResource]
+      ## `repro system rollback` seam: resources the rollback must
+      ## actively REVERT (a feature disable / capability uninstall /
+      ## registry-value delete / VS uninstall) because the target
+      ## generation no longer declares them. They are folded into the
+      ## SAME apply as the target-profile convergence, so a rollback
+      ## still raises at most one elevation prompt.
 
   ApplyResult* = object
     generationId*: string
@@ -181,12 +189,23 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   result.planId = env.planId
 
   # --- 2. Partition the effective operations. ---
-  let planned = plannedOperationsFor(profileText, env)
+  var planned = plannedOperationsFor(profileText, env)
   var noOps: seq[PlannedOperationRecord]
   for rec in env.operations:
     if rec.action == "no-op":
       noOps.add(rec)
   result.noOpCount = noOps.len
+
+  # Fold in any `repro system rollback` destroy operations: each
+  # removed resource becomes a typed destroy operation whose baseline
+  # digest is the resource's live observed state, so the broker's
+  # drift gate treats it uniformly. An already-reverted resource
+  # (observe says absent) is dispatched as a destroy no-op.
+  for r in opts.extraDestroyResources:
+    let obs = observeResource(r)
+    planned.add(PlannedOperation(
+      operation: toPrivilegedOperation(r, destroy = true),
+      baselineDigestHex: obs.observedDigestHex))
 
   let partition = partitionApply(
     block:
@@ -255,6 +274,22 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   let logPath = applyLogPath(opts.stateDir, generationId)
   writeAuditRecords(logPath, outcome.applyLog, noOps)
   result.auditLogPath = logPath
+  # Write the per-generation RBSG envelope. It embeds the applied
+  # `system.nim` text so `repro system history` can enumerate this
+  # generation and `repro system rollback` can re-apply a prior
+  # generation's profile (the system state dir has no CAS, so the
+  # small profile text is embedded directly).
+  writeGenerationEnvelope(pointerPath(opts.stateDir, generationId),
+    GenerationEnvelope(
+      schemaVersion: GenSchemaVersion,
+      generationId: generationId,
+      activationTimestamp: commitTs,
+      hostIdentity: opts.hostIdentity,
+      planId: env.planId,
+      profileDigestHex: env.profileDigestHex,
+      profileText: profileText,
+      appliedCount: result.appliedCount,
+      noOpCount: result.noOpCount))
   # The generation pointer / `current` marker is updated by the
   # NON-elevated parent (this proc), never the broker.
   writeCurrentGenerationId(opts.stateDir, generationId)

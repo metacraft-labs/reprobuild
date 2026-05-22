@@ -35,6 +35,7 @@ import ./fixture_driver
 import ./operations
 import ./protocol
 import ./windows_system_driver
+import ./windows_vs_installer_driver
 
 type
   DispatchOutcome* = enum
@@ -73,6 +74,8 @@ proc desiredDigest(op: PrivilegedOperation): string =
   of pokWindowsRegistryValue, pokWindowsOptionalFeature,
      pokWindowsCapability, pokWindowsService:
     systemDesiredDigestHex(op)
+  of pokWindowsVsInstaller:
+    vsInstallerDesiredDigestHex(op)
 
 # ---------------------------------------------------------------------------
 # Re-observe one operation's current real-world state.
@@ -97,6 +100,8 @@ proc reobserve*(ctx: FixtureContext;
     observeWindowsCapability(op)
   of pokWindowsService:
     observeWindowsService(op)
+  of pokWindowsVsInstaller:
+    observeWindowsVsInstaller(op)
 
 proc applyOne(ctx: FixtureContext;
               op: PrivilegedOperation): ObservedOperationState =
@@ -117,6 +122,10 @@ proc applyOne(ctx: FixtureContext;
     result.restartNeeded = r.restartNeeded
   of pokWindowsService:
     result = applyWindowsService(op)
+  of pokWindowsVsInstaller:
+    let r = applyWindowsVsInstaller(op)
+    result = r.state
+    result.restartNeeded = r.restartNeeded
 
 # ---------------------------------------------------------------------------
 # Dispatch one planned operation with the re-observe / drift gate.
@@ -150,9 +159,11 @@ proc dispatchOperation*(ctx: FixtureContext;
   let desiredHex = desiredDigest(op)
 
   # 2. Cache-hit: the live state already matches the desired value.
-  #    For a destroy op (`hklmDestroy`) the desired digest is the
-  #    absent sentinel — an already-absent target is a no-op.
-  let destroyOp = op.kind == pokWindowsRegistryValue and op.hklmDestroy
+  #    For a destroy op the desired digest is the absent sentinel —
+  #    an already-absent target is a no-op.
+  let destroyOp =
+    (op.kind == pokWindowsRegistryValue and op.hklmDestroy) or
+    (op.kind == pokWindowsVsInstaller and op.vsDestroy)
   if destroyOp:
     if not observed.present:
       result.outcome = doNoOp

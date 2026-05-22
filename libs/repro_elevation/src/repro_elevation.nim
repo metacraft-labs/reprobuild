@@ -17,10 +17,11 @@
 ##
 ##   * `operations`      — the closed, typed `PrivilegedOperation`
 ##     set, the `requiresElevation` predicate, and the closed-set
-##     validation. M81 shipped two FIXTURE kinds; M69 added the four
-##     real Windows system-scope kinds (`windows.registryValue`
+##     validation. M81 shipped two FIXTURE kinds; M69 Phase A added
+##     four real Windows system-scope kinds (`windows.registryValue`
 ##     scope=system, `windows.optionalFeature`, `windows.capability`,
-##     `windows.service`).
+##     `windows.service`); M69 Phase B added a fifth,
+##     `windows.vsInstaller`.
 ##   * `system_value`    — the M69 typed registry value kinds and
 ##     their payload encoders, shared with the HKLM driver.
 ##   * `windows_system_parse` — the M69 PURE DISM / capability /
@@ -57,6 +58,8 @@ import repro_elevation/ipc
 import repro_elevation/fixture_driver
 import repro_elevation/windows_system_parse
 import repro_elevation/windows_system_driver
+import repro_elevation/windows_vs_installer_parse
+import repro_elevation/windows_vs_installer_driver
 import repro_elevation/dispatch
 import repro_elevation/broker
 
@@ -70,5 +73,7 @@ export ipc
 export fixture_driver
 export windows_system_parse
 export windows_system_driver
+export windows_vs_installer_parse
+export windows_vs_installer_driver
 export dispatch
 export broker

@@ -17,8 +17,12 @@
 ## `--accept-feature-destroy` is required and, if it is and the flag
 ## is absent, fail closed with `EFeatureDestroy` BEFORE any mutation.
 
+import ./apply
 import ./errors
+import ./gen_envelope
+import ./planner
 import ./profile
+import ./state_dir
 
 type
   RollbackSafetyDecision* = object
@@ -52,3 +56,129 @@ proc enforceFeatureDestroyGate*(decision: RollbackSafetyDecision;
         decision.destructiveAddresses[0]
       else:
         "<unknown>")
+
+# ===========================================================================
+# `repro system rollback` — the M64 home-rollback analogue at system
+# scope (M69 Phase B).
+#
+# A system rollback re-applies a PRIOR generation's `system.nim`. The
+# RBSG generation envelope embeds the profile text the generation
+# applied (the system state dir has no CAS), so rollback is: resolve
+# the target generation, screen the revert for destructive operations
+# (`--accept-feature-destroy`), screen for live drift (system-scope
+# rollback ALWAYS confirms drift, per the spec), then drive the same
+# `runInfraApply` path with the target profile text.
+#
+# This is parameterized by the SYSTEM state dir. The M62/M64 home
+# machinery is NOT reused: it is wired to the home CAS, the
+# `PointerEnvelope`/`ActivationManifest` pair, launchers and stow —
+# none of which exist at system scope (the system state dir is the
+# deliberately slim shape the spec mandates). A small system-scope
+# implementation on the RBSG envelope is the honest fit.
+# ===========================================================================
+
+type
+  SystemRollbackOptions* = object
+    stateDir*: string
+    hostIdentity*: string
+    reproExe*: string
+    targetGenerationId*: string        ## "" => the immediately-previous one
+    acceptFeatureDestroy*: bool
+    reconcileDrift*: bool
+    forceBroker*: bool
+
+  SystemRollbackOutcome* = object
+    fromGenerationId*: string
+    toGenerationId*: string
+    appliedCount*: int
+    noOpCount*: int
+    driftedAddresses*: seq[string]
+    apply*: ApplyResult
+
+proc resourcesRemovedByRollback*(activeProfileText,
+                                 targetProfileText: string):
+    seq[SystemResource] =
+  ## The resources the active generation declares that the rollback
+  ## target does NOT — rolling back reverts (destroys) them. Used to
+  ## screen for the `--accept-feature-destroy` gate.
+  let active = parseSystemProfile(activeProfileText)
+  let target = parseSystemProfile(targetProfileText)
+  var targetAddrs: seq[string]
+  for r in target.resources:
+    targetAddrs.add(r.address)
+  for r in active.resources:
+    if r.address notin targetAddrs:
+      result.add(r)
+
+proc detectRollbackDrift*(targetProfileText: string): seq[string] =
+  ## Re-observe every resource the target generation declares and
+  ## return the addresses whose LIVE state matches neither absent nor
+  ## the target's desired value — i.e. the world drifted out of band
+  ## since the target generation was applied. System-scope rollback
+  ## ALWAYS requires explicit confirmation on drift (the spec's extra
+  ## conservatism), so the caller surfaces this list.
+  let target = parseSystemProfile(targetProfileText)
+  for r in target.resources:
+    let obs = observeResource(r)
+    let op = toPrivilegedOperation(r)
+    let desired = desiredDigestForKind(op)
+    # Absent or already-at-desired is consistent; anything else is
+    # drift the operator must acknowledge.
+    if obs.present and obs.observedDigestHex != desired:
+      result.add(r.address)
+
+proc runSystemRollback*(opts: SystemRollbackOptions): SystemRollbackOutcome =
+  ## Roll the system profile back to a prior generation. Re-applies
+  ## the target generation's embedded `system.nim` through the Phase-A
+  ## `runInfraApply` path.
+  ##
+  ## Safety, per System-Profile-And-Infra-Apply.md "Rollback":
+  ##   * a rollback that would disable a feature / uninstall a
+  ##     capability / uninstall VS needs `--accept-feature-destroy`;
+  ##   * drift on rollback ALWAYS needs explicit confirmation, even
+  ##     with `--reconcile-drift` — without `--reconcile-drift` the
+  ##     rollback refuses, naming the drifted resources.
+  let activeId = readCurrentGenerationId(opts.stateDir)
+  if activeId.len == 0:
+    raiseSystemStateDirInvalid(
+      "no active system generation to roll back from")
+  result.fromGenerationId = activeId
+  let targetId = resolveGenerationId(opts.stateDir, opts.targetGenerationId)
+  result.toGenerationId = targetId
+  if targetId == activeId:
+    raiseSystemStateDirInvalid(
+      "the rollback target generation '" & targetId &
+      "' is already the active generation")
+  let targetEnv = readGenerationEnvelope(
+    pointerPath(opts.stateDir, targetId))
+  let activeEnv = readGenerationEnvelope(
+    pointerPath(opts.stateDir, activeId))
+
+  # --- Destructive-revert screening (`--accept-feature-destroy`). ---
+  let reverted = resourcesRemovedByRollback(
+    activeEnv.profileText, targetEnv.profileText)
+  let decision = screenRollback(reverted)
+  enforceFeatureDestroyGate(decision, opts.acceptFeatureDestroy)
+
+  # --- Drift screening — system-scope rollback always confirms. ---
+  let drifted = detectRollbackDrift(targetEnv.profileText)
+  result.driftedAddresses = drifted
+  if drifted.len > 0 and not opts.reconcileDrift:
+    raisePlanStale(targetId, drifted)
+
+  # --- Re-apply the target generation's profile, AND actively revert
+  #     every resource the active generation added that the target
+  #     does not declare. Both halves run in ONE apply so the rollback
+  #     raises at most one elevation prompt. ---
+  var applyOpts: ApplyOptions
+  applyOpts.stateDir = opts.stateDir
+  applyOpts.hostIdentity = opts.hostIdentity
+  applyOpts.reproExe = opts.reproExe
+  applyOpts.planId = ""                 # fresh plan of the target profile
+  applyOpts.elevationMode = emBroker
+  applyOpts.forceBroker = opts.forceBroker
+  applyOpts.noPreview = true
+  applyOpts.extraDestroyResources = reverted
+  result.apply = runInfraApply(targetEnv.profileText, applyOpts)
+  result.appliedCount = result.apply.appliedCount
+  result.noOpCount = result.apply.noOpCount

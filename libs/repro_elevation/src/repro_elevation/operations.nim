@@ -58,6 +58,11 @@ type
       ## The M69 `windows.service` operation: manage a Windows
       ## service's start-type and runtime state. Does NOT install or
       ## remove the service itself.
+    pokWindowsVsInstaller = "windows.vsInstaller"
+      ## The M69 Phase-B `windows.vsInstaller` operation: install /
+      ## modify / uninstall a Visual Studio product through the
+      ## bootstrapped installer, with workload/component membership
+      ## convergence. State is read through the embedded `vswhere.exe`.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -113,6 +118,22 @@ type
       serviceName*: string
       serviceStartType*: string
       serviceRunning*: bool
+    of pokWindowsVsInstaller:
+      ## Converge a Visual Studio installation to the declared
+      ## workload/component membership. `vsEdition` is the short
+      ## edition (`Community` / `Professional` / `Enterprise` /
+      ## `BuildTools`); `vsChannel` the release channel id;
+      ## `vsInstallPath` the install directory; `vsWorkloads` /
+      ## `vsComponents` the declared membership sets; `vsStrict`
+      ## selects hard membership (remove out-of-spec workloads);
+      ## `vsDestroy` selects the uninstall (rollback) direction.
+      vsEdition*: string
+      vsChannel*: string
+      vsInstallPath*: string
+      vsWorkloads*: seq[string]
+      vsComponents*: seq[string]
+      vsStrict*: bool
+      vsDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -137,6 +158,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokWindowsOptionalFeature: true
   of pokWindowsCapability: true
   of pokWindowsService: true
+  of pokWindowsVsInstaller: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -153,6 +175,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokWindowsOptionalFeature: pokWindowsOptionalFeature
   of $pokWindowsCapability: pokWindowsCapability
   of $pokWindowsService: pokWindowsService
+  of $pokWindowsVsInstaller: pokWindowsVsInstaller
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -230,6 +253,15 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if op.serviceStartType notin ["Automatic", "Manual", "Disabled"]:
       return "windows.service start-type '" & op.serviceStartType &
         "' is not one of Automatic / Manual / Disabled"
+  of pokWindowsVsInstaller:
+    if op.vsEdition.len == 0:
+      return "windows.vsInstaller operation has an empty edition"
+    if op.vsChannel.len == 0:
+      return "windows.vsInstaller operation has an empty channel"
+    # A modify / uninstall both need the install path; an install
+    # without one defaults to the VS standard location, so an empty
+    # install path is allowed only for a fresh install — the driver's
+    # re-observe handles the distinction.
   return ""
 
 # ---------------------------------------------------------------------------

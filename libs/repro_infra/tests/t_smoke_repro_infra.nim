@@ -250,3 +250,188 @@ suite "repro_infra: system state dir":
     check planPath(sd, "pid").endsWith("pid.rbip")
     check applyLogPath(sd, "gid").endsWith("apply.log")
     check applyLockPath(sd).endsWith("apply.lock")
+
+# ===========================================================================
+# M69 Phase B — windows.vsInstaller profile parsing, the structural
+# editor, and the RBSG generation envelope.
+# ===========================================================================
+
+suite "repro_infra: windows.vsInstaller profile parsing (Phase B)":
+
+  test "a vsInstaller stanza with list fields parses":
+    let profile = parseSystemProfile("""
+windows.vsInstaller {
+  edition = "BuildTools"
+  channel = "VisualStudio.17.Release"
+  installPath = "C:\BuildTools"
+  workloads = [
+    "Microsoft.VisualStudio.Workload.VCTools",
+    "Microsoft.VisualStudio.Workload.MSBuildTools"
+  ]
+  components = ["Microsoft.VisualStudio.Component.Git"]
+  strict = true
+}
+""")
+    check profile.resources.len == 1
+    let r = profile.resources[0]
+    check r.kind == srkWindowsVsInstaller
+    check r.vsEdition == "BuildTools"
+    check r.vsChannel == "VisualStudio.17.Release"
+    check r.vsWorkloads.len == 2
+    check r.vsComponents == @["Microsoft.VisualStudio.Component.Git"]
+    check r.vsStrict
+    let op = toPrivilegedOperation(r)
+    check op.kind == pokWindowsVsInstaller
+    check op.vsWorkloads.len == 2
+
+  test "channel defaults to Release, strict defaults to false":
+    let profile = parseSystemProfile("""
+windows.vsInstaller {
+  edition = "Community"
+}
+""")
+    check profile.resources[0].vsChannel == "Release"
+    check not profile.resources[0].vsStrict
+    check profile.resources[0].vsWorkloads.len == 0
+
+  test "parseListLiteral handles empty, single, and multi-element lists":
+    check parseListLiteral("[]").len == 0
+    check parseListLiteral("[\"a\"]") == @["a"]
+    check parseListLiteral("[a, b, c]") == @["a", "b", "c"]
+    check parseListLiteral("[\n  \"x\",\n  \"y\"\n]") == @["x", "y"]
+
+  test "a vsInstaller rollback is destructive (uninstall)":
+    let profile = parseSystemProfile(
+      "windows.vsInstaller { edition = \"BuildTools\" }\n")
+    check isDestructiveRollback(profile.resources[0])
+
+suite "repro_infra: system.nim structural editor (Phase B)":
+
+  test "addResource then removeResource round-trips byte-identically":
+    let dir = createTempDir("repro-infra-editor-", "")
+    defer: removeDir(dir)
+    let p = dir / "system.nim"
+    let original =
+      "# the gate's system profile\n" &
+      "windows.service {\n  name = \"sshd\"\n  startType = Automatic\n" &
+      "  state = Running\n}\n"
+    writeFile(p, original)
+    var doc = loadSystemIntent(p)
+    let newRes = SystemResource(kind: srkWindowsOptionalFeature,
+      address: "feature:Containers", featureName: "Containers",
+      featureEnabled: true)
+    addResource(doc, newRes)
+    writeSystemIntent(doc)
+    check readFile(p) != original
+    # remove the just-added resource — must restore byte-for-byte.
+    var doc2 = loadSystemIntent(p)
+    check removeResource(doc2, "feature:Containers")
+    writeSystemIntent(doc2)
+    check readFile(p) == original
+
+  test "addResource refuses a duplicate address":
+    let dir = createTempDir("repro-infra-editor-dup-", "")
+    defer: removeDir(dir)
+    let p = dir / "system.nim"
+    writeFile(p, "")
+    var doc = loadSystemIntent(p)
+    let r = SystemResource(kind: srkWindowsCapability,
+      address: "capability:OpenSSH.Server~~~~0.0.1.0",
+      capabilityName: "OpenSSH.Server~~~~0.0.1.0", capabilityInstalled: true)
+    addResource(doc, r)
+    expect ESystemProfileInvalid:
+      addResource(doc, r)
+
+  test "removeResource of an absent address is a no-op (returns false)":
+    let dir = createTempDir("repro-infra-editor-absent-", "")
+    defer: removeDir(dir)
+    let p = dir / "system.nim"
+    writeFile(p, "windows.service {\n  name = \"sshd\"\n}\n")
+    var doc = loadSystemIntent(p)
+    check not removeResource(doc, "service:not-here")
+
+  test "the editor preserves a CRLF line ending":
+    let dir = createTempDir("repro-infra-editor-crlf-", "")
+    defer: removeDir(dir)
+    let p = dir / "system.nim"
+    let crlf = "windows.service {\r\n  name = \"sshd\"\r\n}\r\n"
+    writeFile(p, crlf)
+    var doc = loadSystemIntent(p)
+    check doc.lineEnding == "\r\n"
+    addResource(doc, SystemResource(kind: srkWindowsOptionalFeature,
+      address: "feature:WSL", featureName: "WSL", featureEnabled: true))
+    writeSystemIntent(doc)
+    var doc2 = loadSystemIntent(p)
+    check removeResource(doc2, "feature:WSL")
+    writeSystemIntent(doc2)
+    check readFile(p) == crlf
+
+  test "a rendered vsInstaller stanza re-parses to the same resource":
+    let r = SystemResource(kind: srkWindowsVsInstaller,
+      address: "vsInstaller:BuildTools",
+      vsEdition: "BuildTools", vsChannel: "VisualStudio.17.Release",
+      vsInstallPath: r"C:\BuildTools",
+      vsWorkloads: @["Microsoft.VisualStudio.Workload.VCTools"],
+      vsComponents: @["Microsoft.VisualStudio.Component.Git"],
+      vsStrict: true)
+    var lines = renderStanza(r)
+    let reparsed = parseSystemProfile(lines.join("\n") & "\n")
+    check reparsed.resources.len == 1
+    check reparsed.resources[0].kind == srkWindowsVsInstaller
+    check reparsed.resources[0].vsEdition == "BuildTools"
+    check reparsed.resources[0].vsWorkloads ==
+      @["Microsoft.VisualStudio.Workload.VCTools"]
+    check reparsed.resources[0].vsStrict
+
+suite "repro_infra: RBSG generation envelope (Phase B)":
+
+  test "encode / decode round-trip":
+    let env = GenerationEnvelope(
+      schemaVersion: GenSchemaVersion,
+      generationId: "0123456789abcdef0123456789abcdef",
+      activationTimestamp: 1_700_000_500,
+      hostIdentity: "eli-pc",
+      planId: "plan-abc",
+      profileDigestHex: "deadbeef",
+      profileText: "windows.service {\n  name = \"sshd\"\n}\n",
+      appliedCount: 3, noOpCount: 1)
+    let back = decodeGenerationBytes(encodeGeneration(env))
+    check back.generationId == env.generationId
+    check back.hostIdentity == "eli-pc"
+    check back.profileText == env.profileText
+    check back.appliedCount == 3
+    check back.noOpCount == 1
+
+  test "a corrupt checksum is rejected":
+    let env = GenerationEnvelope(generationId: "x")
+    var bytes = encodeGeneration(env)
+    bytes[^1] = bytes[^1] xor 0xff'u8
+    expect EPlanCorrupt:
+      discard decodeGenerationBytes(bytes)
+
+  test "enumerateSystemGenerations + resolveGenerationId":
+    let dir = createTempDir("repro-infra-gens-", "")
+    defer: removeDir(dir)
+    ensureSystemStateDir(dir)
+    # Two generations, increasing timestamps.
+    for (gid, ts) in [("aaaa1111aaaa1111aaaa1111aaaa1111", 100'i64),
+                      ("bbbb2222bbbb2222bbbb2222bbbb2222", 200'i64)]:
+      createDir(generationDir(dir, gid))
+      writeGenerationEnvelope(pointerPath(dir, gid), GenerationEnvelope(
+        schemaVersion: GenSchemaVersion, generationId: gid,
+        activationTimestamp: ts, hostIdentity: "h", planId: "p",
+        profileDigestHex: "d", profileText: "", appliedCount: 1))
+    writeCurrentGenerationId(dir, "bbbb2222bbbb2222bbbb2222bbbb2222")
+    let gens = enumerateSystemGenerations(dir)
+    check gens.len == 2
+    check gens[0].generationId == "aaaa1111aaaa1111aaaa1111aaaa1111"  # oldest
+    check gens[1].isActive
+    # An empty requested id resolves to the immediately-previous gen.
+    check resolveGenerationId(dir, "") ==
+      "aaaa1111aaaa1111aaaa1111aaaa1111"
+    # A prefix resolves unambiguously.
+    check resolveGenerationId(dir, "aaaa") ==
+      "aaaa1111aaaa1111aaaa1111aaaa1111"
+    # An unknown id raises.
+    expect ESystemStateDirInvalid:
+      discard resolveGenerationId(dir, "ffff")

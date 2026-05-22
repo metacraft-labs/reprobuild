@@ -12,16 +12,19 @@
 ## cross-platform. Each parsed `SystemResource` maps to exactly one
 ## typed `PrivilegedOperation` (the M81 closed set, extended by M69).
 ##
-## Phase A supports the four Windows system-scope resources:
+## Phase A supports the four Windows system-scope resources; Phase B
+## adds the fifth, `windows.vsInstaller`:
 ##
 ##   windows.registryValue { key=... name=... kind=... value=... }
 ##   windows.optionalFeature { name=... }
 ##   windows.capability { name=... }
 ##   windows.service { name=... startType=... state=... }
+##   windows.vsInstaller { edition=... channel=... installPath=...
+##                         workloads=[...] components=[...] strict=... }
 ##
-## `fs.systemFile`, `env.systemVariable`, `windows.vsInstaller`, the
-## POSIX surface, and `macos.systemDefault` are deferred — the parser
-## rejects them with a clear "deferred to a later phase" diagnostic.
+## `fs.systemFile`, `env.systemVariable`, the POSIX surface, and
+## `macos.systemDefault` are deferred — the parser rejects them with a
+## clear "deferred to a later phase" diagnostic.
 
 import std/[strutils, tables]
 
@@ -35,6 +38,7 @@ type
     srkWindowsOptionalFeature = "windows.optionalFeature"
     srkWindowsCapability = "windows.capability"
     srkWindowsService = "windows.service"
+    srkWindowsVsInstaller = "windows.vsInstaller"
 
   SystemResource* = object
     ## One declared system-scope resource. `address` is the stable
@@ -57,6 +61,13 @@ type
       serviceName*: string
       serviceStartType*: string
       serviceRunning*: bool
+    of srkWindowsVsInstaller:
+      vsEdition*: string
+      vsChannel*: string
+      vsInstallPath*: string
+      vsWorkloads*: seq[string]
+      vsComponents*: seq[string]
+      vsStrict*: bool
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -64,7 +75,7 @@ type
     resources*: seq[SystemResource]
 
 const DeferredKinds = [
-  "fs.systemFile", "env.systemVariable", "windows.vsInstaller",
+  "fs.systemFile", "env.systemVariable",
   "macos.systemDefault", "systemd.systemUnit", "launchd.systemDaemon",
   "passwd.user"]
 
@@ -79,6 +90,9 @@ proc realWorldIdentity*(r: SystemResource): string =
     "capability:" & r.capabilityName
   of srkWindowsService:
     "service:" & r.serviceName
+  of srkWindowsVsInstaller:
+    "vsInstaller:" & r.vsEdition &
+      (if r.vsInstallPath.len > 0: "@" & r.vsInstallPath else: "")
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -113,48 +127,97 @@ proc splitFieldAssignments(body: string): seq[string] =
   ## Split a brace body into `key = value` assignment tokens. An
   ## assignment ends at a newline OR at the start of the next
   ## `<ident> =` — so `{ name = "X" }` and multi-line bodies both
-  ## parse. A quoted value may itself contain spaces.
+  ## parse. A quoted value may itself contain spaces; a `[...]` list
+  ## value may itself span lines and carry commas, so the splitter
+  ## tracks bracket depth and never splits inside a list. Comment
+  ## stripping happens globally upstream.
   var assignments: seq[string]
-  var current = ""
-  for rawLine in body.splitLines():
-    let line = stripComment(rawLine).strip()
-    if line.len == 0:
-      continue
-    # A single physical line may carry several `key = value` pairs
-    # (the compact single-line stanza form). Split on a heuristic:
-    # an unquoted run of `whitespace <ident> =` starts a new pair.
-    var i = 0
-    var token = ""
-    var inQuote = false
-    while i < line.len:
-      let c = line[i]
-      if c == '"':
-        inQuote = not inQuote
-        token.add(c)
-        inc i
-      elif (not inQuote) and c in {' ', '\t'} and token.strip().len > 0:
-        # Look ahead: `<ws>* <ident> <ws>* =` begins a new assignment.
-        var j = i
-        while j < line.len and line[j] in {' ', '\t'}: inc j
-        var k = j
-        while k < line.len and (line[k].isAlphaNumeric or line[k] == '_'):
-          inc k
-        var m = k
-        while m < line.len and line[m] in {' ', '\t'}: inc m
-        if k > j and m < line.len and line[m] == '=' and
-           token.contains('='):
-          assignments.add(token.strip())
-          token = ""
-          i = j
-        else:
-          token.add(c)
-          inc i
+  var token = ""
+  var inQuote = false
+  var bracketDepth = 0
+
+  proc flush() =
+    if token.strip().len > 0:
+      assignments.add(token.strip())
+    token = ""
+
+  var i = 0
+  while i < body.len:
+    let c = body[i]
+    if c == '"':
+      inQuote = not inQuote
+      token.add(c)
+      inc i
+    elif inQuote:
+      token.add(c)
+      inc i
+    elif c == '[':
+      inc bracketDepth
+      token.add(c)
+      inc i
+    elif c == ']':
+      if bracketDepth > 0: dec bracketDepth
+      token.add(c)
+      inc i
+    elif bracketDepth > 0:
+      # Inside a list literal: copy verbatim (commas, newlines, all).
+      token.add(c)
+      inc i
+    elif c in {'\r', '\n'} and token.strip().len > 0:
+      # A newline ends an assignment (the multi-line stanza form).
+      flush()
+      inc i
+    elif c in {' ', '\t'} and token.strip().len > 0 and token.contains('='):
+      # The compact single-line stanza form: an unquoted run of
+      # `<ws>* <ident> <ws>* =` begins a new assignment.
+      var j = i
+      while j < body.len and body[j] in {' ', '\t'}: inc j
+      var k = j
+      while k < body.len and (body[k].isAlphaNumeric or body[k] == '_'):
+        inc k
+      var m = k
+      while m < body.len and body[m] in {' ', '\t'}: inc m
+      if k > j and m < body.len and body[m] == '=':
+        flush()
+        i = j
       else:
         token.add(c)
         inc i
-    if token.strip().len > 0:
-      assignments.add(token.strip())
+    else:
+      token.add(c)
+      inc i
+  flush()
   return assignments
+
+proc parseListLiteral*(raw: string): seq[string] =
+  ## Parse a `[a, b, c]` list literal into its string elements. Each
+  ## element may be a bare identifier or a double-quoted string;
+  ## whitespace and newlines around elements are stripped. An empty
+  ## `[]` yields an empty seq. Used by `windows.vsInstaller`'s
+  ## `workloads` / `components` fields.
+  let t = raw.strip()
+  if t.len < 2 or t[0] != '[' or t[^1] != ']':
+    raiseSystemProfileInvalid("expected a '[...]' list literal, got: '" &
+      raw & "'")
+  let inner = t[1 ..< t.len - 1]
+  var elem = ""
+  var inQuote = false
+
+  proc flushElem(items: var seq[string]) =
+    let v = elem.strip()
+    if v.len > 0:
+      items.add(unquote(v))
+    elem = ""
+
+  for c in inner:
+    if c == '"':
+      inQuote = not inQuote
+      elem.add(c)
+    elif c == ',' and not inQuote:
+      flushElem(result)
+    else:
+      elem.add(c)
+  flushElem(result)
 
 proc parseSystemProfile*(text: string): SystemProfile =
   ## Parse the declarative `system.nim` text into a `SystemProfile`.
@@ -192,6 +255,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkWindowsOptionalFeature: srk = srkWindowsOptionalFeature
     of $srkWindowsCapability: srk = srkWindowsCapability
     of $srkWindowsService: srk = srkWindowsService
+    of $srkWindowsVsInstaller: srk = srkWindowsVsInstaller
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -202,16 +266,20 @@ proc parseSystemProfile*(text: string): SystemProfile =
         "' block is not closed with '}'")
     let bodyText = clean[braceIdx + 1 ..< closeIdx]
     pos = closeIdx + 1
-    # Collect `key = value` assignments.
+    # Collect `key = value` assignments. The RAW value (before
+    # `unquote`) is kept so a `[...]` list field can be parsed with
+    # `parseListLiteral`; a scalar field uses the unquoted form.
     var fields = initTable[string, string]()
+    var rawFields = initTable[string, string]()
     for assignment in splitFieldAssignments(bodyText):
       let eq = assignment.find('=')
       if eq < 0:
         raiseSystemProfileInvalid("expected 'key = value' in resource '" &
           kindTag & "', got: '" & assignment & "'")
       let key = assignment[0 ..< eq].strip()
-      let value = unquote(assignment[eq + 1 .. ^1])
-      fields[key] = value
+      let rawValue = assignment[eq + 1 .. ^1].strip()
+      rawFields[key] = rawValue
+      fields[key] = unquote(rawValue)
     # Build the typed resource.
     proc need(k: string): string =
       if k notin fields:
@@ -263,6 +331,23 @@ proc parseSystemProfile*(text: string): SystemProfile =
         serviceName: need("name"),
         serviceStartType: st,
         serviceRunning: stateStr == "running")
+    of srkWindowsVsInstaller:
+      let workloads =
+        if "workloads" in rawFields: parseListLiteral(rawFields["workloads"])
+        else: @[]
+      let components =
+        if "components" in rawFields: parseListLiteral(rawFields["components"])
+        else: @[]
+      res = SystemResource(kind: srkWindowsVsInstaller,
+        vsEdition: need("edition"),
+        vsChannel: (if "channel" in fields: fields["channel"]
+                    else: "Release"),
+        vsInstallPath: (if "installPath" in fields: fields["installPath"]
+                        else: ""),
+        vsWorkloads: workloads,
+        vsComponents: components,
+        vsStrict: (if "strict" in fields: parseBoolField("strict",
+          fields["strict"]) else: false))
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -302,9 +387,19 @@ proc toPrivilegedOperation*(r: SystemResource;
       serviceName: r.serviceName,
       serviceStartType: r.serviceStartType,
       serviceRunning: r.serviceRunning)
+  of srkWindowsVsInstaller:
+    PrivilegedOperation(kind: pokWindowsVsInstaller, address: r.address,
+      vsEdition: r.vsEdition,
+      vsChannel: r.vsChannel,
+      vsInstallPath: r.vsInstallPath,
+      vsWorkloads: r.vsWorkloads,
+      vsComponents: r.vsComponents,
+      vsStrict: r.vsStrict,
+      vsDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional
-  ## Feature or uninstall a Capability — the operations
-  ## `--accept-feature-destroy` gates.
-  r.kind in {srkWindowsOptionalFeature, srkWindowsCapability}
+  ## Feature, uninstall a Capability, or uninstall a Visual Studio
+  ## product — the operations `--accept-feature-destroy` gates.
+  r.kind in {srkWindowsOptionalFeature, srkWindowsCapability,
+    srkWindowsVsInstaller}

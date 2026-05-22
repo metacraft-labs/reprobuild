@@ -1051,6 +1051,40 @@ e2e_windows_optional_feature_and_capability:
         tests/e2e/m69/t_e2e_windows_optional_feature_and_capability.nim \
         2>&1 | tee test-logs/e2e_windows_optional_feature_and_capability.log
 
+e2e_repro_system_command_family:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_system_command_family.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_repro_system_command_family \
+        --out:build/test-bin/e2e_repro_system_command_family \
+        tests/e2e/m69/t_e2e_repro_system_command_family.nim \
+        2>&1 | tee test-logs/e2e_repro_system_command_family.log
+
+e2e_windows_vs_installer:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_windows_vs_installer.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_windows_vs_installer \
+        --out:build/test-bin/e2e_windows_vs_installer \
+        tests/e2e/m69/t_e2e_windows_vs_installer.nim \
+        2>&1 | tee test-logs/e2e_windows_vs_installer.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

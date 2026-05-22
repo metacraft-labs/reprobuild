@@ -34,9 +34,11 @@ type
     profilePath: string
     host: string
     planId: string
+    generationId: string
     noElevate: bool
     noPreview: bool
     acceptFeatureDestroy: bool
+    reconcileDrift: bool
 
 proc hostIdentity(explicit: string): string =
   if explicit.len > 0:
@@ -72,11 +74,16 @@ proc parseInfraFlags(args: openArray[string]):
     elif a == "--plan": result.flags.planId = valueOf()
     elif a.startsWith("--plan="):
       result.flags.planId = a["--plan=".len .. ^1]
+    elif a == "--generation": result.flags.generationId = valueOf()
+    elif a.startsWith("--generation="):
+      result.flags.generationId = a["--generation=".len .. ^1]
     elif a == "--no-elevate": result.flags.noElevate = true
     elif a == "--elevate": result.flags.noElevate = false
     elif a == "--no-preview": result.flags.noPreview = true
     elif a == "--accept-feature-destroy":
       result.flags.acceptFeatureDestroy = true
+    elif a == "--reconcile-drift":
+      result.flags.reconcileDrift = true
     elif a.startsWith("--"):
       raise newException(ValueError, "unknown flag: " & a)
     else:
@@ -251,6 +258,297 @@ proc runSystemAudit(args: openArray[string]): int =
       "was interrupted); the records above are intact."
   return 0
 
+# ===========================================================================
+# repro system add / remove / list / why / sync / history / rollback
+# (M69 Phase B — the system-scope analogue of the M60-M64 home commands).
+#
+# `add` / `remove` edit `system.nim` through the formatting-preserving
+# structural editor (`repro_infra/intent.nim`); `list` / `why` query
+# the parsed profile; `sync` drives the Phase-A `repro infra apply`
+# path; `history` enumerates the RBSG generation envelopes; `rollback`
+# re-applies a prior generation.
+# ===========================================================================
+
+proc systemProfilePathOrCreate(flags: InfraCliFlags;
+                               stateDir: string): string =
+  ## The `system.nim` path. `repro system add` may target a file that
+  ## does not exist yet — the editor creates it on first add.
+  if flags.profilePath.len > 0: flags.profilePath
+  else: systemProfilePath(stateDir)
+
+proc buildResourceFromArgs(kindTag: string;
+                           fieldArgs: openArray[string]): SystemResource =
+  ## Build a `SystemResource` from `repro system add <kind> key=value
+  ## ...` positional arguments. Reuses the Phase-A `parseSystemProfile`
+  ## parser by rendering the arguments into a single stanza and
+  ## parsing it — so `add` and a hand-authored stanza go through the
+  ## SAME validation, and a list field (`workloads=[a,b]`) parses
+  ## identically.
+  var stanza = kindTag & " {\n"
+  for fa in fieldArgs:
+    let eq = fa.find('=')
+    if eq <= 0:
+      raise newException(ValueError,
+        "expected key=value, got '" & fa & "'")
+    let key = fa[0 ..< eq].strip()
+    let raw = fa[eq + 1 .. ^1]
+    # A list literal or a bool/identifier passes through verbatim; a
+    # bare string is quoted so the parser unquotes it back.
+    let rendered =
+      if raw.startsWith("["): raw
+      elif raw.toLowerAscii() in ["true", "false"]: raw
+      elif key in ["kind", "startType", "state"]: raw
+      else: "\"" & raw & "\""
+    stanza.add("  " & key & " = " & rendered & "\n")
+  stanza.add("}\n")
+  let parsed = parseSystemProfile(stanza)
+  if parsed.resources.len != 1:
+    raise newException(ValueError,
+      "internal: add stanza did not parse to exactly one resource")
+  parsed.resources[0]
+
+proc runSystemAdd(args: openArray[string]): int =
+  let (flags, positional) = parseInfraFlags(args)
+  let stateDir = (if flags.stateDir.len > 0: flags.stateDir
+                  else: resolveSystemStateDir())
+  setStateDirOverride(stateDir)
+  if positional.len == 0:
+    stderr.writeLine("usage: repro system add <kind> key=value ...")
+    return 2
+  let kindTag = positional[0]
+  let fieldArgs = if positional.len > 1: positional[1 .. ^1] else: @[]
+  let resource = buildResourceFromArgs(kindTag, fieldArgs)
+  let profilePath = systemProfilePathOrCreate(flags, stateDir)
+  # Create an empty profile file on first add so the editor has a
+  # document to splice into.
+  if not fileExists(profilePath):
+    let parent = parentDir(profilePath)
+    if parent.len > 0: createDir(parent)
+    writeFile(profilePath, "")
+  var doc = loadSystemIntent(profilePath)
+  addResource(doc, resource)
+  writeSystemIntent(doc)
+  echo "repro system add"
+  echo "  profile  : " & profilePath
+  echo "  added    : " & $resource.kind & "  " & resource.address
+  echo "  apply with: repro system sync"
+  return 0
+
+proc runSystemRemove(args: openArray[string]): int =
+  let (flags, positional) = parseInfraFlags(args)
+  let stateDir = (if flags.stateDir.len > 0: flags.stateDir
+                  else: resolveSystemStateDir())
+  setStateDirOverride(stateDir)
+  if positional.len == 0:
+    stderr.writeLine("usage: repro system remove <address>")
+    return 2
+  let address = positional[0]
+  let profilePath = systemProfilePathOrCreate(flags, stateDir)
+  if not fileExists(profilePath):
+    stderr.writeLine("repro system remove: no system profile at " &
+      profilePath)
+    return 1
+  var doc = loadSystemIntent(profilePath)
+  if not removeResource(doc, address):
+    stderr.writeLine("repro system remove: no resource with address '" &
+      address & "' in " & profilePath)
+    return 1
+  writeSystemIntent(doc)
+  echo "repro system remove"
+  echo "  profile  : " & profilePath
+  echo "  removed  : " & address
+  echo "  apply with: repro system sync"
+  return 0
+
+proc runSystemList(args: openArray[string]): int =
+  let (flags, _) = parseInfraFlags(args)
+  let stateDir = (if flags.stateDir.len > 0: flags.stateDir
+                  else: resolveSystemStateDir())
+  setStateDirOverride(stateDir)
+  let profilePath = systemProfilePathOrCreate(flags, stateDir)
+  if not fileExists(profilePath):
+    echo "repro system list"
+    echo "  (no system profile at " & profilePath & ")"
+    return 0
+  let profile = parseSystemProfile(readFile(profilePath))
+  echo "repro system list"
+  echo "  profile   : " & profilePath
+  echo "  resources : " & $profile.resources.len
+  for r in profile.resources:
+    echo "  - " & $r.kind & "  " & r.address
+  return 0
+
+proc runSystemWhy(args: openArray[string]): int =
+  let (flags, positional) = parseInfraFlags(args)
+  let stateDir = (if flags.stateDir.len > 0: flags.stateDir
+                  else: resolveSystemStateDir())
+  setStateDirOverride(stateDir)
+  if positional.len == 0:
+    stderr.writeLine("usage: repro system why <address>")
+    return 2
+  let address = positional[0]
+  let profilePath = systemProfilePathOrCreate(flags, stateDir)
+  if not fileExists(profilePath):
+    stderr.writeLine("repro system why: no system profile at " &
+      profilePath)
+    return 1
+  let profile = parseSystemProfile(readFile(profilePath))
+  for r in profile.resources:
+    if r.address == address:
+      echo "repro system why " & address
+      echo "  declared in : " & profilePath
+      echo "  kind        : " & $r.kind
+      echo "  target      : " & realWorldIdentity(r)
+      echo "  destructive rollback: " & $isDestructiveRollback(r)
+      let op = toPrivilegedOperation(r)
+      echo "  privileged  : " & $requiresElevation(op.kind) &
+        " (a system-scope resource — applied through the elevation broker)"
+      return 0
+  stderr.writeLine("repro system why: no resource with address '" &
+    address & "' in " & profilePath)
+  return 1
+
+proc runSystemSync(args: openArray[string]): int =
+  ## `repro system sync` — apply the current `system.nim`. Drives the
+  ## Phase-A `repro infra apply` path with a fresh plan (no preview),
+  ## the system-scope analogue of `repro home apply`.
+  let (flags, _) = parseInfraFlags(args)
+  let stateDir = (if flags.stateDir.len > 0: flags.stateDir
+                  else: resolveSystemStateDir())
+  setStateDirOverride(stateDir)
+  let profilePath = systemProfilePathOrCreate(flags, stateDir)
+  if not fileExists(profilePath):
+    stderr.writeLine("repro system sync: no system profile at " &
+      profilePath)
+    return 1
+  let profileText = readFile(profilePath)
+  let host = hostIdentity(flags.host)
+  if not acquireApplyLock(stateDir):
+    stderr.writeLine("repro system sync: another system apply is in " &
+      "progress (lock held at " & applyLockPath(stateDir) & ").")
+    return 1
+  defer: releaseApplyLock(stateDir)
+  var opts: ApplyOptions
+  opts.stateDir = stateDir
+  opts.hostIdentity = host
+  opts.reproExe = reproExePath()
+  opts.planId = ""
+  opts.elevationMode = if flags.noElevate: emNoElevate else: emBroker
+  opts.forceBroker = getEnv(ForceBrokerEnvVar).len > 0
+  opts.noPreview = true
+  var applyResult: ApplyResult
+  try:
+    applyResult = runInfraApply(profileText, opts)
+  except EInfra as e:
+    stderr.writeLine("repro system sync: " & e.msg)
+    return 1
+  echo "repro system sync"
+  echo "  generation   : " & applyResult.generationId
+  echo "  applied      : " & $applyResult.appliedCount
+  echo "  no-op        : " & $applyResult.noOpCount
+  if applyResult.skippedCount > 0:
+    echo "  skipped      : " & $applyResult.skippedCount &
+      " (privileged; not elevated)"
+  if applyResult.driftCount > 0:
+    echo "  drift        : " & $applyResult.driftCount &
+      " (fail-closed; re-plan)"
+  if applyResult.errorCount > 0:
+    echo "  errors       : " & $applyResult.errorCount
+  echo "  broker used  : " & $applyResult.usedBroker &
+    " (launches: " & $applyResult.brokerLaunchCount & ")"
+  echo "  audit log    : " & applyResult.auditLogPath
+  if applyResult.restartNeeded:
+    echo "  NOTE: a reboot is required to finish one or more changes; " &
+      "Reprobuild does not auto-reboot."
+  for d in applyResult.diagnostics:
+    echo "  - " & d
+  if applyResult.driftCount > 0 or applyResult.errorCount > 0:
+    return 1
+  if applyResult.skippedCount > 0:
+    return 4
+  return 0
+
+proc runSystemHistory(args: openArray[string]): int =
+  ## `repro system history` — list the system-scope generations, the
+  ## M62 `repro home history` analogue at system scope.
+  let (flags, _) = parseInfraFlags(args)
+  let stateDir = (if flags.stateDir.len > 0: flags.stateDir
+                  else: resolveSystemStateDir())
+  setStateDirOverride(stateDir)
+  let generations = enumerateSystemGenerations(stateDir)
+  echo "repro system history"
+  echo "  state-dir   : " & stateDir
+  echo "  generations : " & $generations.len
+  for rec in generations:
+    let ts = $fromUnix(rec.envelope.activationTimestamp).utc()
+    let marker = if rec.isActive: "* " else: "  "
+    echo "  " & marker & rec.generationId & "  [" & ts & "]  " &
+      "applied=" & $rec.envelope.appliedCount &
+      " no-op=" & $rec.envelope.noOpCount
+  if generations.len == 0:
+    echo "  (no system generations — run `repro system sync` first)"
+  return 0
+
+proc runSystemRollbackCmd(args: openArray[string]): int =
+  ## `repro system rollback [<generation-id>]` — the M64 home-rollback
+  ## analogue at system scope. Re-applies a prior generation's
+  ## `system.nim` and actively reverts resources the active generation
+  ## added that the target does not declare.
+  let (flags, positional) = parseInfraFlags(args)
+  let stateDir = (if flags.stateDir.len > 0: flags.stateDir
+                  else: resolveSystemStateDir())
+  setStateDirOverride(stateDir)
+  var targetId = flags.generationId
+  if targetId.len == 0 and positional.len > 0:
+    targetId = positional[0]
+  if not acquireApplyLock(stateDir):
+    stderr.writeLine("repro system rollback: another system apply is in " &
+      "progress (lock held at " & applyLockPath(stateDir) & ").")
+    return 1
+  defer: releaseApplyLock(stateDir)
+  var opts: SystemRollbackOptions
+  opts.stateDir = stateDir
+  opts.hostIdentity = hostIdentity(flags.host)
+  opts.reproExe = reproExePath()
+  opts.targetGenerationId = targetId
+  opts.acceptFeatureDestroy = flags.acceptFeatureDestroy
+  opts.reconcileDrift = flags.reconcileDrift
+  opts.forceBroker = getEnv(ForceBrokerEnvVar).len > 0
+  var outcome: SystemRollbackOutcome
+  try:
+    outcome = runSystemRollback(opts)
+  except EFeatureDestroy as e:
+    stderr.writeLine("repro system rollback: " & e.msg)
+    return 1
+  except EPlanStale as e:
+    # System-scope rollback always confirms drift: a drifted resource
+    # blocks the rollback unless `--reconcile-drift` is passed.
+    stderr.writeLine("repro system rollback: " & $e.drifted.len &
+      " resource(s) drifted since the target generation was applied; " &
+      "system-scope rollback requires explicit confirmation — re-run " &
+      "with --reconcile-drift to overwrite the drift.")
+    for a in e.drifted:
+      stderr.writeLine("  drifted: " & a)
+    return 3
+  except EInfra as e:
+    stderr.writeLine("repro system rollback: " & e.msg)
+    return 1
+  echo "repro system rollback"
+  echo "  from generation : " & outcome.fromGenerationId
+  echo "  to generation   : " & outcome.toGenerationId
+  echo "  new generation  : " & outcome.apply.generationId
+  echo "  applied         : " & $outcome.appliedCount
+  echo "  no-op           : " & $outcome.noOpCount
+  if outcome.driftedAddresses.len > 0:
+    echo "  reconciled drift: " & $outcome.driftedAddresses.len &
+      " resource(s) (--reconcile-drift)"
+  echo "  broker used     : " & $outcome.apply.usedBroker &
+    " (launches: " & $outcome.apply.brokerLaunchCount & ")"
+  if outcome.apply.errorCount > 0:
+    echo "  errors          : " & $outcome.apply.errorCount
+    return 1
+  return 0
+
 # ---------------------------------------------------------------------------
 # Dispatch.
 # ---------------------------------------------------------------------------
@@ -277,23 +575,26 @@ proc runInfraCommand*(args: seq[string]): int =
     return 1
 
 proc runSystemCommand*(args: seq[string]): int =
-  ## `repro system <subcommand>`. M69 Phase A: only `audit` is wired;
-  ## the `add/remove/list/why/sync/history/rollback` profile-editing
-  ## family is deferred to a later phase.
+  ## `repro system <subcommand>`. M69 Phase B wires the full
+  ## `add/remove/list/why/sync/history/rollback` profile-editing
+  ## family (the system-scope analogue of the M60-M64 `repro home`
+  ## commands), alongside the Phase-A `audit` reader.
   if args.len == 0:
-    stderr.writeLine("usage: repro system {audit} ...")
+    stderr.writeLine("usage: repro system {add | remove | list | why | " &
+      "sync | history | rollback | audit} ...")
     return 2
   let sub = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
   try:
     case sub
+    of "add": return runSystemAdd(rest)
+    of "remove": return runSystemRemove(rest)
+    of "list": return runSystemList(rest)
+    of "why": return runSystemWhy(rest)
+    of "sync": return runSystemSync(rest)
+    of "history": return runSystemHistory(rest)
+    of "rollback": return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
-    of "add", "remove", "list", "why", "sync", "history", "rollback":
-      stderr.writeLine("repro system " & sub & ": the system-profile " &
-        "editing command family is deferred to a later M69 phase; " &
-        "Phase A applies a hand-authored system.nim via " &
-        "`repro infra plan` / `repro infra apply`.")
-      return 2
     else:
       stderr.writeLine("repro system: unknown subcommand: " & sub)
       return 2
