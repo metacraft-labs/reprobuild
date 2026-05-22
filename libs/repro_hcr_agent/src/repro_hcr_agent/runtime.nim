@@ -19,6 +19,8 @@ type
     jitRegistration*: Option[JitRegistrationEvidence]
     unwindRegistration*: Option[UnwindRegistrationEvidence]
 
+const DefaultRegisterDebugUnwind = defined(macosx) and defined(arm64)
+
 proc bytesOf(text: string): seq[byte] =
   result = newSeq[byte](text.len)
   for i, ch in text:
@@ -61,7 +63,7 @@ proc requireRuntime(runtime: HcrAgentRuntimeOps) =
 proc applyDirectPatchRequest*(runtime: HcrAgentRuntimeOps;
                               request: HcrPatchRequest;
                               nopSledBytes = 16'u32;
-                              registerDebugUnwind = true):
+                              registerDebugUnwind = DefaultRegisterDebugUnwind):
                               HcrAgentApplyResult =
   runtime.requireRuntime()
   if request.schemaId.len > 0 and request.schemaId != HcrPatchRequestSchemaId:

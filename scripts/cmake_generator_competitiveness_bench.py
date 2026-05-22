@@ -23,6 +23,17 @@ WORKSPACE = ROOT.parent
 DEFAULT_CMAKE_ROOT = WORKSPACE / "reprobuild-cmake"
 DEFAULT_RUNQUOTA_ROOT = WORKSPACE / "runquota"
 GENERATED_FIXTURE = ROOT / "benchmarks" / "fixtures" / "cmake-generated-custom-command"
+HEADER_INCREMENTAL_CANDIDATES = {
+    "CMake": [
+        "Source/cmSystemTools.h",
+        "Source/cmValue.h",
+        "Source/cmStringAlgorithms.h",
+    ],
+    "fmt": ["include/fmt/format.h"],
+    "libuv": ["include/uv.h"],
+    "protobuf": ["src/google/protobuf/message.h"],
+    "zlib": ["zlib.h"],
+}
 
 
 def json_now():
@@ -582,6 +593,14 @@ def compile_command_source(binary_dir, needle):
     return None
 
 
+def header_incremental_source(project_key, source_dir):
+    for relative in HEADER_INCREMENTAL_CANDIDATES.get(project_key, []):
+        path = source_dir / relative
+        if path.exists():
+            return path
+    return None
+
+
 def append_comment(path, label):
     with path.open("a") as handle:
         handle.write(f"\n/* reprobuild benchmark edit {label} {time.time_ns()} */\n")
@@ -748,6 +767,20 @@ def benchmark_project_mode(args, context, project_report, key, source_dir,
             else:
                 project_report.setdefault("incrementalSkipped", {})[
                     execution_mode] = "compile command source not found"
+
+            edit_header = header_incremental_source(key, mode_source)
+            if edit_header and edit_header.exists():
+                append_comment(edit_header, key)
+                ninja_header_incremental = ninja_build(build_target)
+                rb_header_incremental = rb_build(build_target)
+                project_report.setdefault("incrementalHeaders", {})[
+                    execution_mode] = str(edit_header)
+                add_pair(project_report, "single_header_incremental_rebuild",
+                         execution_mode, ninja_header_incremental,
+                         rb_header_incremental)
+            else:
+                project_report.setdefault("incrementalHeaderSkipped", {})[
+                    execution_mode] = "header benchmark source not found"
 
         if custom_seed:
             mode_custom_seed = mode_source / custom_seed.relative_to(source_dir)

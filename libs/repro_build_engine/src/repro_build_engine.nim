@@ -1135,7 +1135,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       hotRecords.add(hotRecord.get())
     let lookupStart = statStart()
     let inputsUnchanged =
-      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
+      if hotRecords.len == cache.hotMetadataRecordCount():
+        cache.hotMetadataInputsUnchanged(addr metadataCache)
+      else:
+        hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
     finishStat("repro cache lookup", lookupStart)
     if not inputsUnchanged:
       return none(BuildRunResult)
@@ -1424,7 +1427,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let lookup = cache.lookupActionResult(cas, action.weakFingerprint,
             action.actionCachePolicy,
             verifyOutputBlobs = not outputsPresentBeforeLookup,
-            allowMetadataOnlyHit = false,
+            allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
+              outputsPresentBeforeLookup,
             metadataCache = addr fileMetadataCache)
           finishStat("repro cache lookup", lookupStart)
           case lookup.status

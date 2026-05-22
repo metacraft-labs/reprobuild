@@ -1,5 +1,8 @@
 import std/[options, os, sets, tables, times]
 
+when defined(linux):
+  import std/posix
+
 import repro_core
 import repro_hash
 
@@ -234,19 +237,45 @@ proc digestFileName(digest: ContentDigest): string =
     toHex(digest.bytes) & ".rbar"
 
 proc fingerprintMetadata(path: string): FileMetadata =
-  if not fileExists(path) and not dirExists(path):
-    return FileMetadata(kind: ffkMissing)
-  let info = getFileInfo(path, followSymlink = false)
-  result.kind =
-    case info.kind
-    of pcFile, pcLinkToFile:
-      ffkRegular
-    of pcDir, pcLinkToDir:
-      ffkDirectory
-  result.sizeBytes = uint64(max(info.size, 0))
-  let mtime = info.lastWriteTime
-  result.mtimeNs = uint64(mtime.toUnix) * 1_000_000_000'u64 +
-    uint64(mtime.nanosecond)
+  when defined(linux):
+    var stat: Stat
+    if lstat(path, stat) != 0:
+      return FileMetadata(kind: ffkMissing)
+    result.kind =
+      if S_ISREG(stat.st_mode):
+        ffkRegular
+      elif S_ISDIR(stat.st_mode):
+        ffkDirectory
+      elif S_ISLNK(stat.st_mode):
+        try:
+          let info = getFileInfo(path, followSymlink = false)
+          case info.kind
+          of pcFile, pcLinkToFile:
+            ffkRegular
+          of pcDir, pcLinkToDir:
+            ffkDirectory
+        except OSError:
+          ffkMissing
+      else:
+        ffkOther
+    result.sizeBytes =
+      if stat.st_size < 0: 0'u64 else: uint64(stat.st_size)
+    result.mtimeNs = uint64(cast[int64](stat.st_mtim.tv_sec)) *
+      1_000_000_000'u64 + uint64(stat.st_mtim.tv_nsec)
+  else:
+    if not fileExists(path) and not dirExists(path):
+      return FileMetadata(kind: ffkMissing)
+    let info = getFileInfo(path, followSymlink = false)
+    result.kind =
+      case info.kind
+      of pcFile, pcLinkToFile:
+        ffkRegular
+      of pcDir, pcLinkToDir:
+        ffkDirectory
+    result.sizeBytes = uint64(max(info.size, 0))
+    let mtime = info.lastWriteTime
+    result.mtimeNs = uint64(mtime.toUnix) * 1_000_000_000'u64 +
+      uint64(mtime.nanosecond)
 
 proc initFileMetadataCache*(): FileMetadataCache =
   FileMetadataCache(entries: initTable[string, FileMetadata]())
@@ -267,6 +296,14 @@ proc fileBytesForHash(path: string; metadata: FileMetadata): seq[byte] =
   if metadata.kind != ffkRegular:
     return @[]
   bytes(readFile(path))
+
+proc isDirectRegularFile(path: string): bool =
+  when defined(linux):
+    var stat: Stat
+    lstat(path, stat) == 0 and S_ISREG(stat.st_mode)
+  else:
+    let info = getFileInfo(path, followSymlink = false)
+    info.kind == pcFile
 
 proc observeFileWithMetadata(path: string; policy: FileFingerprintPolicy;
                              metadata: FileMetadata): FileFingerprint =
@@ -324,6 +361,28 @@ proc storeBlob*(cas: LocalCas; payload: openArray[byte]): CasBlobRef =
   let tmpPath = cas.root / "tmp" / (digestHex(result.digest) & "." &
     $getCurrentProcessId() & "." & $now.toUnix & "." & $now.nanosecond)
   writeFile(tmpPath, byteString(payload))
+  try:
+    moveFile(tmpPath, finalPath)
+  except OSError:
+    if fileExists(tmpPath):
+      removeFile(tmpPath)
+    if fileExists(finalPath):
+      cas.verifyBlob(result)
+    else:
+      raise
+
+proc storeFileBlob*(cas: LocalCas; path: string; sizeBytes: uint64): CasBlobRef =
+  result.digest = casFileDigest(path, sizeBytes)
+  result.sizeBytes = sizeBytes
+  let finalPath = cas.blobPath(result.digest)
+  if fileExists(finalPath):
+    cas.verifyBlob(result)
+    return
+  createDir(finalPath.splitPath.head)
+  let now = getTime()
+  let tmpPath = cas.root / "tmp" / (digestHex(result.digest) & "." &
+    $getCurrentProcessId() & "." & $now.toUnix & "." & $now.nanosecond)
+  copyFile(path, tmpPath)
   try:
     moveFile(tmpPath, finalPath)
   except OSError:
@@ -798,6 +857,9 @@ proc hotMetadataInputsUnchanged*(cache: ActionCache;
       return false
   true
 
+proc hotMetadataRecordCount*(cache: ActionCache): int =
+  cache.hotByWeak.len
+
 proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
                                        metadataCache: ptr FileMetadataCache = nil): bool =
   var seen = initHashSet[string]()
@@ -828,7 +890,7 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
   result.strongFingerprint = computeStrongFingerprint(weak, result.inputs)
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    let data = bytes(readFile(source))
+    let sourceMetadata = fingerprintMetadata(source)
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.
@@ -836,8 +898,12 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
       let perms: set[FilePermission] = {}
     else:
       let perms = getFilePermissions(source)
-    result.outputs.add(OutputBlob(path: path, blob: cas.storeBlob(data),
-      permissions: perms))
+    let blob =
+      if sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
+        cas.storeFileBlob(source, sourceMetadata.sizeBytes)
+      else:
+        cas.storeBlob(bytes(readFile(source)))
+    result.outputs.add(OutputBlob(path: path, blob: blob, permissions: perms))
   cache.appendRecord(result)
 
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
