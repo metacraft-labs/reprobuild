@@ -24,6 +24,11 @@ DEFAULT_CMAKE_ROOT = WORKSPACE / "reprobuild-cmake"
 DEFAULT_RUNQUOTA_ROOT = WORKSPACE / "runquota"
 GENERATED_FIXTURE = ROOT / "benchmarks" / "fixtures" / "cmake-generated-custom-command"
 
+# Per-command wall-clock ceiling. A hung subprocess (e.g. a build step that
+# never returns) must not stall the whole benchmark indefinitely.
+COMMAND_TIMEOUT_SECONDS = int(
+    os.environ.get("REPROBUILD_CMAKE_BENCH_COMMAND_TIMEOUT", "600"))
+
 
 def json_now():
     return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
@@ -43,16 +48,35 @@ def tail(text, limit=6000):
     return text[-limit:]
 
 
-def run_command(args, cwd=None, env=None, check=True):
+def run_command(args, cwd=None, env=None, check=True,
+                timeout=COMMAND_TIMEOUT_SECONDS):
     start = time.perf_counter()
-    proc = subprocess.run(
-        [str(arg) for arg in args],
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.run(
+            [str(arg) for arg in args],
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        result = {
+            "command": [str(arg) for arg in args],
+            "commandLine": shlex_join(args),
+            "cwd": str(cwd) if cwd else None,
+            "exitCode": None,
+            "status": "timeout",
+            "timeoutSeconds": timeout,
+            "wallMs": round(elapsed_ms, 3),
+            "stdoutTail": tail(exc.stdout or ""),
+            "stderrTail": tail(exc.stderr or ""),
+        }
+        if check:
+            raise CommandFailure(result)
+        return result
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     result = {
         "command": [str(arg) for arg in args],
@@ -287,7 +311,7 @@ def ensure_archive(project_key, project, cache_dir):
     if not archive.exists():
         print(f"fetching pinned source for {project_key}", file=sys.stderr)
         try:
-            with urllib.request.urlopen(url) as response, archive.open("wb") as output:
+            with urllib.request.urlopen(url, timeout=120) as response, archive.open("wb") as output:
                 shutil.copyfileobj(response, output)
         except Exception:
             curl = shutil.which("curl")
