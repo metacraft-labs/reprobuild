@@ -113,7 +113,7 @@ suite "project DSL build action payload":
     check automatic.call.arguments[3].repeated
     check automatic.dependencyPolicy.kind == bdpAutomaticMonitor
     check automatic.dependencyPolicy.depfile == ""
-    check automatic.actionCachePolicy == acfpHybrid
+    check automatic.actionCachePolicy == acfpTimestamp
 
     let makeDepfile = decodeBuildActionPayload(encodeBuildActionPayload(
       sampleAction(makeDepfilePolicy("deps/generated.d"),
@@ -132,7 +132,7 @@ suite "project DSL build action payload":
     check decoded.call.arguments[0].role == carOrdinary
     check decoded.dependencyPolicy.kind == bdpMakeDepfile
     check decoded.dependencyPolicy.depfile == "deps/generated.d"
-    check decoded.actionCachePolicy == acfpHybrid
+    check decoded.actionCachePolicy == acfpTimestamp
 
   test "version 2 payloads decode with default dependency policy":
     let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
@@ -142,7 +142,7 @@ suite "project DSL build action payload":
     check decoded.call.arguments[0].role == carOrdinary
     check decoded.dependencyPolicy.kind == bdpDefault
     check decoded.dependencyPolicy.depfile == ""
-    check decoded.actionCachePolicy == acfpHybrid
+    check decoded.actionCachePolicy == acfpTimestamp
 
   test "invalid dependency policy kind fails closed":
     var encoded = encodeBuildActionPayload(sampleAction(

@@ -1980,7 +1980,8 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
     cache.flushHotIndex()
   let record = cache.recordActionResult(cas, regenerationAction.weakFingerprint,
     regenerationAction.actionCachePolicy, regenerationAction.inputs,
-    regenerationAction.outputs, regenerationAction.cwd)
+    regenerationAction.outputs, regenerationAction.cwd,
+    storeOutputBlobs = false)
   writeActionResultRecordFile(
     dependencyEvidencePath(cmakeCacheRoot, regenerationAction.id), record)
   true
@@ -2055,6 +2056,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
+      deferLocalOutputBlobs: true,
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
@@ -2153,6 +2155,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         stdoutLimit: 1024 * 1024,
         stderrLimit: 1024 * 1024,
         rebuildMissingOutputsOnCacheHit: true,
+        deferLocalOutputBlobs: true,
         bypassRunQuota: bypassRunQuota,
         fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
         inlineRunQuota: true,
@@ -2288,6 +2291,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         stdoutLimit: 1024 * 1024,
         stderrLimit: 1024 * 1024,
         rebuildMissingOutputsOnCacheHit: true,
+        deferLocalOutputBlobs: true,
         bypassRunQuota: bypassRunQuota,
         fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
         inlineRunQuota: true,
@@ -2391,6 +2395,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
+      deferLocalOutputBlobs: true,
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,

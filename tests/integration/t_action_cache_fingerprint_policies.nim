@@ -302,6 +302,48 @@ suite "integration_action_cache_fingerprint_policies":
       check hotHit.record.inputs.len == 1
       check hotHit.record.inputs[0].path == inputPath
 
+    block metadataOnlyOutputRecords:
+      let localRoot = tempRoot / "metadata-only-output"
+      createDir(localRoot)
+      let inputPath = localRoot / "input.txt"
+      let outputPath = localRoot / "out.txt"
+      writeFile(inputPath, "alpha\n")
+      runFixtureAction(inputPath, outputPath)
+
+      let record = cache.recordActionResult(cas, weakFor("metadata-only-output"),
+        ffpHybrid, [inputPath], ["out.txt"], localRoot,
+        storeOutputBlobs = false)
+      check record.outputPayloadKind == opkMetadataOnly
+      check record.outputs.len == 1
+      check record.outputs[0].path == "out.txt"
+      check record.outputs[0].metadata.kind == ffkRegular
+
+      let metadataHit = cache.lookupActionResult(cas,
+        weakFor("metadata-only-output"), ffpHybrid, verifyOutputBlobs = false)
+      check metadataHit.status == aclHit
+
+      removeIfExists(outputPath)
+      let restoreLookup = cache.lookupActionResult(cas,
+        weakFor("metadata-only-output"), ffpHybrid)
+      check restoreLookup.status == aclMissNoOutputPayload
+      expect CacheIntegrityError:
+        cas.restoreOutputs(record, localRoot)
+
+    block timestampDirectoryProbeIsExistenceOnly:
+      let localRoot = tempRoot / "timestamp-directory-probe"
+      createDir(localRoot)
+      writeFile(localRoot / "out.txt", "one\n")
+
+      discard cache.recordActionResult(cas,
+        weakFor("timestamp-directory-probe"), ffpTimestamp,
+        [localRoot], ["out.txt"], localRoot)
+      writeFile(localRoot / "later-created-output.txt", "two\n")
+
+      let lookup = cache.lookupActionResult(cas,
+        weakFor("timestamp-directory-probe"), ffpTimestamp,
+        verifyOutputBlobs = false)
+      check lookup.status == aclHit
+
     block newestMismatchedRecordFallsBackToOlderHit:
       let weak = weakFor("newest-mismatch-fallback")
       let oldRoot = tempRoot / "newest-mismatch-old"

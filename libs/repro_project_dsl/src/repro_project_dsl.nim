@@ -393,7 +393,7 @@ proc makeDepfilePolicy*(depfile = ""): BuildActionDependencyPolicy =
   BuildActionDependencyPolicy(kind: bdpMakeDepfile, depfile: depfile)
 
 proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy =
-  acfpHybrid
+  acfpTimestamp
 
 const
   BuiltinPackageName = "reprobuild.builtin"

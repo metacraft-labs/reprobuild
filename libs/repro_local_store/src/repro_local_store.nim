@@ -1,4 +1,5 @@
 import std/[options, os, sets, tables, times]
+import std/memfiles except open
 
 when defined(linux):
   import std/posix
@@ -48,8 +49,13 @@ type
     digest*: ContentDigest
     sizeBytes*: uint64
 
+  OutputPayloadKind* = enum
+    opkCasBlobs
+    opkMetadataOnly
+
   OutputBlob* = object
     path*: string
+    metadata*: FileMetadata
     blob*: CasBlobRef
     permissions*: set[FilePermission]
 
@@ -58,6 +64,7 @@ type
     policy*: FileFingerprintPolicy
     inputs*: seq[FileFingerprint]
     strongFingerprint*: ContentDigest
+    outputPayloadKind*: OutputPayloadKind
     outputs*: seq[OutputBlob]
 
   LocalCas* = object
@@ -70,7 +77,10 @@ type
     hotRecordsPath: string
     hotIndexPath: string
     loadedAllRecords: bool
+    hotLoaded: bool
     hotIndexDirty: bool
+    hotIndexRaw: seq[byte]
+    hotIndexRawValid: bool
     byWeak: Table[string, seq[ActionResultRecord]]
     hotByWeak: Table[string, ActionResultRecord]
     hotInputs: seq[FileFingerprint]
@@ -81,6 +91,7 @@ type
   ActionCacheLookupStatus* = enum
     aclMissNoRecord
     aclMissInputChanged
+    aclMissNoOutputPayload
     aclHit
     aclHybridCutoff
     aclRejectedCorruptOutput
@@ -94,9 +105,26 @@ type
     records: Table[string, ActionResultRecord]
     inputs: seq[FileFingerprint]
 
+  HotMetadataProbe* = object
+    weakFingerprint*: ContentDigest
+    policy*: FileFingerprintPolicy
+
+  HotMetadataScanStatus* = enum
+    hmssUnavailable
+    hmssHit
+    hmssMissingRecord
+    hmssInputChanged
+    hmssCorrupt
+
+  HotMetadataScan* = object
+    status*: HotMetadataScanStatus
+    recordCount*: int
+    inputCount*: int
+    checkedInputCount*: int
+
 const
   ActionRecordMagic = "RBAR"
-  ActionRecordVersion = 2'u16
+  ActionRecordVersion = 3'u16
   ActionHotRecordMagic = "RBAH"
   ActionHotRecordVersion = 1'u16
   ActionHotIndexMagic = "RBHI"
@@ -277,12 +305,23 @@ proc fingerprintMetadata(path: string): FileMetadata =
     let mtime = info.lastWriteTime
     result.mtimeNs = uint64(mtime.toUnix) * 1_000_000_000'u64 +
       uint64(mtime.nanosecond)
+  if result.kind == ffkDirectory:
+    # Existing-directory probes depend on the fact that a directory exists,
+    # not on the physical directory inode mtime. Directory enumeration needs a
+    # membership fingerprint; the transitional monitor path stores those
+    # observations as probes, so recording directory mtimes would make actions
+    # miss whenever their own output directory is touched.
+    result.sizeBytes = 0
+    result.mtimeNs = 0
 
 proc initFileMetadataCache*(): FileMetadataCache =
   FileMetadataCache(entries: initTable[string, FileMetadata]())
 
 proc clear*(cache: var FileMetadataCache) =
   cache.entries.clear()
+
+proc invalidate*(cache: var FileMetadataCache; path: string) =
+  cache.entries.del(path)
 
 proc fingerprintMetadata(path: string;
                          cache: ptr FileMetadataCache): FileMetadata =
@@ -317,6 +356,10 @@ proc observeFileWithMetadata(path: string; policy: FileFingerprintPolicy;
 
 proc observeFile*(path: string; policy: FileFingerprintPolicy): FileFingerprint =
   observeFileWithMetadata(path, policy, fingerprintMetadata(path))
+
+proc observeFile*(path: string; policy: FileFingerprintPolicy;
+                  cache: ptr FileMetadataCache): FileFingerprint =
+  observeFileWithMetadata(path, policy, fingerprintMetadata(path, cache))
 
 proc digestHex*(digest: ContentDigest): string =
   toHex(digest.bytes)
@@ -404,6 +447,9 @@ proc materialPath(root, path: string): string =
 
 proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
                      outputRoot = "") =
+  if record.outputPayloadKind != opkCasBlobs:
+    raise newException(CacheIntegrityError,
+      "cache record does not contain output payloads")
   var payloads: seq[seq[byte]] = @[]
   for output in record.outputs:
     payloads.add(cas.readBlob(output.blob))
@@ -460,12 +506,18 @@ proc encodeRecord(record: ActionResultRecord): seq[byte] =
   for input in record.inputs:
     result.writeFingerprint(input)
   result.writeDigest(record.strongFingerprint)
+  result.add(byte(ord(record.outputPayloadKind)))
   result.writeU32Le(uint32(record.outputs.len))
   for output in record.outputs:
     result.writeString(output.path)
-    result.writeDigest(output.blob.digest)
-    result.writeU64Le(output.blob.sizeBytes)
+    result.writeMetadata(output.metadata)
     result.writePermissions(output.permissions)
+    case record.outputPayloadKind
+    of opkCasBlobs:
+      result.writeDigest(output.blob.digest)
+      result.writeU64Le(output.blob.sizeBytes)
+    of opkMetadataOnly:
+      discard
 
 proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
   if payload.len < 6:
@@ -475,7 +527,7 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       raiseEnvelopeError(eeUnknownMagic, "unknown action record magic")
   var pos = 4
   let version = readU16Le(payload, pos)
-  if version != ActionRecordVersion:
+  if version notin {2'u16, ActionRecordVersion}:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported action record version")
   result.weakFingerprint = readDigest(payload, pos)
   let policy = readByte(payload, pos)
@@ -487,14 +539,32 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
   for i in 0 ..< inputCount:
     result.inputs[i] = readFingerprint(payload, pos)
   result.strongFingerprint = readDigest(payload, pos)
+  if version >= 3'u16:
+    let outputPayloadKind = readByte(payload, pos)
+    if outputPayloadKind > byte(ord(opkMetadataOnly)):
+      raiseEnvelopeError(eeMalformed, "invalid output payload kind")
+    result.outputPayloadKind = OutputPayloadKind(outputPayloadKind)
+  else:
+    result.outputPayloadKind = opkCasBlobs
   let outputCount = int(readU32Le(payload, pos))
   result.outputs = newSeq[OutputBlob](outputCount)
   for i in 0 ..< outputCount:
     result.outputs[i].path = readString(payload, pos)
-    let digest = readDigest(payload, pos)
-    let size = readU64Le(payload, pos)
-    result.outputs[i].blob = blobRef(digest, size)
-    result.outputs[i].permissions = readPermissions(payload, pos)
+    if version >= 3'u16:
+      result.outputs[i].metadata = readMetadata(payload, pos)
+      result.outputs[i].permissions = readPermissions(payload, pos)
+      case result.outputPayloadKind
+      of opkCasBlobs:
+        let digest = readDigest(payload, pos)
+        let size = readU64Le(payload, pos)
+        result.outputs[i].blob = blobRef(digest, size)
+      of opkMetadataOnly:
+        discard
+    else:
+      let digest = readDigest(payload, pos)
+      let size = readU64Le(payload, pos)
+      result.outputs[i].blob = blobRef(digest, size)
+      result.outputs[i].permissions = readPermissions(payload, pos)
   if pos != payload.len:
     raiseEnvelopeError(eeMalformed, "trailing action record bytes")
 
@@ -538,6 +608,7 @@ proc decodeHotRecord(payload: openArray[byte]): ActionResultRecord =
   if policy > byte(ord(ffpHybrid)):
     raiseEnvelopeError(eeMalformed, "invalid hot record policy")
   result.policy = FileFingerprintPolicy(policy)
+  result.outputPayloadKind = opkMetadataOnly
   let inputCount = int(readU32Le(payload, pos))
   result.inputs = newSeq[FileFingerprint](inputCount)
   for i in 0 ..< inputCount:
@@ -560,6 +631,7 @@ proc hotMetadataRecord(record: ActionResultRecord): ActionResultRecord =
   for input in record.inputs:
     result.inputs.add(metadataOnly(input))
   result.outputs.setLen(0)
+  result.outputPayloadKind = opkMetadataOnly
   result.strongFingerprint = ContentDigest()
 
 proc recordTail(payload: openArray[byte]): uint32 =
@@ -576,7 +648,10 @@ proc appendFramedPayload(path: string; payload: openArray[byte]) =
   finally:
     handle.close()
 
+proc ensureHotRecordsLoaded(cache: var ActionCache)
+
 proc appendHotRecord(cache: var ActionCache; record: ActionResultRecord) =
+  cache.ensureHotRecordsLoaded()
   var hot = record
   hot = hotMetadataRecord(record)
   let payload = encodeHotRecord(hot)
@@ -669,6 +744,7 @@ proc decodeHotIndex(payload: openArray[byte]): HotIndexDecode =
     if policy > byte(ord(ffpHybrid)):
       raiseEnvelopeError(eeMalformed, "invalid hot index record policy")
     record.policy = FileFingerprintPolicy(policy)
+    record.outputPayloadKind = opkMetadataOnly
     let recordInputCount = int(readU32Le(payload, pos))
     record.inputs = newSeq[FileFingerprint](recordInputCount)
     for i in 0 ..< recordInputCount:
@@ -681,6 +757,116 @@ proc decodeHotIndex(payload: openArray[byte]): HotIndexDecode =
   if pos != payload.len:
     raiseEnvelopeError(eeMalformed, "trailing action hot index bytes")
 
+proc skipString(data: openArray[byte]; pos: var int) =
+  let length = int(readU32Le(data, pos))
+  if pos + length > data.len:
+    raiseEnvelopeError(eeMalformed, "truncated string")
+  pos += length
+
+proc parseHotIndexLayout(data: openArray[byte];
+                         inputOffsets: var seq[int];
+                         recordStart: var int;
+                         recordCount: var int) =
+  if data.len < 6:
+    raiseEnvelopeError(eeMalformed, "truncated action hot index")
+  for i in 0 ..< 4:
+    if data[i] != byte(ord(ActionHotIndexMagic[i])):
+      raiseEnvelopeError(eeUnknownMagic, "unknown action hot index magic")
+  var pos = 4
+  let version = readU16Le(data, pos)
+  if version != ActionHotIndexVersion:
+    raiseEnvelopeError(eeUnsupportedVersion, "unsupported action hot index version")
+  let inputCount = int(readU32Le(data, pos))
+  inputOffsets = newSeq[int](inputCount)
+  for i in 0 ..< inputCount:
+    inputOffsets[i] = pos
+    skipString(data, pos)
+    discard readByte(data, pos)
+    discard readMetadata(data, pos)
+  recordCount = int(readU32Le(data, pos))
+  recordStart = pos
+
+proc hotIndexInputUnchanged(data: openArray[byte]; inputOffset: int;
+                            metadataCache: ptr FileMetadataCache): bool =
+  var pos = inputOffset
+  let path = readString(data, pos)
+  discard readByte(data, pos)
+  let recordedMetadata = readMetadata(data, pos)
+  fingerprintMetadata(path, metadataCache) == recordedMetadata
+
+template mappedBytes(mapping: MemFile): untyped =
+  toOpenArray(cast[ptr UncheckedArray[byte]](mapping.mem), 0, mapping.size - 1)
+
+proc scanHotIndexMetadataInputs(data: openArray[byte];
+                                probes: openArray[HotMetadataProbe];
+                                metadataCache: ptr FileMetadataCache = nil):
+                                HotMetadataScan =
+  if probes.len == 0:
+    return HotMetadataScan(status: hmssHit)
+  try:
+    var inputOffsets: seq[int]
+    var recordStart = 0
+    var recordCount = 0
+    parseHotIndexLayout(data, inputOffsets, recordStart, recordCount)
+    result.recordCount = recordCount
+    result.inputCount = inputOffsets.len
+    var matched = newSeq[bool](probes.len)
+    var neededInputIds = initHashSet[uint32]()
+    var pos = recordStart
+    for _ in 0 ..< recordCount:
+      let weak = readDigest(data, pos)
+      let policyByte = readByte(data, pos)
+      if policyByte > byte(ord(ffpHybrid)):
+        raiseEnvelopeError(eeMalformed, "invalid hot index record policy")
+      let policy = FileFingerprintPolicy(policyByte)
+      let recordInputCount = int(readU32Le(data, pos))
+      var needed = false
+      for i, probe in probes:
+        if probe.weakFingerprint == weak and probe.policy == policy:
+          matched[i] = true
+          needed = true
+      for _ in 0 ..< recordInputCount:
+        let inputId = readU32Le(data, pos)
+        if int(inputId) < 0 or int(inputId) >= inputOffsets.len:
+          raiseEnvelopeError(eeMalformed, "invalid hot index input reference")
+        if needed:
+          neededInputIds.incl(inputId)
+    if pos != data.len:
+      raiseEnvelopeError(eeMalformed, "trailing action hot index bytes")
+    for item in matched:
+      if not item:
+        return HotMetadataScan(status: hmssMissingRecord,
+          recordCount: recordCount, inputCount: inputOffsets.len)
+    for inputId in neededInputIds:
+      inc result.checkedInputCount
+      if not hotIndexInputUnchanged(data, inputOffsets[int(inputId)],
+                                    metadataCache):
+        result.status = hmssInputChanged
+        return
+    result.status = hmssHit
+  except EnvelopeError:
+    result.status = hmssCorrupt
+
+proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
+                                          probes: openArray[HotMetadataProbe];
+                                          metadataCache: ptr FileMetadataCache = nil):
+                                          HotMetadataScan =
+  if not cache.hotIndexRawValid:
+    return HotMetadataScan(status: hmssUnavailable)
+  if probes.len == 0:
+    return HotMetadataScan(status: hmssHit)
+  try:
+    var mapping = memfiles.open(extendedPath(cache.hotIndexPath), fmRead)
+    defer:
+      mapping.close()
+    if mapping.size <= 0:
+      return HotMetadataScan(status: hmssUnavailable)
+    scanHotIndexMetadataInputs(mappedBytes(mapping), probes, metadataCache)
+  except OSError, IOError:
+    if cache.hotIndexRaw.len > 0:
+      return scanHotIndexMetadataInputs(cache.hotIndexRaw, probes, metadataCache)
+    HotMetadataScan(status: hmssUnavailable)
+
 proc writeHotIndex(cache: ActionCache) =
   writeFile(extendedPath(cache.hotIndexPath), byteString(encodeHotIndex(cache.hotByWeak)))
 
@@ -691,12 +877,25 @@ proc sourceNewerThanIndex(sourcePath, indexPath: string): bool =
     return true
   getLastModificationTime(extendedPath(sourcePath)) > getLastModificationTime(extendedPath(indexPath))
 
-proc loadHotRecords(cache: var ActionCache) =
-  cache.hotByWeak.clear()
+proc tryLoadHotIndexRaw(cache: var ActionCache) =
+  cache.hotIndexRaw.setLen(0)
+  cache.hotIndexRawValid = false
   if fileExists(extendedPath(cache.hotIndexPath)) and
       not sourceNewerThanIndex(cache.hotRecordsPath, cache.hotIndexPath):
     try:
-      let decoded = decodeHotIndex(bytes(readFile(extendedPath(cache.hotIndexPath))))
+      cache.hotIndexRawValid = getFileSize(extendedPath(cache.hotIndexPath)) > 0
+    except OSError:
+      cache.hotIndexRawValid = false
+
+proc loadHotRecords(cache: var ActionCache) =
+  cache.hotLoaded = true
+  cache.hotByWeak.clear()
+  if cache.hotIndexRawValid:
+    try:
+      var mapping = memfiles.open(extendedPath(cache.hotIndexPath), fmRead)
+      defer:
+        mapping.close()
+      let decoded = decodeHotIndex(mappedBytes(mapping))
       cache.hotByWeak = decoded.records
       cache.hotInputs = decoded.inputs
       return
@@ -726,12 +925,18 @@ proc loadHotRecords(cache: var ActionCache) =
   if getFileSize(extendedPath(cache.hotRecordsPath)) >= ActionCacheCompactThreshold:
     cache.rebuildHotInputs()
     cache.writeHotIndex()
+    cache.tryLoadHotIndexRaw()
     cache.hotIndexDirty = false
   else:
     cache.rebuildHotInputs()
 
-proc readHotRecord(cache: ActionCache; weak: ContentDigest):
+proc ensureHotRecordsLoaded(cache: var ActionCache) =
+  if not cache.hotLoaded:
+    cache.loadHotRecords()
+
+proc readHotRecord(cache: var ActionCache; weak: ContentDigest):
     tuple[found: bool; record: ActionResultRecord] =
+  cache.ensureHotRecordsLoaded()
   let key = digestKey(weak)
   if cache.hotByWeak.hasKey(key):
     return (found: true, record: cache.hotByWeak[key])
@@ -791,6 +996,9 @@ proc loadRecords(cache: var ActionCache) =
 
 proc compactLoadedRecords(cache: var ActionCache) =
   var frameBytes: seq[byte] = @[]
+  cache.hotByWeak.clear()
+  cache.hotInputs.setLen(0)
+  cache.hotLoaded = true
   for key in cache.byWeak.keys:
     var records = cache.byWeak[key]
     if records.len > MaxRecordsPerWeakFingerprint:
@@ -806,6 +1014,7 @@ proc compactLoadedRecords(cache: var ActionCache) =
         hotMetadataRecord(records[^1])
   writeFile(extendedPath(cache.recordsPath), byteString(frameBytes))
   cache.writeHotIndex()
+  cache.tryLoadHotIndexRaw()
 
 proc maybeCompactRecords(cache: var ActionCache) =
   if not fileExists(extendedPath(cache.recordsPath)):
@@ -821,7 +1030,10 @@ proc openActionCache*(root: string): ActionCache =
   result.hotRecordsPath = root / "action-results.hot.records"
   result.hotIndexPath = root / "action-results.hot.index"
   result.loadedAllRecords = false
+  result.hotLoaded = false
   result.hotIndexDirty = false
+  result.hotIndexRaw = @[]
+  result.hotIndexRawValid = false
   result.byWeak = initTable[string, seq[ActionResultRecord]]()
   result.hotByWeak = initTable[string, ActionResultRecord]()
   result.hotInputs = @[]
@@ -831,18 +1043,21 @@ proc openActionCache*(root: string): ActionCache =
     writeFile(extendedPath(result.recordsPath), "")
   if not fileExists(extendedPath(result.hotRecordsPath)):
     writeFile(extendedPath(result.hotRecordsPath), "")
-  result.loadHotRecords()
+  result.tryLoadHotIndexRaw()
 
 proc flushHotIndex*(cache: var ActionCache) =
   if not cache.hotIndexDirty:
     return
+  cache.ensureHotRecordsLoaded()
   cache.rebuildHotInputs()
   cache.writeHotIndex()
+  cache.tryLoadHotIndexRaw()
   cache.hotIndexDirty = false
 
-proc lookupHotMetadataRecord*(cache: ActionCache; weak: ContentDigest;
+proc lookupHotMetadataRecord*(cache: var ActionCache; weak: ContentDigest;
                               policy: FileFingerprintPolicy):
     Option[ActionResultRecord] =
+  cache.ensureHotRecordsLoaded()
   if policy notin {ffpTimestamp, ffpHybrid}:
     return none(ActionResultRecord)
   let key = digestKey(weak)
@@ -853,14 +1068,16 @@ proc lookupHotMetadataRecord*(cache: ActionCache; weak: ContentDigest;
     return none(ActionResultRecord)
   some(record)
 
-proc hotMetadataInputsUnchanged*(cache: ActionCache;
+proc hotMetadataInputsUnchanged*(cache: var ActionCache;
                                  metadataCache: ptr FileMetadataCache = nil): bool =
+  cache.ensureHotRecordsLoaded()
   for input in cache.hotInputs:
     if fingerprintMetadata(input.path, metadataCache) != input.metadata:
       return false
   true
 
-proc hotMetadataRecordCount*(cache: ActionCache): int =
+proc hotMetadataRecordCount*(cache: var ActionCache): int =
+  cache.ensureHotRecordsLoaded()
   cache.hotByWeak.len
 
 proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
@@ -885,12 +1102,17 @@ proc ensureLoadedRecords(cache: var ActionCache) =
 proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
                          inputPaths, outputPaths: openArray[string];
-                         outputRoot = ""): ActionResultRecord =
+                         outputRoot = "";
+                         storeOutputBlobs = true;
+                         metadataCache: ptr FileMetadataCache = nil):
+                         ActionResultRecord =
   result.weakFingerprint = weak
   result.policy = policy
   for path in inputPaths:
-    result.inputs.add(observeFile(path, policy))
+    result.inputs.add(observeFile(path, policy, metadataCache))
   result.strongFingerprint = computeStrongFingerprint(weak, result.inputs)
+  result.outputPayloadKind =
+    if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
     let sourceMetadata = fingerprintMetadata(source)
@@ -902,11 +1124,15 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     else:
       let perms = getFilePermissions(extendedPath(source))
     let blob =
-      if sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
-        cas.storeFileBlob(source, sourceMetadata.sizeBytes)
+      if storeOutputBlobs:
+        if sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
+          cas.storeFileBlob(source, sourceMetadata.sizeBytes)
+        else:
+          cas.storeBlob(bytes(readFile(extendedPath(source))))
       else:
-        cas.storeBlob(bytes(readFile(extendedPath(source))))
-    result.outputs.add(OutputBlob(path: path, blob: blob, permissions: perms))
+        CasBlobRef()
+    result.outputs.add(OutputBlob(path: path, metadata: sourceMetadata,
+      blob: blob, permissions: perms))
   cache.appendRecord(result)
 
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
@@ -959,6 +1185,9 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
         return
 
 proc verifyOutputs(cas: LocalCas; record: ActionResultRecord) =
+  if record.outputPayloadKind != opkCasBlobs:
+    raise newException(CacheIntegrityError,
+      "cache record does not contain output payloads")
   for output in record.outputs:
     cas.verifyBlob(output.blob)
 
@@ -1004,6 +1233,10 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
         sawInputChange = true
         continue
     if verifyOutputBlobs:
+      if candidate.outputPayloadKind != opkCasBlobs:
+        return ActionCacheLookup(status: aclMissNoOutputPayload,
+          record: candidate,
+          message: "cache record does not contain output payloads")
       try:
         cas.verifyOutputs(candidate)
       except CacheIntegrityError as err:

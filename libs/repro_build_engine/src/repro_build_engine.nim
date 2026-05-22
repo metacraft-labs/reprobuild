@@ -79,6 +79,11 @@ type
     stdoutLimit*: int
     stderrLimit*: int
     rebuildMissingOutputsOnCacheHit*: bool
+    # When true, successful actions record input/output metadata for local
+    # invalidation but do not synchronously hash and copy output payloads into
+    # the local CAS. This is only appropriate for modes that rebuild missing
+    # outputs instead of restoring them from cache.
+    deferLocalOutputBlobs*: bool
     # When true, the engine spawns each `bakProcess` action directly via
     # `osproc.startProcess` instead of going through the RunQuota helper, and
     # synthesizes a result JSON in the same on-disk schema the helper would
@@ -207,6 +212,7 @@ proc defaultBuildEngineConfig*(cacheRoot: string): BuildEngineConfig =
     stdoutLimit: 1_048_576,
     stderrLimit: 1_048_576,
     rebuildMissingOutputsOnCacheHit: false,
+    deferLocalOutputBlobs: false,
     bypassRunQuota: false,
     fallbackToRunQuotaBypass: false,
     inlineRunQuota: false,
@@ -250,7 +256,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              cpuMilli = 1000'u32; memoryBytes = 0'u64;
              commandStatsId = ""; cacheable = false;
              weakFingerprint = weakFingerprintFromText(id);
-             actionCachePolicy = ffpHybrid;
+             actionCachePolicy = ffpTimestamp;
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
              dependencyPolicy = declaredOnlyPolicy();
@@ -283,7 +289,7 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
                     outputs: openArray[string] = [];
                     commandStatsId = ""; cacheable = true;
                     weakFingerprint = weakFingerprintFromText(id);
-                    actionCachePolicy = ffpHybrid;
+                    actionCachePolicy = ffpTimestamp;
                     text = ""; entries: openArray[string] = []): BuildAction =
   if kind == bakProcess:
     raise newException(BuildEngineError, "builtinAction requires a built-in action kind")
@@ -1099,8 +1105,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       getCurrentDir() / ".repro" / "build-engine-cache"
     else:
       config.cacheRoot
+  let casOpenStart = statStart()
   let cas = openLocalCas(cacheRoot / "cas")
+  finishStat("repro cas open", casOpenStart)
+  let actionCacheOpenStart = statStart()
   var cache = openActionCache(cacheRoot / "action-cache")
+  finishStat("repro action cache open", actionCacheOpenStart)
   defer:
     cache.flushHotIndex()
 
@@ -1119,6 +1129,42 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
     var metadataCache = initFileMetadataCache()
+    if config.skipCacheHitEvidence:
+      var hotProbes: seq[HotMetadataProbe] = @[]
+      for action in buildGraph.actions:
+        if (not action.cacheable) or action.dynamicDepsFile.len > 0:
+          return none(BuildRunResult)
+        let outputStatStart = statStart()
+        let outputsPresent = action.allOutputsExist()
+        finishStat("repro output stat", outputStatStart)
+        if not outputsPresent:
+          return none(BuildRunResult)
+        hotProbes.add(HotMetadataProbe(
+          weakFingerprint: action.weakFingerprint,
+          policy: action.actionCachePolicy))
+      let lookupStart = statStart()
+      let navigatorStart = statStart()
+      let scan = cache.scanHotIndexMetadataInputsUnchanged(hotProbes,
+        addr metadataCache)
+      finishStat("repro hot index navigator scan", navigatorStart)
+      finishStat("repro cache lookup", lookupStart)
+      case scan.status
+      of hmssHit:
+        let resultMaterializeStart = statStart()
+        for action in buildGraph.actions:
+          fastResult.results.add(ActionResult(
+            id: action.id,
+            status: asCacheHit,
+            cacheDecision: cdHit,
+            dependencyPolicyKind: action.dependencyPolicy.kind))
+        finishStat("repro cache hit result materialize", resultMaterializeStart)
+        fastResult.stats = stats
+        return some(fastResult)
+      of hmssMissingRecord, hmssInputChanged:
+        return none(BuildRunResult)
+      of hmssUnavailable, hmssCorrupt:
+        discard
+
     var hotRecords: seq[ActionResultRecord] = @[]
     for action in buildGraph.actions:
       if (not action.cacheable) or action.dynamicDepsFile.len > 0:
@@ -1128,27 +1174,44 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       finishStat("repro output stat", outputStatStart)
       if not outputsPresent:
         return none(BuildRunResult)
+      let hotRecordLookupStart = statStart()
       let hotRecord = cache.lookupHotMetadataRecord(action.weakFingerprint,
         action.actionCachePolicy)
+      finishStat("repro hot record lookup", hotRecordLookupStart)
       if hotRecord.isNone:
         return none(BuildRunResult)
-      hotRecords.add(hotRecord.get())
+      if not config.skipCacheHitEvidence:
+        hotRecords.add(hotRecord.get())
     let lookupStart = statStart()
+    let inputScanStart = statStart()
     let inputsUnchanged =
-      if hotRecords.len == cache.hotMetadataRecordCount():
+      if buildGraph.actions.len == cache.hotMetadataRecordCount():
         cache.hotMetadataInputsUnchanged(addr metadataCache)
       else:
-        hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
+        if config.skipCacheHitEvidence:
+          var selectedHotRecords: seq[ActionResultRecord] = @[]
+          for action in buildGraph.actions:
+            selectedHotRecords.add(cache.lookupHotMetadataRecord(
+              action.weakFingerprint, action.actionCachePolicy).get())
+          hotMetadataRecordInputsUnchanged(selectedHotRecords, addr metadataCache)
+        else:
+          hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
+    finishStat("repro hot input scan", inputScanStart)
     finishStat("repro cache lookup", lookupStart)
     if not inputsUnchanged:
       return none(BuildRunResult)
+    let resultMaterializeStart = statStart()
     for i, action in buildGraph.actions:
+      let record =
+        if config.skipCacheHitEvidence: ActionResultRecord()
+        else: hotRecords[i]
       fastResult.results.add(ActionResult(
         id: action.id,
         status: asCacheHit,
         cacheDecision: cdHit,
         dependencyPolicyKind: action.dependencyPolicy.kind,
-        evidence: cacheHitEvidence(action, hotRecords[i])))
+        evidence: cacheHitEvidence(action, record)))
+    finishStat("repro cache hit result materialize", resultMaterializeStart)
     fastResult.stats = stats
     some(fastResult)
 
@@ -1174,6 +1237,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var fileMetadataCache = initFileMetadataCache()
   var inlineRunQuotaSession: ReproRunQuotaSession
   var inlineRunQuotaSessionOpen = false
+
+  proc invalidateCachedPath(path: string) =
+    fileMetadataCache.invalidate(path)
+
+  proc invalidateCachedOutputs(action: BuildAction) =
+    for output in action.outputs:
+      invalidateCachedPath(materialPath(action.cwd, output))
+
+  proc invalidateCachedWrites(action: BuildAction; evidence: PathSetEvidence) =
+    for output in evidence.monitorWrites:
+      invalidateCachedPath(materialPath(action.cwd, output))
 
   poolCapacity[""] = maxParallel
   for p in buildGraph.pools:
@@ -1554,7 +1628,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               previousCacheDecision
           statuses[id] = finished.status
           if finished.status == asSucceeded:
-            fileMetadataCache.clear()
+            invalidateCachedOutputs(plan.action)
             let evidenceStart = statStart()
             let evidence = collectEvidence(plan.action, strict = true)
             finishStat("repro evidence collect", evidenceStart)
@@ -1570,11 +1644,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               completed = terminalCount()
               launchedAny = true
               continue
+            invalidateCachedWrites(plan.action, evidence.evidence)
             if plan.action.cacheable:
               let recordStart = statStart()
               let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
-                plan.action.outputs, plan.action.cwd)
+                plan.action.outputs, plan.action.cwd,
+                storeOutputBlobs = not config.deferLocalOutputBlobs,
+                metadataCache = addr fileMetadataCache)
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
@@ -1767,8 +1844,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           previousCacheDecision
       statuses[finished.id] = finished.status
       if finished.status == asSucceeded:
-        fileMetadataCache.clear()
         let action = runningItem.action
+        invalidateCachedOutputs(action)
         let converterStart = statStart()
         let converterResult = action.runConverters(action.converterSpecsForPolicy())
         finishStat("repro dependency convert", converterStart)
@@ -1799,11 +1876,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           emitProgress(bpkActionCompleted, finished.id)
           completed = terminalCount()
           continue
+        invalidateCachedWrites(action, evidence.evidence)
         if action.cacheable:
           let recordStart = statStart()
           let record = cache.recordActionResult(cas, action.weakFingerprint,
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
-            action.outputs, action.cwd)
+            action.outputs, action.cwd,
+            storeOutputBlobs = not config.deferLocalOutputBlobs,
+            metadataCache = addr fileMetadataCache)
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)

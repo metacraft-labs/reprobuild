@@ -122,7 +122,7 @@ proc prepopulateCache(cacheRoot, workRoot, markerPath, outputPath: string) =
   fixtureWrite(outputPath, "restored cached output\n")
   let cas = openLocalCas(cacheRoot / "cas")
   var cache = openActionCache(cacheRoot / "action-cache")
-  discard cache.recordActionResult(cas, weak("cache-hit"), ffpHybrid,
+  discard cache.recordActionResult(cas, weak("cache-hit"), ffpTimestamp,
     [inputPath], ["cache/out.txt"], workRoot)
   removeFile(outputPath)
   if fileExists(markerPath):
@@ -666,7 +666,7 @@ suite "integration_build_engine_api_ready_queue":
     var actionCache = openActionCache(cacheRoot / "action-cache")
     let cas = openLocalCas(cacheRoot / "cas")
     let seededLookup = actionCache.lookupActionResult(cas,
-      weak("cache-present-output"), ffpHybrid)
+      weak("cache-present-output"), ffpTimestamp)
     check seededLookup.status == aclHit
     check actionCache.lookupActionResult(cas, weak("cache-present-output"),
       ffpChecksum).status == aclMissNoRecord
