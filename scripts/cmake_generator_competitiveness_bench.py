@@ -958,6 +958,12 @@ def parse_args():
     args = parser.parse_args()
     if args.noop_runs <= 0:
         fail("--noop-runs must be greater than zero")
+    args.work_root = args.work_root.expanduser().resolve()
+    args.output = args.output.expanduser().resolve()
+    args.cmake_root = args.cmake_root.expanduser().resolve()
+    args.cmake = args.cmake.expanduser().resolve()
+    args.repro = args.repro.expanduser().resolve()
+    args.runquotad = args.runquotad.expanduser().resolve()
     return args
 
 
