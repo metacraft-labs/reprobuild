@@ -177,7 +177,13 @@ proc observeUserDefault*(domain, key: string): ObservedState =
   ## digest covers are the structurally-canonicalized value text so
   ## that two structurally-equal observations digest identically.
   when defined(macosx):
-    let (output, exitCode) = execCmdEx("defaults read " & domain & " " & key)
+    # `domain` / `key` are `quoteShell`'d as defence-in-depth: the
+    # pre-dispatch validator (`resourceValidationError`) already
+    # rejects any value bearing a shell metacharacter, but escaping
+    # the arguments here means even a bypassed validation cannot
+    # break out of the argument and reach arbitrary execution.
+    let (output, exitCode) = execCmdEx(
+      "defaults read " & quoteShell(domain) & " " & quoteShell(key))
     if exitCode != 0:
       result.present = false
       result.digest = zeroDigest()
@@ -203,15 +209,18 @@ proc applyUserDefault*(domain, key, valueLiteral: string;
   ## `valueChanged = true`. The recorded payload bytes are the
   ## structurally-canonicalized value so drift comparison is stable.
   when defined(macosx):
+    # Every operator-controlled argument is `quoteShell`'d (defence-
+    # in-depth layer 2; `resourceValidationError` is layer 1).
     let (output, exitCode) = execCmdEx(
-      "defaults write " & domain & " " & key & " " & valueLiteral)
+      "defaults write " & quoteShell(domain) & " " & quoteShell(key) &
+      " " & quoteShell(valueLiteral))
     if exitCode != 0:
       raiseUnsupportedDomain(domain,
         "defaults write returned exit " & $exitCode & ": " &
         output.strip() & " (domain may be an unwritable sandboxed-app " &
         "container)")
     if restartTarget.len > 0 and valueChanged:
-      discard execCmd("killall " & restartTarget)
+      discard execCmd("killall " & quoteShell(restartTarget))
     let canonical = canonicalizeDefaultsValue(valueLiteral)
     result = newSeq[byte](canonical.len)
     for i, ch in canonical:
@@ -223,8 +232,10 @@ proc destroyUserDefault*(domain, key, restartTarget: string) =
   ## `defaults delete <domain> <key>`, then `killall <restartTarget>`
   ## so the affected daemon drops the now-removed value.
   when defined(macosx):
-    discard execCmd("defaults delete " & domain & " " & key)
+    # Operator-controlled arguments are `quoteShell`'d (layer 2).
+    discard execCmd(
+      "defaults delete " & quoteShell(domain) & " " & quoteShell(key))
     if restartTarget.len > 0:
-      discard execCmd("killall " & restartTarget)
+      discard execCmd("killall " & quoteShell(restartTarget))
   else:
     raiseNotImplementedPlatform("macos.userDefault", "macosx")

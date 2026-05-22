@@ -206,7 +206,11 @@ proc observeGsettings*(schema, path, key: string): ObservedState =
   ## (a GVariant literal) is the canonical bytes the digest covers.
   when defined(linux):
     let spec = gsettingsSchemaSpec(schema, path)
-    let (output, exitCode) = execCmdEx("gsettings get " & spec & " " & key)
+    # `spec` (schema[:path]) and `key` are `quoteShell`'d as
+    # defence-in-depth layer 2; `resourceValidationError` rejects
+    # any metacharacter-bearing schema / path / key as layer 1.
+    let (output, exitCode) = execCmdEx(
+      "gsettings get " & quoteShell(spec) & " " & quoteShell(key))
     if exitCode != 0:
       result.present = false
       result.digest = zeroDigest()
@@ -227,8 +231,14 @@ proc applyGsettings*(schema, path, key, valueLiteral: string):
   ## recorded payload bytes are the literal itself.
   when defined(linux):
     let spec = gsettingsSchemaSpec(schema, path)
+    # `valueLiteral` is a GVariant literal that LEGITIMATELY carries
+    # spaces, quotes and brackets — it is NOT validated against the
+    # metacharacter set, so `quoteShell` here is its sole protection
+    # (it must reach `gsettings set` as exactly one argument). `spec`
+    # and `key` are quoted as defence-in-depth (validated at layer 1).
     let (output, exitCode) = execCmdEx(
-      "gsettings set " & spec & " " & key & " " & valueLiteral)
+      "gsettings set " & quoteShell(spec) & " " & quoteShell(key) &
+      " " & quoteShell(valueLiteral))
     if exitCode != 0:
       raiseResourceDriver("gsettings:" & spec & ":" & key,
         "linux.gsettings", "gsettings set",
@@ -244,6 +254,8 @@ proc destroyGsettings*(schema, path, key: string) =
   ## default.
   when defined(linux):
     let spec = gsettingsSchemaSpec(schema, path)
-    discard execCmd("gsettings reset " & spec & " " & key)
+    # `spec` / `key` are `quoteShell`'d (layer 2; validated layer 1).
+    discard execCmd(
+      "gsettings reset " & quoteShell(spec) & " " & quoteShell(key))
   else:
     raiseNotImplementedPlatform("linux.gsettings", "linux")

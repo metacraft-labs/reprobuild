@@ -1222,6 +1222,18 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
   let desiredResources = composeDesiredResources(profile, opts.homeDir,
     opts.host)
+  # M69 Phase C follow-up: defence-in-depth layer 1 — the SAME
+  # pre-dispatch gate as `runApply`. The `--plan` path composes the
+  # plan via `composePlan` -> `observeResource` -> the observe procs
+  # (`observeGsettings` / `observeUserDefault` / `observeLaunchAgent`
+  # / `observeUserUnit`), which shell out. A preview must therefore
+  # refuse an unsafe operator-controlled field exactly as apply does,
+  # fail-closed, before any observe driver runs.
+  for addr1, res in desiredResources.resources:
+    let validationErr = resourceValidationError(res)
+    if validationErr.len > 0:
+      raiseResourceDriver(addr1, $res.kind,
+        "pre-dispatch validation", validationErr)
   var recordedBindings = initOrderedTable[string, RecordedBinding]()
   if activeGenIdHex.len > 0:
     let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
@@ -1701,6 +1713,19 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # by address (so existing M68/M70 gates keep working).
       let desiredResources = composeDesiredResources(profile, opts.homeDir,
         opts.host)
+      # M69 Phase C follow-up: defence-in-depth layer 1. The four
+      # POSIX/macOS home drivers (`gsettings`, `defaults`,
+      # `systemd_user`, `launchd_user`) interpolate operator-controlled
+      # typed fields into shell command lines. Reject — fail-closed,
+      # before the plan is composed or any driver runs — any resource
+      # whose shell-bound field bears a shell metacharacter or falls
+      # outside its closed identifier set. The drivers also `quoteShell`
+      # those fields at the call site (layer 2).
+      for addr1, res in desiredResources.resources:
+        let validationErr = resourceValidationError(res)
+        if validationErr.len > 0:
+          raiseResourceDriver(addr1, $res.kind,
+            "pre-dispatch validation", validationErr)
       var recordedBindings = initOrderedTable[string, RecordedBinding]()
       if activeGenIdHex.len > 0:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)

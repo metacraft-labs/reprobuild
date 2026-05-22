@@ -120,7 +120,12 @@ proc observeLaunchAgent*(homeDir, label: string): ObservedState =
     result.present = true
     result.rawBytes = raw
     result.digest = digestOfBytes(raw)
-    discard execCmdEx("launchctl print gui/" & currentUid() & "/" & label)
+    # `gui/<uid>/<label>` is `quoteShell`'d as one argument
+    # (defence-in-depth layer 2; `resourceValidationError` already
+    # rejects any label outside the launchd identifier charset at
+    # layer 1).
+    discard execCmdEx("launchctl print " &
+      quoteShell("gui/" & currentUid() & "/" & label))
   else:
     raiseNotImplementedPlatform("launchd.userAgent", "macosx")
 
@@ -136,10 +141,15 @@ proc applyLaunchAgent*(homeDir, label, plistContent: string;
     writeFile(extendedPath(path), plistContent)
     let uid = currentUid()
     # Boot out any stale registration; ignore the exit code (no
-    # prior registration is the common, non-error case).
-    discard execCmd("launchctl bootout gui/" & uid & "/" & label)
+    # prior registration is the common, non-error case). The
+    # domain target and the plist path are `quoteShell`'d as one
+    # argument each (defence-in-depth layer 2; the label is
+    # validated against the launchd identifier charset at layer 1).
+    discard execCmd("launchctl bootout " &
+      quoteShell("gui/" & uid & "/" & label))
     let (bootOut, bootCode) = execCmdEx(
-      "launchctl bootstrap gui/" & uid & " " & path)
+      "launchctl bootstrap " & quoteShell("gui/" & uid) & " " &
+      quoteShell(path))
     if bootCode != 0:
       raiseResourceDriver("launchd:user:" & label, "launchd.userAgent",
         "launchctl bootstrap",
@@ -155,7 +165,10 @@ proc destroyLaunchAgent*(homeDir, label: string) =
   ## `launchctl bootout gui/<uid>/<label>`, then remove the plist.
   when defined(macosx):
     let path = agentPlistPath(homeDir, label)
-    discard execCmd("launchctl bootout gui/" & currentUid() & "/" & label)
+    # `gui/<uid>/<label>` is `quoteShell`'d as one argument
+    # (layer 2; the label is validated at layer 1).
+    discard execCmd("launchctl bootout " &
+      quoteShell("gui/" & currentUid() & "/" & label))
     if fileExists(extendedPath(path)):
       try: removeFile(extendedPath(path))
       except OSError: discard

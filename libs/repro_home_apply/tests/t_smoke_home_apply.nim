@@ -2,10 +2,11 @@
 ## API surface compiles, the planner produces deterministic plans,
 ## and the partial-recovery marker round-trips.
 
-import std/[os, unittest]
+import std/[os, strutils, unittest]
 from repro_core/paths import extendedPath
 
 import repro_home_apply
+import repro_home_resources
 
 const SmokeDir = "build/test-tmp/home-apply-smoke"
 
@@ -79,3 +80,57 @@ suite "Home-apply smoke":
     check res.diagnostics.len == 1
     check res.diagnostics[0].code == sdWStowOverridesShadowed
     check "userEmail" in res.diagnostics[0].deadConfigKeys
+
+  test "runApplyPlan fails-closed on a shell-injected resource (M68)":
+    # M68 / M69 Phase C: the `--plan` path composes the resource plan
+    # via `composePlan` -> `observeResource` -> the observe procs,
+    # which SHELL OUT. The pre-dispatch validation gate must therefore
+    # fire on the `--plan` path exactly as it does on `runApply`,
+    # refusing an operator-controlled field that bears a shell
+    # metacharacter BEFORE any observe driver runs. This drives
+    # `runApplyPlan` (the `repro home apply --plan` entry point) with
+    # an injected `linux.gsettings` resource whose schema carries a
+    # `$( ... )` command substitution and asserts it is rejected.
+    let profileDir = SmokeDir / "plan-inject-profile"
+    let stateDir = SmokeDir / "plan-inject-state"
+    let storeRoot = SmokeDir / "plan-inject-store"
+    let homeDir = SmokeDir / "plan-inject-home"
+    resetDir(profileDir)
+    resetDir(stateDir)
+    resetDir(storeRoot)
+    resetDir(homeDir)
+    writeFile(extendedPath(profileDir / "home.nim"),
+      "import repro/profile\n\nprofile \"m68-plan-inject\":\n" &
+      "  activity default:\n    m68-plan-inject-fixture\n")
+
+    # An injected `linux.gsettings` resource. The `;` is the seam's
+    # own field separator, so the metacharacter is a `$( ... )`
+    # command substitution embedded in the schema — `$`, `(`, `)` are
+    # all in `ShellMetaCharacters`, so `resourceValidationError`
+    # refuses it. Seam: gsettings:<address>:<schema>;<path>;<key>;<lit>
+    putEnv("REPRO_TEST_RESOURCES",
+      "gsettings:g.injected:org.gnome.x$(touch /tmp/pwn);;clock-format;'24h'")
+    defer: delEnv("REPRO_TEST_RESOURCES")
+
+    var raised = false
+    var sawPreDispatch = false
+    var reason = ""
+    try:
+      discard runApplyPlan(ApplyOptions(
+        profileDir: profileDir,
+        host: "m68-plan-inject-host",
+        stateDir: stateDir,
+        storeRoot: storeRoot,
+        homeDir: homeDir))
+    except EResourceDriver as e:
+      raised = true
+      # `operation == "pre-dispatch validation"` proves the gate fired
+      # BEFORE `composePlan` / `observeGsettings` — an observe-driver
+      # failure would carry a different operation tag.
+      sawPreDispatch = e.operation == "pre-dispatch validation"
+      reason = e.msg
+    # The `--plan` preview must REFUSE the unsafe resource.
+    check raised
+    check sawPreDispatch
+    check reason.contains("g.injected")
+    check reason.contains("shell metacharacter")

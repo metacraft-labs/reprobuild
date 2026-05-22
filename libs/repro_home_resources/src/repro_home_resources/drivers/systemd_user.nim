@@ -65,7 +65,10 @@ proc observeUserUnit*(homeDir, name: string): ObservedState =
     # `is-enabled` is read for completeness (drift on the file
     # content is what the lifecycle compares); the exit code is not
     # an error here — a disabled unit is still a valid observation.
-    discard execCmdEx("systemctl --user is-enabled " & name)
+    # `name` is `quoteShell`'d as defence-in-depth layer 2;
+    # `resourceValidationError` rejects a metacharacter-bearing unit
+    # name as layer 1.
+    discard execCmdEx("systemctl --user is-enabled " & quoteShell(name))
   else:
     raiseNotImplementedPlatform("systemd.userUnit", "linux")
 
@@ -83,8 +86,9 @@ proc applyUserUnit*(homeDir, name, unitContent: string; enabled: bool):
         "systemctl --user daemon-reload",
         "exit " & $reloadCode & ": " & reloadOut.strip())
     if enabled:
+      # `name` is `quoteShell`'d (layer 2; validated at layer 1).
       let (enableOut, enableCode) = execCmdEx(
-        "systemctl --user enable --now " & name)
+        "systemctl --user enable --now " & quoteShell(name))
       if enableCode != 0:
         raiseResourceDriver("systemd:user:" & name, "systemd.userUnit",
           "systemctl --user enable --now",
@@ -99,7 +103,8 @@ proc destroyUserUnit*(homeDir, name: string) =
   ## `disable --now`, remove the unit file, then `daemon-reload`.
   when defined(linux):
     let path = userUnitPath(homeDir, name)
-    discard execCmd("systemctl --user disable --now " & name)
+    # `name` is `quoteShell`'d (layer 2; validated at layer 1).
+    discard execCmd("systemctl --user disable --now " & quoteShell(name))
     if fileExists(extendedPath(path)):
       try: removeFile(extendedPath(path))
       except OSError: discard

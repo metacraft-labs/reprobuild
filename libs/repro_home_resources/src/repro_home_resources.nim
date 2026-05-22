@@ -28,6 +28,7 @@
 import repro_home_resources/errors
 import repro_home_resources/types
 import repro_home_resources/manifest_record
+import repro_home_resources/validation
 import repro_home_resources/lifecycle
 import repro_home_resources/plan
 import repro_home_resources/drivers/env_user
@@ -43,6 +44,7 @@ import repro_home_resources/drivers/systemd_user
 export errors
 export types
 export manifest_record
+export validation
 export lifecycle
 export plan
 export env_user

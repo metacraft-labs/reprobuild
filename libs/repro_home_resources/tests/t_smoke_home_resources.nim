@@ -371,3 +371,141 @@ suite "M68 smoke: home resource lifecycle":
     expect EPreventDestroy:
       discard decideAction(state, DecisionOptions(
         reconcile: rpAcceptOverwrite, enforcePreventDestroy: true))
+
+# ---------------------------------------------------------------------------
+# Defence-in-depth: pre-dispatch shell-injection validation.
+#
+# The four POSIX/macOS home drivers (`gsettings`, `defaults`,
+# `systemd_user`, `launchd_user`) interpolate operator-controlled
+# typed fields into shell command lines. `resourceValidationError`
+# (layer 1) must REJECT any value bearing a shell metacharacter or
+# falling outside its closed identifier set, before the value can
+# reach a driver — the drivers also `quoteShell` the field (layer
+# 2). These are cross-platform pure-logic tests.
+# ---------------------------------------------------------------------------
+
+suite "M68 security: shell-injection field validation":
+
+  # The shell metacharacters / whitespace a malicious or malformed
+  # field value might carry. `/` is NOT here: a `/` is not a shell
+  # metacharacter, and a gsettings RELOCATABLE-schema path
+  # legitimately contains `/` — it must stay accepted. The
+  # single-segment kinds (launchd label, systemd unit name) ALSO
+  # reject `/` via `segmentInjectionChars` below.
+  const shellMetaChars = [";", " ", "$", "`", "&", "|", "\n",
+    "\t", "\r", "\"", "'", "(", ")", "*", "?", ">", "<"]
+  # The single-path-segment kinds reject every shell metacharacter
+  # AND `/` (a launchd label / systemd unit name must not escape its
+  # one path segment).
+  const segmentInjectionChars = @shellMetaChars & @["/"]
+
+  test "isSafeLaunchdLabel: accepts a legitimate reverse-DNS label":
+    check isSafeLaunchdLabel("com.metacraft.repro.agent")
+    check isSafeLaunchdLabel("repro-dev_agent.v2")
+    check isSafeLaunchdLabel("A0")
+
+  test "isSafeLaunchdLabel: rejects metacharacters / empty / dot":
+    check not isSafeLaunchdLabel("")
+    check not isSafeLaunchdLabel("   ")
+    check not isSafeLaunchdLabel(".")
+    check not isSafeLaunchdLabel("..")
+    for c in segmentInjectionChars:
+      check not isSafeLaunchdLabel("com.x" & c & "evil")
+    # A label that is `quoteShell`-safe but still not a launchd
+    # identifier is rejected too (charset is closed, not just
+    # metacharacter-blocking).
+    check not isSafeLaunchdLabel("com.x:evil")
+    check not isSafeLaunchdLabel("com.x=evil")
+
+  test "hasShellMetacharacter: flags every injection character":
+    check not hasShellMetacharacter("com.metacraft.repro")
+    check not hasShellMetacharacter("repro-dev.service")
+    check not hasShellMetacharacter("org.gnome.desktop.interface")
+    # `/` is deliberately NOT a shell metacharacter.
+    check not hasShellMetacharacter("/org/gnome/desktop/")
+    for c in shellMetaChars:
+      check hasShellMetacharacter("safe" & c & "tail")
+
+  test "resourceValidationError: clean POSIX/macOS resources pass":
+    # A well-formed resource of each shell-out kind validates clean.
+    check resourceValidationError(Resource(kind: rkLaunchdUserAgent,
+      address: "agent:ok", launchdLabel: "com.metacraft.repro.agent",
+      launchdPlistContent: "<plist/>")) == ""
+    check resourceValidationError(Resource(kind: rkMacosUserDefault,
+      address: "default:ok", defaultsDomain: "com.apple.dock",
+      defaultsKey: "autohide", defaultsValueLiteral: "1",
+      defaultsRestartTarget: "Dock")) == ""
+    check resourceValidationError(Resource(kind: rkLinuxGsettings,
+      address: "gset:ok", gsettingsSchema: "org.gnome.desktop.interface",
+      gsettingsKey: "clock-format", gsettingsPath: "",
+      gsettingsValueLiteral: "'24h'")) == ""
+    check resourceValidationError(Resource(kind: rkSystemdUserUnit,
+      address: "unit:ok", unitName: "repro-dev.service",
+      unitContent: "[Unit]\n", unitEnabled: true)) == ""
+    # A `gsettings` value literal LEGITIMATELY carries spaces / quotes
+    # / brackets — it must NOT be rejected by validation (layer 2
+    # `quoteShell` protects it).
+    check resourceValidationError(Resource(kind: rkLinuxGsettings,
+      address: "gset:arr", gsettingsSchema: "org.gnome.shell",
+      gsettingsKey: "favorite-apps", gsettingsPath: "",
+      gsettingsValueLiteral: "['a.desktop', 'b.desktop']")) == ""
+    # Windows / pure-IO driver kinds have nothing to shell-validate.
+    check resourceValidationError(Resource(kind: rkFsManagedBlock,
+      address: "fs:ok", hostFilePath: "/tmp/x; rm -rf /",
+      managedBlockId: "blk", managedBlockContent: "")) == ""
+
+  test "resourceValidationError: rejects an injected launchd label":
+    for c in segmentInjectionChars:
+      let r = Resource(kind: rkLaunchdUserAgent, address: "agent:evil",
+        launchdLabel: "com.x" & c & "touch /tmp/pwn",
+        launchdPlistContent: "<plist/>")
+      check resourceValidationError(r).len > 0
+    # Empty label is also refused.
+    check resourceValidationError(Resource(kind: rkLaunchdUserAgent,
+      address: "agent:empty", launchdLabel: "",
+      launchdPlistContent: "<plist/>")).len > 0
+
+  test "resourceValidationError: rejects an injected macos.userDefault":
+    for c in shellMetaChars:
+      # Injected domain.
+      check resourceValidationError(Resource(kind: rkMacosUserDefault,
+        address: "d:evil-domain",
+        defaultsDomain: "com.apple.dock" & c & "evil",
+        defaultsKey: "autohide", defaultsValueLiteral: "1")).len > 0
+      # Injected key.
+      check resourceValidationError(Resource(kind: rkMacosUserDefault,
+        address: "d:evil-key", defaultsDomain: "com.apple.dock",
+        defaultsKey: "autohide" & c & "evil",
+        defaultsValueLiteral: "1")).len > 0
+      # Injected restartTarget (flows into `killall <target>`).
+      check resourceValidationError(Resource(kind: rkMacosUserDefault,
+        address: "d:evil-target", defaultsDomain: "com.apple.dock",
+        defaultsKey: "autohide", defaultsValueLiteral: "1",
+        defaultsRestartTarget: "Dock" & c & "evil")).len > 0
+
+  test "resourceValidationError: rejects an injected gsettings field":
+    for c in shellMetaChars:
+      # Injected schema.
+      check resourceValidationError(Resource(kind: rkLinuxGsettings,
+        address: "g:evil-schema",
+        gsettingsSchema: "org.gnome.x" & c & "evil",
+        gsettingsKey: "k", gsettingsPath: "")).len > 0
+      # Injected key.
+      check resourceValidationError(Resource(kind: rkLinuxGsettings,
+        address: "g:evil-key", gsettingsSchema: "org.gnome.x",
+        gsettingsKey: "k" & c & "evil", gsettingsPath: "")).len > 0
+      # Injected relocatable-schema path.
+      check resourceValidationError(Resource(kind: rkLinuxGsettings,
+        address: "g:evil-path", gsettingsSchema: "org.gnome.x",
+        gsettingsKey: "k",
+        gsettingsPath: "/org/x" & c & "evil/")).len > 0
+
+  test "resourceValidationError: rejects an injected systemd unit name":
+    for c in segmentInjectionChars:
+      check resourceValidationError(Resource(kind: rkSystemdUserUnit,
+        address: "u:evil", unitName: "repro" & c & "evil.service",
+        unitContent: "[Unit]\n", unitEnabled: false)).len > 0
+    # Empty unit name is refused.
+    check resourceValidationError(Resource(kind: rkSystemdUserUnit,
+      address: "u:empty", unitName: "", unitContent: "",
+      unitEnabled: false)).len > 0
