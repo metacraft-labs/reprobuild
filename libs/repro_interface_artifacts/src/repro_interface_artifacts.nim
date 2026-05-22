@@ -1505,9 +1505,32 @@ proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
   else:
     outputBinaryPath
 
+proc providerNimcacheKey(outputBinaryPath: string): string =
+  ## A short, stable directory key for a provider nimcache, derived from
+  ## the (possibly deeply nested) provider output path via FNV-1a so two
+  ## distinct providers never share -- and therefore never clobber -- a
+  ## single nimcache, while a given provider keeps a stable cache across
+  ## rebuilds. The hex is rendered inline to avoid depending on a `toHex`
+  ## that several imported modules each define.
+  var h = 0xcbf29ce484222325'u64
+  for ch in absolutePath(outputBinaryPath):
+    h = (h xor uint64(ord(ch))) * 0x100000001b3'u64
+  const hexDigits = "0123456789abcdef"
+  result = newString(16)
+  for i in 0 ..< 16:
+    result[15 - i] = hexDigits[int((h shr (uint64(i) * 4)) and 0xF'u64)]
+
 proc providerCompileCommand*(modulePath, outputBinaryPath: string;
                              workDir = getCurrentDir()): seq[string] =
-  let nimcache = parentDir(outputBinaryPath) / "nimcache-provider"
+  # The Nim provider nimcache holds generated C/object files with long
+  # `@m..@s..nim.c` names. When `outputBinaryPath` lands deep inside a
+  # CMake TryCompile scratch tree, a nimcache placed next to it overflows
+  # Windows' 260-char MAX_PATH. The nimcache is a pure build intermediate,
+  # so anchor it under the short `workDir` (the `build/` scratch area the
+  # interface extractor also uses), keyed by the output path so distinct
+  # providers stay isolated and Nim incremental compilation still works.
+  let nimcache = workDir / "build" / "nimcache-provider" /
+    providerNimcacheKey(outputBinaryPath)
   result = @[
     nimCompilerPath(), "c",
     "--define:reproProviderMode",

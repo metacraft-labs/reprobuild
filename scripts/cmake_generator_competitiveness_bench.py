@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -47,6 +48,34 @@ def json_now():
 
 def fail(message):
     raise RuntimeError(message)
+
+
+def rmtree_long(path):
+    r"""``shutil.rmtree`` that tolerates Windows MAX_PATH and read-only files.
+
+    The Reprobuild work tree nests CMake TryCompile scratch dirs inside the
+    generator's own per-build worktrees, so individual cache files (e.g.
+    dependency-evidence ``.rbar`` blobs) routinely exceed the 260-char
+    MAX_PATH limit. ``repro`` itself uses ``\\?\`` extended-length paths;
+    Python's ``shutil`` does not, so prefix the root here and let the prefix
+    propagate through the recursive walk. ``shutil.rmtree`` still unlinks
+    (rather than follows) directory junctions, so this stays junction-safe.
+    """
+    target = str(path)
+    if not os.path.exists(target):
+        return
+
+    def _on_error(func, failed, _exc):
+        # Clear the read-only bit (cache blobs, Git objects) and retry once.
+        try:
+            os.chmod(failed, stat.S_IWRITE)
+            func(failed)
+        except OSError:
+            pass
+
+    if os.name == "nt":
+        target = "\\\\?\\" + os.path.abspath(target)
+    shutil.rmtree(target, onerror=_on_error)
 
 
 def shlex_join(args):
@@ -341,7 +370,7 @@ def extract_project(project_key, project, archive, sources_root):
         fail(f"project {project_key} is missing SOURCE_SUBDIR")
     dest_root = sources_root / project_key
     if dest_root.exists():
-        shutil.rmtree(dest_root)
+        rmtree_long(dest_root)
     dest_root.mkdir(parents=True)
     with tarfile.open(archive, "r:gz") as tar:
         try:
@@ -356,14 +385,14 @@ def extract_project(project_key, project, archive, sources_root):
 
 def copy_generated_fixture(dest):
     if dest.exists():
-        shutil.rmtree(dest)
+        rmtree_long(dest)
     shutil.copytree(GENERATED_FIXTURE, dest)
     return dest
 
 
 def copy_source_tree(source_dir, dest):
     if dest.exists():
-        shutil.rmtree(dest)
+        rmtree_long(dest)
     shutil.copytree(source_dir, dest, symlinks=True)
     return dest
 
@@ -372,7 +401,7 @@ def configure_project(cmake, ninja, generator, source_dir, binary_dir,
                       c_compiler, cxx_compiler, install_prefix,
                       configure_args, env=None):
     if binary_dir.exists():
-        shutil.rmtree(binary_dir)
+        rmtree_long(binary_dir)
     args = [
         cmake,
         "-S", source_dir,
@@ -531,7 +560,7 @@ def run_direct_reprobuild_clean(binary_dir):
         if not path.exists() and not path.is_symlink():
             continue
         if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
+            rmtree_long(path)
         else:
             path.unlink()
         removed += 1
@@ -876,7 +905,7 @@ def build_report(args):
         fail("could not resolve C and CXX compilers")
 
     if args.work_root.exists() and args.fresh:
-        shutil.rmtree(args.work_root)
+        rmtree_long(args.work_root)
     args.work_root.mkdir(parents=True, exist_ok=True)
     source_cache = args.work_root / "source-cache"
     sources_root = args.work_root / "sources"
