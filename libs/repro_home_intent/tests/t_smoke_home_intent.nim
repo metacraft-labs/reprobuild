@@ -5,6 +5,7 @@
 ## `tests/e2e/home-intent/`.
 
 import std/[options, os, sets, strutils, tables, unittest]
+from repro_core/paths import extendedPath
 
 import repro_home_intent
 
@@ -33,7 +34,7 @@ profile "zahary":
 """
 
 proc writeSample(path = SamplePath): string =
-  writeFile(path, SampleProfile)
+  writeFile(extendedPath(path), SampleProfile)
   result = path
 
 suite "Home-intent smoke":
@@ -60,10 +61,10 @@ profile "x":
     - extra
 """
     let badPath = "/tmp/repro-home-smoke-bad-toplevel.nim"
-    writeFile(badPath, bad)
+    writeFile(extendedPath(badPath), bad)
     expect EUnstructured:
       discard loadProfile(badPath)
-    removeFile(badPath)
+    removeFile(extendedPath(badPath))
 
   test "rejects runtime control flow inside activity body":
     let bad = """
@@ -75,10 +76,10 @@ profile "x":
       pkg
 """
     let badPath = "/tmp/repro-home-smoke-bad-for.nim"
-    writeFile(badPath, bad)
+    writeFile(extendedPath(badPath), bad)
     expect EUnstructured:
       discard loadProfile(badPath)
-    removeFile(badPath)
+    removeFile(extendedPath(badPath))
 
   test "predicate canonicalize: commutative ordering":
     check canonicalize("windows and arm64") == "arm64 and windows"
@@ -104,15 +105,15 @@ profile "x":
 
   test "round-trip: add then remove restores byte-equal file":
     let path = writeSample()
-    let original = readFile(path)
+    let original = readFile(extendedPath(path))
     addPackageReference(path, "ripgrep", activity = "default")
-    let added = readFile(path)
+    let added = readFile(extendedPath(path))
     check added != original
     check "ripgrep" in added
     removePackageReference(path, "ripgrep", activity = "default")
-    let after = readFile(path)
+    let after = readFile(extendedPath(path))
     check after == original
-    removeFile(path)
+    removeFile(extendedPath(path))
 
   test "setConfigurable creates config + sub-block + entry":
     # Use a profile WITHOUT a config block.
@@ -124,10 +125,10 @@ profile "x":
     neovim
 """
     let path = "/tmp/repro-home-smoke-set-config.nim"
-    writeFile(path, p)
+    writeFile(extendedPath(path), p)
     setConfigurable(path, "git.userName", "Zahary", nil)
     setConfigurable(path, "git.userEmail", "z@example.com", nil)
-    let after = readFile(path)
+    let after = readFile(extendedPath(path))
     check "config:" in after
     check "git:" in after
     check "userName = \"Zahary\"" in after
@@ -139,7 +140,7 @@ profile "x":
     check gitHeader >= 0
     check gitHeader < nameLine
     check nameLine < emailLine
-    removeFile(path)
+    removeFile(extendedPath(path))
 
   test "effective config buckets enabled vs inert overrides":
     let path = writeSample()
@@ -154,4 +155,4 @@ profile "x":
     check "git" in cfg.overrides
     check "userName" in cfg.overrides["git"]
     check cfg.inertOverrides.len == 0
-    removeFile(path)
+    removeFile(extendedPath(path))

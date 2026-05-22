@@ -45,6 +45,7 @@
 ##   catalog so the M63/M68/M70 gates do not regress.
 
 import std/[os, strutils, tables]
+from repro_core/paths import extendedPath
 
 import blake3
 import repro_local_store
@@ -168,7 +169,7 @@ proc realizePathAdapter(store: var Store; packageId, sourcePath: string):
   ## The realization-hash is derived deterministically from
   ## `(packageId, sourcePath)` so two applies of the same intent
   ## produce the same prefix id (no-op short-circuit relies on this).
-  if not fileExists(sourcePath):
+  if not fileExists(extendedPath(sourcePath)):
     raiseRealizeFailed(packageId, "path",
       "source executable not found at '" & sourcePath & "' (" &
       PackageSourceEnvVar & ")")
@@ -193,7 +194,7 @@ proc realizePathAdapter(store: var Store; packageId, sourcePath: string):
         createHardlink(sourcePath, dst)
         mechanism = "hardlink"
       except OSError, IOError:
-        copyFile(sourcePath, dst)
+        copyFile(extendedPath(sourcePath), extendedPath(dst))
         mechanism = "copy")
   result.packageId = packageId
   result.adapter = akPath
@@ -255,7 +256,7 @@ when defined(windows):
       rel.replace('\\', '/')
     # The receipt path under the prefix encodes the realization hash.
     let receiptPath = absPath / ".repro-receipt"
-    if not fileExists(receiptPath):
+    if not fileExists(extendedPath(receiptPath)):
       raiseRealizeFailed(packageId, "scoop",
         "no receipt at expected path " & receiptPath)
     let recipt = readReceiptFile(receiptPath)
@@ -334,7 +335,7 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
     var preview = PackagePreview(packageId: p.packageId)
     if p.packageId in pathCatalog:
       let src = pathCatalog[p.packageId].sourcePath
-      if fileExists(src):
+      if fileExists(extendedPath(src)):
         preview.kind = ppkRealize
         preview.detail = "path adapter (test seam) -> " & src
       else:

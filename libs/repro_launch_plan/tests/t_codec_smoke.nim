@@ -5,6 +5,7 @@
 ## generator (byte-determinism for two structurally-identical plans).
 
 import std/[os, strutils, tables, tempfiles, unittest]
+from repro_core/paths import extendedPath
 
 import repro_local_store
 import repro_launch_plan
@@ -74,7 +75,7 @@ suite "M57 LaunchPlan codec and CAS round-trip":
   test "CAS round-trip via M56 store":
     let storeRoot = createTempDir("repro-m57-codec-", "")
     defer:
-      try: removeDir(storeRoot) except OSError: discard
+      try: removeDir(extendedPath(storeRoot)) except OSError: discard
     var store = openStore(storeRoot)
     defer: store.close()
     let plan = samplePlan(lbkLinuxRunpathExact, @["/store/dep/lib"])

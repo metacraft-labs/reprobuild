@@ -296,10 +296,10 @@ proc fromByteString(text: string): seq[byte] =
     result[i] = byte(ord(ch))
 
 proc writeEnvelope*(path: string; value: DomainValue) =
-  writeFile(path, toByteString(encodeEnvelope(value)))
+  writeFile(extendedPath(path), toByteString(encodeEnvelope(value)))
 
 proc readEnvelope*(path: string): DomainValue =
-  decodeEnvelope(fromByteString(readFile(path)))
+  decodeEnvelope(fromByteString(readFile(extendedPath(path))))
 
 proc fixedSchemaMagic*(): array[4, byte] =
   EnvelopeMagic

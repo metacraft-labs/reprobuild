@@ -36,6 +36,7 @@ when not defined(windows):
     "repro-launcher targets Windows only; compile with `nim c -d:mingw`."
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 import repro_launch_plan
 # Note: we deliberately do NOT import `repro_local_store` here. The
@@ -269,10 +270,10 @@ proc resolveSidecarPath(argv0: string): string =
   ## sidecar must live next to the resolved executable. We resolve
   ## via `getAppFilename()` as the canonical fallback.
   let candidate = argv0 & LaunchPlanSidecarSuffix
-  if fileExists(candidate):
+  if fileExists(extendedPath(candidate)):
     return candidate
   let fromAppFilename = getAppFilename() & LaunchPlanSidecarSuffix
-  if fileExists(fromAppFilename):
+  if fileExists(extendedPath(fromAppFilename)):
     return fromAppFilename
   raise newException(IOError,
     "no Reprobuild launcher sidecar at " & candidate &

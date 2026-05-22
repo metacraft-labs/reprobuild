@@ -18,6 +18,7 @@
 ## `MaterializedLauncherRecord` per command for the manifest writer.
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 import repro_home_generations
 import repro_local_store
@@ -54,7 +55,7 @@ proc locateLauncherBinary(): string =
     exeDir.parentDir / "repro-launcher.exe",
     getCurrentDir() / "build" / "repro-launcher.exe"]
   for c in candidates:
-    if fileExists(c):
+    if fileExists(extendedPath(c)):
       return c
   ""
 
@@ -113,7 +114,7 @@ when defined(windows):
                                   prefix: string): MaterializedLauncherRecord =
     let cmdExe = binDir / (commandName & ".exe")
     let sidecar = cmdExe & LaunchPlanSidecarSuffix
-    createDir(binDir)
+    createDir(extendedPath(binDir))
     # The Reprobuild native launcher binary launches via CreateProcessW,
     # which on Windows only spawns native PE executables (.exe). When
     # the realized executable is a `.cmd` or `.bat` script (typical for
@@ -122,11 +123,11 @@ when defined(windows):
     # `.cmd` shim that delegates through `cmd.exe /c`. The activation
     # manifest records `launcher-script` in that case so the on-disk
     # artifact and the manifest record stay consistent.
-    if launcherBinary.len > 0 and fileExists(launcherBinary) and
+    if launcherBinary.len > 0 and fileExists(extendedPath(launcherBinary)) and
         isNativeExe(exePath):
-      if fileExists(cmdExe):
-        removeFile(cmdExe)
-      copyFile(launcherBinary, cmdExe)
+      if fileExists(extendedPath(cmdExe)):
+        removeFile(extendedPath(cmdExe))
+      copyFile(extendedPath(launcherBinary), extendedPath(cmdExe))
       let sidecarRec = LaunchSidecar(
         schemaVersion: LaunchSidecarCurrentVersion,
         launchPlanIdHex: idHex,
@@ -143,14 +144,14 @@ when defined(windows):
       # when the launcher binary is missing.
       let cmdShim = binDir / (commandName & ".cmd")
       let body = "@echo off\r\n\"" & exePath & "\" %*\r\n"
-      writeFile(cmdShim, body)
+      writeFile(extendedPath(cmdShim), body)
       result.binDirArtifactKind = "launcher-script"
 
 proc materializeLaunchers*(store: var Store; binDir: string;
                            realized: seq[RealizedRecord];
                            launchers: seq[PlannedLauncher]):
     seq[MaterializedLauncherRecord] =
-  createDir(binDir)
+  createDir(extendedPath(binDir))
   # Build a quick lookup from package id → realized record.
   var byPkg: seq[(string, RealizedRecord)]
   for r in realized:
@@ -203,11 +204,11 @@ proc materializeLaunchers*(store: var Store; binDir: string;
               p
           generatePosixLauncherScript(posixPlan,
             when defined(macosx): "DYLD_LIBRARY_PATH" else: "LD_LIBRARY_PATH")
-      writeFile(scriptPath, scriptBody)
+      writeFile(extendedPath(scriptPath), scriptBody)
       when not defined(windows):
         # 0o755
         try:
-          setFilePermissions(scriptPath, {fpUserExec, fpUserWrite, fpUserRead,
+          setFilePermissions(extendedPath(scriptPath), {fpUserExec, fpUserWrite, fpUserRead,
             fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
         except OSError as err:
           raiseLauncherFailed(l.commandName,
@@ -222,9 +223,9 @@ proc removeLauncher*(binDir, commandName: string) =
     let cmdExe = binDir / (commandName & ".exe")
     let sidecar = cmdExe & LaunchPlanSidecarSuffix
     let cmdShim = binDir / (commandName & ".cmd")
-    if fileExists(cmdExe): removeFile(cmdExe)
-    if fileExists(sidecar): removeFile(sidecar)
-    if fileExists(cmdShim): removeFile(cmdShim)
+    if fileExists(extendedPath(cmdExe)): removeFile(extendedPath(cmdExe))
+    if fileExists(extendedPath(sidecar)): removeFile(extendedPath(sidecar))
+    if fileExists(extendedPath(cmdShim)): removeFile(extendedPath(cmdShim))
   else:
     let scriptPath = binDir / commandName
-    if fileExists(scriptPath): removeFile(scriptPath)
+    if fileExists(extendedPath(scriptPath)): removeFile(extendedPath(scriptPath))

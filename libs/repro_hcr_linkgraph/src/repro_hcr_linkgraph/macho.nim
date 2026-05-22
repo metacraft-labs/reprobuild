@@ -1,4 +1,5 @@
 import std/[strutils]
+from repro_core/paths import extendedPath
 
 import repro_hcr_linkgraph/types
 
@@ -93,7 +94,7 @@ proc bytesFrom(data: string; offset: uint64; size: uint64): seq[byte] =
     result[i] = byte(ord(data[int(offset) + i]))
 
 proc parseMachOArm64Object*(path: string): LinkGraph =
-  let data = readFile(path)
+  let data = readFile(extendedPath(path))
   if data.len < 32:
     raise newException(ValueError, "file too small for Mach-O header")
   if readU32Le(data, 0) != MachO64Magic:

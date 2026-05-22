@@ -1,4 +1,5 @@
 import std/[json, os, strutils]
+from repro_core/paths import extendedPath
 
 # Windows: the sibling runquota repository now ships a Windows port
 # (named-pipe transport + Job-Object-based process spawning), so the real
@@ -558,12 +559,12 @@ proc runRunQuotaHelperCli*(args: openArray[string]): int =
   if resultPath.len == 0 or command.argv.len == 0:
     return 2
   try:
-    writeFile(resultPath, $executionJson(runWithRunQuota(request, command)))
+    writeFile(extendedPath(resultPath), $executionJson(runWithRunQuota(request, command)))
   except CatchableError as err:
     var failed = ReproRunQuotaExecution(
       exitCode: 1,
       exited: true,
       stderr: err.msg,
       backendName: "runquota-client")
-    writeFile(resultPath, $executionJson(failed, err.msg))
+    writeFile(extendedPath(resultPath), $executionJson(failed, err.msg))
   0

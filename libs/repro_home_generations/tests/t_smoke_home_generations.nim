@@ -5,15 +5,16 @@
 ## pipeline against the M56 store + apply lock.
 
 import std/[os, unittest]
+from repro_core/paths import extendedPath
 
 import repro_home_generations
 
 const SmokeDir = "build/test-tmp/home-generations-smoke"
 
 proc resetDir(path: string) =
-  if dirExists(path):
-    removeDir(path)
-  createDir(path)
+  if dirExists(extendedPath(path)):
+    removeDir(extendedPath(path))
+  createDir(extendedPath(path))
 
 suite "Home-generations smoke":
 
@@ -47,18 +48,18 @@ suite "Home-generations smoke":
     check decoded.realizedPrefixIds[0] == realized
     # No padding, no extras: the on-disk file size equals the field
     # sizes plus the envelope frame.
-    let onDiskBytes = readFile(p)
+    let onDiskBytes = readFile(extendedPath(p))
     check onDiskBytes.len == expectedPointerFileSize(env)
 
   test "corrupt pointer body byte fails closed":
     let p = SmokeDir / "pointer.bin"
-    var raw = readFile(p)
+    var raw = readFile(extendedPath(p))
     # Flip a byte in the middle of the body (well past the magic +
     # version + bodyLen header, well before the trailing checksum).
     let mid = raw.len div 2
     raw[mid] = char(byte(raw[mid]) xor 0xff'u8)
     let corrupt = SmokeDir / "pointer-corrupt.bin"
-    writeFile(corrupt, raw)
+    writeFile(extendedPath(corrupt), raw)
     expect EPointerCorrupt:
       discard readPointerFile(corrupt)
 

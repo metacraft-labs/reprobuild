@@ -20,6 +20,7 @@
 ## can quarantine the partial generation.
 
 import std/[options, os, sequtils, sets, strutils, tables, times]
+from repro_core/paths import extendedPath
 
 import blake3
 import repro_home_generations
@@ -910,7 +911,7 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
   ## manifest, then verify every recorded post-write digest against
   ## the live filesystem. Returns true when everything matches.
   let pointerFile = pointerPath(stateDir, activeGenIdHex)
-  if not fileExists(pointerFile):
+  if not fileExists(extendedPath(pointerFile)):
     return false
   let env = readPointerFile(pointerFile)
   var manifestKey: PrefixIdBytes
@@ -927,13 +928,13 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
     of gfoStowSymlink, gfoStowJunction:
       # The link itself must exist; phase B can extend to verify the
       # link target.
-      if not symlinkExists(gf.absoluteOutputPath) and
-         not fileExists(gf.absoluteOutputPath):
+      if not symlinkExists(extendedPath(gf.absoluteOutputPath)) and
+         not fileExists(extendedPath(gf.absoluteOutputPath)):
         return false
     of gfoOwned, gfoMerged, gfoExistingPreserved, gfoStowCopy:
-      if not fileExists(gf.absoluteOutputPath):
+      if not fileExists(extendedPath(gf.absoluteOutputPath)):
         return false
-      let raw = readFile(gf.absoluteOutputPath)
+      let raw = readFile(extendedPath(gf.absoluteOutputPath))
       var buf = newSeq[byte](raw.len)
       for i, ch in raw:
         buf[i] = byte(ord(ch))
@@ -945,12 +946,12 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
       let binDir = stableBinDir(stateDir)
       let cmdExe = binDir / (ec.commandName & ".exe")
       let cmdShim = binDir / (ec.commandName & ".cmd")
-      if not fileExists(cmdExe) and not fileExists(cmdShim):
+      if not fileExists(extendedPath(cmdExe)) and not fileExists(extendedPath(cmdShim)):
         return false
     else:
       let binDir = generationBinDir(stateDir, activeGenIdHex)
       let cmdScript = binDir / ec.commandName
-      if not fileExists(cmdScript):
+      if not fileExists(extendedPath(cmdScript)):
         return false
     inc outVerified
   # M68: verify recorded resource bindings still match the live
@@ -1031,17 +1032,17 @@ proc previewStowItem(profileDir, homeDir: string;
   result.name = entry.targetAbsolutePath
   let target = entry.targetAbsolutePath
   let source = entry.sourceAbsolutePath
-  if not fileExists(target) and not symlinkExists(target) and
-     not dirExists(target):
+  if not fileExists(extendedPath(target)) and not symlinkExists(extendedPath(target)) and
+     not dirExists(extendedPath(target)):
     result.action = piaLink
     result.detail = "would link -> " & source
     return
-  if symlinkExists(target):
+  if symlinkExists(extendedPath(target)):
     # Compare by file identity (robust across Windows reparse-point
     # resolution quirks) — the same check the materializer uses.
     var pointsAtSource = false
     try:
-      pointsAtSource = fileExists(source) and sameFile(target, source)
+      pointsAtSource = fileExists(extendedPath(source)) and sameFile(target, source)
     except OSError, IOError:
       pointsAtSource = false
     if pointsAtSource:
@@ -1057,14 +1058,14 @@ proc previewStowItem(profileDir, homeDir: string;
         "to the stow source"
     else:
       var resolved = ""
-      try: resolved = expandSymlink(target)
+      try: resolved = expandSymlink(extendedPath(target))
       except OSError: resolved = ""
       result.action = piaConflictDrift
       result.detail = "existing symlink points at a different source (" &
         resolved & ")"
     return
   # A regular file (or directory) at the target path.
-  if fileExists(target):
+  if fileExists(extendedPath(target)):
     # M76: the ONE byte-identical predicate, shared with the apply
     # path (`tryCreateSymlink` and the stow copy fallback) — so a
     # plan that previews a cache-hit never fails at apply.
@@ -1100,7 +1101,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   ensureStateDir(opts.stateDir)
 
   # ---- Step 2: load intent ----------------------------------------------
-  if not fileExists(opts.profilePath):
+  if not fileExists(extendedPath(opts.profilePath)):
     raiseIntentLoad(opts.profilePath,
       "no home.nim at expected path (profile-dir: " & opts.profileDir & ")")
   let profile = loadProfileOrRaise(opts.profilePath)
@@ -1173,7 +1174,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   var prevFileDigests = initTable[string, Digest256]()
   if activeGenIdHex.len > 0:
     let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
-    if fileExists(prevPointerFile):
+    if fileExists(extendedPath(prevPointerFile)):
       try:
         let prevEnv = readPointerFile(prevPointerFile)
         var prevKey: PrefixIdBytes
@@ -1196,7 +1197,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
     let candidateDigest = digestOf(g.contentBytes)
     if g.absoluteOutputPath in prevFileDigests and
        prevFileDigests[g.absoluteOutputPath] == candidateDigest and
-       fileExists(g.absoluteOutputPath):
+       fileExists(extendedPath(g.absoluteOutputPath)):
       item.action = piaCacheHit
       item.detail = "content unchanged from the active generation"
     else:
@@ -1224,7 +1225,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   var recordedBindings = initOrderedTable[string, RecordedBinding]()
   if activeGenIdHex.len > 0:
     let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
-    if fileExists(prevPointerFile):
+    if fileExists(extendedPath(prevPointerFile)):
       try:
         let prevEnv = readPointerFile(prevPointerFile)
         var prevKey: PrefixIdBytes
@@ -1312,7 +1313,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       raiseKilledByTestHook(1)
 
     # ---- Step 2: load intent layer --------------------------------------
-    if not fileExists(opts.profilePath):
+    if not fileExists(extendedPath(opts.profilePath)):
       raiseIntentLoad(opts.profilePath,
         "no home.nim at expected path (profile-dir: " & opts.profileDir &
         ")")
@@ -1457,7 +1458,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # rotation in step 10 is the point of no return.
       let earlyGenDir = generationDir(opts.stateDir,
         generationIdHex(candidateId))
-      createDir(earlyGenDir)
+      createDir(extendedPath(earlyGenDir))
 
       # ---- Step 7: realize packages -------------------------------------
       let realized = realizePlannedPackages(store, applyPlan.packages)
@@ -1475,7 +1476,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       var prevFileDigests = initTable[string, Digest256]()
       if activeGenIdHex.len > 0:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
-        if fileExists(prevPointerFile):
+        if fileExists(extendedPath(prevPointerFile)):
           try:
             let prevEnv = readPointerFile(prevPointerFile)
             var prevKey: PrefixIdBytes
@@ -1570,8 +1571,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         var isCacheHit = false
         if g.absoluteOutputPath in prevFileDigests and
            prevFileDigests[g.absoluteOutputPath] == candidateDigest and
-           fileExists(g.absoluteOutputPath):
-          let raw = readFile(g.absoluteOutputPath)
+           fileExists(extendedPath(g.absoluteOutputPath)):
+          let raw = readFile(extendedPath(g.absoluteOutputPath))
           var liveBuf = newSeq[byte](raw.len)
           for i, ch in raw:
             liveBuf[i] = byte(ord(ch))
@@ -1598,7 +1599,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # and the bytes are reachable via `readCasBlob`. M63 only RECORDS
       # the digest; M64 needs the bytes too.
       proc readFileBytes(path: string): seq[byte] =
-        let raw = readFile(path)
+        let raw = readFile(extendedPath(path))
         result = newSeq[byte](raw.len)
         for i, ch in raw:
           result[i] = byte(ord(ch))
@@ -1606,7 +1607,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         if g.sourceKind == pgfsPackageOutput:
           discard storeCasBlob(store, g.contentBytes)
       for entry in stowEntries:
-        if fileExists(entry.sourceAbsolutePath):
+        if fileExists(extendedPath(entry.sourceAbsolutePath)):
           let bytes = readFileBytes(entry.sourceAbsolutePath)
           discard storeCasBlob(store, bytes)
       # Materialize synthetic managed blocks from the M64 test hook.
@@ -1629,7 +1630,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # symmetry assumes apply already cleaned up.
       if activeGenIdHex.len > 0:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
-        if fileExists(prevPointerFile):
+        if fileExists(extendedPath(prevPointerFile)):
           var newPaths: seq[string]
           for sf in stagedFiles:
             newPaths.add(sf.absoluteOutputPath)
@@ -1651,8 +1652,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               let k = mb.hostFilePath & "\x1a" & mb.blockId
               if k notin newBlockKeys:
                 # Strip the sentinel-delimited region from the host file.
-                if fileExists(mb.hostFilePath):
-                  let existing = readFile(mb.hostFilePath)
+                if fileExists(extendedPath(mb.hostFilePath)):
+                  let existing = readFile(extendedPath(mb.hostFilePath))
                   let openS = OpenSentinelPrefix & mb.blockId &
                     OpenSentinelSuffix
                   let closeS = CloseSentinelPrefix & mb.blockId &
@@ -1670,7 +1671,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
                       inc closeLineEnd
                     let rewritten = existing[0 ..< openLineStart] &
                       existing[closeLineEnd .. ^1]
-                    writeFile(mb.hostFilePath, rewritten)
+                    writeFile(extendedPath(mb.hostFilePath), rewritten)
           except CatchableError:
             # The previous manifest may be unreadable in pathological
             # cases (manifest in CAS was GC'd by another tool, etc.).
@@ -1683,7 +1684,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # ---- Step 9: materialize launch plans -----------------------------
       let perGenBin = generationBinDir(opts.stateDir,
         generationIdHex(candidateId))
-      createDir(perGenBin)
+      createDir(extendedPath(perGenBin))
       let launchers = materializeLaunchers(store, perGenBin, realized,
         applyPlan.launchers)
       if shouldKillAfter(9):
@@ -1703,7 +1704,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       var recordedBindings = initOrderedTable[string, RecordedBinding]()
       if activeGenIdHex.len > 0:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
-        if fileExists(prevPointerFile):
+        if fileExists(extendedPath(prevPointerFile)):
           try:
             let prevEnv = readPointerFile(prevPointerFile)
             var prevKey: PrefixIdBytes

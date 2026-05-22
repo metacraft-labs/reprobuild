@@ -37,6 +37,7 @@
 ## once per package.
 
 import std/[json, os, osproc, strutils, tables]
+from repro_core/paths import extendedPath
 
 # M80: the plan classifier and the apply-time Scoop adapter
 # (`repro_tool_profiles.resolveScoopTool`) share ONE installed-version
@@ -110,10 +111,10 @@ proc raiseUnknownPackage*(packageId: string;
 
 proc resolveScoopExecutable(): string =
   let override = getEnv(ScoopOverrideEnvVar)
-  if override.len > 0 and fileExists(override):
+  if override.len > 0 and fileExists(extendedPath(override)):
     return override
   let envBinary = getEnv("REPROBUILD_SCOOP_BINARY")
-  if envBinary.len > 0 and fileExists(envBinary):
+  if envBinary.len > 0 and fileExists(extendedPath(envBinary)):
     return envBinary
   for candidate in ["scoop.cmd", "scoop.exe", "scoop.ps1", "scoop"]:
     let resolved = findExe(candidate)
@@ -172,13 +173,13 @@ proc readInstalledFromTree(scoopRoot: string;
   ## marker. This is the robust path the M55 sandbox fixtures rely on
   ## (`populateScoopApp` lays down `apps/<app>/<version>` directly).
   let appsDir = scoopRoot / "apps"
-  if not dirExists(appsDir):
+  if not dirExists(extendedPath(appsDir)):
     return
-  for kind, appPath in walkDir(appsDir):
+  for kind, appPath in walkDir(extendedPath(appsDir)):
     if kind notin {pcDir, pcLinkToDir}:
       continue
     let app = extractFilename(appPath)
-    for vk, vPath in walkDir(appPath):
+    for vk, vPath in walkDir(extendedPath(appPath)):
       if vk notin {pcDir, pcLinkToDir}:
         continue
       let ver = extractFilename(vPath)
@@ -235,9 +236,9 @@ proc ensureBucketsQueried(cat: var ProductionCatalog) =
   if cat.buckets.len > 0:
     return
   let bucketsDir = cat.scoopRoot / "buckets"
-  if not dirExists(bucketsDir):
+  if not dirExists(extendedPath(bucketsDir)):
     return
-  for kind, path in walkDir(bucketsDir):
+  for kind, path in walkDir(extendedPath(bucketsDir)):
     if kind in {pcDir, pcLinkToDir}:
       cat.buckets.add(extractFilename(path))
 
@@ -279,11 +280,11 @@ proc findBucketManifest*(cat: var ProductionCatalog; app: string):
   ensureBucketsQueried(cat)
   for bucket in cat.buckets:
     let mp = bucketManifestPath(cat.scoopRoot, bucket, app)
-    if fileExists(mp):
+    if fileExists(extendedPath(mp)):
       var version = ""
       var binName = ""
       try:
-        let parsed = parseJson(readFile(mp))
+        let parsed = parseJson(readFile(extendedPath(mp)))
         if parsed.kind == JObject:
           version = parsed{"version"}.getStr("")
           binName = manifestBinName(parsed)
@@ -297,10 +298,10 @@ proc installedExecutableName(scoopRoot, app, version: string): string =
   ## copies the bucket manifest into `apps/<app>/<version>/
   ## manifest.json`; the M55 sandbox fixture writes that too.
   let mp = scoopRoot / "apps" / app / version / "manifest.json"
-  if not fileExists(mp):
+  if not fileExists(extendedPath(mp)):
     return ""
   try:
-    let parsed = parseJson(readFile(mp))
+    let parsed = parseJson(readFile(extendedPath(mp)))
     if parsed.kind == JObject:
       return manifestBinName(parsed)
   except CatchableError:
@@ -415,9 +416,9 @@ proc resolvePackage*(cat: var ProductionCatalog; packageId: string):
         # adapter can still bind `bucket/app`.
         let installJson = cat.scoopRoot / "apps" / packageId / inst.version /
           "install.json"
-        if fileExists(installJson):
+        if fileExists(extendedPath(installJson)):
           try:
-            let parsed = parseJson(readFile(installJson))
+            let parsed = parseJson(readFile(extendedPath(installJson)))
             if parsed.kind == JObject:
               result.bucket = parsed{"bucket"}.getStr("")
           except CatchableError:

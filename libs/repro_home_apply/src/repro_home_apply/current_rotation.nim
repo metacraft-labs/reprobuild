@@ -21,6 +21,7 @@
 ##     `current.txt`.
 
 import std/[os]
+from repro_core/paths import extendedPath
 
 import repro_home_generations
 
@@ -39,9 +40,9 @@ proc generationBinDir*(stateDir, generationId: string): string =
   generationDir(stateDir, generationId) / "bin"
 
 proc clearDirEntries(dir: string) =
-  if not dirExists(dir):
+  if not dirExists(extendedPath(dir)):
     return
-  for kind, entry in walkDir(dir, relative = false):
+  for kind, entry in walkDir(extendedPath(dir), relative = false):
     case kind
     of pcFile, pcLinkToFile:
       try:
@@ -72,14 +73,15 @@ proc mirrorBinDir(srcBinDir, dstBinDir: string) =
   ## was already populated by `materializeLaunchers`; we copy because
   ## the stable dir lives outside any one generation and survives
   ## rollback.
-  createDir(dstBinDir)
+  createDir(extendedPath(dstBinDir))
+  # TODO(win-longpath): walk results escape; needs review
   for kind, entry in walkDir(srcBinDir, relative = false):
     let leaf = extractFilename(entry)
     let dst = dstBinDir / leaf
     case kind
     of pcFile, pcLinkToFile:
       try:
-        copyFile(entry, dst)
+        copyFile(extendedPath(entry), extendedPath(dst))
       except OSError as err:
         raiseCurrentRotationFailed(dst,
           "could not mirror launcher file into stable bin dir: " & err.msg)
@@ -104,13 +106,13 @@ proc rotateCurrent*(stateDir, generationId: string) =
   ## "committed-but-unsealed" condition that is recoverable on the
   ## next apply.
   let genDir = generationDir(stateDir, generationId)
-  if not dirExists(genDir):
+  if not dirExists(extendedPath(genDir)):
     raiseCurrentRotationFailed(genDir,
       "expected generation directory does not exist on disk")
   when defined(windows):
     let stable = stableBinDir(stateDir)
     let srcBin = generationBinDir(stateDir, generationId)
-    if dirExists(srcBin):
+    if dirExists(extendedPath(srcBin)):
       # Wipe the stable bin dir, then mirror the new generation's
       # bin entries in. Wiping is safe because every entry in the
       # stable dir was put there by a previous apply and is fully
@@ -118,7 +120,7 @@ proc rotateCurrent*(stateDir, generationId: string) =
       # the next apply re-populates with the current generation's
       # entries.
       clearDirEntries(stable)
-      createDir(stable)
+      createDir(extendedPath(stable))
       mirrorBinDir(srcBin, stable)
     writeCurrentGenerationId(stateDir, generationId)
   else:
@@ -129,7 +131,7 @@ proc demoteCurrent*(stateDir: string) =
   ## apply recovery path when the only generation present is the one
   ## we just aborted.
   let p = currentPath(stateDir)
-  if fileExists(p) or symlinkExists(p):
-    try: removeFile(p) except OSError: discard
+  if fileExists(extendedPath(p)) or symlinkExists(extendedPath(p)):
+    try: removeFile(extendedPath(p)) except OSError: discard
   when defined(windows):
     clearDirEntries(stableBinDir(stateDir))

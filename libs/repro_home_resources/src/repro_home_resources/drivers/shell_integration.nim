@@ -11,6 +11,7 @@
 ## branch.
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 import ./managed_block
 import ./../types
@@ -45,10 +46,10 @@ proc resolveShellIntegrationHost*(homeDir: string): string =
   ## Pick the shell startup file for managed shell integration.
   when defined(windows):
     let modern = defaultPowerShellProfilePath(homeDir)
-    if fileExists(modern):
+    if fileExists(extendedPath(modern)):
       return modern
     let legacy = legacyPowerShellProfilePath(homeDir)
-    if fileExists(legacy):
+    if fileExists(extendedPath(legacy)):
       return legacy
     # Neither exists yet — create the modern one.
     modern

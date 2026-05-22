@@ -4,6 +4,7 @@
 ## real M59 gates live under `tests/e2e/`.
 
 import std/[os, strutils, tables, unittest]
+from repro_core/paths import extendedPath
 
 import repro_dsl_stdlib/configurables
 import repro_dsl_stdlib/generated_config
@@ -60,20 +61,20 @@ suite "Generated-config smoke":
 
   test "managed-block update/remove":
     let tmp = getTempDir() / "repro-mb-smoke.txt"
-    if fileExists(tmp): removeFile(tmp)
-    writeFile(tmp, "alpha\nbeta\n")
+    if fileExists(extendedPath(tmp)): removeFile(extendedPath(tmp))
+    writeFile(extendedPath(tmp), "alpha\nbeta\n")
     discard updateManagedBlock(tmp, "demo", "managed line 1\nmanaged line 2")
-    let c1 = readFile(tmp)
+    let c1 = readFile(extendedPath(tmp))
     check "alpha" in c1
     check "managed line 1" in c1
     check "managed line 2" in c1
     check ">>> repro:home:demo >>>" in c1
     check removeManagedBlock(tmp, "demo")
-    let c2 = readFile(tmp)
+    let c2 = readFile(extendedPath(tmp))
     check "managed line 1" notin c2
     check ">>> repro:home:demo >>>" notin c2
     check "alpha" in c2
-    removeFile(tmp)
+    removeFile(extendedPath(tmp))
 
   test "renderBuiltinTemplate: {{name}} + {{#if}} on typed values":
     var values = initTable[string, TplValue]()

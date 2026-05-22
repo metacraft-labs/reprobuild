@@ -234,9 +234,9 @@ proc digestFileName(digest: ContentDigest): string =
     toHex(digest.bytes) & ".rbar"
 
 proc fingerprintMetadata(path: string): FileMetadata =
-  if not fileExists(path) and not dirExists(path):
+  if not fileExists(extendedPath(path)) and not dirExists(extendedPath(path)):
     return FileMetadata(kind: ffkMissing)
-  let info = getFileInfo(path, followSymlink = false)
+  let info = getFileInfo(extendedPath(path), followSymlink = false)
   result.kind =
     case info.kind
     of pcFile, pcLinkToFile:
@@ -266,7 +266,7 @@ proc fingerprintMetadata(path: string;
 proc fileBytesForHash(path: string; metadata: FileMetadata): seq[byte] =
   if metadata.kind != ffkRegular:
     return @[]
-  bytes(readFile(path))
+  bytes(readFile(extendedPath(path)))
 
 proc observeFileWithMetadata(path: string; policy: FileFingerprintPolicy;
                              metadata: FileMetadata): FileFingerprint =
@@ -285,8 +285,8 @@ proc digestHex*(digest: ContentDigest): string =
 
 proc openLocalCas*(root: string): LocalCas =
   result.root = root
-  createDir(result.root)
-  createDir(result.root / "tmp")
+  createDir(extendedPath(result.root))
+  createDir(extendedPath(result.root / "tmp"))
 
 proc blobPath*(cas: LocalCas; digest: ContentDigest): string =
   let hex = digestHex(digest)
@@ -297,10 +297,10 @@ proc blobRef*(digest: ContentDigest; sizeBytes: uint64): CasBlobRef =
 
 proc readBlob*(cas: LocalCas; blob: CasBlobRef): seq[byte] =
   let path = cas.blobPath(blob.digest)
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     raise newException(CacheIntegrityError, "missing CAS object " &
       digestHex(blob.digest))
-  result = bytes(readFile(path))
+  result = bytes(readFile(extendedPath(path)))
   if uint64(result.len) != blob.sizeBytes:
     raise newException(CacheIntegrityError, "CAS size mismatch for " &
       digestHex(blob.digest))
@@ -316,20 +316,20 @@ proc storeBlob*(cas: LocalCas; payload: openArray[byte]): CasBlobRef =
   result.digest = casDigest(payload)
   result.sizeBytes = uint64(payload.len)
   let finalPath = cas.blobPath(result.digest)
-  if fileExists(finalPath):
+  if fileExists(extendedPath(finalPath)):
     cas.verifyBlob(result)
     return
-  createDir(finalPath.splitPath.head)
+  createDir(extendedPath(finalPath.splitPath.head))
   let now = getTime()
   let tmpPath = cas.root / "tmp" / (digestHex(result.digest) & "." &
     $getCurrentProcessId() & "." & $now.toUnix & "." & $now.nanosecond)
-  writeFile(tmpPath, byteString(payload))
+  writeFile(extendedPath(tmpPath), byteString(payload))
   try:
-    moveFile(tmpPath, finalPath)
+    moveFile(extendedPath(tmpPath), extendedPath(finalPath))
   except OSError:
-    if fileExists(tmpPath):
-      removeFile(tmpPath)
-    if fileExists(finalPath):
+    if fileExists(extendedPath(tmpPath)):
+      removeFile(extendedPath(tmpPath))
+    if fileExists(extendedPath(finalPath)):
       cas.verifyBlob(result)
     else:
       raise
@@ -347,20 +347,20 @@ proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
     payloads.add(cas.readBlob(output.blob))
   for i, output in record.outputs:
     let destination = materialPath(outputRoot, output.path)
-    createDir(destination.splitPath.head)
+    createDir(extendedPath(destination.splitPath.head))
     let tmpPath = destination & ".reprotmp." & $getCurrentProcessId()
-    writeFile(tmpPath, byteString(payloads[i]))
+    writeFile(extendedPath(tmpPath), byteString(payloads[i]))
     # Windows: rwx permissions are not preserved (see writePermissions);
     # applying setFilePermissions with an empty set would clobber the file's
     # NTFS ACLs in unhelpful ways, so we skip it entirely. Follow-up:
     # preserve ACLs / read-only attribute via icacls / SetFileAttributes.
     when not defined(windows):
-      setFilePermissions(tmpPath, output.permissions)
-    if fileExists(destination):
-      removeFile(destination)
-    moveFile(tmpPath, destination)
+      setFilePermissions(extendedPath(tmpPath), output.permissions)
+    if fileExists(extendedPath(destination)):
+      removeFile(extendedPath(destination))
+    moveFile(extendedPath(tmpPath), extendedPath(destination))
     when not defined(windows):
-      setFilePermissions(destination, output.permissions)
+      setFilePermissions(extendedPath(destination), output.permissions)
 
 proc strongIdentityPayload(weak: ContentDigest;
                            inputs: openArray[FileFingerprint]): seq[byte] =
@@ -437,8 +437,8 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
     raiseEnvelopeError(eeMalformed, "trailing action record bytes")
 
 proc writeActionResultRecordFile*(path: string; record: ActionResultRecord) =
-  createDir(parentDir(path))
-  writeFile(path, byteString(encodeRecord(record)))
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), byteString(encodeRecord(record)))
 
 proc metadataOnly(input: FileFingerprint): FileFingerprint =
   FileFingerprint(
@@ -508,7 +508,7 @@ proc appendFramedPayload(path: string; payload: openArray[byte]) =
   frame.writeU32Le(uint32(payload.len))
   frame.add(payload)
   frame.writeU32Le(recordTail(payload))
-  var handle = open(path, fmAppend)
+  var handle = open(extendedPath(path), fmAppend)
   try:
     handle.write(byteString(frame))
   finally:
@@ -620,30 +620,30 @@ proc decodeHotIndex(payload: openArray[byte]): HotIndexDecode =
     raiseEnvelopeError(eeMalformed, "trailing action hot index bytes")
 
 proc writeHotIndex(cache: ActionCache) =
-  writeFile(cache.hotIndexPath, byteString(encodeHotIndex(cache.hotByWeak)))
+  writeFile(extendedPath(cache.hotIndexPath), byteString(encodeHotIndex(cache.hotByWeak)))
 
 proc sourceNewerThanIndex(sourcePath, indexPath: string): bool =
-  if not fileExists(sourcePath):
+  if not fileExists(extendedPath(sourcePath)):
     return false
-  if not fileExists(indexPath):
+  if not fileExists(extendedPath(indexPath)):
     return true
-  getLastModificationTime(sourcePath) > getLastModificationTime(indexPath)
+  getLastModificationTime(extendedPath(sourcePath)) > getLastModificationTime(extendedPath(indexPath))
 
 proc loadHotRecords(cache: var ActionCache) =
   cache.hotByWeak.clear()
-  if fileExists(cache.hotIndexPath) and
+  if fileExists(extendedPath(cache.hotIndexPath)) and
       not sourceNewerThanIndex(cache.hotRecordsPath, cache.hotIndexPath):
     try:
-      let decoded = decodeHotIndex(bytes(readFile(cache.hotIndexPath)))
+      let decoded = decodeHotIndex(bytes(readFile(extendedPath(cache.hotIndexPath))))
       cache.hotByWeak = decoded.records
       cache.hotInputs = decoded.inputs
       return
     except EnvelopeError:
       cache.hotByWeak.clear()
       cache.hotInputs.setLen(0)
-  if not fileExists(cache.hotRecordsPath):
+  if not fileExists(extendedPath(cache.hotRecordsPath)):
     return
-  let raw = bytes(readFile(cache.hotRecordsPath))
+  let raw = bytes(readFile(extendedPath(cache.hotRecordsPath)))
   var pos = 0
   while pos + 8 <= raw.len:
     let length = int(readU32Le(raw, pos))
@@ -661,7 +661,7 @@ proc loadHotRecords(cache: var ActionCache) =
       cache.hotByWeak[digestKey(record.weakFingerprint)] = record
     except EnvelopeError:
       discard
-  if getFileSize(cache.hotRecordsPath) >= ActionCacheCompactThreshold:
+  if getFileSize(extendedPath(cache.hotRecordsPath)) >= ActionCacheCompactThreshold:
     cache.rebuildHotInputs()
     cache.writeHotIndex()
     cache.hotIndexDirty = false
@@ -674,10 +674,10 @@ proc readHotRecord(cache: ActionCache; weak: ContentDigest):
   if cache.hotByWeak.hasKey(key):
     return (found: true, record: cache.hotByWeak[key])
   let path = cache.hotRecordPath(weak)
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     return
   try:
-    result.record = decodeHotRecord(bytes(readFile(path)))
+    result.record = decodeHotRecord(bytes(readFile(extendedPath(path))))
     if result.record.weakFingerprint == weak:
       result.found = true
   except EnvelopeError:
@@ -689,7 +689,7 @@ proc appendRecord(cache: var ActionCache; record: ActionResultRecord) =
   frame.writeU32Le(uint32(payload.len))
   frame.add(payload)
   frame.writeU32Le(recordTail(payload))
-  var handle = open(cache.recordsPath, fmAppend)
+  var handle = open(extendedPath(cache.recordsPath), fmAppend)
   try:
     handle.write(byteString(frame))
   finally:
@@ -705,9 +705,9 @@ proc appendRecord(cache: var ActionCache; record: ActionResultRecord) =
 proc loadRecords(cache: var ActionCache) =
   cache.byWeak.clear()
   cache.loadedAllRecords = true
-  if not fileExists(cache.recordsPath):
+  if not fileExists(extendedPath(cache.recordsPath)):
     return
-  let raw = bytes(readFile(cache.recordsPath))
+  let raw = bytes(readFile(extendedPath(cache.recordsPath)))
   var pos = 0
   while pos + 8 <= raw.len:
     let length = int(readU32Le(raw, pos))
@@ -742,13 +742,13 @@ proc compactLoadedRecords(cache: var ActionCache) =
     if records.len > 0:
       cache.hotByWeak[digestKey(records[^1].weakFingerprint)] =
         hotMetadataRecord(records[^1])
-  writeFile(cache.recordsPath, byteString(frameBytes))
+  writeFile(extendedPath(cache.recordsPath), byteString(frameBytes))
   cache.writeHotIndex()
 
 proc maybeCompactRecords(cache: var ActionCache) =
-  if not fileExists(cache.recordsPath):
+  if not fileExists(extendedPath(cache.recordsPath)):
     return
-  if getFileSize(cache.recordsPath) < ActionCacheCompactThreshold:
+  if getFileSize(extendedPath(cache.recordsPath)) < ActionCacheCompactThreshold:
     return
   compactLoadedRecords(cache)
 
@@ -763,12 +763,12 @@ proc openActionCache*(root: string): ActionCache =
   result.byWeak = initTable[string, seq[ActionResultRecord]]()
   result.hotByWeak = initTable[string, ActionResultRecord]()
   result.hotInputs = @[]
-  createDir(result.root)
-  createDir(result.hotRoot)
-  if not fileExists(result.recordsPath):
-    writeFile(result.recordsPath, "")
-  if not fileExists(result.hotRecordsPath):
-    writeFile(result.hotRecordsPath, "")
+  createDir(extendedPath(result.root))
+  createDir(extendedPath(result.hotRoot))
+  if not fileExists(extendedPath(result.recordsPath)):
+    writeFile(extendedPath(result.recordsPath), "")
+  if not fileExists(extendedPath(result.hotRecordsPath)):
+    writeFile(extendedPath(result.hotRecordsPath), "")
   result.loadHotRecords()
 
 proc flushHotIndex*(cache: var ActionCache) =
@@ -828,14 +828,14 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
   result.strongFingerprint = computeStrongFingerprint(weak, result.inputs)
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    let data = bytes(readFile(source))
+    let data = bytes(readFile(extendedPath(source)))
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.
     when defined(windows):
       let perms: set[FilePermission] = {}
     else:
-      let perms = getFilePermissions(source)
+      let perms = getFilePermissions(extendedPath(source))
     result.outputs.add(OutputBlob(path: path, blob: cas.storeBlob(data),
       permissions: perms))
   cache.appendRecord(result)

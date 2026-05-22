@@ -14,6 +14,7 @@
 ## `repro home set` integration is the first consumer.
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 import blake3
 import repro_home_generations
@@ -85,10 +86,10 @@ proc spliceBlock(existing, blockBytes, openSentinel, closeSentinel: string):
 proc applyManagedBlock*(planned: PlannedManagedBlock): AppliedManagedBlockRecord =
   let parent = parentDir(planned.hostFilePath)
   if parent.len > 0:
-    createDir(parent)
+    createDir(extendedPath(parent))
   var existing = ""
-  if fileExists(planned.hostFilePath):
-    existing = readFile(planned.hostFilePath)
+  if fileExists(extendedPath(planned.hostFilePath)):
+    existing = readFile(extendedPath(planned.hostFilePath))
   result.hostFilePath = planned.hostFilePath
   result.blockId = planned.blockId
   result.preWriteFileDigest = digestBytes(existing)
@@ -98,11 +99,11 @@ proc applyManagedBlock*(planned: PlannedManagedBlock): AppliedManagedBlockRecord
     CloseSentinelSuffix)
   let rewritten = spliceBlock(existing, planned.blockBytes, openS, closeS)
   let tmp = planned.hostFilePath & ".repro.tmp"
-  writeFile(tmp, rewritten)
+  writeFile(extendedPath(tmp), rewritten)
   try:
-    if fileExists(planned.hostFilePath):
-      removeFile(planned.hostFilePath)
-    moveFile(tmp, planned.hostFilePath)
+    if fileExists(extendedPath(planned.hostFilePath)):
+      removeFile(extendedPath(planned.hostFilePath))
+    moveFile(extendedPath(tmp), extendedPath(planned.hostFilePath))
   except OSError as err:
     raiseMaterializeFailed(planned.hostFilePath,
       "managed-block atomic rename failed: " & err.msg)

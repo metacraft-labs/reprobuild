@@ -11,6 +11,7 @@
 ##     lowercased OS hostname.
 
 import std/[os, osproc, strutils]
+from repro_core/paths import extendedPath
 
 import ./errors
 
@@ -95,7 +96,7 @@ proc loadProfilePath*(): string =
   ## scaffold a new profile in that case.
   let dir = resolveProfileDir()
   let path = dir / HomeProfileAnchor
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     raiseNoProfile(dir, path)
   result = path
 

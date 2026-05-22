@@ -12,6 +12,7 @@
 ## leaving the rest of the host file intact.
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 type
   ManagedBlockError* = object of CatchableError
@@ -115,7 +116,7 @@ proc updateManagedBlock*(hostFile: string; blockId: string;
   ## Returns the prior + new managed-block payloads so callers can derive
   ## the cache key.
   var prior =
-    if fileExists(hostFile): readFile(hostFile)
+    if fileExists(extendedPath(hostFile)): readFile(extendedPath(hostFile))
     else: ""
   result.priorContent = prior
   let blockText = renderBlock(blockId, content)
@@ -137,12 +138,12 @@ proc updateManagedBlock*(hostFile: string; blockId: string;
   result.newBlockBytes = content
   result.newContent = newContent
   if newContent != prior:
-    createDir(parentDir(hostFile))
+    createDir(extendedPath(parentDir(hostFile)))
     let tmpPath = hostFile & ".reprotmp." & $getCurrentProcessId()
-    writeFile(tmpPath, newContent)
-    if fileExists(hostFile):
-      removeFile(hostFile)
-    moveFile(tmpPath, hostFile)
+    writeFile(extendedPath(tmpPath), newContent)
+    if fileExists(extendedPath(hostFile)):
+      removeFile(extendedPath(hostFile))
+    moveFile(extendedPath(tmpPath), extendedPath(hostFile))
     result.rewroteFile = true
   else:
     result.rewroteFile = false
@@ -150,16 +151,16 @@ proc updateManagedBlock*(hostFile: string; blockId: string;
 proc removeManagedBlock*(hostFile: string; blockId: string): bool =
   ## Remove `blockId`'s sentinels and contents. Returns true if the file
   ## was modified.
-  if not fileExists(hostFile): return false
-  let prior = readFile(hostFile)
+  if not fileExists(extendedPath(hostFile)): return false
+  let prior = readFile(extendedPath(hostFile))
   let range = locateBlock(prior, blockId)
   if not range.found: return false
   let newContent = prior.substr(0, range.openLineStart - 1) &
     prior.substr(range.closeLineEnd, prior.len - 1)
   if newContent == prior: return false
   let tmpPath = hostFile & ".reprotmp." & $getCurrentProcessId()
-  writeFile(tmpPath, newContent)
-  if fileExists(hostFile):
-    removeFile(hostFile)
-  moveFile(tmpPath, hostFile)
+  writeFile(extendedPath(tmpPath), newContent)
+  if fileExists(extendedPath(hostFile)):
+    removeFile(extendedPath(hostFile))
+  moveFile(extendedPath(tmpPath), extendedPath(hostFile))
   return true

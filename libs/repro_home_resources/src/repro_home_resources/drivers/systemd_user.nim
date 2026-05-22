@@ -19,6 +19,7 @@
 ## exercised by the Windows smoke suite.
 
 import std/[osproc, strutils]
+from repro_core/paths import extendedPath
 
 when defined(linux):
   import std/os
@@ -50,11 +51,11 @@ proc observeUserUnit*(homeDir, name: string): ObservedState =
   ## canonical bytes the digest covers are the unit-file contents.
   when defined(linux):
     let path = userUnitPath(homeDir, name)
-    if not fileExists(path):
+    if not fileExists(extendedPath(path)):
       result.present = false
       result.digest = zeroDigest()
       return
-    let content = readFile(path)
+    let content = readFile(extendedPath(path))
     var raw = newSeq[byte](content.len)
     for i, ch in content:
       raw[i] = byte(ord(ch))
@@ -74,8 +75,8 @@ proc applyUserUnit*(homeDir, name, unitContent: string; enabled: bool):
   ## `enable --now`. All filesystem I/O is inside the linux guard.
   when defined(linux):
     let path = userUnitPath(homeDir, name)
-    createDir(parentDir(path))
-    writeFile(path, unitContent)
+    createDir(extendedPath(parentDir(path)))
+    writeFile(extendedPath(path), unitContent)
     let (reloadOut, reloadCode) = execCmdEx("systemctl --user daemon-reload")
     if reloadCode != 0:
       raiseResourceDriver("systemd:user:" & name, "systemd.userUnit",
@@ -99,8 +100,8 @@ proc destroyUserUnit*(homeDir, name: string) =
   when defined(linux):
     let path = userUnitPath(homeDir, name)
     discard execCmd("systemctl --user disable --now " & name)
-    if fileExists(path):
-      try: removeFile(path)
+    if fileExists(extendedPath(path)):
+      try: removeFile(extendedPath(path))
       except OSError: discard
     discard execCmd("systemctl --user daemon-reload")
   else:

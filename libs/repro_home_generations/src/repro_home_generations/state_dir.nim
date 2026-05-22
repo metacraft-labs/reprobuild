@@ -20,6 +20,7 @@
 ##     locks/apply.lock
 
 import std/[os]
+from repro_core/paths import extendedPath
 
 import ./errors
 
@@ -123,9 +124,9 @@ proc currentPath*(stateDir: string): string =
 
 proc ensureStateDir*(stateDir: string) =
   ## Create the on-disk layout for the state directory if missing.
-  createDir(stateDir)
-  createDir(generationsRoot(stateDir))
-  createDir(locksDir(stateDir))
+  createDir(extendedPath(stateDir))
+  createDir(extendedPath(generationsRoot(stateDir)))
+  createDir(extendedPath(locksDir(stateDir)))
 
 # ---------------------------------------------------------------------------
 # `current` reader / writer.
@@ -138,21 +139,21 @@ proc readCurrentGenerationId*(stateDir: string): string =
   ## `current.txt` with surrounding whitespace stripped.
   let p = currentPath(stateDir)
   when defined(windows):
-    if not fileExists(p):
+    if not fileExists(extendedPath(p)):
       return ""
-    var raw = readFile(p)
+    var raw = readFile(extendedPath(p))
     while raw.len > 0 and raw[^1] in {'\r', '\n', ' ', '\t'}:
       raw.setLen(raw.len - 1)
     return raw
   else:
-    if not symlinkExists(p) and not fileExists(p):
+    if not symlinkExists(extendedPath(p)) and not fileExists(extendedPath(p)):
       return ""
     try:
-      let target = expandSymlink(p)
+      let target = expandSymlink(extendedPath(p))
       return extractFilename(target)
     except OSError:
-      if fileExists(p):
-        var raw = readFile(p)
+      if fileExists(extendedPath(p)):
+        var raw = readFile(extendedPath(p))
         while raw.len > 0 and raw[^1] in {'\r', '\n', ' ', '\t'}:
           raw.setLen(raw.len - 1)
         return raw
@@ -168,14 +169,14 @@ proc writeCurrentGenerationId*(stateDir, generationId: string) =
   let p = currentPath(stateDir)
   when defined(windows):
     let tmpPath = p & ".tmp"
-    writeFile(tmpPath, generationId)
-    if fileExists(p): removeFile(p)
-    moveFile(tmpPath, p)
+    writeFile(extendedPath(tmpPath), generationId)
+    if fileExists(extendedPath(p)): removeFile(extendedPath(p))
+    moveFile(extendedPath(tmpPath), extendedPath(p))
   else:
     let target = generationDir(stateDir, generationId)
-    if symlinkExists(p) or fileExists(p):
-      try: removeFile(p) except OSError: discard
+    if symlinkExists(extendedPath(p)) or fileExists(extendedPath(p)):
+      try: removeFile(extendedPath(p)) except OSError: discard
     try:
-      createSymlink(target, p)
+      createSymlink(extendedPath(target), extendedPath(p))
     except OSError:
-      writeFile(p, generationId)
+      writeFile(extendedPath(p), generationId)

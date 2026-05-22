@@ -24,6 +24,7 @@
 ## only the activation manifest's resource-binding addresses differ.
 
 import std/[os, times]
+from repro_core/paths import extendedPath
 
 import blake3
 import repro_home_generations
@@ -93,7 +94,7 @@ proc runResourceMove*(oldAddress, newAddress: string;
         "repro home resource move: no active generation — run " &
         "`repro home apply` before renaming a resource")
     let pointerFile = pointerPath(resolvedStateDir, activeIdHex)
-    if not fileExists(pointerFile):
+    if not fileExists(extendedPath(pointerFile)):
       raiseResourceMove(
         "repro home resource move: active generation pointer missing " &
         "at " & pointerFile)

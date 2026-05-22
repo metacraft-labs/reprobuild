@@ -152,12 +152,12 @@ proc writePointerFile*(pointerFilePath: string; envelope: PointerEnvelope) =
   let bytes = encodePointer(envelope)
   let parent = parentDir(pointerFilePath)
   if parent.len > 0:
-    createDir(parent)
+    createDir(extendedPath(parent))
   let tmpPath = pointerFilePath & ".tmp"
-  writeFile(tmpPath, bytesToString(bytes))
-  if fileExists(pointerFilePath):
-    removeFile(pointerFilePath)
-  moveFile(tmpPath, pointerFilePath)
+  writeFile(extendedPath(tmpPath), bytesToString(bytes))
+  if fileExists(extendedPath(pointerFilePath)):
+    removeFile(extendedPath(pointerFilePath))
+  moveFile(extendedPath(tmpPath), extendedPath(pointerFilePath))
 
 # ---------------------------------------------------------------------------
 # Decoding.
@@ -252,9 +252,9 @@ proc decodePointerBytes*(bytes: openArray[byte];
       "(extras are forbidden by the audited schema)")
 
 proc readPointerFile*(pointerFilePath: string): PointerEnvelope =
-  if not fileExists(pointerFilePath):
+  if not fileExists(extendedPath(pointerFilePath)):
     raisePointerCorrupt(pointerFilePath, "file", "no such file")
-  let raw = readFile(pointerFilePath)
+  let raw = readFile(extendedPath(pointerFilePath))
   decodePointerBytes(stringToBytes(raw), pointerFilePath)
 
 # ---------------------------------------------------------------------------

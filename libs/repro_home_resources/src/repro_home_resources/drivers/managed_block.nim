@@ -12,6 +12,7 @@
 ## owned file" semantics are preserved.
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 import ./../manifest_record
 import ./../types
@@ -36,11 +37,11 @@ proc observeManagedBlock*(hostFile, blockId: string): ObservedState =
   ## are the content BETWEEN the sentinels — the block id and the
   ## sentinel lines themselves are NOT included so surrounding
   ## edits don't trigger drift.
-  if not fileExists(hostFile):
+  if not fileExists(extendedPath(hostFile)):
     result.present = false
     result.digest = zeroDigest()
     return
-  let content = readFile(hostFile)
+  let content = readFile(extendedPath(hostFile))
   let openS = ResourceOpenSentinelPrefix & blockId & ResourceOpenSentinelSuffix
   let closeS = ResourceCloseSentinelPrefix & blockId & ResourceCloseSentinelSuffix
   let openIdx = content.find(openS)
@@ -96,10 +97,10 @@ proc applyManagedBlockResource*(hostFile, blockId, content: string):
   ## will read back on the next apply.
   let parent = parentDir(hostFile)
   if parent.len > 0:
-    createDir(parent)
+    createDir(extendedPath(parent))
   var existing = ""
-  if fileExists(hostFile):
-    existing = readFile(hostFile)
+  if fileExists(extendedPath(hostFile)):
+    existing = readFile(extendedPath(hostFile))
   let openS = ResourceOpenSentinelPrefix & blockId & ResourceOpenSentinelSuffix
   let closeS = ResourceCloseSentinelPrefix & blockId & ResourceCloseSentinelSuffix
   let rewritten = spliceManagedBlock(existing, content, openS, closeS)
@@ -111,16 +112,16 @@ proc applyManagedBlockResource*(hostFile, blockId, content: string):
   # on every re-apply.
   block:
     var f: File
-    if not open(f, tmp, fmWrite):
+    if not open(f, extendedPath(tmp), fmWrite):
       raise newException(IOError, "cannot open " & tmp)
     try:
       if rewritten.len > 0:
         discard f.writeBuffer(unsafeAddr rewritten[0], rewritten.len)
     finally:
       close(f)
-  if fileExists(hostFile):
-    try: removeFile(hostFile) except OSError: discard
-  moveFile(tmp, hostFile)
+  if fileExists(extendedPath(hostFile)):
+    try: removeFile(extendedPath(hostFile)) except OSError: discard
+  moveFile(extendedPath(tmp), extendedPath(hostFile))
   # Re-read the just-written block so the recorded payload bytes
   # match exactly what `observeManagedBlock` will see on the next
   # apply's drift check. `spliceManagedBlock` may have inserted a
@@ -136,9 +137,9 @@ proc applyManagedBlockResource*(hostFile, blockId, content: string):
 proc destroyManagedBlockResource*(hostFile, blockId: string) =
   ## Remove the managed-block sentinels and content from the host
   ## file (leaves the surrounding user content intact).
-  if not fileExists(hostFile):
+  if not fileExists(extendedPath(hostFile)):
     return
-  let content = readFile(hostFile)
+  let content = readFile(extendedPath(hostFile))
   let openS = ResourceOpenSentinelPrefix & blockId & ResourceOpenSentinelSuffix
   let closeS = ResourceCloseSentinelPrefix & blockId & ResourceCloseSentinelSuffix
   let openIdx = content.find(openS)
@@ -153,7 +154,7 @@ proc destroyManagedBlockResource*(hostFile, blockId: string) =
     inc closeLineEnd
   let rewritten = content[0 ..< openLineStart] & content[closeLineEnd .. ^1]
   let tmp = hostFile & ".repro.tmp"
-  writeFile(tmp, rewritten)
-  if fileExists(hostFile):
-    try: removeFile(hostFile) except OSError: discard
-  moveFile(tmp, hostFile)
+  writeFile(extendedPath(tmp), rewritten)
+  if fileExists(extendedPath(hostFile)):
+    try: removeFile(extendedPath(hostFile)) except OSError: discard
+  moveFile(extendedPath(tmp), extendedPath(hostFile))

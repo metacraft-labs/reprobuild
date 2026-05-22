@@ -26,6 +26,7 @@
 ## order.
 
 import std/[options, os, strutils]
+from repro_core/paths import extendedPath
 
 import ./errors
 import ./model
@@ -53,8 +54,8 @@ proc writeProfile*(p: Profile) =
   try:
     let payload = serialize(p)
     let tmpPath = p.path & ".tmp"
-    writeFile(tmpPath, payload)
-    moveFile(tmpPath, p.path)
+    writeFile(extendedPath(tmpPath), payload)
+    moveFile(extendedPath(tmpPath), extendedPath(p.path))
   except IOError as e:
     var err = newException(EProfileWriteError,
       "writing profile failed: " & e.msg)

@@ -3,15 +3,16 @@
 ## and the partial-recovery marker round-trips.
 
 import std/[os, unittest]
+from repro_core/paths import extendedPath
 
 import repro_home_apply
 
 const SmokeDir = "build/test-tmp/home-apply-smoke"
 
 proc resetDir(path: string) =
-  if dirExists(path):
-    removeDir(path)
-  createDir(path)
+  if dirExists(extendedPath(path)):
+    removeDir(extendedPath(path))
+  createDir(extendedPath(path))
 
 suite "Home-apply smoke":
 
@@ -34,14 +35,14 @@ suite "Home-apply smoke":
     let homeDir = SmokeDir / "home"
     resetDir(profileDir)
     resetDir(homeDir)
-    createDir(profileDir / "stow" / "gitpkg")
-    createDir(profileDir / "stow" / "confpkg" / ".config" / "foo")
-    writeFile(profileDir / "stow" / "gitpkg" / ".gitconfig",
+    createDir(extendedPath(profileDir / "stow" / "gitpkg"))
+    createDir(extendedPath(profileDir / "stow" / "confpkg" / ".config" / "foo"))
+    writeFile(extendedPath(profileDir / "stow" / "gitpkg" / ".gitconfig"),
       "[user]\n  email = test@example.com\n")
-    writeFile(profileDir / "stow" / "confpkg" / ".config" / "foo" / "bar.toml",
+    writeFile(extendedPath(profileDir / "stow" / "confpkg" / ".config" / "foo" / "bar.toml"),
       "[a]\n")
     # A loose file directly under stow/ — not valid GNU stow layout.
-    writeFile(profileDir / "stow" / "loose.txt", "loose\n")
+    writeFile(extendedPath(profileDir / "stow" / "loose.txt"), "loose\n")
     let discovery = discoverStowEntries(profileDir, homeDir)
     check discovery.entries.len == 2
     var rels: seq[string]

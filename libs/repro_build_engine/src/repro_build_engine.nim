@@ -378,7 +378,7 @@ proc validateGraph(g: BuildGraph) =
       raiseEngine("pool capacity must be positive: " & p.name)
 
 proc pathExists(path: string): bool =
-  fileExists(path) or dirExists(path)
+  fileExists(extendedPath(path)) or dirExists(extendedPath(path))
 
 proc allOutputsExist(action: BuildAction): bool =
   if action.outputs.len == 0:
@@ -434,9 +434,9 @@ proc materialPath(root, path: string): string =
     root / path
 
 proc readDynamicGraphFragment(path: string): DynamicGraphFragment =
-  if path.len == 0 or not fileExists(path):
+  if path.len == 0 or not fileExists(extendedPath(path)):
     raiseEngine("dynamic dependency fragment missing: " & path)
-  let lines = readFile(path).splitLines()
+  let lines = readFile(extendedPath(path)).splitLines()
   if lines.len == 0 or lines[0] != "repro-dynamic-graph-v1":
     raiseEngine(path & ": missing repro-dynamic-graph-v1 header")
   for lineNo in 1 ..< lines.len:
@@ -524,11 +524,11 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
   for report in reports:
     for output in report.outputs:
       let path = action.expectedPath(output)
-      if output.required and not fileExists(path):
+      if output.required and not fileExists(extendedPath(path)):
         result.evidence.diagnostics.add("dependency report missing: " & path)
         result.publishable = false
         continue
-      if not fileExists(path):
+      if not fileExists(extendedPath(path)):
         continue
       try:
         result.evidence.addPathSet(
@@ -625,7 +625,7 @@ proc runConverter(action: BuildAction; converterSpec: PostBuildDependencyConvert
     tuple[ok: bool; diagnostic: string] =
   for input in converterSpec.inputs:
     let path = action.expectedPath(input)
-    if input.required and not fileExists(path):
+    if input.required and not fileExists(extendedPath(path)):
       return (ok: false, diagnostic: "converter input missing: " & path)
   let process = converterSpec.converterProcess
   if process.executable.value.len == 0:
@@ -648,7 +648,7 @@ proc runConverter(action: BuildAction; converterSpec: PostBuildDependencyConvert
     return (ok: false, diagnostic: diagnostic)
   for output in converterSpec.outputs:
     let path = action.expectedPath(output)
-    if output.required and not fileExists(path):
+    if output.required and not fileExists(extendedPath(path)):
       return (ok: false, diagnostic: "converter output missing: " & path)
   (ok: true, diagnostic: "")
 
@@ -669,11 +669,11 @@ proc collectConvertedEvidence(action: BuildAction;
   for converterSpec in specs:
     for output in converterSpec.outputs:
       let path = action.expectedPath(output)
-      if output.required and not fileExists(path):
+      if output.required and not fileExists(extendedPath(path)):
         evidence.diagnostics.add("converted dependency report missing: " & path)
         result = false
         continue
-      if not fileExists(path):
+      if not fileExists(extendedPath(path)):
         continue
       try:
         case converterSpec.outputKind
@@ -704,7 +704,7 @@ proc monitorCliPath(config: BuildEngineConfig): string =
   # so the same logic works cross-platform.
   let repoBuild = getCurrentDir() / "build" / "bin" /
     addFileExt("repro-fs-snoop", ExeExt)
-  if fileExists(repoBuild):
+  if fileExists(extendedPath(repoBuild)):
     return repoBuild
   ""
 
@@ -868,8 +868,8 @@ proc writeBypassResultJson(resultPath: string; exitCode: int;
     "lease_finished_sent": false,
     "lease_released": false
   }
-  createDir(parentDir(resultPath))
-  writeFile(resultPath, $payload)
+  createDir(extendedPath(parentDir(resultPath)))
+  writeFile(extendedPath(resultPath), $payload)
 
 proc finishBypassRunQuotaProcess(id: string; process: Process;
                                  resultPath: string) =
@@ -895,7 +895,7 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
   var helperOutput = ""
   if not bypassRunQuota and process.outputStream != nil:
     helperOutput = process.outputStream.readAll()
-  if not fileExists(resultPath):
+  if not fileExists(extendedPath(resultPath)):
     result.status = asFailed
     result.exitCode = if helperExit == 0: 1 else: helperExit
     result.stderr = "runquota helper did not write result"
@@ -977,20 +977,20 @@ proc preserveTreeManifestPath(action: BuildAction): string =
     (sanitizeActionId(action.id) & ".manifest"))
 
 proc readManifestEntries(path: string): seq[string] =
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     return @[]
-  for line in readFile(path).splitLines:
+  for line in readFile(extendedPath(path)).splitLines:
     let entry = line.strip().replace('\\', '/')
     if entry.len > 0:
       result.add(entry)
 
 proc writeManifestEntries(path: string; entries: openArray[string]) =
-  createDir(path.splitPath.head)
+  createDir(extendedPath(path.splitPath.head))
   var text = ""
   for entry in entries:
     text.add(entry)
     text.add("\n")
-  writeFile(path, text)
+  writeFile(extendedPath(path), text)
 
 proc executeBuiltinAction(action: BuildAction): ActionResult =
   result = ActionResult(
@@ -1006,35 +1006,35 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
           action.id)
       let source = action.builtinPath(action.inputs[0])
       let destination = action.builtinPath(action.outputs[0])
-      createDir(destination.splitPath.head)
-      copyFile(source, destination)
+      createDir(extendedPath(destination.splitPath.head))
+      copyFile(extendedPath(source), extendedPath(destination))
     of bakEnsureDir:
       if action.outputs.len != 1:
         raiseEngine("ensureDir action requires exactly one output: " & action.id)
-      createDir(action.builtinPath(action.outputs[0]))
+      createDir(extendedPath(action.builtinPath(action.outputs[0])))
     of bakWriteText:
       if action.outputs.len != 1:
         raiseEngine("writeText action requires exactly one output: " & action.id)
       let destination = action.builtinPath(action.outputs[0])
-      createDir(destination.splitPath.head)
-      writeFile(destination, action.builtinText)
+      createDir(extendedPath(destination.splitPath.head))
+      writeFile(extendedPath(destination), action.builtinText)
     of bakStamp:
       if action.outputs.len != 1:
         raiseEngine("stamp action requires exactly one output: " & action.id)
       let destination = action.builtinPath(action.outputs[0])
-      createDir(destination.splitPath.head)
+      createDir(extendedPath(destination.splitPath.head))
       var text = action.builtinText
       if text.len > 0 and not text.endsWith("\n"):
         text.add("\n")
       for entry in action.builtinEntries:
         text.add(entry)
         text.add("\n")
-      writeFile(destination, text)
+      writeFile(extendedPath(destination), text)
     of bakPreserveTree:
       let roots = builtinRoots(action.builtinText)
       let sourceRoot = action.builtinPath(roots.sourceRoot)
       let outputRoot = action.builtinPath(roots.outputRoot)
-      createDir(outputRoot)
+      createDir(extendedPath(outputRoot))
       var expected = initHashSet[string]()
       var currentEntries: seq[string] = @[]
       for entry in action.builtinEntries:
@@ -1045,17 +1045,17 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
         currentEntries.add(relative)
         let source = sourceRoot / relative
         let destination = outputRoot / relative
-        if not fileExists(source):
+        if not fileExists(extendedPath(source)):
           raiseEngine("preserveTree source file disappeared before execution: " &
             source)
-        createDir(destination.splitPath.head)
-        copyFile(source, destination)
+        createDir(extendedPath(destination.splitPath.head))
+        copyFile(extendedPath(source), extendedPath(destination))
       let manifestPath = preserveTreeManifestPath(action)
       for previous in readManifestEntries(manifestPath):
         if not expected.contains(previous):
           let stale = outputRoot / previous
-          if fileExists(stale):
-            removeFile(stale)
+          if fileExists(extendedPath(stale)):
+            removeFile(extendedPath(stale))
       currentEntries.sort(system.cmp[string])
       writeManifestEntries(manifestPath, currentEntries)
     of bakProcess:
@@ -1376,7 +1376,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
   var completed = 0
   let runQuotaResultRoot = cacheRoot / "runquota-results"
-  createDir(runQuotaResultRoot)
+  createDir(extendedPath(runQuotaResultRoot))
   var launchSeq = 0
   try:
     while completed < buildGraph.actions.len:

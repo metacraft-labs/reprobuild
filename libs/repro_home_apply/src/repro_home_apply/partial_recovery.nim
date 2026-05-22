@@ -23,6 +23,7 @@
 ## So a kill at any earlier step leaves `current` intact.
 
 import std/[os, strutils, times]
+from repro_core/paths import extendedPath
 
 import repro_home_generations
 
@@ -53,22 +54,22 @@ proc writeMarker*(stateDir, generationId, reason: string) =
   let p = applyInProgressMarkerPath(stateDir)
   let payload = generationId & "\n" & reason & "\n"
   let tmp = p & ".tmp"
-  writeFile(tmp, payload)
-  if fileExists(p):
-    try: removeFile(p) except OSError: discard
-  moveFile(tmp, p)
+  writeFile(extendedPath(tmp), payload)
+  if fileExists(extendedPath(p)):
+    try: removeFile(extendedPath(p)) except OSError: discard
+  moveFile(extendedPath(tmp), extendedPath(p))
 
 proc clearMarker*(stateDir: string) =
   let p = applyInProgressMarkerPath(stateDir)
-  if fileExists(p):
-    try: removeFile(p) except OSError: discard
+  if fileExists(extendedPath(p)):
+    try: removeFile(extendedPath(p)) except OSError: discard
 
 proc readMarker*(stateDir: string): tuple[present: bool;
                                           generationId, reason: string] =
   let p = applyInProgressMarkerPath(stateDir)
-  if not fileExists(p):
+  if not fileExists(extendedPath(p)):
     return (false, "", "")
-  let raw = readFile(p)
+  let raw = readFile(extendedPath(p))
   let lines = raw.split('\n')
   result.present = true
   if lines.len >= 1: result.generationId = lines[0].strip()
@@ -80,15 +81,15 @@ proc quarantineGenerationDir(stateDir, generationId, reason: string):
   ## `<state-dir>/generations/.aborted/<id>-<reason>-<timestamp>/`.
   ## Returns the destination path so the caller can record it.
   let src = generationDir(stateDir, generationId)
-  if not dirExists(src):
+  if not dirExists(extendedPath(src)):
     return ""
   let aborted = abortedDir(stateDir)
-  createDir(aborted)
+  createDir(extendedPath(aborted))
   let stamp = $getTime().toUnix
   let leaf = generationId & "-" & reason & "-" & stamp
   result = aborted / leaf
   try:
-    moveDir(src, result)
+    moveDir(extendedPath(src), extendedPath(result))
   except OSError as err:
     raise newException(IOError,
       "could not quarantine aborted generation " & src & " -> " & result &
@@ -105,12 +106,12 @@ proc recoverPartialApply*(stateDir: string): seq[AbortedGenerationRecord] =
   ##   B. Every other directory under `generations/` (excluding
   ##      `.aborted/`) that lacks a `pointer.bin` is quarantined as
   ##      `incomplete`.
-  if not dirExists(stateDir):
+  if not dirExists(extendedPath(stateDir)):
     return @[]
   let marker = readMarker(stateDir)
   if marker.present and marker.generationId.len > 0:
     let src = generationDir(stateDir, marker.generationId)
-    if dirExists(src):
+    if dirExists(extendedPath(src)):
       let dst = quarantineGenerationDir(stateDir, marker.generationId,
         if marker.reason.len > 0: marker.reason else: "incomplete")
       if dst.len > 0:
@@ -120,7 +121,8 @@ proc recoverPartialApply*(stateDir: string): seq[AbortedGenerationRecord] =
           reason: if marker.reason.len > 0: marker.reason else: "incomplete"))
     clearMarker(stateDir)
   let root = generationsRoot(stateDir)
-  if dirExists(root):
+  if dirExists(extendedPath(root)):
+    # TODO(win-longpath): walk results escape; needs review
     for kind, entry in walkDir(root, relative = false):
       if kind notin {pcDir, pcLinkToDir}:
         continue

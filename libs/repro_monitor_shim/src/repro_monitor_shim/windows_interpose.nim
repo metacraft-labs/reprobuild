@@ -14,6 +14,7 @@ when not defined(windows):
 # entirely reused.
 
 import std/[locks, os, tables]
+from repro_core/paths import extendedPath
 
 import repro_monitor_depfile/types
 import repro_monitor_depfile/writer
@@ -386,10 +387,12 @@ proc ensureFragmentDir() =
   if fragmentDir.len == 0:
     return
   try:
-    createDir(fragmentDir)
+    createDir(extendedPath(fragmentDir))
   except OSError:
     discard
   except IOError:
+    discard
+  except ValueError:
     discard
 
 proc recordProcessStart() =

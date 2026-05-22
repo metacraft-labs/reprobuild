@@ -21,6 +21,7 @@
 ##     `Store` open.
 
 import std/[algorithm, os, strutils]
+from repro_core/paths import extendedPath
 
 import repro_local_store
 
@@ -84,7 +85,7 @@ proc writeGeneration*(stateDir: string;
   # Materialize the generation directory and the pointer envelope.
   let genIdHex = generationIdHex(envelope.generationId)
   let dir = generationDir(stateDir, genIdHex)
-  createDir(dir)
+  createDir(extendedPath(dir))
   let pointerFile = pointerPath(stateDir, genIdHex)
   writePointerFile(pointerFile, envelope)
   # Register the profile root + the per-prefix holds in the store
@@ -113,9 +114,10 @@ proc enumerateGenerations*(stateDir: string): seq[GenerationRecord] =
   ## directory. (M62 surfaces directly; the M63 apply pipeline will
   ## skip + quarantine.)
   let root = generationsRoot(stateDir)
-  if not dirExists(root):
+  if not dirExists(extendedPath(root)):
     return @[]
   let activeId = readCurrentGenerationId(stateDir)
+  # TODO(win-longpath): walk results escape; needs review
   for kind, entry in walkDir(root, relative = false):
     if kind notin {pcDir, pcLinkToDir}:
       continue

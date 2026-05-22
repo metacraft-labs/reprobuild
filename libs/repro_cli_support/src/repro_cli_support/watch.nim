@@ -1,4 +1,5 @@
 import std/[deques, os, sets, strutils, tables]
+from repro_core/paths import extendedPath
 when defined(windows):
   import std/winlean
 
@@ -89,7 +90,7 @@ when defined(macosx):
         if seen.contains(path):
           continue
         seen.incl(path)
-        if not fileExists(path) and not dirExists(path):
+        if not fileExists(extendedPath(path)) and not dirExists(extendedPath(path)):
           continue
         let fd = cOpen(path.cstring, OEvOnly)
         if fd < 0:
@@ -333,10 +334,10 @@ elif defined(windows):
         seen.incl(path)
         var dirPath: string
         var matchBasename: string
-        if dirExists(path):
+        if dirExists(extendedPath(path)):
           dirPath = path
           matchBasename = ""
-        elif fileExists(path):
+        elif fileExists(extendedPath(path)):
           dirPath = parentDir(path)
           if dirPath.len == 0:
             dirPath = "."

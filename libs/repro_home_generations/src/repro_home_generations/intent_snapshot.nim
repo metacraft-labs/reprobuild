@@ -86,10 +86,10 @@ proc defaultWalkProfileFiles*(profileDir: string): seq[IntentFileEntry] =
   ## `profileDir` (non-recursive). Sorted by path so two equivalent
   ## profile directories produce byte-identical snapshots regardless
   ## of OS readdir order.
-  if not dirExists(profileDir):
+  if not dirExists(extendedPath(profileDir)):
     return @[]
   var paths: seq[string]
-  for kind, entry in walkDir(profileDir, relative = true):
+  for kind, entry in walkDir(extendedPath(profileDir), relative = true):
     if kind notin {pcFile, pcLinkToFile}:
       continue
     if not entry.endsWith(".nim"):
@@ -98,7 +98,7 @@ proc defaultWalkProfileFiles*(profileDir: string): seq[IntentFileEntry] =
   paths.sort()
   for rel in paths:
     let abs = profileDir / rel
-    let content = readFile(abs)
+    let content = readFile(extendedPath(abs))
     result.add(IntentFileEntry(path: normalizePath(rel),
       content: bytesOf(content)))
 

@@ -68,6 +68,7 @@
 ##   wrong-link target's *resolved* content is what is compared).
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 import blake3
 import repro_home_generations
@@ -141,19 +142,19 @@ proc discoverStowEntries*(profileDir, homeDir: string): StowDiscovery =
   ## returned in `looseFiles` for the caller to diagnose; it is never
   ## materialized. An empty package directory contributes nothing.
   let stowRoot = profileDir / StowSubdirName
-  if not dirExists(stowRoot):
+  if not dirExists(extendedPath(stowRoot)):
     return StowDiscovery()
   # Loose files: regular files sitting directly under `stow/`.
-  for kind, path in walkDir(stowRoot, relative = true):
+  for kind, path in walkDir(extendedPath(stowRoot), relative = true):
     if kind in {pcFile, pcLinkToFile}:
       result.looseFiles.add path.replace('\\', '/')
   # Packages: each immediate subdirectory of `stow/`. The package
   # name is the directory name; it is STRIPPED on materialization.
-  for kind, pkgPath in walkDir(stowRoot, relative = true):
+  for kind, pkgPath in walkDir(extendedPath(stowRoot), relative = true):
     if kind notin {pcDir, pcLinkToDir}:
       continue
     let packageDir = stowRoot / pkgPath
-    for filePath in walkDirRec(packageDir, yieldFilter = {pcFile, pcLinkToFile},
+    for filePath in walkDirRec(extendedPath(packageDir), yieldFilter = {pcFile, pcLinkToFile},
         relative = true):
       # `filePath` is the within-package relative path — the path
       # that maps verbatim under `$HOME` with the package stripped.
@@ -167,8 +168,8 @@ proc discoverStowEntries*(profileDir, homeDir: string): StowDiscovery =
 proc stowEntriesToPlanned*(entries: seq[StowEntry]): seq[PlannedGeneratedFile] =
   for e in entries:
     var content: seq[byte]
-    if fileExists(e.sourceAbsolutePath):
-      let raw = readFile(e.sourceAbsolutePath)
+    if fileExists(extendedPath(e.sourceAbsolutePath)):
+      let raw = readFile(extendedPath(e.sourceAbsolutePath))
       content = newSeq[byte](raw.len)
       for i, ch in raw:
         content[i] = byte(ord(ch))
@@ -190,9 +191,9 @@ proc digestBytes(content: openArray[byte]): Digest256 =
     result[i] = raw[i]
 
 proc readPreWriteDigest(dst: string): tuple[has: bool; digest: Digest256] =
-  if not fileExists(dst):
+  if not fileExists(extendedPath(dst)):
     return (false, default(Digest256))
-  let raw = readFile(dst)
+  let raw = readFile(extendedPath(dst))
   var buf = newSeq[byte](raw.len)
   for i, ch in raw:
     buf[i] = byte(ord(ch))
@@ -225,7 +226,7 @@ proc linkPointsAtSource(linkPath, desiredSource: string): bool =
   ## reparse-point target, which would misclassify a correct link as
   ## a wrong link.
   try:
-    if not fileExists(desiredSource):
+    if not fileExists(extendedPath(desiredSource)):
       return false
     # `sameFile` follows the link on both arguments. If `linkPath`'s
     # target was deleted it will raise; treat that as "not the same".
@@ -238,7 +239,7 @@ proc readLinkTargetBestEffort(linkPath: string): string =
   ## human-readable diagnostic. `sameFile` already drives the
   ## decision; this is purely cosmetic.
   try:
-    result = expandSymlink(linkPath)
+    result = expandSymlink(extendedPath(linkPath))
   except OSError, IOError:
     result = ""
 
@@ -259,14 +260,14 @@ proc stowTargetMatchesSource*(target, desiredSource: string): bool =
   ## resolved bytes equal the source's is still a cache-hit, per the
   ## M76 deliverable). NEVER mutates the filesystem.
   try:
-    if not fileExists(desiredSource):
+    if not fileExists(extendedPath(desiredSource)):
       return false
-    if not fileExists(target):
+    if not fileExists(extendedPath(target)):
       # `fileExists` follows links; false here means there is no
       # readable file content at the target (absent, dangling link,
       # or a directory) — nothing byte-identical to compare against.
       return false
-    readFile(target) == readFile(desiredSource)
+    readFile(extendedPath(target)) == readFile(extendedPath(desiredSource))
   except OSError, IOError:
     false
 
@@ -274,10 +275,10 @@ proc inspectTarget(target, desiredSource: string): TargetInspection =
   ## Classify what currently lives at `target` relative to the desired
   ## stow link. NEVER mutates the filesystem — this is the read the
   ## non-destructive decision tree branches on.
-  if not fileExists(target) and not symlinkExists(target) and
-     not dirExists(target):
+  if not fileExists(extendedPath(target)) and not symlinkExists(extendedPath(target)) and
+     not dirExists(extendedPath(target)):
     return TargetInspection(state: tsAbsent)
-  if symlinkExists(target):
+  if symlinkExists(extendedPath(target)):
     # A symlink (file or dir). Compare by file identity — robust
     # across Windows reparse-point resolution quirks.
     if linkPointsAtSource(target, desiredSource):
@@ -291,7 +292,7 @@ proc inspectTarget(target, desiredSource: string): TargetInspection =
   # directory reports via `dirExists` but not `symlinkExists`; the
   # stow files this module materializes are always FILES, so a
   # directory at a file's target path is itself a conflict.
-  if dirExists(target):
+  if dirExists(extendedPath(target)):
     return TargetInspection(state: tsRegularFile,
       existingKind: "directory")
   return TargetInspection(state: tsRegularFile,
@@ -346,17 +347,17 @@ proc tryCreateSymlink(target, source: string;
     # so the link can be created in its place.
     outReconciled = true
     try:
-      removeFile(target)
+      removeFile(extendedPath(target))
     except OSError, IOError:
       # A directory cannot be removed with removeFile.
-      try: removeDir(target) except OSError: discard
+      try: removeDir(extendedPath(target)) except OSError: discard
   of tsAbsent:
     discard
   try:
     let parent = parentDir(target)
     if parent.len > 0:
-      createDir(parent)
-    createSymlink(source, target)
+      createDir(extendedPath(parent))
+    createSymlink(extendedPath(source), extendedPath(target))
     true
   except OSError, IOError:
     false
@@ -385,17 +386,17 @@ proc tryCreateJunctionAtAncestor(homeDir, homeRel: string;
       return false  # at $HOME root; not junctionable
     let relParent = relPath[0 ..< slash]
     let homeParent = homeDir / relParent.replace('/', DirSep)
-    if dirExists(homeParent):
+    if dirExists(extendedPath(homeParent)):
       return false  # ancestor already populated; would clobber
     # The stow-side junction target is the real source file's parent
     # directory inside `stow/<package>/...`.
     let stowParent = parentDir(sourceFile)
-    if not dirExists(stowParent):
+    if not dirExists(extendedPath(stowParent)):
       return false
     try:
       let parentOfParent = parentDir(homeParent)
       if parentOfParent.len > 0:
-        createDir(parentOfParent)
+        createDir(extendedPath(parentOfParent))
       # `mklink /J <link> <target>` creates an NTFS junction.
       let cmd = "cmd /c mklink /J " & quoteShell(homeParent) & " " &
         quoteShell(stowParent)
@@ -405,7 +406,7 @@ proc tryCreateJunctionAtAncestor(homeDir, homeRel: string;
     except OSError, IOError:
       return false
     actualTarget = homeParent / extractFilename(sourceFile)
-    return fileExists(actualTarget)
+    return fileExists(extendedPath(actualTarget))
   else:
     discard
     return false
@@ -435,10 +436,10 @@ proc materializeStowEntry*(profileDir, homeDir: string;
   result.hasPreWriteDigest = preDigest.has
   if preDigest.has:
     result.preWriteDigest = preDigest.digest
-  if not fileExists(entry.sourceAbsolutePath):
+  if not fileExists(extendedPath(entry.sourceAbsolutePath)):
     raiseMaterializeFailed(entry.targetAbsolutePath,
       "stow source missing: " & entry.sourceAbsolutePath)
-  let raw = readFile(entry.sourceAbsolutePath)
+  let raw = readFile(extendedPath(entry.sourceAbsolutePath))
   var buf = newSeq[byte](raw.len)
   for i, ch in raw:
     buf[i] = byte(ord(ch))
@@ -493,14 +494,14 @@ proc materializeStowEntry*(profileDir, homeDir: string;
       raiseStowConflict(entry.targetAbsolutePath, inspection.existingKind,
         entry.sourceAbsolutePath)
     result.wasReconciled = true
-    try: removeFile(entry.targetAbsolutePath)
+    try: removeFile(extendedPath(entry.targetAbsolutePath))
     except OSError:
-      try: removeDir(entry.targetAbsolutePath) except OSError: discard
+      try: removeDir(extendedPath(entry.targetAbsolutePath)) except OSError: discard
   of tsAbsent:
     discard
   if parent.len > 0:
-    createDir(parent)
-  copyFile(entry.sourceAbsolutePath, entry.targetAbsolutePath)
+    createDir(extendedPath(parent))
+  copyFile(extendedPath(entry.sourceAbsolutePath), extendedPath(entry.targetAbsolutePath))
   result.mode = smCopy
 
 proc modeToOwnershipPolicy*(mode: StowMaterializationMode):

@@ -1,4 +1,5 @@
 import std/[json, os, strutils, tables]
+from repro_core/paths import extendedPath
 
 type
   ScanInfo = object
@@ -23,9 +24,9 @@ proc usage() {.noreturn.} =
   fail("usage: repro-cmake-dyndep-fragment --out <fragment> --map <map> <ddi>...")
 
 proc parseMap(path: string): Table[string, string] =
-  if path.len == 0 or not fileExists(path):
+  if path.len == 0 or not fileExists(extendedPath(path)):
     fail("action map missing: " & path)
-  let lines = readFile(path).splitLines()
+  let lines = readFile(extendedPath(path)).splitLines()
   for lineNo in 0 ..< lines.len:
     let line = lines[lineNo]
     if line.len == 0:
@@ -55,7 +56,7 @@ proc arrayField(node: JsonNode; name, path: string): JsonNode =
   node[name]
 
 proc parseDdi(path: string; actionForOutput: Table[string, string]): ScanInfo =
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     fail("scanner output missing: " & path)
   var root: JsonNode
   try:
@@ -151,7 +152,7 @@ proc main() =
       let dep = providerForModule[require]
       if dep != info.actionId:
         text.add("dep\t" & info.actionId & "\t" & dep & "\n")
-  createDir(parentDir(outPath))
-  writeFile(outPath, text)
+  createDir(extendedPath(parentDir(outPath)))
+  writeFile(extendedPath(outPath), text)
 
 main()

@@ -14,6 +14,7 @@
 ## footprint stays at "kernel32 + CRT" exactly because of this.
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 import blake3
 
@@ -43,10 +44,10 @@ proc readLaunchPlanByHex*(storeRoot, idHex: string): LaunchPlan =
   ## against the supplied hex key, and decode the RBLP envelope.
   let expected = decodeHex32(idHex.toLowerAscii)
   let path = casBlobPath(storeRoot, idHex.toLowerAscii)
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     raise newException(SlimCasError,
       "launch plan CAS blob not found at " & path)
-  let raw = readFile(path)
+  let raw = readFile(extendedPath(path))
   var buf = newSeq[byte](raw.len)
   for i, ch in raw:
     buf[i] = byte(ord(ch))

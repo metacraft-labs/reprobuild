@@ -1,4 +1,5 @@
 import std/[algorithm, macros, os, strutils, tables]
+from repro_core/paths import extendedPath
 
 when defined(reproProviderMode):
   import repro_provider_runtime
@@ -286,8 +287,9 @@ else:
     discard memberEntryPointBodyHash
 
 proc dirListing*(path: string): seq[string] =
-  if not dirExists(path):
+  if not dirExists(extendedPath(path)):
     return @[]
+  # TODO(win-longpath): walk results escape; needs review
   for kind, child in walkDir(path):
     if kind in {pcFile, pcDir}:
       result.add(child)
@@ -664,12 +666,13 @@ proc normalizedRelPath(path: string): string =
   path.replace('\\', '/')
 
 proc collectRegularTree(root: string): tuple[dirs: seq[string]; files: seq[string]] =
-  if not dirExists(root):
+  if not dirExists(extendedPath(root)):
     return
   var pending = @[root]
   while pending.len > 0:
     let dir = pending.pop()
     result.dirs.add(dir)
+    # TODO(win-longpath): walk results escape; needs review
     for kind, child in walkDir(dir):
       case kind
       of pcDir:
@@ -2358,7 +2361,7 @@ when defined(reproProviderMode):
       entryPointBodyHash: request.entryPointBodyHash,
       arguments: request.arguments,
       namespace: request.namespace)
-    if includeDefault and fileExists(pkg.sourceFile):
+    if includeDefault and fileExists(extendedPath(pkg.sourceFile)):
       result.evaluationInputs.add(fileReadInput(pkg.sourceFile))
     for input in registeredProviderEvaluationInputs():
       result.evaluationInputs.add(input)

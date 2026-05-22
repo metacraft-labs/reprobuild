@@ -640,19 +640,19 @@ proc fromByteString(text: string): seq[byte] =
     result[i] = byte(ord(ch))
 
 proc writeInterfaceArtifact*(path: string; artifact: ProjectInterfaceArtifact) =
-  createDir(parentDir(path))
-  writeFile(path, toByteString(encodeProjectInterfaceArtifact(artifact)))
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), toByteString(encodeProjectInterfaceArtifact(artifact)))
 
 proc readInterfaceArtifact*(path: string): ProjectInterfaceArtifact =
-  decodeProjectInterfaceArtifact(fromByteString(readFile(path)))
+  decodeProjectInterfaceArtifact(fromByteString(readFile(extendedPath(path))))
 
 proc writeProviderCompileArtifact*(path: string;
     artifact: ProviderCompileArtifact) =
-  createDir(parentDir(path))
-  writeFile(path, toByteString(encodeProviderCompileArtifact(artifact)))
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), toByteString(encodeProviderCompileArtifact(artifact)))
 
 proc readProviderCompileArtifact*(path: string): ProviderCompileArtifact =
-  decodeProviderCompileArtifact(fromByteString(readFile(path)))
+  decodeProviderCompileArtifact(fromByteString(readFile(extendedPath(path))))
 
 proc writeFileStamp(outp: var seq[byte]; stamp: FileStamp) =
   outp.writeString(stamp.path)
@@ -1002,8 +1002,8 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
         exe.binaryName &
         "\", \"" & cmd.name & "\", \"" & cmd.providerEntrypointId &
         "\", @[" & argCalls.join(", ") & "])\n\n")
-  createDir(parentDir(path))
-  writeFile(path, code)
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), code)
 
 proc shellQuote(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
@@ -1059,9 +1059,9 @@ proc nimCompilerPath(): string =
     if dir.len == 0:
       continue
     let candidate = dir / exeName
-    if fileExists(candidate):
+    if fileExists(extendedPath(candidate)):
       candidates.addUnique(candidate)
-  if BuiltNimCompilerPath.len > 0 and fileExists(BuiltNimCompilerPath):
+  if BuiltNimCompilerPath.len > 0 and fileExists(extendedPath(BuiltNimCompilerPath)):
     candidates.addUnique(BuiltNimCompilerPath)
   candidates.addUnique("nim")
   for candidate in candidates:
@@ -1069,7 +1069,7 @@ proc nimCompilerPath(): string =
       cachedNimCompilerPath = candidate
       return candidate
   cachedNimCompilerPath =
-    if BuiltNimCompilerPath.len > 0 and fileExists(BuiltNimCompilerPath):
+    if BuiltNimCompilerPath.len > 0 and fileExists(extendedPath(BuiltNimCompilerPath)):
       BuiltNimCompilerPath
     else:
       "nim"
@@ -1088,14 +1088,14 @@ proc ensureExecutable(path: string) =
   when defined(windows):
     discard path
   else:
-    setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
+    setFilePermissions(extendedPath(path), {fpUserRead, fpUserWrite, fpUserExec,
       fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 proc hostCCompilerPath(): string =
   let ccEnv = getEnv("CC")
   if ccEnv.len > 0 and isAbsolute(ccEnv):
     return ccEnv
-  if BuiltCCompilerPath.len > 0 and fileExists(BuiltCCompilerPath):
+  if BuiltCCompilerPath.len > 0 and fileExists(extendedPath(BuiltCCompilerPath)):
     return BuiltCCompilerPath
   ""
 
@@ -1110,11 +1110,12 @@ proc hostCCompilerFlags(): seq[string] =
 
 proc reproLibPathFlags(workDir: string): seq[string] =
   let libsRoot = workDir / "libs"
-  if dirExists(libsRoot):
+  if dirExists(extendedPath(libsRoot)):
+    # TODO(win-longpath): walk results escape; needs review
     for path in walkDir(libsRoot):
       if path.kind == pcDir:
         let src = path.path / "src"
-        if dirExists(src):
+        if dirExists(extendedPath(src)):
           result.add("--path:" & src)
   result.sort(system.cmp[string])
 
@@ -1123,6 +1124,7 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
   var dirs = @[root]
   while dirs.len > 0:
     let dir = dirs.pop()
+    # TODO(win-longpath): walk results escape; needs review
     for kind, path in walkDir(dir):
       let tail = splitPath(path).tail
       case kind
@@ -1141,10 +1143,10 @@ proc normalizedStampPath(path: string): string =
 
 proc fileStamp(path: string): FileStamp =
   result.path = normalizedStampPath(path)
-  if not fileExists(path) and not dirExists(path):
+  if not fileExists(extendedPath(path)) and not dirExists(extendedPath(path)):
     result.kind = fskMissing
     return
-  let info = getFileInfo(path, followSymlink = false)
+  let info = getFileInfo(extendedPath(path), followSymlink = false)
   result.kind =
     case info.kind
     of pcFile, pcLinkToFile:
@@ -1183,7 +1185,7 @@ proc interfaceExtractionFingerprint(context: InterfaceExtractionContext):
   payload.writeStringSeq(context.libPathFlags)
   for path in context.sources:
     payload.writeString(path)
-    let content = toBytes(readFile(path))
+    let content = toBytes(readFile(extendedPath(path)))
     payload.writeU64Le(uint64(content.len))
     payload.add(content)
   blake3DomainDigest(payload, hdActionFingerprint)
@@ -1205,24 +1207,24 @@ proc writeInterfaceExtractionCacheRecord(artifactPath: string;
     sourceStamps: fileStamps(context.sources),
     inputFingerprint: fingerprint)
   try:
-    writeFile(interfaceExtractionMetadataPath(artifactPath),
+    writeFile(extendedPath(interfaceExtractionMetadataPath(artifactPath)),
       toByteString(encodeInterfaceExtractionCacheRecord(record)))
   except CatchableError:
     discard
 
 proc readInterfaceExtractionCacheRecord(path: string):
     Option[InterfaceExtractionCacheRecord] =
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     return none(InterfaceExtractionCacheRecord)
   try:
-    return some(decodeInterfaceExtractionCacheRecord(fromByteString(readFile(path))))
+    return some(decodeInterfaceExtractionCacheRecord(fromByteString(readFile(extendedPath(path)))))
   except CatchableError:
     return none(InterfaceExtractionCacheRecord)
 
 proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
                                        context: InterfaceExtractionContext):
     Option[ProjectInterfaceArtifact] =
-  if not (fileExists(artifactPath) and fileExists(stubPath)):
+  if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(stubPath))):
     return none(ProjectInterfaceArtifact)
   let record = readInterfaceExtractionCacheRecord(
     interfaceExtractionMetadataPath(artifactPath))
@@ -1245,10 +1247,10 @@ proc cachedInterfaceArtifactByFingerprint(artifactPath, stubPath: string;
                                           fingerprint: ContentDigest):
     Option[ProjectInterfaceArtifact] =
   let cachePath = interfaceExtractionCachePath(artifactPath)
-  if not (fileExists(artifactPath) and fileExists(stubPath) and
-      fileExists(cachePath)):
+  if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(stubPath)) and
+      fileExists(extendedPath(cachePath))):
     return none(ProjectInterfaceArtifact)
-  if readFile(cachePath).strip() != toHex(fingerprint.bytes):
+  if readFile(extendedPath(cachePath)).strip() != toHex(fingerprint.bytes):
     return none(ProjectInterfaceArtifact)
   try:
     return some(readInterfaceArtifact(artifactPath))
@@ -1259,7 +1261,7 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
                          libraryNames: openArray[string]): string =
   proc hasLibrary(prefix, libraryName: string): bool =
     let exact = prefix / "lib" / libraryName
-    if fileExists(exact):
+    if fileExists(extendedPath(exact)):
       return true
     let dot = libraryName.find('.')
     let stem =
@@ -1267,9 +1269,9 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
         libraryName[0 ..< dot]
       else:
         libraryName
-    if not dirExists(prefix / "lib"):
+    if not dirExists(extendedPath(prefix / "lib")):
       return false
-    for kind, path in walkDir(prefix / "lib"):
+    for kind, path in walkDir(extendedPath(prefix / "lib")):
       if kind == pcFile:
         let tail = splitPath(path).tail
         if tail == libraryName or tail.startsWith(stem & "."):
@@ -1278,7 +1280,7 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
   for prefix in candidates:
     if prefix.len == 0:
       continue
-    if not fileExists(prefix / header):
+    if not fileExists(extendedPath(prefix / header)):
       continue
     for libraryName in libraryNames:
       if hasLibrary(prefix, libraryName):
@@ -1287,16 +1289,17 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
 
 proc nixPrefix(namePattern, header: string;
                libraryNames: openArray[string]): string =
-  if not dirExists("/nix/store"):
+  if not dirExists(extendedPath("/nix/store")):
     return ""
   let needle = namePattern.replace("*", "")
+  # TODO(win-longpath): walk results escape; needs review
   for kind, path in walkDir("/nix/store"):
     if kind != pcDir:
       continue
     let tail = splitPath(path).tail
     if needle.len > 0 and tail.find(needle) < 0:
       continue
-    if not fileExists(path / header):
+    if not fileExists(extendedPath(path / header)):
       continue
     for libraryName in libraryNames:
       if firstExistingPrefix([path], header, [libraryName]).len > 0:
@@ -1319,9 +1322,9 @@ proc externalHashFlags(workDir = ""): seq[string] =
         "blake3" / "c"
       let xxhashInc = workDir / "references" / "mold" / "third-party" /
         "xxhash"
-      if fileExists(blake3Inc / "blake3.h"):
+      if fileExists(extendedPath(blake3Inc / "blake3.h")):
         result.add("--passC:-I" & blake3Inc)
-      if fileExists(xxhashInc / "xxhash.h"):
+      if fileExists(extendedPath(xxhashInc / "xxhash.h")):
         result.add("--passC:-I" & xxhashInc)
     return
 
@@ -1376,16 +1379,16 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   let moduleDir = parentDir(modulePath)
   let moduleName = splitFile(modulePath).name
   let tempParent = workDir / "build" / "m7-temp"
-  createDir(tempParent)
+  createDir(extendedPath(tempParent))
   inc interfaceTempNonce
   let now = getTime()
   let tempRoot = tempParent / ("repro-interface-extract-" &
     $getCurrentProcessId() & "-" & $now.toUnix & "-" & $now.nanosecond &
     "-" & $interfaceTempNonce)
-  createDir(tempRoot)
-  defer: removeDir(tempRoot)
+  createDir(extendedPath(tempRoot))
+  defer: removeDir(extendedPath(tempRoot))
   let runnerPath = tempRoot / "extract_runner.nim"
-  writeFile(runnerPath,
+  writeFile(extendedPath(runnerPath),
     "import std/os\n" &
     "import repro_interface_artifacts\n" &
     "import repro_project_dsl\n" &
@@ -1406,19 +1409,19 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   command.insert(reproLibPathFlags(workDir), 4)
   let compileExecution = runCommand(command, cwd = workDir)
   let runnerExe = compiledExecutablePath(runnerBin)
-  if not fileExists(runnerExe):
+  if not fileExists(extendedPath(runnerExe)):
     raise newException(IOError,
       "interface extraction runner was not compiled: " & runnerExe &
         "\n" & compileExecution.output)
   ensureExecutable(runnerExe)
   let execution = runCommand(@[runnerExe, artifactPath, stubPath, modulePath],
     cwd = workDir)
-  if not fileExists(artifactPath):
+  if not fileExists(extendedPath(artifactPath)):
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
         "\n" & execution.output)
   result = readInterfaceArtifact(artifactPath)
-  writeFile(interfaceExtractionCachePath(artifactPath), toHex(
+  writeFile(extendedPath(interfaceExtractionCachePath(artifactPath)), toHex(
       inputFingerprint.bytes))
   writeInterfaceExtractionCacheRecord(artifactPath, extractionContext,
     inputFingerprint)
@@ -1429,7 +1432,7 @@ proc providerFingerprintFor*(inputSources: openArray[string];
   payload.writeDigest(interfaceFingerprint)
   for path in inputSources:
     payload.writeString(path)
-    let content = toBytes(readFile(path))
+    let content = toBytes(readFile(extendedPath(path)))
     payload.writeU64Le(uint64(content.len))
     payload.add(content)
   blake3DomainDigest(payload, hdActionFingerprint)
@@ -1448,17 +1451,17 @@ proc writeProviderFreshnessCacheRecord(artifactPath, modulePath: string;
     providerFingerprint: artifact.providerFingerprint,
     outputBinaryFingerprint: artifact.outputBinaryFingerprint)
   try:
-    writeFile(providerFreshnessCachePath(artifactPath),
+    writeFile(extendedPath(providerFreshnessCachePath(artifactPath)),
       toByteString(encodeProviderFreshnessCacheRecord(record)))
   except CatchableError:
     discard
 
 proc readProviderFreshnessCacheRecord(path: string):
     Option[ProviderFreshnessCacheRecord] =
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     return none(ProviderFreshnessCacheRecord)
   try:
-    return some(decodeProviderFreshnessCacheRecord(fromByteString(readFile(path))))
+    return some(decodeProviderFreshnessCacheRecord(fromByteString(readFile(extendedPath(path)))))
   except CatchableError:
     return none(ProviderFreshnessCacheRecord)
 
@@ -1538,7 +1541,7 @@ proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
                                    interfaceFingerprint,
                                    providerFingerprint: ContentDigest): bool =
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
-  if not (fileExists(artifactPath) and fileExists(normalizedOutputPath)):
+  if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(normalizedOutputPath))):
     return false
   try:
     let cached = readProviderCompileArtifact(artifactPath)
@@ -1552,7 +1555,7 @@ proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
         cached.inputSources, cached):
       return true
     if cached.outputBinaryFingerprint != casDigest(toBytes(readFile(
-        normalizedOutputPath))):
+        extendedPath(normalizedOutputPath)))):
       return false
     return true
   except CatchableError:
@@ -1563,7 +1566,7 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
                                        interfaceFingerprint: ContentDigest):
     Option[ProviderCompileArtifact] =
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
-  if not (fileExists(artifactPath) and fileExists(normalizedOutputPath)):
+  if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(normalizedOutputPath))):
     return none(ProviderCompileArtifact)
   try:
     let cached = readProviderCompileArtifact(artifactPath)
@@ -1580,7 +1583,7 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
     if cached.providerFingerprint != providerFingerprint:
       return none(ProviderCompileArtifact)
     if cached.outputBinaryFingerprint != casDigest(toBytes(readFile(
-        normalizedOutputPath))):
+        extendedPath(normalizedOutputPath)))):
       return none(ProviderCompileArtifact)
     writeProviderFreshnessCacheRecord(artifactPath, modulePath, cached)
     return some(cached)
@@ -1596,9 +1599,9 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   if artifactPath.len > 0 and providerCompileArtifactFresh(artifactPath,
       plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint):
     return readProviderCompileArtifact(artifactPath)
-  createDir(parentDir(plan.outputBinaryPath))
+  createDir(extendedPath(parentDir(plan.outputBinaryPath)))
   let execution = runCommand(plan.compilerCommand, cwd = workDir)
-  if not fileExists(plan.outputBinaryPath):
+  if not fileExists(extendedPath(plan.outputBinaryPath)):
     raise newException(IOError,
       "provider compilation did not write binary: " & plan.outputBinaryPath &
         "\n" & execution.output)
@@ -1610,7 +1613,7 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     interfaceFingerprint: interfaceFingerprint,
     providerFingerprint: plan.providerFingerprint,
     outputBinaryFingerprint: casDigest(toBytes(readFile(
-        plan.outputBinaryPath))),
+        extendedPath(plan.outputBinaryPath)))),
     executionResult: execution)
   if artifactPath.len > 0:
     writeProviderCompileArtifact(artifactPath, result)

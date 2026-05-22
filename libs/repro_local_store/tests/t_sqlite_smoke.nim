@@ -3,6 +3,7 @@
 ## fast during development.
 
 import std/[os, tempfiles, unittest]
+from repro_core/paths import extendedPath
 
 import repro_local_store
 
@@ -14,7 +15,7 @@ suite "sqlite_binding_smoke":
   test "open and exec on a real temp file":
     let dir = createTempDir("repro-store-smoke-", "")
     defer:
-      try: removeDir(dir) except OSError: discard
+      try: removeDir(extendedPath(dir)) except OSError: discard
     var db = sqlite3_binding.open(dir / "smoke.db")
     defer: db.close()
     db.exec("CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)")
@@ -31,12 +32,12 @@ suite "sqlite_binding_smoke":
   test "openStore creates layout":
     let dir = createTempDir("repro-store-layout-", "")
     defer:
-      try: removeDir(dir) except OSError: discard
+      try: removeDir(extendedPath(dir)) except OSError: discard
     var s = openStore(dir / "store")
     defer: s.close()
-    check dirExists(s.casRoot)
-    check dirExists(s.prefixesRoot)
-    check dirExists(s.tmpRoot)
-    check dirExists(s.gcPendingRoot)
-    check fileExists(s.indexPath)
+    check dirExists(extendedPath(s.casRoot))
+    check dirExists(extendedPath(s.prefixesRoot))
+    check dirExists(extendedPath(s.tmpRoot))
+    check dirExists(extendedPath(s.gcPendingRoot))
+    check fileExists(extendedPath(s.indexPath))
     check s.db.userVersion() == StoreSchemaVersion

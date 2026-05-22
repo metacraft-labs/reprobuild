@@ -374,10 +374,10 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
     process.close()
 
   var captured = ""
-  if fileExists(outPath):
-    try: captured = readFile(outPath)
+  if fileExists(extendedPath(outPath)):
+    try: captured = readFile(extendedPath(outPath))
     except CatchableError: discard
-    try: removeFile(outPath)
+    try: removeFile(extendedPath(outPath))
     except CatchableError: discard
 
   if timedOut:
@@ -511,7 +511,7 @@ proc findExecutableOnPath(executableName: string;
         continue
       for suffix in suffixes:
         let candidate = dir / (executableName & suffix)
-        if fileExists(candidate):
+        if fileExists(extendedPath(candidate)):
           return absolutePath(candidate)
     return ""
   else:
@@ -519,16 +519,16 @@ proc findExecutableOnPath(executableName: string;
       if dir.len == 0:
         continue
       let candidate = dir / executableName
-      if fileExists(candidate) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
-            it in getFilePermissions(candidate)):
+      if fileExists(extendedPath(candidate)) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
+            it in getFilePermissions(extendedPath(candidate))):
         return absolutePath(candidate)
     ""
 
 proc sidecarToolProfile(path: string): Table[string, string] =
   let sidecar = path & ".repro-tool-profile"
-  if not fileExists(sidecar):
+  if not fileExists(extendedPath(sidecar)):
     return
-  for line in readFile(sidecar).splitLines:
+  for line in readFile(extendedPath(sidecar)).splitLines:
     let stripped = line.strip()
     if stripped.len == 0 or stripped.startsWith("#") or
         stripped == "reprobuild-tool-profile-v1":
@@ -653,7 +653,7 @@ proc pathContainsSymlink(root, relativePath: string): bool =
       continue
     current = current / part
     try:
-      if getFileInfo(current, followSymlink = false).kind in
+      if getFileInfo(extendedPath(current), followSymlink = false).kind in
           {pcLinkToFile, pcLinkToDir}:
         return true
     except OSError:
@@ -666,8 +666,8 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
   if rejectSymlinks and pathContainsSymlink(storePath, declaredExecutablePath):
     return ""
   let candidate = storePath / declaredExecutablePath
-  if fileExists(candidate) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
-      it in getFilePermissions(candidate)):
+  if fileExists(extendedPath(candidate)) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
+      it in getFilePermissions(extendedPath(candidate))):
     absolutePath(candidate)
   else:
     ""
@@ -769,8 +769,8 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
   var receiptText = newString(receiptBytes.len)
   for i, b in receiptBytes:
     receiptText[i] = char(b)
-  createDir(absoluteRealizedPath)
-  writeFile(absoluteRealizedPath / ".repro-receipt", receiptText)
+  createDir(extendedPath(absoluteRealizedPath))
+  writeFile(extendedPath(absoluteRealizedPath / ".repro-receipt"), receiptText)
 
   let row = PrefixRow(
     prefixId: prefixId,
@@ -875,8 +875,8 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
       nixVersion, "nix", plan.lockIdentity,
       plan.declaredExecutablePath, "nix://" & plan.nixSelector,
       selectedStorePath, realized)
-    createDir(unified.absolutePath)
-    writeFile(unified.absolutePath / "nix-store-path.txt",
+    createDir(extendedPath(unified.absolutePath))
+    writeFile(extendedPath(unified.absolutePath / "nix-store-path.txt"),
       selectedStorePath & "\n")
     discard registerInUnifiedStore(storeRoot, nixPackageName,
       nixVersion, "nix", plan.lockIdentity,
@@ -994,12 +994,12 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
         "sha256:" & sha256)
 
 proc downloadUrlToFile(url, destination: string) =
-  createDir(parentDir(destination))
+  createDir(extendedPath(parentDir(destination)))
   if url.startsWith("file://"):
     let source = url["file://".len .. ^1]
-    if not fileExists(source):
+    if not fileExists(extendedPath(source)):
       raise newException(IOError, "file URL does not exist: " & url)
-    copyFile(source, destination)
+    copyFile(extendedPath(source), extendedPath(destination))
   elif url.startsWith("http://") or url.startsWith("https://"):
     let curl = findExe("curl")
     if curl.len == 0:
@@ -1015,22 +1015,22 @@ proc downloadUrlToFile(url, destination: string) =
       raise newException(IOError,
         "curl failed while downloading archive URL: " & url)
   else:
-    if not fileExists(url):
+    if not fileExists(extendedPath(url)):
       raise newException(IOError, "unsupported archive URL or missing file: " & url)
-    copyFile(url, destination)
+    copyFile(extendedPath(url), extendedPath(destination))
 
 proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
     tuple[path: string; selectedUrl: string] =
   let downloads = storeRoot / "downloads"
   let tmpRoot = storeRoot / "tmp"
-  createDir(downloads)
-  createDir(tmpRoot)
+  createDir(extendedPath(downloads))
+  createDir(extendedPath(tmpRoot))
   let finalPath = downloads / (plan.sha256 & ".archive")
-  if fileExists(finalPath):
+  if fileExists(extendedPath(finalPath)):
     let actual = fileSha256Hex(finalPath)
     if actual == plan.sha256:
       return (path: finalPath, selectedUrl: "cache")
-    removeFile(finalPath)
+    removeFile(extendedPath(finalPath))
 
   var diagnostics: seq[string] = @[]
   for url in @[plan.url] & plan.mirrors:
@@ -1042,21 +1042,21 @@ proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
       if actual != plan.sha256:
         diagnostics.add(url & ": sha256 mismatch expected " & plan.sha256 &
           " got " & actual)
-        removeFile(tmpPath)
+        removeFile(extendedPath(tmpPath))
         continue
       try:
-        moveFile(tmpPath, finalPath)
+        moveFile(extendedPath(tmpPath), extendedPath(finalPath))
       except OSError:
-        if fileExists(finalPath) and fileSha256Hex(finalPath) == plan.sha256:
-          if fileExists(tmpPath):
-            removeFile(tmpPath)
+        if fileExists(extendedPath(finalPath)) and fileSha256Hex(finalPath) == plan.sha256:
+          if fileExists(extendedPath(tmpPath)):
+            removeFile(extendedPath(tmpPath))
         else:
           raise
       return (path: finalPath, selectedUrl: url)
     except CatchableError as e:
       diagnostics.add(url & ": " & e.msg)
-      if fileExists(tmpPath):
-        removeFile(tmpPath)
+      if fileExists(extendedPath(tmpPath)):
+        removeFile(extendedPath(tmpPath))
   raise newException(OSError,
     "tool-resolution failed: all tarball archive URLs failed for " &
     plan.packageSelector & "\n" & diagnostics.join("\n"))
@@ -1090,7 +1090,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
 proc extractTarballArchive(archivePath, destination, archiveType: string;
                            stripComponents: int) =
   validateTarEntries(archivePath, archiveType)
-  createDir(destination)
+  createDir(extendedPath(destination))
   let lowerType = archiveType.toLowerAscii()
   var args =
     case lowerType
@@ -1128,11 +1128,11 @@ proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
     "lockIdentity": plan.lockIdentity,
     "realizationBoundary": prefix
   }
-  writeFile(tarballReceiptPath(prefix), receipt.pretty())
+  writeFile(extendedPath(tarballReceiptPath(prefix)), receipt.pretty())
 
 proc selectedUrlFromReceipt(prefix: string): string =
   let path = tarballReceiptPath(prefix)
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     return "existing"
   try:
     result = parseFile(path){"selectedUrl"}.getStr("existing")
@@ -1144,7 +1144,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
   ## Materializes a tarball realization into the unified M56 layout
   ## (`<store-root>/prefixes/<package>/<version>-<hash>/`).
   let tmpRoot = storeRoot / "tmp"
-  createDir(tmpRoot)
+  createDir(extendedPath(tmpRoot))
   let packageName = safeStoreSegment(plan.packageSelector, "package")
   let resolvedVersion =
     if versionFromPackageSelector(plan.packageSelector).len > 0:
@@ -1155,7 +1155,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
     "tarball", plan.lockIdentity, plan.declaredExecutablePath,
     plan.url, plan.sha256, [plan.archiveType, $plan.stripComponents])
   let prefix = unified.absolutePath
-  if dirExists(prefix):
+  if dirExists(extendedPath(prefix)):
     if executableInStorePath(prefix, plan.declaredExecutablePath,
         rejectSymlinks = true).len == 0:
       raise newException(OSError,
@@ -1167,8 +1167,8 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
   let downloaded = verifiedDownload(plan, storeRoot)
   let tempPrefix = tmpRoot / ("extract." & $getCurrentProcessId() & "." &
     $getTime().toUnix & "." & plan.sha256[0 .. 15])
-  if dirExists(tempPrefix):
-    removeDir(tempPrefix)
+  if dirExists(extendedPath(tempPrefix)):
+    removeDir(extendedPath(tempPrefix))
   try:
     extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
       plan.stripComponents)
@@ -1178,12 +1178,12 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
         "tool-resolution failed: extracted tarball lacks executable " &
         plan.declaredExecutablePath)
     writeTarballReceipt(tempPrefix, plan, downloaded.selectedUrl)
-    createDir(prefix.parentDir)
+    createDir(extendedPath(prefix.parentDir))
     try:
-      moveDir(tempPrefix, prefix)
+      moveDir(extendedPath(tempPrefix), extendedPath(prefix))
     except OSError:
-      if dirExists(prefix):
-        removeDir(tempPrefix)
+      if dirExists(extendedPath(prefix)):
+        removeDir(extendedPath(tempPrefix))
       else:
         raise
     if executableInStorePath(prefix, plan.declaredExecutablePath,
@@ -1203,8 +1203,8 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
     (prefix: prefix, archivePath: downloaded.path,
       selectedUrl: downloaded.selectedUrl)
   except CatchableError:
-    if dirExists(tempPrefix):
-      removeDir(tempPrefix)
+    if dirExists(extendedPath(tempPrefix)):
+      removeDir(extendedPath(tempPrefix))
     raise
 
 proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string):
@@ -1262,7 +1262,7 @@ proc blake3HexText*(value: string): string =
   blake3.toHex(blake3.digest(value))
 
 proc blake3HexFile*(path: string): string =
-  blake3.toHex(blake3.digest(readFile(path)))
+  blake3.toHex(blake3.digest(readFile(extendedPath(path))))
 
 proc normalizeScoopVersionTag(value: string): string =
   result = value.strip()
@@ -1388,10 +1388,10 @@ proc scoopExecutableName(): string =
     "scoop"
 
 proc resolveScoopExecutable(scoopOverride: string): string =
-  if scoopOverride.len > 0 and fileExists(scoopOverride):
+  if scoopOverride.len > 0 and fileExists(extendedPath(scoopOverride)):
     return scoopOverride
   let envOverride = getEnv("REPROBUILD_SCOOP_BINARY")
-  if envOverride.len > 0 and fileExists(envOverride):
+  if envOverride.len > 0 and fileExists(extendedPath(envOverride)):
     return envOverride
   # scoop.exe is just a CLI launcher around the PowerShell entry point,
   # but on Windows hosts the typical install ships scoop.cmd / scoop.ps1
@@ -1449,7 +1449,7 @@ proc resolveScoopRoot(scoopOverride: string): string =
     return explicit
   if scoopOverride.len > 0:
     let parent = scoopOverride.parentDir.parentDir
-    if dirExists(parent / "apps"):
+    if dirExists(extendedPath(parent / "apps")):
       return parent
   let home = getEnv("USERPROFILE", getEnv("HOME"))
   if home.len > 0:
@@ -1459,12 +1459,12 @@ proc resolveScoopRoot(scoopOverride: string): string =
 proc readScoopManifest(scoopRoot, bucket, app: string): tuple[
     raw: string; version: string; checksum: string; path: string] =
   let manifestPath = scoopRoot / "buckets" / bucket / "bucket" / (app & ".json")
-  if not fileExists(manifestPath):
+  if not fileExists(extendedPath(manifestPath)):
     raise newException(EScoopBucketMissing,
       "EScoopBucketMissing: bucket manifest not present at " & manifestPath)
   var raw: string
   try:
-    raw = readFile(manifestPath)
+    raw = readFile(extendedPath(manifestPath))
   except CatchableError as err:
     raise newException(EScoopManifestUnreadable,
       "EScoopManifestUnreadable: " & manifestPath & ": " & err.msg)
@@ -1588,13 +1588,13 @@ proc readInstalledManifestBin*(versionDir: string):
   ## `shortcuts` field — the GUI-app signal that suppresses exec-probing.
   let manifestPath = versionDir / "manifest.json"
   result.manifestPath = manifestPath
-  if not fileExists(manifestPath):
+  if not fileExists(extendedPath(manifestPath)):
     result.present = false
     return
   result.present = true
   var parsed: JsonNode
   try:
-    parsed = parseJson(readFile(manifestPath))
+    parsed = parseJson(readFile(extendedPath(manifestPath)))
   except CatchableError as err:
     raise newException(EScoopManifestUnreadable,
       "EScoopManifestUnreadable: " & manifestPath & ": " & err.msg)
@@ -1692,11 +1692,11 @@ proc peExecutableSubsystem*(path: string): PeSubsystem =
   if ext in [".cmd", ".bat", ".ps1"]:
     # A script "executable" — not a PE; the caller treats it as console.
     return pssUnknown
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     return pssUnknown
   var data: string
   try:
-    data = readFile(path)
+    data = readFile(extendedPath(path))
   except CatchableError:
     return pssUnknown
   let bytes = cast[seq[byte]](data)
@@ -1742,34 +1742,34 @@ proc scoopAppIsGuiApplication*(manifestHasShortcuts: bool;
   false
 
 proc deleteJunctionDir(target: string) =
-  if not dirExists(target):
+  if not dirExists(extendedPath(target)):
     return
   when defined(windows):
     # Use cmd's rmdir which removes the junction reparse point without
     # following into the target directory.
     let res = execCmdEx("cmd /c rmdir " & quoteShell(target))
-    if res.exitCode != 0 and dirExists(target):
-      removeDir(target)
+    if res.exitCode != 0 and dirExists(extendedPath(target)):
+      removeDir(extendedPath(target))
   else:
-    removeDir(target)
+    removeDir(extendedPath(target))
 
 proc createScoopJunction(target, source: string) =
   ## Creates an NTFS junction (or symlink on POSIX) from `target` to `source`.
-  if not dirExists(source):
+  if not dirExists(extendedPath(source)):
     raise newException(EScoopJunctionFailed,
       "EScoopJunctionFailed: junction source missing: " & source)
-  createDir(target.parentDir)
+  createDir(extendedPath(target.parentDir))
   deleteJunctionDir(target)
   when defined(windows):
     let res = execCmdEx("cmd /c mklink /J " & quoteShell(target) & " " &
       quoteShell(source))
-    if res.exitCode != 0 or not dirExists(target):
+    if res.exitCode != 0 or not dirExists(extendedPath(target)):
       raise newException(EScoopJunctionFailed,
         "EScoopJunctionFailed: mklink /J " & target & " -> " & source &
         " exited " & $res.exitCode & "\n" & res.output)
   else:
     try:
-      createSymlink(source, target)
+      createSymlink(extendedPath(source), extendedPath(target))
     except OSError as err:
       raise newException(EScoopJunctionFailed,
         "EScoopJunctionFailed: createSymlink " & target & " -> " &
@@ -1792,13 +1792,14 @@ proc readJunctionTarget*(junctionPath: string): string =
     ""
   else:
     try:
-      expandSymlink(junctionPath)
+      expandSymlink(extendedPath(junctionPath))
     except OSError:
       ""
 
 proc fileTreeListing(root: string): seq[string] =
-  if not dirExists(root):
+  if not dirExists(extendedPath(root)):
     return
+  # TODO(win-longpath): walk results escape; needs review
   for path in walkDirRec(root, yieldFilter = {pcFile, pcLinkToFile},
       relative = true):
     result.add(path.replace('\\', '/'))
@@ -1820,7 +1821,7 @@ proc executionProfilePayload*(prefix: string;
   result.add("reprobuild.scoop.executionProfile.v1\n")
   result.add("exe:" & normalizedExe & "\n")
   let executable = prefix / relativeExecutablePath
-  if fileExists(executable):
+  if fileExists(extendedPath(executable)):
     result.add("blake3:" & blake3HexFile(executable) & "\n")
   else:
     result.add("blake3:missing\n")
@@ -1828,8 +1829,8 @@ proc executionProfilePayload*(prefix: string;
   result.add("files:" & $entries.len & "\n")
   for entry in entries:
     let absolute = prefix / entry
-    if fileExists(absolute):
-      let size = getFileSize(absolute)
+    if fileExists(extendedPath(absolute)):
+      let size = getFileSize(extendedPath(absolute))
       let digest = blake3HexFile(absolute)
       result.add(entry & "\t" & $size & "\t" & digest & "\n")
     else:
@@ -1887,8 +1888,8 @@ proc writeScoopReceipt(prefix: string; plan: ScoopAcquisitionPlan;
     "lockIdentity": plan.lockIdentity,
     "realizationBoundary": prefix
   }
-  createDir(prefix)
-  writeFile(scoopReceiptPath(prefix), receipt.pretty())
+  createDir(extendedPath(prefix))
+  writeFile(extendedPath(scoopReceiptPath(prefix)), receipt.pretty())
 
 proc safeScoopSegment(value, fallback: string): string =
   for ch in value:
@@ -1951,7 +1952,7 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
       "EScoopMissing: could not determine Scoop root (SCOOP env var unset and " &
       "no USERPROFILE/HOME available)")
 
-  if not dirExists(scoopRoot / "buckets" / plan.bucket):
+  if not dirExists(extendedPath(scoopRoot / "buckets" / plan.bucket)):
     raise newException(EScoopBucketMissing,
       "EScoopBucketMissing: bucket directory not present at " &
       (scoopRoot / "buckets" / plan.bucket) &
@@ -1983,8 +1984,9 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
   proc installedScoopVersions(): seq[string] =
     ## The exact-version directories present under `appsDir` (Scoop's
     ## per-app install tree). `current` is a junction, not a version.
-    if not dirExists(appsDir):
+    if not dirExists(extendedPath(appsDir)):
       return @[]
+    # TODO(win-longpath): walk results escape; needs review
     for kind, path in walkDir(appsDir, relative = true):
       if kind in {pcDir, pcLinkToDir}:
         let leaf = path.extractFilename
@@ -2036,10 +2038,10 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
           " (manifest=" & manifest.path & ")")
 
   let versionDir = appsDir / resolvedVersion
-  if not dirExists(versionDir):
+  if not dirExists(extendedPath(versionDir)):
     runScoopInstall(scoopExe, scoopRoot, plan.bucket, plan.app,
       resolvedVersion)
-    if not dirExists(versionDir):
+    if not dirExists(extendedPath(versionDir)):
       raise newException(EScoopInstallFailed,
         "EScoopInstallFailed: post-install directory missing: " & versionDir)
 
@@ -2063,10 +2065,10 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
   # reaches the real executable wherever the app actually places it.
   let junctionTarget = prefix / "bin"
 
-  if dirExists(prefix):
+  if dirExists(extendedPath(prefix)):
     deleteJunctionDir(junctionTarget)
   else:
-    createDir(prefix)
+    createDir(extendedPath(prefix))
   createScoopJunction(junctionTarget, versionDir)
 
   # M74: resolve the executable(s) from the installed app's Scoop
@@ -2101,7 +2103,7 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
       selectPrimaryScoopExecutable(manifestBinPaths,
         plan.declaredExecutablePath, plan.app)
     elif packageDeclaredPath.len > 0 and
-        fileExists(junctionTarget / packageDeclaredPath):
+        fileExists(extendedPath(junctionTarget / packageDeclaredPath)):
       packageDeclaredPath
     else:
       ""
@@ -2114,7 +2116,7 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
   if manifestHasBin:
     for binPath in manifestBinPaths:
       let resolved = junctionTarget / binPath
-      if not fileExists(resolved):
+      if not fileExists(extendedPath(resolved)):
         raise newException(EScoopInstallFailed,
           "EScoopInstallFailed: executable not present after install: " &
           resolved & " (declared by " & installedManifest.manifestPath &
@@ -2223,7 +2225,7 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
       # a genuinely absent manifest-declared executable; for a no-`bin`
       # app whose package-declared path was used, re-confirm presence
       # here so a GUI app still receives a real presence check.
-      if not fileExists(resolvedExecutable):
+      if not fileExists(extendedPath(resolvedExecutable)):
         raise newException(EScoopInstallFailed,
           "EScoopInstallFailed: GUI app executable not present after " &
           "install: " & resolvedExecutable & " (scoop " & plan.bucket &
@@ -2261,7 +2263,7 @@ proc verifyScoopExecutionProfile*(prefix: string) =
   ## checksum against the live junction target. Raises
   ## `EScoopProfileChecksumMismatch` if the recorded checksum differs.
   let receiptPath = scoopReceiptPath(prefix)
-  if not fileExists(receiptPath):
+  if not fileExists(extendedPath(receiptPath)):
     raise newException(EScoopProfileChecksumMismatch,
       "EScoopProfileChecksumMismatch: receipt not present at " & receiptPath)
   let receipt = parseFile(receiptPath)
@@ -2293,7 +2295,7 @@ proc launchScoopExecutable*(prefix: string; args: openArray[string]):
   verifyScoopExecutionProfile(prefix)
   let receipt = parseFile(scoopReceiptPath(prefix))
   let resolved = receipt{"resolvedExecutablePath"}.getStr("")
-  if resolved.len == 0 or not fileExists(resolved):
+  if resolved.len == 0 or not fileExists(extendedPath(resolved)):
     raise newException(EScoopInstallFailed,
       "EScoopInstallFailed: resolved executable missing for " & prefix)
   let cmd = (@[resolved] & @args).mapIt(quoteShell(it)).join(" ")
@@ -2728,11 +2730,11 @@ proc decodePathOnlyBuildIdentity*(bytes: openArray[
 
 proc writePathOnlyBuildIdentity*(path: string;
     identity: PathOnlyBuildIdentity) =
-  createDir(parentDir(path))
-  writeFile(path, toByteString(encodePathOnlyBuildIdentity(identity)))
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), toByteString(encodePathOnlyBuildIdentity(identity)))
 
 proc readPathOnlyBuildIdentity*(path: string): PathOnlyBuildIdentity =
-  decodePathOnlyBuildIdentity(fromByteString(readFile(path)))
+  decodePathOnlyBuildIdentity(fromByteString(readFile(extendedPath(path))))
 
 proc jsonProbe(probe: ToolProbeResult): JsonNode =
   %*{
@@ -2844,5 +2846,5 @@ proc inspectionJson*(identity: PathOnlyBuildIdentity): string =
   root.pretty()
 
 proc writeInspectionJson*(path: string; identity: PathOnlyBuildIdentity) =
-  createDir(parentDir(path))
-  writeFile(path, inspectionJson(identity))
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), inspectionJson(identity))

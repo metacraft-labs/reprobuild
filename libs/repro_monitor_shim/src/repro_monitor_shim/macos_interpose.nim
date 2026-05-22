@@ -2,6 +2,7 @@ when not defined(macosx):
   {.error: "repro_monitor_shim/macos_interpose is macOS-only".}
 
 import std/[locks, os, tables]
+from repro_core/paths import extendedPath
 
 import ct_interpose/macos_interpose_runtime
 import repro_monitor_depfile/types
@@ -141,7 +142,7 @@ proc repro_monitor_shim_init*(configPath: cstring): cint {.exportc, dynlib.} =
   withShimMuted:
     fragmentDir = getEnv("REPRO_MONITOR_FRAGMENT_DIR")
     if fragmentDir.len > 0:
-      createDir(fragmentDir)
+      createDir(extendedPath(fragmentDir))
   initialized = true
   recordProcessStart()
   result = 0

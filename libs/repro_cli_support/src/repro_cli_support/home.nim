@@ -34,6 +34,7 @@
 ## while still letting the gate exercise the error path.
 
 import std/[options, os, sets, strutils, tables, times]
+from repro_core/paths import extendedPath
 
 import repro_home_intent
 import repro_home_generations
@@ -1133,7 +1134,7 @@ proc profileFromIntentSnapshot(stateDir: string; profilePath: string):
   if activeIdHex.len == 0:
     return none(Profile)
   let pointerFile = pointerPath(stateDir, activeIdHex)
-  if not fileExists(pointerFile):
+  if not fileExists(extendedPath(pointerFile)):
     return none(Profile)
   try:
     let env = readPointerFile(pointerFile)
@@ -1156,14 +1157,14 @@ proc profileFromIntentSnapshot(stateDir: string; profilePath: string):
         # reuse the editor's `loadProfile`. The temp lives inside
         # the state dir to keep test isolation tidy.
         let tmpDir = stateDir / "get-tmp"
-        createDir(tmpDir)
+        createDir(extendedPath(tmpDir))
         let tmpPath = tmpDir / anchor
-        writeFile(tmpPath, content)
+        writeFile(extendedPath(tmpPath), content)
         try:
           let prof = loadProfile(tmpPath)
           return some(prof)
         finally:
-          try: removeFile(tmpPath) except OSError: discard
+          try: removeFile(extendedPath(tmpPath)) except OSError: discard
     return none(Profile)
   except CatchableError:
     return none(Profile)
@@ -1287,7 +1288,7 @@ proc runHomePlan(args: openArray[string]): int =
     let activeId = readCurrentGenerationId(stateDir)
     if activeId.len > 0:
       let pointerFile = pointerPath(stateDir, activeId)
-      if fileExists(pointerFile):
+      if fileExists(extendedPath(pointerFile)):
         try:
           let env = readPointerFile(pointerFile)
           var manifestKey: PrefixIdBytes

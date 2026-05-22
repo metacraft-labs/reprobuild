@@ -319,10 +319,10 @@ proc writeSidecarFile*(path: string; sidecar: LaunchSidecar) =
   var text = newString(bytes.len)
   for i, b in bytes:
     text[i] = char(b)
-  writeFile(path, text)
+  writeFile(extendedPath(path), text)
 
 proc readSidecarFile*(path: string): LaunchSidecar =
-  let raw = readFile(path)
+  let raw = readFile(extendedPath(path))
   var buf = newSeq[byte](raw.len)
   for i, ch in raw:
     buf[i] = byte(ord(ch))

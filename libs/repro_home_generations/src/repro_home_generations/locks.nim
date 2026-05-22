@@ -28,6 +28,7 @@
 ## timeout.
 
 import std/[os, times]
+from repro_core/paths import extendedPath
 
 import ./errors
 import ./state_dir
@@ -95,7 +96,7 @@ proc tryAcquireOnce(lockPath: string): tuple[ok: bool; lock: ApplyLock] =
   ## an exception.
   let parent = parentDir(lockPath)
   if parent.len > 0:
-    createDir(parent)
+    createDir(extendedPath(parent))
   when defined(windows):
     let wide = newWideCString(lockPath)
     let h = createFileW(wide,

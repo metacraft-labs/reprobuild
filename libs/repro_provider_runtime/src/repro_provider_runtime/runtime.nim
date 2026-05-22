@@ -46,37 +46,37 @@ proc computeGraphFragmentDigest*(fragment: GraphFragment): string =
   digestHex(encodeFragmentForDigest(fragment))
 
 proc readProviderRequestFile*(path: string): ProviderGraphRequest =
-  decodeProviderRequest(fromByteString(readFile(path)))
+  decodeProviderRequest(fromByteString(readFile(extendedPath(path))))
 
 proc writeProviderRequestFile*(path: string; request: ProviderGraphRequest) =
-  createDir(parentDir(path))
-  writeFile(path, toByteString(encodeProviderRequest(request)))
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), toByteString(encodeProviderRequest(request)))
 
 proc readProviderResponseFile*(path: string): ProviderGraphResponse =
-  decodeProviderResponse(fromByteString(readFile(path)))
+  decodeProviderResponse(fromByteString(readFile(extendedPath(path))))
 
 proc writeProviderResponseFile*(path: string; response: ProviderGraphResponse) =
-  createDir(parentDir(path))
-  writeFile(path, toByteString(encodeProviderResponse(response)))
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), toByteString(encodeProviderResponse(response)))
 
 proc providerSnapshotPath*(storeRoot: string): string =
   storeRoot / "provider-fragments.rbsz"
 
 proc loadProviderGraphSnapshot*(storeRoot: string): ProviderGraphSnapshot =
   let path = providerSnapshotPath(storeRoot)
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     return ProviderGraphSnapshot()
-  decodeProviderSnapshot(fromByteString(readFile(path)))
+  decodeProviderSnapshot(fromByteString(readFile(extendedPath(path))))
 
 proc saveProviderGraphSnapshot*(storeRoot: string; snapshot: ProviderGraphSnapshot) =
-  createDir(storeRoot)
+  createDir(extendedPath(storeRoot))
   let path = providerSnapshotPath(storeRoot)
   let tmp = storeRoot / ("provider-fragments." & $getCurrentProcessId() & "." &
     $epochTime() & ".tmp")
-  writeFile(tmp, toByteString(encodeProviderSnapshot(snapshot)))
-  if fileExists(path):
-    removeFile(path)
-  moveFile(tmp, path)
+  writeFile(extendedPath(tmp), toByteString(encodeProviderSnapshot(snapshot)))
+  if fileExists(extendedPath(path)):
+    removeFile(extendedPath(path))
+  moveFile(extendedPath(tmp), extendedPath(path))
 
 proc parseProviderProtocolArgs*(args: openArray[string]):
     tuple[requestPath: string; responsePath: string] =
@@ -106,22 +106,22 @@ proc runProviderProtocol*(config: ProviderExecutionConfig;
   let tempRoot =
     if config.tempRoot.len > 0: config.tempRoot
     else: getTempDir()
-  createDir(tempRoot)
+  createDir(extendedPath(tempRoot))
   let stem = "repro-provider-" & $getCurrentProcessId() & "-" & $epochTime()
   let requestPath = tempRoot / (stem & ".request.rbpg")
   let responsePath = tempRoot / (stem & ".response.rbpg")
   defer:
-    if fileExists(requestPath):
-      removeFile(requestPath)
-    if fileExists(responsePath):
-      removeFile(responsePath)
+    if fileExists(extendedPath(requestPath)):
+      removeFile(extendedPath(requestPath))
+    if fileExists(extendedPath(responsePath)):
+      removeFile(extendedPath(responsePath))
 
   writeProviderRequestFile(requestPath, request)
 
   let tracePath = getEnv("REPRO_PROVIDER_TRACE")
   if tracePath.len > 0:
-    createDir(tracePath.splitPath.head)
-    var handle = open(tracePath, fmAppend)
+    createDir(extendedPath(tracePath.splitPath.head))
+    var handle = open(extendedPath(tracePath), fmAppend)
     try:
       handle.writeLine(($request.kind) & "|" & request.entryPointId & "|" &
         request.arguments & "|" & $request.reason)
@@ -141,7 +141,7 @@ proc runProviderProtocol*(config: ProviderExecutionConfig;
   close(process)
   if exitCode != 0:
     raiseRuntime("provider exited with code " & $exitCode & ": " & output)
-  if not fileExists(responsePath):
+  if not fileExists(extendedPath(responsePath)):
     raiseRuntime("provider did not write a response file")
   readProviderResponseFile(responsePath)
 
@@ -260,14 +260,14 @@ proc invokeProviderEntryPoint*(config: ProviderExecutionConfig;
   response
 
 proc fileContentDigest*(path: string): string =
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     return "missing"
-  digestHex(toBytes(readFile(path)))
+  digestHex(toBytes(readFile(extendedPath(path))))
 
 proc directoryMemberNames*(path: string): seq[string] =
-  if not dirExists(path):
+  if not dirExists(extendedPath(path)):
     return @[]
-  for kind, child in walkDir(path):
+  for kind, child in walkDir(extendedPath(path)):
     if kind in {pcFile, pcDir}:
       result.add(splitPath(child).tail)
   result.sort()

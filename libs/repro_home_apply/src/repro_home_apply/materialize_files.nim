@@ -18,6 +18,7 @@
 ## the pipeline orchestrator.
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 import blake3
 import repro_home_generations
@@ -47,21 +48,21 @@ proc atomicWriteBytes(dst: string; content: openArray[byte]) =
   ## Stage at `<dst>.repro.tmp` then move into place.
   let parent = parentDir(dst)
   if parent.len > 0:
-    createDir(parent)
+    createDir(extendedPath(parent))
   let tmp = dst & ".repro.tmp"
   var text = newString(content.len)
   for i, b in content:
     text[i] = char(b)
-  writeFile(tmp, text)
-  if fileExists(dst):
+  writeFile(extendedPath(tmp), text)
+  if fileExists(extendedPath(dst)):
     try:
-      removeFile(dst)
+      removeFile(extendedPath(dst))
     except OSError as err:
       raiseMaterializeFailed(dst,
         "could not remove pre-existing target before atomic rename: " &
         err.msg)
   try:
-    moveFile(tmp, dst)
+    moveFile(extendedPath(tmp), extendedPath(dst))
   except OSError as err:
     raiseMaterializeFailed(dst,
       "could not move staging file '" & tmp & "' into place: " &
@@ -70,9 +71,9 @@ proc atomicWriteBytes(dst: string; content: openArray[byte]) =
 proc readPreWriteDigest(dst: string): tuple[has: bool; digest: Digest256] =
   ## Capture the pre-existing content's BLAKE3-256 so rollback can
   ## restore it on `EUserEditDetected` paths.
-  if not fileExists(dst):
+  if not fileExists(extendedPath(dst)):
     return (false, default(Digest256))
-  let raw = readFile(dst)
+  let raw = readFile(extendedPath(dst))
   var buf = newSeq[byte](raw.len)
   for i, ch in raw:
     buf[i] = byte(ord(ch))
@@ -99,11 +100,11 @@ proc deleteRemovedFile*(absoluteOutputPath: string) =
   ## absent from the current plan. Called by the pipeline when the
   ## diff identifies a `removed` file. The function never raises if
   ## the file is already absent (intent and reality already agree).
-  if not fileExists(absoluteOutputPath) and
-     not symlinkExists(absoluteOutputPath):
+  if not fileExists(extendedPath(absoluteOutputPath)) and
+     not symlinkExists(extendedPath(absoluteOutputPath)):
     return
   try:
-    removeFile(absoluteOutputPath)
+    removeFile(extendedPath(absoluteOutputPath))
   except OSError as err:
     raiseMaterializeFailed(absoluteOutputPath,
       "could not remove generated file: " & err.msg)

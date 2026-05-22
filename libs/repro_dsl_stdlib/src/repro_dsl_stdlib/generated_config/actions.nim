@@ -11,6 +11,7 @@
 ## changed). Re-applies with identical inputs are no-ops.
 
 import std/[os, osproc, strutils, tables]
+from repro_core/paths import extendedPath
 
 import repro_local_store
 
@@ -81,16 +82,16 @@ proc materializeFromCas(store: var Store; digest: PrefixIdBytes;
   let blob = store.readCasBlob(digest)
   var data = newString(blob.len)
   for i, b in blob: data[i] = char(b)
-  if fileExists(targetPath):
-    let existing = readFile(targetPath)
+  if fileExists(extendedPath(targetPath)):
+    let existing = readFile(extendedPath(targetPath))
     if existing == data:
       return false
-  createDir(parentDir(targetPath))
+  createDir(extendedPath(parentDir(targetPath)))
   let tmpPath = targetPath & ".reprotmp." & $getCurrentProcessId()
-  writeFile(tmpPath, data)
-  if fileExists(targetPath):
-    removeFile(targetPath)
-  moveFile(tmpPath, targetPath)
+  writeFile(extendedPath(tmpPath), data)
+  if fileExists(extendedPath(targetPath)):
+    removeFile(extendedPath(targetPath))
+  moveFile(extendedPath(tmpPath), extendedPath(targetPath))
   return true
 
 proc applyOwnedFile*(state: var ApplyState; store: var Store;
@@ -114,16 +115,16 @@ proc applyOwnedFile*(state: var ApplyState; store: var Store;
   let blobId = store.storeCasBlob(contentSeq)
   result.contentDigestHex = toHex(blobId)
   result.bytesWritten = content.len
-  if priorMatches and fileExists(result.targetPath):
+  if priorMatches and fileExists(extendedPath(result.targetPath)):
     # Verify on-disk content still matches.
-    let existing = readFile(result.targetPath)
+    let existing = readFile(extendedPath(result.targetPath))
     var existingSeq = newSeq[byte](existing.len)
     for i, ch in existing: existingSeq[i] = byte(ord(ch))
     if hashContent(existingSeq) == hashContent(contentSeq):
       result.outcome = oaCacheHit
       return
   # Materialize from CAS, then update state.
-  let didCreate = not fileExists(result.targetPath)
+  let didCreate = not fileExists(extendedPath(result.targetPath))
   let didChange = materializeFromCas(store, blobId, result.targetPath)
   state.cacheKeys[idKey] = key
   if didCreate: result.outcome = oaCreated
@@ -161,10 +162,10 @@ proc applyManagedBlock*(state: var ApplyState; store: var Store;
   let prior = state.cacheKeys.getOrDefault(idKey)
   let cacheMatches = (prior == key)
   # Read the existing host file to find the current block bytes.
-  let hostExists = fileExists(result.targetPath)
+  let hostExists = fileExists(extendedPath(result.targetPath))
   var currentBlockOnDisk = ""
   if hostExists:
-    let prior2 = readFile(result.targetPath)
+    let prior2 = readFile(extendedPath(result.targetPath))
     let range = locateBlock(prior2, blockId)
     if range.found:
       currentBlockOnDisk = prior2.substr(range.blockStart, range.blockEnd - 1)
@@ -224,7 +225,7 @@ type
   TemplateRunError* = object of CatchableError
 
 proc readFileSafe(path: string): string =
-  if fileExists(path): readFile(path) else: ""
+  if fileExists(extendedPath(path)): readFile(extendedPath(path)) else: ""
 
 proc computeTemplateContent*(spec: ExternalTemplateSpec;
                              inputs: seq[ResolvedInput]):
@@ -239,10 +240,10 @@ proc computeTemplateContent*(spec: ExternalTemplateSpec;
   if exitCode != 0:
     raise newException(TemplateRunError,
       "external template tool failed (exit " & $exitCode & "): " & output)
-  if not fileExists(spec.outputPath):
+  if not fileExists(extendedPath(spec.outputPath)):
     raise newException(TemplateRunError,
       "external template tool did not produce output at " & spec.outputPath)
-  let rendered = readFile(spec.outputPath)
+  let rendered = readFile(extendedPath(spec.outputPath))
   var content = newSeq[byte](rendered.len)
   for i, ch in rendered: content[i] = byte(ord(ch))
   # Build a synthetic ResolvedInput list that includes the tool identity

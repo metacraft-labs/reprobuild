@@ -1,4 +1,5 @@
 import std/[os, osproc, strutils, times]
+from repro_core/paths import extendedPath
 
 import repro_monitor_depfile/reader
 import repro_monitor_depfile/render
@@ -25,7 +26,7 @@ proc createLocalTempDir(prefix: string): string =
   let now = getTime()
   result = getTempDir() / (prefix & "-" & $getCurrentProcessId() & "-" &
     $now.toUnix & "-" & $now.nanosecond & "-" & $tempDirNonce)
-  createDir(result)
+  createDir(extendedPath(result))
 
 proc parseOutputMode(value: string): FsSnoopOutputMode =
   case value
@@ -129,7 +130,7 @@ proc parseFsSnoopCommand(args: seq[string]): ParsedFsSnoopCommand =
 proc ensureParentDir(path: string) =
   let parent = parentDir(path)
   if parent.len > 0:
-    createDir(parent)
+    createDir(extendedPath(parent))
 
 proc candidateShimLibraries(): seq[string] =
   let appDir = getAppDir()
@@ -159,7 +160,7 @@ proc candidateShimLibraries(): seq[string] =
 
 proc findShimLibrary(): string =
   for candidate in candidateShimLibraries():
-    if candidate.len > 0 and fileExists(candidate):
+    if candidate.len > 0 and fileExists(extendedPath(candidate)):
       return absolutePath(candidate)
   ""
 
@@ -196,7 +197,7 @@ proc renderStreamToPath(depfilePath: string; mode: FsSnoopOutputMode;
       raise newException(ValueError,
         "--events binary requires --event-stream so child output stays separate")
     ensureParentDir(streamPath)
-    writeFile(streamPath, readFile(depfilePath))
+    writeFile(extendedPath(streamPath), readFile(extendedPath(depfilePath)))
   of fsoText, fsoJsonl:
     var lines: seq[string] = @[]
     for item in streamMonitorDepFile(depfilePath):
@@ -206,7 +207,7 @@ proc renderStreamToPath(depfilePath: string; mode: FsSnoopOutputMode;
         lines.add(renderMonitorStreamItemJsonl(item))
     if streamPath.len > 0:
       ensureParentDir(streamPath)
-      writeFile(streamPath, lines.join("\n") & "\n")
+      writeFile(extendedPath(streamPath), lines.join("\n") & "\n")
     else:
       for line in lines:
         stderr.writeLine(line)
@@ -220,7 +221,7 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
           "REPRO_MONITOR_SHIM_LIB")
 
     let fragmentDir = createLocalTempDir("repro-fs-snoop-fragments")
-    defer: removeDir(fragmentDir)
+    defer: removeDir(extendedPath(fragmentDir))
     ensureParentDir(request.depFilePath)
 
     var oldEnv: seq[(string, string, bool)] = @[]
@@ -253,7 +254,7 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
           "REPRO_MONITOR_SHIM_LIB")
 
     let fragmentDir = createLocalTempDir("repro-fs-snoop-fragments")
-    defer: removeDir(fragmentDir)
+    defer: removeDir(extendedPath(fragmentDir))
     ensureParentDir(request.depFilePath)
 
     var oldEnv: seq[(string, string, bool)] = @[]
@@ -292,7 +293,7 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
           "REPRO_MONITOR_SHIM_LIB")
 
     let fragmentDir = createLocalTempDir("repro-fs-snoop-fragments")
-    defer: removeDir(fragmentDir)
+    defer: removeDir(extendedPath(fragmentDir))
     ensureParentDir(request.depFilePath)
 
     var oldEnv: seq[(string, string, bool)] = @[]
@@ -328,7 +329,7 @@ proc runFsSnoopCli*(programName: string; args: seq[string]): int =
       result = runMonitoredCommand(parsed.request)
     finally:
       if tempRoot.len > 0:
-        removeDir(tempRoot)
+        removeDir(extendedPath(tempRoot))
   except CatchableError as err:
     stderr.writeLine(programName & ": error: " & err.msg)
     result = 1

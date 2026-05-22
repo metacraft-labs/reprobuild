@@ -12,6 +12,7 @@ when not defined(windows):
 {.push raises: [OSError].}
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 # strutils is used for cmpIgnoreCase and allCharsInSet in argument quoting.
 
 type
@@ -192,7 +193,10 @@ proc runWithMonitorShim*(argv: openArray[string], dllPath: string,
   ## Returns when the child process exits.
   if argv.len == 0:
     raise newException(OSError, "runWithMonitorShim: empty argv")
-  if not fileExists(dllPath):
+  let dllExists =
+    try: fileExists(extendedPath(dllPath))
+    except ValueError: false
+  if not dllExists:
     raise newException(OSError, "shim DLL not found: " & dllPath)
 
   let commandLine = buildCommandLine(argv)

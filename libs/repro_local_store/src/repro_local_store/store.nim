@@ -374,9 +374,9 @@ proc receiptDigest*(rec: RealizationReceipt): PrefixIdBytes =
   blake3.digest(encodeReceipt(rec))
 
 proc readReceiptFile*(path: string): RealizationReceipt =
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     raise newException(EReceiptMissing, "no receipt at " & path)
-  let raw = readFile(path)
+  let raw = readFile(extendedPath(path))
   var buf = newSeq[byte](raw.len)
   for i, ch in raw:
     buf[i] = byte(ord(ch))
@@ -387,8 +387,8 @@ proc writeReceiptFile*(path: string; rec: RealizationReceipt) =
   var text = newString(bytes.len)
   for i, b in bytes:
     text[i] = char(b)
-  createDir(parentDir(path))
-  writeFile(path, text)
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), text)
 
 # ---------------------------------------------------------------------------
 # Realization-hash computation
@@ -479,16 +479,16 @@ proc openStore*(root: string): Store =
   ## created on demand. The SQLite index is opened in WAL mode and
   ## passes `PRAGMA quick_check` (or raises `EStoreIndexCorrupt`).
   result.root = root
-  createDir(root)
+  createDir(extendedPath(root))
   result.casRoot = root / "cas" / "blake3"
   result.prefixesRoot = root / "prefixes"
   result.tmpRoot = root / "tmp"
   result.gcPendingRoot = root / "gc" / "pending-deletion"
   result.indexPath = root / "index.db"
-  createDir(result.casRoot)
-  createDir(result.prefixesRoot)
-  createDir(result.tmpRoot)
-  createDir(result.gcPendingRoot)
+  createDir(extendedPath(result.casRoot))
+  createDir(extendedPath(result.prefixesRoot))
+  createDir(extendedPath(result.tmpRoot))
+  createDir(extendedPath(result.gcPendingRoot))
   result.db = sqlite3_binding.open(result.indexPath)
   let onDiskVersion = result.db.userVersion()
   if onDiskVersion == 0:
@@ -544,27 +544,27 @@ proc storeCasBlob*(s: var Store; payload: openArray[byte]): PrefixIdBytes =
   ## the BLAKE3-256 key the caller uses to read it back. Idempotent.
   result = blake3.digest(payload)
   let finalPath = s.casPath(result)
-  if fileExists(finalPath):
+  if fileExists(extendedPath(finalPath)):
     return
-  createDir(parentDir(finalPath))
+  createDir(extendedPath(parentDir(finalPath)))
   let stagePath = s.casStageDir() & ".blob"
-  createDir(parentDir(stagePath))
-  writeFile(stagePath, textOf(payload))
+  createDir(extendedPath(parentDir(stagePath)))
+  writeFile(extendedPath(stagePath), textOf(payload))
   try:
-    moveFile(stagePath, finalPath)
+    moveFile(extendedPath(stagePath), extendedPath(finalPath))
   except OSError:
-    if fileExists(stagePath): removeFile(stagePath)
-    if not fileExists(finalPath):
+    if fileExists(extendedPath(stagePath)): removeFile(extendedPath(stagePath))
+    if not fileExists(extendedPath(finalPath)):
       raise
 
 proc readCasBlob*(s: Store; digest: PrefixIdBytes): seq[byte] =
   ## Reads a CAS blob and verifies its BLAKE3-256 digest BEFORE the
   ## bytes are returned to the caller (mandatory per spec).
   let path = s.casPath(digest)
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     var e = newException(ECasMissing, "missing CAS blob " & hexOf(digest))
     raise e
-  let raw = readFile(path)
+  let raw = readFile(extendedPath(path))
   result = bytesOf(raw)
   let actual = blake3.digest(result)
   if actual != digest:
@@ -643,7 +643,7 @@ proc insertPrefixOrIgnore*(s: Store; row: PrefixRow): bool =
 
 proc allocateStagingDir*(s: var Store): string =
   result = s.tmpRoot / ("stage." & s.uniqueStoreToken())
-  createDir(result)
+  createDir(extendedPath(result))
 
 proc absolutePrefixPath*(s: Store; relative: string): string =
   s.root / relative.replace('/', DirSep)
@@ -668,16 +668,16 @@ proc materializeViaHardlinkOrCopy*(srcDir, dstDir: string;
   ## a regular file copy. The chosen mechanism string is written back so
   ## the caller can record it as a debugging hint.
   mechanism = "copy"
-  if not dirExists(srcDir):
+  if not dirExists(extendedPath(srcDir)):
     raise newException(StoreError, "materialize source missing: " & srcDir)
-  createDir(dstDir)
+  createDir(extendedPath(dstDir))
   var anyHardlink = false
   var anyCopy = false
-  for entry in walkDirRec(srcDir, yieldFilter = {pcFile, pcLinkToFile},
+  for entry in walkDirRec(extendedPath(srcDir), yieldFilter = {pcFile, pcLinkToFile},
       relative = true):
     let src = srcDir / entry
     let dst = dstDir / entry
-    createDir(parentDir(dst))
+    createDir(extendedPath(parentDir(dst)))
     var hardlinked = false
     when defined(windows) or defined(posix):
       try:
@@ -687,7 +687,7 @@ proc materializeViaHardlinkOrCopy*(srcDir, dstDir: string;
       except OSError, IOError:
         hardlinked = false
     if not hardlinked:
-      copyFile(src, dst)
+      copyFile(extendedPath(src), extendedPath(dst))
       anyCopy = true
   if anyHardlink and not anyCopy:
     mechanism = "hardlink"
@@ -718,7 +718,7 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
   if lookup.found:
     result.outcome = roAlreadyPresent
     result.row = lookup.row
-    if dirExists(result.absolutePath):
+    if dirExists(extendedPath(result.absolutePath)):
       return result
     # Index says we have it but the directory was wiped externally; fall
     # through and re-materialize.
@@ -750,16 +750,16 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
     writeReceiptFile(stage / ReceiptFileName, receipt)
     let digest = receiptDigest(receipt)
     # Publish (atomic rename):
-    createDir(parentDir(result.absolutePath))
+    createDir(extendedPath(parentDir(result.absolutePath)))
     var publishedSelf = true
     try:
-      moveDir(stage, result.absolutePath)
+      moveDir(extendedPath(stage), extendedPath(result.absolutePath))
     except OSError:
       publishedSelf = false
     if not publishedSelf:
-      if dirExists(stage):
-        try: removeDir(stage) except OSError: discard
-      if not dirExists(result.absolutePath):
+      if dirExists(extendedPath(stage)):
+        try: removeDir(extendedPath(stage)) except OSError: discard
+      if not dirExists(extendedPath(result.absolutePath)):
         raise
       result.outcome = roLoserOfRace
       let row = s.lookupPrefix(prefixId)
@@ -791,8 +791,8 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
         try: s.db.exec("ROLLBACK") except CatchableError: discard
     return result
   except CatchableError:
-    if dirExists(stage):
-      try: removeDir(stage) except OSError: discard
+    if dirExists(extendedPath(stage)):
+      try: removeDir(extendedPath(stage)) except OSError: discard
     raise
 
 # ---------------------------------------------------------------------------
@@ -915,8 +915,8 @@ proc quarantineUnique(s: var Store; absolutePath: string): string =
   let leaf = absolutePath.extractFilename
   let token = s.uniqueStoreToken()
   result = s.gcPendingRoot / (leaf & "." & token)
-  createDir(s.gcPendingRoot)
-  moveDir(absolutePath, result)
+  createDir(extendedPath(s.gcPendingRoot))
+  moveDir(extendedPath(absolutePath), extendedPath(result))
 
 proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
   ## Runs the spec's eager GC: dead-set query, move to
@@ -928,7 +928,7 @@ proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
   for row in dead:
     let absPath = s.absolutePrefixPath(row.realizedPath)
     var movedTo = ""
-    if dirExists(absPath):
+    if dirExists(extendedPath(absPath)):
       try:
         movedTo = s.quarantineUnique(absPath)
       except OSError as err:
@@ -957,8 +957,9 @@ proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
       result.quarantinedPaths.add(movedTo)
 
   # Sweep pending-deletion entries past grace.
-  if dirExists(s.gcPendingRoot):
+  if dirExists(extendedPath(s.gcPendingRoot)):
     let now = getTime().toUnix
+    # TODO(win-longpath): walk results escape; needs review
     for kind, entry in walkDir(s.gcPendingRoot, relative = false):
       if kind notin {pcDir, pcLinkToDir, pcFile, pcLinkToFile}:
         continue
@@ -990,8 +991,9 @@ proc sweepStaging*(s: var Store): seq[string] =
   ## Unconditionally remove every directory under `tmp/`. Concurrent
   ## writers should be quiesced before calling this (the recover code
   ## path is for startup / explicit `repro store recover`).
-  if not dirExists(s.tmpRoot):
+  if not dirExists(extendedPath(s.tmpRoot)):
     return
+  # TODO(win-longpath): walk results escape; needs review
   for kind, entry in walkDir(s.tmpRoot, relative = false):
     case kind
     of pcDir, pcLinkToDir:
@@ -1015,11 +1017,13 @@ proc relativeFromRoot(s: Store; absolutePath: string): string =
 proc reconcileUnindexedPrefixes(s: var Store; report: var RecoverReport) =
   ## For each `prefixes/<pkg>/<dir>/` not present in the index, re-read
   ## its receipt and either re-insert the row or quarantine the prefix.
-  if not dirExists(s.prefixesRoot):
+  if not dirExists(extendedPath(s.prefixesRoot)):
     return
+  # TODO(win-longpath): walk results escape; needs review
   for pkgKind, pkgDir in walkDir(s.prefixesRoot, relative = false):
     if pkgKind notin {pcDir, pcLinkToDir}:
       continue
+    # TODO(win-longpath): walk results escape; needs review
     for kind, dir in walkDir(pkgDir, relative = false):
       if kind notin {pcDir, pcLinkToDir}:
         continue

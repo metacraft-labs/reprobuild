@@ -1,4 +1,5 @@
 import std/[algorithm, os, strutils]
+from repro_core/paths import extendedPath
 
 import repro_core/codec
 import repro_monitor_depfile/capabilities
@@ -84,10 +85,10 @@ proc fragmentPath*(fragmentDir: string; osPid, threadId: uint64): string =
   fragmentDir / ("repro-monitor-" & $osPid & "-" & $threadId & ".rmdf-frag")
 
 proc appendFragmentRecord*(fragmentDir: string; record: MonitorRecord) =
-  createDir(fragmentDir)
+  createDir(extendedPath(fragmentDir))
   let path = fragmentPath(fragmentDir, record.osPid, record.threadId)
   var file: File
-  if not open(file, path, fmAppend):
+  if not open(file, extendedPath(path), fmAppend):
     raiseEnvelopeError(eeMalformed, "cannot open RMDF fragment for append: " & path)
   defer: close(file)
   let frame = encodeFrame(record)
@@ -95,7 +96,7 @@ proc appendFragmentRecord*(fragmentDir: string; record: MonitorRecord) =
     discard file.writeBytes(frame, 0, frame.len)
 
 proc readFragmentRecords*(path: string): seq[MonitorRecord] =
-  let raw = readFile(path).toBytes()
+  let raw = readFile(extendedPath(path)).toBytes()
   decodeFrames(raw)
 
 proc canonicalOrder(a, b: MonitorRecord): int =
@@ -163,17 +164,17 @@ proc encodeCanonical*(records: openArray[MonitorRecord]): seq[byte] =
 
 proc mergeFragments*(fragmentDir, outputPath: string): MonitorDepFile =
   var records: seq[MonitorRecord] = @[]
-  if dirExists(fragmentDir):
-    for kind, path in walkDir(fragmentDir):
+  if dirExists(extendedPath(fragmentDir)):
+    for kind, path in walkDir(extendedPath(fragmentDir)):
       if kind == pcFile and path.endsWith(".rmdf-frag"):
         records.add readFragmentRecords(path)
   records.add profileRecords(defaultHooksMonitorProfile(
     MacosMonitorShimTaxonomyCapabilities))
 
   let canonical = encodeCanonical(records)
-  writeFile(outputPath, canonical.fromBytes())
+  writeFile(extendedPath(outputPath), canonical.fromBytes())
   depFileFromRecords(records)
 
 proc writeCanonical*(outputPath: string; records: openArray[MonitorRecord]) =
   let canonical = encodeCanonical(records)
-  writeFile(outputPath, canonical.fromBytes())
+  writeFile(extendedPath(outputPath), canonical.fromBytes())

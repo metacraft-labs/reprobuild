@@ -5,6 +5,7 @@
 ## and the apply-action procs that hold the three together.
 
 import std/[os, strutils, tables]
+from repro_core/paths import extendedPath
 
 import repro_local_store
 
@@ -129,9 +130,10 @@ proc walkTemplateDir(templateDir: string): seq[string] =
   ## directory we guarantee an edit to any `{% include %}`d sibling will
   ## change the cache key.
   result = @[]
-  if not dirExists(templateDir): return
+  if not dirExists(extendedPath(templateDir)): return
+  # TODO(win-longpath): walk results escape; needs review
   for path in walkDirRec(templateDir):
-    if fileExists(path):
+    if fileExists(extendedPath(path)):
       result.add path
 
 proc runJinja*(state: var actions.ApplyState;
@@ -153,7 +155,7 @@ proc runJinja*(state: var actions.ApplyState;
   # transitive-import scan (which lists every file under workingDir)
   # does not pick up the staging file as a self-referential input.
   let stageDir = parentDir(spec.workingDir) / "_repro_jinja_stage"
-  createDir(stageDir)
+  createDir(extendedPath(stageDir))
   let stagePath = stageDir / "output.tmp"
   let driverPath = stageDir / "_repro_jinja_driver.py"
   # Build a Python driver script.
@@ -174,8 +176,8 @@ proc runJinja*(state: var actions.ApplyState;
   driver.add "os.makedirs(os.path.dirname(out_path), exist_ok=True)\n"
   driver.add "with open(out_path, \"w\", encoding=\"utf-8\") as fh:\n"
   driver.add "  fh.write(tpl.render(**vars))\n"
-  createDir(spec.workingDir)
-  writeFile(driverPath, driver)
+  createDir(extendedPath(spec.workingDir))
+  writeFile(extendedPath(driverPath), driver)
   # Encode vars as JSON for argv.
   var varsJson = "{"
   var firstVar = true
@@ -208,7 +210,7 @@ proc runJinja*(state: var actions.ApplyState;
     inputs.add ResolvedInput(name: "var:" & k, value: cvString(v))
   # Remove any prior staging file so the wrapper detects a fresh write
   # vs. the tool silently doing nothing.
-  if fileExists(stagePath): removeFile(stagePath)
+  if fileExists(extendedPath(stagePath)): removeFile(extendedPath(stagePath))
   let extSpec = ExternalTemplateSpec(
     commandLine: @["\"" & spec.pythonExe & "\"", "\"" & driverPath & "\"",
       "\"" & varsJson.replace("\"", "\\\"") & "\""],

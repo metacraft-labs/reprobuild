@@ -108,15 +108,15 @@ type
 proc parseBuildTarget(target: string): ParsedBuildTarget =
   let parts = splitTarget(target)
   if parts.fragment.len > 0:
-    if dirExists(parts.base):
+    if dirExists(extendedPath(parts.base)):
       let fragmentModule = parts.base / (parts.fragment & ".nim")
-      if fileExists(fragmentModule):
+      if fileExists(extendedPath(fragmentModule)):
         return ParsedBuildTarget(
           modulePath: fragmentModule,
           outputName: parts.fragment,
           fragmentKind: tfkModule)
       let rootModule = parts.base / "reprobuild.nim"
-      if fileExists(rootModule):
+      if fileExists(extendedPath(rootModule)):
         return ParsedBuildTarget(
           modulePath: rootModule,
           outputName: splitFile(rootModule).name,
@@ -132,7 +132,7 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
       fragmentKind: tfkModule)
 
   let modulePath =
-    if dirExists(parts.base):
+    if dirExists(extendedPath(parts.base)):
       parts.base / "reprobuild.nim"
     else:
       parts.base
@@ -193,9 +193,9 @@ type
     values: Table[string, string]
 
 proc readKeyValueMetadata(path: string): Table[string, string] =
-  if path.len == 0 or not fileExists(path):
+  if path.len == 0 or not fileExists(extendedPath(path)):
     return
-  for rawLine in readFile(path).splitLines():
+  for rawLine in readFile(extendedPath(path)).splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):
       continue
@@ -279,9 +279,9 @@ proc parseCmakeQuotedList(text, setName: string): seq[string] =
   parsed
 
 proc parseCmakeListFromFile(path, setName: string): seq[string] =
-  if path.len == 0 or not fileExists(path):
+  if path.len == 0 or not fileExists(extendedPath(path)):
     return
-  parseCmakeQuotedList(readFile(path), setName)
+  parseCmakeQuotedList(readFile(extendedPath(path)), setName)
 
 proc addUniquePath(paths: var seq[string]; path: string) =
   if path.len == 0:
@@ -326,21 +326,21 @@ proc cmakeRegenerationMetadataForModule(modulePath: string):
 proc cmakeRegenerationInputs(meta: CmakeRegenerationMetadata;
                              publicCliPath: string): seq[string] =
   result.addUniquePath(meta.metadataFile)
-  if publicCliPath.len > 0 and fileExists(publicCliPath):
+  if publicCliPath.len > 0 and fileExists(extendedPath(publicCliPath)):
     result.addUniquePath(publicCliPath)
-  if meta.cmakeCommand.isAbsolute and fileExists(meta.cmakeCommand):
+  if meta.cmakeCommand.isAbsolute and fileExists(extendedPath(meta.cmakeCommand)):
     result.addUniquePath(meta.cmakeCommand)
   let checkPath = meta.materializeCmakePath(meta.checkFile)
   result.addUniquePath(checkPath)
   result.addUniquePath(meta.binaryDir / "CMakeCache.txt")
   result.addUniquePath(meta.binaryDir / "CMakeFiles" / "cmake.check_cache")
-  if meta.globVerifyScript.len > 0 and fileExists(meta.globVerifyScript):
+  if meta.globVerifyScript.len > 0 and fileExists(extendedPath(meta.globVerifyScript)):
     result.addUniquePath(meta.globVerifyScript)
   for input in parseCmakeListFromFile(checkPath, "CMAKE_MAKEFILE_DEPENDS"):
     result.addUniquePath(meta.materializeCmakePath(input))
 
 proc cmakeRegenerationHasGlobVerification(meta: CmakeRegenerationMetadata): bool =
-  meta.globVerifyScript.len > 0 and fileExists(meta.globVerifyScript)
+  meta.globVerifyScript.len > 0 and fileExists(extendedPath(meta.globVerifyScript))
 
 proc cmakeRegenerationOutputs(meta: CmakeRegenerationMetadata): seq[string] =
   result.addUniquePath(meta.providerFile)
@@ -424,7 +424,7 @@ proc applyCmakeProviderEnvironment(meta: CmakeRegenerationMetadata) =
 
 proc reprobuildLibraryWorkDir(): string =
   proc hasReprobuildLibs(root: string): bool =
-    dirExists(root / "libs" / "repro_project_dsl" / "src")
+    dirExists(extendedPath(root / "libs" / "repro_project_dsl" / "src"))
 
   let envRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if envRoot.len > 0 and hasReprobuildLibs(envRoot):
@@ -440,7 +440,7 @@ proc reprobuildLibraryWorkDir(): string =
   cwd
 
 proc moduleHasBuildBlock(modulePath: string): bool =
-  for line in readFile(modulePath).splitLines:
+  for line in readFile(extendedPath(modulePath)).splitLines:
     if line.strip() == "build:":
       return true
 
@@ -1260,10 +1260,10 @@ proc loweredGraphCachePath(outDir, selectedActionId: string): string =
 proc readFreshLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
                                 pathEnv: string):
     Option[tuple[actions: seq[BuildAction]; pools: seq[BuildPool]]] =
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
   try:
-    let record = decodeLoweredGraphCache(toBytes(readFile(path)))
+    let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
     if record.modulePath != modulePath or record.projectRoot != projectRoot or
         record.selectedActionId != selectedActionId or record.pathEnv != pathEnv:
       return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
@@ -1275,7 +1275,7 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
                             pathEnv: string;
                             lowered: tuple[actions: seq[BuildAction];
                                            pools: seq[BuildPool]]) =
-  createDir(parentDir(path))
+  createDir(extendedPath(parentDir(path)))
   let record = LoweredGraphCacheRecord(
     modulePath: modulePath,
     projectRoot: projectRoot,
@@ -1283,7 +1283,7 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
     pathEnv: pathEnv,
     actions: lowered.actions,
     pools: lowered.pools)
-  writeFile(path, fromBytes(encodeLoweredGraphCache(record)))
+  writeFile(extendedPath(path), fromBytes(encodeLoweredGraphCache(record)))
 
 proc evidenceJson(evidence: PathSetEvidence): JsonNode =
   %*{
@@ -1365,8 +1365,8 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
     "trace": trace,
     "stats": statsJson(buildResult.stats)
   }
-  createDir(parentDir(path))
-  writeFile(path, $root)
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), $root)
 
 proc hasFailedActions(buildResult: BuildRunResult): bool =
   for item in buildResult.results:
@@ -1398,12 +1398,12 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
 
 proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
                                             artifactPath: string) =
-  if artifactPath.len == 0 or not fileExists(artifactPath):
+  if artifactPath.len == 0 or not fileExists(extendedPath(artifactPath)):
     return
   if providerCompileArtifactFresh(artifactPath, plan.outputBinaryPath,
       plan.interfaceFingerprint, plan.providerFingerprint):
     return
-  removeFile(artifactPath)
+  removeFile(extendedPath(artifactPath))
 
 proc providerCompileFailure(buildResult: BuildRunResult): string =
   for item in buildResult.results:
@@ -1417,9 +1417,9 @@ proc providerCompileFailure(buildResult: BuildRunResult): string =
   "provider compile failed"
 
 proc readTextIfExists(path: string): string =
-  if path.len == 0 or not fileExists(path):
+  if path.len == 0 or not fileExists(extendedPath(path)):
     return ""
-  readFile(path)
+  readFile(extendedPath(path))
 
 proc runLoggedCommand(argv: openArray[string]; cwd: string): int =
   let command = shellCommand(argv)
@@ -1430,19 +1430,19 @@ proc runLoggedCommand(argv: openArray[string]; cwd: string): int =
   res.exitCode
 
 proc removeManifestEntries(path: string) =
-  if path.len == 0 or not fileExists(path):
+  if path.len == 0 or not fileExists(extendedPath(path)):
     return
-  for rawLine in readFile(path).splitLines():
+  for rawLine in readFile(extendedPath(path)).splitLines():
     let filePath = rawLine.strip()
-    if filePath.len > 0 and fileExists(filePath):
-      removeFile(filePath)
+    if filePath.len > 0 and fileExists(extendedPath(filePath)):
+      removeFile(extendedPath(filePath))
 
 proc invalidateCmakeProviderDerivedState(meta: CmakeRegenerationMetadata) =
   if meta.providerRoot.len > 0:
     let pattern = meta.providerRoot / "worktrees" / "*" / "build" /
       "reprobuild" / "provider-graph" / "provider-fragments.rbsz"
-    for fragment in walkFiles(pattern):
-      removeFile(fragment)
+    for fragment in walkFiles(extendedPath(pattern)):
+      removeFile(extendedPath(fragment))
   for key, value in meta.values:
     if key == "clean_manifest" or key.startsWith("clean_manifest_"):
       removeManifestEntries(value)
@@ -1502,7 +1502,7 @@ proc runCmakeRegenerationHelper*(args: openArray[string]): int =
     return 0
 
   let providerBefore = readTextIfExists(meta.providerStateFile)
-  if meta.globVerifyScript.len > 0 and fileExists(meta.globVerifyScript):
+  if meta.globVerifyScript.len > 0 and fileExists(extendedPath(meta.globVerifyScript)):
     let verifyRet = runLoggedCommand(@[
       meta.cmakeCommand, "-P", meta.globVerifyScript
     ], meta.binaryDir)
@@ -1526,8 +1526,8 @@ proc runCmakeRegenerationHelper*(args: openArray[string]): int =
         meta.providerFile)
   if providerBefore.len > 0 and providerBefore != providerAfter:
     invalidateCmakeProviderDerivedState(meta)
-  createDir(parentDir(meta.providerStateFile))
-  writeFile(meta.providerStateFile, providerAfter)
+  createDir(extendedPath(parentDir(meta.providerStateFile)))
+  writeFile(extendedPath(meta.providerStateFile), providerAfter)
   echo "cmakeRegeneration: complete providerChanged=" &
     $(providerBefore.len > 0 and providerBefore != providerAfter)
   0
@@ -1615,35 +1615,35 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
   let cacheIdentityPath = cacheDir / (key & ".rbtp")
   let cacheInspectionPath = cacheDir / (key & ".inspect.json")
   let stableKeyPath = cacheDir / (mode.modeName & ".current-key")
-  if fileExists(stableIdentityPath) and fileExists(stableKeyPath) and
-      readFile(stableKeyPath).strip() == key:
+  if fileExists(extendedPath(stableIdentityPath)) and fileExists(extendedPath(stableKeyPath)) and
+      readFile(extendedPath(stableKeyPath)).strip() == key:
     try:
       let identity = readPathOnlyBuildIdentity(stableIdentityPath)
       if identity.interfaceFingerprint != artifact.interfaceFingerprint:
         return
-      if not fileExists(stableInspectionPath):
-        if fileExists(cacheInspectionPath):
-          createDir(parentDir(stableInspectionPath))
-          copyFile(cacheInspectionPath, stableInspectionPath)
+      if not fileExists(extendedPath(stableInspectionPath)):
+        if fileExists(extendedPath(cacheInspectionPath)):
+          createDir(extendedPath(parentDir(stableInspectionPath)))
+          copyFile(extendedPath(cacheInspectionPath), extendedPath(stableInspectionPath))
         else:
           writeInspectionJson(stableInspectionPath, identity)
       return (hit: true, identity: identity)
     except CatchableError:
       discard
-  if not fileExists(cacheIdentityPath):
+  if not fileExists(extendedPath(cacheIdentityPath)):
     return
   try:
     let identity = readPathOnlyBuildIdentity(cacheIdentityPath)
     if identity.interfaceFingerprint != artifact.interfaceFingerprint:
       return
     writePathOnlyBuildIdentity(stableIdentityPath, identity)
-    if fileExists(cacheInspectionPath):
-      createDir(parentDir(stableInspectionPath))
-      copyFile(cacheInspectionPath, stableInspectionPath)
+    if fileExists(extendedPath(cacheInspectionPath)):
+      createDir(extendedPath(parentDir(stableInspectionPath)))
+      copyFile(extendedPath(cacheInspectionPath), extendedPath(stableInspectionPath))
     else:
       writeInspectionJson(stableInspectionPath, identity)
-    createDir(cacheDir)
-    writeFile(stableKeyPath, key & "\n")
+    createDir(extendedPath(cacheDir))
+    writeFile(extendedPath(stableKeyPath), key & "\n")
     return (hit: true, identity: identity)
   except CatchableError:
     return (hit: false, identity: PathOnlyBuildIdentity())
@@ -1672,8 +1672,8 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   writePathOnlyBuildIdentity(paths.identityPath, identity)
   writeInspectionJson(paths.inspectionPath, identity)
   writeToolIdentityCache(outDir, mode, artifact, identity)
-  createDir(outDir / "tool-identity-cache")
-  writeFile(outDir / "tool-identity-cache" / (mode.modeName & ".current-key"),
+  createDir(extendedPath(outDir / "tool-identity-cache"))
+  writeFile(extendedPath(outDir / "tool-identity-cache" / (mode.modeName & ".current-key")),
     toolIdentityCacheKey(artifact, mode) & "\n")
   (identity: identity, identityPath: paths.identityPath,
     inspectionPath: paths.inspectionPath)
@@ -1714,7 +1714,7 @@ proc stablePublicCliPath(): string =
 proc siblingFsSnoopPath(publicCliPath: string): string =
   let candidate = parentDir(publicCliPath) /
     addFileExt("repro-fs-snoop", ExeExt)
-  if fileExists(candidate):
+  if fileExists(extendedPath(candidate)):
     os.normalizedPath(candidate)
   else:
     ""
@@ -1935,7 +1935,7 @@ proc renderBuildStats*(stats: BuildStats): string =
       formatFloat(totalMs, ffDecimal, 1) & "\n")
 
 proc cliPathExists(path: string): bool =
-  fileExists(path) or dirExists(path)
+  fileExists(extendedPath(path)) or dirExists(extendedPath(path))
 
 proc actionOutputsPresent(action: BuildAction): bool =
   if action.outputs.len == 0:
@@ -1954,14 +1954,14 @@ proc cmakeGeneratedStateFresh(meta: CmakeRegenerationMetadata;
                               publicCliPath: string): bool =
   if meta.providerFile.len == 0 or meta.providerStateFile.len == 0:
     return false
-  if not fileExists(meta.providerFile) or not fileExists(meta.providerStateFile):
+  if not fileExists(extendedPath(meta.providerFile)) or not fileExists(extendedPath(meta.providerStateFile)):
     return false
-  if readFile(meta.providerFile) != readFile(meta.providerStateFile):
+  if readFile(extendedPath(meta.providerFile)) != readFile(extendedPath(meta.providerStateFile)):
     return false
-  let stamp = getLastModificationTime(meta.providerStateFile)
+  let stamp = getLastModificationTime(extendedPath(meta.providerStateFile))
   for input in cmakeRegenerationInputs(meta, publicCliPath):
-    if (fileExists(input) or dirExists(input)) and
-        getLastModificationTime(input) > stamp:
+    if (fileExists(extendedPath(input)) or dirExists(extendedPath(input))) and
+        getLastModificationTime(extendedPath(input)) > stamp:
       return false
   true
 
@@ -2001,7 +2001,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   var parsedTarget = parseBuildTarget(target)
   parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
   let modulePath = parsedTarget.modulePath
-  if not fileExists(modulePath):
+  if not fileExists(extendedPath(modulePath)):
     raise newException(IOError, "build target module not found: " & modulePath)
 
   let outDir = outputDirForTarget(parsedTarget, workRoot)
@@ -2303,7 +2303,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           $item.cacheDecision)
       if providerCompileResult.hasFailedActions():
         raise newException(OSError, providerCompileFailure(providerCompileResult))
-      if not fileExists(providerArtifactPath):
+      if not fileExists(extendedPath(providerArtifactPath)):
         raise newException(IOError,
           "provider compile edge did not write artifact: " & providerArtifactPath)
       provider = readProviderCompileArtifact(providerArtifactPath)
@@ -2358,8 +2358,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         cacheWriteStart)
     if prepareOnly:
       if cmakeMeta.enabled:
-        createDir(parentDir(cmakeMeta.providerStateFile))
-        writeFile(cmakeMeta.providerStateFile, readFile(modulePath))
+        createDir(extendedPath(parentDir(cmakeMeta.providerStateFile)))
+        writeFile(extendedPath(cmakeMeta.providerStateFile), readFile(extendedPath(modulePath)))
         let seedStart = statStart(statsEnabled)
         discard seedCmakeRegenerationCache(cmakeMeta, publicCliPath, outDir)
         finishStat(buildStats, statsEnabled,
@@ -2473,7 +2473,7 @@ proc addWatchCandidate(paths: var HashSet[string]; projectRoot, path: string) =
 proc watchPathsFromReport(outcome: BuildCommandOutcome): seq[string] =
   var paths = initHashSet[string]()
   addWatchCandidate(paths, outcome.projectRoot, outcome.modulePath)
-  if outcome.buildReportPath.len > 0 and fileExists(outcome.buildReportPath):
+  if outcome.buildReportPath.len > 0 and fileExists(extendedPath(outcome.buildReportPath)):
     let report = parseFile(outcome.buildReportPath)
     for action in report{"actions"}:
       let evidence = action{"evidence"}
@@ -2492,11 +2492,11 @@ proc binDirsForDevelop(identity: PathOnlyBuildIdentity): seq[string] =
     if profile.installMethod == "nix":
       for storePath in profile.realizedStorePaths:
         let binDir = storePath / "bin"
-        if dirExists(binDir) and not result.contains(binDir):
+        if dirExists(extendedPath(binDir)) and not result.contains(binDir):
           result.add(binDir)
     else:
       for binDir in profile.pathSearchList:
-        if binDir.len > 0 and dirExists(binDir) and not result.contains(binDir):
+        if binDir.len > 0 and dirExists(extendedPath(binDir)) and not result.contains(binDir):
           result.add(binDir)
 
 proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
@@ -2648,20 +2648,20 @@ proc pathListJoin(values: openArray[string]; separator: char): string =
 proc profilePrefixes(identity: PathOnlyBuildIdentity): seq[string] =
   for profile in identity.profiles:
     if profile.selectedStorePath.len > 0 and dirExists(
-        profile.selectedStorePath):
+        extendedPath(profile.selectedStorePath)):
       if not result.contains(profile.selectedStorePath):
         result.add(profile.selectedStorePath)
     let binDir = parentDir(profile.resolvedExecutablePath)
     if binDir.len > 0:
       let prefix = parentDir(binDir)
-      if prefix.len > 0 and dirExists(prefix) and not result.contains(prefix):
+      if prefix.len > 0 and dirExists(extendedPath(prefix)) and not result.contains(prefix):
         result.add(prefix)
 
 proc pkgConfigPaths(prefixes: openArray[string]): seq[string] =
   for prefix in prefixes:
     for suffix in ["lib/pkgconfig", "share/pkgconfig"]:
       let candidate = prefix / suffix
-      if dirExists(candidate) and not result.contains(candidate):
+      if dirExists(extendedPath(candidate)) and not result.contains(candidate):
         result.add(candidate)
 
 proc cmakeEscape(value: string): string =
@@ -2676,7 +2676,7 @@ proc cmakeSet(name, kind, value: string; force = true): string =
 
 proc sdkRootForCMake(): string =
   let explicit = getEnv("SDKROOT")
-  if explicit.len > 0 and dirExists(explicit):
+  if explicit.len > 0 and dirExists(extendedPath(explicit)):
     return explicit
 
 proc writeCMakeToolchain(path: string; identity: PathOnlyBuildIdentity;
@@ -2712,8 +2712,8 @@ proc writeCMakeToolchain(path: string; identity: PathOnlyBuildIdentity;
     inspectionPath))
   if pkgValue.len > 0:
     content.add("set(ENV{PKG_CONFIG_PATH} \"" & cmakeEscape(pkgValue) & "\")\n")
-  createDir(parentDir(path))
-  writeFile(path, content)
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), content)
 
 proc shellAssign(name, value: string): string =
   name & "=" & q(value) & "\n"
@@ -2726,11 +2726,11 @@ proc resolveCMakeExecutable(candidate: string): string =
   when defined(windows):
     if candidate.len == 0:
       return candidate
-    if fileExists(candidate):
+    if fileExists(extendedPath(candidate)):
       return candidate
     if not candidate.endsWith(".exe"):
       let withExe = candidate & ".exe"
-      if fileExists(withExe):
+      if fileExists(extendedPath(withExe)):
         return withExe
     candidate
   else:
@@ -2782,9 +2782,9 @@ proc writeCMakeConfigureWrapperPosix(path: string;
   content.add("-DREPROBUILD_TOOL_PROFILE_ARTIFACT=" & q(identityPath) & " ")
   content.add("-DREPROBUILD_TOOL_PROFILE_INSPECTION=" & q(inspectionPath) & " ")
   content.add("$extra_sysroot_args \"$@\"\n")
-  createDir(parentDir(path))
-  writeFile(path, content)
-  setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), content)
+  setFilePermissions(extendedPath(path), {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 proc writeCMakeConfigureWrapperWindows(path: string;
@@ -2843,8 +2843,8 @@ proc writeCMakeConfigureWrapperWindows(path: string;
   content.add(")\n")
   content.add("& $cmake_bin @cmake_args @args\n")
   content.add("exit $LASTEXITCODE\n")
-  createDir(parentDir(path))
-  writeFile(path, content)
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), content)
 
 proc cmakeConfigureWrapperBaseName(): string =
   # Windows: emit a `.ps1` wrapper instead of an extensionless shell script so
@@ -2889,12 +2889,12 @@ proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
     raise newException(ValueError,
       "repro develop --cmake requires --tool-provisioning=path|nix")
   let sourceRoot = absolutePath(target)
-  if not dirExists(sourceRoot):
+  if not dirExists(extendedPath(sourceRoot)):
     raise newException(IOError, "cmake source directory not found: " & sourceRoot)
-  if not fileExists(sourceRoot / "CMakeLists.txt"):
+  if not fileExists(extendedPath(sourceRoot / "CMakeLists.txt")):
     raise newException(IOError,
       "cmake source directory does not contain CMakeLists.txt: " & sourceRoot)
-  if cmakeBinary.len > 0 and not fileExists(cmakeBinary):
+  if cmakeBinary.len > 0 and not fileExists(extendedPath(cmakeBinary)):
     raise newException(IOError, "cmake binary not found: " & cmakeBinary)
 
   let outDir = cmakeDevelopOutDir(sourceRoot, workRoot)
@@ -3036,11 +3036,11 @@ type
     newObject: string
 
 proc writeJsonFile(path: string; node: JsonNode) =
-  createDir(parentDir(path))
-  writeFile(path, pretty(node))
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), pretty(node))
 
 proc hcrSourceDigest(path: string): string =
-  byteDigest(readFile(path).bytesOf())
+  byteDigest(readFile(extendedPath(path)).bytesOf())
 
 proc objectFunctionBytes(objectPath, symbolName: string): seq[byte] =
   let graph = parseMachOArm64Object(objectPath)
@@ -3099,7 +3099,7 @@ proc defaultObjectSymbol(functionName: string): string =
 proc readHcrWatchPatchMetadata(projectRoot, metadataPath: string):
     HcrWatchPatchMetadata =
   let resolvedMetadataPath = resolveProjectPath(projectRoot, metadataPath)
-  if not fileExists(resolvedMetadataPath):
+  if not fileExists(extendedPath(resolvedMetadataPath)):
     raise newException(ValueError,
       "HCR watch metadata does not exist: " & resolvedMetadataPath)
   let root = parseFile(resolvedMetadataPath)
@@ -3127,7 +3127,7 @@ proc initHcrWatchSession(config: HcrWatchConfig): HcrWatchSession =
   result.enabled = config.hcrWatchEnabled
   result.config = config
   if result.enabled:
-    createDir(config.artifacts)
+    createDir(extendedPath(config.artifacts))
     result.listener = listenHcrAgentUnixSocket(config.socketPath)
     result.client = initHcrCoordinatorClient(CodetracerHcrSupportProfile)
 
@@ -3144,13 +3144,13 @@ proc captureHcrWatchBaseline(session: var HcrWatchSession;
     return
   session.metadata = readHcrWatchPatchMetadata(
     outcome.projectRoot, session.config.metadataPath)
-  if not fileExists(session.metadata.objectPath):
+  if not fileExists(extendedPath(session.metadata.objectPath)):
     raise newException(ValueError,
       "HCR watch object does not exist after initial build: " &
         session.metadata.objectPath)
   session.oldObject = session.config.artifacts /
     (safePathSegment(session.metadata.functionName, "patch") & "-generation0.o")
-  copyFile(session.metadata.objectPath, session.oldObject)
+  copyFile(extendedPath(session.metadata.objectPath), extendedPath(session.oldObject))
   writeJsonFile(session.config.artifacts / "hcr-watch-baseline.json", %*{
     "schemaId": "reprobuild.hcr.watch-baseline.v1",
     "supportProfile": CodetracerHcrSupportProfile,
@@ -3182,11 +3182,11 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
       "HCR watch cannot deliver a patch before the target agent connects")
   session.metadata = readHcrWatchPatchMetadata(
     outcome.projectRoot, session.config.metadataPath)
-  if not fileExists(session.metadata.objectPath):
+  if not fileExists(extendedPath(session.metadata.objectPath)):
     raise newException(ValueError,
       "HCR watch object does not exist after rebuild: " &
         session.metadata.objectPath)
-  if not fileExists(session.metadata.sourcePath):
+  if not fileExists(extendedPath(session.metadata.sourcePath)):
     raise newException(ValueError,
       "HCR watch source does not exist after rebuild: " &
         session.metadata.sourcePath)
@@ -3194,7 +3194,7 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
   session.newObject = session.config.artifacts /
     (safePathSegment(session.metadata.functionName, "patch") & "-generation" &
       $(cycle - 1) & ".o")
-  copyFile(session.metadata.objectPath, session.newObject)
+  copyFile(extendedPath(session.metadata.objectPath), extendedPath(session.newObject))
 
   let patchBytes = objectFunctionBytes(session.newObject,
     session.metadata.objectSymbol)
@@ -3203,7 +3203,7 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
     generation: uint32(cycle - 1),
     snapshotDigest: hcrSourceDigest(session.metadata.sourcePath),
     lineTableDigest: byteDigest(patchBytes))
-  let objectBytes = readFile(session.newObject).bytesOf()
+  let objectBytes = readFile(extendedPath(session.newObject)).bytesOf()
   let plan = directPatchPlanFromBytes(
     session.metadata.functionName, patchBytes,
     supportProfile = CodetracerHcrSupportProfile,
@@ -3426,7 +3426,7 @@ proc runDevelopCommand(args: openArray[string]): int =
     return runCMakeDevelopCommand(target, mode, command, workRoot, cmakeBinary)
 
   let modulePath = absolutePath(moduleForTarget(target))
-  if not fileExists(modulePath):
+  if not fileExists(extendedPath(modulePath)):
     raise newException(IOError, "develop target module not found: " & modulePath)
 
   let scopedRoot = scopedWorktreeRoot(modulePath, workRoot)
@@ -3627,7 +3627,7 @@ proc runLaunchPlanCommand*(args: seq[string]): int =
       return 2
     let path = positional[1]
     try:
-      let raw = readFile(path)
+      let raw = readFile(extendedPath(path))
       var buf = newSeq[byte](raw.len)
       for i, ch in raw: buf[i] = byte(ord(ch))
       let plan = decodeLaunchPlan(buf)
@@ -3688,12 +3688,12 @@ proc requireHcrArg(value, name: string) =
 
 proc requireHcrFile(path, name: string) =
   requireHcrArg(path, name)
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     raise newException(ValueError, name & " does not exist: " & path)
 
 proc requireHcrDir(path, name: string) =
   requireHcrArg(path, name)
-  if not dirExists(path):
+  if not dirExists(extendedPath(path)):
     raise newException(ValueError, name & " does not exist: " & path)
 
 proc runHcrBuildCycle(project, target, logPath: string): string =
@@ -3705,8 +3705,8 @@ proc runHcrBuildCycle(project, target, logPath: string): string =
     "--log=actions"])
   let res = execCmdEx(command, workingDir = project)
   result = res.output
-  createDir(parentDir(logPath))
-  writeFile(logPath, res.output)
+  createDir(extendedPath(parentDir(logPath)))
+  writeFile(extendedPath(logPath), res.output)
   if res.exitCode != 0:
     raise newException(ValueError,
       "repro build failed during HCR coordination with exit code " &
@@ -3728,12 +3728,12 @@ proc runHcrCoordinateCommand(args: seq[string]): int =
   requireHcrArg(parsed.socketPath, "--socket")
   requireHcrFile(parsed.sourceEditDriver, "--source-edit-driver")
   requireHcrArg(parsed.artifacts, "--artifacts")
-  createDir(parsed.artifacts)
+  createDir(extendedPath(parsed.artifacts))
 
   let patchObject = parsed.project / "build" / "patchable.o"
   requireHcrFile(patchObject, "initial patchable object")
   let oldObject = parsed.artifacts / "patchable-generation0.o"
-  copyFile(patchObject, oldObject)
+  copyFile(extendedPath(patchObject), extendedPath(oldObject))
 
   var listener = listenHcrAgentUnixSocket(parsed.socketPath)
   defer: listener.close()
@@ -3746,7 +3746,7 @@ proc runHcrCoordinateCommand(args: seq[string]): int =
 
   let edit = execCmdEx(shellCommand([parsed.sourceEditDriver, parsed.project]),
     workingDir = parsed.project)
-  writeFile(parsed.artifacts / "source-edit-driver.log", edit.output)
+  writeFile(extendedPath(parsed.artifacts / "source-edit-driver.log"), edit.output)
   if edit.exitCode != 0:
     raise newException(ValueError,
       "source edit driver failed with exit code " & $edit.exitCode &
@@ -3756,7 +3756,7 @@ proc runHcrCoordinateCommand(args: seq[string]): int =
     parsed.artifacts / "reprobuild-build-report.txt")
   requireHcrFile(patchObject, "rebuilt patchable object")
   let newObject = parsed.artifacts / "patchable-generation1.o"
-  copyFile(patchObject, newObject)
+  copyFile(extendedPath(patchObject), extendedPath(newObject))
 
   let symbolName = "_" & parsed.patchFunction
   let patchBytes = objectFunctionBytes(newObject, symbolName)
@@ -3766,7 +3766,7 @@ proc runHcrCoordinateCommand(args: seq[string]): int =
     generation: 1'u32,
     snapshotDigest: hcrSourceDigest(sourcePath),
     lineTableDigest: byteDigest(patchBytes))
-  let objectBytes = readFile(newObject).bytesOf()
+  let objectBytes = readFile(extendedPath(newObject)).bytesOf()
   let plan = directPatchPlanFromBytes(parsed.patchFunction, patchBytes,
     supportProfile = CodetracerHcrSupportProfile,
     snapshotId = "codetracer-hcr-generation-1")

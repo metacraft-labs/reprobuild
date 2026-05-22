@@ -2,6 +2,7 @@ when not defined(linux):
   {.error: "repro_monitor_shim/linux_preload is Linux-only".}
 
 import std/[locks, os, tables]
+from repro_core/paths import extendedPath
 
 import repro_monitor_depfile/types
 import repro_monitor_depfile/writer
@@ -165,7 +166,7 @@ proc repro_monitor_shim_init*(configPath: cstring): cint
   withShimMuted:
     fragmentDir = getEnv("REPRO_MONITOR_FRAGMENT_DIR")
     if fragmentDir.len > 0:
-      createDir(fragmentDir)
+      createDir(extendedPath(fragmentDir))
   initialized = true
   recordProcessStart()
   result = 0

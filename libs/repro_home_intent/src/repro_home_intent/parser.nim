@@ -21,6 +21,7 @@
 ##   edit.
 
 import std/strutils
+from repro_core/paths import extendedPath
 
 import ./errors
 import ./model
@@ -862,5 +863,5 @@ proc parseProfile*(profilePath, source: string): Profile =
 proc loadProfile*(profilePath: string): Profile =
   ## Read `profilePath` and parse it. `ENoProfile` and `EUnstructured`
   ## propagate to the caller.
-  let src = readFile(profilePath)
+  let src = readFile(extendedPath(profilePath))
   result = parseProfile(profilePath, src)

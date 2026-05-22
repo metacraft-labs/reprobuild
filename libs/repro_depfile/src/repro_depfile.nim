@@ -1,4 +1,5 @@
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 type
   DependencyReportErrorKind* = enum
@@ -140,11 +141,11 @@ proc parseMakeLikeText(path, text: string): DependencyPathSet =
   parsed
 
 proc readRecognizedDependencyReport*(formatName, path: string): DependencyPathSet =
-  if path.len == 0 or not fileExists(path):
+  if path.len == 0 or not fileExists(extendedPath(path)):
     raiseReport(dreMissingFile, "dependency report is missing: " & path)
   case formatName
   of MakeDepfileFormatName, NinjaDepfileFormatName:
-    parseMakeLikeText(path, readFile(path))
+    parseMakeLikeText(path, readFile(extendedPath(path)))
   of MsvcShowIncludesFormatName, ClangScanDepsJsonFormatName:
     raiseReport(dreUnsupportedFormat,
       "recognized dependency format is not implemented yet: " & formatName)
@@ -153,9 +154,9 @@ proc readRecognizedDependencyReport*(formatName, path: string): DependencyPathSe
       "unknown dependency report format: " & formatName)
 
 proc readReproPathSet*(path: string): DependencyPathSet =
-  if path.len == 0 or not fileExists(path):
+  if path.len == 0 or not fileExists(extendedPath(path)):
     raiseReport(dreMissingFile, "path-set report is missing: " & path)
-  let lines = readFile(path).splitLines()
+  let lines = readFile(extendedPath(path)).splitLines()
   if lines.len == 0 or lines[0] != "repro-pathset-v1":
     raiseReport(dreMalformed, path & ": missing repro-pathset-v1 header")
   for lineNo in 1 ..< lines.len:

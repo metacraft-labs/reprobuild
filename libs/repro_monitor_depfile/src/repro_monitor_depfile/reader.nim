@@ -1,4 +1,5 @@
 import std/[os, options, strutils]
+from repro_core/paths import extendedPath
 
 import repro_core/codec
 import repro_monitor_depfile/types
@@ -79,10 +80,10 @@ proc decodeMonitorDepFile(bytes: openArray[byte];
 
 proc readMonitorDepFile*(path: string;
                          options: MonitorDepFileReaderOptions): MonitorDepFile =
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     raiseMonitorDepFileReaderError(mrMissingFile,
       "RMDF file does not exist: " & path)
-  decodeMonitorDepFile(readFile(path).toBytes(), options)
+  decodeMonitorDepFile(readFile(extendedPath(path)).toBytes(), options)
 
 proc readMonitorDepFile*(path: string): MonitorDepFile =
   readMonitorDepFile(path, defaultMonitorDepFileReaderOptions())

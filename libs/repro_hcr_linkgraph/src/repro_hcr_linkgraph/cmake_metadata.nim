@@ -1,4 +1,5 @@
 import std/[json, os, strutils]
+from repro_core/paths import extendedPath
 
 type
   CMakeHcrMetadataError* = object of CatchableError
@@ -54,7 +55,7 @@ proc normalizeForLookup(path: string): string =
   result = canonical.replace('\\', '/')
 
 proc readCMakeHcrMetadata*(path: string): CMakeHcrMetadata =
-  if not fileExists(path):
+  if not fileExists(extendedPath(path)):
     fail("CMake HCR metadata file not found: " & path)
   let root = parseFile(path)
   if root.kind != JObject:

@@ -1,4 +1,5 @@
 import std/[json, net, os, strutils]
+from repro_core/paths import extendedPath
 
 import repro_hcr_agent/protocol
 
@@ -18,7 +19,7 @@ proc close*(listener: var HcrAgentUnixListener) =
     listener.socket = nil
   if listener.path.len > 0:
     try:
-      removeFile(listener.path)
+      removeFile(extendedPath(listener.path))
     except OSError:
       discard
 
@@ -63,7 +64,7 @@ proc listenHcrAgentUnixSocket*(path: string;
   when defined(posix):
     if removeExisting:
       try:
-        removeFile(path)
+        removeFile(extendedPath(path))
       except OSError:
         discard
     result = HcrAgentUnixListener(

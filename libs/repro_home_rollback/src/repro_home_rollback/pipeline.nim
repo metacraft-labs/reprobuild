@@ -19,6 +19,7 @@
 ##  10. Release the lock.
 
 import std/[algorithm, os, strutils, times]
+from repro_core/paths import extendedPath
 
 import repro_home_apply
 import repro_home_generations
@@ -92,16 +93,16 @@ proc userPathHostFromIdentity(resourceId: string): string =
 
 proc listGenerationIds(stateDir: string): seq[string] =
   let root = generationsRoot(stateDir)
-  if not dirExists(root):
+  if not dirExists(extendedPath(root)):
     return @[]
-  for kind, entry in walkDir(root, relative = false):
+  for kind, entry in walkDir(extendedPath(root), relative = false):
     if kind notin {pcDir, pcLinkToDir}:
       continue
     let leaf = extractFilename(entry)
     if leaf.startsWith("."):
       continue
     let p = entry / PointerFileName
-    if fileExists(p):
+    if fileExists(extendedPath(p)):
       result.add(leaf)
 
 proc resolveTargetId(stateDir, currentId, requested: string): string =
@@ -160,7 +161,7 @@ proc loadManifestFor(stateDir: string; generationId: string;
                     store: var Store):
     tuple[envelope: PointerEnvelope; manifest: ActivationManifest] =
   let pointerFile = pointerPath(stateDir, generationId)
-  if not fileExists(pointerFile):
+  if not fileExists(extendedPath(pointerFile)):
     raiseUnknownGeneration(generationId, listGenerationIds(stateDir))
   result.envelope = readPointerFile(pointerFile)
   let manifestKey = digestToPrefixId(result.envelope.activationManifestDigest)
@@ -266,16 +267,16 @@ proc stringFromBytes(b: openArray[byte]): string =
 proc atomicWriteBytes(dst: string; content: openArray[byte]) =
   let parent = parentDir(dst)
   if parent.len > 0:
-    createDir(parent)
+    createDir(extendedPath(parent))
   let tmp = dst & ".repro.tmp"
-  writeFile(tmp, stringFromBytes(content))
-  if fileExists(dst):
-    try: removeFile(dst) except OSError: discard
-  moveFile(tmp, dst)
+  writeFile(extendedPath(tmp), stringFromBytes(content))
+  if fileExists(extendedPath(dst)):
+    try: removeFile(extendedPath(dst)) except OSError: discard
+  moveFile(extendedPath(tmp), extendedPath(dst))
 
 proc removeFileIfPresent(path: string) =
-  if symlinkExists(path) or fileExists(path):
-    try: removeFile(path) except OSError: discard
+  if symlinkExists(extendedPath(path)) or fileExists(extendedPath(path)):
+    try: removeFile(extendedPath(path)) except OSError: discard
 
 proc loadContentBytes(store: var Store; rec: GeneratedFile): seq[byte] =
   ## Pull a file's content bytes back out of the CAS using the
@@ -298,10 +299,10 @@ proc restoreFileFromTarget(store: var Store; rec: GeneratedFile;
     removeFileIfPresent(rec.absoluteOutputPath)
     let parent = parentDir(rec.absoluteOutputPath)
     if parent.len > 0:
-      createDir(parent)
-    if rec.stowSource.len > 0 and fileExists(rec.stowSource):
+      createDir(extendedPath(parent))
+    if rec.stowSource.len > 0 and fileExists(extendedPath(rec.stowSource)):
       try:
-        createSymlink(rec.stowSource, rec.absoluteOutputPath)
+        createSymlink(extendedPath(rec.stowSource), extendedPath(rec.absoluteOutputPath))
       except OSError:
         # Symlink unavailable; fall back to a CAS-content copy.
         let bytes = loadContentBytes(store, rec)
@@ -327,10 +328,10 @@ proc rewriteManagedBlock(hostFilePath, blockId: string;
   ## `repro_home_apply/materialize_managed_blocks.nim`.
   let parent = parentDir(hostFilePath)
   if parent.len > 0:
-    createDir(parent)
+    createDir(extendedPath(parent))
   var existing = ""
-  if fileExists(hostFilePath):
-    existing = readFile(hostFilePath)
+  if fileExists(extendedPath(hostFilePath)):
+    existing = readFile(extendedPath(hostFilePath))
   let openS = OpenSentinelPrefix & blockId & OpenSentinelSuffix
   let closeS = CloseSentinelPrefix & blockId & CloseSentinelSuffix
   let openIdx = existing.find(openS)
@@ -350,18 +351,18 @@ proc rewriteManagedBlock(hostFilePath, blockId: string;
       (if bodyText.len > 0 and not bodyText.endsWith("\n"): "\n" else: "") &
       closeS & "\n"
   let tmp = hostFilePath & ".repro.tmp"
-  writeFile(tmp, rewritten)
-  if fileExists(hostFilePath):
-    try: removeFile(hostFilePath) except OSError: discard
-  moveFile(tmp, hostFilePath)
+  writeFile(extendedPath(tmp), rewritten)
+  if fileExists(extendedPath(hostFilePath)):
+    try: removeFile(extendedPath(hostFilePath)) except OSError: discard
+  moveFile(extendedPath(tmp), extendedPath(hostFilePath))
 
 proc removeManagedBlock(hostFilePath, blockId: string) =
   ## Strip the sentinel-delimited region (and the sentinel lines)
   ## from the host file. Leaves the file alone if the sentinels are
   ## missing.
-  if not fileExists(hostFilePath):
+  if not fileExists(extendedPath(hostFilePath)):
     return
-  let existing = readFile(hostFilePath)
+  let existing = readFile(extendedPath(hostFilePath))
   let openS = OpenSentinelPrefix & blockId & OpenSentinelSuffix
   let closeS = CloseSentinelPrefix & blockId & CloseSentinelSuffix
   let openIdx = existing.find(openS)
@@ -382,10 +383,10 @@ proc removeManagedBlock(hostFilePath, blockId: string) =
     e
   let rewritten = existing[0 ..< openLineStart] & existing[closeLineEnd .. ^1]
   let tmp = hostFilePath & ".repro.tmp"
-  writeFile(tmp, rewritten)
-  if fileExists(hostFilePath):
-    try: removeFile(hostFilePath) except OSError: discard
-  moveFile(tmp, hostFilePath)
+  writeFile(extendedPath(tmp), rewritten)
+  if fileExists(extendedPath(hostFilePath)):
+    try: removeFile(extendedPath(hostFilePath)) except OSError: discard
+  moveFile(extendedPath(tmp), extendedPath(hostFilePath))
 
 # ---- Launcher restoration ----
 
@@ -399,9 +400,9 @@ proc removeLauncherArtifact(stateDir, currentGenIdHex: string;
     let cmdExe = stable / (rec.commandName & ".exe")
     let sidecar = cmdExe & ".repro-launch"
     let cmdShim = stable / (rec.commandName & ".cmd")
-    if fileExists(cmdExe): removeFile(cmdExe)
-    if fileExists(sidecar): removeFile(sidecar)
-    if fileExists(cmdShim): removeFile(cmdShim)
+    if fileExists(extendedPath(cmdExe)): removeFile(extendedPath(cmdExe))
+    if fileExists(extendedPath(sidecar)): removeFile(extendedPath(sidecar))
+    if fileExists(extendedPath(cmdShim)): removeFile(extendedPath(cmdShim))
   else:
     # POSIX launchers live inside immutable per-generation bin dirs.
     # Rolling away from a generation is just a `current` pointer move;
@@ -427,29 +428,29 @@ proc materializeLauncherFromTarget(stateDir, targetGenIdHex: string;
   let perGenBin = stateDir / "generations" / targetGenIdHex / "bin"
   when defined(windows):
     let stable = stateDir / "bin"
-    createDir(stable)
+    createDir(extendedPath(stable))
     let cmdExe = perGenBin / (rec.commandName & ".exe")
     let cmdShim = perGenBin / (rec.commandName & ".cmd")
     let sidecar = cmdExe & ".repro-launch"
-    if fileExists(cmdExe):
-      copyFile(cmdExe, stable / (rec.commandName & ".exe"))
-      if fileExists(sidecar):
-        copyFile(sidecar, stable / (rec.commandName & ".exe.repro-launch"))
-    elif fileExists(cmdShim):
-      copyFile(cmdShim, stable / (rec.commandName & ".cmd"))
+    if fileExists(extendedPath(cmdExe)):
+      copyFile(extendedPath(cmdExe), extendedPath(stable / (rec.commandName & ".exe")))
+      if fileExists(extendedPath(sidecar)):
+        copyFile(extendedPath(sidecar), extendedPath(stable / (rec.commandName & ".exe.repro-launch")))
+    elif fileExists(extendedPath(cmdShim)):
+      copyFile(extendedPath(cmdShim), extendedPath(stable / (rec.commandName & ".cmd")))
   else:
     let scriptPath = perGenBin / rec.commandName
-    if fileExists(scriptPath):
+    if fileExists(extendedPath(scriptPath)):
       return
-    createDir(perGenBin)
+    createDir(extendedPath(perGenBin))
     var plan = loadLaunchPlan(store, launchPlanDigestToKey(
       rec.launchPlanDigest))
     plan.binding = when defined(macosx): lbkMacosScript else: lbkLinuxScript
     let scriptBody = generatePosixLauncherScript(plan,
       when defined(macosx): "DYLD_LIBRARY_PATH" else: "LD_LIBRARY_PATH")
-    writeFile(scriptPath, scriptBody)
+    writeFile(extendedPath(scriptPath), scriptBody)
     try:
-      setFilePermissions(scriptPath, {fpUserExec, fpUserWrite, fpUserRead,
+      setFilePermissions(extendedPath(scriptPath), {fpUserExec, fpUserWrite, fpUserRead,
         fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
     except OSError:
       discard
@@ -459,10 +460,10 @@ proc materializeLauncherFromTarget(stateDir, targetGenIdHex: string;
 # ---------------------------------------------------------------------------
 
 proc touchMtime(path: string; timestamp: int64) =
-  if not dirExists(path) and not fileExists(path):
+  if not dirExists(extendedPath(path)) and not fileExists(extendedPath(path)):
     return
   try:
-    setLastModificationTime(path, fromUnix(timestamp))
+    setLastModificationTime(extendedPath(path), fromUnix(timestamp))
   except OSError:
     # Best-effort: an mtime update failure should not abort the rollback.
     discard

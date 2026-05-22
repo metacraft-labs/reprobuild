@@ -24,6 +24,7 @@
 ##     at materialization time and stored to CAS by the apply pipeline.
 
 import std/[os, strutils]
+from repro_core/paths import extendedPath
 
 import blake3
 import repro_home_apply
@@ -39,7 +40,7 @@ proc digestBytes*(content: openArray[byte]): Digest256 =
     result[i] = raw[i]
 
 proc readFileAsBytes(path: string): seq[byte] =
-  let raw = readFile(path)
+  let raw = readFile(extendedPath(path))
   result = newSeq[byte](raw.len)
   for i, ch in raw:
     result[i] = byte(ord(ch))
@@ -70,15 +71,15 @@ proc verifyFileAgainstCurrent*(rec: GeneratedFile): FileDriftReport =
   ## we honor that (treat existence-of-link as the entire check).
   case rec.ownershipPolicy
   of gfoStowSymlink, gfoStowJunction:
-    if not symlinkExists(rec.absoluteOutputPath) and
-       not fileExists(rec.absoluteOutputPath):
+    if not symlinkExists(extendedPath(rec.absoluteOutputPath)) and
+       not fileExists(extendedPath(rec.absoluteOutputPath)):
       result.missing = true
       result.drifted = true
       result.expectedHex = digestHex(rec.postWriteDigest)
       result.observedHex = "<missing>"
     return
   of gfoOwned, gfoMerged, gfoExistingPreserved, gfoStowCopy:
-    if not fileExists(rec.absoluteOutputPath):
+    if not fileExists(extendedPath(rec.absoluteOutputPath)):
       result.missing = true
       result.drifted = true
       result.expectedHex = digestHex(rec.postWriteDigest)
@@ -123,13 +124,13 @@ proc verifyManagedBlockAgainstCurrent*(rec: ManagedBlock): FileDriftReport =
   ## bytes between the sentinels in the live host file to the
   ## recorded `postWriteBlockBytes`' BLAKE3. Surrounding edits to the
   ## rest of the host file do NOT count as drift (cache-key isolation).
-  if not fileExists(rec.hostFilePath):
+  if not fileExists(extendedPath(rec.hostFilePath)):
     result.missing = true
     result.drifted = true
     result.expectedHex = digestHex(digestBytes(rec.postWriteBlockBytes))
     result.observedHex = "<host-file-missing>"
     return
-  let hostBytes = readFile(rec.hostFilePath)
+  let hostBytes = readFile(extendedPath(rec.hostFilePath))
   let openS = renderSentinelLocal(OpenSentinelPrefix, rec.blockId,
     OpenSentinelSuffix)
   let closeS = renderSentinelLocal(CloseSentinelPrefix, rec.blockId,
@@ -183,7 +184,7 @@ proc verifyLauncherAgainstCurrent*(stateDir, generationId: string;
     let stable = stateDir / "bin"
     let cmdExe = stable / (rec.commandName & ".exe")
     let cmdShim = stable / (rec.commandName & ".cmd")
-    if fileExists(cmdExe) or fileExists(cmdShim):
+    if fileExists(extendedPath(cmdExe)) or fileExists(extendedPath(cmdShim)):
       return  # ok
     result.missing = true
     result.drifted = true
@@ -192,7 +193,7 @@ proc verifyLauncherAgainstCurrent*(stateDir, generationId: string;
   else:
     let scriptPath = stateDir / "generations" / generationId / "bin" /
       rec.commandName
-    if fileExists(scriptPath):
+    if fileExists(extendedPath(scriptPath)):
       return  # ok
     result.missing = true
     result.drifted = true

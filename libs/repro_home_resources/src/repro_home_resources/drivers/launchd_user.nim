@@ -26,6 +26,7 @@
 ## `launchctl` shell-out is platform-bound.
 
 import std/[osproc, strutils]
+from repro_core/paths import extendedPath
 
 when defined(macosx):
   import std/os
@@ -108,11 +109,11 @@ proc observeLaunchAgent*(homeDir, label: string): ObservedState =
   ## canonical bytes the digest covers are the plist file contents.
   when defined(macosx):
     let path = agentPlistPath(homeDir, label)
-    if not fileExists(path):
+    if not fileExists(extendedPath(path)):
       result.present = false
       result.digest = zeroDigest()
       return
-    let content = readFile(path)
+    let content = readFile(extendedPath(path))
     var raw = newSeq[byte](content.len)
     for i, ch in content:
       raw[i] = byte(ord(ch))
@@ -131,8 +132,8 @@ proc applyLaunchAgent*(homeDir, label, plistContent: string;
   ## the macosx guard.
   when defined(macosx):
     let path = agentPlistPath(homeDir, label)
-    createDir(parentDir(path))
-    writeFile(path, plistContent)
+    createDir(extendedPath(parentDir(path)))
+    writeFile(extendedPath(path), plistContent)
     let uid = currentUid()
     # Boot out any stale registration; ignore the exit code (no
     # prior registration is the common, non-error case).
@@ -155,8 +156,8 @@ proc destroyLaunchAgent*(homeDir, label: string) =
   when defined(macosx):
     let path = agentPlistPath(homeDir, label)
     discard execCmd("launchctl bootout gui/" & currentUid() & "/" & label)
-    if fileExists(path):
-      try: removeFile(path)
+    if fileExists(extendedPath(path)):
+      try: removeFile(extendedPath(path))
       except OSError: discard
   else:
     raiseNotImplementedPlatform("launchd.userAgent", "macosx")
