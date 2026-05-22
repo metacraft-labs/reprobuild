@@ -33,6 +33,45 @@ proc framedPayload(domain: HashDomain; payload: openArray[byte]): seq[byte] =
   result.addU64Le(uint64(payload.len))
   result.add(payload)
 
+proc updateU16Le(hasher: blake3.Blake3Hasher; value: uint16) =
+  var bytes: array[2, byte]
+  bytes[0] = byte(value and 0xff'u16)
+  bytes[1] = byte((value shr 8) and 0xff'u16)
+  hasher.update(bytes)
+
+proc updateU64Le(hasher: blake3.Blake3Hasher; value: uint64) =
+  var bytes: array[8, byte]
+  for shift in [0, 8, 16, 24, 32, 40, 48, 56]:
+    bytes[shift div 8] = byte((value shr shift) and 0xff'u64)
+  hasher.update(bytes)
+
+proc framedFileDigest(path: string; sizeBytes: uint64;
+                      domain: HashDomain): blake3.Blake3Digest =
+  let tag = domainTag(domain)
+  var hasher = blake3.initHasher()
+  defer:
+    hasher.close()
+  hasher.update(FrameMagic)
+  hasher.updateU16Le(uint16(tag.len))
+  hasher.update(tag)
+  hasher.updateU64Le(sizeBytes)
+
+  const ChunkSize = 1024 * 1024
+  var file = open(path, fmRead)
+  defer:
+    file.close()
+  var buffer = newSeq[byte](ChunkSize)
+  var total = 0'u64
+  while true:
+    let n = file.readBuffer(addr buffer[0], buffer.len)
+    if n <= 0:
+      break
+    total += uint64(n)
+    hasher.update(addr buffer[0], n)
+  if total != sizeBytes:
+    raise newException(IOError, "file changed while hashing: " & path)
+  hasher.finalize()
+
 proc casDigest*(payload: openArray[byte];
                 domain: HashDomain = hdCasContent): ContentDigest =
   if domain == hdLocalInvalidation:
@@ -41,6 +80,15 @@ proc casDigest*(payload: openArray[byte];
     algorithm: haBlake3_256,
     domain: domain,
     bytes: blake3.digest(framedPayload(domain, payload)))
+
+proc casFileDigest*(path: string; sizeBytes: uint64;
+                    domain: HashDomain = hdCasContent): ContentDigest =
+  if domain == hdLocalInvalidation:
+    raise newException(ValueError, "local invalidation domain is not a CAS digest")
+  ContentDigest(
+    algorithm: haBlake3_256,
+    domain: domain,
+    bytes: framedFileDigest(path, sizeBytes, domain))
 
 proc blake3DomainDigest*(payload: openArray[byte]; domain: HashDomain): ContentDigest =
   if domain == hdLocalInvalidation:

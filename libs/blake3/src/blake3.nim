@@ -16,11 +16,22 @@ when defined(windows) or defined(reproVendoredHash):
 import std/strutils
 
 type Blake3Digest* = array[32, byte]
+type Blake3Hasher* = distinct pointer
 
 proc reproBlake3Hash(input: pointer; inputLen: csize_t; output: ptr byte)
   {.importc: "repro_blake3_hash".}
 
 proc reproBlake3Version(): cstring {.importc: "repro_blake3_version".}
+
+proc reproBlake3HasherNew(): pointer {.importc: "repro_blake3_hasher_new".}
+
+proc reproBlake3HasherUpdate(state: pointer; input: pointer; inputLen: csize_t)
+  {.importc: "repro_blake3_hasher_update".}
+
+proc reproBlake3HasherFinalize(state: pointer; output: ptr byte)
+  {.importc: "repro_blake3_hasher_finalize".}
+
+proc reproBlake3HasherFree(state: pointer) {.importc: "repro_blake3_hasher_free".}
 
 proc digest*(bytes: openArray[byte]): Blake3Digest =
   var output: Blake3Digest
@@ -35,6 +46,33 @@ proc digest*(text: string): Blake3Digest =
   for i, ch in text:
     bytes[i] = byte(ord(ch))
   digest(bytes)
+
+proc initHasher*(): Blake3Hasher =
+  let state = reproBlake3HasherNew()
+  if state.isNil:
+    raise newException(OutOfMemDefect, "could not allocate BLAKE3 hasher")
+  Blake3Hasher(state)
+
+proc update*(hasher: Blake3Hasher; input: pointer; inputLen: int) =
+  reproBlake3HasherUpdate(pointer(hasher), input, csize_t(inputLen))
+
+proc update*(hasher: Blake3Hasher; bytes: openArray[byte]) =
+  let input =
+    if bytes.len == 0: nil
+    else: unsafeAddr bytes[0]
+  hasher.update(input, bytes.len)
+
+proc update*(hasher: Blake3Hasher; text: string) =
+  let input =
+    if text.len == 0: nil
+    else: unsafeAddr text[0]
+  hasher.update(input, text.len)
+
+proc finalize*(hasher: Blake3Hasher): Blake3Digest =
+  reproBlake3HasherFinalize(pointer(hasher), addr result[0])
+
+proc close*(hasher: Blake3Hasher) =
+  reproBlake3HasherFree(pointer(hasher))
 
 proc version*(): string =
   $reproBlake3Version()

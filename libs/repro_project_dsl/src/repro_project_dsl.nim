@@ -1,5 +1,13 @@
 import std/[algorithm, macros, os, strutils, tables]
-from repro_core/paths import extendedPath
+
+proc extendedPath(path: string): string =
+  when defined(windows):
+    if path.len == 0 or path.startsWith("\\\\"):
+      path
+    else:
+      "\\\\?\\" & absolutePath(path).replace('/', '\\')
+  else:
+    path
 
 when defined(reproProviderMode):
   import repro_provider_runtime

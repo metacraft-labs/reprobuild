@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -125,6 +126,17 @@ repro scheduler total                    1   25100.0        25.1
             bench.selected_execution_modes("both"),
             ["cmake-driver", "direct"],
         )
+
+    def test_header_incremental_source_uses_project_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp)
+            self.assertIsNone(bench.header_incremental_source("unknown", source_dir))
+            header = source_dir / "zlib.h"
+            header.write_text("/* test header */\n")
+            self.assertEqual(
+                bench.header_incremental_source("zlib", source_dir),
+                header,
+            )
 
 
 if __name__ == "__main__":
