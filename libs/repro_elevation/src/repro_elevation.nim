@@ -17,8 +17,17 @@
 ##
 ##   * `operations`      — the closed, typed `PrivilegedOperation`
 ##     set, the `requiresElevation` predicate, and the closed-set
-##     validation. M81 ships two FIXTURE kinds; M69 adds the real
-##     system-scope catalog here.
+##     validation. M81 shipped two FIXTURE kinds; M69 added the four
+##     real Windows system-scope kinds (`windows.registryValue`
+##     scope=system, `windows.optionalFeature`, `windows.capability`,
+##     `windows.service`).
+##   * `system_value`    — the M69 typed registry value kinds and
+##     their payload encoders, shared with the HKLM driver.
+##   * `windows_system_parse` — the M69 PURE DISM / capability /
+##     service output parsers + drift comparison (unit-tested
+##     cross-platform).
+##   * `windows_system_driver` — the M69 real Windows system-scope
+##     drivers behind `when defined(windows)`.
 ##   * `partition`       — the planner partition splitting an apply
 ##     into a non-privileged set (parent) and a privileged set.
 ##   * `elevation_state` — the already-elevated fast-path detection
@@ -40,20 +49,26 @@
 
 import repro_elevation/errors
 import repro_elevation/operations
+import repro_elevation/system_value
 import repro_elevation/partition
 import repro_elevation/elevation_state
 import repro_elevation/protocol
 import repro_elevation/ipc
 import repro_elevation/fixture_driver
+import repro_elevation/windows_system_parse
+import repro_elevation/windows_system_driver
 import repro_elevation/dispatch
 import repro_elevation/broker
 
 export errors
 export operations
+export system_value
 export partition
 export elevation_state
 export protocol
 export ipc
 export fixture_driver
+export windows_system_parse
+export windows_system_driver
 export dispatch
 export broker

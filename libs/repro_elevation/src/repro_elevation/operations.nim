@@ -7,18 +7,20 @@
 ## records — each one a typed system-scope resource operation. There
 ## is no code path that runs a parent-supplied arbitrary command.
 ##
-## M69's real system-scope resource catalog
-## (`windows.optionalFeature`, `windows.capability`,
-## `windows.service`, `windows.registryValue scope=system`,
-## `fs.systemFile`, `systemd.systemUnit`, …) does not exist yet
-## (M69 is `planned`). M81 ships the broker MECHANISM plus one real
-## FIXTURE operation kind so the gate proves the mechanism
-## end-to-end; the real catalog plugs into `dispatch.nim` at M69 by
-## adding `PrivilegedOperationKind` entries and their drivers.
+## M81 shipped the broker MECHANISM plus two FIXTURE operation kinds
+## so the M81 gate proves the mechanism end-to-end. M69 (this change)
+## adds the FOUR real Windows system-scope operation kinds —
+## `windows.registryValue scope=system`, `windows.optionalFeature`,
+## `windows.capability`, `windows.service` — each plugging into
+## `dispatch.nim` exactly the way the fixture kinds are wired. The
+## set stays CLOSED and typed; there is never a parent-supplied
+## arbitrary command.
 ##
 ## This module is platform-pure and unit-testable everywhere.
 
 import std/[strutils]
+
+import ./system_value
 
 type
   PrivilegedOperationKind* = enum
@@ -38,6 +40,24 @@ type
       ## An `HKLM` value write, confined by the driver to the
       ## `HKLM\SOFTWARE\Reprobuild-Tests\` subkey. Stands in for
       ## `windows.registryValue scope=system`.
+    pokWindowsRegistryValue = "windows.registryValue"
+      ## The M69 real `windows.registryValue scope=system` operation:
+      ## a typed value write under `HKLM\...`. The `scope = system`
+      ## marker is what partitions this into the privileged set; an
+      ## `HKLM` write from a non-elevated apply is rejected before any
+      ## side effect.
+    pokWindowsOptionalFeature = "windows.optionalFeature"
+      ## The M69 `windows.optionalFeature` operation: enable or
+      ## disable a Windows Optional Feature via DISM. The driver never
+      ## auto-reboots — it surfaces `RestartNeeded`.
+    pokWindowsCapability = "windows.capability"
+      ## The M69 `windows.capability` operation: install or uninstall
+      ## a Windows Capability via `Add-WindowsCapability` /
+      ## `Remove-WindowsCapability`.
+    pokWindowsService = "windows.service"
+      ## The M69 `windows.service` operation: manage a Windows
+      ## service's start-type and runtime state. Does NOT install or
+      ## remove the service itself.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -61,6 +81,38 @@ type
       regSubPath*: string
       regValueName*: string
       regValueData*: string
+    of pokWindowsRegistryValue:
+      ## A typed `HKLM` registry value. `hklmSubkey` is the subkey
+      ## path WITHOUT the `HKLM\` prefix (the driver pins the HKLM
+      ## hive); `hklmValueName` is the value name (`""` for the
+      ## default value); `hklmValueKind` + `hklmValueLiteral` carry
+      ## the typed desired value. `hklmDestroy` selects the rollback
+      ## direction — delete the value rather than write it.
+      hklmSubkey*: string
+      hklmValueName*: string
+      hklmValueKind*: SystemRegistryValueKind
+      hklmValueLiteral*: string
+      hklmDestroy*: bool
+    of pokWindowsOptionalFeature:
+      ## Enable (`featureEnable == true`) or disable a Windows
+      ## Optional Feature. `featureName` is the DISM feature name
+      ## (e.g. `Microsoft-Windows-Subsystem-Linux`).
+      featureName*: string
+      featureEnable*: bool
+    of pokWindowsCapability:
+      ## Install (`capabilityInstall == true`) or uninstall a Windows
+      ## Capability. `capabilityName` is the full capability name
+      ## (e.g. `OpenSSH.Server~~~~0.0.1.0`).
+      capabilityName*: string
+      capabilityInstall*: bool
+    of pokWindowsService:
+      ## Configure a Windows service's start-type and runtime state.
+      ## `serviceName` is the service short name; `serviceStartType`
+      ## is one of `Automatic` / `Manual` / `Disabled`;
+      ## `serviceRunning` selects the desired runtime state.
+      serviceName*: string
+      serviceStartType*: string
+      serviceRunning*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -74,9 +126,17 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   ## the privileged set. The predicate is kept explicit (rather than
   ## a blanket `true`) so the M69 catalog, which will add kinds whose
   ## privilege depends on a `scope` field, has the hook it needs.
+  # `pokWindowsRegistryValue` is constructed by the non-elevated
+  # planner ONLY for an HKLM (`scope = system`) target — an HKCU
+  # value stays a home-scope M68 resource and never becomes a
+  # `PrivilegedOperation`. Every kind in this enum is privileged.
   case kind
   of pokFixtureFile: true
   of pokFixtureRegistry: true
+  of pokWindowsRegistryValue: true
+  of pokWindowsOptionalFeature: true
+  of pokWindowsCapability: true
+  of pokWindowsService: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -89,6 +149,10 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   case s
   of $pokFixtureFile: pokFixtureFile
   of $pokFixtureRegistry: pokFixtureRegistry
+  of $pokWindowsRegistryValue: pokWindowsRegistryValue
+  of $pokWindowsOptionalFeature: pokWindowsOptionalFeature
+  of $pokWindowsCapability: pokWindowsCapability
+  of $pokWindowsService: pokWindowsService
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -149,4 +213,55 @@ proc operationValidationError*(op: PrivilegedOperation): string =
         "' is not a safe relative path (sandbox escape refused)"
     if op.regValueName.len == 0:
       return "fixture.systemRegistry operation has an empty value name"
+  of pokWindowsRegistryValue:
+    if not isSafeRelativeSubPath(op.hklmSubkey):
+      return "windows.registryValue HKLM subkey '" & op.hklmSubkey &
+        "' is not a safe relative subkey path"
+    # An empty value name targets the key's default value — allowed.
+  of pokWindowsOptionalFeature:
+    if op.featureName.len == 0:
+      return "windows.optionalFeature operation has an empty feature name"
+  of pokWindowsCapability:
+    if op.capabilityName.len == 0:
+      return "windows.capability operation has an empty capability name"
+  of pokWindowsService:
+    if op.serviceName.len == 0:
+      return "windows.service operation has an empty service name"
+    if op.serviceStartType notin ["Automatic", "Manual", "Disabled"]:
+      return "windows.service start-type '" & op.serviceStartType &
+        "' is not one of Automatic / Manual / Disabled"
   return ""
+
+# ---------------------------------------------------------------------------
+# HKLM key-string helpers for the `windows.registryValue scope=system`
+# planner. A `system.nim` profile authors `key = r"HKLM\SOFTWARE\..."`;
+# the planner strips the hive prefix and confirms the key is an HKLM
+# key (the only hive the privileged registry driver writes).
+# ---------------------------------------------------------------------------
+
+proc isHklmKey*(key: string): bool =
+  ## True when `key` names an `HKLM` (HKEY_LOCAL_MACHINE) registry
+  ## key. The privileged `windows.registryValue` operation is built
+  ## ONLY for an HKLM key — an HKCU key is a home-scope M68 resource.
+  let u = key.toUpperAscii()
+  u.startsWith("HKLM\\") or u.startsWith("HKLM/") or
+    u.startsWith("HKEY_LOCAL_MACHINE\\") or
+    u.startsWith("HKEY_LOCAL_MACHINE/")
+
+proc stripHklmPrefix*(key: string): string =
+  ## Return the subkey path under HKLM, with the `HKLM\` /
+  ## `HKEY_LOCAL_MACHINE\` prefix removed and separators normalized
+  ## to backslash. Raises `ValueError` if `key` is not an HKLM key.
+  if not isHklmKey(key):
+    raise newException(ValueError,
+      "windows.registryValue scope=system requires an HKLM key, got '" &
+      key & "'")
+  var rest: string
+  let u = key.toUpperAscii()
+  if u.startsWith("HKEY_LOCAL_MACHINE"):
+    rest = key[len("HKEY_LOCAL_MACHINE") .. ^1]
+  else:
+    rest = key[len("HKLM") .. ^1]
+  if rest.len > 0 and (rest[0] == '\\' or rest[0] == '/'):
+    rest = rest[1 .. ^1]
+  return rest.replace('/', '\\')

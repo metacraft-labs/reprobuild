@@ -17,10 +17,12 @@ import repro_hcr_linkgraph
 import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/home
+import repro_cli_support/infra
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
        home.ConfigurableSchemaEnvVar
+export infra.runInfraCommand, infra.runSystemCommand
 
 proc wantsVersion*(args: openArray[string]): bool =
   args.len == 1 and args[0] in ["--version", "-V"]
@@ -3969,5 +3971,19 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runHomeCommand(homeArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "infra":
+    let infraArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runInfraCommand(infraArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "system":
+    let systemArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runSystemCommand(systemArgs)
   stderr.writeLine(renderUsage(programName))
   2

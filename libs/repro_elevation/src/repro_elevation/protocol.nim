@@ -36,6 +36,7 @@ import repro_core
 
 import ./errors
 import ./operations
+import ./system_value
 
 const
   RbebMagic* = "RBEB"
@@ -76,12 +77,16 @@ type
     ## A structured apply-log record streamed back so the parent
     ## writes the unified apply log (deliverable 7). One is emitted
     ## per privileged operation, before its `OperationResult`.
+    ## `restartNeeded` is set by the M69 `windows.optionalFeature` /
+    ## `windows.capability` drivers when DISM signals a pending
+    ## reboot — Reprobuild surfaces it, never auto-reboots.
     operationAddress*: string
     operationKind*: string
     outcome*: string                   ## "applied" | "no-op" | "drift" | "error"
     detail*: string
     preWriteDigestHex*: string
     postWriteDigestHex*: string
+    restartNeeded*: bool
 
   OperationResultFrame* = object
     ## broker -> parent, one per `Operation`. `ok == false` carries
@@ -251,6 +256,22 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.regSubPath)
     body.writeString(op.regValueName)
     body.writeString(op.regValueData)
+  of pokWindowsRegistryValue:
+    body.writeString(op.hklmSubkey)
+    body.writeString(op.hklmValueName)
+    body.writeString($op.hklmValueKind)
+    body.writeString(op.hklmValueLiteral)
+    body.writeBool(op.hklmDestroy)
+  of pokWindowsOptionalFeature:
+    body.writeString(op.featureName)
+    body.writeBool(op.featureEnable)
+  of pokWindowsCapability:
+    body.writeString(op.capabilityName)
+    body.writeBool(op.capabilityInstall)
+  of pokWindowsService:
+    body.writeString(op.serviceName)
+    body.writeString(op.serviceStartType)
+    body.writeBool(op.serviceRunning)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -279,6 +300,36 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.regSubPath = readString(body, pos)
     result.operation.regValueName = readString(body, pos)
     result.operation.regValueData = readString(body, pos)
+  of pokWindowsRegistryValue:
+    result.operation = PrivilegedOperation(kind: pokWindowsRegistryValue,
+      address: address)
+    result.operation.hklmSubkey = readString(body, pos)
+    result.operation.hklmValueName = readString(body, pos)
+    let valueKindTag = readString(body, pos)
+    if not isKnownSystemRegistryValueKind(valueKindTag):
+      raiseProtocol("windows.registryValue frame names an unrecognized " &
+        "value kind '" & valueKindTag & "'")
+    result.operation.hklmValueKind =
+      systemRegistryValueKindFromString(valueKindTag)
+    result.operation.hklmValueLiteral = readString(body, pos)
+    result.operation.hklmDestroy = readBool(body, pos, "hklmDestroy")
+  of pokWindowsOptionalFeature:
+    result.operation = PrivilegedOperation(kind: pokWindowsOptionalFeature,
+      address: address)
+    result.operation.featureName = readString(body, pos)
+    result.operation.featureEnable = readBool(body, pos, "featureEnable")
+  of pokWindowsCapability:
+    result.operation = PrivilegedOperation(kind: pokWindowsCapability,
+      address: address)
+    result.operation.capabilityName = readString(body, pos)
+    result.operation.capabilityInstall =
+      readBool(body, pos, "capabilityInstall")
+  of pokWindowsService:
+    result.operation = PrivilegedOperation(kind: pokWindowsService,
+      address: address)
+    result.operation.serviceName = readString(body, pos)
+    result.operation.serviceStartType = readString(body, pos)
+    result.operation.serviceRunning = readBool(body, pos, "serviceRunning")
 
 # ---- OperationResult -------------------------------------------------------
 
@@ -307,6 +358,7 @@ proc encodeApplyLogRecord*(r: ApplyLogRecord): seq[byte] =
   body.writeString(r.detail)
   body.writeString(r.preWriteDigestHex)
   body.writeString(r.postWriteDigestHex)
+  body.writeBool(r.restartNeeded)
   encodeFrame(rmtApplyLogRecord, body)
 
 proc decodeApplyLogRecord*(body: openArray[byte]): ApplyLogRecord =
@@ -317,6 +369,7 @@ proc decodeApplyLogRecord*(body: openArray[byte]): ApplyLogRecord =
   result.detail = readString(body, pos)
   result.preWriteDigestHex = readString(body, pos)
   result.postWriteDigestHex = readString(body, pos)
+  result.restartNeeded = readBool(body, pos, "restartNeeded")
 
 # ---- Done ------------------------------------------------------------------
 

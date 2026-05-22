@@ -1000,6 +1000,57 @@ integration_privileged_broker_single_prompt:
         tests/e2e/m81/t_integration_privileged_broker_single_prompt.nim \
         2>&1 | tee test-logs/integration_privileged_broker_single_prompt.log
 
+e2e_windows_registry_system_scope:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_windows_registry_system_scope.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_windows_registry_system_scope \
+        --out:build/test-bin/e2e_windows_registry_system_scope \
+        tests/e2e/m69/t_e2e_windows_registry_system_scope.nim \
+        2>&1 | tee test-logs/e2e_windows_registry_system_scope.log
+
+e2e_repro_infra_plan_apply_convergent:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_infra_plan_apply_convergent.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_repro_infra_plan_apply_convergent \
+        --out:build/test-bin/e2e_repro_infra_plan_apply_convergent \
+        tests/e2e/m69/t_e2e_repro_infra_plan_apply_convergent.nim \
+        2>&1 | tee test-logs/e2e_repro_infra_plan_apply_convergent.log
+
+e2e_windows_optional_feature_and_capability:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_windows_optional_feature_and_capability.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_windows_optional_feature_and_capability \
+        --out:build/test-bin/e2e_windows_optional_feature_and_capability \
+        tests/e2e/m69/t_e2e_windows_optional_feature_and_capability.nim \
+        2>&1 | tee test-logs/e2e_windows_optional_feature_and_capability.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

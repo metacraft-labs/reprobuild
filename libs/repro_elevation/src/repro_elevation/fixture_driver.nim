@@ -39,8 +39,12 @@ type
     ## just before mutating. `present == false` means the target is
     ## absent. `digestHex` is the BLAKE3-256 (hex) over the canonical
     ## observed bytes — the value drift detection compares against.
+    ## `restartNeeded` is set by the M69 `windows.optionalFeature` /
+    ## `windows.capability` drivers when DISM signals a reboot is
+    ## required; Reprobuild never auto-reboots — it surfaces the flag.
     present*: bool
     digestHex*: string
+    restartNeeded*: bool
 
   FixtureContext* = object
     ## Per-apply context the broker hands every fixture driver call.
@@ -73,12 +77,18 @@ const ZeroDigestHex* = "00000000000000000000000000000000000000000000000000000000
 # ---------------------------------------------------------------------------
 
 proc desiredDigestHex*(op: PrivilegedOperation): string =
-  ## Canonical content digest of the operation's desired payload.
+  ## Canonical content digest of a FIXTURE operation's desired
+  ## payload. The M69 real system kinds compute their desired digest
+  ## in `windows_system_driver.systemDesiredDigestHex`; `dispatch.nim`
+  ## routes each kind to the right function.
   case op.kind
   of pokFixtureFile:
     digestHexOfText(op.fileContent)
   of pokFixtureRegistry:
     digestHexOfText(op.regValueData)
+  else:
+    raise newException(ValueError,
+      "desiredDigestHex (fixture) called on a non-fixture kind " & $op.kind)
 
 # ---------------------------------------------------------------------------
 # fixture.systemFile
