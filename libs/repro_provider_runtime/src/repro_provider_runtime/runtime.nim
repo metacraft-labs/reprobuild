@@ -42,6 +42,9 @@ proc graphInvocationKey*(providerArtifactId, entryPointId, entryPointBodyHash,
     argumentDigest(arguments) & "|" & lockSliceId & "|" & activity & "|" &
     namespace
 
+proc devEnvIntrospectionEntryPointId*(projectName: string): string =
+  projectName & ".dev-env"
+
 proc computeGraphFragmentDigest*(fragment: GraphFragment): string =
   digestHex(encodeFragmentForDigest(fragment))
 
@@ -258,6 +261,82 @@ proc invokeProviderEntryPoint*(config: ProviderExecutionConfig;
   validateManifest(response.manifest, request.providerArtifactId)
   validateFragment(response.fragment, request, response.manifest)
   response
+
+proc splitActivities(activity: string): seq[string] =
+  for item in activity.split(','):
+    let stripped = item.strip()
+    if stripped.len > 0:
+      result.add(stripped)
+
+proc validateDevEnvResult(devEnv: DevEnvResult; request: ProviderGraphRequest;
+                          manifest: ProviderManifest) =
+  if devEnv.schemaVersion == 0'u32:
+    raiseRuntime("provider dev-env result is missing a schema version")
+  if devEnv.providerArtifactId != request.providerArtifactId:
+    raiseRuntime("provider dev-env artifact id mismatch")
+  if devEnv.providerEntryPointId != request.entryPointId:
+    raiseRuntime("provider dev-env entry point mismatch")
+  if devEnv.providerEntryPointBodyHash != request.entryPointBodyHash:
+    raiseRuntime("provider dev-env body hash mismatch")
+  if devEnv.projectRoot != request.arguments:
+    raiseRuntime("provider dev-env project root mismatch")
+  if devEnv.lockSliceId != request.lockSliceId:
+    raiseRuntime("provider dev-env lock slice mismatch")
+
+  let descriptors = manifestById(manifest)
+  if not descriptors.hasKey(request.entryPointId):
+    raiseRuntime("provider dev-env entry point is absent from manifest")
+  let descriptor = descriptors[request.entryPointId]
+  if descriptor.kind != gpkDevEnvIntrospection:
+    raiseRuntime("provider dev-env entry point has the wrong kind")
+  if descriptor.bodyHash != request.entryPointBodyHash:
+    raiseRuntime("provider dev-env body hash does not match manifest")
+
+proc invokeProviderDevEnvIntrospection*(config: ProviderExecutionConfig;
+                                        providerArtifactId, projectRoot: string;
+                                        entryPointId = "";
+                                        activity = "";
+                                        lockSliceId = ""): DevEnvResult =
+  let manifest = readProviderManifest(config, providerArtifactId)
+  let selectedEntryPoint =
+    if entryPointId.len > 0:
+      entryPointId
+    else:
+      var found = ""
+      for descriptor in manifest.entryPoints:
+        if descriptor.kind == gpkDevEnvIntrospection:
+          found = descriptor.id
+          break
+      if found.len == 0:
+        raiseRuntime("provider manifest does not expose dev-env introspection")
+      found
+  let descriptors = manifestById(manifest)
+  if not descriptors.hasKey(selectedEntryPoint):
+    raiseRuntime("dev-env entry point is missing from provider manifest")
+  let descriptor = descriptors[selectedEntryPoint]
+  if descriptor.kind != gpkDevEnvIntrospection:
+    raiseRuntime("entry point is not dev-env introspection: " &
+      selectedEntryPoint)
+  let selectedActivity =
+    if activity.len > 0: activity else: "default"
+  let request = ProviderGraphRequest(
+    kind: prkDevEnvIntrospection,
+    providerArtifactId: providerArtifactId,
+    entryPointId: selectedEntryPoint,
+    entryPointBodyHash: descriptor.bodyHash,
+    reason: girExplicitUserRequest,
+    arguments: projectRoot,
+    lockSliceId: lockSliceId,
+    activity: selectedActivity)
+  let response = runProviderProtocol(config, request)
+  if response.kind != pskDevEnvResult:
+    raiseRuntime("provider dev-env request did not return a dev-env result")
+  validateManifest(response.manifest, providerArtifactId)
+  validateDevEnvResult(response.devEnv, request, response.manifest)
+  let expectedActivities = splitActivities(selectedActivity)
+  if response.devEnv.selectedActivities != expectedActivities:
+    raiseRuntime("provider dev-env activity selection mismatch")
+  response.devEnv
 
 proc fileContentDigest*(path: string): string =
   if not fileExists(extendedPath(path)):

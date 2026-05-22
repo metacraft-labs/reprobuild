@@ -29,17 +29,17 @@ proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
     result[i] = readString(bytes, pos)
 
 proc requestKind(value: byte): ProviderRequestKind =
-  if value > byte(ord(prkGraphInvocation)):
+  if value > byte(ord(prkDevEnvIntrospection)):
     raiseEnvelopeError(eeMalformed, "invalid provider request kind")
   ProviderRequestKind(value)
 
 proc responseKind(value: byte): ProviderResponseKind =
-  if value > byte(ord(pskGraphResult)):
+  if value > byte(ord(pskDevEnvResult)):
     raiseEnvelopeError(eeMalformed, "invalid provider response kind")
   ProviderResponseKind(value)
 
 proc entryPointKind(value: byte): GraphEntryPointKind =
-  if value > byte(ord(gpkServicePlan)):
+  if value > byte(ord(gpkDevEnvIntrospection)):
     raiseEnvelopeError(eeMalformed, "invalid graph entry point kind")
   GraphEntryPointKind(value)
 
@@ -49,9 +49,19 @@ proc invocationReason(value: byte): GraphInvocationReason =
   GraphInvocationReason(value)
 
 proc evaluationInputKind(value: byte): GraphEvaluationInputKind =
-  if value > byte(ord(gevProviderDependencyResult)):
+  if value > byte(ord(gevActivitySelection)):
     raiseEnvelopeError(eeMalformed, "invalid graph evaluation input kind")
   GraphEvaluationInputKind(value)
+
+proc shellOpKind(value: byte): DevEnvShellOpKind =
+  if value > byte(ord(deskSetWorkingDirectory)):
+    raiseEnvelopeError(eeMalformed, "invalid dev-env shell op kind")
+  DevEnvShellOpKind(value)
+
+proc diagnosticSeverity(value: byte): DevEnvDiagnosticSeverity =
+  if value > byte(ord(dedsError)):
+    raiseEnvelopeError(eeMalformed, "invalid dev-env diagnostic severity")
+  DevEnvDiagnosticSeverity(value)
 
 proc nodeKind(value: byte): GraphNodeKind =
   if value > byte(ord(gnkMetadata)):
@@ -235,6 +245,154 @@ proc readFragment(bytes: openArray[byte]; pos: var int): GraphFragment =
     result.evaluationInputs[i] = readInput(bytes, pos)
   result.fragmentDigest = readString(bytes, pos)
 
+proc writeDevEnvShellOp(outp: var seq[byte]; value: DevEnvShellOp) =
+  outp.writeByte(byte(ord(value.kind)))
+  outp.writeString(value.name)
+  outp.writeString(value.value)
+  outp.writeString(value.separator)
+  outp.writeStringSeq(value.activityRequirements)
+
+proc readDevEnvShellOp(bytes: openArray[byte]; pos: var int): DevEnvShellOp =
+  DevEnvShellOp(
+    kind: shellOpKind(readByte(bytes, pos)),
+    name: readString(bytes, pos),
+    value: readString(bytes, pos),
+    separator: readString(bytes, pos),
+    activityRequirements: readStringSeq(bytes, pos))
+
+proc writeDevEnvTool(outp: var seq[byte]; value: DevEnvToolRequirement) =
+  outp.writeString(value.logicalName)
+  outp.writeString(value.packageSelector)
+  outp.writeString(value.executableName)
+  outp.writeStringSeq(value.policyPath)
+  outp.writeStringSeq(value.activityRequirements)
+
+proc readDevEnvTool(bytes: openArray[byte]; pos: var int): DevEnvToolRequirement =
+  DevEnvToolRequirement(
+    logicalName: readString(bytes, pos),
+    packageSelector: readString(bytes, pos),
+    executableName: readString(bytes, pos),
+    policyPath: readStringSeq(bytes, pos),
+    activityRequirements: readStringSeq(bytes, pos))
+
+proc writeDevEnvTask(outp: var seq[byte]; value: DevEnvTaskMetadata) =
+  outp.writeString(value.name)
+  outp.writeString(value.description)
+  outp.writeString(value.command)
+  outp.writeStringSeq(value.activityRequirements)
+
+proc readDevEnvTask(bytes: openArray[byte]; pos: var int): DevEnvTaskMetadata =
+  DevEnvTaskMetadata(
+    name: readString(bytes, pos),
+    description: readString(bytes, pos),
+    command: readString(bytes, pos),
+    activityRequirements: readStringSeq(bytes, pos))
+
+proc writeDevEnvService(outp: var seq[byte]; value: DevEnvServiceMetadata) =
+  outp.writeString(value.name)
+  outp.writeStringSeq(value.activityRequirements)
+  outp.writeString(value.metadata)
+
+proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetadata =
+  DevEnvServiceMetadata(
+    name: readString(bytes, pos),
+    activityRequirements: readStringSeq(bytes, pos),
+    metadata: readString(bytes, pos))
+
+proc writeDevEnvDiagnostic(outp: var seq[byte]; value: DevEnvDiagnostic) =
+  outp.writeByte(byte(ord(value.severity)))
+  outp.writeString(value.message)
+  outp.writeString(value.sourceFile)
+  outp.writeU32Le(uint32(max(value.sourceLine, 0)))
+
+proc readDevEnvDiagnostic(bytes: openArray[byte]; pos: var int): DevEnvDiagnostic =
+  DevEnvDiagnostic(
+    severity: diagnosticSeverity(readByte(bytes, pos)),
+    message: readString(bytes, pos),
+    sourceFile: readString(bytes, pos),
+    sourceLine: int(readU32Le(bytes, pos)))
+
+proc writeDevEnvFingerprint(outp: var seq[byte]; value: DevEnvSourceFingerprint) =
+  outp.writeString(value.kind)
+  outp.writeString(value.identity)
+  outp.writeString(value.digest)
+
+proc readDevEnvFingerprint(bytes: openArray[byte]; pos: var int):
+    DevEnvSourceFingerprint =
+  DevEnvSourceFingerprint(
+    kind: readString(bytes, pos),
+    identity: readString(bytes, pos),
+    digest: readString(bytes, pos))
+
+proc writeDevEnvResult(outp: var seq[byte]; value: DevEnvResult) =
+  outp.writeU32Le(value.schemaVersion)
+  outp.writeString(value.providerArtifactId)
+  outp.writeString(value.providerEntryPointId)
+  outp.writeString(value.providerEntryPointBodyHash)
+  outp.writeString(value.projectRoot)
+  outp.writeString(value.lockSliceId)
+  outp.writeStringSeq(value.selectedActivities)
+  outp.writeStringSeq(value.declaredActivities)
+  outp.writeU32Le(uint32(value.shellOps.len))
+  for item in value.shellOps:
+    outp.writeDevEnvShellOp(item)
+  outp.writeU32Le(uint32(value.toolRequirements.len))
+  for item in value.toolRequirements:
+    outp.writeDevEnvTool(item)
+  outp.writeU32Le(uint32(value.tasks.len))
+  for item in value.tasks:
+    outp.writeDevEnvTask(item)
+  outp.writeU32Le(uint32(value.services.len))
+  for item in value.services:
+    outp.writeDevEnvService(item)
+  outp.writeU32Le(uint32(value.diagnostics.len))
+  for item in value.diagnostics:
+    outp.writeDevEnvDiagnostic(item)
+  outp.writeU32Le(uint32(value.evaluationInputs.len))
+  for item in value.evaluationInputs:
+    outp.writeInput(item)
+  outp.writeU32Le(uint32(value.sourceFingerprints.len))
+  for item in value.sourceFingerprints:
+    outp.writeDevEnvFingerprint(item)
+
+proc readDevEnvResult(bytes: openArray[byte]; pos: var int): DevEnvResult =
+  result.schemaVersion = readU32Le(bytes, pos)
+  result.providerArtifactId = readString(bytes, pos)
+  result.providerEntryPointId = readString(bytes, pos)
+  result.providerEntryPointBodyHash = readString(bytes, pos)
+  result.projectRoot = readString(bytes, pos)
+  result.lockSliceId = readString(bytes, pos)
+  result.selectedActivities = readStringSeq(bytes, pos)
+  result.declaredActivities = readStringSeq(bytes, pos)
+  var count = int(readU32Le(bytes, pos))
+  result.shellOps = newSeq[DevEnvShellOp](count)
+  for i in 0 ..< count:
+    result.shellOps[i] = readDevEnvShellOp(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  result.toolRequirements = newSeq[DevEnvToolRequirement](count)
+  for i in 0 ..< count:
+    result.toolRequirements[i] = readDevEnvTool(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  result.tasks = newSeq[DevEnvTaskMetadata](count)
+  for i in 0 ..< count:
+    result.tasks[i] = readDevEnvTask(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  result.services = newSeq[DevEnvServiceMetadata](count)
+  for i in 0 ..< count:
+    result.services[i] = readDevEnvService(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  result.diagnostics = newSeq[DevEnvDiagnostic](count)
+  for i in 0 ..< count:
+    result.diagnostics[i] = readDevEnvDiagnostic(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  result.evaluationInputs = newSeq[GraphEvaluationInput](count)
+  for i in 0 ..< count:
+    result.evaluationInputs[i] = readInput(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  result.sourceFingerprints = newSeq[DevEnvSourceFingerprint](count)
+  for i in 0 ..< count:
+    result.sourceFingerprints[i] = readDevEnvFingerprint(bytes, pos)
+
 proc writeStoredFragment(outp: var seq[byte]; value: StoredGraphFragment) =
   outp.writeString(value.invocationKey)
   outp.writeString(value.providerArtifactId)
@@ -363,6 +521,8 @@ proc encodeProviderResponse*(value: ProviderGraphResponse): seq[byte] =
   payload.writeByte(byte(ord(value.kind)))
   payload.writeManifest(value.manifest)
   payload.writeFragmentPayload(value.fragment, includeDigest = true)
+  if value.kind == pskDevEnvResult:
+    payload.writeDevEnvResult(value.devEnv)
   payload.writeStringSeq(value.diagnostics)
   result.writeHeader(ProviderResponseType, payload.len)
   result.add(payload)
@@ -373,6 +533,8 @@ proc decodeProviderResponse*(bytes: openArray[byte]): ProviderGraphResponse =
   result.kind = responseKind(readByte(payload, pos))
   result.manifest = readManifest(payload, pos)
   result.fragment = readFragment(payload, pos)
+  if result.kind == pskDevEnvResult:
+    result.devEnv = readDevEnvResult(payload, pos)
   result.diagnostics = readStringSeq(payload, pos)
   if pos != payload.len:
     raiseEnvelopeError(eeMalformed, "trailing provider response payload bytes")

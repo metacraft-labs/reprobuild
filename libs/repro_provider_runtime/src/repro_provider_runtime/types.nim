@@ -5,10 +5,12 @@ type
   ProviderRequestKind* = enum
     prkManifest
     prkGraphInvocation
+    prkDevEnvIntrospection
 
   ProviderResponseKind* = enum
     pskManifest
     pskGraphResult
+    pskDevEnvResult
 
   GraphEntryPointKind* = enum
     gpkProjectRoot
@@ -19,6 +21,7 @@ type
     gpkTypedExecutableLowering
     gpkResourcePlan
     gpkServicePlan
+    gpkDevEnvIntrospection
 
   GraphInvocationReason* = enum
     girColdStart
@@ -40,6 +43,8 @@ type
     gevHostFact
     gevStaticPackageMetadata
     gevProviderDependencyResult
+    gevDevelopModeOverride
+    gevActivitySelection
 
   GraphNodeKind* = enum
     gnkAction
@@ -134,6 +139,72 @@ type
     evaluationInputs*: seq[GraphEvaluationInput]
     fragmentDigest*: string
 
+  DevEnvShellOpKind* = enum
+    deskSetEnv
+    deskUnsetEnv
+    deskPrependPath
+    deskAppendPath
+    deskSetPathList
+    deskSetWorkingDirectory
+
+  DevEnvDiagnosticSeverity* = enum
+    dedsInfo
+    dedsWarning
+    dedsError
+
+  DevEnvShellOp* = object
+    kind*: DevEnvShellOpKind
+    name*: string
+    value*: string
+    separator*: string
+    activityRequirements*: seq[string]
+
+  DevEnvToolRequirement* = object
+    logicalName*: string
+    packageSelector*: string
+    executableName*: string
+    policyPath*: seq[string]
+    activityRequirements*: seq[string]
+
+  DevEnvTaskMetadata* = object
+    name*: string
+    description*: string
+    command*: string
+    activityRequirements*: seq[string]
+
+  DevEnvServiceMetadata* = object
+    name*: string
+    activityRequirements*: seq[string]
+    metadata*: string
+
+  DevEnvDiagnostic* = object
+    severity*: DevEnvDiagnosticSeverity
+    message*: string
+    sourceFile*: string
+    sourceLine*: int
+
+  DevEnvSourceFingerprint* = object
+    kind*: string
+    identity*: string
+    digest*: string
+
+  DevEnvResult* = object
+    schemaVersion*: uint32
+    providerArtifactId*: string
+    providerEntryPointId*: string
+    providerEntryPointBodyHash*: string
+    projectRoot*: string
+    lockSliceId*: string
+    selectedActivities*: seq[string]
+    declaredActivities*: seq[string]
+    shellOps*: seq[DevEnvShellOp]
+    toolRequirements*: seq[DevEnvToolRequirement]
+    tasks*: seq[DevEnvTaskMetadata]
+    services*: seq[DevEnvServiceMetadata]
+    diagnostics*: seq[DevEnvDiagnostic]
+    evaluationInputs*: seq[GraphEvaluationInput]
+    sourceFingerprints*: seq[DevEnvSourceFingerprint]
+
   ProviderGraphRequest* = object
     kind*: ProviderRequestKind
     providerArtifactId*: string
@@ -149,6 +220,7 @@ type
     kind*: ProviderResponseKind
     manifest*: ProviderManifest
     fragment*: GraphFragment
+    devEnv*: DevEnvResult
     diagnostics*: seq[string]
 
   StoredGraphFragment* = object
@@ -224,3 +296,8 @@ proc graphResponse*(manifest: ProviderManifest; fragment: GraphFragment;
                     diagnostics: openArray[string] = []): ProviderGraphResponse =
   ProviderGraphResponse(kind: pskGraphResult, manifest: manifest,
     fragment: fragment, diagnostics: @diagnostics)
+
+proc devEnvResponse*(manifest: ProviderManifest; devEnv: DevEnvResult;
+                     diagnostics: openArray[string] = []): ProviderGraphResponse =
+  ProviderGraphResponse(kind: pskDevEnvResult, manifest: manifest,
+    devEnv: devEnv, diagnostics: @diagnostics)

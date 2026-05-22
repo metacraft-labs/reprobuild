@@ -119,6 +119,8 @@ type
     scoopProvisioning*: seq[ScoopProvisioningDef]
     usesImportPaths*: seq[string]
     publicSignatureDependencies*: seq[string]
+    hasDevEnv*: bool
+    devEnvBodyHash*: string
     sourceFile*: string
     sourceLine*: int
 
@@ -200,6 +202,12 @@ const fs* = ReproFs()
 when defined(reproProviderMode):
   var providerEvaluationInputRegistry: seq[GraphEvaluationInput] = @[]
   var currentProviderProjectRoot = ""
+  var devEnvShellOpsRegistry: seq[DevEnvShellOp] = @[]
+  var devEnvToolRegistry: seq[DevEnvToolRequirement] = @[]
+  var devEnvActivityRegistry: seq[string] = @[]
+  var devEnvTaskRegistry: seq[DevEnvTaskMetadata] = @[]
+  var devEnvServiceRegistry: seq[DevEnvServiceMetadata] = @[]
+  var devEnvDiagnosticRegistry: seq[DevEnvDiagnostic] = @[]
 
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
@@ -264,6 +272,14 @@ when defined(reproProviderMode):
   proc resetProviderEvaluationInputRegistry() =
     providerEvaluationInputRegistry.setLen(0)
 
+  proc resetDevEnvRegistry() =
+    devEnvShellOpsRegistry.setLen(0)
+    devEnvToolRegistry.setLen(0)
+    devEnvActivityRegistry.setLen(0)
+    devEnvTaskRegistry.setLen(0)
+    devEnvServiceRegistry.setLen(0)
+    devEnvDiagnosticRegistry.setLen(0)
+
   proc materialProviderPath(path: string): string =
     if path.len == 0 or path.isAbsolute:
       path
@@ -283,6 +299,94 @@ when defined(reproProviderMode):
 
   proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
     providerEvaluationInputRegistry
+
+  proc selectedActivityList*(activity: string): seq[string] =
+    for item in activity.split(','):
+      let stripped = item.strip()
+      if stripped.len > 0:
+        result.add(stripped)
+
+  proc addUniqueActivity(value: string) =
+    let stripped = value.strip()
+    if stripped.len > 0 and devEnvActivityRegistry.find(stripped) < 0:
+      devEnvActivityRegistry.add(stripped)
+
+  proc addDevEnvShellOp(kind: DevEnvShellOpKind; name, value: string;
+                        separator = $PathSep;
+                        activities: openArray[string] = []) =
+    devEnvShellOpsRegistry.add(DevEnvShellOp(
+      kind: kind,
+      name: name,
+      value: value,
+      separator: separator,
+      activityRequirements: @activities))
+
+  proc setEnv*(name, value: string; activities: openArray[string] = []) =
+    addDevEnvShellOp(deskSetEnv, name, value, activities = activities)
+
+  proc unsetEnv*(name: string; activities: openArray[string] = []) =
+    addDevEnvShellOp(deskUnsetEnv, name, "", activities = activities)
+
+  proc prependPath*(name, value: string; separator = $PathSep;
+                    activities: openArray[string] = []) =
+    addDevEnvShellOp(deskPrependPath, name, value, separator, activities)
+
+  proc appendPath*(name, value: string; separator = $PathSep;
+                   activities: openArray[string] = []) =
+    addDevEnvShellOp(deskAppendPath, name, value, separator, activities)
+
+  proc setPathList*(name: string; values: openArray[string];
+                    separator = $PathSep;
+                    activities: openArray[string] = []) =
+    addDevEnvShellOp(deskSetPathList, name, (@values).join(separator),
+      separator, activities)
+
+  proc setWorkingDirectory*(path: string; activities: openArray[string] = []) =
+    addDevEnvShellOp(deskSetWorkingDirectory, "PWD", materialProviderPath(path),
+      activities = activities)
+
+  proc useTool*(logicalName: string; packageSelector = "";
+                executableName = ""; policyPath: openArray[string] = [];
+                activities: openArray[string] = []) =
+    let selector =
+      if packageSelector.len > 0: packageSelector else: logicalName
+    devEnvToolRegistry.add(DevEnvToolRequirement(
+      logicalName: logicalName,
+      packageSelector: selector,
+      executableName: if executableName.len > 0: executableName else: logicalName,
+      policyPath: @policyPath,
+      activityRequirements: @activities))
+
+  proc activity*(name: string) =
+    addUniqueActivity(name)
+
+  proc task*(name: string; command = ""; description = "";
+             activities: openArray[string] = []) =
+    devEnvTaskRegistry.add(DevEnvTaskMetadata(
+      name: name,
+      description: description,
+      command: command,
+      activityRequirements: @activities))
+
+  proc servicePlaceholder*(name: string; metadata = "";
+                           activities: openArray[string] = []) =
+    devEnvServiceRegistry.add(DevEnvServiceMetadata(
+      name: name,
+      activityRequirements: @activities,
+      metadata: metadata))
+
+  proc diagnostic*(message: string; severity = dedsInfo;
+                   sourceFile = ""; sourceLine = 0) =
+    devEnvDiagnosticRegistry.add(DevEnvDiagnostic(
+      severity: severity,
+      message: message,
+      sourceFile: sourceFile,
+      sourceLine: sourceLine))
+
+  proc readDevEnvFile*(path: string): string =
+    let material = materialProviderPath(path)
+    providerEvaluationInputRegistry.add(fileReadInput(material))
+    readFile(extendedPath(material))
 
 else:
   proc providerDirectoryInput*(path: string) =
@@ -1605,6 +1709,12 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       if stmt.len != 2:
         error("usesImportPath expects exactly one string literal", stmt)
       result.usesImportPaths.add(stringLiteral(stmt[1]))
+    elif calleeName(stmt).normalize == "devenv":
+      if stmt.len < 2:
+        error("devEnv expects a body", stmt)
+      result.hasDevEnv = true
+      result.devEnvBodyHash = stableHashHex(result.packageName & ".dev-env\n" &
+        stmt[stmt.len - 1].repr)
 
 proc escForCode(text: string): string =
   text.escape()
@@ -1676,7 +1786,10 @@ proc packageLiteral(pkg: PackageDef): string =
     result.add(escForCode(path))
   result.add("], publicSignatureDependencies: @[], sourceFile: " & escForCode(
       pkg.sourceFile) &
-    ", sourceLine: " & $pkg.sourceLine & ", toolUses: @[")
+    ", sourceLine: " & $pkg.sourceLine &
+    ", hasDevEnv: " & $pkg.hasDevEnv &
+    ", devEnvBodyHash: " & escForCode(pkg.devEnvBodyHash) &
+    ", toolUses: @[")
   for useIndex, useDef in pkg.toolUses:
     if useIndex > 0:
       result.add(", ")
@@ -2283,6 +2396,9 @@ when defined(reproProviderMode):
   proc rootEntryPointId(pkg: PackageDef): string =
     pkg.packageName & ".root"
 
+  proc devEnvEntryPointId(pkg: PackageDef): string =
+    devEnvIntrospectionEntryPointId(pkg.packageName)
+
   proc sanitizeNodePart(value: string): string =
     for ch in value:
       if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
@@ -2308,6 +2424,14 @@ when defined(reproProviderMode):
           argumentSchemaId: "reprobuild.project-root.v1",
           outputSchemaId: "reprobuild.graph-fragment.v1")
       ])
+    if pkg.hasDevEnv:
+      result.entryPoints.add(GraphEntryPointDescriptor(
+        id: devEnvEntryPointId(pkg),
+        kind: gpkDevEnvIntrospection,
+        stableName: pkg.packageName & ":dev-env",
+        bodyHash: pkg.devEnvBodyHash,
+        argumentSchemaId: "reprobuild.dev-env-request.v1",
+        outputSchemaId: "reprobuild.dev-env-result.v1"))
     for def in foreachDefs:
       result.entryPoints.add(GraphEntryPointDescriptor(
         id: def.id,
@@ -2356,7 +2480,8 @@ when defined(reproProviderMode):
     resetProviderEvaluationInputRegistry()
     currentProviderProjectRoot = request.arguments
     try:
-      buildProc()
+      if buildProc != nil:
+        buildProc()
     finally:
       currentProviderProjectRoot = ""
     let actions = inferDeclaredActionDeps(
@@ -2443,10 +2568,63 @@ when defined(reproProviderMode):
           payload: action.id))
     result.fragmentDigest = computeGraphFragmentDigest(result)
 
+  proc buildPackageDevEnv*(pkg: PackageDef; request: ProviderGraphRequest;
+                           devEnvProc: proc ()): DevEnvResult =
+    if devEnvProc == nil:
+      raise newException(ValueError,
+        "provider does not implement dev-env introspection")
+    resetProviderEvaluationInputRegistry()
+    resetDevEnvRegistry()
+    currentProviderProjectRoot = request.arguments
+    try:
+      devEnvProc()
+    finally:
+      currentProviderProjectRoot = ""
+
+    result = DevEnvResult(
+      schemaVersion: 1'u32,
+      providerArtifactId: request.providerArtifactId,
+      providerEntryPointId: request.entryPointId,
+      providerEntryPointBodyHash: request.entryPointBodyHash,
+      projectRoot: request.arguments,
+      lockSliceId: request.lockSliceId,
+      selectedActivities: selectedActivityList(request.activity),
+      declaredActivities: devEnvActivityRegistry,
+      shellOps: devEnvShellOpsRegistry,
+      toolRequirements: devEnvToolRegistry,
+      tasks: devEnvTaskRegistry,
+      services: devEnvServiceRegistry,
+      diagnostics: devEnvDiagnosticRegistry)
+    if fileExists(extendedPath(pkg.sourceFile)):
+      let input = fileReadInput(pkg.sourceFile)
+      result.evaluationInputs.add(input)
+      result.sourceFingerprints.add(DevEnvSourceFingerprint(
+        kind: "provider-source",
+        identity: input.identity,
+        digest: input.digest))
+    result.evaluationInputs.add(GraphEvaluationInput(
+      kind: gevActivitySelection,
+      identity: request.activity,
+      digest: request.activity))
+    for input in registeredProviderEvaluationInputs():
+      result.evaluationInputs.add(input)
+      if input.kind == gevFileRead:
+        result.sourceFingerprints.add(DevEnvSourceFingerprint(
+          kind: "file-read",
+          identity: input.identity,
+          digest: input.digest))
+    for useDef in pkg.toolUses:
+      result.toolRequirements.add(DevEnvToolRequirement(
+        logicalName: useDef.executableName,
+        packageSelector: useDef.packageSelector,
+        executableName: useDef.executableName,
+        policyPath: useDef.policyPath))
+
   proc runPackageProvider*(pkg: PackageDef; buildProc: proc ();
                            foreachDefs: openArray[ProviderForeachDef] = [];
                            foreachDispatch: proc (
-                             request: ProviderGraphRequest): GraphFragment = nil): int =
+                             request: ProviderGraphRequest): GraphFragment = nil;
+                           devEnvProc: proc () = nil): int =
     try:
       let paths = parseProviderProtocolArgs(commandLineParams())
       let request = readProviderRequestFile(paths.requestPath)
@@ -2464,6 +2642,15 @@ when defined(reproProviderMode):
             graphResponse(manifest, foreachDispatch(request)))
         else:
           stderr.writeLine("unknown provider entry point: " & request.entryPointId)
+          return 2
+      of prkDevEnvIntrospection:
+        if request.entryPointId == devEnvEntryPointId(pkg):
+          writeProviderResponseFile(paths.responsePath,
+            devEnvResponse(manifest, buildPackageDevEnv(pkg, request,
+              devEnvProc)))
+        else:
+          stderr.writeLine("unknown provider dev-env entry point: " &
+            request.entryPointId)
           return 2
       0
     except CatchableError as err:
@@ -2521,6 +2708,14 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
         if calleeName(exeStmt).normalize == "build":
           for buildStmt in exeStmt[1]:
             result.add(buildStmt)
+
+proc collectDevEnvStatements(pkgBody: NimNode): NimNode =
+  result = newStmtList()
+  for stmt in pkgBody:
+    if calleeName(stmt).normalize == "devenv":
+      let body = stmt[stmt.len - 1]
+      for devEnvStmt in body:
+        result.add(devEnvStmt)
 
 proc liftForeachStatements(pkg: PackageDef; buildBody: NimNode):
     tuple[rootBody: NimNode; liftedProcs: NimNode; lifts: seq[ForeachLift]] =
@@ -2597,19 +2792,34 @@ proc foreachDispatchCode(pkg: PackageDef; dispatchName: string;
 
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let buildBody = collectBuildStatements(body)
-  if buildBody.len == 0:
+  let devEnvBody = collectDevEnvStatements(body)
+  if buildBody.len == 0 and devEnvBody.len == 0:
     return newStmtList()
   let lifted = liftForeachStatements(pkg, buildBody)
   let procName = ident("build" & titleIdent(pkg.packageName))
+  let devEnvProcName = ident("devEnv" & titleIdent(pkg.packageName))
   let pkgLiteral = parseExpr(packageLiteral(pkg))
+  let devEnvProc =
+    if devEnvBody.len > 0:
+      quote do:
+        when defined(reproProviderMode):
+          proc `devEnvProcName`*() =
+            `devEnvBody`
+    else:
+      newStmtList()
   if lifted.lifts.len == 0:
     let rootBody = lifted.rootBody
     result = quote do:
       when not defined(reproInterfaceMode):
+        `devEnvProc`
         proc `procName`*() =
           `rootBody`
         when defined(reproProviderMode) and isMainModule:
-          quit runPackageProvider(`pkgLiteral`, `procName`)
+          when compiles(`devEnvProcName`()):
+            quit runPackageProvider(`pkgLiteral`, `procName`,
+              devEnvProc = `devEnvProcName`)
+          else:
+            quit runPackageProvider(`pkgLiteral`, `procName`)
   else:
     let rootBody = lifted.rootBody
     let liftedProcs = lifted.liftedProcs
@@ -2619,14 +2829,19 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
     let defsLiteral = foreachDefsLiteral(lifted.lifts)
     result = quote do:
       when not defined(reproInterfaceMode):
+        `devEnvProc`
         `liftedProcs`
         proc `procName`*() =
           `rootBody`
         when defined(reproProviderMode):
           `dispatchProc`
           when isMainModule:
-            quit runPackageProvider(`pkgLiteral`, `procName`, `defsLiteral`,
-              `dispatchName`)
+            when compiles(`devEnvProcName`()):
+              quit runPackageProvider(`pkgLiteral`, `procName`, `defsLiteral`,
+                `dispatchName`, devEnvProc = `devEnvProcName`)
+            else:
+              quit runPackageProvider(`pkgLiteral`, `procName`, `defsLiteral`,
+                `dispatchName`)
 
 macro package*(name: untyped; body: untyped): untyped =
   let pkg = parsePackageDef(name, body)

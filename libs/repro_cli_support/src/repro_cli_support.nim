@@ -2919,7 +2919,8 @@ proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
     toolchainPath, resolved.identityPath, resolved.inspectionPath, sourceRoot,
     stablePublicCliPath(), reprobuildLibraryWorkDir())
 
-  echo "repro develop: cmake profile active (tool-provisioning=" &
+  echo "repro develop: compatibility cmake dev-env path active " &
+    "(provider-driven artifact integration pending, tool-provisioning=" &
     mode.modeName & ")"
   echo "project: " & artifact.projectInterface.projectName
   echo "interface: " & interfacePath
@@ -3455,7 +3456,8 @@ proc runDevelopCommand(args: openArray[string]): int =
         "development environment.")
 
   if mode == tpmUnspecified:
-    echo "repro develop: no external tools requested"
+    echo "repro develop: compatibility dev-env path active (provider-driven " &
+      "artifact integration pending); no external tools requested"
     if command.len == 0:
       return 0
     return runInDevelopEnvironment(command, projectRootForModule(modulePath),
@@ -3468,8 +3470,8 @@ proc runDevelopCommand(args: openArray[string]): int =
       "unsupported develop tool provisioning mode: " & mode.modeName)
 
   let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
-  echo "repro develop: tool provisioning active (tool-provisioning=" &
-    mode.modeName & ")"
+  echo "repro develop: compatibility dev-env path active (provider-driven " &
+    "artifact integration pending, tool-provisioning=" & mode.modeName & ")"
   echo "project: " & artifact.projectInterface.projectName
   echo "interface: " & interfacePath
   echo "toolIdentity: " & resolved.identityPath

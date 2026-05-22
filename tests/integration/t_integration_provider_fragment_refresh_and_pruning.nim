@@ -148,7 +148,9 @@ proc writeFixtureProvider(path: string) =
     "      writeProviderResponseFile(paths.responsePath,\n" &
     "        graphResponse(manifest, memberFragment(request)))\n" &
     "    else:\n" &
-    "      quit(\"unknown entry point\", 2)\n")
+    "      quit(\"unknown entry point\", 2)\n" &
+    "  of prkDevEnvIntrospection:\n" &
+    "    quit(\"dev-env introspection is not implemented by this fixture\", 2)\n")
 
 proc compileProvider(sourcePath, outputPath, nimcache: string;
                      defines: openArray[string] = []): string =
