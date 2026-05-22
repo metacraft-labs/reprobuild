@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild privileged-operation broker / elevation mechanism (M81)"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

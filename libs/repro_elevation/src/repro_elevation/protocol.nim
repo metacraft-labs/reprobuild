@@ -1,0 +1,326 @@
+## The framed, typed `RBEB` ("Reprobuild Elevation Broker") wire
+## protocol (M81 deliverable 4).
+##
+## Modelled on the existing M62 binary envelopes (`RBPT` / `RBAM` /
+## `RBSN` in `repro_home_generations`): a 4-byte ASCII magic, a u16
+## LE schema version, a u32 LE body length, the body, and a trailing
+## 32-byte BLAKE3-256 checksum over magic+version+type+bodyLen+body.
+## RBEB adds a u16 LE message-type discriminator after the version,
+## because — unlike the single-purpose RBPT/RBAM/RBSN envelopes — one
+## RBEB channel carries a STREAM of differently-typed frames.
+##
+## Frame on-disk shape (little-endian throughout):
+##
+##   offset 0   :  magic            4 bytes ASCII "RBEB"
+##   offset 4   :  schemaVersion    u16 LE
+##   offset 6   :  messageType      u16 LE   (RbebMessageType)
+##   offset 8   :  bodyLength       u32 LE
+##   offset 12  :  body             bodyLength bytes
+##   trailing   :  checksum         32 bytes BLAKE3-256
+##
+## Message stream over one channel:
+##
+##   parent -> broker : Hello   (nonce + protocol version)
+##   broker -> parent : HelloAck
+##   parent -> broker : Operation       \  repeated, one per
+##   broker -> parent : OperationResult  \ privileged operation;
+##   broker -> parent : ApplyLogRecord  /  the ApplyLogRecord is
+##                                      /  emitted before the result
+##   parent -> broker : Done
+##
+## This module is platform-pure and unit-testable everywhere — it
+## owns ONLY the byte encoding; `ipc.nim` owns the transport.
+
+import blake3
+import repro_core
+
+import ./errors
+import ./operations
+
+const
+  RbebMagic* = "RBEB"
+  RbebSchemaVersion*: uint16 = 1
+  RbebHeaderSize = 4 + 2 + 2 + 4
+  RbebTrailerSize = 32
+  RbebMaxFrameBody* = 8 * 1024 * 1024
+    ## Hard cap on a single frame body. A frame claiming a larger
+    ## body is rejected before any allocation — a malformed /
+    ## hostile length field cannot drive an unbounded allocation.
+
+type
+  RbebMessageType* = enum
+    ## The closed set of RBEB frame types. The on-disk value is the
+    ## ordinal; an unknown discriminator is rejected by the decoder.
+    rmtHello = 1
+    rmtHelloAck = 2
+    rmtOperation = 3
+    rmtOperationResult = 4
+    rmtApplyLogRecord = 5
+    rmtDone = 6
+
+  HelloFrame* = object
+    ## First frame, parent -> broker. The broker checks `nonce`
+    ## against the `--token` it was launched with; a mismatch is
+    ## `EChannelAuth`.
+    protocolVersion*: uint16
+    nonce*: string
+
+  HelloAckFrame* = object
+    ## broker -> parent. `accepted == false` means the broker
+    ## rejected the handshake (nonce mismatch); `reason` says why.
+    accepted*: bool
+    protocolVersion*: uint16
+    reason*: string
+
+  ApplyLogRecord* = object
+    ## A structured apply-log record streamed back so the parent
+    ## writes the unified apply log (deliverable 7). One is emitted
+    ## per privileged operation, before its `OperationResult`.
+    operationAddress*: string
+    operationKind*: string
+    outcome*: string                   ## "applied" | "no-op" | "drift" | "error"
+    detail*: string
+    preWriteDigestHex*: string
+    postWriteDigestHex*: string
+
+  OperationResultFrame* = object
+    ## broker -> parent, one per `Operation`. `ok == false` carries
+    ## a structured diagnostic; `driftDetected` distinguishes a
+    ## fail-closed drift from a generic driver failure.
+    operationAddress*: string
+    ok*: bool
+    driftDetected*: bool
+    diagnostic*: string
+
+# ---------------------------------------------------------------------------
+# Frame envelope encode / decode.
+# ---------------------------------------------------------------------------
+
+proc encodeFrame*(messageType: RbebMessageType;
+                  body: openArray[byte]): seq[byte] =
+  ## Wrap a body in the RBEB envelope. Deterministic: identical
+  ## (type, body) always produce identical bytes.
+  if body.len > RbebMaxFrameBody:
+    raiseProtocol("frame body " & $body.len & " bytes exceeds the " &
+      $RbebMaxFrameBody & "-byte cap")
+  result = newSeqOfCap[byte](RbebHeaderSize + body.len + RbebTrailerSize)
+  for ch in RbebMagic:
+    result.add(byte(ord(ch)))
+  result.writeU16Le(RbebSchemaVersion)
+  result.writeU16Le(uint16(ord(messageType)))
+  result.writeU32Le(uint32(body.len))
+  for b in body:
+    result.add(b)
+  let checksum = blake3.digest(result)
+  for b in checksum:
+    result.add(b)
+
+type
+  DecodedFrame* = object
+    messageType*: RbebMessageType
+    body*: seq[byte]
+
+proc messageTypeFromOrd(v: uint16): RbebMessageType =
+  case v
+  of 1: rmtHello
+  of 2: rmtHelloAck
+  of 3: rmtOperation
+  of 4: rmtOperationResult
+  of 5: rmtApplyLogRecord
+  of 6: rmtDone
+  else:
+    raiseProtocol("unknown RBEB message-type discriminator " & $v)
+
+proc parseFrameHeader*(header: openArray[byte]): tuple[
+    messageType: RbebMessageType; bodyLength: int] =
+  ## Validate just the fixed-size `RbebHeaderSize` header — magic,
+  ## schema version, message type, body length. The transport reads
+  ## the header first so it knows how many body bytes to read next.
+  if header.len < RbebHeaderSize:
+    raiseProtocol("RBEB header is shorter than " & $RbebHeaderSize &
+      " bytes")
+  for i in 0 ..< 4:
+    if header[i] != byte(ord(RbebMagic[i])):
+      raiseProtocol("bad RBEB magic (expected '" & RbebMagic & "')")
+  var pos = 4
+  let version = readU16Le(header, pos)
+  if version != RbebSchemaVersion:
+    raiseProtocol("unsupported RBEB schema version " & $version &
+      " (this build speaks " & $RbebSchemaVersion & ")")
+  let mt = messageTypeFromOrd(readU16Le(header, pos))
+  let bodyLen = int(readU32Le(header, pos))
+  if bodyLen > RbebMaxFrameBody:
+    raiseProtocol("RBEB frame claims a " & $bodyLen &
+      "-byte body, over the " & $RbebMaxFrameBody & "-byte cap")
+  result = (messageType: mt, bodyLength: bodyLen)
+
+proc decodeFrame*(frame: openArray[byte]): DecodedFrame =
+  ## Decode a complete frame (header + body + trailing checksum).
+  ## Validates magic, version, type, length bounds and the trailing
+  ## BLAKE3-256 checksum. Raises `EProtocol` on any inconsistency.
+  if frame.len < RbebHeaderSize + RbebTrailerSize:
+    raiseProtocol("RBEB frame is too short to be valid")
+  let hdr = parseFrameHeader(frame)
+  let bodyEnd = RbebHeaderSize + hdr.bodyLength
+  if bodyEnd + RbebTrailerSize != frame.len:
+    raiseProtocol("RBEB declared body length disagrees with frame size")
+  var prefix = newSeqOfCap[byte](bodyEnd)
+  for i in 0 ..< bodyEnd:
+    prefix.add(frame[i])
+  let expected = blake3.digest(prefix)
+  for i in 0 ..< 32:
+    if frame[bodyEnd + i] != expected[i]:
+      raiseProtocol("RBEB trailing BLAKE3-256 checksum mismatch")
+  result.messageType = hdr.messageType
+  result.body = newSeq[byte](hdr.bodyLength)
+  for i in 0 ..< hdr.bodyLength:
+    result.body[i] = frame[RbebHeaderSize + i]
+
+# ---------------------------------------------------------------------------
+# Per-message body codecs. Strings are length-prefixed via the shared
+# `repro_core/codec` helpers; bools are a single byte.
+# ---------------------------------------------------------------------------
+
+proc writeBool(outp: var seq[byte]; v: bool) =
+  outp.add(if v: 1'u8 else: 0'u8)
+
+proc readBool(bytes: openArray[byte]; pos: var int; field: string): bool =
+  if pos >= bytes.len:
+    raiseProtocol("truncated bool field '" & field & "'")
+  let b = bytes[pos]; inc pos
+  if b != 0 and b != 1:
+    raiseProtocol("field '" & field & "' is not a valid bool byte")
+  b == 1
+
+# ---- Hello -----------------------------------------------------------------
+
+proc encodeHello*(h: HelloFrame): seq[byte] =
+  var body: seq[byte]
+  body.writeU16Le(h.protocolVersion)
+  body.writeString(h.nonce)
+  encodeFrame(rmtHello, body)
+
+proc decodeHello*(body: openArray[byte]): HelloFrame =
+  var pos = 0
+  result.protocolVersion = readU16Le(body, pos)
+  result.nonce = readString(body, pos)
+
+# ---- HelloAck --------------------------------------------------------------
+
+proc encodeHelloAck*(h: HelloAckFrame): seq[byte] =
+  var body: seq[byte]
+  body.writeBool(h.accepted)
+  body.writeU16Le(h.protocolVersion)
+  body.writeString(h.reason)
+  encodeFrame(rmtHelloAck, body)
+
+proc decodeHelloAck*(body: openArray[byte]): HelloAckFrame =
+  var pos = 0
+  result.accepted = readBool(body, pos, "accepted")
+  result.protocolVersion = readU16Le(body, pos)
+  result.reason = readString(body, pos)
+
+# ---- Operation -------------------------------------------------------------
+
+type
+  WireOperation* = object
+    ## The on-wire form of a privileged operation: the typed
+    ## operation PLUS the digest the non-elevated plan observed for
+    ## the target (the "expected baseline"). The broker needs the
+    ## baseline so it can distinguish a safe update (observed ==
+    ## baseline) from a genuine mid-flight drift (observed is neither
+    ## the desired value nor the baseline) — exactly the M68
+    ## plan-apply-record drift contract.
+    operation*: PrivilegedOperation
+    baselineDigestHex*: string
+
+proc encodeOperation*(wire: WireOperation): seq[byte] =
+  ## The privileged-operation request frame. The kind tag is
+  ## serialized as its string form so the decoder can reject an
+  ## unknown tag before constructing the variant.
+  let op = wire.operation
+  var body: seq[byte]
+  body.writeString($op.kind)
+  body.writeString(op.address)
+  body.writeString(wire.baselineDigestHex)
+  case op.kind
+  of pokFixtureFile:
+    body.writeString(op.fileRelPath)
+    body.writeString(op.fileContent)
+  of pokFixtureRegistry:
+    body.writeString(op.regSubPath)
+    body.writeString(op.regValueName)
+    body.writeString(op.regValueData)
+  encodeFrame(rmtOperation, body)
+
+proc decodeOperation*(body: openArray[byte]): WireOperation =
+  ## Decode an `Operation` body. An unrecognized kind tag raises
+  ## `EProtocol` — this is the broker's primary closed-set guard:
+  ## a frame that is not a recognized typed `PrivilegedOperation` is
+  ## never constructed, let alone dispatched.
+  var pos = 0
+  let kindTag = readString(body, pos)
+  if not isKnownPrivilegedOperationKind(kindTag):
+    raiseProtocol("frame names an unrecognized privileged-operation " &
+      "kind '" & kindTag & "'; the broker executes only the closed " &
+      "typed operation set")
+  let kind = privilegedOperationKindFromString(kindTag)
+  let address = readString(body, pos)
+  result.baselineDigestHex = readString(body, pos)
+  case kind
+  of pokFixtureFile:
+    result.operation = PrivilegedOperation(kind: pokFixtureFile,
+      address: address)
+    result.operation.fileRelPath = readString(body, pos)
+    result.operation.fileContent = readString(body, pos)
+  of pokFixtureRegistry:
+    result.operation = PrivilegedOperation(kind: pokFixtureRegistry,
+      address: address)
+    result.operation.regSubPath = readString(body, pos)
+    result.operation.regValueName = readString(body, pos)
+    result.operation.regValueData = readString(body, pos)
+
+# ---- OperationResult -------------------------------------------------------
+
+proc encodeOperationResult*(r: OperationResultFrame): seq[byte] =
+  var body: seq[byte]
+  body.writeString(r.operationAddress)
+  body.writeBool(r.ok)
+  body.writeBool(r.driftDetected)
+  body.writeString(r.diagnostic)
+  encodeFrame(rmtOperationResult, body)
+
+proc decodeOperationResult*(body: openArray[byte]): OperationResultFrame =
+  var pos = 0
+  result.operationAddress = readString(body, pos)
+  result.ok = readBool(body, pos, "ok")
+  result.driftDetected = readBool(body, pos, "driftDetected")
+  result.diagnostic = readString(body, pos)
+
+# ---- ApplyLogRecord --------------------------------------------------------
+
+proc encodeApplyLogRecord*(r: ApplyLogRecord): seq[byte] =
+  var body: seq[byte]
+  body.writeString(r.operationAddress)
+  body.writeString(r.operationKind)
+  body.writeString(r.outcome)
+  body.writeString(r.detail)
+  body.writeString(r.preWriteDigestHex)
+  body.writeString(r.postWriteDigestHex)
+  encodeFrame(rmtApplyLogRecord, body)
+
+proc decodeApplyLogRecord*(body: openArray[byte]): ApplyLogRecord =
+  var pos = 0
+  result.operationAddress = readString(body, pos)
+  result.operationKind = readString(body, pos)
+  result.outcome = readString(body, pos)
+  result.detail = readString(body, pos)
+  result.preWriteDigestHex = readString(body, pos)
+  result.postWriteDigestHex = readString(body, pos)
+
+# ---- Done ------------------------------------------------------------------
+
+proc encodeDone*(): seq[byte] =
+  ## `Done` carries no body — the parent sends it to tell the broker
+  ## to exit cleanly.
+  encodeFrame(rmtDone, @[])

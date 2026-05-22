@@ -14,6 +14,7 @@ import repro_local_store
 import repro_launch_plan
 import repro_hcr_agent
 import repro_hcr_linkgraph
+import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/home
 
@@ -3824,9 +3825,31 @@ proc runHcrCoordinateCommand(args: seq[string]): int =
     return 1
   0
 
+proc runPrivilegedBrokerMode(args: openArray[string]): int =
+  ## The hidden `repro --privileged-broker --channel <name> --token
+  ## <nonce> [--file-prefix <dir>]` entrypoint (M81 deliverable 3).
+  ## The broker is the SAME `repro` binary re-execed; this mode
+  ## connects back to the launching parent over the authenticated
+  ## RBEB channel and services the closed, typed `PrivilegedOperation`
+  ## stream. It is one-shot — it exits when the parent sends `Done`.
+  try:
+    let parsed = parseBrokerModeArgs(args)
+    doAssert parsed.isBrokerMode
+    let ctx = FixtureContext(filePrefix: parsed.filePrefix)
+    return runBrokerSession(parsed.token, ctx)
+  except EElevation as err:
+    stderr.writeLine("repro --privileged-broker: " & err.msg)
+    return 7
+  except CatchableError as err:
+    stderr.writeLine("repro --privileged-broker: error: " & err.msg)
+    return 7
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
+  if programName == "repro" and args.len > 0 and
+      args[0] == BrokerModeFlag:
+    return runPrivilegedBrokerMode(args)
   if wantsVersion(args):
     echo renderVersion(programName)
     return 0

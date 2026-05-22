@@ -983,6 +983,23 @@ integration_plan_classifier_bucket_drift_is_cache_hit:
         tests/e2e/m80/t_integration_plan_classifier_bucket_drift_is_cache_hit.nim \
         2>&1 | tee test-logs/integration_plan_classifier_bucket_drift_is_cache_hit.log
 
+integration_privileged_broker_single_prompt:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_privileged_broker_single_prompt.build.log
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/integration_privileged_broker_single_prompt \
+        --out:build/test-bin/integration_privileged_broker_single_prompt \
+        tests/e2e/m81/t_integration_privileged_broker_single_prompt.nim \
+        2>&1 | tee test-logs/integration_privileged_broker_single_prompt.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \
