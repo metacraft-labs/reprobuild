@@ -567,15 +567,24 @@ def start_runquota(runquotad, root):
         stdout=log,
         stderr=subprocess.STDOUT,
     )
-    for _ in range(100):
-        if socket_path.exists():
-            return proc, socket_path, log
+    # runquotad prints "runquotad listening <endpoint>" (and flushes stdout)
+    # once it has bound its endpoint. Poll its log for that line rather than
+    # waiting for a socket file to appear: on Windows the transport is a
+    # named pipe, which creates no `.sock` file on disk.
+    deadline = time.time() + 15.0
+    while time.time() < deadline:
+        try:
+            if "runquotad listening" in log_path.read_text(errors="replace"):
+                return proc, socket_path, log
+        except OSError:
+            pass
         if proc.poll() is not None:
             break
         time.sleep(0.05)
     proc.terminate()
     log.close()
-    fail(f"runquotad socket did not appear: {socket_path}")
+    fail(f"runquotad did not report readiness within 15s "
+         f"(socket={socket_path}); see {log_path}")
 
 
 def stop_runquota(proc, log):
