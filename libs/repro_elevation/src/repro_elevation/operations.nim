@@ -20,6 +20,7 @@
 
 import std/[strutils]
 
+import ./posix_system_parse
 import ./system_value
 
 type
@@ -63,6 +64,38 @@ type
       ## modify / uninstall a Visual Studio product through the
       ## bootstrapped installer, with workload/component membership
       ## convergence. State is read through the embedded `vswhere.exe`.
+    pokMacosSystemDefault = "macos.systemDefault"
+      ## The M69 Phase-C `macos.systemDefault` operation: a typed
+      ## value write under `/Library/Preferences/<plist>` via
+      ## `defaults`. The system-scope analogue of M68's
+      ## `macos.userDefault`. Structural drift comparison; an optional
+      ## `restartTarget` runs `killall <target>` when the value
+      ## actually changed.
+    pokSystemdSystemUnit = "systemd.systemUnit"
+      ## The M69 Phase-C `systemd.systemUnit` operation: a unit file
+      ## under `/etc/systemd/system/`, managed via `systemctl` (no
+      ## `--user`). The system-scope analogue of M68's
+      ## `systemd.userUnit`.
+    pokLaunchdSystemDaemon = "launchd.systemDaemon"
+      ## The M69 Phase-C `launchd.systemDaemon` operation: a plist
+      ## under `/Library/LaunchDaemons/`, managed via `launchctl
+      ## bootstrap/bootout system`. The system-scope analogue of
+      ## M68's `launchd.userAgent`.
+    pokFsSystemFile = "fs.systemFile"
+      ## The M69 Phase-C `fs.systemFile` operation: a managed file
+      ## under a recognized system directory (`/etc/`,
+      ## `/usr/local/etc/`, `${PROGRAMDATA}`). A path outside the
+      ## allowlist is rejected with an out-of-scope error.
+    pokEnvSystemVariable = "env.systemVariable"
+      ## The M69 Phase-C `env.systemVariable` operation: a system
+      ## environment variable / system PATH with contribution-not-
+      ## overwrite semantics. The system-scope analogue of M68's
+      ## `env.userVariable` / `env.userPath`.
+    pokPasswdUser = "passwd.user"
+      ## The M69 Phase-C `passwd.user` operation: create / modify /
+      ## remove a user account via `useradd` / `usermod` / `userdel`
+      ## (Linux) or the macOS equivalent. The destroy direction is
+      ## gated by `--accept-passwd-destroy`.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -134,6 +167,65 @@ type
       vsComponents*: seq[string]
       vsStrict*: bool
       vsDestroy*: bool
+    of pokMacosSystemDefault:
+      ## Write `sdValueLiteral` (a `defaults`-literal) for `sdKey`
+      ## under `sdDomain` (a `/Library/Preferences/...` plist path,
+      ## or a bare reverse-DNS domain). `sdValueType` is the
+      ## `defaults` type flag (`-string` / `-bool` / `-int` / ...).
+      ## `sdRestartTarget` names a daemon for `killall` on a real
+      ## value change. `sdDestroy` selects the delete direction.
+      sdDomain*: string
+      sdKey*: string
+      sdValueType*: string
+      sdValueLiteral*: string
+      sdRestartTarget*: string
+      sdDestroy*: bool
+    of pokSystemdSystemUnit:
+      ## Write the unit file `suName` (a single path segment) under
+      ## `/etc/systemd/system/` with `suContent`, then `daemon-reload`
+      ## and optionally `enable --now`. `suDestroy` selects the
+      ## disable + remove direction.
+      suName*: string
+      suContent*: string
+      suEnabled*: bool
+      suDestroy*: bool
+    of pokLaunchdSystemDaemon:
+      ## Write `/Library/LaunchDaemons/<sdaLabel>.plist` and
+      ## `launchctl bootstrap system`. `sdaProgramArgs` is the daemon
+      ## argv; `sdaRunAtLoad` is the `RunAtLoad` plist key.
+      ## `sdaDestroy` selects the bootout + remove direction.
+      sdaLabel*: string
+      sdaProgramArgs*: seq[string]
+      sdaRunAtLoad*: bool
+      sdaDestroy*: bool
+    of pokFsSystemFile:
+      ## Write `sfContent` to `sfPath` — an absolute path that MUST
+      ## be under a recognized system directory (`/etc/`,
+      ## `/usr/local/etc/`, `${PROGRAMDATA}`). `sfDestroy` selects the
+      ## delete direction.
+      sfPath*: string
+      sfContent*: string
+      sfDestroy*: bool
+    of pokEnvSystemVariable:
+      ## Contribute `evContribution` to the system variable `evName`.
+      ## `evIsPathList` selects PATH-list (contribution-not-overwrite,
+      ## `;`/`:` separated) semantics versus a scalar variable.
+      ## `evDestroy` selects the rollback direction (subtract the
+      ## contribution).
+      evName*: string
+      evContribution*: seq[string]
+      evIsPathList*: bool
+      evDestroy*: bool
+    of pokPasswdUser:
+      ## Create / modify / remove the user account `puName`. `puHome`
+      ## / `puShell` are the pinned attributes (empty => unpinned);
+      ## `puGroups` the supplementary groups. `puDestroy` selects the
+      ## remove direction — gated by `--accept-passwd-destroy`.
+      puName*: string
+      puHome*: string
+      puShell*: string
+      puGroups*: seq[string]
+      puDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -159,6 +251,12 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokWindowsCapability: true
   of pokWindowsService: true
   of pokWindowsVsInstaller: true
+  of pokMacosSystemDefault: true
+  of pokSystemdSystemUnit: true
+  of pokLaunchdSystemDaemon: true
+  of pokFsSystemFile: true
+  of pokEnvSystemVariable: true
+  of pokPasswdUser: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -176,6 +274,12 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokWindowsCapability: pokWindowsCapability
   of $pokWindowsService: pokWindowsService
   of $pokWindowsVsInstaller: pokWindowsVsInstaller
+  of $pokMacosSystemDefault: pokMacosSystemDefault
+  of $pokSystemdSystemUnit: pokSystemdSystemUnit
+  of $pokLaunchdSystemDaemon: pokLaunchdSystemDaemon
+  of $pokFsSystemFile: pokFsSystemFile
+  of $pokEnvSystemVariable: pokEnvSystemVariable
+  of $pokPasswdUser: pokPasswdUser
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -209,6 +313,63 @@ proc isSafeRelativeSubPath*(p: string): bool =
     return false                       # leading separator
   for seg in p.multiReplace(("\\", "/")).split('/'):
     if seg == ".." or seg == ".":
+      return false
+  return true
+
+# ---------------------------------------------------------------------------
+# macos.systemDefault — `defaults write` type-flag allowlist.
+#
+# `applyMacosSystemDefault` interpolates `sdValueType` straight into the
+# `defaults write` command line (it does not branch on the flag). The
+# value comes verbatim from a `system.nim` `type = "..."` field. To keep
+# the broker's closed-typed-operation guarantee — "no parent-supplied
+# value can break out of its shell argument" — the value MUST be one of
+# the fixed `defaults write` type flags. A profile carrying
+# `type = "-bool true; rm -rf /"` is rejected here before the operation
+# ever reaches the elevated driver (defence-in-depth layer 1; the driver
+# `quoteShell`s the flag as layer 2).
+# ---------------------------------------------------------------------------
+
+const MacosDefaultsTypeFlags* = [
+  "-string", "-data", "-int", "-integer", "-float", "-bool", "-boolean",
+  "-date", "-array", "-array-add", "-dict", "-dict-add"]
+  ## The closed allowlist of `defaults write` type flags. `-int` /
+  ## `-integer` and `-bool` / `-boolean` are both accepted forms the
+  ## `defaults(1)` CLI recognizes. An empty `sdValueType` is also valid
+  ## — the driver substitutes `-string` as its default.
+
+proc isSafeDefaultsTypeFlag*(flag: string): bool =
+  ## True when `flag` is an accepted `defaults write` type flag, or the
+  ## empty string (the driver's `-string` default). Anything else —
+  ## including any value bearing shell metacharacters or whitespace —
+  ## is rejected so it can never reach the elevated `defaults write`.
+  flag.len == 0 or flag in MacosDefaultsTypeFlags
+
+# ---------------------------------------------------------------------------
+# launchd.systemDaemon — launchd label charset allowlist.
+#
+# `observeLaunchdSystemDaemon` / `applyLaunchdSystemDaemon` interpolate
+# `sdaLabel` into `launchctl print|bootout system/<label>` command
+# lines. `isSafeDaemonLabel` (in posix_system_parse) blocks only path
+# separators — it permits `;`, spaces, `$`, backticks, `&`, `|`,
+# newlines. A launchd label is a reverse-DNS-style identifier; only
+# alphanumerics, `.`, `-`, `_` have a legitimate place in one. This
+# allowlist closes the residual shell-injection surface (defence-in-
+# depth layer 1; the driver `quoteShell`s `system/<label>` as layer 2).
+# ---------------------------------------------------------------------------
+
+proc isSafeLaunchdLabel*(label: string): bool =
+  ## True only for a non-empty launchd label whose every character is
+  ## in the conservative reverse-DNS identifier charset
+  ## (alphanumerics, `.`, `-`, `_`), and which is not `.` or `..`.
+  ## Shell metacharacters, whitespace and path separators are refused.
+  let l = label.strip()
+  if l.len == 0:
+    return false
+  if l == "." or l == "..":
+    return false
+  for ch in l:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
       return false
   return true
 
@@ -262,6 +423,62 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     # without one defaults to the VS standard location, so an empty
     # install path is allowed only for a fresh install — the driver's
     # re-observe handles the distinction.
+  of pokMacosSystemDefault:
+    if op.sdDomain.len == 0:
+      return "macos.systemDefault operation has an empty domain"
+    if op.sdKey.len == 0:
+      return "macos.systemDefault operation has an empty key"
+    if not isSystemDefaultDomain(op.sdDomain):
+      return "macos.systemDefault domain '" & op.sdDomain &
+        "' does not resolve to a plist under /Library/Preferences/"
+    # The type flag flows into the elevated `defaults write` command
+    # line — it MUST be one of the fixed `defaults` type flags so a
+    # `type = "...; <cmd>"` profile cannot reach arbitrary root exec.
+    if not isSafeDefaultsTypeFlag(op.sdValueType):
+      return "macos.systemDefault value type '" & op.sdValueType &
+        "' is not one of the accepted `defaults write` type flags"
+  of pokSystemdSystemUnit:
+    if not isSafeUnitName(op.suName):
+      return "systemd.systemUnit name '" & op.suName &
+        "' is not a safe single-segment unit file name"
+  of pokLaunchdSystemDaemon:
+    if not isSafeDaemonLabel(op.sdaLabel):
+      return "launchd.systemDaemon label '" & op.sdaLabel &
+        "' is not a safe single-segment label"
+    # The label flows into the elevated `launchctl print|bootout
+    # system/<label>` command lines — restrict it to the conservative
+    # reverse-DNS identifier charset so a `label = "x; <cmd>"` profile
+    # cannot reach arbitrary root execution. `isSafeDaemonLabel` above
+    # blocks only path separators; this also rejects shell
+    # metacharacters and whitespace.
+    if not isSafeLaunchdLabel(op.sdaLabel):
+      return "launchd.systemDaemon label '" & op.sdaLabel &
+        "' contains characters outside the launchd identifier charset " &
+        "(letters, digits, '.', '-', '_')"
+    if not op.sdaDestroy and op.sdaProgramArgs.len == 0:
+      return "launchd.systemDaemon '" & op.sdaLabel &
+        "' has an empty ProgramArguments array"
+  of pokFsSystemFile:
+    # The `${PROGRAMDATA}` root is supplied by the driver at apply
+    # time (it is not a fixed path); the closed-set validator checks
+    # only the fixed POSIX allowlist plus a `..`-segment guard. A
+    # `${PROGRAMDATA}`-rooted path that the fixed roots reject here is
+    # re-validated against the live `${PROGRAMDATA}` by the driver.
+    let scopeErr = systemFileScopeError(op.sfPath)
+    if scopeErr.len > 0 and op.sfPath.find("..") >= 0:
+      return scopeErr
+    if op.sfPath.strip().len == 0:
+      return "fs.systemFile operation has an empty path"
+  of pokEnvSystemVariable:
+    if op.evName.len == 0:
+      return "env.systemVariable operation has an empty variable name"
+  of pokPasswdUser:
+    if op.puName.strip().len == 0:
+      return "passwd.user operation has an empty user name"
+    for ch in op.puName:
+      if ch in {'/', ':', ' ', '\t', '\n'}:
+        return "passwd.user name '" & op.puName &
+          "' contains an invalid character"
   return ""
 
 # ---------------------------------------------------------------------------

@@ -58,14 +58,25 @@ windows.registryValue {
 }
 """)
 
-  test "a deferred resource kind is rejected with a clear message":
+  test "an unknown resource kind is rejected with a clear message":
+    # M69 Phase C undeferred the six POSIX/macOS resource kinds
+    # (`fs.systemFile`, `env.systemVariable`, `macos.systemDefault`,
+    # `systemd.systemUnit`, `launchd.systemDaemon`, `passwd.user`):
+    # `fs.systemFile` now parses (covered by the Phase-C suites). A
+    # genuinely UNKNOWN kind tag is still rejected.
     var raised = false
     try:
-      discard parseSystemProfile("fs.systemFile {\n  path = \"/etc/x\"\n}\n")
+      discard parseSystemProfile(
+        "totally.unknownKind {\n  path = \"/etc/x\"\n}\n")
     except ESystemProfileInvalid as e:
       raised = true
-      check e.detail.contains("deferred")
+      check e.detail.contains("unknown system resource kind")
     check raised
+    # `fs.systemFile` is a recognized Phase-C kind — it parses cleanly.
+    let parsed = parseSystemProfile(
+      "fs.systemFile {\n  path = \"/etc/x\"\n  content = \"y\"\n}\n")
+    check parsed.resources.len == 1
+    check parsed.resources[0].kind == srkFsSystemFile
 
   test "an unclosed block is rejected":
     expect ESystemProfileInvalid:
@@ -435,3 +446,206 @@ suite "repro_infra: RBSG generation envelope (Phase B)":
     # An unknown id raises.
     expect ESystemStateDirInvalid:
       discard resolveGenerationId(dir, "ffff")
+
+# ===========================================================================
+# M69 Phase C — the six POSIX / macOS resource kinds: profile parsing,
+# the typed-operation mapping, the structural editor round-trip, the
+# planner summary, and the `--accept-passwd-destroy` safety gate. All
+# platform-pure — these run on every host.
+# ===========================================================================
+
+suite "repro_infra: Phase C POSIX/macOS profile parsing":
+
+  test "the six Phase-C resource kinds parse (no longer deferred)":
+    let profile = parseSystemProfile("""
+macos.systemDefault {
+  domain = "/Library/Preferences/com.apple.loginwindow"
+  key = "SHOWFULLNAME"
+  type = "-bool"
+  value = "true"
+  restartTarget = "loginwindow"
+}
+systemd.systemUnit {
+  name = "repro-agent.service"
+  content = "[Unit]
+Description=Repro agent
+[Service]
+ExecStart=/usr/local/bin/repro-agent
+"
+}
+launchd.systemDaemon {
+  label = "com.example.daemon"
+  programArgs = ["/usr/local/bin/d", "--flag"]
+}
+fs.systemFile {
+  path = "/etc/profile.d/repro-system.sh"
+  content = "export REPRO=1
+"
+}
+env.systemVariable {
+  name = "PATH"
+  contribute = ["/opt/repro/bin"]
+  isPathList = true
+}
+passwd.user {
+  name = "deploy"
+  home = "/home/deploy"
+  shell = "/bin/bash"
+  groups = ["docker", "wheel"]
+}
+""")
+    check profile.resources.len == 6
+    check profile.resources[0].kind == srkMacosSystemDefault
+    check profile.resources[0].sdKey == "SHOWFULLNAME"
+    check profile.resources[0].sdRestartTarget == "loginwindow"
+    check profile.resources[1].kind == srkSystemdSystemUnit
+    check profile.resources[1].suName == "repro-agent.service"
+    check profile.resources[1].suContent.contains("ExecStart=")
+    check profile.resources[1].suEnabled        # defaults true
+    check profile.resources[2].kind == srkLaunchdSystemDaemon
+    check profile.resources[2].sdaProgramArgs ==
+      @["/usr/local/bin/d", "--flag"]
+    check profile.resources[3].kind == srkFsSystemFile
+    check profile.resources[3].sfPath == "/etc/profile.d/repro-system.sh"
+    check profile.resources[4].kind == srkEnvSystemVariable
+    check profile.resources[4].evContribution == @["/opt/repro/bin"]
+    check profile.resources[4].evIsPathList
+    check profile.resources[5].kind == srkPasswdUser
+    check profile.resources[5].puName == "deploy"
+    check profile.resources[5].puGroups == @["docker", "wheel"]
+
+  test "each Phase-C resource maps to its typed PrivilegedOperation":
+    let profile = parseSystemProfile("""
+passwd.user { name = "deploy" groups = ["docker"] }
+fs.systemFile { path = "/etc/repro.conf" content = "x" }
+""")
+    let userOp = toPrivilegedOperation(profile.resources[0])
+    check userOp.kind == pokPasswdUser
+    check userOp.puName == "deploy"
+    check not userOp.puDestroy
+    check requiresElevation(userOp.kind)
+    # The destroy direction flips the typed operation.
+    let userDestroy = toPrivilegedOperation(profile.resources[0],
+      destroy = true)
+    check userDestroy.puDestroy
+    let fileOp = toPrivilegedOperation(profile.resources[1])
+    check fileOp.kind == pokFsSystemFile
+    check fileOp.sfPath == "/etc/repro.conf"
+
+  test "a launchd.systemDaemon with no programArgs is rejected":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile(
+        "launchd.systemDaemon { label = \"com.x.d\" }\n")
+
+  test "systemd.systemUnit requires name + content":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile(
+        "systemd.systemUnit { name = \"x.service\" }\n")
+
+  test "passwd.user rollback is gated by --accept-passwd-destroy, not -feature":
+    let profile = parseSystemProfile(
+      "passwd.user { name = \"deploy\" }\n")
+    check requiresPasswdDestroy(profile.resources[0])
+    check not isDestructiveRollback(profile.resources[0])
+    # A feature is the other way round.
+    let feat = parseSystemProfile(
+      "windows.optionalFeature { name = \"WSL\" }\n")
+    check isDestructiveRollback(feat.resources[0])
+    check not requiresPasswdDestroy(feat.resources[0])
+
+suite "repro_infra: Phase C --accept-passwd-destroy gate":
+
+  test "screenRollback flags a passwd.user revert separately from features":
+    let profile = parseSystemProfile("""
+passwd.user { name = "deploy" }
+windows.optionalFeature { name = "WSL" }
+windows.registryValue { key = "HKLM\SOFTWARE\X" name = "v" }
+""")
+    let decision = screenRollback(profile.resources)
+    check decision.requiresPasswdDestroyFlag
+    check decision.passwdDestroyAddresses == @["user:deploy"]
+    check decision.requiresFeatureDestroyFlag    # the WSL feature
+    check decision.destructiveAddresses.len == 1
+
+  test "the passwd-destroy gate fails closed without the flag":
+    let profile = parseSystemProfile(
+      "passwd.user { name = \"deploy\" }\n")
+    let decision = screenRollback(profile.resources)
+    expect EPasswdDestroy:
+      enforcePasswdDestroyGate(decision, acceptPasswdDestroy = false)
+    # With the flag it does not raise.
+    enforcePasswdDestroyGate(decision, acceptPasswdDestroy = true)
+    # A profile with no passwd.user does not trip the gate.
+    let noUser = parseSystemProfile(
+      "windows.optionalFeature { name = \"WSL\" }\n")
+    enforcePasswdDestroyGate(screenRollback(noUser.resources),
+      acceptPasswdDestroy = false)
+
+suite "repro_infra: Phase C structural editor round-trip":
+
+  test "add then remove a passwd.user stanza round-trips byte-identically":
+    let dir = createTempDir("repro-infra-editor-pc-", "")
+    defer: removeDir(dir)
+    let p = dir / "system.nim"
+    let original =
+      "# the gate's system profile\n" &
+      "windows.service {\n  name = \"sshd\"\n  startType = Automatic\n" &
+      "  state = Running\n}\n"
+    writeFile(p, original)
+    var doc = loadSystemIntent(p)
+    addResource(doc, SystemResource(kind: srkPasswdUser,
+      address: "user:deploy", puName: "deploy", puHome: "/home/deploy",
+      puShell: "/bin/bash", puGroups: @["docker"]))
+    writeSystemIntent(doc)
+    check readFile(p) != original
+    var doc2 = loadSystemIntent(p)
+    check removeResource(doc2, "user:deploy")
+    writeSystemIntent(doc2)
+    check readFile(p) == original
+
+  test "a rendered Phase-C stanza re-parses to the same resource":
+    # The rendered stanza carries no explicit `address` field, so the
+    # re-parsed resource derives its address via `realWorldIdentity`;
+    # each fixture below uses the matching derived address.
+    for r in [
+      SystemResource(kind: srkPasswdUser, address: "user:deploy",
+        puName: "deploy", puHome: "/home/deploy", puShell: "/bin/bash",
+        puGroups: @["docker", "wheel"]),
+      SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:/etc/profile.d/repro.sh",
+        sfPath: "/etc/profile.d/repro.sh", sfContent: "export X=1"),
+      SystemResource(kind: srkEnvSystemVariable,
+        address: "systemVariable:REPRO_HOME",
+        evName: "REPRO_HOME", evContribution: @["/opt/repro"],
+        evIsPathList: false),
+      SystemResource(kind: srkMacosSystemDefault,
+        address: "systemDefault:com.apple.loginwindow:SHOWFULLNAME",
+        sdDomain: "com.apple.loginwindow", sdKey: "SHOWFULLNAME",
+        sdValueType: "-bool", sdValueLiteral: "true",
+        sdRestartTarget: "loginwindow")]:
+      let lines = renderStanza(r)
+      let reparsed = parseSystemProfile(lines.join("\n") & "\n")
+      check reparsed.resources.len == 1
+      check reparsed.resources[0].kind == r.kind
+      check reparsed.resources[0].address == r.address
+
+suite "repro_infra: Phase C planner summary":
+
+  test "the planner action decision works for a Phase-C kind":
+    # decideAction is kind-agnostic; confirm it on a passwd.user obs.
+    check decideAction(ResourceObservation(present: false), "ff",
+      destroy = false) == "create"
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: "ff"), "ff", destroy = false) == "no-op"
+
+  test "Phase-C resources partition as privileged":
+    let profile = parseSystemProfile("""
+passwd.user { name = "deploy" }
+systemd.systemUnit { name = "x.service" content = "[Unit]" }
+""")
+    var ops: seq[PrivilegedOperation]
+    for r in profile.resources:
+      ops.add(toPrivilegedOperation(r))
+    let part = partitionApply(ops, nonPrivilegedOperationCount = 0)
+    check part.privilegedOperations.len == 2
+    check part.hasPrivilegedWork()

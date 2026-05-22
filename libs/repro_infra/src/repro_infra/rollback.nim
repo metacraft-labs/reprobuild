@@ -31,18 +31,28 @@ type
     destructiveAddresses*: seq[string]
       ## The resources whose rollback would disable a feature /
       ## uninstall a capability.
+    requiresPasswdDestroyFlag*: bool
+    passwdDestroyAddresses*: seq[string]
+      ## The `passwd.user` resources whose rollback would REMOVE a
+      ## user account — gated by `--accept-passwd-destroy`.
 
 proc screenRollback*(reverted: openArray[SystemResource]):
     RollbackSafetyDecision =
   ## Screen the resources a rollback would revert. A
-  ## `windows.optionalFeature` / `windows.capability` revert is
-  ## destructive (it disables / uninstalls); everything else
-  ## (registry value, service config) is non-destructive — the
-  ## rollback restores the recorded pre-write value.
+  ## `windows.optionalFeature` / `windows.capability` /
+  ## `windows.vsInstaller` revert is destructive (it disables /
+  ## uninstalls) — `--accept-feature-destroy`. A `passwd.user` revert
+  ## REMOVES a user account — the separate `--accept-passwd-destroy`
+  ## gate. Everything else (registry value, service config, a
+  ## system-file delete, an env-var contribution withdrawal) is
+  ## non-destructive in this sense.
   for r in reverted:
     if isDestructiveRollback(r):
       result.requiresFeatureDestroyFlag = true
       result.destructiveAddresses.add(r.address)
+    if requiresPasswdDestroy(r):
+      result.requiresPasswdDestroyFlag = true
+      result.passwdDestroyAddresses.add(r.address)
 
 proc enforceFeatureDestroyGate*(decision: RollbackSafetyDecision;
                                 acceptFeatureDestroy: bool) =
@@ -54,6 +64,20 @@ proc enforceFeatureDestroyGate*(decision: RollbackSafetyDecision;
     raiseFeatureDestroy(
       if decision.destructiveAddresses.len > 0:
         decision.destructiveAddresses[0]
+      else:
+        "<unknown>")
+
+proc enforcePasswdDestroyGate*(decision: RollbackSafetyDecision;
+                               acceptPasswdDestroy: bool) =
+  ## Fail closed when the rollback would remove a user account and
+  ## the operator did not pass `--accept-passwd-destroy`. Raises
+  ## `EPasswdDestroy` naming the FIRST `passwd.user` destroy. Called
+  ## BEFORE any mutation — the symmetric counterpart of
+  ## `enforceFeatureDestroyGate`.
+  if decision.requiresPasswdDestroyFlag and not acceptPasswdDestroy:
+    raisePasswdDestroy(
+      if decision.passwdDestroyAddresses.len > 0:
+        decision.passwdDestroyAddresses[0]
       else:
         "<unknown>")
 
@@ -84,6 +108,7 @@ type
     reproExe*: string
     targetGenerationId*: string        ## "" => the immediately-previous one
     acceptFeatureDestroy*: bool
+    acceptPasswdDestroy*: bool
     reconcileDrift*: bool
     forceBroker*: bool
 
@@ -154,11 +179,14 @@ proc runSystemRollback*(opts: SystemRollbackOptions): SystemRollbackOutcome =
   let activeEnv = readGenerationEnvelope(
     pointerPath(opts.stateDir, activeId))
 
-  # --- Destructive-revert screening (`--accept-feature-destroy`). ---
+  # --- Destructive-revert screening (`--accept-feature-destroy` +
+  #     `--accept-passwd-destroy`). Both gates run BEFORE any
+  #     mutation; a refused rollback touches nothing. ---
   let reverted = resourcesRemovedByRollback(
     activeEnv.profileText, targetEnv.profileText)
   let decision = screenRollback(reverted)
   enforceFeatureDestroyGate(decision, opts.acceptFeatureDestroy)
+  enforcePasswdDestroyGate(decision, opts.acceptPasswdDestroy)
 
   # --- Drift screening — system-scope rollback always confirms. ---
   let drifted = detectRollbackDrift(targetEnv.profileText)

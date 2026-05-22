@@ -38,6 +38,7 @@ type
     noElevate: bool
     noPreview: bool
     acceptFeatureDestroy: bool
+    acceptPasswdDestroy: bool
     reconcileDrift: bool
 
 proc hostIdentity(explicit: string): string =
@@ -82,6 +83,8 @@ proc parseInfraFlags(args: openArray[string]):
     elif a == "--no-preview": result.flags.noPreview = true
     elif a == "--accept-feature-destroy":
       result.flags.acceptFeatureDestroy = true
+    elif a == "--accept-passwd-destroy":
+      result.flags.acceptPasswdDestroy = true
     elif a == "--reconcile-drift":
       result.flags.reconcileDrift = true
     elif a.startsWith("--"):
@@ -181,6 +184,7 @@ proc runInfraApply(args: openArray[string]): int =
   opts.elevationMode = if flags.noElevate: emNoElevate else: emBroker
   opts.forceBroker = getEnv(ForceBrokerEnvVar).len > 0
   opts.noPreview = flags.noPreview
+  opts.acceptPasswdDestroy = flags.acceptPasswdDestroy
 
   var applyResult: ApplyResult
   try:
@@ -190,6 +194,9 @@ proc runInfraApply(args: openArray[string]): int =
     for a in e.drifted:
       stderr.writeLine("  drifted: " & a)
     return 3
+  except EPasswdDestroy as e:
+    stderr.writeLine("repro infra apply: " & e.msg)
+    return 1
   except EInfra as e:
     stderr.writeLine("repro infra apply: " & e.msg)
     return 1
@@ -436,6 +443,7 @@ proc runSystemSync(args: openArray[string]): int =
   opts.elevationMode = if flags.noElevate: emNoElevate else: emBroker
   opts.forceBroker = getEnv(ForceBrokerEnvVar).len > 0
   opts.noPreview = true
+  opts.acceptPasswdDestroy = flags.acceptPasswdDestroy
   var applyResult: ApplyResult
   try:
     applyResult = runInfraApply(profileText, opts)
@@ -512,12 +520,16 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
   opts.reproExe = reproExePath()
   opts.targetGenerationId = targetId
   opts.acceptFeatureDestroy = flags.acceptFeatureDestroy
+  opts.acceptPasswdDestroy = flags.acceptPasswdDestroy
   opts.reconcileDrift = flags.reconcileDrift
   opts.forceBroker = getEnv(ForceBrokerEnvVar).len > 0
   var outcome: SystemRollbackOutcome
   try:
     outcome = runSystemRollback(opts)
   except EFeatureDestroy as e:
+    stderr.writeLine("repro system rollback: " & e.msg)
+    return 1
+  except EPasswdDestroy as e:
     stderr.writeLine("repro system rollback: " & e.msg)
     return 1
   except EPlanStale as e:

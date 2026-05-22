@@ -21,7 +21,10 @@
 ##     four real Windows system-scope kinds (`windows.registryValue`
 ##     scope=system, `windows.optionalFeature`, `windows.capability`,
 ##     `windows.service`); M69 Phase B added a fifth,
-##     `windows.vsInstaller`.
+##     `windows.vsInstaller`; M69 Phase C added the six POSIX/macOS
+##     system-scope kinds (`macos.systemDefault`, `systemd.systemUnit`,
+##     `launchd.systemDaemon`, `fs.systemFile`, `env.systemVariable`,
+##     `passwd.user`).
 ##   * `system_value`    — the M69 typed registry value kinds and
 ##     their payload encoders, shared with the HKLM driver.
 ##   * `windows_system_parse` — the M69 PURE DISM / capability /
@@ -29,6 +32,15 @@
 ##     cross-platform).
 ##   * `windows_system_driver` — the M69 real Windows system-scope
 ##     drivers behind `when defined(windows)`.
+##   * `posix_system_parse`  — the M69 Phase-C PURE POSIX/macOS logic:
+##     the `defaults` structural comparison, the `systemctl show`
+##     parser, the launchd plist + systemd unit + env-fragment
+##     generators, the `fs.systemFile` allowlist, the system-PATH
+##     merge, and the `passwd.user` observation parse + attribute diff
+##     (all unit-tested cross-platform).
+##   * `posix_system_driver` — the M69 Phase-C six POSIX/macOS
+##     system-scope drivers behind `when defined(linux)` /
+##     `when defined(macosx)`.
 ##   * `partition`       — the planner partition splitting an apply
 ##     into a non-privileged set (parent) and a privileged set.
 ##   * `elevation_state` — the already-elevated fast-path detection
@@ -60,6 +72,8 @@ import repro_elevation/windows_system_parse
 import repro_elevation/windows_system_driver
 import repro_elevation/windows_vs_installer_parse
 import repro_elevation/windows_vs_installer_driver
+import repro_elevation/posix_system_parse
+import repro_elevation/posix_system_driver
 import repro_elevation/dispatch
 import repro_elevation/broker
 
@@ -75,5 +89,7 @@ export windows_system_parse
 export windows_system_driver
 export windows_vs_installer_parse
 export windows_vs_installer_driver
+export posix_system_parse
+export posix_system_driver
 export dispatch
 export broker

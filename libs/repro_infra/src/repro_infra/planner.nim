@@ -62,10 +62,15 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
   ## The desired-state digest for any M69 system-scope operation. The
   ## four Phase-A kinds use `windows_system_driver.systemDesired
   ## DigestHex`; the Phase-B `windows.vsInstaller` kind uses
-  ## `windows_vs_installer_driver.vsInstallerDesiredDigestHex`.
+  ## `windows_vs_installer_driver.vsInstallerDesiredDigestHex`; the
+  ## six Phase-C POSIX/macOS kinds use
+  ## `posix_system_driver.posixSystemDesiredDigestHex`.
   case op.kind
   of pokWindowsVsInstaller:
     vsInstallerDesiredDigestHex(op)
+  of pokMacosSystemDefault, pokSystemdSystemUnit, pokLaunchdSystemDaemon,
+     pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser:
+    posixSystemDesiredDigestHex(op)
   else:
     systemDesiredDigestHex(op)
 
@@ -80,6 +85,12 @@ proc observeResource*(r: SystemResource): ResourceObservation =
     of srkWindowsCapability: observeWindowsCapability(op)
     of srkWindowsService: observeWindowsService(op)
     of srkWindowsVsInstaller: observeWindowsVsInstaller(op)
+    of srkMacosSystemDefault: observeMacosSystemDefault(op)
+    of srkSystemdSystemUnit: observeSystemdSystemUnit(op)
+    of srkLaunchdSystemDaemon: observeLaunchdSystemDaemon(op)
+    of srkFsSystemFile: observeFsSystemFile(op)
+    of srkEnvSystemVariable: observeEnvSystemVariable(op)
+    of srkPasswdUser: observePasswdUser(op)
   result.present = obs.present
   result.observedDigestHex =
     if obs.present: obs.digestHex else: ZeroDigestHex
@@ -128,6 +139,22 @@ proc summaryLine(r: SystemResource; action: string): string =
     action & " vs-installer " & r.vsEdition & " (" &
       $r.vsWorkloads.len & " workload(s), " & $r.vsComponents.len &
       " component(s)" & (if r.vsStrict: ", strict" else: "") & ")"
+  of srkMacosSystemDefault:
+    action & " system-default " & r.sdDomain & " " & r.sdKey
+  of srkSystemdSystemUnit:
+    action & " system-unit " & r.suName &
+      (if r.suEnabled: " (enable)" else: " (no-enable)")
+  of srkLaunchdSystemDaemon:
+    action & " system-daemon " & r.sdaLabel
+  of srkFsSystemFile:
+    action & " system-file " & r.sfPath
+  of srkEnvSystemVariable:
+    action & " system-variable " & r.evName & " (+" &
+      $r.evContribution.len & " entr" &
+      (if r.evContribution.len == 1: "y" else: "ies") & ")"
+  of srkPasswdUser:
+    action & " user " & r.puName &
+      (if r.puGroups.len > 0: " groups=" & $r.puGroups.len else: "")
 
 # ---------------------------------------------------------------------------
 # The planner.

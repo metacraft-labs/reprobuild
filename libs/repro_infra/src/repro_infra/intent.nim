@@ -256,6 +256,43 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  components = " & renderList(r.vsComponents))
     if r.vsStrict:
       result.add("  strict = true")
+  of srkMacosSystemDefault:
+    result.add("  domain = " & renderScalar(r.sdDomain))
+    result.add("  key = " & renderScalar(r.sdKey))
+    if r.sdValueType.len > 0 and r.sdValueType != "-string":
+      result.add("  type = " & renderScalar(r.sdValueType))
+    if r.sdValueLiteral.len > 0:
+      result.add("  value = " & renderScalar(r.sdValueLiteral))
+    if r.sdRestartTarget.len > 0:
+      result.add("  restartTarget = " & renderScalar(r.sdRestartTarget))
+  of srkSystemdSystemUnit:
+    result.add("  name = " & renderScalar(r.suName))
+    result.add("  content = " & renderScalar(r.suContent))
+    if not r.suEnabled:
+      result.add("  enabled = false")
+  of srkLaunchdSystemDaemon:
+    result.add("  label = " & renderScalar(r.sdaLabel))
+    result.add("  programArgs = " & renderList(r.sdaProgramArgs))
+    if not r.sdaRunAtLoad:
+      result.add("  runAtLoad = false")
+  of srkFsSystemFile:
+    result.add("  path = " & renderScalar(r.sfPath))
+    if r.sfContent.len > 0:
+      result.add("  content = " & renderScalar(r.sfContent))
+  of srkEnvSystemVariable:
+    result.add("  name = " & renderScalar(r.evName))
+    if r.evContribution.len > 0:
+      result.add("  contribute = " & renderList(r.evContribution))
+    if r.evIsPathList:
+      result.add("  isPathList = true")
+  of srkPasswdUser:
+    result.add("  name = " & renderScalar(r.puName))
+    if r.puHome.len > 0:
+      result.add("  home = " & renderScalar(r.puHome))
+    if r.puShell.len > 0:
+      result.add("  shell = " & renderScalar(r.puShell))
+    if r.puGroups.len > 0:
+      result.add("  groups = " & renderList(r.puGroups))
   result.add("}")
 
 # ---------------------------------------------------------------------------

@@ -284,6 +284,44 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
       body.writeString(c)
     body.writeBool(op.vsStrict)
     body.writeBool(op.vsDestroy)
+  of pokMacosSystemDefault:
+    body.writeString(op.sdDomain)
+    body.writeString(op.sdKey)
+    body.writeString(op.sdValueType)
+    body.writeString(op.sdValueLiteral)
+    body.writeString(op.sdRestartTarget)
+    body.writeBool(op.sdDestroy)
+  of pokSystemdSystemUnit:
+    body.writeString(op.suName)
+    body.writeString(op.suContent)
+    body.writeBool(op.suEnabled)
+    body.writeBool(op.suDestroy)
+  of pokLaunchdSystemDaemon:
+    body.writeString(op.sdaLabel)
+    body.writeU32Le(uint32(op.sdaProgramArgs.len))
+    for a in op.sdaProgramArgs:
+      body.writeString(a)
+    body.writeBool(op.sdaRunAtLoad)
+    body.writeBool(op.sdaDestroy)
+  of pokFsSystemFile:
+    body.writeString(op.sfPath)
+    body.writeString(op.sfContent)
+    body.writeBool(op.sfDestroy)
+  of pokEnvSystemVariable:
+    body.writeString(op.evName)
+    body.writeU32Le(uint32(op.evContribution.len))
+    for c in op.evContribution:
+      body.writeString(c)
+    body.writeBool(op.evIsPathList)
+    body.writeBool(op.evDestroy)
+  of pokPasswdUser:
+    body.writeString(op.puName)
+    body.writeString(op.puHome)
+    body.writeString(op.puShell)
+    body.writeU32Le(uint32(op.puGroups.len))
+    for g in op.puGroups:
+      body.writeString(g)
+    body.writeBool(op.puDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -360,6 +398,62 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
       result.operation.vsComponents.add(readString(body, pos))
     result.operation.vsStrict = readBool(body, pos, "vsStrict")
     result.operation.vsDestroy = readBool(body, pos, "vsDestroy")
+  of pokMacosSystemDefault:
+    result.operation = PrivilegedOperation(kind: pokMacosSystemDefault,
+      address: address)
+    result.operation.sdDomain = readString(body, pos)
+    result.operation.sdKey = readString(body, pos)
+    result.operation.sdValueType = readString(body, pos)
+    result.operation.sdValueLiteral = readString(body, pos)
+    result.operation.sdRestartTarget = readString(body, pos)
+    result.operation.sdDestroy = readBool(body, pos, "sdDestroy")
+  of pokSystemdSystemUnit:
+    result.operation = PrivilegedOperation(kind: pokSystemdSystemUnit,
+      address: address)
+    result.operation.suName = readString(body, pos)
+    result.operation.suContent = readString(body, pos)
+    result.operation.suEnabled = readBool(body, pos, "suEnabled")
+    result.operation.suDestroy = readBool(body, pos, "suDestroy")
+  of pokLaunchdSystemDaemon:
+    result.operation = PrivilegedOperation(kind: pokLaunchdSystemDaemon,
+      address: address)
+    result.operation.sdaLabel = readString(body, pos)
+    let aCount = int(readU32Le(body, pos))
+    if aCount < 0 or pos + aCount > body.len:
+      raiseProtocol("launchd.systemDaemon frame: implausible argv count")
+    for _ in 0 ..< aCount:
+      result.operation.sdaProgramArgs.add(readString(body, pos))
+    result.operation.sdaRunAtLoad = readBool(body, pos, "sdaRunAtLoad")
+    result.operation.sdaDestroy = readBool(body, pos, "sdaDestroy")
+  of pokFsSystemFile:
+    result.operation = PrivilegedOperation(kind: pokFsSystemFile,
+      address: address)
+    result.operation.sfPath = readString(body, pos)
+    result.operation.sfContent = readString(body, pos)
+    result.operation.sfDestroy = readBool(body, pos, "sfDestroy")
+  of pokEnvSystemVariable:
+    result.operation = PrivilegedOperation(kind: pokEnvSystemVariable,
+      address: address)
+    result.operation.evName = readString(body, pos)
+    let cCount = int(readU32Le(body, pos))
+    if cCount < 0 or pos + cCount > body.len:
+      raiseProtocol("env.systemVariable frame: implausible contribution count")
+    for _ in 0 ..< cCount:
+      result.operation.evContribution.add(readString(body, pos))
+    result.operation.evIsPathList = readBool(body, pos, "evIsPathList")
+    result.operation.evDestroy = readBool(body, pos, "evDestroy")
+  of pokPasswdUser:
+    result.operation = PrivilegedOperation(kind: pokPasswdUser,
+      address: address)
+    result.operation.puName = readString(body, pos)
+    result.operation.puHome = readString(body, pos)
+    result.operation.puShell = readString(body, pos)
+    let gCount = int(readU32Le(body, pos))
+    if gCount < 0 or pos + gCount > body.len:
+      raiseProtocol("passwd.user frame: implausible group count")
+    for _ in 0 ..< gCount:
+      result.operation.puGroups.add(readString(body, pos))
+    result.operation.puDestroy = readBool(body, pos, "puDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

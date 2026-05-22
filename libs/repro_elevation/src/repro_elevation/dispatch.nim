@@ -33,6 +33,7 @@
 import ./errors
 import ./fixture_driver
 import ./operations
+import ./posix_system_driver
 import ./protocol
 import ./windows_system_driver
 import ./windows_vs_installer_driver
@@ -76,6 +77,9 @@ proc desiredDigest(op: PrivilegedOperation): string =
     systemDesiredDigestHex(op)
   of pokWindowsVsInstaller:
     vsInstallerDesiredDigestHex(op)
+  of pokMacosSystemDefault, pokSystemdSystemUnit, pokLaunchdSystemDaemon,
+     pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser:
+    posixSystemDesiredDigestHex(op)
 
 # ---------------------------------------------------------------------------
 # Re-observe one operation's current real-world state.
@@ -102,6 +106,18 @@ proc reobserve*(ctx: FixtureContext;
     observeWindowsService(op)
   of pokWindowsVsInstaller:
     observeWindowsVsInstaller(op)
+  of pokMacosSystemDefault:
+    observeMacosSystemDefault(op)
+  of pokSystemdSystemUnit:
+    observeSystemdSystemUnit(op)
+  of pokLaunchdSystemDaemon:
+    observeLaunchdSystemDaemon(op)
+  of pokFsSystemFile:
+    observeFsSystemFile(op)
+  of pokEnvSystemVariable:
+    observeEnvSystemVariable(op)
+  of pokPasswdUser:
+    observePasswdUser(op)
 
 proc applyOne(ctx: FixtureContext;
               op: PrivilegedOperation): ObservedOperationState =
@@ -126,6 +142,18 @@ proc applyOne(ctx: FixtureContext;
     let r = applyWindowsVsInstaller(op)
     result = r.state
     result.restartNeeded = r.restartNeeded
+  of pokMacosSystemDefault:
+    result = applyMacosSystemDefault(op)
+  of pokSystemdSystemUnit:
+    result = applySystemdSystemUnit(op)
+  of pokLaunchdSystemDaemon:
+    result = applyLaunchdSystemDaemon(op)
+  of pokFsSystemFile:
+    result = applyFsSystemFile(op)
+  of pokEnvSystemVariable:
+    result = applyEnvSystemVariable(op)
+  of pokPasswdUser:
+    result = applyPasswdUser(op)
 
 # ---------------------------------------------------------------------------
 # Dispatch one planned operation with the re-observe / drift gate.
@@ -163,7 +191,13 @@ proc dispatchOperation*(ctx: FixtureContext;
   #    an already-absent target is a no-op.
   let destroyOp =
     (op.kind == pokWindowsRegistryValue and op.hklmDestroy) or
-    (op.kind == pokWindowsVsInstaller and op.vsDestroy)
+    (op.kind == pokWindowsVsInstaller and op.vsDestroy) or
+    (op.kind == pokMacosSystemDefault and op.sdDestroy) or
+    (op.kind == pokSystemdSystemUnit and op.suDestroy) or
+    (op.kind == pokLaunchdSystemDaemon and op.sdaDestroy) or
+    (op.kind == pokFsSystemFile and op.sfDestroy) or
+    (op.kind == pokEnvSystemVariable and op.evDestroy) or
+    (op.kind == pokPasswdUser and op.puDestroy)
   if destroyOp:
     if not observed.present:
       result.outcome = doNoOp

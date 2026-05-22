@@ -40,6 +40,14 @@ type
     ## passed. Symmetric with `--accept-passwd-destroy`.
     operationAddress*: string
 
+  EPasswdDestroy* = object of EInfra
+    ## An apply / rollback would REMOVE a user account
+    ## (`passwd.user` destroy) and `--accept-passwd-destroy` was not
+    ## passed. The symmetric counterpart of `EFeatureDestroy` — a
+    ## `passwd.user` destroy deletes a real account, so it is gated
+    ## even when the account was created by a prior apply.
+    operationAddress*: string
+
   EElevationRefused* = object of EInfra
     ## A privileged operation could not be applied because the apply
     ## was run `--no-elevate`, the OS prompt was declined, or the
@@ -81,6 +89,13 @@ proc raiseFeatureDestroy*(address: string) {.noreturn.} =
     "repro infra: operation '" & address & "' would disable an " &
     "Optional Feature / uninstall a Capability; pass " &
     "--accept-feature-destroy to allow it.")
+  e.operationAddress = address
+  raise e
+
+proc raisePasswdDestroy*(address: string) {.noreturn.} =
+  var e = newException(EPasswdDestroy,
+    "repro infra: operation '" & address & "' would REMOVE a user " &
+    "account; pass --accept-passwd-destroy to allow it.")
   e.operationAddress = address
   raise e
 

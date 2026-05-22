@@ -39,6 +39,12 @@ type
     srkWindowsCapability = "windows.capability"
     srkWindowsService = "windows.service"
     srkWindowsVsInstaller = "windows.vsInstaller"
+    srkMacosSystemDefault = "macos.systemDefault"
+    srkSystemdSystemUnit = "systemd.systemUnit"
+    srkLaunchdSystemDaemon = "launchd.systemDaemon"
+    srkFsSystemFile = "fs.systemFile"
+    srkEnvSystemVariable = "env.systemVariable"
+    srkPasswdUser = "passwd.user"
 
   SystemResource* = object
     ## One declared system-scope resource. `address` is the stable
@@ -68,16 +74,37 @@ type
       vsWorkloads*: seq[string]
       vsComponents*: seq[string]
       vsStrict*: bool
+    of srkMacosSystemDefault:
+      sdDomain*: string
+      sdKey*: string
+      sdValueType*: string             ## `defaults` type flag, e.g. -string
+      sdValueLiteral*: string
+      sdRestartTarget*: string
+    of srkSystemdSystemUnit:
+      suName*: string                  ## unit file name, e.g. foo.service
+      suContent*: string
+      suEnabled*: bool                 ## desired: enabled --now (default true)
+    of srkLaunchdSystemDaemon:
+      sdaLabel*: string
+      sdaProgramArgs*: seq[string]
+      sdaRunAtLoad*: bool
+    of srkFsSystemFile:
+      sfPath*: string
+      sfContent*: string
+    of srkEnvSystemVariable:
+      evName*: string
+      evContribution*: seq[string]
+      evIsPathList*: bool              ## PATH-list contribution semantics
+    of srkPasswdUser:
+      puName*: string
+      puHome*: string
+      puShell*: string
+      puGroups*: seq[string]
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
     ## order is the apply order.
     resources*: seq[SystemResource]
-
-const DeferredKinds = [
-  "fs.systemFile", "env.systemVariable",
-  "macos.systemDefault", "systemd.systemUnit", "launchd.systemDaemon",
-  "passwd.user"]
 
 proc realWorldIdentity*(r: SystemResource): string =
   ## Stable identity of the real-world object the resource targets.
@@ -93,6 +120,18 @@ proc realWorldIdentity*(r: SystemResource): string =
   of srkWindowsVsInstaller:
     "vsInstaller:" & r.vsEdition &
       (if r.vsInstallPath.len > 0: "@" & r.vsInstallPath else: "")
+  of srkMacosSystemDefault:
+    "systemDefault:" & r.sdDomain & ":" & r.sdKey
+  of srkSystemdSystemUnit:
+    "systemUnit:" & r.suName
+  of srkLaunchdSystemDaemon:
+    "systemDaemon:" & r.sdaLabel
+  of srkFsSystemFile:
+    "systemFile:" & r.sfPath
+  of srkEnvSystemVariable:
+    "systemVariable:" & r.evName
+  of srkPasswdUser:
+    "user:" & r.puName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -244,11 +283,6 @@ proc parseSystemProfile*(text: string): SystemProfile =
           "' must be followed by a '{' block")
       break
     let kindTag = clean[pos ..< braceIdx].strip()
-    if kindTag in DeferredKinds:
-      raiseSystemProfileInvalid("resource kind '" & kindTag &
-        "' is deferred to a later M69 phase (Phase A covers the four " &
-        "Windows resources: windows.registryValue, " &
-        "windows.optionalFeature, windows.capability, windows.service)")
     var srk: SystemResourceKind
     case kindTag
     of $srkWindowsRegistryValue: srk = srkWindowsRegistryValue
@@ -256,6 +290,12 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkWindowsCapability: srk = srkWindowsCapability
     of $srkWindowsService: srk = srkWindowsService
     of $srkWindowsVsInstaller: srk = srkWindowsVsInstaller
+    of $srkMacosSystemDefault: srk = srkMacosSystemDefault
+    of $srkSystemdSystemUnit: srk = srkSystemdSystemUnit
+    of $srkLaunchdSystemDaemon: srk = srkLaunchdSystemDaemon
+    of $srkFsSystemFile: srk = srkFsSystemFile
+    of $srkEnvSystemVariable: srk = srkEnvSystemVariable
+    of $srkPasswdUser: srk = srkPasswdUser
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -348,6 +388,60 @@ proc parseSystemProfile*(text: string): SystemProfile =
         vsComponents: components,
         vsStrict: (if "strict" in fields: parseBoolField("strict",
           fields["strict"]) else: false))
+    of srkMacosSystemDefault:
+      res = SystemResource(kind: srkMacosSystemDefault,
+        sdDomain: need("domain"),
+        sdKey: need("key"),
+        sdValueType: (if "type" in fields: fields["type"] else: "-string"),
+        sdValueLiteral: (if "value" in fields: fields["value"] else: ""),
+        sdRestartTarget: (if "restartTarget" in fields:
+          fields["restartTarget"] else: ""))
+    of srkSystemdSystemUnit:
+      res = SystemResource(kind: srkSystemdSystemUnit,
+        suName: need("name"),
+        suContent: need("content"),
+        suEnabled:
+          if "enabled" in fields: parseBoolField("enabled",
+            fields["enabled"]) else: true)
+    of srkLaunchdSystemDaemon:
+      let programArgs =
+        if "programArgs" in rawFields:
+          parseListLiteral(rawFields["programArgs"])
+        else: @[]
+      if programArgs.len == 0:
+        raiseSystemProfileInvalid("launchd.systemDaemon '" &
+          (if "label" in fields: fields["label"] else: "?") &
+          "' requires a non-empty programArgs list")
+      res = SystemResource(kind: srkLaunchdSystemDaemon,
+        sdaLabel: need("label"),
+        sdaProgramArgs: programArgs,
+        sdaRunAtLoad:
+          if "runAtLoad" in fields: parseBoolField("runAtLoad",
+            fields["runAtLoad"]) else: true)
+    of srkFsSystemFile:
+      res = SystemResource(kind: srkFsSystemFile,
+        sfPath: need("path"),
+        sfContent: (if "content" in fields: fields["content"] else: ""))
+    of srkEnvSystemVariable:
+      let contribution =
+        if "contribute" in rawFields:
+          parseListLiteral(rawFields["contribute"])
+        else: @[]
+      res = SystemResource(kind: srkEnvSystemVariable,
+        evName: need("name"),
+        evContribution: contribution,
+        evIsPathList:
+          if "isPathList" in fields: parseBoolField("isPathList",
+            fields["isPathList"]) else: false)
+    of srkPasswdUser:
+      let groups =
+        if "groups" in rawFields: parseListLiteral(rawFields["groups"])
+        else: @[]
+      res = SystemResource(kind: srkPasswdUser,
+        puName: need("name"),
+        puHome: (if "home" in fields: fields["home"] else: ""),
+        puShell: (if "shell" in fields: fields["shell"] else: ""),
+        puGroups: groups)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -396,10 +490,58 @@ proc toPrivilegedOperation*(r: SystemResource;
       vsComponents: r.vsComponents,
       vsStrict: r.vsStrict,
       vsDestroy: destroy)
+  of srkMacosSystemDefault:
+    PrivilegedOperation(kind: pokMacosSystemDefault, address: r.address,
+      sdDomain: r.sdDomain,
+      sdKey: r.sdKey,
+      sdValueType: r.sdValueType,
+      sdValueLiteral: r.sdValueLiteral,
+      sdRestartTarget: r.sdRestartTarget,
+      sdDestroy: destroy)
+  of srkSystemdSystemUnit:
+    PrivilegedOperation(kind: pokSystemdSystemUnit, address: r.address,
+      suName: r.suName,
+      suContent: r.suContent,
+      suEnabled: r.suEnabled,
+      suDestroy: destroy)
+  of srkLaunchdSystemDaemon:
+    PrivilegedOperation(kind: pokLaunchdSystemDaemon, address: r.address,
+      sdaLabel: r.sdaLabel,
+      sdaProgramArgs: r.sdaProgramArgs,
+      sdaRunAtLoad: r.sdaRunAtLoad,
+      sdaDestroy: destroy)
+  of srkFsSystemFile:
+    PrivilegedOperation(kind: pokFsSystemFile, address: r.address,
+      sfPath: r.sfPath,
+      sfContent: r.sfContent,
+      sfDestroy: destroy)
+  of srkEnvSystemVariable:
+    PrivilegedOperation(kind: pokEnvSystemVariable, address: r.address,
+      evName: r.evName,
+      evContribution: r.evContribution,
+      evIsPathList: r.evIsPathList,
+      evDestroy: destroy)
+  of srkPasswdUser:
+    PrivilegedOperation(kind: pokPasswdUser, address: r.address,
+      puName: r.puName,
+      puHome: r.puHome,
+      puShell: r.puShell,
+      puGroups: r.puGroups,
+      puDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional
   ## Feature, uninstall a Capability, or uninstall a Visual Studio
   ## product — the operations `--accept-feature-destroy` gates.
+  ## `passwd.user` is handled by the SEPARATE `--accept-passwd-destroy`
+  ## gate (`requiresPasswdDestroy`), not this one.
   r.kind in {srkWindowsOptionalFeature, srkWindowsCapability,
     srkWindowsVsInstaller}
+
+proc requiresPasswdDestroy*(r: SystemResource): bool =
+  ## True when rolling this resource back would REMOVE a user account
+  ## — the operation `--accept-passwd-destroy` gates (the symmetric
+  ## counterpart of `--accept-feature-destroy`). A `passwd.user`
+  ## destroy deletes a real account, so it is gated even when the
+  ## account was created by a prior apply.
+  r.kind == srkPasswdUser

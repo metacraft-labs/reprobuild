@@ -49,13 +49,20 @@ type
     elevationMode*: ElevationMode
     forceBroker*: bool                ## REPRO_FORCE_BROKER test seam
     noPreview*: bool                  ## scripted: converge without preview
+    acceptPasswdDestroy*: bool
+      ## The M69 Phase-C `--accept-passwd-destroy` flag. A
+      ## `passwd.user` destroy in `extraDestroyResources` REMOVES a
+      ## user account; the apply fails closed with `EPasswdDestroy`
+      ## BEFORE any mutation unless this flag is set. The symmetric
+      ## counterpart of the `--accept-feature-destroy` rollback gate.
     extraDestroyResources*: seq[SystemResource]
       ## `repro system rollback` seam: resources the rollback must
       ## actively REVERT (a feature disable / capability uninstall /
-      ## registry-value delete / VS uninstall) because the target
-      ## generation no longer declares them. They are folded into the
-      ## SAME apply as the target-profile convergence, so a rollback
-      ## still raises at most one elevation prompt.
+      ## registry-value delete / VS uninstall / user removal /
+      ## system-file delete) because the target generation no longer
+      ## declares them. They are folded into the SAME apply as the
+      ## target-profile convergence, so a rollback still raises at
+      ## most one elevation prompt.
 
   ApplyResult* = object
     generationId*: string
@@ -195,6 +202,14 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     if rec.action == "no-op":
       noOps.add(rec)
   result.noOpCount = noOps.len
+
+  # `--accept-passwd-destroy` gate: a `passwd.user` destroy in the
+  # fold-in set REMOVES a real user account. Fail closed BEFORE any
+  # mutation unless the operator accepted it — the symmetric
+  # counterpart of the `--accept-feature-destroy` rollback gate.
+  for r in opts.extraDestroyResources:
+    if requiresPasswdDestroy(r) and not opts.acceptPasswdDestroy:
+      raisePasswdDestroy(r.address)
 
   # Fold in any `repro system rollback` destroy operations: each
   # removed resource becomes a typed destroy operation whose baseline

@@ -309,3 +309,376 @@ suite "repro_elevation: windows.vsInstaller pure logic (Phase B)":
     check dec.operation.vsWorkloads == @["A", "B"]
     check dec.operation.vsComponents == @["C"]
     check dec.operation.vsStrict
+
+# ===========================================================================
+# M69 Phase C — the six POSIX / macOS system-scope drivers: the pure
+# parsers, the structural / drift comparison, the plist & unit & env
+# generators, the passwd.user attribute diff, and the typed-operation
+# wiring into the closed set. All platform-pure — these run on every
+# host; the Linux/macOS shell-out is guarded and exercised only by the
+# Linux/macOS e2e gate.
+# ===========================================================================
+
+suite "repro_elevation: Phase C closed-set wiring":
+
+  test "the six Phase-C kinds are in the closed set and require elevation":
+    for k in [pokMacosSystemDefault, pokSystemdSystemUnit,
+              pokLaunchdSystemDaemon, pokFsSystemFile,
+              pokEnvSystemVariable, pokPasswdUser]:
+      check requiresElevation(k)
+      check isKnownPrivilegedOperationKind($k)
+    check not isKnownPrivilegedOperationKind("posix.runArbitraryCommand")
+
+  test "macos.systemDefault operation frame round-trips":
+    let op = PrivilegedOperation(kind: pokMacosSystemDefault,
+      address: "sd", sdDomain: "/Library/Preferences/com.apple.loginwindow",
+      sdKey: "SHOWFULLNAME", sdValueType: "-bool", sdValueLiteral: "true",
+      sdRestartTarget: "loginwindow", sdDestroy: false)
+    check operationValidationError(op) == ""
+    let dec = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: op, baselineDigestHex: "ab"))).body)
+    check dec.operation.kind == pokMacosSystemDefault
+    check dec.operation.sdDomain == op.sdDomain
+    check dec.operation.sdKey == "SHOWFULLNAME"
+    check dec.operation.sdRestartTarget == "loginwindow"
+    check dec.baselineDigestHex == "ab"
+
+  test "systemd.systemUnit operation frame round-trips":
+    let op = PrivilegedOperation(kind: pokSystemdSystemUnit,
+      address: "su", suName: "repro-agent.service",
+      suContent: "[Unit]\nDescription=x\n[Service]\nExecStart=/bin/true\n",
+      suEnabled: true, suDestroy: false)
+    check operationValidationError(op) == ""
+    let dec = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: op, baselineDigestHex: ""))).body)
+    check dec.operation.kind == pokSystemdSystemUnit
+    check dec.operation.suName == "repro-agent.service"
+    check dec.operation.suContent == op.suContent
+    check dec.operation.suEnabled
+
+  test "launchd.systemDaemon operation frame round-trips":
+    let op = PrivilegedOperation(kind: pokLaunchdSystemDaemon,
+      address: "lda", sdaLabel: "com.example.daemon",
+      sdaProgramArgs: @["/usr/local/bin/d", "--flag"],
+      sdaRunAtLoad: true, sdaDestroy: false)
+    check operationValidationError(op) == ""
+    let dec = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: op, baselineDigestHex: ""))).body)
+    check dec.operation.kind == pokLaunchdSystemDaemon
+    check dec.operation.sdaProgramArgs == @["/usr/local/bin/d", "--flag"]
+    check dec.operation.sdaRunAtLoad
+
+  test "fs.systemFile + env.systemVariable + passwd.user frames round-trip":
+    let f = PrivilegedOperation(kind: pokFsSystemFile, address: "f",
+      sfPath: "/etc/profile.d/repro-system.sh", sfContent: "export X=1\n",
+      sfDestroy: false)
+    let fd = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: f, baselineDigestHex: ""))).body)
+    check fd.operation.sfPath == "/etc/profile.d/repro-system.sh"
+    check fd.operation.sfContent == "export X=1\n"
+    let e = PrivilegedOperation(kind: pokEnvSystemVariable, address: "e",
+      evName: "PATH", evContribution: @["/opt/a/bin", "/opt/b/bin"],
+      evIsPathList: true, evDestroy: false)
+    let ed = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: e, baselineDigestHex: ""))).body)
+    check ed.operation.evContribution == @["/opt/a/bin", "/opt/b/bin"]
+    check ed.operation.evIsPathList
+    let u = PrivilegedOperation(kind: pokPasswdUser, address: "u",
+      puName: "deploy", puHome: "/home/deploy", puShell: "/bin/bash",
+      puGroups: @["docker", "wheel"], puDestroy: false)
+    let ud = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: u, baselineDigestHex: ""))).body)
+    check ud.operation.puName == "deploy"
+    check ud.operation.puGroups == @["docker", "wheel"]
+
+  test "operationValidationError rejects a shell-injecting sdValueType":
+    # The type flag flows into the elevated `defaults write` command
+    # line — a `;`-bearing / metacharacter / non-allowlisted value MUST
+    # be rejected before the operation ever reaches the broker.
+    proc badDefault(ty: string): PrivilegedOperation =
+      PrivilegedOperation(kind: pokMacosSystemDefault, address: "a",
+        sdDomain: "com.apple.loginwindow", sdKey: "K",
+        sdValueType: ty, sdValueLiteral: "v")
+    # A `;`-terminated type that smuggles a second command.
+    check operationValidationError(
+      badDefault("-bool true; rm -rf /")).len > 0
+    # Other shell metacharacters / substitutions.
+    check operationValidationError(badDefault("-string `id`")).len > 0
+    check operationValidationError(badDefault("-string $(id)")).len > 0
+    check operationValidationError(badDefault("-string && id")).len > 0
+    check operationValidationError(badDefault("-string | id")).len > 0
+    check operationValidationError(badDefault("-string\nid")).len > 0
+    # A flag that simply is not in the closed `defaults` allowlist.
+    check operationValidationError(badDefault("-notAFlag")).len > 0
+    check operationValidationError(badDefault("string")).len > 0
+    # The legitimate type flags — and an empty type (driver default) —
+    # all still pass.
+    for ty in ["-string", "-data", "-int", "-integer", "-float",
+               "-bool", "-boolean", "-date", "-array", "-array-add",
+               "-dict", "-dict-add", ""]:
+      check operationValidationError(badDefault(ty)) == ""
+
+  test "operationValidationError rejects a shell-injecting sdaLabel":
+    # The label flows into the elevated `launchctl ... system/<label>`
+    # command lines — a label bearing a shell metacharacter, a space,
+    # a `$`, a backtick, a `/`, or a newline MUST be rejected.
+    proc badDaemon(label: string): PrivilegedOperation =
+      PrivilegedOperation(kind: pokLaunchdSystemDaemon, address: "a",
+        sdaLabel: label, sdaProgramArgs: @["/usr/local/bin/d"],
+        sdaRunAtLoad: true, sdaDestroy: false)
+    check operationValidationError(badDaemon("x; rm -rf /")).len > 0
+    check operationValidationError(badDaemon("a b")).len > 0
+    check operationValidationError(badDaemon("x$(id)")).len > 0
+    check operationValidationError(badDaemon("x`id`")).len > 0
+    check operationValidationError(badDaemon("a/b")).len > 0
+    check operationValidationError(badDaemon("x\nid")).len > 0
+    check operationValidationError(badDaemon("x&y")).len > 0
+    check operationValidationError(badDaemon("x|y")).len > 0
+    check operationValidationError(badDaemon("")).len > 0
+    # A legitimate reverse-DNS-style label still passes.
+    check operationValidationError(badDaemon("com.example.daemon")) == ""
+    check operationValidationError(
+      badDaemon("com.example.repro-agent_1")) == ""
+
+  test "isSafeDefaultsTypeFlag / isSafeLaunchdLabel pure predicates":
+    check isSafeDefaultsTypeFlag("-bool")
+    check isSafeDefaultsTypeFlag("")          # driver `-string` default
+    check not isSafeDefaultsTypeFlag("-bool true; id")
+    check not isSafeDefaultsTypeFlag("-bogus")
+    check isSafeLaunchdLabel("com.example.d")
+    check not isSafeLaunchdLabel("x; id")
+    check not isSafeLaunchdLabel("a b")
+    check not isSafeLaunchdLabel("a/b")
+    check not isSafeLaunchdLabel("")
+
+  test "operationValidationError flags out-of-policy Phase-C operations":
+    # macos.systemDefault: domain must resolve under /Library/Preferences/.
+    check operationValidationError(PrivilegedOperation(
+      kind: pokMacosSystemDefault, address: "a",
+      sdDomain: "/etc/evil.plist", sdKey: "K")).len > 0
+    # systemd.systemUnit: a unit name with a path separator escapes.
+    check operationValidationError(PrivilegedOperation(
+      kind: pokSystemdSystemUnit, address: "a",
+      suName: "../escape.service")).len > 0
+    # launchd.systemDaemon: a non-destroy op needs ProgramArguments.
+    check operationValidationError(PrivilegedOperation(
+      kind: pokLaunchdSystemDaemon, address: "a",
+      sdaLabel: "ok", sdaDestroy: false)).len > 0
+    # passwd.user: a name with a `:` is invalid.
+    check operationValidationError(PrivilegedOperation(
+      kind: pokPasswdUser, address: "a", puName: "bad:name")).len > 0
+    # An in-policy operation passes.
+    check operationValidationError(PrivilegedOperation(
+      kind: pokPasswdUser, address: "a", puName: "deploy",
+      puGroups: @["docker"])) == ""
+
+suite "repro_elevation: macos.systemDefault pure logic (Phase C)":
+
+  test "structural comparison ignores dict key order, not array order":
+    check defaultsValuesEqual("{ a = 1; b = 2; }", "{ b = 2; a = 1; }")
+    check not defaultsValuesEqual("(1, 2, 3)", "(3, 2, 1)")
+    check defaultsValuesEqual("  true  ", "true")
+    check defaultsValuesEqual("\"hello\"", "hello")
+
+  test "systemDefaultPlistPath resolves a bare domain and a path":
+    check systemDefaultPlistPath("com.apple.loginwindow") ==
+      "/Library/Preferences/com.apple.loginwindow"
+    check systemDefaultPlistPath(
+      "/Library/Preferences/com.apple.loginwindow") ==
+      "/Library/Preferences/com.apple.loginwindow"
+
+  test "isSystemDefaultDomain rejects an out-of-scope plist path":
+    check isSystemDefaultDomain("com.apple.loginwindow")
+    check not isSystemDefaultDomain("/etc/passwd")
+    check not isSystemDefaultDomain("/Library/Preferences/../../etc/x")
+
+  test "the desired digest is structural — whitespace does not change it":
+    let a = PrivilegedOperation(kind: pokMacosSystemDefault, address: "x",
+      sdDomain: "com.apple.x", sdKey: "K", sdValueLiteral: "{a=1;b=2;}")
+    let b = PrivilegedOperation(kind: pokMacosSystemDefault, address: "x",
+      sdDomain: "com.apple.x", sdKey: "K", sdValueLiteral: "{ b = 2; a = 1; }")
+    check posixSystemDesiredDigestHex(a) == posixSystemDesiredDigestHex(b)
+
+suite "repro_elevation: systemd.systemUnit pure logic (Phase C)":
+
+  test "systemUnitPath lands under /etc/systemd/system/":
+    check systemUnitPath("repro-agent.service") ==
+      "/etc/systemd/system/repro-agent.service"
+    check SystemdSystemUnitDir == "/etc/systemd/system"
+
+  test "isSafeUnitName rejects escapes":
+    check isSafeUnitName("foo.service")
+    check not isSafeUnitName("")
+    check not isSafeUnitName("..")
+    check not isSafeUnitName("a/b.service")
+    check not isSafeUnitName("a\\b.service")
+
+  test "parseSystemctlShow reads LoadState / ActiveState / UnitFileState":
+    let obs = parseSystemctlShow(
+      "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n")
+    check obs.loadState == "loaded"
+    check obs.activeState == "active"
+    check obs.unitFileState == "enabled"
+    check systemdUnitIsLoaded(obs)
+    let absent = parseSystemctlShow(
+      "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n")
+    check not systemdUnitIsLoaded(absent)
+    check systemdUnitIsLoaded(parseSystemctlShow("LoadState=masked\n"))
+
+suite "repro_elevation: launchd.systemDaemon pure logic (Phase C)":
+
+  test "daemonPlistPath lands under /Library/LaunchDaemons/":
+    check daemonPlistPath("com.example.d") ==
+      "/Library/LaunchDaemons/com.example.d.plist"
+    check LaunchDaemonsDir == "/Library/LaunchDaemons"
+
+  test "buildLaunchDaemonPlist emits a valid plist with the argv + RunAtLoad":
+    let plist = buildLaunchDaemonPlist("com.example.d",
+      @["/usr/local/bin/d", "--flag"], runAtLoad = true)
+    check plist.contains("<key>Label</key>")
+    check plist.contains("<string>com.example.d</string>")
+    check plist.contains("<string>/usr/local/bin/d</string>")
+    check plist.contains("<string>--flag</string>")
+    check plist.contains("<key>RunAtLoad</key>")
+    check plist.contains("<true/>")
+    # XML special characters in an argv element are escaped.
+    let escaped = buildLaunchDaemonPlist("d", @["a<b>&c"], runAtLoad = false)
+    check escaped.contains("a&lt;b&gt;&amp;c")
+    check escaped.contains("<false/>")
+
+  test "isSafeDaemonLabel rejects escapes":
+    check isSafeDaemonLabel("com.example.d")
+    check not isSafeDaemonLabel("")
+    check not isSafeDaemonLabel("a/b")
+
+suite "repro_elevation: fs.systemFile allowlist (Phase C)":
+
+  test "paths under recognized system directories are allowed":
+    check isAllowedSystemFilePath("/etc/profile.d/repro.sh")
+    check isAllowedSystemFilePath("/usr/local/etc/repro.conf")
+    check isAllowedSystemFilePath(
+      "C:/ProgramData/repro/x.cfg", r"C:\ProgramData")
+
+  test "out-of-allowlist or escaping paths are rejected":
+    check not isAllowedSystemFilePath("/home/u/.bashrc")
+    check not isAllowedSystemFilePath("/tmp/x")
+    check not isAllowedSystemFilePath("/etc/../home/u/x")
+    check not isAllowedSystemFilePath("")
+    check systemFileScopeError("/home/u/x").len > 0
+    check systemFileScopeError("/etc/ok") == ""
+
+suite "repro_elevation: env.systemVariable merge (Phase C)":
+
+  test "computeMergedSystemPath keeps existing order, appends new entries":
+    check computeMergedSystemPath(@["/bin", "/usr/bin"],
+      @["/opt/a/bin", "/bin"]) == @["/bin", "/usr/bin", "/opt/a/bin"]
+
+  test "subtractSystemPathContribution removes only the contribution":
+    check subtractSystemPathContribution(
+      @["/bin", "/opt/a/bin", "/usr/bin"], @["/opt/a/bin"]) ==
+      @["/bin", "/usr/bin"]
+
+  test "splitPathList / joinPathList round-trip and drop empties":
+    check splitPathList("/a::/b:", ':') == @["/a", "/b"]
+    check joinPathList(@["/a", "/b"], ':') == "/a:/b"
+
+suite "repro_elevation: passwd.user pure logic (Phase C)":
+
+  test "parseGetentPasswd reads the colon-separated record":
+    let obs = parseGetentPasswd(
+      "deploy:x:1001:1001:Deploy User:/home/deploy:/bin/bash")
+    check obs.present
+    check obs.uid == "1001"
+    check obs.homeDir == "/home/deploy"
+    check obs.shell == "/bin/bash"
+    check not parseGetentPasswd("").present
+    check not parseGetentPasswd("garbage").present
+
+  test "parseIdGroups returns a sorted supplementary-group set":
+    check parseIdGroups("wheel docker  staff") ==
+      @["docker", "staff", "wheel"]
+
+  test "diffPasswdUser: an absent account => create with all groups":
+    let diff = diffPasswdUser(
+      PasswdUserDesired(name: "deploy", groups: @["docker", "wheel"]),
+      PasswdUserObservation(present: false))
+    check diff.accountAbsent
+    check diff.missingGroups == @["docker", "wheel"]
+
+  test "diffPasswdUser: pinned attribute differs => usermod needed":
+    let observed = PasswdUserObservation(present: true, uid: "1001",
+      homeDir: "/home/deploy", shell: "/bin/sh", groups: @["docker"])
+    let diff = diffPasswdUser(
+      PasswdUserDesired(name: "deploy", shell: "/bin/bash",
+        groups: @["docker", "wheel"]), observed)
+    check not diff.accountAbsent
+    check diff.shellDiffers
+    check not diff.homeDirDiffers      # homeDir unpinned (empty desired)
+    check diff.groupsDiffer
+    check diff.missingGroups == @["wheel"]
+    check passwdUserNeedsUpdate(diff)
+
+  test "diffPasswdUser: an extra supplementary group is reported":
+    let observed = PasswdUserObservation(present: true, uid: "1001",
+      groups: @["docker", "wheel", "sudo"])
+    let diff = diffPasswdUser(
+      PasswdUserDesired(name: "deploy", groups: @["docker"]), observed)
+    check diff.extraGroups == @["sudo", "wheel"]
+    check diff.groupsDiffer
+
+  test "diffPasswdUser: an in-sync account needs no update":
+    let observed = PasswdUserObservation(present: true, uid: "1001",
+      homeDir: "/home/deploy", shell: "/bin/bash", groups: @["docker"])
+    let diff = diffPasswdUser(
+      PasswdUserDesired(name: "deploy", homeDir: "/home/deploy",
+        shell: "/bin/bash", groups: @["docker"]), observed)
+    check not passwdUserNeedsUpdate(diff)
+
+  test "buildUseraddArgs builds a create argv from typed fields":
+    let args = buildUseraddArgs(PasswdUserDesired(name: "deploy",
+      homeDir: "/home/deploy", shell: "/bin/bash",
+      groups: @["wheel", "docker"]))
+    check args[0] == "deploy"
+    check "--home-dir" in args
+    check "/home/deploy" in args
+    check "--create-home" in args
+    check "--shell" in args
+    check "--groups" in args
+    # The group list is sorted + comma-joined.
+    let gi = args.find("--groups")
+    check args[gi + 1] == "docker,wheel"
+
+  test "buildUsermodArgs passes only the differing attributes":
+    let observed = PasswdUserObservation(present: true, uid: "1001",
+      homeDir: "/home/deploy", shell: "/bin/sh", groups: @["docker"])
+    let desired = PasswdUserDesired(name: "deploy", shell: "/bin/bash",
+      groups: @["docker", "wheel"])
+    let args = buildUsermodArgs(desired, diffPasswdUser(desired, observed))
+    check "--shell" in args
+    check "/bin/bash" in args
+    check "--home" notin args            # homeDir unpinned
+    check "--groups" in args
+    check args[^1] == "deploy"
+    # An in-sync account yields an empty argv.
+    check buildUsermodArgs(desired, diffPasswdUser(desired,
+      PasswdUserObservation(present: true, shell: "/bin/bash",
+        groups: @["docker", "wheel"]))).len == 0
+
+  test "buildUserdelArgs removes the home directory":
+    check buildUserdelArgs("deploy") == @["--remove", "deploy"]
+
+  test "canonical desired vs observed: unpinned attributes use a wildcard":
+    let desired = PasswdUserDesired(name: "deploy", shell: "/bin/bash",
+      groups: @["docker"])
+    # An observation matching the pinned attributes (any uid / home)
+    # canonicalizes to the same string as the desired wildcard form.
+    check canonicalPasswdUserDesired(desired) ==
+      "user:present;uid=*;home=*;shell=/bin/bash;groups=docker"
+    check canonicalPasswdUserState(
+      PasswdUserObservation(present: false)) == "user:absent"
+
+  test "passwd.user desired digest: a destroy op is the absent sentinel":
+    let destroyOp = PrivilegedOperation(kind: pokPasswdUser, address: "u",
+      puName: "deploy", puDestroy: true)
+    check posixSystemDesiredDigestHex(destroyOp) ==
+      "0000000000000000000000000000000000000000000000000000000000000000"
