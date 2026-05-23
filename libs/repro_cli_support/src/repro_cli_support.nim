@@ -1336,6 +1336,33 @@ proc statsJson(stats: BuildStats): JsonNode =
     })
   %*{"metrics": metrics}
 
+proc metricCount(stats: BuildStats; name: string): int =
+  for metric in stats.metrics:
+    if metric.name == name:
+      return metric.count
+
+proc metricTotalUs(stats: BuildStats; name: string): float =
+  for metric in stats.metrics:
+    if metric.name == name:
+      return metric.totalUs
+
+proc fileSizeOrZero(path: string): BiggestInt =
+  if path.len == 0 or not fileExists(extendedPath(path)):
+    return 0
+  getFileSize(extendedPath(path))
+
+proc evidenceInputCount(evidence: PathSetEvidence): int =
+  var seen: seq[string] = @[]
+  for group in [evidence.declaredInputs, evidence.depfileInputs,
+      evidence.monitorReads, evidence.monitorProbes]:
+    for path in group:
+      if path.len > 0 and seen.find(path) < 0:
+        seen.add(path)
+  seen.len
+
+proc actionPresent(action: ActionResult): bool =
+  action.id.len > 0 and action.status != asPending
+
 proc actionResultJson(item: ActionResult): JsonNode =
   # Windows: include exitCode/stdout/stderr in the build report so failed
   # actions can be diagnosed without re-running them. Without this, the JSON
@@ -3033,6 +3060,74 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     renderShell: renderShell,
     statsEnabled: selection.statsPath.len > 0))
 
+proc devEnvPerformanceEvidenceJson(edge: DevEnvEdgeResult): JsonNode =
+  let devStats = edge.devEnvResult.stats
+  let compileStats = edge.providerCompileResult.stats
+  let introspectionInputs = edge.introspectionAction.evidence.evidenceInputCount()
+  let shellInputs = edge.shellRenderAction.evidence.evidenceInputCount()
+  let shellRenderPresent = edge.shellRenderAction.actionPresent()
+  %*{
+    "schemaId": "reprobuild.dev-env.performance-evidence.v1",
+    "providerBuild": {
+      "checks": 1,
+      "launched": edge.stats.providerBuildLaunched,
+      "skippedFresh": edge.stats.providerBuildSkippedFresh,
+      "cacheHit": edge.stats.providerBuildCacheHit,
+      "actionPresent": edge.providerCompileAction.actionPresent(),
+      "actionStatus": $edge.providerCompileAction.status,
+      "cacheLookupCount": compileStats.metricCount("repro cache lookup"),
+      "cacheLookupTotalUs": compileStats.metricTotalUs("repro cache lookup"),
+      "hotInputScanCount": compileStats.metricCount("repro hot input scan"),
+      "outputStatCount": compileStats.metricCount("repro output stat"),
+      "runBuildTotalUs": compileStats.metricTotalUs("repro scheduler total")
+    },
+    "providerIntrospection": {
+      "actions": 1,
+      "launched": edge.stats.providerIntrospectionLaunched,
+      "cacheHit": edge.stats.providerIntrospectionCacheHit,
+      "actionStatus": $edge.introspectionAction.status,
+      "cacheDecision": $edge.introspectionAction.cacheDecision,
+      "evidenceInputPathCount": introspectionInputs,
+      "declaredInputCount": edge.introspectionAction.evidence.declaredInputs.len,
+      "monitorReadCount": edge.introspectionAction.evidence.monitorReads.len,
+      "monitorProbeCount": edge.introspectionAction.evidence.monitorProbes.len
+    },
+    "artifactLookup": {
+      "artifactPath": edge.artifactPath,
+      "artifactBytes": edge.artifactPath.fileSizeOrZero(),
+      "artifactWriteLaunched": edge.stats.artifactWriteLaunched,
+      "artifactWriteSkipped": edge.stats.artifactWriteSkipped,
+      "introspectionCacheHit": edge.stats.providerIntrospectionCacheHit
+    },
+    "invalidation": {
+      "cacheLookupCount": devStats.metricCount("repro cache lookup"),
+      "cacheLookupTotalUs": devStats.metricTotalUs("repro cache lookup"),
+      "hotRecordLookupCount": devStats.metricCount("repro hot record lookup"),
+      "hotRecordLookupTotalUs": devStats.metricTotalUs("repro hot record lookup"),
+      "hotInputScanCount": devStats.metricCount("repro hot input scan"),
+      "hotInputScanTotalUs": devStats.metricTotalUs("repro hot input scan"),
+      "fastNoopScanCount": devStats.metricCount("repro fast noop scan"),
+      "fastNoopScanTotalUs": devStats.metricTotalUs("repro fast noop scan"),
+      "outputStatCount": devStats.metricCount("repro output stat"),
+      "checkedInputPathCount": introspectionInputs + shellInputs,
+      "cacheHitResultMaterializeCount":
+        devStats.metricCount("repro cache hit result materialize")
+    },
+    "shellRender": {
+      "actions": if shellRenderPresent: 1 else: 0,
+      "launched": edge.stats.shellRenderingLaunched,
+      "cacheHit": edge.stats.shellRenderingCacheHit,
+      "skipped": edge.stats.shellRenderingSkipped,
+      "actionStatus": $edge.shellRenderAction.status,
+      "cacheDecision": $edge.shellRenderAction.cacheDecision,
+      "evidenceInputPathCount": shellInputs,
+      "shellFragmentPath": edge.shellFragmentPath,
+      "shellFragmentBytes": edge.shellFragmentPath.fileSizeOrZero(),
+      "navigatorStatsPath": edge.shellNavigatorStatsPath,
+      "navigatorStatsBytes": edge.shellNavigatorStatsPath.fileSizeOrZero()
+    }
+  }
+
 proc devEnvStatsJson(edge: DevEnvEdgeResult; commandName: string): JsonNode =
   let navigatorStats =
     if edge.shellNavigatorStatsPath.len > 0 and fileExists(
@@ -3066,7 +3161,8 @@ proc devEnvStatsJson(edge: DevEnvEdgeResult; commandName: string): JsonNode =
     "introspectionAction": actionResultJson(edge.introspectionAction),
     "shellRenderAction": actionResultJson(edge.shellRenderAction),
     "providerCompileRunStats": statsJson(edge.providerCompileResult.stats),
-    "devEnvRunStats": statsJson(edge.devEnvResult.stats)
+    "devEnvRunStats": statsJson(edge.devEnvResult.stats),
+    "performance": devEnvPerformanceEvidenceJson(edge)
   }
 
 proc writeDevEnvStats(path: string; edge: DevEnvEdgeResult;

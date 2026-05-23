@@ -195,18 +195,46 @@ proc fishSourceValue(fish, path, cwd: string): string =
     raise newException(OSError, "Fish source failed: " & res.output)
   res.output.firstNonEmptyLine()
 
-proc psQuote(value: string): string =
-  "'" & value.replace("'", "''") & "'"
+when defined(windows):
+  proc psQuote(value: string): string =
+    "'" & value.replace("'", "''") & "'"
 
-proc powerShellSourceValue(pwsh, path, cwd: string): string =
-  let res = runProgram(pwsh, @[
-    "-NoProfile", "-Command",
-    ". " & psQuote(path) &
-      "; Write-Output \"$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_TASKS\""
-  ], cwd)
+  proc powerShellSourceValue(pwsh, path, cwd: string): string =
+    let res = runProgram(pwsh, @[
+      "-NoProfile", "-Command",
+      ". " & psQuote(path) &
+        "; Write-Output \"$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_TASKS\""
+    ], cwd)
+    if res.exitCode != 0:
+      raise newException(OSError, "PowerShell source failed: " & res.output)
+    res.output.firstNonEmptyLine()
+
+proc nixFish(): string =
+  let nix = findExe("nix")
+  if nix.len == 0:
+    return ""
+  let res = execCmdEx(shellCommand([
+    nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
+    "--extra-experimental-features", "nix-command flakes"
+  ]))
   if res.exitCode != 0:
-    raise newException(OSError, "PowerShell source failed: " & res.output)
-  res.output.firstNonEmptyLine()
+    return ""
+  for line in res.output.splitLines():
+    let candidate = line.strip()
+    if candidate.startsWith("/nix/store/") and
+        fileExists(candidate / "bin" / "fish"):
+      return candidate / "bin" / "fish"
+
+proc requireFish(): string =
+  result = findExe("fish")
+  if result.len > 0:
+    return
+  result = nixFish()
+  if result.len > 0:
+    return
+  raise newException(OSError,
+    "M4 shell print gate requires a real fish binary; PATH has none and " &
+      "`nix build nixpkgs#fish` did not provide one")
 
 suite "e2e_repro_exec_shell_artifact_consumers":
   test "e2e_repro_exec_uses_cached_dev_env_artifact":
@@ -269,24 +297,23 @@ suite "e2e_repro_exec_shell_artifact_consumers":
     check jsonView["projectRoot"].getStr() == c.projectRoot
     check jsonView["tasks"][0]["name"].getStr() == "build"
 
-    let fish = findExe("fish")
-    if fish.len > 0:
-      let fishStatsPath = c.tempRoot / "fish-stats.json"
-      let fishText = requireRepro(c, @[
-        "shell", "--print-env=fish", c.projectRoot,
-        "--dev-env-stats=" & fishStatsPath
-      ])
-      requireShellCacheStats(fishStatsPath, artifactPath)
-      let fishPath = c.tempRoot / "dev-env.fish"
-      writeFile(fishPath, fishText)
-      check fishSourceValue(fish, fishPath, c.projectRoot) == expected
-    else:
-      echo "[platform N/A] fish shell unavailable on this host"
-      check true
+    let fish = requireFish()
+    let fishStatsPath = c.tempRoot / "fish-stats.json"
+    let fishText = requireRepro(c, @[
+      "shell", "--print-env=fish", c.projectRoot,
+      "--dev-env-stats=" & fishStatsPath
+    ])
+    requireShellCacheStats(fishStatsPath, artifactPath)
+    let fishPath = c.tempRoot / "dev-env.fish"
+    writeFile(fishPath, fishText)
+    check fishSourceValue(fish, fishPath, c.projectRoot) == expected
 
-    let pwsh =
-      if findExe("pwsh").len > 0: findExe("pwsh") else: findExe("powershell")
-    if pwsh.len > 0:
+    when defined(windows):
+      let pwsh =
+        if findExe("pwsh").len > 0: findExe("pwsh") else: findExe("powershell")
+      if pwsh.len == 0:
+        raise newException(OSError,
+          "M4 PowerShell shell print gate requires a real PowerShell binary")
       let psStatsPath = c.tempRoot / "powershell-stats.json"
       let psText = requireRepro(c, @[
         "shell", "--print-env=powershell", c.projectRoot,
@@ -297,8 +324,14 @@ suite "e2e_repro_exec_shell_artifact_consumers":
       writeFile(psPath, psText)
       check powerShellSourceValue(pwsh, psPath, c.projectRoot) == expected
     else:
-      echo "[platform N/A] PowerShell unavailable on this host"
-      check true
+      let psStatsPath = c.tempRoot / "powershell-render-stats.json"
+      let psText = requireRepro(c, @[
+        "shell", "--print-env=powershell", c.projectRoot,
+        "--dev-env-stats=" & psStatsPath
+      ])
+      requireShellCacheStats(psStatsPath, artifactPath)
+      check psText.contains("$env:AUX_VALUE")
+      check psText.contains("$env:FIXTURE_MODE")
 
   test "e2e_repro_exec_exit_status_and_cwd":
     let c = prepareCase("repro-m4-exec-status")

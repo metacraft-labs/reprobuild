@@ -15,6 +15,10 @@ test:
 
 t: test
 
+dev-env-full-regression:
+    mkdir -p test-logs
+    bash ./scripts/run_tests.sh 2>&1 | tee test-logs/dev-env-full-regression.log
+
 integration-stackable-hooks:
     mkdir -p test-logs
     nim c -r \

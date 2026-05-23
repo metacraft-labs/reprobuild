@@ -350,8 +350,8 @@ suite "e2e_native_shell_hooks":
     check expandSymlink(c.homeDir / ".bashrc") == storeRc
     check readFile(storeRc) == storeBytes
 
-  test "e2e_native_shell_hooks_powershell":
-    when defined(windows):
+  when defined(windows):
+    test "e2e_native_shell_hooks_powershell":
       let c = prepareCase("repro-m6-native-powershell")
       defer: removeDir(c.tempRoot)
       let pwsh =
@@ -375,9 +375,3 @@ suite "e2e_native_shell_hooks":
         "A:alpha|one|" & c.projectA)
       requireShellValue(res.output, "OUT:", "OUT:||")
       requireNativeStats(statsPath)
-    else:
-      echo "[platform N/A] e2e_native_shell_hooks_powershell: " &
-        "requires Windows and a real temp PowerShell profile"
-      checkpoint "platform-skip: e2e_native_shell_hooks_powershell is a " &
-        "Windows CI gate because it needs a real temp PowerShell profile"
-      skip()
