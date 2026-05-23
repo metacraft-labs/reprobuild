@@ -1,0 +1,95 @@
+<Configuration>
+  <!--
+    M69 system-scope destructive-gate Sandbox harness.
+
+    Runs the REAL-MUTATION halves of two M69 platform-e2e gates inside
+    a disposable Windows Sandbox so they NEVER touch the real host:
+
+      * e2e_windows_optional_feature_and_capability
+        (`REPRO_M69_FEATURE_VM=1`):
+          - reboot-free Optional-Feature lifecycle (enable -> observe
+            Enabled -> drift -> rollback-disable) on `TelnetClient`
+            (or the next reboot-free candidate the gate selects)
+          - reboot-gated `RestartNeeded`-reporting contract via
+            `VirtualMachinePlatform` / WSL
+          - OpenSSH-server capability install + sshd service config
+
+      * e2e_windows_vs_installer (`REPRO_M69_VSINSTALLER_VM=1`):
+          - real VS Build Tools install via the VS bootstrapper
+          - vswhere confirmation that the workloads landed
+
+    Everything mapped in is READ-ONLY except the OUTPUT folder. The
+    in-sandbox provision script copies the read-only inputs to
+    writable sandbox paths before touching them.
+
+    Modeled on `tools/sandbox-migration/migration.wsb` (the M70
+    dotfiles-migration harness — a known-good Sandbox driver pattern).
+    Key differences: a VS-Build-Tools install needs at least 8 GB RAM
+    and networking enabled (the bootstrapper downloads the
+    multi-gigabyte workload payloads from Microsoft); no Scoop /
+    dotfiles plumbing — this harness is system-scope only.
+  -->
+  <VGpu>Disable</VGpu>
+  <Networking>Enable</Networking>
+  <MemoryInMB>8192</MemoryInMB>
+  <MappedFolders>
+    <!-- The built `repro` binary directory (repro.exe + sqlite3_64.dll
+         + repro-launcher.exe). Read-only; the in-sandbox script copies
+         them to a writable path the gate's REPRO_TEST_BIN_DIR points at. -->
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\build\bin</HostFolder>
+      <SandboxFolder>C:\harness\repro-bin</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- The built gate test binaries. Read-only; the in-sandbox script
+         copies them to a writable path before running. -->
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\build\test-bin</HostFolder>
+      <SandboxFolder>C:\harness\test-bin</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- The Visual C++ 2015-2022 x64 runtime DLLs, copied from the HOST's
+         own C:\Windows\System32 by run-sandbox-m69-system.ps1 before
+         launch. Read-only; provision-and-run-m69.ps1 copies them into
+         the sandbox's C:\Windows\System32 (sandbox user is admin). This
+         is the same M70/M76 fidelity pattern: a pristine Windows
+         Sandbox image lacks the MSVC runtime, but every real developer
+         host has it system-wide, so this faithfully replicates the
+         host's existing runtime. -->
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\tools\sandbox-m69-system\vcruntime</HostFolder>
+      <SandboxFolder>C:\harness\vcruntime</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- The in-sandbox provision+run script. -->
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\tools\sandbox-m69-system</HostFolder>
+      <SandboxFolder>C:\harness\scripts</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+
+    <!-- OUTPUT directory - the ONLY read-write mapped folder. All
+         per-gate captured output + the DONE sentinel land here for the
+         host runner to read. -->
+    <MappedFolder>
+      <HostFolder>D:\metacraft\sandbox-m69-system-out</HostFolder>
+      <SandboxFolder>C:\harness\out</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+
+  <LogonCommand>
+    <!--
+      Same shape as the M70 harness: route through `cmd /c` so the
+      heartbeat file lands BEFORE PowerShell starts, then copy the
+      provision script to a writable LOCAL path, then run it with
+      stdout+stderr redirected to a host-visible log. This lets the
+      host runner distinguish "LogonCommand never fired" from "script
+      failed to parse" from "script ran but wedged".
+    -->
+    <Command>cmd.exe /c "echo logon-fired %DATE% %TIME% &gt; C:\harness\out\_logon-heartbeat.txt &amp; copy /Y C:\harness\scripts\provision-and-run-m69.ps1 C:\provision-and-run-m69.ps1 &gt;&gt; C:\harness\out\_logon-heartbeat.txt 2&gt;&amp;1 &amp; powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\provision-and-run-m69.ps1 &gt; C:\harness\out\_logon-powershell.log 2&gt;&amp;1"</Command>
+  </LogonCommand>
+</Configuration>

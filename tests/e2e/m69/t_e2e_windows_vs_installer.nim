@@ -42,6 +42,17 @@ const ProjectRoot = currentSourcePath().parentDir().parentDir()
   .parentDir().parentDir()
 
 proc reproBinary(): string =
+  ## Resolve the `repro.exe` to use for broker launches. Honors the
+  ## `REPRO_TEST_BIN_DIR` override so the gate can be run inside the
+  ## M69 system-scope Sandbox harness (`tools/sandbox-m69-system/`)
+  ## where the built binaries are mapped into a fixed sandbox path,
+  ## not at the host-side `ProjectRoot / build / bin /`.
+  let override = getEnv("REPRO_TEST_BIN_DIR")
+  if override.len > 0:
+    let c = override / "repro.exe"
+    doAssert fileExists(c), "repro binary not found at " & c &
+      " (REPRO_TEST_BIN_DIR override)"
+    return c
   let candidate = ProjectRoot / "build" / "bin" / "repro.exe"
   doAssert fileExists(candidate), "repro binary not found at " & candidate
   candidate

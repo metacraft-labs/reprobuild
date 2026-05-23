@@ -1,0 +1,5 @@
+# VC++ runtime DLLs are copied from the host's System32 by
+# run-sandbox-m69-system.ps1 at run time (Microsoft redistributable
+# binaries; regenerated each run). Same precedent as
+# tools/sandbox-migration/.gitignore.
+vcruntime/
