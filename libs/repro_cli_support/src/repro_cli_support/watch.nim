@@ -107,10 +107,16 @@ when defined(macosx):
         if seen.contains(path):
           continue
         seen.incl(path)
-        if not fileExists(extendedPath(path)) and not dirExists(extendedPath(path)):
-          continue
+        let watchPath =
+          if fileExists(extendedPath(path)) or dirExists(extendedPath(path)):
+            path
+          else:
+            let parent = parentDir(path)
+            if parent.len == 0 or not dirExists(extendedPath(parent)):
+              continue
+            parent
         result.watchedPaths.add(path)
-        let fd = cOpen(path.cstring, OEvOnly)
+        let fd = cOpen(watchPath.cstring, OEvOnly)
         if fd < 0:
           continue
         var event = Kevent(
@@ -171,6 +177,164 @@ when defined(macosx):
       if n <= 0:
         break
       result.inc
+
+elif defined(linux):
+  import std/posix
+  import posix/inotify
+
+  const
+    InotifyBufferBytes = 64 * 1024
+    InotifyMask = IN_MODIFY or IN_ATTRIB or IN_CLOSE_WRITE or IN_MOVED_FROM or
+      IN_MOVED_TO or IN_CREATE or IN_DELETE or IN_DELETE_SELF or
+      IN_MOVE_SELF or IN_Q_OVERFLOW
+
+  type
+    WatchEntry = object
+      wd: cint
+      reportPath: string
+      matchBasename: string
+
+    FilesystemWatcher* = ref object
+      fd: cint
+      entriesByWd: Table[cint, WatchEntry]
+      pending: Deque[FilesystemWatchEvent]
+
+  proc eventDetail(mask: uint32): string =
+    var parts: seq[string] = @[]
+    if (mask and IN_Q_OVERFLOW) != 0: parts.add("overflow")
+    if (mask and IN_MODIFY) != 0: parts.add("write")
+    if (mask and IN_CLOSE_WRITE) != 0: parts.add("close-write")
+    if (mask and IN_ATTRIB) != 0: parts.add("attrib")
+    if (mask and IN_CREATE) != 0: parts.add("create")
+    if (mask and IN_DELETE) != 0: parts.add("delete")
+    if (mask and IN_MOVED_FROM) != 0 or (mask and IN_MOVED_TO) != 0:
+      parts.add("rename")
+    if (mask and IN_DELETE_SELF) != 0: parts.add("delete-self")
+    if (mask and IN_MOVE_SELF) != 0: parts.add("move-self")
+    if parts.len == 0:
+      "unknown"
+    else:
+      parts.join(",")
+
+  proc closeFilesystemWatcher*(watcher: FilesystemWatcher) =
+    if watcher.isNil:
+      return
+    if watcher.fd >= 0:
+      for wd in watcher.entriesByWd.keys:
+        discard inotify_rm_watch(watcher.fd, wd)
+      discard close(watcher.fd)
+      watcher.fd = -1
+    watcher.entriesByWd.clear()
+    watcher.pending.clear()
+
+  proc addWatch(watcher: FilesystemWatcher; path, reportPath,
+                matchBasename: string) =
+    let wd = inotify_add_watch(watcher.fd, path.cstring, InotifyMask)
+    if wd < 0:
+      return
+    watcher.entriesByWd[wd] = WatchEntry(
+      wd: wd,
+      reportPath: reportPath,
+      matchBasename: matchBasename)
+
+  proc openFilesystemWatcher*(paths: openArray[string]): FilesystemWatcher =
+    result = FilesystemWatcher(
+      fd: inotify_init1(O_NONBLOCK),
+      pending: initDeque[FilesystemWatchEvent]())
+    if result.fd < 0:
+      raise newException(OSError, "inotify_init failed")
+    var seen = initHashSet[string]()
+    try:
+      for rawPath in paths:
+        if rawPath.len == 0:
+          continue
+        let path = rawPath.normalizedPath
+        if seen.contains(path):
+          continue
+        seen.incl(path)
+        if dirExists(extendedPath(path)):
+          result.addWatch(path, path, "")
+        elif fileExists(extendedPath(path)):
+          result.addWatch(path, path, extractFilename(path))
+        else:
+          var dirPath = parentDir(path)
+          if dirPath.len == 0:
+            dirPath = "."
+          if dirExists(extendedPath(dirPath)):
+            result.addWatch(dirPath, path, extractFilename(path))
+          else:
+            continue
+      if result.entriesByWd.len == 0:
+        raise newException(ValueError,
+          "no existing filesystem paths could be watched")
+    except CatchableError:
+      result.closeFilesystemWatcher()
+      raise
+
+  proc watchedPathCount*(watcher: FilesystemWatcher): int =
+    if watcher.isNil:
+      0
+    else:
+      watcher.entriesByWd.len
+
+  proc queueEvents(watcher: FilesystemWatcher; bytesRead: int;
+                   buffer: pointer) =
+    for event in inotify_events(buffer, bytesRead):
+      let wd = cint(event.wd)
+      let entry = watcher.entriesByWd.getOrDefault(wd)
+      var eventName = ""
+      if event.len > 0:
+        eventName = $cast[cstring](addr event.name[0])
+      let emit =
+        if entry.matchBasename.len == 0:
+          true
+        elif eventName.len == 0:
+          true
+        else:
+          extractFilename(eventName) == entry.matchBasename
+      if not emit:
+        continue
+      let reportPath =
+        if entry.matchBasename.len > 0:
+          entry.reportPath
+        elif eventName.len > 0:
+          entry.reportPath / eventName
+        else:
+          entry.reportPath
+      watcher.pending.addLast(FilesystemWatchEvent(
+        path: reportPath,
+        detail: eventDetail(event.mask)))
+
+  proc readAvailable(watcher: FilesystemWatcher; blocking: bool) =
+    var buffer = alloc(InotifyBufferBytes)
+    defer: dealloc(buffer)
+    while true:
+      let bytesRead = read(watcher.fd, buffer, InotifyBufferBytes)
+      if bytesRead > 0:
+        watcher.queueEvents(bytesRead, buffer)
+      elif bytesRead == 0:
+        if blocking:
+          continue
+        break
+      else:
+        if blocking:
+          sleep(20)
+          continue
+        break
+      if blocking or watcher.pending.len > 0:
+        break
+
+  proc waitForEvent*(watcher: FilesystemWatcher): FilesystemWatchEvent =
+    while watcher.pending.len == 0:
+      watcher.readAvailable(blocking = true)
+    watcher.pending.popFirst()
+
+  proc drainDebouncedEvents*(watcher: FilesystemWatcher; debounceMs: int): int =
+    if debounceMs > 0:
+      sleep(debounceMs)
+    watcher.readAvailable(blocking = false)
+    result = watcher.pending.len
+    watcher.pending.clear()
 
 elif defined(windows):
   # Windows: backend uses ReadDirectoryChangesW. kqueue can watch arbitrary
@@ -374,7 +538,12 @@ elif defined(windows):
             dirPath = "."
           matchBasename = extractFilename(path)
         else:
-          continue
+          dirPath = parentDir(path)
+          if dirPath.len == 0:
+            dirPath = "."
+          if not dirExists(extendedPath(dirPath)):
+            continue
+          matchBasename = extractFilename(path)
         if result.entries.len >= MaxWatchHandles:
           raise newException(OSError,
             "repro watch on Windows supports at most " & $MaxWatchHandles &

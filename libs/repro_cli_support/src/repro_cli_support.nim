@@ -19,6 +19,7 @@ import repro_hcr_agent
 import repro_hcr_linkgraph
 import repro_elevation
 import repro_cli_support/watch
+import repro_cli_support/dev_session
 import repro_cli_support/home
 import repro_cli_support/infra
 import repro_home_resources/drivers/managed_block
@@ -44,6 +45,12 @@ proc renderUsage*(programName: string): string =
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
       " shell [selector] [--activity=name] [--print-env=posix|fish|powershell|json] [--dev-env-stats=PATH]\n       " &
+          programName &
+      " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT]\n       " &
+          programName &
+      " down [selector] [--activity=name] [--force]\n       " &
+          programName &
+      " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N]\n       " &
           programName &
       " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [path]\n       " &
           programName &
@@ -3127,6 +3134,204 @@ proc runReproShellCommand(args: openArray[string];
   spawnActivatedShell(artifact, edge.artifactPath, shellPath,
     parsed.selection.projectRoot)
 
+type
+  ParsedDevSessionCommand = object
+    selection: DevEnvCliSelection
+    foreground: bool
+    httpBind: string
+    debounceMs: int
+    force: bool
+
+proc parseDevSessionArgs(args: openArray[string]; commandName: string):
+    ParsedDevSessionCommand =
+  var selection = DevEnvCliSelection()
+  result.httpBind = "127.0.0.1:0"
+  result.debounceMs = 250
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--activity" or arg.startsWith("--activity="):
+      selection.activity.appendActivitySelection(valueFromFlag(args, i,
+        "--activity"))
+    elif arg == "--work-root" or arg.startsWith("--work-root="):
+      selection.workRoot = valueFromFlag(args, i, "--work-root")
+    elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
+      selection.lockSliceId = valueFromFlag(args, i, "--lock-slice")
+    elif arg == "--foreground":
+      result.foreground = true
+    elif arg == "--force":
+      result.force = true
+    elif arg == "--http" or arg.startsWith("--http="):
+      result.httpBind = valueFromFlag(args, i, "--http")
+    elif arg == "--debounce-ms" or arg.startsWith("--debounce-ms="):
+      result.debounceMs = parseInt(valueFromFlag(args, i, "--debounce-ms"))
+      if result.debounceMs < 0:
+        raise newException(ValueError, "--debounce-ms must be non-negative")
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported " & commandName & " flag: " & arg)
+    elif selection.selector.len == 0:
+      selection.selector = arg
+    else:
+      raise newException(ValueError,
+        "unexpected " & commandName & " argument: " & arg)
+    inc i
+  selection.resolveDevEnvSelection()
+  result.selection = selection
+
+proc supervisorConfig(parsed: ParsedDevSessionCommand;
+                      edge: DevEnvEdgeResult;
+                      publicCliPath: string;
+                      mode: DevSessionMode): DevSessionSupervisorConfig =
+  DevSessionSupervisorConfig(
+    mode: mode,
+    foreground: parsed.foreground,
+    projectRoot: parsed.selection.projectRoot,
+    modulePath: parsed.selection.modulePath,
+    outDir: parsed.selection.outDir,
+    workDir: reprobuildLibraryWorkDir(),
+    publicCliPath: publicCliPath,
+    monitorCliPath: publicDevEnvFsSnoop(publicCliPath),
+    monitorShimLibPath: getEnv("REPRO_MONITOR_SHIM_LIB"),
+    artifactPath: edge.artifactPath,
+    activity: parsed.selection.activity,
+    lockSliceId: parsed.selection.lockSliceId,
+    developOverridesPath: parsed.selection.developOverridesPath,
+    httpBind: parsed.httpBind,
+    debounceMs: parsed.debounceMs)
+
+proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
+  result = @[
+    "__repro-dev-session-supervisor",
+    "--mode", config.mode.modeName,
+    "--project-root", config.projectRoot,
+    "--module", config.modulePath,
+    "--out-dir", config.outDir,
+    "--work-dir", config.workDir,
+    "--artifact", config.artifactPath,
+    "--activity", config.activity,
+    "--lock-slice", config.lockSliceId,
+    "--develop-overrides", config.developOverridesPath,
+    "--monitor-cli", config.monitorCliPath,
+    "--monitor-shim", config.monitorShimLibPath,
+    "--http", config.httpBind,
+    "--debounce-ms", $config.debounceMs
+  ]
+  if config.foreground:
+    result.add("--foreground")
+
+proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
+  createDir(extendedPath(config.outDir.sessionDir))
+  let logPath = config.outDir.sessionDir / "supervisor.log"
+  when defined(windows):
+    discard startProcess(config.publicCliPath,
+      args = config.supervisorCliArgs(),
+      workingDir = config.projectRoot,
+      options = {poUsePath, poDaemon, poParentStreams})
+  else:
+    var fdsToClose: seq[string] = @[]
+    for fd in 3 .. 64:
+      fdsToClose.add($fd)
+    let closeInheritedFds = "for fd in " & fdsToClose.join(" ") &
+      "; do eval \"exec $fd>&-\"; done; "
+    let command = "(cd " & q(config.projectRoot) & " && " &
+      closeInheritedFds &
+      "exec " &
+      shellCommand(@[config.publicCliPath] & config.supervisorCliArgs()) &
+      ") </dev/null >> " & q(logPath) & " 2>&1 &"
+    let exitCode = execShellCmd(command)
+    if exitCode != 0:
+      raise newException(OSError,
+        "failed to launch dev session supervisor: " & command)
+
+proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
+                       mode: DevSessionMode): int =
+  let commandName = if mode == dsmDev: "dev" else: "up"
+  var parsed = parseDevSessionArgs(args, commandName)
+  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+  let config = supervisorConfig(parsed, edge, publicCliPath, mode)
+  if parsed.foreground:
+    return runDevSessionSupervisor(config)
+  config.startBackgroundSupervisor()
+  let status = waitForDevSessionReady(config)
+  echo "repro " & commandName & ": session " &
+    status["sessionId"].getStr() & " " & status["status"].getStr() &
+    " " & status["httpBind"].getStr()
+  0
+
+proc runDownCommand(args: openArray[string]): int =
+  let parsed = parseDevSessionArgs(args, "down")
+  let metadataPath = parsed.selection.outDir.sessionMetadataPath()
+  if not fileExists(extendedPath(metadataPath)):
+    raise newException(IOError,
+      "no authoritative Reprobuild dev session metadata at " & metadataPath)
+  let metadata = parseFile(extendedPath(metadataPath))
+  let httpBindValue = metadata{"httpBind"}.getStr()
+  if httpBindValue.len == 0:
+    raise newException(ValueError,
+      "dev session metadata is missing httpBind: " & metadataPath)
+  try:
+    let response = httpRequest(httpBindValue, "/session/stop",
+      httpMethod = "POST")
+    if response.status < 200 or response.status >= 300:
+      raise newException(IOError,
+        "session stop request failed with HTTP " & $response.status &
+          ": " & response.body)
+  except CatchableError as err:
+    if not parsed.force:
+      raise
+    writeFile(extendedPath(parsed.selection.outDir.sessionDir /
+      StopRequestFile), "{\"source\":\"force-file\"}\n")
+    stderr.writeLine("repro down: HTTP stop failed; wrote stop request file: " &
+      err.msg)
+  var waited = 0
+  while waited <= 10000:
+    if fileExists(extendedPath(metadataPath)):
+      let current = parseFile(extendedPath(metadataPath))
+      if current{"status"}.getStr() == "down":
+        echo "repro down: session " & current{"sessionId"}.getStr() &
+          " down"
+        return 0
+    sleep(100)
+    waited.inc(100)
+  raise newException(IOError,
+    "timed out waiting for dev session to stop: " & metadataPath)
+
+proc runDevSessionSupervisorHelper(args: openArray[string];
+                                   publicCliPath: string): int =
+  let modeText = valueAfterFlag(args, "--mode")
+  let mode =
+    case modeText
+    of "dev": dsmDev
+    of "up", "": dsmUp
+    else:
+      raise newException(ValueError, "unsupported dev session mode: " & modeText)
+  let debounceText = valueAfterFlag(args, "--debounce-ms")
+  let config = DevSessionSupervisorConfig(
+    mode: mode,
+    foreground: args.find("--foreground") >= 0,
+    projectRoot: valueAfterFlag(args, "--project-root"),
+    modulePath: valueAfterFlag(args, "--module"),
+    outDir: valueAfterFlag(args, "--out-dir"),
+    workDir: valueAfterFlag(args, "--work-dir"),
+    publicCliPath: publicCliPath,
+    monitorCliPath: valueAfterFlag(args, "--monitor-cli"),
+    monitorShimLibPath: valueAfterFlag(args, "--monitor-shim"),
+    artifactPath: valueAfterFlag(args, "--artifact"),
+    activity: valueAfterFlag(args, "--activity"),
+    lockSliceId: valueAfterFlag(args, "--lock-slice"),
+    developOverridesPath: valueAfterFlag(args, "--develop-overrides"),
+    httpBind: valueAfterFlag(args, "--http"),
+    debounceMs: if debounceText.len > 0: parseInt(debounceText) else: 250)
+  runDevSessionSupervisor(config)
+
+proc runDevSessionHttpHelper(args: openArray[string]): int =
+  let portText = valueAfterFlag(args, "--port")
+  runDevSessionHttpServer(DevSessionHttpConfig(
+    sessionDir: valueAfterFlag(args, "--session-dir"),
+    host: valueAfterFlag(args, "--host"),
+    port: if portText.len > 0: parseInt(portText) else: 0))
+
 const
   DirenvManagedBlockId = "repro-dev-env-direnv"
   DirenvActivationGuard = "REPRO_DIRENV_ACTIVATING"
@@ -5427,6 +5632,28 @@ proc runThinApp*(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro native shell activate: error: " & err.msg)
       return 1
+  if args.len > 0 and args[0] == "__repro-dev-session-supervisor":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    try:
+      return runDevSessionSupervisorHelper(helperArgs, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro dev-session supervisor: error: " & err.msg)
+      return 1
+  if args.len > 0 and args[0] == "__repro-dev-session-http":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    try:
+      return runDevSessionHttpHelper(helperArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro dev-session http: error: " & err.msg)
+      return 1
   if args.len > 0 and args[0] == "__repro-cmake-regenerate":
     let helperArgs =
       if args.len > 1:
@@ -5489,6 +5716,39 @@ proc runThinApp*(programName: string): int =
       return runReproShellCommand(shellArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro shell: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "up":
+    try:
+      let upArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runUpOrDevCommand(upArgs, publicCliPath, dsmUp)
+    except CatchableError as err:
+      stderr.writeLine("repro up: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "down":
+    try:
+      let downArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runDownCommand(downArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro down: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "dev":
+    try:
+      let devArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runUpOrDevCommand(devArgs, publicCliPath, dsmDev)
+    except CatchableError as err:
+      stderr.writeLine("repro dev: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "hooks":
     try:
