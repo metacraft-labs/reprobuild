@@ -37,6 +37,7 @@ type
   DevEnvEdgeResult* = object
     artifactPath*: string
     shellFragmentPath*: string
+    shellNavigatorStatsPath*: string
     providerArtifactPath*: string
     providerBinaryPath*: string
     providerArtifactId*: string
@@ -184,20 +185,21 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
       completeness: decComplete))
 
 proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
-                       shellFragmentPath: string): BuildAction =
+                       shellFragmentPath, navigatorStatsPath: string): BuildAction =
   let weak = fingerprintText([
-    "reprobuild.dev-env.shell-render.v1",
+    "reprobuild.dev-env.shell-render.v2",
     artifactPath
   ])
   action("__repro_dev_env_shell_render", @[
     config.publicCliPath,
     "__repro-render-dev-env-shell",
     "--artifact", artifactPath,
-    "--out", shellFragmentPath
+    "--out", shellFragmentPath,
+    "--navigator-stats", navigatorStatsPath
   ],
     cwd = config.workDir,
     inputs = @[artifactPath],
-    outputs = @[shellFragmentPath],
+    outputs = @[shellFragmentPath, navigatorStatsPath],
     commandStatsId = "repro dev-env shell render edge",
     cacheable = true,
     weakFingerprint = weak,
@@ -230,6 +232,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   result.providerArtifactPath = active.outDir / "provider-compile.rbsz"
   result.artifactPath = active.outDir / "dev-env.rbde"
   result.shellFragmentPath = active.outDir / "dev-env.env"
+  result.shellNavigatorStatsPath = active.outDir / "dev-env.env.navigator.json"
 
   var provider: ProviderCompileArtifact
   let cachedProvider = readFreshProviderCompileArtifact(
@@ -273,7 +276,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     result.providerArtifactPath, result.providerArtifactId, result.artifactPath)]
   if active.renderShell:
     actions.add(active.shellRenderAction(result.artifactPath,
-      result.shellFragmentPath))
+      result.shellFragmentPath, result.shellNavigatorStatsPath))
   var devEnvConfig = active.engineConfig()
   result.devEnvResult = runBuild(graph(actions), devEnvConfig)
   result.introspectionAction = result.devEnvResult.actionById(
