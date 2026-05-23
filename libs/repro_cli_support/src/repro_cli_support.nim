@@ -45,7 +45,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " shell [selector] [--activity=name] [--print-env=posix|fish|powershell|json] [--dev-env-stats=PATH]\n       " &
           programName &
-      " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [path]\n       " &
+      " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [path]\n       " &
           programName &
       " watch [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--hcr-agent-socket=PATH --hcr-artifacts=PATH --hcr-metadata=PATH]\n       " &
           programName &
@@ -3010,6 +3010,8 @@ proc runReproShellCommand(args: openArray[string];
 const
   DirenvManagedBlockId = "repro-dev-env-direnv"
   DirenvActivationGuard = "REPRO_DIRENV_ACTIVATING"
+  NativeShellManagedBlockPrefix = "repro-dev-env-native-"
+  NativeShellActivationGuard = "REPRO_NATIVE_SHELL_HOOK_RUNNING"
   VcsDispatcherMarker = "reprobuild hook dispatcher"
   VcsHookNames = ["pre-push", "post-commit"]
 
@@ -3019,11 +3021,322 @@ type
     hakReinstall
     hakUninstall
 
+  NativeShellKind = enum
+    nskBash
+    nskZsh
+    nskFish
+    nskPowerShell
+
   ParsedHooksCommand = object
     action: HookActionKind
     targetPath: string
     shellDirenv: bool
     vcs: bool
+    nativeShells: seq[NativeShellKind]
+
+  NativeShellActivationRequest = object
+    cwd: string
+    shell: NativeShellKind
+    previousArtifact: string
+    previousProjectRoot: string
+    statsPath: string
+
+proc nativeShellName(shell: NativeShellKind): string =
+  case shell
+  of nskBash: "bash"
+  of nskZsh: "zsh"
+  of nskFish: "fish"
+  of nskPowerShell: "powershell"
+
+proc parseNativeShell(value: string): NativeShellKind =
+  case value.normalize()
+  of "bash":
+    nskBash
+  of "zsh":
+    nskZsh
+  of "fish":
+    nskFish
+  of "powershell", "pwsh", "ps1":
+    nskPowerShell
+  else:
+    raise newException(ValueError,
+      "unsupported shell for repro hooks --shell: " & value)
+
+proc nativeShellFormat(shell: NativeShellKind): DevEnvPrintFormat =
+  case shell
+  of nskBash, nskZsh:
+    depPosix
+  of nskFish:
+    depFish
+  of nskPowerShell:
+    depPowerShell
+
+proc nativeShellBlockId(shell: NativeShellKind): string =
+  NativeShellManagedBlockPrefix & shell.nativeShellName()
+
+proc nativeShellRcPath(shell: NativeShellKind; homeDir = getEnv("HOME")): string =
+  case shell
+  of nskBash:
+    homeDir / ".bashrc"
+  of nskZsh:
+    homeDir / ".zshrc"
+  of nskFish:
+    let xdg = getEnv("XDG_CONFIG_HOME")
+    if xdg.len > 0:
+      xdg / "fish" / "config.fish"
+    else:
+      homeDir / ".config" / "fish" / "config.fish"
+  of nskPowerShell:
+    when defined(windows):
+      let profileHome = getEnv("USERPROFILE", homeDir)
+      profileHome / "Documents" / "PowerShell" /
+        "Microsoft.PowerShell_profile.ps1"
+    else:
+      homeDir / ".config" / "powershell" /
+        "Microsoft.PowerShell_profile.ps1"
+
+proc containsNixStoreSegment(path: string): bool =
+  let normalized = path.replace('\\', '/')
+  normalized.startsWith("/nix/store/") or normalized.contains("/nix/store/")
+
+proc absoluteSymlinkTarget(linkPath: string): string =
+  let rawTarget = expandSymlink(extendedPath(linkPath))
+  if rawTarget.isAbsolute:
+    os.normalizedPath(rawTarget)
+  else:
+    os.normalizedPath(parentDir(linkPath) / rawTarget)
+
+proc rcFileWritePath(rcPath: string): string =
+  ## Return the file to edit for a shell rc managed block. Refuses Nix-managed
+  ## read-only symlinks instead of replacing the symlink with a regular file.
+  let expandedRc = extendedPath(rcPath)
+  if symlinkExists(expandedRc):
+    let target = absoluteSymlinkTarget(rcPath)
+    if target.containsNixStoreSegment():
+      raise newException(ValueError,
+        "refusing to write shell rc file " & rcPath &
+          ": it is a Nix-managed symlink into the Nix store (" & target &
+          "). Edit the source file in your dotfiles/home-manager " &
+          "configuration and rebuild with home-switch.")
+    if fileExists(extendedPath(target)):
+      let permissions = getFilePermissions(extendedPath(target))
+      if fpUserWrite notin permissions:
+        raise newException(ValueError,
+          "refusing to write shell rc file " & rcPath &
+            ": it points at a read-only file (" & target &
+            "). Edit the owning source file instead.")
+    return target
+  if expandedRc.containsNixStoreSegment():
+    raise newException(ValueError,
+      "refusing to write shell rc file in the Nix store: " & rcPath &
+        ". Edit the source file in your dotfiles/home-manager configuration " &
+        "and rebuild with home-switch.")
+  if fileExists(expandedRc):
+    let permissions = getFilePermissions(expandedRc)
+    if fpUserWrite notin permissions:
+      raise newException(ValueError,
+        "refusing to write read-only shell rc file " & rcPath &
+          ". Edit the owning source file instead.")
+  rcPath
+
+proc posixLiteral(value: string): string =
+  result = "'"
+  for ch in value:
+    if ch == '\'':
+      result.add("'\\''")
+    else:
+      result.add(ch)
+  result.add("'")
+
+proc fishLiteral(value: string): string =
+  result = "'"
+  for ch in value:
+    case ch
+    of '\'':
+      result.add("\\'")
+    of '\\':
+      result.add("\\\\")
+    else:
+      result.add(ch)
+  result.add("'")
+
+proc powerShellLiteral(value: string): string =
+  "'" & value.replace("'", "''") & "'"
+
+const NativeMetadataNames = [
+  "REPRO_DEV_ENV_ARTIFACT",
+  "REPRO_DEV_ENV_PROJECT_ROOT",
+  "REPRO_DEV_ENV_SELECTED_ACTIVITIES",
+  "REPRO_DEV_ENV_TASKS",
+  "REPRO_DEV_ENV_SERVICES"
+]
+
+proc sortedUnique(values: seq[string]): seq[string] =
+  var seen: HashSet[string]
+  for value in values:
+    if value.len > 0 and value notin seen:
+      seen.incl(value)
+      result.add(value)
+  result.sort()
+
+proc nativeUnsetNames(artifact: DevEnvArtifact): seq[string] =
+  var names: seq[string] = @[]
+  for op in artifact.shellOps:
+    case op.kind
+    of deskSetEnv, deskSetPathList, deskUnsetEnv:
+      names.add(op.name)
+    of deskPrependPath, deskAppendPath, deskSetWorkingDirectory:
+      discard
+  for name in NativeMetadataNames:
+    names.add(name)
+  names.sortedUnique()
+
+proc nativePathRemovals(artifact: DevEnvArtifact):
+    seq[tuple[name, value, separator: string]] =
+  var seen: HashSet[string]
+  for op in artifact.shellOps:
+    case op.kind
+    of deskPrependPath, deskAppendPath:
+      let sep = if op.separator.len > 0: op.separator else: $PathSep
+      let key = op.name & "\0" & op.value & "\0" & sep
+      if key notin seen:
+        seen.incl(key)
+        result.add((name: op.name, value: op.value, separator: sep))
+    else:
+      discard
+
+proc renderPosixDevEnvUnload(artifact: DevEnvArtifact): string =
+  result = "# Reprobuild native shell unload\n"
+  let removals = nativePathRemovals(artifact)
+  if removals.len > 0:
+    result.add("__repro_native_remove_path() {\n")
+    result.add("  __repro_native_var=$1\n")
+    result.add("  __repro_native_remove=$2\n")
+    result.add("  __repro_native_sep=$3\n")
+    result.add("  eval \"__repro_native_value=\\${$__repro_native_var-}\"\n")
+    result.add("  __repro_native_out=\n")
+    result.add("  __repro_native_old_ifs=$IFS\n")
+    result.add("  IFS=$__repro_native_sep\n")
+    result.add("  for __repro_native_part in $__repro_native_value; do\n")
+    result.add("    if [ \"$__repro_native_part\" != \"$__repro_native_remove\" ]; then\n")
+    result.add("      if [ -n \"$__repro_native_out\" ]; then\n")
+    result.add("        __repro_native_out=$__repro_native_out$__repro_native_sep$__repro_native_part\n")
+    result.add("      else\n")
+    result.add("        __repro_native_out=$__repro_native_part\n")
+    result.add("      fi\n")
+    result.add("    fi\n")
+    result.add("  done\n")
+    result.add("  IFS=$__repro_native_old_ifs\n")
+    result.add("  export \"$__repro_native_var=$__repro_native_out\"\n")
+    result.add("}\n")
+    for removal in removals:
+      result.add("__repro_native_remove_path " & posixLiteral(removal.name) &
+        " " & posixLiteral(removal.value) & " " &
+        posixLiteral(removal.separator) & "\n")
+    result.add("unset -f __repro_native_remove_path 2>/dev/null || true\n")
+    result.add("unset __repro_native_var __repro_native_remove __repro_native_sep __repro_native_value __repro_native_out __repro_native_old_ifs __repro_native_part\n")
+  let names = nativeUnsetNames(artifact)
+  if names.len > 0:
+    result.add("unset " & names.join(" ") & "\n")
+
+proc renderFishDevEnvUnload(artifact: DevEnvArtifact): string =
+  result = "# Reprobuild native shell unload\n"
+  let removals = nativePathRemovals(artifact)
+  if removals.len > 0:
+    result.add("function __repro_native_remove_path\n")
+    result.add("  set -l __repro_native_var $argv[1]\n")
+    result.add("  set -l __repro_native_remove $argv[2]\n")
+    result.add("  set -l __repro_native_kept\n")
+    result.add("  for __repro_native_part in $$__repro_native_var\n")
+    result.add("    if test \"$__repro_native_part\" != \"$__repro_native_remove\"\n")
+    result.add("      set __repro_native_kept $__repro_native_kept \"$__repro_native_part\"\n")
+    result.add("    end\n")
+    result.add("  end\n")
+    result.add("  if test (count $__repro_native_kept) -gt 0\n")
+    result.add("    set -gx $__repro_native_var $__repro_native_kept\n")
+    result.add("  else\n")
+    result.add("    set -e $__repro_native_var\n")
+    result.add("  end\n")
+    result.add("end\n")
+    for removal in removals:
+      result.add("__repro_native_remove_path " & fishLiteral(removal.name) &
+        " " & fishLiteral(removal.value) & "\n")
+    result.add("functions -e __repro_native_remove_path\n")
+  for name in nativeUnsetNames(artifact):
+    result.add("set -e " & name & "\n")
+
+proc renderPowerShellDevEnvUnload(artifact: DevEnvArtifact): string =
+  result = "# Reprobuild native shell unload\n"
+  let removals = nativePathRemovals(artifact)
+  if removals.len > 0:
+    result.add("function __ReproNativeRemovePath($Name, $Value, $Sep) {\n")
+    result.add("  $current = [Environment]::GetEnvironmentVariable($Name, 'Process')\n")
+    result.add("  if ($null -eq $current) { return }\n")
+    result.add("  $kept = @()\n")
+    result.add("  foreach ($part in $current -split [regex]::Escape($Sep)) {\n")
+    result.add("    if ($part -ne $Value) { $kept += $part }\n")
+    result.add("  }\n")
+    result.add("  if ($kept.Count -gt 0) { Set-Item -Path \"Env:$Name\" -Value ($kept -join $Sep) }\n")
+    result.add("  else { Remove-Item -Path \"Env:$Name\" -ErrorAction SilentlyContinue }\n")
+    result.add("}\n")
+    for removal in removals:
+      result.add("__ReproNativeRemovePath " &
+        powerShellLiteral(removal.name) & " " &
+        powerShellLiteral(removal.value) & " " &
+        powerShellLiteral(removal.separator) & "\n")
+    result.add("Remove-Item Function:__ReproNativeRemovePath -ErrorAction SilentlyContinue\n")
+  for name in nativeUnsetNames(artifact):
+    result.add("Remove-Item Env:" & name & " -ErrorAction SilentlyContinue\n")
+
+proc renderDevEnvUnload(artifact: DevEnvArtifact;
+                        format: DevEnvPrintFormat): string =
+  case format
+  of depPosix:
+    renderPosixDevEnvUnload(artifact)
+  of depFish:
+    renderFishDevEnvUnload(artifact)
+  of depPowerShell:
+    renderPowerShellDevEnvUnload(artifact)
+  of depJson:
+    raise newException(ValueError,
+      "json is not a native shell activation format")
+
+proc renderNativeShellTransition(previousArtifactPath: string;
+                                 nextArtifact: Option[DevEnvArtifact];
+                                 nextArtifactPath: string;
+                                 format: DevEnvPrintFormat): string =
+  if previousArtifactPath.len > 0 and
+      fileExists(extendedPath(previousArtifactPath)):
+    result.add(renderDevEnvUnload(readDevEnvArtifact(previousArtifactPath),
+      format))
+  elif previousArtifactPath.len > 0:
+    for name in NativeMetadataNames:
+      case format
+      of depPosix:
+        result.add("unset " & name & "\n")
+      of depFish:
+        result.add("set -e " & name & "\n")
+      of depPowerShell:
+        result.add("Remove-Item Env:" & name &
+          " -ErrorAction SilentlyContinue\n")
+      of depJson:
+        discard
+  if nextArtifact.isSome:
+    result.add(renderDevEnvArtifact(nextArtifact.get(), nextArtifactPath,
+      format))
+
+proc findDevEnvProjectRoot(startPath: string): string =
+  var cursor = os.normalizedPath(absolutePath(startPath))
+  if fileExists(extendedPath(cursor)) and not dirExists(extendedPath(cursor)):
+    cursor = parentDir(cursor)
+  while cursor.len > 0:
+    if fileExists(extendedPath(cursor / "reprobuild.nim")):
+      return cursor
+    let parent = parentDir(cursor)
+    if parent == cursor or parent.len == 0:
+      break
+    cursor = parent
+  ""
 
 proc direnvOpenSentinel(): string =
   ResourceOpenSentinelPrefix & DirenvManagedBlockId & ResourceOpenSentinelSuffix
@@ -3137,6 +3450,132 @@ proc uninstallDirenvHook(targetPath: string) =
         envrcPath & "; refusing to edit user-owned content")
   destroyManagedBlockResource(envrcPath, DirenvManagedBlockId)
   echo "repro hooks: removed direnv .envrc block from " & envrcPath
+
+proc nativePosixHookContent(shell: NativeShellKind): string =
+  let shellName = shell.nativeShellName()
+  let shellArg = if shell == nskZsh: "zsh" else: "bash"
+  result = "# Generated by repro hooks ensure --shell " & shellName &
+    ". Do not edit this block.\n"
+  result.add("__repro_native_shell_hook() {\n")
+  result.add("  if [ -n \"${" & NativeShellActivationGuard & ":-}\" ]; then\n")
+  result.add("    return 0\n")
+  result.add("  fi\n")
+  result.add("  export " & NativeShellActivationGuard & "=1\n")
+  result.add("  local __repro_native_repro=\"${REPROBUILD_REPRO:-repro}\"\n")
+  result.add("  if ! command -v \"$__repro_native_repro\" >/dev/null 2>&1 && [ ! -x \"$__repro_native_repro\" ]; then\n")
+  result.add("    echo \"repro hooks: repro CLI not found; set REPROBUILD_REPRO or put repro on PATH\" >&2\n")
+  result.add("    unset " & NativeShellActivationGuard & "\n")
+  result.add("    return 1\n")
+  result.add("  fi\n")
+  result.add("  local __repro_native_status=0\n")
+  result.add("  local __repro_native_script\n")
+  result.add("  if [ -n \"${REPRO_NATIVE_SHELL_STATS:-}\" ]; then\n")
+  result.add("    __repro_native_script=\"$(\"$__repro_native_repro\" __repro-native-shell-activate \"$PWD\" --shell " & shellArg & " --previous-artifact \"${REPRO_DEV_ENV_ARTIFACT:-}\" --previous-project-root \"${REPRO_DEV_ENV_PROJECT_ROOT:-}\" --dev-env-stats \"$REPRO_NATIVE_SHELL_STATS\")\" || __repro_native_status=$?\n")
+  result.add("  else\n")
+  result.add("    __repro_native_script=\"$(\"$__repro_native_repro\" __repro-native-shell-activate \"$PWD\" --shell " & shellArg & " --previous-artifact \"${REPRO_DEV_ENV_ARTIFACT:-}\" --previous-project-root \"${REPRO_DEV_ENV_PROJECT_ROOT:-}\")\" || __repro_native_status=$?\n")
+  result.add("  fi\n")
+  result.add("  if [ \"$__repro_native_status\" -eq 0 ]; then\n")
+  result.add("    eval \"$__repro_native_script\"\n")
+  result.add("  else\n")
+  result.add("    printf '%s\\n' \"$__repro_native_script\" >&2\n")
+  result.add("  fi\n")
+  result.add("  unset " & NativeShellActivationGuard & "\n")
+  result.add("  unset __repro_native_repro __repro_native_script\n")
+  result.add("  return \"$__repro_native_status\"\n")
+  result.add("}\n")
+  case shell
+  of nskBash:
+    result.add("cd() { builtin cd \"$@\" || return $?; __repro_native_shell_hook; }\n")
+    result.add("pushd() { builtin pushd \"$@\" || return $?; __repro_native_shell_hook; }\n")
+    result.add("popd() { builtin popd \"$@\" || return $?; __repro_native_shell_hook; }\n")
+  of nskZsh:
+    result.add("autoload -Uz add-zsh-hook\n")
+    result.add("add-zsh-hook chpwd __repro_native_shell_hook\n")
+  else:
+    discard
+  result.add("__repro_native_shell_hook\n")
+
+proc nativeFishHookContent(): string =
+  result = "# Generated by repro hooks ensure --shell fish. Do not edit this block.\n"
+  result.add("function __repro_native_shell_hook --on-variable PWD\n")
+  result.add("  if set -q " & NativeShellActivationGuard & "\n")
+  result.add("    return 0\n")
+  result.add("  end\n")
+  result.add("  set -gx " & NativeShellActivationGuard & " 1\n")
+  result.add("  set -l __repro_native_repro \"$REPROBUILD_REPRO\"\n")
+  result.add("  if test -z \"$__repro_native_repro\"\n")
+  result.add("    set __repro_native_repro repro\n")
+  result.add("  end\n")
+  result.add("  if not test -x \"$__repro_native_repro\"; and not type -q \"$__repro_native_repro\"\n")
+  result.add("    echo \"repro hooks: repro CLI not found; set REPROBUILD_REPRO or put repro on PATH\" >&2\n")
+  result.add("    set -e " & NativeShellActivationGuard & "\n")
+  result.add("    return 1\n")
+  result.add("  end\n")
+  result.add("  set -l __repro_native_tmp (mktemp)\n")
+  result.add("  if set -q REPRO_NATIVE_SHELL_STATS\n")
+  result.add("    \"$__repro_native_repro\" __repro-native-shell-activate \"$PWD\" --shell fish --previous-artifact \"$REPRO_DEV_ENV_ARTIFACT\" --previous-project-root \"$REPRO_DEV_ENV_PROJECT_ROOT\" --dev-env-stats \"$REPRO_NATIVE_SHELL_STATS\" > \"$__repro_native_tmp\"\n")
+  result.add("  else\n")
+  result.add("    \"$__repro_native_repro\" __repro-native-shell-activate \"$PWD\" --shell fish --previous-artifact \"$REPRO_DEV_ENV_ARTIFACT\" --previous-project-root \"$REPRO_DEV_ENV_PROJECT_ROOT\" > \"$__repro_native_tmp\"\n")
+  result.add("  end\n")
+  result.add("  set -l __repro_native_status $status\n")
+  result.add("  if test $__repro_native_status -eq 0\n")
+  result.add("    source \"$__repro_native_tmp\"\n")
+  result.add("  else\n")
+  result.add("    cat \"$__repro_native_tmp\" >&2\n")
+  result.add("  end\n")
+  result.add("  rm -f \"$__repro_native_tmp\"\n")
+  result.add("  set -e " & NativeShellActivationGuard & "\n")
+  result.add("  return $__repro_native_status\n")
+  result.add("end\n")
+  result.add("__repro_native_shell_hook\n")
+
+proc nativePowerShellHookContent(): string =
+  result = "# Generated by repro hooks ensure --shell powershell. Do not edit this block.\n"
+  result.add("function Invoke-ReproNativeShellHook {\n")
+  result.add("  if ($env:" & NativeShellActivationGuard & ") { return }\n")
+  result.add("  $env:" & NativeShellActivationGuard & " = '1'\n")
+  result.add("  $reproCmd = if ($env:REPROBUILD_REPRO) { $env:REPROBUILD_REPRO } else { 'repro' }\n")
+  result.add("  $args = @('__repro-native-shell-activate', (Get-Location).Path, '--shell', 'powershell', '--previous-artifact', $env:REPRO_DEV_ENV_ARTIFACT, '--previous-project-root', $env:REPRO_DEV_ENV_PROJECT_ROOT)\n")
+  result.add("  if ($env:REPRO_NATIVE_SHELL_STATS) { $args += @('--dev-env-stats', $env:REPRO_NATIVE_SHELL_STATS) }\n")
+  result.add("  $script = & $reproCmd @args\n")
+  result.add("  if ($LASTEXITCODE -eq 0) { Invoke-Expression ($script -join \"`n\") }\n")
+  result.add("  else { [Console]::Error.WriteLine(($script -join \"`n\")) }\n")
+  result.add("  Remove-Item Env:" & NativeShellActivationGuard & " -ErrorAction SilentlyContinue\n")
+  result.add("}\n")
+  result.add("function Set-Location {\n")
+  result.add("  Microsoft.PowerShell.Management\\Set-Location @args\n")
+  result.add("  if ($?) { Invoke-ReproNativeShellHook }\n")
+  result.add("}\n")
+  result.add("Set-Alias cd Set-Location -Option AllScope\n")
+  result.add("Set-Alias chdir Set-Location -Option AllScope\n")
+  result.add("Set-Alias sl Set-Location -Option AllScope\n")
+  result.add("Invoke-ReproNativeShellHook\n")
+
+proc nativeShellHookContent(shell: NativeShellKind): string =
+  case shell
+  of nskBash, nskZsh:
+    nativePosixHookContent(shell)
+  of nskFish:
+    nativeFishHookContent()
+  of nskPowerShell:
+    nativePowerShellHookContent()
+
+proc ensureNativeShellHook(shell: NativeShellKind; reinstall = false) =
+  let rcPath = nativeShellRcPath(shell)
+  let writePath = rcFileWritePath(rcPath)
+  if reinstall:
+    destroyManagedBlockResource(writePath, nativeShellBlockId(shell))
+  discard applyManagedBlockResource(writePath, nativeShellBlockId(shell),
+    nativeShellHookContent(shell))
+  echo "repro hooks: ensured native " & shell.nativeShellName() &
+    " shell block at " & rcPath
+
+proc uninstallNativeShellHook(shell: NativeShellKind) =
+  let rcPath = nativeShellRcPath(shell)
+  let writePath = rcFileWritePath(rcPath)
+  destroyManagedBlockResource(writePath, nativeShellBlockId(shell))
+  echo "repro hooks: removed native " & shell.nativeShellName() &
+    " shell block from " & rcPath
 
 proc gitTopLevel(targetPath: string): string =
   let res = execCmdEx(shellCommand(@["git", "-C", resolveHooksTarget(targetPath),
@@ -3350,20 +3789,25 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
       raise newException(ValueError,
         "repro hooks --shell-autocomplete is not implemented yet")
     of "--shell":
-      raise newException(ValueError,
-        "repro hooks --shell is milestone M6 work and is not implemented yet")
+      result.nativeShells.add(parseNativeShell(valueFromFlag(args, i,
+        "--shell")))
     else:
       if arg.startsWith("--shell="):
-        raise newException(ValueError,
-          "repro hooks --shell is milestone M6 work and is not implemented yet")
-      if arg.startsWith("-"):
+        var value = arg["--shell=".len .. ^1]
+        if value.len == 0:
+          raise newException(ValueError,
+            "missing value for --shell")
+        result.nativeShells.add(parseNativeShell(value))
+      elif arg.startsWith("-"):
         raise newException(ValueError, "unsupported hooks flag: " & arg)
-      if result.targetPath.len > 0:
+      elif result.targetPath.len > 0:
         raise newException(ValueError,
           "repro hooks accepts at most one path argument")
-      result.targetPath = arg
+      else:
+        result.targetPath = arg
     inc i
-  if not result.shellDirenv and not result.vcs:
+  if not result.shellDirenv and not result.vcs and
+      result.nativeShells.len == 0:
     result.shellDirenv = true
     result.vcs = true
 
@@ -3375,17 +3819,76 @@ proc runHooksCommand(args: openArray[string]): int =
       ensureDirenvHook(parsed.targetPath)
     if parsed.vcs:
       runVcsHooksCommand(parsed.action, parsed.targetPath)
+    for shell in parsed.nativeShells:
+      ensureNativeShellHook(shell)
   of hakReinstall:
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath, reinstall = true)
     if parsed.vcs:
       runVcsHooksCommand(parsed.action, parsed.targetPath)
+    for shell in parsed.nativeShells:
+      ensureNativeShellHook(shell, reinstall = true)
   of hakUninstall:
     if parsed.shellDirenv:
       uninstallDirenvHook(parsed.targetPath)
     if parsed.vcs:
       runVcsHooksCommand(parsed.action, parsed.targetPath)
+    for shell in parsed.nativeShells:
+      uninstallNativeShellHook(shell)
   0
+
+proc parseNativeShellActivationRequest(args: openArray[string]):
+    NativeShellActivationRequest =
+  if args.len == 0:
+    raise newException(ValueError,
+      "__repro-native-shell-activate requires a directory argument")
+  result.cwd = args[0]
+  result.shell = nskBash
+  var i = 1
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--shell" or arg.startsWith("--shell="):
+      result.shell = parseNativeShell(valueFromFlag(args, i, "--shell"))
+    elif arg == "--previous-artifact" or
+        arg.startsWith("--previous-artifact="):
+      result.previousArtifact = valueFromFlag(args, i,
+        "--previous-artifact")
+    elif arg == "--previous-project-root" or
+        arg.startsWith("--previous-project-root="):
+      result.previousProjectRoot = valueFromFlag(args, i,
+        "--previous-project-root")
+    elif arg == "--dev-env-stats" or arg.startsWith("--dev-env-stats="):
+      result.statsPath = valueFromFlag(args, i, "--dev-env-stats")
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported native shell activation flag: " & arg)
+    else:
+      raise newException(ValueError,
+        "unexpected native shell activation argument: " & arg)
+    inc i
+
+proc runReproNativeShellActivationHelper(args: openArray[string];
+                                         publicCliPath: string): int =
+  let request = parseNativeShellActivationRequest(args)
+  let format = nativeShellFormat(request.shell)
+  let projectRoot = findDevEnvProjectRoot(request.cwd)
+  if projectRoot.len == 0:
+    stdout.write(renderNativeShellTransition(request.previousArtifact,
+      none(DevEnvArtifact), "", format))
+    return 0
+  var selection = DevEnvCliSelection(
+    selector: projectRoot,
+    activity: "default",
+    statsPath: request.statsPath)
+  selection.resolveDevEnvSelection()
+  let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true)
+  writeDevEnvStats(selection.statsPath, edge, "hooks shell-native")
+  let artifact = readDevEnvArtifact(edge.artifactPath)
+  if emitDevEnvDiagnostics(artifact):
+    return 1
+  stdout.write(renderNativeShellTransition(request.previousArtifact,
+    some(artifact), edge.artifactPath, format))
+  return 0
 
 proc runReproDirenvActivationHelper(args: openArray[string];
                                     publicCliPath: string): int =
@@ -4758,6 +5261,17 @@ proc runThinApp*(programName: string): int =
       return runReproDirenvActivationHelper(helperArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro direnv activate: error: " & err.msg)
+      return 1
+  if args.len > 0 and args[0] == "__repro-native-shell-activate":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    try:
+      return runReproNativeShellActivationHelper(helperArgs, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro native shell activate: error: " & err.msg)
       return 1
   if args.len > 0 and args[0] == "__repro-cmake-regenerate":
     let helperArgs =
