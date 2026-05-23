@@ -1,8 +1,9 @@
-import std/[algorithm, json, options, os, osproc, sequtils, sets, strutils,
-    tables, terminal, times]
+import std/[algorithm, json, options, os, osproc, sequtils, sets, streams,
+    strutils, tables, terminal, times]
 import repro_core
 import repro_build_engine
 import repro_depfile
+import repro_dev_env_artifacts
 import repro_interface_artifacts
 import repro_monitor_depfile/fs_snoop
 import repro_provider_runtime
@@ -2558,13 +2559,202 @@ proc runProviderCompileHelper(args: openArray[string]): int =
       return 2
   try:
     let interfaceArtifact = readInterfaceArtifact(interfacePath)
-    let provider = compileProviderBinary(modulePath, outputPath,
+    discard compileProviderBinary(modulePath, outputPath,
       interfaceArtifact.interfaceFingerprint, artifactPath, workDir)
-    echo "providerBinary: " & provider.outputBinaryPath
-    echo "providerArtifact: " & digestHex(provider.providerFingerprint)
     return 0
   except CatchableError as err:
     stderr.writeLine("repro provider compile: error: " & err.msg)
+    return 1
+
+proc splitDevEnvActivities(value: string): seq[string] =
+  let source = if value.len > 0: value else: "default"
+  for raw in source.split(','):
+    let item = raw.strip()
+    if item.len > 0:
+      result.add(item)
+  if result.len == 0:
+    result.add("default")
+
+proc descriptorById(manifest: ProviderManifest; id: string):
+    Option[GraphEntryPointDescriptor] =
+  for descriptor in manifest.entryPoints:
+    if descriptor.id == id:
+      return some(descriptor)
+  none(GraphEntryPointDescriptor)
+
+proc validateDevEnvManifest(manifest: ProviderManifest;
+                            providerArtifactId: string) =
+  if manifest.protocolVersion != ProviderProtocolVersion:
+    raise newException(ValueError, "unsupported provider protocol version " &
+      $manifest.protocolVersion)
+  if providerArtifactId.len > 0 and
+      manifest.providerArtifactId != providerArtifactId:
+    raise newException(ValueError,
+      "provider manifest artifact mismatch: expected " &
+        providerArtifactId & ", got " & manifest.providerArtifactId)
+
+proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
+                               request: ProviderGraphRequest):
+                               ProviderGraphResponse =
+  createDir(extendedPath(protocolRoot))
+  let requestPath = protocolRoot / (stem & ".request.rbpg")
+  let responsePath = protocolRoot / (stem & ".response.rbpg")
+  writeProviderRequestFile(requestPath, request)
+  if fileExists(extendedPath(responsePath)):
+    removeFile(extendedPath(responsePath))
+  let process = startProcess(binaryPath,
+    args = @[
+      "--repro-provider-request", requestPath,
+      "--repro-provider-response", responsePath
+    ],
+    workingDir = cwd,
+    options = {poUsePath, poStdErrToStdOut})
+  let output =
+    if process.outputStream != nil: process.outputStream.readAll()
+    else: ""
+  let exitCode = process.waitForExit()
+  process.close()
+  if exitCode != 0:
+    raise newException(OSError,
+      "provider exited with code " & $exitCode & ": " & output)
+  if not fileExists(extendedPath(responsePath)):
+    raise newException(IOError, "provider did not write response: " &
+      responsePath)
+  readProviderResponseFile(responsePath)
+
+proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
+  let providerBinary = valueAfterFlag(args, "--provider-binary")
+  let providerArtifactId = valueAfterFlag(args, "--provider-artifact-id")
+  let projectRoot = valueAfterFlag(args, "--project-root")
+  let artifactPath = valueAfterFlag(args, "--out")
+  let protocolRoot = valueAfterFlag(args, "--protocol-root")
+  let entryPointId = valueAfterFlag(args, "--entry-point")
+  let activity = valueAfterFlag(args, "--activity")
+  let lockSliceId = valueAfterFlag(args, "--lock-slice")
+  for (name, value) in [
+    ("--provider-binary", providerBinary),
+    ("--provider-artifact-id", providerArtifactId),
+    ("--project-root", projectRoot),
+    ("--out", artifactPath),
+    ("--protocol-root", protocolRoot)
+  ]:
+    if value.len == 0:
+      stderr.writeLine("repro dev-env introspection: missing " & name)
+      return 2
+  try:
+    let cwd = if projectRoot.len > 0: projectRoot else: getCurrentDir()
+    let manifestResponse = runStableProviderProtocol(providerBinary,
+      protocolRoot, "manifest", cwd, ProviderGraphRequest(
+        kind: prkManifest,
+        providerArtifactId: providerArtifactId,
+        reason: girExplicitUserRequest))
+    if manifestResponse.kind != pskManifest:
+      raise newException(ValueError,
+        "provider manifest request returned non-manifest response")
+    validateDevEnvManifest(manifestResponse.manifest, providerArtifactId)
+
+    var selectedEntryPoint = entryPointId
+    if selectedEntryPoint.len == 0:
+      for descriptor in manifestResponse.manifest.entryPoints:
+        if descriptor.kind == gpkDevEnvIntrospection:
+          selectedEntryPoint = descriptor.id
+          break
+    if selectedEntryPoint.len == 0:
+      raise newException(ValueError,
+        "provider manifest does not expose dev-env introspection")
+    let descriptorOpt = manifestResponse.manifest.descriptorById(
+      selectedEntryPoint)
+    if descriptorOpt.isNone:
+      raise newException(ValueError,
+        "dev-env entry point is missing from provider manifest")
+    let descriptor = descriptorOpt.get()
+    if descriptor.kind != gpkDevEnvIntrospection:
+      raise newException(ValueError,
+        "entry point is not dev-env introspection: " & selectedEntryPoint)
+
+    let selectedActivity = if activity.len > 0: activity else: "default"
+    let request = ProviderGraphRequest(
+      kind: prkDevEnvIntrospection,
+      providerArtifactId: providerArtifactId,
+      entryPointId: selectedEntryPoint,
+      entryPointBodyHash: descriptor.bodyHash,
+      reason: girExplicitUserRequest,
+      arguments: projectRoot,
+      lockSliceId: lockSliceId,
+      activity: selectedActivity)
+    let response = runStableProviderProtocol(providerBinary, protocolRoot,
+      "dev-env", cwd, request)
+    if response.kind != pskDevEnvResult:
+      raise newException(ValueError,
+        "provider dev-env request did not return a dev-env result")
+    validateDevEnvManifest(response.manifest, providerArtifactId)
+    if response.devEnv.providerArtifactId != providerArtifactId:
+      raise newException(ValueError, "provider artifact mismatch in dev-env result")
+    if response.devEnv.providerEntryPointId != selectedEntryPoint:
+      raise newException(ValueError, "provider entry point mismatch in dev-env result")
+    if response.devEnv.providerEntryPointBodyHash != descriptor.bodyHash:
+      raise newException(ValueError, "provider body hash mismatch in dev-env result")
+    if response.devEnv.projectRoot != projectRoot:
+      raise newException(ValueError, "project root mismatch in dev-env result")
+    if response.devEnv.lockSliceId != lockSliceId:
+      raise newException(ValueError, "lock slice mismatch in dev-env result")
+    if response.devEnv.selectedActivities !=
+        splitDevEnvActivities(selectedActivity):
+      raise newException(ValueError, "activity selection mismatch in dev-env result")
+
+    writeDevEnvArtifact(artifactPath, artifactFromDevEnvResult(response.devEnv))
+    return 0
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env introspection: error: " & err.msg)
+    return 1
+
+proc shellQuote(value: string): string =
+  result = "'"
+  for ch in value:
+    if ch == '\'':
+      result.add("'\\''")
+    else:
+      result.add(ch)
+  result.add("'")
+
+proc renderShellOpsPosix(ops: openArray[DevEnvShellOp]): string =
+  result = "# Generated by repro dev-env. Do not edit.\n"
+  for op in ops:
+    let name = op.name
+    let value = shellQuote(op.value)
+    let sep = if op.separator.len > 0: op.separator else: $PathSep
+    case op.kind
+    of deskSetEnv, deskSetPathList:
+      result.add("export " & name & "=" & value & "\n")
+    of deskUnsetEnv:
+      result.add("unset " & name & "\n")
+    of deskPrependPath:
+      result.add("export " & name & "=" & value & "\"${" & name &
+        ":+" & sep & "$" & name & "}\"" & "\n")
+    of deskAppendPath:
+      result.add("export " & name & "=\"${" & name & ":+$" & name &
+        sep & "}\"" & value & "\n")
+    of deskSetWorkingDirectory:
+      result.add("cd " & value & "\n")
+
+proc runDevEnvShellRenderHelper(args: openArray[string]): int =
+  let artifactPath = valueAfterFlag(args, "--artifact")
+  let outputPath = valueAfterFlag(args, "--out")
+  for (name, value) in [
+    ("--artifact", artifactPath),
+    ("--out", outputPath)
+  ]:
+    if value.len == 0:
+      stderr.writeLine("repro dev-env shell render: missing " & name)
+      return 2
+  try:
+    var navigatorStats: DevEnvNavigatorStats
+    let ops = shellOpsFromNavigatorFile(artifactPath, navigatorStats)
+    createDir(extendedPath(parentDir(outputPath)))
+    writeFile(extendedPath(outputPath), renderShellOpsPosix(ops))
+    return 0
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env shell render: error: " & err.msg)
     return 1
 
 proc sourceLocation(file: string): SourceLocation =
@@ -3878,6 +4068,20 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runProviderCompileHelper(helperArgs)
+  if args.len > 0 and args[0] == "__repro-dev-env-introspect":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runDevEnvIntrospectionHelper(helperArgs)
+  if args.len > 0 and args[0] == "__repro-render-dev-env-shell":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runDevEnvShellRenderHelper(helperArgs)
   if args.len > 0 and args[0] == "__repro-cmake-regenerate":
     let helperArgs =
       if args.len > 1:

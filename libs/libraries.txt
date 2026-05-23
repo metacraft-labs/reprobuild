@@ -17,6 +17,7 @@ repro_project_dsl
 repro_dsl_stdlib
 repro_interface_artifacts
 repro_dev_env_artifacts
+repro_dev_env_engine
 repro_tool_profiles
 repro_local_store
 repro_runquota
