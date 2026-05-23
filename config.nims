@@ -28,6 +28,7 @@ for libName in [
   "repro_infra",
   "repro_interface_artifacts",
   "repro_dev_env_artifacts",
+  "repro_dev_env_activation",
   "repro_dev_env_engine",
   "repro_tool_profiles",
   "repro_local_store",
