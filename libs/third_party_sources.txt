@@ -1,0 +1,49 @@
+# Third-party source slices vendored for M2 dev-env SSZ artifacts.
+#
+# These directories intentionally contain only the source files needed by
+# config.nims import paths. Upstream repository metadata, tests, docs, examples,
+# generated outputs, and build artifacts are not vendored.
+
+libs/nim-ssz-serialization
+  source: https://github.com/status-im/nim-ssz-serialization
+  revision: 1cc4d87437a9f8f7a8b1119991af48308fbfe04b
+  included: ssz_serialization.nim, ssz_serialization/
+  license: MIT or Apache-2.0
+
+libs/nim-serialization
+  source: https://github.com/status-im/nim-serialization
+  revision: 1790d8a931fce125d6722f7ee8432ee8c054d297
+  included: serialization.nim, serialization/
+  license: MIT or Apache-2.0
+
+libs/nim-json-serialization
+  source: https://github.com/status-im/nim-json-serialization
+  revision: f3e4bcbfa7b5eb518b3a6bcb3004176f9e0ee5af
+  included: json_serialization.nim, json_serialization/
+  license: MIT or Apache-2.0
+
+libs/nim-faststreams
+  source: https://github.com/status-im/nim-faststreams
+  revision: 50889cd16ec8771106cdd0eeea460039e8571e06
+  included: faststreams/
+  license: MIT or Apache-2.0
+
+libs/nim-stew
+  source: https://github.com/status-im/nim-stew
+  revision: 30dadcd14b5ec1631935d9037213ece6871cc11a
+  included: stew/
+  license: MIT or Apache-2.0
+
+libs/results
+  source: https://github.com/arnetheduck/nim-results
+  revision: df8113dda4c2d74d460a8fa98252b0b771bf1f27
+  nimble: results 0.5.1
+  included: results.nim
+  license: MIT or Apache-2.0
+
+libs/stint
+  source: https://github.com/status-im/nim-stint
+  revision: 1a2c661e3f50ff696b0b6692fab0d7bb2abf10cc
+  nimble: stint 0.8.1
+  included: stint.nim, stint/
+  license: MIT or Apache-2.0

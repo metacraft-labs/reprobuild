@@ -1,0 +1,5 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "SSZ-backed development-environment artifacts"
+license = "MIT"
+requires "nim >= 2.2.0"

@@ -27,6 +27,7 @@ for libName in [
   "repro_elevation",
   "repro_infra",
   "repro_interface_artifacts",
+  "repro_dev_env_artifacts",
   "repro_tool_profiles",
   "repro_local_store",
   "repro_launch_plan",
@@ -39,6 +40,55 @@ for libName in [
   "repro_hcr_test",
 ]:
   switch("path", "libs" / libName / "src")
+
+proc addPackagePath(envName: string; candidates: openArray[string];
+                    marker: string) =
+  let envPath = getEnv(envName)
+  if envPath.len > 0 and fileExists(envPath / marker):
+    switch("path", envPath)
+    return
+  for candidate in candidates:
+    if fileExists(candidate / marker):
+      switch("path", candidate)
+      return
+
+# M2 dev-env artifacts use status-im/nim-ssz-serialization for their canonical
+# payload. Prefer explicit checkouts, then workspace siblings, then local
+# vendored copies if present.
+addPackagePath("FASTSTREAMS_SRC", [
+  "libs" / "nim-faststreams" / "src",
+  ".." / "codetracer" / "libs" / "nim-faststreams",
+  ".." / "nim-faststreams",
+], "faststreams" / "inputs.nim")
+addPackagePath("NIM_STEW_SRC", [
+  "libs" / "nim-stew" / "src",
+  ".." / "codetracer" / "libs" / "nim-stew",
+  ".." / "nim-stew",
+], "stew" / "objects.nim")
+addPackagePath("NIM_SERIALIZATION_SRC", [
+  "libs" / "nim-serialization" / "src",
+  ".." / "codetracer" / "libs" / "nim-serialization",
+  ".." / "nim-serialization",
+], "serialization" / "case_objects.nim")
+addPackagePath("NIM_JSON_SERIALIZATION_SRC", [
+  "libs" / "nim-json-serialization" / "src",
+  ".." / "codetracer" / "libs" / "nim-json-serialization",
+  ".." / "nim-json-serialization",
+], "json_serialization.nim")
+addPackagePath("SSZ_SERIALIZATION_SRC", [
+  "libs" / "nim-ssz-serialization" / "src",
+  ".." / "nim-ssz-serialization",
+], "ssz_serialization.nim")
+addPackagePath("NIMCRYPTO_SRC", [
+  ".." / "codetracer" / "libs" / "nimcrypto",
+  ".." / "nimcrypto",
+], "nimcrypto" / "hash.nim")
+addPackagePath("RESULTS_SRC", [
+  "libs" / "results" / "src",
+], "results.nim")
+addPackagePath("STINT_SRC", [
+  "libs" / "stint" / "src",
+], "stint.nim")
 
 let runquotaRoot = block:
   let fromEnv = getEnv("RUNQUOTA_SRC")
