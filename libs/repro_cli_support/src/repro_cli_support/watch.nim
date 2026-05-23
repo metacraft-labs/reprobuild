@@ -1,4 +1,4 @@
-import std/[deques, os, sets, strutils, tables]
+import std/[deques, os, sets, strutils, tables, times]
 from repro_core/paths import extendedPath
 when defined(windows):
   import std/winlean
@@ -26,6 +26,12 @@ when defined(macosx):
       kq: cint
       fds: seq[cint]
       pathsByFd: Table[cint, string]
+      watchedPaths: seq[string]
+
+    PathSnapshot = object
+      exists: bool
+      size: BiggestInt
+      mtime: float
 
   const
     EvFilterVnode = -4.cshort
@@ -67,6 +73,17 @@ when defined(macosx):
     else:
       parts.join(",")
 
+  proc snapshotPath(path: string): PathSnapshot =
+    if fileExists(extendedPath(path)) or dirExists(extendedPath(path)):
+      let info = getFileInfo(extendedPath(path))
+      result.exists = true
+      result.size = info.size
+      result.mtime = info.lastWriteTime.toUnixFloat()
+
+  proc snapshotWatchedPaths(watcher: FilesystemWatcher): Table[string, PathSnapshot] =
+    for path in watcher.watchedPaths:
+      result[path] = snapshotPath(path)
+
   proc closeFilesystemWatcher*(watcher: FilesystemWatcher) =
     if watcher.isNil:
       return
@@ -92,6 +109,7 @@ when defined(macosx):
         seen.incl(path)
         if not fileExists(extendedPath(path)) and not dirExists(extendedPath(path)):
           continue
+        result.watchedPaths.add(path)
         let fd = cOpen(path.cstring, OEvOnly)
         if fd < 0:
           continue
@@ -108,7 +126,7 @@ when defined(macosx):
           continue
         result.fds.add(fd)
         result.pathsByFd[fd] = path
-      if result.fds.len == 0:
+      if result.watchedPaths.len == 0:
         raise newException(ValueError,
           "no existing filesystem paths could be watched")
     except CatchableError:
@@ -119,16 +137,29 @@ when defined(macosx):
     if watcher.isNil:
       0
     else:
-      watcher.fds.len
+      watcher.watchedPaths.len
 
   proc waitForEvent*(watcher: FilesystemWatcher): FilesystemWatchEvent =
-    var event: Kevent
-    let n = kevent(watcher.kq, nil, 0, addr event, 1, nil)
-    if n < 0:
-      raise newException(OSError, "kevent wait failed")
-    let fd = cint(event.ident)
-    result.path = watcher.pathsByFd.getOrDefault(fd, "<unknown>")
-    result.detail = eventDetail(event.fflags)
+    var snapshots = watcher.snapshotWatchedPaths()
+    while true:
+      var event: Kevent
+      var timeout = Timespec(tv_sec: 0, tv_nsec: 250_000_000)
+      let n = kevent(watcher.kq, nil, 0, addr event, 1, addr timeout)
+      if n < 0:
+        raise newException(OSError, "kevent wait failed")
+      if n > 0:
+        let fd = cint(event.ident)
+        result.path = watcher.pathsByFd.getOrDefault(fd, "<unknown>")
+        result.detail = eventDetail(event.fflags)
+        return
+
+      for path, previous in snapshots.mpairs:
+        let current = snapshotPath(path)
+        if current != previous:
+          previous = current
+          result.path = path
+          result.detail = "poll-change"
+          return
 
   proc drainDebouncedEvents*(watcher: FilesystemWatcher; debounceMs: int): int =
     if debounceMs > 0:
