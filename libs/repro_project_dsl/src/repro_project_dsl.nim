@@ -1,4 +1,4 @@
-import std/[algorithm, macros, os, strutils, tables]
+import std/[algorithm, json, macros, os, strutils, tables]
 
 proc extendedPath(path: string): string =
   when defined(windows):
@@ -388,6 +388,61 @@ when defined(reproProviderMode):
     providerEvaluationInputRegistry.add(fileReadInput(material))
     readFile(extendedPath(material))
 
+  proc developOverridePath*(dependency: string): string =
+    ## Return the active local develop-mode path for `dependency`, if one is
+    ## present in the local workspace metadata supplied by the engine.
+    let metadataPath = getEnv("REPRO_DEVELOP_OVERRIDES_FILE")
+    if metadataPath.len == 0 or not fileExists(extendedPath(metadataPath)):
+      return ""
+    let metadataInput = fileReadInput(metadataPath)
+    providerEvaluationInputRegistry.add(metadataInput)
+    let metadata = parseFile(extendedPath(metadataPath))
+    if metadata.kind != JObject or not metadata.hasKey("overrides"):
+      return ""
+    for item in metadata["overrides"]:
+      if item.kind != JObject:
+        continue
+      let node =
+        if item.hasKey("node"): item["node"].getStr()
+        elif item.hasKey("dependency"): item["dependency"].getStr()
+        else: ""
+      if node == dependency:
+        result = item{"path"}.getStr()
+        providerEvaluationInputRegistry.add(GraphEvaluationInput(
+          kind: gevDevelopModeOverride,
+          identity: dependency,
+          digest: result))
+        return
+
+  proc activityRecordIsActive(requirements, selected: openArray[string]): bool =
+    if requirements.len == 0:
+      return true
+    for requirement in requirements:
+      if selected.find(requirement) < 0:
+        return false
+    true
+
+  proc activeShellOps(selected: openArray[string]): seq[DevEnvShellOp] =
+    for op in devEnvShellOpsRegistry:
+      if activityRecordIsActive(op.activityRequirements, selected):
+        result.add(op)
+
+  proc activeToolRequirements(selected: openArray[string]):
+      seq[DevEnvToolRequirement] =
+    for tool in devEnvToolRegistry:
+      if activityRecordIsActive(tool.activityRequirements, selected):
+        result.add(tool)
+
+  proc activeTasks(selected: openArray[string]): seq[DevEnvTaskMetadata] =
+    for task in devEnvTaskRegistry:
+      if activityRecordIsActive(task.activityRequirements, selected):
+        result.add(task)
+
+  proc activeServices(selected: openArray[string]): seq[DevEnvServiceMetadata] =
+    for service in devEnvServiceRegistry:
+      if activityRecordIsActive(service.activityRequirements, selected):
+        result.add(service)
+
 else:
   proc providerDirectoryInput*(path: string) =
     discard path
@@ -397,6 +452,10 @@ else:
     discard path
     discard memberEntryPointId
     discard memberEntryPointBodyHash
+
+  proc developOverridePath*(dependency: string): string =
+    discard dependency
+    ""
 
 proc dirListing*(path: string): seq[string] =
   if not dirExists(extendedPath(path)):
@@ -2581,6 +2640,7 @@ when defined(reproProviderMode):
     finally:
       currentProviderProjectRoot = ""
 
+    let selectedActivities = selectedActivityList(request.activity)
     result = DevEnvResult(
       schemaVersion: 1'u32,
       providerArtifactId: request.providerArtifactId,
@@ -2588,12 +2648,12 @@ when defined(reproProviderMode):
       providerEntryPointBodyHash: request.entryPointBodyHash,
       projectRoot: request.arguments,
       lockSliceId: request.lockSliceId,
-      selectedActivities: selectedActivityList(request.activity),
+      selectedActivities: selectedActivities,
       declaredActivities: devEnvActivityRegistry,
-      shellOps: devEnvShellOpsRegistry,
-      toolRequirements: devEnvToolRegistry,
-      tasks: devEnvTaskRegistry,
-      services: devEnvServiceRegistry,
+      shellOps: activeShellOps(selectedActivities),
+      toolRequirements: activeToolRequirements(selectedActivities),
+      tasks: activeTasks(selectedActivities),
+      services: activeServices(selectedActivities),
       diagnostics: devEnvDiagnosticRegistry)
     if fileExists(extendedPath(pkg.sourceFile)):
       let input = fileReadInput(pkg.sourceFile)

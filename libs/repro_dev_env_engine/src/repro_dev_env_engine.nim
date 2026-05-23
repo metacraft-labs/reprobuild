@@ -31,6 +31,7 @@ type
     entryPointId*: string
     activity*: string
     lockSliceId*: string
+    developOverridesPath*: string
     renderShell*: bool
     statsEnabled*: bool
 
@@ -135,9 +136,19 @@ proc commonMonitorEnv(config: DevEnvEdgeConfig): seq[string] =
       result.add(name & "=" & getEnv(name))
   if config.monitorShimLibPath.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & config.monitorShimLibPath)
+  if config.developOverridesPath.len > 0:
+    result.add("REPRO_DEVELOP_OVERRIDES_FILE=" &
+      config.developOverridesPath)
 
 proc fingerprintText(parts: openArray[string]): ContentDigest =
   weakFingerprintFromText(parts.join("\n"))
+
+proc fileFingerprintPart(path: string): string =
+  if path.len == 0:
+    return ""
+  if not fileExists(extendedPath(path)):
+    return path & "\n<missing>"
+  path & "\n" & readFile(extendedPath(path))
 
 proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
                                provider: ProviderCompileArtifact;
@@ -152,7 +163,8 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
     config.projectRoot,
     config.entryPointId,
     config.activity,
-    config.lockSliceId
+    config.lockSliceId,
+    fileFingerprintPart(config.developOverridesPath)
   ])
   var argv = @[
     config.publicCliPath,
@@ -172,9 +184,16 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
   if config.lockSliceId.len > 0:
     argv.add("--lock-slice")
     argv.add(config.lockSliceId)
+  if config.developOverridesPath.len > 0:
+    argv.add("--develop-overrides")
+    argv.add(config.developOverridesPath)
+  var inputs = @[provider.outputBinaryPath, providerArtifactPath]
+  if config.developOverridesPath.len > 0 and
+      fileExists(extendedPath(config.developOverridesPath)):
+    inputs.add(config.developOverridesPath)
   action("__repro_dev_env_introspection", argv,
     cwd = config.workDir,
-    inputs = @[provider.outputBinaryPath, providerArtifactPath],
+    inputs = inputs,
     outputs = @[artifactPath],
     env = config.commonMonitorEnv(),
     commandStatsId = "repro dev-env introspection edge",

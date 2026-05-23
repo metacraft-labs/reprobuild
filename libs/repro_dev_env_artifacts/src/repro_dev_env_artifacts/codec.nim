@@ -559,7 +559,11 @@ proc artifactFromDevEnvResult*(devEnv: DevEnvResult): DevEnvArtifact =
   result.selectedActivities = devEnv.selectedActivities
   result.declaredActivities = devEnv.declaredActivities
   result.activitySelectionDigest = digestStringSeq(devEnv.selectedActivities)
-  result.developModeOverrideDigest = zeroDigest()
+  let developInputs = devEnv.evaluationInputs.filterIt(
+    it.kind == gevDevelopModeOverride)
+  result.developModeOverrideDigest =
+    if developInputs.len > 0: digestGraphInputs(developInputs)
+    else: zeroDigest()
   result.shellOps = devEnv.shellOps
   for tool in devEnv.toolRequirements:
     var identityPayload: seq[byte] = @[]

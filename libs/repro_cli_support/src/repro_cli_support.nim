@@ -51,6 +51,10 @@ proc renderUsage*(programName: string): string =
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
           programName &
+      " develop --list\n       " &
+          programName &
+      " develop <dependency> --into=PATH\n       " &
+          programName &
       " develop <target[#name]> --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] -- <command> [args...]\n       " &
           programName &
       " develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n       " &
@@ -2658,6 +2662,7 @@ proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
   let entryPointId = valueAfterFlag(args, "--entry-point")
   let activity = valueAfterFlag(args, "--activity")
   let lockSliceId = valueAfterFlag(args, "--lock-slice")
+  let developOverridesPath = valueAfterFlag(args, "--develop-overrides")
   for (name, value) in [
     ("--provider-binary", providerBinary),
     ("--provider-artifact-id", providerArtifactId),
@@ -2669,6 +2674,8 @@ proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
       stderr.writeLine("repro dev-env introspection: missing " & name)
       return 2
   try:
+    if developOverridesPath.len > 0:
+      putEnv("REPRO_DEVELOP_OVERRIDES_FILE", developOverridesPath)
     let cwd = if projectRoot.len > 0: projectRoot else: getCurrentDir()
     let manifestResponse = runStableProviderProtocol(providerBinary,
       protocolRoot, "manifest", cwd, ProviderGraphRequest(
@@ -2761,6 +2768,10 @@ proc runDevEnvShellRenderHelper(args: openArray[string]): int =
     return 1
 
 type
+  DevelopOverrideEntry = object
+    node: string
+    path: string
+
   DevEnvCliSelection = object
     selector: string
     modulePath: string
@@ -2769,6 +2780,7 @@ type
     workRoot: string
     activity: string
     lockSliceId: string
+    developOverridesPath: string
     statsPath: string
 
   ParsedDevEnvExec = object
@@ -2792,6 +2804,109 @@ proc valueFromFlag(args: openArray[string]; i: var int; flag: string): string =
     return args[i]
   ""
 
+proc appendActivitySelection(current: var string; value: string) =
+  for raw in value.split(','):
+    let item = raw.strip()
+    if item.len == 0:
+      continue
+    if current.len == 0:
+      current = item
+    elif current.split(',').find(item) < 0:
+      current.add("," & item)
+
+proc gitDirForProjectRoot(projectRoot: string): string =
+  let dotGit = projectRoot / ".git"
+  if dirExists(extendedPath(dotGit)):
+    return dotGit
+  if fileExists(extendedPath(dotGit)):
+    let content = readFile(extendedPath(dotGit)).strip()
+    const prefix = "gitdir:"
+    if content.normalize().startsWith(prefix):
+      let raw = content[prefix.len .. ^1].strip()
+      if raw.isAbsolute:
+        return os.normalizedPath(raw)
+      return os.normalizedPath(projectRoot / raw)
+  ""
+
+proc developOverridesMetadataPath(projectRoot: string): string =
+  let gitDir = gitDirForProjectRoot(projectRoot)
+  if gitDir.len > 0:
+    return gitDir / "reprobuild" / "develop-overrides.json"
+  projectRoot / ".repro" / "local" / "develop-overrides.json"
+
+proc readDevelopOverrides(path: string): seq[DevelopOverrideEntry] =
+  if path.len == 0 or not fileExists(extendedPath(path)):
+    return @[]
+  let root = parseFile(extendedPath(path))
+  if root.kind != JObject or not root.hasKey("overrides"):
+    return @[]
+  for item in root["overrides"]:
+    if item.kind != JObject:
+      continue
+    let node = item{"node"}.getStr()
+    let localPath = item{"path"}.getStr()
+    if node.len > 0 and localPath.len > 0:
+      result.add(DevelopOverrideEntry(node: node, path: localPath))
+
+proc writeDevelopOverrides(path, projectRoot: string;
+                           entries: openArray[DevelopOverrideEntry]) =
+  var sorted = @entries
+  sorted.sort(proc (a, b: DevelopOverrideEntry): int = cmp(a.node, b.node))
+  var overrides = newJArray()
+  for entry in sorted:
+    overrides.add(%*{
+      "node": entry.node,
+      "path": entry.path
+    })
+  let payload = %*{
+    "schemaId": "reprobuild.develop-overrides.v1",
+    "projectRoot": projectRoot,
+    "overrides": overrides
+  }
+  createDir(extendedPath(parentDir(path)))
+  let tmp = path & ".tmp"
+  writeFile(extendedPath(tmp), pretty(payload) & "\n")
+  if fileExists(extendedPath(path)):
+    removeFile(extendedPath(path))
+  moveFile(extendedPath(tmp), extendedPath(path))
+
+proc findDevEnvProjectRoot(startPath: string): string
+
+proc activeProjectRootFromCwd(): string =
+  result = findDevEnvProjectRoot(getCurrentDir())
+  if result.len == 0:
+    raise newException(ValueError,
+      "repro develop requires a current project containing reprobuild.nim")
+
+proc resolveDevelopOverrideCheckout(dependency, intoPath: string): string =
+  if intoPath.len == 0:
+    raise newException(ValueError,
+      "repro develop <dependency> requires --into=PATH for local overrides")
+  let intoAbs = os.normalizedPath(absolutePath(intoPath))
+  var candidates = @[intoAbs]
+  let (_, tail) = splitPath(intoAbs)
+  if tail != dependency:
+    candidates.add(intoAbs / safePathSegment(dependency, "dependency"))
+  for candidate in candidates:
+    if fileExists(extendedPath(candidate / "reprobuild.nim")):
+      return os.normalizedPath(candidate)
+  raise newException(IOError,
+    "develop override checkout for " & dependency &
+      " must already exist and contain reprobuild.nim under " &
+      candidates.join(" or "))
+
+proc upsertDevelopOverride(projectRoot, dependency, localPath: string): string =
+  result = developOverridesMetadataPath(projectRoot)
+  var entries = readDevelopOverrides(result)
+  var replaced = false
+  for entry in entries.mitems:
+    if entry.node == dependency:
+      entry.path = localPath
+      replaced = true
+  if not replaced:
+    entries.add(DevelopOverrideEntry(node: dependency, path: localPath))
+  writeDevelopOverrides(result, projectRoot, entries)
+
 proc devEnvActivitySegment(activity: string): string =
   safePathSegment(if activity.len > 0: activity else: "default", "default")
 
@@ -2812,6 +2927,8 @@ proc resolveDevEnvSelection(selection: var DevEnvCliSelection) =
     raise newException(IOError,
       "dev-env target module not found: " & selection.modulePath)
   selection.projectRoot = projectRootForModule(selection.modulePath)
+  selection.developOverridesPath =
+    developOverridesMetadataPath(selection.projectRoot)
   selection.outDir = defaultDevEnvOutDir(selection.modulePath,
     selection.workRoot, selection.activity)
 
@@ -2826,7 +2943,8 @@ proc parseDevEnvExecArgs(args: openArray[string]): ParsedDevEnvExec =
     elif arg == "--":
       afterSeparator = true
     elif arg == "--activity" or arg.startsWith("--activity="):
-      selection.activity = valueFromFlag(args, i, "--activity")
+      selection.activity.appendActivitySelection(valueFromFlag(args, i,
+        "--activity"))
     elif arg == "--work-root" or arg.startsWith("--work-root="):
       selection.workRoot = valueFromFlag(args, i, "--work-root")
     elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
@@ -2854,7 +2972,8 @@ proc parseDevEnvShellArgs(args: openArray[string]): ParsedDevEnvShell =
   while i < args.len:
     let arg = args[i]
     if arg == "--activity" or arg.startsWith("--activity="):
-      selection.activity = valueFromFlag(args, i, "--activity")
+      selection.activity.appendActivitySelection(valueFromFlag(args, i,
+        "--activity"))
     elif arg == "--work-root" or arg.startsWith("--work-root="):
       selection.workRoot = valueFromFlag(args, i, "--work-root")
     elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
@@ -2903,6 +3022,7 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     monitorShimLibPath: getEnv("REPRO_MONITOR_SHIM_LIB"),
     activity: selection.activity,
     lockSliceId: selection.lockSliceId,
+    developOverridesPath: selection.developOverridesPath,
     renderShell: renderShell,
     statsEnabled: selection.statsPath.len > 0))
 
@@ -3897,7 +4017,8 @@ proc runReproDirenvActivationHelper(args: openArray[string];
   while i < args.len:
     let arg = args[i]
     if arg == "--activity" or arg.startsWith("--activity="):
-      selection.activity = valueFromFlag(args, i, "--activity")
+      selection.activity.appendActivitySelection(valueFromFlag(args, i,
+        "--activity"))
     elif arg == "--work-root" or arg.startsWith("--work-root="):
       selection.workRoot = valueFromFlag(args, i, "--work-root")
     elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
@@ -4753,13 +4874,21 @@ proc runDevelopCommand(args: openArray[string]): int =
   var workRoot = ""
   var cmakeMode = false
   var cmakeBinary = ""
-  for arg in args:
+  var listOverrides = false
+  var intoPath = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
     if afterSeparator:
       command.add(arg)
     elif arg == "--":
       afterSeparator = true
     elif arg == "--cmake":
       cmakeMode = true
+    elif arg == "--list":
+      listOverrides = true
+    elif arg == "--into" or arg.startsWith("--into="):
+      intoPath = valueFromFlag(args, i, "--into")
     elif arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
     elif arg == "--tool-provisioning":
@@ -4783,6 +4912,31 @@ proc runDevelopCommand(args: openArray[string]): int =
       target = arg
     else:
       raise newException(ValueError, "unexpected develop argument before --: " & arg)
+    inc i
+
+  if listOverrides:
+    if target.len > 0 or intoPath.len > 0 or command.len > 0 or cmakeMode:
+      raise newException(ValueError,
+        "repro develop --list does not accept a target, --into, --cmake, or a command")
+    let projectRoot = activeProjectRootFromCwd()
+    for entry in readDevelopOverrides(developOverridesMetadataPath(projectRoot)):
+      echo entry.node & "\t" & entry.path
+    return 0
+
+  if intoPath.len > 0:
+    if cmakeMode or mode != tpmUnspecified or command.len > 0:
+      raise newException(ValueError,
+        "repro develop <dependency> --into=PATH cannot be combined with " &
+          "--cmake, --tool-provisioning, or -- <command>")
+    if target.len == 0:
+      raise newException(ValueError,
+        "repro develop --into=PATH requires a dependency name")
+    let projectRoot = activeProjectRootFromCwd()
+    let localPath = resolveDevelopOverrideCheckout(target, intoPath)
+    let metadataPath = upsertDevelopOverride(projectRoot, target, localPath)
+    echo target & "\t" & localPath
+    echo "metadata\t" & metadataPath
+    return 0
 
   if target.len == 0:
     raise newException(ValueError, "missing develop target")
