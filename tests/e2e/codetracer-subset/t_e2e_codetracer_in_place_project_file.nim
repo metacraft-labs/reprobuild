@@ -186,16 +186,40 @@ when defined(js):
 
   type PlatformFuture*[T] = Future[T]
 
+  proc isSyncResolved*(future: PlatformFuture): bool =
+    var resolved: bool
+    {.emit: "`resolved` = (`future`.__syncResolved === true);".}
+    resolved
+
+  proc isSyncFailed*(future: PlatformFuture): bool =
+    var failed: bool
+    {.emit: "`failed` = (`future`.__syncFailed === true);".}
+    failed
+
+  proc getSyncValue*[T](future: PlatformFuture[T]): T =
+    var value: T
+    {.emit: "`value` = `future`.__syncValue;".}
+    value
+
+  proc getSyncError*(future: PlatformFuture): string =
+    var message: string
+    {.emit: "`message` = `future`.__syncError;".}
+    message
+
   proc newCompletedFuture*[T](value: T): PlatformFuture[T] =
-    newPromise(proc(resolve: proc(response: T)) =
+    result = newPromise(proc(resolve: proc(response: T)) =
       resolve(value))
+    {.emit: "`result`.__syncResolved = true; `result`.__syncValue = `value`;".}
 
   proc newCompletedFuture*(): PlatformFuture[void] =
-    newPromise(proc(resolve: proc()) =
+    result = newPromise(proc(resolve: proc()) =
       resolve())
+    {.emit: "`result`.__syncResolved = true;".}
 
-  proc newFailedFuture*[T](message: string): PlatformFuture[T]
-      {.importjs: "(Promise.reject(new Error(#)))".}
+  proc newFailedFuture*[T](message: string): PlatformFuture[T] =
+    result = newPromise proc(resolve: proc(value: T)) =
+      raise newException(CatchableError, message)
+    {.emit: "`result`.__syncFailed = true; `result`.__syncError = `message`; `result`.catch(function(){});".}
 
   proc attachPromiseHandlers[T](future: PlatformFuture[T];
       onSuccess: proc(value: T); onError: proc(message: cstring))

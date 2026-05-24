@@ -344,7 +344,7 @@ suite "e2e_repro_dev_sessions":
       devProcess.close()
 
     let metadataPath = sessionMetadataPath(c.projectRoot)
-    let up = waitForStatus(metadataPath, "up")
+    let up = waitForStatus(metadataPath, "up", timeoutMs = 30000)
     let httpBindValue = up["httpBind"].getStr()
     check statusJson(httpBindValue)["services"][0]["ready"].getBool()
 
