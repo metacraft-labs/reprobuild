@@ -1,0 +1,425 @@
+<#
+  run-hyperv-m69-system.ps1 - HOST-SIDE per-test runner for the M69
+  Hyper-V destructive-gate harness.
+
+  Reverts the harness VM to the named snapshot, starts it, stages the
+  gate binary + repro.exe + dependencies via Copy-VMFile, runs the gate
+  inside the VM via Invoke-Command -VMName with the appropriate
+  REPRO_M69_*_VM env var set, captures stdout / stderr / exit, writes
+  artifacts to a per-test output dir, and stops the VM in a `finally`.
+
+  HOST SAFETY:
+    * Touches exactly ONE VM: `repro-m69-hyperv`. No other VM on the
+      host is queried, started, stopped, or altered.
+    * Never `Save-VM`s (a saved-state revert would desync the
+      snapshot). Always `Stop-VM -TurnOff`.
+    * The per-test output dir is cleared on entry; only this dir is
+      ever modified on the host.
+    * The gates' real DISM / capability / service / VS mutations happen
+      INSIDE the VM only; they evaporate on the next snapshot revert.
+
+  Usage:
+    pwsh -File run-hyperv-m69-system.ps1
+                -Gate <feature-capability|vs-installer>
+                [-Scenario <base-clean|base-with-vs>]
+                [-OutDir D:\metacraft\hyperv-m69-system-out]
+                [-GateTimeoutMinutes <int>]
+                [-KeepVmRunning]    # debug: skip Stop-VM in finally
+#>
+
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory)]
+  [ValidateSet('feature-capability','vs-installer')]
+  [string]$Gate,
+
+  [ValidateSet('base-clean','base-with-vs')]
+  [string]$Scenario = '',
+
+  [string]$OutDir = 'D:\metacraft\hyperv-m69-system-out',
+
+  [int]$GateTimeoutMinutes = 0,
+
+  [switch]$KeepVmRunning
+)
+
+$ErrorActionPreference = 'Stop'
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+$VmName        = 'repro-m69-hyperv'
+$CredCachePath = Join-Path $env:LOCALAPPDATA 'Repro\hyperv-m69\vm-cred.xml'
+
+# Per-gate parameters: which env var, which exe, which default
+# scenario (snapshot), default timeout.
+$GateConfig = @{
+  'feature-capability' = @{
+    Exe        = 'e2e_windows_optional_feature_and_capability.exe'
+    EnvVar     = 'REPRO_M69_FEATURE_VM'
+    DefaultScenario = 'base-clean'
+    DefaultTimeoutMin = 30
+  }
+  'vs-installer' = @{
+    Exe        = 'e2e_windows_vs_installer.exe'
+    EnvVar     = 'REPRO_M69_VSINSTALLER_VM'
+    DefaultScenario = 'base-clean'     # current gate has only fresh-install
+    DefaultTimeoutMin = 90              # VS install is multi-GB
+  }
+}
+
+$cfg = $GateConfig[$Gate]
+if (-not $Scenario) { $Scenario = $cfg.DefaultScenario }
+if ($GateTimeoutMinutes -le 0) { $GateTimeoutMinutes = $cfg.DefaultTimeoutMin }
+
+$ReproBinHost  = 'D:\metacraft\reprobuild\build\bin'
+$TestBinHost   = 'D:\metacraft\reprobuild\build\test-bin'
+$PerTestOut    = Join-Path $OutDir "$Gate-$Scenario"
+
+$VmHarness     = 'C:\harness'
+$VmReproDir    = "$VmHarness\repro"
+$VmGateBinDir  = "$VmHarness\gate-bin"
+$VmGateExe     = "$VmGateBinDir\$($cfg.Exe)"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+function Info($m) { Write-Host "[run] $m" }
+function Warn($m) { Write-Host "[run] WARNING: $m" -ForegroundColor Yellow }
+function Fail($m) { Write-Host "[run] ERROR: $m"   -ForegroundColor Red }
+
+function Get-VmOrNull([string]$name) {
+  try { return Get-VM -Name $name -ErrorAction Stop } catch { return $null }
+}
+
+function Wait-VmPSDirectReady {
+  param(
+    [string]$Name,
+    [System.Management.Automation.PSCredential]$Credential,
+    [int]$TimeoutSec
+  )
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  $startedAt = Get-Date
+  $lastReport = $startedAt
+  while ((Get-Date) -lt $deadline) {
+    $vm = Get-VmOrNull $Name
+    if ($vm -and $vm.State -eq 'Running') {
+      try {
+        $hostnameRaw = Invoke-Command -VMName $Name -Credential $Credential `
+          -ScriptBlock { hostname } -ErrorAction Stop
+        if ($hostnameRaw) {
+          Info "  PowerShell Direct ready - guest hostname: $hostnameRaw"
+          return $true
+        }
+      } catch { }
+    }
+    if (((Get-Date) - $lastReport).TotalSeconds -ge 15) {
+      $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
+      $st = if ($vm) { $vm.State } else { 'absent' }
+      Info ("  waiting for PowerShell Direct ... ${elapsed}s elapsed (state=" + $st + ")")
+      $lastReport = Get-Date
+    }
+    Start-Sleep -Seconds 5
+  }
+  return $false
+}
+
+# ---------------------------------------------------------------------------
+# Pre-flight
+# ---------------------------------------------------------------------------
+Info ("=" * 70)
+Info "M69 Hyper-V destructive-gate runner"
+Info ("=" * 70)
+Info "gate:        $Gate"
+Info "scenario:    $Scenario"
+Info "vm:          $VmName"
+Info "out dir:     $PerTestOut"
+Info "gate exe:    $($cfg.Exe)"
+Info "env var:     $($cfg.EnvVar)=1"
+Info "timeout:     $GateTimeoutMinutes min"
+
+# Hyper-V module
+try {
+  Import-Module Hyper-V -ErrorAction Stop
+} catch {
+  Fail "Hyper-V module not importable: $_"
+  Fail "Is the Microsoft-Hyper-V Windows Optional Feature enabled?"
+  exit 1
+}
+
+# VM exists
+$vm = Get-VmOrNull $VmName
+if (-not $vm) {
+  Fail "VM '$VmName' does not exist. Run provision-base-vm.ps1 first."
+  exit 1
+}
+
+# Snapshot exists
+try {
+  $snap = Get-VMSnapshot -VMName $VmName -Name $Scenario -ErrorAction Stop
+  Info "  snapshot '$Scenario' present (created $($snap.CreationTime.ToString('yyyy-MM-dd HH:mm:ss')))"
+} catch {
+  Fail "snapshot '$Scenario' does not exist on VM '$VmName'. Run provision-base-vm.ps1 first."
+  exit 1
+}
+
+# Credential
+if (-not (Test-Path $CredCachePath)) {
+  Fail "guest credential cache missing: $CredCachePath"
+  Fail "Run provision-base-vm.ps1 first - it will prompt for the guest credential."
+  exit 1
+}
+$cred = $null
+try { $cred = Import-Clixml -Path $CredCachePath } catch {
+  Fail "could not load credential from $CredCachePath : $_"
+  exit 1
+}
+
+# Host-side binaries
+foreach ($f in @('repro.exe','sqlite3_64.dll','repro-launcher.exe')) {
+  $p = Join-Path $ReproBinHost $f
+  if (-not (Test-Path $p)) {
+    Fail "missing host-side repro artifact: $p"
+    Fail "Build first (in the dev shell):"
+    Fail "  nim c --out:build/bin/repro apps/repro/repro.nim"
+    Fail "  Copy-Item build/repro-launcher.exe build/bin/repro-launcher.exe"
+    exit 1
+  }
+}
+$gateBinHost = Join-Path $TestBinHost $cfg.Exe
+if (-not (Test-Path $gateBinHost)) {
+  Fail "missing host-side gate binary: $gateBinHost"
+  Fail "Build first (in the dev shell):"
+  Fail "  just e2e_$($Gate -replace '-','_')"
+  exit 1
+}
+
+# Per-test out dir
+if (Test-Path $PerTestOut) {
+  Info "clearing per-test out dir $PerTestOut"
+  Get-ChildItem -LiteralPath $PerTestOut -Force -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+} else {
+  New-Item -ItemType Directory -Path $PerTestOut -Force | Out-Null
+}
+
+# Started-checkpoint, written FIRST so we can distinguish run-started vs.
+# pre-existing artifacts on disk.
+$startedAt = Get-Date
+Set-Content -Path (Join-Path $PerTestOut '_run-started.txt') `
+  -Value ("run-hyperv-m69-system.ps1 started $($startedAt.ToString('yyyy-MM-dd HH:mm:ss')); gate=$Gate scenario=$Scenario") `
+  -Encoding ascii
+
+# Snapshot before
+$beforeLog = Join-Path $PerTestOut '00-vm-state.log'
+"=== VM state BEFORE run ($($startedAt.ToString('yyyy-MM-dd HH:mm:ss'))) ===" | Set-Content -Path $beforeLog -Encoding utf8
+Get-VM -Name $VmName | Format-List Name,State,Generation,ProcessorCount,Status,Uptime | Out-String | Add-Content -Path $beforeLog
+Get-VMSnapshot -VMName $VmName | Format-Table Name,SnapshotType,CreationTime,ParentSnapshotName | Out-String | Add-Content -Path $beforeLog
+Get-VMIntegrationService -VMName $VmName | Format-Table Name,Enabled,PrimaryStatusDescription | Out-String | Add-Content -Path $beforeLog
+
+# ---------------------------------------------------------------------------
+# Per-test step accumulator (RESULT.txt)
+# ---------------------------------------------------------------------------
+$steps = [ordered]@{}
+function Record($k, $v) {
+  $steps[$k] = $v
+  Info ("  step '$k' -> $v")
+}
+
+# ---------------------------------------------------------------------------
+# Main lifecycle - try/finally so Stop-VM always runs
+# ---------------------------------------------------------------------------
+$gateExitCode = $null
+$gateVerdict  = 'UNKNOWN'
+
+try {
+  # ---- Step 1: revert to snapshot ----------------------------------------
+  # If the VM is running, stop first - Restore-VMCheckpoint will refuse a
+  # running VM.
+  if ($vm.State -ne 'Off') {
+    Info "VM was in state $($vm.State); stopping before snapshot revert"
+    Stop-VM -Name $VmName -TurnOff -Force -ErrorAction SilentlyContinue
+  }
+  Info "Restore-VMCheckpoint -VMName $VmName -Name $Scenario"
+  Restore-VMCheckpoint -VMName $VmName -Name $Scenario -Confirm:$false
+  Record 'revert' 'OK'
+
+  # ---- Step 2: start VM ---------------------------------------------------
+  Info "Start-VM"
+  Start-VM -Name $VmName
+  $ready = Wait-VmPSDirectReady -Name $VmName -Credential $cred -TimeoutSec 300
+  if (-not $ready) {
+    Record 'boot' 'TIMEOUT'
+    throw "VM did not come up on PowerShell Direct within 5 min"
+  }
+  Record 'boot' 'OK'
+
+  # ---- Step 3: prepare harness dirs inside VM ----------------------------
+  Info "preparing $VmHarness inside the VM"
+  Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock {
+    param($root, $reproDir, $gateBinDir)
+    foreach ($d in @($root, $reproDir, $gateBinDir)) {
+      if (-not (Test-Path $d)) {
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+      } else {
+        # Wipe pre-existing contents (so a re-revert that didn't actually
+        # touch the harness dir doesn't leave a stale exe in place).
+        Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+  } -ArgumentList @($VmHarness, $VmReproDir, $VmGateBinDir) | Out-Null
+  Record 'prep-harness-dirs' 'OK'
+
+  # ---- Step 4: Copy-VMFile the binaries in -------------------------------
+  Info "Copy-VMFile: staging repro binaries into $VmReproDir"
+  foreach ($f in @('repro.exe','sqlite3_64.dll','repro-launcher.exe')) {
+    $src = Join-Path $ReproBinHost $f
+    $dst = "$VmReproDir\$f"
+    Info "  $src -> $dst"
+    Copy-VMFile -Name $VmName -SourcePath $src -DestinationPath $dst -CreateFullPath -FileSource Host -Force
+  }
+  Info "Copy-VMFile: staging gate binary into $VmGateBinDir"
+  Copy-VMFile -Name $VmName -SourcePath $gateBinHost -DestinationPath $VmGateExe -CreateFullPath -FileSource Host -Force
+  Record 'stage-binaries' 'OK'
+
+  # ---- Step 5: run the gate ----------------------------------------------
+  $envVarName = $cfg.EnvVar
+  Info "running gate: $VmGateExe with $envVarName=1"
+  $gateScript = {
+    param($gateExe, $envVar, $reproDir)
+    Set-Item -Path "Env:$envVar" -Value '1'
+    Set-Item -Path 'Env:REPRO_TEST_BIN_DIR' -Value $reproDir
+    $stdoutF = Join-Path $env:TEMP "gate-out.txt"
+    $stderrF = Join-Path $env:TEMP "gate-err.txt"
+    if (Test-Path $stdoutF) { Remove-Item $stdoutF -Force }
+    if (Test-Path $stderrF) { Remove-Item $stderrF -Force }
+    $p = Start-Process -FilePath $gateExe -NoNewWindow -PassThru `
+           -RedirectStandardOutput $stdoutF -RedirectStandardError $stderrF
+    $null = $p.Handle
+    $p.WaitForExit()
+    $stdout = if (Test-Path $stdoutF) { Get-Content $stdoutF -Raw } else { '' }
+    $stderr = if (Test-Path $stderrF) { Get-Content $stderrF -Raw } else { '' }
+    Remove-Item $stdoutF, $stderrF -Force -ErrorAction SilentlyContinue
+    return [pscustomobject]@{
+      ExitCode = $p.ExitCode
+      Stdout   = $stdout
+      Stderr   = $stderr
+    }
+  }
+  $gateTimeoutSec = $GateTimeoutMinutes * 60
+  $job = Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock $gateScript `
+           -ArgumentList @($VmGateExe, $envVarName, $VmReproDir) -AsJob
+  $waited = Wait-Job -Job $job -Timeout $gateTimeoutSec
+  if (-not $waited) {
+    Warn "gate run TIMED OUT after $GateTimeoutMinutes min"
+    try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    $gateExitCode = 'TIMEOUT'
+    $gateVerdict  = "TIMEOUT after $GateTimeoutMinutes min"
+    Record 'gate-run' $gateVerdict
+  } else {
+    $result = Receive-Job -Job $job -ErrorAction Continue
+    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    if ($result) {
+      $gateExitCode = $result.ExitCode
+      $body = @()
+      $body += "GATE: $($cfg.Exe)"
+      $body += "ENV : $envVarName=1  REPRO_TEST_BIN_DIR=$VmReproDir"
+      $body += "EXIT CODE: $gateExitCode"
+      $body += ""
+      $body += "----- STDOUT -----"
+      $body += ($result.Stdout -split "`r?`n")
+      $body += "----- STDERR -----"
+      $body += ($result.Stderr -split "`r?`n")
+      $outFile = Join-Path $PerTestOut "02-$Gate-run.txt"
+      Set-Content -Path $outFile -Value ($body -join "`r`n") -Encoding utf8
+      Info "wrote $outFile (exit $gateExitCode)"
+      $gateVerdict = if ("$gateExitCode" -eq '0') { 'PASS' } else { "FAIL exit=$gateExitCode" }
+      Record 'gate-run' $gateVerdict
+    } else {
+      $gateVerdict = 'NO-OUTPUT'
+      Record 'gate-run' $gateVerdict
+    }
+  }
+
+}
+catch {
+  Fail "lifecycle threw: $_"
+  Fail $_.ScriptStackTrace
+  $gateVerdict = "ERROR: $_"
+  Record 'lifecycle' "EXCEPTION: $_"
+}
+finally {
+  # ---- Always Stop-VM (never Save-VM) -----------------------------------
+  if ($KeepVmRunning) {
+    Warn "  -KeepVmRunning set: leaving '$VmName' running for debugging"
+    Warn "  When done, stop with: Stop-VM -Name $VmName -TurnOff -Force"
+  } else {
+    $vmFinal = Get-VmOrNull $VmName
+    if ($vmFinal -and $vmFinal.State -ne 'Off') {
+      Info "Stop-VM -TurnOff (never Save-VM)"
+      try { Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop } catch {
+        Warn "  Stop-VM failed: $_"
+      }
+    } else {
+      Info "VM already stopped"
+    }
+  }
+
+  # ---- Always write RESULT.txt + DONE ------------------------------------
+  $elapsedMin = [math]::Round(((Get-Date) - $startedAt).TotalMinutes, 2)
+  $resultLines = @()
+  $resultLines += "M69 Hyper-V destructive-gate run - RESULT"
+  $resultLines += "generated:      $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+  $resultLines += "host:           $env:COMPUTERNAME  user: $env:USERNAME"
+  $resultLines += "vm:             $VmName"
+  $resultLines += "gate:           $Gate"
+  $resultLines += "scenario:       $Scenario"
+  $resultLines += "wall-clock min: $elapsedMin"
+  $resultLines += ""
+  foreach ($k in $steps.Keys) {
+    $resultLines += ("{0,-24} {1}" -f $k, $steps[$k])
+  }
+  $resultLines += ""
+  $resultLines += "VERDICT: $gateVerdict"
+  Set-Content -Path (Join-Path $PerTestOut 'RESULT.txt') -Value $resultLines -Encoding utf8
+
+  # Append the "after" VM-state to 00-vm-state.log
+  "" | Add-Content -Path $beforeLog
+  "=== VM state AFTER run ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) ===" | Add-Content -Path $beforeLog
+  Get-VM -Name $VmName -ErrorAction SilentlyContinue | Format-List Name,State,Status,Uptime | Out-String | Add-Content -Path $beforeLog
+  Get-VMSnapshot -VMName $VmName -ErrorAction SilentlyContinue |
+    Format-Table Name,SnapshotType,CreationTime,ParentSnapshotName |
+    Out-String | Add-Content -Path $beforeLog
+
+  # DONE sentinel - written LAST
+  Set-Content -Path (Join-Path $PerTestOut 'DONE') -Value "done $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Encoding ascii
+}
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+Write-Host ""
+Info ("=" * 70)
+Info "Results in: $PerTestOut"
+Get-ChildItem -LiteralPath $PerTestOut -File -ErrorAction SilentlyContinue |
+  Sort-Object Name |
+  ForEach-Object { Info ("  {0,-40} {1,10} bytes" -f $_.Name, $_.Length) }
+$rt = Join-Path $PerTestOut 'RESULT.txt'
+if (Test-Path $rt) {
+  Write-Host ""
+  Info "----- RESULT.txt -----"
+  Get-Content $rt | ForEach-Object { Write-Host "  $_" }
+}
+$gt = Join-Path $PerTestOut "02-$Gate-run.txt"
+if (Test-Path $gt) {
+  Write-Host ""
+  Info "----- 02-$Gate-run.txt (tail 50) -----"
+  Get-Content $gt -Tail 50 | ForEach-Object { Write-Host "  $_" }
+}
+Info ("=" * 70)
+
+if ("$gateExitCode" -eq '0') { exit 0 }
+elseif ("$gateExitCode" -eq 'TIMEOUT') { exit 2 }
+else { exit 1 }
