@@ -1008,30 +1008,74 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
 proc shellQuote(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
 
+proc cmdExeShellEscape(value: string): string =
+  ## cmd.exe quoting: wrap in double quotes; escape embedded double quotes.
+  "\"" & value.replace("\"", "\\\"") & "\""
+
 proc runCommand(command: openArray[string];
     cwd = ""): ProviderCompileExecutionResult =
   if command.len == 0:
     raise newException(OSError, "runCommand requires a non-empty argv")
-  # Use startProcess(argv) directly instead of execCmdEx(quoted) so this works
-  # on Windows where the POSIX single-quote shell-quoting in shellQuote is not
-  # understood by cmd.exe. The behaviour on POSIX hosts is preserved: same
-  # workingDir, stdout+stderr merged, single combined-output string returned.
-  let process = startProcess(command[0],
-    args = command[1 .. ^1],
-    workingDir = cwd,
-    options = {poUsePath, poStdErrToStdOut})
-  var output = ""
-  if process.outputStream != nil:
-    output = process.outputStream.readAll()
-  let exitCode = process.waitForExit()
-  process.close()
-  result = ProviderCompileExecutionResult(
-    exitCode: exitCode,
-    output: output)
-  if exitCode != 0:
+  when defined(windows):
+    # Capture the child's merged stdout+stderr through a temp-file sink
+    # rather than draining an inherited OS pipe. The pipe variant deadlocks
+    # on Windows whenever the child (typically `nim c`) spawns a sub-process
+    # (gcc) that inherits the pipe write handle: when `nim` exits but gcc
+    # is still running, the pipe never EOFs and the parent's `readAll()`
+    # blocks forever. Materialising the redirection as a tiny .cmd script
+    # (rather than passing it inline through `cmd.exe /c`) sidesteps the
+    # cmd.exe outer-quote-stripping rule that otherwise mangles the `>`
+    # redirection when the assembled command line starts with a quoted
+    # absolute path.
+    let sinkDir = getTempDir()
+    createDir(extendedPath(sinkDir))
+    let nonce = $getCurrentProcessId() & "-" &
+      $int64(epochTime() * 1_000_000.0)
+    let sinkPath = sinkDir / ("repro-runcommand-" & nonce & ".log")
+    let scriptPath = sinkDir / ("repro-runcommand-" & nonce & ".cmd")
+    let scriptBody = "@echo off\r\n" &
+      command.mapIt(cmdExeShellEscape(it)).join(" ") &
+      " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
+    writeFile(extendedPath(scriptPath), scriptBody)
+    var process = startProcess("cmd.exe",
+      args = @["/c", scriptPath],
+      workingDir = cwd, options = {poUsePath})
+    let exitCode = process.waitForExit()
+    process.close()
+    try:
+      removeFile(extendedPath(scriptPath))
+    except CatchableError:
+      discard
+    var output = ""
+    if fileExists(extendedPath(sinkPath)):
+      try:
+        output = readFile(extendedPath(sinkPath))
+      except CatchableError:
+        output = ""
+      try:
+        removeFile(extendedPath(sinkPath))
+      except CatchableError:
+        discard
+    result = ProviderCompileExecutionResult(
+      exitCode: exitCode,
+      output: output)
+  else:
+    let process = startProcess(command[0],
+      args = command[1 .. ^1],
+      workingDir = cwd,
+      options = {poUsePath, poStdErrToStdOut})
+    var output = ""
+    if process.outputStream != nil:
+      output = process.outputStream.readAll()
+    let exitCode = process.waitForExit()
+    process.close()
+    result = ProviderCompileExecutionResult(
+      exitCode: exitCode,
+      output: output)
+  if result.exitCode != 0:
     let quoted = command.mapIt(shellQuote(it)).join(" ")
-    raise newException(OSError, "command failed (" & $exitCode & "): " &
-      quoted & "\n" & output)
+    raise newException(OSError, "command failed (" & $result.exitCode &
+      "): " & quoted & "\n" & result.output)
 
 proc nimCompilerPath(): string =
   if cachedNimCompilerPath.len > 0:
@@ -1360,6 +1404,45 @@ proc externalHashFlags(workDir = ""): seq[string] =
     result.add("--passL:-L" & xxhashPrefix / "lib")
     result.add("--passL:-lxxhash")
 
+proc fnvHex64(parts: openArray[string]): string =
+  ## FNV-1a 64-bit hex digest of the concatenation of `parts` (with a NUL
+  ## separator between parts so prefix collisions are impossible). Rendered
+  ## inline to avoid pulling in a specific `toHex`.
+  var h = 0xcbf29ce484222325'u64
+  for i, part in parts:
+    if i > 0:
+      h = (h xor 0'u64) * 0x100000001b3'u64
+    for ch in part:
+      h = (h xor uint64(ord(ch))) * 0x100000001b3'u64
+  const hexDigits = "0123456789abcdef"
+  result = newString(16)
+  for i in 0 ..< 16:
+    result[15 - i] = hexDigits[int((h shr (uint64(i) * 4)) and 0xF'u64)]
+
+proc providerNimcacheKey(outputBinaryPath: string): string =
+  ## Per-output-binary nimcache key (FNV-1a of absolute output path).
+  ## Retained for opt-in isolation via `REPRO_PROVIDER_NIMCACHE_MODE=per-binary`.
+  fnvHex64([absolutePath(outputBinaryPath)])
+
+proc sharedProviderNimcacheKey(workDir: string;
+                               hostFlags, libFlags: openArray[string]): string =
+  ## Toolchain-stable nimcache key shared across every provider compile that
+  ## targets the same Nim compiler + host C compiler + library set, anchored
+  ## at the same `workDir`. Provider compiles invoked from a single CMake
+  ## configure (the parent project plus every `try_compile`) land in the
+  ## same nimcache so unchanged library modules are reused across them --
+  ## the dominant slice of each provider compile.
+  var parts = @[nimCompilerPath(), absolutePath(workDir)]
+  for f in hostFlags:
+    parts.add(f)
+  for f in libFlags:
+    parts.add(f)
+  fnvHex64(parts)
+
+proc providerNimcacheMode(): string =
+  let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
+  if mode.len == 0: "shared" else: mode.toLowerAscii()
+
 proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  workDir = getCurrentDir()): ProjectInterfaceArtifact =
   let extractionContext = interfaceExtractionContext(modulePath, workDir)
@@ -1397,16 +1480,31 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "writeInterfaceArtifact(paramStr(1), artifact)\n" &
     "writeNimInterfaceStub(paramStr(2), artifact)\n")
   let runnerBin = tempRoot / "extract_runner"
+  let hostFlags = hostCCompilerFlags()
+  let libFlags = reproLibPathFlags(workDir)
+  # Share the extractor nimcache across every interface extraction with the
+  # same toolchain + library set. The runner module itself (`extract_runner`)
+  # recompiles each time because it imports a project-specific module, but
+  # every standard library / repro library module is reused via Nim's
+  # `.sha1`-based incremental compilation -- the dominant slice of the
+  # compile cost. `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` falls back to
+  # the per-tempRoot nimcache that isolates each invocation.
+  let nimcache =
+    if providerNimcacheMode() == "per-binary":
+      tempRoot / "nimcache"
+    else:
+      workDir / "build" / "nimcache-interface" /
+        sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
   var command = @[
     nimCompilerPath(), "c",
     "--define:reproInterfaceMode",
     "--path:" & moduleDir,
-    "--nimcache:" & (tempRoot / "nimcache"),
+    "--nimcache:" & nimcache,
     "--out:" & runnerBin,
     runnerPath
   ]
-  command.insert(hostCCompilerFlags(), 2)
-  command.insert(reproLibPathFlags(workDir), 4)
+  command.insert(hostFlags, 2)
+  command.insert(libFlags, 4)
   let compileExecution = runCommand(command, cwd = workDir)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
@@ -1505,21 +1603,6 @@ proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
   else:
     outputBinaryPath
 
-proc providerNimcacheKey(outputBinaryPath: string): string =
-  ## A short, stable directory key for a provider nimcache, derived from
-  ## the (possibly deeply nested) provider output path via FNV-1a so two
-  ## distinct providers never share -- and therefore never clobber -- a
-  ## single nimcache, while a given provider keeps a stable cache across
-  ## rebuilds. The hex is rendered inline to avoid depending on a `toHex`
-  ## that several imported modules each define.
-  var h = 0xcbf29ce484222325'u64
-  for ch in absolutePath(outputBinaryPath):
-    h = (h xor uint64(ord(ch))) * 0x100000001b3'u64
-  const hexDigits = "0123456789abcdef"
-  result = newString(16)
-  for i in 0 ..< 16:
-    result[15 - i] = hexDigits[int((h shr (uint64(i) * 4)) and 0xF'u64)]
-
 proc providerCompileCommand*(modulePath, outputBinaryPath: string;
                              workDir = getCurrentDir()): seq[string] =
   # The Nim provider nimcache holds generated C/object files with long
@@ -1527,10 +1610,25 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # CMake TryCompile scratch tree, a nimcache placed next to it overflows
   # Windows' 260-char MAX_PATH. The nimcache is a pure build intermediate,
   # so anchor it under the short `workDir` (the `build/` scratch area the
-  # interface extractor also uses), keyed by the output path so distinct
-  # providers stay isolated and Nim incremental compilation still works.
-  let nimcache = workDir / "build" / "nimcache-provider" /
-    providerNimcacheKey(outputBinaryPath)
+  # interface extractor also uses).
+  #
+  # The key is shared across every provider compile that targets the same
+  # toolchain + library set (default `REPRO_PROVIDER_NIMCACHE_MODE=shared`).
+  # Each CMake configure pays for one cold provider compile; subsequent
+  # try_compile providers reuse all unchanged library object files via
+  # Nim's `.sha1`-based incremental compilation. Within a single CMake
+  # configure the provider compiles are sequential, so the shared cache is
+  # safe. `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` restores the legacy
+  # per-output isolation.
+  let hostFlags = hostCCompilerFlags()
+  let libFlags = reproLibPathFlags(workDir)
+  let nimcache =
+    if providerNimcacheMode() == "per-binary":
+      workDir / "build" / "nimcache-provider" /
+        providerNimcacheKey(outputBinaryPath)
+    else:
+      workDir / "build" / "nimcache-provider" /
+        sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
   result = @[
     nimCompilerPath(), "c",
     "--define:reproProviderMode",
@@ -1539,9 +1637,9 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     "--out:" & outputBinaryPath,
     modulePath
   ]
-  result.insert(hostCCompilerFlags(), 2)
+  result.insert(hostFlags, 2)
   result.insert(externalHashFlags(workDir), 2)
-  result.insert(reproLibPathFlags(workDir), 2)
+  result.insert(libFlags, 2)
 
 proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           interfaceFingerprint: ContentDigest;
