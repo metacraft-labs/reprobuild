@@ -40,7 +40,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [--prepare-only]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [--prepare-only] [--no-runquota]\n       " &
           programName &
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
@@ -183,7 +183,26 @@ proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
   let (_, tail) = splitPath(projectRoot)
   let hash = digestHex(blake3DomainDigest(projectRoot.bytesOf(),
     hdMetadataEnvelope))
-  base / "worktrees" / (safePathSegment(tail, "worktree") & "-" & hash[0 .. 15])
+  # The worktree dir name combines the project tail (for debuggability)
+  # and a 16-char content-hash (for identity). When the resulting full
+  # path approaches Windows' MAX_PATH (260 chars) the host's underlying
+  # tools — notably nim's own stdlib used by the provider compile —
+  # fail with ERROR_FILENAME_EXCED_RANGE since they don't transparently
+  # prefix `\\?\` for every OS call. Detect that and fall back to the
+  # bare hash; we lose a small amount of debuggability but the build
+  # stays correct. The threshold leaves room for the tail of the path
+  # the engine adds inside the worktree
+  # (`/build/<outputName>/provider/project-provider.exe` ≈ 60 chars).
+  const reservedTailChars = 80
+  let tailSegment = safePathSegment(tail, "worktree")
+  let combined = tailSegment & "-" & hash[0 .. 15]
+  let baseLen = base.len + "/worktrees/".len
+  let segment =
+    if baseLen + combined.len + reservedTailChars > 260:
+      hash[0 .. 15]
+    else:
+      combined
+  base / "worktrees" / segment
 
 proc outputDirForTarget(target: ParsedBuildTarget;
     explicitWorkRoot = ""): string =
@@ -782,6 +801,48 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     if encoded.len == 0:
       return @[]
     encoded.split("\x1f")
+
+  if payload.call.packageName == "reprobuild.builtin" and
+      payload.call.executableName == "exec":
+    # Inline-exec builtin: the call carries a literal argv (and optional cwd)
+    # and the action is launched directly via the engine's process action
+    # without any package-profile lookup. The wrapper layer is bypassed
+    # entirely; the binary graph cache holds the resolved argv.
+    let argv = argSeqValue("argv")
+    if argv.len == 0:
+      raise newException(ValueError,
+        "reprobuild.builtin.exec action " & payload.id &
+          " has empty argv")
+    let cwdValue = argValue("cwd")
+    let commandStatsId =
+      if payload.commandStatsId.len > 0:
+        payload.commandStatsId
+      else:
+        payload.id
+    let fingerprintText = [
+      "reprobuild.localInlineExecAction.v1",
+      payload.id,
+      node.payload
+    ].join("\n")
+    return repro_build_engine.action(
+      payload.id,
+      argv,
+      cwd =
+        if cwdValue.len > 0: cwdValue
+        else: projectRoot,
+      deps = payload.deps,
+      inputs = payload.inputs.mapIt(materialProjectPath(projectRoot, it)),
+      outputs = payload.outputs,
+      pool = payload.pool,
+      poolUnits = payload.poolUnits,
+      depfile = payload.depfile,
+      dynamicDepsFile = payload.dynamicDepsFile,
+      cacheable = payload.cacheable,
+      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      actionCachePolicy = actionCachePolicy,
+      dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
+        payload.dependencyPolicy),
+      commandStatsId = commandStatsId)
 
   if payload.call.packageName == "reprobuild.builtin" and
       payload.call.executableName == "fs":
@@ -2096,7 +2157,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         reportMode = brmFull;
                         logMode = blmActions;
                         prepareOnly = false;
-                        skipCmakeRegeneration = false):
+                        skipCmakeRegeneration = false;
+                        bypassRunQuotaExplicit = false):
     BuildCommandOutcome =
   let statsEnabled = statsMode == bsmText
   var buildStats: BuildStats
@@ -2111,7 +2173,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   result.modulePath = modulePath
   result.projectRoot = projectRootForModule(modulePath)
   result.outDir = outDir
-  let bypassRunQuota = false
+  # When --no-runquota was passed (or the env knob is set), skip the daemon
+  # entirely: every action goes through the bypass-spawn path with no lease
+  # round-trip. Default is "use runquota when reachable, fall back if not".
+  let bypassRunQuota = bypassRunQuotaExplicit
   let fallbackToRunQuotaBypass = mode in {tpmPathOnly, tpmScoop}
   var warnedRunQuotaBypass = false
 
@@ -4785,6 +4850,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var logMode = configuredBuildLogMode()
   var prepareOnly = false
   var skipCmakeRegeneration = false
+  # Default: use runquota when reachable; --no-runquota forces full bypass.
+  var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
+    ["1", "true", "yes", "on"]
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
@@ -4820,6 +4888,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       prepareOnly = true
     elif arg == "--skip-cmake-regeneration":
       skipCmakeRegeneration = true
+    elif arg == "--no-runquota":
+      bypassRunQuota = true
+    elif arg == "--runquota":
+      bypassRunQuota = false
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported build flag: " & arg)
     elif target.len == 0:
@@ -4839,7 +4911,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     reportMode = reportMode,
     logMode = logMode,
     prepareOnly = prepareOnly,
-    skipCmakeRegeneration = skipCmakeRegeneration).exitCode
+    skipCmakeRegeneration = skipCmakeRegeneration,
+    bypassRunQuotaExplicit = bypassRunQuota).exitCode
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:

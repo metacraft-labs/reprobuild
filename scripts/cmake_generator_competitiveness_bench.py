@@ -627,10 +627,9 @@ def stop_runquota(proc, log):
 
 
 def repro_env(base_env, rb_bin, runquota_socket, binary_dir, parallel,
-              reprobuild_diagnostics):
+              reprobuild_diagnostics, use_runquota=True):
     env = dict(base_env)
     env.update({
-        "RUNQUOTA_SOCKET": str(runquota_socket),
         "REPROBUILD_WORK_ROOT": str(binary_dir / "CMakeFiles" / "reprobuild" / "work-root"),
         "REPROBUILD_REPRO": str(rb_bin),
         "REPROBUILD_SOURCE_ROOT": str(ROOT),
@@ -639,6 +638,13 @@ def repro_env(base_env, rb_bin, runquota_socket, binary_dir, parallel,
         "REPROBUILD_REPORT": "none",
         "REPROBUILD_LOG": "quiet",
     })
+    if use_runquota and runquota_socket is not None:
+        env["RUNQUOTA_SOCKET"] = str(runquota_socket)
+    else:
+        # Engine's fallbackToRunQuotaBypass kicks in when no socket is
+        # reachable; clearing the env var disables the runquota dispatch
+        # path entirely so we measure the bare scheduler + spawn cost.
+        env.pop("RUNQUOTA_SOCKET", None)
     return env
 
 
@@ -681,7 +687,8 @@ def execution_mode_name_env(execution_mode, scenario):
     return scenario_name_env(f"{execution_mode}_{scenario}")
 
 
-def ratio_record(project_key, scenario, execution_mode, ninja_result, rb_result):
+def ratio_record(project_key, scenario, execution_mode, ninja_result, rb_result,
+                 parallel=None, runquota=None):
     ratio = None
     if ninja_result["wallMs"] > 0:
         ratio = rb_result["wallMs"] / ninja_result["wallMs"]
@@ -701,7 +708,7 @@ def ratio_record(project_key, scenario, execution_mode, ninja_result, rb_result)
         status = "pass" if ratio <= threshold_value else "fail"
     else:
         threshold_value = None
-    return {
+    record = {
         "project": project_key,
         "scenario": scenario,
         "executionMode": execution_mode,
@@ -711,24 +718,38 @@ def ratio_record(project_key, scenario, execution_mode, ninja_result, rb_result)
         "threshold": threshold_value,
         "status": status,
     }
+    if parallel is not None:
+        record["parallel"] = parallel
+    if runquota is not None:
+        record["runquota"] = runquota
+    return record
 
 
-def add_pair(project_report, scenario, execution_mode, ninja_result, rb_result):
+def add_pair(project_report, scenario, execution_mode, ninja_result, rb_result,
+             parallel=None, runquota=None):
+    common_tag = {}
+    if parallel is not None:
+        common_tag["parallel"] = parallel
+    if runquota is not None:
+        common_tag["runquota"] = runquota
     project_report["scenarios"].append({
         "name": scenario,
         "executionMode": execution_mode,
         "generator": "Ninja",
+        **common_tag,
         **ninja_result,
     })
     project_report["scenarios"].append({
         "name": scenario,
         "executionMode": execution_mode,
         "generator": "Reprobuild",
+        **common_tag,
         **rb_result,
     })
     project_report["ratios"].append(
         ratio_record(project_report["key"], scenario, execution_mode,
-                     ninja_result, rb_result))
+                     ninja_result, rb_result,
+                     parallel=parallel, runquota=runquota))
 
 
 def selected_execution_modes(mode):
@@ -746,7 +767,6 @@ def benchmark_project_mode(args, context, project_report, key, source_dir,
     runquotad = context["runquotad"]
     c_compiler = context["cCompiler"]
     cxx_compiler = context["cxxCompiler"]
-    parallel = args.parallel
     base_env = os.environ.copy()
 
     mode_root = args.work_root / "projects" / key / execution_mode
@@ -766,12 +786,41 @@ def benchmark_project_mode(args, context, project_report, key, source_dir,
         cmake, ninja, "Reprobuild", mode_source, rb_bin_dir, c_compiler,
         cxx_compiler, mode_root / "reprobuild-install", configure_args,
         env=configure_repro_env)
+    # Configure is parallelism-independent and runquota-independent (it's the
+    # CMake generate phase + provider compile, none of which run build edges
+    # under runquota). Tag with the first matrix entry so the JSON is still
+    # well-formed but the cost isn't re-measured per combo.
+    first_parallel = args.parallel_matrix[0]
+    first_runquota = args.runquota_matrix[0]
     add_pair(project_report, "configure", execution_mode, ninja_configure,
-             rb_configure)
+             rb_configure, parallel=first_parallel, runquota=first_runquota)
 
-    rq_proc, rq_socket, rq_log = start_runquota(runquotad, mode_root / "runquota")
-    rb_env = repro_env(base_env, repro, rq_socket, rb_bin_dir, parallel,
-                       args.reprobuild_diagnostics)
+    rq_proc, rq_socket, rq_log = start_runquota(
+        runquotad, mode_root / "runquota")
+    try:
+        for parallel in args.parallel_matrix:
+            for runquota_setting in args.runquota_matrix:
+                use_runquota = (runquota_setting == "on")
+                rb_env = repro_env(
+                    base_env, repro, rq_socket, rb_bin_dir, parallel,
+                    args.reprobuild_diagnostics, use_runquota=use_runquota)
+                _run_scenarios_for_combo(
+                    args, project_report, key, source_dir, execution_mode,
+                    build_target, compiled, source_needle, custom_seed,
+                    cmake, ninja, repro, ninja_bin, rb_bin_dir, mode_source,
+                    rb_env, parallel, runquota_setting)
+    finally:
+        stop_runquota(rq_proc, rq_log)
+
+
+def _run_scenarios_for_combo(args, project_report, key, source_dir,
+                             execution_mode, build_target, compiled,
+                             source_needle, custom_seed, cmake, ninja, repro,
+                             ninja_bin, rb_bin_dir, mode_source, rb_env,
+                             parallel, runquota_setting):
+    """Run the full scenario set (clean_build, noop, post_clean, incremental,
+    generated_cc) for one (parallel, runquota) combination. Configure was
+    already done by the caller; the project on disk is reused across combos."""
     if execution_mode == "direct":
         ninja_build = lambda target: run_direct_ninja_build(
             ninja, ninja_bin, target, parallel,
@@ -796,65 +845,70 @@ def benchmark_project_mode(args, context, project_report, key, source_dir,
         rb_clean = lambda: run_build(
             cmake, rb_bin_dir, "clean", parallel, env=rb_env,
             reprobuild_diagnostics=args.reprobuild_diagnostics)
-    try:
-        ninja_clean_build = ninja_build(build_target)
-        rb_clean_build = rb_build(build_target)
-        add_pair(project_report, "clean_build", execution_mode,
-                 ninja_clean_build, rb_clean_build)
 
-        ninja_noop = repeated_result(lambda: ninja_build(build_target),
-                                     args.noop_runs)
-        rb_noop = repeated_result(lambda: rb_build(build_target),
-                                  args.noop_runs)
-        add_pair(project_report, "noop_rebuild", execution_mode,
-                 ninja_noop, rb_noop)
+    tag = dict(parallel=parallel, runquota=runquota_setting)
 
-        ninja_clean()
-        rb_clean()
-        ninja_after_clean = ninja_build(build_target)
-        rb_cache_hit = rb_build(build_target)
-        add_pair(project_report, "post_clean_rebuild", execution_mode,
-                 ninja_after_clean, rb_cache_hit)
+    # Start each combo from a known-clean state so the wall times are
+    # comparable across (parallel, runquota) cells.
+    ninja_clean()
+    rb_clean()
 
-        if compiled:
-            edit_source = compile_command_source(ninja_bin, source_needle)
-            if edit_source and edit_source.exists():
-                append_comment(edit_source, key)
-                ninja_incremental = ninja_build(build_target)
-                rb_incremental = rb_build(build_target)
-                project_report.setdefault("incrementalSources", {})[
-                    execution_mode] = str(edit_source)
-                add_pair(project_report, "single_source_incremental_rebuild",
-                         execution_mode, ninja_incremental, rb_incremental)
-            else:
-                project_report.setdefault("incrementalSkipped", {})[
-                    execution_mode] = "compile command source not found"
+    ninja_clean_build = ninja_build(build_target)
+    rb_clean_build = rb_build(build_target)
+    add_pair(project_report, "clean_build", execution_mode,
+             ninja_clean_build, rb_clean_build, **tag)
 
-            edit_header = header_incremental_source(key, mode_source)
-            if edit_header and edit_header.exists():
-                append_comment(edit_header, key)
-                ninja_header_incremental = ninja_build(build_target)
-                rb_header_incremental = rb_build(build_target)
-                project_report.setdefault("incrementalHeaders", {})[
-                    execution_mode] = str(edit_header)
-                add_pair(project_report, "single_header_incremental_rebuild",
-                         execution_mode, ninja_header_incremental,
-                         rb_header_incremental)
-            else:
-                project_report.setdefault("incrementalHeaderSkipped", {})[
-                    execution_mode] = "header benchmark source not found"
+    ninja_noop = repeated_result(lambda: ninja_build(build_target),
+                                 args.noop_runs)
+    rb_noop = repeated_result(lambda: rb_build(build_target),
+                              args.noop_runs)
+    add_pair(project_report, "noop_rebuild", execution_mode,
+             ninja_noop, rb_noop, **tag)
 
-        if custom_seed:
-            mode_custom_seed = mode_source / custom_seed.relative_to(source_dir)
-            append_seed(mode_custom_seed, key)
-            ninja_generated = ninja_build(build_target)
-            rb_generated = rb_build(build_target)
-            project_report.setdefault("customCommandInputs", {})[
-                execution_mode] = str(mode_custom_seed)
-            add_pair(project_report, "generated_source_custom_command_rebuild",
-                     execution_mode, ninja_generated, rb_generated)
-    finally:
-        stop_runquota(rq_proc, rq_log)
+    ninja_clean()
+    rb_clean()
+    ninja_after_clean = ninja_build(build_target)
+    rb_cache_hit = rb_build(build_target)
+    add_pair(project_report, "post_clean_rebuild", execution_mode,
+             ninja_after_clean, rb_cache_hit, **tag)
+
+    if compiled:
+        edit_source = compile_command_source(ninja_bin, source_needle)
+        if edit_source and edit_source.exists():
+            append_comment(edit_source, key)
+            ninja_incremental = ninja_build(build_target)
+            rb_incremental = rb_build(build_target)
+            project_report.setdefault("incrementalSources", {})[
+                execution_mode] = str(edit_source)
+            add_pair(project_report, "single_source_incremental_rebuild",
+                     execution_mode, ninja_incremental, rb_incremental, **tag)
+        else:
+            project_report.setdefault("incrementalSkipped", {})[
+                execution_mode] = "compile command source not found"
+
+        edit_header = header_incremental_source(key, mode_source)
+        if edit_header and edit_header.exists():
+            append_comment(edit_header, key)
+            ninja_header_incremental = ninja_build(build_target)
+            rb_header_incremental = rb_build(build_target)
+            project_report.setdefault("incrementalHeaders", {})[
+                execution_mode] = str(edit_header)
+            add_pair(project_report, "single_header_incremental_rebuild",
+                     execution_mode, ninja_header_incremental,
+                     rb_header_incremental, **tag)
+        else:
+            project_report.setdefault("incrementalHeaderSkipped", {})[
+                execution_mode] = "header benchmark source not found"
+
+    if custom_seed:
+        mode_custom_seed = mode_source / custom_seed.relative_to(source_dir)
+        append_seed(mode_custom_seed, key)
+        ninja_generated = ninja_build(build_target)
+        rb_generated = rb_build(build_target)
+        project_report.setdefault("customCommandInputs", {})[
+            execution_mode] = str(mode_custom_seed)
+        add_pair(project_report, "generated_source_custom_command_rebuild",
+                 execution_mode, ninja_generated, rb_generated, **tag)
 
 
 def benchmark_project(args, context, key, source_dir, configure_args, build_target,
@@ -947,6 +1001,8 @@ def build_report(args):
                 "cxxCompiler": {"path": str(cxx_compiler), "version": command_version([cxx_compiler, "--version"])},
             },
             "parallel": args.parallel,
+            "parallelMatrix": args.parallel_matrix,
+            "runquotaMatrix": args.runquota_matrix,
             "executionModes": selected_execution_modes(args.execution_mode),
             "noopRuns": args.noop_runs,
             "ninjaDiagnostics": {
@@ -1037,6 +1093,16 @@ def parse_args():
     parser.add_argument("--c-compiler", default="")
     parser.add_argument("--cxx-compiler", default="")
     parser.add_argument("--parallel", type=int, default=max(1, default_parallel))
+    parser.add_argument(
+        "--parallel-matrix", type=str, default=None,
+        help="comma-separated list of parallelism levels to bench "
+             "(e.g. 1,4,max). 'max' resolves to os.cpu_count(). "
+             "When unset, falls back to a single run at --parallel.")
+    parser.add_argument(
+        "--runquota", choices=["on", "off", "both"], default="on",
+        help="bench reprobuild with runquota enabled (default), disabled, "
+             "or both (matrix dimension). When 'off' the engine falls back "
+             "to bypass mode (no quota leases, raw spawn).")
     parser.add_argument("--execution-mode",
                         choices=["cmake-driver", "direct", "both"],
                         default="both",
@@ -1059,6 +1125,40 @@ def parse_args():
     args.cmake = args.cmake.expanduser().resolve()
     args.repro = args.repro.expanduser().resolve()
     args.runquotad = args.runquotad.expanduser().resolve()
+
+    # Resolve --parallel-matrix into args.parallel_matrix (list[int]).
+    # "max" expands to os.cpu_count(); raw integers are kept.
+    if args.parallel_matrix:
+        resolved = []
+        for raw in args.parallel_matrix.split(","):
+            token = raw.strip()
+            if not token:
+                continue
+            if token.lower() == "max":
+                value = os.cpu_count() or 1
+            else:
+                try:
+                    value = int(token)
+                except ValueError:
+                    fail(f"--parallel-matrix: '{token}' is not an int or 'max'")
+                if value < 1:
+                    fail(f"--parallel-matrix: parallelism must be >= 1 (got {value})")
+            resolved.append(value)
+        if not resolved:
+            fail("--parallel-matrix produced no values")
+        # De-dupe while preserving order.
+        seen = set()
+        args.parallel_matrix = [
+            v for v in resolved if not (v in seen or seen.add(v))]
+    else:
+        args.parallel_matrix = [args.parallel]
+
+    # Resolve --runquota into args.runquota_matrix (list[str] of "on"/"off").
+    if args.runquota == "both":
+        args.runquota_matrix = ["on", "off"]
+    else:
+        args.runquota_matrix = [args.runquota]
+
     return args
 
 

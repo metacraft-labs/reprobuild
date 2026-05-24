@@ -527,11 +527,10 @@ proc findExecutableOnPath(executableName: string;
         return absolutePath(candidate)
     ""
 
-proc sidecarToolProfile(path: string): Table[string, string] =
-  let sidecar = path & ".repro-tool-profile"
-  if not fileExists(extendedPath(sidecar)):
+proc readSidecarToolProfile(sidecarPath: string): Table[string, string] =
+  if not fileExists(extendedPath(sidecarPath)):
     return
-  for line in readFile(extendedPath(sidecar)).splitLines:
+  for line in readFile(extendedPath(sidecarPath)).splitLines:
     let stripped = line.strip()
     if stripped.len == 0 or stripped.startsWith("#") or
         stripped == "reprobuild-tool-profile-v1":
@@ -540,6 +539,29 @@ proc sidecarToolProfile(path: string): Table[string, string] =
     if marker <= 0:
       continue
     result[stripped[0 ..< marker]] = stripped[marker + 1 .. ^1]
+
+proc sidecarToolProfile(path: string): Table[string, string] =
+  readSidecarToolProfile(path & ".repro-tool-profile")
+
+proc findToolProfileSidecarOnPath(executableName: string;
+                                  pathSearchList: openArray[string]): string =
+  ## Look for a freestanding ``<dir>/<executableName>.repro-tool-profile``
+  ## on PATH. Generators that already know the tool's absolute location
+  ## (e.g. the CMake Reprobuild generator, which gets the compiler path
+  ## from CMAKE_<LANG>_COMPILER) write just the profile sidecar into a
+  ## bin/ marker dir and rely on this lookup so the resolver does not
+  ## also require a wrapper executable to be present on PATH. The sidecar
+  ## carries the real ``resolvedExecutablePath``; nothing in the engine's
+  ## launch path consults the bin/ marker dir at run time.
+  if executableName.len == 0:
+    return ""
+  for dir in pathSearchList:
+    if dir.len == 0:
+      continue
+    let candidate = dir / (executableName & ".repro-tool-profile")
+    if fileExists(extendedPath(candidate)):
+      return absolutePath(candidate)
+  ""
 
 proc applySidecarProfile(profile: var PathOnlyToolProfile;
                          sidecar: Table[string, string]) =
@@ -583,6 +605,40 @@ proc applySidecarProfile(profile: var PathOnlyToolProfile;
 proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
                           pathValue = getEnv("PATH")): PathOnlyToolProfile =
   let searchList = splitPathList(pathValue)
+
+  # Sidecar-first lookup: when a generator already knows the tool's
+  # absolute path and drops a `<name>.repro-tool-profile` on PATH, honour
+  # that profile directly. The sidecar's `resolvedExecutablePath` IS the
+  # tool; no wrapper executable file needs to exist next to it.
+  let sidecarPath =
+    findToolProfileSidecarOnPath(useDef.executableName, searchList)
+  if sidecarPath.len > 0:
+    let sidecar = readSidecarToolProfile(sidecarPath)
+    let resolvedFromSidecar = sidecar.getOrDefault("resolvedExecutablePath")
+    if resolvedFromSidecar.len > 0 and
+        fileExists(extendedPath(resolvedFromSidecar)):
+      result = PathOnlyToolProfile(
+        installMethod: "path",
+        packageSelector: useDef.packageSelector,
+        packageId: useDef.packageSelector,
+        declaredExecutablePath: useDef.executableName,
+        executableName: useDef.executableName,
+        pathSearchList: searchList,
+        resolvedExecutablePath: resolvedFromSidecar,
+        adapterStrength: asWeak,
+        cachePortability: cpLocalOnly)
+      result.applySidecarProfile(sidecar)
+      for probe in configuredProbes(useDef.packageSelector,
+                                    useDef.executableName):
+        let probeResult = runProbe(result.resolvedExecutablePath, probe)
+        if probeResult.exitCode != 0:
+          raise newException(OSError,
+            "tool-resolution failed: probe " & probe.name & " for " &
+            useDef.executableName & " exited " & $probeResult.exitCode)
+        result.probes.add(probeResult)
+      result.profileFingerprint = profileFingerprintFor(result)
+      return
+
   let resolved = findExecutableOnPath(useDef.executableName, searchList)
   if resolved.len == 0:
     raise newException(OSError,

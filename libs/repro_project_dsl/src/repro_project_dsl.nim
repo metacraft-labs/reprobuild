@@ -564,6 +564,7 @@ const
   BuiltinPackageName = "reprobuild.builtin"
   BuiltinFsExecutable = "fs"
   BuiltinHcrExecutable = "hcr"
+  BuiltinExecExecutable = "exec"
 
 proc builtinFsCall(command: string; arguments: openArray[PublicCliArg]):
     PublicCliCall =
@@ -575,6 +576,25 @@ proc builtinHcrCall(command: string; arguments: openArray[PublicCliArg]):
   publicCliCall(BuiltinPackageName, BuiltinHcrExecutable, command,
     BuiltinPackageName & "." & BuiltinHcrExecutable & "." & command, arguments)
 
+proc inlineExecCall*(argv: openArray[string]; cwd = ""): PublicCliCall =
+  ## Builds a PublicCliCall that, when lowered by the engine, runs `argv`
+  ## directly via the OS spawn primitive without consulting any package
+  ## profile or wrapper script. The action's LaunchPlan is fully realized
+  ## at provider-compile time and the binary graph cache stores the literal
+  ## argv. Intended for generated provider files (such as the one emitted
+  ## by the CMake Reprobuild generator) whose upstream build system already
+  ## knows the absolute executable path and arguments of one build edge.
+  ## Pair this with an `external` block (see Inline External Profiles in
+  ## reprobuild-specs/External-Package-Catalog-Adapters.md) when the call
+  ## also needs to expose the executable as a typed tool to other call
+  ## sites in the same project file.
+  var arguments: seq[PublicCliArg] = @[
+    cliArgSeq("argv", @argv, cpkPositional, 0)
+  ]
+  if cwd.len > 0:
+    arguments.add(cliArg("cwd", cwd))
+  publicCliCall(BuiltinPackageName, BuiltinExecExecutable, "",
+    BuiltinPackageName & "." & BuiltinExecExecutable, arguments)
 proc builtinActionIdPart(value: string): string =
   for ch in value:
     if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-'}:

@@ -1,6 +1,9 @@
 import std/[algorithm, json, options, os, osproc, sets, streams, strtabs,
     strutils, tables, times]
 
+when defined(windows):
+  import std/winlean
+
 import repro_core
 import repro_depfile
 import repro_hash
@@ -183,6 +186,15 @@ type
     queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
     inlineFailure: ActionResult
     resultPath: string
+    when defined(windows):
+      # Synchronize-only HANDLE duplicate of the child process, opened on
+      # first wait-loop entry via OpenProcess(SYNCHRONIZE, pid). Used as a
+      # WaitForMultipleObjects argument so process-exit detection is
+      # event-driven (~microseconds) instead of the previous
+      # peekExitCode+Sleep(1) spin loop (≥15 ms Windows timer quantum).
+      # Closed when the action is reaped. Mirrors Ninja's IOCP-based wait
+      # in references/ninja/src/subprocess-win32.cc.
+      processWaitHandle: Handle
 
   DynamicGraphFragment = object
     deps: Table[string, seq[string]]
@@ -798,6 +810,64 @@ proc envTableFromArgvStyle(env: openArray[string]): StringTableRef =
       continue
     result[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
 
+when defined(windows):
+  proc ensureRunningProcessHandle(item: var RunningAction): Handle =
+    ## Lazily open a SYNCHRONIZE-only HANDLE for the running child process,
+    ## suitable for WaitForMultipleObjects. Cached on the RunningAction so
+    ## each process is opened once and reused across wait iterations.
+    if item.processWaitHandle != 0:
+      return item.processWaitHandle
+    let pid = processID(item.process)
+    if pid <= 0:
+      return 0
+    let handle = openProcess(SYNCHRONIZE, WINBOOL(0), DWORD(pid))
+    item.processWaitHandle = handle
+    handle
+
+  proc closeRunningProcessHandle(item: var RunningAction) =
+    if item.processWaitHandle != 0:
+      discard closeHandle(item.processWaitHandle)
+      item.processWaitHandle = 0
+
+  proc waitAnyProcessExitWindows(running: var seq[RunningAction];
+                                 timeoutMs: int): int =
+    ## Returns the index in `running` of the first process whose handle is
+    ## signaled within `timeoutMs`, or -1 on timeout. Mirrors Ninja's
+    ## event-driven wait (references/ninja/src/subprocess-win32.cc:260):
+    ## one syscall, the OS wakes us when ANY child exits, no polling.
+    ## Inline-runquota / queued / inline-failed running entries are not
+    ## handle-based and are skipped here — the caller still checks them
+    ## via pollCompletion / inlineFailure after this returns (the timeout
+    ## gives the caller a cadence for those checks).
+    var handles: WOHandleArray
+    var indices: array[MAXIMUM_WAIT_OBJECTS, int]
+    var count = 0
+    for i in 0 ..< running.len:
+      if count >= MAXIMUM_WAIT_OBJECTS:
+        break
+      case running[i].processKind
+      of rpkHelperProcess, rpkBypassProcess:
+        let h = ensureRunningProcessHandle(running[i])
+        if h != 0:
+          handles[count] = h
+          indices[count] = i
+          inc count
+      else:
+        discard
+    if count == 0:
+      return -1
+    let ret = waitForMultipleObjects(DWORD(count), addr handles,
+                                     WINBOOL(0), DWORD(timeoutMs))
+    const WAIT_OBJECT_0_DWORD = DWORD(0)
+    const WAIT_TIMEOUT_DWORD = DWORD(0x102)
+    const WAIT_FAILED_DWORD = cast[DWORD](0xFFFFFFFF'u32)
+    if ret == WAIT_TIMEOUT_DWORD or ret == WAIT_FAILED_DWORD:
+      return -1
+    let signaled = int(ret - WAIT_OBJECT_0_DWORD)
+    if signaled < 0 or signaled >= count:
+      return -1
+    indices[signaled]
+
 proc startBypassRunQuotaProcess(action: BuildAction): Process =
   ## Path-mode escape hatch: spawn the action's argv directly via osproc,
   ## bypassing the RunQuota helper. Only used when
@@ -915,7 +985,13 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
       result.stderr.add(": " & helperOutput)
     return
   try:
-    let node = parseFile(resultPath)
+    # extendedPath() is required: the result file's path can exceed Windows
+    # MAX_PATH (260 chars) once nested under <bench-root>/CMakeFiles/
+    # CMakeScratch/TryCompile-<hash>/CMakeFiles/reprobuild/worktrees/<…>/
+    # build/reprobuild/build-engine-cache/runquota-results/1.json. Without
+    # the \\?\ prefix, parseFile() raises "cannot read from file" even when
+    # the prior fileExists() check (which DOES use extendedPath) saw it.
+    let node = parseFile(extendedPath(resultPath))
     result.leaseId = node{"lease_id"}.getBiggestInt(0).uint64
     result.exitCode = node{"exit_code"}.getInt(1)
     result.stdout = node{"stdout"}.getStr("")
@@ -1395,6 +1471,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return true
     false
 
+  proc anyInlineRunQuotaProcess(): bool =
+    ## True when any running entry uses the inline RunQuota path (active
+    ## or pending). The Windows event-driven wait can't include these
+    ## (they don't expose a SYNCHRONIZE handle to us), so a non-zero
+    ## answer caps the WaitForMultipleObjects timeout so we still poll
+    ## `pollCompletion` periodically. Zero answer lets us wait longer.
+    for item in running:
+      if item.processKind in {rpkInlineRunQuota, rpkInlineRunQuotaPending,
+                              rpkInlineRunQuotaFailed}:
+        return true
+    false
+
   proc failRunningAction(index: int; message: string) =
     running[index].inlineFailure = inlineRunQuotaFailureResult(
       running[index].id, message)
@@ -1834,6 +1922,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           nextGrantPoll = epochTime() + 0.025
           if runIndex >= 0:
             break
+        # Cheap inline-only checks first: queued/failed inline-runquota
+        # entries are not handle-based and the OS won't wake us for them.
+        # Inline-RunQuota processes do their own pipe / handle wait in
+        # `pollCompletion`, which is non-blocking here.
         for j in 0 ..< running.len:
           case running[j].processKind
           of rpkInlineRunQuotaPending:
@@ -1846,10 +1938,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runIndex = j
             break
           of rpkHelperProcess, rpkBypassProcess:
-            if running[j].process.peekExitCode() != -1:
-              runIndex = j
-              break
-        if runIndex < 0:
+            # Handled by the event-driven block below; skip here.
+            discard
+        if runIndex >= 0:
+          break
+        # Event-driven wait: ask the OS to wake us when ANY child process
+        # exits. On Windows this is WaitForMultipleObjects on cached
+        # SYNCHRONIZE-only handles (mirrors Ninja's IOCP-driven design in
+        # references/ninja/src/subprocess-win32.cc) and avoids the
+        # ≥15 ms timer-quantum latency the old peekExitCode + sleep(1)
+        # spin loop had. We cap the timeout so the loop still revisits
+        # inline-runquota grants and pending-queued state periodically.
+        let timeoutMs =
+          if hasPendingInlineRunQuota(): 25
+          elif anyInlineRunQuotaProcess(): 50
+          else: 250
+        when defined(windows):
+          let signaled = waitAnyProcessExitWindows(running, timeoutMs)
+          if signaled >= 0:
+            runIndex = signaled
+        else:
+          # POSIX `sleep(1)` is genuine 1 ms (not 15 ms like Windows), so
+          # the spin pattern is acceptable here. A SIGCHLD-based waiter
+          # would be more efficient but is a larger change.
           sleep(1)
       finishStat("repro process wait", waitStart)
       var runningItem = running[runIndex]
@@ -1889,6 +2000,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishedUsed - runningItem.poolUnits
         else:
           0'u32
+      when defined(windows):
+        closeRunningProcessHandle(running[runIndex])
       running.delete(runIndex)
 
       let idx = idToIndex.resultIndex(finished.id)
