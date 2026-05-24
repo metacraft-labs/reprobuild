@@ -10,6 +10,7 @@ when not (defined(macosx) or defined(linux)):
 
 const FixtureSource = r"""
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <spawn.h>
@@ -49,6 +50,23 @@ static void write_file(const char *path, const char *message) {
   close(fd);
 }
 
+static void require_missing_stat(const char *path, int use_lstat, int exit_code) {
+  struct stat st;
+  errno = 0;
+  int status = use_lstat ? lstat(path, &st) : stat(path, &st);
+  if (status != -1 || errno != ENOENT) exit(exit_code);
+}
+
+static void require_missing_open(const char *path, int exit_code) {
+  errno = 0;
+  int fd = open(path, O_RDONLY);
+  if (fd >= 0) {
+    close(fd);
+    exit(exit_code);
+  }
+  if (errno != ENOENT) exit(exit_code);
+}
+
 static void *thread_main(void *raw) {
   struct thread_arg *arg = (struct thread_arg *)raw;
   char output_path[1024];
@@ -56,8 +74,7 @@ static void *thread_main(void *raw) {
   snprintf(output_path, sizeof(output_path), "%s/thread-%d.txt", arg->out_dir, arg->index);
   snprintf(missing_path, sizeof(missing_path), "%s/missing-thread-%d.txt", arg->out_dir, arg->index);
   read_file(arg->input);
-  struct stat st;
-  lstat(missing_path, &st);
+  require_missing_stat(missing_path, 1, 84);
   write_file(output_path, "thread output\n");
   return NULL;
 }
@@ -68,9 +85,22 @@ static int child_mode(const char *child_input) {
   fflush(stdout);
   fputs("fixture-child-stderr\n", stderr);
   read_file(child_input);
-  struct stat st;
-  lstat("missing-child-probe.txt", &st);
+  require_missing_stat("missing-child-probe.txt", 1, 91);
+  require_missing_open("missing-child-open.txt", 92);
   return 0;
+}
+
+static int fork_exec_child(const char *self, const char *child_input) {
+  pid_t pid = fork();
+  if (pid < 0) return 93;
+  if (pid == 0) {
+    execl(self, self, "--child", child_input, (char *)NULL);
+    _exit(94);
+  }
+  int status = 0;
+  if (waitpid(pid, &status, 0) < 0) return 95;
+  if (!WIFEXITED(status)) return 96;
+  return WEXITSTATUS(status);
 }
 
 int main(int argc, char **argv) {
@@ -96,8 +126,8 @@ int main(int argc, char **argv) {
 
   char missing_path[1024];
   snprintf(missing_path, sizeof(missing_path), "%s/missing-parent-probe.txt", out_dir);
-  struct stat st;
-  stat(missing_path, &st);
+  require_missing_stat(missing_path, 0, 68);
+  require_missing_open(missing_path, 69);
 
   DIR *dir = opendir(out_dir);
   if (dir != NULL) {
@@ -128,7 +158,9 @@ int main(int argc, char **argv) {
   int status = 0;
   waitpid(pid, &status, 0);
   if (!WIFEXITED(status)) return 67;
-  return WEXITSTATUS(status);
+  int child_status = WEXITSTATUS(status);
+  if (child_status != 0) return child_status;
+  return fork_exec_child(argv[0], child_input);
 }
 """
 

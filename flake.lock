@@ -1105,6 +1105,23 @@
         "type": "github"
       }
     },
+    "nimcrypto-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1739624651,
+        "narHash": "sha256-Z6oaGzRiai/hLdudDb/VP6euoiEKG6T4sivucfmdFyM=",
+        "owner": "cheatfate",
+        "repo": "nimcrypto",
+        "rev": "69eec0375dd146aede41f920c702c531bfe89c6b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cheatfate",
+        "repo": "nimcrypto",
+        "rev": "69eec0375dd146aede41f920c702c531bfe89c6b",
+        "type": "github"
+      }
+    },
     "nix": {
       "inputs": {
         "flake-compat": [
@@ -1932,6 +1949,7 @@
           "nixos-modules",
           "git-hooks-nix"
         ],
+        "nimcrypto-src": "nimcrypto-src",
         "nixos-modules": "nixos-modules",
         "nixpkgs": [
           "nixos-modules",

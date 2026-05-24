@@ -263,7 +263,10 @@ proc splitPathList(pathValue: string): seq[string] =
 proc configuredProbes*(packageSelector, executableName: string): seq[
     ToolProbeSpec] =
   discard packageSelector
-  discard executableName
+  if executableName == "tmux":
+    return @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["-V"])]
+  if executableName == "xvfb-run":
+    return @[ToolProbeSpec(kind: tpkVersion, name: "help", args: @["--help"])]
   @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["--version"])]
 
 proc shellCommand(args: openArray[string]): string =

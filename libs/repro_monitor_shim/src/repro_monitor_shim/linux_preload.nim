@@ -28,14 +28,25 @@ var
   fdPaths = initTable[cint, string]()
   dirPaths = initTable[uint, string]()
 
-var disabled {.threadvar.}: int
+var
+  disabled {.threadvar.}: int
+  inForkChild {.threadvar.}: bool
 
 {.emit: """
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <errno.h>
 
 long repro_linux_gettid(void) {
   return syscall(SYS_gettid);
+}
+
+int repro_linux_get_errno(void) {
+  return errno;
+}
+
+void repro_linux_set_errno(int value) {
+  errno = value;
 }
 
 extern int repro_monitor_shim_init(char *configPath);
@@ -49,6 +60,8 @@ static void repro_linux_monitor_constructor(void) {
 proc c_getpid(): cint {.importc: "getpid", header: "<unistd.h>".}
 proc c_getppid(): cint {.importc: "getppid", header: "<unistd.h>".}
 proc c_gettid(): clong {.importc: "repro_linux_gettid", raises: [].}
+proc c_get_errno(): cint {.importc: "repro_linux_get_errno", raises: [].}
+proc c_set_errno(value: cint) {.importc: "repro_linux_set_errno", raises: [].}
 
 proc currentThreadId(): uint64 =
   uint64(c_gettid())
@@ -69,6 +82,9 @@ template withShimMuted(body: untyped) =
   finally:
     dec disabled
 
+proc shouldBypass(): bool {.inline, raises: [].} =
+  disabled > 0 or inForkChild
+
 proc baseRecord(kind: MonitorRecordKind;
                 observationKind: MonitorObservationKind): MonitorRecord =
   MonitorRecord(
@@ -81,7 +97,7 @@ proc baseRecord(kind: MonitorRecordKind;
     probeResult: prUnknown)
 
 proc emitRecord(record: MonitorRecord) {.raises: [].} =
-  if not initialized or fragmentDir.len == 0 or disabled > 0:
+  if not initialized or fragmentDir.len == 0 or shouldBypass():
     return
   withShimMuted:
     appendFragmentRecord(fragmentDir, record)
@@ -97,6 +113,11 @@ proc repro_monitor_shim_init*(configPath: cstring): cint
 proc ensureInitialized() {.raises: [].} =
   if not initialized:
     discard repro_monitor_shim_init(nil)
+
+proc ensureInitializedPreservingErrno() {.raises: [].} =
+  let savedErrno = c_get_errno()
+  ensureInitialized()
+  c_set_errno(savedErrno)
 
 proc observationForOpen(flags: cint): MonitorObservationKind =
   if (flags and (OCreat or OTrunc or OAppend)) != 0:
@@ -191,69 +212,83 @@ proc recordOpen(path: cstring; flags, mode, fd: cint) {.raises: [].} =
   emitRecord(record)
 
 proc repro_hook_open*(ctx: var OpenContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   recordOpen(ctx.path, ctx.flags, ctx.mode, ctx.result)
+  c_set_errno(savedErrno)
 
 proc repro_hook_open64*(ctx: var OpenContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   recordOpen(ctx.path, ctx.flags, ctx.mode, ctx.result)
+  c_set_errno(savedErrno)
 
 proc repro_hook_openat*(ctx: var OpenatContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   recordOpen(ctx.path, ctx.flags, ctx.mode, ctx.result)
+  c_set_errno(savedErrno)
 
 proc repro_hook_openat64*(ctx: var OpenatContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   recordOpen(ctx.path, ctx.flags, ctx.mode, ctx.result)
+  c_set_errno(savedErrno)
 
 proc repro_hook_read*(ctx: var ReadContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   if ctx.result >= 0:
     var record = baseRecord(mrFileRead, moFileRead)
     record.path = pathForFd(ctx.fd)
     record.result = ctx.result.int64
     record.flags = uint32(ctx.fd)
     emitRecord(record)
+  c_set_errno(savedErrno)
 
 proc repro_hook_write*(ctx: var WriteContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   if ctx.result >= 0 and ctx.fd > 2:
     var record = baseRecord(mrFileWrite, moFileWrite)
     record.path = pathForFd(ctx.fd)
     record.result = ctx.result.int64
     record.flags = uint32(ctx.fd)
     emitRecord(record)
+  c_set_errno(savedErrno)
 
 proc repro_hook_close*(ctx: var CloseContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
   callNext(ctx)
+  let savedErrno = c_get_errno()
   removeFdPath(ctx.fd)
+  c_set_errno(savedErrno)
 
 proc emitProbe(path: cstring; callResult: cint) {.raises: [].} =
   var record = baseRecord(mrPathProbe, moPathProbe)
@@ -264,56 +299,67 @@ proc emitProbe(path: cstring; callResult: cint) {.raises: [].} =
   emitRecord(record)
 
 proc repro_hook_stat*(ctx: var StatContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   emitProbe(ctx.path, ctx.result)
+  c_set_errno(savedErrno)
 
 proc repro_hook_lstat*(ctx: var StatContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   emitProbe(ctx.path, ctx.result)
+  c_set_errno(savedErrno)
 
 proc repro_hook_opendir*(ctx: var OpendirContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   updateDirPath(ctx.result, ctx.path)
+  c_set_errno(savedErrno)
 
 proc repro_hook_readdir*(ctx: var ReaddirContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   let dirPath = pathForDir(ctx.dirp)
   callNext(ctx)
+  let savedErrno = c_get_errno()
   if ctx.result != nil:
     var record = baseRecord(mrDirectoryEnumerate, moDirectoryEnumerate)
     record.path = dirPath
     record.result = 1
     record.detail = "readdir"
     emitRecord(record)
+  c_set_errno(savedErrno)
 
 proc repro_hook_closedir*(ctx: var ClosedirContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
   callNext(ctx)
+  let savedErrno = c_get_errno()
   removeDirPath(ctx.dirp)
+  c_set_errno(savedErrno)
 
 proc repro_hook_fork*(ctx: var ForkContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   callNext(ctx)
+  let savedErrno = c_get_errno()
   if ctx.result > 0:
     var record = baseRecord(mrProcessSpawn, moExecute)
     record.childOsPid = uint64(ctx.result)
@@ -321,13 +367,17 @@ proc repro_hook_fork*(ctx: var ForkContext) {.raises: [].} =
     record.detail = "fork"
     emitRecord(record)
   elif ctx.result == 0:
-    recordProcessStart()
+    # After fork only the calling thread survives. Other threads may have held
+    # Nim locks when fork happened, so the child must avoid monitor bookkeeping
+    # until exec loads a fresh image and runs the preload constructor again.
+    inForkChild = true
+  c_set_errno(savedErrno)
 
 proc repro_hook_execve*(ctx: var ExecveContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   var record = baseRecord(mrProcessExec, moExecute)
   if ctx.path != nil:
     record.path = $ctx.path
@@ -336,12 +386,13 @@ proc repro_hook_execve*(ctx: var ExecveContext) {.raises: [].} =
   callNext(ctx)
 
 proc repro_hook_posix_spawn*(ctx: var PosixSpawnContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   ctx.envp = envWithPreload(ctx.envp)
   callNext(ctx)
+  let savedErrno = c_get_errno()
   if ctx.result == 0 and ctx.pid != nil:
     var record = baseRecord(mrProcessSpawn, moExecute)
     record.childOsPid = uint64(ctx.pid[])
@@ -350,14 +401,16 @@ proc repro_hook_posix_spawn*(ctx: var PosixSpawnContext) {.raises: [].} =
       record.path = $ctx.path
     record.detail = "posix_spawn"
     emitRecord(record)
+  c_set_errno(savedErrno)
 
 proc repro_hook_posix_spawnp*(ctx: var PosixSpawnContext) {.raises: [].} =
-  if disabled > 0:
+  if shouldBypass():
     callNext(ctx)
     return
-  ensureInitialized()
+  ensureInitializedPreservingErrno()
   ctx.envp = envWithPreload(ctx.envp)
   callNext(ctx)
+  let savedErrno = c_get_errno()
   if ctx.result == 0 and ctx.pid != nil:
     var record = baseRecord(mrProcessSpawn, moExecute)
     record.childOsPid = uint64(ctx.pid[])
@@ -366,6 +419,7 @@ proc repro_hook_posix_spawnp*(ctx: var PosixSpawnContext) {.raises: [].} =
       record.path = $ctx.path
     record.detail = "posix_spawnp"
     emitRecord(record)
+  c_set_errno(savedErrno)
 
 setPreloadShimEnvVar("REPRO_MONITOR_SHIM_LIB")
 registerOpenHook(repro_hook_open)

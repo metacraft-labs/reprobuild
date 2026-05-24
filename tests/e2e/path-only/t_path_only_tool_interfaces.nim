@@ -46,6 +46,21 @@ proc writeFixtureTool(binDir: string) =
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 suite "e2e_path_only_tool_interfaces":
+  test "configured probes use tool-specific version flags":
+    let defaultProbes = configuredProbes("m8-fixture-tool",
+      "m8-fixture-tool")
+    check defaultProbes.len == 1
+    check defaultProbes[0].args == @["--version"]
+
+    let tmuxProbes = configuredProbes("tmux", "tmux")
+    check tmuxProbes.len == 1
+    check tmuxProbes[0].args == @["-V"]
+
+    let xvfbRunProbes = configuredProbes("xvfb-run", "xvfb-run")
+    check xvfbRunProbes.len == 1
+    check xvfbRunProbes[0].name == "help"
+    check xvfbRunProbes[0].args == @["--help"]
+
   test "public build command resolves typed uses from explicit PATH-only mode":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m8-path-only", "")

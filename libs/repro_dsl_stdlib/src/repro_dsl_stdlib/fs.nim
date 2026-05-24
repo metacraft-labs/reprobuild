@@ -44,8 +44,10 @@ proc stamp*(output, title: string; entries: openArray[string] = [];
 proc preserveTree*(sourceRoot, outputRoot: string; actionId = "";
                    deps: openArray[string] = [];
                    after: openArray[BuildActionDef] = [];
+                   excludePrefixes: openArray[string] = [];
                    commandStatsId = ""):
     BuildActionDef {.discardable.} =
   repro_project_dsl.fs.preserveTree(sourceRoot, outputRoot,
     actionId = actionId, deps = deps, after = after,
+    excludePrefixes = excludePrefixes,
     commandStatsId = commandStatsId)

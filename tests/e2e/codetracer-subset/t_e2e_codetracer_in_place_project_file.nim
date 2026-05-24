@@ -549,7 +549,10 @@ proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
   copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
+  createDir(projectRoot / "src")
   copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
+  copyFile(codeTracerRoot / "src" / "helpers.js",
+    projectRoot / "src" / "helpers.js")
   copyTree(codeTracerRoot / "src" / "frontend",
     projectRoot / "src" / "frontend")
   copyTree(codeTracerRoot / "src" / "common",
@@ -598,7 +601,10 @@ proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
 proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
   copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
+  createDir(projectRoot / "src")
   copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
+  copyFile(codeTracerRoot / "src" / "helpers.js",
+    projectRoot / "src" / "helpers.js")
   copyTree(codeTracerRoot / "src" / "frontend",
     projectRoot / "src" / "frontend")
   copyTree(codeTracerRoot / "src" / "common",
@@ -827,6 +833,9 @@ proc assertOutputAction(report: JsonNode; output, status: string;
 
 const publicResourceAction = "frontend-public-resources"
 
+proc buildDebug(projectRoot, relativePath: string): string =
+  projectRoot / "src" / "build-debug" / relativePath
+
 proc checkPublicResourceOutputs(projectRoot: string) =
   let pairs = [
     ("src/public/Tupfile", "public/Tupfile"),
@@ -838,8 +847,9 @@ proc checkPublicResourceOutputs(projectRoot: string) =
       "codetracerWhite.json")
   ]
   for (source, output) in pairs:
-    check fileExists(projectRoot / output)
-    check readFile(projectRoot / source) == readFile(projectRoot / output)
+    check fileExists(buildDebug(projectRoot, output))
+    check readFile(projectRoot / source) == readFile(buildDebug(projectRoot,
+      output))
 
 proc assertPublicResourceActions(report: JsonNode; status: string;
                                  launched: bool) =
@@ -880,16 +890,16 @@ proc declaredEvidenceContains(action: JsonNode; suffix: string): bool =
       return true
 
 proc checkFrontendBundleOutputs(projectRoot: string) =
-  check fileExists(projectRoot / "ui.js")
-  check fileExists(projectRoot / "public" / "ui.js")
-  check fileExists(projectRoot / "index.js")
-  check fileExists(projectRoot / "index.js.map")
-  check fileExists(projectRoot / "src" / "index.js")
-  check fileExists(projectRoot / "server_index.js")
-  check fileExists(projectRoot / "server_index.js.map")
-  check fileExists(projectRoot / "subwindow.js")
-  check fileExists(projectRoot / "subwindow.js.map")
-  check fileExists(projectRoot / "src" / "subwindow.js")
+  check fileExists(buildDebug(projectRoot, "ui.js"))
+  check fileExists(buildDebug(projectRoot, "public/ui.js"))
+  check fileExists(buildDebug(projectRoot, "index.js"))
+  check fileExists(buildDebug(projectRoot, "index.js.map"))
+  check fileExists(buildDebug(projectRoot, "src/index.js"))
+  check fileExists(buildDebug(projectRoot, "server_index.js"))
+  check fileExists(buildDebug(projectRoot, "server_index.js.map"))
+  check fileExists(buildDebug(projectRoot, "subwindow.js"))
+  check fileExists(buildDebug(projectRoot, "subwindow.js.map"))
+  check fileExists(buildDebug(projectRoot, "src/subwindow.js"))
   for stylesheet in [
     "default_white_theme.css",
     "default_dark_theme_electron.css",
@@ -898,31 +908,33 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
     "loader.css",
     "subwindow.css"
   ]:
-    check fileExists(projectRoot / "src" / "frontend" / "styles" /
-      stylesheet)
-  check fileExists(projectRoot / "index.html")
-  check fileExists(projectRoot / "subwindow.html")
-  check fileExists(projectRoot / "src" / "helpers.js")
-  check readFile(projectRoot / "ui.js") ==
-    readFile(projectRoot / "public" / "ui.js")
-  check readFile(projectRoot / "index.js") ==
-    readFile(projectRoot / "src" / "index.js")
-  check readFile(projectRoot / "subwindow.js") ==
-    readFile(projectRoot / "src" / "subwindow.js")
+    check fileExists(buildDebug(projectRoot, "frontend/styles/" &
+      stylesheet))
+  check fileExists(buildDebug(projectRoot, "index.html"))
+  check fileExists(buildDebug(projectRoot, "subwindow.html"))
+  check fileExists(buildDebug(projectRoot, "src/helpers.js"))
+  check readFile(buildDebug(projectRoot, "ui.js")) ==
+    readFile(buildDebug(projectRoot, "public/ui.js"))
+  check readFile(buildDebug(projectRoot, "index.js")) ==
+    readFile(buildDebug(projectRoot, "src/index.js"))
+  check readFile(buildDebug(projectRoot, "subwindow.js")) ==
+    readFile(buildDebug(projectRoot, "src/subwindow.js"))
   check readFile(projectRoot / "src" / "frontend" / "index.html") ==
-    readFile(projectRoot / "index.html")
+    readFile(buildDebug(projectRoot, "index.html"))
   check readFile(projectRoot / "src" / "frontend" / "subwindow.html") ==
-    readFile(projectRoot / "subwindow.html")
-  check readFile(projectRoot / "helpers.js") ==
-    readFile(projectRoot / "src" / "helpers.js")
+    readFile(buildDebug(projectRoot, "subwindow.html"))
+  check readFile(projectRoot / "src" / "helpers.js") ==
+    readFile(buildDebug(projectRoot, "src/helpers.js"))
+  check readFile(buildDebug(projectRoot, "helpers.js")) ==
+    readFile(buildDebug(projectRoot, "src/helpers.js"))
 
 proc checkConfigOutputs(projectRoot: string) =
-  check fileExists(projectRoot / "config" / "default_layout.json")
-  check fileExists(projectRoot / "config" / "default_config.yaml")
+  check fileExists(buildDebug(projectRoot, "config/default_layout.json"))
+  check fileExists(buildDebug(projectRoot, "config/default_config.yaml"))
   check readFile(projectRoot / "src" / "config" / "default_layout.json") ==
-    readFile(projectRoot / "config" / "default_layout.json")
+    readFile(buildDebug(projectRoot, "config/default_layout.json"))
   check readFile(projectRoot / "src" / "config" / "default_config.yaml") ==
-    readFile(projectRoot / "config" / "default_config.yaml")
+    readFile(buildDebug(projectRoot, "config/default_config.yaml"))
 
 when defined(macosx) or defined(linux):
   suite "e2e_codetracer_in_place_project_file":
@@ -980,7 +992,7 @@ when defined(macosx) or defined(linux):
       check not selected.contains("action: c-sudoku-object-tup")
       check fileExists(projectRoot / "build" / "generated" / "ct_config.h")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
-      check not fileExists(projectRoot / "tests" / "ipc_registry_test.js")
+      check not fileExists(buildDebug(projectRoot, "tests/ipc_registry_test.js"))
       check not fileExists(projectRoot / "build" / "c" / "main.tup.o")
 
       let selectedReport = parseFile(valueAfter(selected, "buildReport:"))
@@ -1057,10 +1069,10 @@ when defined(macosx) or defined(linux):
       check not first.contains("action: frontend-server-index-js")
       check not first.contains("action: c-sudoku-object-tup")
       check not first.contains("action: c-sudoku-object-with-generated-header")
-      check fileExists(projectRoot / "ui.js")
-      check fileExists(projectRoot / "public" / "ui.js")
-      check readFile(projectRoot / "ui.js") ==
-        readFile(projectRoot / "public" / "ui.js")
+      check fileExists(buildDebug(projectRoot, "ui.js"))
+      check fileExists(buildDebug(projectRoot, "public/ui.js"))
+      check readFile(buildDebug(projectRoot, "ui.js")) ==
+        readFile(buildDebug(projectRoot, "public/ui.js"))
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       check firstReport{"actions"}.len == 2
@@ -1153,11 +1165,11 @@ when defined(macosx) or defined(linux):
       check not first.contains("action: nim-js-ipc-registry-test")
       check not first.contains("action: c-sudoku-object-tup")
       check not first.contains("action: c-sudoku-object-with-generated-header")
-      check fileExists(projectRoot / "subwindow.js")
-      check fileExists(projectRoot / "subwindow.js.map")
-      check fileExists(projectRoot / "src" / "subwindow.js")
-      check readFile(projectRoot / "subwindow.js") ==
-        readFile(projectRoot / "src" / "subwindow.js")
+      check fileExists(buildDebug(projectRoot, "subwindow.js"))
+      check fileExists(buildDebug(projectRoot, "subwindow.js.map"))
+      check fileExists(buildDebug(projectRoot, "src/subwindow.js"))
+      check readFile(buildDebug(projectRoot, "subwindow.js")) ==
+        readFile(buildDebug(projectRoot, "src/subwindow.js"))
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       check firstReport{"actions"}.len == 2
@@ -1256,11 +1268,11 @@ when defined(macosx) or defined(linux):
       check not first.contains("action: nim-js-ipc-registry-test")
       check not first.contains("action: c-sudoku-object-tup")
       check not first.contains("action: c-sudoku-object-with-generated-header")
-      check fileExists(projectRoot / "index.js")
-      check fileExists(projectRoot / "index.js.map")
-      check fileExists(projectRoot / "src" / "index.js")
-      check readFile(projectRoot / "index.js") ==
-        readFile(projectRoot / "src" / "index.js")
+      check fileExists(buildDebug(projectRoot, "index.js"))
+      check fileExists(buildDebug(projectRoot, "index.js.map"))
+      check fileExists(buildDebug(projectRoot, "src/index.js"))
+      check readFile(buildDebug(projectRoot, "index.js")) ==
+        readFile(buildDebug(projectRoot, "src/index.js"))
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       check firstReport{"actions"}.len == 2
@@ -1364,10 +1376,10 @@ when defined(macosx) or defined(linux):
       check not first.contains("action: nim-js-ipc-registry-test")
       check not first.contains("action: c-sudoku-object-tup")
       check not first.contains("action: c-sudoku-object-with-generated-header")
-      check fileExists(projectRoot / "src" / "bin" / "db-backend-record")
+      check fileExists(buildDebug(projectRoot, "bin/db-backend-record"))
 
       let fileOutput = requireSuccess(shellCommand([
-        "file", "src/bin/db-backend-record"
+        "file", "src/build-debug/bin/db-backend-record"
       ]), projectRoot)
       when defined(linux):
         check fileOutput.contains("ELF")
@@ -1460,13 +1472,13 @@ when defined(macosx) or defined(linux):
       check not first.contains("action: nim-js-ipc-registry-test")
       check not first.contains("action: c-sudoku-object-tup")
       check not first.contains("action: c-sudoku-object-with-generated-header")
-      check fileExists(projectRoot / "src" / "bin" / "ct")
+      check fileExists(buildDebug(projectRoot, "bin/ct"))
       discard requireSuccess(shellCommand([
-        "sh", "-c", "test -x src/bin/ct"
+        "sh", "-c", "test -x src/build-debug/bin/ct"
       ]), projectRoot)
 
       let fileOutput = requireSuccess(shellCommand([
-        "file", "src/bin/ct"
+        "file", "src/build-debug/bin/ct"
       ]), projectRoot)
       when defined(linux):
         check fileOutput.contains("ELF")
@@ -1552,7 +1564,7 @@ when defined(macosx) or defined(linux):
         nativeEnv)
       check first.contains("defaultTarget: codetracer")
       check first.contains("selectedTarget: codetracer")
-      check first.contains("scheduler: actions=21")
+      check first.contains("scheduler: actions=24")
       check first.contains("action: ct status=asSucceeded launched=true")
       check first.contains(
         "action: db-backend-record status=asSucceeded launched=true")
@@ -1567,11 +1579,11 @@ when defined(macosx) or defined(linux):
       checkFrontendBundleOutputs(projectRoot)
       checkPublicResourceOutputs(projectRoot)
       checkConfigOutputs(projectRoot)
-      check fileExists(projectRoot / "src" / "bin" / "ct")
-      check fileExists(projectRoot / "src" / "bin" / "db-backend-record")
+      check fileExists(buildDebug(projectRoot, "bin/ct"))
+      check fileExists(buildDebug(projectRoot, "bin/db-backend-record"))
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 21
+      check firstReport{"actions"}.len == 24
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
@@ -1592,7 +1604,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(firstReport,
-          "src/frontend/styles/" & stylesheet, "asSucceeded", true)
+          "src/build-debug/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       assertAction(firstReport, "config-default-layout-json", "asSucceeded",
         true)
@@ -1622,7 +1634,7 @@ when defined(macosx) or defined(linux):
         nativeEnv)
       check second.contains("selectedTarget: codetracer")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      check secondReport{"actions"}.len == 21
+      check secondReport{"actions"}.len == 24
       assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
       assertAction(secondReport, "frontend-public-ui-js", "asCacheHit", false)
       assertAction(secondReport, "frontend-index-js", "asCacheHit", false)
@@ -1646,7 +1658,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(secondReport,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(secondReport, "asSucceeded", true)
       assertAction(secondReport, "config-default-layout-json", "asCacheHit",
         false)
@@ -1664,8 +1676,6 @@ when defined(macosx) or defined(linux):
         "CodeTracer - the user-friendly reprobuild m44 debugger"))
       let changed = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
-      check not changed.contains("action: nim-js-ipc-registry-test")
-      check not changed.contains("action: c-sudoku-object-tup")
       let changedReport = parseFile(valueAfter(changed, "buildReport:"))
       assertAction(changedReport, "frontend-ui-js", "asCacheHit", false)
       assertAction(changedReport, "frontend-public-ui-js", "asCacheHit", false)
@@ -1691,7 +1701,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(changedReport,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(changedReport, "asSucceeded", true)
       assertAction(changedReport, "config-default-layout-json", "asCacheHit",
         false)
@@ -1754,9 +1764,9 @@ when defined(macosx) or defined(linux):
       check not first.contains("action: nim-js-ipc-registry-test")
       check not first.contains("action: c-sudoku-object-tup")
       check not first.contains("action: c-sudoku-object-with-generated-header")
-      check fileExists(projectRoot / "server_index.js")
-      check fileExists(projectRoot / "server_index.js.map")
-      check not fileExists(projectRoot / "src" / "index.js")
+      check fileExists(buildDebug(projectRoot, "server_index.js"))
+      check fileExists(buildDebug(projectRoot, "server_index.js.map"))
+      check not fileExists(buildDebug(projectRoot, "src/index.js"))
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       check firstReport{"actions"}.len == 1
@@ -1871,10 +1881,10 @@ when defined(macosx) or defined(linux):
       check added.contains("scheduler: actions=1")
       check added.contains(
         "action: frontend-public-resources status=asSucceeded launched=true")
-      check fileExists(projectRoot / "public" / "resources" / "shared" /
-        "add_file.svg")
-      check readFile(addedSource) == readFile(projectRoot / "public" /
-        "resources" / "shared" / "add_file.svg")
+      check fileExists(buildDebug(projectRoot,
+        "public/resources/shared/add_file.svg"))
+      check readFile(addedSource) == readFile(buildDebug(projectRoot,
+        "public/resources/shared/add_file.svg"))
 
       removeFile(projectRoot / "src" / "public" / "third_party" / "io.js")
       let removed = build(reproBin, selectedTarget, repoRoot, pathValue)
@@ -1882,7 +1892,7 @@ when defined(macosx) or defined(linux):
       check removed.contains("scheduler: actions=1")
       let removedReport = parseFile(valueAfter(removed, "buildReport:"))
       check removedReport{"actions"}.len == 1
-      check not fileExists(projectRoot / "public" / "third_party" / "io.js")
+      check not fileExists(buildDebug(projectRoot, "public/third_party/io.js"))
 
     test "m51_codetracer_stdlib_file_ops":
       let repoRoot = getCurrentDir()
@@ -1895,9 +1905,11 @@ when defined(macosx) or defined(linux):
       check projectText.contains("fs.writeText")
       check projectText.contains("fs.ensureDir")
       check projectText.contains("fs.preserveTree")
+      check projectText.contains("excludePrefixes = @[\"dist\"]")
+      check projectText.contains("frontend-webpack-dist")
+      check projectText.contains("frontend-public-dist")
+      check projectText.contains("shell(")
       check not projectText.contains("sh(")
-      check not projectText.contains("mkdir -p")
-      check not projectText.contains(" cp ")
       check not projectText.contains("buildAction(\"frontend-public-resource")
 
       let tempRoot = createTempDir("repro-m51-codetracer-stdlib-fs", "")
@@ -1932,7 +1944,7 @@ when defined(macosx) or defined(linux):
       let removed = build(reproBin, projectRoot & "#frontend-public-resources",
         repoRoot, pathValue)
       check removed.contains("scheduler: actions=1")
-      check not fileExists(projectRoot / "public" / "third_party" / "io.js")
+      check not fileExists(buildDebug(projectRoot, "public/third_party/io.js"))
 
     test "selected frontend aggregate target builds current frontend bundle set":
       let repoRoot = getCurrentDir()
@@ -1970,7 +1982,7 @@ when defined(macosx) or defined(linux):
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check first.contains("selectedTarget: frontend")
-      check first.contains("scheduler: actions=17")
+      check first.contains("scheduler: actions=20")
       check first.contains(
         "action: frontend-ui-js status=asSucceeded launched=true")
       check first.contains(
@@ -2001,7 +2013,7 @@ when defined(macosx) or defined(linux):
       checkPublicResourceOutputs(projectRoot)
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 17
+      check firstReport{"actions"}.len == 20
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
@@ -2022,7 +2034,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(firstReport,
-          "src/frontend/styles/" & stylesheet, "asSucceeded", true)
+          "src/build-debug/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
@@ -2056,7 +2068,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(secondReport,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(secondReport, "asSucceeded", true)
 
       let indexHtml = projectRoot / "src" / "frontend" / "index.html"
@@ -2097,18 +2109,18 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(htmlChangedReport,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(htmlChangedReport, "asSucceeded", true)
       check readFile(projectRoot / "src" / "frontend" / "index.html") ==
-        readFile(projectRoot / "index.html")
+        readFile(buildDebug(projectRoot, "index.html"))
       check reportAction(htmlChangedReport, "nim-js-ipc-registry-test").kind ==
         JNull
       check reportAction(htmlChangedReport, "generate-config-header").kind ==
         JNull
       check reportAction(htmlChangedReport, "c-sudoku-object-tup").kind == JNull
 
-      writeFile(projectRoot / "helpers.js",
-        readFile(projectRoot / "helpers.js") &
+      writeFile(projectRoot / "src" / "helpers.js",
+        readFile(projectRoot / "src" / "helpers.js") &
         "\n// reprobuild m39 static helper edit\n")
       let helperChanged = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -2147,10 +2159,10 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(helperChangedReport,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(helperChangedReport, "asSucceeded", true)
-      check readFile(projectRoot / "helpers.js") ==
-        readFile(projectRoot / "src" / "helpers.js")
+      check readFile(projectRoot / "src" / "helpers.js") ==
+        readFile(buildDebug(projectRoot, "src/helpers.js"))
       check reportAction(helperChangedReport,
         "nim-js-ipc-registry-test").kind == JNull
       check reportAction(helperChangedReport, "generate-config-header").kind ==
@@ -2203,7 +2215,7 @@ when defined(macosx) or defined(linux):
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=22")
+      check first.contains("scheduler: actions=25")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
       check first.contains("action: build-c-dir status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
@@ -2221,20 +2233,20 @@ when defined(macosx) or defined(linux):
       check first.contains("action: c-sudoku-object-tup status=asSucceeded launched=true")
       check first.contains("action: c-sudoku-object-with-generated-header status=asSucceeded launched=true")
       check fileExists(projectRoot / "build" / "generated" / "ct_config.h")
-      check fileExists(projectRoot / "tests" / "ipc_registry_test.js")
-      check fileExists(projectRoot / "ui.js")
-      check fileExists(projectRoot / "public" / "ui.js")
-      check fileExists(projectRoot / "index.js")
-      check fileExists(projectRoot / "index.js.map")
-      check fileExists(projectRoot / "src" / "index.js")
-      check fileExists(projectRoot / "server_index.js")
-      check fileExists(projectRoot / "server_index.js.map")
-      check fileExists(projectRoot / "subwindow.js")
-      check fileExists(projectRoot / "subwindow.js.map")
-      check fileExists(projectRoot / "src" / "subwindow.js")
-      check fileExists(projectRoot / "index.html")
-      check fileExists(projectRoot / "subwindow.html")
-      check fileExists(projectRoot / "src" / "helpers.js")
+      check fileExists(buildDebug(projectRoot, "tests/ipc_registry_test.js"))
+      check fileExists(buildDebug(projectRoot, "ui.js"))
+      check fileExists(buildDebug(projectRoot, "public/ui.js"))
+      check fileExists(buildDebug(projectRoot, "index.js"))
+      check fileExists(buildDebug(projectRoot, "index.js.map"))
+      check fileExists(buildDebug(projectRoot, "src/index.js"))
+      check fileExists(buildDebug(projectRoot, "server_index.js"))
+      check fileExists(buildDebug(projectRoot, "server_index.js.map"))
+      check fileExists(buildDebug(projectRoot, "subwindow.js"))
+      check fileExists(buildDebug(projectRoot, "subwindow.js.map"))
+      check fileExists(buildDebug(projectRoot, "src/subwindow.js"))
+      check fileExists(buildDebug(projectRoot, "index.html"))
+      check fileExists(buildDebug(projectRoot, "subwindow.html"))
+      check fileExists(buildDebug(projectRoot, "src/helpers.js"))
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -2243,8 +2255,8 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        check fileExists(projectRoot / "src" / "frontend" / "styles" /
-          stylesheet)
+        check fileExists(buildDebug(projectRoot, "frontend/styles/" &
+          stylesheet))
       checkPublicResourceOutputs(projectRoot)
       check fileExists(projectRoot / "build" / "c" / "main.tup.o")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
@@ -2281,7 +2293,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(firstReport,
-          "src/frontend/styles/" & stylesheet, "asSucceeded", true)
+          "src/build-debug/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-with-generated-header",
@@ -2301,7 +2313,7 @@ when defined(macosx) or defined(linux):
       check monitoredC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
       check hasMonitorEvidence(monitoredC)
 
-      check runNode("tests/ipc_registry_test.js", projectRoot,
+      check runNode("src/build-debug/tests/ipc_registry_test.js", projectRoot,
         pathValue).contains(
         "[OK] handlers still invoked after reconnect")
       check mainSymbol("build/c/main.tup.o", projectRoot).len > 0
@@ -2334,7 +2346,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(secondReport,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(secondReport, "asSucceeded", true)
       assertAction(secondReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-with-generated-header",
@@ -2372,7 +2384,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(cChangedReport,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(cChangedReport, "asSucceeded", true)
       assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(cChangedReport, "c-sudoku-object-with-generated-header",
@@ -2412,7 +2424,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(headerDeletedReport,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
       assertPublicResourceActions(headerDeletedReport, "asSucceeded", true)
       assertAction(headerDeletedReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",

@@ -10,12 +10,17 @@
       url = "github:metacraft-labs/runquota/main";
       flake = false;
     };
+    nimcrypto-src = {
+      url = "github:cheatfate/nimcrypto/69eec0375dd146aede41f920c702c531bfe89c6b";
+      flake = false;
+    };
   };
 
   outputs =
     inputs@{
       flake-parts,
       git-hooks,
+      nimcrypto-src,
       runquota-src,
       ...
     }:
@@ -64,6 +69,7 @@
                   ]
                 }:$PATH
                 export BLAKE3_PREFIX=${blake3Prefix}
+                export NIMCRYPTO_SRC=${nimcrypto-src}
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
                 export XXHASH_PREFIX=${pkgs.xxHash}
@@ -92,6 +98,7 @@
             ];
 
             BLAKE3_PREFIX = blake3Prefix;
+            NIMCRYPTO_SRC = nimcrypto-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             XXHASH_PREFIX = pkgs.xxHash;
@@ -152,7 +159,9 @@
 
           devShells.default = pkgs.mkShell {
             BLAKE3_PREFIX = blake3Prefix;
+            NIMCRYPTO_SRC = nimcrypto-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
+            RUNQUOTA_SRC = runquota-src;
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [
               pkgs.just

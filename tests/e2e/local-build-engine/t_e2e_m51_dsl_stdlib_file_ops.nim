@@ -86,6 +86,11 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
+proc declaredInputEndsWith(action: JsonNode; suffix: string): bool =
+  for item in action{"evidence"}{"declaredInputs"}.getElems():
+    if item.getStr().endsWith(suffix):
+      return true
+
 proc writeStdlibCopyProject(path: string) =
   createDir(path.splitPath.head)
   writeFile(path,
@@ -113,6 +118,18 @@ proc writePreserveTreeProject(path: string) =
     "    let mirrored = fs.preserveTree(\n" &
     "      sourceRoot = \"assets\",\n" &
     "      outputRoot = \"mirror\")\n" &
+    "    defaultTarget(mirrored)\n")
+
+proc writePreserveTreeExcludeProject(path: string) =
+  createDir(path.splitPath.head)
+  writeFile(path,
+    "import repro_dsl_stdlib\n\n" &
+    "package m51TreeExclude:\n" &
+    "  build:\n" &
+    "    let mirrored = fs.preserveTree(\n" &
+    "      sourceRoot = \"assets\",\n" &
+    "      outputRoot = \"mirror\",\n" &
+    "      excludePrefixes = @[\"dist\", \"tmp/generated\"])\n" &
     "    defaultTarget(mirrored)\n")
 
 proc writeSymlinkOutputProject(path: string) =
@@ -314,3 +331,60 @@ suite "m51_dsl_stdlib_file_ops":
       check readFile(projectRoot / "mirror" / "keep.txt") == "tree output\n"
       check readFile(copyVictim) == "do not mutate copy target\n"
       check readFile(treeVictim) == "do not mutate tree target\n"
+
+  test "m51_preserve_tree_excludes_prefixes":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m51-preserve-tree-excludes", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = compilePublicReproTestBin(repoRoot)
+    let projectRoot = tempRoot / "project"
+    createDir(projectRoot / "assets" / "dist")
+    createDir(projectRoot / "assets" / "tmp" / "generated")
+    createDir(projectRoot / "assets" / "tmp" / "manual")
+    createDir(projectRoot / "mirror" / "dist")
+    createDir(projectRoot / "mirror" / "tmp" / "generated")
+    writeFile(projectRoot / "assets" / "keep.txt", "keep\n")
+    writeFile(projectRoot / "assets" / "dist" / "bundle.js", "excluded\n")
+    writeFile(projectRoot / "assets" / "tmp" / "generated" / "cache.txt",
+      "excluded nested\n")
+    writeFile(projectRoot / "assets" / "tmp" / "manual" / "note.txt",
+      "included nested\n")
+    writeFile(projectRoot / "mirror" / "dist" / "stale.js", "stale\n")
+    writeFile(projectRoot / "mirror" / "tmp" / "generated" / "stale.txt",
+      "stale nested\n")
+    writePreserveTreeExcludeProject(projectRoot / "reprobuild.nim")
+
+    let first = build(reproBin, projectRoot, repoRoot)
+    check first.contains("scheduler: actions=1")
+    let firstReport = parseFile(valueAfter(first, "buildReport:"))
+    assertAction(firstReport, "fs-preserveTree-mirror", "asSucceeded", true)
+    let firstAction = reportAction(firstReport, "fs-preserveTree-mirror")
+    check readFile(projectRoot / "mirror" / "keep.txt") == "keep\n"
+    check readFile(projectRoot / "mirror" / "tmp" / "manual" / "note.txt") ==
+      "included nested\n"
+    check not fileExists(projectRoot / "mirror" / "dist" / "bundle.js")
+    check fileExists(projectRoot / "mirror" / "dist" / "stale.js")
+    check not fileExists(projectRoot / "mirror" / "tmp" / "generated" /
+      "cache.txt")
+    check fileExists(projectRoot / "mirror" / "tmp" / "generated" /
+      "stale.txt")
+    check declaredInputEndsWith(firstAction, "assets/keep.txt")
+    check declaredInputEndsWith(firstAction, "assets/tmp/manual/note.txt")
+    check not declaredInputEndsWith(firstAction, "assets/dist/bundle.js")
+    check not declaredInputEndsWith(firstAction,
+      "assets/tmp/generated/cache.txt")
+
+    writeFile(projectRoot / "assets" / "dist" / "bundle.js",
+      "excluded changed\n")
+    let second = build(reproBin, projectRoot, repoRoot)
+    let secondReport = parseFile(valueAfter(second, "buildReport:"))
+    assertAction(secondReport, "fs-preserveTree-mirror", "asSucceeded", true)

@@ -910,9 +910,21 @@ proc encodePreserveTreeFile(relative: string): string =
 proc encodePreserveTreeSymlink(relative, target: string): string =
   "symlink\t" & relative & "\t" & target
 
+proc shouldExcludePreserveTreeEntry(relative: string;
+                                    excludePrefixes: openArray[string]): bool =
+  let normalized = normalizedRelPath(relative)
+  for prefix in excludePrefixes:
+    let normalizedPrefix = normalizedRelPath(prefix).strip(chars = {'/'})
+    if normalizedPrefix.len == 0:
+      continue
+    if normalized == normalizedPrefix or normalized.startsWith(
+        normalizedPrefix & "/"):
+      return true
+
 proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
                    actionId = ""; deps: openArray[string] = [];
                    after: openArray[BuildActionDef] = [];
+                   excludePrefixes: openArray[string] = [];
                    commandStatsId = ""):
     BuildActionDef {.discardable.} =
   discard tool
@@ -925,11 +937,15 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
   var outputs: seq[string] = @[]
   for sourcePath in tree.files:
     let relative = normalizedRelPath(relativePath(sourcePath, sourceRoot))
+    if shouldExcludePreserveTreeEntry(relative, excludePrefixes):
+      continue
     entries.add(encodePreserveTreeFile(relative))
     inputs.add(normalizedRelPath(sourcePath))
     outputs.add(normalizedRelPath(outputRoot / relative))
   for symlink in tree.symlinks:
     let relative = normalizedRelPath(relativePath(symlink.path, sourceRoot))
+    if shouldExcludePreserveTreeEntry(relative, excludePrefixes):
+      continue
     entries.add(encodePreserveTreeSymlink(relative, symlink.target))
     inputs.add(normalizedRelPath(symlink.path))
     outputs.add(normalizedRelPath(outputRoot / relative))
