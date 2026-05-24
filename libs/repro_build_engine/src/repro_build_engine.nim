@@ -1938,8 +1938,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runIndex = j
             break
           of rpkHelperProcess, rpkBypassProcess:
-            # Handled by the event-driven block below; skip here.
-            discard
+            when defined(windows):
+              # Handled by the event-driven block below; skip here.
+              discard
+            else:
+              if running[j].process.peekExitCode() != -1:
+                runIndex = j
+                break
         if runIndex >= 0:
           break
         # Event-driven wait: ask the OS to wake us when ANY child process
