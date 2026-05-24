@@ -1,21 +1,36 @@
 #!/usr/bin/env bash
 #
 # provision-and-run-m69-posix.sh - runs INSIDE a throwaway Ubuntu 22.04
-# WSL distro to exercise the M69 Linux destructive gate:
+# WSL distro to exercise the FOUR M69 Linux destructive gates:
 #
 #   tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim
+#       REPRO_M69_PASSWD_VM=1   - real useradd / usermod / userdel
+#   tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim
+#       REPRO_M69_FS_VM=1       - real /etc/ file write / drift / rollback
+#   tests/e2e/m69/t_e2e_repro_infra_env_system_variable.nim
+#       REPRO_M69_ENV_VM=1      - real /etc/profile.d/ fragment write
+#   tests/e2e/m69/t_e2e_repro_infra_systemd_system_unit.nim
+#       REPRO_M69_SYSTEMD_VM=1  - real /etc/systemd/system/ unit write +
+#                                 `systemctl daemon-reload` (no
+#                                 `enable --now`, see the gate header
+#                                 for the WSL systemd-as-PID-1 rationale)
 #
-# The non-destructive halves of the gate already pass on every host;
-# this script's job is the real-mutation half (real useradd / usermod /
-# userdel against a sandboxed account). The script:
+# The non-destructive halves of every gate already pass on every host;
+# this script's job is the real-mutation half for all four in ONE
+# distro session. The script:
 #
-#   Stage A - install C toolchain (gcc + libsqlite3-dev + curl + xz-utils)
+#   Stage A - install C toolchain (gcc + libsqlite3-dev + curl + xz-utils
+#             + systemd for the systemctl binary)
 #   Stage B - download + extract Nim 2.2.8 to /opt/nim-2.2.8
 #   Stage C - copy the repo source out of the read-only /mnt/d/ mount
 #             into a writable workdir at /work/reprobuild (and the
 #             sibling runquota repo at /work/runquota)
-#   Stage D - nim c -r the gate, with REPRO_M69_PASSWD_VM=1 set
-#   Stage E - copy logs + RESULT.txt to the OUTPUT folder, write DONE
+#   Stage D - install verification shims for useradd/usermod/userdel/
+#             systemctl that LOG argv + forward to the real binary
+#   Stage E - build + run each gate sequentially, capturing per-gate
+#             stdout/stderr/exit. Each gate gets its own env var
+#             only set for that gate's run.
+#   Stage F - copy logs + RESULT.txt to the OUTPUT folder, write DONE
 #
 # Inputs (env, set by the host-side runner via `wsl --exec env ...`):
 #   REPRO_HOST_OUT_DIR   - host OUTPUT dir, e.g. /mnt/d/metacraft/wsl-m69-posix-out
@@ -24,15 +39,17 @@
 #   REPRO_HOST_NIM_TAR   - cached Nim tarball, e.g. /mnt/d/metacraft/wsl-m69-posix-cache/nim-2.2.8-linux_x64.tar.xz
 #
 # Output to ${REPRO_HOST_OUT_DIR}:
-#   00-provision.log    - stage-by-stage provisioning log
-#   01-gate-build.log   - gate compile log
-#   02-gate-run.txt     - gate stdout/stderr + exit code
-#   RESULT.txt          - per-stage status + verdict
-#   DONE                - sentinel (written last)
+#   00-provision.log                    - stage-by-stage provisioning log
+#   01-<gate>-build.log                 - per-gate compile log
+#   02-<gate>-run.txt                   - per-gate stdout/stderr + exit code
+#   03-passwd-cmd-trace.log             - useradd/usermod/userdel argv trace
+#   04-systemd-cmd-trace.log            - systemctl argv trace
+#   RESULT.txt                          - per-stage + per-gate status, overall verdict
+#   DONE                                - sentinel (written last)
 #
 # This script's exit code is informational; the host runner reads
 # DONE + RESULT.txt for the real verdict. The script never aborts on
-# an individual stage failure - it records the failure and pushes on,
+# an individual gate failure - it records the failure and pushes on,
 # so the host runner always gets a RESULT.txt + DONE.
 
 set -u
@@ -50,6 +67,9 @@ REPO_WORK="${WORK_ROOT}/reprobuild"
 RUNQUOTA_WORK="${WORK_ROOT}/runquota"
 NIM_ROOT="/opt/nim-2.2.8"
 NIM_BIN="${NIM_ROOT}/bin/nim"
+
+PASSWD_TRACE_LOG="${OUT_DIR}/03-passwd-cmd-trace.log"
+SYSTEMD_TRACE_LOG="${OUT_DIR}/04-systemd-cmd-trace.log"
 
 # ---- Result table accumulator ---------------------------------------------
 declare -A RESULTS
@@ -88,7 +108,7 @@ finalize() {
     echo "user: $(id -u -n) (uid=$(id -u))"
     echo ""
     for k in "${RESULTS_ORDER[@]}"; do
-      printf '%-32s %s\n' "$k" "${RESULTS[$k]}"
+      printf '%-40s %s\n' "$k" "${RESULTS[$k]}"
     done
     echo ""
     echo "VERDICT: ${verdict}"
@@ -103,8 +123,10 @@ finalize() {
 mkdir -p "${OUT_DIR}" 2>/dev/null || true
 LOG_FILE="${OUT_DIR}/00-provision.log"
 : > "${LOG_FILE}" 2>/dev/null || true
+: > "${PASSWD_TRACE_LOG}" 2>/dev/null || true
+: > "${SYSTEMD_TRACE_LOG}" 2>/dev/null || true
 
-log "M69 POSIX destructive-gate WSL harness starting."
+log "M69 POSIX destructive-gate WSL harness starting (multi-gate)."
 log "OUT_DIR        = ${OUT_DIR}"
 log "REPO_HOST      = ${REPO_HOST}"
 log "RUNQUOTA_HOST  = ${RUNQUOTA_HOST}"
@@ -116,15 +138,21 @@ log "running as: $(id -u -n) (uid=$(id -u))"
 trap '[ -f "${OUT_DIR}/DONE" ] || finalize "ERROR - script exited unexpectedly"' EXIT
 
 # ===========================================================================
-# Stage A - apt-install C toolchain + libsqlite3 + curl + xz
+# Stage A - apt-install C toolchain + libsqlite3 + curl + xz + systemd
 # ===========================================================================
-section "Stage A - apt-install gcc, libsqlite3-dev, curl, xz-utils"
+section "Stage A - apt-install gcc, libsqlite3-dev, curl, xz-utils, systemd"
 export DEBIAN_FRONTEND=noninteractive
 # The rootfs ships without an updated apt cache; refresh once.
+# `systemd` brings the `systemctl` binary the systemd.systemUnit gate
+# needs even when systemd is NOT PID 1 - daemon-reload and `systemctl
+# show` parse from the unit file on disk regardless. We do NOT
+# activate systemd-as-PID-1 in this harness; the gate is scoped to
+# the file-on-disk + daemon-reload path per its header.
 {
   apt-get update -y -qq 2>&1
   apt-get install -y --no-install-recommends \
     ca-certificates curl xz-utils gcc libc6-dev libsqlite3-dev passwd \
+    systemd \
     2>&1
 } >> "${LOG_FILE}" 2>&1
 APT_STATUS=$?
@@ -138,6 +166,7 @@ else
 fi
 record "stageA_gcc_version"  "$(gcc --version 2>/dev/null | head -n1 || echo 'gcc not found')"
 record "stageA_useradd"      "$(which useradd 2>/dev/null || echo 'useradd not found')"
+record "stageA_systemctl"    "$(which systemctl 2>/dev/null || echo 'systemctl not found')"
 
 # ===========================================================================
 # Stage B - install Nim 2.2.8 from the cached prebuilt linux x64 tarball
@@ -193,16 +222,7 @@ copy_repo() {
   log "    excluding: ${excludes}"
   mkdir -p "${dst}"
   # rsync is not in the rootfs by default; cp -a with a find-based
-  # top-level exclusion is robust and dependency-free. The excludes
-  # arg is a space-separated list of top-level NAMES (e.g.
-  # 'build .git target references/llvm-project').
-  #
-  # We can't pass a "deep" exclude to cp; for nested excludes we
-  # copy the parent excluding the deep child, then re-add siblings.
-  # For simplicity here: top-level NAMES only, plus the well-known
-  # heavy subtrees inside references/ that we DO copy
-  # (third-party/blake3 + third-party/xxhash) - other references/*
-  # sub-trees are explicitly excluded by name.
+  # top-level exclusion is robust and dependency-free.
   (cd "${src}" && find . -mindepth 1 -maxdepth 1 \
       ! -name 'build' ! -name '.git' ! -name 'target' \
       ! -name 'bench-results' ! -name 'test-logs' \
@@ -210,8 +230,7 @@ copy_repo() {
       -exec cp -a -t "${dst}" -- {} +) >> "${LOG_FILE}" 2>&1
   local cp_status=$?
   # Pull in only the vendored hash headers/c that config.nims actually
-  # needs - that is references/mold/third-party/{blake3,xxhash}/. Skip
-  # everything else under references/ (llvm-project alone is 2.5 GB).
+  # needs.
   if [ -d "${src}/references/mold/third-party" ]; then
     mkdir -p "${dst}/references/mold/third-party"
     for sub in blake3 xxhash; do
@@ -228,7 +247,6 @@ C_REPO=0
 copy_repo "${REPO_HOST}" "${REPO_WORK}" "host reprobuild repo" \
   "build .git target bench-results test-logs references-except-blake3-xxhash" \
   || C_REPO=1
-# runquota is small (~50 MB); no special exclusion needed beyond build/.git.
 C_RQ=0
 if [ -d "${RUNQUOTA_HOST}" ]; then
   log "  copy runquota: ${RUNQUOTA_HOST} -> ${RUNQUOTA_WORK}"
@@ -242,9 +260,19 @@ else
   C_RQ=1
 fi
 
-# Size sanity check.
-if [ "${C_REPO}" -eq 0 ] \
-   && [ -f "${REPO_WORK}/tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim" ]; then
+# Size sanity check + assert every gate source is present.
+ALL_GATES_PRESENT=1
+for src in \
+    tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim \
+    tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim \
+    tests/e2e/m69/t_e2e_repro_infra_env_system_variable.nim \
+    tests/e2e/m69/t_e2e_repro_infra_systemd_system_unit.nim ; do
+  if [ ! -f "${REPO_WORK}/${src}" ]; then
+    log "  MISSING gate source: ${src}"
+    ALL_GATES_PRESENT=0
+  fi
+done
+if [ "${C_REPO}" -eq 0 ] && [ "${ALL_GATES_PRESENT}" -eq 1 ]; then
   record "stageC_repo_copy"     "OK ($(du -sh "${REPO_WORK}" 2>/dev/null | awk '{print $1}'))"
 else
   record "stageC_repo_copy"     "FAIL"
@@ -256,129 +284,280 @@ else
 fi
 
 # ===========================================================================
-# Stage D - build + run the gate (one nim c -r invocation)
+# Stage D - install verification shims for the destructive commands
+# every gate may exercise. The shim logs argv to its trace log and
+# FORWARDS to the real binary (renamed `<name>.real`). Without this,
+# a `[OK]` from the test could in principle come from a misconfigured
+# else-branch that silently no-ops. After each gate runs we assert
+# its trace log contains the expected destructive shell-outs.
 # ===========================================================================
-section "Stage D - build + run the M69 passwd.user gate"
-export REPRO_M69_PASSWD_VM=1
+section "Stage D - install verification shims"
 
-if [ ! -x "${NIM_BIN}" ] || [ ! -d "${REPO_WORK}" ]; then
-  record "stageD_gate_exit"    "PRE-FAIL - missing nim or workdir"
-  GATE_EXIT=255
-else
-  BUILD_LOG="${OUT_DIR}/01-gate-build.log"
-  RUN_OUT="${OUT_DIR}/02-gate-run.txt"
-  TRACE_LOG="${OUT_DIR}/03-passwd-cmd-trace.log"
-  : > "${BUILD_LOG}"
-  : > "${RUN_OUT}"
-  : > "${TRACE_LOG}"
-
-  # --- Verification shim: wrap useradd / usermod / userdel so we can
-  # PROVE the gate's destructive path really shelled out to them.
-  # The shim logs argv to ${TRACE_LOG} and forwards to the real binary
-  # (renamed to <name>.real). Without this, a `[OK]` from the test
-  # could in principle come from a misconfigured else-branch that
-  # silently no-ops. After the gate runs we assert the trace log
-  # contains a real useradd AND a real userdel call.
-  log "  installing useradd/usermod/userdel verification shims:"
-  for bin in useradd usermod userdel; do
-    real="/usr/sbin/${bin}"
-    if [ -x "${real}" ] && [ ! -x "${real}.real" ]; then
-      cp -a "${real}" "${real}.real"
-    fi
-    # Write the shim. The HOST file path the gate sees is /usr/sbin/<bin>.
-    cat > "${real}" <<SHIM
+install_shim() {
+  local bin_path="$1" trace_log="$2"
+  local bin_name="$(basename "${bin_path}")"
+  if [ ! -x "${bin_path}" ]; then
+    log "  WARN: ${bin_path} not present - skipping shim"
+    return 0
+  fi
+  if [ -x "${bin_path}.real" ]; then
+    log "  shim already installed for ${bin_path}"
+    return 0
+  fi
+  cp -a "${bin_path}" "${bin_path}.real"
+  cat > "${bin_path}" <<SHIM
 #!/bin/bash
-echo "[\$(date -u +%H:%M:%S)] ${bin} \$@" >> ${TRACE_LOG}
-exec ${real}.real "\$@"
+echo "[\$(date -u +%H:%M:%S)] ${bin_name} \$@" >> ${trace_log}
+exec ${bin_path}.real "\$@"
 SHIM
-    chmod +x "${real}"
-    log "    ${real} -> ${real}.real (shimmed)"
-  done
+  chmod +x "${bin_path}"
+  log "    ${bin_path} -> ${bin_path}.real (shimmed; trace=${trace_log})"
+}
 
-  log "  REPRO_M69_PASSWD_VM=1"
-  log "  cd ${REPO_WORK} && nim c -r ..."
+log "  installing useradd / usermod / userdel verification shims:"
+for bin in useradd usermod userdel; do
+  install_shim "/usr/sbin/${bin}" "${PASSWD_TRACE_LOG}"
+done
+
+log "  installing systemctl verification shim:"
+# systemctl can live in /bin/systemctl, /usr/bin/systemctl, or
+# /usr/sbin/systemctl depending on the distro; install for whichever
+# the live binary resolves to so the trace captures it.
+SYSTEMCTL_LIVE="$(command -v systemctl 2>/dev/null || true)"
+if [ -n "${SYSTEMCTL_LIVE}" ]; then
+  # Resolve symlinks to the real on-disk path so we don't shim a link.
+  SYSTEMCTL_REAL_PATH="$(readlink -f "${SYSTEMCTL_LIVE}" 2>/dev/null || echo "${SYSTEMCTL_LIVE}")"
+  install_shim "${SYSTEMCTL_REAL_PATH}" "${SYSTEMD_TRACE_LOG}"
+else
+  log "    systemctl NOT FOUND in PATH - systemd gate will skip"
+fi
+
+record "stageD_passwd_shims"   "useradd/usermod/userdel shimmed"
+record "stageD_systemctl_shim" "${SYSTEMCTL_LIVE:-not-found}"
+
+# ===========================================================================
+# Stage E - build + run each gate sequentially
+# ===========================================================================
+section "Stage E - build + run each M69 Linux destructive gate"
+
+run_gate() {
+  # $1 = short name (e.g. passwd-user)
+  # $2 = gate source path (relative to repo)
+  # $3 = env-var to set (e.g. REPRO_M69_PASSWD_VM)
+  # $4 = expected destructive trace log (or "" if none expected)
+  # $5 = expected trace-grep pattern (or "")
+  local name="$1" src="$2" env_var="$3" trace_log="$4" trace_pattern="$5"
+  local build_log="${OUT_DIR}/01-${name}-build.log"
+  local run_out="${OUT_DIR}/02-${name}-run.txt"
+  local bin_out="/tmp/m69-${name}-gate"
+  local nimcache="/tmp/m69-${name}-nimcache"
+
+  : > "${build_log}"
+  : > "${run_out}"
+
+  if [ ! -x "${NIM_BIN}" ] || [ ! -d "${REPO_WORK}" ] || [ ! -f "${REPO_WORK}/${src}" ]; then
+    record "gateE_${name}_exit"     "PRE-FAIL (nim/workdir/src missing)"
+    return 1
+  fi
+
+  log "  --- build ${name} ---"
   pushd "${REPO_WORK}" >/dev/null || true
-
-  # Build first, so the build log and the run log are separable.
   "${NIM_BIN}" c \
       --hints:off \
       --warning:UnusedImport:off \
       --warning:CaseTransition:off \
       --threads:on \
-      --nimcache:/tmp/m69-passwd-nimcache \
-      --out:/tmp/m69-passwd-gate \
-      tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim \
-      > "${BUILD_LOG}" 2>&1
-  BUILD_EXIT=$?
-  log "  nim c exit=${BUILD_EXIT}"
-  record "stageD_build_exit"   "${BUILD_EXIT}"
-
-  if [ "${BUILD_EXIT}" -eq 0 ] && [ -x /tmp/m69-passwd-gate ]; then
-    # We are running as root inside the throwaway distro; the gate's
-    # real-mutation scenario expects root (useradd is root-only).
-    log "  ./m69-passwd-gate    (REPRO_M69_PASSWD_VM=1)"
-    {
-      echo "COMMAND: /tmp/m69-passwd-gate"
-      echo "ENV: REPRO_M69_PASSWD_VM=1"
-      echo "USER: $(id -u -n) (uid=$(id -u))"
-      echo "DISTRO: $(. /etc/os-release; echo "${PRETTY_NAME:-unknown}")"
-      echo ""
-      echo "----- STDOUT + STDERR -----"
-    } >> "${RUN_OUT}"
-    /tmp/m69-passwd-gate >> "${RUN_OUT}" 2>&1
-    GATE_EXIT=$?
-    {
-      echo ""
-      echo "----- END -----"
-      echo "EXIT CODE: ${GATE_EXIT}"
-    } >> "${RUN_OUT}"
-    log "  gate exit=${GATE_EXIT}"
-    record "stageD_gate_exit"  "${GATE_EXIT}"
-
-    # --- Verify the trace log: real useradd AND real userdel ran ----
-    log "  verifying useradd/userdel were actually invoked (trace log):"
-    if [ -s "${TRACE_LOG}" ]; then
-      # Show the trace inline for the report.
-      while IFS= read -r line; do log "    trace: ${line}"; done < "${TRACE_LOG}"
-    else
-      log "    trace: (empty)"
-    fi
-    trace_useradd=$(grep -c '^\[..:..:..\] useradd ' "${TRACE_LOG}" || true)
-    trace_userdel=$(grep -c '^\[..:..:..\] userdel ' "${TRACE_LOG}" || true)
-    record "stageD_trace_useradd_calls" "${trace_useradd}"
-    record "stageD_trace_userdel_calls" "${trace_userdel}"
-    if [ "${trace_useradd}" -ge 1 ] && [ "${trace_userdel}" -ge 1 ]; then
-      record "stageD_destructive_verified" "YES (useradd=${trace_useradd}, userdel=${trace_userdel})"
-    else
-      record "stageD_destructive_verified" "NO (useradd=${trace_useradd}, userdel=${trace_userdel}) - gate may have skipped the destructive branch"
-    fi
-  else
-    log "  BUILD FAILED - see 01-gate-build.log"
-    record "stageD_gate_exit"  "BUILD-FAILED"
-    GATE_EXIT=255
+      "--nimcache:${nimcache}" \
+      "--out:${bin_out}" \
+      "${src}" \
+      > "${build_log}" 2>&1
+  local build_exit=$?
+  log "    nim c exit=${build_exit}"
+  record "gateE_${name}_build_exit"  "${build_exit}"
+  if [ "${build_exit}" -ne 0 ] || [ ! -x "${bin_out}" ]; then
+    record "gateE_${name}_exit"      "BUILD-FAILED"
+    popd >/dev/null || true
+    return 1
   fi
-  popd >/dev/null || true
-fi
 
-# Defense in depth: make sure no test user is left behind in the
-# distro's /etc/passwd. The distro will be unregistered shortly, so
-# this is belt-and-braces only - the gate itself should already clean
-# up via runInfraApply destroy, but a failed gate run might leave a
-# user named `reprotest*`. We try to delete it; failure is non-fatal.
-log "Stage D cleanup - removing any stray reprotest* accounts:"
+  log "  --- run ${name} (${env_var}=1) ---"
+  {
+    echo "COMMAND: ${bin_out}"
+    echo "ENV: ${env_var}=1"
+    echo "USER: $(id -u -n) (uid=$(id -u))"
+    echo "DISTRO: $(. /etc/os-release; echo "${PRETTY_NAME:-unknown}")"
+    echo ""
+    echo "----- STDOUT + STDERR -----"
+  } >> "${run_out}"
+
+  # Set ONLY this gate's env var for this gate's invocation. The
+  # other gates' env vars are kept unset so an accidental cross-
+  # pollination (one gate triggering another's destructive path) is
+  # impossible.
+  env -i \
+    PATH="${PATH}" \
+    HOME="${HOME:-/root}" \
+    "${env_var}=1" \
+    "${bin_out}" >> "${run_out}" 2>&1
+  local gate_exit=$?
+  {
+    echo ""
+    echo "----- END -----"
+    echo "EXIT CODE: ${gate_exit}"
+  } >> "${run_out}"
+  log "    gate exit=${gate_exit}"
+  record "gateE_${name}_exit"        "${gate_exit}"
+
+  # Verify the destructive trace log captured the expected shell-out,
+  # if a pattern was supplied. The trace log is APPEND-only per gate
+  # and SHARED across gates with similar shell-outs (the systemd gate
+  # appends to systemd-cmd-trace.log; the passwd gate appends to
+  # passwd-cmd-trace.log). We grep for the gate-specific marker the
+  # call-site uses.
+  if [ -n "${trace_log}" ] && [ -n "${trace_pattern}" ]; then
+    local trace_hits
+    trace_hits=$(grep -cE "${trace_pattern}" "${trace_log}" 2>/dev/null || true)
+    record "gateE_${name}_trace_hits"  "${trace_hits} (pattern=${trace_pattern})"
+    if [ "${trace_hits}" -ge 1 ]; then
+      record "gateE_${name}_destructive_verified" "YES"
+    else
+      record "gateE_${name}_destructive_verified" "NO - gate may have skipped the destructive branch"
+    fi
+  fi
+
+  popd >/dev/null || true
+  return ${gate_exit}
+}
+
+# --- Gate 1: passwd.user ---------------------------------------------------
+log ""
+log "============================================================"
+log "Gate 1/4: passwd.user (REPRO_M69_PASSWD_VM=1)"
+log "============================================================"
+run_gate \
+  "passwd-user" \
+  "tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim" \
+  "REPRO_M69_PASSWD_VM" \
+  "${PASSWD_TRACE_LOG}" \
+  '^\[..:..:..\] useradd '
+PASSWD_EXIT=$?
+
+# --- Stage-D cleanup for passwd: defence in depth, remove any stray
+#    reprotest* accounts the gate may have left behind on failure. -----
 for u in $(getent passwd | awk -F: '/^reprotest/ {print $1}'); do
-  log "  userdel -r ${u}"
-  userdel -r "${u}" >> "${LOG_FILE}" 2>&1 || true
+  log "  cleanup: userdel -r ${u}"
+  /usr/sbin/userdel.real -r "${u}" >> "${LOG_FILE}" 2>&1 || \
+    userdel -r "${u}" >> "${LOG_FILE}" 2>&1 || true
 done
 
+# --- Gate 2: fs.systemFile -------------------------------------------------
+log ""
+log "============================================================"
+log "Gate 2/4: fs.systemFile (REPRO_M69_FS_VM=1)"
+log "============================================================"
+run_gate \
+  "fs-system-file" \
+  "tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim" \
+  "REPRO_M69_FS_VM" \
+  "" \
+  ""
+FS_EXIT=$?
+# Belt-and-braces: remove any stray /etc/repro-m69-fs-gate-*.conf.
+for f in /etc/repro-m69-fs-gate-*.conf; do
+  [ -f "${f}" ] || continue
+  log "  cleanup: rm -f ${f}"
+  rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+
+# --- Gate 3: env.systemVariable --------------------------------------------
+log ""
+log "============================================================"
+log "Gate 3/4: env.systemVariable (REPRO_M69_ENV_VM=1)"
+log "============================================================"
+run_gate \
+  "env-system-variable" \
+  "tests/e2e/m69/t_e2e_repro_infra_env_system_variable.nim" \
+  "REPRO_M69_ENV_VM" \
+  "" \
+  ""
+ENV_EXIT=$?
+# Belt-and-braces: remove any stray /etc/profile.d/repro-system-env-*.sh
+# fragments. Match by lowercased prefix.
+for f in /etc/profile.d/repro-system-env-repro_m69_gate_var_*.sh; do
+  [ -f "${f}" ] || continue
+  log "  cleanup: rm -f ${f}"
+  rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+
+# --- Gate 4: systemd.systemUnit --------------------------------------------
+log ""
+log "============================================================"
+log "Gate 4/4: systemd.systemUnit (REPRO_M69_SYSTEMD_VM=1)"
+log "============================================================"
+run_gate \
+  "systemd-system-unit" \
+  "tests/e2e/m69/t_e2e_repro_infra_systemd_system_unit.nim" \
+  "REPRO_M69_SYSTEMD_VM" \
+  "${SYSTEMD_TRACE_LOG}" \
+  '^\[..:..:..\] systemctl( .*)? daemon-reload'
+SYSTEMD_EXIT=$?
+# Belt-and-braces: remove any stray /etc/systemd/system/repro-m69-gate-*.service.
+for f in /etc/systemd/system/repro-m69-gate-*.service; do
+  [ -f "${f}" ] || continue
+  log "  cleanup: rm -f ${f}"
+  rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+# A final daemon-reload so systemd's view of /etc/systemd/system/ is
+# consistent with what's on disk (defensive; the distro is unregistered
+# next anyway).
+systemctl daemon-reload >> "${LOG_FILE}" 2>&1 || true
+
 # ===========================================================================
-# Stage E - verdict
+# Per-gate destructive-trace inline summary
 # ===========================================================================
-section "Stage E - verdict"
-if [ "${GATE_EXIT}" = "0" ]; then
-  finalize "PASS - gate exited 0 inside the throwaway WSL distro."
+section "Stage E - destructive-trace inline summary"
+log "  passwd-cmd-trace:"
+if [ -s "${PASSWD_TRACE_LOG}" ]; then
+  while IFS= read -r line; do log "    ${line}"; done < "${PASSWD_TRACE_LOG}"
 else
-  finalize "FAIL - gate exited ${GATE_EXIT} - see 02-gate-run.txt and 01-gate-build.log."
+  log "    (empty)"
+fi
+log "  systemd-cmd-trace:"
+if [ -s "${SYSTEMD_TRACE_LOG}" ]; then
+  while IFS= read -r line; do log "    ${line}"; done < "${SYSTEMD_TRACE_LOG}"
+else
+  log "    (empty)"
+fi
+
+# Per-gate trace-summary records.
+record "trace_useradd_calls"  "$(grep -cE '^\[..:..:..\] useradd ' "${PASSWD_TRACE_LOG}" 2>/dev/null || echo 0)"
+record "trace_usermod_calls"  "$(grep -cE '^\[..:..:..\] usermod ' "${PASSWD_TRACE_LOG}" 2>/dev/null || echo 0)"
+record "trace_userdel_calls"  "$(grep -cE '^\[..:..:..\] userdel ' "${PASSWD_TRACE_LOG}" 2>/dev/null || echo 0)"
+record "trace_systemctl_calls" "$(grep -cE '^\[..:..:..\] systemctl ' "${SYSTEMD_TRACE_LOG}" 2>/dev/null || echo 0)"
+record "trace_daemon_reload_calls" \
+  "$(grep -cE '^\[..:..:..\] systemctl( .*)? daemon-reload' "${SYSTEMD_TRACE_LOG}" 2>/dev/null || echo 0)"
+
+# ===========================================================================
+# Stage F - verdict
+# ===========================================================================
+section "Stage F - verdict"
+record "gate_passwd_user_exit"           "${PASSWD_EXIT}"
+record "gate_fs_system_file_exit"        "${FS_EXIT}"
+record "gate_env_system_variable_exit"   "${ENV_EXIT}"
+record "gate_systemd_system_unit_exit"   "${SYSTEMD_EXIT}"
+
+ALL_OK=1
+for ec in "${PASSWD_EXIT}" "${FS_EXIT}" "${ENV_EXIT}" "${SYSTEMD_EXIT}"; do
+  if [ "${ec}" != "0" ]; then
+    ALL_OK=0
+    break
+  fi
+done
+
+if [ "${ALL_OK}" = "1" ]; then
+  finalize "PASS - all four M69 Linux destructive gates exited 0 inside the throwaway WSL distro."
+else
+  finalize "FAIL - one or more gates exited non-zero (passwd=${PASSWD_EXIT} fs=${FS_EXIT} env=${ENV_EXIT} systemd=${SYSTEMD_EXIT}) - see 02-<gate>-run.txt + 01-<gate>-build.log."
 fi
 
 # Disarm the trap so we don't double-finalize.

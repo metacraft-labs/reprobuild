@@ -3,10 +3,19 @@
   destructive-gate WSL harness.
 
   Creates a THROWAWAY Ubuntu 22.04 WSL distro (imported from the
-  official cloud-image rootfs tarball), runs the M69 Linux passwd.user
-  gate inside it with REPRO_M69_PASSWD_VM=1 set, captures the output to
-  D:\metacraft\wsl-m69-posix-out\, and **unregisters the distro in a
-  finally block** so a gate failure does NOT leak a stale distro.
+  official cloud-image rootfs tarball), runs all FOUR M69 Linux
+  destructive gates inside it sequentially in ONE distro session
+  (provision once, build + run each gate with its own
+  REPRO_M69_*_VM=1 env var, capture per-gate stdout/stderr/exit),
+  copies the output to D:\metacraft\wsl-m69-posix-out\, and
+  **unregisters the distro in a finally block** so a gate failure
+  does NOT leak a stale distro.
+
+  Gates exercised (all in one distro session):
+    - passwd.user             (REPRO_M69_PASSWD_VM=1)
+    - fs.systemFile           (REPRO_M69_FS_VM=1)
+    - env.systemVariable      (REPRO_M69_ENV_VM=1)
+    - systemd.systemUnit      (REPRO_M69_SYSTEMD_VM=1)
 
   HOST SAFETY: this script only ever writes inside three scoped dirs:
       D:\metacraft\wsl-m69-posix-cache\  (rootfs + Nim tarball cache)
@@ -14,13 +23,14 @@
       D:\metacraft\wsl-m69-posix-state\<distro-name>\
                                           (the throwaway distro's VHD)
   The user's primary WSL distribution (eli-wsl) is NEVER touched.
-  Every useradd / usermod / userdel the gate performs runs inside the
-  disposable distro and disappears with wsl --unregister.
+  Every useradd / usermod / userdel / /etc write / systemctl
+  daemon-reload the gates perform runs inside the disposable distro
+  and disappears with wsl --unregister.
 
   Idempotence: at start, any stale distro matching `repro-m69-posix-*`
   is unregistered, and any corresponding stale state dir is removed.
 
-  Usage:  pwsh -File run-wsl-m69-posix.ps1 [-TimeoutMinutes 30]
+  Usage:  pwsh -File run-wsl-m69-posix.ps1 [-TimeoutMinutes 45]
                                            [-KeepDistro]
                                            [-Verbose]
 
@@ -32,7 +42,7 @@
 
 [CmdletBinding()]
 param(
-  [int]$TimeoutMinutes = 30,
+  [int]$TimeoutMinutes = 45,
   [switch]$KeepDistro
 )
 
@@ -477,11 +487,15 @@ if (Test-Path $resultTxt) {
   Info "----- RESULT.txt -----"
   Get-Content $resultTxt | ForEach-Object { Write-Host "  $_" }
 }
-$runOut = Join-Path $OutDir '02-gate-run.txt'
-if (Test-Path $runOut) {
+$perGateRunFiles = @(
+  Get-ChildItem -LiteralPath $OutDir -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like '02-*-run.txt' } |
+    Sort-Object Name
+)
+foreach ($f in $perGateRunFiles) {
   Write-Host ""
-  Info "----- 02-gate-run.txt (tail 80) -----"
-  Get-Content $runOut -Tail 80 | ForEach-Object { Write-Host "  $_" }
+  Info "----- $($f.Name) (tail 40) -----"
+  Get-Content $f.FullName -Tail 40 | ForEach-Object { Write-Host "  $_" }
 }
 Info "=================================================================="
 
