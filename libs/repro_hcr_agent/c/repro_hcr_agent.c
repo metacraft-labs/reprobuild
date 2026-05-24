@@ -17,9 +17,11 @@
 
 #if defined(__APPLE__) && defined(__aarch64__)
 #include <dlfcn.h>
+#include <mach/mach.h>
 #include <mach-o/arm64/reloc.h>
 #include <libkern/OSCacheControl.h>
 #include <mach-o/loader.h>
+#include <mach-o/nlist.h>
 #include <mach-o/reloc.h>
 #endif
 
@@ -380,7 +382,12 @@ static int repro_hcr_symbol_matches(const char *registered_name,
   if (strcmp(registered_name, requested_name) == 0) {
     return 1;
   }
-  if (requested_name[0] == '_' && strcmp(registered_name, requested_name + 1) == 0) {
+  if (registered_name[0] == '_' &&
+      strcmp(registered_name + 1, requested_name) == 0) {
+    return 1;
+  }
+  if (requested_name[0] == '_' &&
+      strcmp(registered_name, requested_name + 1) == 0) {
     return 1;
   }
   return 0;
@@ -395,6 +402,20 @@ static void *repro_hcr_find_symbol(repro_hcr_agent_thread_args *args,
       return args->symbols[i].address;
     }
   }
+#if defined(__APPLE__) && defined(__aarch64__)
+  if (target_symbol != NULL && target_symbol[0] != '\0') {
+    void *resolved = dlsym(RTLD_DEFAULT, target_symbol);
+    if (resolved != NULL) {
+      return resolved;
+    }
+  }
+  if (changed_function != NULL && changed_function[0] != '\0') {
+    void *resolved = dlsym(RTLD_DEFAULT, changed_function);
+    if (resolved != NULL) {
+      return resolved;
+    }
+  }
+#endif
   return NULL;
 }
 
@@ -439,6 +460,10 @@ typedef struct repro_hcr_jit_registration_evidence {
   uint64_t retained_debug_object_address;
   uint64_t retained_debug_object_size;
   uint64_t register_hook_call_count;
+  uint32_t rebased_section_ordinal;
+  uint64_t rebased_section_address;
+  uint64_t rebased_symbol_value;
+  int32_t applied_relocations;
   uint32_t success;
 } repro_hcr_jit_registration_evidence;
 
@@ -495,8 +520,100 @@ static void repro_hcr_fill_jit_evidence(
   out->success = 1;
 }
 
-static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
-                                               uint64_t code_address) {
+typedef struct repro_hcr_symbol_section {
+  uint32_t section_ordinal;
+  uint64_t symbol_value;
+  int found;
+} repro_hcr_symbol_section;
+
+static int repro_hcr_find_macho_symbol_section(
+    const uint8_t *bytes, uint64_t size, const char *symbol_name,
+    repro_hcr_symbol_section *out) {
+  if (bytes == 0 || out == 0 || size < sizeof(struct mach_header_64)) {
+    return 0;
+  }
+  memset(out, 0, sizeof(*out));
+
+  const struct mach_header_64 *header =
+      (const struct mach_header_64 *)bytes;
+  if (header->magic != MH_MAGIC_64 || header->filetype != MH_OBJECT ||
+      header->sizeofcmds > size - sizeof(*header)) {
+    return 0;
+  }
+
+  const uint8_t *cursor = bytes + sizeof(*header);
+  const uint8_t *end = cursor + header->sizeofcmds;
+  const struct symtab_command *symtab = 0;
+  for (uint32_t i = 0; i < header->ncmds; ++i) {
+    if ((size_t)(end - cursor) < sizeof(struct load_command)) {
+      return -1;
+    }
+    const struct load_command *command =
+        (const struct load_command *)cursor;
+    if (command->cmdsize < sizeof(*command) ||
+        cursor + command->cmdsize > end) {
+      return -1;
+    }
+    if (command->cmd == LC_SYMTAB) {
+      if (command->cmdsize < sizeof(struct symtab_command)) {
+        return -1;
+      }
+      symtab = (const struct symtab_command *)cursor;
+    }
+    cursor += command->cmdsize;
+  }
+
+  if (symtab == 0 || symtab->nsyms == 0 || symtab->strsize == 0) {
+    return 0;
+  }
+  uint64_t symbols_size = (uint64_t)symtab->nsyms * sizeof(struct nlist_64);
+  if (symtab->symoff > size || symbols_size > size - symtab->symoff ||
+      symtab->stroff > size || symtab->strsize > size - symtab->stroff) {
+    return -1;
+  }
+
+  const struct nlist_64 *symbols =
+      (const struct nlist_64 *)(const void *)(bytes + symtab->symoff);
+  const char *strings = (const char *)(const void *)(bytes + symtab->stroff);
+  repro_hcr_symbol_section fallback;
+  memset(&fallback, 0, sizeof(fallback));
+  int fallback_count = 0;
+
+  for (uint32_t i = 0; i < symtab->nsyms; ++i) {
+    if ((symbols[i].n_type & N_TYPE) != N_SECT ||
+        symbols[i].n_sect == NO_SECT ||
+        symbols[i].n_un.n_strx >= symtab->strsize) {
+      continue;
+    }
+    const char *name = strings + symbols[i].n_un.n_strx;
+    if (memchr(name, '\0', symtab->strsize - symbols[i].n_un.n_strx) == 0) {
+      return -1;
+    }
+    if (symbol_name != 0 && symbol_name[0] != '\0' &&
+        repro_hcr_symbol_matches(name, symbol_name)) {
+      out->section_ordinal = symbols[i].n_sect;
+      out->symbol_value = symbols[i].n_value;
+      out->found = 1;
+      return 1;
+    }
+    if ((symbols[i].n_type & N_EXT) != 0 && name[0] != '\0') {
+      fallback.section_ordinal = symbols[i].n_sect;
+      fallback.symbol_value = symbols[i].n_value;
+      fallback.found = 1;
+      fallback_count++;
+    }
+  }
+
+  if (fallback_count == 1) {
+    *out = fallback;
+    return 1;
+  }
+  return 0;
+}
+
+static int repro_hcr_rebase_macho_debug_object(
+    uint8_t *bytes, uint64_t size, uint64_t code_address,
+    const char *symbol_name, repro_hcr_jit_registration_evidence *out) {
   if (bytes == 0 || size < sizeof(struct mach_header_64) || code_address == 0) {
     return 0;
   }
@@ -512,7 +629,14 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
   uint8_t *cursor = bytes + sizeof(*header);
   uint8_t *end = cursor + header->sizeofcmds;
   uint32_t hcr_text_section = 0;
+  uint64_t hcr_section_address = code_address;
   uint32_t section_ordinal = 0;
+  repro_hcr_symbol_section symbol_section;
+  int symbol_section_status = repro_hcr_find_macho_symbol_section(
+      bytes, size, symbol_name, &symbol_section);
+  if (symbol_section_status < 0) {
+    return -1;
+  }
   for (uint32_t i = 0; i < header->ncmds; ++i) {
     if ((size_t)(end - cursor) < sizeof(struct load_command)) {
       return -1;
@@ -537,12 +661,18 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
       for (uint32_t section_index = 0; section_index < segment->nsects;
            ++section_index) {
         ++section_ordinal;
-        if (strncmp(section[section_index].sectname, "__text",
+        if (symbol_section.found &&
+            section_ordinal == symbol_section.section_ordinal) {
+          hcr_section_address = code_address - symbol_section.symbol_value;
+          section[section_index].addr = hcr_section_address;
+          hcr_text_section = section_ordinal;
+        } else if (!symbol_section.found &&
+            strncmp(section[section_index].sectname, "__text",
                     sizeof(section[section_index].sectname)) == 0 &&
             strncmp(section[section_index].segname, "__HCR",
                     sizeof(section[section_index].segname)) == 0 &&
             section[section_index].size != 0) {
-          section[section_index].addr = code_address;
+          section[section_index].addr = hcr_section_address;
           hcr_text_section = section_ordinal;
         }
       }
@@ -550,6 +680,9 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
     cursor += command->cmdsize;
   }
   if (hcr_text_section == 0) {
+    if (symbol_name != 0 && symbol_name[0] != '\0') {
+      return -1;
+    }
     return 0;
   }
 
@@ -592,7 +725,7 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
           }
           uint64_t value = 0;
           memcpy(&value, bytes + patch_offset, sizeof(value));
-          value += code_address;
+          value += hcr_section_address;
           memcpy(bytes + patch_offset, &value, sizeof(value));
           ++applied_relocations;
         }
@@ -601,6 +734,13 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
     cursor += command->cmdsize;
   }
 
+  if (out != 0) {
+    out->rebased_section_ordinal = hcr_text_section;
+    out->rebased_section_address = hcr_section_address;
+    out->rebased_symbol_value =
+        symbol_section.found ? symbol_section.symbol_value : 0;
+    out->applied_relocations = applied_relocations;
+  }
   return applied_relocations;
 }
 
@@ -608,6 +748,7 @@ static int repro_hcr_register_jit_debug_object(
     const uint8_t *bytes,
     uint64_t size,
     uint64_t code_address,
+    const char *symbol_name,
     repro_hcr_jit_registration_evidence *out) {
   if (bytes == 0 || size == 0 || out == 0) {
     return -1;
@@ -625,8 +766,11 @@ static int repro_hcr_register_jit_debug_object(
     return -3;
   }
   memcpy(record->debug_bytes, bytes, (size_t)size);
+  repro_hcr_jit_registration_evidence rebase_evidence;
+  memset(&rebase_evidence, 0, sizeof(rebase_evidence));
   if (repro_hcr_rebase_macho_debug_object(record->debug_bytes, size,
-                                          code_address) < 0) {
+                                          code_address, symbol_name,
+                                          &rebase_evidence) < 0) {
     free(record->debug_bytes);
     free(record);
     return -4;
@@ -646,6 +790,10 @@ static int repro_hcr_register_jit_debug_object(
   __jit_debug_descriptor.action_flag = REPRO_HCR_JIT_REGISTER_FN;
   __jit_debug_register_code();
   repro_hcr_fill_jit_evidence(record, out);
+  out->rebased_section_ordinal = rebase_evidence.rebased_section_ordinal;
+  out->rebased_section_address = rebase_evidence.rebased_section_address;
+  out->rebased_symbol_value = rebase_evidence.rebased_symbol_value;
+  out->applied_relocations = rebase_evidence.applied_relocations;
   pthread_mutex_unlock(&repro_hcr_jit_mutex);
   return 0;
 }
@@ -718,10 +866,12 @@ static int repro_hcr_register_jit_debug_object(
     const uint8_t *bytes,
     uint64_t size,
     uint64_t code_address,
+    const char *symbol_name,
     repro_hcr_jit_registration_evidence *out) {
   (void)bytes;
   (void)size;
   (void)code_address;
+  (void)symbol_name;
   (void)out;
   return -1;
 }
@@ -827,11 +977,21 @@ static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_byte
                                           (uint64_t)(uintptr_t)patch_page);
   uint8_t branch_bytes[4];
   repro_hcr_write_u32_le(branch_bytes, branch);
-  if (mprotect((void *)(uintptr_t)page, page_size, PROT_READ | PROT_WRITE) != 0) {
-    return NULL;
+  void *page_ptr = (void *)(uintptr_t)page;
+  if (mprotect(page_ptr, page_size, PROT_READ | PROT_WRITE) != 0) {
+    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page,
+                                  (vm_size_t)page_size, TRUE,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS ||
+        vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)page_size,
+                   FALSE, VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS) {
+      return NULL;
+    }
   }
   memcpy(entry, branch_bytes, sizeof(branch_bytes));
-  if (mprotect((void *)(uintptr_t)page, page_size, PROT_READ | PROT_EXEC) != 0) {
+  if (mprotect(page_ptr, page_size, PROT_READ | PROT_EXEC) != 0 &&
+      vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)page_size,
+                 FALSE, VM_PROT_READ | VM_PROT_EXECUTE) != KERN_SUCCESS) {
     return NULL;
   }
   sys_icache_invalidate(entry, sizeof(branch_bytes));
@@ -984,6 +1144,16 @@ static void *repro_hcr_agent_thread(void *raw_args) {
   uint8_t *unwind_bytes = NULL;
   void *dispatch_entry = NULL;
   void *entry = repro_hcr_find_symbol(args, target_symbol, changed_function);
+  const char *failure_message = "C agent failed to apply direct patch";
+  if (patch_id == NULL) {
+    failure_message = "patch request is missing patchId";
+  } else if (changed_function == NULL) {
+    failure_message = "patch request is missing changed function";
+  } else if (patch_hex == NULL) {
+    failure_message = "patch request is missing direct patch bytes";
+  } else if (entry == NULL) {
+    failure_message = "target symbol was not found in process";
+  }
   if (patch_id != NULL && changed_function != NULL && patch_hex != NULL &&
       entry != NULL) {
     patch_bytes = repro_hcr_bytes_from_hex(patch_hex, &patch_len);
@@ -994,14 +1164,21 @@ static void *repro_hcr_agent_thread(void *raw_args) {
                                                        patch_len);
       dispatch_entry = patch_entry;
       ok = dispatch_entry != NULL;
+      if (!ok) {
+        failure_message = "direct patch branch installation failed";
+      }
       if (ok && debug_hex != NULL) {
         debug_bytes = repro_hcr_bytes_from_hex(debug_hex, &debug_len);
         repro_hcr_jit_registration_evidence jit_evidence;
+        const char *debug_symbol =
+            changed_function != NULL ? changed_function : target_symbol;
         if (debug_bytes == NULL || debug_len == 0 ||
             repro_hcr_register_jit_debug_object(
               debug_bytes, (uint64_t)debug_len,
-              (uint64_t)(uintptr_t)dispatch_entry, &jit_evidence) != 0) {
+              (uint64_t)(uintptr_t)dispatch_entry, debug_symbol,
+              &jit_evidence) != 0) {
           ok = 0;
+          failure_message = "JIT debug object registration failed";
         }
       }
       if (ok && unwind_hex != NULL) {
@@ -1013,8 +1190,11 @@ static void *repro_hcr_agent_thread(void *raw_args) {
               (uint64_t)(uintptr_t)dispatch_entry, (uint64_t)patch_len,
               &unwind_evidence) != 0) {
           ok = 0;
+          failure_message = "dynamic unwind registration failed";
         }
       }
+    } else {
+      failure_message = "direct patch bytes are not valid hex";
     }
   }
 
@@ -1029,7 +1209,7 @@ static void *repro_hcr_agent_thread(void *raw_args) {
       repro_hcr_lifecycle_json(patch_id == NULL ? "" : patch_id,
                                "hcr/patchFailed", 2));
     repro_hcr_send_owned_json(fd,
-      repro_hcr_patch_failed_json(patch_id, "C agent failed to apply direct patch"));
+      repro_hcr_patch_failed_json(patch_id, failure_message));
   }
 
   free(patch_bytes);

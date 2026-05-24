@@ -1,4 +1,4 @@
-import std/[options, tables, unittest]
+import std/[options, os, tables, unittest]
 
 import repro_hcr_agent
 
@@ -7,33 +7,60 @@ const
   FunctionName = "repro_hcr_process_target_entry"
 
 when defined(macosx) and defined(arm64):
-  {.emit: """
-__attribute__((noinline, used, visibility("default"),
-               section("__HCR,__text")))
-int repro_hcr_process_target_entry(void) {
-  extern volatile int repro_hcr_process_target_seed;
-  return repro_hcr_process_target_seed;
-}
+  import std/posix
 
-volatile int repro_hcr_process_target_seed = 11;
+  proc sysIcacheInvalidate(start: pointer; len: csize_t) {.
+    importc: "sys_icache_invalidate", header: "<libkern/OSCacheControl.h>".}
 
-void *repro_hcr_process_target_entry_addr(void) {
-  return (void *)&repro_hcr_process_target_entry;
-}
-""".}
+  type EntryProc = proc(): cint {.cdecl.}
 
-  proc repro_hcr_process_target_entry(): cint {.cdecl, importc.}
-  proc repro_hcr_process_target_entry_addr(): pointer {.cdecl, importc.}
+  proc ptrFromAddress(address: uint64): pointer =
+    cast[pointer](uint(address))
+
+  proc mmapFailed(p: pointer): bool =
+    cast[int](p) == -1
+
+  proc hostPageSize(): int =
+    let value = sysconf(SC_PAGESIZE)
+    if value <= 0:
+      raiseOSError(osLastError(), "sysconf(SC_PAGESIZE) failed")
+    int(value)
+
+  proc requireMprotect(address: uint64; size: int; protection: cint;
+                       context: string) =
+    if mprotect(ptrFromAddress(address), size, protection) != 0:
+      raiseOSError(osLastError(), "mprotect failed for " & context)
+
+  proc allocateExecutableFunction(bytes: openArray[byte]):
+      tuple[address: uint64; size: int] =
+    let pageSize = hostPageSize()
+    let mapped = mmap(nil, pageSize, PROT_READ or PROT_WRITE,
+      MAP_PRIVATE or MAP_ANONYMOUS, -1, 0)
+    if mmapFailed(mapped):
+      raiseOSError(osLastError(), "mmap failed for process HCR test function")
+    if bytes.len > 0:
+      copyMem(mapped, unsafeAddr bytes[0], bytes.len)
+      sysIcacheInvalidate(mapped, csize_t(bytes.len))
+    result = (addressFromPointer(mapped), pageSize)
+    try:
+      requireMprotect(result.address, result.size, PROT_READ or PROT_EXEC,
+        "process HCR test function")
+    except CatchableError:
+      discard munmap(mapped, pageSize)
+      raise
 
   suite "HCR process target runtime":
-    test "agent runtime patches a linked function in the current process":
+    test "agent runtime patches executable memory in the current process":
+      let originalBytes = aarch64ReturnImmediateBytes(11)
+      let code = allocateExecutableFunction(originalBytes)
+      defer: discard munmap(ptrFromAddress(code.address), code.size)
+      let entry = cast[EntryProc](ptrFromAddress(code.address))
+
       var target = initProcessTargetRuntime()
-      target.addProcessTargetSymbol(
-        FunctionName,
-        addressFromPointer(repro_hcr_process_target_entry_addr()))
+      target.addProcessTargetSymbol(FunctionName, code.address)
       defer: target.close()
 
-      check repro_hcr_process_target_entry() == 11
+      check entry() == 11
 
       let request = directPatchRequest(
         patchId = "patch-process-0001",
@@ -55,7 +82,7 @@ void *repro_hcr_process_target_entry_addr(void) {
         request,
         registerDebugUnwind = false)
 
-      check repro_hcr_process_target_entry() == 77
+      check entry() == 77
       check applied.patchApplied.patchId == "patch-process-0001"
       check applied.patchApplied.changedFunctions == @[FunctionName]
       check applied.patchApplied.symbolGeneration == 1'u64

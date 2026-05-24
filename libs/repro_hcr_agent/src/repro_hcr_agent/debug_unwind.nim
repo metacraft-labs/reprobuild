@@ -17,6 +17,10 @@ type
     retainedDebugObjectAddress: uint64
     retainedDebugObjectSize: uint64
     registerHookCallCount: uint64
+    rebasedSectionOrdinal: uint32
+    rebasedSectionAddress: uint64
+    rebasedSymbolValue: uint64
+    appliedRelocations: int32
     success: uint32
 
   CUnwindRegistrationEvidence {.bycopy.} = object
@@ -43,6 +47,10 @@ type
     retainedDebugObjectAddress*: uint64
     retainedDebugObjectSize*: uint64
     registerHookCallCount*: uint64
+    rebasedSectionOrdinal*: uint32
+    rebasedSectionAddress*: uint64
+    rebasedSymbolValue*: uint64
+    appliedRelocations*: int32
     retainedDebugObjectDigest*: string
     retainedDebugObjectHexPrefix*: string
     success*: bool
@@ -67,6 +75,7 @@ when defined(macosx) and defined(arm64):
 #include <pthread.h>
 #include <mach-o/arm64/reloc.h>
 #include <mach-o/loader.h>
+#include <mach-o/nlist.h>
 #include <mach-o/reloc.h>
 
 enum {
@@ -109,6 +118,10 @@ typedef struct {
   uint64_t retainedDebugObjectAddress;
   uint64_t retainedDebugObjectSize;
   uint64_t registerHookCallCount;
+  uint32_t rebasedSectionOrdinal;
+  uint64_t rebasedSectionAddress;
+  uint64_t rebasedSymbolValue;
+  int32_t appliedRelocations;
   uint32_t success;
 } CJitRegistrationEvidence;
 
@@ -164,8 +177,117 @@ static void repro_hcr_fill_jit_evidence(
   out->success = 1;
 }
 
-static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
-                                               uint64_t code_address) {
+static int repro_hcr_symbol_matches(const char *object_name,
+                                    const char *requested_name) {
+  if (object_name == 0 || requested_name == 0) {
+    return 0;
+  }
+  if (strcmp(object_name, requested_name) == 0) {
+    return 1;
+  }
+  if (object_name[0] == '_' && strcmp(object_name + 1, requested_name) == 0) {
+    return 1;
+  }
+  if (requested_name[0] == '_' && strcmp(object_name, requested_name + 1) == 0) {
+    return 1;
+  }
+  return 0;
+}
+
+typedef struct {
+  uint32_t sectionOrdinal;
+  uint64_t symbolValue;
+  int found;
+} ReproHcrSymbolSection;
+
+static int repro_hcr_find_macho_symbol_section(
+    const uint8_t *bytes, uint64_t size, const char *symbol_name,
+    ReproHcrSymbolSection *out) {
+  if (bytes == 0 || out == 0 || size < sizeof(struct mach_header_64)) {
+    return 0;
+  }
+  memset(out, 0, sizeof(*out));
+
+  const struct mach_header_64 *header =
+      (const struct mach_header_64 *)bytes;
+  if (header->magic != MH_MAGIC_64 || header->filetype != MH_OBJECT ||
+      header->sizeofcmds > size - sizeof(*header)) {
+    return 0;
+  }
+
+  const uint8_t *cursor = bytes + sizeof(*header);
+  const uint8_t *end = cursor + header->sizeofcmds;
+  const struct symtab_command *symtab = 0;
+  for (uint32_t i = 0; i < header->ncmds; ++i) {
+    if ((size_t)(end - cursor) < sizeof(struct load_command)) {
+      return -1;
+    }
+    const struct load_command *command =
+        (const struct load_command *)cursor;
+    if (command->cmdsize < sizeof(*command) ||
+        cursor + command->cmdsize > end) {
+      return -1;
+    }
+    if (command->cmd == LC_SYMTAB) {
+      if (command->cmdsize < sizeof(struct symtab_command)) {
+        return -1;
+      }
+      symtab = (const struct symtab_command *)cursor;
+    }
+    cursor += command->cmdsize;
+  }
+
+  if (symtab == 0 || symtab->nsyms == 0 || symtab->strsize == 0) {
+    return 0;
+  }
+  uint64_t symbols_size = (uint64_t)symtab->nsyms * sizeof(struct nlist_64);
+  if (symtab->symoff > size || symbols_size > size - symtab->symoff ||
+      symtab->stroff > size || symtab->strsize > size - symtab->stroff) {
+    return -1;
+  }
+
+  const struct nlist_64 *symbols =
+      (const struct nlist_64 *)(const void *)(bytes + symtab->symoff);
+  const char *strings = (const char *)(const void *)(bytes + symtab->stroff);
+  ReproHcrSymbolSection fallback;
+  memset(&fallback, 0, sizeof(fallback));
+  int fallback_count = 0;
+
+  for (uint32_t i = 0; i < symtab->nsyms; ++i) {
+    if ((symbols[i].n_type & N_TYPE) != N_SECT ||
+        symbols[i].n_sect == NO_SECT ||
+        symbols[i].n_un.n_strx >= symtab->strsize) {
+      continue;
+    }
+    const char *name = strings + symbols[i].n_un.n_strx;
+    if (memchr(name, '\0', symtab->strsize - symbols[i].n_un.n_strx) == 0) {
+      return -1;
+    }
+    if (symbol_name != 0 && symbol_name[0] != '\0' &&
+        repro_hcr_symbol_matches(name, symbol_name)) {
+      out->sectionOrdinal = symbols[i].n_sect;
+      out->symbolValue = symbols[i].n_value;
+      out->found = 1;
+      return 1;
+    }
+    if ((symbols[i].n_type & N_EXT) != 0 && name[0] != '\0') {
+      fallback.sectionOrdinal = symbols[i].n_sect;
+      fallback.symbolValue = symbols[i].n_value;
+      fallback.found = 1;
+      fallback_count++;
+    }
+  }
+
+  if (fallback_count == 1) {
+    *out = fallback;
+    return 1;
+  }
+  return 0;
+}
+
+static int repro_hcr_rebase_macho_debug_object(
+    uint8_t *bytes, uint64_t size, uint64_t code_address,
+    const char *symbol_name, CJitRegistrationEvidence *out) {
   if (bytes == 0 || size < sizeof(struct mach_header_64) || code_address == 0) {
     return 0;
   }
@@ -181,7 +303,14 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
   uint8_t *cursor = bytes + sizeof(*header);
   uint8_t *end = cursor + header->sizeofcmds;
   uint32_t hcr_text_section = 0;
+  uint64_t hcr_section_address = code_address;
   uint32_t section_ordinal = 0;
+  ReproHcrSymbolSection symbol_section;
+  int symbol_section_status = repro_hcr_find_macho_symbol_section(
+      bytes, size, symbol_name, &symbol_section);
+  if (symbol_section_status < 0) {
+    return -1;
+  }
   for (uint32_t i = 0; i < header->ncmds; ++i) {
     if ((size_t)(end - cursor) < sizeof(struct load_command)) {
       return -1;
@@ -206,12 +335,18 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
       for (uint32_t section_index = 0; section_index < segment->nsects;
            ++section_index) {
         ++section_ordinal;
-        if (strncmp(section[section_index].sectname, "__text",
+        if (symbol_section.found &&
+            section_ordinal == symbol_section.sectionOrdinal) {
+          hcr_section_address = code_address - symbol_section.symbolValue;
+          section[section_index].addr = hcr_section_address;
+          hcr_text_section = section_ordinal;
+        } else if (!symbol_section.found &&
+            strncmp(section[section_index].sectname, "__text",
                     sizeof(section[section_index].sectname)) == 0 &&
             strncmp(section[section_index].segname, "__HCR",
                     sizeof(section[section_index].segname)) == 0 &&
             section[section_index].size != 0) {
-          section[section_index].addr = code_address;
+          section[section_index].addr = hcr_section_address;
           hcr_text_section = section_ordinal;
         }
       }
@@ -219,6 +354,9 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
     cursor += command->cmdsize;
   }
   if (hcr_text_section == 0) {
+    if (symbol_name != 0 && symbol_name[0] != '\0') {
+      return -1;
+    }
     return 0;
   }
 
@@ -261,7 +399,7 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
           }
           uint64_t value = 0;
           memcpy(&value, bytes + patch_offset, sizeof(value));
-          value += code_address;
+          value += hcr_section_address;
           memcpy(bytes + patch_offset, &value, sizeof(value));
           ++applied_relocations;
         }
@@ -270,6 +408,12 @@ static int repro_hcr_rebase_macho_debug_object(uint8_t *bytes, uint64_t size,
     cursor += command->cmdsize;
   }
 
+  if (out != 0) {
+    out->rebasedSectionOrdinal = hcr_text_section;
+    out->rebasedSectionAddress = hcr_section_address;
+    out->rebasedSymbolValue = symbol_section.found ? symbol_section.symbolValue : 0;
+    out->appliedRelocations = applied_relocations;
+  }
   return applied_relocations;
 }
 
@@ -277,6 +421,7 @@ int repro_hcr_register_jit_debug_object(
     const uint8_t *bytes,
     uint64_t size,
     uint64_t code_address,
+    const char *symbol_name,
     CJitRegistrationEvidence *out) {
   if (bytes == 0 || size == 0 || out == 0) {
     return -1;
@@ -294,8 +439,11 @@ int repro_hcr_register_jit_debug_object(
     return -3;
   }
   memcpy(record->debug_bytes, bytes, (size_t)size);
+  CJitRegistrationEvidence rebase_evidence;
+  memset(&rebase_evidence, 0, sizeof(rebase_evidence));
   if (repro_hcr_rebase_macho_debug_object(record->debug_bytes, size,
-                                          code_address) < 0) {
+                                          code_address, symbol_name,
+                                          &rebase_evidence) < 0) {
     free(record->debug_bytes);
     free(record);
     return -4;
@@ -315,6 +463,10 @@ int repro_hcr_register_jit_debug_object(
   __jit_debug_descriptor.action_flag = REPRO_HCR_JIT_REGISTER_FN;
   __jit_debug_register_code();
   repro_hcr_fill_jit_evidence(record, out);
+  out->rebasedSectionOrdinal = rebase_evidence.rebasedSectionOrdinal;
+  out->rebasedSectionAddress = rebase_evidence.rebasedSectionAddress;
+  out->rebasedSymbolValue = rebase_evidence.rebasedSymbolValue;
+  out->appliedRelocations = rebase_evidence.appliedRelocations;
   pthread_mutex_unlock(&repro_hcr_jit_mutex);
   return 0;
 }
@@ -378,6 +530,7 @@ int repro_hcr_register_dynamic_eh_frame(
 
   proc cRegisterJitDebugObject(bytes: ptr UncheckedArray[byte]; size: uint64;
                                codeAddress: uint64;
+                               symbolName: cstring;
                                outEvidence: ptr CJitRegistrationEvidence):
                                cint {.
     importc: "repro_hcr_register_jit_debug_object", nodecl.}
@@ -392,15 +545,15 @@ proc hexPrefix(bytes: openArray[byte]; maxBytes: int): string =
   let count = min(bytes.len, maxBytes)
   bytesHex(bytes.toOpenArray(0, count - 1))
 
-proc registerJitDebugObject*(bytes: openArray[byte];
-                             codeAddress: uint64): JitRegistrationEvidence =
+proc registerJitDebugObject*(bytes: openArray[byte]; codeAddress: uint64;
+                             symbolName = ""): JitRegistrationEvidence =
   if bytes.len == 0:
     raise newException(ValueError, "JIT debug object payload is empty")
   when defined(macosx) and defined(arm64):
     var c: CJitRegistrationEvidence
     let rc = cRegisterJitDebugObject(
       cast[ptr UncheckedArray[byte]](unsafeAddr bytes[0]),
-      uint64(bytes.len), codeAddress, addr c)
+      uint64(bytes.len), codeAddress, symbolName.cstring, addr c)
     if rc != 0:
       raise newException(ValueError, "JIT debug registration failed: " & $rc)
     result = JitRegistrationEvidence(
@@ -417,6 +570,10 @@ proc registerJitDebugObject*(bytes: openArray[byte];
       retainedDebugObjectAddress: c.retainedDebugObjectAddress,
       retainedDebugObjectSize: c.retainedDebugObjectSize,
       registerHookCallCount: c.registerHookCallCount,
+      rebasedSectionOrdinal: c.rebasedSectionOrdinal,
+      rebasedSectionAddress: c.rebasedSectionAddress,
+      rebasedSymbolValue: c.rebasedSymbolValue,
+      appliedRelocations: c.appliedRelocations,
       retainedDebugObjectDigest: byteDigest(bytes),
       retainedDebugObjectHexPrefix: hexPrefix(bytes, 32),
       success: c.success != 0
@@ -470,6 +627,10 @@ proc jitRegistrationJson*(evidence: JitRegistrationEvidence): JsonNode =
     "retainedDebugObjectAddress": evidence.retainedDebugObjectAddress,
     "retainedDebugObjectSize": evidence.retainedDebugObjectSize,
     "registerHookCallCount": evidence.registerHookCallCount,
+    "rebasedSectionOrdinal": evidence.rebasedSectionOrdinal,
+    "rebasedSectionAddress": evidence.rebasedSectionAddress,
+    "rebasedSymbolValue": evidence.rebasedSymbolValue,
+    "appliedRelocations": evidence.appliedRelocations,
     "retainedDebugObjectDigest": evidence.retainedDebugObjectDigest,
     "retainedDebugObjectHexPrefix": evidence.retainedDebugObjectHexPrefix,
     "success": evidence.success

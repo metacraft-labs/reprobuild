@@ -54,9 +54,11 @@ proc renderUsage*(programName: string): string =
           programName &
       " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [path]\n       " &
           programName &
-      " watch [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--hcr-agent-socket=PATH --hcr-artifacts=PATH --hcr-metadata=PATH]\n       " &
+      " watch [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]]\n       " &
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
+          programName &
+      " hcr prepare-object --input PATH --output PATH (--function NAME|--all-code) [--segment NAME]\n       " &
           programName &
       " develop --list\n       " &
           programName &
@@ -820,6 +822,55 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         else:
           argValue("text") & argValue("title"),
       entries = argSeqValue("entries"))
+
+  if payload.call.packageName == "reprobuild.builtin" and
+      payload.call.executableName == "hcr":
+    if payload.call.subcommand != "prepareObject":
+      raise newException(ValueError,
+        "unknown built-in HCR operation: " & payload.call.subcommand)
+    let commandStatsId =
+      if payload.commandStatsId.len > 0:
+        payload.commandStatsId
+      else:
+        payload.id
+    let fingerprintText = [
+      "reprobuild.localBuiltinHcrAction.v1",
+      payload.id,
+      payload.call.subcommand,
+      node.payload
+    ].join("\n")
+    var argv = @[
+      getAppFilename(), "hcr", "prepare-object",
+      "--input", argValue("input"),
+      "--output", argValue("output"),
+      "--segment", argValue("segment")
+    ]
+    let functionName = argValue("function")
+    if functionName.len > 0:
+      argv.add "--function"
+      argv.add functionName
+    else:
+      argv.add "--all-code"
+    var inputs: seq[string] = @[]
+    for input in payload.inputs:
+      inputs.add(materialProjectPath(projectRoot, input))
+    return repro_build_engine.action(
+      payload.id,
+      argv,
+      cwd = projectRoot,
+      deps = payload.deps,
+      inputs = inputs,
+      outputs = payload.outputs,
+      pool = payload.pool,
+      poolUnits = payload.poolUnits,
+      depfile = payload.depfile,
+      dynamicDepsFile = payload.dynamicDepsFile,
+      cacheable = payload.cacheable,
+      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      actionCachePolicy = actionCachePolicy,
+      dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
+        payload.dependencyPolicy),
+      commandStatsId = commandStatsId)
 
   let executableName = payload.call.executableName
   let packageName = payload.call.packageName
@@ -4807,17 +4858,28 @@ type
     artifacts: string
     metadataPath: string
 
-  HcrWatchPatchMetadata = object
-    functionName: string
-    targetSymbol: string
-    objectSymbol: string
-    objectPath: string
-    sourcePath: string
+  HcrWatchPatchMetadata* = object
+    functionName*: string
+    targetSymbol*: string
+    objectSymbol*: string
+    objectPath*: string
+    sourcePath*: string
+
+  HcrWatchObjectBaseline* = object
+    objectPath*: string
+    sourcePath*: string
+    generation0Object*: string
+
+  HcrWatchInferredPatch* = object
+    metadata*: HcrWatchPatchMetadata
+    oldObject*: string
+    newObject*: string
 
   HcrWatchSession = object
     enabled: bool
     config: HcrWatchConfig
     metadata: HcrWatchPatchMetadata
+    inferredBaselines: seq[HcrWatchObjectBaseline]
     listener: HcrAgentUnixListener
     connection: HcrAgentSocketConnection
     client: HcrCoordinatorClient
@@ -4854,9 +4916,6 @@ proc validateHcrWatchConfig(config: HcrWatchConfig) =
   if config.artifacts.len == 0:
     raise newException(ValueError,
       "--hcr-artifacts is required when HCR watch mode is enabled")
-  if config.metadataPath.len == 0:
-    raise newException(ValueError,
-      "--hcr-metadata is required when HCR watch mode is enabled")
 
 proc resolveProjectPath(projectRoot, path: string): string =
   if path.len == 0:
@@ -4912,6 +4971,134 @@ proc readHcrWatchPatchMetadata(projectRoot, metadataPath: string):
   result.sourcePath = resolveProjectPath(
     projectRoot, patch.requiredJsonString("source", "HCR patch metadata"))
 
+proc jsonStringSeqField(node: JsonNode; key: string): seq[string] =
+  let values = node{key}
+  if values.kind != JArray:
+    return
+  for value in values:
+    if value.kind == JString and value.getStr().len > 0:
+      result.add value.getStr()
+
+proc materialReportPath(projectRoot, path: string): string =
+  if path.len == 0:
+    return ""
+  result =
+    if path.isAbsolute:
+      path
+    else:
+      projectRoot / path
+  result = os.normalizedPath(result)
+
+proc isCxxSource(path: string): bool =
+  splitFile(path).ext.toLowerAscii in [".c", ".cc", ".cpp", ".cxx"]
+
+proc isObjectFile(path: string): bool =
+  splitFile(path).ext.toLowerAscii in [".o", ".obj"]
+
+proc stripObjectSymbolPrefix(symbol: string): string =
+  if symbol.startsWith("_") and symbol.len > 1:
+    symbol[1 .. ^1]
+  else:
+    symbol
+
+proc hcrWatchObjectCandidatesFromReport*(projectRoot, buildReportPath: string):
+    seq[HcrWatchObjectBaseline] =
+  if buildReportPath.len == 0 or not fileExists(extendedPath(buildReportPath)):
+    raise newException(ValueError,
+      "HCR watch inference requires a build report")
+  let report = parseFile(buildReportPath)
+  for action in report{"actions"}:
+    let evidence = action{"evidence"}
+    if evidence.kind != JObject:
+      continue
+
+    var inputs: seq[string]
+    for key in ["declaredInputs", "depfileInputs", "monitorReads"]:
+      for path in evidence.jsonStringSeqField(key):
+        inputs.addUnique(projectRoot.materialReportPath(path))
+    var sourceInputs: seq[string]
+    for path in inputs:
+      if path.isCxxSource and fileExists(extendedPath(path)):
+        sourceInputs.addUnique(path)
+    if sourceInputs.len != 1:
+      continue
+
+    for path in evidence.jsonStringSeqField("declaredOutputs"):
+      let objectPath = projectRoot.materialReportPath(path)
+      if objectPath.isObjectFile and fileExists(extendedPath(objectPath)):
+        result.add HcrWatchObjectBaseline(
+          objectPath: objectPath,
+          sourcePath: sourceInputs[0])
+
+proc captureInferredHcrWatchBaseline*(projectRoot, buildReportPath,
+                                      artifacts: string):
+    seq[HcrWatchObjectBaseline] =
+  result = hcrWatchObjectCandidatesFromReport(projectRoot, buildReportPath)
+  if result.len == 0:
+    raise newException(ValueError,
+      "HCR watch could not infer any C/C++ object outputs from the build report")
+  createDir(extendedPath(artifacts))
+  for i in 0 ..< result.len:
+    let objectSegment = safePathSegment(result[i].objectPath, "object")
+    result[i].generation0Object =
+      artifacts / ("generation0-" & align($i, 4, '0') & "-" & objectSegment)
+    copyFile(extendedPath(result[i].objectPath),
+      extendedPath(result[i].generation0Object))
+
+proc inferHcrWatchPatch*(baselines: openArray[HcrWatchObjectBaseline];
+                         artifacts: string; cycle: int):
+    HcrWatchInferredPatch =
+  type Candidate = object
+    baseline: HcrWatchObjectBaseline
+    objectSymbol: string
+
+  var candidates: seq[Candidate]
+  for baseline in baselines:
+    if not fileExists(extendedPath(baseline.generation0Object)) or
+        not fileExists(extendedPath(baseline.objectPath)):
+      continue
+    let oldGraph = parseMachOArm64Object(baseline.generation0Object)
+    let newGraph = parseMachOArm64Object(baseline.objectPath)
+    let diff = diffFunctions(oldGraph, newGraph)
+    for entry in diff.functions:
+      case entry.kind
+      of fckUnchanged:
+        discard
+      of fckRemoved:
+        raise newException(ValueError,
+          "HCR watch does not support removed function " & entry.name)
+      of fckChangedCode, fckRelocationSignatureChanged, fckAdded:
+        candidates.add Candidate(
+          baseline: baseline,
+          objectSymbol: entry.name)
+
+  if candidates.len == 0:
+    raise newException(ValueError,
+      "HCR watch did not find a changed function in rebuilt object outputs")
+  if candidates.len > 1:
+    var names: seq[string]
+    for candidate in candidates:
+      names.add candidate.objectSymbol
+    raise newException(ValueError,
+      "HCR watch currently requires exactly one changed function; found " &
+        names.join(", "))
+
+  let candidate = candidates[0]
+  let functionName = stripObjectSymbolPrefix(candidate.objectSymbol)
+  let newObject = artifacts /
+    (safePathSegment(functionName, "patch") & "-generation" &
+      $(cycle - 1) & ".o")
+  copyFile(extendedPath(candidate.baseline.objectPath), extendedPath(newObject))
+  result = HcrWatchInferredPatch(
+    metadata: HcrWatchPatchMetadata(
+      functionName: functionName,
+      targetSymbol: functionName,
+      objectSymbol: candidate.objectSymbol,
+      objectPath: candidate.baseline.objectPath,
+      sourcePath: candidate.baseline.sourcePath),
+    oldObject: candidate.baseline.generation0Object,
+    newObject: newObject)
+
 proc initHcrWatchSession(config: HcrWatchConfig): HcrWatchSession =
   config.validateHcrWatchConfig()
   result.enabled = config.hcrWatchEnabled
@@ -4932,27 +5119,48 @@ proc captureHcrWatchBaseline(session: var HcrWatchSession;
                              outcome: BuildCommandOutcome) =
   if not session.enabled:
     return
-  session.metadata = readHcrWatchPatchMetadata(
-    outcome.projectRoot, session.config.metadataPath)
-  if not fileExists(extendedPath(session.metadata.objectPath)):
-    raise newException(ValueError,
-      "HCR watch object does not exist after initial build: " &
-        session.metadata.objectPath)
-  session.oldObject = session.config.artifacts /
-    (safePathSegment(session.metadata.functionName, "patch") & "-generation0.o")
-  copyFile(extendedPath(session.metadata.objectPath), extendedPath(session.oldObject))
-  writeJsonFile(session.config.artifacts / "hcr-watch-baseline.json", %*{
-    "schemaId": "reprobuild.hcr.watch-baseline.v1",
-    "supportProfile": CodetracerHcrSupportProfile,
-    "function": session.metadata.functionName,
-    "targetSymbol": session.metadata.targetSymbol,
-    "objectSymbol": session.metadata.objectSymbol,
-    "object": session.metadata.objectPath,
-    "source": session.metadata.sourcePath,
-    "generation0Object": session.oldObject
-  })
-  echo "repro watch: hcr baseline captured object=" &
-    session.metadata.objectPath
+  if session.config.metadataPath.len > 0:
+    session.metadata = readHcrWatchPatchMetadata(
+      outcome.projectRoot, session.config.metadataPath)
+    if not fileExists(extendedPath(session.metadata.objectPath)):
+      raise newException(ValueError,
+        "HCR watch object does not exist after initial build: " &
+          session.metadata.objectPath)
+    session.oldObject = session.config.artifacts /
+      (safePathSegment(session.metadata.functionName, "patch") & "-generation0.o")
+    copyFile(extendedPath(session.metadata.objectPath),
+      extendedPath(session.oldObject))
+    writeJsonFile(session.config.artifacts / "hcr-watch-baseline.json", %*{
+      "schemaId": "reprobuild.hcr.watch-baseline.v1",
+      "supportProfile": CodetracerHcrSupportProfile,
+      "mode": "metadata",
+      "function": session.metadata.functionName,
+      "targetSymbol": session.metadata.targetSymbol,
+      "objectSymbol": session.metadata.objectSymbol,
+      "object": session.metadata.objectPath,
+      "source": session.metadata.sourcePath,
+      "generation0Object": session.oldObject
+    })
+    echo "repro watch: hcr baseline captured object=" &
+      session.metadata.objectPath
+  else:
+    session.inferredBaselines = captureInferredHcrWatchBaseline(
+      outcome.projectRoot, outcome.buildReportPath, session.config.artifacts)
+    var objects = newJArray()
+    for baseline in session.inferredBaselines:
+      objects.add %*{
+        "object": baseline.objectPath,
+        "source": baseline.sourcePath,
+        "generation0Object": baseline.generation0Object
+      }
+    writeJsonFile(session.config.artifacts / "hcr-watch-baseline.json", %*{
+      "schemaId": "reprobuild.hcr.watch-baseline.v1",
+      "supportProfile": CodetracerHcrSupportProfile,
+      "mode": "inferred",
+      "objects": objects
+    })
+    echo "repro watch: hcr baseline inferred objects=" &
+      $session.inferredBaselines.len
   echo "repro watch: hcr waiting for agent socket=" & session.config.socketPath
   flushStdout()
   session.connection = acceptHcrAgentConnection(session.listener)
@@ -4970,21 +5178,30 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
   if not session.connected:
     raise newException(ValueError,
       "HCR watch cannot deliver a patch before the target agent connects")
-  session.metadata = readHcrWatchPatchMetadata(
-    outcome.projectRoot, session.config.metadataPath)
-  if not fileExists(extendedPath(session.metadata.objectPath)):
-    raise newException(ValueError,
-      "HCR watch object does not exist after rebuild: " &
-        session.metadata.objectPath)
+  if session.config.metadataPath.len > 0:
+    session.metadata = readHcrWatchPatchMetadata(
+      outcome.projectRoot, session.config.metadataPath)
+    if not fileExists(extendedPath(session.metadata.objectPath)):
+      raise newException(ValueError,
+        "HCR watch object does not exist after rebuild: " &
+          session.metadata.objectPath)
+    session.newObject = session.config.artifacts /
+      (safePathSegment(session.metadata.functionName, "patch") & "-generation" &
+        $(cycle - 1) & ".o")
+    copyFile(extendedPath(session.metadata.objectPath),
+      extendedPath(session.newObject))
+  else:
+    let inferred = inferHcrWatchPatch(
+      session.inferredBaselines, session.config.artifacts, cycle)
+    session.metadata = inferred.metadata
+    session.oldObject = inferred.oldObject
+    session.newObject = inferred.newObject
+    echo "repro watch: hcr inferred changed function=" &
+      session.metadata.functionName & " object=" & session.metadata.objectPath
   if not fileExists(extendedPath(session.metadata.sourcePath)):
     raise newException(ValueError,
       "HCR watch source does not exist after rebuild: " &
         session.metadata.sourcePath)
-
-  session.newObject = session.config.artifacts /
-    (safePathSegment(session.metadata.functionName, "patch") & "-generation" &
-      $(cycle - 1) & ".o")
-  copyFile(extendedPath(session.metadata.objectPath), extendedPath(session.newObject))
 
   let patchBytes = objectFunctionBytes(session.newObject,
     session.metadata.objectSymbol)
@@ -5536,12 +5753,77 @@ proc runHcrBuildCycle(project, target, logPath: string): string =
       "repro build failed during HCR coordination with exit code " &
         $res.exitCode & "\n" & res.output)
 
+type HcrPrepareObjectArgs = object
+  input: string
+  output: string
+  functionName: string
+  segmentName: string
+  allCodeSections: bool
+
+proc parseHcrPrepareObjectArgs(args: seq[string]): HcrPrepareObjectArgs =
+  result.segmentName = "__HCR"
+  var index = 0
+  proc valueFor(name: string): string =
+    let arg = args[index]
+    let prefix = name & "="
+    if arg.startsWith(prefix):
+      arg[prefix.len .. ^1]
+    else:
+      index.inc
+      if index >= args.len:
+        raise newException(ValueError, name & " requires a value")
+      args[index]
+
+  while index < args.len:
+    let arg = args[index]
+    if arg == "--input" or arg.startsWith("--input="):
+      result.input = valueFor("--input")
+    elif arg == "--output" or arg.startsWith("--output="):
+      result.output = valueFor("--output")
+    elif arg == "--function" or arg.startsWith("--function="):
+      result.functionName = valueFor("--function")
+    elif arg == "--all-code":
+      result.allCodeSections = true
+    elif arg == "--segment" or arg.startsWith("--segment="):
+      result.segmentName = valueFor("--segment")
+    else:
+      raise newException(ValueError,
+        "unsupported HCR prepare-object flag: " & arg)
+    index.inc
+
+proc runHcrPrepareObjectCommand(args: seq[string]): int =
+  let parsed = parseHcrPrepareObjectArgs(args)
+  requireHcrFile(parsed.input, "--input")
+  requireHcrArg(parsed.output, "--output")
+  if parsed.functionName.len == 0 and not parsed.allCodeSections:
+    raise newException(ValueError, "--function or --all-code is required")
+  if parsed.functionName.len > 0 and parsed.allCodeSections:
+    raise newException(ValueError, "--function and --all-code are mutually exclusive")
+  requireHcrArg(parsed.segmentName, "--segment")
+  createDir(extendedPath(parentDir(parsed.output)))
+  if parsed.allCodeSections:
+    let count = rewriteMachOArm64CodeSectionSegments(
+      parsed.input, parsed.output, parsed.segmentName)
+    echo "repro hcr prepare-object: output=" & parsed.output &
+      " codeSections=" & $count & " segment=" & parsed.segmentName
+  else:
+    rewriteMachOArm64FunctionSectionSegment(
+      parsed.input, parsed.output, parsed.functionName, parsed.segmentName)
+    echo "repro hcr prepare-object: output=" & parsed.output &
+      " function=" & parsed.functionName & " segment=" & parsed.segmentName
+  0
+
 proc runHcrCoordinateCommand(args: seq[string]): int =
   if args.len == 0:
     stderr.writeLine(
       "repro hcr coordinate --project PATH --target NAME --socket PATH " &
-      "--source-edit-driver PATH --artifacts PATH")
+      "--source-edit-driver PATH --artifacts PATH\n" &
+      "repro hcr prepare-object --input PATH --output PATH " &
+      "(--function NAME|--all-code) " &
+      "[--segment NAME]")
     return 2
+  if args[0] == "prepare-object":
+    return runHcrPrepareObjectCommand(args[1 .. ^1])
   if args[0] != "coordinate":
     stderr.writeLine("repro hcr: unknown subcommand: " & args[0])
     return 2

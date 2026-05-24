@@ -19,6 +19,7 @@ type
   Tool*[name: static string] = object
 
   ReproFs* = object
+  ReproHcr* = object
 
   CliParamKind* = enum
     cpkPositional
@@ -198,6 +199,7 @@ var buildPoolRegistry: seq[BuildPoolDef] = @[]
 var defaultBuildActionRegistry = ""
 
 const fs* = ReproFs()
+const hcr* = ReproHcr()
 
 when defined(reproProviderMode):
   var providerEvaluationInputRegistry: seq[GraphEvaluationInput] = @[]
@@ -561,11 +563,17 @@ proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy =
 const
   BuiltinPackageName = "reprobuild.builtin"
   BuiltinFsExecutable = "fs"
+  BuiltinHcrExecutable = "hcr"
 
 proc builtinFsCall(command: string; arguments: openArray[PublicCliArg]):
     PublicCliCall =
   publicCliCall(BuiltinPackageName, BuiltinFsExecutable, command,
     BuiltinPackageName & "." & BuiltinFsExecutable & "." & command, arguments)
+
+proc builtinHcrCall(command: string; arguments: openArray[PublicCliArg]):
+    PublicCliCall =
+  publicCliCall(BuiltinPackageName, BuiltinHcrExecutable, command,
+    BuiltinPackageName & "." & BuiltinHcrExecutable & "." & command, arguments)
 
 proc builtinActionIdPart(value: string): string =
   for ch in value:
@@ -761,6 +769,39 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
     commandStatsId = commandStatsId,
     dependencyPolicy = dependencyPolicy,
     actionCachePolicy = actionCachePolicy)
+
+proc prepareObject*(tool: ReproHcr; input, output: string;
+                    functionName = ""; segmentName = "__HCR"; actionId = "";
+                    deps: openArray[string] = [];
+                    after: openArray[BuildActionDef] = [];
+                    cacheable = true; commandStatsId = "";
+                    actionCachePolicy = defaultActionCachePolicy()):
+    BuildActionDef {.discardable.} =
+  discard tool
+  let call = builtinHcrCall("prepareObject", [
+    inputArg("input", input),
+    outputArg("output", output),
+    cliArg("function", functionName),
+    cliArg("segment", segmentName)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("hcr-prepareObject", output)
+  recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
+    cacheable = cacheable, commandStatsId = commandStatsId,
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    actionCachePolicy = actionCachePolicy)
+
+proc machoSegmentLinkFlags*(tool: ReproHcr; segmentName = "__HCR"): string =
+  discard tool
+  when defined(macosx):
+    "-Wl,-segprot," & segmentName & ",rwx,rwx"
+  else:
+    ""
+
+proc patchableFunctionEntryFlag*(tool: ReproHcr; entryBytes = 16;
+                                 entryOffset = 0): string =
+  discard tool
+  "-fpatchable-function-entry=" & $entryBytes & "," & $entryOffset
 
 proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
                deps: openArray[string] = [];

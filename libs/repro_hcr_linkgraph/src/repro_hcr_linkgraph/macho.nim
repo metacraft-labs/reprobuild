@@ -49,6 +49,31 @@ proc readCString(data: string; pos, limit: int): string =
     result.add(data[i])
     inc i
 
+proc symbolNameMatches(objectName, requestedName: string): bool =
+  if objectName.len == 0 or requestedName.len == 0:
+    return false
+  if objectName == requestedName:
+    return true
+  if objectName.len > 1 and objectName.startsWith("_") and
+      objectName[1 .. ^1] == requestedName:
+    return true
+  if requestedName.len > 1 and requestedName.startsWith("_") and
+      objectName == requestedName[1 .. ^1]:
+    return true
+  false
+
+proc writeFixedCString(data: var string; pos, size: int; value: string) =
+  if pos + size > data.len:
+    raise newException(ValueError, "truncated Mach-O fixed string write")
+  if value.len >= size:
+    raise newException(ValueError, "Mach-O fixed string is too long: " & value)
+  for i in 0 ..< size:
+    data[pos + i] =
+      if i < value.len:
+        value[i]
+      else:
+        '\0'
+
 proc sectionFullName(section: SectionFact): string =
   section.segmentName & "," & section.name
 
@@ -305,3 +330,119 @@ proc parseMachOArm64Object*(path: string): LinkGraph =
       relocationId: -1,
       reason: "object has no unwind section"
     )
+
+proc rewriteMachOArm64FunctionSectionSegment*(inputPath, outputPath,
+                                              symbolName,
+                                              segmentName: string) =
+  var data = readFile(extendedPath(inputPath))
+  if data.len < 32:
+    raise newException(ValueError, "file too small for Mach-O header")
+  if readU32Le(data, 0) != MachO64Magic:
+    raise newException(ValueError, "expected little-endian Mach-O 64-bit object")
+  if readI32Le(data, 4) != CpuTypeArm64:
+    raise newException(ValueError, "expected arm64 Mach-O object")
+  if readU32Le(data, 12) != MhObject:
+    raise newException(ValueError, "expected relocatable Mach-O object")
+
+  let ncmds = int(readU32Le(data, 16))
+  var commandOffset = 32
+  var symoff = 0'u32
+  var nsyms = 0'u32
+  var stroff = 0'u32
+  var strsize = 0'u32
+  var sectionHeaderOffsets: seq[int]
+
+  for _ in 0 ..< ncmds:
+    let cmd = readU32Le(data, commandOffset)
+    let cmdsize = int(readU32Le(data, commandOffset + 4))
+    if cmdsize < 8 or commandOffset + cmdsize > data.len:
+      raise newException(ValueError, "invalid Mach-O load command size")
+
+    if cmd == LcSegment64:
+      let nsects = int(readU32Le(data, commandOffset + 64))
+      var sectionOffset = commandOffset + 72
+      for _ in 0 ..< nsects:
+        if sectionOffset + 80 > commandOffset + cmdsize:
+          raise newException(ValueError, "invalid Mach-O section table")
+        sectionHeaderOffsets.add sectionOffset
+        sectionOffset += 80
+    elif cmd == LcSymtab:
+      symoff = readU32Le(data, commandOffset + 8)
+      nsyms = readU32Le(data, commandOffset + 12)
+      stroff = readU32Le(data, commandOffset + 16)
+      strsize = readU32Le(data, commandOffset + 20)
+
+    commandOffset += cmdsize
+
+  if nsyms == 0 or strsize == 0:
+    raise newException(ValueError, "Mach-O object lacks a symbol table")
+  let stringLimit = int(stroff + strsize)
+  var symbolSectionOrdinal = 0
+  for i in 0 ..< int(nsyms):
+    let entryOffset = int(symoff) + i * 16
+    let strx = readU32Le(data, entryOffset)
+    let ntype = readU8(data, entryOffset + 4)
+    let nsect = int(readU8(data, entryOffset + 5))
+    if (ntype and NType) != NSect or nsect <= 0:
+      continue
+    let rawName =
+      if strx == 0: ""
+      else: readCString(data, int(stroff + strx), stringLimit)
+    if rawName.symbolNameMatches(symbolName):
+      symbolSectionOrdinal = nsect
+      break
+
+  if symbolSectionOrdinal == 0:
+    raise newException(ValueError,
+      "symbol not found in Mach-O object: " & symbolName)
+  if symbolSectionOrdinal > sectionHeaderOffsets.len:
+    raise newException(ValueError,
+      "symbol section is outside Mach-O section table: " & symbolName)
+
+  let sectionOffset = sectionHeaderOffsets[symbolSectionOrdinal - 1]
+  data.writeFixedCString(sectionOffset + 16, 16, segmentName)
+  writeFile(extendedPath(outputPath), data)
+
+proc rewriteMachOArm64CodeSectionSegments*(inputPath, outputPath,
+                                           segmentName: string): int =
+  var data = readFile(extendedPath(inputPath))
+  if data.len < 32:
+    raise newException(ValueError, "file too small for Mach-O header")
+  if readU32Le(data, 0) != MachO64Magic:
+    raise newException(ValueError, "expected little-endian Mach-O 64-bit object")
+  if readI32Le(data, 4) != CpuTypeArm64:
+    raise newException(ValueError, "expected arm64 Mach-O object")
+  if readU32Le(data, 12) != MhObject:
+    raise newException(ValueError, "expected relocatable Mach-O object")
+
+  let ncmds = int(readU32Le(data, 16))
+  var commandOffset = 32
+  for _ in 0 ..< ncmds:
+    let cmd = readU32Le(data, commandOffset)
+    let cmdsize = int(readU32Le(data, commandOffset + 4))
+    if cmdsize < 8 or commandOffset + cmdsize > data.len:
+      raise newException(ValueError, "invalid Mach-O load command size")
+
+    if cmd == LcSegment64:
+      let segmentNameInCommand = readFixedCString(data, commandOffset + 8, 16)
+      let nsects = int(readU32Le(data, commandOffset + 64))
+      var sectionOffset = commandOffset + 72
+      for _ in 0 ..< nsects:
+        if sectionOffset + 80 > commandOffset + cmdsize:
+          raise newException(ValueError, "invalid Mach-O section table")
+        let sectionName = readFixedCString(data, sectionOffset, 16)
+        let sectionSegment = readFixedCString(data, sectionOffset + 16, 16)
+        let flags = readU32Le(data, sectionOffset + 64)
+        let effectiveSegment =
+          if sectionSegment.len > 0: sectionSegment else: segmentNameInCommand
+        if sectionKind(effectiveSegment, sectionName, flags) == skCode:
+          data.writeFixedCString(sectionOffset + 16, 16, segmentName)
+          inc result
+        sectionOffset += 80
+
+    commandOffset += cmdsize
+
+  if result == 0:
+    raise newException(ValueError,
+      "Mach-O object has no code sections to prepare: " & inputPath)
+  writeFile(extendedPath(outputPath), data)
