@@ -4,6 +4,9 @@ import std/memfiles except open
 when defined(linux):
   import std/posix
 
+when defined(windows):
+  import std/winlean
+
 import repro_core
 import repro_hash
 
@@ -264,6 +267,31 @@ proc digestFileName(digest: ContentDigest): string =
   $ord(digest.algorithm) & "-" & $ord(digest.domain) & "-" &
     toHex(digest.bytes) & ".rbar"
 
+when defined(windows):
+  # Minimal binding to GetFileAttributesExW so fingerprintMetadata can collect
+  # kind+size+mtime in ONE syscall. The stdlib path (fileExists + dirExists +
+  # getFileInfo) was three calls -- two GetFileAttributesW plus a much heavier
+  # CreateFile/GetFileInformationByHandle/CloseHandle round trip -- and noop
+  # cache hits stat hundreds of inputs/outputs per build.
+  type
+    Win32FileAttributeData = object
+      dwFileAttributes: int32
+      ftCreationTime: FILETIME
+      ftLastAccessTime: FILETIME
+      ftLastWriteTime: FILETIME
+      nFileSizeHigh: int32
+      nFileSizeLow: int32
+
+  proc getFileAttributesExW(lpFileName: WideCString;
+                            fInfoLevelId: int32;
+                            lpFileInformation: pointer): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "GetFileAttributesExW",
+    sideEffect.}
+
+  const
+    GetFileExInfoStandard = 0'i32
+    FileTimeEpochDiff100Ns = 116_444_736_000_000_000'i64
+
 proc fingerprintMetadata(path: string): FileMetadata =
   let fsPath = extendedPath(path)
   when defined(linux):
@@ -291,6 +319,24 @@ proc fingerprintMetadata(path: string): FileMetadata =
       if stat.st_size < 0: 0'u64 else: uint64(stat.st_size)
     result.mtimeNs = uint64(cast[int64](stat.st_mtim.tv_sec)) *
       1_000_000_000'u64 + uint64(stat.st_mtim.tv_nsec)
+  elif defined(windows):
+    var data: Win32FileAttributeData
+    let wide = newWideCString(fsPath)
+    if getFileAttributesExW(wide, GetFileExInfoStandard, addr data) == 0:
+      return FileMetadata(kind: ffkMissing)
+    if (data.dwFileAttributes and FILE_ATTRIBUTE_DIRECTORY) != 0:
+      result.kind = ffkDirectory
+    else:
+      result.kind = ffkRegular
+      result.sizeBytes = (uint64(cast[uint32](data.nFileSizeHigh)) shl 32) or
+        uint64(cast[uint32](data.nFileSizeLow))
+      # FILETIME is 100-ns ticks since 1601-01-01 UTC; convert to ns since
+      # the Unix epoch so the value matches what the Linux stat path emits.
+      let ft100Ns = (int64(cast[uint32](data.ftLastWriteTime.dwHighDateTime)) shl 32) or
+        int64(cast[uint32](data.ftLastWriteTime.dwLowDateTime))
+      let unixNs100 = ft100Ns - FileTimeEpochDiff100Ns
+      if unixNs100 > 0:
+        result.mtimeNs = uint64(unixNs100) * 100'u64
   else:
     if not fileExists(fsPath) and not dirExists(fsPath):
       return FileMetadata(kind: ffkMissing)
