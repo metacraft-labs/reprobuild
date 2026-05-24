@@ -146,6 +146,7 @@ suite "integration_project_interface_artifact_import_modes":
 
     let providerDir = tempRoot / "provider"
     let outDir = tempRoot / "out"
+    let scratchDir = outDir / "scratch"
     let thinDir = tempRoot / "thin"
     let binDir = tempRoot / "bin"
     createDir(outDir)
@@ -159,10 +160,12 @@ suite "integration_project_interface_artifact_import_modes":
     let stubPath = thinDir / "asset_pack_interface.nim"
 
     let artifact1 =
-      extractInterfaceFromModule(providerModule, artifactPath, stubPath, repoRoot)
+      extractInterfaceFromModule(providerModule, artifactPath, stubPath,
+        repoRoot, scratchDir)
 
     check fileExists(artifactPath)
     check fileExists(stubPath)
+    check dirExists(scratchDir / "m7-temp")
     check fileExists(artifactPath & ".inputs")
     check fileExists(artifactPath & ".inputs.meta")
     let raw = readFile(artifactPath)
@@ -238,12 +241,15 @@ suite "integration_project_interface_artifact_import_modes":
       binDir / "asset-pack-provider-one",
       artifact1.interfaceFingerprint,
       providerArtifactPath,
-      repoRoot)
+      repoRoot,
+      scratchDir)
     check fileExists(provider1.outputBinaryPath)
     check provider1.compilerCommand.len > 0
     check ExpectedNimCompiler.len > 0
     check provider1.compilerCommand[0] == ExpectedNimCompiler
     check provider1.compilerCommand.contains("c")
+    check provider1.compilerCommand.anyIt(
+      it.startsWith("--nimcache:" & (scratchDir / "nimcache-provider")))
     check provider1.compileEdge.actionSpec.process.kind == ckDirect
     check provider1.compileEdge.actionSpec.process.executable.value ==
       ExpectedNimCompiler
@@ -285,7 +291,7 @@ suite "integration_project_interface_artifact_import_modes":
     writeProviderFixture(providerDir, helperSalt = "two")
     let artifactAfterPrivateEdit =
       extractInterfaceFromModule(providerModule, outDir / "asset_pack_private_edit.rbsz",
-        stubPath, repoRoot)
+        stubPath, repoRoot, scratchDir)
     check artifactAfterPrivateEdit.interfaceFingerprint == artifact1.interfaceFingerprint
 
     let thinEdgeAfterPrivateEdit = thinConsumerEdge(thinConsumer, stubPath,
@@ -299,7 +305,8 @@ suite "integration_project_interface_artifact_import_modes":
       binDir / "asset-pack-provider-two",
       artifactAfterPrivateEdit.interfaceFingerprint,
       outDir / "asset_pack_provider_private_edit.rbsz",
-      repoRoot)
+      repoRoot,
+      scratchDir)
     check provider2.providerFingerprint != provider1.providerFingerprint
     check provider2.compileEdge.actionFingerprint !=
       provider1.compileEdge.actionFingerprint
@@ -309,7 +316,7 @@ suite "integration_project_interface_artifact_import_modes":
     writeProviderFixture(providerDir, formatType = "int", helperSalt = "two")
     let artifactAfterPublicEdit =
       extractInterfaceFromModule(providerModule, outDir / "asset_pack_public_edit.rbsz",
-        stubPath, repoRoot)
+        stubPath, repoRoot, scratchDir)
     check artifactAfterPublicEdit.interfaceFingerprint != artifact1.interfaceFingerprint
     check readFile(stubPath).contains("format: int = 0")
     let thinEdgeAfterPublicEdit = thinConsumerEdge(thinConsumer, stubPath,

@@ -79,11 +79,12 @@ proc providerCompileFailure(run: BuildRunResult): string =
 
 proc providerCompileBuildAction(plan: ProviderCompilePlan;
                                 modulePath, interfacePath, artifactPath,
-                                publicCliPath, workDir: string): BuildAction =
+                                publicCliPath, workDir: string;
+                                scratchDir = ""): BuildAction =
   var inputs = plan.inputSources
   if inputs.find(interfacePath) < 0:
     inputs.add(interfacePath)
-  action("__repro_provider_compile", @[
+  var command = @[
     publicCliPath,
     "__repro-compile-provider",
     "--module", modulePath,
@@ -91,7 +92,11 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     "--artifact", artifactPath,
     "--interface", interfacePath,
     "--work-dir", workDir
-  ],
+  ]
+  if scratchDir.len > 0:
+    command.add("--scratch-dir")
+    command.add(scratchDir)
+  action("__repro_provider_compile", command,
     cwd = workDir,
     inputs = inputs,
     outputs = @[plan.outputBinaryPath, artifactPath],
@@ -241,11 +246,12 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     if config.workDir.len > 0: config.workDir else: getCurrentDir()
   var active = config
   active.workDir = workDir
+  let compileScratchDir = active.outDir / "provider-work"
 
   let interfacePath = active.outDir / "project-interface.rbsz"
   let stubPath = active.outDir / "project-interface.nim"
   let interfaceArtifact = extractInterfaceFromModule(active.modulePath,
-    interfacePath, stubPath, workDir)
+    interfacePath, stubPath, workDir, compileScratchDir)
 
   result.providerBinaryPath = active.outDir / "provider" / "project-provider"
   result.providerArtifactPath = active.outDir / "provider-compile.rbsz"
@@ -262,12 +268,13 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     result.stats.providerBuildSkippedFresh = true
   else:
     let providerPlan = providerCompilePlan(active.modulePath,
-      result.providerBinaryPath, interfaceArtifact.interfaceFingerprint, workDir)
+      result.providerBinaryPath, interfaceArtifact.interfaceFingerprint, workDir,
+      compileScratchDir)
     invalidateStaleProviderCompileArtifact(providerPlan,
       result.providerArtifactPath)
     let providerAction = providerCompileBuildAction(providerPlan,
       active.modulePath, interfacePath, result.providerArtifactPath,
-      active.publicCliPath, workDir)
+      active.publicCliPath, workDir, compileScratchDir)
     var compileConfig = active.engineConfig()
     result.providerCompileResult = runBuild(graph([providerAction]),
       compileConfig)

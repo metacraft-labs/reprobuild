@@ -1443,8 +1443,15 @@ proc providerNimcacheMode(): string =
   let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
   if mode.len == 0: "shared" else: mode.toLowerAscii()
 
+proc buildScratchRoot(workDir, scratchDir: string): string =
+  if scratchDir.len > 0:
+    scratchDir
+  else:
+    workDir / "build"
+
 proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
-                                 workDir = getCurrentDir()): ProjectInterfaceArtifact =
+                                 workDir = getCurrentDir();
+                                 scratchDir = ""): ProjectInterfaceArtifact =
   let extractionContext = interfaceExtractionContext(modulePath, workDir)
   let metadataCached = cachedInterfaceArtifactByMetadata(artifactPath,
     stubPath, extractionContext)
@@ -1461,7 +1468,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
 
   let moduleDir = parentDir(modulePath)
   let moduleName = splitFile(modulePath).name
-  let tempParent = workDir / "build" / "m7-temp"
+  let tempParent = buildScratchRoot(workDir, scratchDir) / "m7-temp"
   createDir(extendedPath(tempParent))
   inc interfaceTempNonce
   let now = getTime()
@@ -1493,7 +1500,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     if providerNimcacheMode() == "per-binary":
       tempRoot / "nimcache"
     else:
-      workDir / "build" / "nimcache-interface" /
+      buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
         sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
   var command = @[
     nimCompilerPath(), "c",
@@ -1504,6 +1511,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     runnerPath
   ]
   command.insert(hostFlags, 2)
+  command.insert(externalHashFlags(workDir), 2)
   command.insert(libFlags, 4)
   let compileExecution = runCommand(command, cwd = workDir)
   let runnerExe = compiledExecutablePath(runnerBin)
@@ -1604,13 +1612,14 @@ proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
     outputBinaryPath
 
 proc providerCompileCommand*(modulePath, outputBinaryPath: string;
-                             workDir = getCurrentDir()): seq[string] =
+                             workDir = getCurrentDir();
+                             scratchDir = ""): seq[string] =
   # The Nim provider nimcache holds generated C/object files with long
   # `@m..@s..nim.c` names. When `outputBinaryPath` lands deep inside a
   # CMake TryCompile scratch tree, a nimcache placed next to it overflows
   # Windows' 260-char MAX_PATH. The nimcache is a pure build intermediate,
-  # so anchor it under the short `workDir` (the `build/` scratch area the
-  # interface extractor also uses).
+  # so anchor it under the short scratch root that the interface extractor also
+  # uses.
   #
   # The key is shared across every provider compile that targets the same
   # toolchain + library set (default `REPRO_PROVIDER_NIMCACHE_MODE=shared`).
@@ -1622,12 +1631,13 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # per-output isolation.
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
+  let scratchRoot = buildScratchRoot(workDir, scratchDir)
   let nimcache =
     if providerNimcacheMode() == "per-binary":
-      workDir / "build" / "nimcache-provider" /
+      scratchRoot / "nimcache-provider" /
         providerNimcacheKey(outputBinaryPath)
     else:
-      workDir / "build" / "nimcache-provider" /
+      scratchRoot / "nimcache-provider" /
         sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
   result = @[
     nimCompilerPath(), "c",
@@ -1643,11 +1653,13 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
 
 proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           interfaceFingerprint: ContentDigest;
-                          workDir = getCurrentDir()): ProviderCompilePlan =
+                          workDir = getCurrentDir();
+                          scratchDir = ""): ProviderCompilePlan =
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
   let sources = discoverNimSources(modulePath)
   let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint)
-  let command = providerCompileCommand(modulePath, normalizedOutputPath, workDir)
+  let command = providerCompileCommand(modulePath, normalizedOutputPath, workDir,
+    scratchDir)
   let edge = providerCompileEdge(sources, normalizedOutputPath, command,
     interfaceFingerprint, providerFingerprint, workDir = workDir)
   ProviderCompilePlan(
@@ -1714,9 +1726,10 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
 proc compileProviderBinary*(modulePath, outputBinaryPath: string;
                             interfaceFingerprint: ContentDigest;
                             artifactPath = "";
-                            workDir = getCurrentDir()): ProviderCompileArtifact =
+                            workDir = getCurrentDir();
+                            scratchDir = ""): ProviderCompileArtifact =
   let plan = providerCompilePlan(modulePath, outputBinaryPath,
-    interfaceFingerprint, workDir)
+    interfaceFingerprint, workDir, scratchDir)
   if artifactPath.len > 0 and providerCompileArtifactFresh(artifactPath,
       plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint):
     return readProviderCompileArtifact(artifactPath)

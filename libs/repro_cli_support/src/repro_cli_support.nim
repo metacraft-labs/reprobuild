@@ -1538,11 +1538,12 @@ proc hasFailedActions(buildResult: BuildRunResult): bool =
 
 proc providerCompileBuildAction(plan: ProviderCompilePlan;
                                 modulePath, interfacePath, artifactPath,
-                                publicCliPath, workDir: string): BuildAction =
+                                publicCliPath, workDir: string;
+                                scratchDir = ""): BuildAction =
   var inputs = plan.inputSources
   if not inputs.contains(interfacePath):
     inputs.add(interfacePath)
-  action("__repro_provider_compile", @[
+  var command = @[
     publicCliPath,
     "__repro-compile-provider",
     "--module", modulePath,
@@ -1550,7 +1551,11 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     "--artifact", artifactPath,
     "--interface", interfacePath,
     "--work-dir", workDir
-  ],
+  ]
+  if scratchDir.len > 0:
+    command.add("--scratch-dir")
+    command.add(scratchDir)
+  action("__repro_provider_compile", command,
     cwd = workDir,
     inputs = inputs,
     outputs = @[plan.outputBinaryPath, artifactPath],
@@ -2378,9 +2383,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let interfacePath = outDir / "project-interface.rbsz"
   let stubPath = outDir / "project-interface.nim"
   let compileWorkDir = reprobuildLibraryWorkDir()
+  let compileScratchDir = outDir / "provider-work"
   let interfaceStart = statStart(statsEnabled)
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
-    compileWorkDir)
+    compileWorkDir, compileScratchDir)
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
 
@@ -2445,11 +2451,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       provider = cachedProvider.get()
     else:
       let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
-        artifact.interfaceFingerprint, compileWorkDir)
+        artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
       invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
       let providerCompileAction = providerCompileBuildAction(providerPlan,
         modulePath, interfacePath, providerArtifactPath, publicCliPath,
-        compileWorkDir)
+        compileWorkDir, compileScratchDir)
       var providerCompileConfig = BuildEngineConfig(
         cacheRoot: outDir / "build-engine-cache",
         runQuotaCliPath: publicCliPath,
@@ -2728,6 +2734,7 @@ proc runProviderCompileHelper(args: openArray[string]): int =
   let artifactPath = valueAfterFlag(args, "--artifact")
   let interfacePath = valueAfterFlag(args, "--interface")
   let workDir = valueAfterFlag(args, "--work-dir")
+  let scratchDir = valueAfterFlag(args, "--scratch-dir")
   for (name, value) in [
     ("--module", modulePath),
     ("--out", outputPath),
@@ -2741,7 +2748,7 @@ proc runProviderCompileHelper(args: openArray[string]): int =
   try:
     let interfaceArtifact = readInterfaceArtifact(interfacePath)
     discard compileProviderBinary(modulePath, outputPath,
-      interfaceArtifact.interfaceFingerprint, artifactPath, workDir)
+      interfaceArtifact.interfaceFingerprint, artifactPath, workDir, scratchDir)
     return 0
   except CatchableError as err:
     stderr.writeLine("repro provider compile: error: " & err.msg)
@@ -5550,7 +5557,10 @@ proc runDevelopCommand(args: openArray[string]): int =
       parentDir(modulePath) / ".repro" / "develop"
   let interfacePath = outDir / "project-interface.rbsz"
   let stubPath = outDir / "project-interface.nim"
-  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath)
+  let compileWorkDir = reprobuildLibraryWorkDir()
+  let compileScratchDir = outDir / "provider-work"
+  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
+    compileWorkDir, compileScratchDir)
 
   if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
     raise newException(ValueError,
