@@ -726,6 +726,9 @@ proc monitorCliPath(config: BuildEngineConfig): string =
   # Windows: the fs-snoop binary is `repro-fs-snoop.exe` (ExeExt expansion).
   # Without the suffix the fileExists check below misses it. Use addFileExt
   # so the same logic works cross-platform.
+  let appSibling = getAppDir() / addFileExt("repro-fs-snoop", ExeExt)
+  if fileExists(extendedPath(appSibling)):
+    return appSibling
   let repoBuild = getCurrentDir() / "build" / "bin" /
     addFileExt("repro-fs-snoop", ExeExt)
   if fileExists(extendedPath(repoBuild)):

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p build/bin build/nimcache
+mkdir -p build/bin build/lib build/nimcache
 
 nim_mode_flags=()
 case "${REPROBUILD_BUILD_MODE:-debug}" in
@@ -17,7 +17,6 @@ case "${REPROBUILD_BUILD_MODE:-debug}" in
 esac
 
 if [ "$(uname -s)" = "Darwin" ]; then
-  mkdir -p build/lib
   if [ -d /Users/zahary/metacraft/ct_interpose/src ]; then
     nim c \
       "${nim_mode_flags[@]}" \
@@ -32,11 +31,20 @@ if [ "$(uname -s)" = "Darwin" ]; then
   fi
 fi
 
+if [ "$(uname -s)" = "Linux" ]; then
+  nim c \
+    "${nim_mode_flags[@]}" \
+    --app:lib \
+    --threads:on \
+    --nimcache:build/nimcache/repro-monitor-shim-so \
+    --out:build/lib/librepro_monitor_shim.so \
+    libs/repro_monitor_shim/src/repro_monitor_shim/linux_preload.nim
+fi
+
 # Windows: build the IAT-patching DLL counterpart of the macOS dylib.
 # Detect MSYS/Cygwin/Git Bash builds running under Windows by checking uname.
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
-    mkdir -p build/lib
     nim c \
       "${nim_mode_flags[@]}" \
       --app:lib \

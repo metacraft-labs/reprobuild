@@ -2223,6 +2223,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       runQuotaCliPath: publicCliPath,
+      monitorCliPath: siblingFsSnoopPath(publicCliPath),
       maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
@@ -2563,6 +2564,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       runQuotaCliPath: publicCliPath,
+      monitorCliPath: siblingFsSnoopPath(publicCliPath),
       maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,

@@ -111,9 +111,13 @@
 
             installPhase = ''
               runHook preInstall
-              mkdir -p "$out/bin"
+              mkdir -p "$out/bin" "$out/lib"
               for bin in build/bin/*; do
                 install -m755 "$bin" "$out/bin/$(basename "$bin")"
+              done
+              for lib in build/lib/*; do
+                [ -e "$lib" ] || continue
+                install -m755 "$lib" "$out/lib/$(basename "$lib")"
               done
               runHook postInstall
             '';
