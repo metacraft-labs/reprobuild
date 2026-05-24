@@ -386,12 +386,18 @@ proc validateGraph(g: BuildGraph) =
 proc pathExists(path: string): bool =
   fileExists(extendedPath(path)) or dirExists(extendedPath(path))
 
+proc outputPathReady(action: BuildAction; path: string): bool =
+  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakPreserveTree} and
+      symlinkExists(extendedPath(path)):
+    return false
+  path.pathExists()
+
 proc allOutputsExist(action: BuildAction): bool =
   if action.outputs.len == 0:
     return false
   for output in action.outputs:
     let path = if output.isAbsolute or action.cwd.len == 0: output else: action.cwd / output
-    if not path.pathExists():
+    if not action.outputPathReady(path):
       return false
   true
 
@@ -998,6 +1004,13 @@ proc writeManifestEntries(path: string; entries: openArray[string]) =
     text.add("\n")
   writeFile(extendedPath(path), text)
 
+proc prepareBuiltinFileOutput(path: string) =
+  ## Built-in file writes must replace output symlinks instead of writing
+  ## through them into their targets.
+  let expanded = extendedPath(path)
+  if symlinkExists(expanded):
+    removeFile(expanded)
+
 proc executeBuiltinAction(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -1013,6 +1026,7 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
       let source = action.builtinPath(action.inputs[0])
       let destination = action.builtinPath(action.outputs[0])
       createDir(extendedPath(destination.splitPath.head))
+      prepareBuiltinFileOutput(destination)
       copyFile(extendedPath(source), extendedPath(destination))
     of bakEnsureDir:
       if action.outputs.len != 1:
@@ -1023,12 +1037,14 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
         raiseEngine("writeText action requires exactly one output: " & action.id)
       let destination = action.builtinPath(action.outputs[0])
       createDir(extendedPath(destination.splitPath.head))
+      prepareBuiltinFileOutput(destination)
       writeFile(extendedPath(destination), action.builtinText)
     of bakStamp:
       if action.outputs.len != 1:
         raiseEngine("stamp action requires exactly one output: " & action.id)
       let destination = action.builtinPath(action.outputs[0])
       createDir(extendedPath(destination.splitPath.head))
+      prepareBuiltinFileOutput(destination)
       var text = action.builtinText
       if text.len > 0 and not text.endsWith("\n"):
         text.add("\n")
@@ -1055,12 +1071,13 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
           raiseEngine("preserveTree source file disappeared before execution: " &
             source)
         createDir(extendedPath(destination.splitPath.head))
+        prepareBuiltinFileOutput(destination)
         copyFile(extendedPath(source), extendedPath(destination))
       let manifestPath = preserveTreeManifestPath(action)
       for previous in readManifestEntries(manifestPath):
         if not expected.contains(previous):
           let stale = outputRoot / previous
-          if fileExists(extendedPath(stale)):
+          if symlinkExists(extendedPath(stale)) or fileExists(extendedPath(stale)):
             removeFile(extendedPath(stale))
       currentEntries.sort(system.cmp[string])
       writeManifestEntries(manifestPath, currentEntries)

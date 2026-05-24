@@ -115,6 +115,21 @@ proc writePreserveTreeProject(path: string) =
     "      outputRoot = \"mirror\")\n" &
     "    defaultTarget(mirrored)\n")
 
+proc writeSymlinkOutputProject(path: string) =
+  createDir(path.splitPath.head)
+  writeFile(path,
+    "import repro_dsl_stdlib\n\n" &
+    "package m51SymlinkOutputs:\n" &
+    "  build:\n" &
+    "    let copied = fs.copyFile(\n" &
+    "      source = \"src/input.txt\",\n" &
+    "      output = \"out/link-copy.txt\")\n" &
+    "    let mirrored = fs.preserveTree(\n" &
+    "      sourceRoot = \"assets\",\n" &
+    "      outputRoot = \"mirror\")\n" &
+    "    let all = aggregate(\"all\", actions = @[copied, mirrored])\n" &
+    "    defaultTarget(all)\n")
+
 suite "m51_dsl_stdlib_file_ops":
   test "m51_stdlib_copy_and_stamp_e2e":
     let repoRoot = getCurrentDir()
@@ -192,3 +207,54 @@ suite "m51_dsl_stdlib_file_ops":
     assertAction(secondReport, "fs-preserveTree-mirror", "asSucceeded", true)
     check fileExists(projectRoot / "mirror" / "keep.txt")
     check not fileExists(projectRoot / "mirror" / "nested" / "drop.txt")
+
+  test "m51_builtin_file_outputs_replace_existing_symlinks":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m51-symlink-output", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = compilePublicReproTestBin(repoRoot)
+    let projectRoot = tempRoot / "project"
+    createDir(projectRoot / "src")
+    createDir(projectRoot / "assets")
+    createDir(projectRoot / "out")
+    createDir(projectRoot / "mirror")
+    createDir(projectRoot / "victims")
+    writeFile(projectRoot / "src" / "input.txt", "copy output\n")
+    writeFile(projectRoot / "assets" / "keep.txt", "tree output\n")
+    let copyVictim = projectRoot / "victims" / "copy-target.txt"
+    let treeVictim = projectRoot / "victims" / "tree-target.txt"
+    writeFile(copyVictim, "do not mutate copy target\n")
+    writeFile(treeVictim, "do not mutate tree target\n")
+
+    var symlinkOk = true
+    try:
+      createSymlink(copyVictim, projectRoot / "out" / "link-copy.txt")
+      createSymlink(treeVictim, projectRoot / "mirror" / "keep.txt")
+    except OSError:
+      symlinkOk = false
+
+    if not symlinkOk:
+      checkpoint "platform-skip: host cannot create symlinks"
+    else:
+      writeSymlinkOutputProject(projectRoot / "reprobuild.nim")
+
+      let first = build(reproBin, projectRoot, repoRoot)
+      let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      assertAction(firstReport, "fs-copyFile-out-2flink-copy.txt",
+        "asSucceeded", true)
+      assertAction(firstReport, "fs-preserveTree-mirror", "asSucceeded", true)
+      check not symlinkExists(projectRoot / "out" / "link-copy.txt")
+      check not symlinkExists(projectRoot / "mirror" / "keep.txt")
+      check readFile(projectRoot / "out" / "link-copy.txt") == "copy output\n"
+      check readFile(projectRoot / "mirror" / "keep.txt") == "tree output\n"
+      check readFile(copyVictim) == "do not mutate copy target\n"
+      check readFile(treeVictim) == "do not mutate tree target\n"
