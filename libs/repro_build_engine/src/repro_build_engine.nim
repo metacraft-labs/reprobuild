@@ -1011,6 +1011,39 @@ proc prepareBuiltinFileOutput(path: string) =
   if symlinkExists(expanded):
     removeFile(expanded)
 
+proc removeExistingPath(path: string) =
+  let expanded = extendedPath(path)
+  if symlinkExists(expanded) or fileExists(expanded):
+    removeFile(expanded)
+  elif dirExists(expanded):
+    removeDir(expanded)
+
+type
+  PreserveTreeEntryKind = enum
+    ptekFile
+    ptekSymlink
+
+  PreserveTreeEntry = object
+    kind: PreserveTreeEntryKind
+    relative: string
+    target: string
+
+proc parsePreserveTreeEntry(entry: string): PreserveTreeEntry =
+  let normalized = entry.replace('\\', '/')
+  let fields = normalized.split('\t')
+  if fields.len > 0 and fields[0] == "file":
+    if fields.len != 2 or fields[1].len == 0:
+      raiseEngine("invalid preserveTree file entry: " & entry)
+    return PreserveTreeEntry(kind: ptekFile, relative: fields[1])
+  if fields.len > 0 and fields[0] == "symlink":
+    if fields.len != 3 or fields[1].len == 0:
+      raiseEngine("invalid preserveTree symlink entry: " & entry)
+    return PreserveTreeEntry(
+      kind: ptekSymlink,
+      relative: fields[1],
+      target: fields[2])
+  PreserveTreeEntry(kind: ptekFile, relative: normalized)
+
 proc executeBuiltinAction(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -1059,20 +1092,30 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
       createDir(extendedPath(outputRoot))
       var expected = initHashSet[string]()
       var currentEntries: seq[string] = @[]
-      for entry in action.builtinEntries:
-        let relative = entry.replace('\\', '/')
+      for rawEntry in action.builtinEntries:
+        let entry = parsePreserveTreeEntry(rawEntry)
+        let relative = entry.relative
         if relative.len == 0:
           continue
         expected.incl(relative)
         currentEntries.add(relative)
         let source = sourceRoot / relative
         let destination = outputRoot / relative
-        if not fileExists(extendedPath(source)):
-          raiseEngine("preserveTree source file disappeared before execution: " &
-            source)
         createDir(extendedPath(destination.splitPath.head))
-        prepareBuiltinFileOutput(destination)
-        copyFile(extendedPath(source), extendedPath(destination))
+        case entry.kind
+        of ptekFile:
+          if not fileExists(extendedPath(source)):
+            raiseEngine("preserveTree source file disappeared before execution: " &
+              source)
+          prepareBuiltinFileOutput(destination)
+          copyFile(extendedPath(source), extendedPath(destination))
+        of ptekSymlink:
+          if not symlinkExists(extendedPath(source)):
+            raiseEngine("preserveTree source symlink disappeared before execution: " &
+              source)
+          let currentTarget = expandSymlink(source)
+          removeExistingPath(destination)
+          createSymlink(currentTarget, extendedPath(destination))
       let manifestPath = preserveTreeManifestPath(action)
       for previous in readManifestEntries(manifestPath):
         if not expected.contains(previous):

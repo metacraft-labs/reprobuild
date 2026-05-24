@@ -836,7 +836,11 @@ proc stamp*(tool: ReproFs; output, title: string;
 proc normalizedRelPath(path: string): string =
   path.replace('\\', '/')
 
-proc collectRegularTree(root: string): tuple[dirs: seq[string]; files: seq[string]] =
+type
+  PreserveTreeSymlink = tuple[path: string; target: string]
+
+proc collectPreserveTree(root: string):
+    tuple[dirs: seq[string]; files: seq[string]; symlinks: seq[PreserveTreeSymlink]] =
   if not dirExists(extendedPath(root)):
     return
   var pending = @[root]
@@ -850,10 +854,20 @@ proc collectRegularTree(root: string): tuple[dirs: seq[string]; files: seq[strin
         pending.add(child)
       of pcFile:
         result.files.add(child)
+      of pcLinkToFile, pcLinkToDir:
+        result.symlinks.add((path: child, target: expandSymlink(child)))
       else:
         discard
   result.dirs.sort(system.cmp[string])
   result.files.sort(system.cmp[string])
+  result.symlinks.sort(proc(a, b: PreserveTreeSymlink): int =
+    system.cmp(a.path, b.path))
+
+proc encodePreserveTreeFile(relative: string): string =
+  "file\t" & relative
+
+proc encodePreserveTreeSymlink(relative, target: string): string =
+  "symlink\t" & relative & "\t" & target
 
 proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
                    actionId = ""; deps: openArray[string] = [];
@@ -862,21 +876,26 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
     BuildActionDef {.discardable.} =
   discard tool
   providerDirectoryInput(sourceRoot)
-  let tree = collectRegularTree(sourceRoot)
+  let tree = collectPreserveTree(sourceRoot)
   for dirPath in tree.dirs:
     providerDirectoryInput(normalizedRelPath(dirPath))
-  var relativeFiles: seq[string] = @[]
+  var entries: seq[string] = @[]
   var inputs: seq[string] = @[]
   var outputs: seq[string] = @[]
   for sourcePath in tree.files:
     let relative = normalizedRelPath(relativePath(sourcePath, sourceRoot))
-    relativeFiles.add(relative)
+    entries.add(encodePreserveTreeFile(relative))
     inputs.add(normalizedRelPath(sourcePath))
+    outputs.add(normalizedRelPath(outputRoot / relative))
+  for symlink in tree.symlinks:
+    let relative = normalizedRelPath(relativePath(symlink.path, sourceRoot))
+    entries.add(encodePreserveTreeSymlink(relative, symlink.target))
+    inputs.add(normalizedRelPath(symlink.path))
     outputs.add(normalizedRelPath(outputRoot / relative))
   let call = builtinFsCall("preserveTree", [
     cliArg("sourceRoot", normalizedRelPath(sourceRoot)),
     outputArg("outputRoot", normalizedRelPath(outputRoot)),
-    cliArgSeq("entries", relativeFiles)
+    cliArgSeq("entries", entries)
   ])
   let selectedActionId =
     if actionId.len > 0: actionId else: defaultBuiltinActionId("preserveTree", outputRoot)

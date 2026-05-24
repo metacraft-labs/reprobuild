@@ -347,7 +347,7 @@ proc directoryMemberNames*(path: string): seq[string] =
   if not dirExists(extendedPath(path)):
     return @[]
   for kind, child in walkDir(extendedPath(path)):
-    if kind in {pcFile, pcDir}:
+    if kind in {pcFile, pcDir, pcLinkToFile, pcLinkToDir}:
       result.add(splitPath(child).tail)
   result.sort()
 
