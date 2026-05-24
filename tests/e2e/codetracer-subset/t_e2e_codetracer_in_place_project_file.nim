@@ -123,6 +123,61 @@ int main(int argc, char **argv) {
 }
 """
 
+const CodeTracerDevToolExecutables = [
+  "bash",
+  "bpftrace",
+  "bpftool",
+  "cachix",
+  "capnp",
+  "cargo",
+  "cargo-nextest",
+  "clang",
+  "ctags",
+  "curl",
+  "dpkg",
+  "electron",
+  "emcc",
+  "flake8",
+  "nim",
+  "nimble",
+  "node",
+  "npx",
+  "gcc",
+  "gh",
+  "git",
+  "just",
+  "llvm-config",
+  "mdbook",
+  "nix",
+  "openssl",
+  "pcre-config",
+  "pkg-config",
+  "playwright",
+  "python3",
+  "rg",
+  "ruby",
+  "rust-analyzer",
+  "rustc",
+  "rustfmt",
+  "rustup",
+  "sh",
+  "shellcheck",
+  "sqlite3",
+  "stylus",
+  "tmux",
+  "tree-sitter",
+  "tup",
+  "vim",
+  "wasm-opt",
+  "wasm-pack",
+  "webpack-cli",
+  "wget",
+  "xdotool",
+  "xvfb-run",
+  "yarn",
+  "zstd"
+]
+
 const IsonimAsyncCompatFixtureSource = r"""
 when defined(js):
   import std/asyncjs
@@ -582,6 +637,16 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
     "    echo '[OK] handlers still invoked after reconnect'; exit 0 ;;\n" &
     "  *) exit 0 ;;\n" &
     "esac\n")
+  for tool in CodeTracerDevToolExecutables:
+    if tool notin ["bash", "nim", "node", "gcc", "sh", "stylus"] and
+        not fileExists(binDir / tool):
+      writeExecutable(binDir / tool,
+        "#!/bin/sh\n" &
+        "set -eu\n" &
+        "case \"${1:-}\" in\n" &
+        "  --version|-v) echo '" & tool & " fixture 1.0.0'; exit 0 ;;\n" &
+        "  *) exit 0 ;;\n" &
+        "esac\n")
   binDir & $PathSep & getEnv("PATH")
 
 proc codeTracerNimPath(codeTracerRoot: string): string =
@@ -2161,15 +2226,12 @@ when defined(macosx) or defined(linux):
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == 4
+      check identity.profiles.len == CodeTracerDevToolExecutables.len
       check identity.profiles.allIt(it.installMethod == "path")
       check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
-      check identity.profiles.anyIt(it.executableName == "nim")
-      check identity.profiles.anyIt(it.executableName == "node")
-      check identity.profiles.anyIt(it.executableName == "gcc")
-      check identity.profiles.anyIt(it.executableName == "stylus")
+      for executableName in CodeTracerDevToolExecutables:
+        check identity.profiles.anyIt(it.executableName == executableName)
       check not identity.profiles.anyIt(it.executableName == "nim-js")
-      check not identity.profiles.anyIt(it.executableName == "sh")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       assertAction(firstReport, "generate-config-header", "asSucceeded", true)

@@ -1964,10 +1964,22 @@ proc commandProcName(cmdName: string): string =
       result.add("_" & toHex(ord(ch), 2).toLowerAscii())
 
 proc titleIdent(text: string): string =
-  if text.len == 0:
-    "Package"
-  else:
-    text[0].toUpperAscii() & text.substr(1) & "Package"
+  let normalized = selectorModuleName(text)
+  if normalized.len == 0:
+    return "Package"
+  var capitalizeNext = true
+  for ch in normalized:
+    if ch == '_':
+      capitalizeNext = true
+    elif capitalizeNext:
+      result.add(ch.toUpperAscii())
+      capitalizeNext = false
+    else:
+      result.add(ch)
+  result.add("Package")
+
+proc packageValueIdent(text: string): string =
+  selectorModuleName(text)
 
 proc commandCallableName(cmdName: string): string =
   if cmdName.len == 0:
@@ -1998,9 +2010,10 @@ proc toolActionArgExpr(param: CliParamDef): string =
 
 proc toolActionWrapperCode(pkg: PackageDef): string =
   let typeName = titleIdent(pkg.packageName)
+  let valueName = packageValueIdent(pkg.packageName)
   result = "{.experimental: \"callOperator\".}\n"
   result.add("type\n  " & typeName & "* = object\n")
-  result.add("const " & pkg.packageName & "* = " & typeName & "()\n")
+  result.add("const " & valueName & "* = " & typeName & "()\n")
   result.add("proc reprobuildPackageMarker*() = discard\n")
   if pkg.executables.len != 1:
     return
@@ -2042,6 +2055,7 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
     return toolActionWrapperCode(pkg)
   let typeName = titleIdent(pkg.packageName)
   let exeTypeName = typeName & "Executable"
+  let valueName = packageValueIdent(pkg.packageName)
   var prefix = ""
   block:
     var hasCallCommand = false
@@ -2054,7 +2068,7 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
   result = prefix & "type\n  " & typeName & "* = object\n" &
     "  " & exeTypeName & "* = object\n" &
     "    value*: SelectedExecutable\n" &
-    "const " & pkg.packageName & "* = " & typeName & "()\n" &
+    "const " & valueName & "* = " & typeName & "()\n" &
     "proc reprobuildPackageMarker*() = discard\n" &
     "proc executable*(pkg: " & typeName & "; name: string): " &
       exeTypeName & " =\n" &
@@ -2119,7 +2133,60 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
 
 proc usesImportCode(pkg: PackageDef): string =
   proc isBundledStdlibSelector(selector: string): bool =
-    selector in ["nim", "gcc", "node", "sh", "stylus"]
+    selector in [
+      "bash",
+      "bpftrace",
+      "bpftool",
+      "cachix",
+      "capnp",
+      "cargo",
+      "cargo-nextest",
+      "clang",
+      "ctags",
+      "curl",
+      "dpkg",
+      "electron",
+      "emcc",
+      "flake8",
+      "gcc",
+      "gh",
+      "git",
+      "just",
+      "llvm-config",
+      "mdbook",
+      "nim",
+      "nimble",
+      "nix",
+      "node",
+      "npx",
+      "openssl",
+      "pcre-config",
+      "pkg-config",
+      "playwright",
+      "python3",
+      "rg",
+      "ruby",
+      "rust-analyzer",
+      "rustc",
+      "rustfmt",
+      "rustup",
+      "sh",
+      "shellcheck",
+      "sqlite3",
+      "stylus",
+      "tmux",
+      "tree-sitter",
+      "tup",
+      "vim",
+      "wasm-opt",
+      "wasm-pack",
+      "webpack-cli",
+      "wget",
+      "xdotool",
+      "xvfb-run",
+      "yarn",
+      "zstd"
+    ]
   var modules: seq[string] = @[]
   for useDef in pkg.toolUses:
     if isBundledStdlibSelector(useDef.packageSelector):
