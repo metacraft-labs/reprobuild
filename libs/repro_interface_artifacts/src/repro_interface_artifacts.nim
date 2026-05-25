@@ -1443,6 +1443,25 @@ proc providerNimcacheMode(): string =
   let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
   if mode.len == 0: "shared" else: mode.toLowerAscii()
 
+proc providerDynamicEnabled(): bool =
+  ## Returns true when ``REPRO_PROVIDER_DYNAMIC`` selects the Tier 1
+  ## shared DSL runtime DLL link mode (see
+  ## ``reprobuild-specs/Provider-Compile-Tiering.md``). Off by default
+  ## until the DLL's dynamic-mode forward declarations land and the
+  ## bench has measured the configure-time drop; switching it on today
+  ## adds the link arguments to the provider compile but does not yet
+  ## shrink the compile, because the umbrella DSL still pulls every
+  ## runtime proc body into the per-project binary.
+  let raw = getEnv("REPRO_PROVIDER_DYNAMIC").toLowerAscii()
+  raw in ["1", "true", "yes", "on"]
+
+proc providerDynamicLibDir(workDir: string): string =
+  ## Filesystem directory that the per-project provider link step
+  ## searches for the shared DSL runtime DLL. This matches the build
+  ## script's output location
+  ## (``build/lib/librepro_project_dsl_runtime.{dll,so,dylib}``).
+  workDir / "build" / "lib"
+
 proc buildScratchRoot(workDir, scratchDir: string): string =
   if scratchDir.len > 0:
     scratchDir
@@ -1681,6 +1700,21 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   result.insert(hostFlags, 2)
   result.insert(externalHashFlags(workDir), 2)
   result.insert(libFlags, 2)
+  if providerDynamicEnabled():
+    # Tier 1 shared DSL runtime DLL: opt-in via ``REPRO_PROVIDER_DYNAMIC=1``.
+    # The define switches the DSL umbrella module into dynamic mode (today a
+    # no-op pending the dynlib forward declarations) and the link flags
+    # point at the DLL location produced by ``scripts/build_apps.sh``.
+    let libDir = providerDynamicLibDir(workDir)
+    var dynamicFlags = @[
+      "--define:reproProviderDynamic",
+      "--passL:-L" & libDir,
+      "--passL:-lrepro_project_dsl_runtime"
+    ]
+    when not defined(windows):
+      dynamicFlags.add("--passL:-Wl,-rpath," & libDir)
+    for flag in dynamicFlags:
+      result.insert(flag, 2)
 
 proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           interfaceFingerprint: ContentDigest;
