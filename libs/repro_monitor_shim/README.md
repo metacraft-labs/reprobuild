@@ -7,7 +7,8 @@ canonical `.rdep` files by `repro_monitor_depfile`.
 
 Platform-specific interposition mechanics live in reusable hook layers:
 
-- macOS consumes the extracted sibling `ct_interpose` package;
+- macOS consumes `repro_monitor_hooks/macos_interpose_runtime`, using raw
+  syscalls and dyld image lookup for original-call resolution;
 - Linux consumes `repro_monitor_hooks/linux_preload_runtime`, registering
   Reprobuild hook bodies into the stackable `LD_PRELOAD` dispatcher.
 

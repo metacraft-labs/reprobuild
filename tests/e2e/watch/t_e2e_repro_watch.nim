@@ -881,9 +881,10 @@ when defined(macosx):
   proc compileShim(repoRoot, outputPath: string) =
     let arm64Path = outputPath & ".arm64"
     let arm64ePath = outputPath & ".arm64e"
+    let monitorHooksPath = repoRoot / "libs" / "repro_monitor_hooks" / "src"
     discard requireSuccess(shellCommand([
       "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--path:/Users/zahary/metacraft/ct_interpose/src",
+      "--path:" & monitorHooksPath,
       "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-watch-shim",
       "--out:" & arm64Path,
       repoRoot / "libs" / "repro_monitor_shim" / "src" /
@@ -892,7 +893,7 @@ when defined(macosx):
     discard requireSuccess(shellCommand([
       "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
       "--passC:-arch arm64e", "--passL:-arch arm64e",
-      "--path:/Users/zahary/metacraft/ct_interpose/src",
+      "--path:" & monitorHooksPath,
       "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-watch-shim-arm64e",
       "--out:" & arm64ePath,
       repoRoot / "libs" / "repro_monitor_shim" / "src" /

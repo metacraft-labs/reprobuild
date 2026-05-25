@@ -254,7 +254,7 @@ int main(int argc, char **argv) {
       "nim c --app:lib --threads:on " &
       "--path:" & quoteShell(root / "libs/repro_monitor_shim/src") & " "
     when defined(macosx):
-      command.add("--path:" & quoteShell("/Users/zahary/metacraft/ct_interpose/src") & " ")
+      command.add("--path:" & quoteShell(root / "libs/repro_monitor_hooks/src") & " ")
     command.add(
       "--nimcache:" & quoteShell(root / "build/nimcache/integration-repro-monitor-shim") & " " &
       "--out:" & quoteShell(outPath) & " ")
@@ -335,6 +335,7 @@ int main(int argc, char **argv) {
         setEnvVar("REPRO_MONITOR_SHIM_LIB", shimDylib, oldEnv)
       else:
         setEnvVar("DYLD_INSERT_LIBRARIES", shimDylib, oldEnv)
+        setEnvVar("REPRO_MONITOR_SHIM_LIB", shimDylib, oldEnv)
       setEnvVar("REPRO_MONITOR_FRAGMENT_DIR", fragmentDir, oldEnv)
       setEnvVar("REPRO_MONITOR_SESSION", "m10-test-session", oldEnv)
       defer: restoreEnv(oldEnv)

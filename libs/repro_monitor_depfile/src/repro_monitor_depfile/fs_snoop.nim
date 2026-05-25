@@ -229,6 +229,7 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
     setEnvVar("REPRO_MONITOR_FRAGMENT_DIR", fragmentDir, oldEnv)
     setEnvVar("REPRO_MONITOR_OUTPUT", request.depFilePath, oldEnv)
     setEnvVar("REPRO_MONITOR_SESSION", $epochTime(), oldEnv)
+    setEnvVar("REPRO_MONITOR_SHIM_LIB", shimLib, oldEnv)
     defer: restoreEnv(oldEnv)
 
     let childArgs =

@@ -4,9 +4,30 @@ when not defined(macosx):
 import std/[locks, os, tables]
 from repro_core/paths import extendedPath
 
-import ct_interpose/macos_interpose_runtime
+import repro_monitor_hooks/macos_interpose_runtime
 import repro_monitor_depfile/types
 import repro_monitor_depfile/writer
+
+{.emit: """
+#include <dirent.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <stdarg.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+static int repro_monitor_get_errno(void) {
+  return errno;
+}
+
+static void repro_monitor_set_errno(int value) {
+  errno = value;
+}
+""".}
 
 const
   OAccMode = 0x0003.cint
@@ -34,6 +55,8 @@ proc c_getpid(): cint {.importc: "getpid", header: "<unistd.h>".}
 proc c_getppid(): cint {.importc: "getppid", header: "<unistd.h>".}
 proc pthread_threadid_np(thread: pointer; threadId: ptr uint64): cint
   {.importc: "pthread_threadid_np", header: "<pthread.h>".}
+proc getErrno(): cint {.importc: "repro_monitor_get_errno", cdecl.}
+proc setErrno(value: cint) {.importc: "repro_monitor_set_errno", cdecl.}
 
 proc currentThreadId(): uint64 =
   var tid: uint64 = 0
@@ -49,10 +72,12 @@ proc processSeq(): uint64 =
 template withShimMuted(body: untyped) =
   inc disabled
   try:
-    body
-  except CatchableError:
-    discard
-  dec disabled
+    try:
+      body
+    except CatchableError:
+      discard
+  finally:
+    dec disabled
 
 proc baseRecord(kind: MonitorRecordKind; observationKind: MonitorObservationKind): MonitorRecord =
   MonitorRecord(
@@ -84,6 +109,15 @@ proc observationForOpen(flags: cint): MonitorObservationKind =
       moFileWrite
     else:
       moFileOpen
+
+proc recordDirectoryEnumeration(path: cstring) {.raises: [].} =
+  if path == nil or not ct_macos_interpose_path_is_dir(path):
+    return
+  var record = baseRecord(mrDirectoryEnumerate, moDirectoryEnumerate)
+  record.path = $path
+  record.result = 1
+  record.detail = "directory-open"
+  emitRecord(record)
 
 proc updateFdPath(fd: cint; path: cstring) =
   if fd < 0 or path == nil:
@@ -157,9 +191,10 @@ proc repro_monitor_shim_version*(): cstring {.exportc, dynlib.} =
   "repro_monitor_shim_m11"
 
 proc repro_hook_open*(path: cstring; flags, mode: cint): cint {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_open(path, flags, mode)
   result = ct_macos_interpose_real_open(path, flags, mode)
+  let savedErrno = getErrno()
   updateFdPath(result, path)
   var record = baseRecord(mrFileOpen, observationForOpen(flags))
   record.result = result.int64
@@ -167,12 +202,16 @@ proc repro_hook_open*(path: cstring; flags, mode: cint): cint {.exportc, cdecl, 
   if path != nil:
     record.path = $path
   emitRecord(record)
+  if result >= 0:
+    recordDirectoryEnumeration(path)
+  setErrno(savedErrno)
 
 proc repro_hook_openat*(dirfd: cint; path: cstring; flags, mode: cint): cint
     {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_openat(dirfd, path, flags, mode)
   result = ct_macos_interpose_real_openat(dirfd, path, flags, mode)
+  let savedErrno = getErrno()
   updateFdPath(result, path)
   var record = baseRecord(mrFileOpen, observationForOpen(flags))
   record.result = result.int64
@@ -181,9 +220,12 @@ proc repro_hook_openat*(dirfd: cint; path: cstring; flags, mode: cint): cint
     record.path = $path
   record.detail = "dirfd=" & $dirfd
   emitRecord(record)
+  if result >= 0:
+    recordDirectoryEnumeration(path)
+  setErrno(savedErrno)
 
 proc repro_hook_read*(fd: cint; buf: pointer; count: csize_t): int {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_read(fd, buf, count)
   result = ct_macos_interpose_real_read(fd, buf, count)
   if result >= 0:
@@ -194,7 +236,7 @@ proc repro_hook_read*(fd: cint; buf: pointer; count: csize_t): int {.exportc, cd
     emitRecord(record)
 
 proc repro_hook_write*(fd: cint; buf: pointer; count: csize_t): int {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_write(fd, buf, count)
   result = ct_macos_interpose_real_write(fd, buf, count)
   if result >= 0 and fd > 2:
@@ -205,13 +247,13 @@ proc repro_hook_write*(fd: cint; buf: pointer; count: csize_t): int {.exportc, c
     emitRecord(record)
 
 proc repro_hook_close*(fd: cint): cint {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_close(fd)
   result = ct_macos_interpose_real_close(fd)
   removeFdPath(fd)
 
 proc repro_hook_opendir*(path: cstring): pointer {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_opendir(path)
   inc disabled
   try:
@@ -222,7 +264,7 @@ proc repro_hook_opendir*(path: cstring): pointer {.exportc, cdecl, dynlib.} =
     updateDirPath(result, path)
 
 proc repro_hook_readdir*(dirp: pointer): pointer {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_readdir(dirp)
   let dirPath = pathForDir(dirp)
   inc disabled
@@ -238,7 +280,7 @@ proc repro_hook_readdir*(dirp: pointer): pointer {.exportc, cdecl, dynlib.} =
     emitRecord(record)
 
 proc repro_hook_closedir*(dirp: pointer): cint {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_closedir(dirp)
   inc disabled
   try:
@@ -248,29 +290,33 @@ proc repro_hook_closedir*(dirp: pointer): cint {.exportc, cdecl, dynlib.} =
   removeDirPath(dirp)
 
 proc repro_hook_stat*(path: cstring; buf: pointer): cint {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_stat(path, buf)
   result = ct_macos_interpose_real_stat(path, buf)
+  let savedErrno = getErrno()
   var record = baseRecord(mrPathProbe, moPathProbe)
   record.result = result.int64
   record.probeResult = probeFromResult(result)
   if path != nil:
     record.path = $path
   emitRecord(record)
+  setErrno(savedErrno)
 
 proc repro_hook_lstat*(path: cstring; buf: pointer): cint {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_lstat(path, buf)
   result = ct_macos_interpose_real_lstat(path, buf)
+  let savedErrno = getErrno()
   var record = baseRecord(mrPathProbe, moPathProbe)
   record.result = result.int64
   record.probeResult = probeFromResult(result)
   if path != nil:
     record.path = $path
   emitRecord(record)
+  setErrno(savedErrno)
 
 proc repro_hook_fork*(): PidT {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_fork()
   result = ct_macos_interpose_real_fork()
   if result > 0:
@@ -284,7 +330,7 @@ proc repro_hook_fork*(): PidT {.exportc, cdecl, dynlib.} =
 
 proc repro_hook_execve*(path: cstring; argv, envp: cstringArray): cint
     {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_execve(path, argv, envp)
   var record = baseRecord(mrProcessExec, moExecute)
   if path != nil:
@@ -294,7 +340,7 @@ proc repro_hook_execve*(path: cstring; argv, envp: cstringArray): cint
 
 proc repro_hook_posix_spawn*(pid: ptr PidT; path: cstring; fileActions, attrp: pointer;
     argv, envp: cstringArray): cint {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_posix_spawn(pid, path, fileActions, attrp, argv, envp)
   result = ct_macos_interpose_real_posix_spawn(pid, path, fileActions, attrp, argv, envp)
   if result == 0 and pid != nil:
@@ -308,7 +354,7 @@ proc repro_hook_posix_spawn*(pid: ptr PidT; path: cstring; fileActions, attrp: p
 
 proc repro_hook_posix_spawnp*(pid: ptr PidT; path: cstring; fileActions, attrp: pointer;
     argv, envp: cstringArray): cint {.exportc, cdecl, dynlib.} =
-  if disabled > 0 or not initialized:
+  if not initialized or disabled > 0:
     return ct_macos_interpose_real_posix_spawnp(pid, path, fileActions, attrp, argv, envp)
   result = ct_macos_interpose_real_posix_spawnp(pid, path, fileActions, attrp, argv, envp)
   if result == 0 and pid != nil:
@@ -320,21 +366,182 @@ proc repro_hook_posix_spawnp*(pid: ptr PidT; path: cstring; fileActions, attrp: 
     record.detail = "posix_spawnp"
     emitRecord(record)
 
-proc reproRuntimeInit() =
+proc reproRuntimeInit() {.exportc.} =
   discard repro_monitor_shim_init(nil)
 
-registerInitCallback(reproRuntimeInit)
-registerOpenHook(repro_hook_open)
-registerOpenatHook(repro_hook_openat)
-registerReadHook(repro_hook_read)
-registerWriteHook(repro_hook_write)
-registerCloseHook(repro_hook_close)
-registerOpendirHook(repro_hook_opendir)
-registerReaddirHook(repro_hook_readdir)
-registerClosedirHook(repro_hook_closedir)
-registerStatHook(repro_hook_stat)
-registerLstatHook(repro_hook_lstat)
-registerForkHook(repro_hook_fork)
-registerExecveHook(repro_hook_execve)
-registerPosixSpawnHook(repro_hook_posix_spawn)
-registerPosixSpawnpHook(repro_hook_posix_spawnp)
+{.emit: """
+static int repro_monitor_runtime_ready = 0;
+extern void NimMain(void);
+
+typedef DIR *(*repro_real_opendir_fn)(const char *);
+typedef struct dirent *(*repro_real_readdir_fn)(DIR *);
+typedef int (*repro_real_closedir_fn)(DIR *);
+typedef pid_t (*repro_real_fork_fn)(void);
+typedef int (*repro_real_posix_spawn_fn)(pid_t *, const char *,
+  const posix_spawn_file_actions_t *, const posix_spawnattr_t *,
+  char *const [], char *const []);
+
+static int repro_wrap_open(const char *path, int flags, ...) {
+  int mode = 0;
+  if (flags & O_CREAT) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = va_arg(ap, int);
+    va_end(ap);
+  }
+  if (!repro_monitor_runtime_ready) {
+    return (int)syscall(SYS_open, path, flags, mode);
+  }
+  return repro_hook_open((char *)path, flags, mode);
+}
+
+static int repro_wrap_openat(int dirfd, const char *path, int flags, ...) {
+  int mode = 0;
+  if (flags & O_CREAT) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = va_arg(ap, int);
+    va_end(ap);
+  }
+  if (!repro_monitor_runtime_ready) {
+    return (int)syscall(SYS_openat, dirfd, path, flags, mode);
+  }
+  return repro_hook_openat(dirfd, (char *)path, flags, mode);
+}
+
+static ssize_t repro_wrap_read(int fd, void *buf, size_t count) {
+  if (!repro_monitor_runtime_ready) {
+    return syscall(SYS_read, fd, buf, count);
+  }
+  return repro_hook_read(fd, buf, count);
+}
+
+static ssize_t repro_wrap_write(int fd, const void *buf, size_t count) {
+  if (!repro_monitor_runtime_ready) {
+    return syscall(SYS_write, fd, buf, count);
+  }
+  return repro_hook_write(fd, (void *)buf, count);
+}
+
+static int repro_wrap_close(int fd) {
+  if (!repro_monitor_runtime_ready) {
+    return (int)syscall(SYS_close, fd);
+  }
+  return repro_hook_close(fd);
+}
+
+static DIR *repro_wrap_opendir(const char *path) {
+  if (!repro_monitor_runtime_ready) {
+    repro_real_opendir_fn real_fn = (repro_real_opendir_fn)dlsym(RTLD_NEXT, "opendir");
+    return real_fn(path);
+  }
+  return (DIR *)repro_hook_opendir((char *)path);
+}
+
+static struct dirent *repro_wrap_readdir(DIR *dirp) {
+  if (!repro_monitor_runtime_ready) {
+    repro_real_readdir_fn real_fn = (repro_real_readdir_fn)dlsym(RTLD_NEXT, "readdir");
+    return real_fn(dirp);
+  }
+  return (struct dirent *)repro_hook_readdir(dirp);
+}
+
+static int repro_wrap_closedir(DIR *dirp) {
+  if (!repro_monitor_runtime_ready) {
+    repro_real_closedir_fn real_fn = (repro_real_closedir_fn)dlsym(RTLD_NEXT, "closedir");
+    return real_fn(dirp);
+  }
+  return repro_hook_closedir(dirp);
+}
+
+static int repro_wrap_stat(const char *path, struct stat *buf) {
+  if (!repro_monitor_runtime_ready) {
+#ifdef SYS_stat64
+    return (int)syscall(SYS_stat64, path, buf);
+#else
+    return (int)syscall(SYS_stat, path, buf);
+#endif
+  }
+  return repro_hook_stat((char *)path, buf);
+}
+
+static int repro_wrap_lstat(const char *path, struct stat *buf) {
+  if (!repro_monitor_runtime_ready) {
+#ifdef SYS_lstat64
+    return (int)syscall(SYS_lstat64, path, buf);
+#else
+    return (int)syscall(SYS_lstat, path, buf);
+#endif
+  }
+  return repro_hook_lstat((char *)path, buf);
+}
+
+static pid_t repro_wrap_fork(void) {
+  if (!repro_monitor_runtime_ready) {
+    repro_real_fork_fn real_fn = (repro_real_fork_fn)dlsym(RTLD_NEXT, "fork");
+    return real_fn();
+  }
+  return repro_hook_fork();
+}
+
+static int repro_wrap_execve(const char *path, char *const argv[], char *const envp[]) {
+  if (!repro_monitor_runtime_ready) {
+    return (int)syscall(SYS_execve, path, argv, envp);
+  }
+  return repro_hook_execve((char *)path, (char **)argv, (char **)envp);
+}
+
+static int repro_wrap_posix_spawn(pid_t *pid, const char *path,
+  const posix_spawn_file_actions_t *file_actions,
+  const posix_spawnattr_t *attrp,
+  char *const argv[], char *const envp[]) {
+  if (!repro_monitor_runtime_ready) {
+    repro_real_posix_spawn_fn real_fn =
+      (repro_real_posix_spawn_fn)dlsym(RTLD_NEXT, "posix_spawn");
+    return real_fn(pid, path, file_actions, attrp, argv, envp);
+  }
+  return repro_hook_posix_spawn(pid, (char *)path, (void *)file_actions,
+    (void *)attrp, (char **)argv, (char **)envp);
+}
+
+static int repro_wrap_posix_spawnp(pid_t *pid, const char *path,
+  const posix_spawn_file_actions_t *file_actions,
+  const posix_spawnattr_t *attrp,
+  char *const argv[], char *const envp[]) {
+  if (!repro_monitor_runtime_ready) {
+    repro_real_posix_spawn_fn real_fn =
+      (repro_real_posix_spawn_fn)dlsym(RTLD_NEXT, "posix_spawnp");
+    return real_fn(pid, path, file_actions, attrp, argv, envp);
+  }
+  return repro_hook_posix_spawnp(pid, (char *)path, (void *)file_actions,
+    (void *)attrp, (char **)argv, (char **)envp);
+}
+
+__attribute__((constructor))
+static void repro_monitor_shim_constructor(void) {
+  NimMain();
+  reproRuntimeInit();
+  repro_monitor_runtime_ready = 1;
+}
+
+__attribute__((used))
+static struct {
+  const void *replacement;
+  const void *replacee;
+} repro_monitor_interposers[] __attribute__((section("__DATA,__interpose"))) = {
+  { (const void *)repro_wrap_open, (const void *)open },
+  { (const void *)repro_wrap_openat, (const void *)openat },
+  { (const void *)repro_wrap_read, (const void *)read },
+  { (const void *)repro_wrap_write, (const void *)write },
+  { (const void *)repro_wrap_close, (const void *)close },
+  { (const void *)repro_wrap_opendir, (const void *)opendir },
+  { (const void *)repro_wrap_readdir, (const void *)readdir },
+  { (const void *)repro_wrap_closedir, (const void *)closedir },
+  { (const void *)repro_wrap_stat, (const void *)stat },
+  { (const void *)repro_wrap_lstat, (const void *)lstat },
+  { (const void *)repro_wrap_fork, (const void *)fork },
+  { (const void *)repro_wrap_execve, (const void *)execve },
+  { (const void *)repro_wrap_posix_spawn, (const void *)posix_spawn },
+  { (const void *)repro_wrap_posix_spawnp, (const void *)posix_spawnp }
+};
+""".}

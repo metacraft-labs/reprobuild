@@ -188,7 +188,7 @@ when defined(macosx) or defined(linux):
       "--out:" & outputPath
     ]
     when defined(macosx):
-      args.add("--path:/Users/zahary/metacraft/ct_interpose/src")
+      args.add("--path:" & repoRoot / "libs" / "repro_monitor_hooks" / "src")
       args.add(repoRoot / "libs" / "repro_monitor_shim" / "src" /
         "repro_monitor_shim" / "macos_interpose.nim")
     else:

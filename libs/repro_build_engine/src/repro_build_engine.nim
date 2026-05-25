@@ -735,21 +735,6 @@ proc monitorCliPath(config: BuildEngineConfig): string =
     return repoBuild
   ""
 
-proc macosMonitorShimAvailable(): bool =
-  when defined(macosx):
-    let configured = getEnv("REPRO_MONITOR_SHIM_LIB")
-    if configured.len > 0 and fileExists(extendedPath(configured)):
-      return true
-    let appSibling = getAppDir() / ".." / "lib" / "librepro_monitor_shim.dylib"
-    if fileExists(extendedPath(appSibling)):
-      return true
-    let repoBuild = getCurrentDir() / "build" / "lib" / "librepro_monitor_shim.dylib"
-    if fileExists(extendedPath(repoBuild)):
-      return true
-    false
-  else:
-    true
-
 proc sanitizeActionId(value: string): string =
   for ch in value:
     if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
@@ -794,13 +779,6 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
     result.diagnostic =
       "automatic monitor dependency gathering is unsupported on this platform"
   else:
-    if getEnv("REPRO_MONITOR_BYPASS") == "1":
-      result.action.dependencyPolicy = declaredOnlyPolicy()
-      return
-    when defined(macosx):
-      if not macosMonitorShimAvailable():
-        result.action.dependencyPolicy = declaredOnlyPolicy()
-        return
     when defined(windows):
       if getEnv("REPRO_MONITOR_BYPASS") == "1":
         # Windows: downgrade the action to declared-only when the bypass is

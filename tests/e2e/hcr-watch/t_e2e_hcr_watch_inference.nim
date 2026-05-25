@@ -128,13 +128,13 @@ when defined(macosx):
   proc compileShim(repoRoot, outputPath: string) =
     let arm64Path = outputPath & ".arm64"
     let arm64ePath = outputPath & ".arm64e"
-    let interposePath = repoRoot / ".." / "ct_interpose" / "src"
+    let monitorHooksPath = repoRoot / "libs" / "repro_monitor_hooks" / "src"
     let shimSource = repoRoot / "libs" / "repro_monitor_shim" / "src" /
       "repro_monitor_shim" / "macos_interpose.nim"
     requireSuccess(shellCommand([
       "nim", "c", "--app:lib", "--threads:on",
       "--verbosity:0", "--hints:off",
-      "--path:" & interposePath,
+      "--path:" & monitorHooksPath,
       "--nimcache:" & repoRoot / "build" / "nimcache" /
         "hcr-watch-shim-arm64",
       "--out:" & arm64Path,
@@ -144,7 +144,7 @@ when defined(macosx):
       "nim", "c", "--app:lib", "--threads:on",
       "--verbosity:0", "--hints:off",
       "--passC:-arch arm64e", "--passL:-arch arm64e",
-      "--path:" & interposePath,
+      "--path:" & monitorHooksPath,
       "--nimcache:" & repoRoot / "build" / "nimcache" /
         "hcr-watch-shim-arm64e",
       "--out:" & arm64ePath,

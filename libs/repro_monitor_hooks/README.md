@@ -6,6 +6,7 @@ This package owns the common mechanics that should not live in a
 Reprobuild-specific shim:
 
 - monitor fragment collection/finalization helpers;
+- macOS `DYLD_INSERT_LIBRARIES` interpose support and original-call resolution;
 - Linux `LD_PRELOAD` symbol exports and `dlsym(RTLD_NEXT)` original-call
   resolution;
 - priority-ordered stackable hook dispatch with `callNext` and `callReal`;

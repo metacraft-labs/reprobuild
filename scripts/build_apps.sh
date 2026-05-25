@@ -17,18 +17,14 @@ case "${REPROBUILD_BUILD_MODE:-debug}" in
 esac
 
 if [ "$(uname -s)" = "Darwin" ]; then
-  if [ -d /Users/zahary/metacraft/ct_interpose/src ]; then
-    nim c \
-      "${nim_mode_flags[@]}" \
-      --app:lib \
-      --threads:on \
-      --path:/Users/zahary/metacraft/ct_interpose/src \
-      --nimcache:build/nimcache/repro-monitor-shim-dylib \
-      --out:build/lib/librepro_monitor_shim.dylib \
-      libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim
-  else
-    echo "warning: /Users/zahary/metacraft/ct_interpose/src missing; skipping macOS monitor shim dylib" >&2
-  fi
+  nim c \
+    "${nim_mode_flags[@]}" \
+    --app:lib \
+    --threads:on \
+    --path:libs/repro_monitor_hooks/src \
+    --nimcache:build/nimcache/repro-monitor-shim-dylib \
+    --out:build/lib/librepro_monitor_shim.dylib \
+    libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim
 fi
 
 if [ "$(uname -s)" = "Linux" ]; then

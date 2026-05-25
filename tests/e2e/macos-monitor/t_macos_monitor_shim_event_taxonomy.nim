@@ -178,9 +178,10 @@ int main(int argc, char **argv) {
     ]), repoRoot)
 
   proc compileShim(repoRoot, outputPath: string) =
+    let monitorHooksPath = repoRoot / "libs" / "repro_monitor_hooks" / "src"
     discard requireSuccess(shellCommand([
       "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--path:/Users/zahary/metacraft/ct_interpose/src",
+      "--path:" & monitorHooksPath,
       "--nimcache:" & repoRoot / "build" / "nimcache" / "e2e-m14-shim",
       "--out:" & outputPath,
       repoRoot / "libs" / "repro_monitor_shim" / "src" / "repro_monitor_shim" /
