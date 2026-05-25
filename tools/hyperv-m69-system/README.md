@@ -60,12 +60,32 @@ VHDX as the starting image. Two reasons:
 
 URL: <https://developer.microsoft.com/windows/downloads/virtual-machines/>
 (the same VHDX is reachable via the **Hyper-V Quick Create** gallery
-under "Windows 11 dev environment"). Microsoft sometimes only exposes
-this image via the Quick Create UI, with no scriptable direct
-download URL - if that's the case at run time, `provision-base-vm.ps1`
-will STOP with a clear message telling you to obtain the VHDX
-manually and place it at the documented cache path. The script picks
-up from there idempotently.
+under "Windows 11 dev environment"). Microsoft does NOT advertise a
+stable direct-download shortlink for this image (the old
+`aka.ms/windev_VM_vhdx` shortlink now redirects to Bing). The image
+**is** available via a scriptable path, just not a fixed URL:
+`provision-base-vm.ps1` resolves it at runtime by fetching the
+**Quick Create gallery manifest**
+(`https://go.microsoft.com/fwlink/?linkid=851584`, UTF-16-LE encoded
+JSON), locating the `images[]` entry named "Windows 11 dev
+environment", and reading `disk.uri` from that entry. The script then
+HEAD-probes the URL to confirm the body is plausibly the dev image
+(Content-Length >= 5 GB) before downloading.
+
+The downloaded artifact is a **`.zip` wrapper** that contains the
+`.vhdx` plus a small marker file. The script extracts the inner
+`.vhdx` to the cache path and discards the `.zip` + temp extract dir.
+As of 2026-05, the live URL resolves to
+`https://download.microsoft.com/.../WinDev2407Eval.HyperV.zip`
+(~21.7 GB, Windows 11 v10.0.22621); the URL changes on each Microsoft
+refresh, which is why the script discovers it instead of hard-coding
+it.
+
+If manifest discovery fails (network down, manifest shape changed, no
+matching image entry, or the live URL HEAD probe fails), the script
+STOPs with a clear message telling you to use Hyper-V Manager's Quick
+Create UI manually, extract the inner `.vhdx`, and place it at the
+documented cache path. The script picks up idempotently from there.
 
 The VHDX is **20-50 GB**. Cache it at
 `D:\metacraft\hyperv-m69-system-cache\windows-11-dev-env.vhdx` so it
@@ -112,6 +132,61 @@ default for `-Gate vs-installer` is `-Scenario base-clean`.
 | `README.md` | -- | This file |
 
 ## How to run
+
+### One-time interactive bootstrap
+
+Before the first run of `provision-base-vm.ps1` (and again after any
+VHDX refresh), the operator has to do **three things once**, in an
+interactive shell. The rest of the provision runs unattended from a
+sub-agent / CI / `pwsh -NoProfile -NonInteractive -File` context.
+
+**(a) Seed the DPAPI-encrypted credential cache.** PowerShell Direct
+needs a guest credential. The script will NOT prompt for it (a
+`Get-Credential` prompt would hang under `-NonInteractive`); it
+fast-fails with exit code `2` if the cache is missing. Run this once
+in an interactive `pwsh` window:
+
+```pwsh
+$d = "$env:LOCALAPPDATA\Repro\hyperv-m69"
+if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+$cred = Get-Credential -Message 'Hyper-V guest creds for repro-m69-hyperv. Use the username and password you set during the dev VM OOBE first-boot. Default username is User; pick any non-empty password.'
+$cred | Export-Clixml -Path "$d\vm-cred.xml"
+```
+
+The credential is sealed with **DPAPI for the current user** - it
+cannot be moved between accounts or machines. If the file is corrupt
+or sealed with a different user's key, the script also fast-fails with
+the same remediation message.
+
+**(b) Accept the script's automatic VHDX download** (the script
+resolves the live URL via the Quick Create gallery manifest, downloads
+the ~22 GB `.zip` wrapper, extracts the inner `.vhdx`, and moves it to
+`D:\metacraft\hyperv-m69-system-cache\windows-11-dev-env.vhdx`),
+**OR** pre-stage the VHDX manually:
+
+  1. Open Hyper-V Manager > Action > Quick Create > "Windows 11 dev
+     environment". Wait for the download to complete.
+  2. Find the resulting `.zip` (Hyper-V Manager downloads it to a
+     temp dir; the path is reported in its progress dialog) and
+     extract the inner `.vhdx`.
+  3. Move the inner `.vhdx` to
+     `D:\metacraft\hyperv-m69-system-cache\windows-11-dev-env.vhdx`.
+
+Manual staging is the right choice if you've already downloaded the
+VHDX via Quick Create for some other reason, or if the manifest path
+breaks for your network and you want to fail-forward.
+
+**(c) Complete Windows OOBE the first time the VM boots.** The dev
+VHDX boots into a Windows out-of-box-experience flow on first power-on
+(set a password, accept EULA, etc.). The script cannot drive OOBE
+through PowerShell Direct - PSDirect doesn't function until a user
+session exists. Open **Hyper-V Manager > Connect** to the
+`repro-m69-hyperv` VM, finish OOBE setting a password that matches the
+credential you seeded in step (a), then sign out. The script's
+"wait for PowerShell Direct" poll will then succeed.
+
+After those three things, `provision-base-vm.ps1` runs **unattended**
+all the way through `base-clean` + VS install + `base-with-vs`.
 
 ### One-time: provision the VM
 
@@ -288,9 +363,14 @@ Per-test (under `D:\metacraft\hyperv-m69-system-out\<gate>-<scenario>\`):
     other Visual Studio Build Tools content. We rely on the
     `Uninstall` path leaving the disk in a `vswhere`-clean state -
     verified after each uninstall step.
-  * Microsoft sometimes only exposes the Dev VM via Hyper-V Quick
-    Create rather than a direct URL. If the canonical URL doesn't
-    resolve, the script tells you exactly which file to drop at
+  * The Dev VM download URL is not a fixed shortlink - it changes
+    with each Microsoft refresh and the old `aka.ms` shortlink now
+    redirects to Bing. The script resolves it at runtime from the
+    Quick Create gallery manifest (UTF-16 JSON at
+    `https://go.microsoft.com/fwlink/?linkid=851584`). If manifest
+    discovery fails (network down, manifest shape changed, or
+    `Windows 11 dev environment` entry absent), the script tells you
+    exactly which file to extract and drop at
     `D:\metacraft\hyperv-m69-system-cache\windows-11-dev-env.vhdx`
     before re-running.
   * The harness assumes the host is x64. ARM64 Windows hosts can run

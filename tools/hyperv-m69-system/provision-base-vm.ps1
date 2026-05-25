@@ -81,16 +81,23 @@ $OutDir             = 'D:\metacraft\hyperv-m69-system-out'
 
 $BaseVhdxName       = 'windows-11-dev-env.vhdx'
 $BaseVhdxCachePath  = Join-Path $CacheDir $BaseVhdxName
-# Microsoft sometimes only exposes this URL via Hyper-V Quick Create
-# rather than a direct download. We try a few documented endpoints; if
-# none work, we tell the user to obtain the VHDX manually and place it
-# at $BaseVhdxCachePath, then re-run.
-$DevVhdxCandidateUrls = @(
-  # The aka.ms shortlink Microsoft used for the Dev VM image. Subject to
-  # change; verified against the public Hyper-V Quick Create gallery
-  # entry "Windows 11 dev environment".
+# The dev VHDX URL rots aggressively (the old aka.ms shortlink is now a
+# Bing redirect). Microsoft *does* publish the file - it's just behind
+# the Hyper-V Quick Create gallery manifest, in a .zip wrapper that
+# carries the .vhdx plus a marker file. We discover the live URL
+# from the manifest at runtime; the aka.ms shortlink is kept as a
+# documented fallback so if Microsoft ever restores it we keep working.
+$DevVmGalleryManifestUrl = 'https://go.microsoft.com/fwlink/?linkid=851584'
+$DevVmGalleryImageName   = 'Windows 11 dev environment'
+$DevVhdxFallbackUrls = @(
+  # Historical aka.ms shortlink for the Dev VM image. As of 2026-05
+  # this redirects to Bing; keep it documented for the case where
+  # Microsoft restores it.
   'https://aka.ms/windev_VM_vhdx'
 )
+# Reject any "VHDX" / "ZIP" smaller than this - the real dev image is
+# 20+ GB; anything dramatically smaller is a stale or bogus URL.
+$DevVhdxMinExpectedBytes = 5GB
 
 $DiffVhdName        = "$VmName.vhdx"
 $DiffVhdPath        = Join-Path $VhdRoot $DiffVhdName
@@ -193,6 +200,108 @@ function Wait-VmPSDirectReady {
     Start-Sleep -Seconds 5
   }
   return $false
+}
+
+function Resolve-DevVhdxUrlFromManifest {
+  param(
+    [string]$ManifestUrl,
+    [string]$ImageName,
+    [int64]$MinExpectedBytes
+  )
+  # Returns a hashtable @{ Url=...; ContentLength=... } if a valid live
+  # URL was discovered, or $null on any failure. Every failure path
+  # logs via Warn so the operator can see exactly which probe gave up.
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  } catch {}
+  Info "  fetching gallery manifest: $ManifestUrl"
+  $manifest = $null
+  try {
+    $resp = Invoke-WebRequest -Uri $ManifestUrl -UseBasicParsing -TimeoutSec 60
+  } catch {
+    Warn "  manifest fetch failed: $_"
+    return $null
+  }
+  # The gallery manifest is UTF-16-LE encoded JSON with a BOM. Decode
+  # explicitly and strip the BOM; don't rely on Invoke-WebRequest's
+  # heuristic or on ConvertFrom-Json's BOM tolerance (it varies by PS
+  # version).
+  try {
+    $rawBytes = $resp.Content
+    $text = $null
+    if ($rawBytes -is [string]) {
+      # Some PS hosts hand back a string already; trust it.
+      $text = $rawBytes
+    } else {
+      $bytes = [byte[]]$rawBytes
+      # Strip a UTF-16-LE BOM if present (FF FE), then decode as UTF-16-LE.
+      if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        $text = [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+      } elseif ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        # UTF-8 BOM
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3)
+      } else {
+        # No BOM; try UTF-16 first (the manifest's documented encoding),
+        # fall back to UTF-8 if the result doesn't look like JSON.
+        $text = [System.Text.Encoding]::Unicode.GetString($bytes)
+        if ($text -notmatch '"images"') {
+          $alt = [System.Text.Encoding]::UTF8.GetString($bytes)
+          if ($alt -match '"images"') { $text = $alt }
+        }
+      }
+    }
+    # Belt-and-braces: strip any leading U+FEFF (zero-width no-break
+    # space / BOM-as-char) that survived the byte-level strip above.
+    if ($text -and $text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) {
+      $text = $text.Substring(1)
+    }
+    $manifest = $text | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    Warn "  manifest decode/parse failed: $_"
+    return $null
+  }
+  if (-not $manifest -or -not $manifest.images) {
+    Warn "  manifest has no 'images' array; shape may have changed"
+    return $null
+  }
+  $entry = $manifest.images | Where-Object { $_.name -eq $ImageName } | Select-Object -First 1
+  if (-not $entry) {
+    Warn "  manifest does not contain an image entry named: $ImageName"
+    Warn "  available image names: $(@($manifest.images | ForEach-Object { $_.name }) -join ', ')"
+    return $null
+  }
+  $diskUri = $null
+  if ($entry.disk -and $entry.disk.uri) { $diskUri = [string]$entry.disk.uri }
+  if (-not $diskUri) {
+    Warn "  manifest entry for '$ImageName' has no disk.uri"
+    return $null
+  }
+  Info "  manifest disk.uri: $diskUri"
+  # HEAD-probe to validate URL is reachable AND the body is big enough
+  # to plausibly be the dev VM image.
+  $contentLength = 0
+  try {
+    $head = Invoke-WebRequest -Uri $diskUri -Method Head -UseBasicParsing -TimeoutSec 60
+    # Invoke-WebRequest -UseBasicParsing returns header values as
+    # System.String[] (one-element array for single-valued headers).
+    # Take the first element before casting.
+    $clRaw = $head.Headers.'Content-Length'
+    if ($clRaw) {
+      $clScalar = if ($clRaw -is [array]) { $clRaw[0] } else { $clRaw }
+      $contentLength = [int64]$clScalar
+    }
+  } catch {
+    Warn "  HEAD probe of disk.uri failed: $_"
+    return $null
+  }
+  $clGB = [math]::Round($contentLength / 1GB, 2)
+  Info "  HEAD Content-Length = $contentLength bytes ($clGB GB)"
+  if ($contentLength -lt $MinExpectedBytes) {
+    $minGB = [math]::Round($MinExpectedBytes / 1GB, 2)
+    Warn "  HEAD Content-Length ($clGB GB) is below the minimum expected ($minGB GB); rejecting as stale/bogus"
+    return $null
+  }
+  return @{ Url = $diskUri; ContentLength = $contentLength }
 }
 
 function Invoke-VmScript {
@@ -313,76 +422,163 @@ if (Test-Path $BaseVhdxCachePath) {
   }
 }
 if (-not (Test-Path $BaseVhdxCachePath)) {
-  Info "  no cached VHDX; attempting download from documented endpoints"
-  $downloaded = $false
-  foreach ($url in $DevVhdxCandidateUrls) {
-    Info "  trying: $url"
-    try {
-      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-      $t0 = Get-Date
-      $bitsJob = $null
+  Info "  no cached VHDX; attempting to discover a live download URL"
+
+  # Step 4a: discovery. Manifest first, aka.ms fallback after.
+  $discovered = $null
+  $discovered = Resolve-DevVhdxUrlFromManifest `
+                  -ManifestUrl $DevVmGalleryManifestUrl `
+                  -ImageName   $DevVmGalleryImageName `
+                  -MinExpectedBytes $DevVhdxMinExpectedBytes
+  if (-not $discovered) {
+    foreach ($fbUrl in $DevVhdxFallbackUrls) {
+      Info "  manifest discovery failed; trying fallback URL: $fbUrl"
       try {
-        Import-Module BitsTransfer -ErrorAction Stop
-        $bitsJob = Start-BitsTransfer -Source $url -Destination $BaseVhdxCachePath `
-                     -DisplayName 'M69 Dev VM VHDX' -Description 'Microsoft Windows 11 development-environment VHDX' `
-                     -Asynchronous
-        Info "  BITS job started: $($bitsJob.JobId)"
-        while ($bitsJob.JobState -in 'Connecting','Transferring','Queued') {
-          Start-Sleep -Seconds 10
-          $bitsJob = Get-BitsTransfer -JobId $bitsJob.JobId
-          $pct = if ($bitsJob.BytesTotal -gt 0) {
-            [math]::Round(($bitsJob.BytesTransferred / $bitsJob.BytesTotal) * 100, 1)
-          } else { 0 }
-          $mb = [math]::Round($bitsJob.BytesTransferred / 1MB, 0)
-          Info "  BITS: $($bitsJob.JobState)  $mb MB  ($pct %)"
+        $head = Invoke-WebRequest -Uri $fbUrl -Method Head -UseBasicParsing -TimeoutSec 60
+        $cl = 0
+        $clRaw = $head.Headers.'Content-Length'
+        if ($clRaw) {
+          $clScalar = if ($clRaw -is [array]) { $clRaw[0] } else { $clRaw }
+          $cl = [int64]$clScalar
         }
-        if ($bitsJob.JobState -eq 'Transferred') {
-          Complete-BitsTransfer -BitsJob $bitsJob
-          $downloaded = (Test-Path $BaseVhdxCachePath)
+        $clGB = [math]::Round($cl/1GB, 2)
+        Info "  fallback HEAD Content-Length = $cl bytes ($clGB GB)"
+        if ($cl -ge $DevVhdxMinExpectedBytes) {
+          $discovered = @{ Url = $fbUrl; ContentLength = $cl }
+          break
         } else {
-          Warn "  BITS job ended in state: $($bitsJob.JobState); cancelling"
-          try { Remove-BitsTransfer -BitsJob $bitsJob } catch {}
+          Warn "  fallback URL too small ($clGB GB); rejecting"
         }
       } catch {
-        Warn "  BITS path failed: $_; falling back to Invoke-WebRequest"
-        Invoke-WebRequest -Uri $url -OutFile $BaseVhdxCachePath -TimeoutSec 7200
-        $downloaded = (Test-Path $BaseVhdxCachePath)
+        Warn "  fallback URL HEAD failed: $_"
       }
-      $elapsed = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
-      if ($downloaded) {
-        $sz = (Get-Item $BaseVhdxCachePath).Length
-        $szGB = [math]::Round($sz/1GB, 2)
-        Info "  downloaded ${elapsed} min, $szGB GB"
-        if ($sz -lt 5GB) {
-          Warn "  downloaded file is only $szGB GB - probably not the real VHDX"
-          Warn "  removing and retrying next URL"
-          Remove-Item -LiteralPath $BaseVhdxCachePath -Force -ErrorAction SilentlyContinue
-          $downloaded = $false
-        } else {
-          break
-        }
-      }
-    } catch {
-      Warn "  $url failed: $_"
     }
   }
-  if (-not $downloaded) {
+
+  if (-not $discovered) {
     Fail ""
-    Fail "  Could not download the Windows 11 development-environment VHDX from"
-    Fail "  any documented endpoint. Microsoft sometimes only exposes this image"
-    Fail "  via the Hyper-V Quick Create gallery, with no scriptable URL."
+    Fail "  Could not discover the Windows 11 development-environment VHDX URL."
+    Fail "  The Quick Create gallery manifest at"
+    Fail "    $DevVmGalleryManifestUrl"
+    Fail "  did not yield a usable disk.uri (network down, JSON shape changed,"
+    Fail "  or no '$DevVmGalleryImageName' entry), and the documented fallback"
+    Fail "  shortlink(s) did not validate either."
     Fail ""
     Fail "  PLEASE OBTAIN THE VHDX MANUALLY:"
     Fail "    1. Open Hyper-V Manager."
     Fail "    2. Action > Quick Create > 'Windows 11 dev environment'."
     Fail "       (Or visit https://developer.microsoft.com/windows/downloads/virtual-machines/)"
-    Fail "    3. Wait for the download to complete. The downloaded VHDX is"
-    Fail "       typically placed at:"
-    Fail "         %USERPROFILE%\Hyper-V\Virtual Hard Disks\<name>.vhdx"
-    Fail "    4. Move (or copy) the VHDX to the cache path:"
+    Fail "    3. Wait for the download to complete. The download is a .zip"
+    Fail "       wrapper; extract the inner .vhdx."
+    Fail "    4. Move (or copy) the inner .vhdx to the cache path:"
     Fail "         $BaseVhdxCachePath"
     Fail "    5. Re-run this provision script. It will resume idempotently."
     Fail ""
+    exit 2
+  }
+
+  $liveUrl       = $discovered.Url
+  $expectedBytes = [int64]$discovered.ContentLength
+  Info "  live URL accepted: $liveUrl ($([math]::Round($expectedBytes/1GB,2)) GB)"
+
+  # Step 4b: download into a temp .zip path under the cache dir.
+  $zipPath  = Join-Path $CacheDir 'windows-11-dev-env.download.zip'
+  $extractDir = Join-Path $CacheDir 'windows-11-dev-env.extract'
+  if (Test-Path $zipPath)     { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue }
+  if (Test-Path $extractDir)  { Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+  $downloaded = $false
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $t0 = Get-Date
+    $bitsOk = $false
+    try {
+      Import-Module BitsTransfer -ErrorAction Stop
+      $bitsJob = Start-BitsTransfer -Source $liveUrl -Destination $zipPath `
+                   -DisplayName 'M69 Dev VM VHDX (zip)' `
+                   -Description 'Microsoft Windows 11 development-environment VHDX archive' `
+                   -Asynchronous
+      Info "  BITS job started: $($bitsJob.JobId)"
+      while ($bitsJob.JobState -in 'Connecting','Transferring','Queued') {
+        Start-Sleep -Seconds 10
+        $bitsJob = Get-BitsTransfer -JobId $bitsJob.JobId
+        $pct = if ($bitsJob.BytesTotal -gt 0) {
+          [math]::Round(($bitsJob.BytesTransferred / $bitsJob.BytesTotal) * 100, 1)
+        } else { 0 }
+        $mb = [math]::Round($bitsJob.BytesTransferred / 1MB, 0)
+        Info "  BITS: $($bitsJob.JobState)  $mb MB  ($pct %)"
+      }
+      if ($bitsJob.JobState -eq 'Transferred') {
+        Complete-BitsTransfer -BitsJob $bitsJob
+        $bitsOk = (Test-Path $zipPath)
+      } else {
+        Warn "  BITS job ended in state: $($bitsJob.JobState); cancelling"
+        try { Remove-BitsTransfer -BitsJob $bitsJob } catch {}
+      }
+    } catch {
+      Warn "  BITS path failed: $_; falling back to Invoke-WebRequest"
+      Invoke-WebRequest -Uri $liveUrl -OutFile $zipPath -TimeoutSec 7200
+      $bitsOk = (Test-Path $zipPath)
+    }
+    $elapsed = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
+    if (-not $bitsOk) {
+      Fail "  download did not produce a file at $zipPath"
+      exit 2
+    }
+    $zipSize = (Get-Item $zipPath).Length
+    $zipGB   = [math]::Round($zipSize/1GB, 2)
+    Info "  downloaded ${elapsed} min, $zipGB GB"
+    # Tolerate small variance (CDN may close-grain; redirects can yield
+    # slightly different reported lengths). Reject anything wildly off.
+    $tolerance = [math]::Max(64MB, [int64]($expectedBytes * 0.01))
+    if ([math]::Abs($zipSize - $expectedBytes) -gt $tolerance) {
+      Warn "  downloaded size $zipSize differs from HEAD Content-Length $expectedBytes by more than $tolerance bytes"
+      Warn "  (mirror may be inconsistent - continuing, but treat as suspect)"
+    }
+    if ($zipSize -lt $DevVhdxMinExpectedBytes) {
+      Fail "  downloaded archive is only $zipGB GB; expected at least $([math]::Round($DevVhdxMinExpectedBytes/1GB,2)) GB"
+      Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+      exit 2
+    }
+
+    # Step 4c: extract the .zip into a temp subdir and locate the inner .vhdx.
+    Info "  extracting $zipPath -> $extractDir"
+    New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
+
+    $innerVhdx = @(Get-ChildItem -Path $extractDir -Recurse -Filter '*.vhdx' -File)
+    if ($innerVhdx.Count -eq 0) {
+      $contents = @(Get-ChildItem -Path $extractDir -Recurse -File | Select-Object -First 20 |
+                      ForEach-Object { $_.FullName })
+      Fail "  extracted archive contains NO .vhdx file. Top of contents:"
+      foreach ($c in $contents) { Fail "    $c" }
+      exit 2
+    }
+    if ($innerVhdx.Count -gt 1) {
+      Fail "  extracted archive contains $($innerVhdx.Count) .vhdx files (expected exactly 1):"
+      foreach ($v in $innerVhdx) { Fail "    $($v.FullName)  ($([math]::Round($v.Length/1GB,2)) GB)" }
+      exit 2
+    }
+    $innerPath = $innerVhdx[0].FullName
+    $innerSize = $innerVhdx[0].Length
+    $innerGB   = [math]::Round($innerSize/1GB, 2)
+    Info "  inner VHDX: $innerPath ($innerGB GB)"
+    if ($innerSize -lt $DevVhdxMinExpectedBytes) {
+      Fail "  inner VHDX is only $innerGB GB; expected at least $([math]::Round($DevVhdxMinExpectedBytes/1GB,2)) GB"
+      exit 2
+    }
+    Info "  moving inner VHDX -> $BaseVhdxCachePath"
+    Move-Item -LiteralPath $innerPath -Destination $BaseVhdxCachePath -Force
+    $downloaded = (Test-Path $BaseVhdxCachePath)
+  } finally {
+    # Clean up the .zip + temp extract dir whether or not we succeeded
+    # (the cached .vhdx is now at $BaseVhdxCachePath; the temps are
+    # disposable).
+    if (Test-Path $zipPath)    { Remove-Item -LiteralPath $zipPath    -Force         -ErrorAction SilentlyContinue }
+    if (Test-Path $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+  if (-not $downloaded) {
+    Fail "  download + extract did not produce $BaseVhdxCachePath; see warnings above"
     exit 2
   }
 }
@@ -457,39 +653,47 @@ if (-not $gsi -or -not $gsi.Enabled) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 7: cache the VM credential
+# Step 7: load the cached VM credential (fast-fail if absent)
 # ---------------------------------------------------------------------------
-Section 'Step 7: cache the VM credential'
+Section 'Step 7: load the cached VM credential'
+# The DPAPI-encrypted cred cache MUST already exist. This script is
+# designed to run under `pwsh -NoProfile -NonInteractive -File ...`
+# (sub-agent / CI / cron), where a Get-Credential prompt would hang
+# indefinitely with no terminal attached. Seeding the cache is a
+# one-time interactive bootstrap that the operator does once per VHDX
+# refresh - see README's "One-time interactive bootstrap" section.
 $cred = $null
-if (Test-Path $CredCachePath) {
-  try {
-    $cred = Import-Clixml -Path $CredCachePath
-    Info "  loaded cached credential (user: $($cred.UserName))"
-  } catch {
-    Warn "  failed to load cached credential: $_; will re-prompt"
-    Remove-Item -LiteralPath $CredCachePath -Force -ErrorAction SilentlyContinue
-    $cred = $null
-  }
+if (-not (Test-Path $CredCachePath)) {
+  Fail ""
+  Fail "PowerShell Direct credential cache missing at:"
+  Fail "  $CredCachePath"
+  Fail ""
+  Fail "To seed it, run this snippet ONCE in an INTERACTIVE pwsh window"
+  Fail "(the prompt cannot fire from -NonInteractive / sub-agent contexts):"
+  Fail ""
+  Fail "  `$d = `"`$env:LOCALAPPDATA\Repro\hyperv-m69`""
+  Fail "  if (-not (Test-Path `$d)) { New-Item -ItemType Directory -Path `$d -Force | Out-Null }"
+  Fail "  `$cred = Get-Credential -Message 'Hyper-V guest creds for repro-m69-hyperv. Use the username and password you set during the dev VM OOBE first-boot. Default username is User; pick any non-empty password.'"
+  Fail "  `$cred | Export-Clixml -Path `"`$d\vm-cred.xml`""
+  Fail ""
+  Fail "Then re-run provision-base-vm.ps1 - it will pick up at step 5."
+  Fail ""
+  exit 2
 }
-if (-not $cred) {
-  Info ""
-  Info "  The Microsoft Windows 11 dev VM ships with a default user account."
-  Info "  At first boot, the OS may prompt for a password (if it has not"
-  Info "  been customised). Use the credential that exists in the guest."
-  Info ""
-  Info "  Default for the Dev VM image: User=User  Password=(set on first boot)"
-  Info ""
-  Info "  Enter the guest credential now. It will be DPAPI-encrypted for"
-  Info "  the current user and cached at:"
-  Info "    $CredCachePath"
-  $cred = Get-Credential -Message "Guest Administrator credential for $VmName"
-  if (-not $cred) {
-    Fail "no credential supplied; cannot drive the VM via PowerShell Direct"
-    exit 1
-  }
-  $cred | Export-Clixml -Path $CredCachePath
-  Info "  credential cached."
+try {
+  $cred = Import-Clixml -Path $CredCachePath
+} catch {
+  Fail "failed to load cached credential at $CredCachePath : $_"
+  Fail "the file may be corrupt or was sealed with a different user's DPAPI key."
+  Fail "Delete it and re-seed it interactively (see Step 7 seeding snippet above)."
+  exit 2
 }
+if (-not $cred -or -not $cred.UserName) {
+  Fail "cached credential at $CredCachePath has no UserName; refusing to continue"
+  Fail "Delete it and re-seed it interactively (see Step 7 seeding snippet above)."
+  exit 2
+}
+Info "  loaded cached credential (user: $($cred.UserName))"
 
 # ---------------------------------------------------------------------------
 # Step 8: boot the VM
@@ -511,7 +715,8 @@ if (-not $ready) {
   Fail "      finish OOBE (set a password matching the cached credential),"
   Fail "      then re-run this script."
   Fail "    * The cached credential does not match the guest's password."
-  Fail "      Delete $CredCachePath and re-run."
+  Fail "      Delete $CredCachePath and re-seed it interactively (see the"
+  Fail "      Step 7 seeding snippet in the README)."
   exit 1
 }
 
