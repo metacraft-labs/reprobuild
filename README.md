@@ -22,6 +22,23 @@ binary-first domain envelopes, and real BLAKE3/XXH3-backed hash policy.
 This target does not claim full CodeTracer build replacement or Windows
 development-environment replacement; those remain follow-up integration scopes.
 
+## Install
+
+The automatic installer uses the Nix flake package when `nix` is available:
+
+```bash
+curl -L https://raw.githubusercontent.com/metacraft-labs/reprobuild/main/install-on-distributions.sh | bash
+```
+
+From a local checkout, install the current build into a prefix:
+
+```bash
+./install-on-distributions.sh --method local-prefix --prefix "$HOME/.local"
+```
+
+The local-prefix mode installs executables into `<prefix>/bin` and runtime
+libraries into `<prefix>/lib`, matching the layout expected by `repro`.
+
 ## Repository Shape
 
 - `libs/` contains importable Nim libraries.

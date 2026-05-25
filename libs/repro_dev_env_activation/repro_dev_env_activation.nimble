@@ -1,0 +1,5 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Development-environment shell activation rendering"
+license = "MIT"
+requires "nim >= 2.2.0"
