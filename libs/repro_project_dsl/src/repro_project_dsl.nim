@@ -1635,6 +1635,59 @@ proc normalizedImportBase(path: string): string =
   while result.endsWith("/") and result.len > 0:
     result.setLen(result.len - 1)
 
+proc compileTimeDefineValue(name: string): bool =
+  case name.normalize
+  of "linux":
+    result = defined(linux)
+  of "macosx", "macos", "darwin":
+    result = defined(macosx)
+  of "windows", "win32":
+    result = defined(windows)
+  of "posix":
+    result = defined(posix)
+  else:
+    result = false
+
+proc compileTimeConditionValue(node: NimNode): bool =
+  case node.kind
+  of nnkIdent:
+    case identText(node).normalize
+    of "true":
+      true
+    of "false":
+      false
+    else:
+      false
+  of nnkCall, nnkCommand:
+    let name = calleeName(node).normalize
+    if name == "defined" and node.len >= 2:
+      compileTimeDefineValue(identText(node[1]))
+    else:
+      false
+  of nnkPrefix:
+    if node.len == 2 and identText(node[0]).normalize == "not":
+      not compileTimeConditionValue(node[1])
+    else:
+      false
+  of nnkInfix:
+    if node.len == 3:
+      case identText(node[0]).normalize
+      of "and":
+        compileTimeConditionValue(node[1]) and compileTimeConditionValue(node[2])
+      of "or":
+        compileTimeConditionValue(node[1]) or compileTimeConditionValue(node[2])
+      else:
+        false
+    else:
+      false
+  of nnkPar:
+    if node.len == 1:
+      compileTimeConditionValue(node[0])
+    else:
+      false
+  else:
+    false
+
 proc collectUses(node: NimNode; policyPath: seq[string];
                  output: var seq[PackageUseDef]) =
   case node.kind
@@ -1651,6 +1704,19 @@ proc collectUses(node: NimNode; policyPath: seq[string];
   of nnkStmtList:
     for child in node:
       collectUses(child, policyPath, output)
+  of nnkWhenStmt:
+    for branch in node:
+      case branch.kind
+      of nnkElifBranch:
+        if branch.len >= 2 and compileTimeConditionValue(branch[0]):
+          collectUses(branch[1], policyPath, output)
+          break
+      of nnkElse:
+        if branch.len >= 1:
+          collectUses(branch[0], policyPath, output)
+          break
+      else:
+        discard
   of nnkCall, nnkCommand:
     let name = calleeName(node)
     if node.len > 0 and name.len > 0:

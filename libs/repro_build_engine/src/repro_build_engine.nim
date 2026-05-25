@@ -779,6 +779,9 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
     result.diagnostic =
       "automatic monitor dependency gathering is unsupported on this platform"
   else:
+    if getEnv("REPRO_MONITOR_BYPASS") == "1":
+      result.action.dependencyPolicy = declaredOnlyPolicy()
+      return
     when defined(windows):
       if getEnv("REPRO_MONITOR_BYPASS") == "1":
         # Windows: downgrade the action to declared-only when the bypass is
@@ -807,6 +810,8 @@ proc envTableFromArgvStyle(env: openArray[string]): StringTableRef =
   if env.len == 0:
     return nil
   result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    result[key] = value
   for entry in env:
     let eq = entry.find('=')
     if eq <= 0:

@@ -661,6 +661,14 @@ proc profileIndex(identity: PathOnlyBuildIdentity):
     if not result.hasKey(profile.executableName):
       result[profile.executableName] = profile
 
+proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile]): string =
+  var dirs: seq[string] = @[]
+  for profile in profiles.values:
+    let dir = parentDir(profile.resolvedExecutablePath)
+    if dir.len > 0 and dirs.find(dir) < 0:
+      dirs.add(dir)
+  dirs.join($PathSep)
+
 proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string] =
   result = @[profile.resolvedExecutablePath]
 
@@ -780,7 +788,7 @@ proc lowerDependencyPolicy(actionId, depfile: string;
     depfilePolicy(selectedDepfile)
 
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
-                      projectRoot: string): BuildAction =
+                      projectRoot: string; actionPathPrefix = ""): BuildAction =
   let payload = decodeBuildActionPayload(toBytes(node.payload))
   let actionCachePolicy =
     case payload.actionCachePolicy
@@ -981,7 +989,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     actionCachePolicy = actionCachePolicy,
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
-    commandStatsId = commandStatsId)
+    commandStatsId = commandStatsId,
+    env =
+      if actionPathPrefix.len > 0:
+        @["PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")]
+      else:
+        @[])
 
 proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
                            identity: PathOnlyBuildIdentity;
@@ -989,6 +1002,7 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
                            selectedActionId = ""):
     tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
   let profiles = profileIndex(identity)
+  let actionPathPrefix = toolPathPrefix(profiles)
   var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
   var targets = initTable[string, BuildTargetDef]()
   var pools = initTable[string, BuildPoolDef]()
@@ -1041,7 +1055,7 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
       BuildAction =
     var node = item.node
     node.payload = actionPayload(publicPayload(item.payload))
-    lowerGraphAction(node, profiles, projectRoot)
+    lowerGraphAction(node, profiles, projectRoot, actionPathPrefix)
 
   if selectedActionId.len == 0:
     for item in actionNodes:

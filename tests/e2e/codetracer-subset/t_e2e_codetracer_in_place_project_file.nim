@@ -123,10 +123,8 @@ int main(int argc, char **argv) {
 }
 """
 
-const CodeTracerDevToolExecutables = [
+const CodeTracerCommonDevToolExecutables = [
   "bash",
-  "bpftrace",
-  "bpftool",
   "cachix",
   "capnp",
   "cargo",
@@ -134,7 +132,6 @@ const CodeTracerDevToolExecutables = [
   "clang",
   "ctags",
   "curl",
-  "dpkg",
   "electron",
   "emcc",
   "flake8",
@@ -166,17 +163,32 @@ const CodeTracerDevToolExecutables = [
   "stylus",
   "tmux",
   "tree-sitter",
-  "tup",
   "vim",
   "wasm-opt",
   "wasm-pack",
   "webpack-cli",
   "wget",
-  "xdotool",
-  "xvfb-run",
   "yarn",
   "zstd"
 ]
+
+when not defined(macosx):
+  const CodeTracerTupToolExecutables = ["tup"]
+else:
+  const CodeTracerTupToolExecutables: array[0, string] = []
+
+when defined(linux):
+  const CodeTracerDevToolExecutables = CodeTracerCommonDevToolExecutables &
+    CodeTracerTupToolExecutables & [
+    "bpftrace",
+    "bpftool",
+    "dpkg",
+    "xdotool",
+    "xvfb-run"
+  ]
+else:
+  const CodeTracerDevToolExecutables = CodeTracerCommonDevToolExecutables &
+    CodeTracerTupToolExecutables
 
 const IsonimAsyncCompatFixtureSource = r"""
 when defined(js):
