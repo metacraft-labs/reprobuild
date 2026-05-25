@@ -28,52 +28,52 @@ const
     byte(ord('L'))]
   BuildPoolPayloadVersion = 1'u16
 
-proc resetPackageRegistry*() =
+proc resetPackageRegistry*() {.dynOrStatic.} =
   registry.setLen(0)
 
-proc registerPackageDef*(pkg: PackageDef) =
+proc registerPackageDef*(pkg: PackageDef) {.dynOrStatic.} =
   registry.add(pkg)
 
-proc registeredPackages*(): seq[PackageDef] =
+proc registeredPackages*(): seq[PackageDef] {.dynOrStatic.} =
   registry
 
-proc resetBuildActionRegistry*() =
+proc resetBuildActionRegistry*() {.dynOrStatic.} =
   buildActionRegistry.setLen(0)
 
-proc registeredBuildActions*(): seq[BuildActionDef] =
+proc registeredBuildActions*(): seq[BuildActionDef] {.dynOrStatic.} =
   buildActionRegistry
 
-proc resetBuildTargetRegistry*() =
+proc resetBuildTargetRegistry*() {.dynOrStatic.} =
   buildTargetRegistry.setLen(0)
 
-proc registeredBuildTargets*(): seq[BuildTargetDef] =
+proc registeredBuildTargets*(): seq[BuildTargetDef] {.dynOrStatic.} =
   buildTargetRegistry
 
-proc resetBuildPoolRegistry*() =
+proc resetBuildPoolRegistry*() {.dynOrStatic.} =
   buildPoolRegistry.setLen(0)
 
-proc registeredBuildPools*(): seq[BuildPoolDef] =
+proc registeredBuildPools*(): seq[BuildPoolDef] {.dynOrStatic.} =
   buildPoolRegistry
 
-proc resetDefaultBuildActionRegistry*() =
+proc resetDefaultBuildActionRegistry*() {.dynOrStatic.} =
   defaultBuildActionRegistry = ""
 
-proc defaultBuildAction*(id: string) =
+proc defaultBuildAction*(id: string) {.dynOrStatic.} =
   defaultBuildActionRegistry = id
 
-proc defaultBuildAction*(action: BuildActionDef) =
+proc defaultBuildAction*(action: BuildActionDef) {.dynOrStatic.} =
   defaultBuildActionRegistry = action.id
 
-proc defaultBuildAction*(target: BuildTargetDef) =
+proc defaultBuildAction*(target: BuildTargetDef) {.dynOrStatic.} =
   defaultBuildActionRegistry = target.name
 
-proc defaultTarget*(action: BuildActionDef) =
+proc defaultTarget*(action: BuildActionDef) {.dynOrStatic.} =
   defaultBuildAction(action)
 
-proc defaultTarget*(target: BuildTargetDef) =
+proc defaultTarget*(target: BuildTargetDef) {.dynOrStatic.} =
   defaultBuildAction(target)
 
-proc registeredDefaultBuildAction*(): string =
+proc registeredDefaultBuildAction*(): string {.dynOrStatic.} =
   defaultBuildActionRegistry
 
 when defined(reproProviderMode):
@@ -94,12 +94,12 @@ when defined(reproProviderMode):
     else:
       os.normalizedPath(currentProviderProjectRoot / path)
 
-  proc providerDirectoryInput*(path: string) =
+  proc providerDirectoryInput*(path: string) {.dynOrStatic.} =
     providerEvaluationInputRegistry.add(
       directoryEnumerationInput(materialProviderPath(path), "", ""))
 
   proc providerDirectoryInput*(path, memberEntryPointId,
-                               memberEntryPointBodyHash: string) =
+                               memberEntryPointBodyHash: string) {.dynOrStatic.} =
     let material = materialProviderPath(path)
     providerEvaluationInputRegistry.add(
       directoryEnumerationInput(material, memberEntryPointId,
@@ -108,7 +108,7 @@ when defined(reproProviderMode):
   proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
     providerEvaluationInputRegistry
 
-  proc selectedActivityList*(activity: string): seq[string] =
+  proc selectedActivityList*(activity: string): seq[string] {.dynOrStatic.} =
     for item in activity.split(','):
       let stripped = item.strip()
       if stripped.len > 0:
@@ -129,33 +129,33 @@ when defined(reproProviderMode):
       separator: separator,
       activityRequirements: @activities))
 
-  proc setEnv*(name, value: string; activities: openArray[string] = []) =
+  proc setEnv*(name, value: string; activities: openArray[string] = []) {.dynOrStatic.} =
     addDevEnvShellOp(deskSetEnv, name, value, activities = activities)
 
-  proc unsetEnv*(name: string; activities: openArray[string] = []) =
+  proc unsetEnv*(name: string; activities: openArray[string] = []) {.dynOrStatic.} =
     addDevEnvShellOp(deskUnsetEnv, name, "", activities = activities)
 
   proc prependPath*(name, value: string; separator = $PathSep;
-                    activities: openArray[string] = []) =
+                    activities: openArray[string] = []) {.dynOrStatic.} =
     addDevEnvShellOp(deskPrependPath, name, value, separator, activities)
 
   proc appendPath*(name, value: string; separator = $PathSep;
-                   activities: openArray[string] = []) =
+                   activities: openArray[string] = []) {.dynOrStatic.} =
     addDevEnvShellOp(deskAppendPath, name, value, separator, activities)
 
   proc setPathList*(name: string; values: openArray[string];
                     separator = $PathSep;
-                    activities: openArray[string] = []) =
+                    activities: openArray[string] = []) {.dynOrStatic.} =
     addDevEnvShellOp(deskSetPathList, name, (@values).join(separator),
       separator, activities)
 
-  proc setWorkingDirectory*(path: string; activities: openArray[string] = []) =
+  proc setWorkingDirectory*(path: string; activities: openArray[string] = []) {.dynOrStatic.} =
     addDevEnvShellOp(deskSetWorkingDirectory, "PWD", materialProviderPath(path),
       activities = activities)
 
   proc useTool*(logicalName: string; packageSelector = "";
                 executableName = ""; policyPath: openArray[string] = [];
-                activities: openArray[string] = []) =
+                activities: openArray[string] = []) {.dynOrStatic.} =
     let selector =
       if packageSelector.len > 0: packageSelector else: logicalName
     devEnvToolRegistry.add(DevEnvToolRequirement(
@@ -165,11 +165,11 @@ when defined(reproProviderMode):
       policyPath: @policyPath,
       activityRequirements: @activities))
 
-  proc activity*(name: string) =
+  proc activity*(name: string) {.dynOrStatic.} =
     addUniqueActivity(name)
 
   proc task*(name: string; command = ""; description = "";
-             activities: openArray[string] = []) =
+             activities: openArray[string] = []) {.dynOrStatic.} =
     devEnvTaskRegistry.add(DevEnvTaskMetadata(
       name: name,
       description: description,
@@ -177,26 +177,26 @@ when defined(reproProviderMode):
       activityRequirements: @activities))
 
   proc servicePlaceholder*(name: string; metadata = "";
-                           activities: openArray[string] = []) =
+                           activities: openArray[string] = []) {.dynOrStatic.} =
     devEnvServiceRegistry.add(DevEnvServiceMetadata(
       name: name,
       activityRequirements: @activities,
       metadata: metadata))
 
   proc diagnostic*(message: string; severity = dedsInfo;
-                   sourceFile = ""; sourceLine = 0) =
+                   sourceFile = ""; sourceLine = 0) {.dynOrStatic.} =
     devEnvDiagnosticRegistry.add(DevEnvDiagnostic(
       severity: severity,
       message: message,
       sourceFile: sourceFile,
       sourceLine: sourceLine))
 
-  proc readDevEnvFile*(path: string): string =
+  proc readDevEnvFile*(path: string): string {.dynOrStatic.} =
     let material = materialProviderPath(path)
     providerEvaluationInputRegistry.add(fileReadInput(material))
     readFile(extendedPath(material))
 
-  proc developOverridePath*(dependency: string): string =
+  proc developOverridePath*(dependency: string): string {.dynOrStatic.} =
     ## Return the active local develop-mode path for `dependency`, if one is
     ## present in the local workspace metadata supplied by the engine.
     let metadataPath = getEnv("REPRO_DEVELOP_OVERRIDES_FILE")
@@ -252,20 +252,20 @@ when defined(reproProviderMode):
         result.add(service)
 
 else:
-  proc providerDirectoryInput*(path: string) =
+  proc providerDirectoryInput*(path: string) {.dynOrStatic.} =
     discard path
 
   proc providerDirectoryInput*(path, memberEntryPointId,
-                               memberEntryPointBodyHash: string) =
+                               memberEntryPointBodyHash: string) {.dynOrStatic.} =
     discard path
     discard memberEntryPointId
     discard memberEntryPointBodyHash
 
-  proc developOverridePath*(dependency: string): string =
+  proc developOverridePath*(dependency: string): string {.dynOrStatic.} =
     discard dependency
     ""
 
-proc dirListing*(path: string): seq[string] =
+proc dirListing*(path: string): seq[string] {.dynOrStatic.} =
   if not dirExists(extendedPath(path)):
     return @[]
   # TODO(win-longpath): walk results escape; needs review
@@ -277,7 +277,7 @@ proc dirListing*(path: string): seq[string] =
 proc cliArg*(name: string; value: string; kind = cpkFlag; position = 0;
              alias = ""; format = cafSeparate;
              placement = capAfterSubcommand;
-             repeated = false): PublicCliArg =
+             repeated = false): PublicCliArg {.dynOrStatic.} =
   PublicCliArg(name: name, nimType: "string", kind: kind, position: position,
     alias: alias, format: format, placement: placement, repeated: repeated,
     encodedValue: value)
@@ -285,7 +285,7 @@ proc cliArg*(name: string; value: string; kind = cpkFlag; position = 0;
 proc cliArg*(name: string; value: int; kind = cpkFlag; position = 0;
              alias = ""; format = cafSeparate;
              placement = capAfterSubcommand;
-             repeated = false): PublicCliArg =
+             repeated = false): PublicCliArg {.dynOrStatic.} =
   PublicCliArg(name: name, nimType: "int", kind: kind, position: position,
     alias: alias, format: format, placement: placement, repeated: repeated,
     encodedValue: $value)
@@ -293,7 +293,7 @@ proc cliArg*(name: string; value: int; kind = cpkFlag; position = 0;
 proc cliArg*(name: string; value: bool; kind = cpkFlag; position = 0;
              alias = ""; format = cafSeparate;
              placement = capAfterSubcommand;
-             repeated = false): PublicCliArg =
+             repeated = false): PublicCliArg {.dynOrStatic.} =
   PublicCliArg(name: name, nimType: "bool", kind: kind, position: position,
     alias: alias, format: format, placement: placement, repeated: repeated,
     encodedValue: $value)
@@ -301,7 +301,7 @@ proc cliArg*(name: string; value: bool; kind = cpkFlag; position = 0;
 proc cliArgSeq*(name: string; value: seq[string]; kind = cpkFlag; position = 0;
                 alias = ""; format = cafSeparate;
                 placement = capAfterSubcommand;
-                repeated = false): PublicCliArg =
+                repeated = false): PublicCliArg {.dynOrStatic.} =
   PublicCliArg(name: name, nimType: "seq[string]", kind: kind, position: position,
     alias: alias, format: format, placement: placement, repeated: repeated,
     encodedValue: value.join("\x1f"))
@@ -309,7 +309,7 @@ proc cliArgSeq*(name: string; value: seq[string]; kind = cpkFlag; position = 0;
 proc inputArg*(name: string; value: string; kind = cpkFlag; position = 0;
                alias = ""; format = cafSeparate;
                placement = capAfterSubcommand;
-               repeated = false): PublicCliArg =
+               repeated = false): PublicCliArg {.dynOrStatic.} =
   result = cliArg(name, value, kind, position, alias, format, placement,
     repeated)
   result.role = carInput
@@ -317,7 +317,7 @@ proc inputArg*(name: string; value: string; kind = cpkFlag; position = 0;
 proc outputArg*(name: string; value: string; kind = cpkFlag; position = 0;
                 alias = ""; format = cafSeparate;
                 placement = capAfterSubcommand;
-                repeated = false): PublicCliArg =
+                repeated = false): PublicCliArg {.dynOrStatic.} =
   result = cliArg(name, value, kind, position, alias, format, placement,
     repeated)
   result.role = carOutput
@@ -325,7 +325,7 @@ proc outputArg*(name: string; value: string; kind = cpkFlag; position = 0;
 proc inputArgSeq*(name: string; value: seq[string]; kind = cpkFlag; position = 0;
                   alias = ""; format = cafSeparate;
                   placement = capAfterSubcommand;
-                  repeated = false): PublicCliArg =
+                  repeated = false): PublicCliArg {.dynOrStatic.} =
   result = cliArgSeq(name, value, kind, position, alias, format, placement,
     repeated)
   result.role = carInput
@@ -333,14 +333,14 @@ proc inputArgSeq*(name: string; value: seq[string]; kind = cpkFlag; position = 0
 proc outputArgSeq*(name: string; value: seq[string]; kind = cpkFlag;
                    position = 0; alias = ""; format = cafSeparate;
                    placement = capAfterSubcommand;
-                   repeated = false): PublicCliArg =
+                   repeated = false): PublicCliArg {.dynOrStatic.} =
   result = cliArgSeq(name, value, kind, position, alias, format, placement,
     repeated)
   result.role = carOutput
 
 proc publicCliCall*(packageName, executableName, subcommand,
                     providerEntrypointId: string;
-                    arguments: openArray[PublicCliArg]): PublicCliCall =
+                    arguments: openArray[PublicCliArg]): PublicCliCall {.dynOrStatic.} =
   PublicCliCall(
     packageName: packageName,
     executableName: executableName,
@@ -348,22 +348,22 @@ proc publicCliCall*(packageName, executableName, subcommand,
     providerEntrypointId: providerEntrypointId,
     arguments: @arguments)
 
-proc selectedExecutable*(packageName, executableName: string): SelectedExecutable =
+proc selectedExecutable*(packageName, executableName: string): SelectedExecutable {.dynOrStatic.} =
   SelectedExecutable(packageName: packageName, executableName: executableName)
 
-proc defaultDependencyPolicy*(): BuildActionDependencyPolicy =
+proc defaultDependencyPolicy*(): BuildActionDependencyPolicy {.dynOrStatic.} =
   BuildActionDependencyPolicy(kind: bdpDefault)
 
-proc declaredOnlyDependencyPolicy*(): BuildActionDependencyPolicy =
+proc declaredOnlyDependencyPolicy*(): BuildActionDependencyPolicy {.dynOrStatic.} =
   BuildActionDependencyPolicy(kind: bdpDeclaredOnly)
 
-proc automaticMonitorPolicy*(): BuildActionDependencyPolicy =
+proc automaticMonitorPolicy*(): BuildActionDependencyPolicy {.dynOrStatic.} =
   BuildActionDependencyPolicy(kind: bdpAutomaticMonitor)
 
-proc makeDepfilePolicy*(depfile = ""): BuildActionDependencyPolicy =
+proc makeDepfilePolicy*(depfile = ""): BuildActionDependencyPolicy {.dynOrStatic.} =
   BuildActionDependencyPolicy(kind: bdpMakeDepfile, depfile: depfile)
 
-proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy =
+proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy {.dynOrStatic.} =
   acfpTimestamp
 
 const
@@ -382,7 +382,7 @@ proc builtinHcrCall(command: string; arguments: openArray[PublicCliArg]):
   publicCliCall(BuiltinPackageName, BuiltinHcrExecutable, command,
     BuiltinPackageName & "." & BuiltinHcrExecutable & "." & command, arguments)
 
-proc inlineExecCall*(argv: openArray[string]; cwd = ""): PublicCliCall =
+proc inlineExecCall*(argv: openArray[string]; cwd = ""): PublicCliCall {.dynOrStatic.} =
   ## Builds a PublicCliCall that, when lowered by the engine, runs `argv`
   ## directly via the OS spawn primitive without consulting any package
   ## profile or wrapper script. The action's LaunchPlan is fully realized
@@ -425,7 +425,7 @@ proc buildAction*(id: string; call: PublicCliCall;
                   commandStatsId = "";
                   dependencyPolicy = defaultDependencyPolicy();
                   actionCachePolicy = defaultActionCachePolicy()):
-    BuildActionDef =
+    BuildActionDef {.dynOrStatic.} =
   result = BuildActionDef(
     id: id,
     call: call,
@@ -442,7 +442,7 @@ proc buildAction*(id: string; call: PublicCliCall;
     actionCachePolicy: actionCachePolicy)
   buildActionRegistry.add(result)
 
-proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable.} =
+proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
   result = BuildPoolDef(name: name, capacity: capacity)
   buildPoolRegistry.add(result)
 
@@ -450,16 +450,16 @@ proc addUniqueValue(values: var seq[string]; value: string) =
   if value.len > 0 and values.find(value) < 0:
     values.add(value)
 
-proc actionIds*(actions: openArray[BuildActionDef]): seq[string] =
+proc actionIds*(actions: openArray[BuildActionDef]): seq[string] {.dynOrStatic.} =
   for action in actions:
     result.addUniqueValue(action.id)
 
-proc targetNames*(targets: openArray[BuildTargetDef]): seq[string] =
+proc targetNames*(targets: openArray[BuildTargetDef]): seq[string] {.dynOrStatic.} =
   for target in targets:
     result.addUniqueValue(target.name)
 
 proc combineActionDeps*(deps: openArray[string];
-                        after: openArray[BuildActionDef] = []): seq[string] =
+                        after: openArray[BuildActionDef] = []): seq[string] {.dynOrStatic.} =
   for dep in deps:
     result.addUniqueValue(dep)
   for action in after:
@@ -470,27 +470,27 @@ proc registerBuildTarget(target: BuildTargetDef): BuildTargetDef =
   buildTargetRegistry.add(result)
 
 proc target*(name: string; action: BuildActionDef): BuildTargetDef
-    {.discardable.} =
+    {.discardable, dynOrStatic.} =
   registerBuildTarget(BuildTargetDef(name: name, actions: @[action.id]))
 
 proc target*(name: string; actions: openArray[BuildActionDef]): BuildTargetDef
-    {.discardable.} =
+    {.discardable, dynOrStatic.} =
   var actionRefs: seq[string] = @[]
   for action in actions:
     actionRefs.addUniqueValue(action.id)
   registerBuildTarget(BuildTargetDef(name: name, actions: actionRefs))
 
 proc exportTarget*(name: string; action: BuildActionDef): BuildTargetDef
-    {.discardable.} =
+    {.discardable, dynOrStatic.} =
   target(name, action)
 
 proc exportTarget*(name: string; actions: openArray[BuildActionDef]):
-    BuildTargetDef {.discardable.} =
+    BuildTargetDef {.discardable, dynOrStatic.} =
   target(name, actions)
 
 proc aggregate*(name: string; actions: openArray[BuildActionDef] = [];
                 targets: openArray[BuildTargetDef] = []): BuildTargetDef
-    {.discardable.} =
+    {.discardable, dynOrStatic.} =
   var actionRefs: seq[string] = @[]
   var targetRefs: seq[string] = @[]
   for action in actions:
@@ -503,11 +503,11 @@ proc aggregate*(name: string; actions: openArray[BuildActionDef] = [];
     targets: targetRefs))
 
 proc exportTarget*(name: string; target: BuildTargetDef): BuildTargetDef
-    {.discardable.} =
+    {.discardable, dynOrStatic.} =
   registerBuildTarget(BuildTargetDef(name: name, targets: @[target.name]))
 
 proc exportTarget*(name: string; targets: openArray[BuildTargetDef]):
-    BuildTargetDef {.discardable.} =
+    BuildTargetDef {.discardable, dynOrStatic.} =
   var targetRefs: seq[string] = @[]
   for target in targets:
     targetRefs.addUniqueValue(target.name)
@@ -528,12 +528,12 @@ proc addRoleValues(paths: var seq[string]; arg: PublicCliArg) =
   else:
     paths.addUniquePath(arg.encodedValue)
 
-proc declaredInputPaths*(call: PublicCliCall): seq[string] =
+proc declaredInputPaths*(call: PublicCliCall): seq[string] {.dynOrStatic.} =
   for arg in call.arguments:
     if arg.role == carInput:
       result.addRoleValues(arg)
 
-proc declaredOutputPaths*(call: PublicCliCall): seq[string] =
+proc declaredOutputPaths*(call: PublicCliCall): seq[string] {.dynOrStatic.} =
   for arg in call.arguments:
     if arg.role == carOutput:
       result.addRoleValues(arg)
@@ -549,7 +549,7 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
                           commandStatsId = "";
                           dependencyPolicy = defaultDependencyPolicy();
                           actionCachePolicy = defaultActionCachePolicy()):
-    BuildActionDef =
+    BuildActionDef {.dynOrStatic.} =
   var inputs = declaredInputPaths(call)
   var outputs = declaredOutputPaths(call)
   for item in extraInputs:
@@ -581,7 +581,7 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
                            commandStatsId = "";
                            dependencyPolicy = defaultDependencyPolicy();
                            actionCachePolicy = defaultActionCachePolicy()):
-    BuildActionDef =
+    BuildActionDef {.dynOrStatic.} =
   recordCommandAction(
     id,
     call,
@@ -602,7 +602,7 @@ proc prepareObject*(tool: ReproHcr; input, output: string;
                     after: openArray[BuildActionDef] = [];
                     cacheable = true; commandStatsId = "";
                     actionCachePolicy = defaultActionCachePolicy()):
-    BuildActionDef {.discardable.} =
+    BuildActionDef {.discardable, dynOrStatic.} =
   discard tool
   let call = builtinHcrCall("prepareObject", [
     inputArg("input", input),
@@ -617,7 +617,7 @@ proc prepareObject*(tool: ReproHcr; input, output: string;
     dependencyPolicy = declaredOnlyDependencyPolicy(),
     actionCachePolicy = actionCachePolicy)
 
-proc machoSegmentLinkFlags*(tool: ReproHcr; segmentName = "__HCR"): string =
+proc machoSegmentLinkFlags*(tool: ReproHcr; segmentName = "__HCR"): string {.dynOrStatic.} =
   discard tool
   when defined(macosx):
     "-Wl,-segprot," & segmentName & ",rwx,rwx"
@@ -625,7 +625,7 @@ proc machoSegmentLinkFlags*(tool: ReproHcr; segmentName = "__HCR"): string =
     ""
 
 proc patchableFunctionEntryFlag*(tool: ReproHcr; entryBytes = 16;
-                                 entryOffset = 0): string =
+                                 entryOffset = 0): string {.dynOrStatic.} =
   discard tool
   "-fpatchable-function-entry=" & $entryBytes & "," & $entryOffset
 
@@ -634,7 +634,7 @@ proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
                after: openArray[BuildActionDef] = [];
                cacheable = true; commandStatsId = "";
                actionCachePolicy = defaultActionCachePolicy()):
-    BuildActionDef {.discardable.} =
+    BuildActionDef {.discardable, dynOrStatic.} =
   discard tool
   let call = builtinFsCall("copyFile", [
     inputArg("source", source),
@@ -651,7 +651,7 @@ proc ensureDir*(tool: ReproFs; path: string; actionId = "";
                 deps: openArray[string] = [];
                 after: openArray[BuildActionDef] = [];
                 commandStatsId = ""):
-    BuildActionDef {.discardable.} =
+    BuildActionDef {.discardable, dynOrStatic.} =
   discard tool
   let call = builtinFsCall("ensureDir", [
     outputArg("path", path)
@@ -667,7 +667,7 @@ proc writeText*(tool: ReproFs; output, text: string; actionId = "";
                 after: openArray[BuildActionDef] = [];
                 cacheable = true; commandStatsId = "";
                 actionCachePolicy = defaultActionCachePolicy()):
-    BuildActionDef {.discardable.} =
+    BuildActionDef {.discardable, dynOrStatic.} =
   discard tool
   let call = builtinFsCall("writeText", [
     outputArg("output", output),
@@ -686,7 +686,7 @@ proc stamp*(tool: ReproFs; output, title: string;
             after: openArray[BuildActionDef] = [];
             cacheable = true; commandStatsId = "";
             actionCachePolicy = defaultActionCachePolicy()):
-    BuildActionDef {.discardable.} =
+    BuildActionDef {.discardable, dynOrStatic.} =
   discard tool
   let call = builtinFsCall("stamp", [
     outputArg("output", output),
@@ -752,7 +752,7 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
                    after: openArray[BuildActionDef] = [];
                    excludePrefixes: openArray[string] = [];
                    commandStatsId = ""):
-    BuildActionDef {.discardable.} =
+    BuildActionDef {.discardable, dynOrStatic.} =
   discard tool
   providerDirectoryInput(sourceRoot)
   let tree = collectPreserveTree(sourceRoot)
@@ -790,7 +790,7 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
     commandStatsId = commandStatsId,
     dependencyPolicy = declaredOnlyDependencyPolicy())
 
-proc normalizedDeclaredProjectPath*(projectRoot, path: string): string =
+proc normalizedDeclaredProjectPath*(projectRoot, path: string): string {.dynOrStatic.} =
   result = path.replace('\\', '/').strip()
   while result.startsWith("./"):
     result = result.substr(2)
@@ -809,7 +809,7 @@ proc normalizedDeclaredProjectPath*(projectRoot, path: string): string =
     result = normalizedPathValue
 
 proc inferDeclaredActionDeps*(actions: openArray[BuildActionDef];
-                              projectRoot = ""): seq[BuildActionDef] =
+                              projectRoot = ""): seq[BuildActionDef] {.dynOrStatic.} =
   result = @actions
   var outputProducer = initTable[string, string]()
   for action in actions:
@@ -989,7 +989,7 @@ proc readActionCachePolicy(bytes: openArray[byte]; pos: var int):
     raisePayload("invalid action cache policy in build action payload")
   ActionCacheFingerprintPolicy(policy)
 
-proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
+proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.} =
   var payload: seq[byte] = @[]
   payload.writeString(action.id)
   payload.writeCliCall(action.call)
@@ -1010,7 +1010,7 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] =
   result.writeU32Le(uint32(payload.len))
   result.add(payload)
 
-proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
+proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrStatic.} =
   if bytes.len < 10:
     raisePayload("truncated build action payload envelope")
   for i in 0 ..< BuildActionPayloadMagic.len:
@@ -1051,10 +1051,10 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef =
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
-proc actionPayload*(action: BuildActionDef): string =
+proc actionPayload*(action: BuildActionDef): string {.dynOrStatic.} =
   fromBytes(encodeBuildActionPayload(action))
 
-proc encodeBuildTargetPayload*(target: BuildTargetDef): seq[byte] =
+proc encodeBuildTargetPayload*(target: BuildTargetDef): seq[byte] {.dynOrStatic.} =
   var payload: seq[byte] = @[]
   payload.writeString(target.name)
   payload.writeStringSeq(target.actions)
@@ -1065,7 +1065,7 @@ proc encodeBuildTargetPayload*(target: BuildTargetDef): seq[byte] =
   result.writeU32Le(uint32(payload.len))
   result.add(payload)
 
-proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef =
+proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrStatic.} =
   if bytes.len < 10:
     raisePayload("truncated build target payload envelope")
   for i in 0 ..< BuildTargetPayloadMagic.len:
@@ -1084,10 +1084,10 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef =
   if pos != bytes.len:
     raisePayload("trailing build target payload bytes")
 
-proc targetPayload*(target: BuildTargetDef): string =
+proc targetPayload*(target: BuildTargetDef): string {.dynOrStatic.} =
   fromBytes(encodeBuildTargetPayload(target))
 
-proc encodeBuildPoolPayload*(pool: BuildPoolDef): seq[byte] =
+proc encodeBuildPoolPayload*(pool: BuildPoolDef): seq[byte] {.dynOrStatic.} =
   var payload: seq[byte] = @[]
   payload.writeString(pool.name)
   payload.writeU32Le(pool.capacity)
@@ -1097,7 +1097,7 @@ proc encodeBuildPoolPayload*(pool: BuildPoolDef): seq[byte] =
   result.writeU32Le(uint32(payload.len))
   result.add(payload)
 
-proc decodeBuildPoolPayload*(bytes: openArray[byte]): BuildPoolDef =
+proc decodeBuildPoolPayload*(bytes: openArray[byte]): BuildPoolDef {.dynOrStatic.} =
   if bytes.len < 10:
     raisePayload("truncated build pool payload envelope")
   for i in 0 ..< BuildPoolPayloadMagic.len:
@@ -1115,10 +1115,10 @@ proc decodeBuildPoolPayload*(bytes: openArray[byte]): BuildPoolDef =
   if pos != bytes.len:
     raisePayload("trailing build pool payload bytes")
 
-proc poolPayload*(pool: BuildPoolDef): string =
+proc poolPayload*(pool: BuildPoolDef): string {.dynOrStatic.} =
   fromBytes(encodeBuildPoolPayload(pool))
 
-proc callIdentity*(call: PublicCliCall): string =
+proc callIdentity*(call: PublicCliCall): string {.dynOrStatic.} =
   var parts = @[call.packageName, call.executableName, call.subcommand,
                 call.providerEntrypointId]
   for arg in call.arguments:
@@ -1148,8 +1148,9 @@ proc actionIdPart(value: string): string =
   if result.len == 0:
     result = "tool"
 
-proc defaultToolActionId*(call: PublicCliCall): string =
+proc defaultToolActionId*(call: PublicCliCall): string {.dynOrStatic.} =
   var base = actionIdPart(call.executableName)
   if call.subcommand.len > 0:
     base.add("-" & actionIdPart(call.subcommand))
   base & "-" & stableHashHex(callIdentity(call))
+

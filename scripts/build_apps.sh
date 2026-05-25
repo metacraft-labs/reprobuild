@@ -96,6 +96,7 @@ nim c \
   --threads:on \
   --mm:orc \
   --define:reproProviderMode \
+  --define:reproProviderRuntimeDll \
   --nimcache:build/nimcache/repro-project-dsl-runtime-dll \
   --out:"build/lib/librepro_project_dsl_runtime.${dll_ext}" \
   libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim

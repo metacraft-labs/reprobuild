@@ -81,7 +81,7 @@ when defined(reproProviderMode):
 
   proc buildPackageFragment*(pkg: PackageDef; request: ProviderGraphRequest;
                              buildProc: proc (); includeDefault = true):
-      GraphFragment =
+      GraphFragment {.dynOrStatic.} =
     resetBuildActionRegistry()
     resetBuildTargetRegistry()
     resetBuildPoolRegistry()
@@ -178,7 +178,7 @@ when defined(reproProviderMode):
     result.fragmentDigest = computeGraphFragmentDigest(result)
 
   proc buildPackageDevEnv*(pkg: PackageDef; request: ProviderGraphRequest;
-                           devEnvProc: proc ()): DevEnvResult =
+                           devEnvProc: proc ()): DevEnvResult {.dynOrStatic.} =
     if devEnvProc == nil:
       raise newException(ValueError,
         "provider does not implement dev-env introspection")
@@ -234,7 +234,7 @@ when defined(reproProviderMode):
                            foreachDefs: openArray[ProviderForeachDef] = [];
                            foreachDispatch: proc (
                              request: ProviderGraphRequest): GraphFragment = nil;
-                           devEnvProc: proc () = nil): int =
+                           devEnvProc: proc () = nil): int {.dynOrStatic.} =
     try:
       let paths = parseProviderProtocolArgs(commandLineParams())
       let request = readProviderRequestFile(paths.requestPath)
@@ -266,3 +266,4 @@ when defined(reproProviderMode):
     except CatchableError as err:
       stderr.writeLine("repro project provider: error: " & err.msg)
       1
+

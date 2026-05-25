@@ -42,32 +42,29 @@ when defined(reproProviderMode):
 
 include "repro_project_dsl/types"
 
-when defined(reproProviderDynamic):
-  # Tier 1 dynamic mode (opt-in via ``REPRO_PROVIDER_DYNAMIC=1`` on the
-  # engine side; see ``providerCompileCommand`` in
-  # ``repro_interface_artifacts``). The runtime portion of the DSL is
-  # available as ``librepro_project_dsl_runtime.{dll,so,dylib}`` next
-  # to ``repro.exe``.
-  #
-  # Status: the foundation is in place (DLL builds, link flags emit,
-  # umbrella branches), but the runtime include files are still pulled
-  # in here unchanged. The configure-time speedup only materialises
-  # once a follow-on change replaces the runtime includes below with
-  # ``{.dynlib, importc.}`` forward declarations generated from the
-  # same proc surface. The macros call a small set of runtime procs
-  # from their compile-time bodies — at least
-  # ``defaultDependencyPolicy``, ``declaredOnlyDependencyPolicy``,
-  # ``automaticMonitorPolicy``, ``makeDepfilePolicy``,
-  # ``stableHashHex``, ``callIdentity``, ``defaultToolActionId``,
-  # ``actionIdPart``, ``parseExpr``-emitting helpers — and those
-  # specific bodies must stay static so the Nim VM can still execute
-  # them when expanding ``package`` / ``defineCliInterface``.
-  include "repro_project_dsl/runtime_core"
-  include "repro_project_dsl/macros_a"
-  include "repro_project_dsl/runtime_provider"
-  include "repro_project_dsl/macros_b"
-else:
-  include "repro_project_dsl/runtime_core"
-  include "repro_project_dsl/macros_a"
-  include "repro_project_dsl/runtime_provider"
-  include "repro_project_dsl/macros_b"
+# The ``dynOrStatic`` pragma macro toggles each public runtime proc
+# between three roles:
+#   * legacy monolithic build (default): body stays, no decoration;
+#   * shared DSL runtime DLL build (``-d:reproProviderRuntimeDll``):
+#     body stays, proc is annotated ``{.exportc, dynlib.}`` so its
+#     symbol is exported from ``librepro_project_dsl_runtime.{dll,
+#     so,dylib}``;
+#   * static stub in dynamic mode (``-d:reproProviderDynamic``,
+#     selected via ``REPRO_PROVIDER_DYNAMIC=1`` — see
+#     ``providerCompileCommand`` in ``repro_interface_artifacts``):
+#     body is dropped, proc is annotated
+#     ``{.importc, dynlib: "repro_project_dsl_runtime".}`` so the
+#     per-project provider binary links against the shared DLL
+#     instead of compiling ~5000 lines of DSL+runtime code inline.
+#
+# Procs called from macro bodies at compile time (``stableHashHex``,
+# ``parsePackageDef``, ``dependencyPolicyCode``, …) are file-local
+# (no ``*``) and are not annotated with ``{.dynOrStatic.}``; they
+# stay statically compiled so the Nim VM can still execute them when
+# expanding ``package`` / ``defineCliInterface``.
+import "repro_project_dsl/dyn_or_static"
+export dyn_or_static
+include "repro_project_dsl/runtime_core"
+include "repro_project_dsl/macros_a"
+include "repro_project_dsl/runtime_provider"
+include "repro_project_dsl/macros_b"
