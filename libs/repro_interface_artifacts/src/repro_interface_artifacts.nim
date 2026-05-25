@@ -1468,7 +1468,17 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
 
   let moduleDir = parentDir(modulePath)
   let moduleName = splitFile(modulePath).name
-  let tempParent = buildScratchRoot(workDir, scratchDir) / "m7-temp"
+  # Windows: the extract_runner.nim path is passed verbatim to a child
+  # `nim c` invocation, and nim opens it via the non-extended Win32 API,
+  # so paths longer than MAX_PATH (260 chars) cause `Error: cannot open
+  # …extract_runner.nim`. CMake TryCompile workdirs nested inside the
+  # generator's per-build worktree blow past that limit, so prefer the
+  # system temp dir for the runner scratch tree on Windows.
+  let tempParent =
+    when defined(windows):
+      getTempDir() / "repro-interface-extract"
+    else:
+      buildScratchRoot(workDir, scratchDir) / "m7-temp"
   createDir(extendedPath(tempParent))
   inc interfaceTempNonce
   let now = getTime()
@@ -1496,12 +1506,23 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # `.sha1`-based incremental compilation -- the dominant slice of the
   # compile cost. `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` falls back to
   # the per-tempRoot nimcache that isolates each invocation.
+  # Nim's `--nimcache:` directive is also subject to the MAX_PATH ceiling
+  # because Nim's own mkdir does not use the \\?\ extended-length prefix.
+  # On Windows root the shared nimcache under the same short temp parent
+  # we use for the runner, keyed by toolchain+library set so independent
+  # extractions still share the bulk of the standard-library compile
+  # cost. `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` keeps each
+  # extraction's nimcache fully isolated.
   let nimcache =
     if providerNimcacheMode() == "per-binary":
       tempRoot / "nimcache"
     else:
-      buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
-        sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
+      when defined(windows):
+        tempParent / "nimcache-interface" /
+          sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
+      else:
+        buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
+          sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
   var command = @[
     nimCompilerPath(), "c",
     "--define:reproInterfaceMode",
@@ -1632,13 +1653,23 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
   let scratchRoot = buildScratchRoot(workDir, scratchDir)
+  # Windows: nimcache lives in a short system-temp tree because Nim's
+  # mkdir does not use the \\?\ extended-length prefix. CMake TryCompile
+  # roots already overflow MAX_PATH by themselves, so the legacy
+  # `scratchRoot / "nimcache-provider"` layout cannot be created at all
+  # in that context. The same key is reused across every provider
+  # compile with matching toolchain + library set, so we still get the
+  # cache-sharing benefit within the same `repro` process.
+  let nimcacheRoot =
+    when defined(windows):
+      getTempDir() / "repro-nimcache-provider"
+    else:
+      scratchRoot / "nimcache-provider"
   let nimcache =
     if providerNimcacheMode() == "per-binary":
-      scratchRoot / "nimcache-provider" /
-        providerNimcacheKey(outputBinaryPath)
+      nimcacheRoot / providerNimcacheKey(outputBinaryPath)
     else:
-      scratchRoot / "nimcache-provider" /
-        sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
+      nimcacheRoot / sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
   result = @[
     nimCompilerPath(), "c",
     "--define:reproProviderMode",
