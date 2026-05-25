@@ -1702,12 +1702,28 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   result.insert(libFlags, 2)
   if providerDynamicEnabled():
     # Tier 1 shared DSL runtime DLL: opt-in via ``REPRO_PROVIDER_DYNAMIC=1``.
-    # The define switches the DSL umbrella module into dynamic mode (today a
-    # no-op pending the dynlib forward declarations) and the link flags
-    # point at the DLL location produced by ``scripts/build_apps.sh``.
+    # The define switches the DSL umbrella module into dynamic mode and
+    # the link flags point at the DLL location produced by
+    # ``scripts/build_apps.sh``.
+    #
+    # The absolute DLL path is also baked into the per-project provider
+    # via ``--define:reproProviderDynamicLibPath=<abs>`` so the
+    # ``{.dynlib.}`` consumer can ``dlopen``/``LoadLibrary`` the DLL
+    # directly when the per-project binary is launched from a directory
+    # where the default DLL search order would not find it — notably
+    # the deep CMake ``TryCompile`` scratch dirs that the
+    # cmake-reprobuild generator hands the engine. On POSIX the link
+    # step still emits an rpath so the binary is also self-locating
+    # when copied around.
     let libDir = providerDynamicLibDir(workDir)
+    let dllExt =
+      when defined(windows): "dll"
+      elif defined(macosx):  "dylib"
+      else:                  "so"
+    let dllAbsPath = absolutePath(libDir / ("librepro_project_dsl_runtime." & dllExt))
     var dynamicFlags = @[
       "--define:reproProviderDynamic",
+      "--define:reproProviderDynamicLibPath=" & dllAbsPath,
       "--passL:-L" & libDir,
       "--passL:-lrepro_project_dsl_runtime"
     ]

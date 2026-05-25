@@ -39,13 +39,21 @@
 
 import std/[macros, tables]
 
-# Full filename of the shared DSL runtime library. Nim's ``{.dynlib.}``
-# consumer does NOT mangle the string into a platform name
-# (``dlopen``/``LoadLibrary`` receive it verbatim), so we expand the
-# ``lib`` prefix + extension per platform here to match the artifact
-# produced by ``scripts/build_apps.sh``
+# Path passed to Nim's ``{.dynlib.}`` consumer. Nim's loader passes
+# this string verbatim to ``dlopen``/``LoadLibrary``, so we must
+# expand the ``lib`` prefix + platform extension ourselves to match
+# the artifact produced by ``scripts/build_apps.sh``
 # (``build/lib/librepro_project_dsl_runtime.{dll,so,dylib}``).
-const reproProviderDynamicLib* =
+#
+# When the engine has a known absolute DLL location (set via
+# ``--define:reproProviderDynamicLibPath=<abs>`` from
+# ``providerCompileCommand`` in ``repro_interface_artifacts``), prefer
+# the absolute path so the provider binary is self-locating even when
+# launched from a deep CMake ``TryCompile`` scratch dir whose Windows
+# DLL search order would not otherwise find the DLL. Falling back to
+# the bare basename keeps the legacy ``LD_LIBRARY_PATH`` / ``PATH``
+# discovery path open for hand-launched providers.
+const reproProviderDynamicLib* {.strdefine: "reproProviderDynamicLibPath".} =
   when defined(windows):    "librepro_project_dsl_runtime.dll"
   elif defined(macosx):     "librepro_project_dsl_runtime.dylib"
   else:                     "librepro_project_dsl_runtime.so"
