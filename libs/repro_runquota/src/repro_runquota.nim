@@ -1,4 +1,4 @@
-import std/[json, os, strutils]
+import std/[json, os, strutils, tables]
 from repro_core/paths import extendedPath
 
 # Windows: the sibling runquota repository now ships a Windows port
@@ -365,6 +365,83 @@ proc offerWithRunQuota*(session: ReproRunQuotaSession;
         "runquota denied lease: " & decision.diagnostic.diagnosticText())
     raise newException(ReproRunQuotaError,
       "runquota did not return a decision for the offered lease")
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
+
+proc maxOfferBatchSize*(session: ReproRunQuotaSession): int =
+  ## Maximum number of candidates the daemon will accept in a single
+  ## OfferCandidates frame. Negotiated at Hello time. Falls back to the
+  ## protocol default if the session is not (yet) active.
+  if session.isNil or not session.active:
+    return int(DefaultMaxCandidatesPerBatch)
+  let limit = session.client.flow.maxCandidatesPerBatch
+  if limit == 0'u32:
+    int(DefaultMaxCandidatesPerBatch)
+  else:
+    int(limit)
+
+proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
+                             requests: openArray[ReproResourceRequest];
+                             commands: openArray[ReproCommandSpec]):
+    seq[ReproRunQuotaOffer] =
+  ## Pipelined launch: submit up to ``maxCandidatesPerBatch`` candidates
+  ## to the daemon in a single round-trip, then start the granted ones
+  ## locally. Returns one offer per input, in the same order. Granted
+  ## offers spawn their child process; queued offers carry the lease so
+  ## the scheduler can adopt them later via ``pollRunQuotaGrants``.
+  ##
+  ## This eliminates the previous O(N) round-trip blow-up where the
+  ## scheduler waited on every offer response before issuing the next
+  ## one — the dominant contributor to the runquota=on vs runquota=off
+  ## ratio gap at parallel=32.
+  if requests.len != commands.len:
+    raise newException(ReproRunQuotaError,
+      "runquota batch offer: requests and commands have different lengths")
+  if not session.active:
+    raise newException(ReproRunQuotaError, "runquota session is not active")
+  result = newSeq[ReproRunQuotaOffer](requests.len)
+  if requests.len == 0:
+    return
+  let batchLimit = max(1, session.maxOfferBatchSize())
+  var processed = 0
+  try:
+    while processed < requests.len:
+      let chunk = min(batchLimit, requests.len - processed)
+      var candidates = newSeq[LeaseCandidate](chunk)
+      var candidateIds = newSeq[uint64](chunk)
+      for i in 0 ..< chunk:
+        let cid = session.nextCandidateId
+        inc session.nextCandidateId
+        candidateIds[i] = cid
+        candidates[i] = toCandidate(cid, requests[processed + i].toRunQuotaRequest())
+      let decisions = session.session.offerCandidates(candidates)
+      var decisionByCid = initTable[uint64, OfferedLease]()
+      for decision in decisions:
+        decisionByCid[decision.clientCandidateId] = decision
+      for i in 0 ..< chunk:
+        let cid = candidateIds[i]
+        let inputIndex = processed + i
+        if not decisionByCid.hasKey(cid):
+          raise newException(ReproRunQuotaError,
+            "runquota did not return a decision for offered candidate " & $cid)
+        let decision = decisionByCid[cid]
+        if decision.lease.active and not decision.queued:
+          result[inputIndex] = ReproRunQuotaOffer(
+            kind: rqokStarted,
+            running: session.startGrantedWithRunQuota(
+              decision.lease, commands[inputIndex]))
+        elif decision.lease.active and decision.queued:
+          result[inputIndex] = ReproRunQuotaOffer(
+            kind: rqokQueued,
+            queued: ReproRunQuotaQueuedProcess(
+              candidateId: cid,
+              lease: decision.lease,
+              command: commands[inputIndex],
+              active: true))
+        else:
+          raise newException(ReproRunQuotaError,
+            "runquota denied lease: " & decision.diagnostic.diagnosticText())
+      processed += chunk
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
 

@@ -1630,12 +1630,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   let runQuotaResultRoot = cacheRoot / "runquota-results"
   createDir(extendedPath(runQuotaResultRoot))
   var launchSeq = 0
+
+  type StagedInlineLaunch = object
+    id: string
+    pool: string
+    poolUnits: uint32
+    runningIdx: int
+    action: BuildAction
+    resultPath: string
+
   try:
     while completed < buildGraph.actions.len:
       ready.sort(readyCmp)
       var launchedAny = false
+      var stagedInlineLaunches: seq[StagedInlineLaunch] = @[]
       var i = 0
-      while i < ready.len and uint32(running.len) < maxParallel:
+      while i < ready.len and
+          uint32(running.len + stagedInlineLaunches.len) < maxParallel:
         let id = ready[i]
         var action = actionsById[id]
         let poolName = action.pool
@@ -1855,35 +1866,33 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           bypassRunQuota = not inlineRunQuota
         else:
           bypassRunQuota = launchBypassesRunQuota()
+        if inlineRunQuota:
+          # Pipelined path: defer the actual offer round-trip and stage
+          # this launch. After the launch wave we'll dispatch every
+          # staged action in a single OfferCandidates batch — the daemon
+          # already supports batched candidate decisions, so this turns
+          # an O(N) chain of synchronous round-trips at parallel=N into
+          # a single round-trip per wave.
+          stagedInlineLaunches.add(StagedInlineLaunch(
+            id: id,
+            pool: poolName,
+            poolUnits: units,
+            runningIdx: runningIdx,
+            action: plan.action,
+            resultPath: resultPath))
+          launchedAny = true
+          continue
         let launchStart = statStart()
         var process: Process
-        var runQuotaProcess: ReproRunQuotaRunningProcess
-        var queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
         var processKind =
-          if inlineRunQuota: rpkInlineRunQuota
-          elif bypassRunQuota: rpkBypassProcess
+          if bypassRunQuota: rpkBypassProcess
           else: rpkHelperProcess
-        var startEvent = "launched"
-        var startDetail = "pool=" & poolName
+        let startEvent = "launched"
+        let startDetail = "pool=" & poolName
         var launchFailure = ""
         try:
-          if inlineRunQuota:
-            let offer = offerWithRunQuota(
-              inlineRunQuotaSession,
-              plan.action.runQuotaRequest(),
-              plan.action.runQuotaCommand(config))
-            case offer.kind
-            of rqokStarted:
-              runQuotaProcess = offer.running
-              processKind = rpkInlineRunQuota
-            of rqokQueued:
-              queuedRunQuotaProcess = offer.queued
-              processKind = rpkInlineRunQuotaPending
-              startEvent = "queued"
-              startDetail = "pool=" & poolName & " runquota=pending"
-          else:
-            process = startRunQuotaProcess(plan.action, config, resultPath,
-              bypassRunQuota)
+          process = startRunQuotaProcess(plan.action, config, resultPath,
+            bypassRunQuota)
         except CatchableError as err:
           launchFailure = err.msg
         finishStat("repro runquota launch", launchStart)
@@ -1899,8 +1908,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             monitorDepfilePath: plan.action.monitorDepfile,
             stderr: "process launch failed: " & launchFailure,
             runQuotaBackend:
-              if inlineRunQuota: "runquota-inline"
-              elif bypassRunQuota: "runquota-bypass"
+              if bypassRunQuota: "runquota-bypass"
               else: "runquota-helper",
             runQuotaSocket: getEnv("RUNQUOTA_SOCKET", ""))
           statuses[id] = asFailed
@@ -1920,13 +1928,90 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           action: plan.action,
           processKind: processKind,
           process: process,
-          runQuotaProcess: runQuotaProcess,
-          queuedRunQuotaProcess: queuedRunQuotaProcess,
           resultPath: resultPath
         ))
         runResult.trace(id, startEvent, startDetail)
         emitProgress(bpkActionStarted, id)
         launchedAny = true
+
+      # Flush any staged inline-runquota launches as one batched offer.
+      # The previous per-action offerWithRunQuota loop performed an
+      # offerCandidates round-trip serialised on each ready action — at
+      # parallel=32 that's 32 synchronous round-trips before any work
+      # actually starts. The batched call collapses them into one (or a
+      # handful, when stagedInlineLaunches exceeds maxCandidatesPerBatch).
+      if stagedInlineLaunches.len > 0:
+        let batchStart = statStart()
+        var requests = newSeq[ReproResourceRequest](stagedInlineLaunches.len)
+        var commands = newSeq[ReproCommandSpec](stagedInlineLaunches.len)
+        for k, staged in stagedInlineLaunches:
+          requests[k] = staged.action.runQuotaRequest()
+          commands[k] = staged.action.runQuotaCommand(config)
+        var offers: seq[ReproRunQuotaOffer]
+        var batchFailure = ""
+        try:
+          offers = offerWithRunQuotaBatch(inlineRunQuotaSession, requests, commands)
+        except CatchableError as err:
+          batchFailure = err.msg
+        finishStat("repro runquota launch", batchStart)
+        if batchFailure.len > 0:
+          # The whole batch failed (e.g. session died mid-way). Mark
+          # each staged launch failed and undo its pool reservation so
+          # we don't lose capacity for the rest of the build.
+          for staged in stagedInlineLaunches:
+            let previousCacheDecision =
+              runResult.results[staged.runningIdx].cacheDecision
+            runResult.results[staged.runningIdx] = ActionResult(
+              id: staged.id,
+              status: asFailed,
+              exitCode: 1,
+              launched: true,
+              cacheDecision: previousCacheDecision,
+              dependencyPolicyKind: staged.action.dependencyPolicy.kind,
+              monitorDepfilePath: staged.action.monitorDepfile,
+              stderr: "process launch failed: " & batchFailure,
+              runQuotaBackend: "runquota-inline",
+              runQuotaSocket: getEnv("RUNQUOTA_SOCKET", ""))
+            statuses[staged.id] = asFailed
+            let failedUsed = poolRunning.getOrDefault(staged.pool, 0'u32)
+            poolRunning[staged.pool] =
+              if failedUsed > staged.poolUnits: failedUsed - staged.poolUnits
+              else: 0'u32
+            runResult.trace(staged.id, "failed", "launch")
+            blockClosure(staged.id, staged.id)
+            emitProgress(bpkActionCompleted, staged.id)
+          completed = terminalCount()
+          launchedAny = true
+        else:
+          for k, staged in stagedInlineLaunches:
+            let offer = offers[k]
+            var startEvent = "launched"
+            var startDetail = "pool=" & staged.pool
+            var processKind: RunningProcessKind
+            var runQuotaProcess: ReproRunQuotaRunningProcess
+            var queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
+            case offer.kind
+            of rqokStarted:
+              runQuotaProcess = offer.running
+              processKind = rpkInlineRunQuota
+            of rqokQueued:
+              queuedRunQuotaProcess = offer.queued
+              processKind = rpkInlineRunQuotaPending
+              startEvent = "queued"
+              startDetail = "pool=" & staged.pool & " runquota=pending"
+            running.add(RunningAction(
+              id: staged.id,
+              pool: staged.pool,
+              poolUnits: staged.poolUnits,
+              action: staged.action,
+              processKind: processKind,
+              runQuotaProcess: runQuotaProcess,
+              queuedRunQuotaProcess: queuedRunQuotaProcess,
+              resultPath: staged.resultPath
+            ))
+            runResult.trace(staged.id, startEvent, startDetail)
+            emitProgress(bpkActionStarted, staged.id)
+            launchedAny = true
 
       if completed >= buildGraph.actions.len:
         break
