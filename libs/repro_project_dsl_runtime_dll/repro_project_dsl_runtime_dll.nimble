@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Shared DSL runtime library shipped next to repro.exe; per-project provider compiles link against this DLL instead of statically embedding the 5000-line DSL+runtime surface (see reprobuild-specs/Provider-Compile-Tiering.md)"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

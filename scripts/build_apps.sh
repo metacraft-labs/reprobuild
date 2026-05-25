@@ -72,3 +72,30 @@ while read -r name path _; do
     --out:"build/bin/${name}" \
     "${path}"
 done < apps/entrypoints.txt
+
+# Build the shared DSL runtime DLL — the Tier 1 artifact described in
+# reprobuild-specs/Provider-Compile-Tiering.md. Per-project provider
+# compiles eventually link against this library instead of statically
+# embedding the ~5000-line DSL+runtime surface.
+#
+# The DLL is consumed by provider binaries which are themselves built
+# with `--define:reproProviderMode`, so the DLL must also compile with
+# that define to expose the provider-mode-only runtime procs.
+mkdir -p build/lib
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    dll_ext="dll" ;;
+  Darwin)
+    dll_ext="dylib" ;;
+  *)
+    dll_ext="so" ;;
+esac
+nim c \
+  "${nim_mode_flags[@]}" \
+  --app:lib \
+  --threads:on \
+  --mm:orc \
+  --define:reproProviderMode \
+  --nimcache:build/nimcache/repro-project-dsl-runtime-dll \
+  --out:"build/lib/librepro_project_dsl_runtime.${dll_ext}" \
+  libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim

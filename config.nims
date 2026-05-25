@@ -18,6 +18,7 @@ for libName in [
   "repro_monitor_shim",
   "repro_monitor_hooks",
   "repro_project_dsl",
+  "repro_project_dsl_runtime_dll",
   "repro_dsl_stdlib",
   "repro_home_intent",
   "repro_home_generations",

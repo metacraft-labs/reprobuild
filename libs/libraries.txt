@@ -14,6 +14,7 @@ repro_depfile
 repro_monitor_shim
 repro_monitor_hooks
 repro_project_dsl
+repro_project_dsl_runtime_dll
 repro_dsl_stdlib
 repro_interface_artifacts
 repro_dev_env_artifacts
