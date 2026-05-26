@@ -918,27 +918,101 @@ proc sameSourceFile(a, b: string): bool =
   except CatchableError:
     a == b
 
+const
+  RegisteredStandardConventionToolchains* = ["nim"]
+    ## Toolchain names whose presence in ``uses:`` makes a package
+    ## ``executable``/``library`` declaration safe to route through the
+    ## Tier 2b standard provider. This list MUST stay in sync with the
+    ## conventions registered in
+    ## ``apps/repro-standard-provider/repro_standard_provider.nim``.
+    ## Adding a Rust convention there means appending ``"rust"`` here,
+    ## etc. Mismatches break in the engine-side fall-back path:
+    ## the engine will dispatch to the provider, the provider will reply
+    ## "no convention matched", and the build fails loudly — preferable
+    ## to silently routing through the slow path when the user expects
+    ## the fast path.
+
+proc usesIncludesRegisteredConvention(sourceFile: string): bool =
+  ## Heuristic line scan of ``reprobuild.nim`` for any toolchain in
+  ## ``RegisteredStandardConventionToolchains`` appearing inside a
+  ## ``uses:`` block. Mirrors the line-scan in
+  ## ``libs/repro_standard_provider/src/repro_standard_provider/project_intro.nim``
+  ## (no DSL evaluator), kept here rather than imported because
+  ## ``repro_interface_artifacts`` is upstream of ``repro_standard_provider``
+  ## in the library dep graph. Conservative: returns ``false`` on any
+  ## read error or malformed block.
+  if sourceFile.len == 0:
+    return false
+  var content: string
+  try:
+    content = readFile(extendedPath(sourceFile))
+  except CatchableError:
+    return false
+  var inBlock = false
+  for rawLine in content.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      if inBlock:
+        inBlock = false
+      continue
+    var payload = ""
+    if inBlock:
+      let leading = line.len > 0 and line[0] in {' ', '\t'}
+      if not leading:
+        inBlock = false
+      else:
+        payload = stripped
+    if payload.len == 0 and stripped.startsWith("uses:"):
+      let p = stripped[5 .. ^1].strip()
+      if p.len == 0:
+        inBlock = true
+      else:
+        payload = p
+    if payload.len == 0:
+      continue
+    var clean = payload
+    if clean.startsWith("["):
+      clean = clean[1 .. ^1]
+    if clean.endsWith("]"):
+      clean = clean[0 ..< ^1]
+    for raw in clean.split({',', ' ', '\t'}):
+      let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+      if entry.len == 0:
+        continue
+      let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+      for toolchain in RegisteredStandardConventionToolchains:
+        if firstToken == toolchain:
+          return true
+  false
+
 proc detectStandardBuildEligible(sourceFile: string;
                                   pkg: PackageDef): bool =
   ## A package is eligible for the Tier 2b ``repro-standard-provider``
-  ## fast path when both:
-  ##   1. the DSL body declared NO ``build:`` block (top- or
-  ##      executable-level), AND
-  ##   2. the DSL body declared no ``executable`` / library member.
+  ## fast path when the DSL body declares NO ``build:`` block AND one
+  ## of two things is true:
+  ##   1. zero ``executable`` / ``library`` members (pure metadata or
+  ##      "no-build" package — let the standard provider decide what to
+  ##      do; missing match still fails loudly), OR
+  ##   2. ``uses:`` includes a toolchain name listed in
+  ##      ``RegisteredStandardConventionToolchains`` (i.e. the standard
+  ##      provider ships a convention plugin for it).
   ##
-  ## (1) is the explicit "let the standard provider derive the graph"
-  ## opt-in. (2) excludes "tool-action wrapper" packages — those have
-  ## ``executable`` declarations but no ``build:`` body and rely on the
-  ## slow path's typed tool resolution to produce wrapper launchers, not
-  ## on a language convention to compile sources.
+  ## Conservatively excluding executable-bearing packages whose ``uses:``
+  ## doesn't reference any registered convention keeps tool-wrapper
+  ## packages (``executable foo`` with no ``build:``, expecting the slow
+  ## path's typed-tool resolution to materialise a launcher) on the
+  ## traditional path — bypassing them through the standard provider
+  ## would mean every such package hits a "no convention matched" error.
   ##
   ## The ``build:`` check is a heuristic line-scan of the source file,
   ## mirroring ``moduleHasBuildBlock`` in ``repro_cli_support``: a
   ## stripped-equal-to-``build:`` line under either the top-level
   ## package body or a nested ``executable`` block disqualifies. Empty
   ## or unreadable source file → not eligible (conservative default).
-  if pkg.executables.len > 0:
-    return false
   if sourceFile.len == 0:
     return false
   var content: string
@@ -949,7 +1023,9 @@ proc detectStandardBuildEligible(sourceFile: string;
   for line in content.splitLines:
     if line.strip() == "build:":
       return false
-  true
+  if pkg.executables.len == 0:
+    return true
+  usesIncludesRegisteredConvention(sourceFile)
 
 proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   let packages = registeredPackages()

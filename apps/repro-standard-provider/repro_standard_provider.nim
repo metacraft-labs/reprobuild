@@ -23,6 +23,7 @@ import std/[options, os, strutils]
 
 import repro_provider_runtime
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/nim as nim_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -124,6 +125,17 @@ proc dispatchGraphRequest(request: ProviderGraphRequest):
   (empty, false, projectRoot, uses)
 
 when defined(reproProviderMode):
+  # Register the language convention plugins this binary ships with.
+  # The Nim convention is the first one to land (M3); future milestones
+  # add Rust/Go/Python/etc. here in registration-order which is also
+  # match-order. The list of registered conventions MUST stay in sync
+  # with the eligibility heuristic in
+  # ``libs/repro_interface_artifacts/src/repro_interface_artifacts.nim``
+  # (``detectStandardBuildEligible``) — the engine should only mark a
+  # package as standardBuildEligible when at least one registered
+  # convention is plausibly going to match it.
+  addDefaultConvention(nim_convention.nimConvention())
+
   proc runStandardProvider(): int =
     try:
       let args = commandLineParams()
