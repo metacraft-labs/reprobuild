@@ -8,3 +8,4 @@ repro-daemon apps/repro-daemon/repro_daemon.nim
 repro-provider-host apps/repro-provider-host/repro_provider_host.nim
 repro-cmake-dyndep-fragment apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim
 repro-cmake-trycompile-provider apps/repro-cmake-trycompile-provider/repro_cmake_trycompile_provider.nim --define:reproProviderMode
+repro-standard-provider apps/repro-standard-provider/repro_standard_provider.nim --define:reproProviderMode

@@ -42,6 +42,7 @@ for libName in [
   "repro_hcr_agent",
   "repro_hcr_test",
   "repro_cmake_trycompile",
+  "repro_standard_provider_protocol",
 ]:
   switch("path", "libs" / libName / "src")
 
