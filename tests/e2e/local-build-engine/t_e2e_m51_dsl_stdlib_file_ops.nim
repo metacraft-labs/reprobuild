@@ -217,6 +217,10 @@ suite "m51_dsl_stdlib_file_ops":
     check readFile(projectRoot / "mirror" / "keep.txt") == "keep\n"
     check readFile(projectRoot / "mirror" / "nested" / "drop.txt") == "drop\n"
 
+    let noop = build(reproBin, projectRoot, repoRoot)
+    let noopReport = parseFile(valueAfter(noop, "buildReport:"))
+    assertAction(noopReport, "fs-preserveTree-mirror", "asCacheHit", false)
+
     removeFile(projectRoot / "assets" / "nested" / "drop.txt")
     let second = build(reproBin, projectRoot, repoRoot)
     check second.contains("providerInvocations: 1")
@@ -241,13 +245,15 @@ suite "m51_dsl_stdlib_file_ops":
     let reproBin = compilePublicReproTestBin(repoRoot)
     let projectRoot = tempRoot / "project"
     createDir(projectRoot / "assets" / "real-dir")
+    createDir(projectRoot / "assets" / "links")
     writeFile(projectRoot / "assets" / "real-file.txt", "file target\n")
     writeFile(projectRoot / "assets" / "real-dir" / "nested.txt",
       "dir target\n")
 
     var symlinkOk = true
     try:
-      createSymlink("real-file.txt", projectRoot / "assets" / "file-link.txt")
+      createSymlink("../real-file.txt",
+        projectRoot / "assets" / "links" / "file-link.txt")
       createSymlink("real-dir", projectRoot / "assets" / "dir-link")
     except OSError:
       symlinkOk = false
@@ -264,21 +270,21 @@ suite "m51_dsl_stdlib_file_ops":
         "file target\n"
       check readFile(projectRoot / "mirror" / "real-dir" / "nested.txt") ==
         "dir target\n"
-      check symlinkExists(projectRoot / "mirror" / "file-link.txt")
+      check symlinkExists(projectRoot / "mirror" / "links" / "file-link.txt")
       check symlinkExists(projectRoot / "mirror" / "dir-link")
-      check expandSymlink(projectRoot / "mirror" / "file-link.txt") ==
-        "real-file.txt"
+      check expandSymlink(projectRoot / "mirror" / "links" / "file-link.txt") ==
+        "../real-file.txt"
       check expandSymlink(projectRoot / "mirror" / "dir-link") == "real-dir"
-      check readFile(projectRoot / "mirror" / "file-link.txt") ==
+      check readFile(projectRoot / "mirror" / "links" / "file-link.txt") ==
         "file target\n"
       check readFile(projectRoot / "mirror" / "dir-link" / "nested.txt") ==
         "dir target\n"
 
-      removeFile(projectRoot / "assets" / "file-link.txt")
+      removeFile(projectRoot / "assets" / "links" / "file-link.txt")
       let second = build(reproBin, projectRoot, repoRoot)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertAction(secondReport, "fs-preserveTree-mirror", "asSucceeded", true)
-      check not symlinkExists(projectRoot / "mirror" / "file-link.txt")
+      check not symlinkExists(projectRoot / "mirror" / "links" / "file-link.txt")
       check symlinkExists(projectRoot / "mirror" / "dir-link")
 
   test "m51_builtin_file_outputs_replace_existing_symlinks":
@@ -387,4 +393,4 @@ suite "m51_dsl_stdlib_file_ops":
       "excluded changed\n")
     let second = build(reproBin, projectRoot, repoRoot)
     let secondReport = parseFile(valueAfter(second, "buildReport:"))
-    assertAction(secondReport, "fs-preserveTree-mirror", "asSucceeded", true)
+    assertAction(secondReport, "fs-preserveTree-mirror", "asCacheHit", false)

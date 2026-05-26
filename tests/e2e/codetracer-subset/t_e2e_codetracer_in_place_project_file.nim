@@ -1672,7 +1672,7 @@ when defined(macosx) or defined(linux):
       ]:
         assertOutputAction(secondReport,
           "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(secondReport, "asSucceeded", true)
+      assertPublicResourceActions(secondReport, "asCacheHit", false)
       assertAction(secondReport, "config-default-layout-json", "asCacheHit",
         false)
       assertAction(secondReport, "config-default-config-yaml", "asCacheHit",
@@ -1882,7 +1882,7 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       check secondReport{"actions"}.len == 1
-      assertPublicResourceActions(secondReport, "asSucceeded", true)
+      assertPublicResourceActions(secondReport, "asCacheHit", false)
 
       let addedSource = projectRoot / "src" / "public" / "resources" /
         "shared" / "add_file.svg"
@@ -2082,7 +2082,7 @@ when defined(macosx) or defined(linux):
       ]:
         assertOutputAction(secondReport,
           "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(secondReport, "asSucceeded", true)
+      assertPublicResourceActions(secondReport, "asCacheHit", false)
 
       let indexHtml = projectRoot / "src" / "frontend" / "index.html"
       writeFile(indexHtml, readFile(indexHtml) &
@@ -2360,7 +2360,7 @@ when defined(macosx) or defined(linux):
       ]:
         assertOutputAction(secondReport,
           "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(secondReport, "asSucceeded", true)
+      assertPublicResourceActions(secondReport, "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-tup", "asCacheHit", false)
       assertAction(secondReport, "c-sudoku-object-with-generated-header",
         "asCacheHit", false)

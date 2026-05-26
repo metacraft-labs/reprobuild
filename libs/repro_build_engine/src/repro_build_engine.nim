@@ -408,10 +408,11 @@ proc validateGraph(g: BuildGraph) =
       raiseEngine("pool capacity must be positive: " & p.name)
 
 proc pathExists(path: string): bool =
-  fileExists(extendedPath(path)) or dirExists(extendedPath(path))
+  symlinkExists(extendedPath(path)) or fileExists(extendedPath(path)) or
+    dirExists(extendedPath(path))
 
 proc outputPathReady(action: BuildAction; path: string): bool =
-  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakPreserveTree} and
+  if action.kind in {bakCopyFile, bakWriteText, bakStamp} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
@@ -1078,6 +1079,11 @@ proc builtinRoots(text: string): tuple[sourceRoot: string; outputRoot: string] =
   (sourceRoot: lines[0], outputRoot: lines[1])
 
 proc preserveTreeManifestPath(action: BuildAction): string =
+  for output in action.outputs:
+    let normalized = output.replace('\\', '/')
+    if normalized.startsWith(".repro/preserve-tree/") and
+        normalized.endsWith(".manifest"):
+      return action.builtinPath(output)
   action.builtinPath(".repro" / "preserve-tree" /
     (sanitizeActionId(action.id) & ".manifest"))
 
@@ -1110,6 +1116,26 @@ proc removeExistingPath(path: string) =
     removeFile(expanded)
   elif dirExists(expanded):
     removeDir(expanded)
+
+proc pathWithinRoot(path, root: string): tuple[inside: bool; relative: string] =
+  let relative = relativePath(os.normalizedPath(path), os.normalizedPath(root))
+  if relative == ".":
+    return (inside: true, relative: "")
+  if relative.isAbsolute or relative == ".." or relative.startsWith("../") or
+      relative.startsWith("..\\"):
+    return (inside: false, relative: "")
+  (inside: true, relative: relative)
+
+proc copiedSymlinkTarget(sourceRoot, outputRoot, sourceLink, destinationLink,
+    target: string): string =
+  let resolvedTarget =
+    if target.isAbsolute: os.normalizedPath(target)
+    else: os.normalizedPath(sourceLink.splitPath.head / target)
+  let withinSource = pathWithinRoot(resolvedTarget, sourceRoot)
+  let mappedTarget =
+    if withinSource.inside: outputRoot / withinSource.relative
+    else: resolvedTarget
+  relativePath(mappedTarget, destinationLink.splitPath.head)
 
 type
   PreserveTreeEntryKind = enum
@@ -1206,7 +1232,8 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
           if not symlinkExists(extendedPath(source)):
             raiseEngine("preserveTree source symlink disappeared before execution: " &
               source)
-          let currentTarget = expandSymlink(source)
+          let currentTarget = copiedSymlinkTarget(sourceRoot, outputRoot, source,
+            destination, entry.target)
           removeExistingPath(destination)
           createSymlink(currentTarget, extendedPath(destination))
       let manifestPath = preserveTreeManifestPath(action)

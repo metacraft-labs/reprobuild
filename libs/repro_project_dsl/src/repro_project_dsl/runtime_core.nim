@@ -413,6 +413,17 @@ proc builtinActionIdPart(value: string): string =
 proc defaultBuiltinActionId(command: string; key: string): string =
   "fs-" & builtinActionIdPart(command) & "-" & builtinActionIdPart(key)
 
+proc preserveTreeManifestOutput(actionId: string): string =
+  var sanitized = ""
+  for ch in actionId:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}:
+      sanitized.add(ch)
+    else:
+      sanitized.add('_')
+  if sanitized.len == 0:
+    sanitized = "action"
+  ".repro/preserve-tree/" & sanitized & ".manifest"
+
 proc buildAction*(id: string; call: PublicCliCall;
                   deps: openArray[string] = [];
                   inputs: openArray[string] = [];
@@ -659,7 +670,7 @@ proc ensureDir*(tool: ReproFs; path: string; actionId = "";
   let selectedActionId =
     if actionId.len > 0: actionId else: defaultBuiltinActionId("ensureDir", path)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
-    cacheable = false, commandStatsId = commandStatsId,
+    commandStatsId = commandStatsId,
     dependencyPolicy = declaredOnlyDependencyPolicy())
 
 proc writeText*(tool: ReproFs; output, text: string; actionId = "";
@@ -775,18 +786,18 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
     entries.add(encodePreserveTreeSymlink(relative, symlink.target))
     inputs.add(normalizedRelPath(symlink.path))
     outputs.add(normalizedRelPath(outputRoot / relative))
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("preserveTree", outputRoot)
+  outputs.add(preserveTreeManifestOutput(selectedActionId))
   let call = builtinFsCall("preserveTree", [
     cliArg("sourceRoot", normalizedRelPath(sourceRoot)),
     outputArg("outputRoot", normalizedRelPath(outputRoot)),
     cliArgSeq("entries", entries)
   ])
-  let selectedActionId =
-    if actionId.len > 0: actionId else: defaultBuiltinActionId("preserveTree", outputRoot)
   recordCommandAction(selectedActionId, call,
     deps = combineActionDeps(deps, after),
     extraInputs = inputs,
     extraOutputs = outputs,
-    cacheable = false,
     commandStatsId = commandStatsId,
     dependencyPolicy = declaredOnlyDependencyPolicy())
 
@@ -1153,4 +1164,3 @@ proc defaultToolActionId*(call: PublicCliCall): string {.dynOrStatic.} =
   if call.subcommand.len > 0:
     base.add("-" & actionIdPart(call.subcommand))
   base & "-" & stableHashHex(callIdentity(call))
-

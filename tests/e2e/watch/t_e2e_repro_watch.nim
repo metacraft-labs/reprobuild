@@ -1359,7 +1359,7 @@ when defined(macosx):
       ]:
         assertOutputAction(report,
           "src/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(report, "asSucceeded", true)
+      assertPublicResourceActions(report, "asCacheHit", false)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull
