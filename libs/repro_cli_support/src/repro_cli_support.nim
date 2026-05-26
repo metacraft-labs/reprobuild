@@ -2535,10 +2535,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # Per Provider-Compile-Tiering.md §"2a — repro-cmake-trycompile-provider".
   let tryCompileMetaPath = result.projectRoot / "trycompile.rbsz"
   let tryCompileProviderBinary = siblingTryCompileProviderPath(publicCliPath)
-  if mode == tpmPathOnly and not prepareOnly and
+  if mode == tpmPathOnly and
       fileExists(extendedPath(tryCompileMetaPath)) and
       tryCompileProviderBinary.len > 0:
-    invocationFastPath = "tier2a-trycompile-direct"
+    invocationFastPath =
+      if prepareOnly: "tier2c-direct-prepare"
+      else: "tier2a-trycompile-direct"
     logSummary("trycompileDirect: dispatching " & tryCompileProviderBinary)
     logSummary("project: " & TryCompileProviderPackageName)
     logSummary("interface: " & tryCompileMetaPath)
@@ -2573,6 +2575,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let lowered = lowerProviderSnapshot(refresh.snapshot, synthIdentity,
       result.projectRoot, selectedActionId)
     finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
+    if prepareOnly:
+      # PrimeProviderMetadata's prepare-only invocation used to compile
+      # the per-project provider so subsequent TryCompile probes wouldn't
+      # have to. With the direct provider that prep is unnecessary, but
+      # the cmake-regeneration state-file snapshot still needs to be
+      # written so cmake's regeneration check works on the next configure.
+      if cmakeMeta.enabled and not skipCmakeRegeneration and
+          fileExists(extendedPath(modulePath)):
+        createDir(extendedPath(parentDir(cmakeMeta.providerStateFile)))
+        writeFile(extendedPath(cmakeMeta.providerStateFile),
+          readFile(extendedPath(modulePath)))
+        let seedStart = statStart(statsEnabled)
+        discard seedCmakeRegenerationCache(cmakeMeta, publicCliPath, outDir)
+        finishStat(buildStats, statsEnabled,
+          "repro cmake regeneration cache seed", seedStart)
+      result.exitCode = 0
+      return
     result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
     return
 

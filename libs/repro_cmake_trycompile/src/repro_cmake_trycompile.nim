@@ -57,7 +57,11 @@ import repro_core
 
 const
   TryCompileMetadataMagic* = "RBCT"
-  TryCompileMetadataVersion* = 1'u16
+  TryCompileMetadataVersion* = 2'u16
+  ## v1: single target (legacy, TryCompile probes only).
+  ## v2: multi-target with optional default + all aggregator (Tier 2c
+  ##     — main CMake-generated projects). v1 readers should reject v2;
+  ##     v2 readers must accept v1 metadata for backward compat.
   ## Stable identity of the direct provider binary. Goes into the
   ## engine's ``providerArtifactId`` for every TryCompile, so every
   ## project on the same ``repro`` release shares an action cache key
@@ -94,10 +98,27 @@ type
     name*: string
     capacity*: uint32
 
+  TryCompileTargetDef* = object
+    ## A build target as understood by the DSL's ``target(name, actions)``
+    ## primitive. ``actionIds`` may be empty for utility targets that only
+    ## reference other targets via ``aggregate``.
+    name*: string
+    actionIds*: seq[string]
+    childTargets*: seq[string]
+    isAggregate*: bool
+
   TryCompileMetadata* = object
     usedTools*: seq[string]
     pools*: seq[TryCompilePoolDef]
     actions*: seq[TryCompileActionDef]
+    targets*: seq[TryCompileTargetDef]
+    ## Name of the default build target (i.e. the implicit choice when
+    ## ``repro build`` is invoked without an explicit ``#<actionId>``).
+    ## Empty when the project does not declare one.
+    defaultTargetName*: string
+    ## v1 compatibility fields. Decoder fills these on v1 envelopes and
+    ## encoder writes them only when ``targets`` is empty (so v1 readers
+    ## still get a usable single-target view).
     targetName*: string
     targetActionIds*: seq[string]
 
@@ -173,8 +194,13 @@ proc encodeTryCompileMetadata*(meta: TryCompileMetadata): seq[byte] =
   payload.writeU32Le(uint32(meta.actions.len))
   for action in meta.actions:
     payload.writeAction(action)
-  payload.writeString(meta.targetName)
-  payload.writeStringSeq(meta.targetActionIds)
+  payload.writeU32Le(uint32(meta.targets.len))
+  for target in meta.targets:
+    payload.writeString(target.name)
+    payload.writeStringSeq(target.actionIds)
+    payload.writeStringSeq(target.childTargets)
+    payload.writeBool(target.isAggregate)
+  payload.writeString(meta.defaultTargetName)
 
   result = @[]
   for ch in TryCompileMetadataMagic:
@@ -191,7 +217,7 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
       raiseMetadata("unknown trycompile.rbsz magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != TryCompileMetadataVersion:
+  if version != 1'u16 and version != 2'u16:
     raiseMetadata("unsupported trycompile.rbsz version: " & $version)
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -208,8 +234,29 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
   result.actions = newSeq[TryCompileActionDef](actionCount)
   for i in 0 ..< actionCount:
     result.actions[i] = readAction(bytes, pos)
-  result.targetName = readString(bytes, pos)
-  result.targetActionIds = readStringSeq(bytes, pos)
+  if version == 1'u16:
+    # Legacy single-target envelope. Hoist the target into the v2-shape
+    # ``targets`` array so consumers see a uniform view.
+    result.targetName = readString(bytes, pos)
+    result.targetActionIds = readStringSeq(bytes, pos)
+    if result.targetName.len > 0:
+      result.targets.add(TryCompileTargetDef(
+        name: result.targetName,
+        actionIds: result.targetActionIds))
+  else:
+    let targetCount = int(readU32Le(bytes, pos))
+    result.targets = newSeq[TryCompileTargetDef](targetCount)
+    for i in 0 ..< targetCount:
+      result.targets[i].name = readString(bytes, pos)
+      result.targets[i].actionIds = readStringSeq(bytes, pos)
+      result.targets[i].childTargets = readStringSeq(bytes, pos)
+      result.targets[i].isAggregate = readBool(bytes, pos)
+    result.defaultTargetName = readString(bytes, pos)
+    # Maintain v1 compatibility view: expose the first target through the
+    # legacy single-target fields so older code paths still see something.
+    if result.targets.len > 0:
+      result.targetName = result.targets[0].name
+      result.targetActionIds = result.targets[0].actionIds
 
   if pos != bytes.len:
     raiseMetadata("trailing trycompile.rbsz bytes")

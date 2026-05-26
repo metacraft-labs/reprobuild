@@ -14,7 +14,7 @@
 ##
 ## Per Provider-Compile-Tiering.md §"2a — repro-cmake-trycompile-provider".
 
-import std/[os, strutils]
+import std/[os, strutils, tables]
 
 import repro_cmake_trycompile
 import repro_core
@@ -90,19 +90,36 @@ when defined(reproProviderMode):
       for pool in meta.pools:
         discard buildPool(pool.name, pool.capacity)
       var registered: seq[BuildActionDef] = @[]
+      var actionById = initTable[string, BuildActionDef]()
       for action in meta.actions:
-        registered.add(registerAction(action))
-      if meta.targetName.len > 0:
-        if meta.targetActionIds.len == 0:
-          discard target(meta.targetName, registered)
+        let registeredAction = registerAction(action)
+        registered.add(registeredAction)
+        actionById[registeredAction.id] = registeredAction
+      var targetByName = initTable[string, BuildTargetDef]()
+      for targetDef in meta.targets:
+        if targetDef.isAggregate:
+          var childActions: seq[BuildActionDef] = @[]
+          var childTargets: seq[BuildTargetDef] = @[]
+          for actionId in targetDef.actionIds:
+            if actionId in actionById:
+              childActions.add(actionById[actionId])
+          for childName in targetDef.childTargets:
+            if childName in targetByName:
+              childTargets.add(targetByName[childName])
+          targetByName[targetDef.name] = aggregate(targetDef.name,
+            actions = childActions, targets = childTargets)
         else:
-          var byId: seq[BuildActionDef] = @[]
-          for id in meta.targetActionIds:
-            for action in registered:
-              if action.id == id:
-                byId.add(action)
-                break
-          discard target(meta.targetName, byId)
+          var childActions: seq[BuildActionDef] = @[]
+          if targetDef.actionIds.len == 0:
+            childActions = registered
+          else:
+            for actionId in targetDef.actionIds:
+              if actionId in actionById:
+                childActions.add(actionById[actionId])
+          targetByName[targetDef.name] = target(targetDef.name, childActions)
+      if meta.defaultTargetName.len > 0 and
+          meta.defaultTargetName in targetByName:
+        defaultTarget(targetByName[meta.defaultTargetName])
     buildPackageFragment(pkg, request, registerAll, includeDefault = false)
 
   proc runDirectProvider(): int =
