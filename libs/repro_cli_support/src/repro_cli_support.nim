@@ -2315,7 +2315,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # entirely: every action goes through the bypass-spawn path with no lease
   # round-trip. Default is "use runquota when reachable, fall back if not".
   let bypassRunQuota = bypassRunQuotaExplicit
-  let fallbackToRunQuotaBypass = mode in {tpmPathOnly, tpmScoop}
+  var fallbackToRunQuotaBypass = mode in {tpmPathOnly, tpmScoop}
   var warnedRunQuotaBypass = false
 
   template logSummary(line: string) =
@@ -2605,32 +2605,40 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
 
-  if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
+  var effectiveMode = mode
+  if effectiveMode == tpmUnspecified and
+      artifact.projectInterface.defaultToolProvisioning.len > 0:
+    effectiveMode = parseToolProvisioning(
+      artifact.projectInterface.defaultToolProvisioning)
+    fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
+
+  if artifact.projectInterface.toolUses.len > 0 and
+      effectiveMode == tpmUnspecified:
     raise newException(ValueError,
       "typed tool provisioning is required for uses declarations; refusing " &
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
 
-  if mode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     let identityStart = statStart(statsEnabled)
-    let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
+    let resolved = resolveAndWriteIdentity(artifact, outDir, effectiveMode)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
     logSummary("repro build: tool provisioning active (tool-provisioning=" &
-      mode.modeName & ")")
-    if mode == tpmPathOnly:
+      effectiveMode.modeName & ")")
+    if effectiveMode == tpmPathOnly:
       logSummary("repro build: provisioning-disabled mode active (tool-provisioning=path)")
     logSummary("project: " & artifact.projectInterface.projectName)
     logSummary("interface: " & interfacePath)
     logSummary("toolIdentity: " & resolved.identityPath)
     logSummary("inspection: " & resolved.inspectionPath)
     let portability =
-      if mode == tpmNix:
+      if effectiveMode == tpmNix:
         "portable"
-      elif mode == tpmTarball:
+      elif effectiveMode == tpmTarball:
         "portable"
-      elif mode == tpmScoop:
+      elif effectiveMode == tpmScoop:
         # Scoop receipts may be cache-portable or cache-local depending on
         # the practical hardening tier. Read the resolved identity to find
         # out, defaulting to local-only when no profiles are present.
@@ -2740,7 +2748,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let lowered = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
       selectedActionId)
     finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
-    if cmakeMeta.enabled and mode == tpmPathOnly and selectedActionId.len > 0:
+    if cmakeMeta.enabled and effectiveMode == tpmPathOnly and selectedActionId.len > 0:
       let cacheWriteStart = statStart(statsEnabled)
       writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
         modulePath, projectRoot, selectedActionId, pathEnv, lowered)
@@ -5790,14 +5798,21 @@ proc runDevelopCommand(args: openArray[string]): int =
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
     compileWorkDir, compileScratchDir)
 
-  if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
+  var effectiveMode = mode
+  if effectiveMode == tpmUnspecified and
+      artifact.projectInterface.defaultToolProvisioning.len > 0:
+    effectiveMode = parseToolProvisioning(
+      artifact.projectInterface.defaultToolProvisioning)
+
+  if artifact.projectInterface.toolUses.len > 0 and
+      effectiveMode == tpmUnspecified:
     raise newException(ValueError,
       "typed tool provisioning is required for uses declarations; refusing " &
         "implicit PATH fallback. Pass --tool-provisioning=path for the weak " &
         "local profile, or --tool-provisioning=nix|tarball for a provisioned " &
         "development environment.")
 
-  if mode == tpmUnspecified:
+  if effectiveMode == tpmUnspecified:
     echo "repro develop: compatibility dev-env path active (provider-driven " &
       "artifact integration pending); no external tools requested"
     if command.len == 0:
@@ -5807,13 +5822,13 @@ proc runDevelopCommand(args: openArray[string]): int =
         interfaceFingerprint: artifact.interfaceFingerprint),
       "", "", interfacePath)
 
-  if mode notin {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if effectiveMode notin {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     raise newException(ValueError,
-      "unsupported develop tool provisioning mode: " & mode.modeName)
+      "unsupported develop tool provisioning mode: " & effectiveMode.modeName)
 
-  let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
+  let resolved = resolveAndWriteIdentity(artifact, outDir, effectiveMode)
   echo "repro develop: compatibility dev-env path active (provider-driven " &
-    "artifact integration pending, tool-provisioning=" & mode.modeName & ")"
+    "artifact integration pending, tool-provisioning=" & effectiveMode.modeName & ")"
   echo "project: " & artifact.projectInterface.projectName
   echo "interface: " & interfacePath
   echo "toolIdentity: " & resolved.identityPath
