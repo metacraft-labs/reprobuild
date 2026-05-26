@@ -2245,9 +2245,55 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false):
     BuildCommandOutcome =
-  let statsEnabled = statsMode == bsmText
+  # Configure-level aggregation: when REPRO_STATS_DIR is set, each repro
+  # build invocation drops a JSON record into that directory. The companion
+  # ``scripts/aggregate-stats.py`` script rolls them up into a single
+  # per-CMake-configure breakdown. The dir is created lazily on first use.
+  # Setting the dir also implicitly opts every spawned repro build into
+  # text-mode stat collection so the per-metric breakdown survives — CMake
+  # never passes --stats= to its child repro build invocations, so the dir
+  # is the only handle we have on enabling them.
+  let configureStatsDir = getEnv("REPRO_STATS_DIR")
+  let effectiveStatsMode =
+    if configureStatsDir.len > 0 and statsMode == bsmNone: bsmText
+    else: statsMode
+  let statsEnabled = effectiveStatsMode == bsmText
   var buildStats: BuildStats
   let buildTotalStart = statStart(statsEnabled)
+  let invocationWallStart = epochTime()
+  var invocationFastPath = ""
+  defer:
+    if configureStatsDir.len > 0:
+      try:
+        createDir(extendedPath(configureStatsDir))
+        let wallMs = (epochTime() - invocationWallStart) * 1000.0
+        let stamp = $getCurrentProcessId() & "-" &
+          $int(epochTime() * 1_000_000.0)
+        let recordPath = configureStatsDir / (stamp & ".json")
+        var node = %*{
+          "pid": getCurrentProcessId(),
+          "target": target,
+          "modulePath": result.modulePath,
+          "projectRoot": result.projectRoot,
+          "outDir": result.outDir,
+          "wallMs": wallMs,
+          "exitCode": result.exitCode,
+          "mode": $mode,
+          "fastPath": invocationFastPath,
+        }
+        var metrics = newJArray()
+        for metric in buildStats.metrics:
+          metrics.add(%*{
+            "name": metric.name,
+            "count": metric.count,
+            "totalUs": metric.totalUs,
+          })
+        node["metrics"] = metrics
+        writeFile(extendedPath(recordPath), $node)
+      except CatchableError:
+        # Telemetry is best-effort — never fail a build because we
+        # couldn't write a stats record.
+        discard
   var parsedTarget = parseBuildTarget(target)
   parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
   let modulePath = parsedTarget.modulePath
@@ -2269,8 +2315,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # entirely: every action goes through the bypass-spawn path with no lease
   # round-trip. Default is "use runquota when reachable, fall back if not".
   let bypassRunQuota = bypassRunQuotaExplicit
-  var effectiveMode = mode
-  var fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
+  let fallbackToRunQuotaBypass = mode in {tpmPathOnly, tpmScoop}
   var warnedRunQuotaBypass = false
 
   template logSummary(line: string) =
@@ -2293,7 +2338,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     warnedRunQuotaBypass = true
     logSummary("repro build: WARNING runquotad is not reachable; using " &
-      "RunQuota bypass for tool-provisioning=" & effectiveMode.modeName &
+      "RunQuota bypass for tool-provisioning=" & mode.modeName &
       " (no quotas/leases enforced). Start `runquotad` and rerun to " &
       "use the real lease coordinator.")
 
@@ -2350,7 +2395,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
-    if statsEnabled:
+    # Only dump the text-mode table to stderr when --stats=text was
+    # requested explicitly. The implicit enable-via-REPRO_STATS_DIR path
+    # uses the JSON dropfile and does not want to spam CMake's child
+    # stderr with per-invocation tables.
+    if statsMode == bsmText:
       let statsRenderStart = statStart(statsEnabled)
       stderr.write(renderBuildStats(buildResult.stats))
       stderr.flushFile()
@@ -2461,7 +2510,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     else:
       "\0"
   if cmakeMeta.enabled and not cmakeRegenerated and not prepareOnly and
-      effectiveMode == tpmPathOnly and reportMode == brmNone and
+      mode == tpmPathOnly and reportMode == brmNone and
       cacheSelectedActionId != "\0":
     let loweredCacheStart = statStart(statsEnabled)
     let loweredCache = readFreshLoweredGraphCache(
@@ -2489,6 +2538,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   if mode == tpmPathOnly and not prepareOnly and
       fileExists(extendedPath(tryCompileMetaPath)) and
       tryCompileProviderBinary.len > 0:
+    invocationFastPath = "tier2a-trycompile-direct"
     logSummary("trycompileDirect: dispatching " & tryCompileProviderBinary)
     logSummary("project: " & TryCompileProviderPackageName)
     logSummary("interface: " & tryCompileMetaPath)
@@ -2536,39 +2586,32 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
 
-  if effectiveMode == tpmUnspecified and
-      artifact.projectInterface.defaultToolProvisioning.len > 0:
-    effectiveMode = parseToolProvisioning(
-      artifact.projectInterface.defaultToolProvisioning)
-    fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
-
-  if artifact.projectInterface.toolUses.len > 0 and
-      effectiveMode == tpmUnspecified:
+  if artifact.projectInterface.toolUses.len > 0 and mode == tpmUnspecified:
     raise newException(ValueError,
       "typed tool provisioning is required for uses declarations; refusing " &
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
 
-  if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if mode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     let identityStart = statStart(statsEnabled)
-    let resolved = resolveAndWriteIdentity(artifact, outDir, effectiveMode)
+    let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
     logSummary("repro build: tool provisioning active (tool-provisioning=" &
-      effectiveMode.modeName & ")")
-    if effectiveMode == tpmPathOnly:
+      mode.modeName & ")")
+    if mode == tpmPathOnly:
       logSummary("repro build: provisioning-disabled mode active (tool-provisioning=path)")
     logSummary("project: " & artifact.projectInterface.projectName)
     logSummary("interface: " & interfacePath)
     logSummary("toolIdentity: " & resolved.identityPath)
     logSummary("inspection: " & resolved.inspectionPath)
     let portability =
-      if effectiveMode == tpmNix:
+      if mode == tpmNix:
         "portable"
-      elif effectiveMode == tpmTarball:
+      elif mode == tpmTarball:
         "portable"
-      elif effectiveMode == tpmScoop:
+      elif mode == tpmScoop:
         # Scoop receipts may be cache-portable or cache-local depending on
         # the practical hardening tier. Read the resolved identity to find
         # out, defaulting to local-only when no profiles are present.
@@ -2678,7 +2721,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let lowered = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
       selectedActionId)
     finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
-    if cmakeMeta.enabled and effectiveMode == tpmPathOnly and selectedActionId.len > 0:
+    if cmakeMeta.enabled and mode == tpmPathOnly and selectedActionId.len > 0:
       let cacheWriteStart = statStart(statsEnabled)
       writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
         modulePath, projectRoot, selectedActionId, pathEnv, lowered)
@@ -2697,7 +2740,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "repro cmake regeneration cache seed", seedStart)
       finishStat(buildStats, statsEnabled, "repro build total",
         buildTotalStart)
-      if statsEnabled:
+      if statsMode == bsmText:
         let statsRenderStart = statStart(statsEnabled)
         stderr.write(renderBuildStats(buildStats))
         stderr.flushFile()
@@ -2766,7 +2809,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
-    if statsEnabled:
+    if statsMode == bsmText:
       let statsRenderStart = statStart(statsEnabled)
       stderr.write(renderBuildStats(buildResult.stats))
       stderr.flushFile()
