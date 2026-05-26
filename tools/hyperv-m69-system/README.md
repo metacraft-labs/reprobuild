@@ -248,7 +248,7 @@ Wall-clock budget for a cold first run:
 | VS uninstall + WSL/VMP disable + cleanup reboot | ~15-30 min |
 | Nim + gcc provisioned inside the VM | ~5 min |
 | `base-clean` checkpoint | <1 min |
-| VS Build Tools install (VCTools + MSBuildTools) | 30-60 min |
+| VS Build Tools install (VCTools + MSBuildTools, fetched over Default Switch NAT) | 30-60 min |
 | `base-with-vs` checkpoint | <1 min |
 
 Total: ~2-4 hours, mostly download + VS install. The script is
@@ -413,6 +413,15 @@ Per-test (under `D:\metacraft\hyperv-m69-system-out\<gate>-<scenario>\`):
     other Visual Studio Build Tools content. We rely on the
     `Uninstall` path leaving the disk in a `vswhere`-clean state -
     verified after each uninstall step.
+  * **VS Build Tools install fetches over the network.** Step 9a's
+    uninstall takes the dev VHDX's pre-baked VS layout/payload cache
+    with it, so `--noWeb` (cache-only install) is NOT used by Step 12;
+    the bootstrapper fetches over Default Switch NAT instead. If the
+    install fails the script aborts BEFORE creating `base-with-vs`
+    (avoiding a broken-state snapshot). Recovery: if a prior aborted
+    run left a stale `base-with-vs` around, remove it
+    (`Remove-VMSnapshot -VMName repro-m69-hyperv -Name base-with-vs`)
+    or re-run with `-Force` to wipe everything before re-trying.
   * The Dev VM download URL is not a fixed shortlink - it changes
     with each Microsoft refresh and the old `aka.ms` shortlink now
     redirects to Bing. The script resolves it at runtime from the
@@ -466,14 +475,41 @@ upstream URL.
     Adequate for a local-account password on a disposable VM where
     the host-side cred cache is DPAPI-sealed.
 
+## Gate semantics that differ from the Sandbox harness
+
+The gate-split (reboot-free / RestartNeeded / OpenSSH-capability)
+carries over from the Sandbox harness unchanged, but a few of the
+post-mutation observations are environment-dependent:
+
+  * **WSL RestartNeeded-reporting scenario.** Inside Sandbox the
+    post-mutation observation could only ever be `EnablePending` (or
+    `Disabled` if DISM refused) — Sandbox can't reboot, so reaching
+    `Enabled` was impossible. Inside the Hyper-V VM with Windows
+    Update + reboot capability, a reboot-gated feature CAN transition
+    to `Enabled` transparently (Win11 22H2 22621 + WU sometimes
+    completes feature enablement without an explicit reboot — the
+    servicing stack finalizes out-of-band). The gate's WSL scenario
+    therefore accepts `Enabled` in its post-state set; the HARD
+    contract assertions remain (`restartNeeded == true` was surfaced
+    by the driver; the driver did not auto-reboot).
+  * **OpenSSH capability + sshd service scenario.**
+    `Add-WindowsCapability` returns synchronously but Windows takes
+    additional seconds to FINALIZE the install (service registration,
+    file extraction, servicing-stack finalization). The Hyper-V VM
+    observed `InstallPending` immediately after the driver returned.
+    The gate now POLLS `Get-WindowsCapability` for up to 120s for
+    `Installed`, and then polls `Get-Service -Name sshd` for up to
+    30s for the service to appear. This honestly tests "capability
+    eventually installs" without papering over a real bug — a stuck
+    `InstallPending` past the timeout fails the gate with the last
+    observed state and a slice of the DISM event log.
+
 ## Cross-references
 
   * `reprobuild-specs/Destructive-Gate-Test-Environments.md` -
     approach 4 (Hyper-V VM for groups C and D).
   * `reprobuild/tools/sandbox-m69-system/README.md` - the Sandbox
-    harness this one supersedes for the destructive scenarios. The
-    gate-split (reboot-free / RestartNeeded / OpenSSH-capability)
-    carries over unchanged.
+    harness this one supersedes for the destructive scenarios.
   * `reprobuild/tools/wsl-m69-posix/README.md` - the structural
     precedent: provisioner + idempotent state + per-gate runner +
     `try / finally` cleanup.

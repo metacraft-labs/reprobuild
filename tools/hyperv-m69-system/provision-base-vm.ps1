@@ -1276,24 +1276,71 @@ if (Test-SnapshotExists $VmName $SnapshotBaseWithVs) {
       throw "bootstrapper download failed"
     }
     Write-Host "  bootstrap size = $((Get-Item $bootstrap).Length) bytes"
-    $vsArgs = @('install','--installPath', $installPath, '--quiet', '--norestart', '--wait', '--noUpdateInstaller', '--noWeb')
+    # NOTE: do NOT pass --noWeb. The dev VHDX's pre-baked VS install
+    # was uninstalled in Step 9a (taking its layout/payload cache with
+    # it), so --noWeb would force the bootstrapper to install from an
+    # empty cache and silently exit with code 1. Letting it fetch over
+    # the network (via the Default Switch NAT) is the only path that
+    # actually installs VS after the Step 9a uninstall.
+    $vsArgs = @('install','--installPath', $installPath, '--quiet', '--norestart', '--wait', '--noUpdateInstaller')
     foreach ($w in $workloads) { $vsArgs += @('--add', $w) }
     Write-Host "running: $bootstrap $($vsArgs -join ' ')"
     $p = Start-Process -FilePath $bootstrap -ArgumentList $vsArgs -Wait -PassThru -NoNewWindow
     Write-Host "  vs_buildtools.exe exit = $($p.ExitCode)"
+    $vsExit = $p.ExitCode
     # Verify with vswhere.
     $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path $vswhere)) {
-      throw "vs_buildtools.exe ran (exit $($p.ExitCode)) but vswhere is not present"
+      return "VS-INSTALL-FAILED: vs_buildtools.exe ran (exit $vsExit) but vswhere is not present"
     }
     $out = & $vswhere -prerelease -format json -all -products * | Out-String
     Write-Host "vswhere output length: $($out.Length) chars"
-    if ($out.Trim() -eq '[]') {
-      throw "vs_buildtools.exe ran (exit $($p.ExitCode)) but vswhere reports no VS instance"
+    if ($out.Trim() -eq '[]' -or $out.Trim().Length -eq 0) {
+      return "VS-INSTALL-FAILED: vs_buildtools.exe ran (exit $vsExit) but vswhere reports no VS instance (vswhere returned $($out.Length) chars: '$($out.Trim())')"
     }
-    return "VS install ok (exit $($p.ExitCode)); vswhere returned $($out.Length) chars"
+    if ($vsExit -ne 0) {
+      return "VS-INSTALL-FAILED: vs_buildtools.exe exited $vsExit; vswhere returned $($out.Length) chars"
+    }
+    return "VS install ok (exit $vsExit); vswhere returned $($out.Length) chars"
   }
-  foreach ($l in @($vsInstall)) { Info "    $l" }
+  # Fail-loud guard: the in-VM script can emit ErrorRecords that
+  # Invoke-VmScript captures (via Receive-Job 2>&1 + SilentlyContinue)
+  # and returns as objects in the result stream. The earlier provision
+  # run silently proceeded past a vs_buildtools.exe exit=1 because the
+  # only signal was an in-band error-record; we now also gate on a
+  # `VS-INSTALL-FAILED:` marker that the in-VM block returns instead
+  # of `throw`-ing, so the failure can never be lost.
+  $vsInstallLines = @($vsInstall)
+  foreach ($l in $vsInstallLines) { Info "    $l" }
+  $vsInstallFailed = $false
+  $vsInstallFailureDetail = ''
+  foreach ($l in $vsInstallLines) {
+    $asStr = if ($null -ne $l) { "$l" } else { '' }
+    if ($l -is [System.Management.Automation.ErrorRecord]) {
+      $vsInstallFailed = $true
+      $vsInstallFailureDetail = "in-VM ErrorRecord: $asStr"
+      break
+    }
+    if ($asStr -like '*VS-INSTALL-FAILED:*') {
+      $vsInstallFailed = $true
+      $vsInstallFailureDetail = $asStr
+      break
+    }
+  }
+  if ($vsInstallFailed) {
+    # Snapshot-cleanup hint: a prior aborted run may have left a stale
+    # `base-with-vs` snapshot around (we abort BEFORE taking the new
+    # checkpoint here, but a previous broken run may have skipped this
+    # guard). Tell the operator how to recover.
+    $staleHint = ''
+    if (Test-SnapshotExists $VmName $SnapshotBaseWithVs) {
+      $staleHint = " A stale '$SnapshotBaseWithVs' snapshot exists from a prior run — remove it before re-trying: Remove-VMSnapshot -VMName $VmName -Name $SnapshotBaseWithVs (or re-run this script with -Force to wipe everything)."
+    }
+    throw ("[provision] ERROR: VS Build Tools install failed: " +
+      "$vsInstallFailureDetail. Aborting before the '$SnapshotBaseWithVs' " +
+      "checkpoint — a broken-state snapshot is worse than no snapshot." +
+      $staleHint)
+  }
 
   Info "  shutting down VM cleanly before checkpoint"
   try {
