@@ -124,6 +124,53 @@ function Wait-VmPSDirectReady {
   return $false
 }
 
+function Wait-VmGuestServiceInterfaceReady {
+  param(
+    [string]$Name,
+    [int]$TimeoutSec
+  )
+  # The Guest Service Interface integration service is what
+  # `Copy-VMFile` rides on. It is INDEPENDENT of PowerShell Direct
+  # (PSDirect goes over VMBus; Copy-VMFile goes over GSI). On a
+  # freshly-reverted VM, PSDirect can come up several seconds before
+  # the GSI integration service reaches `PrimaryStatusDescription =
+  # 'OK'`. If `Copy-VMFile` is invoked while GSI is still in
+  # `No Contact`, the cmdlet REPORTS SUCCESS but silently no-ops —
+  # nothing is actually copied. The subsequent in-VM gate invocation
+  # then fails with "Hyper-V socket target process has ended" because
+  # the staged directory is empty.
+  #
+  # Poll until GSI reports `OK` (or the timeout elapses). Both
+  # readiness signals must be green before we begin staging binaries.
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  $startedAt = Get-Date
+  $lastReport = $startedAt
+  $lastStatus = ''
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $gsi = Get-VMIntegrationService -VMName $Name `
+        -Name 'Guest Service Interface' -ErrorAction Stop
+      $lastStatus = "$($gsi.PrimaryStatusDescription)"
+      if ($gsi.Enabled -and $lastStatus -eq 'OK') {
+        Info "  Guest Service Interface ready (PrimaryStatusDescription=OK)"
+        return $true
+      }
+    } catch {
+      $lastStatus = "query-error: $_"
+    }
+    if (((Get-Date) - $lastReport).TotalSeconds -ge 10) {
+      $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
+      Info ("  waiting for Guest Service Interface ... ${elapsed}s elapsed " +
+            "(PrimaryStatusDescription=" + $lastStatus + ")")
+      $lastReport = Get-Date
+    }
+    Start-Sleep -Seconds 2
+  }
+  Warn ("  Guest Service Interface did not reach 'OK' within ${TimeoutSec}s " +
+        "(last status='$lastStatus')")
+  return $false
+}
+
 # ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
@@ -254,6 +301,20 @@ try {
   }
   Record 'boot' 'OK'
 
+  # Separately wait for the Guest Service Interface (GSI) integration
+  # service. Copy-VMFile rides on GSI, not on VMBus/PSDirect, and the
+  # two readiness signals are NOT coupled. On a freshly-reverted VM,
+  # PSDirect can be green while GSI is still in 'No Contact', which
+  # makes the first few `Copy-VMFile` calls silently no-op (report
+  # success, copy nothing). Skipping this wait is the race that left
+  # the gate directory empty in the M69 Hyper-V runs.
+  $gsiReady = Wait-VmGuestServiceInterfaceReady -Name $VmName -TimeoutSec 60
+  if (-not $gsiReady) {
+    Record 'gsi-ready' 'TIMEOUT'
+    throw "Guest Service Interface did not report 'OK' within 60 s"
+  }
+  Record 'gsi-ready' 'OK'
+
   # ---- Step 3: prepare harness dirs inside VM ----------------------------
   Info "preparing $VmHarness inside the VM"
   Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock {
@@ -282,6 +343,47 @@ try {
   Info "Copy-VMFile: staging gate binary into $VmGateBinDir"
   Copy-VMFile -Name $VmName -SourcePath $gateBinHost -DestinationPath $VmGateExe -CreateFullPath -FileSource Host -Force
   Record 'stage-binaries' 'OK'
+
+  # ---- Step 4b: stage vs_buildtools.exe next to repro.exe ----------------
+  # The M69 vsInstaller driver dispatches a FRESH install through the
+  # edition-specific bootstrapper `vs_<edition>.exe` (the resident
+  # `vs_installer.exe` cannot perform a true fresh install on a clean
+  # machine). The driver looks for the bootstrapper next to the running
+  # `repro` binary, in `%TEMP%`, and in `%LOCALAPPDATA%\Repro\`. The
+  # provisioning script (`provision-base-vm.ps1` Step 12) downloads
+  # `vs_buildtools.exe` to the GUEST's `$env:TEMP` AT PROVISIONING TIME
+  # ONLY — that copy lives in the diff disk that gets discarded on
+  # snapshot revert, so by the time the runner reverts to a snapshot the
+  # bootstrapper is gone. We therefore stage a host-side copy beside
+  # `repro.exe` here, every run.
+  #
+  # Host path choice: `D:\metacraft\hyperv-m69-system-cache\
+  # vs_buildtools.exe`. The cache dir is documented as the harness's
+  # caching location (alongside the dev VHDX) in
+  # `reprobuild-specs/Destructive-Gate-Test-Environments.md` §4. The
+  # provisioning script does NOT pre-populate it with the bootstrapper
+  # — it downloads in-VM — so the user must drop the binary there once
+  # (via `Invoke-WebRequest https://aka.ms/vs/17/release/vs_buildtools.exe`)
+  # for the vs-installer gate to be runnable. Absence here is non-fatal:
+  # the feature-capability gate doesn't need it, and the vs-installer
+  # gate's driver will surface a clear "bootstrapper not staged" error.
+  $VsBootstrapHostPath = 'D:\metacraft\hyperv-m69-system-cache\vs_buildtools.exe'
+  if (Test-Path $VsBootstrapHostPath) {
+    $dst = "$VmReproDir\vs_buildtools.exe"
+    Info "Copy-VMFile: staging vs_buildtools.exe into $dst"
+    try {
+      Copy-VMFile -Name $VmName -SourcePath $VsBootstrapHostPath -DestinationPath $dst -CreateFullPath -FileSource Host -Force
+      Record 'stage-vs-bootstrapper' 'OK'
+    } catch {
+      Warn "  Copy-VMFile of vs_buildtools.exe failed: $_"
+      Record 'stage-vs-bootstrapper' "FAILED: $_"
+    }
+  } else {
+    Warn "  vs_buildtools.exe not found at $VsBootstrapHostPath"
+    Warn "  vs-installer gate will fail with bootstrapper-not-staged"
+    Warn "  (drop it there via: Invoke-WebRequest https://aka.ms/vs/17/release/vs_buildtools.exe -OutFile $VsBootstrapHostPath)"
+    Record 'stage-vs-bootstrapper' "SKIPPED: $VsBootstrapHostPath missing"
+  }
 
   # ---- Step 5: run the gate ----------------------------------------------
   $envVarName = $cfg.EnvVar

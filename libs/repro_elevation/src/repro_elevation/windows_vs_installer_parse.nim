@@ -409,6 +409,17 @@ proc diffMembership*(desired: VsInstallerDesiredState;
   ## reported as a difference (the spec's "version drift is benign"
   ## caveat is satisfied by construction: this function only ever
   ## compares package IDS).
+  ##
+  ## "Don't care" semantics: an EMPTY desired.workloads list means the
+  ## resource does not pin a workload set — extras are NOT actionable
+  ## drift. Same for components. This matches how operators write the
+  ## resource in practice: declaring only `workloads = [...]` and
+  ## leaving `components` unset means "I care about the workloads;
+  ## let VS pull in whatever dependent components those workloads
+  ## need." Without this rule a freshly-installed BuildTools product
+  ## that auto-pulled its workload-required components would always
+  ## classify as `membership-drift`, which makes the post-apply
+  ## convergence assertion impossible to satisfy.
   let idx = selectProduct(products, desired.edition, desired.installPath)
   if idx < 0:
     result.productInstalled = false
@@ -426,13 +437,17 @@ proc diffMembership*(desired: VsInstallerDesiredState;
   for c in desired.components:
     if not containsId(haveComponents, c):
       result.missingComponents.add(c)
-  # Extra = installed but not desired.
-  for w in haveWorkloads:
-    if not containsId(desired.workloads, w):
-      result.extraWorkloads.add(w)
-  for c in haveComponents:
-    if not containsId(desired.components, c):
-      result.extraComponents.add(c)
+  # Extra = installed but not desired. Only populated when the
+  # resource declared a non-empty list of that kind — see the
+  # "don't care" semantics in the proc doc above.
+  if desired.workloads.len > 0:
+    for w in haveWorkloads:
+      if not containsId(desired.workloads, w):
+        result.extraWorkloads.add(w)
+  if desired.components.len > 0:
+    for c in haveComponents:
+      if not containsId(desired.components, c):
+        result.extraComponents.add(c)
 
 proc classifyDrift*(diff: VsMembershipDiff): VsDriftClass =
   ## Reduce a membership diff to a single drift class.
@@ -523,6 +538,15 @@ proc buildInstallerArgs*(desired: VsInstallerDesiredState;
   ## a reboot requirement separately, it never auto-reboots. Returns an
   ## EMPTY seq when no mutation is required (in-sync, or non-strict
   ## membership-drift).
+  ##
+  ## NOTE: the `vsdNeedsInstall` argv emitted here is the FALLBACK
+  ## form for hosts where the bootstrapper `vs_<edition>.exe` is not
+  ## available (the resident `vs_installer.exe install ...` form). It
+  ## requires an already-registered channel on the host. The driver
+  ## prefers `buildBootstrapperInstallArgs` when the bootstrapper IS
+  ## present (the only path that works on a freshly-uninstalled
+  ## machine, where the resident installer cannot perform a true
+  ## fresh install).
   let cls = classifyDrift(diff)
   case cls
   of vsdInSync:
@@ -568,6 +592,35 @@ proc buildInstallerArgs*(desired: VsInstallerDesiredState;
   result.add("--quiet")
   result.add("--wait")
   result.add("--norestart")
+
+proc buildBootstrapperInstallArgs*(desired: VsInstallerDesiredState): seq[string] =
+  ## Build the argv for the BOOTSTRAPPER `vs_<edition>.exe` to perform
+  ## a fresh install. Unlike the resident `vs_installer.exe install`
+  ## form (`buildInstallerArgs` `vsdNeedsInstall` branch), the
+  ## bootstrapper has its `productId` baked in and does NOT accept
+  ## `--productId` / `--channelId` — passing them produces a usage
+  ## error and an instant exit. The bootstrapper also needs
+  ## `--noUpdateInstaller` to avoid an unrelated self-update step
+  ## that interferes on offline / freshly-reverted snapshots.
+  ##
+  ## This matches the args set the M69 Hyper-V provisioning script
+  ## uses to install Build Tools (`tools/hyperv-m69-system/
+  ## provision-base-vm.ps1`), which is the form known to work on the
+  ## post-snapshot-revert VM.
+  result.add("install")
+  if desired.installPath.len > 0:
+    result.add("--installPath")
+    result.add(desired.installPath)
+  for w in desired.workloads:
+    result.add("--add")
+    result.add(w)
+  for c in desired.components:
+    result.add("--add")
+    result.add(c)
+  result.add("--quiet")
+  result.add("--wait")
+  result.add("--norestart")
+  result.add("--noUpdateInstaller")
 
 proc buildUninstallArgs*(desired: VsInstallerDesiredState): seq[string] =
   ## Build the `vs_installer uninstall` argv (the resource's destroy /

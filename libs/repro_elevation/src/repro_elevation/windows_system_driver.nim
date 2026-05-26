@@ -265,6 +265,37 @@ when defined(windows):
     ## is defence-in-depth.
     "'" & s.replace("'", "''") & "'"
 
+  proc wrapCmdletTerminating(invocation: string): string =
+    ## Wrap a DISM-style PowerShell cmdlet invocation so the script's
+    ## EXIT CODE reflects the cmdlet's terminating-error outcome only,
+    ## NOT the noisy `$?`/`$LASTEXITCODE` semantics PowerShell uses by
+    ## default.
+    ##
+    ## Default PowerShell behavior: a cmdlet that writes ANY object to
+    ## the error stream sets `$?` to false, which in turn makes
+    ## `powershell.exe -Command` exit with 1 — even though the cmdlet
+    ## itself succeeded and the operation is in flight. The M69 Hyper-V
+    ## runs surfaced this against `Add-WindowsCapability -Online -Name
+    ## 'OpenSSH.Server~~~~0.0.1.0'`: the cmdlet kicked off the FoD
+    ## install (post-call polls observed `InstallPending`) but wrote a
+    ## non-terminating warning/error to the error stream, so PowerShell
+    ## exited 1 and the driver `raiseProtocol`'d a spurious failure.
+    ##
+    ## This wrapper:
+    ##   * raises `$ErrorActionPreference = 'Stop'` so any cmdlet error
+    ##     is converted to a terminating exception;
+    ##   * runs the invocation under `try { ... } catch { ... }`;
+    ##   * captures the returned object's `Format-List` rendering so
+    ##     the existing `restartNeeded` / state parsers still see the
+    ##     `RestartNeeded : ...` line they expect;
+    ##   * exits 0 on success, 1 only on a TRUE terminating cmdlet
+    ##     error (with the error message on the output stream so the
+    ##     diagnostic survives).
+    "$ErrorActionPreference = 'Stop'; try { $r = " & invocation &
+      "; if ($null -ne $r) { $r | Format-List | Out-String | Write-Output } " &
+      "; exit 0 } catch { Write-Output ('ERROR: ' + " &
+      "$_.Exception.Message); exit 1 }"
+
 # ===========================================================================
 # windows.optionalFeature — DISM via PowerShell.
 # ===========================================================================
@@ -295,9 +326,12 @@ proc applyWindowsOptionalFeature*(op: PrivilegedOperation):
       if op.featureEnable: "Enable-WindowsOptionalFeature"
       else: "Disable-WindowsOptionalFeature"
     let extra = if op.featureEnable: " -All" else: ""
-    let (output, code) = runPowerShell(
-      verb & " -Online -NoRestart" & extra & " -FeatureName " &
-      psQuote(op.featureName))
+    let invocation = verb & " -Online -NoRestart" & extra & " -FeatureName " &
+      psQuote(op.featureName)
+    # Run the cmdlet under explicit terminating-error semantics so the
+    # script exit code reflects the operation's outcome, not a
+    # `$?`-from-a-non-terminating-warning. See wrapCmdletTerminating.
+    let (output, code) = runPowerShell(wrapCmdletTerminating(invocation))
     if code != 0:
       raiseProtocol("windows.optionalFeature " &
         (if op.featureEnable: "enable" else: "disable") & " of '" &
@@ -331,8 +365,16 @@ proc applyWindowsCapability*(op: PrivilegedOperation):
     let verb =
       if op.capabilityInstall: "Add-WindowsCapability"
       else: "Remove-WindowsCapability"
-    let (output, code) = runPowerShell(
-      verb & " -Online -Name " & psQuote(op.capabilityName))
+    let invocation = verb & " -Online -Name " & psQuote(op.capabilityName)
+    # Run the cmdlet under explicit terminating-error semantics so the
+    # script exit code reflects the operation's outcome, not a
+    # `$?`-from-a-non-terminating-warning. The M69 Hyper-V runs
+    # showed `Add-WindowsCapability -Online -Name 'OpenSSH.Server...'`
+    # successfully kicked off the FoD install (post-call polls observed
+    # `InstallPending`) but PowerShell exited 1 because the cmdlet wrote
+    # a non-terminating warning to the error stream. See
+    # wrapCmdletTerminating for the rationale.
+    let (output, code) = runPowerShell(wrapCmdletTerminating(invocation))
     if code != 0:
       raiseProtocol("windows.capability " &
         (if op.capabilityInstall: "install" else: "uninstall") & " of '" &

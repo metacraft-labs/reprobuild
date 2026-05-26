@@ -110,6 +110,41 @@ when defined(windows):
       return wellKnown
     return "vs_installer.exe"
 
+  proc bootstrapperExeName(edition: string): string =
+    ## The bootstrapper executable name for a given VS edition.
+    ## Microsoft's aka.ms redirects use the lower-cased edition.
+    "vs_" & edition.toLowerAscii() & ".exe"
+
+  proc resolveVsBootstrapper(edition: string): string =
+    ## Locate the edition-specific bootstrapper `vs_<edition>.exe` used
+    ## for a FRESH install. Unlike the resident `vs_installer.exe`,
+    ## this binary is NOT installed by the OS — the harness / dev
+    ## environment must stage it. Preference order:
+    ##   * next to the running `repro` binary (the future embedded /
+    ##     gate-staged copy),
+    ##   * in `%TEMP%\vs_<edition>.exe` (the path the provisioning
+    ##     script downloads to),
+    ##   * bare exe name resolved via PATH.
+    ## Returns the empty string if none of the candidates exist — the
+    ## caller must surface a clear "missing bootstrapper" error rather
+    ## than silently launching a `vs_installer.exe install` that fails
+    ## fast on a clean machine.
+    let name = bootstrapperExeName(edition)
+    let beside = getAppDir() / name
+    if fileExists(beside):
+      return beside
+    let tempDir = getEnv("TEMP")
+    if tempDir.len > 0:
+      let inTemp = tempDir / name
+      if fileExists(inTemp):
+        return inTemp
+    let localAppData = getEnv("LOCALAPPDATA")
+    if localAppData.len > 0:
+      let inLocal = localAppData / "Repro" / name
+      if fileExists(inLocal):
+        return inLocal
+    return ""
+
   proc runVsWhere(): tuple[output: string; code: int] =
     ## Run `vswhere -products * -include packages -format json -utf8`
     ## and capture stdout. `-include packages` makes vswhere emit the
@@ -122,9 +157,11 @@ when defined(windows):
     (output, code)
 
   proc runVsInstaller(args: seq[string]): tuple[output: string; code: int] =
-    ## Run the VS installer with a typed argv. The argument LIST is
-    ## built by `buildInstallerArgs` from typed operation fields — no
-    ## operator string is ever interpolated into a shell command.
+    ## Run the resident `vs_installer.exe` with a typed argv. Used for
+    ## `modify` / `uninstall` once VS is on the machine. Fresh installs
+    ## go through `runVsBootstrapper` instead — the resident installer
+    ## cannot perform a true fresh install on a machine where no
+    ## product / channel is yet registered.
     let exe = resolveVsInstaller()
     var cmd = quoteShell(exe)
     for a in args:
@@ -132,6 +169,23 @@ when defined(windows):
       cmd.add(quoteShell(a))
     let (output, code) = execCmdEx(cmd)
     (output, code)
+
+  proc runVsBootstrapper(edition: string;
+                          args: seq[string]):
+      tuple[output: string; code: int; missing: bool] =
+    ## Run the edition-specific bootstrapper for a fresh install.
+    ## `missing = true` (with code != 0 and empty output) signals that
+    ## the bootstrapper was NOT staged on the machine; the caller
+    ## should surface that as a clear configuration error.
+    let exe = resolveVsBootstrapper(edition)
+    if exe.len == 0:
+      return (output: "", code: -1, missing: true)
+    var cmd = quoteShell(exe)
+    for a in args:
+      cmd.add(" ")
+      cmd.add(quoteShell(a))
+    let (output, code) = execCmdEx(cmd)
+    (output: output, code: code, missing: false)
 
 # ===========================================================================
 # observe — read the live VS installation through vswhere.
@@ -179,10 +233,22 @@ proc observeWindowsVsInstaller*(op: PrivilegedOperation):
 proc applyWindowsVsInstaller*(op: PrivilegedOperation):
     tuple[state: ObservedOperationState; restartNeeded: bool] =
   ## Converge the VS installation to the declared workload/component
-  ## membership. Runs `vs_installer install` / `modify` / `uninstall`
-  ## as `classifyDrift` / `op.vsDestroy` select. NEVER auto-reboots —
+  ## membership. Runs `vs_<edition>.exe install` (the bootstrapper)
+  ## for a fresh install, and `vs_installer.exe modify` / `uninstall`
+  ## for in-place mutations of an existing installation, as
+  ## `classifyDrift` / `op.vsDestroy` select. NEVER auto-reboots —
   ## `--norestart` is always in the argv and a reboot requirement is
   ## surfaced via `restartNeeded`.
+  ##
+  ## Why the binary split:
+  ##   * The resident `vs_installer.exe` is for modifying or
+  ##     uninstalling an EXISTING install. On a freshly-uninstalled or
+  ##     clean machine it can return non-zero in seconds without doing
+  ##     anything useful (no channel registered, no layout).
+  ##   * The edition-specific bootstrapper `vs_<edition>.exe` is what
+  ##     performs a true fresh install. The args set matches the
+  ##     M69 Hyper-V provisioning script — see
+  ##     `buildBootstrapperInstallArgs`.
   when defined(windows):
     let desired = desiredStateOf(op)
     if op.vsDestroy:
@@ -195,10 +261,41 @@ proc applyWindowsVsInstaller*(op: PrivilegedOperation):
       result.state = observeWindowsVsInstaller(op)
       return
     let observed = observeVsInstallerState(op)
+    let cls = classifyDrift(observed.diff)
+    if cls == vsdInSync:
+      # Already in sync — no mutation.
+      result.state = observeWindowsVsInstaller(op)
+      return
+    if cls == vsdMembershipDrift and not desired.strict:
+      # Non-strict membership-drift: leave-alone policy.
+      result.state = observeWindowsVsInstaller(op)
+      return
+    if cls == vsdNeedsInstall:
+      # Fresh install: use the edition-specific bootstrapper. The
+      # resident vs_installer.exe cannot perform a true fresh install
+      # on a clean machine.
+      let bootArgs = buildBootstrapperInstallArgs(desired)
+      let (bOut, bCode, bMissing) = runVsBootstrapper(op.vsEdition, bootArgs)
+      if bMissing:
+        raiseProtocol("windows.vsInstaller fresh install of edition '" &
+          op.vsEdition & "' cannot proceed: the bootstrapper '" &
+          "vs_" & op.vsEdition.toLowerAscii() & ".exe' is not staged " &
+          "on the host. Expected one of: alongside the running " &
+          "repro binary, %TEMP%, or %LOCALAPPDATA%\\Repro\\.")
+      if not vsInstallerSucceeded(bCode):
+        raiseProtocol("windows.vsInstaller fresh install of edition '" &
+          op.vsEdition & "' failed (bootstrapper exit " & $bCode & "): " &
+          bOut.strip())
+      result.restartNeeded = vsInstallerRestartNeeded(bCode)
+      result.state = observeWindowsVsInstaller(op)
+      return
+    # vsdNeedsModify OR (vsdMembershipDrift + strict): in-place
+    # modification of an existing install.
     let args = buildInstallerArgs(desired, observed.diff)
     if args.len == 0:
-      # No mutation required (already in sync, or a non-strict
-      # membership-drift the leave-alone policy ignores).
+      # Defensive: buildInstallerArgs returned no work even though
+      # classifyDrift said we needed mutation. Treat as no-op rather
+      # than crash.
       result.state = observeWindowsVsInstaller(op)
       return
     let (iOut, iCode) = runVsInstaller(args)
