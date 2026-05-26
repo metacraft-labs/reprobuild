@@ -9,19 +9,25 @@
 ## Per Provider-Compile-Tiering.md §"2b — repro-standard-provider" and
 ## Language-Conventions/README.md.
 ##
-## **M0 scaffold.** This first revision is a skeleton: it answers
-## ``--version`` with a stable string, advertises one placeholder entry
-## point in its manifest, and returns an empty ``GraphFragment`` for
-## graph-invocation requests. The convention dispatch framework lands
-## in M1; per-language fragments land in M3+.
+## **M1 framework.** Manifest requests still return the M0 placeholder
+## entry point (the manifest's shape doesn't depend on conventions — see
+## Standard-Provider-Implementation.milestones.org §M1). Graph requests
+## dispatch through ``defaultConventionRegistry``; on the first
+## ``recognize`` hit the convention's ``emitFragment`` produces the
+## fragment, otherwise we exit non-zero with a "no convention matched"
+## diagnostic that names the project root and the package's ``uses:``
+## hint (parsed heuristically — see project_intro.nim). Per-language
+## convention plugins land in M3+.
 
-import std/[os]
+import std/[options, os, strutils]
 
 import repro_provider_runtime
+import repro_standard_provider/convention
+import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
 const
-  StandardProviderVersion = "0.0.1-m0-scaffold"
+  StandardProviderVersion = "0.0.2-m1-framework"
     ## Bump whenever ``--version`` output should change for release
     ## tracking. Engine routing keys off
     ## ``StandardProviderArtifactId``, not this string — this exists
@@ -34,11 +40,13 @@ proc parseEarlyFlags(args: openArray[string]): tuple[wantVersion: bool] =
       return
 
 proc placeholderManifest(providerArtifactId: string): ProviderManifest =
-  ## Manifest the M0 scaffold advertises. Engine validation requires
-  ## the returned ``providerArtifactId`` to match the request when the
-  ## request supplied one; falling back to
-  ## ``StandardProviderArtifactId`` keeps stand-alone smoke runs
-  ## working when the caller leaves it empty.
+  ## Manifest the standard provider advertises. M1 keeps the M0
+  ## placeholder entry point — conventions don't change the entry-point
+  ## shape, they fan out from a single project-root entry point.
+  ## Engine validation requires the returned ``providerArtifactId`` to
+  ## match the request when the request supplied one; falling back to
+  ## ``StandardProviderArtifactId`` keeps stand-alone smoke runs working
+  ## when the caller leaves it empty.
   ProviderManifest(
     providerArtifactId:
       if providerArtifactId.len > 0: providerArtifactId
@@ -54,19 +62,58 @@ proc placeholderManifest(providerArtifactId: string): ProviderManifest =
         outputSchemaId: "reprobuild.graph-fragment.v1")
     ])
 
-proc placeholderFragment(request: ProviderGraphRequest): GraphFragment =
-  ## Empty graph fragment — no nodes, no edges — echoing the request's
-  ## entry-point + arguments so engine-side validation passes the
-  ## structural checks even though there is no real graph to consume.
-  ## The digest is recomputed here because callers like
-  ## ``invokeProviderEntryPoint`` cross-check it against
-  ## ``computeGraphFragmentDigest``.
-  result = GraphFragment(
+proc projectRootFromRequest(request: ProviderGraphRequest): string =
+  ## At M1 the engine passes the project root via ``request.arguments``
+  ## as a bare path string — same shape the Tier 2c trycompile provider
+  ## uses. M2 will replace this with an interface-artifact handle.
+  request.arguments.strip()
+
+proc formatUsesHint(uses: seq[string]): string =
+  if uses.len == 0:
+    "(none declared)"
+  else:
+    uses.join(", ")
+
+proc noConventionMatchedMessage(projectRoot: string;
+                                uses: seq[string]): string =
+  ## Diagnostic message emitted when no convention recognises the
+  ## project. The substring ``"no convention matched"`` is part of the
+  ## contract — ``scripts/validate-standard-provider-no-match.ps1``
+  ## greps for it.
+  "repro-standard-provider: no convention matched for project root '" &
+    projectRoot & "' (uses: " & formatUsesHint(uses) & ")"
+
+proc dispatchGraphRequest(request: ProviderGraphRequest):
+    tuple[fragment: GraphFragment; matched: bool; projectRoot: string;
+          uses: seq[string]] =
+  ## Look up the first matching convention against
+  ## ``defaultConventionRegistry`` and delegate to it. ``matched=false``
+  ## tells the caller to emit the diagnostic and exit non-zero.
+  let projectRoot = projectRootFromRequest(request)
+  let uses = readUsesHint(projectRoot)
+  let hit = firstMatchingConvention(defaultConventionRegistry,
+    projectRoot, request)
+  if hit.isSome:
+    var fragment = hit.get.emitFragment(projectRoot, request)
+    # Make sure the convention's emitFragment didn't forget to echo
+    # back the request's identity — the engine cross-checks these.
+    if fragment.entryPointId.len == 0:
+      fragment.entryPointId = request.entryPointId
+    if fragment.entryPointBodyHash.len == 0:
+      fragment.entryPointBodyHash = request.entryPointBodyHash
+    if fragment.arguments.len == 0:
+      fragment.arguments = request.arguments
+    if fragment.namespace.len == 0:
+      fragment.namespace = request.namespace
+    if fragment.fragmentDigest.len == 0:
+      fragment.fragmentDigest = computeGraphFragmentDigest(fragment)
+    return (fragment, true, projectRoot, uses)
+  let empty = GraphFragment(
     entryPointId: request.entryPointId,
     entryPointBodyHash: request.entryPointBodyHash,
     arguments: request.arguments,
     namespace: request.namespace)
-  result.fragmentDigest = computeGraphFragmentDigest(result)
+  (empty, false, projectRoot, uses)
 
 when defined(reproProviderMode):
   proc runStandardProvider(): int =
@@ -85,13 +132,17 @@ when defined(reproProviderMode):
         writeProviderResponseFile(paths.responsePath,
           manifestResponse(manifest))
       of prkGraphInvocation:
-        let fragment = placeholderFragment(request)
+        let outcome = dispatchGraphRequest(request)
+        if not outcome.matched:
+          stderr.writeLine(noConventionMatchedMessage(outcome.projectRoot,
+            outcome.uses))
+          return 3
         writeProviderResponseFile(paths.responsePath,
-          graphResponse(manifest, fragment))
+          graphResponse(manifest, outcome.fragment))
       of prkDevEnvIntrospection:
         stderr.writeLine(
           "repro-standard-provider: dev-env introspection not supported " &
-          "in the M0 scaffold")
+          "in the M1 framework")
         return 2
       0
     except CatchableError as err:
