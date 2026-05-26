@@ -919,18 +919,20 @@ proc sameSourceFile(a, b: string): bool =
     a == b
 
 const
-  RegisteredStandardConventionToolchains* = ["nim"]
+  RegisteredStandardConventionToolchains* = ["nim", "rust", "cargo"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
     ## Tier 2b standard provider. This list MUST stay in sync with the
     ## conventions registered in
     ## ``apps/repro-standard-provider/repro_standard_provider.nim``.
-    ## Adding a Rust convention there means appending ``"rust"`` here,
-    ## etc. Mismatches break in the engine-side fall-back path:
-    ## the engine will dispatch to the provider, the provider will reply
-    ## "no convention matched", and the build fails loudly — preferable
-    ## to silently routing through the slow path when the user expects
-    ## the fast path.
+    ## Adding a Go convention there means appending ``"go"`` here, etc.
+    ## ``"rust"`` and ``"cargo"`` both route to the same Rust convention
+    ## plugin (M4) — the Rust convention's ``recognize`` matches either
+    ## token in ``uses:``. Mismatches break in the engine-side fall-back
+    ## path: the engine will dispatch to the provider, the provider will
+    ## reply "no convention matched", and the build fails loudly —
+    ## preferable to silently routing through the slow path when the
+    ## user expects the fast path.
 
 proc usesIncludesRegisteredConvention(sourceFile: string): bool =
   ## Heuristic line scan of ``reprobuild.nim`` for any toolchain in
