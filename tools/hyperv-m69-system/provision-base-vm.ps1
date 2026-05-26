@@ -108,6 +108,11 @@ $SnapshotBaseWithVs   = 'base-with-vs'
 $CredCacheDir       = Join-Path $env:LOCALAPPDATA 'Repro\hyperv-m69'
 $CredCachePath      = Join-Path $CredCacheDir 'vm-cred.xml'
 
+# Auto-passphrase + auto-OOBE
+$WordlistPath       = Join-Path $PSScriptRoot 'wordlist.txt'
+$VmLocalAccountName = 'User'
+$UnattendIsoPath    = Join-Path $VhdRoot "unattend-$VmName.iso"
+
 # Inside the VM
 $VmHarnessRoot      = 'C:\harness'
 $VmNimVersion       = '2.2.8'
@@ -326,6 +331,212 @@ function Invoke-VmScript {
   $out = Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1
   Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
   return $out
+}
+
+# Cached wordlist (loaded lazily by New-Passphrase, then reused).
+$script:CachedPassphraseWords = $null
+
+function Get-PassphraseWords {
+  param([string]$Path = $WordlistPath)
+  if ($script:CachedPassphraseWords) { return $script:CachedPassphraseWords }
+  if (-not (Test-Path $Path)) {
+    throw "wordlist.txt not found at $Path (expected alongside this script)"
+  }
+  # The wordlist is the EFF Short Wordlist 1.0 with a 5-line `#`-prefixed
+  # header. Drop comment lines + blanks; keep only words that match
+  # ^[a-z]+$ (the canonical list contains a single hyphenated entry,
+  # 'yo-yo', which we exclude so generated passphrases always tokenise
+  # cleanly on '-').
+  $lines = Get-Content -LiteralPath $Path -Encoding UTF8
+  $words = @()
+  foreach ($ln in $lines) {
+    if ($ln -match '^\s*#') { continue }
+    if ($ln -match '^\s*$') { continue }
+    $w = $ln.Trim()
+    if ($w -match '^[a-z]+$') { $words += $w }
+  }
+  if ($words.Count -lt 1000) {
+    throw "wordlist.txt loaded only $($words.Count) usable words; expected ~1295"
+  }
+  $script:CachedPassphraseWords = ,$words
+  return $script:CachedPassphraseWords
+}
+
+function New-Passphrase {
+  # Generates a 4-word passphrase from the EFF Short Wordlist using a
+  # CRYPTOGRAPHIC RNG (System.Security.Cryptography.RandomNumberGenerator).
+  # NOT Get-Random: that is Mersenne Twister, non-cryptographic, and
+  # this is a real local-account password the OOBE will set.
+  $words = Get-PassphraseWords
+  $picked = @()
+  for ($i = 0; $i -lt 4; $i++) {
+    $idx = [System.Security.Cryptography.RandomNumberGenerator]::GetInt32(0, $words.Count)
+    $picked += $words[$idx]
+  }
+  return ($picked -join '-')
+}
+
+function New-AutounattendXml {
+  param(
+    [Parameter(Mandatory)] [string]$Passphrase,
+    [string]$LocalAccountName = $VmLocalAccountName
+  )
+  # Generates an Autounattend.xml that auto-completes the entire
+  # Windows 11 OOBE: creates a local Administrators account
+  # ($LocalAccountName) with the supplied passphrase, hides every OOBE
+  # screen, sets en-US locale + UTC TZ. No AutoLogon - PSDirect
+  # authenticates via SAM credential against the local account.
+  # XML-encode the passphrase so a stray '<', '&', etc. cannot break
+  # the document (our generated passphrases are [a-z-]+ today, but the
+  # encoder is cheap insurance).
+  $encodedPw = [System.Security.SecurityElement]::Escape($Passphrase)
+  @"
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UILanguageFallback>en-US</UILanguageFallback>
+      <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>$LocalAccountName</Name>
+            <Group>Administrators</Group>
+            <Description>repro-m69 test VM auto-OOBE user</Description>
+            <Password>
+              <Value>$encodedPw</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+      <TimeZone>UTC</TimeZone>
+      <RegisteredOwner>repro-m69</RegisteredOwner>
+      <RegisteredOrganization>Reprobuild</RegisteredOrganization>
+    </component>
+  </settings>
+</unattend>
+"@
+}
+
+$script:UnattendIsoHelperLoaded = $false
+function Initialize-UnattendIsoHelper {
+  if ($script:UnattendIsoHelperLoaded) { return }
+  # IMAPI2FS returns the result image's ImageStream as a COM
+  # System.__ComObject. PowerShell cannot directly cast it to
+  # System.Runtime.InteropServices.ComTypes.IStream because the COM
+  # interop wrappers need an explicit IStream contract at compile time.
+  # The well-known pattern is a tiny C# helper that takes the IStream
+  # as an `object`, marshals it to the strongly-typed IStream interface
+  # via Marshal.GetIUnknownForObject + Marshal.GetTypedObjectForIUnknown,
+  # then drains it into a FileStream in BlockSize-sized chunks.
+  Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+
+public static class UnattendIsoHelper {
+  public static void WriteIStreamToFile(object comStream, string path, int blockSize, int totalBlocks) {
+    IntPtr iunk = Marshal.GetIUnknownForObject(comStream);
+    try {
+      Guid iid = typeof(IStream).GUID;
+      IntPtr ipStream;
+      // Marshal.QueryInterface takes the IID as a 'ref Guid' on
+      // .NET Framework and as an 'in Guid' on net6+. Both bindings
+      // accept a local Guid variable by reference; we use 'ref' for
+      // compatibility, suppressing the Roslyn CS9191 hint.
+#pragma warning disable CS9191
+      Marshal.QueryInterface(iunk, ref iid, out ipStream);
+#pragma warning restore CS9191
+      if (ipStream == IntPtr.Zero) { throw new InvalidOperationException("COM object does not implement IStream"); }
+      IStream istream = (IStream)Marshal.GetObjectForIUnknown(ipStream);
+      try {
+        long totalBytes = (long)blockSize * (long)totalBlocks;
+        byte[] buffer = new byte[blockSize];
+        IntPtr pcbRead = Marshal.AllocCoTaskMem(IntPtr.Size);
+        try {
+          using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None)) {
+            long remaining = totalBytes;
+            while (remaining > 0) {
+              int chunk = (int)Math.Min((long)blockSize, remaining);
+              istream.Read(buffer, chunk, pcbRead);
+              int read = Marshal.ReadInt32(pcbRead);
+              if (read <= 0) { break; }
+              fs.Write(buffer, 0, read);
+              remaining -= read;
+            }
+          }
+        } finally {
+          Marshal.FreeCoTaskMem(pcbRead);
+        }
+      } finally {
+        Marshal.ReleaseComObject(istream);
+        Marshal.Release(ipStream);
+      }
+    } finally {
+      Marshal.Release(iunk);
+    }
+  }
+}
+'@ -ErrorAction Stop
+  $script:UnattendIsoHelperLoaded = $true
+}
+
+function New-UnattendIso {
+  param(
+    [Parameter(Mandatory)] [string]$XmlPath,
+    [Parameter(Mandatory)] [string]$IsoPath,
+    [string]$VolumeName = 'AUTOUNATTEND'
+  )
+  # Build a small ISO carrying a single file (typically Autounattend.xml)
+  # at its ROOT via the IMAPI2FS COM API. No ADK / oscdimg dependency.
+  # Returns nothing on success; throws on failure.
+  if (-not (Test-Path -LiteralPath $XmlPath)) {
+    throw "New-UnattendIso: source file not found: $XmlPath"
+  }
+  Initialize-UnattendIsoHelper
+  $stagingDir = Join-Path ([System.IO.Path]::GetTempPath()) ("unattend-iso-stage-" + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+  try {
+    Copy-Item -LiteralPath $XmlPath -Destination (Join-Path $stagingDir ([System.IO.Path]::GetFileName($XmlPath))) -Force
+    $image = New-Object -ComObject 'IMAPI2FS.MsftFileSystemImage'
+    # 7 = Joliet (4) + ISO9660 (1) + UDF (2). Maximum compatibility.
+    $image.FileSystemsToCreate = 7
+    $image.VolumeName = $VolumeName
+    $image.Root.AddTree($stagingDir, $false)
+    $resultImage = $image.CreateResultImage()
+    $blockSize = [int]$resultImage.BlockSize
+    $totalBlocks = [int]$resultImage.TotalBlocks
+    if (Test-Path -LiteralPath $IsoPath) {
+      Remove-Item -LiteralPath $IsoPath -Force -ErrorAction Stop
+    }
+    [UnattendIsoHelper]::WriteIStreamToFile($resultImage.ImageStream, $IsoPath, $blockSize, $totalBlocks)
+    # Release COM objects.
+    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($resultImage)
+    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($image)
+    if (-not (Test-Path -LiteralPath $IsoPath)) {
+      throw "New-UnattendIso: ISO was not written to $IsoPath"
+    }
+  } finally {
+    if (Test-Path -LiteralPath $stagingDir) {
+      Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -584,6 +795,100 @@ if (-not (Test-Path $BaseVhdxCachePath)) {
 }
 
 # ---------------------------------------------------------------------------
+# Step 4.5: ensure the VM credential exists (auto-generate if absent)
+# ---------------------------------------------------------------------------
+Section 'Step 4.5: ensure the VM credential exists (auto-generate if absent)'
+# If the DPAPI-encrypted cred cache is missing, generate a fresh 4-word
+# EFF-Short passphrase, build a PSCredential for the local guest
+# account, and seal it via Export-Clixml. The same passphrase is also
+# embedded in the Autounattend.xml on the unattend ISO (Step 4.6) so
+# Windows OOBE creates a matching local account on first boot. After
+# OOBE completes the ISO is detached + deleted (Step 8 finally block).
+$cred = $null
+if (-not (Test-Path $CredCachePath)) {
+  Info "  no cached credential at $CredCachePath - generating one"
+  $newPassphrase = New-Passphrase
+  $securePw = ConvertTo-SecureString -String $newPassphrase -AsPlainText -Force
+  $cred = New-Object System.Management.Automation.PSCredential($VmLocalAccountName, $securePw)
+  $cred | Export-Clixml -Path $CredCachePath
+  # Best-effort: keep the cred file off the world's view. DPAPI already
+  # ties it to the current user; ACLs are belt-and-braces.
+  try {
+    $acl = Get-Acl -LiteralPath $CredCachePath
+    $acl.SetAccessRuleProtection($true, $false)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+      [System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+      'FullControl','Allow')
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $CredCachePath -AclObject $acl
+  } catch {
+    Warn "  could not tighten ACL on $CredCachePath ; DPAPI seal still applies"
+  }
+  Info "[provision] generated new VM passphrase (4-word EFF short); stored DPAPI-encrypted at $CredCachePath ; retrieve with Get-VmPassword.ps1"
+  # IMPORTANT: never print the passphrase to stdout. Operators retrieve
+  # it via tools/hyperv-m69-system/Get-VmPassword.ps1 if needed.
+} else {
+  try {
+    $cred = Import-Clixml -Path $CredCachePath
+  } catch {
+    Fail "failed to load cached credential at $CredCachePath : $_"
+    Fail "the file may be corrupt or was sealed with a different user's DPAPI key."
+    Fail "Delete it and re-run; the script will generate a fresh passphrase."
+    exit 2
+  }
+  if (-not $cred -or -not $cred.UserName) {
+    Fail "cached credential at $CredCachePath has no UserName; refusing to continue"
+    Fail "Delete it and re-run; the script will generate a fresh passphrase."
+    exit 2
+  }
+  Info "  loaded cached credential (user: $($cred.UserName))"
+}
+
+# ---------------------------------------------------------------------------
+# Step 4.6: build the unattend ISO (Autounattend.xml seeded with the
+# cached passphrase). Step 6 attaches it as a DVD when creating the VM
+# (or when resuming a partly-provisioned VM that does not yet have it
+# attached). Step 8 detaches + deletes it after OOBE completes.
+# ---------------------------------------------------------------------------
+Section 'Step 4.6: build unattend ISO'
+$buildIso = $true
+if (Test-VmExists $VmName) {
+  $existingDvd = Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Path -and ($_.Path -ieq $UnattendIsoPath) }
+  if (-not $existingDvd -and -not (Test-Path -LiteralPath $UnattendIsoPath)) {
+    # VM exists but no unattend DVD attached and no ISO on disk - the
+    # VM has presumably already completed OOBE on a prior run. No need
+    # to rebuild the ISO; OOBE only runs once per VHDX provisioning.
+    Info "  VM exists with no unattend DVD attached and no ISO on disk - assume OOBE already complete; skip ISO build"
+    $buildIso = $false
+  }
+}
+if ($buildIso) {
+  if (Test-Path -LiteralPath $UnattendIsoPath) {
+    Info "  unattend ISO already present: $UnattendIsoPath (will reuse)"
+  } else {
+    Info "  building unattend ISO at: $UnattendIsoPath"
+    $plainPw = $cred.GetNetworkCredential().Password
+    $unattendXml = New-AutounattendXml -Passphrase $plainPw -LocalAccountName $cred.UserName
+    $xmlTmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("autounattend-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $xmlTmpDir -Force | Out-Null
+    try {
+      $xmlPath = Join-Path $xmlTmpDir 'Autounattend.xml'
+      [System.IO.File]::WriteAllText($xmlPath, $unattendXml, [System.Text.Encoding]::UTF8)
+      # Basic structural sanity check before we burn it to an ISO.
+      [void]([xml](Get-Content -LiteralPath $xmlPath -Raw))
+      New-UnattendIso -XmlPath $xmlPath -IsoPath $UnattendIsoPath
+      $isoSize = (Get-Item -LiteralPath $UnattendIsoPath).Length
+      Info "  unattend ISO written ($isoSize bytes)"
+    } finally {
+      if (Test-Path -LiteralPath $xmlTmpDir) {
+        Remove-Item -LiteralPath $xmlTmpDir -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Step 5: -Force handling - blow away the existing VM + snapshots
 # ---------------------------------------------------------------------------
 if ($Force) {
@@ -602,14 +907,50 @@ if ($Force) {
     Info "  removing differencing VHD: $DiffVhdPath"
     Remove-Item -LiteralPath $DiffVhdPath -Force -ErrorAction SilentlyContinue
   }
+  # The stale unattend ISO (if any) carries an embedded passphrase that
+  # may not match the current cached credential after -Force; force a
+  # rebuild against the live cred so OOBE on the rebuilt VM matches.
+  if (Test-Path -LiteralPath $UnattendIsoPath) {
+    Info "  removing stale unattend ISO: $UnattendIsoPath"
+    Remove-Item -LiteralPath $UnattendIsoPath -Force -ErrorAction SilentlyContinue
+  }
+  Info "  rebuilding unattend ISO against the live cred"
+  $plainPw = $cred.GetNetworkCredential().Password
+  $unattendXml = New-AutounattendXml -Passphrase $plainPw -LocalAccountName $cred.UserName
+  $xmlTmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("autounattend-" + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $xmlTmpDir -Force | Out-Null
+  try {
+    $xmlPath = Join-Path $xmlTmpDir 'Autounattend.xml'
+    [System.IO.File]::WriteAllText($xmlPath, $unattendXml, [System.Text.Encoding]::UTF8)
+    [void]([xml](Get-Content -LiteralPath $xmlPath -Raw))
+    New-UnattendIso -XmlPath $xmlPath -IsoPath $UnattendIsoPath
+    $isoSize = (Get-Item -LiteralPath $UnattendIsoPath).Length
+    Info "  unattend ISO written ($isoSize bytes)"
+  } finally {
+    if (Test-Path -LiteralPath $xmlTmpDir) {
+      Remove-Item -LiteralPath $xmlTmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------
-# Step 6: ensure the VM exists
+# Step 6: ensure the VM exists (attach unattend ISO as DVD for auto-OOBE)
 # ---------------------------------------------------------------------------
 Section 'Step 6: ensure VM exists'
+$attachUnattendDvd = $false
 if (Test-VmExists $VmName) {
   Info "  VM '$VmName' already exists - skip create"
+  # Idempotent: if a fresh ISO was just built (Step 7.5) and the VM has
+  # no DVD pointing at it, attach it. This covers the case where a
+  # prior provisioning run crashed before OOBE completed and we are
+  # resuming.
+  if (Test-Path -LiteralPath $UnattendIsoPath) {
+    $existingDvd = Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Path -and ($_.Path -ieq $UnattendIsoPath) }
+    if (-not $existingDvd) {
+      $attachUnattendDvd = $true
+    }
+  }
 } else {
   Info "  VM '$VmName' does not exist - creating"
   # Create a differencing VHD so the cached VHDX is preserved
@@ -642,7 +983,15 @@ if (Test-VmExists $VmName) {
   foreach ($svc in @('Heartbeat','Shutdown','Time Synchronization','Key-Value Pair Exchange')) {
     Enable-VMIntegrationService -VMName $VmName -Name $svc -ErrorAction SilentlyContinue
   }
+  if (Test-Path -LiteralPath $UnattendIsoPath) {
+    $attachUnattendDvd = $true
+  }
   Info "  VM '$VmName' created."
+}
+
+if ($attachUnattendDvd) {
+  Info "  attaching unattend ISO as DVD: $UnattendIsoPath"
+  Add-VMDvdDrive -VMName $VmName -Path $UnattendIsoPath | Out-Null
 }
 
 # Verify Guest Service Interface
@@ -653,70 +1002,71 @@ if (-not $gsi -or -not $gsi.Enabled) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 7: load the cached VM credential (fast-fail if absent)
-# ---------------------------------------------------------------------------
-Section 'Step 7: load the cached VM credential'
-# The DPAPI-encrypted cred cache MUST already exist. This script is
-# designed to run under `pwsh -NoProfile -NonInteractive -File ...`
-# (sub-agent / CI / cron), where a Get-Credential prompt would hang
-# indefinitely with no terminal attached. Seeding the cache is a
-# one-time interactive bootstrap that the operator does once per VHDX
-# refresh - see README's "One-time interactive bootstrap" section.
-$cred = $null
-if (-not (Test-Path $CredCachePath)) {
-  Fail ""
-  Fail "PowerShell Direct credential cache missing at:"
-  Fail "  $CredCachePath"
-  Fail ""
-  Fail "To seed it, run this snippet ONCE in an INTERACTIVE pwsh window"
-  Fail "(the prompt cannot fire from -NonInteractive / sub-agent contexts):"
-  Fail ""
-  Fail "  `$d = `"`$env:LOCALAPPDATA\Repro\hyperv-m69`""
-  Fail "  if (-not (Test-Path `$d)) { New-Item -ItemType Directory -Path `$d -Force | Out-Null }"
-  Fail "  `$cred = Get-Credential -Message 'Hyper-V guest creds for repro-m69-hyperv. Use the username and password you set during the dev VM OOBE first-boot. Default username is User; pick any non-empty password.'"
-  Fail "  `$cred | Export-Clixml -Path `"`$d\vm-cred.xml`""
-  Fail ""
-  Fail "Then re-run provision-base-vm.ps1 - it will pick up at step 5."
-  Fail ""
-  exit 2
-}
-try {
-  $cred = Import-Clixml -Path $CredCachePath
-} catch {
-  Fail "failed to load cached credential at $CredCachePath : $_"
-  Fail "the file may be corrupt or was sealed with a different user's DPAPI key."
-  Fail "Delete it and re-seed it interactively (see Step 7 seeding snippet above)."
-  exit 2
-}
-if (-not $cred -or -not $cred.UserName) {
-  Fail "cached credential at $CredCachePath has no UserName; refusing to continue"
-  Fail "Delete it and re-seed it interactively (see Step 7 seeding snippet above)."
-  exit 2
-}
-Info "  loaded cached credential (user: $($cred.UserName))"
-
-# ---------------------------------------------------------------------------
-# Step 8: boot the VM
+# Step 8: boot the VM and wait for PowerShell Direct
+#
+# OOBE auto-completion happens here: the Autounattend.xml on the unattend
+# ISO drives the local-account creation + locale + EULA hide-all, taking
+# ~2-5 minutes. Once PSDirect-as-the-local-account succeeds, OOBE is
+# definitively complete. The finally block detaches + deletes the ISO
+# even if Wait-VmPSDirectReady crashes, so we never leave the cleartext
+# passphrase on host disk longer than necessary.
 # ---------------------------------------------------------------------------
 Section 'Step 8: boot the VM and wait for PowerShell Direct'
-$vm = Get-VmOrNull $VmName
-if ($vm.State -ne 'Running') {
-  Info "  starting VM"
-  Start-VM -Name $VmName
-} else {
-  Info "  VM already running"
+$ready = $false
+try {
+  $vm = Get-VmOrNull $VmName
+  if ($vm.State -ne 'Running') {
+    Info "  starting VM"
+    Start-VM -Name $VmName
+  } else {
+    Info "  VM already running"
+  }
+  $ready = Wait-VmPSDirectReady -Name $VmName -Credential $cred -TimeoutSec $BootReadyTimeoutSec
+} finally {
+  # Best-effort cleanup of the unattend DVD + ISO. Failures here are
+  # logged but do NOT abort provisioning (the VM is up and OOBE is
+  # done; the ISO is just disposable scaffolding).
+  $detachedAny = $false
+  $deletedIso  = $false
+  try {
+    $unattendDvds = Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Path -and ($_.Path -ieq $UnattendIsoPath) }
+    foreach ($dvd in $unattendDvds) {
+      try {
+        Remove-VMDvdDrive -VMName $VmName -ControllerNumber $dvd.ControllerNumber `
+          -ControllerLocation $dvd.ControllerLocation -ErrorAction Stop
+        $detachedAny = $true
+      } catch {
+        Warn "  could not detach unattend DVD: $_"
+      }
+    }
+  } catch {
+    Warn "  unattend DVD enumeration failed during cleanup: $_"
+  }
+  if (Test-Path -LiteralPath $UnattendIsoPath) {
+    try {
+      Remove-Item -LiteralPath $UnattendIsoPath -Force -ErrorAction Stop
+      $deletedIso = $true
+    } catch {
+      Warn "  could not delete unattend ISO at $UnattendIsoPath : $_"
+    }
+  }
+  if ($detachedAny -or $deletedIso) {
+    Info "[provision] OOBE complete; detached + deleted unattend ISO"
+  }
 }
-$ready = Wait-VmPSDirectReady -Name $VmName -Credential $cred -TimeoutSec $BootReadyTimeoutSec
 if (-not $ready) {
   Fail "VM did not become responsive on PowerShell Direct within $BootReadyTimeoutSec s"
   Fail "  Common causes:"
-  Fail "    * The guest is still on the OOBE screen and needs an interactive"
-  Fail "      first-boot. Open Hyper-V Manager, connect to '$VmName',"
-  Fail "      finish OOBE (set a password matching the cached credential),"
-  Fail "      then re-run this script."
-  Fail "    * The cached credential does not match the guest's password."
-  Fail "      Delete $CredCachePath and re-seed it interactively (see the"
-  Fail "      Step 7 seeding snippet in the README)."
+  Fail "    * OOBE has not yet completed (it normally takes 2-5 min). On a"
+  Fail "      slow host, bump BootReadyTimeoutSec at the top of this script"
+  Fail "      and re-run."
+  Fail "    * The unattend ISO was not built / not attached on the VM's"
+  Fail "      first boot, leaving OOBE on the interactive first-screen.  "
+  Fail "      Open Hyper-V Manager > Connect to '$VmName' to see the guest."
+  Fail "    * The cached credential and the Autounattend.xml passphrase"
+  Fail "      have drifted. Delete $CredCachePath and the unattend ISO at"
+  Fail "      $UnattendIsoPath and re-run with -Force."
   exit 1
 }
 

@@ -127,68 +127,81 @@ default for `-Gate vs-installer` is `-Scenario base-clean`.
 
 | File | Runs on | Purpose |
 |---|---|---|
-| `provision-base-vm.ps1` | host | One-time idempotent VM provisioning: verify Hyper-V, cache the dev VHDX, create the VM, uninstall VS, disable WSL/VMP, install Nim/gcc inside the VM, take `base-clean` checkpoint, install VS Build Tools, take `base-with-vs` checkpoint |
+| `provision-base-vm.ps1` | host | One-time idempotent VM provisioning: verify Hyper-V, cache the dev VHDX, **auto-generate a 4-word passphrase and build an `Autounattend.xml` ISO so OOBE runs unattended**, create the VM, uninstall VS, disable WSL/VMP, install Nim/gcc inside the VM, take `base-clean` checkpoint, install VS Build Tools, take `base-with-vs` checkpoint |
 | `run-hyperv-m69-system.ps1` | host | Per-test runner: revert -> start -> stage binaries via `Copy-VMFile` -> run a gate via `Invoke-Command -VMName` -> capture output -> stop. Parameterised by `-Gate` + `-Scenario` |
+| `Get-VmPassword.ps1` | host | Reads the DPAPI-sealed `vm-cred.xml` and prints the cleartext passphrase to stdout. Exit `0` on success, `2` if the cred cache is absent. Use only when you need to sign into the VM console; PSDirect-driven tooling does not need it |
+| `wordlist.txt` | host | The EFF Short Wordlist 1.0 (CC-BY-3.0), 1296 words 3-5 chars each, used by `New-Passphrase` |
 | `README.md` | -- | This file |
 
 ## How to run
 
-### One-time interactive bootstrap
+### Provisioning is now fully unattended
 
-Before the first run of `provision-base-vm.ps1` (and again after any
-VHDX refresh), the operator has to do **three things once**, in an
-interactive shell. The rest of the provision runs unattended from a
-sub-agent / CI / `pwsh -NoProfile -NonInteractive -File` context.
+`provision-base-vm.ps1` runs **end-to-end without any interactive
+prompts**, including the dev VHDX's first-boot Windows OOBE. There is
+no longer a "seed the cred cache" or "finish OOBE in Hyper-V Manager"
+step. The only remaining human cost is the multi-GB VHDX download (and
+the script picks up idempotently after an interrupted download too).
 
-**(a) Seed the DPAPI-encrypted credential cache.** PowerShell Direct
-needs a guest credential. The script will NOT prompt for it (a
-`Get-Credential` prompt would hang under `-NonInteractive`); it
-fast-fails with exit code `2` if the cache is missing. Run this once
-in an interactive `pwsh` window:
+What happens on a first run:
+
+  1. **Auto-passphrase.** The script generates a fresh **4-word EFF
+     Short Wordlist 1.0** passphrase via a cryptographic RNG
+     (`System.Security.Cryptography.RandomNumberGenerator.GetInt32`,
+     NOT `Get-Random`), builds a `PSCredential` for the guest's local
+     `User` account, and `Export-Clixml`-seals it at
+     `$env:LOCALAPPDATA\Repro\hyperv-m69\vm-cred.xml` (DPAPI-encrypted
+     for the current user). The passphrase is **never printed to
+     stdout**; retrieve it with `Get-VmPassword.ps1` (see below) if you
+     need to sign into the VM console.
+  2. **Auto-OOBE via `Autounattend.xml`.** The script builds a small
+     ISO (via the in-box `IMAPI2FS` COM API - no ADK / `oscdimg`
+     dependency) containing a single `Autounattend.xml` at its root.
+     The XML drives the OOBE oobeSystem pass: creates the local
+     Administrators account `User` with the auto-generated passphrase,
+     sets `en-US` locale + UTC TZ, hides every OOBE screen
+     (EULA / OEM-reg / online-account / wireless / local-account /
+     ProtectYourPC), and is keyed for x64 Windows 10/11 (they share
+     the relevant settings schema). The ISO is attached as a DVD to
+     the VM at creation time.
+  3. **VHDX download.** Same flow as before - the script resolves
+     the live URL via the Hyper-V Quick Create gallery manifest,
+     downloads, extracts the inner `.vhdx`, and caches it. If
+     manifest discovery fails the script prints a clear "do this
+     manually" message and exits.
+  4. **First boot.** OOBE runs unattended (~2-5 min) using the
+     `Autounattend.xml`. Once it's done, `PSDirect` becomes
+     reachable; `Wait-VmPSDirectReady` polls until
+     `Invoke-Command -VMName <name> { hostname }` returns. At that
+     point the ISO is **detached + deleted** from host disk (in a
+     `finally` block so a crashed `Wait-VmPSDirectReady` still
+     triggers cleanup).
+  5. **The rest is unchanged.** VS uninstall, WSL/VMP disable,
+     OpenSSH removal, Nim+gcc install, `base-clean` snapshot, VS
+     Build Tools install, `base-with-vs` snapshot.
+
+### Retrieving the VM passphrase
+
+The auto-generated passphrase is needed only for the rare case where
+you want to sign into the VM console directly (Hyper-V Manager >
+Connect to `repro-m69-hyperv`). PowerShell Direct (the script's
+exclusive automation channel) reads the credential directly from the
+DPAPI-sealed `vm-cred.xml` and never touches the cleartext.
+
+To print the passphrase to stdout:
 
 ```pwsh
-$d = "$env:LOCALAPPDATA\Repro\hyperv-m69"
-if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
-$cred = Get-Credential -Message 'Hyper-V guest creds for repro-m69-hyperv. Use the username and password you set during the dev VM OOBE first-boot. Default username is User; pick any non-empty password.'
-$cred | Export-Clixml -Path "$d\vm-cred.xml"
+pwsh -File D:\metacraft\reprobuild\tools\hyperv-m69-system\Get-VmPassword.ps1
 ```
 
-The credential is sealed with **DPAPI for the current user** - it
-cannot be moved between accounts or machines. If the file is corrupt
-or sealed with a different user's key, the script also fast-fails with
-the same remediation message.
+  * Exits `0` and prints the cleartext on a successful read.
+  * Exits `2` and writes a single `Write-Error` to stderr if the
+    cred cache is missing (run `provision-base-vm.ps1` first).
 
-**(b) Accept the script's automatic VHDX download** (the script
-resolves the live URL via the Quick Create gallery manifest, downloads
-the ~22 GB `.zip` wrapper, extracts the inner `.vhdx`, and moves it to
-`D:\metacraft\hyperv-m69-system-cache\windows-11-dev-env.vhdx`),
-**OR** pre-stage the VHDX manually:
+The cred file is DPAPI-sealed for the current user; the script will
+refuse to import a file sealed with a different user's key.
 
-  1. Open Hyper-V Manager > Action > Quick Create > "Windows 11 dev
-     environment". Wait for the download to complete.
-  2. Find the resulting `.zip` (Hyper-V Manager downloads it to a
-     temp dir; the path is reported in its progress dialog) and
-     extract the inner `.vhdx`.
-  3. Move the inner `.vhdx` to
-     `D:\metacraft\hyperv-m69-system-cache\windows-11-dev-env.vhdx`.
-
-Manual staging is the right choice if you've already downloaded the
-VHDX via Quick Create for some other reason, or if the manifest path
-breaks for your network and you want to fail-forward.
-
-**(c) Complete Windows OOBE the first time the VM boots.** The dev
-VHDX boots into a Windows out-of-box-experience flow on first power-on
-(set a password, accept EULA, etc.). The script cannot drive OOBE
-through PowerShell Direct - PSDirect doesn't function until a user
-session exists. Open **Hyper-V Manager > Connect** to the
-`repro-m69-hyperv` VM, finish OOBE setting a password that matches the
-credential you seeded in step (a), then sign out. The script's
-"wait for PowerShell Direct" poll will then succeed.
-
-After those three things, `provision-base-vm.ps1` runs **unattended**
-all the way through `base-clean` + VS install + `base-with-vs`.
-
-### One-time: provision the VM
+### Running the provisioning
 
 ```pwsh
 . D:\metacraft\env.ps1
@@ -270,10 +283,14 @@ This needs:
     (the Microsoft Dev VM ships with it on; the provision script
     verifies).
   * Local credentials for an Administrator account in the guest.
-    The Dev VM ships with a default `User` account and we use that;
-    the provision script captures the credential as a `PSCredential`
-    cached at `$env:LOCALAPPDATA\Repro\hyperv-m69\vm-cred.xml` (via
-    `Export-Clixml`, encrypted with DPAPI for the current user).
+    `provision-base-vm.ps1` **auto-generates** a 4-word EFF-Short
+    passphrase via a cryptographic RNG and seeds both the
+    DPAPI-encrypted cache at `$env:LOCALAPPDATA\Repro\hyperv-m69\vm-cred.xml`
+    (via `Export-Clixml`) and the `Autounattend.xml` on the unattend
+    ISO. Windows OOBE then creates the local `User` account with that
+    passphrase on first boot; PSDirect logs in via SAM credential
+    against that account. Use `Get-VmPassword.ps1` to retrieve the
+    cleartext if you need it for the console.
   * No host networking changes - PowerShell Direct works over the
     VMBus, not over IP. The VM still has Internet (we want Windows
     Update + the VS bootstrapper download), via whichever virtual
@@ -376,6 +393,34 @@ Per-test (under `D:\metacraft\hyperv-m69-system-out\<gate>-<scenario>\`):
   * The harness assumes the host is x64. ARM64 Windows hosts can run
     Hyper-V but the Dev VM image is x64; that combination has not
     been validated.
+  * **Unattend ISO carries the passphrase in cleartext for the ~2-5
+    min OOBE window.** The auto-OOBE Autounattend.xml must contain
+    `<Password>` in plaintext for Windows to consume it. The ISO
+    lives on host disk at
+    `D:\metacraft\hyperv-m69-system-vhds\unattend-repro-m69-hyperv.iso`
+    only between Step 4.6 (ISO build) and the Step 8 `finally` block
+    (ISO detach + delete). The DPAPI-sealed `vm-cred.xml` in
+    `$env:LOCALAPPDATA\Repro\hyperv-m69\` is the only long-lived
+    copy. Threat model: this is a host-only **disposable** VM that
+    has no shared filesystem with the host and runs against the
+    Default Switch. The passphrase unlocks nothing outside the VM,
+    so a brief plaintext-on-host window is acceptable for our use.
+
+### Wordlist provenance
+
+The passphrase wordlist (`wordlist.txt`) is the **EFF Short Wordlist
+1.0**, curated by the Electronic Frontier Foundation for diceware-
+style passphrases. The list is CC-BY-3.0 licensed; we redistribute the
+word column with a 5-line `#`-prefixed header crediting EFF + the
+upstream URL.
+
+  * 1296 canonical entries, 3-5 chars each, ASCII, no duplicates.
+  * The list contains one hyphenated entry (`yo-yo`) which the
+    runtime helper filters out so generated passphrases always
+    tokenise cleanly on `-`. Effective pool: 1295 words.
+  * Entropy: ~10.34 bits/word x 4 words = ~41 bits per passphrase.
+    Adequate for a local-account password on a disposable VM where
+    the host-side cred cache is DPAPI-sealed.
 
 ## Cross-references
 
