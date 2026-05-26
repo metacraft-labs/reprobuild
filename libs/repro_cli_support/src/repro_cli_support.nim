@@ -11,6 +11,7 @@ import repro_interface_artifacts
 import repro_monitor_depfile/fs_snoop
 import repro_provider_runtime
 import repro_project_dsl
+import repro_standard_provider_protocol
 import repro_runquota
 import repro_hash
 import repro_tool_profiles
@@ -1956,6 +1957,20 @@ proc siblingTryCompileProviderPath(publicCliPath: string): string =
   else:
     ""
 
+proc siblingStandardProviderPath(publicCliPath: string): string =
+  ## Pre-built Tier 2b standard-provider binary, normally shipped next
+  ## to the repro CLI by ``scripts/build_apps.sh``. Empty string means
+  ## the standard provider is unavailable on this install — callers
+  ## must fall back to per-project provider compile and surface a
+  ## warning. See ``Provider-Compile-Tiering.md`` §"2b — repro-standard-
+  ## provider".
+  let candidate = parentDir(publicCliPath) /
+    addFileExt("repro-standard-provider", ExeExt)
+  if fileExists(extendedPath(candidate)):
+    os.normalizedPath(candidate)
+  else:
+    ""
+
 type
   BuildProgressMode = enum
     bpmAuto
@@ -2618,6 +2633,60 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       "typed tool provisioning is required for uses declarations; refusing " &
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
+
+  # Tier 2b fast path: a package whose DSL body declared no ``build:``
+  # block is eligible for the pre-built ``repro-standard-provider``
+  # binary. The provider walks language conventions (Nim/Rust/Go/...) to
+  # derive a fine-grained graph fragment without a per-project provider
+  # compile. We dispatch only when the standard provider binary is
+  # actually shipped next to ``repro``; missing-binary installs fall
+  # back to the slow path with a warning so users get a build either
+  # way.
+  # Per Provider-Compile-Tiering.md §"2b — repro-standard-provider" and
+  # reprobuild-specs/Standard-Provider-Implementation.milestones.org §M2.
+  if mode == tpmPathOnly and not prepareOnly and
+      artifact.projectInterface.standardBuildEligible:
+    let standardProviderBinary = siblingStandardProviderPath(publicCliPath)
+    if standardProviderBinary.len > 0:
+      invocationFastPath = "tier2b-standard-direct"
+      logSummary("standardDirect: dispatching " & standardProviderBinary)
+      logSummary("project: " & artifact.projectInterface.projectName)
+      logSummary("interface: " & interfacePath)
+      logSummary("providerBinary: " & standardProviderBinary)
+      logSummary("providerArtifact: " & StandardProviderArtifactId)
+      logSummary("runQuotaSocket: " & runQuotaSocketDiagnostic())
+      let synthIdentity = PathOnlyBuildIdentity(
+        projectName: artifact.projectInterface.projectName,
+        interfaceFingerprint: artifact.interfaceFingerprint)
+      let providerGraphStart = statStart(statsEnabled)
+      let refresh = refreshProviderGraph(RefreshConfig(
+        storeRoot: outDir / "provider-graph",
+        providerBinaryPath: standardProviderBinary,
+        providerArtifactId: StandardProviderArtifactId,
+        rootEntryPointId: StandardProviderRootEntryPointId,
+        rootArguments: result.projectRoot,
+        namespace: StandardProviderNamespace,
+        lockSliceId: digestHex(synthIdentity.interfaceFingerprint),
+        activity: "build",
+        providerWorkingDir: result.projectRoot))
+      finishStat(buildStats, statsEnabled, "repro provider graph refresh",
+        providerGraphStart)
+      logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
+      logSummary("providerInvocations: " & $refresh.invoked.len)
+      var selectedActionId = parsedTarget.selectedActionId
+      if selectDefaultAction and selectedActionId.len == 0:
+        selectedActionId = defaultBuildActionId(refresh.snapshot)
+        if selectedActionId.len > 0:
+          logSummary("defaultTarget: " & selectedActionId)
+      let graphLowerStart = statStart(statsEnabled)
+      let lowered = lowerProviderSnapshot(refresh.snapshot, synthIdentity,
+        result.projectRoot, selectedActionId)
+      finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
+      result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
+      return
+    else:
+      logSummary("standardDirect: provider binary missing; falling back to " &
+        "per-project provider compile")
 
   if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     let identityStart = statStart(statsEnabled)

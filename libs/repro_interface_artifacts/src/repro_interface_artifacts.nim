@@ -103,6 +103,14 @@ type
     toolUses*: seq[InterfaceToolUse]
     publicSignatureDependencies*: seq[string]
     location*: SourceLocation
+    standardBuildEligible*: bool
+      ## True iff the package's DSL body declared no ``build:`` block —
+      ## the engine's Tier 2b fast path dispatches such projects to the
+      ## pre-built ``repro-standard-provider`` binary, which derives the
+      ## graph from language conventions instead of compiling a project-
+      ## specific provider. See
+      ## ``reprobuild-specs/Standard-Provider-Implementation.milestones.org``
+      ## §M2 and ``Provider-Compile-Tiering.md`` §"2b".
 
   ProjectInterfaceArtifact* = object
     projectInterface*: ProjectInterface
@@ -172,7 +180,13 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 7'u16
+  EnvelopeVersion = 8'u16
+    ## v8 (current): adds ``ProjectInterface.standardBuildEligible``, a
+    ##               single byte at the tail of the interface payload.
+    ##               v7 readers reject v8 envelopes (the version >
+    ##               EnvelopeVersion check below). v8 readers accept v7
+    ##               by treating ``standardBuildEligible`` as false — so
+    ##               existing on-disk artifacts continue to load.
   InterfaceExtractionCacheRecordMagic =
     "reprobuild.interfaceExtractionCache.v1"
   ProviderFreshnessCacheRecordMagic =
@@ -505,6 +519,15 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
   result.location = readLocation(bytes, pos)
 
 proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
+  ## Encodes the fingerprinted portion of the project-interface payload.
+  ## ``standardBuildEligible`` is deliberately NOT serialised here so it
+  ## does NOT contribute to ``interfaceFingerprint``: the flag is a
+  ## function of the DSL source's structural shape (presence of a
+  ## ``build:`` block), and the source-file digest is already part of
+  ## the interface-extraction cache key. Keeping the flag out of the
+  ## interface fingerprint also means existing v<8 artifacts on disk
+  ## continue to round-trip cleanly under the v8 codec — their stored
+  ## fingerprints match what ``interfaceFingerprint`` recomputes.
   result.writeString(value.projectName)
   result.writeString(value.packageName)
   result.writeString(value.defaultToolProvisioning)
@@ -555,6 +578,13 @@ proc writeEnvelopeHeader(outp: var seq[byte]; kind: InterfaceEnvelopeKind;
 proc encodeProjectInterfaceArtifact*(artifact: ProjectInterfaceArtifact): seq[byte] =
   var payload = encodeInterfacePayload(artifact.projectInterface)
   payload.writeDigest(artifact.interfaceFingerprint)
+  # v8: ``standardBuildEligible`` lives in the envelope tail, NOT in the
+  # fingerprinted payload — see ``encodeInterfacePayload`` for why. v8
+  # readers decoding a v7 envelope skip this byte and leave the field
+  # as ``false`` (the conservative slow-path default), keeping existing
+  # on-disk artifacts loadable without re-extraction.
+  payload.writeByte(
+    if artifact.projectInterface.standardBuildEligible: 1'u8 else: 0'u8)
   result.writeEnvelopeHeader(iekProjectInterface, payload.len)
   result.add(payload)
 
@@ -575,7 +605,10 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
     raiseEnvelopeError(eeMalformed, "interface envelope payload length mismatch")
-  let interfacePayloadLen = payloadLength - 34
+  # v8 envelopes carry an extra trailing byte for standardBuildEligible
+  # past the 34-byte interface fingerprint; older envelopes do not.
+  let standardBuildEligibleBytes = if version >= 8'u16: 1 else: 0
+  let interfacePayloadLen = payloadLength - 34 - standardBuildEligibleBytes
   if interfacePayloadLen < 0:
     raiseEnvelopeError(eeMalformed, "truncated interface fingerprint")
   result.projectInterface =
@@ -586,6 +619,9 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[
   if result.interfaceFingerprint != interfaceFingerprint(
       result.projectInterface):
     raiseEnvelopeError(eeMalformed, "interface fingerprint mismatch")
+  if version >= 8'u16:
+    result.projectInterface.standardBuildEligible =
+      readByte(bytes, pos) != 0'u8
 
 proc encodeProviderCompileArtifact*(artifact: ProviderCompileArtifact): seq[byte] =
   var payload: seq[byte] = @[]
@@ -882,6 +918,39 @@ proc sameSourceFile(a, b: string): bool =
   except CatchableError:
     a == b
 
+proc detectStandardBuildEligible(sourceFile: string;
+                                  pkg: PackageDef): bool =
+  ## A package is eligible for the Tier 2b ``repro-standard-provider``
+  ## fast path when both:
+  ##   1. the DSL body declared NO ``build:`` block (top- or
+  ##      executable-level), AND
+  ##   2. the DSL body declared no ``executable`` / library member.
+  ##
+  ## (1) is the explicit "let the standard provider derive the graph"
+  ## opt-in. (2) excludes "tool-action wrapper" packages — those have
+  ## ``executable`` declarations but no ``build:`` body and rely on the
+  ## slow path's typed tool resolution to produce wrapper launchers, not
+  ## on a language convention to compile sources.
+  ##
+  ## The ``build:`` check is a heuristic line-scan of the source file,
+  ## mirroring ``moduleHasBuildBlock`` in ``repro_cli_support``: a
+  ## stripped-equal-to-``build:`` line under either the top-level
+  ## package body or a nested ``executable`` block disqualifies. Empty
+  ## or unreadable source file → not eligible (conservative default).
+  if pkg.executables.len > 0:
+    return false
+  if sourceFile.len == 0:
+    return false
+  var content: string
+  try:
+    content = readFile(extendedPath(sourceFile))
+  except CatchableError:
+    return false
+  for line in content.splitLines:
+    if line.strip() == "build:":
+      return false
+  true
+
 proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   let packages = registeredPackages()
   if rootSourceFile.len > 0:
@@ -890,7 +959,10 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
       if sameSourceFile(pkg.sourceFile, rootSourceFile):
         matches.add(pkg)
     if matches.len == 1:
-      return artifactFor(toProjectInterface(matches[0], packages))
+      var pi = toProjectInterface(matches[0], packages)
+      pi.standardBuildEligible =
+        detectStandardBuildEligible(rootSourceFile, matches[0])
+      return artifactFor(pi)
     if matches.len > 1:
       raise newException(ValueError,
         "expected one root package in " & rootSourceFile & ", got " &
@@ -898,7 +970,10 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   if packages.len != 1:
     raise newException(ValueError, "expected exactly one registered package, got " &
       $packages.len)
-  artifactFor(toProjectInterface(packages[0], packages))
+  var pi = toProjectInterface(packages[0], packages)
+  pi.standardBuildEligible =
+    detectStandardBuildEligible(packages[0].sourceFile, packages[0])
+  artifactFor(pi)
 
 proc nimDefault(nimType: string): string =
   case nimType.normalize
@@ -1209,7 +1284,14 @@ proc reproLibSourceFingerprint(workDir: string): string =
   if not dirExists(extendedPath(libsRoot)):
     return ""
   var paths: seq[string] = @[]
-  for path in walkDirRec(extendedPath(libsRoot)):
+  # NOTE: pass the *non*-extended ``libsRoot`` to ``walkDirRec`` here.
+  # On Windows ``walkDirRec`` propagates whatever path it was handed,
+  # so feeding it ``\\?\D:\...`` produces ``\\?\D:\...`` children. Those
+  # children then survive ``normalizedStampPath`` as ``//?/D:/...`` and
+  # the subsequent ``extendedPath`` call re-prefixes them, yielding the
+  # invalid ``\\?\\\?\D:\...`` Nim then fails to open. The libs tree is
+  # well under MAX_PATH so the raw form is safe.
+  for path in walkDirRec(libsRoot):
     if path.endsWith(".nim") or path.endsWith(".nims"):
       paths.add(normalizedStampPath(path))
   paths.sort(system.cmp[string])

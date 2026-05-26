@@ -40,19 +40,27 @@ proc parseEarlyFlags(args: openArray[string]): tuple[wantVersion: bool] =
       return
 
 proc placeholderManifest(providerArtifactId: string): ProviderManifest =
-  ## Manifest the standard provider advertises. M1 keeps the M0
-  ## placeholder entry point — conventions don't change the entry-point
-  ## shape, they fan out from a single project-root entry point.
-  ## Engine validation requires the returned ``providerArtifactId`` to
-  ## match the request when the request supplied one; falling back to
-  ## ``StandardProviderArtifactId`` keeps stand-alone smoke runs working
-  ## when the caller leaves it empty.
+  ## Manifest the standard provider advertises. M2 wires the engine
+  ## routing to dispatch on ``StandardProviderRootEntryPointId``, so we
+  ## advertise both that canonical id (root) and the legacy
+  ## ``standardProvider.placeholder`` alias the M0 smoke / M1 no-match
+  ## scripts still send. Engine validation requires the returned
+  ## ``providerArtifactId`` to match the request when the request
+  ## supplied one; falling back to ``StandardProviderArtifactId`` keeps
+  ## stand-alone smoke runs working when the caller leaves it empty.
   ProviderManifest(
     providerArtifactId:
       if providerArtifactId.len > 0: providerArtifactId
       else: StandardProviderArtifactId,
     protocolVersion: ProviderProtocolVersion,
     entryPoints: @[
+      GraphEntryPointDescriptor(
+        id: StandardProviderRootEntryPointId,
+        kind: gpkProjectRoot,
+        stableName: StandardProviderPackageName,
+        bodyHash: StandardProviderRootBodyHash,
+        argumentSchemaId: "reprobuild.project-root.v1",
+        outputSchemaId: "reprobuild.graph-fragment.v1"),
       GraphEntryPointDescriptor(
         id: "standardProvider.placeholder",
         kind: gpkProjectRoot,
