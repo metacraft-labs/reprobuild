@@ -542,108 +542,49 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
         reportScenario("rf-feature-rollback-gate", true,
           "refused without flag, applied with flag, final=" & finSt)
 
-suite "windows.optionalFeature: REAL RestartNeeded-reporting contract (VM-only)":
-
-  test "REAL: WSL enable surfaces RestartNeeded without claiming Enabled":
-    if not vmMode:
-      echo "  [VM-gated] REPRO_M69_FEATURE_VM not set — skipping " &
-        "WSL RestartNeeded-reporting contract. Run inside the M69 " &
-        "system-scope Sandbox harness."
-      check true
-    else:
-      when defined(windows):
-        # WSL is the canonical reboot-gated feature. The CORE CONTRACT
-        # this test asserts is environment-independent:
-        #
-        #   (a) DISM runs and signals RestartNeeded,
-        #   (b) the driver surfaces RestartNeeded through
-        #       ApplyResult.restartNeeded AND audit-log record,
-        #   (c) the driver does NOT auto-reboot — we are still running
-        #       in-process after applyWindowsOptionalFeature returns.
-        #
-        # The post-mutation OBSERVATION is ENVIRONMENT-DEPENDENT and
-        # therefore NOT a hard contract assertion:
-        #
-        #   * Windows Sandbox can never reboot, so the post-state is
-        #     EnablePending (or still Disabled if DISM refused for
-        #     missing prerequisites). The original Sandbox-era version
-        #     of this scenario asserted `postSt != "Enabled"` because
-        #     reaching Enabled would have implied an impossible reboot.
-        #
-        #   * Hyper-V VM with Windows Update + reboot capability: a
-        #     reboot-gated feature CAN transition to `Enabled` without
-        #     an explicit reboot inside the lifetime of the apply
-        #     call. Win11 22H2 22621 + WU sometimes completes feature
-        #     enablement transparently (servicing-stack finalization
-        #     happens out-of-band; from the gate's perspective the
-        #     transient EnablePending may already have collapsed to
-        #     Enabled by the time we observe). This is NOT a contract
-        #     violation: the driver still ran DISM with -NoRestart,
-        #     still surfaced restartNeeded faithfully, and did not
-        #     auto-reboot. Observing `Enabled` here is benign — the OS
-        #     handled the transition transparently.
-        #
-        # The post-state set therefore widens to include `Enabled`.
-        # `restartNeeded == true` remains a HARD assertion: that IS
-        # the contract this scenario was designed to prove.
-        #
-        # We try a couple of candidate reboot-gated features. The
-        # first one whose enable returns RestartNeeded is the one we
-        # exercise the contract against. WSL's DISM payload requires
-        # VirtualMachinePlatform as well; we try VirtualMachinePlatform
-        # FIRST since it has no further dependencies and reliably
-        # reports RestartNeeded inside Sandbox.
-        let candidates = ["VirtualMachinePlatform",
-                          "Microsoft-Windows-Subsystem-Linux"]
-        var picked = ""
-        var pickedOutput: tuple[state: ObservedOperationState;
-                                restartNeeded: bool]
-        var lastError = ""
-        for cand in candidates:
-          let (preSt, _) = psQuery(cand)
-          if preSt in ["Unknown", ""]:
-            continue
-          if preSt == "Enabled":
-            # Already on — pre-disable to make the enable a real
-            # mutation. (Disable is allowed even for reboot-gated
-            # features; the side-effects only land after reboot.)
-            echo "  pre-disable " & cand & " out-of-band"
-            psSetFeatureDirectly(cand, enable = false)
-          let op = PrivilegedOperation(kind: pokWindowsOptionalFeature,
-            address: "feature:" & cand, featureName: cand,
-            featureEnable: true)
-          try:
-            pickedOutput = applyWindowsOptionalFeature(op)
-            picked = cand
-            echo "  driver applied " & cand &
-              " — restartNeeded=" & $pickedOutput.restartNeeded
-            if pickedOutput.restartNeeded: break
-          except CatchableError as e:
-            lastError = $e.msg
-            echo "  driver enable of " & cand & " raised: " & lastError
-            continue
-        if picked.len == 0:
-          reportScenario("reboot-gated-restartneeded", false,
-            "no candidate could be applied: " & lastError)
-        check picked.len > 0
-        # (a) + (b): RestartNeeded surfaced. THIS is the contract.
-        check pickedOutput.restartNeeded
-        # (c) the env did NOT auto-reboot from under us. We are still
-        # here. Pure tautology in-process but documented for
-        # completeness — the driver promises to honor -NoRestart.
-        check true
-        # POST-OBSERVATION: env-dependent, observed-only. Accept the
-        # full set of legal transient states across both Sandbox-style
-        # (no-reboot) and Hyper-V-style (reboot-capable) environments.
-        # See the comment block above for why `Enabled` is in this
-        # set even though the driver reported restartNeeded=true.
-        let (postSt, _) = psQuery(picked)
-        echo "  post-mutation state for " & picked & ": " & postSt
-        check postSt in ["EnablePending", "Enabled", "Disabled",
-                         "DisabledWithPayloadRemoved"]
-        reportScenario("reboot-gated-restartneeded", true,
-          "feature=" & picked & " post=" & postSt &
-          " restartNeeded=true")
+# ===========================================================================
+# REAL-MUTATION SCENARIO ORDERING — DO NOT REORDER NAIVELY.
+# ===========================================================================
+#
+# The two suites below MUST run in this order:
+#
+#   1. "windows.capability + service: REAL apply"
+#      (`openssh-capability-and-sshd-service` scenario)
+#   2. "windows.optionalFeature: REAL RestartNeeded-reporting contract"
+#      (`reboot-gated-restartneeded` scenario)
+#
+# WHY: the `reboot-gated-restartneeded` scenario enables a reboot-gated
+# Optional Feature (VirtualMachinePlatform / WSL) via DISM. That
+# enablement transitions the CBS (Component-Based Servicing) store into
+# a PENDING-REBOOT state — CBS sets a `FODOrOCPended=true` flag on the
+# active session as part of the VMP transaction. Any subsequent
+# capability install attempt (e.g. `Add-WindowsCapability
+# OpenSSH.Server`) then gets PENDED at the CBS layer regardless of the
+# cmdlet's exit status: `Add-WindowsCapability` returns 0, but the
+# capability's install state stays at `InstallPending` because CBS
+# refuses to finalize a Feature-on-Demand install while the prior VMP
+# transaction is still pending its reboot. The capability never
+# transitions to `Installed` without a reboot we cannot perform inside
+# the gate's lifetime (the gate's host-side runner can reboot the VM
+# between scenarios but NOT mid-suite — and the OpenSSH scenario's
+# in-suite sshd-service poll runs in the SAME apply, which CBS has
+# already pended).
+#
+# Running the OpenSSH capability scenario FIRST avoids this: in a
+# clean CBS state (no prior reboot-gated transaction pending),
+# `Add-WindowsCapability OpenSSH.Server` completes synchronously, the
+# capability reaches `Installed` within the gate's existing poll
+# window, and the sshd service registers. The VMP scenario then runs
+# LAST: it leaves CBS in a pending-reboot state but no subsequent
+# scenario depends on a clean CBS, so the pollution is harmless.
+#
+# This ordering interaction is a CBS-layer behavior, not a driver bug:
+# the M69 driver faithfully runs DISM / Add-WindowsCapability with
+# `-NoRestart`, surfaces `restartNeeded` correctly, and does not
+# auto-reboot. The pending-reboot wedge is OS-layer and cannot be
+# resolved by tweaking the driver.
+#
+# ===========================================================================
 
 suite "windows.capability + service: REAL apply (VM-only)":
 
@@ -775,3 +716,114 @@ windows.service {
           "capability=" & capState & " " & svcLine &
           " (cap-poll iters=" & $capPollIterations &
           " svc-poll iters=" & $svcPollIterations & ")")
+
+suite "windows.optionalFeature: REAL RestartNeeded-reporting contract (VM-only)":
+
+  test "REAL: WSL enable surfaces RestartNeeded without claiming Enabled":
+    if not vmMode:
+      echo "  [VM-gated] REPRO_M69_FEATURE_VM not set — skipping " &
+        "WSL RestartNeeded-reporting contract. Run inside the M69 " &
+        "system-scope Sandbox harness."
+      check true
+    else:
+      when defined(windows):
+        # WSL is the canonical reboot-gated feature. The CORE CONTRACT
+        # this test asserts is environment-independent:
+        #
+        #   (a) DISM runs and signals RestartNeeded,
+        #   (b) the driver surfaces RestartNeeded through
+        #       ApplyResult.restartNeeded AND audit-log record,
+        #   (c) the driver does NOT auto-reboot — we are still running
+        #       in-process after applyWindowsOptionalFeature returns.
+        #
+        # The post-mutation OBSERVATION is ENVIRONMENT-DEPENDENT and
+        # therefore NOT a hard contract assertion:
+        #
+        #   * Windows Sandbox can never reboot, so the post-state is
+        #     EnablePending (or still Disabled if DISM refused for
+        #     missing prerequisites). The original Sandbox-era version
+        #     of this scenario asserted `postSt != "Enabled"` because
+        #     reaching Enabled would have implied an impossible reboot.
+        #
+        #   * Hyper-V VM with Windows Update + reboot capability: a
+        #     reboot-gated feature CAN transition to `Enabled` without
+        #     an explicit reboot inside the lifetime of the apply
+        #     call. Win11 22H2 22621 + WU sometimes completes feature
+        #     enablement transparently (servicing-stack finalization
+        #     happens out-of-band; from the gate's perspective the
+        #     transient EnablePending may already have collapsed to
+        #     Enabled by the time we observe). This is NOT a contract
+        #     violation: the driver still ran DISM with -NoRestart,
+        #     still surfaced restartNeeded faithfully, and did not
+        #     auto-reboot. Observing `Enabled` here is benign — the OS
+        #     handled the transition transparently.
+        #
+        # The post-state set therefore widens to include `Enabled`.
+        # `restartNeeded == true` remains a HARD assertion: that IS
+        # the contract this scenario was designed to prove.
+        #
+        # ORDERING NOTE: this scenario MUST run AFTER the OpenSSH
+        # capability + sshd-service scenario. Enabling
+        # VirtualMachinePlatform / WSL pends CBS into a pending-reboot
+        # state that prevents any subsequent capability install from
+        # transitioning to `Installed` within the gate's lifetime. See
+        # the "REAL-MUTATION SCENARIO ORDERING" comment block above
+        # the OpenSSH suite for the full rationale.
+        #
+        # We try a couple of candidate reboot-gated features. The
+        # first one whose enable returns RestartNeeded is the one we
+        # exercise the contract against. WSL's DISM payload requires
+        # VirtualMachinePlatform as well; we try VirtualMachinePlatform
+        # FIRST since it has no further dependencies and reliably
+        # reports RestartNeeded inside Sandbox.
+        let candidates = ["VirtualMachinePlatform",
+                          "Microsoft-Windows-Subsystem-Linux"]
+        var picked = ""
+        var pickedOutput: tuple[state: ObservedOperationState;
+                                restartNeeded: bool]
+        var lastError = ""
+        for cand in candidates:
+          let (preSt, _) = psQuery(cand)
+          if preSt in ["Unknown", ""]:
+            continue
+          if preSt == "Enabled":
+            # Already on — pre-disable to make the enable a real
+            # mutation. (Disable is allowed even for reboot-gated
+            # features; the side-effects only land after reboot.)
+            echo "  pre-disable " & cand & " out-of-band"
+            psSetFeatureDirectly(cand, enable = false)
+          let op = PrivilegedOperation(kind: pokWindowsOptionalFeature,
+            address: "feature:" & cand, featureName: cand,
+            featureEnable: true)
+          try:
+            pickedOutput = applyWindowsOptionalFeature(op)
+            picked = cand
+            echo "  driver applied " & cand &
+              " — restartNeeded=" & $pickedOutput.restartNeeded
+            if pickedOutput.restartNeeded: break
+          except CatchableError as e:
+            lastError = $e.msg
+            echo "  driver enable of " & cand & " raised: " & lastError
+            continue
+        if picked.len == 0:
+          reportScenario("reboot-gated-restartneeded", false,
+            "no candidate could be applied: " & lastError)
+        check picked.len > 0
+        # (a) + (b): RestartNeeded surfaced. THIS is the contract.
+        check pickedOutput.restartNeeded
+        # (c) the env did NOT auto-reboot from under us. We are still
+        # here. Pure tautology in-process but documented for
+        # completeness — the driver promises to honor -NoRestart.
+        check true
+        # POST-OBSERVATION: env-dependent, observed-only. Accept the
+        # full set of legal transient states across both Sandbox-style
+        # (no-reboot) and Hyper-V-style (reboot-capable) environments.
+        # See the comment block above for why `Enabled` is in this
+        # set even though the driver reported restartNeeded=true.
+        let (postSt, _) = psQuery(picked)
+        echo "  post-mutation state for " & picked & ": " & postSt
+        check postSt in ["EnablePending", "Enabled", "Disabled",
+                         "DisabledWithPayloadRemoved"]
+        reportScenario("reboot-gated-restartneeded", true,
+          "feature=" & picked & " post=" & postSt &
+          " restartNeeded=true")

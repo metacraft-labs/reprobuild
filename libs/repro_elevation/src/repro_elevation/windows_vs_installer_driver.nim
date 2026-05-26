@@ -120,19 +120,49 @@ when defined(windows):
     ## for a FRESH install. Unlike the resident `vs_installer.exe`,
     ## this binary is NOT installed by the OS — the harness / dev
     ## environment must stage it. Preference order:
-    ##   * next to the running `repro` binary (the future embedded /
-    ##     gate-staged copy),
+    ##   * next to the running binary (`getAppDir()` — the future
+    ##     embedded / dev-shell copy),
+    ##   * next to the staged `repro.exe` (parent dir of the
+    ##     `REPROBUILD_REPRO` env var, or the `REPRO_TEST_BIN_DIR`
+    ##     override the M69 destructive gates set when the gate test
+    ##     exe lives in a DIFFERENT dir from the staged `repro.exe`
+    ##     and `getAppDir()` therefore does not point at the
+    ##     bootstrapper's actual home),
     ##   * in `%TEMP%\vs_<edition>.exe` (the path the provisioning
     ##     script downloads to),
-    ##   * bare exe name resolved via PATH.
+    ##   * in `%LOCALAPPDATA%\Repro\vs_<edition>.exe`.
     ## Returns the empty string if none of the candidates exist — the
     ## caller must surface a clear "missing bootstrapper" error rather
     ## than silently launching a `vs_installer.exe install` that fails
     ## fast on a clean machine.
     let name = bootstrapperExeName(edition)
-    let beside = getAppDir() / name
+    let appDir = getAppDir()
+    let beside = appDir / name
     if fileExists(beside):
       return beside
+    # Parent dir of the staged `repro.exe`. The M69 destructive-gate
+    # harness stages `vs_<edition>.exe` next to `repro.exe` (e.g.
+    # `C:\harness\repro\vs_buildtools.exe`); the gate's test exe lives
+    # under a sibling dir (e.g. `C:\harness\gate-bin\`) so `getAppDir()`
+    # — the test exe's own dir — does NOT see the bootstrapper. The
+    # harness publishes the staged `repro.exe` location via either
+    # `REPROBUILD_REPRO` (full path) or `REPRO_TEST_BIN_DIR` (dir).
+    proc tryReproDir(dir: string): string =
+      if dir.len > 0 and dir != appDir:
+        let cand = dir / name
+        if fileExists(cand):
+          return cand
+      ""
+    let reproExeEnv = getEnv("REPROBUILD_REPRO")
+    if reproExeEnv.len > 0:
+      let hit = tryReproDir(parentDir(reproExeEnv))
+      if hit.len > 0:
+        return hit
+    let reproBinDir = getEnv("REPRO_TEST_BIN_DIR")
+    if reproBinDir.len > 0:
+      let hit = tryReproDir(reproBinDir)
+      if hit.len > 0:
+        return hit
     let tempDir = getEnv("TEMP")
     if tempDir.len > 0:
       let inTemp = tempDir / name

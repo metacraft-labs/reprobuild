@@ -453,6 +453,29 @@ try {
   # slices) are STATIC at this point — perfect time to scoop them.
   # Wrapped in a try/catch so a harvest failure cannot prevent the
   # Stop-VM in `finally` from firing.
+  #
+  # Two implementation notes:
+  #
+  #   1. The harvest zip is returned as a `[byte[]]` from the
+  #      Invoke-Command script block rather than written to a guest
+  #      path that the host then `Copy-VMFile -FileSource Guest`-s
+  #      out. `Copy-VMFile -FileSource Guest` is NOT supported on
+  #      Windows 11 26200 (the Hyper-V module's `CopyFileSourceType`
+  #      enum only has `Host`) and every harvest attempt failed at
+  #      the copy step. PowerShell Remoting can return arbitrary
+  #      objects, including `[byte[]]`, so a few-MB zip is fine to
+  #      stream back inline. Keep the harvest content concise — a
+  #      100MB+ payload would hit WSMan serialization limits.
+  #
+  #   2. Each per-file harvest is wrapped in its OWN try/catch so a
+  #      single file's failure (e.g. `CBS.log` being locked by
+  #      TrustedInstaller / TiWorker — `[IO.File]::ReadAllBytes`
+  #      throws "file in use" because the default FileShare flags
+  #      do not include ReadWrite) does not abort the WHOLE harvest.
+  #      The CBS.log + dism.log tails read via `Get-Content -Tail N`,
+  #      which opens the file with shared read+write access so an
+  #      open writer does not block us. The outer try/catch only
+  #      handles Compress-Archive + the byte-return failures.
   try {
     Info "harvesting VM-side diagnostic logs"
     $harvestScript = {
@@ -460,59 +483,101 @@ try {
       New-Item -ItemType Directory -Force -Path $diagDir | Out-Null
 
       # vs_buildtools logs (issue 2 evidence)
-      Get-ChildItem 'C:\Users\User\AppData\Local\Temp' -Filter 'dd_*.log' -ErrorAction SilentlyContinue |
-          Copy-Item -Destination $diagDir -Force -ErrorAction SilentlyContinue
-      # also check ProgramData VS install logs
-      if (Test-Path 'C:\ProgramData\Microsoft\VisualStudio\Packages\_Instances') {
-        Get-ChildItem 'C:\ProgramData\Microsoft\VisualStudio\Packages\_Instances' -Recurse -Filter '*.log' -ErrorAction SilentlyContinue |
-            Copy-Item -Destination $diagDir -Force -ErrorAction SilentlyContinue
+      try {
+        Get-ChildItem 'C:\Users\User\AppData\Local\Temp' -Filter 'dd_*.log' -ErrorAction Stop |
+            Copy-Item -Destination $diagDir -Force -ErrorAction Stop
+      } catch {
+        "dd_*.log harvest error: $_" |
+          Out-File -FilePath (Join-Path $diagDir 'dd-logs-error.txt') -Encoding utf8
       }
 
-      # DISM file log (issue 1 evidence; tail last ~5MB to avoid huge transfers)
-      $dism = 'C:\Windows\Logs\DISM\dism.log'
-      if (Test-Path $dism) {
-        $bytes = [System.IO.File]::ReadAllBytes($dism)
-        $tail  = if ($bytes.Length -gt 5MB) { $bytes[($bytes.Length - 5MB)..($bytes.Length-1)] } else { $bytes }
-        [System.IO.File]::WriteAllBytes((Join-Path $diagDir 'dism-tail.log'), $tail)
+      # ProgramData VS install logs
+      try {
+        if (Test-Path 'C:\ProgramData\Microsoft\VisualStudio\Packages\_Instances') {
+          Get-ChildItem 'C:\ProgramData\Microsoft\VisualStudio\Packages\_Instances' -Recurse -Filter '*.log' -ErrorAction Stop |
+              Copy-Item -Destination $diagDir -Force -ErrorAction Stop
+        }
+      } catch {
+        "ProgramData VS log harvest error: $_" |
+          Out-File -FilePath (Join-Path $diagDir 'vs-programdata-error.txt') -Encoding utf8
       }
 
-      # CBS.log tail (Component Based Servicing — what's under DISM)
-      $cbs = 'C:\Windows\Logs\CBS\CBS.log'
-      if (Test-Path $cbs) {
-        $bytes = [System.IO.File]::ReadAllBytes($cbs)
-        $tail  = if ($bytes.Length -gt 5MB) { $bytes[($bytes.Length - 5MB)..($bytes.Length-1)] } else { $bytes }
-        [System.IO.File]::WriteAllBytes((Join-Path $diagDir 'cbs-tail.log'), $tail)
+      # DISM file log (issue 1 evidence). Use Get-Content -Tail which
+      # opens the file with shared read+write access so an open
+      # writer (TiWorker / DISM service) does not block us. We keep
+      # the last 2000 lines — enough context for a recent failure,
+      # much smaller than 5MB of raw bytes, and tolerant of locks.
+      $dismTail = $null
+      try {
+        $dismTail = Get-Content -Path 'C:\Windows\Logs\DISM\dism.log' -Tail 2000 -ErrorAction Stop
+      } catch {
+        $dismTail = "dism.log harvest error: $_"
+      }
+      $dismTail | Out-File -FilePath (Join-Path $diagDir 'dism-tail.txt') -Encoding utf8
+
+      # CBS.log tail (Component Based Servicing — what's under DISM).
+      # CBS.log is held open by TrustedInstaller / TiWorker with
+      # non-shared-read flags from the default `ReadAllBytes` path;
+      # `Get-Content -Tail N` uses shared read access so the harvest
+      # works even when CBS is actively writing.
+      $cbsTail = $null
+      try {
+        $cbsTail = Get-Content -Path 'C:\Windows\Logs\CBS\CBS.log' -Tail 2000 -ErrorAction Stop
+      } catch {
+        $cbsTail = "CBS.log harvest error: $_"
+      }
+      $cbsTail | Out-File -FilePath (Join-Path $diagDir 'cbs-tail.txt') -Encoding utf8
+
+      # Event log slices (last 200 events from the channels most likely to record DISM/installer activity).
+      try {
+        Get-WinEvent -LogName 'Microsoft-Windows-DISM/Operational' -MaxEvents 200 -ErrorAction Stop |
+          Export-Clixml -Path (Join-Path $diagDir 'evt-dism.xml')
+      } catch {
+        "evt-dism harvest error: $_" |
+          Out-File -FilePath (Join-Path $diagDir 'evt-dism-error.txt') -Encoding utf8
+      }
+      try {
+        Get-WinEvent -LogName 'System' -MaxEvents 200 -ErrorAction Stop |
+          Export-Clixml -Path (Join-Path $diagDir 'evt-system.xml')
+      } catch {
+        "evt-system harvest error: $_" |
+          Out-File -FilePath (Join-Path $diagDir 'evt-system-error.txt') -Encoding utf8
+      }
+      try {
+        Get-WinEvent -LogName 'Setup' -MaxEvents 200 -ErrorAction Stop |
+          Export-Clixml -Path (Join-Path $diagDir 'evt-setup.xml')
+      } catch {
+        "evt-setup harvest error: $_" |
+          Out-File -FilePath (Join-Path $diagDir 'evt-setup-error.txt') -Encoding utf8
       }
 
-      # Event log slices (last 200 events from the channels most likely to record DISM/installer activity)
-      try { Get-WinEvent -LogName 'Microsoft-Windows-DISM/Operational' -MaxEvents 200 -ErrorAction Stop |
-              Export-Clixml -Path (Join-Path $diagDir 'evt-dism.xml') } catch { }
-      try { Get-WinEvent -LogName 'System' -MaxEvents 200 -ErrorAction Stop |
-              Export-Clixml -Path (Join-Path $diagDir 'evt-system.xml') } catch { }
-      try { Get-WinEvent -LogName 'Setup' -MaxEvents 200 -ErrorAction Stop |
-              Export-Clixml -Path (Join-Path $diagDir 'evt-setup.xml') } catch { }
-
-      # Compress the whole diagDir so we transfer one file out
+      # Compress the whole diagDir, then read it back as bytes so we
+      # can return the payload inline through Invoke-Command.
       $zip = "C:\Users\User\AppData\Local\Temp\m69-diag.zip"
-      if (Test-Path $zip) { Remove-Item $zip -Force }
-      Compress-Archive -Path "$diagDir\*" -DestinationPath $zip -CompressionLevel Fastest -ErrorAction SilentlyContinue
-      if (Test-Path $zip) { (Get-Item $zip).FullName } else { '' }
+      if (Test-Path $zip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
+      Compress-Archive -Path "$diagDir\*" -DestinationPath $zip -CompressionLevel Fastest -ErrorAction Stop
+      [byte[]]$bytes = [System.IO.File]::ReadAllBytes($zip)
+      $fileList = Get-ChildItem -LiteralPath $diagDir | Select-Object Name, Length
+      Remove-Item $zip -Force -ErrorAction SilentlyContinue
+      return [pscustomobject]@{
+        Bytes  = $bytes
+        Length = $bytes.Length
+        Files  = $fileList
+      }
     }
-    $zipPathInGuest = Invoke-Command -VMName $VmName -Credential $cred `
-                                     -ScriptBlock $harvestScript -ErrorAction Stop
-    if ($zipPathInGuest -and $zipPathInGuest.Trim().Length -gt 0) {
+    $harvest = Invoke-Command -VMName $VmName -Credential $cred `
+                              -ScriptBlock $harvestScript -ErrorAction Stop
+    if ($harvest -and $harvest.Length -gt 0) {
       $hostZip = Join-Path $PerTestOut 'm69-vm-diag.zip'
-      Info "Copy-VMFile (Guest->Host): $zipPathInGuest -> $hostZip"
-      Copy-VMFile -VMName $VmName -SourcePath $zipPathInGuest `
-                  -DestinationPath $hostZip -FileSource Guest `
-                  -CreateFullPath -Force -ErrorAction Stop
+      Info "byte-stream harvest: writing $($harvest.Length) bytes to $hostZip"
+      [System.IO.File]::WriteAllBytes($hostZip, $harvest.Bytes)
       if (Test-Path $hostZip) {
-        Record 'harvest-vm-diag' "OK ($hostZip)"
+        Record 'harvest-vm-diag' "OK ($hostZip, $($harvest.Length) bytes)"
       } else {
-        Record 'harvest-vm-diag' 'SKIPPED: Copy-VMFile reported success but the destination is missing'
+        Record 'harvest-vm-diag' 'SKIPPED: WriteAllBytes reported success but the destination is missing'
       }
     } else {
-      Record 'harvest-vm-diag' 'SKIPPED: in-VM harvest produced no zip (no logs found?)'
+      Record 'harvest-vm-diag' 'SKIPPED: in-VM harvest produced no bytes (no logs found?)'
     }
   } catch {
     Warn "  diag-harvest failed (non-fatal): $_"
