@@ -987,6 +987,7 @@ proc usesImportCode(pkg: PackageDef): string =
       "cargo-nextest",
       "clang",
       "ctags",
+      "create-dmg",
       "curl",
       "dpkg",
       "electron",
