@@ -108,10 +108,16 @@ $SnapshotBaseWithVs   = 'base-with-vs'
 $CredCacheDir       = Join-Path $env:LOCALAPPDATA 'Repro\hyperv-m69'
 $CredCachePath      = Join-Path $CredCacheDir 'vm-cred.xml'
 
-# Auto-passphrase + auto-OOBE
+# Auto-passphrase + auto-OOBE.
+# OOBE-pass auto-completion is driven by a Panther override: we write
+# OUR unattend.xml to <drive>:\Windows\Panther\unattend.xml in the
+# per-VM differencing disk before first boot. The Microsoft dev VHDX
+# already ships with a baked Panther unattend - which wins priority 2
+# in Setup's OOBE-pass search order and is why the historical
+# removable-DVD mechanism never had its content read. We back up the
+# baked unattend to unattend.original.xml for transparency.
 $WordlistPath       = Join-Path $PSScriptRoot 'wordlist.txt'
 $VmLocalAccountName = 'User'
-$UnattendIsoPath    = Join-Path $VhdRoot "unattend-$VmName.iso"
 
 # Inside the VM
 $VmHarnessRoot      = 'C:\harness'
@@ -376,23 +382,38 @@ function New-Passphrase {
   return ($picked -join '-')
 }
 
-function New-AutounattendXml {
+function New-PantherUnattendXml {
   param(
     [Parameter(Mandatory)] [string]$Passphrase,
-    [string]$LocalAccountName = $VmLocalAccountName
+    [string]$LocalAccountName = $VmLocalAccountName,
+    [string]$ComputerName = '*'
   )
-  # Generates an Autounattend.xml that auto-completes the entire
-  # Windows 11 OOBE: creates a local Administrators account
-  # ($LocalAccountName) with the supplied passphrase, hides every OOBE
-  # screen, sets en-US locale + UTC TZ. No AutoLogon - PSDirect
-  # authenticates via SAM credential against the local account.
+  # Generates the unattend.xml we write to <drive>:\Windows\Panther\
+  # on the VM's per-VM differencing disk before first boot. Setup's
+  # OOBE-pass search order prefers the Panther location (priority 2)
+  # over any removable read-only media (priority 6); the Microsoft
+  # dev VHDX ships with its own Panther unattend, which is why the
+  # historical removable-DVD approach never won. We overwrite it.
+  #
+  # Structure mirrors Microsoft's baked Panther unattend (specialize +
+  # oobeSystem passes) but seeds OUR local account + passphrase and
+  # skips the FirstLogonCommands / AutoLogon that the Microsoft image
+  # used (autologon hits a SID-mismatch bug in their scrubbed image;
+  # we authenticate via PSDirect SAM credential instead).
+  #
   # XML-encode the passphrase so a stray '<', '&', etc. cannot break
   # the document (our generated passphrases are [a-z-]+ today, but the
   # encoder is cheap insurance).
   $encodedPw = [System.Security.SecurityElement]::Escape($Passphrase)
+  $encodedComputerName = [System.Security.SecurityElement]::Escape($ComputerName)
   @"
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <ComputerName>$encodedComputerName</ComputerName>
+    </component>
+  </settings>
   <settings pass="oobeSystem">
     <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <InputLocale>en-US</InputLocale>
@@ -403,6 +424,8 @@ function New-AutounattendXml {
     </component>
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <OOBE>
+        <SkipMachineOOBE>true</SkipMachineOOBE>
+        <SkipUserOOBE>true</SkipUserOOBE>
         <HideEULAPage>true</HideEULAPage>
         <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
         <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
@@ -433,108 +456,95 @@ function New-AutounattendXml {
 "@
 }
 
-$script:UnattendIsoHelperLoaded = $false
-function Initialize-UnattendIsoHelper {
-  if ($script:UnattendIsoHelperLoaded) { return }
-  # IMAPI2FS returns the result image's ImageStream as a COM
-  # System.__ComObject. PowerShell cannot directly cast it to
-  # System.Runtime.InteropServices.ComTypes.IStream because the COM
-  # interop wrappers need an explicit IStream contract at compile time.
-  # The well-known pattern is a tiny C# helper that takes the IStream
-  # as an `object`, marshals it to the strongly-typed IStream interface
-  # via Marshal.GetIUnknownForObject + Marshal.GetTypedObjectForIUnknown,
-  # then drains it into a FileStream in BlockSize-sized chunks.
-  Add-Type -TypeDefinition @'
-using System;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
-
-public static class UnattendIsoHelper {
-  public static void WriteIStreamToFile(object comStream, string path, int blockSize, int totalBlocks) {
-    IntPtr iunk = Marshal.GetIUnknownForObject(comStream);
-    try {
-      Guid iid = typeof(IStream).GUID;
-      IntPtr ipStream;
-      // Marshal.QueryInterface takes the IID as a 'ref Guid' on
-      // .NET Framework and as an 'in Guid' on net6+. Both bindings
-      // accept a local Guid variable by reference; we use 'ref' for
-      // compatibility, suppressing the Roslyn CS9191 hint.
-#pragma warning disable CS9191
-      Marshal.QueryInterface(iunk, ref iid, out ipStream);
-#pragma warning restore CS9191
-      if (ipStream == IntPtr.Zero) { throw new InvalidOperationException("COM object does not implement IStream"); }
-      IStream istream = (IStream)Marshal.GetObjectForIUnknown(ipStream);
-      try {
-        long totalBytes = (long)blockSize * (long)totalBlocks;
-        byte[] buffer = new byte[blockSize];
-        IntPtr pcbRead = Marshal.AllocCoTaskMem(IntPtr.Size);
-        try {
-          using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None)) {
-            long remaining = totalBytes;
-            while (remaining > 0) {
-              int chunk = (int)Math.Min((long)blockSize, remaining);
-              istream.Read(buffer, chunk, pcbRead);
-              int read = Marshal.ReadInt32(pcbRead);
-              if (read <= 0) { break; }
-              fs.Write(buffer, 0, read);
-              remaining -= read;
-            }
-          }
-        } finally {
-          Marshal.FreeCoTaskMem(pcbRead);
-        }
-      } finally {
-        Marshal.ReleaseComObject(istream);
-        Marshal.Release(ipStream);
-      }
-    } finally {
-      Marshal.Release(iunk);
-    }
-  }
-}
-'@ -ErrorAction Stop
-  $script:UnattendIsoHelperLoaded = $true
-}
-
-function New-UnattendIso {
+function Write-PantherUnattend {
   param(
-    [Parameter(Mandatory)] [string]$XmlPath,
-    [Parameter(Mandatory)] [string]$IsoPath,
-    [string]$VolumeName = 'AUTOUNATTEND'
+    [Parameter(Mandatory)] [string]$VhdxPath,
+    [Parameter(Mandatory)] [string]$UnattendXml
   )
-  # Build a small ISO carrying a single file (typically Autounattend.xml)
-  # at its ROOT via the IMAPI2FS COM API. No ADK / oscdimg dependency.
-  # Returns nothing on success; throws on failure.
-  if (-not (Test-Path -LiteralPath $XmlPath)) {
-    throw "New-UnattendIso: source file not found: $XmlPath"
+  # Mounts $VhdxPath read-write, finds the NTFS Windows-system volume,
+  # backs up any existing \Windows\Panther\unattend.xml to
+  # unattend.original.xml, writes OUR unattend.xml as UTF-8 *without*
+  # a BOM (matching Microsoft's own Panther output), then dismounts.
+  # Returns the target path on success; throws on failure. The mount
+  # is always dismounted via the try/finally even if the write fails.
+  if (-not (Test-Path -LiteralPath $VhdxPath)) {
+    throw "Write-PantherUnattend: VHDX not found: $VhdxPath"
   }
-  Initialize-UnattendIsoHelper
-  $stagingDir = Join-Path ([System.IO.Path]::GetTempPath()) ("unattend-iso-stage-" + [Guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+  $mounted = $null
   try {
-    Copy-Item -LiteralPath $XmlPath -Destination (Join-Path $stagingDir ([System.IO.Path]::GetFileName($XmlPath))) -Force
-    $image = New-Object -ComObject 'IMAPI2FS.MsftFileSystemImage'
-    # 7 = Joliet (4) + ISO9660 (1) + UDF (2). Maximum compatibility.
-    $image.FileSystemsToCreate = 7
-    $image.VolumeName = $VolumeName
-    $image.Root.AddTree($stagingDir, $false)
-    $resultImage = $image.CreateResultImage()
-    $blockSize = [int]$resultImage.BlockSize
-    $totalBlocks = [int]$resultImage.TotalBlocks
-    if (Test-Path -LiteralPath $IsoPath) {
-      Remove-Item -LiteralPath $IsoPath -Force -ErrorAction Stop
+    Info "    mounting VHDX read-write: $VhdxPath"
+    $mounted = Mount-VHD -Path $VhdxPath -Passthru -ErrorAction Stop
+    # Re-query by path; Mount-VHD's Passthru object lacks DiskNumber on
+    # some PS hosts.
+    $vhdInfo = Get-VHD -Path $VhdxPath -ErrorAction Stop
+    $diskNumber = $vhdInfo.DiskNumber
+    if (-not $diskNumber) {
+      throw "Write-PantherUnattend: mounted VHD has no DiskNumber (mount silently failed?)"
     }
-    [UnattendIsoHelper]::WriteIStreamToFile($resultImage.ImageStream, $IsoPath, $blockSize, $totalBlocks)
-    # Release COM objects.
-    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($resultImage)
-    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($image)
-    if (-not (Test-Path -LiteralPath $IsoPath)) {
-      throw "New-UnattendIso: ISO was not written to $IsoPath"
+    Info "    mounted as Disk $diskNumber; enumerating NTFS volumes"
+    $partitions = Get-Partition -DiskNumber $diskNumber -ErrorAction Stop
+    $ntfsVolumes = @()
+    foreach ($part in $partitions) {
+      $vol = $null
+      try { $vol = Get-Volume -Partition $part -ErrorAction Stop } catch { continue }
+      if ($vol -and $vol.FileSystem -eq 'NTFS') {
+        $ntfsVolumes += [pscustomobject]@{
+          Volume    = $vol
+          Partition = $part
+          Size      = $vol.Size
+        }
+      }
     }
+    if ($ntfsVolumes.Count -eq 0) {
+      throw "Write-PantherUnattend: no NTFS volumes on Disk $diskNumber"
+    }
+    # The Windows system volume is the largest NTFS volume on the disk
+    # (the dev VHDX layout: 100MB EFI system, ~16MB MSR, ~600MB recovery,
+    # and the Windows partition occupying the remainder).
+    $best = $ntfsVolumes | Sort-Object -Property Size -Descending | Select-Object -First 1
+    $driveLetter = $best.Volume.DriveLetter
+    if (-not $driveLetter) {
+      throw "Write-PantherUnattend: largest NTFS volume on Disk $diskNumber has no drive letter (Mount-VHD usually assigns one - check Volume Shadow or another tool is not holding it)"
+    }
+    $sysRoot = "${driveLetter}:"
+    $pantherDir = Join-Path $sysRoot 'Windows\Panther'
+    $targetPath = Join-Path $pantherDir 'unattend.xml'
+    $backupPath = Join-Path $pantherDir 'unattend.original.xml'
+    Info "    target volume: $sysRoot (NTFS, $([math]::Round($best.Volume.Size/1GB,2)) GB)"
+    if (-not (Test-Path -LiteralPath $pantherDir)) {
+      Info "    creating $pantherDir (was absent)"
+      New-Item -ItemType Directory -Path $pantherDir -Force | Out-Null
+    }
+    # Back up any existing Microsoft-baked unattend so a developer who
+    # inspects the VM later can still see what shipped. We back up only
+    # if the backup does not already exist (idempotent across reruns).
+    if (Test-Path -LiteralPath $targetPath) {
+      if (-not (Test-Path -LiteralPath $backupPath)) {
+        Info "    backing up existing unattend.xml -> unattend.original.xml"
+        Copy-Item -LiteralPath $targetPath -Destination $backupPath -Force
+      } else {
+        Info "    unattend.original.xml already present; leaving prior backup intact"
+      }
+    } else {
+      Info "    no existing unattend.xml at $targetPath (will create)"
+    }
+    # Write our unattend.xml as UTF-8 WITHOUT a BOM. Setup is BOM-tolerant
+    # in practice, but Microsoft's own Panther writer omits the BOM so we
+    # match for fidelity. .NET's UTF8Encoding(false) suppresses the BOM.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($targetPath, $UnattendXml, $utf8NoBom)
+    # Structural sanity check.
+    [void]([xml](Get-Content -LiteralPath $targetPath -Raw))
+    Info "    wrote $targetPath ($((Get-Item -LiteralPath $targetPath).Length) bytes, UTF-8 no BOM)"
+    return $targetPath
   } finally {
-    if (Test-Path -LiteralPath $stagingDir) {
-      Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($mounted) {
+      try {
+        Info "    dismounting VHDX: $VhdxPath"
+        Dismount-VHD -Path $VhdxPath -ErrorAction Stop
+      } catch {
+        Warn "    Dismount-VHD failed: $_  (the diff disk MAY remain mounted - check Get-VHD manually)"
+      }
     }
   }
 }
@@ -801,9 +811,10 @@ Section 'Step 4.5: ensure the VM credential exists (auto-generate if absent)'
 # If the DPAPI-encrypted cred cache is missing, generate a fresh 4-word
 # EFF-Short passphrase, build a PSCredential for the local guest
 # account, and seal it via Export-Clixml. The same passphrase is also
-# embedded in the Autounattend.xml on the unattend ISO (Step 4.6) so
-# Windows OOBE creates a matching local account on first boot. After
-# OOBE completes the ISO is detached + deleted (Step 8 finally block).
+# written into the differencing disk's \Windows\Panther\unattend.xml
+# (Step 5.5, before the VM is first booted) so Windows OOBE creates a
+# matching local account on first boot. The Panther override lives in
+# the diff disk only - the cached base VHDX is never modified.
 $cred = $null
 if (-not (Test-Path $CredCachePath)) {
   Info "  no cached credential at $CredCachePath - generating one"
@@ -845,50 +856,6 @@ if (-not (Test-Path $CredCachePath)) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 4.6: build the unattend ISO (Autounattend.xml seeded with the
-# cached passphrase). Step 6 attaches it as a DVD when creating the VM
-# (or when resuming a partly-provisioned VM that does not yet have it
-# attached). Step 8 detaches + deletes it after OOBE completes.
-# ---------------------------------------------------------------------------
-Section 'Step 4.6: build unattend ISO'
-$buildIso = $true
-if (Test-VmExists $VmName) {
-  $existingDvd = Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue |
-                   Where-Object { $_.Path -and ($_.Path -ieq $UnattendIsoPath) }
-  if (-not $existingDvd -and -not (Test-Path -LiteralPath $UnattendIsoPath)) {
-    # VM exists but no unattend DVD attached and no ISO on disk - the
-    # VM has presumably already completed OOBE on a prior run. No need
-    # to rebuild the ISO; OOBE only runs once per VHDX provisioning.
-    Info "  VM exists with no unattend DVD attached and no ISO on disk - assume OOBE already complete; skip ISO build"
-    $buildIso = $false
-  }
-}
-if ($buildIso) {
-  if (Test-Path -LiteralPath $UnattendIsoPath) {
-    Info "  unattend ISO already present: $UnattendIsoPath (will reuse)"
-  } else {
-    Info "  building unattend ISO at: $UnattendIsoPath"
-    $plainPw = $cred.GetNetworkCredential().Password
-    $unattendXml = New-AutounattendXml -Passphrase $plainPw -LocalAccountName $cred.UserName
-    $xmlTmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("autounattend-" + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $xmlTmpDir -Force | Out-Null
-    try {
-      $xmlPath = Join-Path $xmlTmpDir 'Autounattend.xml'
-      [System.IO.File]::WriteAllText($xmlPath, $unattendXml, [System.Text.Encoding]::UTF8)
-      # Basic structural sanity check before we burn it to an ISO.
-      [void]([xml](Get-Content -LiteralPath $xmlPath -Raw))
-      New-UnattendIso -XmlPath $xmlPath -IsoPath $UnattendIsoPath
-      $isoSize = (Get-Item -LiteralPath $UnattendIsoPath).Length
-      Info "  unattend ISO written ($isoSize bytes)"
-    } finally {
-      if (Test-Path -LiteralPath $xmlTmpDir) {
-        Remove-Item -LiteralPath $xmlTmpDir -Recurse -Force -ErrorAction SilentlyContinue
-      }
-    }
-  }
-}
-
-# ---------------------------------------------------------------------------
 # Step 5: -Force handling - blow away the existing VM + snapshots
 # ---------------------------------------------------------------------------
 if ($Force) {
@@ -907,61 +874,65 @@ if ($Force) {
     Info "  removing differencing VHD: $DiffVhdPath"
     Remove-Item -LiteralPath $DiffVhdPath -Force -ErrorAction SilentlyContinue
   }
-  # The stale unattend ISO (if any) carries an embedded passphrase that
-  # may not match the current cached credential after -Force; force a
-  # rebuild against the live cred so OOBE on the rebuilt VM matches.
-  if (Test-Path -LiteralPath $UnattendIsoPath) {
-    Info "  removing stale unattend ISO: $UnattendIsoPath"
-    Remove-Item -LiteralPath $UnattendIsoPath -Force -ErrorAction SilentlyContinue
-  }
-  Info "  rebuilding unattend ISO against the live cred"
-  $plainPw = $cred.GetNetworkCredential().Password
-  $unattendXml = New-AutounattendXml -Passphrase $plainPw -LocalAccountName $cred.UserName
-  $xmlTmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("autounattend-" + [Guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $xmlTmpDir -Force | Out-Null
-  try {
-    $xmlPath = Join-Path $xmlTmpDir 'Autounattend.xml'
-    [System.IO.File]::WriteAllText($xmlPath, $unattendXml, [System.Text.Encoding]::UTF8)
-    [void]([xml](Get-Content -LiteralPath $xmlPath -Raw))
-    New-UnattendIso -XmlPath $xmlPath -IsoPath $UnattendIsoPath
-    $isoSize = (Get-Item -LiteralPath $UnattendIsoPath).Length
-    Info "  unattend ISO written ($isoSize bytes)"
-  } finally {
-    if (Test-Path -LiteralPath $xmlTmpDir) {
-      Remove-Item -LiteralPath $xmlTmpDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-  }
+  # The Panther override lives inside the diff disk, so removing the
+  # diff disk above already drops our prior unattend.xml. Step 5.5 will
+  # re-write it against the current cred when the diff disk is recreated.
 }
 
 # ---------------------------------------------------------------------------
-# Step 6: ensure the VM exists (attach unattend ISO as DVD for auto-OOBE)
+# Step 5.5: create the per-VM differencing disk if needed, then write
+# our Panther unattend override into it BEFORE the VM is created /
+# booted. This is the new OOBE-injection mechanism (replaces the
+# removable-DVD Autounattend.xml approach, which Setup ignored because
+# the dev VHDX ships with a baked C:\Windows\Panther\unattend.xml that
+# wins priority 2 in Setup's OOBE-pass search order).
+#
+# Idempotence: skip the Panther write if the VM is already running OR
+# if any OOBE-complete snapshot exists - by then OOBE is done and the
+# unattend is no longer consulted.
+# ---------------------------------------------------------------------------
+Section 'Step 5.5: ensure differencing disk + Panther unattend override'
+$diffExisted = Test-Path $DiffVhdPath
+if (-not $diffExisted) {
+  Info "  creating differencing VHD from cached base: $DiffVhdPath"
+  New-VHD -Path $DiffVhdPath -ParentPath $BaseVhdxCachePath -Differencing | Out-Null
+} else {
+  Info "  differencing VHD already exists: $DiffVhdPath"
+}
+
+$panther_needed = $true
+$vmExists = Test-VmExists $VmName
+if ($vmExists) {
+  $vmObj = Get-VmOrNull $VmName
+  if ($vmObj -and $vmObj.State -ne 'Off') {
+    Info "  VM '$VmName' state is $($vmObj.State); cannot mount diff disk live - assume OOBE already complete; skip Panther write"
+    $panther_needed = $false
+  }
+  if ($panther_needed -and (Test-SnapshotExists $VmName $SnapshotBaseClean)) {
+    Info "  '$SnapshotBaseClean' snapshot already present - OOBE already complete; skip Panther write"
+    $panther_needed = $false
+  }
+}
+
+if ($panther_needed) {
+  Info "  writing Panther unattend override into $DiffVhdPath"
+  $plainPw = $cred.GetNetworkCredential().Password
+  $unattendXml = New-PantherUnattendXml -Passphrase $plainPw -LocalAccountName $cred.UserName
+  # Belt-and-braces structural check before we ever mount the VHD.
+  [void]([xml]$unattendXml)
+  Write-PantherUnattend -VhdxPath $DiffVhdPath -UnattendXml $unattendXml | Out-Null
+  Info "  Panther override in place"
+}
+
+# ---------------------------------------------------------------------------
+# Step 6: ensure the VM exists (the per-VM diff disk already carries our
+# Panther unattend - the Autounattend-on-DVD mechanism is gone)
 # ---------------------------------------------------------------------------
 Section 'Step 6: ensure VM exists'
-$attachUnattendDvd = $false
 if (Test-VmExists $VmName) {
   Info "  VM '$VmName' already exists - skip create"
-  # Idempotent: if a fresh ISO was just built (Step 7.5) and the VM has
-  # no DVD pointing at it, attach it. This covers the case where a
-  # prior provisioning run crashed before OOBE completed and we are
-  # resuming.
-  if (Test-Path -LiteralPath $UnattendIsoPath) {
-    $existingDvd = Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue |
-                     Where-Object { $_.Path -and ($_.Path -ieq $UnattendIsoPath) }
-    if (-not $existingDvd) {
-      $attachUnattendDvd = $true
-    }
-  }
 } else {
   Info "  VM '$VmName' does not exist - creating"
-  # Create a differencing VHD so the cached VHDX is preserved
-  # untouched (so we can re-create the VM on a future provision
-  # without re-downloading 20-50 GB).
-  if (-not (Test-Path $DiffVhdPath)) {
-    Info "  creating differencing VHD from cached base: $DiffVhdPath"
-    New-VHD -Path $DiffVhdPath -ParentPath $BaseVhdxCachePath -Differencing | Out-Null
-  } else {
-    Info "  differencing VHD already exists: $DiffVhdPath"
-  }
   Info "  creating Gen2 VM with ${VmRamBytes} bytes RAM, $VmProcessorCount vCPU"
   New-VM -Name $VmName -Generation $VmGeneration `
     -MemoryStartupBytes $VmRamBytes `
@@ -983,15 +954,7 @@ if (Test-VmExists $VmName) {
   foreach ($svc in @('Heartbeat','Shutdown','Time Synchronization','Key-Value Pair Exchange')) {
     Enable-VMIntegrationService -VMName $VmName -Name $svc -ErrorAction SilentlyContinue
   }
-  if (Test-Path -LiteralPath $UnattendIsoPath) {
-    $attachUnattendDvd = $true
-  }
   Info "  VM '$VmName' created."
-}
-
-if ($attachUnattendDvd) {
-  Info "  attaching unattend ISO as DVD: $UnattendIsoPath"
-  Add-VMDvdDrive -VMName $VmName -Path $UnattendIsoPath | Out-Null
 }
 
 # Verify Guest Service Interface
@@ -1004,69 +967,39 @@ if (-not $gsi -or -not $gsi.Enabled) {
 # ---------------------------------------------------------------------------
 # Step 8: boot the VM and wait for PowerShell Direct
 #
-# OOBE auto-completion happens here: the Autounattend.xml on the unattend
-# ISO drives the local-account creation + locale + EULA hide-all, taking
-# ~2-5 minutes. Once PSDirect-as-the-local-account succeeds, OOBE is
-# definitively complete. The finally block detaches + deletes the ISO
-# even if Wait-VmPSDirectReady crashes, so we never leave the cleartext
-# passphrase on host disk longer than necessary.
+# OOBE auto-completion happens here: the Panther unattend.xml we wrote
+# in Step 5.5 drives the local-account creation + locale + EULA hide-all,
+# taking ~2-5 minutes. Once PSDirect-as-the-local-account succeeds, OOBE
+# is definitively complete. The Panther unattend lives inside the diff
+# disk (not on host filesystem), so there is no host-side cleanup to do
+# after OOBE - the passphrase persists only in the DPAPI-sealed
+# vm-cred.xml plus the diff disk's own Panther dir.
 # ---------------------------------------------------------------------------
 Section 'Step 8: boot the VM and wait for PowerShell Direct'
-$ready = $false
-try {
-  $vm = Get-VmOrNull $VmName
-  if ($vm.State -ne 'Running') {
-    Info "  starting VM"
-    Start-VM -Name $VmName
-  } else {
-    Info "  VM already running"
-  }
-  $ready = Wait-VmPSDirectReady -Name $VmName -Credential $cred -TimeoutSec $BootReadyTimeoutSec
-} finally {
-  # Best-effort cleanup of the unattend DVD + ISO. Failures here are
-  # logged but do NOT abort provisioning (the VM is up and OOBE is
-  # done; the ISO is just disposable scaffolding).
-  $detachedAny = $false
-  $deletedIso  = $false
-  try {
-    $unattendDvds = Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue |
-                      Where-Object { $_.Path -and ($_.Path -ieq $UnattendIsoPath) }
-    foreach ($dvd in $unattendDvds) {
-      try {
-        Remove-VMDvdDrive -VMName $VmName -ControllerNumber $dvd.ControllerNumber `
-          -ControllerLocation $dvd.ControllerLocation -ErrorAction Stop
-        $detachedAny = $true
-      } catch {
-        Warn "  could not detach unattend DVD: $_"
-      }
-    }
-  } catch {
-    Warn "  unattend DVD enumeration failed during cleanup: $_"
-  }
-  if (Test-Path -LiteralPath $UnattendIsoPath) {
-    try {
-      Remove-Item -LiteralPath $UnattendIsoPath -Force -ErrorAction Stop
-      $deletedIso = $true
-    } catch {
-      Warn "  could not delete unattend ISO at $UnattendIsoPath : $_"
-    }
-  }
-  if ($detachedAny -or $deletedIso) {
-    Info "[provision] OOBE complete; detached + deleted unattend ISO"
-  }
+$vm = Get-VmOrNull $VmName
+if ($vm.State -ne 'Running') {
+  Info "  starting VM"
+  Start-VM -Name $VmName
+} else {
+  Info "  VM already running"
 }
+$ready = Wait-VmPSDirectReady -Name $VmName -Credential $cred -TimeoutSec $BootReadyTimeoutSec
 if (-not $ready) {
   Fail "VM did not become responsive on PowerShell Direct within $BootReadyTimeoutSec s"
   Fail "  Common causes:"
   Fail "    * OOBE has not yet completed (it normally takes 2-5 min). On a"
   Fail "      slow host, bump BootReadyTimeoutSec at the top of this script"
   Fail "      and re-run."
-  Fail "    * The unattend ISO was not built / not attached on the VM's"
-  Fail "      first boot, leaving OOBE on the interactive first-screen.  "
-  Fail "      Open Hyper-V Manager > Connect to '$VmName' to see the guest."
-  Fail "    * The cached credential and the Autounattend.xml passphrase"
-  Fail "      have drifted. Delete $CredCachePath and the unattend ISO at"
-  Fail "      $UnattendIsoPath and re-run with -Force."
+  Fail "    * The Panther unattend.xml was not written to the diff disk on"
+  Fail "      the VM's first boot, leaving OOBE on the interactive"
+  Fail "      first-screen. Open Hyper-V Manager > Connect to '$VmName' to"
+  Fail "      see the guest. Verify Step 5.5 ran by inspecting the diff disk"
+  Fail "      at $DiffVhdPath - mount it (Mount-VHD) and check"
+  Fail "      \\Windows\\Panther\\unattend.xml for our content (look for"
+  Fail "      the LocalAccount Name=$($cred.UserName))."
+  Fail "    * The cached credential and the Panther unattend passphrase"
+  Fail "      have drifted. Delete $CredCachePath and re-run with -Force"
+  Fail "      to rebuild both."
   exit 1
 }
 

@@ -127,9 +127,10 @@ default for `-Gate vs-installer` is `-Scenario base-clean`.
 
 | File | Runs on | Purpose |
 |---|---|---|
-| `provision-base-vm.ps1` | host | One-time idempotent VM provisioning: verify Hyper-V, cache the dev VHDX, **auto-generate a 4-word passphrase and build an `Autounattend.xml` ISO so OOBE runs unattended**, create the VM, uninstall VS, disable WSL/VMP, install Nim/gcc inside the VM, take `base-clean` checkpoint, install VS Build Tools, take `base-with-vs` checkpoint |
+| `provision-base-vm.ps1` | host | One-time idempotent VM provisioning: verify Hyper-V, cache the dev VHDX, **auto-generate a 4-word passphrase and write a Panther-override `unattend.xml` into the per-VM differencing disk so OOBE runs unattended**, create the VM, uninstall VS, disable WSL/VMP, install Nim/gcc inside the VM, take `base-clean` checkpoint, install VS Build Tools, take `base-with-vs` checkpoint |
 | `run-hyperv-m69-system.ps1` | host | Per-test runner: revert -> start -> stage binaries via `Copy-VMFile` -> run a gate via `Invoke-Command -VMName` -> capture output -> stop. Parameterised by `-Gate` + `-Scenario` |
 | `Get-VmPassword.ps1` | host | Reads the DPAPI-sealed `vm-cred.xml` and prints the cleartext passphrase to stdout. Exit `0` on success, `2` if the cred cache is absent. Use only when you need to sign into the VM console; PSDirect-driven tooling does not need it |
+| `verify-panther-write.ps1` | host | Self-test for the Panther-override mechanism. Creates a 100 MB throwaway VHDX in `$env:TEMP`, seeds it with a baked unattend, exercises the helper, re-mounts to verify, cleans up. Touches NO real harness state and is safe to run alongside a real provisioning |
 | `wordlist.txt` | host | The EFF Short Wordlist 1.0 (CC-BY-3.0), 1296 words 3-5 chars each, used by `New-Passphrase` |
 | `README.md` | -- | This file |
 
@@ -143,6 +144,20 @@ no longer a "seed the cred cache" or "finish OOBE in Hyper-V Manager"
 step. The only remaining human cost is the multi-GB VHDX download (and
 the script picks up idempotently after an interrupted download too).
 
+Microsoft's dev VHDX ships with a baked
+`C:\Windows\Panther\unattend.xml` containing scrubbed credentials.
+That file wins **priority 2** in Setup's OOBE-pass unattend search
+order, well ahead of any removable read-only media (priority 6). An
+earlier version of this harness shipped an `Autounattend.xml` on a
+small ISO attached as a DVD - it was empirically ignored by Setup,
+because the baked Panther file always won. The harness now mounts
+the **per-VM differencing disk** before first boot and writes our own
+`unattend.xml` to the diff disk's `\Windows\Panther\` path; our
+content wins priority 2 cleanly because it's at the same priority-2
+search location but inside the diff layer. The cached base VHDX is
+**read-only and never modified** - the override lives only in the
+per-VM diff layer.
+
 What happens on a first run:
 
   1. **Auto-passphrase.** The script generates a fresh **4-word EFF
@@ -154,31 +169,47 @@ What happens on a first run:
      for the current user). The passphrase is **never printed to
      stdout**; retrieve it with `Get-VmPassword.ps1` (see below) if you
      need to sign into the VM console.
-  2. **Auto-OOBE via `Autounattend.xml`.** The script builds a small
-     ISO (via the in-box `IMAPI2FS` COM API - no ADK / `oscdimg`
-     dependency) containing a single `Autounattend.xml` at its root.
-     The XML drives the OOBE oobeSystem pass: creates the local
-     Administrators account `User` with the auto-generated passphrase,
-     sets `en-US` locale + UTC TZ, hides every OOBE screen
-     (EULA / OEM-reg / online-account / wireless / local-account /
-     ProtectYourPC), and is keyed for x64 Windows 10/11 (they share
-     the relevant settings schema). The ISO is attached as a DVD to
-     the VM at creation time.
+  2. **Auto-OOBE via Panther override.** The script generates an
+     `unattend.xml` (specialize + oobeSystem passes; the oobeSystem
+     pass creates the local Administrators account `User` with the
+     auto-generated passphrase, sets `en-US` locale + UTC TZ, and
+     fires `SkipMachineOOBE` / `SkipUserOOBE` plus the modern
+     `Hide*` flags so every OOBE screen is suppressed). Before the
+     VM is created and first-booted, the script mounts the per-VM
+     differencing disk read-write, walks `Get-Disk` -> `Get-Partition`
+     -> `Get-Volume` to find the largest NTFS volume (the Windows
+     system volume), backs up the baked `unattend.xml` to
+     `unattend.original.xml` (so a developer who later opens the VM
+     can still see what Microsoft baked), writes our `unattend.xml`
+     as UTF-8 *without* a BOM (matching Microsoft's own Panther
+     output), then dismounts. The mount/write/dismount sequence is
+     wrapped in a `try / finally` so any write failure still
+     dismounts the VHD cleanly.
   3. **VHDX download.** Same flow as before - the script resolves
      the live URL via the Hyper-V Quick Create gallery manifest,
      downloads, extracts the inner `.vhdx`, and caches it. If
      manifest discovery fails the script prints a clear "do this
      manually" message and exits.
   4. **First boot.** OOBE runs unattended (~2-5 min) using the
-     `Autounattend.xml`. Once it's done, `PSDirect` becomes
-     reachable; `Wait-VmPSDirectReady` polls until
-     `Invoke-Command -VMName <name> { hostname }` returns. At that
-     point the ISO is **detached + deleted** from host disk (in a
-     `finally` block so a crashed `Wait-VmPSDirectReady` still
-     triggers cleanup).
+     Panther unattend we wrote into the diff disk. Once it's done,
+     `PSDirect` becomes reachable; `Wait-VmPSDirectReady` polls
+     until `Invoke-Command -VMName <name> { hostname }` returns.
+     There is no host-side cleanup of the unattend after OOBE - it
+     lives inside the diff disk, not on host filesystem.
   5. **The rest is unchanged.** VS uninstall, WSL/VMP disable,
      OpenSSH removal, Nim+gcc install, `base-clean` snapshot, VS
      Build Tools install, `base-with-vs` snapshot.
+
+The Panther-write helper is self-tested by `verify-panther-write.ps1`,
+which exercises the full mount/write/dismount sequence against a
+throwaway 100 MB VHDX in `$env:TEMP`. The self-test creates the
+VHDX, seeds it with a "baked Microsoft-style" unattend, runs the
+helper, re-mounts to verify both `unattend.original.xml` (the
+preserved backup) and our overwritten `unattend.xml` are present and
+have the expected content, then cleans up. Run it before / after
+edits to `Write-PantherUnattend` to catch regressions; it does **not**
+touch any real harness state, so it is safe to run alongside a real
+provisioning.
 
 ### Retrieving the VM passphrase
 
@@ -286,11 +317,13 @@ This needs:
     `provision-base-vm.ps1` **auto-generates** a 4-word EFF-Short
     passphrase via a cryptographic RNG and seeds both the
     DPAPI-encrypted cache at `$env:LOCALAPPDATA\Repro\hyperv-m69\vm-cred.xml`
-    (via `Export-Clixml`) and the `Autounattend.xml` on the unattend
-    ISO. Windows OOBE then creates the local `User` account with that
-    passphrase on first boot; PSDirect logs in via SAM credential
-    against that account. Use `Get-VmPassword.ps1` to retrieve the
-    cleartext if you need it for the console.
+    (via `Export-Clixml`) and the Panther-override
+    `\Windows\Panther\unattend.xml` written into the per-VM
+    differencing disk before first boot. Windows OOBE then creates
+    the local `User` account with that passphrase on first boot;
+    PSDirect logs in via SAM credential against that account. Use
+    `Get-VmPassword.ps1` to retrieve the cleartext if you need it
+    for the console.
   * No host networking changes - PowerShell Direct works over the
     VMBus, not over IP. The VM still has Internet (we want Windows
     Update + the VS bootstrapper download), via whichever virtual
@@ -393,18 +426,29 @@ Per-test (under `D:\metacraft\hyperv-m69-system-out\<gate>-<scenario>\`):
   * The harness assumes the host is x64. ARM64 Windows hosts can run
     Hyper-V but the Dev VM image is x64; that combination has not
     been validated.
-  * **Unattend ISO carries the passphrase in cleartext for the ~2-5
-    min OOBE window.** The auto-OOBE Autounattend.xml must contain
-    `<Password>` in plaintext for Windows to consume it. The ISO
-    lives on host disk at
-    `D:\metacraft\hyperv-m69-system-vhds\unattend-repro-m69-hyperv.iso`
-    only between Step 4.6 (ISO build) and the Step 8 `finally` block
-    (ISO detach + delete). The DPAPI-sealed `vm-cred.xml` in
-    `$env:LOCALAPPDATA\Repro\hyperv-m69\` is the only long-lived
+  * **Panther unattend persists the passphrase in cleartext inside
+    the VM's diff disk.** The auto-OOBE `unattend.xml` must contain
+    `<Password>` in plaintext for Windows to consume it. Our content
+    is written to the per-VM differencing disk at
+    `\Windows\Panther\unattend.xml` before first boot, which is
+    where Microsoft's own baked unattend would have lived. After
+    OOBE completes the file remains in the diff disk - a developer
+    who later opens the VM and reads
+    `C:\Windows\Panther\unattend.xml` sees the passphrase in
+    cleartext (and the original Microsoft-baked content backed up to
+    `C:\Windows\Panther\unattend.original.xml` next to it, for
+    transparency). The DPAPI-sealed `vm-cred.xml` in
+    `$env:LOCALAPPDATA\Repro\hyperv-m69\` is the only host-side
     copy. Threat model: this is a host-only **disposable** VM that
     has no shared filesystem with the host and runs against the
     Default Switch. The passphrase unlocks nothing outside the VM,
-    so a brief plaintext-on-host window is acceptable for our use.
+    so a plaintext copy inside the disposable diff disk is
+    acceptable for our use. To delete the in-VM copy after
+    provisioning, you can `Remove-Item C:\Windows\Panther\unattend.xml`
+    via PSDirect once `base-clean` exists - but this is not
+    automated because (a) the file is already inside a disposable
+    VM and (b) Windows continues to consult Panther during certain
+    servicing operations, so wiping it is not free of side effects.
 
 ### Wordlist provenance
 
