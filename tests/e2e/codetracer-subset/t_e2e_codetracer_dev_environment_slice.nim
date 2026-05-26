@@ -152,7 +152,9 @@ proc assertNixIdentity(identity: PathOnlyBuildIdentity) =
     check profile.probes[0].exitCode == 0
     check profile.probes[0].output.strip().len > 0
   check identity.profiles.anyIt(it.executableName == "sh" and
-    it.nixSelector == "nixpkgs#bash" and it.declaredExecutablePath == "bin/sh")
+    it.nixSelector.startsWith("github:NixOS/nixpkgs/") and
+    it.nixSelector.endsWith("#bash") and
+    it.declaredExecutablePath == "bin/sh")
   check identity.profiles.anyIt(it.executableName == "stylus" and
     it.nixSelector == "reprobuild-stdlib-stylus-0.64.0" and
     it.declaredExecutablePath == "bin/stylus" and
@@ -167,6 +169,10 @@ proc assertPackageProvisioningMetadata(interfacePath: string) =
     check metadata.packageName == useDef.packageSelector
     check metadata.executablePath == "bin/" & useDef.executableName
     check metadata.location.file.contains("repro_dsl_stdlib")
+    if useDef.packageSelector != "stylus":
+      check metadata.nixpkgsRef.startsWith("github:NixOS/nixpkgs/")
+      check metadata.nixpkgsRev.len == 40
+      check metadata.nixpkgsNarHash.startsWith("sha256-")
     case useDef.packageSelector
     of "nim":
       check metadata.selector == "nixpkgs#nim"

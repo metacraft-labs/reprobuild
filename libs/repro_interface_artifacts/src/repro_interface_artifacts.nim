@@ -52,6 +52,9 @@ type
     selector*: string
     executablePath*: string
     expressionFile*: string
+    nixpkgsRef*: string
+    nixpkgsRev*: string
+    nixpkgsNarHash*: string
     packageId*: string
     lockIdentity*: string
     location*: SourceLocation
@@ -169,7 +172,7 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 6'u16
+  EnvelopeVersion = 7'u16
   InterfaceExtractionCacheRecordMagic =
     "reprobuild.interfaceExtractionCache.v1"
   ProviderFreshnessCacheRecordMagic =
@@ -382,6 +385,9 @@ proc writeNixProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.selector)
   outp.writeString(provisioning.executablePath)
   outp.writeString(provisioning.expressionFile)
+  outp.writeString(provisioning.nixpkgsRef)
+  outp.writeString(provisioning.nixpkgsRev)
+  outp.writeString(provisioning.nixpkgsNarHash)
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
   outp.writeLocation(provisioning.location)
@@ -393,6 +399,10 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
   result.executablePath = readString(bytes, pos)
   if version >= 3'u16:
     result.expressionFile = readString(bytes, pos)
+  if version >= 7'u16:
+    result.nixpkgsRef = readString(bytes, pos)
+    result.nixpkgsRev = readString(bytes, pos)
+    result.nixpkgsNarHash = readString(bytes, pos)
   result.packageId = readString(bytes, pos)
   result.lockIdentity = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
@@ -766,6 +776,9 @@ proc toInterfaceNixProvisioning(packageName: string;
     selector: provisioning.selector,
     executablePath: provisioning.executablePath,
     expressionFile: provisioning.expressionFile,
+    nixpkgsRef: provisioning.nixpkgsRef,
+    nixpkgsRev: provisioning.nixpkgsRev,
+    nixpkgsNarHash: provisioning.nixpkgsNarHash,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
     location: SourceLocation(file: provisioning.sourceFile,

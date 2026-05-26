@@ -385,7 +385,6 @@ proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
       node)
   result.selector = stringLiteral(node[1])
   result.packageId = result.selector
-  result.lockIdentity = result.selector
   result.sourceFile = loc.file
   result.sourceLine = loc.line
   for i in 2 ..< node.len:
@@ -395,6 +394,15 @@ proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
     let expressionFileValue = namedValue(node[i], "expressionFile")
     if not expressionFileValue.isNil:
       result.expressionFile = stringLiteral(expressionFileValue)
+    let nixpkgsRefValue = namedValue(node[i], "nixpkgsRef")
+    if not nixpkgsRefValue.isNil:
+      result.nixpkgsRef = stringLiteral(nixpkgsRefValue)
+    let nixpkgsRevValue = namedValue(node[i], "nixpkgsRev")
+    if not nixpkgsRevValue.isNil:
+      result.nixpkgsRev = stringLiteral(nixpkgsRevValue)
+    let nixpkgsNarHashValue = namedValue(node[i], "nixpkgsNarHash")
+    if not nixpkgsNarHashValue.isNil:
+      result.nixpkgsNarHash = stringLiteral(nixpkgsNarHashValue)
     let packageIdValue = namedValue(node[i], "packageId")
     if not packageIdValue.isNil:
       result.packageId = stringLiteral(packageIdValue)
@@ -403,6 +411,19 @@ proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
       result.lockIdentity = stringLiteral(lockIdentityValue)
   if result.selector.len == 0:
     error("nixPackage selector must not be empty", node)
+  if result.nixpkgsRev.len > 0 and result.nixpkgsRef.len == 0:
+    result.nixpkgsRef = "github:NixOS/nixpkgs/" & result.nixpkgsRev
+  if result.nixpkgsRef.len > 0 and not result.selector.startsWith("nixpkgs#"):
+    error("nixPackage nixpkgsRef/nixpkgsRev metadata applies only to nixpkgs# selectors",
+      node)
+  if result.lockIdentity.len == 0:
+    if result.nixpkgsRef.len > 0:
+      result.lockIdentity = result.nixpkgsRef
+      if result.nixpkgsNarHash.len > 0:
+        result.lockIdentity.add("?narHash=" & result.nixpkgsNarHash)
+      result.lockIdentity.add("#" & result.selector["nixpkgs#".len .. ^1])
+    else:
+      result.lockIdentity = result.selector
   if result.executablePath.len == 0:
     error("nixPackage requires executablePath = \"bin/name\"", node)
   if result.executablePath.isAbsolute or result.executablePath.startsWith(".."):
@@ -619,6 +640,9 @@ proc packageLiteral(pkg: PackageDef): string =
         provisioning.selector) &
       ", executablePath: " & escForCode(provisioning.executablePath) &
       ", expressionFile: " & escForCode(provisioning.expressionFile) &
+      ", nixpkgsRef: " & escForCode(provisioning.nixpkgsRef) &
+      ", nixpkgsRev: " & escForCode(provisioning.nixpkgsRev) &
+      ", nixpkgsNarHash: " & escForCode(provisioning.nixpkgsNarHash) &
       ", packageId: " & escForCode(provisioning.packageId) &
       ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &

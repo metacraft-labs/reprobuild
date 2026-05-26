@@ -154,6 +154,9 @@ type
     nixSelector*: string
     declaredExecutablePath*: string
     nixExpressionFile*: string
+    nixpkgsRef*: string
+    nixpkgsRev*: string
+    nixpkgsNarHash*: string
     lockIdentity*: string
 
   TarballAcquisitionPlan* = object
@@ -668,6 +671,21 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
 
   result.profileFingerprint = profileFingerprintFor(result)
 
+proc lockedNixpkgsRef(baseRef, narHash: string): string =
+  result = baseRef
+  if narHash.len > 0 and not result.contains("narHash="):
+    if result.contains("?"):
+      result.add("&narHash=")
+    else:
+      result.add("?narHash=")
+    result.add(narHash)
+
+proc effectiveNixSelector(selected: InterfaceNixProvisioning): string =
+  if selected.nixpkgsRef.len > 0 and selected.selector.startsWith("nixpkgs#"):
+    return lockedNixpkgsRef(selected.nixpkgsRef,
+      selected.nixpkgsNarHash) & "#" & selected.selector["nixpkgs#".len .. ^1]
+  selected.selector
+
 proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
   if useDef.nixProvisioning.len == 0:
     raise newException(ValueError,
@@ -684,17 +702,23 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
       selected.packageId
     else:
       selected.selector
+  let resolvedSelector = effectiveNixSelector(selected)
   let lockIdentity =
     if selected.lockIdentity.len > 0:
       selected.lockIdentity
+    elif selected.nixpkgsRef.len > 0:
+      resolvedSelector
     else:
       selected.selector
   NixAcquisitionPlan(
     packageSelector: useDef.packageSelector,
     packageId: packageId,
-    nixSelector: selected.selector,
+    nixSelector: resolvedSelector,
     declaredExecutablePath: selected.executablePath,
     nixExpressionFile: selected.expressionFile,
+    nixpkgsRef: selected.nixpkgsRef,
+    nixpkgsRev: selected.nixpkgsRev,
+    nixpkgsNarHash: selected.nixpkgsNarHash,
     lockIdentity: lockIdentity)
 
 proc unsafeRelativePath(value: string): bool =

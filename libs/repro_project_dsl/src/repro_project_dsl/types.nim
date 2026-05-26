@@ -65,6 +65,9 @@ type
     selector*: string
     executablePath*: string
     expressionFile*: string
+    nixpkgsRef*: string
+    nixpkgsRev*: string
+    nixpkgsNarHash*: string
     packageId*: string
     lockIdentity*: string
     sourceFile*: string
