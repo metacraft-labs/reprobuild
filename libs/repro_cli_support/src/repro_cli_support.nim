@@ -2,6 +2,7 @@ import std/[algorithm, json, options, os, osproc, sequtils, sets, streams,
     strutils, tables, terminal, times]
 import repro_core
 import repro_build_engine
+import repro_cmake_trycompile
 import repro_dev_env_activation
 import repro_depfile
 import repro_dev_env_artifacts
@@ -1943,6 +1944,18 @@ proc siblingFsSnoopPath(publicCliPath: string): string =
   else:
     ""
 
+proc siblingTryCompileProviderPath(publicCliPath: string): string =
+  ## Pre-built Tier 2a direct provider binary, normally shipped next to
+  ## the repro CLI by ``scripts/build_apps.sh``. Empty string means the
+  ## direct provider is unavailable on this install — callers must fall
+  ## back to per-project provider compile.
+  let candidate = parentDir(publicCliPath) /
+    addFileExt("repro-cmake-trycompile-provider", ExeExt)
+  if fileExists(extendedPath(candidate)):
+    os.normalizedPath(candidate)
+  else:
+    ""
+
 type
   BuildProgressMode = enum
     bpmAuto
@@ -2239,7 +2252,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
   let modulePath = parsedTarget.modulePath
   if not fileExists(extendedPath(modulePath)):
-    raise newException(IOError, "build target module not found: " & modulePath)
+    # Tier 2a: when the CMake generator emits ``trycompile.rbsz`` as the
+    # sole project descriptor, no ``reprobuild.nim`` is written. Accept
+    # the target as long as that metadata file is present next to the
+    # would-be module — the fast path below recognises it explicitly and
+    # never tries to compile a per-project provider.
+    let trycompileSiblingMeta = parentDir(modulePath) / "trycompile.rbsz"
+    if not fileExists(extendedPath(trycompileSiblingMeta)):
+      raise newException(IOError, "build target module not found: " & modulePath)
 
   let outDir = outputDirForTarget(parsedTarget, workRoot)
   result.modulePath = modulePath
@@ -2453,6 +2473,57 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       result.exitCode = runLoweredGraphBuild(loweredCache.get(),
         cacheSelectedActionId)
       return
+
+  # Tier 2a fast path: stereotyped CMake try_compile() projects ship a
+  # ``trycompile.rbsz`` metadata file emitted by the Reprobuild generator
+  # and skip the per-project provider compile entirely. The engine
+  # dispatches the pre-built ``repro-cmake-trycompile-provider`` binary
+  # which parses the metadata, registers the synthesized actions via the
+  # standard DSL primitives, and emits the build graph. The provider
+  # artifact id is a constant per ``repro`` release so every TryCompile
+  # against the same toolchain shares a cache key.
+  # Per Provider-Compile-Tiering.md §"2a — repro-cmake-trycompile-provider".
+  let tryCompileMetaPath = result.projectRoot / "trycompile.rbsz"
+  let tryCompileProviderBinary = siblingTryCompileProviderPath(publicCliPath)
+  if mode == tpmPathOnly and not prepareOnly and
+      fileExists(extendedPath(tryCompileMetaPath)) and
+      tryCompileProviderBinary.len > 0:
+    logSummary("trycompileDirect: dispatching " & tryCompileProviderBinary)
+    logSummary("project: " & TryCompileProviderPackageName)
+    logSummary("interface: " & tryCompileMetaPath)
+    logSummary("providerBinary: " & tryCompileProviderBinary)
+    logSummary("providerArtifact: " & TryCompileProviderArtifactId)
+    logSummary("runQuotaSocket: " & runQuotaSocketDiagnostic())
+    let synthIdentity = PathOnlyBuildIdentity(
+      projectName: TryCompileProviderPackageName,
+      interfaceFingerprint: blake3DomainDigest(
+        toBytes(TryCompileProviderArtifactId), hdActionFingerprint))
+    let providerGraphStart = statStart(statsEnabled)
+    let refresh = refreshProviderGraph(RefreshConfig(
+      storeRoot: outDir / "provider-graph",
+      providerBinaryPath: tryCompileProviderBinary,
+      providerArtifactId: TryCompileProviderArtifactId,
+      rootEntryPointId: TryCompileProviderRootEntryPointId,
+      rootArguments: result.projectRoot,
+      namespace: TryCompileProviderNamespace,
+      lockSliceId: digestHex(synthIdentity.interfaceFingerprint),
+      activity: "build",
+      providerWorkingDir: result.projectRoot))
+    finishStat(buildStats, statsEnabled, "repro provider graph refresh",
+      providerGraphStart)
+    logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
+    logSummary("providerInvocations: " & $refresh.invoked.len)
+    var selectedActionId = parsedTarget.selectedActionId
+    if selectDefaultAction and selectedActionId.len == 0:
+      selectedActionId = defaultBuildActionId(refresh.snapshot)
+      if selectedActionId.len > 0:
+        logSummary("defaultTarget: " & selectedActionId)
+    let graphLowerStart = statStart(statsEnabled)
+    let lowered = lowerProviderSnapshot(refresh.snapshot, synthIdentity,
+      result.projectRoot, selectedActionId)
+    finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
+    result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
+    return
 
   let interfacePath = outDir / "project-interface.rbsz"
   let stubPath = outDir / "project-interface.nim"

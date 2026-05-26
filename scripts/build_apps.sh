@@ -17,14 +17,18 @@ case "${REPROBUILD_BUILD_MODE:-debug}" in
 esac
 
 if [ "$(uname -s)" = "Darwin" ]; then
-  nim c \
-    "${nim_mode_flags[@]}" \
-    --app:lib \
-    --threads:on \
-    --path:libs/repro_monitor_hooks/src \
-    --nimcache:build/nimcache/repro-monitor-shim-dylib \
-    --out:build/lib/librepro_monitor_shim.dylib \
-    libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim
+  if [ -d /Users/zahary/metacraft/ct_interpose/src ]; then
+    nim c \
+      "${nim_mode_flags[@]}" \
+      --app:lib \
+      --threads:on \
+      --path:/Users/zahary/metacraft/ct_interpose/src \
+      --nimcache:build/nimcache/repro-monitor-shim-dylib \
+      --out:build/lib/librepro_monitor_shim.dylib \
+      libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim
+  else
+    echo "warning: /Users/zahary/metacraft/ct_interpose/src missing; skipping macOS monitor shim dylib" >&2
+  fi
 fi
 
 if [ "$(uname -s)" = "Linux" ]; then
@@ -58,12 +62,18 @@ case "$(uname -s)" in
     ;;
 esac
 
-while read -r name path _; do
+while read -r name path extra_flags; do
   case "${name}" in
     ""|\#*) continue ;;
   esac
+  # extra_flags is the optional third field of apps/entrypoints.txt — used
+  # to opt individual binaries into per-entrypoint nim defines without
+  # forking the loop (e.g. -d:reproProviderMode for the direct provider).
+  # shellcheck disable=SC2206
+  extra_flag_array=(${extra_flags})
   nim c \
     "${nim_mode_flags[@]}" \
+    "${extra_flag_array[@]}" \
     --nimcache:"build/nimcache/${name}" \
     --out:"build/bin/${name}" \
     "${path}"

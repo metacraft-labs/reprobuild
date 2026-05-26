@@ -1,4 +1,4 @@
-# name path
+# name path [extra-nim-flags...]
 repro apps/repro/repro.nim
 repro-fs-snoop apps/repro-fs-snoop/repro_fs_snoop.nim
 repro-hcr-link apps/repro-hcr-link/repro_hcr_link.nim
@@ -7,3 +7,4 @@ repro-worker apps/repro-worker/repro_worker.nim
 repro-daemon apps/repro-daemon/repro_daemon.nim
 repro-provider-host apps/repro-provider-host/repro_provider_host.nim
 repro-cmake-dyndep-fragment apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim
+repro-cmake-trycompile-provider apps/repro-cmake-trycompile-provider/repro_cmake_trycompile_provider.nim --define:reproProviderMode

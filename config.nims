@@ -41,6 +41,7 @@ for libName in [
   "repro_hcr_linker",
   "repro_hcr_agent",
   "repro_hcr_test",
+  "repro_cmake_trycompile",
 ]:
   switch("path", "libs" / libName / "src")
 
