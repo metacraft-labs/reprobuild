@@ -301,7 +301,11 @@ desync the snapshot). The lifecycle:
   5. **Write artifacts** to the host's per-test output dir:
      `01-<gate>-build.log` (skipped - host pre-builds), `02-<gate>-run.txt`,
      `RESULT.txt`, then the `DONE` sentinel **last**.
-  6. **Stop** the VM (`Stop-VM -TurnOff -Force`). The snapshot remains
+  6. **Harvest VM-side diagnostic logs** while the VM is still up and
+     the logs are static (see "Diagnostic artifacts" below). Wrapped
+     in a `try / catch` so a harvest failure cannot prevent the
+     `finally` block from stopping the VM.
+  7. **Stop** the VM (`Stop-VM -TurnOff -Force`). The snapshot remains
      untouched; the per-run mutations evaporate.
 
 ## PowerShell Direct (no SSH, no networking acrobatics)
@@ -381,8 +385,53 @@ Per-test (under `D:\metacraft\hyperv-m69-system-out\<gate>-<scenario>\`):
 | `_run-started.txt` | runner start checkpoint (written first) |
 | `00-vm-state.log` | `Get-VM`, `Get-VMSnapshot`, `Get-VMIntegrationService` snapshots before + after the run |
 | `02-<gate>-run.txt` | gate stdout/stderr + exit code (the destructive scenario's full output) |
+| `m69-vm-diag.zip` | VM-side diagnostic logs harvested after the gate runs and before the VM is stopped (see "Diagnostic artifacts" below). Absent if the harvest skipped or failed - check the `harvest-vm-diag` row of `RESULT.txt` for the reason. |
 | `RESULT.txt` | per-step status + per-gate exit code + one-line verdict |
 | `DONE` | sentinel - written **last** so its presence means everything else flushed |
+
+### Diagnostic artifacts
+
+Gate failures inside the VM are no longer opaque. Two observability
+hooks surface what Windows is actually doing:
+
+  * **Gate-side: `r.errors` / `r.diagnostics` echoed on apply failure.**
+    Each REAL-scenario VM-only sub-test in
+    `tests/e2e/m69/t_e2e_windows_optional_feature_and_capability.nim`
+    and `tests/e2e/m69/t_e2e_windows_vs_installer.nim` calls
+    `echoApplyFailure(r, scenario)` immediately BEFORE its
+    `check r.errorCount == 0` assertion. When `errorCount > 0` the
+    helper echoes one `[apply-fail] scenario=<name> ...` summary line
+    (errorCount / driftCount / appliedCount / restartNeeded /
+    usedBroker / brokerLaunchCount / planId / auditLogPath) followed
+    by one `[apply-err] scenario=<name> | <diagnostic>` line per
+    diagnostic the driver emitted. The assertions themselves are
+    unchanged; the echo only runs on failure, so a passing run stays
+    silent.
+  * **Runner-side: VM-side log harvest into `m69-vm-diag.zip`.** After
+    the gate command returns (success OR failure) and BEFORE the
+    `finally` block stops the VM, the runner runs a harvest
+    `Invoke-Command` inside the guest that copies:
+      * `dd_*.log` from `%TEMP%` (vs_buildtools bootstrap logs - what
+        the vs-installer gate's 19-second bail leaves behind).
+      * `*.log` files under `C:\ProgramData\Microsoft\VisualStudio\
+        Packages\_Instances\` (full VS install logs).
+      * `dism-tail.log` - the last ~5 MB of `C:\Windows\Logs\DISM\
+        dism.log` (where DISM records its actual complaint about the
+        OpenSSH capability sticking at `InstallPending`).
+      * `cbs-tail.log` - the last ~5 MB of `C:\Windows\Logs\CBS\
+        CBS.log` (the Component-Based Servicing layer underneath
+        DISM).
+      * `evt-dism.xml`, `evt-system.xml`, `evt-setup.xml` - last 200
+        events from the `Microsoft-Windows-DISM/Operational`,
+        `System`, and `Setup` channels (`Export-Clixml`-encoded so a
+        host-side `Import-Clixml` round-trips the structured records).
+    The guest then compresses the diagnostic directory to
+    `C:\Users\User\AppData\Local\Temp\m69-diag.zip` and the runner
+    pulls it out via `Copy-VMFile -FileSource Guest` to
+    `<per-test-out>\m69-vm-diag.zip`. The whole harvest is wrapped in
+    a `try / catch`; if it fails the `finally` block still stops the
+    VM, and `RESULT.txt`'s `harvest-vm-diag` row records the reason
+    (`OK`, `SKIPPED: <why>`, or `FAILED: <error>`).
 
 ## Hard prerequisites
 

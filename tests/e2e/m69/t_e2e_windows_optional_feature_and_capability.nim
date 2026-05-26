@@ -124,6 +124,33 @@ proc reproBinary(): string =
 
 let vmMode = getEnv("REPRO_M69_FEATURE_VM") == "1"
 
+proc echoApplyFailure(r: ApplyResult; scenario: string) =
+  ## Observability hook: when a REAL-scenario `runInfraApply` returns
+  ## with a non-zero `errorCount`, echo the driver's complaint to
+  ## stdout BEFORE the assertion fires so the failing test surfaces
+  ## the actual error. Format is one grep-able line per diagnostic
+  ## (prefix `[apply-err]`) plus a one-line summary of the result
+  ## counters. Silent when `errorCount == 0`.
+  if r.errorCount == 0:
+    return
+  echo "[apply-fail] scenario=" & scenario &
+    " errorCount=" & $r.errorCount &
+    " driftCount=" & $r.driftCount &
+    " skippedCount=" & $r.skippedCount &
+    " appliedCount=" & $r.appliedCount &
+    " noOpCount=" & $r.noOpCount &
+    " restartNeeded=" & $r.restartNeeded &
+    " usedBroker=" & $r.usedBroker &
+    " brokerLaunchCount=" & $r.brokerLaunchCount &
+    " planId=" & r.planId &
+    " auditLogPath=" & r.auditLogPath
+  if r.diagnostics.len == 0:
+    echo "[apply-err] scenario=" & scenario &
+      " (no diagnostics emitted by driver)"
+  else:
+    for d in r.diagnostics:
+      echo "[apply-err] scenario=" & scenario & " | " & d
+
 # The reboot-free Optional Feature used by the lifecycle scenario.
 # `TelnetClient` is the canonical reboot-free Windows Optional Feature
 # (user-mode program activation; no driver reload; documented by
@@ -394,6 +421,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
         opts.elevationMode = emBroker
         opts.forceBroker = false          # VM runs already-elevated
         let r = runInfraApply(profileText, opts)
+        echoApplyFailure(r, "rf-feature-enable-lifecycle")
         check r.errorCount == 0
         # A reboot-free feature must NOT signal RestartNeeded.
         check not r.restartNeeded
@@ -434,6 +462,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
         # First apply: converge so the next plan starts from
         # baseline=Enabled.
         let r1 = runInfraApply(profileText, opts)
+        echoApplyFailure(r1, "rf-feature-drift-detection/converge")
         check r1.errorCount == 0
         # Manually disable the feature OUT-OF-BAND.
         echo "  out-of-band: disabling " & feature
@@ -443,6 +472,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
         check driftSt in ["Disabled", "DisablePending"]
         # The next apply observes drift and re-enables it.
         let r2 = runInfraApply(profileText, opts)
+        echoApplyFailure(r2, "rf-feature-drift-detection/reapply")
         check r2.errorCount == 0
         let (finSt, _) = psQuery(feature)
         echo "  after second apply: state=" & finSt
@@ -472,6 +502,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
         opts.elevationMode = emBroker
         # Converge to Enabled.
         let r0 = runInfraApply(profileText, opts)
+        echoApplyFailure(r0, "rf-feature-rollback-gate/converge")
         check r0.errorCount == 0
         # Rollback: the target system.nim no longer declares the
         # feature, so a rollback REVERTS the still-enabled feature.
@@ -644,6 +675,7 @@ windows.service {
         opts.elevationMode = emBroker
         opts.forceBroker = false        # VM runs already-elevated
         let r = runInfraApply(profileText, opts)
+        echoApplyFailure(r, "openssh-capability-and-sshd-service/first-apply")
         check r.errorCount == 0
         # Audit log records BOTH operations.
         let audit = readAuditLog(r.auditLogPath)
@@ -736,6 +768,7 @@ windows.service {
         check "Status=Running" in svcLine
         # Idempotent re-apply.
         let r2 = runInfraApply(profileText, opts)
+        echoApplyFailure(r2, "openssh-capability-and-sshd-service/reapply")
         check r2.errorCount == 0
         check r2.driftCount == 0
         reportScenario("openssh-capability-and-sshd-service", true,

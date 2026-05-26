@@ -445,6 +445,80 @@ try {
     }
   }
 
+  # ---- Step 6: harvest VM-side diagnostic logs --------------------------
+  # Runs AFTER the gate command completes (success OR failure) and
+  # BEFORE the `finally` block stops the VM. The VM is still up here
+  # and the logs that the gate produced (vs_buildtools dd_*.log,
+  # ProgramData VS install logs, DISM/CBS log tails, event-log
+  # slices) are STATIC at this point — perfect time to scoop them.
+  # Wrapped in a try/catch so a harvest failure cannot prevent the
+  # Stop-VM in `finally` from firing.
+  try {
+    Info "harvesting VM-side diagnostic logs"
+    $harvestScript = {
+      $diagDir = "C:\Users\User\AppData\Local\Temp\m69-diag"
+      New-Item -ItemType Directory -Force -Path $diagDir | Out-Null
+
+      # vs_buildtools logs (issue 2 evidence)
+      Get-ChildItem 'C:\Users\User\AppData\Local\Temp' -Filter 'dd_*.log' -ErrorAction SilentlyContinue |
+          Copy-Item -Destination $diagDir -Force -ErrorAction SilentlyContinue
+      # also check ProgramData VS install logs
+      if (Test-Path 'C:\ProgramData\Microsoft\VisualStudio\Packages\_Instances') {
+        Get-ChildItem 'C:\ProgramData\Microsoft\VisualStudio\Packages\_Instances' -Recurse -Filter '*.log' -ErrorAction SilentlyContinue |
+            Copy-Item -Destination $diagDir -Force -ErrorAction SilentlyContinue
+      }
+
+      # DISM file log (issue 1 evidence; tail last ~5MB to avoid huge transfers)
+      $dism = 'C:\Windows\Logs\DISM\dism.log'
+      if (Test-Path $dism) {
+        $bytes = [System.IO.File]::ReadAllBytes($dism)
+        $tail  = if ($bytes.Length -gt 5MB) { $bytes[($bytes.Length - 5MB)..($bytes.Length-1)] } else { $bytes }
+        [System.IO.File]::WriteAllBytes((Join-Path $diagDir 'dism-tail.log'), $tail)
+      }
+
+      # CBS.log tail (Component Based Servicing — what's under DISM)
+      $cbs = 'C:\Windows\Logs\CBS\CBS.log'
+      if (Test-Path $cbs) {
+        $bytes = [System.IO.File]::ReadAllBytes($cbs)
+        $tail  = if ($bytes.Length -gt 5MB) { $bytes[($bytes.Length - 5MB)..($bytes.Length-1)] } else { $bytes }
+        [System.IO.File]::WriteAllBytes((Join-Path $diagDir 'cbs-tail.log'), $tail)
+      }
+
+      # Event log slices (last 200 events from the channels most likely to record DISM/installer activity)
+      try { Get-WinEvent -LogName 'Microsoft-Windows-DISM/Operational' -MaxEvents 200 -ErrorAction Stop |
+              Export-Clixml -Path (Join-Path $diagDir 'evt-dism.xml') } catch { }
+      try { Get-WinEvent -LogName 'System' -MaxEvents 200 -ErrorAction Stop |
+              Export-Clixml -Path (Join-Path $diagDir 'evt-system.xml') } catch { }
+      try { Get-WinEvent -LogName 'Setup' -MaxEvents 200 -ErrorAction Stop |
+              Export-Clixml -Path (Join-Path $diagDir 'evt-setup.xml') } catch { }
+
+      # Compress the whole diagDir so we transfer one file out
+      $zip = "C:\Users\User\AppData\Local\Temp\m69-diag.zip"
+      if (Test-Path $zip) { Remove-Item $zip -Force }
+      Compress-Archive -Path "$diagDir\*" -DestinationPath $zip -CompressionLevel Fastest -ErrorAction SilentlyContinue
+      if (Test-Path $zip) { (Get-Item $zip).FullName } else { '' }
+    }
+    $zipPathInGuest = Invoke-Command -VMName $VmName -Credential $cred `
+                                     -ScriptBlock $harvestScript -ErrorAction Stop
+    if ($zipPathInGuest -and $zipPathInGuest.Trim().Length -gt 0) {
+      $hostZip = Join-Path $PerTestOut 'm69-vm-diag.zip'
+      Info "Copy-VMFile (Guest->Host): $zipPathInGuest -> $hostZip"
+      Copy-VMFile -VMName $VmName -SourcePath $zipPathInGuest `
+                  -DestinationPath $hostZip -FileSource Guest `
+                  -CreateFullPath -Force -ErrorAction Stop
+      if (Test-Path $hostZip) {
+        Record 'harvest-vm-diag' "OK ($hostZip)"
+      } else {
+        Record 'harvest-vm-diag' 'SKIPPED: Copy-VMFile reported success but the destination is missing'
+      }
+    } else {
+      Record 'harvest-vm-diag' 'SKIPPED: in-VM harvest produced no zip (no logs found?)'
+    }
+  } catch {
+    Warn "  diag-harvest failed (non-fatal): $_"
+    Record 'harvest-vm-diag' "SKIPPED: $_"
+  }
+
 }
 catch {
   Fail "lifecycle threw: $_"

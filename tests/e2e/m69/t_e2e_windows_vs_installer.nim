@@ -59,6 +59,33 @@ proc reproBinary(): string =
 
 let vmMode = getEnv("REPRO_M69_VSINSTALLER_VM") == "1"
 
+proc echoApplyFailure(r: ApplyResult; scenario: string) =
+  ## Observability hook: when a REAL-scenario `runInfraApply` returns
+  ## with a non-zero `errorCount`, echo the driver's complaint to
+  ## stdout BEFORE the assertion fires so the failing test surfaces
+  ## the actual error. Format is one grep-able line per diagnostic
+  ## (prefix `[apply-err]`) plus a one-line summary of the result
+  ## counters. Silent when `errorCount == 0`.
+  if r.errorCount == 0:
+    return
+  echo "[apply-fail] scenario=" & scenario &
+    " errorCount=" & $r.errorCount &
+    " driftCount=" & $r.driftCount &
+    " skippedCount=" & $r.skippedCount &
+    " appliedCount=" & $r.appliedCount &
+    " noOpCount=" & $r.noOpCount &
+    " restartNeeded=" & $r.restartNeeded &
+    " usedBroker=" & $r.usedBroker &
+    " brokerLaunchCount=" & $r.brokerLaunchCount &
+    " planId=" & r.planId &
+    " auditLogPath=" & r.auditLogPath
+  if r.diagnostics.len == 0:
+    echo "[apply-err] scenario=" & scenario &
+      " (no diagnostics emitted by driver)"
+  else:
+    for d in r.diagnostics:
+      echo "[apply-err] scenario=" & scenario & " | " & d
+
 # A representative `vswhere -format json -include packages` document:
 # one installed Build Tools product carrying two workloads and two
 # components, plus a few non-workload/non-component packages (which the
@@ -375,6 +402,7 @@ windows.vsInstaller {
       opts.elevationMode = emBroker
       opts.forceBroker = false          # the VM runs elevated
       let r = runInfraApply(profileText, opts)
+      echoApplyFailure(r, "vs-installer-fresh-install")
       check r.errorCount == 0
       # vswhere confirms the installed product manifest matches.
       let products = observeVsInstallerState(PrivilegedOperation(
