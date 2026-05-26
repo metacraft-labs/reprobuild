@@ -40,7 +40,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [--prepare-only] [--no-runquota]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [--prepare-only] [--no-runquota]\n       " &
           programName &
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
@@ -111,6 +111,48 @@ proc configuredWorkRoot(explicitRoot: string): string =
   if explicitRoot.len > 0:
     return explicitRoot
   getEnv("REPROBUILD_WORK_ROOT")
+
+proc resolveActionCacheRoot*(explicitRoot: string = ""): string =
+  ## Returns the user-level action-cache root with the precedence documented
+  ## in Provider-Compile-Tiering.md §"Cache Scope" Phase 1:
+  ##   1. ``explicitRoot`` (e.g. ``--action-cache-root=`` CLI flag)
+  ##   2. ``${REPROBUILD_STORE_ROOT}/action-cache`` if the env var is set
+  ##   3. ``${REPRO_STORE_ROOT}/action-cache`` (compat alias)
+  ##   4. Platform default user cache dir
+  ##
+  ## The returned path is a *directory* root. The build engine adds the
+  ## conventional ``action-cache`` and ``cas`` subdirectories. So this
+  ## function returns ``<root-for-cache-and-cas>`` directly.
+  if explicitRoot.len > 0:
+    return explicitRoot
+  let storeRoot = block:
+    let v = getEnv("REPROBUILD_STORE_ROOT")
+    if v.len > 0: v else: getEnv("REPRO_STORE_ROOT")
+  if storeRoot.len > 0:
+    return storeRoot / "action-cache"
+  when defined(windows):
+    let local = getEnv("LOCALAPPDATA")
+    let base = if local.len > 0: local
+               else: getEnv("USERPROFILE") / "AppData" / "Local"
+    return base / "repro" / "action-cache"
+  elif defined(macosx):
+    let home = getEnv("HOME")
+    return home / "Library" / "Caches" / "repro" / "action-cache"
+  else:
+    let xdg = getEnv("XDG_CACHE_HOME")
+    let base = if xdg.len > 0: xdg else: getEnv("HOME") / ".cache"
+    return base / "repro" / "action-cache"
+
+# Process-wide override for the user-level action-cache root. Set by the
+# ``--action-cache-root=`` CLI flag and consumed by every BuildEngineConfig
+# constructor in this module. Empty means "use the platform default".
+var actionCacheRootOverride: string = ""
+
+proc setActionCacheRootOverride*(value: string) =
+  actionCacheRootOverride = value
+
+proc currentActionCacheRoot(): string =
+  resolveActionCacheRoot(actionCacheRootOverride)
 
 proc splitTarget(target: string): tuple[base: string; fragment: string] =
   let marker = target.find('#')
@@ -2154,9 +2196,20 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
     return false
   if not regenerationAction.actionOutputsPresent():
     return false
+  # CAS + action-cache moved to the user-level shared root in M70 (see
+  # Provider-Compile-Tiering.md §"Cache Scope" Phase 1). The project-local
+  # cmake-regeneration-cache dir is still used for per-build scratch
+  # (runquota-results, monitor depfiles, dependency-evidence files) but the
+  # action cache itself lives under the shared root so cross-project hits
+  # are possible.
+  # The action cache + CAS live under the user-level shared root (Phase 1
+  # of Provider-Compile-Tiering.md §"Cache Scope"); the dependency-evidence
+  # file stays project-local because it tracks per-project regeneration
+  # state, not action result bytes.
+  let sharedRoot = currentActionCacheRoot()
   let cmakeCacheRoot = outDir / "cmake-regeneration-cache"
-  let cas = openLocalCas(cmakeCacheRoot / "cas")
-  var cache = openActionCache(cmakeCacheRoot / "action-cache")
+  let cas = openLocalCas(sharedRoot / "cas")
+  var cache = openActionCache(sharedRoot / "action-cache")
   defer:
     cache.flushHotIndex()
   let record = cache.recordActionResult(cas, regenerationAction.weakFingerprint,
@@ -2236,6 +2289,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var progressRenderer = newBuildProgressRenderer(progressMode)
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
+      actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
       monitorCliPath: siblingFsSnoopPath(publicCliPath),
       maxParallelism: buildMaxParallelism(),
@@ -2298,7 +2352,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let cmakeCacheRoot = outDir / "cmake-regeneration-cache"
     var cmakeFastHit = false
     if reportMode == brmNone and logMode == blmQuiet:
-      var cmakeCache = openActionCache(cmakeCacheRoot / "action-cache")
+      # The CMake regeneration action's cache lives under the shared
+      # user-level action cache root, matching the runBuild() path below
+      # (Provider-Compile-Tiering.md §"Cache Scope" Phase 1).
+      let sharedRoot = currentActionCacheRoot()
+      var cmakeCache = openActionCache(sharedRoot / "action-cache")
       defer:
         cmakeCache.flushHotIndex()
       let outputStatStart = statStart(statsEnabled)
@@ -2335,6 +2393,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if not cmakeFastHit:
       var cmakeRegenerationConfig = BuildEngineConfig(
         cacheRoot: cmakeCacheRoot,
+        actionCacheRoot: currentActionCacheRoot(),
         runQuotaCliPath: publicCliPath,
         monitorCliPath: siblingFsSnoopPath(publicCliPath),
         maxParallelism: 1'u32,
@@ -2473,6 +2532,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         compileWorkDir, compileScratchDir)
       var providerCompileConfig = BuildEngineConfig(
         cacheRoot: outDir / "build-engine-cache",
+        actionCacheRoot: currentActionCacheRoot(),
         runQuotaCliPath: publicCliPath,
         maxParallelism: 1'u32,
         stdoutLimit: 1024 * 1024,
@@ -2577,6 +2637,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var progressRenderer = newBuildProgressRenderer(progressMode)
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
+      actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
       monitorCliPath: siblingFsSnoopPath(publicCliPath),
       maxParallelism: buildMaxParallelism(),
@@ -4888,6 +4949,16 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     elif arg == "--work-root":
       raise newException(ValueError,
         "--work-root requires an inline value, for example --work-root=.repro")
+    elif arg.startsWith("--action-cache-root="):
+      # Phase 1 cache-scope split: user-level action cache + CAS root.
+      # See Provider-Compile-Tiering.md §"Cache Scope". When omitted, we
+      # resolve from ${REPROBUILD_STORE_ROOT}/action-cache or the platform
+      # default user cache dir at engine config build time.
+      setActionCacheRootOverride(arg.split("=", maxsplit = 1)[1])
+    elif arg == "--action-cache-root":
+      raise newException(ValueError,
+        "--action-cache-root requires an inline value, for example " &
+        "--action-cache-root=/var/cache/repro/action-cache")
     elif arg.startsWith("--progress="):
       progressMode = parseBuildProgressMode(arg.split("=", maxsplit = 1)[1])
     elif arg == "--progress":

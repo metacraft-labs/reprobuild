@@ -75,7 +75,17 @@ type
     pools*: seq[BuildPool]
 
   BuildEngineConfig* = object
+    # Project-local scratch root: holds `runquota-results/*.json`,
+    # `monitor-depfiles/*.rdep`, `dependency-evidence/*.rbar`, and per-build
+    # transient state. Cleaned by `repro clean`. Per-project by design.
     cacheRoot*: string
+    # User-level shared action cache + CAS root. When empty, defaults to
+    # `cacheRoot` for backwards compatibility (callers that haven't been
+    # updated yet keep the old single-root behavior). When populated, the
+    # engine opens `<actionCacheRoot>/cas` and
+    # `<actionCacheRoot>/action-cache` instead of paths under `cacheRoot`.
+    # Phase 1 of Provider-Compile-Tiering.md §"Cache Scope".
+    actionCacheRoot*: string
     runQuotaCliPath*: string
     monitorCliPath*: string
     maxParallelism*: uint32
@@ -215,9 +225,11 @@ const
     dgPostBuildConverterValidatedByMonitor
   }
 
-proc defaultBuildEngineConfig*(cacheRoot: string): BuildEngineConfig =
+proc defaultBuildEngineConfig*(cacheRoot: string;
+                               actionCacheRoot: string = ""): BuildEngineConfig =
   BuildEngineConfig(
     cacheRoot: cacheRoot,
+    actionCacheRoot: actionCacheRoot,
     runQuotaCliPath: "",
     monitorCliPath: "",
     maxParallelism: 8'u32,
@@ -1246,11 +1258,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       getCurrentDir() / ".repro" / "build-engine-cache"
     else:
       config.cacheRoot
+  # The CAS and action-cache live under the shared user-level
+  # `actionCacheRoot` when set (Provider-Compile-Tiering.md §"Cache Scope"
+  # Phase 1). When empty (legacy / unmigrated callers, tests), they fall
+  # back to `cacheRoot` so the single-root layout still works.
+  let sharedRoot = if config.actionCacheRoot.len > 0:
+      config.actionCacheRoot
+    else:
+      cacheRoot
   let casOpenStart = statStart()
-  let cas = openLocalCas(cacheRoot / "cas")
+  let cas = openLocalCas(sharedRoot / "cas")
   finishStat("repro cas open", casOpenStart)
   let actionCacheOpenStart = statStart()
-  var cache = openActionCache(cacheRoot / "action-cache")
+  var cache = openActionCache(sharedRoot / "action-cache")
   finishStat("repro action cache open", actionCacheOpenStart)
   defer:
     cache.flushHotIndex()
