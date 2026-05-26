@@ -568,6 +568,13 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   for stmt in body:
     if calleeName(stmt).normalize == "executable":
       result.executables.add(parseExecutable(result.packageName, stmt))
+    elif calleeName(stmt).normalize in ["defaulttoolprovisioning", "toolprovisioning"]:
+      if stmt.len != 2:
+        error("defaultToolProvisioning expects exactly one string literal", stmt)
+      let provisioning = stringLiteral(stmt[1])
+      if provisioning.normalize notin ["path", "nix", "tarball", "scoop"]:
+        error("defaultToolProvisioning must be one of: path, nix, tarball, scoop", stmt[1])
+      result.defaultToolProvisioning = provisioning
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
         collectUses(stmt[i], @[], result.toolUses)
@@ -603,6 +610,7 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
 
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
+    ", defaultToolProvisioning: " & escForCode(pkg.defaultToolProvisioning) &
     ", nixProvisioning: @["
   for provisioningIndex, provisioning in pkg.nixProvisioning:
     if provisioningIndex > 0:
@@ -1326,4 +1334,3 @@ macro defineCliInterface*(toolSymbol: untyped;
         error("CLI interface accepts call: or subcmd \"name\": sections", stmt)
   result = parseStmt(defineCliInterfaceCode(identText(toolSymbol), toolId,
     commands))
-

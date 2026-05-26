@@ -95,6 +95,7 @@ type
   ProjectInterface* = object
     projectName*: string
     packageName*: string
+    defaultToolProvisioning*: string
     publicExecutables*: seq[InterfaceExecutable]
     toolUses*: seq[InterfaceToolUse]
     publicSignatureDependencies*: seq[string]
@@ -149,6 +150,7 @@ type
     workDir: string
     nimCompiler: string
     libPathFlags: seq[string]
+    reproLibFingerprint: string
     sources: seq[string]
 
   InterfaceExtractionCacheRecord = object
@@ -167,7 +169,7 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 5'u16
+  EnvelopeVersion = 6'u16
   InterfaceExtractionCacheRecordMagic =
     "reprobuild.interfaceExtractionCache.v1"
   ProviderFreshnessCacheRecordMagic =
@@ -495,6 +497,7 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
 proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
   result.writeString(value.projectName)
   result.writeString(value.packageName)
+  result.writeString(value.defaultToolProvisioning)
   result.writeStringSeq(value.publicSignatureDependencies)
   result.writeLocation(value.location)
   result.writeU32Le(uint32(value.publicExecutables.len))
@@ -509,6 +512,8 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
   var pos = 0
   result.projectName = readString(bytes, pos)
   result.packageName = readString(bytes, pos)
+  if version >= 6'u16:
+    result.defaultToolProvisioning = readString(bytes, pos)
   result.publicSignatureDependencies = readStringSeq(bytes, pos)
   result.location = readLocation(bytes, pos)
   let count = int(readU32Le(bytes, pos))
@@ -826,6 +831,7 @@ proc toProjectInterface*(pkg: PackageDef;
     ProjectInterface =
   result.projectName = pkg.packageName
   result.packageName = pkg.packageName
+  result.defaultToolProvisioning = pkg.defaultToolProvisioning
   result.publicSignatureDependencies = pkg.publicSignatureDependencies
   result.location = SourceLocation(file: pkg.sourceFile, line: pkg.sourceLine)
   for useDef in pkg.toolUses:
@@ -1185,6 +1191,24 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
 proc normalizedStampPath(path: string): string =
   os.normalizedPath(path).replace('\\', '/')
 
+proc reproLibSourceFingerprint(workDir: string): string =
+  let libsRoot = workDir / "libs"
+  if not dirExists(extendedPath(libsRoot)):
+    return ""
+  var paths: seq[string] = @[]
+  for path in walkDirRec(extendedPath(libsRoot)):
+    if path.endsWith(".nim") or path.endsWith(".nims"):
+      paths.add(normalizedStampPath(path))
+  paths.sort(system.cmp[string])
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.lib-sources.v1")
+  for path in paths:
+    payload.writeString(path)
+    let content = toBytes(readFile(extendedPath(path)))
+    payload.writeU64Le(uint64(content.len))
+    payload.add(content)
+  toHex(blake3DomainDigest(payload, hdActionFingerprint).bytes)
+
 proc fileStamp(path: string): FileStamp =
   result.path = normalizedStampPath(path)
   if not fileExists(extendedPath(path)) and not dirExists(extendedPath(path)):
@@ -1217,6 +1241,7 @@ proc interfaceExtractionContext(modulePath: string;
     workDir: normalizedStampPath(workDir),
     nimCompiler: nimCompilerPath(),
     libPathFlags: reproLibPathFlags(workDir),
+    reproLibFingerprint: reproLibSourceFingerprint(workDir),
     sources: sources)
 
 proc interfaceExtractionFingerprint(context: InterfaceExtractionContext):
@@ -1227,6 +1252,7 @@ proc interfaceExtractionFingerprint(context: InterfaceExtractionContext):
   payload.writeString(context.workDir)
   payload.writeString(context.nimCompiler)
   payload.writeStringSeq(context.libPathFlags)
+  payload.writeString(context.reproLibFingerprint)
   for path in context.sources:
     payload.writeString(path)
     let content = toBytes(readFile(extendedPath(path)))
@@ -1437,6 +1463,7 @@ proc sharedProviderNimcacheKey(workDir: string;
     parts.add(f)
   for f in libFlags:
     parts.add(f)
+  parts.add(reproLibSourceFingerprint(workDir))
   fnvHex64(parts)
 
 proc providerNimcacheMode(): string =

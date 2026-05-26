@@ -98,6 +98,7 @@ type
 
   PackageDef* = object
     packageName*: string
+    defaultToolProvisioning*: string
     executables*: seq[ExecutableDef]
     toolUses*: seq[PackageUseDef]
     nixProvisioning*: seq[NixPackageProvisioningDef]
@@ -176,4 +177,3 @@ type
   BuildPoolDef* = object
     name*: string
     capacity*: uint32
-
