@@ -42,7 +42,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--no-runquota]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
           programName &
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
@@ -2420,6 +2420,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         diagnosticsPath = "";
                         prepareOnly = false;
                         dryRun = false;
+                        forceRebuild = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false):
     BuildCommandOutcome =
@@ -2563,6 +2564,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
       dryRun: dryRun,
+      forceRebuild: forceRebuild,
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
     engineConfig.statsEnabled = statsEnabled
@@ -2620,7 +2622,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cmakeRegenerationBuildAction(cmakeMeta, publicCliPath)
     let cmakeCacheRoot = outDir / "cmake-regeneration-cache"
     var cmakeFastHit = false
-    if reportMode == brmNone and logMode == blmQuiet:
+    if reportMode == brmNone and logMode == blmQuiet and not forceRebuild:
       # The CMake regeneration action's cache lives under the shared
       # user-level action cache root, matching the runBuild() path below
       # (Provider-Compile-Tiering.md §"Cache Scope" Phase 1).
@@ -2650,7 +2652,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       let stateFresh = cmakeGeneratedStateFresh(cmakeMeta, publicCliPath)
       finishStat(buildStats, statsEnabled, "repro cmake state check",
         stateStart)
-      if stateFresh:
+      if stateFresh and not forceRebuild:
         discard seedCmakeRegenerationCache(cmakeMeta, publicCliPath, outDir)
         cmakeFastHit = true
         cmakeRegenerationResult.results.add(ActionResult(
@@ -2673,7 +2675,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         bypassRunQuota: bypassRunQuota,
         fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
         inlineRunQuota: true,
-        dryRun: dryRun,
+        dryRun: false,
+        forceRebuild: forceRebuild,
         suppressTrace: reportMode == brmNone,
         skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
       cmakeRegenerationConfig.statsEnabled = statsEnabled
@@ -2923,8 +2926,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let providerCompileStart = statStart(statsEnabled)
     var providerCompileResult: BuildRunResult
     var provider: ProviderCompileArtifact
-    let cachedProvider = readFreshProviderCompileArtifact(providerArtifactPath,
-      modulePath, providerBinaryPath, artifact.interfaceFingerprint)
+    let cachedProvider =
+      if forceRebuild and not dryRun:
+        none(ProviderCompileArtifact)
+      else:
+        readFreshProviderCompileArtifact(providerArtifactPath,
+          modulePath, providerBinaryPath, artifact.interfaceFingerprint)
     if cachedProvider.isSome:
       provider = cachedProvider.get()
     else:
@@ -2946,7 +2953,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         bypassRunQuota: bypassRunQuota,
         fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
         inlineRunQuota: true,
-        dryRun: dryRun,
+        dryRun: false,
+        forceRebuild: forceRebuild,
         suppressTrace: reportMode == brmNone,
         skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
       providerCompileConfig.statsEnabled = statsEnabled
@@ -3055,6 +3063,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
       dryRun: dryRun,
+      forceRebuild: forceRebuild,
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
     engineConfig.statsEnabled = statsEnabled
@@ -5386,6 +5395,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var diagnosticsPath = ""
   var prepareOnly = false
   var dryRun = false
+  var forceRebuild = false
   var skipCmakeRegeneration = false
   var logModeExplicit = false
   var statsModeExplicit = false
@@ -5452,6 +5462,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       prepareOnly = true
     elif arg == "--dry-run":
       dryRun = true
+    elif arg in ["--force-rebuild", "--rebuild"]:
+      forceRebuild = true
     elif arg == "--skip-cmake-regeneration":
       skipCmakeRegeneration = true
     elif arg == "--no-runquota":
@@ -5487,6 +5499,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       diagnosticsPath = diagnosticsPath,
       prepareOnly = prepareOnly,
       dryRun = dryRun,
+      forceRebuild = forceRebuild,
       skipCmakeRegeneration = skipCmakeRegeneration,
       bypassRunQuotaExplicit = bypassRunQuota).exitCode
   finally:

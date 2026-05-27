@@ -42,3 +42,31 @@ repro build --progress=quiet --log=quiet \
 
 `--diagnostics=PATH` records summary/action lines that would otherwise be printed
 to the terminal. It is a debugging artifact, not a persistent state file.
+
+## Forced Rebuilds
+
+`repro build --force-rebuild` forces the selected build graph to execute even
+when outputs are present and action-cache records are valid:
+
+```sh
+repro build --force-rebuild
+repro build --rebuild
+```
+
+`--rebuild` is an alias for `--force-rebuild`.
+
+Forced rebuild mode does not delete the action cache. It bypasses cache-hit and
+up-to-date decisions for the current invocation, executes the selected actions
+in graph order, and records fresh action-cache entries for successful cacheable
+actions. Dependency ordering, pools, runquota leases, monitoring, and output
+recording are still active.
+
+Combine it with dry run to inspect the rebuild plan without executing commands:
+
+```sh
+repro build --force-rebuild --dry-run --log=actions
+```
+
+Actions that would be forced report `status: "asWouldRun"` and
+`reason: "force-rebuild"` unless they are already forced by an upstream
+dependency launch.

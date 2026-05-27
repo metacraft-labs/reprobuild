@@ -93,6 +93,7 @@ type
     stdoutLimit*: int
     stderrLimit*: int
     rebuildMissingOutputsOnCacheHit*: bool
+    forceRebuild*: bool
     # When true, successful actions record input/output metadata for local
     # invalidation but do not synchronously hash and copy output payloads into
     # the local CAS. This is only appropriate for modes that rebuild missing
@@ -241,6 +242,7 @@ proc defaultBuildEngineConfig*(cacheRoot: string;
     stdoutLimit: 1_048_576,
     stderrLimit: 1_048_576,
     rebuildMissingOutputsOnCacheHit: false,
+    forceRebuild: false,
     deferLocalOutputBlobs: false,
     bypassRunQuota: false,
     fallbackToRunQuotaBypass: false,
@@ -1822,6 +1824,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.results[idToIndex.resultIndex(id)].reason =
             "dependency-launched"
           runResult.trace(id, "cache-skipped", "dependency-launched")
+        elif config.forceRebuild:
+          runResult.results[idToIndex.resultIndex(id)].cacheDecision =
+            if action.cacheable: cdMiss else: cdNotCacheable
+          runResult.results[idToIndex.resultIndex(id)].reason = "force-rebuild"
+          runResult.trace(id, "cache-skipped", "force-rebuild")
         elif action.cacheable:
           if config.rebuildMissingOutputsOnCacheHit:
             let outputStatStart = statStart()
@@ -1917,6 +1924,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishStat("repro output stat", outputStatStart)
         if outputsPresent and not cacheMissInputChanged and
             not dependencyLaunched and
+            not config.forceRebuild and
             not action.needsExecutionForPolicy():
           let evidenceStart = statStart()
           let evidence = collectEvidence(action, strict = true)
