@@ -6,7 +6,7 @@
 ## (Windows, Linux, macOS); the Windows-only IPC / broker-launch
 ## path is exercised by the M81 integration gate.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, strutils, tempfiles, times, unittest]
 
 import repro_core
 import repro_elevation
@@ -169,6 +169,68 @@ suite "repro_elevation: fixture file driver + drift contract":
       PlannedOperation(operation: op,
         baselineDigestHex: desiredDigestHex(op)))
     check r2.outcome == doNoOp
+
+  test "cache-hit decision is confirmed by a second observation":
+    # M69 regression guard. Dispatch must NOT declare a cache-hit on
+    # a single re-observe — that lost a windows.service flip when the
+    # initial sample caught a CBS-finalization transient. The cache-hit
+    # path now takes a confirmation sample `CacheHitConfirmDelayMs`
+    # later. We assert the wall-clock cost as a proxy for "the
+    # confirmation actually happened": a single-sample cache-hit
+    # would return in microseconds.
+    let prefix = createTempDir("repro-elev-unit-", "")
+    defer: removeDir(prefix)
+    let ctx = FixtureContext(filePrefix: prefix)
+    let op = PrivilegedOperation(kind: pokFixtureFile, address: "f-confirm",
+      fileRelPath: "data.txt", fileContent: "settled content")
+    # Seed the target so the first dispatch immediately sees the
+    # desired digest -- the very condition that triggers the
+    # confirmation sample.
+    writeFile(prefix / "data.txt", "settled content")
+    let started = epochTime()
+    let r = dispatchOperation(ctx,
+      PlannedOperation(operation: op,
+        baselineDigestHex: desiredDigestHex(op)))
+    let elapsedMs = int((epochTime() - started) * 1000.0)
+    check r.outcome == doNoOp
+    # Allow a 100 ms slack below the nominal delay for scheduler jitter
+    # on slow CI machines while still proving the confirmation sample
+    # was taken (a single-sample cache-hit would be sub-10ms).
+    check elapsedMs >= CacheHitConfirmDelayMs - 100
+
+  test "cache-hit confirmation falls through when the second sample disagrees":
+    # The complement of the regression guard above: when the world
+    # changes between the two cache-hit samples (the M69 sshd race in
+    # miniature), the dispatch must NOT silently no-op. The second
+    # observation is taken as ground truth and drives the drift / apply
+    # path. Here we delete the seed file out-of-band BEFORE dispatch
+    # runs, on a background task that fires inside the confirmation
+    # window: sample 1 sees the seeded content (apparent cache-hit),
+    # the deletion lands during the 1 s confirmation pause, sample 2
+    # sees the file missing — so dispatch must recreate the desired
+    # content.
+    let prefix = createTempDir("repro-elev-unit-", "")
+    defer: removeDir(prefix)
+    let ctx = FixtureContext(filePrefix: prefix)
+    let op = PrivilegedOperation(kind: pokFixtureFile,
+      address: "f-transient", fileRelPath: "data.txt",
+      fileContent: "settled content")
+    writeFile(prefix / "data.txt", "settled content")
+    let targetPath = prefix / "data.txt"
+    var killer: Thread[string]
+    proc deleteAfterPause(p: string) {.thread.} =
+      sleep(200)
+      removeFile(p)
+    createThread(killer, deleteAfterPause, targetPath)
+    let r = dispatchOperation(ctx,
+      PlannedOperation(operation: op,
+        baselineDigestHex: desiredDigestHex(op)))
+    joinThread(killer)
+    # Sample 1 looked like a cache-hit; sample 2 saw the absent file;
+    # dispatch must have recreated the target with the desired content.
+    check r.outcome == doApplied
+    check fileExists(targetPath)
+    check readFile(targetPath) == "settled content"
 
   test "broker fails closed on a drifted file":
     let prefix = createTempDir("repro-elev-unit-", "")

@@ -30,6 +30,8 @@
 ## The dispatch result feeds both an `OperationResult` and an
 ## `ApplyLogRecord` so the parent writes the unified apply log.
 
+import std/os
+
 import ./errors
 import ./fixture_driver
 import ./operations
@@ -37,6 +39,15 @@ import ./posix_system_driver
 import ./protocol
 import ./windows_system_driver
 import ./windows_vs_installer_driver
+
+const
+  CacheHitConfirmDelayMs* = 1000
+    ## Delay between the two cache-hit observations. See the cache-hit
+    ## confirmation comment in `dispatchOperation` for the rationale.
+    ## One second matches the per-sample cadence the windows.capability
+    ## driver uses for its post-install service-stability loop, so a
+    ## confirmation sample taken here lands a full cadence later than
+    ## the driver's last steady-state read.
 
 type
   DispatchOutcome* = enum
@@ -181,7 +192,7 @@ proc dispatchOperation*(ctx: FixtureContext;
     raiseProtocol(policyErr)
 
   # 1. Re-observe.
-  let observed = reobserve(ctx, op)
+  var observed = reobserve(ctx, op)
   result.preWriteDigestHex =
     if observed.present: observed.digestHex else: ZeroDigestHex
   let desiredHex = desiredDigest(op)
@@ -198,17 +209,50 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokFsSystemFile and op.sfDestroy) or
     (op.kind == pokEnvSystemVariable and op.evDestroy) or
     (op.kind == pokPasswdUser and op.puDestroy)
-  if destroyOp:
-    if not observed.present:
+  let firstSampleLooksLikeCacheHit =
+    if destroyOp: not observed.present
+    else: observed.present and observed.digestHex == desiredHex
+
+  # Confirm an apparent cache-hit with a second observation taken
+  # `CacheHitConfirmDelayMs` later. M69 root-caused a sshd test
+  # failure to this very point: after the windows.capability driver
+  # finished installing OpenSSH.Server it waited for the sshd
+  # service to stabilize at its post-install steady state
+  # (Manual/Stopped), then returned. The dispatch loop's NEXT op was
+  # the windows.service op that flips sshd to Automatic/Running.
+  # That op's initial re-observe here had a small but real chance
+  # of sampling a transient CBS-finalization read in which sshd
+  # briefly appeared Automatic/Running — the cache-hit predicate
+  # matched, the apply was skipped, CBS then reset sshd back to
+  # Manual/Stopped, and the gate failed. Confirming with a second
+  # observation closes that race: a true cache-hit is a steady-state
+  # property and survives a one-second hold; a transient read does
+  # not. If the two samples disagree, the second (later) read is
+  # used as the source of truth for the drift gate and apply path
+  # since it is closer to the actual settled state. The cost of a
+  # ~1 s pause on every legitimate cache-hit is acceptable for the
+  # privileged-operations workload (low op-count, high stakes per
+  # op); see the accompanying smoke test for the contract.
+  if firstSampleLooksLikeCacheHit:
+    sleep(CacheHitConfirmDelayMs)
+    let confirm = reobserve(ctx, op)
+    let confirmAgrees =
+      if destroyOp: not confirm.present
+      else: confirm.present and confirm.digestHex == desiredHex
+    if confirmAgrees:
       result.outcome = doNoOp
-      result.detail = "already absent (destroy is a no-op)"
-      result.postWriteDigestHex = ZeroDigestHex
+      if destroyOp:
+        result.detail = "already absent (destroy is a no-op)"
+        result.postWriteDigestHex = ZeroDigestHex
+      else:
+        result.detail = "already at desired state"
+        result.postWriteDigestHex = confirm.digestHex
       return
-  elif observed.present and observed.digestHex == desiredHex:
-    result.outcome = doNoOp
-    result.detail = "already at desired state"
-    result.postWriteDigestHex = observed.digestHex
-    return
+    # Samples disagree => the first read was a transient. Treat the
+    # second observation as ground truth from here on.
+    observed = confirm
+    result.preWriteDigestHex =
+      if observed.present: observed.digestHex else: ZeroDigestHex
 
   # 3. Drift gate. If the target is present and its observed digest
   #    matches NEITHER the desired value NOR the baseline the plan
