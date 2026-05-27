@@ -2203,9 +2203,9 @@ proc statusLabel(event: BuildProgressEvent): string =
   of bpkActionCompleted:
     case event.status
     of asSucceeded:
-      "done"
+      if event.launched: "executed" else: "succeeded"
     of asCacheHit:
-      "cache"
+      "cache-hit"
     of asUpToDate:
       "up-to-date"
     of asFailed:
@@ -2222,12 +2222,14 @@ proc buildProgressPercent(event: BuildProgressEvent): int =
     min(100, (max(event.completed, 0) * 100) div event.total)
 
 proc buildProgressCounters(event: BuildProgressEvent): string =
-  $event.completed & "/" & $event.total & " " &
+  "checked=" & $event.completed & "/" & $event.total & " " &
     $buildProgressPercent(event) & "%"
 
 proc buildProgressInvocation(event: BuildProgressEvent): string =
   let invocation =
-    if event.command.len > 0:
+    if event.kind == bpkActionCompleted and not event.launched:
+      event.actionId
+    elif event.command.len > 0:
       event.command
     else:
       event.actionId

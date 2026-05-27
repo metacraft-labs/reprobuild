@@ -16,8 +16,16 @@ repro build --progress=quiet
 fixed-width progress bar on the left:
 
 ```text
-repro [########............] 12/28 42% running=3 ready=5 started gcc -c ...
+repro [########............] checked=12/28 42% running=3 ready=5 started gcc -c ...
 ```
+
+The progress fraction counts selected scheduler actions that have been checked
+or completed, not command executions. A steady-state no-op build still visits
+the selected graph to verify invalidation state, so it may finish at
+`checked=30/30` while launching zero commands. Actual execution is indicated by
+`started` and `executed` events, with `running=` showing how many actions are
+currently launched. `up-to-date` and `cache-hit` events did not execute the
+shown action during that build invocation.
 
 On ANSI-capable terminals, progress bars use color by default: completed
 segments are highlighted, pending segments are dimmed, and the plain ASCII shape
