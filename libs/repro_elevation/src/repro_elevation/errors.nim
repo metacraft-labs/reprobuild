@@ -123,6 +123,17 @@ proc raiseProtocol*(reason: string) {.noreturn.} =
 
 proc raiseBrokerDrift*(address, kind, expectedHex, observedHex: string)
     {.noreturn.} =
+  ## (M82 Phase A) Symbol retained but no longer reached from
+  ## `dispatch.dispatchOperation` — the apply-time plan-time-baseline
+  ## drift gate was removed because it conflated external drift with
+  ## legitimate intra-batch evolution (see Planner-Apply-Refresh-
+  ## Model.md and the M69 OpenSSH+sshd scenario). The planner will
+  ## raise drift in some form for plan-time external-drift detection
+  ## (M82 Phase B/C), so the typed exception, its diagnostic shape,
+  ## and the broker-side `except EBrokerDrift` catches all remain
+  ## valid — the SEMANTICS shift from "drift detected at apply time"
+  ## to "drift detected at plan time" and the layer that raises shifts
+  ## from `dispatch.nim` to the planner.
   var e = newException(EBrokerDrift,
     "repro: privileged operation '" & address & "' (" & kind &
     ") drifted between plan and broker execution: expected " &

@@ -1,26 +1,38 @@
-## Broker-side dispatch (M81 deliverable 5; extended by M69).
+## Broker-side dispatch (M81 deliverable 5; extended by M69; apply-
+## time contract reshaped by M82 Phase A).
 ##
 ## Per Elevation-And-Privileged-Operations.md "The Broker Executes A
 ## Closed, Typed Operation Set": the broker dispatches each decoded
 ## `PrivilegedOperation` to a typed driver — never a parent-supplied
 ## arbitrary command — and, before mutating, **re-observes** the
-## resource's current state and runs the plan-apply-record drift
-## check. State can change between the non-elevated plan and the
-## elevated execution; the broker re-validates rather than blindly
-## trusting the parent's plan.
+## resource's current state. The live observation is the apply-time
+## baseline; the planner's recorded baseline is NOT consulted here.
 ##
-## The drift contract here mirrors M68's `decideAction`:
+## The apply-time pipeline (M82 Phase A — see
+## Planner-Apply-Refresh-Model.md):
 ##
-##   - observed absent                                  -> create
-##   - observed digest == desired digest                -> no-op (cache-hit)
-##   - observed digest == the plan's expected baseline   -> safe update
-##   - observed digest is neither                        -> DRIFT (fail-closed)
+##   - observed absent           -> create (apply runs)
+##   - observed == desired       -> cache-hit (no-op); confirmed by a
+##                                  second observation a short delay
+##                                  later to defeat CBS-finalization
+##                                  transients (see `dispatchOperation`)
+##   - observed != desired       -> update (apply runs against the
+##                                  observed state); the per-driver
+##                                  post-apply re-probe is the
+##                                  integrity check that the mutation
+##                                  achieved the desired state
 ##
-## The "expected baseline" is the digest the non-elevated plan saw
-## when it last observed the resource — carried alongside each
-## operation. A broker-side observation that matches NEITHER the
-## desired value NOR that baseline means the world changed out of
-## band: fail closed, do not overwrite.
+## The plan-time-baseline drift gate that pre-M82-Phase-A raised
+## `EBrokerDrift` whenever observed matched neither the recorded
+## baseline nor the desired digest was REMOVED: it conflated external
+## drift (a third party modified state out of band — the legitimate
+## fail-closed case) with intra-batch evolution (a preceding op in the
+## same apply caused the change — the legitimate proceed case). The
+## M69 `openssh-capability-and-sshd-service` REAL scenario surfaced
+## this; see `dispatchOperation`'s step-3 comment for the full
+## rationale. External-drift detection moves to plan time (M82 Phase
+## B/C — `repro infra plan` / `repro home plan` compare observed
+## state against the previously-applied generation's recorded state).
 ##
 ## M81 shipped this with the two fixture kinds; M69 wires the four
 ## real Windows system-scope kinds into the same closed `case`
@@ -173,11 +185,16 @@ proc applyOne(ctx: FixtureContext;
 proc dispatchOperation*(ctx: FixtureContext;
                         planned: PlannedOperation): DispatchResult =
   ## Execute one privileged operation through its typed driver, with
-  ## the mandated re-observe / drift-check BEFORE any mutation.
+  ## the mandated re-observe BEFORE any mutation.
   ##
-  ## Raises `EBrokerDrift` when the broker-observed state matches
-  ## neither the desired value nor the plan's baseline — fail-closed,
-  ## the caller turns it into a structured `OperationResult`.
+  ## M82 Phase A: the apply-time plan-time-baseline drift gate was
+  ## removed (see the module docstring and the step-3 comment below).
+  ## `EBrokerDrift` is no longer raised from this proc — the typed
+  ## exception is retained in `errors.nim` for the Phase B/C planner
+  ## migration of external-drift detection. The per-driver post-apply
+  ## re-probe is the integrity check that the apply achieved the
+  ## desired state; a disagreement raises `EProtocol`.
+  ##
   ## `EProtocol` is raised for an out-of-policy (sandbox-escape)
   ## operation; the broker validates the closed set up front, but
   ## `reobserve` re-checks as defence in depth.
@@ -254,18 +271,38 @@ proc dispatchOperation*(ctx: FixtureContext;
     result.preWriteDigestHex =
       if observed.present: observed.digestHex else: ZeroDigestHex
 
-  # 3. Drift gate. If the target is present and its observed digest
-  #    matches NEITHER the desired value NOR the baseline the plan
-  #    recorded, the world changed out of band — fail closed.
-  if observed.present:
-    let baseline =
-      if planned.baselineDigestHex.len > 0: planned.baselineDigestHex
-      else: ZeroDigestHex
-    if observed.digestHex != baseline and observed.digestHex != desiredHex:
-      raiseBrokerDrift(op.address, $op.kind, baseline, observed.digestHex)
+  # 3. (M82 Phase A) The plan-time-baseline drift gate USED TO LIVE
+  #    HERE and would `raiseBrokerDrift` whenever `observed.digestHex`
+  #    matched neither the recorded plan-time baseline nor the desired
+  #    digest. It was removed because the contract it implemented —
+  #    "refuse to act if the world differs from what the plan thought
+  #    it would be" — conflated EXTERNAL drift (a third party modified
+  #    state out of band, the legitimate fail-closed case) with
+  #    INTRA-BATCH evolution (a preceding op in the SAME apply caused
+  #    the change, the legitimate proceed case). The M69
+  #    `openssh-capability-and-sshd-service` REAL scenario surfaced
+  #    this: baseline_service=absent recorded at plan time before the
+  #    capability installs sshd; observed Manual/Stopped at dispatch
+  #    time after the capability registered the service; dispatch
+  #    treated this as drift and refused to act, Set-Service never
+  #    ran. See Planner-Apply-Refresh-Model.md for the full design
+  #    rationale and the Terraform-inspired layering. The integrity
+  #    check now lives in each driver's post-apply re-probe (the
+  #    `applyWindowsService` precedent from `f19a0ed`, extended in
+  #    M82 Phase A Deliverable 1 to every other system-scope driver):
+  #    "did my apply actually achieve the desired state?" External
+  #    drift detection moves to plan time per M82 Phase B/C —
+  #    `repro infra plan` / `repro home plan` will compare observed
+  #    state against the previously-applied generation's recorded
+  #    state and surface drift with a user-confirmation flow.
+  #
+  #    `preWriteDigestHex` is still set above for audit-record
+  #    completeness; it no longer gates the apply decision.
 
-  # 4. Safe to mutate (create when absent, update when observed
-  #    matches the baseline; destroy when a destroy op reaches here).
+  # 4. Safe to mutate (create when absent, otherwise overwrite the
+  #    observed state; destroy when a destroy op reaches here). Live
+  #    observation is the baseline for the delta computation; the
+  #    planner's recorded baseline is not consulted here.
   let post = applyOne(ctx, op)
   result.outcome = doApplied
   result.restartNeeded = post.restartNeeded

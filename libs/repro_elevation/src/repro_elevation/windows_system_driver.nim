@@ -233,11 +233,41 @@ proc observeWindowsRegistryValue*(op: PrivilegedOperation):
 
 proc applyWindowsRegistryValue*(op: PrivilegedOperation):
     ObservedOperationState =
+  ## Write or delete an HKLM registry value via the Win32 `Reg*` API.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. The Win32 `Reg*` calls are synchronous,
+  ## but a system-policy GPO or another agent could clobber a write
+  ## between `RegSetValueExW` and our return; re-reading via the same
+  ## `RegQueryValueExW` path `observeHklmRegistryValue` uses and
+  ## comparing the canonical-bytes digest closes that gap. Raises
+  ## `EProtocol` on a genuine disagreement.
   when defined(windows):
     if op.hklmDestroy:
-      deleteHklmRegistryValue(op)
+      result = deleteHklmRegistryValue(op)
     else:
-      writeHklmRegistryValue(op)
+      result = writeHklmRegistryValue(op)
+    # Post-apply re-probe — see the contract comment above.
+    let post = observeHklmRegistryValue(op)
+    let desiredHex =
+      if op.hklmDestroy: ZeroDigestHex
+      else: digestHexOfBytes(encodeSystemRegistryPayload(
+        op.hklmValueKind, op.hklmValueLiteral))
+    let observedHex =
+      if post.present: post.digestHex else: ZeroDigestHex
+    if observedHex != desiredHex:
+      raiseProtocol("windows.registryValue HKLM\\" & op.hklmSubkey & "\\" &
+        op.hklmValueName & " post-apply observation disagrees with " &
+        "desired state: observed digest " &
+        (if observedHex.len >= 12: observedHex[0 ..< 12] else: observedHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The Reg* call returned ERROR_SUCCESS but a re-read shows " &
+        "a different value — the driver fails closed rather than " &
+        "reporting a spurious success.")
+    result = post
   else:
     raiseNotImplementedPlatform("windows.registryValue apply")
 
@@ -321,6 +351,16 @@ proc applyWindowsOptionalFeature*(op: PrivilegedOperation):
     tuple[state: ObservedOperationState; restartNeeded: bool] =
   ## Enable or disable the feature via DISM. NEVER auto-reboots —
   ## `-NoRestart` is always passed and `restartNeeded` is surfaced.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. When this proc returns without raising,
+  ## the observed feature state matches what the operation asked for —
+  ## OR `restartNeeded` is true and the feature is at its post-reboot
+  ## pending target (DISM's `*Pending` states count as "at the desired
+  ## state" per `optionalFeatureStateMatchesDesired`). A genuine
+  ## disagreement raises `EProtocol`.
   when defined(windows):
     let verb =
       if op.featureEnable: "Enable-WindowsOptionalFeature"
@@ -337,7 +377,27 @@ proc applyWindowsOptionalFeature*(op: PrivilegedOperation):
         (if op.featureEnable: "enable" else: "disable") & " of '" &
         op.featureName & "' failed: " & output.strip())
     result.restartNeeded = optionalFeatureRestartNeeded(output)
-    result.state = observeWindowsOptionalFeature(op)
+    # Post-apply re-probe — see the contract comment above. The same
+    # `Get-WindowsOptionalFeature` query `observeWindowsOptionalFeature`
+    # parses; a `*Pending` state on a restart-required apply still
+    # canonicalizes to the desired bucket via
+    # `optionalFeatureStateMatchesDesired`.
+    let (postOutput, _) = runPowerShell(
+      "Get-WindowsOptionalFeature -Online -FeatureName " &
+      psQuote(op.featureName) & " | Format-List State")
+    let postState = parseOptionalFeatureState(postOutput)
+    if not optionalFeatureStateMatchesDesired(postState, op.featureEnable):
+      raiseProtocol("windows.optionalFeature '" & op.featureName &
+        "' post-apply observation disagrees with desired state: " &
+        "observed State=" & $postState &
+        "; desired " & (if op.featureEnable: "enabled" else: "disabled") &
+        ". The DISM cmdlet returned exit 0 but the feature state does " &
+        "not reflect the change — the driver fails closed rather than " &
+        "reporting a spurious success.")
+    result.state.present = postState != ofsAbsent
+    result.state.digestHex =
+      if postState == ofsAbsent: ZeroDigestHex
+      else: digestHexOfText(canonicalOptionalFeatureState(postState))
   else:
     raiseNotImplementedPlatform("windows.optionalFeature apply")
 
@@ -510,6 +570,19 @@ proc observeWindowsCapability*(op: PrivilegedOperation):
 
 proc applyWindowsCapability*(op: PrivilegedOperation):
     tuple[state: ObservedOperationState; restartNeeded: bool] =
+  ## Install or remove a Windows Capability via DISM. NEVER
+  ## auto-reboots — `restartNeeded` is surfaced.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. When this proc returns without raising,
+  ## the observed capability state matches what the operation asked for
+  ## — OR `restartNeeded` is true and the capability is at its
+  ## post-reboot pending target (DISM's `InstallPending` /
+  ## `UninstallPending` states count as "at the desired state" per
+  ## `capabilityStateMatchesDesired`). A genuine disagreement raises
+  ## `EProtocol`.
   when defined(windows):
     let verb =
       if op.capabilityInstall: "Add-WindowsCapability"
@@ -535,7 +608,26 @@ proc applyWindowsCapability*(op: PrivilegedOperation):
     # cannot clobber a registered service, and a `RestartNeeded`
     # install has not yet completed in-place.
     awaitCapabilityFinalization(op, result.restartNeeded)
-    result.state = observeWindowsCapability(op)
+    # Post-apply re-probe — see the contract comment above. The same
+    # `Get-WindowsCapability` query `observeWindowsCapability` parses;
+    # a `*Pending` state on a restart-required apply still canonicalizes
+    # to the desired bucket via `capabilityStateMatchesDesired`.
+    let (postOutput, _) = runPowerShell(
+      "Get-WindowsCapability -Online -Name " &
+      psQuote(op.capabilityName) & " | Format-List State")
+    let postState = parseCapabilityState(postOutput)
+    if not capabilityStateMatchesDesired(postState, op.capabilityInstall):
+      raiseProtocol("windows.capability '" & op.capabilityName &
+        "' post-apply observation disagrees with desired state: " &
+        "observed State=" & $postState &
+        "; desired " & (if op.capabilityInstall: "installed" else: "absent") &
+        ". The DISM cmdlet returned exit 0 but the capability state " &
+        "does not reflect the change — the driver fails closed rather " &
+        "than reporting a spurious success.")
+    result.state.present = postState != capsAbsent
+    result.state.digestHex =
+      if postState == capsAbsent: ZeroDigestHex
+      else: digestHexOfText(canonicalCapabilityState(postState))
   else:
     raiseNotImplementedPlatform("windows.capability apply")
 

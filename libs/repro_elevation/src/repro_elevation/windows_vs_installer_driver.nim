@@ -279,8 +279,32 @@ proc applyWindowsVsInstaller*(op: PrivilegedOperation):
   ##     performs a true fresh install. The args set matches the
   ##     M69 Hyper-V provisioning script — see
   ##     `buildBootstrapperInstallArgs`.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. After a mutating branch (uninstall, fresh
+  ## install, in-place modify) the driver runs `vswhere` again and
+  ## raises `EProtocol` if the resulting membership diff still
+  ## classifies as needing mutation — i.e. the installer returned a
+  ## success exit but the underlying state did not converge. The
+  ## non-strict `vsdMembershipDrift` leave-alone branch is itself a
+  ## desired post-state (the resource declares it tolerant of unrelated
+  ## membership), so it does not re-classify.
   when defined(windows):
     let desired = desiredStateOf(op)
+
+    proc raisePostApplyMismatch(branch: string;
+                                 postDiff: VsMembershipDiff;
+                                 postCls: VsDriftClass) =
+      raiseProtocol("windows.vsInstaller " & branch & " of edition '" &
+        op.vsEdition & "' post-apply observation disagrees with " &
+        "desired state: drift classification " & $postCls &
+        ", productInstalled=" & $postDiff.productInstalled &
+        ". The installer returned success but the live VS membership " &
+        "does not reflect the change — the driver fails closed rather " &
+        "than reporting a spurious success.")
+
     if op.vsDestroy:
       let (uOut, uCode) = runVsInstaller(buildUninstallArgs(desired))
       if not vsInstallerSucceeded(uCode):
@@ -288,6 +312,11 @@ proc applyWindowsVsInstaller*(op: PrivilegedOperation):
           op.vsEdition & "' failed (installer exit " & $uCode & "): " &
           uOut.strip())
       result.restartNeeded = vsInstallerRestartNeeded(uCode)
+      # Post-apply re-probe: an uninstall is "done" when the product
+      # is no longer installed.
+      let post = observeVsInstallerState(op)
+      if post.diff.productInstalled:
+        raisePostApplyMismatch("uninstall", post.diff, classifyDrift(post.diff))
       result.state = observeWindowsVsInstaller(op)
       return
     let observed = observeVsInstallerState(op)
@@ -297,7 +326,10 @@ proc applyWindowsVsInstaller*(op: PrivilegedOperation):
       result.state = observeWindowsVsInstaller(op)
       return
     if cls == vsdMembershipDrift and not desired.strict:
-      # Non-strict membership-drift: leave-alone policy.
+      # Non-strict membership-drift: leave-alone policy. The resource
+      # declared itself tolerant of unrelated members already present,
+      # so no post-apply re-probe is needed — the live state is the
+      # desired state under this policy.
       result.state = observeWindowsVsInstaller(op)
       return
     if cls == vsdNeedsInstall:
@@ -317,6 +349,16 @@ proc applyWindowsVsInstaller*(op: PrivilegedOperation):
           op.vsEdition & "' failed (bootstrapper exit " & $bCode & "): " &
           bOut.strip())
       result.restartNeeded = vsInstallerRestartNeeded(bCode)
+      # Post-apply re-probe: a fresh install is "done" when the
+      # product is present and the diff no longer needs mutation. A
+      # reboot-pending install legitimately leaves a non-in-sync
+      # observation, so the check is gated on `restartNeeded`.
+      if not result.restartNeeded:
+        let post = observeVsInstallerState(op)
+        let postCls = classifyDrift(post.diff)
+        if postCls != vsdInSync and
+           not (postCls == vsdMembershipDrift and not desired.strict):
+          raisePostApplyMismatch("fresh install", post.diff, postCls)
       result.state = observeWindowsVsInstaller(op)
       return
     # vsdNeedsModify OR (vsdMembershipDrift + strict): in-place
@@ -334,6 +376,14 @@ proc applyWindowsVsInstaller*(op: PrivilegedOperation):
         op.vsEdition & "' failed (installer exit " & $iCode & "): " &
         iOut.strip())
     result.restartNeeded = vsInstallerRestartNeeded(iCode)
+    # Post-apply re-probe for the modify branch (same gating on
+    # `restartNeeded` as the fresh-install branch).
+    if not result.restartNeeded:
+      let post = observeVsInstallerState(op)
+      let postCls = classifyDrift(post.diff)
+      if postCls != vsdInSync and
+         not (postCls == vsdMembershipDrift and not desired.strict):
+        raisePostApplyMismatch("modify", post.diff, postCls)
     result.state = observeWindowsVsInstaller(op)
   else:
     raiseNotImplementedPlatform("windows.vsInstaller apply")

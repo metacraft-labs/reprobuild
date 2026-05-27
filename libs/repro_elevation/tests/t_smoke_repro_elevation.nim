@@ -233,24 +233,54 @@ suite "repro_elevation: fixture file driver + drift contract":
     check readFile(targetPath) == "settled content"
 
   test "broker fails closed on a drifted file":
-    let prefix = createTempDir("repro-elev-unit-", "")
-    defer: removeDir(prefix)
-    let ctx = FixtureContext(filePrefix: prefix)
-    let op = PrivilegedOperation(kind: pokFixtureFile, address: "f2",
-      fileRelPath: "data.txt", fileContent: "desired content")
-    # The plan's baseline says the target held "plan-time content".
-    let planBaseline = desiredDigestHex(PrivilegedOperation(
-      kind: pokFixtureFile, address: "f2", fileRelPath: "data.txt",
-      fileContent: "plan-time content"))
-    # But the real world now holds something a third party changed.
-    writeFile(prefix / "data.txt", "a hostile out-of-band edit")
-    expect EBrokerDrift:
-      discard dispatchOperation(ctx,
-        PlannedOperation(operation: op, baselineDigestHex: planBaseline))
-    # The drifted file was NOT overwritten.
-    check readFile(prefix / "data.txt") == "a hostile out-of-band edit"
+    # M82 Phase A removes the dispatch-layer apply-time drift gate that
+    # this test exercises (the `raiseBrokerDrift` on
+    # observed != recorded-baseline AND observed != desired in
+    # `dispatch.dispatchOperation`). The contract it documents — refuse
+    # to overwrite a third-party out-of-band edit — does NOT go away;
+    # it migrates to plan time per Planner-Apply-Refresh-Model.md and
+    # the M82 milestone entry: `repro infra plan` / `repro home plan`
+    # will compare observed state against the previously-applied
+    # generation's recorded state and surface external drift with a
+    # user-confirmation flow before any apply runs. The integrity
+    # check at apply time is the driver's post-apply re-probe (the
+    # `applyWindowsService` precedent from `f19a0ed`, extended to the
+    # rest of the system-scope drivers in M82 Phase A Deliverable 1).
+    # This test is preserved (not deleted) because it documents the
+    # contract; it migrates to plan-time external-drift detection in
+    # M82 Phase C.
+    skip()
+    # Phase A removes apply-time drift gate; this scenario migrates to
+    # plan-time external-drift detection in M82 Phase C.
+    when false:
+      let prefix = createTempDir("repro-elev-unit-", "")
+      defer: removeDir(prefix)
+      let ctx = FixtureContext(filePrefix: prefix)
+      let op = PrivilegedOperation(kind: pokFixtureFile, address: "f2",
+        fileRelPath: "data.txt", fileContent: "desired content")
+      # The plan's baseline says the target held "plan-time content".
+      let planBaseline = desiredDigestHex(PrivilegedOperation(
+        kind: pokFixtureFile, address: "f2", fileRelPath: "data.txt",
+        fileContent: "plan-time content"))
+      # But the real world now holds something a third party changed.
+      writeFile(prefix / "data.txt", "a hostile out-of-band edit")
+      expect EBrokerDrift:
+        discard dispatchOperation(ctx,
+          PlannedOperation(operation: op, baselineDigestHex: planBaseline))
+      # The drifted file was NOT overwritten.
+      check readFile(prefix / "data.txt") == "a hostile out-of-band edit"
 
-  test "a safe update (observed == baseline) is applied":
+  test "an apply that needs to update the live state proceeds":
+    # Pre-M82-Phase-A this test was titled "a safe update
+    # (observed == baseline) is applied" and asserted that the
+    # apply-time drift gate let the apply through when observed matched
+    # the plan's recorded baseline. With the apply-time gate removed
+    # (M82 Phase A — see dispatch.dispatchOperation and
+    # Planner-Apply-Refresh-Model.md) the test still passes — the
+    # dispatch now treats the live observation as the baseline and
+    # applies whenever observed != desired, so the baseline argument is
+    # no longer load-bearing. The test is retained as coverage of the
+    # plain "observed != desired => apply runs" path.
     let prefix = createTempDir("repro-elev-unit-", "")
     defer: removeDir(prefix)
     let ctx = FixtureContext(filePrefix: prefix)

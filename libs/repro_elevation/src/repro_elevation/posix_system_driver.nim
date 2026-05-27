@@ -169,6 +169,15 @@ proc applyMacosSystemDefault*(op: PrivilegedOperation):
   ## the value actually changed and a `restartTarget` is set, run
   ## `killall <target>` — a cache-hit re-apply never reaches this
   ## proc (the dispatch layer short-circuits a no-op).
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. `cfprefsd` re-serializes the plist
+  ## asynchronously; re-reading via the same `defaults read` path
+  ## `observeMacosSystemDefault` uses, structurally-canonicalized, and
+  ## comparing digests closes the gap between cmdlet success and
+  ## observable state. Raises `EProtocol` on mismatch.
   when defined(macosx):
     let path = systemDefaultPlistPath(op.sdDomain)
     if op.sdDestroy:
@@ -176,6 +185,13 @@ proc applyMacosSystemDefault*(op: PrivilegedOperation):
         quoteShell(op.sdKey))
       if op.sdRestartTarget.len > 0:
         discard execCmd("killall " & quoteShell(op.sdRestartTarget))
+      # Post-apply re-probe: a destroy is "done" when the value is
+      # absent.
+      let post = observeMacosSystemDefault(op)
+      if post.present:
+        raiseProtocol("macos.systemDefault destroy of " & op.sdDomain &
+          " " & op.sdKey & " post-apply observation disagrees with " &
+          "desired state: value is still present after `defaults delete`.")
       result.present = false
       result.digestHex = ZeroDigestHex
       return
@@ -194,9 +210,22 @@ proc applyMacosSystemDefault*(op: PrivilegedOperation):
         " " & op.sdKey & " failed: " & output.strip())
     if op.sdRestartTarget.len > 0:
       discard execCmd("killall " & quoteShell(op.sdRestartTarget))
-    result.present = true
-    result.digestHex = posixDigestHexOfText(
+    # Post-apply re-probe — see the contract comment above.
+    let post = observeMacosSystemDefault(op)
+    let desiredHex = posixDigestHexOfText(
       canonicalizeDefaultsValue(op.sdValueLiteral))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("macos.systemDefault write of " & op.sdDomain &
+        " " & op.sdKey & " post-apply observation disagrees with " &
+        "desired state: observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". `defaults write` returned exit 0 but the live value does " &
+        "not reflect the change — the driver fails closed rather than " &
+        "reporting a spurious success.")
+    result = post
   else:
     raiseNotImplementedPlatform("macos.systemDefault apply")
 
@@ -231,6 +260,16 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
   ## Write the unit file, `systemctl daemon-reload`, then optionally
   ## `systemctl enable --now` (NO `--user` — this is a system unit).
   ## The destroy direction `disable --now`s and removes the file.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. The unit-file write is synchronous but
+  ## another agent (or a `systemctl preset`) could overwrite the
+  ## content between our write and our return; re-reading via the same
+  ## file-read path `observeSystemdSystemUnit` uses and comparing the
+  ## canonical-bytes digest closes that gap. Raises `EProtocol` on
+  ## mismatch.
   when defined(linux):
     let path = systemUnitPath(op.suName)
     if op.suDestroy:
@@ -239,6 +278,13 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
         try: removeFile(path)
         except OSError: discard
       discard execCmd("systemctl daemon-reload")
+      # Post-apply re-probe: a destroy is "done" when the unit file
+      # no longer exists.
+      if fileExists(path):
+        raiseProtocol("systemd.systemUnit destroy of '" & op.suName &
+          "' post-apply observation disagrees with desired state: " &
+          "unit file " & path & " still exists after `disable --now` " &
+          "and `removeFile`.")
       result.present = false
       result.digestHex = ZeroDigestHex
       return
@@ -265,8 +311,21 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
       if enCode != 0:
         raiseProtocol("systemd.systemUnit enable --now of '" &
           op.suName & "' failed: " & enOut.strip())
-    result.present = true
-    result.digestHex = posixDigestHexOfText(op.suContent)
+    # Post-apply re-probe — see the contract comment above.
+    let post = observeSystemdSystemUnit(op)
+    let desiredHex = posixDigestHexOfText(op.suContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("systemd.systemUnit '" & op.suName &
+        "' post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The unit-file write completed but a re-read shows a " &
+        "different value — the driver fails closed rather than " &
+        "reporting a spurious success.")
+    result = post
   else:
     raiseNotImplementedPlatform("systemd.systemUnit apply")
 
@@ -301,6 +360,14 @@ proc applyLaunchdSystemDaemon*(op: PrivilegedOperation):
   ## `system` domain target (NOT `gui/<uid>` — this is a system
   ## daemon). The destroy direction `bootout system/<label>`s and
   ## removes the plist.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. After the plist write + `launchctl
+  ## bootstrap`, re-read via the same file-read path
+  ## `observeLaunchdSystemDaemon` uses; raise `EProtocol` on a
+  ## canonical-bytes digest mismatch.
   when defined(macosx):
     let path = daemonPlistPath(op.sdaLabel)
     if op.sdaDestroy:
@@ -311,6 +378,13 @@ proc applyLaunchdSystemDaemon*(op: PrivilegedOperation):
       if fileExists(path):
         try: removeFile(path)
         except OSError: discard
+      # Post-apply re-probe: a destroy is "done" when the plist no
+      # longer exists.
+      if fileExists(path):
+        raiseProtocol("launchd.systemDaemon destroy of '" & op.sdaLabel &
+          "' post-apply observation disagrees with desired state: " &
+          "plist " & path & " still exists after `launchctl bootout` " &
+          "and `removeFile`.")
       result.present = false
       result.digestHex = ZeroDigestHex
       return
@@ -337,8 +411,21 @@ proc applyLaunchdSystemDaemon*(op: PrivilegedOperation):
     if bootCode != 0:
       raiseProtocol("launchd.systemDaemon bootstrap of '" &
         op.sdaLabel & "' failed: " & bootOut.strip())
-    result.present = true
-    result.digestHex = posixDigestHexOfText(plist)
+    # Post-apply re-probe — see the contract comment above.
+    let post = observeLaunchdSystemDaemon(op)
+    let desiredHex = posixDigestHexOfText(plist)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("launchd.systemDaemon '" & op.sdaLabel &
+        "' post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The plist write completed but a re-read shows a different " &
+        "value — the driver fails closed rather than reporting a " &
+        "spurious success.")
+    result = post
   else:
     raiseNotImplementedPlatform("launchd.systemDaemon apply")
 
@@ -377,6 +464,15 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
   ## The path is re-validated against the allowlist before any I/O —
   ## a path outside `/etc/`, `/usr/local/etc/`, `${PROGRAMDATA}` is
   ## refused with an out-of-scope protocol error.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. The filesystem write is synchronous but
+  ## permissions / a concurrent writer could corrupt the bytes between
+  ## our write and our return; re-reading via the same file-read path
+  ## `observeFsSystemFile` uses closes that gap. Raises `EProtocol` on
+  ## mismatch.
   when defined(linux) or defined(macosx) or defined(windows):
     let scopeErr = systemFileScopeError(op.sfPath, programDataRoot())
     if scopeErr.len > 0:
@@ -385,6 +481,12 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
       if fileExists(op.sfPath):
         try: removeFile(op.sfPath)
         except OSError: discard
+      # Post-apply re-probe: a destroy is "done" when the file no
+      # longer exists.
+      if fileExists(op.sfPath):
+        raiseProtocol("fs.systemFile destroy of " & op.sfPath &
+          " post-apply observation disagrees with desired state: " &
+          "the file still exists after `removeFile`.")
       result.present = false
       result.digestHex = ZeroDigestHex
       return
@@ -400,8 +502,21 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
           discard f.writeBuffer(unsafeAddr op.sfContent[0], op.sfContent.len)
       finally:
         close(f)
-    result.present = true
-    result.digestHex = posixDigestHexOfText(op.sfContent)
+    # Post-apply re-probe — see the contract comment above.
+    let post = observeFsSystemFile(op)
+    let desiredHex = posixDigestHexOfText(op.sfContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("fs.systemFile " & op.sfPath &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The filesystem write completed but a re-read shows a " &
+        "different value — the driver fails closed rather than " &
+        "reporting a spurious success.")
+    result = post
   else:
     raiseNotImplementedPlatform("fs.systemFile apply")
 
@@ -469,12 +584,28 @@ proc applyEnvSystemVariable*(op: PrivilegedOperation):
   ## `/etc/profile.d/` fragment. A PATH-list contribution preserves
   ## the host's pre-existing value; the destroy direction removes
   ## only the fragment this generation owns.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. The fragment write is synchronous but
+  ## another agent could overwrite the file between our write and our
+  ## return; re-reading via the same file-read path
+  ## `observeEnvSystemVariable` uses and comparing the joined-
+  ## contribution digest closes that gap. Raises `EProtocol` on
+  ## mismatch.
   when defined(linux) or defined(macosx):
     let path = systemEnvFragmentPath(op.evName)
     if op.evDestroy:
       if fileExists(path):
         try: removeFile(path)
         except OSError: discard
+      # Post-apply re-probe: a destroy is "done" when the fragment no
+      # longer exists.
+      if fileExists(path):
+        raiseProtocol("env.systemVariable destroy of " & op.evName &
+          " post-apply observation disagrees with desired state: " &
+          "fragment " & path & " still exists after `removeFile`.")
       result.present = false
       result.digestHex = ZeroDigestHex
       return
@@ -490,8 +621,21 @@ proc applyEnvSystemVariable*(op: PrivilegedOperation):
           discard f.writeBuffer(unsafeAddr content[0], content.len)
       finally:
         close(f)
-    result.present = true
-    result.digestHex = posixDigestHexOfText(op.evContribution.join("\n"))
+    # Post-apply re-probe — see the contract comment above.
+    let post = observeEnvSystemVariable(op)
+    let desiredHex = posixDigestHexOfText(op.evContribution.join("\n"))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("env.systemVariable " & op.evName &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The fragment write completed but a re-read shows a " &
+        "different value — the driver fails closed rather than " &
+        "reporting a spurious success.")
+    result = post
   else:
     raiseNotImplementedPlatform("env.systemVariable apply")
 
@@ -570,6 +714,14 @@ proc applyPasswdUser*(op: PrivilegedOperation): ObservedOperationState =
   ## (`repro infra apply` / `repro system rollback`) BEFORE the
   ## destroy op is ever handed to the broker; this driver only
   ## performs the I/O the closed-set dispatch reaches.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
+  ## plan-time-baseline drift gate is removed (per
+  ## Planner-Apply-Refresh-Model.md), the per-driver post-apply re-probe
+  ## is the integrity check. After `useradd` / `usermod` / `userdel`
+  ## the driver already re-reads via `observePasswdUserRaw`; this
+  ## contract additionally COMPARES the observation against the
+  ## desired canonical state and raises `EProtocol` if they disagree.
   when defined(linux) or defined(macosx):
     if op.puDestroy:
       when defined(linux):
@@ -583,6 +735,13 @@ proc applyPasswdUser*(op: PrivilegedOperation): ObservedOperationState =
       else:
         discard runArgv("sysadminctl",
           @["-deleteUser", op.puName])
+      # Post-apply re-probe: a destroy is "done" when the account is
+      # no longer present.
+      if observePasswdUserRaw(op.puName).present:
+        raiseProtocol("passwd.user destroy of '" & op.puName &
+          "' post-apply observation disagrees with desired state: " &
+          "account still present after `userdel` / `sysadminctl " &
+          "-deleteUser`.")
       result.present = false
       result.digestHex = ZeroDigestHex
       return
@@ -634,9 +793,23 @@ proc applyPasswdUser*(op: PrivilegedOperation): ObservedOperationState =
           discard runArgv("dseditgroup",
             @["-o", "edit", "-d", op.puName, "-t", "user", g])
     let after = observePasswdUserRaw(op.puName)
-    result.present = after.present
-    result.digestHex =
+    # Post-apply re-probe — see the contract comment on this proc.
+    let desiredHex = posixDigestHexOfText(canonicalPasswdUserDesired(desired))
+    let observedHex =
       if not after.present: ZeroDigestHex
       else: posixDigestHexOfText(canonicalPasswdUserState(after))
+    if not after.present or observedHex != desiredHex:
+      raiseProtocol("passwd.user '" & op.puName &
+        "' post-apply observation disagrees with desired state: " &
+        "observed present=" & $after.present &
+        " canonical digest " &
+        (if observedHex.len >= 12: observedHex[0 ..< 12] else: observedHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The useradd/usermod call returned exit 0 but the account " &
+        "state does not match desired — the driver fails closed " &
+        "rather than reporting a spurious success.")
+    result.present = after.present
+    result.digestHex = observedHex
   else:
     raiseNotImplementedPlatform("passwd.user apply")

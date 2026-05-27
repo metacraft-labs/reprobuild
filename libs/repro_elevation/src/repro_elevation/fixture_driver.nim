@@ -122,6 +122,16 @@ proc applyFixtureFile*(ctx: FixtureContext;
   ## Apply a `pokFixtureFile` operation. Returns the post-write
   ## observed state. Drift must already have been checked by the
   ## broker; this proc only performs the I/O.
+  ##
+  ## POST-APPLY RE-PROBE EXEMPTION (M82 Phase A): the file write here
+  ## is a pure, synchronous `writeFile` of `op.fileContent`. There is
+  ## no OS-side async propagation, no cmdlet exit-code-vs-state gap,
+  ## and no second agent capable of clobbering the bytes during the
+  ## driver's call. The post-write digest is unconditionally
+  ## `digestHexOfText(op.fileContent)` by construction; a re-read and
+  ## compare would be tautological. The fixture-file driver is the
+  ## M81 mechanism prover, not a production driver — keeping it free
+  ## of incidental ceremony is intentional.
   let target = fixtureFileTargetPath(ctx, op)
   createDir(target.parentDir)
   writeFile(target, op.fileContent)
@@ -305,6 +315,18 @@ when defined(windows):
   proc applyFixtureRegistry*(op: PrivilegedOperation):
       ObservedOperationState =
     ## Write the REG_SZ value under the pinned subtree.
+    ##
+    ## POST-APPLY RE-PROBE EXEMPTION (M82 Phase A): the registry write
+    ## here is a single synchronous `RegSetValueExW` of a payload
+    ## derived from `op.regValueData` only, under a subtree
+    ## (`HKLM\SOFTWARE\Reprobuild-Tests`) that nothing on a normal host
+    ## touches. There is no async OS-side propagation; a subsequent
+    ## `RegQueryValueExW` returns the bytes just written. The
+    ## post-write digest is `digestHexOfText(op.regValueData)` by
+    ## construction — a re-read and compare would be tautological. The
+    ## fixture-registry driver is the M81 mechanism prover, not a
+    ## production driver — keeping it free of incidental ceremony is
+    ## intentional.
     let subkey = fixtureRegistrySubkey(op)
     assertFixtureSubtree(subkey)
     var hk: HKEY
