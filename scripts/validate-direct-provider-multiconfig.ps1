@@ -1,5 +1,5 @@
 #requires -Version 5
-# M10 verification gate: e2e_cmake_multiconfig_via_direct_provider.
+# M10 + M19 verification gate: e2e_cmake_multiconfig_via_direct_provider.
 #
 # Configure a multi-config CMake project (CMAKE_CROSS_CONFIGS +
 # CMAKE_DEFAULT_CONFIGS) under the Reprobuild generator, then build
@@ -9,22 +9,34 @@
 # providerCompile fallback fired during configure or build.
 #
 # Per Provider-Compile-Tiering.md §"2c" and
-# Standard-Provider-Implementation.milestones.org M10.
+# Standard-Provider-Implementation.milestones.org M10 + M19.
 #
-# Two fixtures are exercised:
+# Three fixtures are exercised:
 #
 # 1. A minimal hand-written multi-config CMake project (no try_compile
-#    probes). This is the gate the milestone is greppable against — it
+#    probes). This is the gate the M10 milestone is greppable against — it
 #    proves the direct provider's lowering of cross-config descriptors
 #    works end-to-end with a real CMake configure + build.
 #
-# 2. (Optional) The pre-staged zlib fixture with multi-config flags.
-#    zlib invokes CMake's check_type_size / check_function_exists, which
-#    triggers ``try_compile(... COPY_FILE ...)`` probes. The Reprobuild
-#    generator's multi-config support for those inner probes pre-dates
-#    M10 and is independent — when the inner probe build path fails the
-#    block emits an INFO line and continues. The hand-written fixture is
-#    sufficient to validate the M10 code path on its own.
+# 2. A hand-written multi-config CMake project that calls
+#    ``check_type_size`` (a CMake check that uses
+#    ``try_compile(... COPY_FILE ...)`` internally). This is the M19 gate:
+#    it proves the Reprobuild generator's inner-build COPY_FILE path
+#    populates the per-config ``<NAME>_loc`` location file the outer
+#    cmake's ``FindOutputFile`` looks for. Before M19 this configure step
+#    failed with "Unable to find the recorded try_compile output location:
+#    cmTC_<hash>_DEBUG_loc".
+#
+# 3. (Optional) The pre-staged zlib fixture with multi-config flags.
+#    zlib invokes ``check_type_size(off64_t HAVE_OFF64_T)``, which
+#    exercises exactly the same COPY_FILE inner-build path as fixture 2.
+#    Build of the zlib SHARED target itself currently trips an orthogonal
+#    Reprobuild generator bug (``add_custom_command`` output paths for the
+#    MinGW ``zlib1rc.obj`` resource are config-prefixed in the link line
+#    but written to the binary dir without a config prefix), so this
+#    fixture's build step remains optional even after M19 fixes the
+#    configure step. The hand-written ``check_type_size`` fixture is the
+#    load-bearing M19 PASS case.
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\..\env.ps1"
@@ -59,7 +71,9 @@ function Invoke-Fixture {
   param(
     [string]$Label,
     [string]$Source,
-    [bool]$Optional = $false
+    [bool]$Optional = $false,
+    [hashtable]$AssertCacheEntries = $null,
+    [bool]$OptionalBuild = $false
   )
   $caseRoot  = Join-Path $workRoot $Label
   $store     = Join-Path $caseRoot 'store'
@@ -162,6 +176,37 @@ function Invoke-Fixture {
     return [pscustomobject]@{ Label = $Label; Passed = $false }
   }
 
+  # M19 hook: validate that any caller-supplied CMakeCache entries are set
+  # (e.g. ``HAVE_OFF64_T = TRUE`` for the check_type_size fixtures). This
+  # is the load-bearing assertion that the inner-build COPY_FILE probe
+  # actually populated CMake's check result variables — a configure that
+  # silently treats COPY_FILE probes as "not found" would otherwise still
+  # exit 0 with the cache showing FALSE.
+  if ($AssertCacheEntries -and $AssertCacheEntries.Count -gt 0) {
+    $cachePath = Join-Path $buildDir 'CMakeCache.txt'
+    if (-not (Test-Path -LiteralPath $cachePath)) {
+      Write-Host "FAIL: $Label CMakeCache.txt missing at $cachePath"
+      return [pscustomobject]@{ Label = $Label; Passed = $false }
+    }
+    $cacheLines = Get-Content -LiteralPath $cachePath
+    foreach ($key in $AssertCacheEntries.Keys) {
+      $expected = $AssertCacheEntries[$key]
+      $pattern = "^$([regex]::Escape($key)):[^=]+=(.*)$"
+      $line = $cacheLines | Where-Object { $_ -match $pattern } | Select-Object -First 1
+      if (-not $line) {
+        Write-Host "FAIL: $Label CMakeCache missing entry $key (expected $expected)"
+        return [pscustomobject]@{ Label = $Label; Passed = $false }
+      }
+      $matched = [regex]::Match($line, $pattern)
+      $actual = $matched.Groups[1].Value
+      if ($actual -ne $expected) {
+        Write-Host ("FAIL: {0} CMakeCache {1} = '{2}' (expected '{3}')" -f $Label, $key, $actual, $expected)
+        return [pscustomobject]@{ Label = $Label; Passed = $false }
+      }
+      Write-Host ("    cache assert {0} = {1}  (ok)" -f $key, $actual)
+    }
+  }
+
   # Build both configs.
   foreach ($config in 'Debug', 'Release') {
     Write-Host ("==> [{0}] build config={1}" -f $Label, $config)
@@ -174,8 +219,8 @@ function Invoke-Fixture {
     $sw.Stop()
     Write-Host ("    exit={0,-3} wall={1,8:F1} ms" -f $proc.ExitCode, $sw.Elapsed.TotalMilliseconds)
     if ($proc.ExitCode -ne 0) {
-      if ($Optional) {
-        Write-Host ("    INFO [{0}]: build $config failed (optional fixture); continuing" -f $Label)
+      if ($Optional -or $OptionalBuild) {
+        Write-Host ("    INFO [{0}]: build $config failed (optional build); continuing" -f $Label)
         Get-Content "$caseRoot\build-$config.stderr.log" -Tail 20 | ForEach-Object { "    $_" } | Write-Host
         continue
       }
@@ -226,27 +271,86 @@ int main(void) { return 0; }
 
 $miniResult = Invoke-Fixture -Label 'mini' -Source $miniSrc -Optional:$false
 
-# Fixture B (optional): zlib if the bench fixture has staged a source.
-# zlib uses check_type_size which triggers ``try_compile(COPY_FILE)``.
-# The Reprobuild generator's TryCompile-in-multi-config probe path is
-# orthogonal to M10 (the inner probe's build phase has issues with
-# COPY_FILE-style probes that pre-date the schema bump). If the zlib
-# fixture path exists we still attempt it for coverage, but the gate
-# does not require it to pass.
+# Fixture B (M19 PASS): hand-written multi-config project that calls
+# ``check_type_size`` — the smallest possible exercise of the
+# ``try_compile(... COPY_FILE ...)`` inner-build path. Before M19 the
+# configure step here failed with "Unable to find the recorded
+# try_compile output location: cmTC_<hash>_DEBUG_loc" because the
+# inner project (single-config under Reprobuild) wrote the file(GENERATE)
+# location file at ``cmTC_<hash>__loc`` (empty config) while the outer
+# multi-config cmake's ``FindOutputFile`` looked for the
+# ``_<UPPER_CONFIG>_loc`` variant.
+#
+# The fixture also asserts ``HAVE_INT`` / ``HAVE_LONG`` got populated in
+# CMakeCache.txt — without that the configure can exit 0 while silently
+# treating the COPY_FILE probe as "not found", which would defeat the
+# whole purpose of the gate.
+$checkSizeSrc = Join-Path $workRoot 'check-type-size-src'
+New-Item -ItemType Directory -Force -Path $checkSizeSrc | Out-Null
+@'
+cmake_minimum_required(VERSION 3.20)
+project(reprobuild_m19_check_type_size C)
+include(CheckTypeSize)
+check_type_size(int  HAVE_INT)
+check_type_size(long HAVE_LONG)
+add_library(libgreet STATIC greet.c)
+add_executable(standalone main.c)
+'@ | Out-File "$checkSizeSrc\CMakeLists.txt" -Encoding ascii
+@'
+int greet(void) { return 42; }
+'@ | Out-File "$checkSizeSrc\greet.c" -Encoding ascii
+@'
+int main(void) { return 0; }
+'@ | Out-File "$checkSizeSrc\main.c" -Encoding ascii
+
+$checkSizeResult = Invoke-Fixture `
+  -Label 'check_type_size' `
+  -Source $checkSizeSrc `
+  -Optional:$false `
+  -AssertCacheEntries @{ HAVE_INT = '4'; HAVE_LONG = '4' }
+
+# Fixture C (optional configure pass-through): zlib if the bench fixture
+# has staged a source. zlib's ``check_type_size(off64_t HAVE_OFF64_T)``
+# exercises exactly the same COPY_FILE inner-build path as fixture B and
+# is the original M10/M19 motivating regression. Before M19 this fixture's
+# configure step failed at ``check_type_size``; after M19 the configure
+# passes and ``HAVE_OFF64_T`` lands in CMakeCache.
+#
+# Build of zlib's SHARED target itself currently trips an orthogonal
+# Reprobuild bug (``add_custom_command`` outputs like MinGW's
+# ``zlib1rc.obj`` get config-prefixed in the link line but written without
+# the prefix in the binary dir — Ninja Multi-Config does not show this
+# bug), so the build step is left optional. The M19 deliverable is the
+# configure-side COPY_FILE fix; the build-side custom-command path bug is
+# tracked separately.
 $zlibSrc = Join-Path $repoRoot 'build\cmake-generator-competitiveness\projects\zlib\direct\source'
+$zlibResult = $null
 if (Test-Path -LiteralPath (Join-Path $zlibSrc 'CMakeLists.txt')) {
   Write-Host ""
-  Write-Host "==> Optional zlib multi-config fixture detected"
-  $null = Invoke-Fixture -Label 'zlib' -Source $zlibSrc -Optional:$true
+  Write-Host "==> zlib multi-config fixture detected (M19 configure-side pass case)"
+  $zlibResult = Invoke-Fixture `
+    -Label 'zlib' `
+    -Source $zlibSrc `
+    -Optional:$false `
+    -OptionalBuild:$true `
+    -AssertCacheEntries @{ HAVE_OFF64_T = 'TRUE' }
 } else {
   Write-Host ""
-  Write-Host "INFO: zlib fixture missing at $zlibSrc — skipping optional zlib coverage"
+  Write-Host "INFO: zlib fixture missing at $zlibSrc — skipping zlib coverage (M19 still gated by the check_type_size fixture)"
 }
 
 Write-Host ""
 if (-not $miniResult.Passed) {
-  Write-Host "FAIL: primary multi-config fixture did not pass"
+  Write-Host "FAIL: mini multi-config fixture did not pass"
   exit 1
 }
-Write-Host "PASS: multi-config CMake routes through Tier 2c direct provider (no provider-compile fallback)"
+if (-not $checkSizeResult.Passed) {
+  Write-Host "FAIL: check_type_size multi-config fixture did not pass (M19)"
+  exit 1
+}
+if ($zlibResult -and -not $zlibResult.Passed) {
+  Write-Host "FAIL: zlib multi-config configure did not pass (M19)"
+  exit 1
+}
+Write-Host "PASS: multi-config CMake routes through Tier 2c direct provider; check_type_size COPY_FILE probes resolve per-config _loc files (M10 + M19)"
 exit 0
