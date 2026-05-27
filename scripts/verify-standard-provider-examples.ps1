@@ -22,19 +22,22 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set, post-M15):
+# Expected to PASS (the known-working set, post-M16):
 #   nim/binary, nim/multi-binary,
 #   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
 #   rust/library, rust/library-with-tests, rust/workspace,
 #   go/binary, go/library, go/multi-binary,
-#   python/library-pure, python/console-script
+#   python/library-pure, python/console-script,
+#   javascript-typescript/typescript-library,
+#   javascript-typescript/typescript-cli,
+#   javascript-typescript/node-server
 #
 # Expected to KNOWN-FAIL: (none — M14 graduated go/library + go/multi-binary;
-#   M15 graduated python/library-pure + python/console-script)
+#   M15 graduated python/library-pure + python/console-script;
+#   M16 graduated all three javascript-typescript fixtures)
 #
 # Expected to SKIP (no Mode A convention exists yet):
-#   javascript-typescript/typescript-library, typescript-cli, node-server,
 #   c-cpp-make/binary, c-cpp-make/library-static,
 #   c-cpp-autotools/hello-binary
 #
@@ -190,7 +193,36 @@ function Probe-Toolchain([string]$language) {
       return @{ Available = $false; Reason = "'python3'/'python' not on PATH (env.ps1 should provide the managed install)" }
     }
     'javascript-typescript' {
-      return @{ Available = $false; Reason = "Mode A not implemented for JavaScript/TypeScript (M8 outstanding)" }
+      # M16: the JavaScript/TypeScript convention is registered. Probe
+      # for node (and therefore npm/npx, which ship in every node
+      # distribution). env.ps1 doesn't manage node directly today; fall
+      # back to the managed install under D:/metacraft-dev-deps/node/
+      # when the dev shell didn't preload it.
+      $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+      if (-not $nodeCmd) {
+        $nodeRoot = 'D:\metacraft-dev-deps\node'
+        if (Test-Path -LiteralPath $nodeRoot) {
+          $candidates = @()
+          foreach ($verDir in Get-ChildItem -LiteralPath $nodeRoot -Directory -ErrorAction SilentlyContinue) {
+            foreach ($inner in Get-ChildItem -LiteralPath $verDir.FullName -Directory -ErrorAction SilentlyContinue) {
+              $candidate = Join-Path $inner.FullName 'node.exe'
+              if (Test-Path -LiteralPath $candidate) {
+                $candidates += $candidate
+              }
+            }
+          }
+          if ($candidates.Count -gt 0) {
+            $picked = $candidates | Sort-Object | Select-Object -Last 1
+            $binDir = Split-Path -Parent $picked
+            $env:PATH = "$binDir;$env:PATH"
+            $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+          }
+        }
+      }
+      if ($nodeCmd) {
+        return @{ Available = $true; Reason = "node=$($nodeCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "'node' not on PATH and not under D:/metacraft-dev-deps/node/" }
     }
     'c-cpp-make' {
       return @{ Available = $false; Reason = "Mode A not implemented for c-cpp-make (M8 outstanding)" }
@@ -235,6 +267,15 @@ function Get-KnownFailReason([string]$rel) {
     # wrapper emission (the spec's A5 venv + ``installer`` step) is
     # deferred to a follow-up M; ``[project.scripts]`` projects PASS
     # today on the wheel-only headline.
+    #
+    # M16 (2026-05-27): javascript-typescript/typescript-library,
+    # typescript-cli, and node-server all graduated to PASS via the
+    # JavaScript/TypeScript convention's Mode A subset. TS projects emit
+    # a single ``npx tsc -p tsconfig.json`` action; JS-only projects
+    # emit one ``fs.copyFile`` per source. Per-file swc/esbuild transform
+    # (A2), per-bin esbuild bundle (A5), launcher shim emission (A6),
+    # ``tsc --noEmit`` typecheck (A4), per-test runner (A7), and the
+    # Mode B fallback are all deferred to a follow-up M.
     default                    { return $null }
   }
 }
@@ -420,6 +461,40 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
           Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member 'dist'))
           Filter = '*.whl'
         }
+        Greeting = $null
+      })
+    }
+    'javascript-typescript/typescript-library' {
+      # M16: TS library. The JS/TS convention emits a flat
+      # ``.repro/build/dist/`` tree (no per-member subdir) with one
+      # ``.js`` + one ``.d.ts`` per source file. No greeting — the
+      # validate script runs the node-import smoke separately.
+      return @(@{
+        Path     = Join-Path $fixtureDir '.repro\build\dist\index.js'
+        Greeting = $null
+      })
+    }
+    'javascript-typescript/typescript-cli' {
+      # M16: TS CLI. The tsc compile mirrors the source tree under dist,
+      # so src/bin/cli.ts -> dist/bin/cli.js. The hashbang from cli.ts is
+      # preserved verbatim. No greeting check here — the CLI isn't
+      # directly runnable on Windows without a .cmd shim (A6 deferred);
+      # the validate-standard-provider-typescript-cli.ps1 script
+      # explicitly invokes ``node dist/bin/cli.js`` and checks stdout.
+      return @(@{
+        Path     = Join-Path $fixtureDir '.repro\build\dist\bin\cli.js'
+        Greeting = $null
+      })
+    }
+    'javascript-typescript/node-server' {
+      # M16: pure-JS node application. The convention emits one
+      # ``fs.copyFile`` action per ``src/**/*.js`` source. Predicted
+      # output is ``.repro/build/dist/index.js``. No greeting — the
+      # server binds a port and would hang the harness if executed
+      # directly. The validate-standard-provider-node-server.ps1 script
+      # forces ``PORT=0`` and tears the server down after import.
+      return @(@{
+        Path     = Join-Path $fixtureDir '.repro\build\dist\index.js'
         Greeting = $null
       })
     }

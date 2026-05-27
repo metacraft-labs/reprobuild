@@ -972,7 +972,8 @@ proc sameSourceFile(a, b: string): bool =
 
 const
   RegisteredStandardConventionToolchains* = ["nim", "rust", "cargo", "go",
-    "python3", "python", "uv"]
+    "python3", "python", "uv",
+    "node", "typescript", "tsx", "swc", "esbuild"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
     ## Tier 2b standard provider. This list MUST stay in sync with the
