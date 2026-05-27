@@ -22,16 +22,14 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set, post-M12):
+# Expected to PASS (the known-working set, post-M13):
 #   nim/binary, nim/multi-binary,
 #   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
+#   rust/library, rust/library-with-tests, rust/workspace,
 #   go/binary
 #
-# Expected to KNOWN-FAIL (documented coverage gaps in M3-M11 outstanding work):
-#   rust/library, rust/library-with-tests      -- Rust convention rejects
-#                                                  library-only crates (M13)
-#   rust/workspace                              -- workspaces deferred (M13)
+# Expected to KNOWN-FAIL (documented coverage gaps in M14+ outstanding work):
 #   go/library                                  -- Go convention only matches
 #                                                  root main.go (M14)
 #   go/multi-binary                             -- cmd/<name>/main.go layout
@@ -201,16 +199,16 @@ function Probe-Toolchain([string]$language) {
 function Get-KnownFailReason([string]$rel) {
   switch ($rel) {
     # M12 (2026-05-27): nim/library + nim/library-with-tests graduated
-    # from KNOWN-FAIL to PASS. The DSL ``library`` macro lives in
-    # libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim and the
-    # Nim convention's emitFragment branches on ``LibraryKind`` to emit
-    # ``ar rcs`` (static) / ``gcc -shared`` (shared) / both / nothing
-    # (header-only).
-    'rust/library'             { return 'Rust convention rejects library-only crates (M4 outstanding)' }
-    'rust/library-with-tests'  { return 'Rust convention rejects library-only crates (M4 outstanding)' }
-    'rust/workspace'           { return 'Rust workspaces deferred (M4 outstanding)' }
-    'go/library'               { return 'Go convention only matches root main.go (M5 outstanding)' }
-    'go/multi-binary'          { return 'Go cmd/<name>/main.go layout not recognised yet (M5 outstanding)' }
+    # from KNOWN-FAIL to PASS via the DSL ``library`` macro + Nim
+    # convention emit branch.
+    #
+    # M13 (2026-05-27): rust/library + rust/library-with-tests +
+    # rust/workspace graduated from KNOWN-FAIL to PASS. The Rust
+    # convention now accepts library-only crates, ``[[bin]]`` array
+    # entries, and ``[workspace]`` manifests; cargo-metadata-driven
+    # workspace member enumeration wires inter-crate ``--extern`` edges.
+    'go/library'               { return 'Go convention only matches root main.go (M14 outstanding)' }
+    'go/multi-binary'          { return 'Go cmd/<name>/main.go layout not recognised yet (M14 outstanding)' }
     default                    { return $null }
   }
 }
@@ -218,10 +216,18 @@ function Get-KnownFailReason([string]$rel) {
 # --- expected-binary spec per PASS example ----------------------------------
 # Each entry returns either:
 #   $null              -- no executable to run (the build itself is the assertion)
-#   @( @{ Path; Greeting }, ... )  -- one or more produced executables; for
-#                                     each, the file must exist, and if a
-#                                     Greeting is non-null it must match the
-#                                     stdout when run.
+#   @( @{ Path; Greeting }, ... )  -- one or more produced outputs. Each entry
+#                                     carries one of two locator forms:
+#                                       Path     -- literal absolute path
+#                                       PathGlob -- @{ Dir; Filter } pair; the
+#                                                   harness picks the first
+#                                                   matching file (used for
+#                                                   artefacts with a stable-hash
+#                                                   suffix in the name, e.g.
+#                                                   Rust's lib<crate>-<hash>.rlib).
+#                                     If a Greeting is non-null the file must
+#                                     also be runnable and its stdout must
+#                                     contain the greeting.
 function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
   switch ($rel) {
     'nim/binary' {
@@ -266,6 +272,54 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $crate (Join-Path 'bin' ($crate + '.exe'))))
         Greeting = 'hello from rust-binary-example'
       })
+    }
+    'rust/library' {
+      # M13: the Rust convention emits ``lib<crateName>-<stableHash>.rlib``
+      # under ``.repro/build/<crateName>/bin/``. Glob for the rlib rather
+      # than hard-coding the hash (which is derived from
+      # ``<crateName>@<edition>`` and would silently desync on edition
+      # bumps).
+      $crate = 'rust_library_example'
+      return @(@{
+        PathGlob = @{
+          Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $crate 'bin'))
+          Filter = "lib$crate-*.rlib"
+        }
+        Greeting = $null
+      })
+    }
+    'rust/library-with-tests' {
+      # M13: same shape as rust/library. The ``tests/`` directory exists
+      # but the convention's M13 surface only links the library itself —
+      # per-test runner actions are deferred to a later milestone (see
+      # Rust.md §"Test commands").
+      $crate = 'rust_library_with_tests_example'
+      return @(@{
+        PathGlob = @{
+          Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $crate 'bin'))
+          Filter = "lib$crate-*.rlib"
+        }
+        Greeting = $null
+      })
+    }
+    'rust/workspace' {
+      # M13: workspace with two members — ``crate_a`` (lib) and
+      # ``crate_b`` (bin that depends on crate_a via ``--extern``).
+      # The greeting comes from ``crate_a::greet`` so successful execution
+      # of the binary verifies the inter-crate edge wired correctly.
+      return @(
+        @{
+          PathGlob = @{
+            Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'crate_a' 'bin'))
+            Filter = "libcrate_a-*.rlib"
+          }
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'crate_b' (Join-Path 'bin' 'crate_b.exe')))
+          Greeting = 'hello, rust-workspace-example'
+        }
+      )
     }
     'rust/binary-with-build-rs' {
       # Mode B crude path: cargo writes to <fixture>/target/release/.
@@ -399,16 +453,37 @@ foreach ($rel in $PopulatedExamples) {
     }
     $allOk = $true
     foreach ($exp in $expected) {
-      if (-not (Test-Path -LiteralPath $exp.Path)) {
-        Add-Result 'FAIL' $rel "expected binary missing: $($exp.Path)"
-        $allOk = $false
-        break
+      # Resolve the literal path. PathGlob entries pick the first matching
+      # file under their Dir; literal Path entries pass straight through.
+      $resolvedPath = $null
+      if ($exp.ContainsKey('PathGlob') -and $exp.PathGlob) {
+        $globDir = $exp.PathGlob.Dir
+        $globFilter = $exp.PathGlob.Filter
+        if (-not (Test-Path -LiteralPath $globDir)) {
+          Add-Result 'FAIL' $rel "expected output dir missing: $globDir"
+          $allOk = $false
+          break
+        }
+        $globMatches = @(Get-ChildItem -LiteralPath $globDir -Filter $globFilter -ErrorAction SilentlyContinue)
+        if ($globMatches.Count -eq 0) {
+          Add-Result 'FAIL' $rel "no file matching '$globFilter' under $globDir"
+          $allOk = $false
+          break
+        }
+        $resolvedPath = $globMatches[0].FullName
+      } else {
+        $resolvedPath = $exp.Path
+        if (-not (Test-Path -LiteralPath $resolvedPath)) {
+          Add-Result 'FAIL' $rel "expected binary missing: $resolvedPath"
+          $allOk = $false
+          break
+        }
       }
-      if ($exp.Greeting) {
-        $output = & $exp.Path 2>&1 | Out-String
+      if ($exp.ContainsKey('Greeting') -and $exp.Greeting) {
+        $output = & $resolvedPath 2>&1 | Out-String
         $runExit = $LASTEXITCODE
         if ($runExit -ne 0) {
-          Add-Result 'FAIL' $rel "produced binary $($exp.Path) exited $runExit"
+          Add-Result 'FAIL' $rel "produced binary $resolvedPath exited $runExit"
           $allOk = $false
           break
         }

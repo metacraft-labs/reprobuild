@@ -1,21 +1,27 @@
-## M4 verification: Rust language convention.
+## M4 + M13 verification: Rust language convention.
 ##
 ## Tests against the in-tree fixture at
 ## ``reprobuild-examples/rust/binary/`` for the positive recognise path
-## and the two-action emit-fragment path. Negative recognise cases are
-## materialised as tiny scratch projects under the test's temp directory
-## so each case is hermetic.
+## and the two-action emit-fragment path. Library-only / workspace /
+## multi-bin recognise are exercised against scratch fixtures under the
+## test's temp dir (no need for the real ``rust/library`` / ``rust/workspace``
+## fixtures here — the E2E validators cover those end-to-end).
 ##
 ## Coverage:
-##   * ``recognize`` returns true for the canonical fixture
+##   * ``recognize`` returns true for the canonical binary fixture
 ##   * ``recognize`` returns true when ``build.rs`` is present (M6 — the
 ##     convention now claims the project and ``emitFragment`` routes to
 ##     the Mode B crude fallback internally). Runs only when rustc/cargo
 ##     are on PATH; without them the toolchain probe returns false for
 ##     unrelated reasons and the positive-recognise assertion degrades to
 ##     a checkpoint.
+##   * ``recognize`` returns true for library-only crates (``src/lib.rs``
+##     present, no ``src/main.rs``) — M13 graduation.
+##   * ``recognize`` returns true for workspace manifests (``[workspace]``
+##     declared at root) — M13 graduation.
+##   * ``recognize`` returns true for ``[[bin]]`` array entries (multi-bin
+##     crates with no conventional ``src/main.rs``) — M13 graduation.
 ##   * ``recognize`` returns false when:
-##       - ``Cargo.toml`` declares ``[workspace]`` (deferred to M4+1)
 ##       - ``Cargo.toml`` is absent (not a Cargo project)
 ##       - ``uses:`` lists ``python`` instead of ``rust`` / ``cargo``
 ##   * ``emitFragment`` against the canonical fixture produces:
@@ -134,34 +140,130 @@ suite "rust convention M4":
     else:
       check conv.recognize(scratch, request)
 
-  test "recognize: negative — [workspace] in Cargo.toml":
-    let scratch = getTempDir() / "test_rust_convention_workspace"
+  test "recognize: positive — library-only crate (M13)":
+    # M13: a crate with only ``src/lib.rs`` (no ``src/main.rs``) is now
+    # recognised. The convention spec (Rust.md §"Mode A — Fine-grained
+    # build graph") explicitly supports library targets via
+    # ``--crate-type lib --emit=link,dep-info`` producing ``lib<n>.rlib``.
+    let scratch = getTempDir() / "test_rust_convention_library_only"
     if dirExists(scratch):
       removeDir(scratch)
     createDir(scratch / "src")
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package fakeLibExample:\n" &
+      "  uses:\n" &
+      "    \"rust >=1.80\"\n" &
+      "\n" &
+      "  library fake_lib\n")
+    writeFile(scratch / "Cargo.toml",
+      "[package]\n" &
+      "name = \"fake-lib\"\n" &
+      "version = \"0.1.0\"\n" &
+      "edition = \"2024\"\n" &
+      "publish = false\n")
+    writeFile(scratch / "src" / "lib.rs",
+      "pub fn unused() -> i32 { 42 }\n")
+    defer:
+      removeDir(scratch)
+    let conv = rust_convention.rustConvention()
+    let request = dummyRequest(scratch)
+    if not rustToolchainAvailable():
+      checkpoint "rustc/cargo not on PATH — library-only recognise will short-circuit to false"
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
+
+  test "recognize: positive — [workspace] in Cargo.toml (M13)":
+    # M13: previously rejected ([workspace] was a hard-fail in recognize).
+    # The convention now claims the project and ``cargo metadata``
+    # enumerates workspace members at emit time. The scratch fixture
+    # carries a single member to keep the test hermetic — the real
+    # ``rust/workspace`` example covers the multi-member path end-to-end
+    # via the E2E validator.
+    let scratch = getTempDir() / "test_rust_convention_workspace"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "member-a" / "src")
     writeFile(scratch / "reprobuild.nim",
       "import repro_project_dsl\n" &
       "package fakeWorkspaceExample:\n" &
       "  uses:\n" &
       "    \"rust >=1.80\"\n" &
       "\n" &
-      "  executable fake_workspace:\n" &
+      "  executable member_a:\n" &
       "    discard\n")
     writeFile(scratch / "Cargo.toml",
       "[workspace]\n" &
-      "members = [\"crates/a\", \"crates/b\"]\n" &
-      "\n" &
+      "resolver = \"2\"\n" &
+      "members = [\"member-a\"]\n")
+    writeFile(scratch / "member-a" / "Cargo.toml",
       "[package]\n" &
-      "name = \"fake-workspace\"\n" &
+      "name = \"member-a\"\n" &
       "version = \"0.1.0\"\n" &
-      "edition = \"2024\"\n")
-    writeFile(scratch / "src" / "main.rs",
+      "edition = \"2024\"\n" &
+      "publish = false\n" &
+      "\n" &
+      "[[bin]]\n" &
+      "name = \"member_a\"\n" &
+      "path = \"src/main.rs\"\n")
+    writeFile(scratch / "member-a" / "src" / "main.rs",
       "fn main() { println!(\"unused\"); }\n")
     defer:
       removeDir(scratch)
     let conv = rust_convention.rustConvention()
     let request = dummyRequest(scratch)
-    check not conv.recognize(scratch, request)
+    if not rustToolchainAvailable():
+      checkpoint "rustc/cargo not on PATH — workspace recognise will short-circuit to false"
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
+
+  test "recognize: positive — [[bin]] array in Cargo.toml (M13)":
+    # M13: explicit ``[[bin]]`` table entries (with non-default ``path =``)
+    # are recognised. No ``src/main.rs`` exists at the root — the bin
+    # source lives under ``bin/alpha.rs`` per the manifest.
+    let scratch = getTempDir() / "test_rust_convention_multi_bin"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "src" / "bins")
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package fakeMultiBinExample:\n" &
+      "  uses:\n" &
+      "    \"rust >=1.80\"\n" &
+      "\n" &
+      "  executable alpha:\n" &
+      "    discard\n" &
+      "  executable beta:\n" &
+      "    discard\n")
+    writeFile(scratch / "Cargo.toml",
+      "[package]\n" &
+      "name = \"fake-multi-bin\"\n" &
+      "version = \"0.1.0\"\n" &
+      "edition = \"2024\"\n" &
+      "publish = false\n" &
+      "\n" &
+      "[[bin]]\n" &
+      "name = \"alpha\"\n" &
+      "path = \"src/bins/alpha.rs\"\n" &
+      "\n" &
+      "[[bin]]\n" &
+      "name = \"beta\"\n" &
+      "path = \"src/bins/beta.rs\"\n")
+    writeFile(scratch / "src" / "bins" / "alpha.rs",
+      "fn main() { println!(\"alpha\"); }\n")
+    writeFile(scratch / "src" / "bins" / "beta.rs",
+      "fn main() { println!(\"beta\"); }\n")
+    defer:
+      removeDir(scratch)
+    let conv = rust_convention.rustConvention()
+    let request = dummyRequest(scratch)
+    if not rustToolchainAvailable():
+      checkpoint "rustc/cargo not on PATH — multi-bin recognise will short-circuit to false"
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
 
   test "recognize: negative — no Cargo.toml":
     let scratch = getTempDir() / "test_rust_convention_no_cargo"
