@@ -4,12 +4,10 @@
 ## handful of small fixtures. The real M60 gates live under
 ## `tests/e2e/home-intent/`.
 
-import std/[options, os, sets, strutils, tables, unittest]
+import std/[options, os, sets, strutils, tables, tempfiles, unittest]
 from repro_core/paths import extendedPath
 
 import repro_home_intent
-
-const SamplePath = "/tmp/repro-home-smoke-profile.nim"
 
 const SampleProfile = """
 import repro/profile
@@ -33,14 +31,16 @@ profile "zahary":
     "dev-laptop": [develop_software]
 """
 
-proc writeSample(path = SamplePath): string =
-  writeFile(extendedPath(path), SampleProfile)
-  result = path
+proc writeSample(dir: string): string =
+  result = dir / "repro-home-smoke-profile.nim"
+  writeFile(extendedPath(result), SampleProfile)
 
 suite "Home-intent smoke":
 
   test "parse recognized profile shape":
-    let path = writeSample()
+    let dir = createTempDir("repro-home-smoke-", "")
+    defer: removeDir(dir)
+    let path = writeSample(dir)
     let prof = loadProfile(path)
     check prof.root.kind == nkProfileRoot
     check prof.root.name == "zahary"
@@ -60,11 +60,12 @@ profile "x":
   packages:
     - extra
 """
-    let badPath = "/tmp/repro-home-smoke-bad-toplevel.nim"
+    let dir = createTempDir("repro-home-smoke-bad-toplevel-", "")
+    defer: removeDir(dir)
+    let badPath = dir / "repro-home-smoke-bad-toplevel.nim"
     writeFile(extendedPath(badPath), bad)
     expect EUnstructured:
       discard loadProfile(badPath)
-    removeFile(extendedPath(badPath))
 
   test "rejects runtime control flow inside activity body":
     let bad = """
@@ -75,11 +76,12 @@ profile "x":
     for pkg in @["a", "b"]:
       pkg
 """
-    let badPath = "/tmp/repro-home-smoke-bad-for.nim"
+    let dir = createTempDir("repro-home-smoke-bad-for-", "")
+    defer: removeDir(dir)
+    let badPath = dir / "repro-home-smoke-bad-for.nim"
     writeFile(extendedPath(badPath), bad)
     expect EUnstructured:
       discard loadProfile(badPath)
-    removeFile(extendedPath(badPath))
 
   test "predicate canonicalize: commutative ordering":
     check canonicalize("windows and arm64") == "arm64 and windows"
@@ -104,7 +106,9 @@ profile "x":
       parsePredicate("", "host in [\"a\", \"dev-laptop\"]", 0), ctx)
 
   test "round-trip: add then remove restores byte-equal file":
-    let path = writeSample()
+    let dir = createTempDir("repro-home-smoke-roundtrip-", "")
+    defer: removeDir(dir)
+    let path = writeSample(dir)
     let original = readFile(extendedPath(path))
     addPackageReference(path, "ripgrep", activity = "default")
     let added = readFile(extendedPath(path))
@@ -113,7 +117,6 @@ profile "x":
     removePackageReference(path, "ripgrep", activity = "default")
     let after = readFile(extendedPath(path))
     check after == original
-    removeFile(extendedPath(path))
 
   test "setConfigurable creates config + sub-block + entry":
     # Use a profile WITHOUT a config block.
@@ -124,7 +127,9 @@ profile "x":
   activity default:
     neovim
 """
-    let path = "/tmp/repro-home-smoke-set-config.nim"
+    let dir = createTempDir("repro-home-smoke-set-config-", "")
+    defer: removeDir(dir)
+    let path = dir / "repro-home-smoke-set-config.nim"
     writeFile(extendedPath(path), p)
     setConfigurable(path, "git.userName", "Zahary", nil)
     setConfigurable(path, "git.userEmail", "z@example.com", nil)
@@ -140,7 +145,6 @@ profile "x":
     check gitHeader >= 0
     check gitHeader < nameLine
     check nameLine < emailLine
-    removeFile(extendedPath(path))
 
   # ---------------------------------------------------------------------
   # M82 home-scope follow-up: `depends_on` shape validation.
@@ -237,7 +241,9 @@ profile "x":
     check parsed[1].name == "editor:nvim"   # first-colon-split
 
   test "effective config buckets enabled vs inert overrides":
-    let path = writeSample()
+    let dir = createTempDir("repro-home-smoke-effective-config-", "")
+    defer: removeDir(dir)
+    let path = writeSample(dir)
     let prof = loadProfile(path)
     let ctxLaptop = HostContext(platform: "linux", arch: "x86_64",
       host: "dev-laptop")
@@ -249,4 +255,3 @@ profile "x":
     check "git" in cfg.overrides
     check "userName" in cfg.overrides["git"]
     check cfg.inertOverrides.len == 0
-    removeFile(extendedPath(path))
