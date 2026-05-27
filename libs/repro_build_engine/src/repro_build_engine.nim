@@ -666,6 +666,22 @@ proc toolInputRoots(action: BuildAction): seq[string] =
   for value in action.envValue("NODE_PATH").split(PathSep):
     result.addNixStoreRoot(value)
 
+proc cargoHome(action: BuildAction): string =
+  result = action.envValue("CARGO_HOME")
+  if result.len > 0:
+    return
+  let home = block:
+    let envHome = action.envValue("HOME")
+    if envHome.len > 0: envHome else: getEnv("HOME")
+  if home.len > 0:
+    result = home / ".cargo"
+
+proc volatileToolCacheRoots(action: BuildAction): seq[string] =
+  let cargo = action.cargoHome()
+  if cargo.len > 0:
+    result.add(cargo / ".global-cache")
+    result.add(cargo / ".package-cache")
+
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
   for root in roots:
@@ -675,6 +691,7 @@ proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
 
 proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string] =
   let toolRoots = action.toolInputRoots()
+  let volatileRoots = action.volatileToolCacheRoots()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
     let path = materialPath(action.cwd, input)
@@ -683,19 +700,19 @@ proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string
   for input in evidence.depfileInputs:
     let path = materialPath(action.cwd, input)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
-        path.isUnderAnyRoot(toolRoots):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(volatileRoots)):
       continue
     result.addUnique(path)
   for input in evidence.monitorReads:
     let path = materialPath(action.cwd, input)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
-        path.isUnderAnyRoot(toolRoots):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(volatileRoots)):
       continue
     result.addUnique(path)
   for probe in evidence.monitorProbes:
     let path = materialPath(action.cwd, probe)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
-        path.isUnderAnyRoot(toolRoots):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(volatileRoots)):
       continue
     result.addUnique(path)
 
