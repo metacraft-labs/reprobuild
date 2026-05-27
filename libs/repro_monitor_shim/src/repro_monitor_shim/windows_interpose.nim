@@ -106,6 +106,10 @@ proc GetCurrentProcessId(): DWORD
   {.importc, stdcall, dynlib: "kernel32".}
 proc GetCurrentThreadId(): DWORD
   {.importc, stdcall, dynlib: "kernel32".}
+proc GetLastError(): DWORD
+  {.importc, stdcall, dynlib: "kernel32".}
+proc SetLastError(dwErrCode: DWORD): void
+  {.importc, stdcall, dynlib: "kernel32".}
 proc OutputDebugStringA(lpOutputString: cstring): void
   {.importc, stdcall, dynlib: "kernel32".}
 proc GetEnvironmentVariableA(lpName: cstring, lpBuffer: cstring,
@@ -413,7 +417,16 @@ proc hookCreateFileW(lpFileName: LPCWSTR, dwDesiredAccess: DWORD,
   result = origCreateFileW(lpFileName, dwDesiredAccess, dwShareMode,
                             lpSecurityAttributes, dwCreationDisposition,
                             dwFlagsAndAttributes, hTemplateFile)
+  # Windows: every call inside the hook body (Nim allocator, Lock acquire,
+  # debug log, table ops) can clobber the thread-local LastError that the
+  # real CreateFileW set. CreateFileW notably leaves LastError at
+  # ERROR_ALREADY_EXISTS (183) on OPEN_ALWAYS / CREATE_ALWAYS success — a
+  # "success with info" code that callers like Rust's std::process::Command
+  # inspect to decide retry/error paths. Preserve LastError verbatim across
+  # the bookkeeping so the caller sees what the kernel actually returned.
+  let savedLastError = GetLastError()
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     let path = widePtrToString(lpFileName)
@@ -428,6 +441,7 @@ proc hookCreateFileW(lpFileName: LPCWSTR, dwDesiredAccess: DWORD,
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 proc hookCreateFileA(lpFileName: LPCSTR, dwDesiredAccess: DWORD,
                      dwShareMode: DWORD,
@@ -440,7 +454,9 @@ proc hookCreateFileA(lpFileName: LPCSTR, dwDesiredAccess: DWORD,
   result = origCreateFileA(lpFileName, dwDesiredAccess, dwShareMode,
                             lpSecurityAttributes, dwCreationDisposition,
                             dwFlagsAndAttributes, hTemplateFile)
+  let savedLastError = GetLastError()  # see hookCreateFileW for rationale
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     var path = ""
@@ -457,6 +473,7 @@ proc hookCreateFileA(lpFileName: LPCSTR, dwDesiredAccess: DWORD,
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 proc hookReadFile(hFile: HANDLE, lpBuffer: LPVOID,
                   nNumberOfBytesToRead: DWORD,
@@ -466,7 +483,18 @@ proc hookReadFile(hFile: HANDLE, lpBuffer: LPVOID,
     return 0
   result = origReadFile(hFile, lpBuffer, nNumberOfBytesToRead,
                          lpNumberOfBytesRead, lpOverlapped)
+  # ReadFile preservation is load-bearing. Without it, cargo's
+  # std::process::Command::spawn panics with
+  # `Os { code: 183, kind: AlreadyExists }` on the rust-binary-with-build-rs
+  # fixture. Cargo's Rust stdlib uses STARTUPINFOEXW + UpdateProcThreadAttribute
+  # which probes for required buffer size via a path that ends up reading
+  # the LastError; if a previous CreateFileW (e.g. on the cargo lockfile)
+  # left LastError == 183 and our pre-fix ReadFile hook clobbered it,
+  # the subsequent caller-side check would see whatever junk our Nim
+  # bookkeeping left behind. (See M11 audit notes.)
+  let savedLastError = GetLastError()
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     var record = baseRecord(mrFileRead, moFileRead)
@@ -479,6 +507,7 @@ proc hookReadFile(hFile: HANDLE, lpBuffer: LPVOID,
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 proc hookWriteFile(hFile: HANDLE, lpBuffer: LPCVOID,
                    nNumberOfBytesToWrite: DWORD,
@@ -488,7 +517,9 @@ proc hookWriteFile(hFile: HANDLE, lpBuffer: LPCVOID,
     return 0
   result = origWriteFile(hFile, lpBuffer, nNumberOfBytesToWrite,
                           lpNumberOfBytesWritten, lpOverlapped)
+  let savedLastError = GetLastError()  # see hookReadFile / hookCreateFileW
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     var record = baseRecord(mrFileWrite, moFileWrite)
@@ -501,6 +532,7 @@ proc hookWriteFile(hFile: HANDLE, lpBuffer: LPCVOID,
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 proc hookCloseHandle(hObject: HANDLE): BOOL {.stdcall.} =
   if origCloseHandle == nil:
@@ -519,6 +551,9 @@ proc hookCloseHandle(hObject: HANDLE): BOOL {.stdcall.} =
     forgetHandlePath(hObject)
   except CatchableError:
     discard
+  # Call origCloseHandle AFTER the bookkeeping so the caller observes
+  # whatever LastError CloseHandle itself sets (no Nim allocator activity
+  # after this point can clobber it).
   result = origCloseHandle(hObject)
   dec disabled
 
@@ -527,7 +562,9 @@ proc hookGetFileAttributesExW(lpFileName: LPCWSTR, fInfoLevelId: DWORD,
   if origGetFileAttributesExW == nil:
     return 0
   result = origGetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation)
+  let savedLastError = GetLastError()  # ERROR_FILE_NOT_FOUND on absent path
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     var record = baseRecord(mrPathProbe, moPathProbe)
@@ -538,13 +575,16 @@ proc hookGetFileAttributesExW(lpFileName: LPCWSTR, fInfoLevelId: DWORD,
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 proc hookGetFileAttributesExA(lpFileName: LPCSTR, fInfoLevelId: DWORD,
                                lpFileInformation: LPVOID): BOOL {.stdcall.} =
   if origGetFileAttributesExA == nil:
     return 0
   result = origGetFileAttributesExA(lpFileName, fInfoLevelId, lpFileInformation)
+  let savedLastError = GetLastError()
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     var record = baseRecord(mrPathProbe, moPathProbe)
@@ -556,12 +596,15 @@ proc hookGetFileAttributesExA(lpFileName: LPCSTR, fInfoLevelId: DWORD,
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 proc hookGetFileAttributesW(lpFileName: LPCWSTR): DWORD {.stdcall.} =
   if origGetFileAttributesW == nil:
     return 0xFFFFFFFF'u32
   result = origGetFileAttributesW(lpFileName)
+  let savedLastError = GetLastError()
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     var record = baseRecord(mrPathProbe, moPathProbe)
@@ -573,12 +616,15 @@ proc hookGetFileAttributesW(lpFileName: LPCWSTR): DWORD {.stdcall.} =
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 proc hookGetFileAttributesA(lpFileName: LPCSTR): DWORD {.stdcall.} =
   if origGetFileAttributesA == nil:
     return 0xFFFFFFFF'u32
   result = origGetFileAttributesA(lpFileName)
+  let savedLastError = GetLastError()
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     var record = baseRecord(mrPathProbe, moPathProbe)
@@ -591,6 +637,7 @@ proc hookGetFileAttributesA(lpFileName: LPCSTR): DWORD {.stdcall.} =
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 proc hookCreateProcessW(lpApplicationName: LPCWSTR,
                         lpCommandLine: LPWSTR,
@@ -610,7 +657,9 @@ proc hookCreateProcessW(lpApplicationName: LPCWSTR,
                                bInheritHandles, dwCreationFlags,
                                lpEnvironment, lpCurrentDirectory,
                                lpStartupInfo, lpProcessInformation)
+  let savedLastError = GetLastError()
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     var record = baseRecord(mrProcessSpawn, moExecute)
@@ -627,6 +676,7 @@ proc hookCreateProcessW(lpApplicationName: LPCWSTR,
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 proc hookCreateProcessA(lpApplicationName: LPCSTR,
                         lpCommandLine: LPSTR,
@@ -646,7 +696,9 @@ proc hookCreateProcessA(lpApplicationName: LPCSTR,
                                bInheritHandles, dwCreationFlags,
                                lpEnvironment, lpCurrentDirectory,
                                lpStartupInfo, lpProcessInformation)
+  let savedLastError = GetLastError()
   if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
     return
   try:
     var record = baseRecord(mrProcessSpawn, moExecute)
@@ -663,6 +715,7 @@ proc hookCreateProcessA(lpApplicationName: LPCSTR,
     emitRecord(record)
   except CatchableError:
     discard
+  SetLastError(savedLastError)
 
 # --- IAT hook installation -------------------------------------------------
 

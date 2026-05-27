@@ -34,6 +34,21 @@ while IFS= read -r -d '' test_file; do
       "--passL:-Wl,-segprot,__HCR,rwx,rwx"
     )
   fi
+  # Provider-mode tests gate on `--define:reproProviderMode` because the
+  # libs/repro_standard_provider conventions exercise procs that are
+  # `when defined(reproProviderMode)`-gated in repro_project_dsl/runtime_provider.nim
+  # (buildPackageFragment / GraphFragment / StoredGraphFragment /
+  # nimEmitFragment). The standard-provider binary itself ships this define
+  # via apps/entrypoints.txt; the convention tests under
+  # libs/repro_standard_provider/tests/ need the same define to compile.
+  # Path-based detection keeps the runner schema-free and avoids per-test
+  # sidecar files. (Tests under libs/repro_cmake_trycompile/tests/ do not
+  # need the define — only the provider conventions do.)
+  case "${test_file}" in
+    libs/repro_standard_provider/tests/*|*/libs/repro_standard_provider/tests/*)
+      extra_flags+=("--define:reproProviderMode")
+      ;;
+  esac
   nim c -r \
     --threads:on \
     "${extra_flags[@]}" \

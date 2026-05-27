@@ -91,25 +91,33 @@ if (Test-Path -LiteralPath $cargoTargetDir) {
 }
 
 # --- step 2: invoke `repro build` ---
-# REPRO_MONITOR_BYPASS=1 is required on Windows for the crude (Mode B)
-# path: the FS-snoop IAT-patching shim currently interferes with cargo's
-# own subprocess spawn (rustc / build-script binary), causing cargo to
-# panic in std::process::Command with `AlreadyExists (os error 183)`.
-# The bypass downgrades the action to declared-only evidence — the
-# action's declared inputs (the project source tree enumerated by
-# crude.collectCrudeInputs) plus the declared output directory still
-# cover cache correctness. The bypass is documented in
-# libs/repro_build_engine/src/repro_build_engine.nim §monitoredAction.
-# Lifting this requires fixing the IAT shim's interaction with cargo's
-# subprocess machinery — tracked as M6 outstanding work.
-$env:REPRO_MONITOR_BYPASS = "1"
+# M11 (2026-05-27): The previously-required REPRO_MONITOR_BYPASS=1
+# workaround has been retired. The root cause was the FS-snoop IAT
+# shim's hook bodies (libs/repro_monitor_shim/src/repro_monitor_shim/
+# windows_interpose.nim) clobbering the thread-local LastError that
+# the real Win32 functions had just set. Cargo's std::process::Command
+# inspects LastError after CreateNamedPipeW / UpdateProcThreadAttribute
+# probes and would see whatever value our Nim allocator / lock-acquire
+# bookkeeping left behind, ending up panicking with the misleading
+# `Os { code: 183, kind: AlreadyExists, message: "Cannot create a file
+# when that file already exists." }`. Each hook now Save/Restores
+# LastError around the bookkeeping block, so the caller observes the
+# kernel's actual error code.
+#
+# With the bypass dropped, FS-snoop's automaticMonitor policy is now
+# exercised end-to-end on Windows: cargo's reads are captured into the
+# monitor fragment dir and merged into the action's recorded inputs.
+# Ensure no inherited REPRO_MONITOR_BYPASS leaks from the harness env.
+if (Test-Path Env:REPRO_MONITOR_BYPASS) {
+  Remove-Item Env:REPRO_MONITOR_BYPASS
+}
 
 $reproTarget = "$fixture#default"
 $stdoutCapture = Join-Path $repoRoot 'build\validate-standard-provider-rust-crude.stdout.txt'
 $stderrCapture = Join-Path $repoRoot 'build\validate-standard-provider-rust-crude.stderr.txt'
 New-Item -ItemType Directory -Force -Path (Split-Path $stdoutCapture) | Out-Null
 
-Write-Host "==> launching repro.exe build $reproTarget (REPRO_MONITOR_BYPASS=1)"
+Write-Host "==> launching repro.exe build $reproTarget (REPRO_MONITOR_BYPASS unset)"
 $proc = Start-Process -FilePath $reproExe -ArgumentList @(
     'build', $reproTarget,
     '--tool-provisioning=path',

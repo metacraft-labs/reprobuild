@@ -330,14 +330,14 @@ foreach ($rel in $PopulatedExamples) {
   New-Item -ItemType Directory -Force -Path $statsDir | Out-Null
   $env:REPRO_STATS_DIR = $statsDir
 
-  # Mode B build.rs path requires the FS-snoop bypass on Windows; without
-  # it cargo's child rustc panics in std::process::Command. Same rationale
-  # as validate-standard-provider-rust-crude.ps1.
-  if ($rel -eq 'rust/binary-with-build-rs') {
-    $env:REPRO_MONITOR_BYPASS = '1'
-  } else {
-    Remove-Item Env:REPRO_MONITOR_BYPASS -ErrorAction SilentlyContinue
-  }
+  # M11 (2026-05-27): REPRO_MONITOR_BYPASS retired across all examples.
+  # The cargo std::process::Command panic was traced to the FS-snoop shim
+  # clobbering thread-local LastError; the fix lives in
+  # libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim
+  # (Save/Restore LastError around each hook body). The bypass is no
+  # longer needed for rust/binary-with-build-rs either. Clear any inherited
+  # bypass env var so the harness ALWAYS exercises automaticMonitor.
+  Remove-Item Env:REPRO_MONITOR_BYPASS -ErrorAction SilentlyContinue
 
   $stdoutCapture = Join-Path $logsDir ("$exampleName.stdout.txt")
   $stderrCapture = Join-Path $logsDir ("$exampleName.stderr.txt")
