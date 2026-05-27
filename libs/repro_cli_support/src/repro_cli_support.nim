@@ -2026,6 +2026,7 @@ type
     mode: BuildProgressMode
     ansi: bool
     color: bool
+    nativeProgress: bool
     lastLen: int
 
   BuildCommandOutcome = object
@@ -2126,16 +2127,51 @@ proc colorProgressEnabled(): bool =
       return false
     return supportsAnsiProgress()
 
+proc nativeTerminalProgressEnabled(): bool =
+  let configured = getEnv("REPROBUILD_TERMINAL_PROGRESS", "auto").normalize
+  case configured
+  of "0", "false", "no", "off", "never":
+    return false
+  of "1", "true", "yes", "on", "always":
+    return supportsAnsiProgress()
+  else:
+    if not supportsAnsiProgress():
+      return false
+    if getEnv("WT_SESSION", "").len > 0 or
+        getEnv("KONSOLE_VERSION", "").len > 0 or
+        getEnv("WEZTERM_PANE", "").len > 0 or
+        getEnv("ConEmuPID", "").len > 0 or
+        getEnv("MINTTY_SHORTCUT", "").len > 0:
+      return true
+    let termProgram = getEnv("TERM_PROGRAM", "").toLowerAscii()
+    termProgram in ["iterm.app", "wezterm", "ghostty"]
+
 proc newBuildProgressRenderer(mode: BuildProgressMode): BuildProgressRenderer =
   BuildProgressRenderer(
     enabled: mode != bpmQuiet,
     mode: mode,
     ansi: supportsAnsiProgress(),
     color: colorProgressEnabled(),
+    nativeProgress: nativeTerminalProgressEnabled(),
     lastLen: 0)
 
 proc ansi(code, text: string): string =
   "\27[" & code & "m" & text & "\27[0m"
+
+proc isUtf8Continuation(ch: char): bool =
+  (ord(ch) and 0xC0) == 0x80
+
+proc utf8CharLen(text: string; index: int): int =
+  if index >= text.len:
+    return 0
+  let b = ord(text[index])
+  result =
+    if (b and 0x80) == 0x00: 1
+    elif (b and 0xE0) == 0xC0: 2
+    elif (b and 0xF0) == 0xE0: 3
+    elif (b and 0xF8) == 0xF0: 4
+    else: 1
+  result = min(result, text.len - index)
 
 proc visibleLen(text: string): int =
   var i = 0
@@ -2147,7 +2183,8 @@ proc visibleLen(text: string): int =
       if i < text.len:
         i.inc
     else:
-      result.inc
+      if not isUtf8Continuation(text[i]):
+        result.inc
       i.inc
 
 proc takeVisiblePrefix(text: string; width: int): string =
@@ -2156,19 +2193,33 @@ proc takeVisiblePrefix(text: string; width: int): string =
     visible = 0
     inAnsi = false
   while i < text.len and (visible < width or inAnsi):
-    result.add(text[i])
     if text[i] == '\27' and i + 1 < text.len and text[i + 1] == '[':
+      result.add(text[i])
       inAnsi = true
+      i.inc
     elif inAnsi and text[i] in {'A' .. 'Z', 'a' .. 'z'}:
+      result.add(text[i])
       inAnsi = false
-    elif not inAnsi:
+      i.inc
+    elif inAnsi:
+      result.add(text[i])
+      i.inc
+    elif not isUtf8Continuation(text[i]):
+      let charLen = utf8CharLen(text, i)
+      result.add(text[i ..< i + charLen])
       visible.inc
-    i.inc
+      i.inc(charLen)
+    else:
+      i.inc
   if result.contains("\27["):
     result.add("\27[0m")
 
+proc progressCell(glyph, colorCode: string; color: bool): string =
+  if color: ansi(colorCode, glyph) else: glyph
+
 proc progressBar(completed, total, width: int; color = false;
-                 filledColor = "38;5;42"; emptyColor = "38;5;240"): string =
+                 filledColor = "38;5;42"; emptyColor = "38;5;240";
+                 filledGlyph = "#"; emptyGlyph = "."): string =
   let safeWidth = max(width, 1)
   let clampedCompleted =
     if total <= 0:
@@ -2183,11 +2234,11 @@ proc progressBar(completed, total, width: int; color = false;
   let
     openBracket = if color: ansi("38;5;244", "[") else: "["
     closeBracket = if color: ansi("38;5;244", "]") else: "]"
-    filledGlyph = if color: ansi(filledColor, "#") else: "#"
-    emptyGlyph = if color: ansi(emptyColor, ".") else: "."
+    filledCell = progressCell(filledGlyph, filledColor, color)
+    emptyCell = progressCell(emptyGlyph, emptyColor, color)
   result = openBracket
   for i in 0 ..< safeWidth:
-    result.add(if i < filled: filledGlyph else: emptyGlyph)
+    result.add(if i < filled: filledCell else: emptyCell)
   result.add(closeBracket)
 
 proc fitProgressLine(line: string; width: int): string =
@@ -2251,19 +2302,42 @@ proc buildProgressBars(event: BuildProgressEvent; width: int;
   let settled =
     if event.settled > 0 or event.completed == 0: event.settled
     else: event.completed
-  let half = max(5, width div 2)
-  let other = max(5, width - half)
-  let checkBar = progressBar(checked, event.total, half, color,
-    filledColor = "38;5;42")
-  let buildBar =
-    if event.executionPlanKnown and event.plannedExecutions > 0 and
-        settled < event.total:
-      progressBar(event.completedExecutions, event.plannedExecutions, other,
-        color, filledColor = "38;5;213")
+  let safeWidth = max(width, 1)
+  let executionScale = event.executionPlanKnown and
+    event.plannedExecutions > 0 and settled < event.total
+  let
+    checkedFilled =
+      if event.total <= 0: 0
+      else: min(safeWidth, (max(checked, 0) * safeWidth) div event.total)
+    settledFilled =
+      if event.total <= 0: 0
+      else: min(safeWidth, (max(settled, 0) * safeWidth) div event.total)
+    executedFilled =
+      if event.plannedExecutions <= 0: 0
+      else: min(safeWidth,
+        (max(event.completedExecutions, 0) * safeWidth) div
+          event.plannedExecutions)
+  let
+    openBracket = if color: ansi("38;5;244", "▕") else: "["
+    closeBracket = if color: ansi("38;5;244", "▏") else: "]"
+    settledGlyph = if color: "█" else: "#"
+    checkedGlyph = if color: "▓" else: "+"
+    executeGlyph = if color: "█" else: "#"
+    emptyGlyph = if color: "░" else: "."
+  result = openBracket
+  for i in 0 ..< safeWidth:
+    if executionScale:
+      if i < executedFilled:
+        result.add(progressCell(executeGlyph, "38;5;213", color))
+      else:
+        result.add(progressCell(emptyGlyph, "38;5;240", color))
+    elif i < settledFilled:
+      result.add(progressCell(settledGlyph, "38;5;39", color))
+    elif i < checkedFilled:
+      result.add(progressCell(checkedGlyph, "38;5;42", color))
     else:
-      progressBar(settled, event.total, other, color,
-        filledColor = "38;5;39")
-  "check" & checkBar & " build" & buildBar
+      result.add(progressCell(emptyGlyph, "38;5;240", color))
+  result.add(closeBracket)
 
 proc buildProgressInvocation(event: BuildProgressEvent): string =
   let invocation =
@@ -2280,6 +2354,36 @@ proc buildProgressInvocation(event: BuildProgressEvent): string =
   while singleLine.contains("  "):
     singleLine = singleLine.replace("  ", " ")
   statusLabel(event) & " " & singleLine.strip()
+
+proc nativeProgressPercent(event: BuildProgressEvent): int =
+  let executionScale = event.executionPlanKnown and
+    event.plannedExecutions > 0 and event.settled < event.total
+  if executionScale:
+    if event.plannedExecutions <= 0: 100
+    else:
+      min(100, (max(event.completedExecutions, 0) * 100) div
+        event.plannedExecutions)
+  elif event.total <= 0:
+    100
+  else:
+    let checked =
+      if event.checked > 0 or event.completed == 0: event.checked
+      else: event.completed
+    min(100, (max(checked, 0) * 100) div event.total)
+
+proc writeNativeProgress(renderer: BuildProgressRenderer;
+                         event: BuildProgressEvent) =
+  if not renderer.nativeProgress:
+    return
+  let state =
+    if event.status == asFailed: 2
+    elif event.running > 0 or event.ready > 0 or event.checked < event.total: 1
+    else: 1
+  stderr.write("\27]9;4;" & $state & ";" & $nativeProgressPercent(event) & "\7")
+
+proc clearNativeProgress(renderer: BuildProgressRenderer) =
+  if renderer.nativeProgress:
+    stderr.write("\27]9;4;0\7")
 
 proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
                               includeBar = true; barWidth = 20;
@@ -2326,6 +2430,7 @@ proc shouldEmitProgressUnit(event: BuildProgressEvent): bool =
 proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEvent) =
   if not renderer.enabled:
     return
+  renderer.writeNativeProgress(event)
   let width = progressLineWidth()
   case renderer.mode
   of bpmQuiet:
@@ -2352,6 +2457,7 @@ proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEve
       renderer.lastLen.inc
 
 proc finishProgress(renderer: var BuildProgressRenderer) =
+  renderer.clearNativeProgress()
   if renderer.enabled and renderer.lastLen > 0:
     stderr.write("\n")
     stderr.flushFile()

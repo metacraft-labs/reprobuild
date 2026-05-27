@@ -16,7 +16,7 @@ repro build --progress=quiet
 fixed-width progress bar on the left:
 
 ```text
-repro check[######....] build[#####.....] checked=12/28 42% built=9/28 exec=3 running=3 ready=5 started gcc -c ...
+repro ▕████████▓▓▓▓░░░░░░░░░░░░▏ checked=12/28 42% built=9/28 exec=3 running=3 ready=5 started gcc -c ...
 ```
 
 The progress fraction counts selected scheduler actions that have been checked
@@ -27,27 +27,41 @@ the selected graph to verify invalidation state, so it may finish at
 currently launched. `up-to-date` and `cache-hit` events did not execute the
 shown action during that build invocation.
 
-The default bar-line renderer shows two progress bars:
+The default bar-line renderer shows one overlaid progress bar:
 
-- `check[...]` tracks actions whose run/skip decision has been reached.
-- `build[...]` tracks actions whose build state has settled. Skipped
+- The solid segment tracks actions whose build state has settled. Skipped
   `up-to-date` and `cache-hit` actions settle immediately; launched actions
   settle when their command completes.
+- The striped segment overlays the additional actions whose run/skip decision
+  has been reached but whose execution, if any, has not settled yet.
+- The dim segment is the part of the selected graph that has not yet reached a
+  run/skip decision.
 
-While the scheduler is still discovering the run/skip decisions, both bars are
-scaled to the selected graph size. For example, if 25 of 40 actions have been
-checked and their decisions are "execute 4, skip 21", the check bar is `25/40`
-and the build bar is `21/40` until those four commands finish. Once all
-decisions are known and commands are still running, the second bar switches to
-execution scale and the `exec=X/Y` counter reports completed command executions
-out of planned command executions. This execution-scale mode can later use
-RunQuota duration estimates when the RunQuota protocol exposes an
+While the scheduler is still discovering run/skip decisions, the bar is scaled
+to the selected graph size. For example, if 25 of 40 actions have been checked
+and their decisions are "execute 4, skip 21", the solid segment is `21/40` and
+the solid-plus-striped overlay is `25/40` until those four commands finish. Once
+all decisions are known and commands are still running, the bar switches to a
+third color and an execution scale: `exec=X/Y` reports completed command
+executions out of planned command executions. This execution-scale mode can
+later use RunQuota duration estimates when the RunQuota protocol exposes an
 acknowledge-and-wait phase; without those estimates, it uses the planned
 execution count.
 
-On ANSI-capable terminals, progress bars use color by default: completed
-segments are highlighted, pending segments are dimmed, and the plain ASCII shape
-is preserved for logs and limited terminals. Set `NO_COLOR` or
+When ANSI color is enabled, the bar uses Unicode block glyphs by default. In
+non-color output, such as dumb terminals or most captured logs, it falls back to
+plain ASCII characters.
+
+Supported terminals can also show native progress in their tab, window, or
+taskbar UI through the OSC 9;4 sequence. Reprobuild emits this side-channel in
+`auto` mode only for terminals known to support it, including Windows Terminal,
+iTerm2, Ghostty, WezTerm, Konsole, ConEmu, and mintty. Set
+`REPROBUILD_TERMINAL_PROGRESS=never` to disable it or
+`REPROBUILD_TERMINAL_PROGRESS=always` to force it for an ANSI-capable terminal.
+
+On ANSI-capable terminals, progress bars use color by default: settled,
+checked-but-unsettled, execution-scale, and pending segments use distinct
+colors. Set `NO_COLOR` or
 `REPROBUILD_COLOR=never` to disable color in the default `auto` mode. Set
 `REPROBUILD_COLOR=always` to force color, including when output is captured by a
 wrapper that still interprets ANSI escapes. `REPROBUILD_COLOR=auto` is the

@@ -1494,7 +1494,7 @@ suite "e2e_local_reprobuild_project_build":
       getEnv("PATH"), extraArgs = ["--progress=bar-line"])
     check not progressOutput.contains(
       "providerCompileAction: __repro_provider_compile")
-    check progressOutput.contains("repro check[")
+    check progressOutput.contains("repro [")
     check progressOutput.contains("checked=4/4 100%")
 
     let quietOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
