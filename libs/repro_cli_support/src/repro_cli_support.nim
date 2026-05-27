@@ -74,7 +74,9 @@ proc renderUsage*(programName: string): string =
       "build progress: default=bar-line; aliases: " &
       "quiet=silent|none|off, line=ninja|single-line, " &
       "bar-line=bar|ninja-bar|auto|plain, lines=tup|per-line, " &
-      "lines-bar=tup-bar|per-line-bar, dots=dot"
+      "lines-bar=tup-bar|per-line-bar, dots=dot\n" &
+      "build color: auto by default; set NO_COLOR or REPROBUILD_COLOR=never " &
+      "to disable, REPROBUILD_COLOR=always to force"
   elif programName == "repro-fs-snoop":
     programName & " " & versionString() & "\nusage: " & programName &
       " [options] -- <command> [args...]\n       " & programName &
@@ -2001,6 +2003,7 @@ type
     enabled: bool
     mode: BuildProgressMode
     ansi: bool
+    color: bool
     lastLen: int
 
   BuildCommandOutcome = object
@@ -2089,14 +2092,60 @@ proc supportsAnsiProgress(): bool =
   isatty(stderr) and getEnv("NO_COLOR", "").len == 0 and
     getEnv("TERM", "") != "dumb"
 
+proc colorProgressEnabled(): bool =
+  let configured = getEnv("REPROBUILD_COLOR", "auto").normalize
+  case configured
+  of "0", "false", "no", "off", "never":
+    return false
+  of "1", "true", "yes", "on", "always":
+    return true
+  else:
+    if getEnv("NO_COLOR", "").len > 0:
+      return false
+    return supportsAnsiProgress()
+
 proc newBuildProgressRenderer(mode: BuildProgressMode): BuildProgressRenderer =
   BuildProgressRenderer(
     enabled: mode != bpmQuiet,
     mode: mode,
     ansi: supportsAnsiProgress(),
+    color: colorProgressEnabled(),
     lastLen: 0)
 
-proc progressBar(completed, total, width: int): string =
+proc ansi(code, text: string): string =
+  "\27[" & code & "m" & text & "\27[0m"
+
+proc visibleLen(text: string): int =
+  var i = 0
+  while i < text.len:
+    if text[i] == '\27' and i + 1 < text.len and text[i + 1] == '[':
+      i.inc(2)
+      while i < text.len and not (text[i] in {'A' .. 'Z', 'a' .. 'z'}):
+        i.inc
+      if i < text.len:
+        i.inc
+    else:
+      result.inc
+      i.inc
+
+proc takeVisiblePrefix(text: string; width: int): string =
+  var
+    i = 0
+    visible = 0
+    inAnsi = false
+  while i < text.len and (visible < width or inAnsi):
+    result.add(text[i])
+    if text[i] == '\27' and i + 1 < text.len and text[i + 1] == '[':
+      inAnsi = true
+    elif inAnsi and text[i] in {'A' .. 'Z', 'a' .. 'z'}:
+      inAnsi = false
+    elif not inAnsi:
+      visible.inc
+    i.inc
+  if result.contains("\27["):
+    result.add("\27[0m")
+
+proc progressBar(completed, total, width: int; color = false): string =
   let safeWidth = max(width, 1)
   let clampedCompleted =
     if total <= 0:
@@ -2108,17 +2157,22 @@ proc progressBar(completed, total, width: int): string =
       0
     else:
       min(safeWidth, (clampedCompleted * safeWidth) div total)
-  result = "["
+  let
+    openBracket = if color: ansi("38;5;244", "[") else: "["
+    closeBracket = if color: ansi("38;5;244", "]") else: "]"
+    filledGlyph = if color: ansi("38;5;42", "#") else: "#"
+    emptyGlyph = if color: ansi("38;5;240", ".") else: "."
+  result = openBracket
   for i in 0 ..< safeWidth:
-    result.add(if i < filled: '#' else: '.')
-  result.add("]")
+    result.add(if i < filled: filledGlyph else: emptyGlyph)
+  result.add(closeBracket)
 
 proc fitProgressLine(line: string; width: int): string =
-  if width <= 0 or line.len <= width:
+  if width <= 0 or line.visibleLen <= width:
     return line
   if width <= 3:
-    return line[0 ..< width]
-  line[0 ..< width - 3] & "..."
+    return line.takeVisiblePrefix(width)
+  line.takeVisiblePrefix(width - 3) & "..."
 
 proc statusLabel(event: BuildProgressEvent): string =
   case event.kind
@@ -2164,10 +2218,11 @@ proc buildProgressInvocation(event: BuildProgressEvent): string =
   statusLabel(event) & " " & singleLine.strip()
 
 proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
-                              includeBar = true; barWidth = 20): string =
+                              includeBar = true; barWidth = 20;
+                              color = false): string =
   let prefix =
     if includeBar:
-      "repro " & progressBar(event.completed, event.total, barWidth) &
+      "repro " & progressBar(event.completed, event.total, barWidth, color) &
         " " & buildProgressCounters(event)
     else:
       "repro " & buildProgressCounters(event)
@@ -2175,12 +2230,13 @@ proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
   let tail = " " & buildProgressInvocation(event)
   fitProgressLine(prefix & counters & tail, max(width, 20))
 
-proc formatBuildProgressBarLine(event: BuildProgressEvent; width: int): string =
+proc formatBuildProgressBarLine(event: BuildProgressEvent; width: int;
+                                color = false): string =
   let suffix = " " & buildProgressCounters(event) &
     " running=" & $event.running & " ready=" & $event.ready
   let barWidth = max(10, width - suffix.len - "repro ".len - 2)
   fitProgressLine("repro " & progressBar(event.completed, event.total,
-    barWidth) & suffix, max(width, 20))
+    barWidth, color) & suffix, max(width, 20))
 
 proc progressLineWidth(): int =
   min(max(terminalWidth(), 40), 160)
@@ -2215,7 +2271,7 @@ proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEve
       includeBar = false))
   of bpmBarLine:
     renderer.writeRedrawnProgress(formatBuildProgressLine(event, width,
-      includeBar = true, barWidth = 24))
+      includeBar = true, barWidth = 24, color = renderer.color))
   of bpmLines:
     stderr.writeLine(formatBuildProgressLine(event, width, includeBar = false))
     stderr.flushFile()
@@ -2223,7 +2279,8 @@ proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEve
   of bpmLinesBar:
     renderer.clearProgressLine()
     stderr.writeLine(formatBuildProgressLine(event, width, includeBar = false))
-    renderer.writeRedrawnProgress(formatBuildProgressBarLine(event, width))
+    renderer.writeRedrawnProgress(formatBuildProgressBarLine(event, width,
+      color = renderer.color))
   of bpmDots:
     if shouldEmitProgressUnit(event):
       stderr.write(".")

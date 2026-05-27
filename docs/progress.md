@@ -19,6 +19,14 @@ fixed-width progress bar on the left:
 repro [########............] 12/28 42% running=3 ready=5 started gcc -c ...
 ```
 
+On ANSI-capable terminals, progress bars use color by default: completed
+segments are highlighted, pending segments are dimmed, and the plain ASCII shape
+is preserved for logs and limited terminals. Set `NO_COLOR` or
+`REPROBUILD_COLOR=never` to disable color in the default `auto` mode. Set
+`REPROBUILD_COLOR=always` to force color, including when output is captured by a
+wrapper that still interprets ANSI escapes. `REPROBUILD_COLOR=auto` is the
+default.
+
 The progress line is redrawn with carriage returns. When captured by tools that
 do not interpret terminal control characters, every redraw may appear as a
 separate physical line. Commands shown in progress output are normalized to one

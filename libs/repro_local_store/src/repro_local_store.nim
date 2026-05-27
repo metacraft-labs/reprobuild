@@ -1,4 +1,4 @@
-import std/[options, os, sets, tables, times]
+import std/[options, os, sets, strutils, tables, times]
 import std/memfiles except open
 
 when defined(linux):
@@ -406,6 +406,18 @@ proc observeFile*(path: string; policy: FileFingerprintPolicy): FileFingerprint 
 proc observeFile*(path: string; policy: FileFingerprintPolicy;
                   cache: ptr FileMetadataCache): FileFingerprint =
   observeFileWithMetadata(path, policy, fingerprintMetadata(path, cache))
+
+proc isVolatileDevicePath(path: string): bool =
+  let normalized = path.replace('\\', '/')
+  normalized == "/dev" or normalized.startsWith("/dev/") or
+    normalized == "/proc" or normalized.startsWith("/proc/") or
+    normalized == "/sys" or normalized.startsWith("/sys/") or
+    normalized == "/run" or normalized.startsWith("/run/")
+
+proc isRecordableInput(input: FileFingerprint): bool =
+  if input.path.isVolatileDevicePath():
+    return false
+  input.metadata.kind != ffkOther
 
 proc digestHex*(digest: ContentDigest): string =
   toHex(digest.bytes)
@@ -1155,7 +1167,9 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
   result.weakFingerprint = weak
   result.policy = policy
   for path in inputPaths:
-    result.inputs.add(observeFile(path, policy, metadataCache))
+    let input = observeFile(path, policy, metadataCache)
+    if input.isRecordableInput():
+      result.inputs.add(input)
   result.strongFingerprint = computeStrongFingerprint(weak, result.inputs)
   result.outputPayloadKind =
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
