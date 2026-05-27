@@ -8,8 +8,13 @@
 ##
 ## Coverage:
 ##   * ``recognize`` returns true for the canonical fixture
+##   * ``recognize`` returns true when ``build.rs`` is present (M6 — the
+##     convention now claims the project and ``emitFragment`` routes to
+##     the Mode B crude fallback internally). Runs only when rustc/cargo
+##     are on PATH; without them the toolchain probe returns false for
+##     unrelated reasons and the positive-recognise assertion degrades to
+##     a checkpoint.
 ##   * ``recognize`` returns false when:
-##       - ``build.rs`` is present (forces M6 crude fallback)
 ##       - ``Cargo.toml`` declares ``[workspace]`` (deferred to M4+1)
 ##       - ``Cargo.toml`` is absent (not a Cargo project)
 ##       - ``uses:`` lists ``python`` instead of ``rust`` / ``cargo``
@@ -91,7 +96,12 @@ suite "rust convention M4":
     else:
       check conv.recognize(FixtureRoot, request)
 
-  test "recognize: negative — build.rs is present":
+  test "recognize: positive — build.rs is present (M6 relaxation)":
+    # Prior to M6 the convention rejected build.rs projects so the
+    # dispatch loop fell through to "no convention matched". M6 routes
+    # build.rs through the Mode B crude fallback inside emitFragment, so
+    # recognize now claims the project (provided rustc/cargo are on
+    # PATH — same toolchain-probe gate as the positive M4 test).
     let scratch = getTempDir() / "test_rust_convention_build_rs"
     if dirExists(scratch):
       removeDir(scratch)
@@ -118,7 +128,11 @@ suite "rust convention M4":
       removeDir(scratch)
     let conv = rust_convention.rustConvention()
     let request = dummyRequest(scratch)
-    check not conv.recognize(scratch, request)
+    if not rustToolchainAvailable():
+      checkpoint "rustc/cargo not on PATH — recognise will short-circuit to false"
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
 
   test "recognize: negative — [workspace] in Cargo.toml":
     let scratch = getTempDir() / "test_rust_convention_workspace"

@@ -80,6 +80,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/crude
 
 const
   ScratchDirName* = ".repro/build"
@@ -384,16 +385,24 @@ proc extractCrateInfo(projectRoot: string;
 
 proc rustRecognize(projectRoot: string;
                    request: ProviderGraphRequest): bool {.gcsafe.} =
-  ## Recognition contract (M4):
+  ## Recognition contract (post-M6):
   ##   * ``reprobuild.nim`` mentions ``rust`` or ``cargo`` in ``uses:``
   ##   * ``<projectRoot>/Cargo.toml`` exists
   ##   * one of ``src/main.rs``, ``src/lib.rs`` exists
-  ##   * ``<projectRoot>/build.rs`` does NOT exist
   ##   * ``Cargo.toml`` does NOT declare a ``[workspace]`` table
+  ##     (deferred to M4+1)
   ##   * ``Cargo.toml`` does NOT declare explicit ``[[bin]]`` or ``[lib]``
   ##     tables (multi-bin / mixed-target crates are deferred to M4+1)
   ##   * ``src/bin/*.rs`` does NOT exist (extra binaries deferred)
   ##   * ``rustc`` and ``cargo`` are on PATH (so emit can run them)
+  ##
+  ## **M6 change**: ``build.rs`` is no longer a rejection condition.
+  ## When present, the convention now CLAIMS the project at
+  ## ``recognize`` time and routes the work to the Mode B crude
+  ## fallback inside ``emitFragment``. This keeps dispatch order simple
+  ## — the Rust convention is the single owner of any Rust project that
+  ## passes the toolchain probe, and the routing decision (Mode A vs
+  ## Mode B) is internal to the convention.
   let cargoTomlPath = projectRoot / "Cargo.toml"
   if not fileExists(extendedPath(cargoTomlPath)):
     return false
@@ -401,12 +410,6 @@ proc rustRecognize(projectRoot: string;
   if source.len == 0:
     return false
   if not usesIncludesRustOrCargo(source):
-    return false
-  # Tier 2b: build.rs forces the M6 crude fallback. We must reject so
-  # dispatch falls through to whatever comes next (today that's the
-  # "no convention matched" diagnostic; once M6 lands it'll be the
-  # crude-mode emitter).
-  if fileExists(extendedPath(projectRoot / "build.rs")):
     return false
   if cargoTomlHasWorkspace(cargoTomlPath):
     return false
@@ -637,6 +640,67 @@ proc syntheticPackage(projectRoot: string;
     devEnvBodyHash: "",
     toolUses: @[])
 
+proc hasBuildRs(projectRoot: string): bool =
+  fileExists(extendedPath(projectRoot / "build.rs"))
+
+proc rustCrudeFallback(projectRoot: string;
+                       request: ProviderGraphRequest):
+                         GraphFragment {.gcsafe.} =
+  ## Mode B emitter for Rust projects that can't take the Mode A path
+  ## (today: any project carrying a ``build.rs``). Delegates to
+  ## ``cargo build --release --locked --offline`` under FS-snoop
+  ## monitoring per the M6 spec.
+  ##
+  ## ``--offline`` prevents Cargo from reaching crates.io during the
+  ## monitored run — any required crates must already live in the
+  ## local registry cache. This matches the M4 convention's stance on
+  ## hermetic builds and keeps the M6 outstanding-task about FS-snoop
+  ## interacting with Cargo's network access trivially safe (no
+  ## network access happens). ``--locked`` forces Cargo to use the
+  ## checked-in ``Cargo.lock`` rather than regenerate it, which is the
+  ## standard hermeticity flag for CI-grade builds.
+  ##
+  ## We still consult ``cargo metadata`` (offline, no-deps) to extract
+  ## the package name so the synthetic ``PackageDef`` and action id
+  ## carry the canonical crate identity. When that fails (malformed
+  ## manifest, etc.) we fall back to the project directory's basename
+  ## — the crude path is best-effort by design and shouldn't crash on
+  ## metadata-extraction quirks.
+  {.cast(gcsafe).}:
+    let cargoExe = cargoExecutable()
+    if cargoExe.len == 0:
+      raise newException(ValueError,
+        "rust convention: 'cargo' executable not on PATH; cannot run " &
+          "Mode B crude fallback")
+    var packageName = ""
+    try:
+      let metadata = runCargoMetadata(projectRoot, cargoExe)
+      if metadata.kind == JObject and "packages" in metadata and
+         metadata["packages"].kind == JArray and
+         metadata["packages"].len > 0 and
+         metadata["packages"][0].kind == JObject and
+         "name" in metadata["packages"][0]:
+        packageName = metadata["packages"][0]["name"].getStr()
+    except CatchableError:
+      packageName = ""
+    if packageName.len == 0:
+      packageName = projectRoot.extractFilename
+    if packageName.len == 0:
+      packageName = "rust-crude"
+    let argv = @[
+      cargoExe,
+      "build",
+      "--release",
+      "--locked",
+      "--offline",
+    ]
+    result = emitCrudeFragment(
+      projectRoot = projectRoot,
+      request = request,
+      packageName = packageName,
+      nativeBuildArgv = argv,
+      outputDirs = ["target"])
+
 proc rustEmitFragment(projectRoot: string;
                       request: ProviderGraphRequest):
                         GraphFragment {.gcsafe.} =
@@ -644,10 +708,19 @@ proc rustEmitFragment(projectRoot: string;
   ## per-crate info, register Pass 1 / Pass 2 via the DSL, and hand the
   ## whole thing to ``buildPackageFragment``.
   ##
+  ## **M6 routing**: when the project carries a ``build.rs``, the Mode A
+  ## graph would be wrong (rustc alone can't honour build-script env
+  ## vars / linker hints) so we delegate to ``rustCrudeFallback`` which
+  ## drives ``cargo build`` under FS-snoop monitoring. The routing
+  ## decision is internal to the convention — the engine never sees a
+  ## "Mode A failed, try Mode B" interaction.
+  ##
   ## The DSL runtime mutates module-level registries that aren't
   ## annotated ``gcsafe`` (they predate the provider host). Same shape
   ## as the Nim convention's ``cast(gcsafe)`` escape hatch.
   {.cast(gcsafe).}:
+    if hasBuildRs(projectRoot):
+      return rustCrudeFallback(projectRoot, request)
     let rustcExe = rustcExecutable()
     if rustcExe.len == 0:
       raise newException(ValueError,
@@ -678,4 +751,5 @@ proc rustConvention*(): LanguageConvention =
   LanguageConvention(
     name: "rust",
     recognize: rustRecognize,
-    emitFragment: rustEmitFragment)
+    emitFragment: rustEmitFragment,
+    crudeFallback: rustCrudeFallback)

@@ -47,6 +47,21 @@ type
     ## project. The convention owns the digest computation — callers
     ## treat the returned fragment as opaque and forward it on the wire.
 
+  CrudeFallbackProc* = proc(projectRoot: string;
+                            request: ProviderGraphRequest):
+                              GraphFragment {.closure, gcsafe.}
+    ## Optional Mode B fallback. Conventions whose ``emitFragment`` can
+    ## detect a fine-grained-incompatible shape (e.g. Rust's ``build.rs``
+    ## or Cargo workspaces) set this to a closure that delegates to the
+    ## native build tool via ``crude.emitCrudeFragment``. The convention's
+    ## own ``emitFragment`` is responsible for routing to the fallback;
+    ## the dispatch loop does NOT consult ``crudeFallback`` directly. The
+    ## proc is optional — leaving it ``nil`` means the convention does
+    ## not opt into Mode B and any non-Mode-A project the convention
+    ## ``recognize``s must be handled inside ``emitFragment``.
+    ##
+    ## See ``crude.emitCrudeFragment`` for the canonical helper.
+
   LanguageConvention* = object
     ## Snapshot of a single per-language convention. Conventions are
     ## value objects so the registry can hold them by value and tests
@@ -57,6 +72,8 @@ type
       ## ``recognize``, not by name.
     recognize*: RecognizeProc
     emitFragment*: EmitFragmentProc
+    crudeFallback*: CrudeFallbackProc
+      ## Optional — may be ``nil``. See ``CrudeFallbackProc``.
 
   ConventionRegistry* = object
     ## Append-only registry. ``conventions`` is exported as ``seq`` (not

@@ -18,7 +18,9 @@
 ## hint.
 
 import repro_standard_provider/convention
+import repro_standard_provider/crude
 import repro_standard_provider/project_intro
 
 export convention
+export crude
 export project_intro
