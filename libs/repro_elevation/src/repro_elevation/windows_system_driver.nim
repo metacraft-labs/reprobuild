@@ -33,7 +33,7 @@ import ./system_value
 import ./windows_system_parse
 
 when defined(windows):
-  import std/[osproc]
+  import std/[monotimes, os, osproc, times]
 
 # ---------------------------------------------------------------------------
 # Digest helper, shared with the fixture-driver canonical-bytes model.
@@ -343,7 +343,156 @@ proc applyWindowsOptionalFeature*(op: PrivilegedOperation):
 
 # ===========================================================================
 # windows.capability — Add/Get/Remove-WindowsCapability via PowerShell.
+#
+# CBS-finalization race (M69, the OpenSSH.Server symptom):
+# `Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'`
+# returns once `Get-WindowsCapability` reports `State=Installed`, but
+# CBS continues a finalization pass AFTER that point. During the tail
+# of finalization CBS may RESET a service the capability has just
+# registered (`sshd`) back to its default `StartType=Manual` /
+# `Status=Stopped`. A `windows.service` operation applied in the same
+# elevated batch immediately after the capability driver returns
+# therefore sees Set-Service / Start-Service exit 0 but the SCM
+# database snap back to defaults — exactly the M69 sshd gate failure.
+#
+# `applyWindowsCapability` therefore polls the capability's registered
+# service (if known) for STABILITY before returning: N consecutive
+# observations with the same `StartType` + `Status` over a short
+# interval. For capabilities whose service mapping is not in the table
+# below, a small blanket safety pause is taken instead. Cost is paid
+# only on the apply path; observe / drift-gate is untouched.
 # ===========================================================================
+
+const
+  CapabilityServiceMap: array[1, tuple[capPrefix, svc: string]] = [
+    # Match by capability-name PREFIX — the `~~~~0.0.1.0`
+    # version-suffix varies between releases of a capability.
+    (capPrefix: "OpenSSH.Server~~~~", svc: "sshd")]
+    # Add additional `(capability-prefix, service-name)` entries here
+    # as further capability/service races are identified in the field.
+
+  CapabilityServiceStableObservations = 5
+    ## N consecutive equal observations needed before the stability
+    ## loop exits — chosen so CBS's last reset (if any) has time to
+    ## land before we declare stability.
+
+  CapabilityServiceStableIntervalMs = 1000
+    ## Per-observation interval (milliseconds) inside the stability
+    ## loop. Five 1 s samples => ~5 s steady-state hold before exit.
+
+  CapabilityServiceStableTimeoutSec = 30
+    ## Overall deadline (seconds) for the stability loop. If CBS is
+    ## still oscillating the service's state after this, the driver
+    ## fails closed with a diagnostic naming the observed history.
+
+  UnknownCapabilityPostInstallPauseMs = 3000
+    ## Blanket safety wait (milliseconds) taken AFTER `State=Installed`
+    ## for any capability whose service mapping is not in
+    ## `CapabilityServiceMap`. Short enough not to bloat every
+    ## capability install; long enough to dodge most micro-races.
+    ## If a real capability later proves to need a longer tail, add
+    ## an entry to `CapabilityServiceMap` instead of growing this
+    ## constant.
+
+when defined(windows):
+  type
+    CapabilityServiceSampleRun = object
+      ## One entry in the stability-loop's observed-state history:
+      ## a canonical service-state string and the number of
+      ## consecutive samples that observed it.
+      sample: string
+      count: int
+
+  proc serviceProbeScript(name: string): string
+    ## Forward-declared so the capability-finalization wait below can
+    ## reuse the same deterministic `Get-Service` probe `observeWindows
+    ## Service` parses. The definition lives in the windows.service
+    ## section further down.
+
+  proc lookupCapabilityService(capName: string): string =
+    ## Return the SCM service name a Windows Capability is known to
+    ## register, or `""` if the capability is not in
+    ## `CapabilityServiceMap`. Matching is by prefix because the
+    ## `~~~~0.0.1.0` version suffix of a capability name varies.
+    for entry in CapabilityServiceMap:
+      if capName.startsWith(entry.capPrefix):
+        return entry.svc
+    return ""
+
+  proc awaitCapabilityServiceStable(capName, svcName: string) =
+    ## Poll `svcName`'s (StartType, Status) until it has been
+    ## observed unchanged for `CapabilityServiceStableObservations`
+    ## consecutive samples taken `CapabilityServiceStableInterval`
+    ## apart, OR until the overall deadline elapses. The
+    ## observation pair is taken with the same `serviceProbeScript`
+    ## the public `observeWindowsService` uses, so a parser
+    ## regression flags both call sites.
+    ##
+    ## On state CHANGE the run counter resets and the most-recent
+    ## sample becomes the new reference — the loop never declares
+    ## stability across a transition. On overall deadline the proc
+    ## raises `EProtocol` with the observed (sample, count) history
+    ## so the apply log records exactly what CBS was doing.
+    let deadline = getMonoTime() +
+      initDuration(seconds = CapabilityServiceStableTimeoutSec)
+    var reference: string = ""           ## last sample (canonical form)
+    var runCount = 0
+    var history: seq[CapabilityServiceSampleRun] = @[]
+    while true:
+      let (output, _) = runPowerShell(serviceProbeScript(svcName))
+      let obs = parseServiceQuery(output)
+      let sample = canonicalServiceState(obs)
+      if sample == reference:
+        inc runCount
+        if history.len > 0:
+          history[^1].count = runCount
+      else:
+        reference = sample
+        runCount = 1
+        history.add(CapabilityServiceSampleRun(sample: sample, count: 1))
+      if runCount >= CapabilityServiceStableObservations:
+        return
+      if getMonoTime() >= deadline:
+        var trace = ""
+        for i, run in history:
+          if i > 0: trace.add(" -> ")
+          trace.add(run.sample & " x" & $run.count)
+        raiseProtocol("windows.capability '" & capName &
+          "' installed but its associated service '" & svcName &
+          "' state is still oscillating after " &
+          $CapabilityServiceStableTimeoutSec & " s: " & trace &
+          " (the broker fails closed rather than returning a " &
+          "transient post-install observation a same-apply " &
+          "windows.service operation would race against)")
+      sleep(CapabilityServiceStableIntervalMs)
+
+  proc awaitCapabilityFinalization(op: PrivilegedOperation;
+                                   restartNeeded: bool) =
+    ## Wait for CBS post-install finalization to settle before the
+    ## driver returns. Only runs on the INSTALL path AND only when
+    ## the apply did not require a reboot (a `RestartNeeded` install
+    ## has not yet completed in-place; further work happens after the
+    ## operator reboots, so there is nothing to wait on here).
+    if not op.capabilityInstall or restartNeeded:
+      return
+    # Re-observe the capability state directly — the result-shape of
+    # `observeWindowsCapability` is a digest, which collapses
+    # `Installed` / `InstallPending` / `Staged` into one bucket. Only
+    # a true `Installed` triggers the finalization wait; a still-
+    # pending install means CBS has not even reached the race yet.
+    let (probe, _) = runPowerShell(
+      "Get-WindowsCapability -Online -Name " &
+      psQuote(op.capabilityName) & " | Format-List State")
+    if parseCapabilityState(probe) != capsInstalled:
+      return
+    let svc = lookupCapabilityService(op.capabilityName)
+    if svc.len > 0:
+      awaitCapabilityServiceStable(op.capabilityName, svc)
+    else:
+      # No registered-service entry for this capability — take the
+      # blanket safety pause. See the constant's doc comment for the
+      # rationale.
+      sleep(UnknownCapabilityPostInstallPauseMs)
 
 proc observeWindowsCapability*(op: PrivilegedOperation):
     ObservedOperationState =
@@ -380,6 +529,12 @@ proc applyWindowsCapability*(op: PrivilegedOperation):
         (if op.capabilityInstall: "install" else: "uninstall") & " of '" &
         op.capabilityName & "' failed: " & output.strip())
     result.restartNeeded = capabilityRestartNeeded(output)
+    # CBS post-install finalization wait. See the section banner above
+    # for the OpenSSH.Server symptom and the design rationale. Only
+    # the install path on a non-reboot apply enters this — uninstall
+    # cannot clobber a registered service, and a `RestartNeeded`
+    # install has not yet completed in-place.
+    awaitCapabilityFinalization(op, result.restartNeeded)
     result.state = observeWindowsCapability(op)
   else:
     raiseNotImplementedPlatform("windows.capability apply")
