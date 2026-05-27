@@ -61,8 +61,15 @@ The codebase already has pieces of this model:
   recorded project/Reprobuild input file lists from that artifact and restats
   those paths before reusing the interface, avoiding runner compilation and
   content hashing. It is not yet a normal monitored action.
-- Tool identity resolution has a cache keyed by interface/tool metadata, but it
-  is not yet recorded as an action-cache entry with dependency evidence.
+- Tool identity resolution has a cache keyed by interface/tool metadata. Nix
+  provisioning also has a lower-level materialization receipt cache under the
+  unified tool store: the first stage computes the effective Nix package plan,
+  and each package plan stores a reusable receipt containing the realized
+  `/nix/store` paths, selected executable, unified-store pointer, and probe
+  results. This lets another project or a changed project interface reuse the
+  same package materialization without invoking `nix build` again. These caches
+  are still not recorded as ordinary action-cache entries with monitored
+  dependency evidence.
 - Provider compilation is already represented as a build action.
 - Provider graph refresh stores a binary snapshot and tracks provider
   evaluation file reads and directory enumerations. The CLI can reuse this

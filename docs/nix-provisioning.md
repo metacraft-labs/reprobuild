@@ -49,6 +49,29 @@ The resulting tool profile records the effective selector, realized
 catalog metadata remains in the project interface so downstream inspection can
 explain why a particular nixpkgs source was chosen.
 
+## Materialization Receipts
+
+Nix provisioning is split into two logical stages:
+
+1. Resolve the catalog entry into an effective package plan: selector, pinned
+   nixpkgs source, declared executable, expression-file digest when applicable,
+   platform, and configured probe specs.
+2. Materialize that package plan and record a reusable receipt.
+
+The materialization receipt is stored below the Reprobuild unified tool store
+and contains the realized `/nix/store` outputs, the selected executable, the
+unified-store pointer receipt, executable probe results, and the resulting tool
+profile fingerprint. The receipt key is package-plan scoped, not project
+scoped. If another project requests the same package plan, or if the project
+interface changes without changing that package plan, Reprobuild validates that
+the recorded paths still exist and reuses the receipt without invoking
+`nix build`.
+
+This cache is an early implementation of the bootstrap build-graph split. The
+long-term form should expose the plan decision and package materializations as
+ordinary bootstrap actions with monitored dependency evidence and
+`why`/introspection reporting.
+
 ## Catalog Construction Policy
 
 For each package version, choose the newest nixpkgs commit that satisfies all of

@@ -186,6 +186,8 @@ type
 const
   ArtifactMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')), byte(ord('P'))]
   ArtifactVersion = 6'u16
+  NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
+  NixMaterializationVersion = 1'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -862,10 +864,169 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
   let inserted = store.insertPrefixOrIgnore(row)
   (prefixId: prefixId, inserted: inserted)
 
+proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile)
+proc readProfile(bytes: openArray[byte]; pos: var int;
+                 version: uint16): PathOnlyToolProfile
+
+proc materializationKeyFileComponent(value: string): string =
+  safeStoreSegment(value[0 .. min(value.high, 31)], "nix-materialization") &
+    "-" & value
+
+proc nixMaterializationExpressionDigest(path: string): string =
+  if path.len == 0:
+    return ""
+  if not fileExists(extendedPath(path)):
+    return "missing"
+  blake3.toHex(blake3.digest(readFile(extendedPath(path))))
+
+proc nixMaterializationCacheKey(useDef: InterfaceToolUse;
+                                plan: NixAcquisitionPlan): string =
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.nix.materialization.v1")
+  payload.writeString(hostOS)
+  payload.writeString(hostCPU)
+  payload.writeString(useDef.packageSelector)
+  payload.writeString(useDef.executableName)
+  payload.writeString(plan.packageSelector)
+  payload.writeString(plan.packageId)
+  payload.writeString(plan.nixSelector)
+  payload.writeString(plan.declaredExecutablePath)
+  payload.writeString(plan.nixExpressionFile)
+  payload.writeString(nixMaterializationExpressionDigest(plan.nixExpressionFile))
+  payload.writeString(plan.nixpkgsRef)
+  payload.writeString(plan.nixpkgsRev)
+  payload.writeString(plan.nixpkgsNarHash)
+  payload.writeString(plan.lockIdentity)
+  let probes = configuredProbes(useDef.packageSelector, useDef.executableName)
+  payload.writeU32Le(uint32(probes.len))
+  for probe in probes:
+    payload.writeByte(byte(ord(probe.kind)))
+    payload.writeString(probe.name)
+    payload.writeStringSeq(probe.args)
+  blake3.toHex(blake3.digest(toByteString(payload)))
+
+proc nixMaterializationCachePath(storeRoot, key: string): string =
+  storeRoot / "nix-materialization-cache" /
+    (materializationKeyFileComponent(key) & ".rbnm")
+
+proc executableFileUsable(path: string): bool =
+  if not fileExists(extendedPath(path)):
+    return false
+  let permissions = getFilePermissions(extendedPath(path))
+  {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(it in permissions)
+
+proc nixMaterializationProfileMatches(profile: PathOnlyToolProfile;
+                                      useDef: InterfaceToolUse;
+                                      plan: NixAcquisitionPlan): bool =
+  if profile.installMethod != "nix":
+    return false
+  if profile.packageSelector != useDef.packageSelector:
+    return false
+  if profile.packageId != plan.packageId:
+    return false
+  if profile.nixSelector != plan.nixSelector:
+    return false
+  if profile.declaredExecutablePath != plan.declaredExecutablePath:
+    return false
+  if profile.nixExpressionFile != plan.nixExpressionFile:
+    return false
+  if profile.lockIdentity != plan.lockIdentity:
+    return false
+  if profile.executableName != useDef.executableName:
+    return false
+  if profile.selectedStorePath.len == 0 or
+      not dirExists(extendedPath(profile.selectedStorePath)):
+    return false
+  if profile.realizationBoundary.len == 0 or
+      not dirExists(extendedPath(profile.realizationBoundary)):
+    return false
+  if profile.resolvedExecutablePath.len == 0 or
+      not executableFileUsable(profile.resolvedExecutablePath):
+    return false
+  if profile.realizedStorePaths.len == 0:
+    return false
+  for storePath in profile.realizedStorePaths:
+    if storePath.len == 0 or not dirExists(extendedPath(storePath)):
+      return false
+  for searchPath in profile.pathSearchList:
+    if searchPath.len == 0 or not dirExists(extendedPath(searchPath)):
+      return false
+  if profile.profileFingerprint != profileFingerprintFor(profile):
+    return false
+  true
+
+proc encodeNixMaterializationProfile(profile: PathOnlyToolProfile): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeProfile(profile)
+  result.add(NixMaterializationMagic)
+  result.writeU16Le(NixMaterializationVersion)
+  result.writeU16Le(ArtifactVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeNixMaterializationProfile(bytes: openArray[byte]):
+    PathOnlyToolProfile =
+  if bytes.len < 12:
+    raiseEnvelopeError(eeMalformed, "truncated nix materialization receipt")
+  for i in 0 ..< NixMaterializationMagic.len:
+    if bytes[i] != NixMaterializationMagic[i]:
+      raiseEnvelopeError(eeUnknownMagic,
+        "unknown nix materialization receipt magic")
+  var pos = 4
+  let receiptVersion = readU16Le(bytes, pos)
+  if receiptVersion != NixMaterializationVersion:
+    raiseEnvelopeError(eeUnsupportedVersion,
+      "unsupported nix materialization receipt version")
+  let profileVersion = readU16Le(bytes, pos)
+  if profileVersion < 1'u16 or profileVersion > ArtifactVersion:
+    raiseEnvelopeError(eeUnsupportedVersion,
+      "unsupported nix materialization profile version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raiseEnvelopeError(eeMalformed,
+      "nix materialization receipt payload length mismatch")
+  result = readProfile(bytes, pos, profileVersion)
+  if pos != bytes.len:
+    raiseEnvelopeError(eeMalformed,
+      "trailing nix materialization receipt bytes")
+
+proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
+                                  plan: NixAcquisitionPlan):
+    tuple[hit: bool; profile: PathOnlyToolProfile] =
+  if storeRoot.len == 0:
+    return
+  let key = nixMaterializationCacheKey(useDef, plan)
+  let path = nixMaterializationCachePath(storeRoot, key)
+  if not fileExists(extendedPath(path)):
+    return
+  try:
+    let profile = decodeNixMaterializationProfile(
+      fromByteString(readFile(extendedPath(path))))
+    if not profile.nixMaterializationProfileMatches(useDef, plan):
+      return
+    return (hit: true, profile: profile)
+  except CatchableError:
+    return
+
+proc writeCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
+                                   plan: NixAcquisitionPlan;
+                                   profile: PathOnlyToolProfile) =
+  if storeRoot.len == 0:
+    return
+  let key = nixMaterializationCacheKey(useDef, plan)
+  let path = nixMaterializationCachePath(storeRoot, key)
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path),
+    toByteString(encodeNixMaterializationProfile(profile)))
+
 proc resolveNixTool*(useDef: InterfaceToolUse;
                      storeRoot = ""): PathOnlyToolProfile =
   let plan = nixAcquisitionPlan(useDef)
   let selector = plan.nixSelector
+  let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
+  if cached.hit:
+    return cached.profile
+
   var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
   if plan.nixExpressionFile.len > 0:
     nixArgs.add("--file")
@@ -960,6 +1121,7 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
     result.realizedStorePaths.add(unified.absolutePath)
 
   result.profileFingerprint = profileFingerprintFor(result)
+  writeCachedNixMaterialization(storeRoot, useDef, plan, result)
 
 proc normalizedSha256(value: string): string =
   result = value.strip().toLowerAscii()
