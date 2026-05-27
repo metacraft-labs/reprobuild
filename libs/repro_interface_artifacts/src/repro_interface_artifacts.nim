@@ -973,7 +973,8 @@ proc sameSourceFile(a, b: string): bool =
 const
   RegisteredStandardConventionToolchains* = ["nim", "rust", "cargo", "go",
     "python3", "python", "uv",
-    "node", "typescript", "tsx", "swc", "esbuild"]
+    "node", "typescript", "tsx", "swc", "esbuild",
+    "gcc", "clang", "make", "ar", "autoconf", "automake"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
     ## Tier 2b standard provider. This list MUST stay in sync with the
@@ -985,11 +986,15 @@ const
     ## which keys on the ``go.mod`` + ``main.go`` layout. ``"python3"`` /
     ## ``"python"`` / ``"uv"`` (M15) route to the Python convention plugin
     ## which keys on ``pyproject.toml`` + a recognised PEP 517 build
-    ## backend (hatchling / flit_core / setuptools). Mismatches break in
-    ## the engine-side fall-back path: the engine will dispatch to the
-    ## provider, the provider will reply "no convention matched", and the
-    ## build fails loudly — preferable to silently routing through the
-    ## slow path when the user expects the fast path.
+    ## backend (hatchling / flit_core / setuptools). ``"gcc"`` / ``"clang"``
+    ## / ``"make"`` / ``"ar"`` (M17) route to the C/C++ Make convention;
+    ## ``"autoconf"`` / ``"automake"`` (M17) route to the C/C++ Autotools
+    ## convention which keys on ``configure.ac`` + ``Makefile.am`` at the
+    ## project root. Mismatches break in the engine-side fall-back path:
+    ## the engine will dispatch to the provider, the provider will reply
+    ## "no convention matched", and the build fails loudly — preferable to
+    ## silently routing through the slow path when the user expects the
+    ## fast path.
 
 proc usesIncludesRegisteredConvention(sourceFile: string): bool =
   ## Heuristic line scan of ``reprobuild.nim`` for any toolchain in

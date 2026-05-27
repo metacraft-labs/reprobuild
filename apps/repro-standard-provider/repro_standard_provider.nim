@@ -30,6 +30,8 @@ import repro_standard_provider/conventions/rust as rust_convention
 import repro_standard_provider/conventions/go as go_convention
 import repro_standard_provider/conventions/python as python_convention
 import repro_standard_provider/conventions/javascript_typescript as jsts_convention
+import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
+import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -128,20 +130,30 @@ when defined(reproProviderMode):
   # Register the language convention plugins this binary ships with.
   # The Nim convention is the first one to land (M3); the Rust
   # convention (M4) follows, the Go convention (M5) after that, the
-  # Python convention (M15), and the JavaScript/TypeScript convention
-  # (M16) is the latest. Future milestones add C-Make / Autotools / etc.
-  # here in registration-order which is also match-order. The list of
-  # registered conventions MUST stay in sync with
-  # ``RegisteredStandardConventionToolchains`` in
+  # Python convention (M15), the JavaScript/TypeScript convention
+  # (M16), and the C/C++ Make + Autotools conventions (M17) close out
+  # the milestone series' Mode A first wave. Future milestones add
+  # CMake direct / etc. here in registration-order which is also
+  # match-order. The list of registered conventions MUST stay in sync
+  # with ``RegisteredStandardConventionToolchains`` in
   # ``libs/repro_interface_artifacts/src/repro_interface_artifacts.nim``
   # — the engine should only mark a package as standardBuildEligible
   # when at least one registered convention is plausibly going to match
   # it.
+  #
+  # Registration order between c-cpp-make and c-cpp-autotools matters:
+  # c-cpp-autotools is registered FIRST so a project carrying both a
+  # Makefile (generated or hand-written) and ``configure.ac`` /
+  # ``Makefile.am`` routes through the Autotools convention. The
+  # c-cpp-make ``recognize`` separately rejects projects with Autotools
+  # artefacts so the order is defensive in either direction.
   addDefaultConvention(nim_convention.nimConvention())
   addDefaultConvention(rust_convention.rustConvention())
   addDefaultConvention(go_convention.goConvention())
   addDefaultConvention(python_convention.pythonConvention())
   addDefaultConvention(jsts_convention.javaScriptTypeScriptConvention())
+  addDefaultConvention(c_cpp_autotools_convention.cCppAutotoolsConvention())
+  addDefaultConvention(c_cpp_make_convention.cCppMakeConvention())
 
   proc runStandardProvider(): int =
     try:

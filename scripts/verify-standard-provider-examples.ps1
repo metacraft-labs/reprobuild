@@ -22,7 +22,7 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set, post-M16):
+# Expected to PASS (the known-working set, post-M17):
 #   nim/binary, nim/multi-binary,
 #   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
@@ -31,15 +31,18 @@
 #   python/library-pure, python/console-script,
 #   javascript-typescript/typescript-library,
 #   javascript-typescript/typescript-cli,
-#   javascript-typescript/node-server
+#   javascript-typescript/node-server,
+#   c-cpp-make/binary, c-cpp-make/library-static,
+#   c-cpp-autotools/hello-binary (when autotools toolchain available)
 #
 # Expected to KNOWN-FAIL: (none — M14 graduated go/library + go/multi-binary;
 #   M15 graduated python/library-pure + python/console-script;
-#   M16 graduated all three javascript-typescript fixtures)
+#   M16 graduated all three javascript-typescript fixtures;
+#   M17 graduated all three c-cpp fixtures)
 #
-# Expected to SKIP (no Mode A convention exists yet):
-#   c-cpp-make/binary, c-cpp-make/library-static,
-#   c-cpp-autotools/hello-binary
+# Expected to SKIP: (only when toolchain is missing —
+#   c-cpp-autotools/hello-binary SKIPs when autoreconf is unavailable on
+#   the host; gates on Windows boxes without MSYS2 autoconf/automake).
 #
 # Per reprobuild-specs/Standard-Provider-Implementation.milestones.org §M9.
 # ==============================================================================
@@ -225,10 +228,74 @@ function Probe-Toolchain([string]$language) {
       return @{ Available = $false; Reason = "'node' not on PATH and not under D:/metacraft-dev-deps/node/" }
     }
     'c-cpp-make' {
-      return @{ Available = $false; Reason = "Mode A not implemented for c-cpp-make (M8 outstanding)" }
+      # M17: the C/C++ Make convention is registered. Probe for a C
+      # compiler (gcc or clang) AND ``ar`` AND ``make`` (or
+      # ``mingw32-make`` on Windows). The convention itself only
+      # requires gcc/clang at recognize time but the M9 gate's exit
+      # signal benefits from including ``ar``/``make`` so a host
+      # missing them SKIPs cleanly instead of FAILing.
+      $ccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $ccCmd) {
+        $ccCmd = Get-Command clang -ErrorAction SilentlyContinue
+      }
+      if (-not $ccCmd) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH" }
+      }
+      $arCmd = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $arCmd) {
+        return @{ Available = $false; Reason = "'ar' not on PATH" }
+      }
+      $makeCmd = Get-Command make -ErrorAction SilentlyContinue
+      if (-not $makeCmd) {
+        $makeCmd = Get-Command mingw32-make -ErrorAction SilentlyContinue
+      }
+      if (-not $makeCmd) {
+        return @{ Available = $false; Reason = "neither 'make' nor 'mingw32-make' on PATH" }
+      }
+      return @{ Available = $true; Reason = "cc=$($ccCmd.Source); ar=$($arCmd.Source); make=$($makeCmd.Source)" }
     }
     'c-cpp-autotools' {
-      return @{ Available = $false; Reason = "Mode A not implemented for c-cpp-autotools (M8 outstanding)" }
+      # M17: the C/C++ Autotools convention is registered. Probe for
+      # the full autotools stack — gcc/clang + make + sh + (autoreconf
+      # OR a committed ``configure`` in the fixture). When the host's
+      # PATH is missing make/sh but the managed MSYS2 install carries
+      # them, prepend the MSYS2 ``usr/bin`` directory so subsequent
+      # ``Get-Command`` lookups resolve them (env.ps1 only PATH-extends
+      # the MinGW64 ``mingw64/bin``; autotools needs the POSIX side too).
+      $msys2UsrBin = 'D:\metacraft-dev-deps\msys2\msys64\usr\bin'
+      if ((Test-Path -LiteralPath (Join-Path $msys2UsrBin 'make.exe')) -and
+          (Test-Path -LiteralPath (Join-Path $msys2UsrBin 'sh.exe'))) {
+        if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $msys2UsrBin })) {
+          $env:PATH = "$msys2UsrBin;$env:PATH"
+        }
+      }
+      $ccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $ccCmd) {
+        $ccCmd = Get-Command clang -ErrorAction SilentlyContinue
+      }
+      if (-not $ccCmd) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH" }
+      }
+      $makeCmd = Get-Command make -ErrorAction SilentlyContinue
+      if (-not $makeCmd) {
+        $makeCmd = Get-Command mingw32-make -ErrorAction SilentlyContinue
+      }
+      if (-not $makeCmd) {
+        return @{ Available = $false; Reason = "neither 'make' nor 'mingw32-make' on PATH" }
+      }
+      $shCmd = Get-Command sh -ErrorAction SilentlyContinue
+      if (-not $shCmd) {
+        return @{ Available = $false; Reason = "'sh' not on PATH (POSIX shell required for autotools)" }
+      }
+      # The M17 hello-binary fixture is repo-checkout shape (no
+      # committed ``configure``), so autoreconf is REQUIRED to
+      # regenerate the GNU build machinery before configure can run.
+      # When autoreconf is missing the harness SKIPs cleanly.
+      $autoreconfCmd = Get-Command autoreconf -ErrorAction SilentlyContinue
+      if (-not $autoreconfCmd) {
+        return @{ Available = $false; Reason = "'autoreconf' not on PATH (autoconf + automake required for repo-checkout shape)" }
+      }
+      return @{ Available = $true; Reason = "cc=$($ccCmd.Source); make=$($makeCmd.Source); sh=$($shCmd.Source); autoreconf=$($autoreconfCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -498,6 +565,54 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         Greeting = $null
       })
     }
+    'c-cpp-make/binary' {
+      # M17: c-cpp-make/binary. The convention emits per-source compile
+      # + link actions; the binary lands at
+      # ``.repro/build/<member>/<member>[.exe]`` (member name comes from
+      # ``executable hello`` in reprobuild.nim).
+      $member = 'hello'
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
+        Greeting = 'hello from c-cpp-make-binary'
+      })
+    }
+    'c-cpp-make/library-static' {
+      # M17: c-cpp-make/library-static. The convention emits per-source
+      # compile + ``ar rcs`` archive actions; the archive lands at
+      # ``.repro/build/<member>/lib<member>.a`` (member name comes from
+      # ``library greet`` in reprobuild.nim). No greeting check — an
+      # archive isn't runnable; the validate script links a tiny test
+      # consumer separately.
+      $member = 'greet'
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ('lib' + $member + '.a')))
+        Greeting = $null
+      })
+    }
+    'c-cpp-autotools/hello-binary' {
+      # M17: c-cpp-autotools/hello-binary. The convention emits a
+      # configure action + a make action; in-tree automake build leaves
+      # the executable at the project root.
+      $candidates = @('hello.exe', 'hello')
+      $output = $null
+      foreach ($candidate in $candidates) {
+        $candidatePath = Join-Path $fixtureDir $candidate
+        if (Test-Path -LiteralPath $candidatePath) {
+          $output = $candidatePath
+          break
+        }
+      }
+      # Predict the Windows .exe form when no prior build has produced
+      # anything yet — the harness re-checks existence after the build
+      # runs.
+      if (-not $output) {
+        $output = Join-Path $fixtureDir 'hello.exe'
+      }
+      return @(@{
+        Path     = $output
+        Greeting = 'hello from c-cpp-autotools-hello-binary'
+      })
+    }
     default {
       return $null
     }
@@ -563,6 +678,32 @@ foreach ($rel in $PopulatedExamples) {
     $cargoTarget = Join-Path $fixtureDir 'target'
     if (Test-Path -LiteralPath $cargoTarget) {
       Remove-Item -LiteralPath $cargoTarget -Recurse -Force
+    }
+  }
+  # The autotools convention's actions run ``autoreconf -fi`` +
+  # ``./configure`` + ``make``. The M17 fixture ships only the source
+  # files (configure.ac + Makefile.am + src/); every other file is
+  # generated. Wipe the generated set so each gate is reproducible.
+  if ($language -eq 'c-cpp-autotools') {
+    foreach ($leftover in @('Makefile', 'Makefile.in', 'config.log',
+        'config.status', 'aclocal.m4', 'configure', 'confdefs.h',
+        'hello', 'hello.exe')) {
+      $leftoverPath = Join-Path $fixtureDir $leftover
+      if (Test-Path -LiteralPath $leftoverPath) {
+        Remove-Item -LiteralPath $leftoverPath -Force -ErrorAction SilentlyContinue
+      }
+    }
+    foreach ($leftoverDir in @('autom4te.cache', 'build-aux', '.deps',
+        'src/.deps')) {
+      $leftoverDirPath = Join-Path $fixtureDir $leftoverDir
+      if (Test-Path -LiteralPath $leftoverDirPath) {
+        Remove-Item -LiteralPath $leftoverDirPath -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+    # Wipe any per-source .o files automake leaves under src/.
+    $srcObjs = Get-ChildItem -LiteralPath (Join-Path $fixtureDir 'src') -Filter '*.o' -ErrorAction SilentlyContinue
+    foreach ($obj in $srcObjs) {
+      Remove-Item -LiteralPath $obj.FullName -Force -ErrorAction SilentlyContinue
     }
   }
 
