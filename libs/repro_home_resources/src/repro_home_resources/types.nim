@@ -56,6 +56,18 @@ type
     lpPreventDestroy = "preventDestroy"
     lpPreventRecreate = "preventRecreate"
 
+  ResourceDependency* = tuple[kind: string, name: string]
+    ## M82 home-scope follow-up: a single `depends_on` edge —
+    ## `"kind:name"` parsed into its two components. The match against
+    ## another resource in the same profile uses `kind == $resource.kind`
+    ## AND `name == resource.address` so the syntax stays uniform
+    ## across every home-scope resource kind. Parallels the system-scope
+    ## `ResourceDependency` in
+    ## `libs/repro_infra/src/repro_infra/profile.nim`; the two will
+    ## logically converge once the home + system planners share a
+    ## graph module, but today they remain parallel so this PR can
+    ## land without touching system-scope code.
+
   RegistryValuePayload* = object
     ## The typed value the driver writes to a single registry slot.
     ## All kinds collapse to a `kind` + `bytes` representation in
@@ -75,8 +87,19 @@ type
     ## the real world. The address is the stable identity used to
     ## look up the previous binding; the variant carries the
     ## kind-specific desired state.
+    ##
+    ## `dependsOn` carries the user-declared dependency edges from the
+    ## stanza's optional `depends_on = ["kind:name", ...]` attribute
+    ## (M82 home-scope follow-up). The home planner combines these
+    ## EXPLICIT edges with IMPLICIT edges inferred from the
+    ## `home_producer_consumer_map.ProducerConsumerMap` (today empty —
+    ## no home-scope producer/consumer pairs are known) to build the
+    ## apply dependency graph and topologically order the emitted
+    ## actions. Empty seq is the common case — most home resources
+    ## have no declared dependencies.
     address*: string
     lifecyclePolicy*: LifecyclePolicy
+    dependsOn*: seq[ResourceDependency]
     case kind*: ResourceKind
     of rkFsManagedBlock:
       hostFilePath*: string
@@ -272,6 +295,31 @@ proc lifecyclePolicyFromString*(s: string): LifecyclePolicy =
   else:
     raise newException(ValueError,
       "unknown lifecyclePolicy: '" & s & "'")
+
+# ---------------------------------------------------------------------------
+# Dependency-graph helpers — the kind / name pair a `depends_on` entry
+# matches against. The home-scope convention is `name == resource.address`
+# (the parser-declared stable id), which matches how `home.nim` users
+# would naturally name a dependency target (`fs.managedBlock:bashrc`
+# refers to a `fs.managedBlock bashrc:` declaration). M82 home-scope
+# follow-up.
+# ---------------------------------------------------------------------------
+
+proc resourceKindTag*(r: Resource): string =
+  ## The string form of the resource's kind — the LEFT half of the
+  ## `"kind:name"` pair a `depends_on` entry uses. Matches `$r.kind`
+  ## exactly because the enum string values ARE the profile-syntax
+  ## kind tags (e.g. `"fs.managedBlock"`); this proc names the
+  ## convention.
+  $r.kind
+
+proc resourceName*(r: Resource): string =
+  ## The "primary name" of the resource — the RIGHT half of the
+  ## `"kind:name"` pair a `depends_on` entry uses. Home scope uses the
+  ## resource's declaration ADDRESS as the dependency-target name
+  ## (every home resource carries an address; addresses are unique
+  ## per profile so the kind+address pair is a stable identity).
+  r.address
 
 # ---------------------------------------------------------------------------
 # Real-world identity derivation.

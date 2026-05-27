@@ -616,6 +616,107 @@ proc parseResourceAttr(ctx: ParseCtx; idx, attrIndent: int): IntentNode =
     resourceAttrKey: key, resourceAttrValueSource: rhs,
     resourceAttrLine: idx + 1)
 
+proc parseDependsOnListLiteral(raw: string): seq[string] =
+  ## Parse a `[a, b, c]` list literal into its string elements. Each
+  ## element must be a double-quoted string. The brackets are
+  ## required; whitespace and newlines around elements are stripped.
+  ## An empty `[]` yields an empty seq. Helper for
+  ## `parseDependsOnAttr` — used only for that one resource-attribute
+  ## RHS so the home parser stays line-oriented for every other key.
+  let t = raw.strip()
+  if t.len < 2 or t[0] != '[' or t[^1] != ']':
+    raise newException(ValueError,
+      "expected a '[\"kind:name\", ...]' list literal, got: '" & raw & "'")
+  let inner = t[1 ..< t.len - 1]
+  var elem = ""
+  var inQuote = false
+
+  proc flushElem(items: var seq[string]) =
+    let v = elem.strip()
+    if v.len > 0:
+      # Unquote: every element must be a double-quoted string for
+      # explicit shape validation; a bare identifier is rejected
+      # downstream by the empty-after-unquote / no-colon checks.
+      if v.len >= 2 and v[0] == '"' and v[^1] == '"':
+        items.add(v[1 ..< v.len - 1])
+      else:
+        items.add(v)
+    elem = ""
+
+  for c in inner:
+    if c == '"':
+      inQuote = not inQuote
+      elem.add(c)
+    elif c == ',' and not inQuote:
+      flushElem(result)
+    else:
+      elem.add(c)
+  flushElem(result)
+
+proc parseDependsOnAttr*(profilePath: string; entry: IntentNode;
+                        attr: IntentNode): seq[tuple[kind, name: string]] =
+  ## Validate the shape of a `depends_on = ["kind:name", ...]`
+  ## resource attribute and return the parsed dependency edges
+  ## (M82 home-scope follow-up).
+  ##
+  ## Mirrors the system-scope `parseDependsOn` (in
+  ## `libs/repro_infra/src/repro_infra/profile.nim`) shape rules:
+  ##
+  ##   * the RHS must be a `[...]` list literal of double-quoted
+  ##     `"kind:name"` strings;
+  ##   * each entry uses FIRST-COLON-SPLIT semantics — the substring
+  ##     before the FIRST `:` is the dependency kind tag, everything
+  ##     after is the dependency target name (which may itself
+  ##     contain further colons);
+  ##   * empty entries, entries without a `:`, entries with an empty
+  ##     kind, or entries with an empty name are rejected with
+  ##     `EUnstructured` naming the offending text.
+  ##
+  ## The kind tag is NOT validated against a closed allowed-set at
+  ## parse time — the planner catches an unknown / mistyped kind
+  ## downstream when no resource in the desired set satisfies the
+  ## `(kind, name)` pair. This keeps the parser cross-scope
+  ## (home-scope and a future system-scope home variant could share
+  ## this proc without locking in a specific kind set).
+  doAssert attr.kind == nkResourceAttr
+  doAssert attr.resourceAttrKey == "depends_on"
+  let line = attr.resourceAttrLine
+  let entryAddress = entry.resourceAddress
+  var items: seq[string]
+  try:
+    items = parseDependsOnListLiteral(attr.resourceAttrValueSource)
+  except ValueError as e:
+    raiseUnstructured(profilePath, line, 1,
+      "'" & attr.resourceAttrValueSource & "'",
+      "a `depends_on = [\"kind:name\", ...]` list literal (resource '" &
+        entryAddress & "': " & e.msg & ")")
+  for item in items:
+    let t = item.strip()
+    if t.len == 0:
+      raiseUnstructured(profilePath, line, 1,
+        "an empty entry in `depends_on`",
+        "a non-empty 'kind:name' string in `depends_on` for resource '" &
+          entryAddress & "'")
+    let colon = t.find(':')
+    if colon < 0:
+      raiseUnstructured(profilePath, line, 1,
+        "'" & t & "' in `depends_on`",
+        "a 'kind:name' string with a ':' separator in `depends_on` " &
+          "for resource '" & entryAddress & "'")
+    let depKind = t[0 ..< colon].strip()
+    let depName = t[colon + 1 .. ^1].strip()
+    if depKind.len == 0:
+      raiseUnstructured(profilePath, line, 1,
+        "'" & t & "' (empty kind) in `depends_on`",
+        "a non-empty kind before the ':' in `depends_on` for " &
+          "resource '" & entryAddress & "'")
+    if depName.len == 0:
+      raiseUnstructured(profilePath, line, 1,
+        "'" & t & "' (empty name) in `depends_on`",
+        "a non-empty name after the ':' in `depends_on` for " &
+          "resource '" & entryAddress & "'")
+    result.add((kind: depKind, name: depName))
+
 proc parseResourceEntry(ctx: ParseCtx; idx, entryIndent,
                         attrIndent: int): IntentNode =
   ## Parse a `<kind> <address>:` resource declaration and its

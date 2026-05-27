@@ -142,6 +142,100 @@ profile "x":
     check nameLine < emailLine
     removeFile(extendedPath(path))
 
+  # ---------------------------------------------------------------------
+  # M82 home-scope follow-up: `depends_on` shape validation.
+  #
+  # The parser must reject malformed `depends_on = [...]` entries on the
+  # resource attribute with `EUnstructured` naming the offending text.
+  # The parser does NOT validate the KIND TAG against a closed set —
+  # only the SHAPE (list literal of `"kind:name"` strings with non-empty
+  # halves around the first `:`). The planner catches a typo'd kind
+  # downstream when no resource satisfies the `(kind, name)` pair.
+  # ---------------------------------------------------------------------
+
+  test "depends_on shape validation: rejects non-list RHS":
+    var caught = false
+    try:
+      discard parseDependsOnAttr("/tmp/x.nim",
+        IntentNode(kind: nkResourceEntry, resourceAddress: "shellRc"),
+        IntentNode(kind: nkResourceAttr, resourceAttrKey: "depends_on",
+          resourceAttrValueSource: "\"fs.managedBlock:other\"",
+          resourceAttrLine: 7))
+    except EUnstructured as e:
+      caught = true
+      check "list literal" in e.expected
+      check e.line == 7
+    check caught
+
+  test "depends_on shape validation: rejects empty entry":
+    var caught = false
+    try:
+      discard parseDependsOnAttr("/tmp/x.nim",
+        IntentNode(kind: nkResourceEntry, resourceAddress: "shellRc"),
+        IntentNode(kind: nkResourceAttr, resourceAttrKey: "depends_on",
+          resourceAttrValueSource: "[\"fs.managedBlock:a\", \"\"]",
+          resourceAttrLine: 11))
+    except EUnstructured as e:
+      caught = true
+      check "non-empty 'kind:name'" in e.expected
+      check e.line == 11
+    check caught
+
+  test "depends_on shape validation: rejects no-colon entry":
+    var caught = false
+    try:
+      discard parseDependsOnAttr("/tmp/x.nim",
+        IntentNode(kind: nkResourceEntry, resourceAddress: "shellRc"),
+        IntentNode(kind: nkResourceAttr, resourceAttrKey: "depends_on",
+          resourceAttrValueSource: "[\"no-colon-here\"]",
+          resourceAttrLine: 4))
+    except EUnstructured as e:
+      caught = true
+      check "':' separator" in e.expected
+    check caught
+
+  test "depends_on shape validation: rejects empty kind half":
+    var caught = false
+    try:
+      discard parseDependsOnAttr("/tmp/x.nim",
+        IntentNode(kind: nkResourceEntry, resourceAddress: "shellRc"),
+        IntentNode(kind: nkResourceAttr, resourceAttrKey: "depends_on",
+          resourceAttrValueSource: "[\":someName\"]",
+          resourceAttrLine: 3))
+    except EUnstructured as e:
+      caught = true
+      check "non-empty kind" in e.expected
+    check caught
+
+  test "depends_on shape validation: rejects empty name half":
+    var caught = false
+    try:
+      discard parseDependsOnAttr("/tmp/x.nim",
+        IntentNode(kind: nkResourceEntry, resourceAddress: "shellRc"),
+        IntentNode(kind: nkResourceAttr, resourceAttrKey: "depends_on",
+          resourceAttrValueSource: "[\"fs.managedBlock:\"]",
+          resourceAttrLine: 2))
+    except EUnstructured as e:
+      caught = true
+      check "non-empty name" in e.expected
+    check caught
+
+  test "depends_on shape validation: accepts a well-formed list":
+    # A well-formed list with two entries; first-colon-split keeps the
+    # full name half even when it contains further colons (e.g. a
+    # resource address with a `:` in it, or a registry key path).
+    let parsed = parseDependsOnAttr("/tmp/x.nim",
+      IntentNode(kind: nkResourceEntry, resourceAddress: "shellRc"),
+      IntentNode(kind: nkResourceAttr, resourceAttrKey: "depends_on",
+        resourceAttrValueSource:
+          "[\"fs.managedBlock:bashrc\", \"env.userVariable:editor:nvim\"]",
+        resourceAttrLine: 9))
+    check parsed.len == 2
+    check parsed[0].kind == "fs.managedBlock"
+    check parsed[0].name == "bashrc"
+    check parsed[1].kind == "env.userVariable"
+    check parsed[1].name == "editor:nvim"   # first-colon-split
+
   test "effective config buckets enabled vs inert overrides":
     let path = writeSample()
     let prof = loadProfile(path)

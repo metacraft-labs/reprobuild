@@ -28,6 +28,7 @@ import repro_home_intent
 import repro_home_resources
 import repro_local_store
 
+import ./dep_graph
 import ./errors
 import ./plan
 import ./realize
@@ -699,6 +700,21 @@ proc resourceFromEntry(profilePath, homeDir: string;
     resourceProfileError(profilePath, entry.resourceHeaderLine,
       "resource kind `" & entry.resourceKind &
       "` is not materializable by the apply pipeline")
+  # M82 home-scope follow-up: extract the optional
+  # `depends_on = ["kind:name", ...]` attribute. Absent / empty is the
+  # common case (most home resources have no declared dependencies).
+  # The parser validates shape; the planner later resolves each
+  # `(kind, name)` to a node in the dependency graph and adds an
+  # explicit edge. Applies uniformly to ALL SIX home-scope kind
+  # branches above.
+  for a in entry.resourceAttrs:
+    if a.kind == nkResourceAttr and a.resourceAttrKey == "depends_on":
+      let parsed = parseDependsOnAttr(profilePath, entry, a)
+      var deps: seq[ResourceDependency] = @[]
+      for p in parsed:
+        deps.add((kind: p.kind, name: p.name))
+      result.dependsOn = deps
+      break
 
 proc collectProfileResources(profilePath, homeDir, host: string;
                              nodes: seq[IntentNode];
@@ -787,10 +803,40 @@ proc composeDesiredResources*(profile: Profile; homeDir, host: string):
   ## replace the profile-declared entries by address, so existing
   ## M68/M70 gates that drive the test seam keep working. When the
   ## env var is unset, the profile is the sole source.
-  result = parseProfileResources(profile, homeDir, host)
+  ##
+  ## M82 home-scope follow-up: the resulting `DesiredSet`'s OrderedTable
+  ## iteration order is TOPOLOGICALLY sorted — every producer appears
+  ## before every consumer, with declaration index as the stable
+  ## secondary key. The downstream `composePlan` iterates the set's
+  ## `resources` table in insertion order, so this single reorder is
+  ## enough to give the apply executor a dependency-correct action
+  ## sequence. Cycles raise `EHomePlanCyclicDependency` here, before
+  ## any observation or write. Independent resources keep their
+  ## declaration order, so the emitted action stream is byte-comparable
+  ## across runs of the same profile text.
+  let profileSet = parseProfileResources(profile, homeDir, host)
   let seam = parseSyntheticResources(homeDir)
+  # Linearize the merged set (profile + seam override) into a seq so
+  # `dep_graph` can index into it; profile entries first in
+  # declaration order, then seam entries; a seam entry sharing an
+  # address with a profile entry REPLACES the profile entry in place
+  # (preserving declaration order at the position the profile
+  # declared the address). This matches the prior merge semantics.
+  var ordered: seq[Resource]
+  var indexByAddress: Table[string, int]
+  for addr0, r in profileSet.resources:
+    indexByAddress[addr0] = ordered.len
+    ordered.add(r)
   for addr0, r in seam.resources:
-    result.resources[addr0] = r
+    if addr0 in indexByAddress:
+      ordered[indexByAddress[addr0]] = r
+    else:
+      indexByAddress[addr0] = ordered.len
+      ordered.add(r)
+  let sorted = orderResourcesTopologically(ordered)
+  result = initDesiredSet()
+  for r in sorted:
+    result.resources[r.address] = r
 
 proc parseSyntheticPackageManagedBlocks(homeDir: string;
                                         declaredPackages: seq[string]):

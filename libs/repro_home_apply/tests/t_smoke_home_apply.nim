@@ -134,3 +134,100 @@ suite "Home-apply smoke":
     check sawPreDispatch
     check reason.contains("g.injected")
     check reason.contains("shell metacharacter")
+
+  # ---------------------------------------------------------------------
+  # M82 home-scope follow-up: dependency graph + topological sort.
+  #
+  # These tests drive the home `dep_graph` module directly against a
+  # synthesized `seq[Resource]`. They cover the three load-bearing
+  # behaviors the integration gate also asserts but at the unit-test
+  # layer they pin the graph builder's contracts (cycle refusal,
+  # multi-hop chains, stable secondary order) without spinning up the
+  # full apply pipeline.
+  # ---------------------------------------------------------------------
+
+  test "dep-graph: cyclic depends_on refused with the cycle named":
+    # A 3-node cycle A -> B -> C -> A. All three are `fs.managedBlock`
+    # so the test is platform-pure.
+    let a = Resource(kind: rkFsManagedBlock, address: "A",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/A", managedBlockId: "id-A",
+      managedBlockContent: "a",
+      dependsOn: @[(kind: "fs.managedBlock", name: "C")])
+    let b = Resource(kind: rkFsManagedBlock, address: "B",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/B", managedBlockId: "id-B",
+      managedBlockContent: "b",
+      dependsOn: @[(kind: "fs.managedBlock", name: "A")])
+    let c = Resource(kind: rkFsManagedBlock, address: "C",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/C", managedBlockId: "id-C",
+      managedBlockContent: "c",
+      dependsOn: @[(kind: "fs.managedBlock", name: "B")])
+    var raised = false
+    var detail = ""
+    try:
+      discard orderResourcesTopologically(@[a, b, c])
+    except EHomePlanCyclicDependency as e:
+      raised = true
+      detail = e.msg
+      # 3 nodes + 1 closing repetition; first == last.
+      check e.cyclePath.len == 4
+      check e.cyclePath[0] == e.cyclePath[^1]
+      let nodes = e.cyclePath[0 ..< 3]
+      check "A" in nodes
+      check "B" in nodes
+      check "C" in nodes
+    check raised
+    check "cycle" in detail.toLowerAscii()
+
+  test "dep-graph: multi-hop explicit chain ordered correctly":
+    # Declaration order: D, C, B, A (REVERSED). Chain: A -> B -> C -> D
+    # (arrow == "must run BEFORE"). Encoded via `depends_on` on B, C, D.
+    let d = Resource(kind: rkFsManagedBlock, address: "D",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/D", managedBlockId: "id-D",
+      managedBlockContent: "d",
+      dependsOn: @[(kind: "fs.managedBlock", name: "C")])
+    let c = Resource(kind: rkFsManagedBlock, address: "C",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/C", managedBlockId: "id-C",
+      managedBlockContent: "c",
+      dependsOn: @[(kind: "fs.managedBlock", name: "B")])
+    let b = Resource(kind: rkFsManagedBlock, address: "B",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/B", managedBlockId: "id-B",
+      managedBlockContent: "b",
+      dependsOn: @[(kind: "fs.managedBlock", name: "A")])
+    let a = Resource(kind: rkFsManagedBlock, address: "A",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/A", managedBlockId: "id-A",
+      managedBlockContent: "a")
+    let sorted = orderResourcesTopologically(@[d, c, b, a])
+    check sorted.len == 4
+    check sorted[0].address == "A"
+    check sorted[1].address == "B"
+    check sorted[2].address == "C"
+    check sorted[3].address == "D"
+
+  test "dep-graph: independent ops keep declaration order (stable secondary key)":
+    # Three independent resources — no edges between them. The
+    # emitted order must match the declaration order so the plan is
+    # byte-comparable across runs.
+    let alpha = Resource(kind: rkFsManagedBlock, address: "alpha",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/alpha", managedBlockId: "id-alpha",
+      managedBlockContent: "1")
+    let bravo = Resource(kind: rkFsManagedBlock, address: "bravo",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/bravo", managedBlockId: "id-bravo",
+      managedBlockContent: "2")
+    let charlie = Resource(kind: rkFsManagedBlock, address: "charlie",
+      lifecyclePolicy: lpDefault,
+      hostFilePath: "/tmp/charlie", managedBlockId: "id-charlie",
+      managedBlockContent: "3")
+    let sorted = orderResourcesTopologically(@[alpha, bravo, charlie])
+    check sorted.len == 3
+    check sorted[0].address == "alpha"
+    check sorted[1].address == "bravo"
+    check sorted[2].address == "charlie"

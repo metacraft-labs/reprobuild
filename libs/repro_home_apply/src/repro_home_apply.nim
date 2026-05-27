@@ -23,7 +23,9 @@
 ##   * The typed exception hierarchy + `StowDiagnostic` records used
 ##     by the CLI's stderr renderer.
 
+import repro_home_apply/dep_graph
 import repro_home_apply/errors
+import repro_home_apply/home_producer_consumer_map
 import repro_home_apply/plan
 import repro_home_apply/package_catalog
 import repro_home_apply/realize
@@ -37,7 +39,9 @@ import repro_home_apply/suppression
 import repro_home_apply/pipeline
 import repro_home_apply/resource_move
 
+export dep_graph
 export errors
+export home_producer_consumer_map
 export plan
 export package_catalog
 export realize

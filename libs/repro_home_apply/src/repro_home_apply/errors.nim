@@ -88,6 +88,27 @@ type
     ## missing. Distinct from `EUnknownResource` / `EResourceConflict`
     ## (which the resource layer raises for the move's own pre-checks).
 
+  EHomePlanCyclicDependency* = object of EHomeApply
+    ## M82 home-scope follow-up: the home planner's resource
+    ## dependency graph contains a CYCLE — the apply order cannot be
+    ## topologically determined. Causes:
+    ##
+    ##   * explicit `depends_on` edges that form a cycle in the
+    ##     user's `home.nim` `resources:` block (e.g. A depends_on B;
+    ##     B depends_on A);
+    ##   * an explicit edge that closes a cycle with an implicit
+    ##     producer -> consumer edge from
+    ##     `home_producer_consumer_map.ProducerConsumerMap` (the home
+    ##     table is empty today; the diagnostic plumbing is in place
+    ##     so the first implicit-edge cycle is named correctly).
+    ##
+    ## `cyclePath` lists the resource ADDRESSES participating in the
+    ## cycle, in traversal order with the first node repeated at the
+    ## end (e.g. `@["A", "B", "C", "A"]`) so the operator can see
+    ## exactly where the cycle closes. Parallels the system-scope
+    ## `EPlanCyclicDependency` in `libs/repro_infra/`.
+    cyclePath*: seq[string]
+
   EStowConflict* = object of EHomeApply
     ## M72 Deliverable 3: the stow materializer found a target that
     ## already exists as something OTHER than the correct symlink /
@@ -231,6 +252,24 @@ proc raiseResourceMove*(msg: string) {.noreturn.} =
   var e = newException(EResourceMove, msg)
   e.step = 0
   e.stepName = "resource_move"
+  raise e
+
+proc raiseHomePlanCyclicDependency*(cyclePath: seq[string]) {.noreturn.} =
+  ## Raise the M82 home-scope "the dependency graph has a cycle" error.
+  ## `cyclePath` is the cycle's nodes (resource addresses) in traversal
+  ## order with the first node repeated at the end so the diagnostic
+  ## shows the closing edge. Parallels the system-scope
+  ## `raisePlanCyclicDependency` in `libs/repro_infra/`.
+  var arrow = ""
+  for i, node in cyclePath:
+    if i > 0: arrow.add(" -> ")
+    arrow.add(node)
+  var e = newException(EHomePlanCyclicDependency,
+    "repro home apply: resource dependency graph has a cycle: " & arrow &
+    " (refusing to plan — edit `depends_on` so the graph is acyclic).")
+  e.step = 4
+  e.stepName = "plan"
+  e.cyclePath = cyclePath
   raise e
 
 proc raiseStowConflict*(targetPath, existingKind, desiredSource: string)

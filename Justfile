@@ -1121,6 +1121,24 @@ e2e_repro_infra_depends_on_topological:
         tests/e2e/m69/t_e2e_repro_infra_depends_on_topological.nim \
         2>&1 | tee test-logs/e2e_repro_infra_depends_on_topological.log
 
+# M82 home-scope follow-up verification gate — pure logic, runs on
+# every host. The home-scope analog of
+# `e2e_repro_infra_depends_on_topological`: exercises the home
+# planner's `dep_graph` module + the `composeDesiredResources`
+# topological-sort path against fixture `home.nim` text. Asserts the
+# action stream is cycle-refusing, dependency-correct, and
+# declaration-stable across runs.
+e2e_repro_home_depends_on_topological:
+    mkdir -p test-logs build/test-bin build/nimcache build/test-tmp
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_repro_home_depends_on_topological \
+        --out:build/test-bin/e2e_repro_home_depends_on_topological \
+        tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim \
+        2>&1 | tee test-logs/e2e_repro_home_depends_on_topological.log
+
 # M82 Phase C verification gate — pure logic, runs on every host. The
 # DRIFT HALF of `integration_intra_batch_capability_to_service`: the
 # planner's plan-time external-drift detection seen end-to-end across
