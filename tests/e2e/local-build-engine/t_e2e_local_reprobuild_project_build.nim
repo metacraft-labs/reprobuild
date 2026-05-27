@@ -1533,6 +1533,87 @@ suite "e2e_local_reprobuild_project_build":
     let providerCompileActions = statsReport{"providerCompileActions"}.getElems()
     check providerCompileActions.len == 0
 
+  test "graph why and debug artifact inspect the materialized build graph":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-m56-graph-why", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = compilePublicReproTestBin(repoRoot)
+    let projectRoot = tempRoot / "project"
+    writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
+    discard buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+    discard requireSuccess(shellCommand([
+      reproBin, "build", "--tool-provisioning", "path",
+      "--progress", "quiet", "--log", "quiet"
+    ]), projectRoot)
+
+    let graphText = requireSuccess(shellCommand([
+      reproBin, "graph", "--tool-provisioning", "path",
+      "--focus", "copy-file"
+    ]), projectRoot)
+    check graphText.contains("build graph")
+    check graphText.contains("action copy-file")
+    check graphText.contains("directDependents: stamp")
+
+    let graphJson = parseJson(requireSuccess(shellCommand([
+      reproBin, "graph", "--tool-provisioning=path", "--json"
+    ]), projectRoot))
+    check graphJson{"schemaId"}.getStr() == "reprobuild.graph.build.v1"
+    check graphJson{"selectedActionId"}.getStr() == "stamp"
+    check graphJson{"actions"}.getElems().anyIt(
+      it{"id"}.getStr() == "copy-file")
+    let loweredGraphCachePath = graphJson{"loweredGraphCachePath"}.getStr()
+    check fileExists(loweredGraphCachePath)
+
+    let dotGraph = requireSuccess(shellCommand([
+      reproBin, "graph", "--tool-provisioning", "path",
+      "--format", "dot", "--focus", "copy-file"
+    ]), projectRoot)
+    check dotGraph.contains("digraph repro_build")
+    check dotGraph.contains("\"copy-file\"")
+    check dotGraph.contains("->")
+
+    let whyText = requireSuccess(shellCommand([
+      reproBin, "why", "copy-file", "--tool-provisioning=path"
+    ]), projectRoot)
+    check whyText.contains("why action copy-file")
+    check whyText.contains("path: stamp -> copy-file")
+    check whyText.contains("directDependents: stamp")
+    check whyText.contains("lastResult: status=")
+
+    let whyJson = parseJson(requireSuccess(shellCommand([
+      reproBin, "why", "copy-file", "--tool-provisioning", "path",
+      "--format", "json"
+    ]), projectRoot))
+    check whyJson{"schemaId"}.getStr() == "reprobuild.why.action.v1"
+    check whyJson{"path"}.getElems().mapIt(it.getStr()) ==
+      @["stamp", "copy-file"]
+    check whyJson{"lastResult"}{"id"}.getStr() == "copy-file"
+    check whyJson{"evidenceCounts"}{"declaredOutputs"}.getInt() >= 1
+
+    let artifactText = requireSuccess(shellCommand([
+      reproBin, "debug", "artifact", loweredGraphCachePath
+    ]), projectRoot)
+    check artifactText.contains("lowered graph cache")
+    check artifactText.contains("- copy-file")
+
+    let artifactJson = parseJson(requireSuccess(shellCommand([
+      reproBin, "debug", "artifact", loweredGraphCachePath,
+      "--format", "json"
+    ]), projectRoot))
+    check artifactJson{"schemaId"}.getStr() ==
+      "reprobuild.debug.lowered-graph-cache.v1"
+    check artifactJson{"actions"}.getElems().anyIt(
+      it{"id"}.getStr() == "stamp")
+
   test "provider compile fast path skips no-op and invalidates provider sources":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m55-provider-fast-path", "")

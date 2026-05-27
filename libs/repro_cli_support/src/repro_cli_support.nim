@@ -44,6 +44,10 @@ proc renderUsage*(programName: string): string =
       " capabilities [--format=json|text]\n       " & programName &
       " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
           programName &
+      " graph [target[#name]] [--build] [--focus=ACTION] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
+          programName &
+      " why <package-or-action> [target[#name]] [--action=ACTION] [--format=text|json] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
+          programName &
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
       " shell [selector] [--activity=name] [--print-env=posix|fish|powershell|json] [--dev-env-stats=PATH]\n       " &
@@ -71,6 +75,8 @@ proc renderUsage*(programName: string): string =
       " develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n       " &
           programName &
       " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]\n       " &
+          programName &
+      " debug artifact <path> [--format=text|json]\n       " &
           programName &
       " home {add | remove | enable | disable | list | why | history | apply | plan | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n       " &
           programName &
@@ -5777,63 +5783,44 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
-  for arg in args:
-    if arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
-    elif arg == "--tool-provisioning":
-      raise newException(ValueError,
-        "--tool-provisioning requires an inline value, for example " &
-          "--tool-provisioning=path")
-    elif arg.startsWith("--work-root="):
-      workRoot = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--work-root":
-      raise newException(ValueError,
-        "--work-root requires an inline value, for example --work-root=.repro")
-    elif arg.startsWith("--action-cache-root="):
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(valueFromFlag(args, i,
+        "--tool-provisioning"))
+    elif arg == "--work-root" or arg.startsWith("--work-root="):
+      workRoot = valueFromFlag(args, i, "--work-root")
+    elif arg == "--action-cache-root" or arg.startsWith("--action-cache-root="):
       # Phase 1 cache-scope split: user-level action cache + CAS root.
       # See Provider-Compile-Tiering.md §"Cache Scope". When omitted, we
       # resolve from ${REPROBUILD_STORE_ROOT}/action-cache or the platform
       # default user cache dir at engine config build time.
-      setActionCacheRootOverride(arg.split("=", maxsplit = 1)[1])
-    elif arg == "--action-cache-root":
-      raise newException(ValueError,
-        "--action-cache-root requires an inline value, for example " &
-        "--action-cache-root=/var/cache/repro/action-cache")
-    elif arg.startsWith("--progress="):
-      progressMode = parseBuildProgressMode(arg.split("=", maxsplit = 1)[1])
-    elif arg == "--progress":
-      raise newException(ValueError,
-        "--progress requires an inline value, for example --progress=bar-line")
-    elif arg.startsWith("--progress-bars="):
-      progressBarStyle = parseBuildProgressBarStyle(
-        arg.split("=", maxsplit = 1)[1])
-    elif arg == "--progress-bars":
-      raise newException(ValueError,
-        "--progress-bars requires an inline value, for example " &
-          "--progress-bars=split")
-    elif arg.startsWith("--diagnostics="):
-      diagnosticsPath = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--diagnostics":
-      raise newException(ValueError,
-        "--diagnostics requires an inline value, for example " &
-          "--diagnostics=.repro/build/reprobuild/diagnostics.log")
+      setActionCacheRootOverride(valueFromFlag(args, i,
+        "--action-cache-root"))
+    elif arg == "--progress" or arg.startsWith("--progress="):
+      progressMode = parseBuildProgressMode(valueFromFlag(args, i,
+        "--progress"))
+    elif arg == "--progress-bars" or arg.startsWith("--progress-bars="):
+      progressBarStyle = parseBuildProgressBarStyle(valueFromFlag(args, i,
+        "--progress-bars"))
+    elif arg == "--diagnostics" or arg.startsWith("--diagnostics="):
+      diagnosticsPath = valueFromFlag(args, i, "--diagnostics")
     elif arg.startsWith("--stats="):
       statsMode = parseBuildStatsMode(arg.split("=", maxsplit = 1)[1])
       statsModeExplicit = true
     elif arg == "--stats":
-      statsMode = bsmText
+      if i + 1 < args.len and args[i + 1] in ["text", "none"]:
+        inc i
+        statsMode = parseBuildStatsMode(args[i])
+      else:
+        statsMode = bsmText
       statsModeExplicit = true
-    elif arg.startsWith("--report="):
-      reportMode = parseBuildReportMode(arg.split("=", maxsplit = 1)[1])
-    elif arg == "--report":
-      raise newException(ValueError,
-        "--report requires an inline value, for example --report=full")
-    elif arg.startsWith("--log="):
-      logMode = parseBuildLogMode(arg.split("=", maxsplit = 1)[1])
+    elif arg == "--report" or arg.startsWith("--report="):
+      reportMode = parseBuildReportMode(valueFromFlag(args, i, "--report"))
+    elif arg == "--log" or arg.startsWith("--log="):
+      logMode = parseBuildLogMode(valueFromFlag(args, i, "--log"))
       logModeExplicit = true
-    elif arg == "--log":
-      raise newException(ValueError,
-        "--log requires an inline value, for example --log=summary")
     elif arg == "-v" or arg == "--verbose":
       logMode = blmSummary
       logModeExplicit = true
@@ -5858,6 +5845,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       target = arg
     else:
       raise newException(ValueError, "unexpected build argument: " & arg)
+    inc i
 
   let targetWasOmitted = target.len == 0
   if targetWasOmitted:
@@ -5893,6 +5881,932 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
         autoRunQuota.close()
       except CatchableError:
         discard
+
+type
+  GraphOutputFormat = enum
+    gofText
+    gofJson
+    gofDot
+
+  BuildGraphInspection = object
+    target: string
+    modulePath: string
+    projectRoot: string
+    outDir: string
+    interfacePath: string
+    toolProvisioning: ToolProvisioningMode
+    toolIdentityPath: string
+    toolInspectionPath: string
+    providerBinaryPath: string
+    providerCompileArtifactPath: string
+    providerArtifactId: string
+    providerGraphSnapshotPath: string
+    providerInvocations: int
+    providerCompileCacheHit: bool
+    providerGraphCacheHit: bool
+    loweredGraphCachePath: string
+    loweredGraphCacheHit: bool
+    selectedActionId: string
+    defaultActionId: string
+    actions: seq[BuildAction]
+    pools: seq[BuildPool]
+
+proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
+  case value.normalize()
+  of "text":
+    gofText
+  of "json":
+    gofJson
+  of "dot":
+    if allowDot:
+      gofDot
+    else:
+      raise newException(ValueError, "unsupported format for this command: dot")
+  else:
+    raise newException(ValueError,
+      "unsupported format: " & value &
+        (if allowDot: " (expected text, json, or dot)"
+        else: " (expected text or json)"))
+
+proc buildActionById(actions: openArray[BuildAction]): Table[string, BuildAction] =
+  for action in actions:
+    result[action.id] = action
+
+proc availableActionIds(actions: openArray[BuildAction]): seq[string] =
+  for action in actions:
+    result.add(action.id)
+  result.sort()
+
+proc requireAction(actions: openArray[BuildAction]; id: string): BuildAction =
+  for action in actions:
+    if action.id == id:
+      return action
+  let available = availableActionIds(actions)
+  raise newException(ValueError,
+    "unknown build action: " & id &
+      (if available.len > 0:
+        " (available: " & available.join(", ") & ")"
+      else:
+        " (graph contains no build actions)"))
+
+proc directDependents(actions: openArray[BuildAction]; id: string): seq[string] =
+  for action in actions:
+    if action.deps.contains(id):
+      result.add(action.id)
+  result.sort()
+
+proc directDependencies(actions: openArray[BuildAction]; id: string): seq[string] =
+  let action = requireAction(actions, id)
+  result = action.deps
+  result.sort()
+
+proc commandDisplay(action: BuildAction): string =
+  if action.argv.len > 0:
+    shellCommand(action.argv)
+  else:
+    case action.kind
+    of bakCopyFile:
+      "builtin copyFile"
+    of bakEnsureDir:
+      "builtin ensureDir"
+    of bakWriteText:
+      "builtin writeText"
+    of bakStamp:
+      "builtin stamp"
+    of bakPreserveTree:
+      "builtin preserveTree"
+    else:
+      "builtin action"
+
+proc expectedDependencyFileJson(item: ExpectedDependencyFile): JsonNode =
+  %*{
+    "logicalName": item.logicalName,
+    "path": item.path,
+    "required": item.required
+  }
+
+proc expectedDependencyFilesJson(
+    items: openArray[ExpectedDependencyFile]): JsonNode =
+  result = newJArray()
+  for item in items:
+    result.add(expectedDependencyFileJson(item))
+
+proc processSpecJson(process: ProcessSpec): JsonNode =
+  var env = newJArray()
+  for item in process.env:
+    env.add(%*{"name": item.name, "value": item.value})
+  %*{
+    "kind": $process.kind,
+    "executable": process.executable.value,
+    "args": jsonStringSeq(process.args),
+    "cwd": process.cwd.value,
+    "env": env,
+    "stdin": $process.stdinPolicy,
+    "stdout": $process.stdoutPolicy,
+    "stderr": $process.stderrPolicy
+  }
+
+proc dependencyPolicyJson(policy: DependencyGatheringPolicy): JsonNode =
+  var reports = newJArray()
+  for report in policy.recognizedReports:
+    reports.add(%*{
+      "formatName": $report.formatName,
+      "outputs": expectedDependencyFilesJson(report.outputs),
+      "completeness": $report.completeness
+    })
+  var converters = newJArray()
+  for converterSpec in policy.postBuildConverters:
+    converters.add(%*{
+      "converterProcess": processSpecJson(converterSpec.converterProcess),
+      "inputs": expectedDependencyFilesJson(converterSpec.inputs),
+      "outputs": expectedDependencyFilesJson(converterSpec.outputs),
+      "outputKind": $converterSpec.outputKind,
+      "outputFormatName": $converterSpec.outputFormatName,
+      "completeness": $converterSpec.completeness
+    })
+  %*{
+    "kind": $policy.kind,
+    "completeness": $policy.completeness,
+    "recognizedReports": reports,
+    "postBuildConverters": converters,
+    "ignoredInputPrefixes": jsonStringSeq(policy.ignoredInputPrefixes)
+  }
+
+proc buildPoolJson(pool: BuildPool): JsonNode =
+  %*{"name": pool.name, "capacity": pool.capacity}
+
+proc buildPoolsJson(pools: openArray[BuildPool]): JsonNode =
+  result = newJArray()
+  for pool in pools:
+    result.add(buildPoolJson(pool))
+
+proc buildActionJson(action: BuildAction): JsonNode =
+  %*{
+    "id": action.id,
+    "kind": $action.kind,
+    "deps": jsonStringSeq(action.deps),
+    "inputs": jsonStringSeq(action.inputs),
+    "outputs": jsonStringSeq(action.outputs),
+    "argv": jsonStringSeq(action.argv),
+    "cwd": action.cwd,
+    "env": jsonStringSeq(action.env),
+    "pool": action.pool,
+    "poolUnits": action.poolUnits,
+    "cpuMilli": action.cpuMilli,
+    "memoryBytes": $action.memoryBytes,
+    "commandStatsId": action.commandStatsId,
+    "cacheable": action.cacheable,
+    "weakFingerprint": digestHex(action.weakFingerprint),
+    "actionCachePolicy": $action.actionCachePolicy,
+    "depfile": action.depfile,
+    "dynamicDepsFile": action.dynamicDepsFile,
+    "monitorDepfile": action.monitorDepfile,
+    "dependencyPolicy": dependencyPolicyJson(action.dependencyPolicy),
+    "builtinText": action.builtinText,
+    "builtinEntries": jsonStringSeq(action.builtinEntries)
+  }
+
+proc buildActionsJson(actions: openArray[BuildAction]): JsonNode =
+  result = newJArray()
+  for action in actions:
+    result.add(buildActionJson(action))
+
+proc buildGraphInspectionJson(info: BuildGraphInspection): JsonNode =
+  %*{
+    "schemaId": "reprobuild.graph.build.v1",
+    "target": info.target,
+    "modulePath": info.modulePath,
+    "projectRoot": info.projectRoot,
+    "outDir": info.outDir,
+    "interfacePath": info.interfacePath,
+    "toolProvisioning": info.toolProvisioning.modeName,
+    "toolIdentityPath": info.toolIdentityPath,
+    "toolInspectionPath": info.toolInspectionPath,
+    "providerBinaryPath": info.providerBinaryPath,
+    "providerCompileArtifactPath": info.providerCompileArtifactPath,
+    "providerArtifactId": info.providerArtifactId,
+    "providerGraphSnapshotPath": info.providerGraphSnapshotPath,
+    "providerInvocations": info.providerInvocations,
+    "providerCompileCacheHit": info.providerCompileCacheHit,
+    "providerGraphCacheHit": info.providerGraphCacheHit,
+    "loweredGraphCachePath": info.loweredGraphCachePath,
+    "loweredGraphCacheHit": info.loweredGraphCacheHit,
+    "selectedActionId": info.selectedActionId,
+    "defaultActionId": info.defaultActionId,
+    "pools": buildPoolsJson(info.pools),
+    "actions": buildActionsJson(info.actions)
+  }
+
+proc loweredGraphRecordJson(record: LoweredGraphCacheRecord): JsonNode =
+  %*{
+    "schemaId": "reprobuild.debug.lowered-graph-cache.v1",
+    "modulePath": record.modulePath,
+    "projectRoot": record.projectRoot,
+    "selectedActionId": record.selectedActionId,
+    "pathEnv": record.pathEnv,
+    "cacheKey": record.cacheKey,
+    "pools": buildPoolsJson(record.pools),
+    "actions": buildActionsJson(record.actions)
+  }
+
+proc renderActionDetail(action: BuildAction): string =
+  var lines: seq[string] = @[]
+  lines.add("action " & action.id)
+  lines.add("  kind: " & $action.kind)
+  lines.add("  deps: " & (if action.deps.len > 0: action.deps.join(", ") else: "-"))
+  lines.add("  inputs: " & $action.inputs.len)
+  for item in action.inputs:
+    lines.add("    input: " & item)
+  lines.add("  outputs: " & $action.outputs.len)
+  for item in action.outputs:
+    lines.add("    output: " & item)
+  lines.add("  cwd: " & action.cwd)
+  lines.add("  command: " & commandDisplay(action))
+  if action.env.len > 0:
+    lines.add("  env:")
+    for item in action.env:
+      lines.add("    " & item)
+  if action.pool.len > 0:
+    lines.add("  pool: " & action.pool & " units=" & $action.poolUnits)
+  lines.add("  cacheable: " & $action.cacheable)
+  lines.add("  cachePolicy: " & $action.actionCachePolicy)
+  lines.add("  dependencyPolicy: " & $action.dependencyPolicy.kind &
+    " completeness=" & $action.dependencyPolicy.completeness)
+  if action.depfile.len > 0:
+    lines.add("  depfile: " & action.depfile)
+  if action.dynamicDepsFile.len > 0:
+    lines.add("  dynamicDepsFile: " & action.dynamicDepsFile)
+  if action.monitorDepfile.len > 0:
+    lines.add("  monitorDepfile: " & action.monitorDepfile)
+  lines.join("\n")
+
+proc renderBuildGraphText(info: BuildGraphInspection; focus = ""): string =
+  var lines: seq[string] = @[]
+  lines.add("build graph")
+  lines.add("target: " & info.target)
+  lines.add("projectRoot: " & info.projectRoot)
+  lines.add("modulePath: " & info.modulePath)
+  lines.add("outDir: " & info.outDir)
+  lines.add("toolProvisioning: " & info.toolProvisioning.modeName)
+  if info.selectedActionId.len > 0:
+    lines.add("selectedAction: " & info.selectedActionId)
+  elif info.defaultActionId.len > 0:
+    lines.add("defaultAction: " & info.defaultActionId)
+  lines.add("actions: " & $info.actions.len)
+  lines.add("pools: " & $info.pools.len)
+  lines.add("providerCompileCacheHit: " & $info.providerCompileCacheHit)
+  lines.add("providerGraphCacheHit: " & $info.providerGraphCacheHit)
+  lines.add("loweredGraphCacheHit: " & $info.loweredGraphCacheHit)
+  if focus.len > 0:
+    let action = requireAction(info.actions, focus)
+    lines.add("")
+    lines.add(renderActionDetail(action))
+    let deps = directDependencies(info.actions, focus)
+    let dependents = directDependents(info.actions, focus)
+    lines.add("  directDependencies: " &
+      (if deps.len > 0: deps.join(", ") else: "-"))
+    lines.add("  directDependents: " &
+      (if dependents.len > 0: dependents.join(", ") else: "-"))
+    return lines.join("\n")
+  for action in info.actions:
+    lines.add("- " & action.id &
+      " deps=[" & action.deps.join(", ") & "]" &
+      " outputs=" & $action.outputs.len &
+      " policy=" & $action.dependencyPolicy.kind &
+      " command=" & commandDisplay(action))
+  lines.join("\n")
+
+proc dotQuote(value: string): string =
+  "\"" & value.replace("\\", "\\\\").replace("\"", "\\\"") & "\""
+
+proc focusNodeSet(actions: openArray[BuildAction]; focus: string): HashSet[string] =
+  result.incl(focus)
+  let action = requireAction(actions, focus)
+  for dep in action.deps:
+    result.incl(dep)
+  for dependent in directDependents(actions, focus):
+    result.incl(dependent)
+
+proc renderBuildGraphDot(info: BuildGraphInspection; focus = ""): string =
+  var lines = @["digraph repro_build {"]
+  let shown =
+    if focus.len > 0:
+      focusNodeSet(info.actions, focus)
+    else:
+      initHashSet[string]()
+  for action in info.actions:
+    if focus.len > 0 and not shown.contains(action.id):
+      continue
+    lines.add("  " & dotQuote(action.id) & " [label=" &
+      dotQuote(action.id) & "];")
+  for action in info.actions:
+    if focus.len > 0 and not shown.contains(action.id):
+      continue
+    for dep in action.deps:
+      if focus.len == 0 or shown.contains(dep):
+        lines.add("  " & dotQuote(dep) & " -> " & dotQuote(action.id) & ";")
+  lines.add("}")
+  lines.join("\n")
+
+proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
+                                 publicCliPath: string;
+                                 selectDefaultAction = false;
+                                 workRoot = "";
+                                 forceRefresh = false): BuildGraphInspection =
+  var parsedTarget = parseBuildTarget(target)
+  parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
+  let modulePath = parsedTarget.modulePath
+  if not fileExists(extendedPath(modulePath)):
+    raise newException(IOError, "build target module not found: " & modulePath)
+  let outDir = outputDirForTarget(parsedTarget, workRoot)
+  let projectRoot = projectRootForModule(modulePath)
+  result.target = target
+  result.modulePath = modulePath
+  result.projectRoot = projectRoot
+  result.outDir = outDir
+
+  let interfacePath = outDir / "project-interface.rbsz"
+  let stubPath = outDir / "project-interface.nim"
+  let compileWorkDir = reprobuildLibraryWorkDir()
+  let compileScratchDir = outDir / "provider-work"
+  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
+    compileWorkDir, compileScratchDir, requireStub = false)
+  result.interfacePath = interfacePath
+
+  var effectiveMode = mode
+  if effectiveMode == tpmUnspecified and
+      artifact.projectInterface.defaultToolProvisioning.len > 0:
+    effectiveMode = parseToolProvisioning(
+      artifact.projectInterface.defaultToolProvisioning)
+  if artifact.projectInterface.toolUses.len > 0 and
+      effectiveMode == tpmUnspecified:
+    raise newException(ValueError,
+      "typed tool provisioning is required for uses declarations; refusing " &
+        "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
+        "explicit weak local profile.")
+  result.toolProvisioning = effectiveMode
+
+  var identity = PathOnlyBuildIdentity(
+    projectName: artifact.projectInterface.projectName,
+    interfaceFingerprint: artifact.interfaceFingerprint)
+  if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+    let resolved = resolveAndWriteIdentity(artifact, outDir, effectiveMode)
+    identity = resolved.identity
+    result.toolIdentityPath = resolved.identityPath
+    result.toolInspectionPath = resolved.inspectionPath
+
+  if not moduleHasBuildBlock(modulePath):
+    return
+
+  let providerBinaryPath = outDir / "provider" / "project-provider"
+  let providerArtifactPath = outDir / "provider-compile.rbsz"
+  result.providerBinaryPath = providerBinaryPath
+  result.providerCompileArtifactPath = providerArtifactPath
+
+  var provider: ProviderCompileArtifact
+  let cachedProvider =
+    if forceRefresh:
+      none(ProviderCompileArtifact)
+    else:
+      readFreshProviderCompileArtifact(providerArtifactPath,
+        modulePath, providerBinaryPath, artifact.interfaceFingerprint)
+  if cachedProvider.isSome:
+    provider = cachedProvider.get()
+    result.providerCompileCacheHit = true
+  else:
+    let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
+      artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
+    invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
+    let providerCompileAction = providerCompileBuildAction(providerPlan,
+      modulePath, interfacePath, providerArtifactPath, publicCliPath,
+      compileWorkDir, compileScratchDir)
+    var providerCompileConfig = BuildEngineConfig(
+      cacheRoot: outDir / "build-engine-cache",
+      actionCacheRoot: currentActionCacheRoot(),
+      runQuotaCliPath: publicCliPath,
+      maxParallelism: 1'u32,
+      stdoutLimit: 1024 * 1024,
+      stderrLimit: 1024 * 1024,
+      rebuildMissingOutputsOnCacheHit: true,
+      deferLocalOutputBlobs: true,
+      bypassRunQuota: false,
+      fallbackToRunQuotaBypass: effectiveMode in {tpmPathOnly, tpmScoop},
+      inlineRunQuota: true,
+      dryRun: false,
+      forceRebuild: forceRefresh,
+      suppressTrace: true,
+      skipCacheHitEvidence: true)
+    let providerCompileResult = runBuild(graph([providerCompileAction]),
+      providerCompileConfig)
+    if providerCompileResult.hasFailedActions():
+      raise newException(OSError, providerCompileFailure(providerCompileResult))
+    if not fileExists(extendedPath(providerArtifactPath)):
+      raise newException(IOError,
+        "provider compile edge did not write artifact: " & providerArtifactPath)
+    provider = readProviderCompileArtifact(providerArtifactPath)
+    if not providerCompileArtifactFresh(providerArtifactPath,
+        providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
+        providerPlan.providerFingerprint):
+      raise newException(IOError,
+        "provider compile artifact is stale after edge execution: " &
+          providerArtifactPath)
+
+  result.providerArtifactId = digestHex(provider.providerFingerprint)
+  result.providerBinaryPath = provider.outputBinaryPath
+
+  let providerGraphStore = outDir / "provider-graph"
+  var refresh: ProviderRefreshReport
+  let freshSnapshot =
+    if forceRefresh:
+      none(ProviderGraphSnapshot)
+    else:
+      readFreshProviderGraphSnapshot(providerGraphStore, result.providerArtifactId)
+  if freshSnapshot.isSome:
+    refresh.snapshot = freshSnapshot.get()
+    refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
+    result.providerGraphCacheHit = true
+  else:
+    refresh = refreshProviderGraph(RefreshConfig(
+      storeRoot: providerGraphStore,
+      providerBinaryPath: provider.outputBinaryPath,
+      providerArtifactId: result.providerArtifactId,
+      rootEntryPointId: artifact.projectInterface.packageName & ".root",
+      rootArguments: projectRoot,
+      namespace: "project",
+      lockSliceId: digestHex(artifact.interfaceFingerprint),
+      activity: "build",
+      providerWorkingDir: projectRoot))
+  result.providerGraphSnapshotPath = refresh.persistedSnapshotPath
+  result.providerInvocations = refresh.invoked.len
+  result.defaultActionId = defaultBuildActionId(refresh.snapshot)
+
+  var selectedActionId = parsedTarget.selectedActionId
+  if selectDefaultAction and selectedActionId.len == 0:
+    selectedActionId = result.defaultActionId
+  result.selectedActionId = selectedActionId
+
+  let pathEnv = getEnv("PATH")
+  let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
+    result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv)
+  let cachePath = loweredGraphCachePath(outDir, selectedActionId)
+  result.loweredGraphCachePath = cachePath
+  let cachedLowered =
+    if forceRefresh:
+      none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
+    else:
+      readFreshLoweredGraphCache(cachePath, modulePath, projectRoot,
+        selectedActionId, pathEnv, graphCacheKey)
+  let lowered =
+    if cachedLowered.isSome:
+      result.loweredGraphCacheHit = true
+      cachedLowered.get()
+    else:
+      let computed = lowerProviderSnapshot(refresh.snapshot, identity,
+        projectRoot, selectedActionId)
+      writeLoweredGraphCache(cachePath, modulePath, projectRoot,
+        selectedActionId, pathEnv, graphCacheKey, computed)
+      computed
+  result.actions = lowered.actions
+  result.pools = lowered.pools
+
+proc renderFocusedGraphJson(info: BuildGraphInspection; focus: string): JsonNode =
+  let action = requireAction(info.actions, focus)
+  %*{
+    "schemaId": "reprobuild.graph.build.focus.v1",
+    "graph": buildGraphInspectionJson(info),
+    "focus": focus,
+    "action": buildActionJson(action),
+    "directDependencies": jsonStringSeq(directDependencies(info.actions, focus)),
+    "directDependents": jsonStringSeq(directDependents(info.actions, focus))
+  }
+
+proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
+  var target = ""
+  var focus = ""
+  var mode = tpmUnspecified
+  var workRoot = ""
+  var format = gofText
+  var positionals: seq[string] = @[]
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--build":
+      inc i
+    elif arg in ["--lock", "--infra", "--all"]:
+      raise newException(ValueError,
+        arg & " is not implemented yet; use repro lock visualize/debug for " &
+          "solved package graph inspection")
+    elif arg.startsWith("--focus="):
+      focus = arg.split("=", maxsplit = 1)[1]
+      inc i
+    elif arg == "--focus":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--focus requires a value")
+      focus = args[i + 1]
+      inc i, 2
+    elif arg == "--json":
+      format = gofJson
+      inc i
+    elif arg == "--dot":
+      format = gofDot
+      inc i
+    elif arg.startsWith("--format="):
+      format = parseGraphOutputFormat(arg.split("=", maxsplit = 1)[1],
+        allowDot = true)
+      inc i
+    elif arg == "--format":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--format requires a value")
+      format = parseGraphOutputFormat(args[i + 1], allowDot = true)
+      inc i, 2
+    elif arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
+      inc i
+    elif arg == "--tool-provisioning":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--tool-provisioning requires a value")
+      mode = parseToolProvisioning(args[i + 1])
+      inc i, 2
+    elif arg.startsWith("--work-root="):
+      workRoot = arg.split("=", maxsplit = 1)[1]
+      inc i
+    elif arg == "--work-root":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--work-root requires a value")
+      workRoot = args[i + 1]
+      inc i, 2
+    elif arg.startsWith("--action-cache-root="):
+      setActionCacheRootOverride(arg.split("=", maxsplit = 1)[1])
+      inc i
+    elif arg == "--action-cache-root":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--action-cache-root requires a value")
+      setActionCacheRootOverride(args[i + 1])
+      inc i, 2
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported graph flag: " & arg)
+    else:
+      positionals.add(arg)
+      inc i
+
+  if positionals.len > 2:
+    raise newException(ValueError,
+      "unexpected graph arguments: " & positionals[2 .. ^1].join(" "))
+  if positionals.len >= 1:
+    target = positionals[0]
+  if positionals.len >= 2:
+    focus = positionals[1]
+  let targetWasOmitted = target.len == 0
+  if targetWasOmitted:
+    target = "."
+
+  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
+  try:
+    let info = prepareBuildGraphInspection(target, mode, publicCliPath,
+      selectDefaultAction = targetWasOmitted,
+      workRoot = workRoot)
+    case format
+    of gofText:
+      echo renderBuildGraphText(info, focus)
+    of gofJson:
+      if focus.len > 0:
+        echo $renderFocusedGraphJson(info, focus)
+      else:
+        echo $buildGraphInspectionJson(info)
+    of gofDot:
+      echo renderBuildGraphDot(info, focus)
+    return 0
+  finally:
+    if autoRunQuota != nil:
+      try:
+        autoRunQuota.terminate()
+        discard autoRunQuota.waitForExit()
+        autoRunQuota.close()
+      except CatchableError:
+        discard
+
+proc latestReportAction(info: BuildGraphInspection; actionId: string): Option[JsonNode] =
+  let reportPath = info.outDir / "build-report.json"
+  if not fileExists(extendedPath(reportPath)):
+    return none(JsonNode)
+  try:
+    let report = parseFile(extendedPath(reportPath))
+    for section in ["actions", "providerCompileActions", "cmakeRegenerationActions"]:
+      for action in report{section}:
+        if action{"id"}.getStr() == actionId:
+          return some(action)
+  except CatchableError:
+    return none(JsonNode)
+
+proc shortestActionPath(actions: openArray[BuildAction];
+                        roots: openArray[string];
+                        subject: string): seq[string] =
+  let byId = buildActionById(actions)
+  if not byId.hasKey(subject):
+    discard requireAction(actions, subject)
+  var queue: seq[string] = @[]
+  var parent = initTable[string, string]()
+  var seen = initHashSet[string]()
+  for root in roots:
+    if root.len > 0 and byId.hasKey(root) and not seen.contains(root):
+      queue.add(root)
+      seen.incl(root)
+      parent[root] = ""
+  var head = 0
+  while head < queue.len:
+    let current = queue[head]
+    inc head
+    if current == subject:
+      var node = current
+      while node.len > 0:
+        result.add(node)
+        node = parent[node]
+      result.reverse()
+      return
+    for dep in byId[current].deps:
+      if byId.hasKey(dep) and not seen.contains(dep):
+        seen.incl(dep)
+        parent[dep] = current
+        queue.add(dep)
+
+proc jsonArrayLength(node: JsonNode; key: string): int =
+  if node.kind == JObject and node.hasKey(key) and node[key].kind == JArray:
+    node[key].len
+  else:
+    0
+
+proc evidenceCountsJsonFromReport(action: JsonNode): JsonNode =
+  let evidence = action{"evidence"}
+  %*{
+    "declaredInputs": evidence.jsonArrayLength("declaredInputs"),
+    "declaredOutputs": evidence.jsonArrayLength("declaredOutputs"),
+    "depfileInputs": evidence.jsonArrayLength("depfileInputs"),
+    "monitorReads": evidence.jsonArrayLength("monitorReads"),
+    "monitorWrites": evidence.jsonArrayLength("monitorWrites"),
+    "monitorProbes": evidence.jsonArrayLength("monitorProbes"),
+    "diagnostics": evidence.jsonArrayLength("diagnostics")
+  }
+
+proc whyActionJson(info: BuildGraphInspection; actionId: string): JsonNode =
+  let action = requireAction(info.actions, actionId)
+  let roots =
+    if info.selectedActionId.len > 0:
+      @[info.selectedActionId]
+    else:
+      newSeq[string]()
+  let path = shortestActionPath(info.actions, roots, actionId)
+  let report = latestReportAction(info, actionId)
+  var node = %*{
+    "schemaId": "reprobuild.why.action.v1",
+    "subjectKind": "action",
+    "subject": actionId,
+    "selectedActionId": info.selectedActionId,
+    "defaultActionId": info.defaultActionId,
+    "path": jsonStringSeq(path),
+    "directDependencies": jsonStringSeq(directDependencies(info.actions, actionId)),
+    "directDependents": jsonStringSeq(directDependents(info.actions, actionId)),
+    "action": buildActionJson(action)
+  }
+  if report.isSome:
+    let item = report.get()
+    node["lastResult"] = item
+    node["evidenceCounts"] = evidenceCountsJsonFromReport(item)
+  else:
+    node["lastResult"] = newJNull()
+    node["evidenceCounts"] = newJNull()
+  node
+
+proc optionalReportField(action: JsonNode; key: string): string =
+  if action.kind == JObject and action.hasKey(key):
+    let value = action[key]
+    case value.kind
+    of JString:
+      result = value.getStr()
+    of JInt:
+      result = $value.getInt()
+    of JFloat:
+      result = $value.getFloat()
+    of JBool:
+      result = $value.getBool()
+    of JNull:
+      result = ""
+    else:
+      result = $value
+
+proc renderWhyActionText(info: BuildGraphInspection; actionId: string): string =
+  let action = requireAction(info.actions, actionId)
+  let roots =
+    if info.selectedActionId.len > 0:
+      @[info.selectedActionId]
+    else:
+      newSeq[string]()
+  let path = shortestActionPath(info.actions, roots, actionId)
+  var lines: seq[string] = @[]
+  lines.add("why action " & actionId)
+  if info.selectedActionId.len > 0:
+    lines.add("selectedAction: " & info.selectedActionId)
+  elif info.defaultActionId.len > 0:
+    lines.add("defaultAction: " & info.defaultActionId)
+  if path.len > 0:
+    lines.add("path: " & path.join(" -> "))
+  else:
+    lines.add("path: not rooted by the selected action; present in full graph")
+  let deps = directDependencies(info.actions, actionId)
+  let dependents = directDependents(info.actions, actionId)
+  lines.add("directDependencies: " &
+    (if deps.len > 0: deps.join(", ") else: "-"))
+  lines.add("directDependents: " &
+    (if dependents.len > 0: dependents.join(", ") else: "-"))
+  lines.add("command: " & commandDisplay(action))
+  lines.add("dependencyPolicy: " & $action.dependencyPolicy.kind &
+    " completeness=" & $action.dependencyPolicy.completeness)
+  let report = latestReportAction(info, actionId)
+  if report.isSome:
+    let item = report.get()
+    lines.add("lastResult: status=" & item.optionalReportField("status") &
+      " cache=" & item.optionalReportField("cacheDecision") &
+      " launched=" & item.optionalReportField("launched") &
+      " wouldLaunch=" & item.optionalReportField("wouldLaunch") &
+      (if item.optionalReportField("reason").len > 0:
+        " reason=" & item.optionalReportField("reason")
+      else:
+        ""))
+    let counts = evidenceCountsJsonFromReport(item)
+    lines.add("evidenceCounts: declaredInputs=" &
+      $counts["declaredInputs"].getInt() &
+      " declaredOutputs=" & $counts["declaredOutputs"].getInt() &
+      " depfileInputs=" & $counts["depfileInputs"].getInt() &
+      " monitorReads=" & $counts["monitorReads"].getInt() &
+      " monitorWrites=" & $counts["monitorWrites"].getInt() &
+      " monitorProbes=" & $counts["monitorProbes"].getInt() &
+      " diagnostics=" & $counts["diagnostics"].getInt())
+  else:
+    lines.add("lastResult: no build-report.json entry")
+  lines.join("\n")
+
+proc runWhyCommand(args: openArray[string]; publicCliPath: string): int =
+  var subject = ""
+  var target = ""
+  var mode = tpmUnspecified
+  var workRoot = ""
+  var format = gofText
+  var explicitAction = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg.startsWith("--action="):
+      subject = arg.split("=", maxsplit = 1)[1]
+      explicitAction = true
+      inc i
+    elif arg == "--action":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--action requires a value")
+      subject = args[i + 1]
+      explicitAction = true
+      inc i, 2
+    elif arg == "--json":
+      format = gofJson
+      inc i
+    elif arg.startsWith("--format="):
+      format = parseGraphOutputFormat(arg.split("=", maxsplit = 1)[1],
+        allowDot = false)
+      inc i
+    elif arg == "--format":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--format requires a value")
+      format = parseGraphOutputFormat(args[i + 1], allowDot = false)
+      inc i, 2
+    elif arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
+      inc i
+    elif arg == "--tool-provisioning":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--tool-provisioning requires a value")
+      mode = parseToolProvisioning(args[i + 1])
+      inc i, 2
+    elif arg.startsWith("--work-root="):
+      workRoot = arg.split("=", maxsplit = 1)[1]
+      inc i
+    elif arg == "--work-root":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--work-root requires a value")
+      workRoot = args[i + 1]
+      inc i, 2
+    elif arg.startsWith("--action-cache-root="):
+      setActionCacheRootOverride(arg.split("=", maxsplit = 1)[1])
+      inc i
+    elif arg == "--action-cache-root":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--action-cache-root requires a value")
+      setActionCacheRootOverride(args[i + 1])
+      inc i, 2
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported why flag: " & arg)
+    elif explicitAction:
+      if target.len == 0:
+        target = arg
+        inc i
+      else:
+        raise newException(ValueError, "unexpected why argument: " & arg)
+    elif subject.len == 0:
+      subject = arg
+      inc i
+    elif target.len == 0:
+      target = arg
+      inc i
+    else:
+      raise newException(ValueError, "unexpected why argument: " & arg)
+
+  if subject.len == 0:
+    raise newException(ValueError,
+      "missing why subject; use repro why <package-or-action> or " &
+        "repro why --action=<action-id>")
+  if target.len == 0:
+    target = "."
+
+  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
+  try:
+    let info = prepareBuildGraphInspection(target, mode, publicCliPath,
+      selectDefaultAction = true,
+      workRoot = workRoot)
+    try:
+      discard requireAction(info.actions, subject)
+    except ValueError:
+      if explicitAction:
+        raise
+      raise newException(ValueError,
+        "package-level why is not implemented for this project context yet, " &
+          "and no build action named " & subject & " exists")
+    case format
+    of gofText:
+      echo renderWhyActionText(info, subject)
+    of gofJson:
+      echo $whyActionJson(info, subject)
+    of gofDot:
+      discard
+    return 0
+  finally:
+    if autoRunQuota != nil:
+      try:
+        autoRunQuota.terminate()
+        discard autoRunQuota.waitForExit()
+        autoRunQuota.close()
+      except CatchableError:
+        discard
+
+proc renderLoweredGraphRecordText(record: LoweredGraphCacheRecord): string =
+  var lines: seq[string] = @[]
+  lines.add("lowered graph cache")
+  lines.add("modulePath: " & record.modulePath)
+  lines.add("projectRoot: " & record.projectRoot)
+  lines.add("selectedActionId: " &
+    (if record.selectedActionId.len > 0: record.selectedActionId else: "-"))
+  lines.add("actions: " & $record.actions.len)
+  lines.add("pools: " & $record.pools.len)
+  for action in record.actions:
+    lines.add("- " & action.id &
+      " deps=[" & action.deps.join(", ") & "]" &
+      " outputs=" & $action.outputs.len &
+      " command=" & commandDisplay(action))
+  lines.join("\n")
+
+proc runDebugArtifactCommand(args: openArray[string]): int =
+  var path = ""
+  var format = gofText
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--json":
+      format = gofJson
+      inc i
+    elif arg.startsWith("--format="):
+      format = parseGraphOutputFormat(arg.split("=", maxsplit = 1)[1],
+        allowDot = false)
+      inc i
+    elif arg == "--format":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--format requires a value")
+      format = parseGraphOutputFormat(args[i + 1], allowDot = false)
+      inc i, 2
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported debug artifact flag: " & arg)
+    elif path.len == 0:
+      path = arg
+      inc i
+    else:
+      raise newException(ValueError,
+        "unexpected debug artifact argument: " & arg)
+  if path.len == 0:
+    raise newException(ValueError, "debug artifact requires a path")
+  let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
+  case format
+  of gofText:
+    echo renderLoweredGraphRecordText(record)
+  of gofJson:
+    echo $loweredGraphRecordJson(record)
+  of gofDot:
+    discard
+  0
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:
@@ -7114,6 +8028,18 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runFsSnoopCli("repro debug fs-snoop", fsArgs)
+  if programName == "repro" and args.len >= 2 and args[0] == "debug" and
+      args[1] == "artifact":
+    try:
+      let artifactArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runDebugArtifactCommand(artifactArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro debug artifact: error: " & err.msg)
+      return 1
   if programName == "repro" and args.len > 0 and args[0] == "capabilities":
     try:
       let capabilityArgs =
@@ -7124,6 +8050,28 @@ proc runThinApp*(programName: string): int =
       return runCapabilitiesCommand(capabilityArgs)
     except CatchableError as err:
       stderr.writeLine("repro capabilities: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "graph":
+    try:
+      let graphArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runGraphCommand(graphArgs, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro graph: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "why":
+    try:
+      let whyArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runWhyCommand(whyArgs, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro why: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "build":
     try:
