@@ -134,14 +134,22 @@ proc runProviderProtocol*(config: ProviderExecutionConfig;
   let cwd =
     if config.workingDir.len > 0: config.workingDir
     else: getCurrentDir()
-  let providerArgs = config.extraArgs & @[
+  let argv = @[config.binaryPath] & config.extraArgs & @[
     "--repro-provider-request", requestPath,
     "--repro-provider-response", responsePath]
-  let process = startProcess(config.binaryPath, workingDir = cwd,
-    args = providerArgs, options = {poUsePath, poStdErrToStdOut})
-  let output = process.outputStream.readAll()
-  let exitCode = waitForExit(process)
-  close(process)
+  # M8 stderr-truncation fix: previously used
+  # ``startProcess + outputStream.readAll + waitForExit`` to drive the
+  # provider, but on Windows the ``readAll`` path returned only the first
+  # byte of merged stderr — diagnostics like
+  # ``repro-standard-provider: no convention matched ...`` surfaced as a
+  # single ``r``. ``execCmdEx`` uses ``readLine`` + ``peekExitCode`` to
+  # drain incrementally, mirroring the M6.5 cargo/cargo metadata fix in
+  # ``conventions/rust.nim`` and the Go convention's ``runGoListExport``.
+  # ``poStdErrToStdOut`` merges stderr into the captured stream so a
+  # single drain catches the provider's diagnostic.
+  let (output, exitCode) = execCmdEx(quoteShellCommand(argv),
+    options = {poStdErrToStdOut, poUsePath},
+    workingDir = cwd)
   if exitCode != 0:
     raiseRuntime("provider exited with code " & $exitCode & ": " & output)
   if not fileExists(extendedPath(responsePath)):

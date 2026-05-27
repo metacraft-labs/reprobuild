@@ -3273,18 +3273,21 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   writeProviderRequestFile(requestPath, request)
   if fileExists(extendedPath(responsePath)):
     removeFile(extendedPath(responsePath))
-  let process = startProcess(binaryPath,
-    args = @[
-      "--repro-provider-request", requestPath,
-      "--repro-provider-response", responsePath
-    ],
-    workingDir = cwd,
-    options = {poUsePath, poStdErrToStdOut})
-  let output =
-    if process.outputStream != nil: process.outputStream.readAll()
-    else: ""
-  let exitCode = process.waitForExit()
-  process.close()
+  let argv = @[
+    binaryPath,
+    "--repro-provider-request", requestPath,
+    "--repro-provider-response", responsePath]
+  # M8 stderr-truncation fix: previously used
+  # ``startProcess + outputStream.readAll + waitForExit`` to drive the
+  # provider here too, with the same symptom — diagnostics from the
+  # standard provider arrived truncated to a single byte on Windows.
+  # See the matching switch in
+  # ``libs/repro_provider_runtime/src/repro_provider_runtime/runtime.nim``
+  # for the full audit. ``execCmdEx`` drains incrementally via
+  # ``readLine`` + ``peekExitCode``.
+  let (output, exitCode) = execCmdEx(quoteShellCommand(argv),
+    options = {poStdErrToStdOut, poUsePath},
+    workingDir = cwd)
   if exitCode != 0:
     raise newException(OSError,
       "provider exited with code " & $exitCode & ": " & output)
