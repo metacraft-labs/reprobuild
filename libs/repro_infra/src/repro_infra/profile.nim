@@ -46,11 +46,28 @@ type
     srkEnvSystemVariable = "env.systemVariable"
     srkPasswdUser = "passwd.user"
 
+  ResourceDependency* = tuple[kind: string, name: string]
+    ## A single `depends_on` edge: `"kind:name"` parsed into its two
+    ## components. The match against another resource in the same
+    ## profile uses `kind == $resource.kind` AND a kind-specific name
+    ## comparison (`name == resource.<primary-name-field>`), so the
+    ## syntax stays uniform across every resource kind.
+
   SystemResource* = object
     ## One declared system-scope resource. `address` is the stable
     ## plan call-site identity; it defaults to a derivation of the
     ## real-world target when the stanza omits an explicit `address`.
+    ##
+    ## `dependsOn` carries the user-declared dependency edges from the
+    ## stanza's optional `depends_on = ["kind:name", ...]` attribute
+    ## (M82 Phase B). The planner combines these EXPLICIT edges with
+    ## IMPLICIT edges inferred from the shared
+    ## `producer_consumer_map.ProducerConsumerMap` to build the apply
+    ## dependency graph and topologically order the emitted plan.
+    ## Empty seq is the common case — most resources have no declared
+    ## dependencies.
     address*: string
+    dependsOn*: seq[ResourceDependency]
     case kind*: SystemResourceKind
     of srkWindowsRegistryValue:
       regKey*: string                ## "HKLM\\..."
@@ -132,6 +149,36 @@ proc realWorldIdentity*(r: SystemResource): string =
     "systemVariable:" & r.evName
   of srkPasswdUser:
     "user:" & r.puName
+
+proc resourceKindTag*(r: SystemResource): string =
+  ## The string form of the resource's kind — the LEFT half of the
+  ## `"kind:name"` pair used in `depends_on` and in the producer ->
+  ## consumer map (M82 Phase B). Matches `$r.kind` exactly because the
+  ## enum string values ARE the profile-syntax kind tags (e.g.
+  ## `"windows.capability"`); this proc names the convention.
+  $r.kind
+
+proc resourceName*(r: SystemResource): string =
+  ## The "primary name" of the resource — the RIGHT half of the
+  ## `"kind:name"` pair used in `depends_on` and in the producer ->
+  ## consumer map (M82 Phase B). For most kinds this is the natural
+  ## name attribute (e.g. `windows.capability.name`,
+  ## `windows.service.name`); for the registry kind it is the
+  ## fully-qualified `<key>\<valueName>` since neither sub-field alone
+  ## identifies the resource. `windows.vsInstaller` uses its edition.
+  case r.kind
+  of srkWindowsRegistryValue:
+    r.regKey & "\\" & r.regName
+  of srkWindowsOptionalFeature: r.featureName
+  of srkWindowsCapability: r.capabilityName
+  of srkWindowsService: r.serviceName
+  of srkWindowsVsInstaller: r.vsEdition
+  of srkMacosSystemDefault: r.sdDomain & ":" & r.sdKey
+  of srkSystemdSystemUnit: r.suName
+  of srkLaunchdSystemDaemon: r.sdaLabel
+  of srkFsSystemFile: r.sfPath
+  of srkEnvSystemVariable: r.evName
+  of srkPasswdUser: r.puName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -257,6 +304,36 @@ proc parseListLiteral*(raw: string): seq[string] =
     else:
       elem.add(c)
   flushElem(result)
+
+proc parseDependsOn(kindTag, raw: string): seq[ResourceDependency] =
+  ## Parse a `depends_on = ["kind:name", "kind:name", ...]` list value
+  ## into its typed dependency edges (M82 Phase B). Each entry must be
+  ## `kind:name` with a non-empty `kind` and a non-empty `name`; the
+  ## FIRST `:` separates the two, so a name containing a `:` (e.g. an
+  ## HKLM key path) still parses correctly. The shared
+  ## `parseListLiteral` does the surface-level `[...] -> seq[string]`
+  ## split; this proc validates each entry's shape and raises
+  ## `ESystemProfileInvalid` with a clear message on a malformed entry
+  ## (the offending text is echoed back so the operator can find it).
+  let items = parseListLiteral(raw)
+  for item in items:
+    let t = item.strip()
+    if t.len == 0:
+      raiseSystemProfileInvalid("resource '" & kindTag &
+        "' has an empty 'depends_on' entry")
+    let colon = t.find(':')
+    if colon <= 0 or colon == t.len - 1:
+      raiseSystemProfileInvalid("resource '" & kindTag &
+        "' has a malformed 'depends_on' entry '" & t &
+        "' — expected 'kind:name' (e.g. " &
+        "'windows.capability:OpenSSH.Server~~~~0.0.1.0')")
+    let depKind = t[0 ..< colon].strip()
+    let depName = t[colon + 1 .. ^1].strip()
+    if depKind.len == 0 or depName.len == 0:
+      raiseSystemProfileInvalid("resource '" & kindTag &
+        "' has a malformed 'depends_on' entry '" & t &
+        "' — both kind and name must be non-empty")
+    result.add((kind: depKind, name: depName))
 
 proc parseSystemProfile*(text: string): SystemProfile =
   ## Parse the declarative `system.nim` text into a `SystemProfile`.
@@ -445,6 +522,14 @@ proc parseSystemProfile*(text: string): SystemProfile =
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
+    # M82 Phase B: optional `depends_on = ["kind:name", ...]` attribute.
+    # Absent / empty is the common case (most resources have no
+    # declared dependencies — they are independent ops). When present,
+    # the parser validates each entry's shape; the planner later
+    # resolves each `(kind, name)` to a node in the dependency graph
+    # and adds an explicit edge.
+    if "depends_on" in rawFields:
+      res.dependsOn = parseDependsOn(kindTag, rawFields["depends_on"])
     result.resources.add(res)
 
 # ---------------------------------------------------------------------------

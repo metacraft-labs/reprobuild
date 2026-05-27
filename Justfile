@@ -1104,6 +1104,23 @@ e2e_repro_infra_passwd_user_safe_destroy:
         tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim \
         2>&1 | tee test-logs/e2e_repro_infra_passwd_user_safe_destroy.log
 
+# M82 Phase B verification gate — pure logic, runs on every host. No
+# Hyper-V VM / no broker / no real Windows API needed: the gate
+# exercises the planner's dependency-graph + topological-sort path
+# against fixture profile text. The companion REAL Hyper-V scenario
+# (`integration_intra_batch_capability_to_service`) is exercised
+# separately via `tools/hyperv-m69-system/`.
+e2e_repro_infra_depends_on_topological:
+    mkdir -p test-logs build/test-bin build/nimcache build/test-tmp
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_repro_infra_depends_on_topological \
+        --out:build/test-bin/e2e_repro_infra_depends_on_topological \
+        tests/e2e/m69/t_e2e_repro_infra_depends_on_topological.nim \
+        2>&1 | tee test-logs/e2e_repro_infra_depends_on_topological.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

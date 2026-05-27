@@ -774,3 +774,44 @@ suite "repro_elevation: passwd.user pure logic (Phase C)":
       puName: "deploy", puDestroy: true)
     check posixSystemDesiredDigestHex(destroyOp) ==
       "0000000000000000000000000000000000000000000000000000000000000000"
+
+# ===========================================================================
+# M82 Phase B — the shared producer / consumer map, promoted from the
+# driver-private `CapabilityServiceMap`. Verified here at the elevation
+# library boundary so a regression that hides the table (or breaks the
+# prefix-matching semantics) is caught WITHOUT a Windows host or a
+# real broker run.
+# ===========================================================================
+
+suite "repro_elevation: ProducerConsumerMap lookup (M82 Phase B)":
+
+  test "lookupProducedResources matches a Windows Capability by prefix":
+    # The seed entry: `windows.capability OpenSSH.Server~~~~` registers
+    # the `sshd` SCM service. The prefix match is the load-bearing
+    # invariant — the version-tagged real name varies across Windows
+    # releases but the table entry remains stable.
+    let produced = lookupProducedResources("windows.capability",
+      "OpenSSH.Server~~~~0.0.1.0")
+    check produced.len == 1
+    check produced[0].kind == "windows.service"
+    check produced[0].name == "sshd"
+    # The bare prefix matches too.
+    let bare = lookupProducedResources("windows.capability",
+      "OpenSSH.Server~~~~")
+    check bare == produced
+
+  test "lookupProducedResources returns empty for an unmapped producer":
+    check lookupProducedResources("windows.capability",
+      "RSAT.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0").len == 0
+    check lookupProducedResources("windows.service", "sshd").len == 0
+    check lookupProducedResources("totally.unknownKind", "anything").len == 0
+
+  test "lookupCapabilityRegisteredService is the driver-side back-compat shim":
+    # The M69 CBS-finalization wait calls this — verify it still finds
+    # the SAME `sshd` entry the planner's edge inference picks up via
+    # `lookupProducedResources`, so the driver-side and planner-side
+    # views of the table can never diverge.
+    check lookupCapabilityRegisteredService(
+      "OpenSSH.Server~~~~0.0.1.0") == "sshd"
+    check lookupCapabilityRegisteredService(
+      "RSAT.NotInMap") == ""

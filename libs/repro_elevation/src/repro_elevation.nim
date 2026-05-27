@@ -68,6 +68,7 @@ import repro_elevation/elevation_state
 import repro_elevation/protocol
 import repro_elevation/ipc
 import repro_elevation/fixture_driver
+import repro_elevation/producer_consumer_map
 import repro_elevation/windows_system_parse
 import repro_elevation/windows_system_driver
 import repro_elevation/windows_vs_installer_parse
@@ -85,6 +86,7 @@ export elevation_state
 export protocol
 export ipc
 export fixture_driver
+export producer_consumer_map
 export windows_system_parse
 export windows_system_driver
 export windows_vs_installer_parse

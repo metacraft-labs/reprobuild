@@ -649,3 +649,263 @@ systemd.systemUnit { name = "x.service" content = "[Unit]" }
     let part = partitionApply(ops, nonPrivilegedOperationCount = 0)
     check part.privilegedOperations.len == 2
     check part.hasPrivilegedWork()
+
+# ===========================================================================
+# M82 Phase B — `depends_on` profile-syntax + planner dependency graph
+# + topological-order plan emission. Pure-logic, runs on every host.
+# ===========================================================================
+
+suite "repro_infra: depends_on profile syntax (M82 Phase B)":
+
+  test "a resource with no depends_on parses with an empty seq":
+    let profile = parseSystemProfile("""
+windows.service { name = "sshd" startType = Automatic state = Running }
+""")
+    check profile.resources.len == 1
+    check profile.resources[0].dependsOn.len == 0
+
+  test "an explicit depends_on list parses into typed (kind, name) entries":
+    let profile = parseSystemProfile("""
+windows.capability {
+  name = "OpenSSH.Server~~~~0.0.1.0"
+}
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  depends_on = ["windows.capability:OpenSSH.Server~~~~0.0.1.0"]
+}
+""")
+    check profile.resources[1].dependsOn.len == 1
+    check profile.resources[1].dependsOn[0].kind == "windows.capability"
+    check profile.resources[1].dependsOn[0].name ==
+      "OpenSSH.Server~~~~0.0.1.0"
+
+  test "a malformed depends_on entry is rejected with a clear message":
+    var raised = false
+    try:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  depends_on = ["no-colon-at-all"]
+}
+""")
+    except ESystemProfileInvalid as e:
+      raised = true
+      check e.detail.contains("depends_on")
+      check e.detail.contains("kind:name")
+    check raised
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service { name = "s" depends_on = [":missing-kind"] }
+""")
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service { name = "s" depends_on = ["windows.capability:"] }
+""")
+
+  test "an empty depends_on list parses to an empty seq (no error)":
+    let profile = parseSystemProfile("""
+windows.service { name = "s" depends_on = [] }
+""")
+    check profile.resources[0].dependsOn.len == 0
+
+  test "a name with a colon (HKLM key path) still parses by splitting on first ':'":
+    # Per the design, the FIRST `:` separates kind from name — a
+    # consumer that depends on a producer whose name itself contains a
+    # `:` (an HKLM key path that includes a literal colon, or a
+    # `macos.systemDefault` `domain:key` identifier) parses correctly.
+    # The string-literal parser is byte-faithful — it does NOT
+    # un-escape backslashes — so we exercise the colon-split with a
+    # value the parser keeps verbatim.
+    let profile = parseSystemProfile("""
+macos.systemDefault {
+  domain = "com.example.app"
+  key = "feature:enabled"
+  type = "-bool"
+  value = "true"
+}
+fs.systemFile {
+  path = "/etc/app.conf"
+  content = "x"
+  depends_on = ["macos.systemDefault:com.example.app:feature:enabled"]
+}
+""")
+    check profile.resources[1].dependsOn[0].kind == "macos.systemDefault"
+    check profile.resources[1].dependsOn[0].name ==
+      "com.example.app:feature:enabled"
+
+suite "repro_infra: planner dependency graph + topological sort (M82 Phase B)":
+
+  test "buildDependencyGraph picks up an explicit edge":
+    let profile = parseSystemProfile("""
+windows.capability { name = "OpenSSH.Server~~~~0.0.1.0" }
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  depends_on = ["windows.capability:OpenSSH.Server~~~~0.0.1.0"]
+}
+""")
+    let graph = buildDependencyGraph(profile)
+    check graph.edges.len == 1
+    check graph.edges[0].fromIdx == 0     # capability is the producer
+    check graph.edges[0].toIdx == 1       # service is the consumer
+    check graph.edges[0].sourceKind == edkExplicit
+
+  test "buildDependencyGraph infers the OpenSSH.Server -> sshd implicit edge":
+    # No `depends_on` written; the shared `ProducerConsumerMap` is the
+    # only edge source. This is the load-bearing M82 Phase B inference
+    # check — the planner orders the capability before the service
+    # WITHOUT the user spelling out the dependency.
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+}
+windows.capability { name = "OpenSSH.Server~~~~0.0.1.0" }
+""")
+    let graph = buildDependencyGraph(profile)
+    check graph.edges.len == 1
+    # Service is declared FIRST (idx 0); capability is declared SECOND
+    # (idx 1). The implicit edge runs capability -> service regardless,
+    # so the topological order reverses the declaration order.
+    check graph.edges[0].fromIdx == 1
+    check graph.edges[0].toIdx == 0
+    check graph.edges[0].sourceKind == edkImplicit
+
+  test "topologicallyOrder respects an explicit dependency chain":
+    # A -> B -> C -> D via explicit depends_on, declared in REVERSE
+    # order (D first, A last) — the topological sort must put A
+    # first and D last.
+    let profile = parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/d"
+  content = "d"
+  depends_on = ["fs.systemFile:/etc/c"]
+}
+fs.systemFile {
+  path = "/etc/c"
+  content = "c"
+  depends_on = ["fs.systemFile:/etc/b"]
+}
+fs.systemFile {
+  path = "/etc/b"
+  content = "b"
+  depends_on = ["fs.systemFile:/etc/a"]
+}
+fs.systemFile {
+  path = "/etc/a"
+  content = "a"
+}
+""")
+    let graph = buildDependencyGraph(profile)
+    let order = topologicallyOrder(profile, graph)
+    check order.len == 4
+    # Declaration indices: D=0, C=1, B=2, A=3.
+    check order == @[3, 2, 1, 0]          # A, B, C, D
+
+  test "topologicallyOrder is stable for independent ops (declaration order)":
+    # Two unrelated resources keep their declaration order — the
+    # stable secondary key is the declaration index, so the emitted
+    # plan is byte-comparable across runs of the same profile text.
+    let profile = parseSystemProfile("""
+windows.service { name = "svc-A" startType = Automatic state = Running }
+windows.service { name = "svc-B" startType = Manual state = Stopped }
+windows.service { name = "svc-C" startType = Automatic state = Running }
+""")
+    let order = topologicallyOrder(profile, buildDependencyGraph(profile))
+    check order == @[0, 1, 2]
+
+  test "an explicit cycle is refused at plan time with the cycle named":
+    # A depends_on B and B depends_on A — the smallest possible cycle.
+    var raised = false
+    try:
+      let profile = parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/a"
+  content = "a"
+  depends_on = ["fs.systemFile:/etc/b"]
+}
+fs.systemFile {
+  path = "/etc/b"
+  content = "b"
+  depends_on = ["fs.systemFile:/etc/a"]
+}
+""")
+      let graph = buildDependencyGraph(profile)
+      discard topologicallyOrder(profile, graph)
+    except EPlanCyclicDependency as e:
+      raised = true
+      check e.cyclePath.len >= 2
+      # The cycle closes on the same address it started on.
+      check e.cyclePath[0] == e.cyclePath[^1]
+      # Both nodes appear in the path.
+      let firstHalf = e.cyclePath[0 ..< e.cyclePath.len - 1]
+      check "systemFile:/etc/a" in firstHalf
+      check "systemFile:/etc/b" in firstHalf
+      check e.msg.contains("cycle")
+    check raised
+
+  test "a multi-hop explicit cycle is refused with the full cycle path":
+    var raised = false
+    try:
+      let profile = parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/x"
+  content = "x"
+  depends_on = ["fs.systemFile:/etc/z"]
+}
+fs.systemFile {
+  path = "/etc/y"
+  content = "y"
+  depends_on = ["fs.systemFile:/etc/x"]
+}
+fs.systemFile {
+  path = "/etc/z"
+  content = "z"
+  depends_on = ["fs.systemFile:/etc/y"]
+}
+""")
+      discard topologicallyOrder(profile, buildDependencyGraph(profile))
+    except EPlanCyclicDependency as e:
+      raised = true
+      check e.cyclePath.len == 4
+      check e.cyclePath[0] == e.cyclePath[^1]
+    check raised
+
+  test "depends_on referencing a missing resource is rejected at plan time":
+    var raised = false
+    try:
+      let profile = parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  depends_on = ["windows.capability:OpenSSH.Server~~~~0.0.1.0"]
+}
+""")
+      # Build the graph — the missing producer must raise.
+      discard buildDependencyGraph(profile)
+    except ESystemProfileInvalid as e:
+      raised = true
+      check e.detail.contains("depends_on")
+      check e.detail.contains("OpenSSH.Server")
+    check raised
+
+  test "producePlan emits operations in topological order":
+    # Declaration order: service FIRST, capability SECOND. The implicit
+    # edge from `ProducerConsumerMap` makes the capability the producer
+    # — the emitted plan must list the capability's op BEFORE the
+    # service's op.
+    let profileText = """
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+}
+windows.capability { name = "OpenSSH.Server~~~~0.0.1.0" }
+"""
+    let plan = producePlan(profileText, "test-host", now = 1_700_000_000)
+    check plan.envelope.operations.len == 2
+    check plan.envelope.operations[0].kindTag == "windows.capability"
+    check plan.envelope.operations[1].kindTag == "windows.service"

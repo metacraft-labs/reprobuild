@@ -29,6 +29,7 @@ import blake3
 import ./errors
 import ./fixture_driver
 import ./operations
+import ./producer_consumer_map
 import ./system_value
 import ./windows_system_parse
 
@@ -423,14 +424,19 @@ proc applyWindowsOptionalFeature*(op: PrivilegedOperation):
 # only on the apply path; observe / drift-gate is untouched.
 # ===========================================================================
 
-const
-  CapabilityServiceMap: array[1, tuple[capPrefix, svc: string]] = [
-    # Match by capability-name PREFIX — the `~~~~0.0.1.0`
-    # version-suffix varies between releases of a capability.
-    (capPrefix: "OpenSSH.Server~~~~", svc: "sshd")]
-    # Add additional `(capability-prefix, service-name)` entries here
-    # as further capability/service races are identified in the field.
+## The `CapabilityServiceMap` constant that USED to live here is now
+## the producer -> consumer table in `producer_consumer_map.nim`. M82
+## Phase B promoted it from a driver-private const into a planner-
+## visible declarative fact (the planner inserts implicit
+## dependency-graph edges from a `windows.capability` to every
+## `windows.service` it registers, so the planner topologically orders
+## a capability+service pair WITHOUT the user writing `depends_on`).
+## This file now consults the SAME map through
+## `lookupCapabilityRegisteredService` (re-exported from
+## `producer_consumer_map`) so the driver-side CBS-finalization wait
+## and the planner-side edge inference can never disagree.
 
+const
   CapabilityServiceStableObservations = 5
     ## N consecutive equal observations needed before the stability
     ## loop exits — chosen so CBS's last reset (if any) has time to
@@ -447,12 +453,15 @@ const
 
   UnknownCapabilityPostInstallPauseMs = 3000
     ## Blanket safety wait (milliseconds) taken AFTER `State=Installed`
-    ## for any capability whose service mapping is not in
-    ## `CapabilityServiceMap`. Short enough not to bloat every
-    ## capability install; long enough to dodge most micro-races.
-    ## If a real capability later proves to need a longer tail, add
-    ## an entry to `CapabilityServiceMap` instead of growing this
-    ## constant.
+    ## for any capability whose service mapping is not in the shared
+    ## `ProducerConsumerMap` (see `producer_consumer_map.nim`). Short
+    ## enough not to bloat every capability install; long enough to
+    ## dodge most micro-races. If a real capability later proves to
+    ## need a longer tail, add a `ProducerConsumerEntry` instead of
+    ## growing this constant — the same entry then becomes visible to
+    ## the planner's dependency-graph inference, so both the
+    ## stability-wait and the implicit `producer -> consumer` edge stay
+    ## in sync.
 
 when defined(windows):
   type
@@ -468,16 +477,6 @@ when defined(windows):
     ## reuse the same deterministic `Get-Service` probe `observeWindows
     ## Service` parses. The definition lives in the windows.service
     ## section further down.
-
-  proc lookupCapabilityService(capName: string): string =
-    ## Return the SCM service name a Windows Capability is known to
-    ## register, or `""` if the capability is not in
-    ## `CapabilityServiceMap`. Matching is by prefix because the
-    ## `~~~~0.0.1.0` version suffix of a capability name varies.
-    for entry in CapabilityServiceMap:
-      if capName.startsWith(entry.capPrefix):
-        return entry.svc
-    return ""
 
   proc awaitCapabilityServiceStable(capName, svcName: string) =
     ## Poll `svcName`'s (StartType, Status) until it has been
@@ -545,7 +544,7 @@ when defined(windows):
       psQuote(op.capabilityName) & " | Format-List State")
     if parseCapabilityState(probe) != capsInstalled:
       return
-    let svc = lookupCapabilityService(op.capabilityName)
+    let svc = lookupCapabilityRegisteredService(op.capabilityName)
     if svc.len > 0:
       awaitCapabilityServiceStable(op.capabilityName, svc)
     else:

@@ -293,6 +293,16 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  shell = " & renderScalar(r.puShell))
     if r.puGroups.len > 0:
       result.add("  groups = " & renderList(r.puGroups))
+  # M82 Phase B: emit `depends_on` last so its presence is obvious in a
+  # rendered stanza without disrupting the legacy kind-field order.
+  # Absent / empty seq omits the line entirely (the common case), so
+  # the existing structural-editor round-trips for resources without
+  # declared dependencies stay byte-identical.
+  if r.dependsOn.len > 0:
+    var deps = newSeq[string]()
+    for dep in r.dependsOn:
+      deps.add(dep.kind & ":" & dep.name)
+    result.add("  depends_on = " & renderList(deps))
   result.add("}")
 
 # ---------------------------------------------------------------------------

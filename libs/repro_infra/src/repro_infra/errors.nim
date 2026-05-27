@@ -18,6 +18,23 @@ type
     ## unknown resource / value kind.
     detail*: string
 
+  EPlanCyclicDependency* = object of EInfra
+    ## M82 Phase B: the planner's resource dependency graph contains a
+    ## CYCLE — the apply order cannot be topologically determined.
+    ## Causes:
+    ##
+    ##   * explicit `depends_on` edges that form a cycle in the
+    ##     user's `system.nim` (e.g. A depends_on B; B depends_on A);
+    ##   * an explicit edge that closes a cycle with an implicit
+    ##     producer -> consumer edge from
+    ##     `producer_consumer_map.ProducerConsumerMap`.
+    ##
+    ## The exception's `cyclePath` lists the resources participating in
+    ## the cycle, in traversal order with the first node repeated at
+    ## the end (e.g. `@["A", "B", "C", "A"]`) so the operator can see
+    ## exactly where the cycle closes.
+    cyclePath*: seq[string]
+
   EPlanStale* = object of EInfra
     ## `repro infra apply <plan-id>` was given a plan whose recorded
     ## observations no longer match the live world — the user must
@@ -101,3 +118,17 @@ proc raisePasswdDestroy*(address: string) {.noreturn.} =
 
 proc raiseElevationRefused*(msg: string) {.noreturn.} =
   raise newException(EElevationRefused, "repro infra: " & msg)
+
+proc raisePlanCyclicDependency*(cyclePath: seq[string]) {.noreturn.} =
+  ## Raise the M82 Phase B "the dependency graph has a cycle" error.
+  ## `cyclePath` is the cycle's nodes in traversal order with the first
+  ## node repeated at the end so the diagnostic shows the closing edge.
+  var arrow = ""
+  for i, node in cyclePath:
+    if i > 0: arrow.add(" -> ")
+    arrow.add(node)
+  var e = newException(EPlanCyclicDependency,
+    "repro infra: resource dependency graph has a cycle: " & arrow &
+    " (refusing to plan — edit `depends_on` so the graph is acyclic).")
+  e.cyclePath = cyclePath
+  raise e
