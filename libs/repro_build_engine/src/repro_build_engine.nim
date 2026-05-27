@@ -179,6 +179,11 @@ type
     launched*: bool
     total*: int
     completed*: int
+    checked*: int
+    settled*: int
+    plannedExecutions*: int
+    completedExecutions*: int
+    executionPlanKnown*: bool
     running*: int
     ready*: int
 
@@ -1610,6 +1615,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           asWouldRun, asFailed, asBlocked}:
         inc result
 
+  proc checkedCount(): int =
+    terminalCount() + running.len
+
+  proc plannedExecutionCount(): int =
+    for item in runResult.results:
+      if item.launched or item.wouldLaunch:
+        inc result
+
+  proc completedExecutionCount(): int =
+    for item in runResult.results:
+      if item.launched and item.status in {asSucceeded, asFailed}:
+        inc result
+
   proc emitProgress(kind: BuildProgressKind; id: string) =
     if config.progressCallback == nil:
       return
@@ -1632,6 +1650,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       launched: runResult.results[idx].launched,
       total: buildGraph.actions.len,
       completed: terminalCount(),
+      checked: checkedCount(),
+      settled: terminalCount(),
+      plannedExecutions: plannedExecutionCount(),
+      completedExecutions: completedExecutionCount(),
+      executionPlanKnown: checkedCount() >= buildGraph.actions.len,
       running: running.len,
       ready: ready.len))
 

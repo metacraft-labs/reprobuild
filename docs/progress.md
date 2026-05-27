@@ -16,7 +16,7 @@ repro build --progress=quiet
 fixed-width progress bar on the left:
 
 ```text
-repro [########............] checked=12/28 42% running=3 ready=5 started gcc -c ...
+repro check[######....] build[#####.....] checked=12/28 42% built=9/28 exec=3 running=3 ready=5 started gcc -c ...
 ```
 
 The progress fraction counts selected scheduler actions that have been checked
@@ -26,6 +26,24 @@ the selected graph to verify invalidation state, so it may finish at
 `started` and `executed` events, with `running=` showing how many actions are
 currently launched. `up-to-date` and `cache-hit` events did not execute the
 shown action during that build invocation.
+
+The default bar-line renderer shows two progress bars:
+
+- `check[...]` tracks actions whose run/skip decision has been reached.
+- `build[...]` tracks actions whose build state has settled. Skipped
+  `up-to-date` and `cache-hit` actions settle immediately; launched actions
+  settle when their command completes.
+
+While the scheduler is still discovering the run/skip decisions, both bars are
+scaled to the selected graph size. For example, if 25 of 40 actions have been
+checked and their decisions are "execute 4, skip 21", the check bar is `25/40`
+and the build bar is `21/40` until those four commands finish. Once all
+decisions are known and commands are still running, the second bar switches to
+execution scale and the `exec=X/Y` counter reports completed command executions
+out of planned command executions. This execution-scale mode can later use
+RunQuota duration estimates when the RunQuota protocol exposes an
+acknowledge-and-wait phase; without those estimates, it uses the planned
+execution count.
 
 On ANSI-capable terminals, progress bars use color by default: completed
 segments are highlighted, pending segments are dimmed, and the plain ASCII shape

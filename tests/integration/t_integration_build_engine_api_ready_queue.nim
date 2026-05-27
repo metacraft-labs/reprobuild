@@ -230,12 +230,21 @@ suite "integration_build_engine_api_ready_queue":
         check event.status == asRunning
         check event.launched
         check event.total == 1
+        check event.checked == 1
+        check event.settled == 0
+        check event.plannedExecutions == 1
+        check event.completedExecutions == 0
         check event.running == 1
       if event.kind == bpkActionCompleted and event.actionId == "copy-progress":
         sawCompleted = true
         check event.status == asSucceeded
         check event.completed == 1
         check event.total == 1
+        check event.checked == 1
+        check event.settled == 1
+        check event.plannedExecutions == 1
+        check event.completedExecutions == 1
+        check event.executionPlanKnown
         check event.running == 0
     check sawStarted
     check sawCompleted

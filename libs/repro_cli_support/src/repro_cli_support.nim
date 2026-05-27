@@ -2167,7 +2167,8 @@ proc takeVisiblePrefix(text: string; width: int): string =
   if result.contains("\27["):
     result.add("\27[0m")
 
-proc progressBar(completed, total, width: int; color = false): string =
+proc progressBar(completed, total, width: int; color = false;
+                 filledColor = "38;5;42"; emptyColor = "38;5;240"): string =
   let safeWidth = max(width, 1)
   let clampedCompleted =
     if total <= 0:
@@ -2182,8 +2183,8 @@ proc progressBar(completed, total, width: int; color = false): string =
   let
     openBracket = if color: ansi("38;5;244", "[") else: "["
     closeBracket = if color: ansi("38;5;244", "]") else: "]"
-    filledGlyph = if color: ansi("38;5;42", "#") else: "#"
-    emptyGlyph = if color: ansi("38;5;240", ".") else: "."
+    filledGlyph = if color: ansi(filledColor, "#") else: "#"
+    emptyGlyph = if color: ansi(emptyColor, ".") else: "."
   result = openBracket
   for i in 0 ..< safeWidth:
     result.add(if i < filled: filledGlyph else: emptyGlyph)
@@ -2219,11 +2220,50 @@ proc buildProgressPercent(event: BuildProgressEvent): int =
   if event.total <= 0:
     100
   else:
-    min(100, (max(event.completed, 0) * 100) div event.total)
+    let checked =
+      if event.checked > 0 or event.completed == 0: event.checked
+      else: event.completed
+    min(100, (max(checked, 0) * 100) div event.total)
 
 proc buildProgressCounters(event: BuildProgressEvent): string =
-  "checked=" & $event.completed & "/" & $event.total & " " &
+  let checked =
+    if event.checked > 0 or event.completed == 0: event.checked
+    else: event.completed
+  let settled =
+    if event.settled > 0 or event.completed == 0: event.settled
+    else: event.completed
+  result = "checked=" & $checked & "/" & $event.total & " " &
     $buildProgressPercent(event) & "%"
+  if event.executionPlanKnown and event.plannedExecutions > 0:
+    result.add(" exec=" & $event.completedExecutions & "/" &
+      $event.plannedExecutions)
+  elif event.plannedExecutions > 0 or event.running > 0:
+    result.add(" built=" & $settled & "/" & $event.total &
+      " exec=" & $event.plannedExecutions)
+  else:
+    result.add(" built=" & $settled & "/" & $event.total)
+
+proc buildProgressBars(event: BuildProgressEvent; width: int;
+                       color = false): string =
+  let checked =
+    if event.checked > 0 or event.completed == 0: event.checked
+    else: event.completed
+  let settled =
+    if event.settled > 0 or event.completed == 0: event.settled
+    else: event.completed
+  let half = max(5, width div 2)
+  let other = max(5, width - half)
+  let checkBar = progressBar(checked, event.total, half, color,
+    filledColor = "38;5;42")
+  let buildBar =
+    if event.executionPlanKnown and event.plannedExecutions > 0 and
+        settled < event.total:
+      progressBar(event.completedExecutions, event.plannedExecutions, other,
+        color, filledColor = "38;5;213")
+    else:
+      progressBar(settled, event.total, other, color,
+        filledColor = "38;5;39")
+  "check" & checkBar & " build" & buildBar
 
 proc buildProgressInvocation(event: BuildProgressEvent): string =
   let invocation =
@@ -2246,7 +2286,7 @@ proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
                               color = false): string =
   let prefix =
     if includeBar:
-      "repro " & progressBar(event.completed, event.total, barWidth, color) &
+      "repro " & buildProgressBars(event, barWidth, color) &
         " " & buildProgressCounters(event)
     else:
       "repro " & buildProgressCounters(event)
@@ -2259,8 +2299,8 @@ proc formatBuildProgressBarLine(event: BuildProgressEvent; width: int;
   let suffix = " " & buildProgressCounters(event) &
     " running=" & $event.running & " ready=" & $event.ready
   let barWidth = max(10, width - suffix.len - "repro ".len - 2)
-  fitProgressLine("repro " & progressBar(event.completed, event.total,
-    barWidth, color) & suffix, max(width, 20))
+  fitProgressLine("repro " & buildProgressBars(event, barWidth, color) &
+    suffix, max(width, 20))
 
 proc progressLineWidth(): int =
   min(max(terminalWidth(), 40), 160)
