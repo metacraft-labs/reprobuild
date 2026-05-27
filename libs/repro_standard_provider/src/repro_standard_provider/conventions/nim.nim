@@ -48,7 +48,7 @@
 ##     compiler's default on Linux/MinGW. M3+ should consult ``uses:``
 ##     for ``msvc``/``clang`` pins and pick the matching compiler driver.
 
-import std/[algorithm, json, os, osproc, streams, strutils]
+import std/[algorithm, json, os, osproc, strutils]
 
 import repro_core
 import repro_provider_runtime
@@ -271,18 +271,24 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string) =
   ## binary's outer ``try/except`` (in ``apps/repro-standard-provider``)
   ## converts these into the protocol-level error response.
   ##
-  ## ``startProcess(..., options = {poUsePath})`` keeps the argv intact
-  ## (no shell parsing) which matters because our scratch path contains
-  ## a leading dot directory that some shells treat as glob hidden.
+  ## **M6.5 pipe-buffer audit**: previously used
+  ## ``osproc.startProcess(..., options = {poStdErrToStdOut}) +
+  ## outputStream.readAll() + waitForExit()`` which deadlocks on Windows
+  ## when ``nim c`` output exceeds the ~64 KB OS pipe buffer (a real
+  ## project with thousands of modules emits enough log chatter to hit
+  ## this). Switched to ``execCmdEx`` which drains the pipe continuously
+  ## via background reader, matching the Go convention's
+  ## ``runGoListExport`` pattern.
+  ##
+  ## The captured output is used **only** for the non-zero-exit
+  ## diagnostic; the actual graph data is parsed from the on-disk
+  ## ``nimcache.json`` manifest after the process exits, so any progress
+  ## chatter in the merged stdout/stderr is harmless here.
   createDir(extendedPath(nimcacheDir))
   let argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource)
-  let process = startProcess(argv[0], args = argv[1 .. ^1],
-    options = {poUsePath, poStdErrToStdOut})
-  let output =
-    if process.outputStream != nil: process.outputStream.readAll()
-    else: ""
-  let exitCode = process.waitForExit()
-  process.close()
+  let cmd = quoteShellCommand(argv)
+  let (output, exitCode) = execCmdEx(cmd,
+    options = {poStdErrToStdOut, poUsePath})
   if exitCode != 0:
     raise newException(ValueError,
       "nim convention: 'nim c --compileOnly' exited " & $exitCode &

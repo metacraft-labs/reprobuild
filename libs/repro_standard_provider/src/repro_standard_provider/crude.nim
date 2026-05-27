@@ -70,16 +70,40 @@ import repro_project_dsl
 const
   ## Directories pruned from the input enumeration regardless of what
   ## ``outputDirs`` lists. ``.repro`` is the engine's scratch root;
-  ## ``.git`` is the VCS metadata; the other entries are common native
-  ## dependency caches that should never be declared as project inputs.
-  ## Keep this list conservative — anything not pruned here either ends
-  ## up in the static input set or is captured by the FS-snoop monitor.
+  ## ``.git`` / ``.hg`` / ``.svn`` are VCS metadata; the remaining
+  ## entries are common native dependency caches and build-output
+  ## directories from across the supported language ecosystems
+  ## (Rust ``target`` / ``.cargo``, Python ``__pycache__`` / ``.venv`` /
+  ## ``.tox`` / ``.pytest_cache`` / ``.mypy_cache``, JS/TS
+  ## ``node_modules`` / ``.next`` / ``.nuxt``, JVM ``.gradle``, generic
+  ## ``build`` / ``dist`` / ``coverage`` / ``htmlcov``). Per-convention
+  ## ``outputDirs`` typically already cover one of these (Cargo declares
+  ## ``target``); listing them here too is harmless and keeps the prune
+  ## list useful for conventions that omit the declaration. Keep the
+  ## list alphabetically sorted for diff-clean updates — anything not
+  ## pruned here either ends up in the static input set or is captured
+  ## by the FS-snoop monitor.
   StockExcludeDirs* = [
-    ".repro",
+    ".cargo",
     ".git",
+    ".gradle",
     ".hg",
+    ".mypy_cache",
+    ".next",
+    ".nuxt",
+    ".pytest_cache",
+    ".repro",
     ".svn",
-    "node_modules"
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "htmlcov",
+    "node_modules",
+    "target",
+    "venv"
   ]
 
 proc normaliseRel(path: string): string =

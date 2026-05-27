@@ -74,7 +74,7 @@
 ##     with ambient ``cargo check``; M4+1 must switch to cargo-compatible
 ##     hashes when multi-crate workspaces land.
 
-import std/[algorithm, json, os, osproc, streams, strutils]
+import std/[algorithm, json, os, osproc, strutils]
 
 import repro_core
 import repro_provider_runtime
@@ -246,6 +246,45 @@ proc normaliseCrateName(packageName: string): string =
     else:
       result.add(ch)
 
+proc extractFirstJsonObject(blob: string): string =
+  ## Slice out the first balanced ``{ ... }`` JSON object in ``blob``,
+  ## skipping any leading non-JSON noise (e.g. cargo log lines that
+  ## landed in the captured stream because ``poStdErrToStdOut`` is in
+  ## effect). Tracks brace depth while honouring JSON string literals
+  ## (including ``\"`` escapes) so braces inside strings don't throw
+  ## off the count. Returns the empty string when no balanced object
+  ## is found. Same shape as ``splitJsonObjects`` in the Go convention
+  ## but returns just the first object — ``cargo metadata`` emits a
+  ## single top-level JSON object.
+  var depth = 0
+  var startIdx = -1
+  var inString = false
+  var escape = false
+  for i in 0 ..< blob.len:
+    let ch = blob[i]
+    if inString:
+      if escape:
+        escape = false
+      elif ch == '\\':
+        escape = true
+      elif ch == '"':
+        inString = false
+    else:
+      case ch
+      of '"':
+        inString = true
+      of '{':
+        if depth == 0:
+          startIdx = i
+        inc depth
+      of '}':
+        dec depth
+        if depth == 0 and startIdx >= 0:
+          return blob[startIdx .. i]
+      else:
+        discard
+  ""
+
 proc runCargoMetadata(projectRoot, cargoExe: string): JsonNode =
   ## Execute ``cargo metadata --format-version=1 --no-deps`` and parse
   ## the resulting JSON. ``--no-deps`` skips dependency resolution (and
@@ -253,6 +292,23 @@ proc runCargoMetadata(projectRoot, cargoExe: string): JsonNode =
   ## provider relies on Cargo only for manifest parsing. We pass
   ## ``--offline`` too, even with ``--no-deps``, so a cold workspace
   ## without a populated registry index doesn't try to reach crates.io.
+  ##
+  ## **M6.5 pipe-buffer audit**: previously used
+  ## ``osproc.startProcess + outputStream.readAll + errorStream.readAll
+  ## + waitForExit()`` which deadlocks on Windows when either pipe fills
+  ## past the ~64 KB OS buffer (a workspace with hundreds of crates can
+  ## push ``cargo metadata`` JSON well past that, and warning chatter on
+  ## stderr compounds the risk). Switched to ``execCmdEx`` which drains
+  ## continuously, matching the Go convention's ``runGoListExport``
+  ## pattern.
+  ##
+  ## ``poStdErrToStdOut`` merges stderr into the captured stream so a
+  ## single drain handles both. The downside is that any cargo warning
+  ## lines on stderr land alongside the JSON; ``extractFirstJsonObject``
+  ## skips over them to find the first balanced ``{ ... }`` for parsing.
+  ## Cargo metadata always emits exactly one top-level JSON object on
+  ## stdout; stderr noise (lockfile-out-of-date warnings, etc.) is
+  ## non-JSON text that the brace-balanced scan steps right over.
   let argv = @[
     cargoExe,
     "metadata",
@@ -262,22 +318,20 @@ proc runCargoMetadata(projectRoot, cargoExe: string): JsonNode =
     "--manifest-path",
     projectRoot / "Cargo.toml",
   ]
-  let process = startProcess(argv[0], args = argv[1 .. ^1],
-    options = {poUsePath})
-  let output =
-    if process.outputStream != nil: process.outputStream.readAll()
-    else: ""
-  let errOutput =
-    if process.errorStream != nil: process.errorStream.readAll()
-    else: ""
-  let exitCode = process.waitForExit()
-  process.close()
+  let cmd = quoteShellCommand(argv)
+  let (output, exitCode) = execCmdEx(cmd,
+    options = {poStdErrToStdOut, poUsePath})
   if exitCode != 0:
     raise newException(ValueError,
       "rust convention: 'cargo metadata' exited " & $exitCode &
-        " for " & projectRoot & ":\n" & errOutput)
+        " for " & projectRoot & ":\n" & output)
+  let jsonText = extractFirstJsonObject(output)
+  if jsonText.len == 0:
+    raise newException(ValueError,
+      "rust convention: 'cargo metadata' produced no JSON object for " &
+        projectRoot & ":\n" & output)
   try:
-    result = parseJson(output)
+    result = parseJson(jsonText)
   except CatchableError as err:
     raise newException(ValueError,
       "rust convention: failed to parse 'cargo metadata' JSON output for " &
