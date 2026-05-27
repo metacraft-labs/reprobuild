@@ -1,28 +1,43 @@
-## M5 verification: Go language convention.
+## M5 + M14 verification: Go language convention.
 ##
-## Tests against the in-tree fixture at
-## ``reprobuild-examples/go/binary/`` for the positive recognise path
-## and the emit-fragment path. Negative recognise cases are materialised
-## as tiny scratch projects under the test's temp directory so each case
-## is hermetic.
+## Tests against the in-tree fixtures under ``reprobuild-examples/go/``:
+##
+##   * ``go/binary``       — root ``main.go`` (M5 surface)
+##   * ``go/multi-binary`` — ``cmd/alpha/main.go`` + ``cmd/beta/main.go``
+##     (M14 surface)
+##   * ``go/library``      — library-only module, no ``package main``
+##     anywhere (M14 surface)
+##
+## Negative recognise cases are materialised as tiny scratch projects
+## under the test's temp directory so each case is hermetic.
 ##
 ## Coverage:
-##   * ``recognize`` returns true for the canonical fixture
+##   * ``recognize`` returns true for:
+##     - the canonical root-``main.go`` fixture (M5)
+##     - the ``cmd/<name>/main.go`` multi-binary fixture (M14)
+##     - the library-only fixture (M14)
 ##   * ``recognize`` returns false when:
-##       - any ``.go`` file contains ``import "C"`` (cgo trigger)
-##       - a ``_cgo_*.go`` file exists in the project tree
-##       - ``go.work`` is present (workspaces deferred)
-##       - ``go.mod`` is absent (not a Go module)
-##       - ``uses:`` doesn't list ``go``
-##   * ``emitFragment`` against the canonical fixture produces:
-##       - at least one ``go-compile-*`` action with ``go tool compile``
-##         in argv
-##       - exactly one ``go-link-*`` action with ``go tool link`` in argv
-##       - the link action's ``deps`` include the main package's compile
-##         action id (transitively the importcfg.link writer is also a
-##         dep — the link action depends on both)
+##     - any ``.go`` file contains ``import "C"`` (cgo trigger)
+##     - a ``_cgo_*.go`` file exists in the project tree
+##     - ``go.work`` is present (workspaces deferred)
+##     - ``go.mod`` is absent (not a Go module)
+##     - ``uses:`` doesn't list ``go``
+##   * ``emitFragment`` against the canonical M5 fixture produces:
+##     - at least one ``go-compile-*`` action with ``go tool compile``
+##       in argv
+##     - exactly one ``go-link-*`` action with ``go tool link`` in argv
+##     - the link action's ``deps`` include the main package's compile
+##       action id (transitively the importcfg.link writer is also a
+##       dep — the link action depends on both)
+##   * ``emitFragment`` against the M14 multi-binary fixture produces:
+##     - exactly TWO ``go-link-*`` actions (one per ``cmd/<name>/``)
+##     - each link action's output basename matches the cmd's last
+##       path segment (``alpha.exe`` / ``beta.exe``)
+##   * ``emitFragment`` against the M14 library-only fixture produces:
+##     - at least one ``go-compile-*`` action
+##     - ZERO ``go-link-*`` actions
 ##
-## The fragment test depends on ``go`` being on PATH because the
+## The fragment tests depend on ``go`` being on PATH because the
 ## convention invokes ``go list -export -json -deps ./...`` eagerly at
 ## emit time (Standard-Provider-Implementation.milestones.org §M5,
 ## Option 1). When ``go`` is missing we skip the emit assertions — the
@@ -47,6 +62,10 @@ const
   MetacraftRoot = ReprobuildRoot.parentDir
   FixtureRoot = MetacraftRoot / "reprobuild-examples" / "go" / "binary"
   FixtureModulePath = "example.com/go-binary-example"
+  MultiBinaryFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "go" / "multi-binary"
+  LibraryFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "go" / "library"
 
 proc dummyRequest(projectRoot: string): ProviderGraphRequest =
   ProviderGraphRequest(
@@ -86,7 +105,7 @@ proc writeMinimalFixture(scratch, mainGo: string;
     "module " & modulePath & "\n\ngo 1.22\n")
   writeFile(scratch / "main.go", mainGo)
 
-suite "go convention M5":
+suite "go convention M5 + M14":
 
   test "recognize: positive — canonical fixture":
     let conv = go_convention.goConvention()
@@ -271,3 +290,106 @@ suite "go convention M5":
         check outName.startsWith("go_binary_example")
       else:
         check outName.startsWith("go_binary_example")
+
+  # --- M14: cmd/<name>/main.go layout ----------------------------------
+
+  test "recognize: positive — cmd/<name>/main.go multi-binary fixture":
+    let conv = go_convention.goConvention()
+    if not fileExists(MultiBinaryFixtureRoot / "reprobuild.nim"):
+      checkpoint "fixture missing — looked at " & MultiBinaryFixtureRoot
+      fail()
+    let request = dummyRequest(MultiBinaryFixtureRoot)
+    if not goToolchainAvailable():
+      check not conv.recognize(MultiBinaryFixtureRoot, request)
+    else:
+      check conv.recognize(MultiBinaryFixtureRoot, request)
+
+  test "emitFragment: multi-binary fixture produces one link per cmd":
+    if not goToolchainAvailable():
+      skip()
+    else:
+      let conv = go_convention.goConvention()
+      let request = dummyRequest(MultiBinaryFixtureRoot)
+      require conv.recognize(MultiBinaryFixtureRoot, request)
+      let fragment = conv.emitFragment(MultiBinaryFixtureRoot, request)
+      var linkActions: seq[BuildActionDef] = @[]
+      var compileActions: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("go-link-"):
+          linkActions.add(action)
+        elif action.id.startsWith("go-compile-"):
+          compileActions.add(action)
+      # Two main packages (alpha, beta) → exactly two link actions.
+      check linkActions.len == 2
+      # Two project packages → at least two compile actions.
+      check compileActions.len >= 2
+      # Each link action's output basename should match one of the
+      # binaries declared in the fixture's ``cmd/<name>/`` layout.
+      var sawAlpha = false
+      var sawBeta = false
+      for action in linkActions:
+        check action.outputs.len == 1
+        let outName = extractFilename(action.outputs[0])
+        let stem = outName.toLowerAscii
+        if stem.startsWith("alpha"):
+          sawAlpha = true
+        elif stem.startsWith("beta"):
+          sawBeta = true
+        let argv = inlineArgvOf(action)
+        check "tool" in argv
+        check "link" in argv
+        check "-buildmode=exe" in argv
+      check sawAlpha
+      check sawBeta
+
+  # --- M14: library-only module ----------------------------------------
+
+  test "recognize: positive — library-only fixture":
+    let conv = go_convention.goConvention()
+    if not fileExists(LibraryFixtureRoot / "reprobuild.nim"):
+      checkpoint "fixture missing — looked at " & LibraryFixtureRoot
+      fail()
+    let request = dummyRequest(LibraryFixtureRoot)
+    if not goToolchainAvailable():
+      check not conv.recognize(LibraryFixtureRoot, request)
+    else:
+      check conv.recognize(LibraryFixtureRoot, request)
+
+  test "emitFragment: library-only fixture emits no link actions":
+    if not goToolchainAvailable():
+      skip()
+    else:
+      let conv = go_convention.goConvention()
+      let request = dummyRequest(LibraryFixtureRoot)
+      require conv.recognize(LibraryFixtureRoot, request)
+      let fragment = conv.emitFragment(LibraryFixtureRoot, request)
+      var compileActions: seq[BuildActionDef] = @[]
+      var linkActions: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("go-compile-"):
+          compileActions.add(action)
+        elif action.id.startsWith("go-link-"):
+          linkActions.add(action)
+      # At least one compile action (the library package).
+      check compileActions.len >= 1
+      # Library-only modules emit no link actions and no link-importcfg
+      # actions — the umbrella ``default`` target builds every package's
+      # ``.a`` archive and stops there.
+      check linkActions.len == 0
+      # The compile output should be an ``.a`` archive under the
+      # convention's scratch ``pkg/`` directory.
+      var sawArchiveOutput = false
+      for action in compileActions:
+        for outPath in action.outputs:
+          if outPath.endsWith(".a"):
+            sawArchiveOutput = true
+            break
+        if sawArchiveOutput:
+          break
+      check sawArchiveOutput

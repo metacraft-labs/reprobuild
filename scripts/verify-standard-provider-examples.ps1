@@ -22,18 +22,14 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set, post-M13):
+# Expected to PASS (the known-working set, post-M14):
 #   nim/binary, nim/multi-binary,
 #   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
 #   rust/library, rust/library-with-tests, rust/workspace,
-#   go/binary
+#   go/binary, go/library, go/multi-binary
 #
-# Expected to KNOWN-FAIL (documented coverage gaps in M14+ outstanding work):
-#   go/library                                  -- Go convention only matches
-#                                                  root main.go (M14)
-#   go/multi-binary                             -- cmd/<name>/main.go layout
-#                                                  not recognised yet (M14)
+# Expected to KNOWN-FAIL: (none — M14 graduated go/library + go/multi-binary)
 #
 # Expected to SKIP (no Mode A convention exists in M3-M8):
 #   python/library-pure, python/console-script,
@@ -207,8 +203,12 @@ function Get-KnownFailReason([string]$rel) {
     # convention now accepts library-only crates, ``[[bin]]`` array
     # entries, and ``[workspace]`` manifests; cargo-metadata-driven
     # workspace member enumeration wires inter-crate ``--extern`` edges.
-    'go/library'               { return 'Go convention only matches root main.go (M14 outstanding)' }
-    'go/multi-binary'          { return 'Go cmd/<name>/main.go layout not recognised yet (M14 outstanding)' }
+    #
+    # M14 (2026-05-27): go/library + go/multi-binary graduated to PASS.
+    # The Go convention now accepts library-only modules (no
+    # ``package main`` anywhere) and the ``cmd/<name>/main.go``
+    # multi-binary layout; ``go list`` enumerates every package and the
+    # emitter produces one link action per main package.
     default                    { return $null }
   }
 }
@@ -333,6 +333,36 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $entry (Join-Path 'bin' ($entry + '.exe'))))
         Greeting = 'hello from go-binary-example'
+      })
+    }
+    'go/multi-binary' {
+      # M14: ``cmd/<name>/main.go`` layout. The Go convention's
+      # projectEntry is derived from the module path's last segment
+      # (``example.com/go-multi-binary-example`` →
+      # ``go_multi_binary_example``); both binaries land under that
+      # scratch dir's bin/. Per-binary basename is the cmd's last path
+      # segment (``alpha`` / ``beta``).
+      $entry = 'go_multi_binary_example'
+      $alpha = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $entry (Join-Path 'bin' 'alpha.exe')))
+      $beta  = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $entry (Join-Path 'bin' 'beta.exe')))
+      return @(
+        @{ Path = $alpha; Greeting = 'hello from alpha' },
+        @{ Path = $beta;  Greeting = 'hello from beta'  }
+      )
+    }
+    'go/library' {
+      # M14: library-only module. ``go tool compile`` emits a ``.a``
+      # archive under ``<entry>/pkg/`` and the convention emits no link
+      # action. We glob for the archive rather than hard-coding the
+      # import-path sanitisation (slashes become ``__``) so future
+      # module-path tweaks don't silently desync the test.
+      $entry = 'go_library_example'
+      return @(@{
+        PathGlob = @{
+          Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $entry 'pkg'))
+          Filter = '*.a'
+        }
+        Greeting = $null
       })
     }
     default {

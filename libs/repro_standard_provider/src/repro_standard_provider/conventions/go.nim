@@ -2,10 +2,12 @@
 ##
 ## Recognises a single-module Go project whose ``reprobuild.nim`` declares
 ## ``uses:`` containing ``go`` AND ships a conventional Go layout
-## (``go.mod`` at the project root plus a ``package main`` entry point) AND
-## has *no* CGO triggers (no ``import "C"`` lines anywhere and no
-## ``_cgo_*.go`` files in the source tree) AND no ``go.work`` (workspaces
-## are deferred). The convention spec
+## (``go.mod`` at the project root plus at least one of: a root
+## ``main.go``, one or more ``cmd/<name>/main.go`` files, or a non-main
+## library package somewhere in the module) AND has *no* CGO triggers
+## (no ``import "C"`` lines anywhere and no ``_cgo_*.go`` files in the
+## source tree) AND no ``go.work`` (workspaces are deferred). The
+## convention spec
 ## (``reprobuild-specs/Language-Conventions/Go.md`` §"Mode A — Fine-grained
 ## build graph") prescribes:
 ##
@@ -61,14 +63,25 @@
 ## to M3/M4: eager emit produces a static graph; dyndep would defer the
 ## walk to the engine and pay the cost only on go-source churn.
 ##
-## **Out of scope for M5 (handled by ``recognize`` returning ``false``)**:
+## **M14 extensions** over M5's root-``main.go``-only baseline:
+##
+##   * Multi-binary modules with ``cmd/<name>/main.go`` layouts. The
+##     convention iterates every ``package main`` reported by ``go list``
+##     and emits one (compile, link) pair per binary. Binary name is the
+##     last path segment of the main package's import path
+##     (``example.com/foo/cmd/alpha`` → ``alpha``); each link action drops
+##     its executable under ``<scratch>/<project-entry>/bin/<bin>.exe``.
+##   * Library-only modules (``go.mod`` + non-main packages, no
+##     ``package main`` anywhere). The convention emits per-package
+##     ``go tool compile`` actions producing ``.a`` archives but no link
+##     action. The ``default`` target lists every compile action so
+##     ``repro build .#default`` builds the entire module.
+##
+## **Out of scope for M14 (handled by ``recognize`` returning ``false``)**:
 ##
 ##   * ``go.work`` workspaces (per-member DAGs).
 ##   * CGO (``import "C"`` or ``_cgo_*.go``) — needs a C cross-toolchain
 ##     the standard provider doesn't provision; falls through to M6.
-##   * Multi-binary modules with ``cmd/<name>/main.go`` layouts (root-only
-##     ``main.go`` is the M5 surface; the spec lists multi-binary modules
-##     as a separate fixture/milestone).
 ##   * Tests (``_test.go`` files) — the convention spec asks for a
 ##     per-package test binary, deferred to a later M.
 ##
@@ -131,6 +144,11 @@ type
     goVersion: string
       ## ``go.mod``'s ``go`` directive value (``1.22``). Defaults to
       ## ``1.22`` when absent — Go's own behaviour.
+    modulePath: string
+      ## ``go.mod``'s ``module`` directive value
+      ## (``example.com/foo``). Empty when the directive is missing —
+      ## ``go list`` would have already failed in that case so the empty
+      ## fallback is defensive only.
 
 proc readReprobuildSource(projectRoot: string): string =
   ## Read ``<projectRoot>/reprobuild.nim`` or return the empty string.
@@ -242,17 +260,53 @@ proc goExecutable(): string =
   findExe("go")
 
 proc hasRootMainGo(projectRoot: string): bool =
-  ## True when ``<projectRoot>/main.go`` exists. M5 only supports the
-  ## root-``main.go`` shape — ``cmd/<name>/main.go`` and multi-binary
-  ## layouts are deferred to a later milestone.
+  ## True when ``<projectRoot>/main.go`` exists.
   fileExists(extendedPath(projectRoot / "main.go"))
+
+proc hasCmdMainGo(projectRoot: string): bool =
+  ## True when at least one ``<projectRoot>/cmd/<name>/main.go`` exists.
+  ## Used by recognise to accept the canonical Go multi-binary layout
+  ## without paying for a ``go list`` run. We probe only one level under
+  ## ``cmd/`` — that's the Go community convention (sub-commands live in
+  ## ``cmd/<name>/``, not deeper).
+  let cmdDir = projectRoot / "cmd"
+  if not dirExists(extendedPath(cmdDir)):
+    return false
+  for kind, path in walkDir(cmdDir):
+    if kind != pcDir:
+      continue
+    if fileExists(extendedPath(path / "main.go")):
+      return true
+  false
+
+proc hasAnyNonTestGoFile(projectRoot: string): bool =
+  ## True when ANY ``.go`` file exists somewhere under ``projectRoot``
+  ## (excluding ``_test.go`` files). Library-only modules don't carry a
+  ## ``main.go`` anywhere — they're just one or more ``package <name>``
+  ## files. We accept any non-test ``.go`` under the tree as evidence the
+  ## module has compilable content so ``go list`` can derive the graph.
+  if not dirExists(extendedPath(projectRoot)):
+    return false
+  for entry in walkDirRec(projectRoot):
+    let lower = entry.toLowerAscii
+    if not lower.endsWith(".go"):
+      continue
+    if extractFilename(entry).toLowerAscii.endsWith("_test.go"):
+      continue
+    return true
+  false
 
 proc goRecognize(projectRoot: string;
                  request: ProviderGraphRequest): bool {.gcsafe.} =
-  ## Recognition contract (M5):
+  ## Recognition contract (M14):
   ##   * ``<projectRoot>/go.mod`` exists
   ##   * ``<projectRoot>/reprobuild.nim`` mentions ``go`` in ``uses:``
-  ##   * ``<projectRoot>/main.go`` exists (root-binary layout — M5 scope)
+  ##   * at least ONE of:
+  ##       - ``<projectRoot>/main.go`` exists (root-binary layout), OR
+  ##       - at least one ``<projectRoot>/cmd/<name>/main.go`` exists
+  ##         (canonical Go multi-binary layout), OR
+  ##       - any non-test ``.go`` file exists somewhere under
+  ##         ``<projectRoot>`` (library-only module — non-main packages).
   ##   * no ``import "C"`` line and no ``_cgo_*.go`` file anywhere under
   ##     ``projectRoot`` (cgo forces Mode B — M6)
   ##   * ``<projectRoot>/go.work`` does NOT exist (workspaces deferred)
@@ -266,7 +320,9 @@ proc goRecognize(projectRoot: string;
     return false
   if fileExists(extendedPath(projectRoot / "go.work")):
     return false
-  if not hasRootMainGo(projectRoot):
+  if (not hasRootMainGo(projectRoot)) and
+     (not hasCmdMainGo(projectRoot)) and
+     (not hasAnyNonTestGoFile(projectRoot)):
     return false
   if projectGoFilesHaveCgo(projectRoot):
     return false
@@ -275,8 +331,12 @@ proc goRecognize(projectRoot: string;
   true
 
 proc parseGoMod(projectRoot: string): GoModuleInfo =
-  ## Best-effort line-scan for ``go.mod``'s ``go`` directive. We don't
-  ## need the module path — ``go list``'s output carries it for us.
+  ## Best-effort line-scan for ``go.mod``'s ``go`` directive and
+  ## ``module`` directive. ``go list`` is the authoritative source for
+  ## the module path (it carries each package's full import path) but
+  ## we read ``module`` here too so library-only modules — where no
+  ## main package's import path can stand in for the module name — can
+  ## still derive a scratch-dir entry name.
   result.goVersion = "1.22"
   let modPath = projectRoot / "go.mod"
   if not fileExists(extendedPath(modPath)):
@@ -292,7 +352,11 @@ proc parseGoMod(projectRoot: string): GoModuleInfo =
       let payload = stripped[3 .. ^1].strip()
       if payload.len > 0:
         result.goVersion = payload
-        return
+    elif stripped.startsWith("module "):
+      let payload = stripped[7 .. ^1].strip().strip(chars = {'"', '\'',
+        ' ', '\t'})
+      if payload.len > 0:
+        result.modulePath = payload
 
 proc splitJsonObjects(blob: string): seq[JsonNode] =
   ## ``go list -json`` emits one JSON object per package, concatenated
@@ -426,14 +490,43 @@ proc importcfgPathFor(projectRoot, projectEntry, importPath: string): string =
     (sanitizeImportPath(importPath) & ".importcfg")
 
 proc linkImportcfgPathFor(projectRoot, projectEntry: string): string =
+  ## Pre-M14 link importcfg path — kept as the single-binary default for
+  ## backwards-compat with any caller probing the old name.
   scratchPathFor(projectRoot, projectEntry) / "importcfg.link"
 
+proc linkImportcfgPathForBinary(projectRoot, projectEntry,
+                                binaryName: string): string =
+  ## M14: per-binary link importcfg path. Each main package gets its own
+  ## ``importcfg.link`` because the link argv references it positionally,
+  ## and two main packages in the same module could otherwise stomp each
+  ## other when their compile-deps closure differs (it doesn't today —
+  ## the closure is module-wide — but keeping per-binary keeps the action
+  ## fingerprint correctly partitioned).
+  scratchPathFor(projectRoot, projectEntry) /
+    (binaryName & ".importcfg.link")
+
 proc binaryPathFor(projectRoot, projectEntry: string): string =
+  ## Pre-M14 single-binary helper. Retained for the single-main fixture
+  ## that names its binary after the project entry; new call sites should
+  ## prefer ``binaryPathForName`` below so the binary name comes from the
+  ## main package's import path.
   when defined(windows):
     scratchPathFor(projectRoot, projectEntry) / "bin" /
       (projectEntry & ".exe")
   else:
     scratchPathFor(projectRoot, projectEntry) / "bin" / projectEntry
+
+proc binaryPathForName(projectRoot, projectEntry,
+                       binaryName: string): string =
+  ## M14: a main package's binary path under the project's scratch dir.
+  ## All binaries from the same module share ``<scratch>/<projectEntry>/bin/``;
+  ## the per-binary basename is the last path segment of the main
+  ## package's import path (Go's own ``go build`` convention).
+  when defined(windows):
+    scratchPathFor(projectRoot, projectEntry) / "bin" /
+      (binaryName & ".exe")
+  else:
+    scratchPathFor(projectRoot, projectEntry) / "bin" / binaryName
 
 proc actionIdFor(prefix, projectEntry, importPath: string): string =
   ## Build a Reprobuild-safe action id keyed on the import path. Matches
@@ -621,10 +714,13 @@ proc emitImportcfgAction(projectRoot, projectEntry: string;
   (action, importcfgPath)
 
 proc emitLinkImportcfgAction(projectRoot, projectEntry: string;
-                            mainImportPath: string;
+                            mainImportPath, binaryName: string;
                             packages: seq[GoPackage]):
     tuple[action: BuildActionDef; path: string] =
-  let linkImportcfg = linkImportcfgPathFor(projectRoot, projectEntry)
+  ## M14: per-binary importcfg.link. ``binaryName`` is the basename of
+  ## the final executable (last path segment of ``mainImportPath``).
+  let linkImportcfg =
+    linkImportcfgPathForBinary(projectRoot, projectEntry, binaryName)
   createDir(extendedPath(parentDir(linkImportcfg)))
   let text = renderLinkImportcfg(packages, mainImportPath, projectRoot,
     projectEntry)
@@ -637,16 +733,20 @@ proc emitLinkImportcfgAction(projectRoot, projectEntry: string;
   (action, linkImportcfg)
 
 proc emitLinkAction(projectRoot, projectEntry, goExe: string;
-                   mainImportPath: string;
+                   mainImportPath, binaryName: string;
                    compileActions: seq[GoCompileAction];
                    linkImportcfg: string;
                    linkImportcfgActionId: string): BuildActionDef =
-  ## Final ``go tool link`` action. Consumes:
+  ## Final ``go tool link`` action for a single main package. Consumes:
   ##   * the main package's archive (positional),
   ##   * every other project package's archive (via importcfg.link),
   ##   * the link-time importcfg.
   ## Produces the final executable under ``<scratch>/<entry>/bin/``.
-  let binaryOutput = binaryPathFor(projectRoot, projectEntry)
+  ## ``binaryName`` controls the output basename so multi-binary modules
+  ## that share one project-entry scratch dir produce distinct
+  ## executables.
+  let binaryOutput =
+    binaryPathForName(projectRoot, projectEntry, binaryName)
   createDir(extendedPath(parentDir(binaryOutput)))
   var mainArchive = ""
   var compileActionIds: seq[string] = @[]
@@ -691,34 +791,62 @@ proc syntheticPackage(projectRoot, projectEntry: string): PackageDef =
     devEnvBodyHash: "",
     toolUses: @[])
 
-proc deriveProjectEntry(mainPkg: GoPackage; projectRoot: string): string =
-  ## Pick a stable filename-safe ``entry`` name that:
-  ##   * matches the binary name the executable will produce, and
-  ##   * matches what ``reprobuild.nim``'s ``executable`` member declares
-  ##     after the standard provider's snake-case normalisation.
-  ## Go's own convention is "binary name == last path segment of the
-  ## module path" — for ``example.com/go-binary-example`` that's
-  ## ``go-binary-example``. We replace the hyphen with an underscore so
-  ## the directory we drop the binary under matches a ``executable
-  ## go_binary_example`` declaration; the binary itself keeps the
-  ## hyphen-ful filename to match user expectations.
-  let tail = mainPkg.importPath.split('/')[^1]
-  var sanitized = ""
-  for ch in tail:
+proc sanitizeBinaryName(name: string): string =
+  ## Map a binary basename (a path segment like ``go-binary-example``,
+  ## ``alpha``, ``cmd``) to the snake-case form the reprobuild DSL uses
+  ## for ``executable`` member names — hyphens become underscores.
+  ## Cargo's normaliseCrateName does the same thing.
+  result = newStringOfCap(name.len)
+  for ch in name:
     if ch == '-':
-      sanitized.add('_')
+      result.add('_')
     else:
-      sanitized.add(ch)
-  if sanitized.len == 0:
-    sanitized = "go_binary"
-  sanitized
+      result.add(ch)
+  if result.len == 0:
+    result = "go_binary"
 
-proc selectMainPackage(packages: seq[GoPackage]): GoPackage =
+proc binaryNameForMain(mainPkg: GoPackage): string =
+  ## Go's own ``go build`` convention: the binary name is the last path
+  ## segment of the main package's import path.
+  ##   * ``example.com/go-binary-example`` → ``go-binary-example``
+  ##   * ``example.com/foo/cmd/alpha``     → ``alpha``
+  ##   * ``example.com/foo/cmd/beta``      → ``beta``
+  ## We then snake-case the hyphen so the basename round-trips through
+  ## the reprobuild DSL's executable-name normalisation
+  ## (``executable go_binary_example`` declared in reprobuild.nim).
+  let tail = mainPkg.importPath.split('/')[^1]
+  sanitizeBinaryName(tail)
+
+proc deriveProjectEntryFromModule(module: GoModuleInfo;
+                                  projectRoot: string): string =
+  ## Pick a stable filename-safe ``entry`` name for the module as a
+  ## whole. Used as the scratch-dir prefix
+  ## (``<scratch>/<projectEntry>/pkg/``) and as the synthetic
+  ## ``PackageDef.packageName``. Library-only modules use this directly;
+  ## binary-bearing modules also share one entry across all their main
+  ## packages so they don't fragment the scratch tree.
+  ##
+  ## Priority:
+  ##   1. ``go.mod``'s ``module`` directive last segment, snake-cased.
+  ##   2. ``projectRoot`` basename, snake-cased (defensive fallback —
+  ##      ``parseGoMod`` should always populate ``modulePath`` for any
+  ##      project that passes recognise).
+  if module.modulePath.len > 0:
+    let tail = module.modulePath.split('/')[^1]
+    return sanitizeBinaryName(tail)
+  let rootBase = projectRoot.extractFilename
+  if rootBase.len > 0:
+    return sanitizeBinaryName(rootBase)
+  "go_module"
+
+proc collectMainPackages(packages: seq[GoPackage]): seq[GoPackage] =
+  ## All ``package main`` entries reported by ``go list`` (excluding
+  ## stdlib, which never carries a main).
   for pkg in packages:
-    if pkg.name == "main" and not pkg.standard:
-      return pkg
-  raise newException(ValueError,
-    "go convention: no 'package main' found in go list output")
+    if pkg.standard:
+      continue
+    if pkg.name == "main":
+      result.add(pkg)
 
 proc goEmitFragment(projectRoot: string;
                     request: ProviderGraphRequest):
@@ -726,6 +854,23 @@ proc goEmitFragment(projectRoot: string;
   ## Convention entry — eagerly invoke ``go list -export -json -deps``,
   ## register the per-package importcfg, compile, link, and importcfg.link
   ## actions via the DSL, hand the whole thing to ``buildPackageFragment``.
+  ##
+  ## **M14 multi-target shape**:
+  ##   1. ``go list -deps ./...`` enumerates every non-stdlib package in
+  ##      the module. Each gets a per-package importcfg + ``go tool
+  ##      compile`` action (producing ``<importPath>.a``).
+  ##   2. Each ``package main`` additionally gets a per-binary
+  ##      importcfg.link + ``go tool link`` action producing
+  ##      ``<scratch>/<projectEntry>/bin/<binaryName>.exe`` where
+  ##      ``binaryName`` is the last path segment of the main package's
+  ##      import path (``cmd/alpha`` → ``alpha``, ``cmd/beta`` → ``beta``).
+  ##   3. The ``default`` target lists every action so
+  ##      ``repro build .#default`` builds everything. Each binary also
+  ##      gets its own named target keyed on the binary name so
+  ##      ``repro build .#alpha`` works.
+  ##   4. Library-only modules (no ``package main`` anywhere) emit only
+  ##      the per-package compile actions; the ``default`` target still
+  ##      builds every package but no executable is produced.
   ##
   ## The DSL runtime mutates module-level registries that aren't annotated
   ## ``gcsafe`` (they predate the provider host). Same shape as the M3
@@ -740,16 +885,16 @@ proc goEmitFragment(projectRoot: string;
     if packages.len == 0:
       raise newException(ValueError,
         "go convention: 'go list' returned no packages for " & projectRoot)
-    let mainPkg = selectMainPackage(packages)
-    let projectEntry = deriveProjectEntry(mainPkg, projectRoot)
+    let mainPackages = collectMainPackages(packages)
+    let projectEntry = deriveProjectEntryFromModule(module, projectRoot)
     let pkg = syntheticPackage(projectRoot, projectEntry)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       var compileActions: seq[GoCompileAction] = @[]
       var allActions: seq[BuildActionDef] = @[]
-      # Only emit actions for non-stdlib packages — stdlib archives are
-      # treated as toolchain-provisioned (Go.md §"Cross-package ordering
-      # edges").
+      # Pass 1: per-package compile + importcfg actions.
+      # Skip stdlib (treated as toolchain-provisioned per Go.md §"Cross-
+      # package ordering edges").
       for srcPkg in packages:
         if srcPkg.standard:
           continue
@@ -761,13 +906,45 @@ proc goEmitFragment(projectRoot: string;
           importcfgPair.action.id)
         compileActions.add(compileAction)
         allActions.add(compileAction.action)
-      let linkImportcfgPair = emitLinkImportcfgAction(projectRoot,
-        projectEntry, mainPkg.importPath, packages)
-      allActions.add(linkImportcfgPair.action)
-      let linkAction = emitLinkAction(projectRoot, projectEntry, goExe,
-        mainPkg.importPath, compileActions, linkImportcfgPair.path,
-        linkImportcfgPair.action.id)
-      allActions.add(linkAction)
+      # Pass 2: per-main-package link + importcfg.link actions.
+      # Library-only modules skip this pass entirely.
+      var registeredBinaryTargets: seq[string] = @[]
+      for mainPkg in mainPackages:
+        let binaryName = binaryNameForMain(mainPkg)
+        let linkImportcfgPair = emitLinkImportcfgAction(projectRoot,
+          projectEntry, mainPkg.importPath, binaryName, packages)
+        allActions.add(linkImportcfgPair.action)
+        let linkAction = emitLinkAction(projectRoot, projectEntry, goExe,
+          mainPkg.importPath, binaryName, compileActions,
+          linkImportcfgPair.path, linkImportcfgPair.action.id)
+        allActions.add(linkAction)
+        # Per-binary named target so ``repro build .#<binaryName>``
+        # works. The umbrella ``default`` target below covers
+        # ``repro build .#default``. Skip the per-binary alias when the
+        # binary's name collides with the module-wide ``projectEntry``
+        # alias we register below — single-binary modules whose main
+        # package shares the module name's last segment (e.g.
+        # ``example.com/go-binary-example``) would otherwise emit two
+        # ``target("go_binary_example", ...)`` registrations and the
+        # build engine flags the duplicate as a graph error. We register
+        # the umbrella alias instead (it carries the link action
+        # transitively).
+        if binaryName != projectEntry:
+          discard target(binaryName,
+            @[linkImportcfgPair.action, linkAction])
+          registeredBinaryTargets.add(binaryName)
+      if allActions.len == 0:
+        # Defensive: ``go list`` returned packages but they were all
+        # stdlib. This shouldn't happen in practice (the user's own
+        # ``go.mod`` ensures at least one project package) but a clear
+        # error here beats a silent empty graph.
+        raise newException(ValueError,
+          "go convention: no project packages found in 'go list' output " &
+            "for " & projectRoot &
+            " (all reported packages are stdlib — check go.mod)")
+      # Module-wide alias target so ``repro build .#<projectEntry>`` is
+      # equivalent to building everything. Mirrors the M5 surface for
+      # the single-binary case.
       discard target(projectEntry, allActions)
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
