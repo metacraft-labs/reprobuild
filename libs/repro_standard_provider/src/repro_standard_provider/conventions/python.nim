@@ -16,35 +16,37 @@
 ## route to a future Mode B crude fallback that delegates to
 ## ``uv build`` / ``python -m build``.
 ##
-## ``Standard-Provider-Implementation.milestones.org §M15`` and
-## ``reprobuild-specs/Language-Conventions/Python.md §"Mode A — Fine-grained
-## build graph"`` are the canonical spec. Mode A as fully specified covers
-## five sub-graphs (A1 byte-compile, A2 native extension, A3 wheel, A4
-## sdist, A5 venv+installer for executable wrappers). The M15 surface
-## ships **only the wheel build (A3)**: the per-``.py`` byte-compile
-## sub-graph and the venv+installer wrapper emission are deferred to a
-## later milestone — both projects in ``reprobuild-examples/python/``
-## (``library-pure`` and ``console-script``) graduate from SKIPPED to PASS
-## with the wheel alone, since the headline assertion is "a wheel is
-## produced and imports cleanly".
+## ``Standard-Provider-Implementation.milestones.org §M15`` (Tier 2b
+## landing) and ``§M20`` (deferred A1/A4/A5 graduations) are the canonical
+## spec for the M20 surface. Mode A's five sub-graphs:
 ##
-## **Design decision (M15 — eager PEP 517 hook invocation in-process).**
-## Unlike Nim/Rust/Go we don't shell out to a frontend (``uv build`` /
-## ``python -m build``). Instead the convention emits a single action
-## per ``library``/``executable`` member that runs ``python3 -c
-## "<hook script>"``. The hook script:
-##
-##   1. ``import``s the configured build backend (read from
-##      ``pyproject.toml``'s ``[build-system].build-backend``).
-##   2. Calls ``backend.build_wheel(<scratch>/<entry>/dist)`` —
-##      the spec-faithful PEP 517 entry point. The frontend's
-##      build-isolation venv is bypassed because reprobuild's provisioning
-##      catalog already arranged for the backend to be importable.
-##   3. Optionally renames the produced wheel to the deterministic
-##      ``<dist_name>-<version>-py3-none-any.whl`` filename if the backend
-##      happened to use a different naming convention (defensive — the
-##      three recognised backends all already produce that exact form
-##      for pure-Python projects).
+##   * **A1 byte-compile** (per-``.py``) — ``python3 -m compileall -b -q -f
+##     <src.py>`` actions emit a ``<src.py>c`` adjacent to each source.
+##     The wheel-build action consumes those ``.pyc`` files as inputs so
+##     the bytecode is included in the produced wheel (hatchling /
+##     flit_core / setuptools all happily ship adjacent ``.pyc`` files
+##     when present at build time).
+##   * **A2 native extension compile + link** — deferred. Triggered by
+##     ``[tool.setuptools.ext-modules]`` / ``Extension(...)`` blocks;
+##     would also produce platform-tagged wheels.
+##   * **A3 wheel assembly** via the PEP 517 ``build_wheel`` hook called
+##     directly (bypassing the frontend solver). The convention's hook
+##     script ``chdir``s to the project root, ``importlib.import_module``s
+##     the configured backend, and calls ``backend.build_wheel(<dist>)``.
+##   * **A4 sdist assembly** via the PEP 517 ``build_sdist`` hook (M20).
+##     Mirrors A3's shape: one action per member that emits
+##     ``<dist>-<ver>.tar.gz`` under the same ``<scratch>/<member>/dist/``
+##     directory.
+##   * **A5 console-script wrapper shim** (M20). When the project
+##     declares ``[project.scripts]`` AND a member is recognised as an
+##     ``executable``, an additional ``python3 -m installer
+##     --destdir <out>/install <wheel>`` action unpacks the wheel onto
+##     disk and emits the launcher executable. Output paths:
+##     ``<scratch>/<member>/install/Scripts/<name>.exe`` (Windows) or
+##     ``<scratch>/<member>/install/bin/<name>`` (POSIX). The launcher's
+##     ``__main__.py`` is patched with a ``sys.path.insert(0, "...")``
+##     preamble pointing at the install's ``site/`` subtree so the shim
+##     runs without any PYTHONPATH plumbing from the caller.
 ##
 ## **The wheel filename is predicted at convention-emit time** from the
 ## ``[project].name`` + ``[project].version`` fields in ``pyproject.toml``
@@ -67,30 +69,14 @@
 ## regardless of what we declare — declared inputs only affect the
 ## action-cache fingerprint).
 ##
-## **Outstanding tasks (deferred from M15)**:
-##
-##   * A1 per-``.py`` byte-compile via ``python3 -m compileall``. The
-##     wheel-assembly action consumes every source file as a single bundle
-##     today; once the byte-compile pre-step lands, the wheel action's
-##     inputs will be ``.pyc`` outputs and the per-file cache granularity
-##     matches the rest of the standard provider's languages.
-##   * A2 native extension compile/link via the C-family compile helpers.
-##     Triggered by ``[tool.setuptools.ext-modules]`` / ``Extension(...)``
-##     blocks.
-##   * A4 sdist hook (independent action graph, mirrors A3).
-##   * A5 venv + ``installer`` for executable wrappers. The
-##     ``[project.scripts]`` entry-points declared by ``console-script``
-##     fixtures only become runnable launchers after this step lands. The
-##     wheel itself already carries the metadata that materialises them.
-##
 ## **Caveats**:
 ##   * Requires ``python3`` on ``PATH`` AND requires the configured backend
 ##     module (``hatchling``, ``flit_core``, or ``setuptools``) to be
-##     importable from that Python. The M15 surface trusts the
-##     provisioning catalog (``python3.nim``, plus the future
-##     ``pyproject-hooks.nim``) to make the backend available — when it
-##     isn't, the action fails at build time with a clear ``ImportError``
-##     rather than silently falling back to anything.
+##     importable from that Python. The convention trusts the
+##     provisioning catalog (``python3.nim`` + ``installer.nim``) to make
+##     the backend available — when it isn't, the action fails at build
+##     time with a clear ``ImportError`` rather than silently falling back
+##     to anything.
 ##   * The wheel filename prediction assumes pure-Python. If a project
 ##     happens to declare a non-pure backend (e.g. setuptools with C
 ##     extensions) but slips through recognition, the action will produce
@@ -132,7 +118,7 @@ type
     ## Single ``library <name>`` or ``executable <name>`` declaration in
     ## ``reprobuild.nim``. The convention emits one wheel-build action per
     ## member; executables additionally surface their ``[project.scripts]``
-    ## entry-point (A5 wrapper emission is deferred).
+    ## entry-point (M20: an installer action wires the runnable launcher).
     name: string
     kind: PythonMemberKind
 
@@ -429,6 +415,20 @@ proc scratchPathFor(projectRoot, member: string): string =
 proc distDirFor(projectRoot, member: string): string =
   scratchPathFor(projectRoot, member) / "dist"
 
+proc installDirFor(projectRoot, member: string): string =
+  ## M20 A5: per-member ``install/`` scratch directory the
+  ## ``python3 -m installer`` action writes into. Layout:
+  ##
+  ##   <scratch>/<member>/install/
+  ##     Scripts/<console-script>.exe   (Windows)
+  ##     bin/<console-script>            (POSIX)
+  ##     site/<package>/...              (purelib contents)
+  ##     site/<dist>-<ver>.dist-info/...
+  ##
+  ## The install dir is the action's declared output set; the launcher
+  ## itself is the load-bearing artefact validated by the E2E gate.
+  scratchPathFor(projectRoot, member) / "install"
+
 proc hookScriptPathFor(projectRoot, member: string): string =
   ## On-disk location of the PEP 517 hook script the wheel-build action
   ## executes. The script is written at convention-emit time (alongside
@@ -442,12 +442,79 @@ proc hookScriptPathFor(projectRoot, member: string): string =
   ## same behaviour.
   scratchPathFor(projectRoot, member) / "build_wheel.py"
 
+proc sdistHookScriptPathFor(projectRoot, member: string): string =
+  ## On-disk location of the PEP 517 build_sdist hook script (M20 A4).
+  ## Same shape as ``hookScriptPathFor``; lives next to the wheel hook so
+  ## both actions can fingerprint identical input sets and a per-member
+  ## ``ls`` shows the convention's full surface.
+  scratchPathFor(projectRoot, member) / "build_sdist.py"
+
+proc installerHookScriptPathFor(projectRoot, member: string): string =
+  ## On-disk location of the M20 A5 installer hook script. Same as the
+  ## wheel + sdist hooks: written eagerly at convention-emit time;
+  ## referenced positionally on the action's argv.
+  scratchPathFor(projectRoot, member) / "install_wheel.py"
+
 proc predictedWheelFilename(info: PythonProjectInfo): string =
   ## Compose the PEP 427 wheel filename from the parsed pyproject.toml
   ## fields. M15 only targets pure-Python wheels so the python / ABI /
   ## platform tags are fixed at ``py3-none-any``.
   normalizeDistName(info.distributionName) & "-" & info.version &
     "-py3-none-any.whl"
+
+proc predictedSdistFilename(info: PythonProjectInfo): string =
+  ## PEP 625 sdist filename: ``<normalized>-<version>.tar.gz``.
+  normalizeDistName(info.distributionName) & "-" & info.version & ".tar.gz"
+
+proc launcherFilename(scriptName: string): string =
+  ## OS-specific launcher filename for a ``[project.scripts]`` entry.
+  ## Windows installer writes a self-contained ``.exe`` per entry; POSIX
+  ## emits a hashbang script with the bare console-script name.
+  when defined(windows):
+    scriptName & ".exe"
+  else:
+    scriptName
+
+proc launcherSubdir(): string =
+  ## Subdirectory of ``installDirFor`` that holds the console-script
+  ## launchers. Matches the layout the convention's installer hook script
+  ## writes (``scheme_dict['scripts']``); kept in sync with the hook.
+  when defined(windows):
+    "Scripts"
+  else:
+    "bin"
+
+proc collectPySourceFiles(projectRoot: string): seq[string] =
+  ## Enumerate every ``.py`` file under ``<projectRoot>/src/`` (the
+  ## conventional Python src-layout). Used by the M20 A1 byte-compile
+  ## sub-graph to drive one ``python3 -m compileall`` action per file.
+  ##
+  ## We only walk ``src/`` (not the full project tree) because:
+  ##   * The PEP 517 backends we recognise (hatchling / flit_core /
+  ##     setuptools) all use the src-layout; ``pyproject.toml`` packages
+  ##     under ``tool.hatch.build.targets.wheel.packages = ["src/<pkg>"]``.
+  ##   * Auxiliary scripts (``conftest.py`` at the project root, build
+  ##     hooks, tooling helpers) shouldn't have ``.pyc`` siblings created
+  ##     since they aren't shipped in the wheel.
+  ##   * Tests under ``tests/`` are not packaged into the wheel; emitting
+  ##     ``.pyc`` for them would create noise and bloat the per-file
+  ##     action graph.
+  ##
+  ## Files under ``.repro/`` or any ``__pycache__/`` directories are
+  ## skipped — those are reprobuild scratch or stale CPython caches that
+  ## must NOT be byte-compiled (their ``.pyc`` siblings have no source).
+  let srcRoot = projectRoot / "src"
+  if not dirExists(extendedPath(srcRoot)):
+    return @[]
+  for entry in walkDirRec(srcRoot):
+    let normalised = entry.replace('\\', '/')
+    if "/__pycache__/" in normalised:
+      continue
+    if "/.repro/" in normalised:
+      continue
+    if entry.toLowerAscii.endsWith(".py"):
+      result.add(entry)
+  result.sort(system.cmp[string])
 
 proc collectSourceInputs(projectRoot: string): seq[string] =
   ## Every ``.py`` / ``.pyi`` / ``.toml`` file plus the canonical
@@ -555,15 +622,200 @@ proc renderHookScript(projectRoot, backend, distDir,
   lines.add("print(\"wheel:\", produced, file=sys.stderr)")
   result = lines.join("\n") & "\n"
 
-proc emitMemberAction(projectRoot, pythonExe: string;
-                      member: PythonMember;
-                      info: PythonProjectInfo;
-                      sourceInputs: seq[string]):
-                        tuple[action: BuildActionDef;
-                              wheelPath: string] =
+proc renderSdistHookScript(projectRoot, backend, distDir,
+                           predictedSdist: string): string =
+  ## M20 A4: build_sdist hook script. Mirrors ``renderHookScript`` but
+  ## calls ``backend.build_sdist(dist_dir)`` and renames the output to the
+  ## predicted ``<dist>-<version>.tar.gz`` filename if the backend's
+  ## chosen name differs.
+  let projectRootLit = projectRoot.replace("\\", "\\\\").replace("\"", "\\\"")
+  let distDirLit = distDir.replace("\\", "\\\\").replace("\"", "\\\"")
+  let predictedLit = predictedSdist.replace("\\", "\\\\").replace("\"", "\\\"")
+  let backendLit = backend.replace("\"", "\\\"")
+  var lines: seq[string] = @[]
+  lines.add("import importlib, os, sys")
+  lines.add("os.environ.setdefault(\"SOURCE_DATE_EPOCH\", \"315532800\")")
+  lines.add("os.environ.setdefault(\"PYTHONHASHSEED\", \"0\")")
+  lines.add("os.environ.setdefault(\"ZIP_DETERMINISTIC\", \"1\")")
+  lines.add("project_root = \"" & projectRootLit & "\"")
+  lines.add("dist_dir = \"" & distDirLit & "\"")
+  lines.add("predicted = \"" & predictedLit & "\"")
+  lines.add("backend_name = \"" & backendLit & "\"")
+  lines.add("os.makedirs(dist_dir, exist_ok=True)")
+  lines.add("os.chdir(project_root)")
+  lines.add("if \":\" in backend_name:")
+  lines.add("    mod_name, attr_name = backend_name.split(\":\", 1)")
+  lines.add("else:")
+  lines.add("    mod_name, attr_name = backend_name, None")
+  lines.add("backend = importlib.import_module(mod_name)")
+  lines.add("if attr_name:")
+  lines.add("    for part in attr_name.split(\".\"):")
+  lines.add("        backend = getattr(backend, part)")
+  lines.add("build_sdist = getattr(backend, \"build_sdist\")")
+  lines.add("produced = build_sdist(dist_dir)")
+  lines.add("src = os.path.join(dist_dir, produced)")
+  lines.add("if produced != predicted:")
+  lines.add("    target = os.path.join(dist_dir, predicted)")
+  lines.add("    if os.path.exists(target):")
+  lines.add("        os.remove(target)")
+  lines.add("    os.rename(src, target)")
+  lines.add("    produced = predicted")
+  lines.add("print(\"sdist:\", produced, file=sys.stderr)")
+  result = lines.join("\n") & "\n"
+
+proc renderInstallerHookScript(installDir, wheelPath: string): string =
+  ## M20 A5: render the installer hook script. The script:
+  ##
+  ##   1. Imports ``installer`` (PyPA's reference wheel installer).
+  ##   2. Constructs a ``SchemeDictionaryDestination`` pointing every
+  ##      sysconfig key at the action's per-member ``install/`` scratch
+  ##      dir — ``purelib`` -> ``<install>/site``, ``scripts`` ->
+  ##      ``<install>/Scripts`` (Windows) or ``<install>/bin`` (POSIX),
+  ##      etc.
+  ##   3. **Monkey-patches** ``installer.scripts._SCRIPT_TEMPLATE`` so the
+  ##      ``__main__.py`` baked into each launcher.exe prepends the
+  ##      install's ``site/`` directory to ``sys.path``. Without this
+  ##      patch the produced launchers fail with ``ModuleNotFoundError``
+  ##      because nothing in the launcher's environment points Python at
+  ##      where the package was unpacked (the standard installer's
+  ##      assumption is that ``Scripts/`` is a sibling of ``Lib/
+  ##      site-packages/`` under the Python prefix; reprobuild's per-
+  ##      member install layout breaks that assumption deliberately to
+  ##      keep the artefacts self-contained).
+  ##   4. Calls ``installer.install(WheelFile.open(wheel), dest, {})``.
+  ##
+  ## The patched template encodes the absolute path of the install's
+  ## ``site/`` directory as a Python string literal via ``repr()`` (in
+  ## Python, not in Nim) so backslashes and embedded spaces are handled
+  ## correctly.
+  let installDirLit = installDir.replace("\\", "\\\\").replace("\"", "\\\"")
+  let wheelPathLit = wheelPath.replace("\\", "\\\\").replace("\"", "\\\"")
+  var lines: seq[string] = @[]
+  lines.add("import os, sys")
+  lines.add("install_dir = \"" & installDirLit & "\"")
+  lines.add("wheel_path = \"" & wheelPathLit & "\"")
+  lines.add("os.makedirs(install_dir, exist_ok=True)")
+  # Compose the per-member scheme. The keys match sysconfig's install-
+  # scheme keys (purelib / platlib / headers / scripts / data).
+  lines.add("site_dir = os.path.join(install_dir, \"site\")")
+  when defined(windows):
+    lines.add("scripts_dir = os.path.join(install_dir, \"Scripts\")")
+  else:
+    lines.add("scripts_dir = os.path.join(install_dir, \"bin\")")
+  lines.add("headers_dir = os.path.join(install_dir, \"include\")")
+  lines.add("data_dir = os.path.join(install_dir, \"data\")")
+  lines.add("scheme = {")
+  lines.add("    \"purelib\": site_dir,")
+  lines.add("    \"platlib\": site_dir,")
+  lines.add("    \"headers\": headers_dir,")
+  lines.add("    \"scripts\": scripts_dir,")
+  lines.add("    \"data\":    data_dir,")
+  lines.add("}")
+  # Determine the launcher kind. POSIX uses hashbang scripts; Windows
+  # uses the ``installer.scripts`` per-arch launcher templates.
+  lines.add("if sys.platform == \"win32\":")
+  lines.add("    import platform")
+  lines.add("    machine = platform.machine().lower()")
+  lines.add("    if machine in (\"amd64\", \"x86_64\"):")
+  lines.add("        launcher_kind = \"win-amd64\"")
+  lines.add("    elif machine in (\"arm64\", \"aarch64\"):")
+  lines.add("        launcher_kind = \"win-arm64\"")
+  lines.add("    else:")
+  lines.add("        launcher_kind = \"win-ia32\"")
+  lines.add("else:")
+  lines.add("    launcher_kind = \"posix\"")
+  # Monkey-patch the launcher's bundled ``__main__.py`` template so the
+  # produced shim can locate its package without any caller-supplied
+  # PYTHONPATH. The patched template prepends ``<install>/site`` to
+  # ``sys.path`` before importing the entry-point module.
+  lines.add("import installer.scripts as _is")
+  lines.add("import installer")
+  lines.add("from installer.sources import WheelFile")
+  lines.add("from installer.destinations import SchemeDictionaryDestination")
+  lines.add("_PATCHED_TEMPLATE = (")
+  lines.add("    \"# -*- coding: utf-8 -*-\\n\"")
+  lines.add("    \"import os, re, sys\\n\"")
+  lines.add("    \"sys.path.insert(0, \" + repr(site_dir) + \")\\n\"")
+  lines.add("    \"from {module} import {import_name}\\n\"")
+  lines.add("    \"if __name__ == \\\"__main__\\\":\\n\"")
+  lines.add("    \"    sys.argv[0] = re.sub(r\\\"(-script\\\\.pyw|\\\\.exe)?$\\\", \\\"\\\", sys.argv[0])\\n\"")
+  lines.add("    \"    sys.exit({func_path}())\\n\"")
+  lines.add(")")
+  lines.add("_is._SCRIPT_TEMPLATE = _PATCHED_TEMPLATE")
+  lines.add("dest = SchemeDictionaryDestination(")
+  lines.add("    scheme_dict=scheme,")
+  lines.add("    interpreter=sys.executable,")
+  lines.add("    script_kind=launcher_kind,")
+  lines.add("    bytecode_optimization_levels=(0,),")
+  lines.add("    overwrite_existing=True,")
+  lines.add(")")
+  lines.add("with WheelFile.open(wheel_path) as source:")
+  lines.add("    installer.install(source, dest, {})")
+  lines.add("print(\"installed:\", wheel_path, \"->\", install_dir, file=sys.stderr)")
+  result = lines.join("\n") & "\n"
+
+proc emitByteCompileActions(projectRoot, pythonExe: string;
+                            member: PythonMember;
+                            sourceFiles: seq[string]):
+                              tuple[actions: seq[BuildActionDef];
+                                    pycFiles: seq[string]] =
+  ## M20 A1: one byte-compile action per ``.py`` under ``<projectRoot>/src``.
+  ## Each action runs ``python3 -m compileall -b -q -f <src.py>``;
+  ## ``-b`` writes the ``.pyc`` adjacent to the source (NOT under
+  ## ``__pycache__/``), ``-f`` forces recompile so the action's output
+  ## existence check is reliable, and ``-q`` keeps the per-file stdout
+  ## quiet.
+  ##
+  ## The output ``<src.py>c`` is declared so the wheel-build action can
+  ## consume the bytecode and so the engine's per-action cache fires on
+  ## individual source-file edits rather than re-running every byte-
+  ## compile when any source under ``src/`` changes.
+  let kindTag = case member.kind
+    of pmkLibrary: "library"
+    of pmkExecutable: "executable"
+  for source in sourceFiles:
+    let pycPath = source & "c"
+    # Path relative to projectRoot for the action ID — keeps the ID
+    # stable across cwd changes and short enough to read in logs.
+    var rel = source
+    if source.startsWith(projectRoot):
+      rel = source[projectRoot.len .. ^1]
+      while rel.len > 0 and rel[0] in {'/', '\\'}:
+        rel = rel[1 .. ^1]
+    let argv = @[
+      pythonExe,
+      "-m", "compileall",
+      "-b",  # write <src.py>c adjacent (not under __pycache__/)
+      "-q",  # quiet — no per-file stdout
+      "-f",  # force recompile (don't trust mtime)
+      source,
+    ]
+    let actionId = "python-byte-compile-" & sanitizeNamePart(member.name) &
+      "-" & sanitizeNamePart(rel)
+    let action = buildAction(
+      id = actionId,
+      call = inlineExecCall(argv, projectRoot),
+      inputs = @[source],
+      outputs = @[pycPath],
+      pool = "compile",
+      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      commandStatsId = "python.byte-compile." & kindTag)
+    result.actions.add(action)
+    result.pycFiles.add(pycPath)
+
+proc emitMemberWheelAction(projectRoot, pythonExe: string;
+                           member: PythonMember;
+                           info: PythonProjectInfo;
+                           sourceInputs: seq[string];
+                           pycInputs: seq[string];
+                           byteCompileIds: seq[string]):
+                             tuple[action: BuildActionDef;
+                                   wheelPath: string] =
   ## Emit the wheel-build action for a single ``library``/``executable``
-  ## member. M15 ships one action per member; M16+ will add the
-  ## byte-compile pre-step + venv-install post-step.
+  ## member. M20 wires the per-``.py`` byte-compile actions as
+  ## dependencies via ``deps`` (the engine's action-ordering primitive);
+  ## the produced ``.pyc`` files are also listed as inputs so the
+  ## action's cache fingerprint covers them.
   let distDir = distDirFor(projectRoot, member.name)
   let wheelFilename = predictedWheelFilename(info)
   let wheelPath = distDir / wheelFilename
@@ -590,15 +842,111 @@ proc emitMemberAction(projectRoot, pythonExe: string;
     of pmkExecutable: "python.build-wheel.executable"
   var inputs = sourceInputs
   inputs.add(scriptPath)
+  for p in pycInputs:
+    inputs.add(p)
   let action = buildAction(
     id = actionId,
     call = inlineExecCall(argv, projectRoot),
+    deps = byteCompileIds,
     inputs = inputs,
     outputs = @[wheelPath],
     pool = "compile",
     dependencyPolicy = declaredOnlyDependencyPolicy(),
     commandStatsId = statsId)
   (action, wheelPath)
+
+proc emitMemberSdistAction(projectRoot, pythonExe: string;
+                           member: PythonMember;
+                           info: PythonProjectInfo;
+                           sourceInputs: seq[string]):
+                             tuple[action: BuildActionDef;
+                                   sdistPath: string] =
+  ## M20 A4: sdist-build action for a single member. Independent of the
+  ## wheel-build action (different PEP 517 hook, different output) so
+  ## the two run in parallel on the convention's ``compile`` pool.
+  ##
+  ## Unlike the wheel action, the sdist action does NOT depend on the
+  ## byte-compile sub-graph: an sdist is a source archive and should NOT
+  ## carry compiled bytecode (PEP 625 sdist contents are conventionally
+  ## the raw source tree plus generated ``PKG-INFO`` metadata).
+  let distDir = distDirFor(projectRoot, member.name)
+  let sdistFilename = predictedSdistFilename(info)
+  let sdistPath = distDir / sdistFilename
+  let scriptPath = sdistHookScriptPathFor(projectRoot, member.name)
+  createDir(extendedPath(distDir))
+  createDir(extendedPath(parentDir(scriptPath)))
+
+  let script = renderSdistHookScript(projectRoot, info.buildBackend, distDir,
+    sdistFilename)
+  writeFile(extendedPath(scriptPath), script)
+
+  let argv = @[
+    pythonExe,
+    scriptPath,
+  ]
+  let actionId = "python-build-sdist-" & sanitizeNamePart(member.name)
+  let statsId = case member.kind
+    of pmkLibrary: "python.build-sdist.library"
+    of pmkExecutable: "python.build-sdist.executable"
+  var inputs = sourceInputs
+  inputs.add(scriptPath)
+  let action = buildAction(
+    id = actionId,
+    call = inlineExecCall(argv, projectRoot),
+    inputs = inputs,
+    outputs = @[sdistPath],
+    pool = "compile",
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    commandStatsId = statsId)
+  (action, sdistPath)
+
+proc emitMemberInstallerAction(projectRoot, pythonExe: string;
+                               member: PythonMember;
+                               info: PythonProjectInfo;
+                               wheelPath: string;
+                               wheelActionId: string):
+                                 tuple[action: BuildActionDef;
+                                       launcherPaths: seq[string]] =
+  ## M20 A5: emit the installer action that unpacks ``wheelPath`` into
+  ## ``<scratch>/<member>/install/`` and materialises the runnable
+  ## console-script launcher(s). Output paths declare every launcher
+  ## listed under ``[project.scripts]`` so the engine's output-existence
+  ## check fires per-launcher.
+  ##
+  ## The action depends on the wheel-build action via ``deps`` (the
+  ## wheel is its input) and on the byte-compile actions transitively
+  ## (the wheel-build action itself depends on them).
+  let installDir = installDirFor(projectRoot, member.name)
+  let scriptPath = installerHookScriptPathFor(projectRoot, member.name)
+  let launcherDir = installDir / launcherSubdir()
+  createDir(extendedPath(installDir))
+  createDir(extendedPath(parentDir(scriptPath)))
+
+  let script = renderInstallerHookScript(installDir, wheelPath)
+  writeFile(extendedPath(scriptPath), script)
+
+  var launcherPaths: seq[string] = @[]
+  for entry in info.consoleScripts:
+    launcherPaths.add(launcherDir / launcherFilename(entry.name))
+
+  let argv = @[
+    pythonExe,
+    scriptPath,
+  ]
+  let actionId = "python-install-wheel-" & sanitizeNamePart(member.name)
+  let statsId = case member.kind
+    of pmkLibrary: "python.install-wheel.library"
+    of pmkExecutable: "python.install-wheel.executable"
+  let action = buildAction(
+    id = actionId,
+    call = inlineExecCall(argv, projectRoot),
+    deps = @[wheelActionId],
+    inputs = @[wheelPath, scriptPath],
+    outputs = launcherPaths,
+    pool = "compile",
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    commandStatsId = statsId)
+  (action, launcherPaths)
 
 proc syntheticPackage(projectRoot: string;
                       members: seq[PythonMember];
@@ -625,7 +973,8 @@ proc pythonEmitFragment(projectRoot: string;
                         request: ProviderGraphRequest):
                           GraphFragment {.gcsafe.} =
   ## Convention entry — parse pyproject.toml, enumerate the package's
-  ## members, emit one wheel-build action per member, hand the whole
+  ## members, emit per-member action sub-graphs covering byte-compile +
+  ## wheel + sdist + (when applicable) installer, then hand the whole
   ## thing to ``buildPackageFragment``.
   ##
   ## The DSL runtime mutates module-level registries that aren't annotated
@@ -659,22 +1008,44 @@ proc pythonEmitFragment(projectRoot: string;
           "cannot run the PEP 517 build_wheel hook")
     let pkg = syntheticPackage(projectRoot, members, info)
     let sourceInputs = collectSourceInputs(projectRoot)
+    let pySources = collectPySourceFiles(projectRoot)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]
       for member in members:
-        let emitted = emitMemberAction(projectRoot, pythonExe, member, info,
-          sourceInputs)
-        allActions.add(emitted.action)
-      # Per-member target aliases are deferred: at M15 each member emits
-      # exactly one wheel-build action, and the engine's graph linker
-      # rejects "single-action target N + single-action target default
-      # both pointing at the same action" as a duplicate-alias error
-      # (see ``repro_cli_support.nim`` §"aliasForAction"). The ``default``
-      # target alone is sufficient for the M9 harness which builds
-      # ``#default``. Multi-action members (post-M15 once the
-      # byte-compile and installer sub-graphs land) can opt back in to
-      # per-member aliases without triggering the check.
+        # A1: per-``.py`` byte-compile actions.
+        let byteCompile = emitByteCompileActions(projectRoot, pythonExe,
+          member, pySources)
+        var byteCompileIds: seq[string] = @[]
+        for action in byteCompile.actions:
+          byteCompileIds.add(action.id)
+          allActions.add(action)
+        # A3: wheel build (depends on the byte-compile sub-graph so the
+        # produced wheel includes the per-source ``.pyc`` siblings).
+        let wheel = emitMemberWheelAction(projectRoot, pythonExe, member,
+          info, sourceInputs, byteCompile.pycFiles, byteCompileIds)
+        allActions.add(wheel.action)
+        # A4: sdist build (parallel to wheel; independent action graph).
+        let sdist = emitMemberSdistAction(projectRoot, pythonExe, member,
+          info, sourceInputs)
+        allActions.add(sdist.action)
+        # A5: console-script wrapper shim — emitted only when the
+        # package's ``[project.scripts]`` is non-empty AND the member is
+        # an executable. Library members don't get an installer action
+        # even if the project happens to declare console-scripts —
+        # those scripts belong to the executable member's launcher set.
+        if info.consoleScripts.len > 0 and member.kind == pmkExecutable:
+          let installer = emitMemberInstallerAction(projectRoot, pythonExe,
+            member, info, wheel.wheelPath, wheel.action.id)
+          allActions.add(installer.action)
+      # Per-member target aliases remain deferred (M20 doesn't change the
+      # alias surface): the engine's graph linker still rejects
+      # "single-action target N + single-action target default both
+      # pointing at the same action" as a duplicate-alias error. M20
+      # graduates the per-member graph to multi-action (byte-compile +
+      # wheel + sdist [+ installer]) so the duplicate-alias hazard goes
+      # away in principle, but ``default`` alone remains sufficient for
+      # the M9 harness which builds ``#default``.
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

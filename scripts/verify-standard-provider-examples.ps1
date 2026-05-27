@@ -22,13 +22,14 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set, post-M17):
+# Expected to PASS (the known-working set, post-M20):
 #   nim/binary, nim/multi-binary,
 #   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
 #   rust/library, rust/library-with-tests, rust/workspace,
 #   go/binary, go/library, go/multi-binary,
-#   python/library-pure, python/console-script,
+#   python/library-pure,
+#   python/console-script    (M20: byte-compile + sdist + runnable shim),
 #   javascript-typescript/typescript-library,
 #   javascript-typescript/typescript-cli,
 #   javascript-typescript/node-server,
@@ -38,7 +39,8 @@
 # Expected to KNOWN-FAIL: (none — M14 graduated go/library + go/multi-binary;
 #   M15 graduated python/library-pure + python/console-script;
 #   M16 graduated all three javascript-typescript fixtures;
-#   M17 graduated all three c-cpp fixtures)
+#   M17 graduated all three c-cpp fixtures;
+#   M20 promoted python/console-script from wheel-only to runnable shim)
 #
 # Expected to SKIP: (only when toolchain is missing —
 #   c-cpp-autotools/hello-binary SKIPs when autoreconf is unavailable on
@@ -518,18 +520,35 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
     }
     'python/console-script' {
       # M15: console-script project. The Python convention emits a wheel
-      # carrying the ``[project.scripts]`` entry-point metadata; the
-      # launcher (an actual runnable ``.exe`` shim under ``Scripts/``)
-      # comes from a future ``installer``-based A5 step that hasn't
-      # landed yet. The harness only asserts the wheel exists at M15.
+      # carrying the ``[project.scripts]`` entry-point metadata.
+      # M20: A5 installer sub-graph additionally lands a runnable shim
+      # under ``<install>/Scripts/<name>.exe`` (Windows) /
+      # ``<install>/bin/<name>`` (POSIX). The shim's __main__.py is
+      # monkey-patched to prepend the install's site/ directory to
+      # sys.path so it runs without any caller PYTHONPATH plumbing — so
+      # the harness's Greeting assertion (executes the shim, checks
+      # stdout) is a load-bearing M20 PASS criterion, not just a
+      # presence check.
       $member = 'python_console_script'
-      return @(@{
-        PathGlob = @{
-          Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member 'dist'))
-          Filter = '*.whl'
+      $launcherName = 'python-console-script'
+      if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+        $shimPath = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member (Join-Path 'install' (Join-Path 'Scripts' ($launcherName + '.exe')))))
+      } else {
+        $shimPath = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member (Join-Path 'install' (Join-Path 'bin' $launcherName))))
+      }
+      return @(
+        @{
+          PathGlob = @{
+            Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member 'dist'))
+            Filter = '*.whl'
+          }
+          Greeting = $null
+        },
+        @{
+          Path     = $shimPath
+          Greeting = 'hello from python-console-script'
         }
-        Greeting = $null
-      })
+      )
     }
     'javascript-typescript/typescript-library' {
       # M16: TS library. The JS/TS convention emits a flat

@@ -1,23 +1,17 @@
 #requires -Version 5
-# End-to-end M15 verification: build the Python console-script example
-# via the Tier 2b dispatch path and assert the produced wheel
-# (``.whl``) carries the declared ``[project.scripts]`` entry point.
+# End-to-end M20 verification: build the Python console-script example
+# via the Tier 2b dispatch path and assert the produced runnable
+# launcher (``<install>/Scripts/<name>.exe`` on Windows;
+# ``<install>/bin/<name>`` on POSIX) executes ``cli.main()`` and prints
+# the expected greeting.
 #
-# **Scope at M15**: the Python convention emits only the wheel-build
-# action; the spec's A5 venv + ``installer`` step that materialises an
-# executable launcher under ``<out>/Scripts/<name>.exe`` (Windows) is
-# deferred to a follow-up milestone. Until that lands this script
-# verifies only that:
-#
-#   1. The wheel is produced.
-#   2. The wheel's ``entry_points.txt`` metadata declares the
-#      ``[console_scripts]`` ``python-console-script = ...`` line from
-#      ``pyproject.toml``'s ``[project.scripts]`` block. That's the only
-#      runtime evidence we have today that the console-script surface
-#      survived the Mode A wheel build.
-#
-# Once Action 2 (wrapper emission) lands the script will additionally
-# invoke the launcher and assert its stdout.
+# **Scope at M20**: the Python convention's A5 sub-graph now lands an
+# ``installer``-based unpack action after the wheel-build action; this
+# materialises the wheel into a per-member ``install/`` tree with the
+# console-script launcher under ``Scripts/``. The launcher's bundled
+# ``__main__.py`` carries a monkey-patched preamble that prepends
+# ``<install>/site/`` to ``sys.path`` so the produced binary runs
+# without any caller-supplied ``PYTHONPATH``.
 #
 # Mechanics:
 #
@@ -26,9 +20,17 @@
 #   3. Wipe any prior .repro/build/ scratch under the fixture.
 #   4. Invoke repro.exe build <fixture>#default --tool-provisioning=path.
 #   5. Assert exit code 0.
-#   6. Locate the wheel and assert it carries the expected entry-point.
+#   6. Locate the wheel and confirm ``entry_points.txt`` declares the
+#      ``[console_scripts]`` binding (back-compat with the M15 partial
+#      surface — preserves the regression signal if A5 ships but the
+#      wheel itself drops the entry-point metadata).
+#   7. Locate the produced launcher at
+#      ``<install>/Scripts/<name>.exe`` (Windows) /
+#      ``<install>/bin/<name>`` (POSIX) and run it; assert exit 0 + the
+#      expected greeting on stdout. THIS is the M20 graduation criterion.
 #
-# Per reprobuild-specs/Standard-Provider-Implementation.milestones.org §M15.
+# Per reprobuild-specs/Standard-Provider-Implementation.milestones.org §M20
+# verification "e2e_python_console_script_shim_runs".
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\..\env.ps1"
@@ -41,6 +43,17 @@ $fixture        = Join-Path $metacraftRoot 'reprobuild-examples\python\console-s
 $scratchInsideFixture = Join-Path $fixture '.repro'
 $memberDir      = 'python_console_script'
 $expectedDistDir = Join-Path $fixture (Join-Path '.repro\build' (Join-Path $memberDir 'dist'))
+$expectedInstallDir = Join-Path $fixture (Join-Path '.repro\build' (Join-Path $memberDir 'install'))
+# The launcher script name comes verbatim from pyproject.toml's
+# [project.scripts] key (``python-console-script``). On Windows the
+# installer appends ``.exe``; on POSIX the bare name is used.
+$launcherName = 'python-console-script'
+if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+  $expectedShimPath = Join-Path $expectedInstallDir (Join-Path 'Scripts' ($launcherName + '.exe'))
+} else {
+  $expectedShimPath = Join-Path $expectedInstallDir (Join-Path 'bin' $launcherName)
+}
+$expectedGreeting = 'hello from python-console-script'
 
 # --- ensure `python` is available somewhere ---
 $pythonCmd = $null
@@ -55,11 +68,22 @@ foreach ($n in @('python3', 'python')) {
   }
 }
 if (-not $pythonCmd) {
-  Write-Host "SKIP: neither 'python3' nor 'python' available on PATH. M15 e2e gate skipped."
+  Write-Host "SKIP: neither 'python3' nor 'python' available on PATH. M20 e2e gate skipped."
   exit 0
 }
 Write-Host "python = $($pythonCmd.Source)"
 & $pythonCmd.Source --version
+
+# --- ensure `installer` is importable ---
+# M20 A5 depends on the PyPA ``installer`` package being importable from
+# the bundled Python. The convention's hook script imports
+# ``installer``; if it's not on the interpreter's sys.path the action
+# fails at build time with ``ModuleNotFoundError``.
+& $pythonCmd.Source -c "import installer" 2>$null
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "SKIP: 'installer' python package not importable from $($pythonCmd.Source); install via 'python3 -m pip install installer' or rely on the catalog entry. M20 e2e gate skipped."
+  exit 0
+}
 
 # --- preflight ---
 if (-not (Test-Path -LiteralPath $reproExe)) {
@@ -138,7 +162,11 @@ Write-Host "produced wheel: $($wheel.FullName) ($($wheel.Length) bytes)"
 
 # --- step 4: verify the wheel carries the console-script entry-point ---
 # Read entry_points.txt out of the wheel using the stdlib zipfile module
-# rather than installing or unpacking the wheel.
+# rather than installing or unpacking the wheel. M15 PASS-partial gate
+# retained as a back-compat sanity check: if A5 silently produces a shim
+# but the wheel's entry_points.txt is dropped, this step catches the
+# regression before the launcher-runs step potentially fakes success
+# with a stale shim.
 $probe = @"
 import sys, zipfile
 wheel_path = sys.argv[1]
@@ -168,7 +196,44 @@ if ($entryText -notmatch 'python-console-script\s*=\s*python_console_script\.cli
 }
 Write-Host "entry_points.txt declares the expected python-console-script binding"
 
+# --- step 5: M20 — verify the produced shim runs ---
+if (-not (Test-Path -LiteralPath $expectedInstallDir)) {
+  Write-Host "FAIL: expected install dir missing at $expectedInstallDir"
+  Write-Host "--- contents of fixture scratch:"
+  Get-ChildItem -LiteralPath (Join-Path $fixture '.repro\build') -Recurse -ErrorAction SilentlyContinue |
+    Select-Object -First 30 | ForEach-Object { Write-Host "  $($_.FullName)" }
+  exit 1
+}
+if (-not (Test-Path -LiteralPath $expectedShimPath)) {
+  Write-Host "FAIL: expected shim missing at $expectedShimPath"
+  Write-Host "--- contents of install dir:"
+  Get-ChildItem -LiteralPath $expectedInstallDir -Recurse -ErrorAction SilentlyContinue |
+    ForEach-Object { Write-Host "  $($_.FullName)" }
+  exit 1
+}
+$shimItem = Get-Item -LiteralPath $expectedShimPath
+if ($shimItem.Length -le 0) {
+  Write-Host "FAIL: produced shim $expectedShimPath is empty"
+  exit 1
+}
+Write-Host "produced shim: $expectedShimPath ($($shimItem.Length) bytes)"
+
+Write-Host "==> launching shim: $expectedShimPath"
+$shimOutput = & $expectedShimPath 2>&1
+$shimExit = $LASTEXITCODE
+$shimText = ($shimOutput | Out-String).Trim()
+Write-Host "--- shim exit: $shimExit"
+Write-Host "--- shim output: $shimText"
+if ($shimExit -ne 0) {
+  Write-Host "FAIL: shim exited $shimExit (expected 0)"
+  exit 1
+}
+if ($shimText -notmatch [regex]::Escape($expectedGreeting)) {
+  Write-Host "FAIL: shim stdout missing expected greeting '$expectedGreeting'; got: '$shimText'"
+  exit 1
+}
+Write-Host "shim runs and prints '$expectedGreeting'"
+
 Write-Host ""
-Write-Host "PASS (partial): python/console-script wheel built and entry-point recorded."
-Write-Host "NOTE: launcher wrapper emission (Action 2 / installer) deferred to a follow-up M."
+Write-Host "PASS - shim runs: python/console-script built via standard provider; wheel produced, console-script launcher emitted, and the launcher executes the declared entry-point."
 exit 0
