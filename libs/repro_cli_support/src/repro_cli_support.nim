@@ -2092,13 +2092,7 @@ proc newBuildProgressRenderer(mode: BuildProgressMode): BuildProgressRenderer =
     ansi: supportsAnsiProgress(),
     lastLen: 0)
 
-proc progressBar(completed, total, width: int; pretty = false): string =
-  const
-    FullBlock = "\226\150\136"
-    EmptyBlock = "\226\150\145"
-    Green = "\27[38;5;35m"
-    Dim = "\27[38;5;238m"
-    Reset = "\27[0m"
+proc progressBar(completed, total, width: int): string =
   let safeWidth = max(width, 1)
   let clampedCompleted =
     if total <= 0:
@@ -2112,13 +2106,7 @@ proc progressBar(completed, total, width: int; pretty = false): string =
       min(safeWidth, (clampedCompleted * safeWidth) div total)
   result = "["
   for i in 0 ..< safeWidth:
-    if pretty:
-      if i < filled:
-        result.add(Green & FullBlock & Reset)
-      else:
-        result.add(Dim & EmptyBlock & Reset)
-    else:
-      result.add(if i < filled: '#' else: '.')
+    result.add(if i < filled: '#' else: '.')
   result.add("]")
 
 proc fitProgressLine(line: string; width: int): string =
@@ -2166,11 +2154,10 @@ proc buildProgressInvocation(event: BuildProgressEvent): string =
   statusLabel(event) & " " & invocation
 
 proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
-                              includeBar = true; barWidth = 20;
-                              pretty = false): string =
+                              includeBar = true; barWidth = 20): string =
   let prefix =
     if includeBar:
-      "repro " & progressBar(event.completed, event.total, barWidth, pretty) &
+      "repro " & progressBar(event.completed, event.total, barWidth) &
         " " & buildProgressCounters(event)
     else:
       "repro " & buildProgressCounters(event)
@@ -2178,13 +2165,12 @@ proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
   let tail = " " & buildProgressInvocation(event)
   fitProgressLine(prefix & counters & tail, max(width, 20))
 
-proc formatBuildProgressBarLine(event: BuildProgressEvent; width: int;
-                                pretty = false): string =
+proc formatBuildProgressBarLine(event: BuildProgressEvent; width: int): string =
   let suffix = " " & buildProgressCounters(event) &
     " running=" & $event.running & " ready=" & $event.ready
   let barWidth = max(10, width - suffix.len - "repro ".len - 2)
   fitProgressLine("repro " & progressBar(event.completed, event.total,
-    barWidth, pretty) & suffix, max(width, 20))
+    barWidth) & suffix, max(width, 20))
 
 proc progressLineWidth(): int =
   min(max(terminalWidth(), 40), 160)
@@ -2216,10 +2202,10 @@ proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEve
     discard
   of bpmLine:
     renderer.writeRedrawnProgress(formatBuildProgressLine(event, width,
-      includeBar = false, pretty = renderer.ansi))
+      includeBar = false))
   of bpmBarLine:
     renderer.writeRedrawnProgress(formatBuildProgressLine(event, width,
-      includeBar = true, barWidth = 24, pretty = renderer.ansi))
+      includeBar = true, barWidth = 24))
   of bpmLines:
     stderr.writeLine(formatBuildProgressLine(event, width, includeBar = false))
     stderr.flushFile()
@@ -2227,8 +2213,7 @@ proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEve
   of bpmLinesBar:
     renderer.clearProgressLine()
     stderr.writeLine(formatBuildProgressLine(event, width, includeBar = false))
-    renderer.writeRedrawnProgress(formatBuildProgressBarLine(event, width,
-      pretty = renderer.ansi))
+    renderer.writeRedrawnProgress(formatBuildProgressBarLine(event, width))
   of bpmDots:
     if shouldEmitProgressUnit(event):
       stderr.write(".")
@@ -5248,6 +5233,45 @@ proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
   runInDevelopEnvironment(devCommand, sourceRoot, resolved.identity,
     resolved.identityPath, resolved.inspectionPath, interfacePath)
 
+proc autoRunQuotaEnabled(): bool =
+  getEnv("REPROBUILD_AUTO_RUNQUOTA", "1").normalize notin
+    ["0", "false", "no", "off"]
+
+proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
+  if bypassRunQuota or getEnv("RUNQUOTA_SOCKET", "").len > 0 or
+      not autoRunQuotaEnabled():
+    return nil
+  var runquotad = getEnv("RUNQUOTAD_BIN", "")
+  if runquotad.len == 0:
+    runquotad = findExe("runquotad")
+  if runquotad.len == 0:
+    return nil
+  let socket = getTempDir() / ("reprobuild-runquota-" &
+    $getCurrentProcessId() & ".sock")
+  if fileExists(socket):
+    removeFile(socket)
+  result = startProcess(runquotad, args = [
+    "--socket", socket,
+    "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
+    "--memory-bytes", "17179869184"
+  ], options = {poUsePath})
+  putEnv("RUNQUOTA_SOCKET", socket)
+  for _ in 0 ..< 300:
+    if isRunQuotaDaemonReachable():
+      return
+    if not result.running:
+      break
+    sleep(50)
+  try:
+    result.terminate()
+    discard result.waitForExit()
+    result.close()
+  except CatchableError:
+    discard
+  putEnv("RUNQUOTA_SOCKET", "")
+  raise newException(OSError,
+    "runquotad did not become reachable at " & socket)
+
 proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var target = ""
   var mode = tpmUnspecified
@@ -5345,17 +5369,27 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     if not statsModeExplicit:
       statsMode = bsmNone
 
-  executeBuildTarget(target, mode, publicCliPath,
-    selectDefaultAction = targetWasOmitted,
-    workRoot = workRoot,
-    progressMode = progressMode,
-    statsMode = statsMode,
-    reportMode = reportMode,
-    logMode = logMode,
-    diagnosticsPath = diagnosticsPath,
-    prepareOnly = prepareOnly,
-    skipCmakeRegeneration = skipCmakeRegeneration,
-    bypassRunQuotaExplicit = bypassRunQuota).exitCode
+  var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+  try:
+    executeBuildTarget(target, mode, publicCliPath,
+      selectDefaultAction = targetWasOmitted,
+      workRoot = workRoot,
+      progressMode = progressMode,
+      statsMode = statsMode,
+      reportMode = reportMode,
+      logMode = logMode,
+      diagnosticsPath = diagnosticsPath,
+      prepareOnly = prepareOnly,
+      skipCmakeRegeneration = skipCmakeRegeneration,
+      bypassRunQuotaExplicit = bypassRunQuota).exitCode
+  finally:
+    if autoRunQuota != nil:
+      try:
+        autoRunQuota.terminate()
+        discard autoRunQuota.waitForExit()
+        autoRunQuota.close()
+      except CatchableError:
+        discard
 
 proc parsePositiveIntFlag(flagName, value: string): int =
   try:
