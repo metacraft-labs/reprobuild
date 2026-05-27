@@ -18,7 +18,7 @@ actions:
 
 | Phase | Output artifact | Required dependency evidence |
 | --- | --- | --- |
-| Project interface extraction | `project-interface.rbsz`, `project-interface.nim` | Project `reprobuild.nim`, all Nim files imported while registering the DSL, Reprobuild DSL/runtime libraries, Nim compiler identity, compile flags, relevant environment |
+| Project interface extraction | `project-interface.rbsz`; optional `project-interface.nim` stub for callers that import the interface from Nim | Project `reprobuild.nim`, all Nim files imported while registering the DSL, Reprobuild DSL/runtime libraries, Nim compiler identity, compile flags, relevant environment |
 | Tool identity resolution | `*-tool-identities.rbtp`, inspection JSON | Project interface, tool provisioning mode, tool catalog entries, pinned package metadata, local PATH profile when in path mode, Nix/tarball/Scoop resolver inputs, realized executable/profile paths |
 | Provider compilation | provider binary, `provider-compile.rbsz` | Project interface, provider source files, Reprobuild provider/runtime libraries, Nim compiler identity, compile flags, link inputs |
 | Provider graph refresh | `provider-fragments.rbsz` | Provider binary/artifact identity, root entry point, root arguments, provider manifest, directory enumerations, provider evaluation file reads, environment read by provider execution |

@@ -1654,9 +1654,12 @@ proc readInterfaceExtractionCacheRecord(path: string):
     return none(InterfaceExtractionCacheRecord)
 
 proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
-                                       context: InterfaceExtractionContext):
+                                       context: InterfaceExtractionContext;
+                                       requireStub = true):
     Option[ProjectInterfaceArtifact] =
-  if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(stubPath))):
+  if not fileExists(extendedPath(artifactPath)):
+    return none(ProjectInterfaceArtifact)
+  if requireStub and not fileExists(extendedPath(stubPath)):
     return none(ProjectInterfaceArtifact)
   let record = readInterfaceExtractionCacheRecord(
     interfaceExtractionMetadataPath(artifactPath))
@@ -1678,11 +1681,13 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
     return none(ProjectInterfaceArtifact)
 
 proc cachedInterfaceArtifactByFingerprint(artifactPath, stubPath: string;
-                                          fingerprint: ContentDigest):
+                                          fingerprint: ContentDigest;
+                                          requireStub = true):
     Option[ProjectInterfaceArtifact] =
   let cachePath = interfaceExtractionCachePath(artifactPath)
-  if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(stubPath)) and
-      fileExists(extendedPath(cachePath))):
+  if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(cachePath))):
+    return none(ProjectInterfaceArtifact)
+  if requireStub and not fileExists(extendedPath(stubPath)):
     return none(ProjectInterfaceArtifact)
   if readFile(extendedPath(cachePath)).strip() != toHex(fingerprint.bytes):
     return none(ProjectInterfaceArtifact)
@@ -1861,10 +1866,11 @@ proc buildScratchRoot(workDir, scratchDir: string): string =
 
 proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  workDir = getCurrentDir();
-                                 scratchDir = ""): ProjectInterfaceArtifact =
+                                 scratchDir = "";
+                                 requireStub = true): ProjectInterfaceArtifact =
   let extractionContext = interfaceExtractionCacheContext(modulePath, workDir)
   let metadataCached = cachedInterfaceArtifactByMetadata(artifactPath,
-    stubPath, extractionContext)
+    stubPath, extractionContext, requireStub)
   if metadataCached.isSome:
     return metadataCached.get()
 
@@ -1872,7 +1878,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     includeReproLibFingerprint = true)
   let inputFingerprint = interfaceExtractionFingerprint(fingerprintContext)
   let cached = cachedInterfaceArtifactByFingerprint(artifactPath, stubPath,
-    inputFingerprint)
+    inputFingerprint, requireStub)
   if cached.isSome:
     writeInterfaceExtractionCacheRecord(artifactPath, fingerprintContext,
       inputFingerprint)

@@ -3086,9 +3086,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let compileWorkDir = reprobuildLibraryWorkDir()
   let compileScratchDir = outDir / "provider-work"
   let interfaceStart = statStart(statsEnabled)
-  progressRenderer.renderPhase("extracting project interface")
+  progressRenderer.renderPhase("loading project interface")
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
-    compileWorkDir, compileScratchDir)
+    compileWorkDir, compileScratchDir, requireStub = false)
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
 
