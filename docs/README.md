@@ -6,6 +6,7 @@ Reprobuild repository.
 - [Capabilities](capabilities.md)
 - [Build Progress](progress.md)
 - [Build Introspection](build-introspection.md)
+- [Bootstrap Build Graph](bootstrap-build-graph.md)
 - [Dependency Collection](dependency-collection.md)
 - [Build Stats](stats.md)
 - [Nix Provisioning Catalog](nix-provisioning.md)
