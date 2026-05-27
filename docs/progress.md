@@ -18,7 +18,7 @@ repro build --progress-bars=split
 fixed-width progress bar on the left:
 
 ```text
-repro ▕████████▓▓▓▓░░░░░░░░░░░░▏ checked=12/28 42% built=9/28 exec=3 running=3 ready=5 started gcc -c ...
+▕████████▓▓▓▓░░░░░░░░░░░░▏ checked=12/28 running=3 gcc -c ...
 ```
 
 The progress fraction counts selected scheduler actions that have been checked
@@ -45,7 +45,9 @@ and their decisions are "execute 4, skip 21", the solid segment is `21/40` and
 the solid-plus-striped overlay is `25/40` until those four commands finish. Once
 all decisions are known and commands are still running, the bar switches to a
 third color and an execution scale: `exec=X/Y` reports completed command
-executions out of planned command executions. This execution-scale mode can
+executions out of planned command executions. Progress counters are padded to
+the selected graph or execution-plan width so the rest of the line remains
+stable while counts advance. This execution-scale mode can
 later use RunQuota duration estimates when the RunQuota protocol exposes an
 acknowledge-and-wait phase; without those estimates, it uses the planned
 execution count.
@@ -64,7 +66,7 @@ iTerm2, Ghostty, WezTerm, Konsole, ConEmu, and mintty. Set
 `--progress-bars=split` keeps the checking and execution views separate:
 
 ```text
-repro ▕████████████░░░░░░░░▏ exec▕███░░░░░░▏ checked=25/40 62% built=21/40 exec=1/4 running=3 ready=15 started gcc -c ...
+▕████████████░░░░░░░░▏ checked=25/40 ▕███░░░░░░▏ built=1/4 running=3 gcc -c ...
 ```
 
 The first bar is dedicated to checking and is always scaled to the selected
@@ -72,7 +74,12 @@ graph. The execution bar appears as soon as the scheduler discovers at least
 one command that must run. Its denominator is the number of discovered commands
 that must execute, so it can rescale while the scheduler is still finding more
 work. Once the run/skip plan is complete, the execution denominator is stable.
-This mode is intended for side-by-side experience with the overlaid model; set
+The checked counter is displayed after the check bar. When the execution bar is
+visible, the built counter is displayed after that second bar and reports
+completed command executions out of planned command executions. The line keeps
+only `running=N` as the queue summary, followed by one currently executing
+command, preferring the most recently started active command. This mode is
+intended for side-by-side experience with the overlaid model; set
 `REPROBUILD_PROGRESS_BARS=split` to make it the default locally.
 
 The checking scale is currently scheduler actions, not individual filesystem
@@ -82,7 +89,7 @@ layer should be driven from the cache/input-verification code path once it can
 report a total and completed probe count before each expensive scan.
 
 Before the scheduler knows the graph size, the progress renderer prints phase
-status such as `preparing build`, `extracting project interface`, `resolving
+status such as `preparing build`, `loading project interface`, `resolving
 tool identities`, `checking provider compile`, `refreshing project provider
 graph`, and `lowering project graph`. These phase lines are intentionally drawn
 before each potentially slow operation so a stuck build reports the phase it was

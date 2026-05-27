@@ -2359,21 +2359,34 @@ proc buildProgressPercent(event: BuildProgressEvent): int =
       else: event.completed
     min(100, (max(checked, 0) * 100) div event.total)
 
+proc countWidth(total: int): int =
+  max(1, ($max(total, 0)).len)
+
+proc checkedCount(event: BuildProgressEvent): int =
+  if event.checked > 0 or event.completed == 0: event.checked
+  else: event.completed
+
+proc settledCount(event: BuildProgressEvent): int =
+  if event.settled > 0 or event.completed == 0: event.settled
+  else: event.completed
+
+proc checkedCounter(event: BuildProgressEvent): string =
+  let width = countWidth(event.total)
+  "checked=" & align($checkedCount(event), width) & "/" &
+    align($event.total, width)
+
+proc builtCounter(event: BuildProgressEvent): string =
+  let width = countWidth(event.plannedExecutions)
+  "built=" & align($event.completedExecutions, width) & "/" &
+    align($event.plannedExecutions, width)
+
 proc buildProgressCounters(event: BuildProgressEvent): string =
-  let checked =
-    if event.checked > 0 or event.completed == 0: event.checked
-    else: event.completed
-  let settled =
-    if event.settled > 0 or event.completed == 0: event.settled
-    else: event.completed
-  result = "checked=" & $checked & "/" & $event.total & " " &
-    $buildProgressPercent(event) & "%"
+  result = checkedCounter(event)
   if event.executionPlanKnown and event.plannedExecutions > 0:
-    result.add(" exec=" & $event.completedExecutions & "/" &
-      $event.plannedExecutions)
+    result.add(" " & builtCounter(event))
   elif event.plannedExecutions > 0 or event.running > 0:
-    result.add(" settled=" & $settled & "/" & $event.total &
-      " exec=" & $event.plannedExecutions)
+    result.add(" settled=" & align($settledCount(event), countWidth(event.total)) &
+      "/" & align($event.total, countWidth(event.total)))
 
 proc buildProgressOverlayBar(event: BuildProgressEvent; width: int;
                              color = false): string =
@@ -2441,6 +2454,40 @@ proc buildProgressSplitBars(event: BuildProgressEvent; width: int;
       filledGlyph = if color: "█" else: "#",
       emptyGlyph = if color: "░" else: "."))
 
+proc buildProgressBarsWithCounters(event: BuildProgressEvent; width: int;
+                                   color = false;
+                                   barStyle = bpbsOverlay): string =
+  let hasExecBar = barStyle == bpbsSplit and
+    (event.plannedExecutions > 0 or event.running > 0)
+  let checkedText = checkedCounter(event)
+  let builtText =
+    if hasExecBar:
+      " " & builtCounter(event)
+    else:
+      ""
+  let checkWidth =
+    if hasExecBar:
+      max(8, (width * 3) div 5)
+    else:
+      max(width, 1)
+  let execWidth = max(6, width - checkWidth)
+  case barStyle
+  of bpbsOverlay:
+    result = buildProgressOverlayBar(event, width, color) & " " & checkedText
+    if event.executionPlanKnown and event.plannedExecutions > 0:
+      result.add(" " & builtCounter(event))
+  of bpbsSplit:
+    result = progressBar(checkedCount(event), event.total, checkWidth, color,
+      filledColor = "38;5;42", filledGlyph = if color: "█" else: "#",
+      emptyGlyph = if color: "░" else: ".") & " " & checkedText
+    if hasExecBar:
+      result.add(" ")
+      result.add(progressBar(event.completedExecutions, event.plannedExecutions,
+        execWidth, color, filledColor = "38;5;213",
+        filledGlyph = if color: "█" else: "#",
+        emptyGlyph = if color: "░" else: "."))
+      result.add(builtText)
+
 proc buildProgressBars(event: BuildProgressEvent; width: int;
                        color = false;
                        barStyle = bpbsOverlay): string =
@@ -2452,7 +2499,9 @@ proc buildProgressBars(event: BuildProgressEvent; width: int;
 
 proc buildProgressInvocation(event: BuildProgressEvent): string =
   let invocation =
-    if event.kind == bpkActionCompleted and not event.launched:
+    if event.currentCommand.len > 0:
+      event.currentCommand
+    elif event.kind == bpkActionCompleted and not event.launched:
       event.actionId
     elif event.command.len > 0:
       event.command
@@ -2464,7 +2513,10 @@ proc buildProgressInvocation(event: BuildProgressEvent): string =
       singleLine[i] = ' '
   while singleLine.contains("  "):
     singleLine = singleLine.replace("  ", " ")
-  statusLabel(event) & " " & singleLine.strip()
+  if event.currentCommand.len > 0:
+    singleLine.strip()
+  else:
+    statusLabel(event) & " " & singleLine.strip()
 
 proc nativeProgressPercent(event: BuildProgressEvent): int =
   let executionScale = event.executionPlanKnown and
@@ -2502,21 +2554,19 @@ proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
                               barStyle = bpbsOverlay): string =
   let prefix =
     if includeBar:
-      "repro " & buildProgressBars(event, barWidth, color, barStyle) &
-        " " & buildProgressCounters(event)
+      buildProgressBarsWithCounters(event, barWidth, color, barStyle)
     else:
-      "repro " & buildProgressCounters(event)
-  let counters = " running=" & $event.running & " ready=" & $event.ready
+      buildProgressCounters(event)
+  let counters = " running=" & $event.running
   let tail = " " & buildProgressInvocation(event)
   fitProgressLine(prefix & counters & tail, max(width, 20))
 
 proc formatBuildProgressBarLine(event: BuildProgressEvent; width: int;
                                 color = false;
                                 barStyle = bpbsOverlay): string =
-  let suffix = " " & buildProgressCounters(event) &
-    " running=" & $event.running & " ready=" & $event.ready
-  let barWidth = max(10, width - suffix.len - "repro ".len - 2)
-  fitProgressLine("repro " & buildProgressBars(event, barWidth, color,
+  let suffix = " running=" & $event.running
+  let barWidth = max(10, width - suffix.len - 2)
+  fitProgressLine(buildProgressBarsWithCounters(event, barWidth, color,
     barStyle) & suffix, max(width, 20))
 
 proc progressLineWidth(): int =
@@ -2540,8 +2590,7 @@ proc writeRedrawnProgress(renderer: var BuildProgressRenderer; line: string) =
 proc renderPhase(renderer: var BuildProgressRenderer; phase: string) =
   if not renderer.enabled:
     return
-  renderer.writeRedrawnProgress(fitProgressLine("repro " & phase,
-    progressLineWidth()))
+  renderer.writeRedrawnProgress(fitProgressLine(phase, progressLineWidth()))
 
 proc shouldEmitProgressUnit(event: BuildProgressEvent): bool =
   event.kind == bpkActionCompleted

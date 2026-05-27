@@ -174,6 +174,7 @@ type
     kind*: BuildProgressKind
     actionId*: string
     command*: string
+    currentCommand*: string
     status*: ActionStatus
     cacheDecision*: CacheDecision
     launched*: bool
@@ -1633,18 +1634,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return
     let idx = idToIndex.resultIndex(id)
     let action = actionsById[id]
-    var command = ""
-    if action.argv.len > 0:
-      for arg in action.argv:
-        if command.len > 0:
-          command.add(" ")
-        command.add(quoteShell(arg))
-    else:
-      command = $action.kind & " " & action.id
+    proc commandForAction(action: BuildAction): string =
+      if action.argv.len > 0:
+        for arg in action.argv:
+          if result.len > 0:
+            result.add(" ")
+          result.add(quoteShell(arg))
+      else:
+        result = $action.kind & " " & action.id
+    let command = commandForAction(action)
+    let currentCommand =
+      if running.len > 0:
+        commandForAction(running[^1].action)
+      else:
+        ""
     config.progressCallback(BuildProgressEvent(
       kind: kind,
       actionId: id,
       command: command,
+      currentCommand: currentCommand,
       status: runResult.results[idx].status,
       cacheDecision: runResult.results[idx].cacheDecision,
       launched: runResult.results[idx].launched,
