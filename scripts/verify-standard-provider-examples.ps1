@@ -22,17 +22,18 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set, post-M14):
+# Expected to PASS (the known-working set, post-M15):
 #   nim/binary, nim/multi-binary,
 #   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
 #   rust/library, rust/library-with-tests, rust/workspace,
-#   go/binary, go/library, go/multi-binary
+#   go/binary, go/library, go/multi-binary,
+#   python/library-pure, python/console-script
 #
-# Expected to KNOWN-FAIL: (none — M14 graduated go/library + go/multi-binary)
+# Expected to KNOWN-FAIL: (none — M14 graduated go/library + go/multi-binary;
+#   M15 graduated python/library-pure + python/console-script)
 #
-# Expected to SKIP (no Mode A convention exists in M3-M8):
-#   python/library-pure, python/console-script,
+# Expected to SKIP (no Mode A convention exists yet):
 #   javascript-typescript/typescript-library, typescript-cli, node-server,
 #   c-cpp-make/binary, c-cpp-make/library-static,
 #   c-cpp-autotools/hello-binary
@@ -167,10 +168,26 @@ function Probe-Toolchain([string]$language) {
       return @{ Available = $false; Reason = "'go' not on PATH and not under D:/metacraft-dev-deps/go/" }
     }
     'python' {
-      # Mode A for Python is not implemented yet — the standard provider has
-      # no convention registered. Skip uniformly to surface "not implemented"
-      # rather than "toolchain missing", which is the more honest classification.
-      return @{ Available = $false; Reason = "Mode A not implemented for Python (M8 outstanding)" }
+      # M15: the Python convention is registered. Probe for a working
+      # python3 / python interpreter (rejecting the Windows Store stub
+      # via a --version exit-code check). env.ps1 already provisions a
+      # bundled Python 3.12 under D:/metacraft-dev-deps/python/ so this
+      # branch almost always returns Available=$true in the dev shell.
+      $pythonCmd = $null
+      foreach ($n in @('python3', 'python')) {
+        $candidate = Get-Command $n -ErrorAction SilentlyContinue
+        if ($candidate) {
+          & $candidate.Source --version 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            $pythonCmd = $candidate
+            break
+          }
+        }
+      }
+      if ($pythonCmd) {
+        return @{ Available = $true; Reason = "python=$($pythonCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "'python3'/'python' not on PATH (env.ps1 should provide the managed install)" }
     }
     'javascript-typescript' {
       return @{ Available = $false; Reason = "Mode A not implemented for JavaScript/TypeScript (M8 outstanding)" }
@@ -209,6 +226,15 @@ function Get-KnownFailReason([string]$rel) {
     # ``package main`` anywhere) and the ``cmd/<name>/main.go``
     # multi-binary layout; ``go list`` enumerates every package and the
     # emitter produces one link action per main package.
+    #
+    # M15 (2026-05-27): python/library-pure + python/console-script
+    # graduated to PASS via the Python convention's Mode A PEP 517
+    # build_wheel hook. The convention emits one wheel-build action per
+    # ``library`` / ``executable`` member; ``[project.scripts]`` entry
+    # points appear in the wheel's entry_points.txt metadata. Launcher
+    # wrapper emission (the spec's A5 venv + ``installer`` step) is
+    # deferred to a follow-up M; ``[project.scripts]`` projects PASS
+    # today on the wheel-only headline.
     default                    { return $null }
   }
 }
@@ -361,6 +387,38 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         PathGlob = @{
           Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $entry 'pkg'))
           Filter = '*.a'
+        }
+        Greeting = $null
+      })
+    }
+    'python/library-pure' {
+      # M15: pure-Python library. Mode A's PEP 517 ``build_wheel`` hook
+      # produces ``<dist_name>-<version>-py3-none-any.whl`` under
+      # ``<member>/dist/`` where ``<member>`` is the literal name from
+      # ``library <name>`` in reprobuild.nim (camelCase
+      # ``pythonLibraryExample``). No greeting check — a wheel isn't an
+      # executable. The validate-standard-provider-python-library.ps1
+      # script covers the wheel-imports assertion separately.
+      $member = 'pythonLibraryExample'
+      return @(@{
+        PathGlob = @{
+          Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member 'dist'))
+          Filter = '*.whl'
+        }
+        Greeting = $null
+      })
+    }
+    'python/console-script' {
+      # M15: console-script project. The Python convention emits a wheel
+      # carrying the ``[project.scripts]`` entry-point metadata; the
+      # launcher (an actual runnable ``.exe`` shim under ``Scripts/``)
+      # comes from a future ``installer``-based A5 step that hasn't
+      # landed yet. The harness only asserts the wheel exists at M15.
+      $member = 'python_console_script'
+      return @(@{
+        PathGlob = @{
+          Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member 'dist'))
+          Filter = '*.whl'
         }
         Greeting = $null
       })

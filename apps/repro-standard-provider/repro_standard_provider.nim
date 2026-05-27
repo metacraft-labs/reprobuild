@@ -28,6 +28,7 @@ import repro_standard_provider/convention
 import repro_standard_provider/conventions/nim as nim_convention
 import repro_standard_provider/conventions/rust as rust_convention
 import repro_standard_provider/conventions/go as go_convention
+import repro_standard_provider/conventions/python as python_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -125,11 +126,11 @@ proc dispatchGraphRequest(request: ProviderGraphRequest):
 when defined(reproProviderMode):
   # Register the language convention plugins this binary ships with.
   # The Nim convention is the first one to land (M3); the Rust
-  # convention (M4) follows, and the Go convention (M5) is registered
-  # after that. Future milestones add Python/TypeScript/etc. here in
-  # registration-order which is also match-order. The list of registered
-  # conventions MUST stay in sync with
-  # ``RegisteredStandardConventionToolchains`` in
+  # convention (M4) follows, the Go convention (M5) after that, and the
+  # Python convention (M15) is registered last. Future milestones add
+  # TypeScript / C-Make / etc. here in registration-order which is also
+  # match-order. The list of registered conventions MUST stay in sync
+  # with ``RegisteredStandardConventionToolchains`` in
   # ``libs/repro_interface_artifacts/src/repro_interface_artifacts.nim``
   # — the engine should only mark a package as standardBuildEligible
   # when at least one registered convention is plausibly going to match
@@ -137,6 +138,7 @@ when defined(reproProviderMode):
   addDefaultConvention(nim_convention.nimConvention())
   addDefaultConvention(rust_convention.rustConvention())
   addDefaultConvention(go_convention.goConvention())
+  addDefaultConvention(python_convention.pythonConvention())
 
   proc runStandardProvider(): int =
     try:

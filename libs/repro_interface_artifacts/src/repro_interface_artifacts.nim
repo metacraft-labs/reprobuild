@@ -971,7 +971,8 @@ proc sameSourceFile(a, b: string): bool =
     a == b
 
 const
-  RegisteredStandardConventionToolchains* = ["nim", "rust", "cargo", "go"]
+  RegisteredStandardConventionToolchains* = ["nim", "rust", "cargo", "go",
+    "python3", "python", "uv"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
     ## Tier 2b standard provider. This list MUST stay in sync with the
@@ -980,8 +981,11 @@ const
     ## ``"rust"`` and ``"cargo"`` both route to the same Rust convention
     ## plugin (M4) — the Rust convention's ``recognize`` matches either
     ## token in ``uses:``. ``"go"`` (M5) routes to the Go convention plugin
-    ## which keys on the ``go.mod`` + ``main.go`` layout. Mismatches break
-    ## in the engine-side fall-back path: the engine will dispatch to the
+    ## which keys on the ``go.mod`` + ``main.go`` layout. ``"python3"`` /
+    ## ``"python"`` / ``"uv"`` (M15) route to the Python convention plugin
+    ## which keys on ``pyproject.toml`` + a recognised PEP 517 build
+    ## backend (hatchling / flit_core / setuptools). Mismatches break in
+    ## the engine-side fall-back path: the engine will dispatch to the
     ## provider, the provider will reply "no convention matched", and the
     ## build fails loudly — preferable to silently routing through the
     ## slow path when the user expects the fast path.
