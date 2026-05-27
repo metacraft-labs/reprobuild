@@ -57,11 +57,17 @@ import repro_core
 
 const
   TryCompileMetadataMagic* = "RBCT"
-  TryCompileMetadataVersion* = 2'u16
+  TryCompileMetadataVersion* = 3'u16
   ## v1: single target (legacy, TryCompile probes only).
   ## v2: multi-target with optional default + all aggregator (Tier 2c
   ##     — main CMake-generated projects). v1 readers should reject v2;
   ##     v2 readers must accept v1 metadata for backward compat.
+  ## v3: extends v2 with cross-config descriptors so multi-config CMake
+  ##     builds (``CMAKE_CROSS_CONFIGS`` / ``CMAKE_DEFAULT_CONFIGS``) can
+  ##     route through the direct provider. v2 readers MUST reject v3
+  ##     (the cross-config target shape would be invisible otherwise and
+  ##     the slow path is the silent fallback); v3 readers MUST accept
+  ##     v2 metadata and default the new fields to empty.
   ## Stable identity of the direct provider binary. Goes into the
   ## engine's ``providerArtifactId`` for every TryCompile, so every
   ## project on the same ``repro`` release shares an action cache key
@@ -107,6 +113,26 @@ type
     childTargets*: seq[string]
     isAggregate*: bool
 
+  CrossConfigTargetDef* = object
+    ## A v3-only cross-config aggregate descriptor. CMake multi-config
+    ## builds emit synthetic per-config and per-base-name aggregate
+    ## targets in ``reprobuild.nim``. The direct provider mirrors those
+    ## via the DSL's ``aggregate(name, targets = @[...])`` primitive.
+    ##
+    ## - ``name`` is the visible target name (e.g. ``"all:Debug"`` or
+    ##   ``"myTarget:Release"``).
+    ## - ``configName`` is the config this aggregate represents (Debug,
+    ##   Release, …). Empty for cross-config rollups like ``"all"``.
+    ## - ``baseName`` is the base target name without the ``:Config``
+    ##   suffix. Empty for the synthetic ``"all"`` rollup.
+    ## - ``childTargets`` references entries from the v2 ``targets``
+    ##   array (per-config build targets) or other ``crossConfigTargets``
+    ##   (cross-config rollups that aggregate per-config aggregates).
+    name*: string
+    configName*: string
+    baseName*: string
+    childTargets*: seq[string]
+
   TryCompileMetadata* = object
     usedTools*: seq[string]
     pools*: seq[TryCompilePoolDef]
@@ -116,6 +142,17 @@ type
     ## ``repro build`` is invoked without an explicit ``#<actionId>``).
     ## Empty when the project does not declare one.
     defaultTargetName*: string
+    ## v3-only: configs participating in this build (CMAKE_CROSS_CONFIGS
+    ## ∪ CMAKE_DEFAULT_CONFIGS). Empty on v2 envelopes; non-empty signals
+    ## multi-config to the direct provider.
+    crossConfigs*: seq[string]
+    ## v3-only: per-config and cross-config aggregates that CMake's
+    ## multi-config generator emits in addition to the per-config build
+    ## targets in ``targets``.
+    crossConfigTargets*: seq[CrossConfigTargetDef]
+    ## v3-only: the configs CMake selects when no explicit
+    ## ``:Config`` suffix is requested (``CMAKE_DEFAULT_CONFIGS``).
+    defaultConfigs*: seq[string]
     ## v1 compatibility fields. Decoder fills these on v1 envelopes and
     ## encoder writes them only when ``targets`` is empty (so v1 readers
     ## still get a usable single-target view).
@@ -201,6 +238,17 @@ proc encodeTryCompileMetadata*(meta: TryCompileMetadata): seq[byte] =
     payload.writeStringSeq(target.childTargets)
     payload.writeBool(target.isAggregate)
   payload.writeString(meta.defaultTargetName)
+  # v3 trailer: cross-config descriptors. v2 readers reject v3 outright
+  # (see ``decodeTryCompileMetadata``) so we don't need to gate the
+  # trailer on version — every v3 envelope carries it, even when empty.
+  payload.writeStringSeq(meta.crossConfigs)
+  payload.writeU32Le(uint32(meta.crossConfigTargets.len))
+  for target in meta.crossConfigTargets:
+    payload.writeString(target.name)
+    payload.writeString(target.configName)
+    payload.writeString(target.baseName)
+    payload.writeStringSeq(target.childTargets)
+  payload.writeStringSeq(meta.defaultConfigs)
 
   result = @[]
   for ch in TryCompileMetadataMagic:
@@ -217,7 +265,7 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
       raiseMetadata("unknown trycompile.rbsz magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != 1'u16 and version != 2'u16:
+  if version != 1'u16 and version != 2'u16 and version != 3'u16:
     raiseMetadata("unsupported trycompile.rbsz version: " & $version)
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -252,6 +300,21 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
       result.targets[i].childTargets = readStringSeq(bytes, pos)
       result.targets[i].isAggregate = readBool(bytes, pos)
     result.defaultTargetName = readString(bytes, pos)
+    if version >= 3'u16:
+      # v3 trailer: cross-config descriptors. Trail of v2 stops here so a
+      # v3-flagged envelope MUST carry the trailer (the C++ emitter writes
+      # it unconditionally).
+      result.crossConfigs = readStringSeq(bytes, pos)
+      let crossTargetCount = int(readU32Le(bytes, pos))
+      result.crossConfigTargets = newSeq[CrossConfigTargetDef](
+        crossTargetCount)
+      for i in 0 ..< crossTargetCount:
+        result.crossConfigTargets[i].name = readString(bytes, pos)
+        result.crossConfigTargets[i].configName = readString(bytes, pos)
+        result.crossConfigTargets[i].baseName = readString(bytes, pos)
+        result.crossConfigTargets[i].childTargets =
+          readStringSeq(bytes, pos)
+      result.defaultConfigs = readStringSeq(bytes, pos)
     # Maintain v1 compatibility view: expose the first target through the
     # legacy single-target fields so older code paths still see something.
     if result.targets.len > 0:

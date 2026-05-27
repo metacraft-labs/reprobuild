@@ -117,6 +117,21 @@ when defined(reproProviderMode):
               if actionId in actionById:
                 childActions.add(actionById[actionId])
           targetByName[targetDef.name] = target(targetDef.name, childActions)
+      # v3-only: multi-config builds carry a list of per-config and
+      # cross-config aggregate descriptors that mirror the per-config and
+      # rollup ``aggregate(...)`` calls the slow path emits into
+      # ``reprobuild.nim``. The descriptors reference either v2 targets
+      # already registered above or previously-emitted cross-config
+      # aggregates — the C++ generator emits them in declaration order so
+      # forward references never appear.
+      if meta.crossConfigs.len > 0:
+        for crossDef in meta.crossConfigTargets:
+          var childTargets: seq[BuildTargetDef] = @[]
+          for childName in crossDef.childTargets:
+            if childName in targetByName:
+              childTargets.add(targetByName[childName])
+          targetByName[crossDef.name] =
+            aggregate(crossDef.name, targets = childTargets)
       if meta.defaultTargetName.len > 0 and
           meta.defaultTargetName in targetByName:
         defaultTarget(targetByName[meta.defaultTargetName])
