@@ -103,6 +103,7 @@ type
     status*: ActionCacheLookupStatus
     record*: ActionResultRecord
     message*: string
+    changedInputPath*: string
 
   HotIndexDecode = object
     records: Table[string, ActionResultRecord]
@@ -1197,6 +1198,7 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
 
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                      hybridCutoff: var bool;
+                     changedInputPath: var string;
                      metadataCache: ptr FileMetadataCache):
                      tuple[inputs: seq[FileFingerprint],
                            reusedRecordedInputs: bool] =
@@ -1207,6 +1209,7 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
     of ffpTimestamp:
       if currentMetadata != recorded.metadata:
         changed = true
+        changedInputPath = recorded.path
         return
       if not result.reusedRecordedInputs:
         result.inputs[i] = recorded
@@ -1216,6 +1219,7 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
       if (not recorded.hasLocalHash) or (not current.hasLocalHash) or
           current.localHash != recorded.localHash:
         changed = true
+        changedInputPath = recorded.path
         return
       if not result.reusedRecordedInputs:
         result.inputs[i] = recorded
@@ -1226,11 +1230,13 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
         continue
       if not recorded.hasLocalHash:
         changed = true
+        changedInputPath = recorded.path
         return
       let current = observeFileWithMetadata(recorded.path, recorded.policy,
         currentMetadata)
       if not current.hasLocalHash:
         changed = true
+        changedInputPath = recorded.path
         return
       if current.localHash == recorded.localHash:
         if result.reusedRecordedInputs:
@@ -1242,6 +1248,7 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
         hybridCutoff = true
       else:
         changed = true
+        changedInputPath = recorded.path
         return
 
 proc verifyOutputs(cas: LocalCas; record: ActionResultRecord) =
@@ -1261,17 +1268,26 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
     let hot = cache.readHotRecord(weak)
     if hot.found and hot.record.policy == policy:
       var changed = false
+      var changedInput = ""
       for input in hot.record.inputs:
         if fingerprintMetadata(input.path, metadataCache) != input.metadata:
           changed = true
+          changedInput = input.path
           break
       if not changed:
         return ActionCacheLookup(status: aclHit, record: hot.record)
+      return ActionCacheLookup(
+        status: aclMissInputChanged,
+        record: hot.record,
+        message: "input metadata changed: " & changedInput,
+        changedInputPath: changedInput)
 
   cache.ensureLoadedRecords()
   if not cache.byWeak.hasKey(key):
-    return ActionCacheLookup(status: aclMissNoRecord)
+    return ActionCacheLookup(status: aclMissNoRecord,
+      message: "no cache record for weak fingerprint")
   var sawInputChange = false
+  var firstChangedInput = ""
   let records = cache.byWeak[key]
   for i in countdown(records.high, 0):
     let record = records[i]
@@ -1279,10 +1295,13 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
       continue
     var changed = false
     var hybridCutoff = false
+    var changedInput = ""
     let refreshed = refreshedInputs(record, changed, hybridCutoff,
-      metadataCache)
+      changedInput, metadataCache)
     if changed:
       sawInputChange = true
+      if firstChangedInput.len == 0:
+        firstChangedInput = changedInput
       continue
     var candidate = record
     if not refreshed.reusedRecordedInputs:
@@ -1291,6 +1310,8 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
         candidate.inputs)
       if candidate.strongFingerprint != record.strongFingerprint:
         sawInputChange = true
+        if firstChangedInput.len == 0:
+          firstChangedInput = "strong fingerprint"
         continue
     if verifyOutputBlobs:
       if candidate.outputPayloadKind != opkCasBlobs:
@@ -1307,6 +1328,14 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
       return ActionCacheLookup(status: aclHybridCutoff, record: candidate)
     return ActionCacheLookup(status: aclHit, record: candidate)
   if sawInputChange:
-    ActionCacheLookup(status: aclMissInputChanged)
+    ActionCacheLookup(
+      status: aclMissInputChanged,
+      message:
+        if firstChangedInput.len > 0:
+          "input changed: " & firstChangedInput
+        else:
+          "input changed",
+      changedInputPath: firstChangedInput)
   else:
-    ActionCacheLookup(status: aclMissNoRecord)
+    ActionCacheLookup(status: aclMissNoRecord,
+      message: "no matching cache record for policy")

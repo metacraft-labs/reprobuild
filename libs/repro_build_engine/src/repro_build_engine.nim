@@ -20,6 +20,7 @@ type
     asSucceeded
     asCacheHit
     asUpToDate
+    asWouldRun
     asFailed
     asBlocked
 
@@ -111,6 +112,7 @@ type
     # launches child processes directly under leases instead of spawning a
     # `repro __repro-runquota-helper` process for every action.
     inlineRunQuota*: bool
+    dryRun*: bool
     progressCallback*: BuildProgressCallback
     statsEnabled*: bool
     suppressTrace*: bool
@@ -134,7 +136,9 @@ type
     status*: ActionStatus
     exitCode*: int
     launched*: bool
+    wouldLaunch*: bool
     cacheDecision*: CacheDecision
+    reason*: string
     dependencyPolicyKind*: DependencyGatheringKind
     monitorDepfilePath*: string
     blockedBy*: string
@@ -241,6 +245,7 @@ proc defaultBuildEngineConfig*(cacheRoot: string;
     bypassRunQuota: false,
     fallbackToRunQuotaBypass: false,
     inlineRunQuota: false,
+    dryRun: false,
     progressCallback: nil,
     statsEnabled: false,
     suppressTrace: false)
@@ -630,9 +635,69 @@ proc evidenceInputPaths(evidence: PathSetEvidence): seq[string] =
   for probe in evidence.monitorProbes:
     result.addUnique(probe)
 
+proc nixStoreRoot(path: string): string =
+  let normalized = path.replace('\\', '/')
+  const prefix = "/nix/store/"
+  if not normalized.startsWith(prefix):
+    return ""
+  let rest = normalized.substr(prefix.len)
+  let slash = rest.find('/')
+  if slash < 0:
+    normalized
+  else:
+    prefix & rest[0 ..< slash]
+
+proc addNixStoreRoot(roots: var seq[string]; path: string) =
+  let root = nixStoreRoot(path)
+  if root.len > 0:
+    roots.addUnique(root)
+
+proc envValue(action: BuildAction; name: string): string =
+  let prefix = name & "="
+  for item in action.env:
+    if item.startsWith(prefix):
+      return item.substr(prefix.len)
+
+proc toolInputRoots(action: BuildAction): seq[string] =
+  if action.argv.len > 0:
+    result.addNixStoreRoot(action.argv[0])
+  for value in action.envValue("PATH").split(PathSep):
+    result.addNixStoreRoot(value)
+  for value in action.envValue("NODE_PATH").split(PathSep):
+    result.addNixStoreRoot(value)
+
+proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
+  let normalized = path.replace('\\', '/')
+  for root in roots:
+    let normalizedRoot = root.replace('\\', '/')
+    if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
+      return true
+
 proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string] =
-  for input in evidence.evidenceInputPaths():
-    result.addUnique(materialPath(action.cwd, input))
+  let toolRoots = action.toolInputRoots()
+  var declaredMaterialized = initHashSet[string]()
+  for input in evidence.declaredInputs:
+    let path = materialPath(action.cwd, input)
+    declaredMaterialized.incl(path.replace('\\', '/'))
+    result.addUnique(path)
+  for input in evidence.depfileInputs:
+    let path = materialPath(action.cwd, input)
+    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+        path.isUnderAnyRoot(toolRoots):
+      continue
+    result.addUnique(path)
+  for input in evidence.monitorReads:
+    let path = materialPath(action.cwd, input)
+    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+        path.isUnderAnyRoot(toolRoots):
+      continue
+    result.addUnique(path)
+  for probe in evidence.monitorProbes:
+    let path = materialPath(action.cwd, probe)
+    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+        path.isUnderAnyRoot(toolRoots):
+      continue
+    result.addUnique(path)
 
 proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSetEvidence =
   result.declaredInputs = action.inputs
@@ -1500,7 +1565,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
   proc terminalCount(): int =
     for action in buildGraph.actions:
-      if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
+      if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate,
+          asWouldRun, asFailed, asBlocked}:
         inc result
 
   proc emitProgress(kind: BuildProgressKind; id: string) =
@@ -1590,8 +1656,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     runResult.results[idx].status = status
     runResult.results[idx].cacheDecision = cacheDecision
     runResult.results[idx].launched = launched
+    if detail.len > 0:
+      runResult.results[idx].reason = detail
     statuses[id] = status
-    if launched and status == asSucceeded:
+    if (launched and status == asSucceeded) or status == asWouldRun:
       launchedSucceeded.incl(id)
     runResult.trace(id, $status, detail)
     for dep in dependents.getOrDefault(id):
@@ -1638,7 +1706,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       action.deps.add(dep)
       dependents.mgetOrPut(dep, @[]).addUnique(id)
       case statuses[dep]
-      of asSucceeded, asCacheHit, asUpToDate:
+      of asSucceeded, asCacheHit, asUpToDate, asWouldRun:
         discard
       of asFailed, asBlocked:
         statuses[id] = asBlocked
@@ -1712,6 +1780,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             break
         if dependencyLaunched:
           runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+          runResult.results[idToIndex.resultIndex(id)].reason =
+            "dependency-launched"
           runResult.trace(id, "cache-skipped", "dependency-launched")
         elif action.cacheable:
           if config.rebuildMissingOutputsOnCacheHit:
@@ -1741,6 +1811,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
             if config.rebuildMissingOutputsOnCacheHit:
               runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+              runResult.results[idToIndex.resultIndex(id)].reason =
+                "missing-output"
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
               let restoreStart = statStart()
@@ -1767,6 +1839,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
             if config.rebuildMissingOutputsOnCacheHit:
               runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+              runResult.results[idToIndex.resultIndex(id)].reason =
+                "missing-output"
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
               let restoreStart = statStart()
@@ -1781,11 +1855,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
           of aclRejectedCorruptOutput:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdRejected
+            runResult.results[idToIndex.resultIndex(id)].reason =
+              if lookup.message.len > 0: lookup.message else: "corrupt-output"
           of aclMissInputChanged:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+            runResult.results[idToIndex.resultIndex(id)].reason =
+              if lookup.message.len > 0: lookup.message else: "input-changed"
             cacheMissInputChanged = true
           else:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+            runResult.results[idToIndex.resultIndex(id)].reason =
+              if lookup.message.len > 0: lookup.message else: $lookup.status
+        elif not action.cacheable:
+          runResult.results[idToIndex.resultIndex(id)].reason = "not-cacheable"
 
         var outputsPresent: bool
         if outputsPresentKnown:
@@ -1814,6 +1896,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             continue
           completeSuccess(id, asUpToDate, runResult.results[idToIndex.resultIndex(id)].cacheDecision,
             false, "outputs-present")
+          inc completed
+          launchedAny = true
+          continue
+
+        if config.dryRun:
+          let idx = idToIndex.resultIndex(id)
+          var reason = runResult.results[idx].reason
+          if reason.len == 0:
+            if not outputsPresent:
+              reason = "missing-output"
+            elif action.needsExecutionForPolicy():
+              reason = "policy-requires-execution"
+            else:
+              reason = "cache-miss"
+          runResult.results[idx].wouldLaunch = true
+          completeSuccess(id, asWouldRun, runResult.results[idx].cacheDecision,
+            false, reason)
           inc completed
           launchedAny = true
           continue
@@ -2223,7 +2322,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
       completed = 0
       for action in buildGraph.actions:
-        if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate, asFailed, asBlocked}:
+        if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate,
+            asWouldRun, asFailed, asBlocked}:
           inc completed
   finally:
     for item in running.mitems:

@@ -397,6 +397,11 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
     result.exitCode = exitCode
     result.output = captured
 
+proc collectConfiguredProbes(executablePath, packageSelector,
+                             executableName: string): seq[ToolProbeResult] =
+  for probe in configuredProbes(packageSelector, executableName):
+    result.add(runProbe(executablePath, probe))
+
 proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.toolProfile.v5")
@@ -631,14 +636,8 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
         adapterStrength: asWeak,
         cachePortability: cpLocalOnly)
       result.applySidecarProfile(sidecar)
-      for probe in configuredProbes(useDef.packageSelector,
-                                    useDef.executableName):
-        let probeResult = runProbe(result.resolvedExecutablePath, probe)
-        if probeResult.exitCode != 0:
-          raise newException(OSError,
-            "tool-resolution failed: probe " & probe.name & " for " &
-            useDef.executableName & " exited " & $probeResult.exitCode)
-        result.probes.add(probeResult)
+      result.probes = collectConfiguredProbes(result.resolvedExecutablePath,
+        useDef.packageSelector, useDef.executableName)
       result.profileFingerprint = profileFingerprintFor(result)
       return
 
@@ -661,13 +660,8 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
     cachePortability: cpLocalOnly)
   result.applySidecarProfile(sidecarToolProfile(resolved))
 
-  for probe in configuredProbes(useDef.packageSelector, useDef.executableName):
-    let probeResult = runProbe(resolved, probe)
-    if probeResult.exitCode != 0:
-      raise newException(OSError,
-        "tool-resolution failed: probe " & probe.name & " for " &
-        useDef.executableName & " exited " & $probeResult.exitCode)
-    result.probes.add(probeResult)
+  result.probes = collectConfiguredProbes(resolved,
+    useDef.packageSelector, useDef.executableName)
 
   result.profileFingerprint = profileFingerprintFor(result)
 
@@ -925,14 +919,8 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
     adapterStrength: asStrong,
     cachePortability: cpPortable)
 
-  for probe in configuredProbes(useDef.packageSelector, useDef.executableName):
-    let probeResult = runProbe(resolved, probe)
-    if probeResult.exitCode != 0:
-      raise newException(OSError,
-        "tool-resolution failed: probe " & probe.name & " for " &
-        useDef.executableName & " from " & selector & " exited " &
-        $probeResult.exitCode)
-    result.probes.add(probeResult)
+  result.probes = collectConfiguredProbes(resolved,
+    useDef.packageSelector, useDef.executableName)
 
   if storeRoot.len > 0:
     # M56 — record the Nix realization in the unified index. The Nix
@@ -1327,14 +1315,8 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string):
     adapterStrength: asStrong,
     cachePortability: cpPortable)
 
-  for probe in configuredProbes(useDef.packageSelector, useDef.executableName):
-    let probeResult = runProbe(resolved, probe)
-    if probeResult.exitCode != 0:
-      raise newException(OSError,
-        "tool-resolution failed: probe " & probe.name & " for " &
-        useDef.executableName & " from tarball " & plan.url & " exited " &
-        $probeResult.exitCode)
-    result.probes.add(probeResult)
+  result.probes = collectConfiguredProbes(resolved,
+    useDef.packageSelector, useDef.executableName)
 
   result.profileFingerprint = profileFingerprintFor(result)
 

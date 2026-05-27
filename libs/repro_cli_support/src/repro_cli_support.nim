@@ -42,7 +42,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--no-runquota]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--no-runquota]\n       " &
           programName &
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
@@ -1548,7 +1548,9 @@ proc actionResultJson(item: ActionResult): JsonNode =
     "status": $item.status,
     "exitCode": item.exitCode,
     "launched": item.launched,
+    "wouldLaunch": item.wouldLaunch,
     "cacheDecision": $item.cacheDecision,
+    "reason": item.reason,
     "dependencyPolicyKind": $item.dependencyPolicyKind,
     "runQuotaBackend": item.runQuotaBackend,
     "runQuotaSocket": item.runQuotaSocket,
@@ -1837,6 +1839,19 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
       payload.addCacheField(scoop.lockIdentity)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
+proc toolIdentityRealizationsUsable(identity: PathOnlyBuildIdentity): bool =
+  for profile in identity.profiles:
+    for storePath in profile.realizedStorePaths:
+      if storePath.len > 0 and not dirExists(extendedPath(storePath)):
+        return false
+    if profile.resolvedExecutablePath.len > 0 and
+        not fileExists(extendedPath(profile.resolvedExecutablePath)):
+      return false
+    for binDir in profile.pathSearchList:
+      if binDir.len > 0 and not dirExists(extendedPath(binDir)):
+        return false
+  true
+
 proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
                         artifact: ProjectInterfaceArtifact;
                         stableIdentityPath,
@@ -1853,6 +1868,8 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
       let identity = readPathOnlyBuildIdentity(stableIdentityPath)
       if identity.interfaceFingerprint != artifact.interfaceFingerprint:
         return
+      if not identity.toolIdentityRealizationsUsable():
+        return
       if not fileExists(extendedPath(stableInspectionPath)):
         if fileExists(extendedPath(cacheInspectionPath)):
           createDir(extendedPath(parentDir(stableInspectionPath)))
@@ -1867,6 +1884,8 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
   try:
     let identity = readPathOnlyBuildIdentity(cacheIdentityPath)
     if identity.interfaceFingerprint != artifact.interfaceFingerprint:
+      return
+    if not identity.toolIdentityRealizationsUsable():
       return
     writePathOnlyBuildIdentity(stableIdentityPath, identity)
     if fileExists(extendedPath(cacheInspectionPath)):
@@ -2397,6 +2416,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         logMode = blmActions;
                         diagnosticsPath = "";
                         prepareOnly = false;
+                        dryRun = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false):
     BuildCommandOutcome =
@@ -2539,6 +2559,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
+      dryRun: dryRun,
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
     engineConfig.statsEnabled = statsEnabled
@@ -2560,6 +2581,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     for item in buildResult.results:
       logAction("action: " & item.id & " status=" & $item.status &
         " launched=" & $item.launched & " cache=" & $item.cacheDecision &
+        " wouldLaunch=" & $item.wouldLaunch &
+        (if item.reason.len > 0: " reason=" & item.reason else: "") &
         " runquota=" & item.runQuotaBackend &
         " socket=" & (if item.runQuotaSocket.len >
             0: item.runQuotaSocket else: "default") &
@@ -2647,6 +2670,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         bypassRunQuota: bypassRunQuota,
         fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
         inlineRunQuota: true,
+        dryRun: dryRun,
         suppressTrace: reportMode == brmNone,
         skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
       cmakeRegenerationConfig.statsEnabled = statsEnabled
@@ -2659,7 +2683,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     for item in cmakeRegenerationResult.results:
       logAction("cmakeRegenerationAction: " & item.id & " status=" &
         $item.status & " launched=" & $item.launched & " cache=" &
-        $item.cacheDecision)
+        $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
+        (if item.reason.len > 0: " reason=" & item.reason else: ""))
       if logMode != blmQuiet and item.stdout.len > 0:
         stdout.write(item.stdout)
         stdout.flushFile()
@@ -2918,6 +2943,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         bypassRunQuota: bypassRunQuota,
         fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
         inlineRunQuota: true,
+        dryRun: dryRun,
         suppressTrace: reportMode == brmNone,
         skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
       providerCompileConfig.statsEnabled = statsEnabled
@@ -2928,7 +2954,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       for item in providerCompileResult.results:
         logAction("providerCompileAction: " & item.id & " status=" &
           $item.status & " launched=" & $item.launched & " cache=" &
-          $item.cacheDecision)
+          $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
+          (if item.reason.len > 0: " reason=" & item.reason else: ""))
       if providerCompileResult.hasFailedActions():
         raise newException(OSError, providerCompileFailure(providerCompileResult))
       if not fileExists(extendedPath(providerArtifactPath)):
@@ -3024,6 +3051,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
+      dryRun: dryRun,
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
     engineConfig.statsEnabled = statsEnabled
@@ -3053,6 +3081,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     for item in buildResult.results:
       logAction("action: " & item.id & " status=" & $item.status &
         " launched=" & $item.launched & " cache=" & $item.cacheDecision &
+        " wouldLaunch=" & $item.wouldLaunch &
+        (if item.reason.len > 0: " reason=" & item.reason else: "") &
         " runquota=" & item.runQuotaBackend &
         " socket=" & (if item.runQuotaSocket.len >
             0: item.runQuotaSocket else: "default") &
@@ -5349,6 +5379,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var logMode = configuredBuildLogMode()
   var diagnosticsPath = ""
   var prepareOnly = false
+  var dryRun = false
   var skipCmakeRegeneration = false
   var logModeExplicit = false
   var statsModeExplicit = false
@@ -5413,6 +5444,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       logModeExplicit = true
     elif arg == "--prepare-only":
       prepareOnly = true
+    elif arg == "--dry-run":
+      dryRun = true
     elif arg == "--skip-cmake-regeneration":
       skipCmakeRegeneration = true
     elif arg == "--no-runquota":
@@ -5447,6 +5480,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       logMode = logMode,
       diagnosticsPath = diagnosticsPath,
       prepareOnly = prepareOnly,
+      dryRun = dryRun,
       skipCmakeRegeneration = skipCmakeRegeneration,
       bypassRunQuotaExplicit = bypassRunQuota).exitCode
   finally:
