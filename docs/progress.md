@@ -10,6 +10,8 @@ repro build --progress=lines
 repro build --progress=lines-bar
 repro build --progress=dots
 repro build --progress=quiet
+repro build --progress-bars=overlay
+repro build --progress-bars=split
 ```
 
 `bar-line` is the default. It renders a Ninja-like single updating line with a
@@ -58,6 +60,33 @@ taskbar UI through the OSC 9;4 sequence. Reprobuild emits this side-channel in
 iTerm2, Ghostty, WezTerm, Konsole, ConEmu, and mintty. Set
 `REPROBUILD_TERMINAL_PROGRESS=never` to disable it or
 `REPROBUILD_TERMINAL_PROGRESS=always` to force it for an ANSI-capable terminal.
+
+`--progress-bars=split` keeps the checking and execution views separate:
+
+```text
+repro ▕████████████░░░░░░░░▏ exec▕███░░░░░░▏ checked=25/40 62% built=21/40 exec=1/4 running=3 ready=15 started gcc -c ...
+```
+
+The first bar is dedicated to checking and is always scaled to the selected
+graph. The execution bar appears as soon as the scheduler discovers at least
+one command that must run. Its denominator is the number of discovered commands
+that must execute, so it can rescale while the scheduler is still finding more
+work. Once the run/skip plan is complete, the execution denominator is stable.
+This mode is intended for side-by-side experience with the overlaid model; set
+`REPROBUILD_PROGRESS_BARS=split` to make it the default locally.
+
+The checking scale is currently scheduler actions, not individual filesystem
+metadata probes. That is why checking can still advance unevenly when one action
+has a large input set and another has a small one. A future file-check progress
+layer should be driven from the cache/input-verification code path once it can
+report a total and completed probe count before each expensive scan.
+
+Before the scheduler knows the graph size, the progress renderer prints phase
+status such as `preparing build`, `extracting project interface`, `resolving
+tool identities`, `checking provider compile`, `refreshing project provider
+graph`, and `lowering project graph`. These phase lines are intentionally drawn
+before each potentially slow operation so a stuck build reports the phase it was
+entering.
 
 On ANSI-capable terminals, progress bars use color by default: settled,
 checked-but-unsettled, execution-scale, and pending segments use distinct

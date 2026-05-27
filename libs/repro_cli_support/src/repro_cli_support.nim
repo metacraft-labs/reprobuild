@@ -42,7 +42,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
           programName &
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
@@ -75,6 +75,8 @@ proc renderUsage*(programName: string): string =
       "quiet=silent|none|off, line=ninja|single-line, " &
       "bar-line=bar|ninja-bar|auto|plain, lines=tup|per-line, " &
       "lines-bar=tup-bar|per-line-bar, dots=dot\n" &
+      "build progress bars: default=overlay; use --progress-bars=split " &
+      "or REPROBUILD_PROGRESS_BARS=split for separate check/exec bars\n" &
       "build color: auto by default; set NO_COLOR or REPROBUILD_COLOR=never " &
       "to disable, REPROBUILD_COLOR=always to force"
   elif programName == "repro-fs-snoop":
@@ -2008,6 +2010,10 @@ type
     bpmLinesBar
     bpmDots
 
+  BuildProgressBarStyle* = enum
+    bpbsOverlay
+    bpbsSplit
+
   BuildStatsMode = enum
     bsmNone
     bsmText
@@ -2024,6 +2030,7 @@ type
   BuildProgressRenderer = object
     enabled: bool
     mode: BuildProgressMode
+    barStyle: BuildProgressBarStyle
     ansi: bool
     color: bool
     nativeProgress: bool
@@ -2060,6 +2067,23 @@ proc configuredBuildProgressMode(): BuildProgressMode =
   if configured.len == 0:
     return bpmBarLine
   parseBuildProgressMode(configured)
+
+proc parseBuildProgressBarStyle(value: string): BuildProgressBarStyle =
+  case value.toLowerAscii()
+  of "overlay", "overlaid", "single", "combined":
+    bpbsOverlay
+  of "split", "two", "two-bars", "separate":
+    bpbsSplit
+  else:
+    raise newException(ValueError,
+      "unsupported --progress-bars=" & value &
+        " (expected overlay or split)")
+
+proc configuredBuildProgressBarStyle(): BuildProgressBarStyle =
+  let configured = getEnv("REPROBUILD_PROGRESS_BARS", "")
+  if configured.len == 0:
+    return bpbsOverlay
+  parseBuildProgressBarStyle(configured)
 
 proc parseBuildStatsMode(value: string): BuildStatsMode =
   case value.toLowerAscii()
@@ -2146,10 +2170,13 @@ proc nativeTerminalProgressEnabled(): bool =
     let termProgram = getEnv("TERM_PROGRAM", "").toLowerAscii()
     termProgram in ["iterm.app", "wezterm", "ghostty"]
 
-proc newBuildProgressRenderer(mode: BuildProgressMode): BuildProgressRenderer =
+proc newBuildProgressRenderer(mode: BuildProgressMode;
+                              barStyle: BuildProgressBarStyle):
+    BuildProgressRenderer =
   BuildProgressRenderer(
     enabled: mode != bpmQuiet,
     mode: mode,
+    barStyle: barStyle,
     ansi: supportsAnsiProgress(),
     color: colorProgressEnabled(),
     nativeProgress: nativeTerminalProgressEnabled(),
@@ -2294,8 +2321,8 @@ proc buildProgressCounters(event: BuildProgressEvent): string =
   else:
     result.add(" built=" & $settled & "/" & $event.total)
 
-proc buildProgressBars(event: BuildProgressEvent; width: int;
-                       color = false): string =
+proc buildProgressOverlayBar(event: BuildProgressEvent; width: int;
+                             color = false): string =
   let checked =
     if event.checked > 0 or event.completed == 0: event.checked
     else: event.completed
@@ -2338,6 +2365,36 @@ proc buildProgressBars(event: BuildProgressEvent; width: int;
     else:
       result.add(progressCell(emptyGlyph, "38;5;240", color))
   result.add(closeBracket)
+
+proc buildProgressSplitBars(event: BuildProgressEvent; width: int;
+                            color = false): string =
+  let checked =
+    if event.checked > 0 or event.completed == 0: event.checked
+    else: event.completed
+  let checkWidth =
+    if event.plannedExecutions > 0 or event.running > 0:
+      max(8, (width * 3) div 5)
+    else:
+      max(width, 1)
+  let execWidth = max(6, width - checkWidth)
+  result = progressBar(checked, event.total, checkWidth, color,
+    filledColor = "38;5;42", filledGlyph = if color: "█" else: "#",
+    emptyGlyph = if color: "░" else: ".")
+  if event.plannedExecutions > 0 or event.running > 0:
+    result.add(" exec")
+    result.add(progressBar(event.completedExecutions, event.plannedExecutions,
+      execWidth, color, filledColor = "38;5;213",
+      filledGlyph = if color: "█" else: "#",
+      emptyGlyph = if color: "░" else: "."))
+
+proc buildProgressBars(event: BuildProgressEvent; width: int;
+                       color = false;
+                       barStyle = bpbsOverlay): string =
+  case barStyle
+  of bpbsOverlay:
+    buildProgressOverlayBar(event, width, color)
+  of bpbsSplit:
+    buildProgressSplitBars(event, width, color)
 
 proc buildProgressInvocation(event: BuildProgressEvent): string =
   let invocation =
@@ -2387,10 +2444,11 @@ proc clearNativeProgress(renderer: BuildProgressRenderer) =
 
 proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
                               includeBar = true; barWidth = 20;
-                              color = false): string =
+                              color = false;
+                              barStyle = bpbsOverlay): string =
   let prefix =
     if includeBar:
-      "repro " & buildProgressBars(event, barWidth, color) &
+      "repro " & buildProgressBars(event, barWidth, color, barStyle) &
         " " & buildProgressCounters(event)
     else:
       "repro " & buildProgressCounters(event)
@@ -2399,12 +2457,13 @@ proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
   fitProgressLine(prefix & counters & tail, max(width, 20))
 
 proc formatBuildProgressBarLine(event: BuildProgressEvent; width: int;
-                                color = false): string =
+                                color = false;
+                                barStyle = bpbsOverlay): string =
   let suffix = " " & buildProgressCounters(event) &
     " running=" & $event.running & " ready=" & $event.ready
   let barWidth = max(10, width - suffix.len - "repro ".len - 2)
-  fitProgressLine("repro " & buildProgressBars(event, barWidth, color) &
-    suffix, max(width, 20))
+  fitProgressLine("repro " & buildProgressBars(event, barWidth, color,
+    barStyle) & suffix, max(width, 20))
 
 proc progressLineWidth(): int =
   min(max(terminalWidth(), 40), 160)
@@ -2424,6 +2483,12 @@ proc writeRedrawnProgress(renderer: var BuildProgressRenderer; line: string) =
   stderr.flushFile()
   renderer.lastLen = line.len
 
+proc renderPhase(renderer: var BuildProgressRenderer; phase: string) =
+  if not renderer.enabled:
+    return
+  renderer.writeRedrawnProgress(fitProgressLine("repro " & phase,
+    progressLineWidth()))
+
 proc shouldEmitProgressUnit(event: BuildProgressEvent): bool =
   event.kind == bpkActionCompleted
 
@@ -2440,7 +2505,8 @@ proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEve
       includeBar = false))
   of bpmBarLine:
     renderer.writeRedrawnProgress(formatBuildProgressLine(event, width,
-      includeBar = true, barWidth = 24, color = renderer.color))
+      includeBar = true, barWidth = 24, color = renderer.color,
+      barStyle = renderer.barStyle))
   of bpmLines:
     stderr.writeLine(formatBuildProgressLine(event, width, includeBar = false))
     stderr.flushFile()
@@ -2449,7 +2515,7 @@ proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEve
     renderer.clearProgressLine()
     stderr.writeLine(formatBuildProgressLine(event, width, includeBar = false))
     renderer.writeRedrawnProgress(formatBuildProgressBarLine(event, width,
-      color = renderer.color))
+      color = renderer.color, barStyle = renderer.barStyle))
   of bpmDots:
     if shouldEmitProgressUnit(event):
       stderr.write(".")
@@ -2562,6 +2628,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         selectDefaultAction = false;
                         workRoot = "";
                         progressMode = bpmBarLine;
+                        progressBarStyle = bpbsOverlay;
                         statsMode = bsmNone;
                         reportMode = brmFull;
                         logMode = blmActions;
@@ -2588,6 +2655,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   var buildStats: BuildStats
   let buildTotalStart = statStart(statsEnabled)
   let invocationWallStart = epochTime()
+  var progressRenderer = newBuildProgressRenderer(progressMode,
+    progressBarStyle)
+  progressRenderer.renderPhase("preparing build")
+  defer:
+    progressRenderer.finishProgress()
   var invocationFastPath = ""
   var diagnosticLines: seq[string] = @[]
   proc appendDiagnostic(line: string) =
@@ -2697,7 +2769,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logSummary("scheduler: actions=" & $lowered.actions.len)
     if lowered.actions.len == 0:
       return 0
-    var progressRenderer = newBuildProgressRenderer(progressMode)
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
@@ -2722,9 +2793,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var buildResult: BuildRunResult
     let engineStart = statStart(statsEnabled)
     try:
+      progressRenderer.renderPhase("checking graph actions=" &
+        $lowered.actions.len)
       buildResult = runBuild(graph(lowered.actions, lowered.pools), engineConfig)
-    finally:
+    except CatchableError:
       progressRenderer.finishProgress()
+      raise
     finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
     buildStats.mergeStats(buildResult.stats)
     warnRunQuotaBypassIfUsed(buildResult)
@@ -2765,6 +2839,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   var cmakeRegenerated = false
   if cmakeMeta.enabled and not skipCmakeRegeneration:
     logSummary("cmakeRegeneration: started")
+    progressRenderer.renderPhase("cmake regeneration")
     let cmakeRegenerationStart = statStart(statsEnabled)
     let cmakeRegenerationAction =
       cmakeRegenerationBuildAction(cmakeMeta, publicCliPath)
@@ -2865,6 +2940,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       mode == tpmPathOnly and reportMode == brmNone and
       cacheSelectedActionId != "\0":
     let loweredCacheStart = statStart(statsEnabled)
+    progressRenderer.renderPhase("reading lowered graph cache")
     let loweredCache = readFreshLoweredGraphCache(
       loweredGraphCachePath(outDir, cacheSelectedActionId), modulePath,
       result.projectRoot, cacheSelectedActionId, pathEnv)
@@ -2904,6 +2980,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       interfaceFingerprint: blake3DomainDigest(
         toBytes(TryCompileProviderArtifactId), hdActionFingerprint))
     let providerGraphStart = statStart(statsEnabled)
+    progressRenderer.renderPhase("refreshing trycompile provider graph")
     let refresh = refreshProviderGraph(RefreshConfig(
       storeRoot: outDir / "provider-graph",
       providerBinaryPath: tryCompileProviderBinary,
@@ -2924,6 +3001,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if selectedActionId.len > 0:
         logSummary("defaultTarget: " & selectedActionId)
     let graphLowerStart = statStart(statsEnabled)
+    progressRenderer.renderPhase("lowering trycompile graph")
     let lowered = lowerProviderSnapshot(refresh.snapshot, synthIdentity,
       result.projectRoot, selectedActionId)
     finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
@@ -2952,6 +3030,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let compileWorkDir = reprobuildLibraryWorkDir()
   let compileScratchDir = outDir / "provider-work"
   let interfaceStart = statStart(statsEnabled)
+  progressRenderer.renderPhase("extracting project interface")
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
     compileWorkDir, compileScratchDir)
   finishStat(buildStats, statsEnabled, "repro interface extract",
@@ -2996,6 +3075,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         projectName: artifact.projectInterface.projectName,
         interfaceFingerprint: artifact.interfaceFingerprint)
       let providerGraphStart = statStart(statsEnabled)
+      progressRenderer.renderPhase("refreshing standard provider graph")
       let refresh = refreshProviderGraph(RefreshConfig(
         storeRoot: outDir / "provider-graph",
         providerBinaryPath: standardProviderBinary,
@@ -3016,6 +3096,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         if selectedActionId.len > 0:
           logSummary("defaultTarget: " & selectedActionId)
       let graphLowerStart = statStart(statsEnabled)
+      progressRenderer.renderPhase("lowering standard provider graph")
       let lowered = lowerProviderSnapshot(refresh.snapshot, synthIdentity,
         result.projectRoot, selectedActionId)
       finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
@@ -3027,6 +3108,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
   if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     let identityStart = statStart(statsEnabled)
+    progressRenderer.renderPhase("resolving tool identities")
     let resolved = resolveAndWriteIdentity(artifact, outDir, effectiveMode)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
@@ -3071,6 +3153,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let providerBinaryPath = outDir / "provider" / "project-provider"
     let providerArtifactPath = outDir / "provider-compile.rbsz"
     logSummary("providerCompile: started")
+    progressRenderer.renderPhase("checking provider compile")
     let providerCompileStart = statStart(statsEnabled)
     var providerCompileResult: BuildRunResult
     var provider: ProviderCompileArtifact
@@ -3136,6 +3219,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
     let projectRoot = result.projectRoot
     let providerGraphStart = statStart(statsEnabled)
+    progressRenderer.renderPhase("refreshing project provider graph")
     let refresh = refreshProviderGraph(RefreshConfig(
       storeRoot: outDir / "provider-graph",
       providerBinaryPath: provider.outputBinaryPath,
@@ -3158,6 +3242,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         logSummary("defaultTarget: " & selectedActionId)
 
     let graphLowerStart = statStart(statsEnabled)
+    progressRenderer.renderPhase("lowering project graph")
     let lowered = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
       selectedActionId)
     finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
@@ -3196,7 +3281,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if lowered.actions.len == 0:
       result.exitCode = 0
       return
-    var progressRenderer = newBuildProgressRenderer(progressMode)
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
@@ -3221,9 +3305,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var buildResult: BuildRunResult
     let engineStart = statStart(statsEnabled)
     try:
+      progressRenderer.renderPhase("checking graph actions=" &
+        $lowered.actions.len)
       buildResult = runBuild(graph(lowered.actions, lowered.pools), engineConfig)
-    finally:
+    except CatchableError:
       progressRenderer.finishProgress()
+      raise
     finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
     buildStats.mergeStats(buildResult.stats)
     warnRunQuotaBypassIfUsed(buildResult)
@@ -5537,6 +5624,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var mode = tpmUnspecified
   var workRoot = ""
   var progressMode = configuredBuildProgressMode()
+  var progressBarStyle = configuredBuildProgressBarStyle()
   var statsMode = configuredBuildStatsMode()
   var reportMode = configuredBuildReportMode()
   var logMode = configuredBuildLogMode()
@@ -5577,6 +5665,13 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     elif arg == "--progress":
       raise newException(ValueError,
         "--progress requires an inline value, for example --progress=bar-line")
+    elif arg.startsWith("--progress-bars="):
+      progressBarStyle = parseBuildProgressBarStyle(
+        arg.split("=", maxsplit = 1)[1])
+    elif arg == "--progress-bars":
+      raise newException(ValueError,
+        "--progress-bars requires an inline value, for example " &
+          "--progress-bars=split")
     elif arg.startsWith("--diagnostics="):
       diagnosticsPath = arg.split("=", maxsplit = 1)[1]
     elif arg == "--diagnostics":
@@ -5641,6 +5736,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       selectDefaultAction = targetWasOmitted,
       workRoot = workRoot,
       progressMode = progressMode,
+      progressBarStyle = progressBarStyle,
       statsMode = statsMode,
       reportMode = reportMode,
       logMode = logMode,
