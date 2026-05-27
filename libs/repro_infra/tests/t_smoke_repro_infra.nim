@@ -1063,6 +1063,44 @@ suite "repro_infra: loadRecordedDigests reads the prev-gen audit log " &
     # The later record wins.
     check recorded["systemFile:/etc/x"] == "22"
 
+  test "a corrupt audit log degrades silently to no recorded state":
+    # The silent-degrade `except EAuditLogCorrupt` path in
+    # `loadRecordedDigests` is reachable when an apply.log exists but
+    # one of its records fails strict decode (bad magic / version /
+    # body length / checksum). Drift detection is advisory; the
+    # planner MUST NOT crash plan emission on an audit-log
+    # corruption issue orthogonal to its purpose. This test seeds a
+    # valid record, flips the trailing-checksum byte to invalidate
+    # it, and asserts (a) the corruption actually triggers
+    # `EAuditLogCorrupt` when the log is read raw, and (b) the
+    # planner-facing helper returns an empty table without raising.
+    let dir = createTempDir("repro-infra-drift-corrupt-", "")
+    defer: removeDir(dir)
+    ensureSystemStateDir(dir)
+    let genId = "4444444444444444dddddddddddddddd"
+    createDir(generationDir(dir, genId))
+    let logPath = applyLogPath(dir, genId)
+    appendAuditRecord(logPath, AuditRecord(
+      timestamp: 400, operationKind: "fs.systemFile",
+      resourceAddress: "systemFile:/etc/corrupt", outcome: "applied",
+      preDigestHex: "00", postDigestHex: "ff"))
+    writeCurrentGenerationId(dir, genId)
+    # Flip the last byte of the trailing BLAKE3-256 checksum so the
+    # strict decode raises `EAuditLogCorrupt("trailingChecksum")`.
+    var raw = readFile(logPath)
+    let lastIx = raw.high
+    raw[lastIx] = chr(ord(raw[lastIx]) xor 0xFF)
+    writeFile(logPath, raw)
+    # Sanity: the corruption MUST actually trigger the exception
+    # path, otherwise the silent-degrade branch never runs and the
+    # test is vacuous.
+    expect EAuditLogCorrupt:
+      discard readAuditLog(logPath)
+    # The planner-facing helper degrades silently — empty table,
+    # no raise.
+    let recorded = loadRecordedDigests(dir)
+    check recorded.len == 0
+
 suite "repro_infra: producePlan surfaces plan-time drift (M82 Phase C)":
 
   test "no recorded state => no drift findings (first apply ever)":
