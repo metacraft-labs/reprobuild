@@ -666,21 +666,43 @@ proc toolInputRoots(action: BuildAction): seq[string] =
   for value in action.envValue("NODE_PATH").split(PathSep):
     result.addNixStoreRoot(value)
 
-proc cargoHome(action: BuildAction): string =
-  result = action.envValue("CARGO_HOME")
-  if result.len > 0:
-    return
-  let home = block:
-    let envHome = action.envValue("HOME")
-    if envHome.len > 0: envHome else: getEnv("HOME")
-  if home.len > 0:
-    result = home / ".cargo"
+proc expandPolicyPath(action: BuildAction; path: string): string =
+  result = path
+  var start = result.find('$')
+  while start >= 0:
+    var stop = start + 1
+    if stop < result.len and result[stop] == '{':
+      inc stop
+      let nameStart = stop
+      while stop < result.len and result[stop] != '}':
+        inc stop
+      if stop >= result.len:
+        break
+      let name = result[nameStart ..< stop]
+      let value = block:
+        let local = action.envValue(name)
+        if local.len > 0: local else: getEnv(name)
+      result = result[0 ..< start] & value & result.substr(stop + 1)
+    else:
+      let nameStart = stop
+      while stop < result.len and
+          (result[stop].isAlphaNumeric or result[stop] == '_'):
+        inc stop
+      if stop == nameStart:
+        start = result.find('$', start + 1)
+        continue
+      let name = result[nameStart ..< stop]
+      let value = block:
+        let local = action.envValue(name)
+        if local.len > 0: local else: getEnv(name)
+      result = result[0 ..< start] & value & result.substr(stop)
+    start = result.find('$', start)
 
-proc volatileToolCacheRoots(action: BuildAction): seq[string] =
-  let cargo = action.cargoHome()
-  if cargo.len > 0:
-    result.add(cargo / ".global-cache")
-    result.add(cargo / ".package-cache")
+proc ignoredInputRoots(action: BuildAction): seq[string] =
+  for prefix in action.dependencyPolicy.ignoredInputPrefixes:
+    let expanded = action.expandPolicyPath(prefix)
+    if expanded.len > 0:
+      result.add(expanded)
 
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
@@ -691,7 +713,7 @@ proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
 
 proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string] =
   let toolRoots = action.toolInputRoots()
-  let volatileRoots = action.volatileToolCacheRoots()
+  let ignoredRoots = action.ignoredInputRoots()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
     let path = materialPath(action.cwd, input)
@@ -700,19 +722,19 @@ proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string
   for input in evidence.depfileInputs:
     let path = materialPath(action.cwd, input)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(volatileRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(path)
   for input in evidence.monitorReads:
     let path = materialPath(action.cwd, input)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(volatileRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(path)
   for probe in evidence.monitorProbes:
     let path = materialPath(action.cwd, probe)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(volatileRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(path)
 

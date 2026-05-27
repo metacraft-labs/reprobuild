@@ -147,6 +147,7 @@ type
   BuildActionDependencyPolicy* = object
     kind*: BuildActionDependencyPolicyKind
     depfile*: string
+    ignoredInputPrefixes*: seq[string]
 
   ActionCacheFingerprintPolicy* = enum
     acfpTimestamp

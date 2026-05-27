@@ -23,6 +23,7 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
             after: openArray[BuildActionDef] = [];
             extraInputs: openArray[string] = [];
             extraOutputs: openArray[string] = [];
+            ignoredInputPrefixes: openArray[string] = [];
             depfile = ""; cacheable = true;
             actionCachePolicy = defaultActionCachePolicy();
             commandStatsId = ""): BuildActionDef {.discardable.} =
@@ -39,5 +40,6 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
     depfile = depfile,
     cacheable = cacheable,
     commandStatsId = commandStatsId,
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(
+      ignoredInputPrefixes = ignoredInputPrefixes),
     actionCachePolicy = actionCachePolicy)

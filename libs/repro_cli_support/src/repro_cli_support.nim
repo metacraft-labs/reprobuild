@@ -811,16 +811,16 @@ proc lowerDependencyPolicy(actionId, depfile: string;
     DependencyGatheringPolicy =
   case policy.kind
   of bdpDefault:
-    depfilePolicy(depfile)
+    result = depfilePolicy(depfile)
   of bdpDeclaredOnly:
-    repro_core.declaredOnlyPolicy()
+    result = repro_core.declaredOnlyPolicy()
   of bdpAutomaticMonitor:
     if depfile.len > 0:
       raise newException(ValueError,
         "action " & actionId & " supplies legacy depfile and " &
           "automatic monitor dependencyPolicy; remove depfile or use " &
           "makeDepfilePolicy")
-    DependencyGatheringPolicy(kind: dgAutomaticMonitor,
+    result = DependencyGatheringPolicy(kind: dgAutomaticMonitor,
         completeness: decComplete)
   of bdpMakeDepfile:
     let selectedDepfile =
@@ -835,7 +835,8 @@ proc lowerDependencyPolicy(actionId, depfile: string;
       raise newException(ValueError,
         "action " & actionId & " supplies conflicting depfile paths: " &
           depfile & " and " & policy.depfile)
-    depfilePolicy(selectedDepfile)
+    result = depfilePolicy(selectedDepfile)
+  result.ignoredInputPrefixes = policy.ignoredInputPrefixes
 
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string; actionPathPrefix = ""): BuildAction =
@@ -1183,7 +1184,7 @@ proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
 
 const
   LoweredGraphCacheMagic = "RBLG"
-  LoweredGraphCacheVersion = 1'u16
+  LoweredGraphCacheVersion = 2'u16
 
 type
   LoweredGraphCacheRecord = object
@@ -1302,6 +1303,7 @@ proc writeDependencyPolicy(outp: var seq[byte];
     outp.add(byte(ord(converterSpec.outputKind)))
     outp.writeString($converterSpec.outputFormatName)
     outp.add(byte(ord(converterSpec.completeness)))
+  outp.writeStringSeq(policy.ignoredInputPrefixes)
 
 proc readCompleteness(bytes: openArray[byte]; pos: var int):
     DependencyEvidenceCompleteness =
@@ -1353,6 +1355,7 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
     result.postBuildConverters[i].outputFormatName =
       DependencyFormatName(readString(bytes, pos))
     result.postBuildConverters[i].completeness = readCompleteness(bytes, pos)
+  result.ignoredInputPrefixes = readStringSeq(bytes, pos)
 
 proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.add(byte(ord(action.kind)))

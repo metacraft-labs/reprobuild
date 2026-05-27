@@ -44,6 +44,7 @@ type
     completeness*: DependencyEvidenceCompleteness
     recognizedReports*: seq[RecognizedDependencyReportSpec]
     postBuildConverters*: seq[PostBuildDependencyConverterSpec]
+    ignoredInputPrefixes*: seq[string]
 
 proc `$`*(name: DependencyFormatName): string =
   string(name)
@@ -51,12 +52,18 @@ proc `$`*(name: DependencyFormatName): string =
 proc `==`*(a, b: DependencyFormatName): bool =
   string(a) == string(b)
 
-proc declaredOnlyPolicy*(): DependencyGatheringPolicy =
-  DependencyGatheringPolicy(kind: dgDeclaredOnly, completeness: decComplete)
+proc declaredOnlyPolicy*(
+    ignoredInputPrefixes: openArray[string] = []): DependencyGatheringPolicy =
+  DependencyGatheringPolicy(
+    kind: dgDeclaredOnly,
+    completeness: decComplete,
+    ignoredInputPrefixes: @ignoredInputPrefixes)
 
 proc monitorValidatedPolicy*(
-    reports: openArray[RecognizedDependencyReportSpec]): DependencyGatheringPolicy =
+    reports: openArray[RecognizedDependencyReportSpec];
+    ignoredInputPrefixes: openArray[string] = []): DependencyGatheringPolicy =
   DependencyGatheringPolicy(
     kind: dgRecognizedFormatValidatedByMonitor,
     completeness: decComplete,
-    recognizedReports: @reports)
+    recognizedReports: @reports,
+    ignoredInputPrefixes: @ignoredInputPrefixes)

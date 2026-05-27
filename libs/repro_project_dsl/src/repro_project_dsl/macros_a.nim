@@ -619,15 +619,27 @@ proc escForCode(text: string): string =
   text.escape()
 
 proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
+  proc ignoredCode(): string =
+    if policy.ignoredInputPrefixes.len == 0:
+      return ""
+    result = "ignoredInputPrefixes: @["
+    for i, prefix in policy.ignoredInputPrefixes:
+      if i > 0:
+        result.add(", ")
+      result.add(escForCode(prefix))
+    result.add("]")
+
   case policy.kind
   of bdpDefault:
-    "defaultDependencyPolicy()"
+    "defaultDependencyPolicy(" & ignoredCode() & ")"
   of bdpDeclaredOnly:
-    "declaredOnlyDependencyPolicy()"
+    "declaredOnlyDependencyPolicy(" & ignoredCode() & ")"
   of bdpAutomaticMonitor:
-    "automaticMonitorPolicy()"
+    "automaticMonitorPolicy(" & ignoredCode() & ")"
   of bdpMakeDepfile:
-    "makeDepfilePolicy(" & escForCode(policy.depfile) & ")"
+    "makeDepfilePolicy(" & escForCode(policy.depfile) &
+      (if policy.ignoredInputPrefixes.len > 0: ", " & ignoredCode() else: "") &
+      ")"
 
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &

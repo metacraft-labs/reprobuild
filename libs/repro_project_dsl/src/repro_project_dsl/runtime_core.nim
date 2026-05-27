@@ -20,7 +20,7 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 9'u16
+  BuildActionPayloadVersion = 10'u16
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
   BuildTargetPayloadVersion = 1'u16
@@ -351,17 +351,34 @@ proc publicCliCall*(packageName, executableName, subcommand,
 proc selectedExecutable*(packageName, executableName: string): SelectedExecutable {.dynOrStatic.} =
   SelectedExecutable(packageName: packageName, executableName: executableName)
 
-proc defaultDependencyPolicy*(): BuildActionDependencyPolicy {.dynOrStatic.} =
-  BuildActionDependencyPolicy(kind: bdpDefault)
+proc defaultDependencyPolicy*(
+    ignoredInputPrefixes: openArray[string] = []):
+    BuildActionDependencyPolicy {.dynOrStatic.} =
+  BuildActionDependencyPolicy(
+    kind: bdpDefault,
+    ignoredInputPrefixes: @ignoredInputPrefixes)
 
-proc declaredOnlyDependencyPolicy*(): BuildActionDependencyPolicy {.dynOrStatic.} =
-  BuildActionDependencyPolicy(kind: bdpDeclaredOnly)
+proc declaredOnlyDependencyPolicy*(
+    ignoredInputPrefixes: openArray[string] = []):
+    BuildActionDependencyPolicy {.dynOrStatic.} =
+  BuildActionDependencyPolicy(
+    kind: bdpDeclaredOnly,
+    ignoredInputPrefixes: @ignoredInputPrefixes)
 
-proc automaticMonitorPolicy*(): BuildActionDependencyPolicy {.dynOrStatic.} =
-  BuildActionDependencyPolicy(kind: bdpAutomaticMonitor)
+proc automaticMonitorPolicy*(
+    ignoredInputPrefixes: openArray[string] = []):
+    BuildActionDependencyPolicy {.dynOrStatic.} =
+  BuildActionDependencyPolicy(
+    kind: bdpAutomaticMonitor,
+    ignoredInputPrefixes: @ignoredInputPrefixes)
 
-proc makeDepfilePolicy*(depfile = ""): BuildActionDependencyPolicy {.dynOrStatic.} =
-  BuildActionDependencyPolicy(kind: bdpMakeDepfile, depfile: depfile)
+proc makeDepfilePolicy*(depfile = "";
+                        ignoredInputPrefixes: openArray[string] = []):
+    BuildActionDependencyPolicy {.dynOrStatic.} =
+  BuildActionDependencyPolicy(
+    kind: bdpMakeDepfile,
+    depfile: depfile,
+    ignoredInputPrefixes: @ignoredInputPrefixes)
 
 proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy {.dynOrStatic.} =
   acfpTimestamp
@@ -980,14 +997,17 @@ proc writeDependencyPolicy(outp: var seq[byte];
                            policy: BuildActionDependencyPolicy) =
   outp.writeByte(byte(ord(policy.kind)))
   outp.writeString(policy.depfile)
+  outp.writeStringSeq(policy.ignoredInputPrefixes)
 
-proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
+proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16):
     BuildActionDependencyPolicy =
   let kind = readByte(bytes, pos)
   if kind > byte(ord(bdpMakeDepfile)):
     raisePayload("invalid dependency policy kind in build action payload")
   result.kind = BuildActionDependencyPolicyKind(kind)
   result.depfile = readString(bytes, pos)
+  if version >= 10'u16:
+    result.ignoredInputPrefixes = readStringSeq(bytes, pos)
 
 proc writeActionCachePolicy(outp: var seq[byte];
                             policy: ActionCacheFingerprintPolicy) =
@@ -1052,7 +1072,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   result.cacheable = readByte(bytes, pos) == 1'u8
   result.commandStatsId = readString(bytes, pos)
   if version >= 3'u16:
-    result.dependencyPolicy = readDependencyPolicy(bytes, pos)
+    result.dependencyPolicy = readDependencyPolicy(bytes, pos, version)
   else:
     result.dependencyPolicy = defaultDependencyPolicy()
   if version >= 9'u16:
