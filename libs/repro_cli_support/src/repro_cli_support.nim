@@ -70,7 +70,13 @@ proc renderUsage*(programName: string): string =
           programName &
       " develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n       " &
           programName &
-      " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]\n\n" &
+      " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]\n       " &
+          programName &
+      " home {add | remove | enable | disable | list | why | history | apply | plan | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n       " &
+          programName &
+      " infra {plan | apply} ...\n       " &
+          programName &
+      " system {add | remove | list | why | sync | history | rollback | audit} ...\n\n" &
       "build progress: default=bar-line; aliases: " &
       "quiet=silent|none|off, line=ninja|single-line, " &
       "bar-line=bar|ninja-bar|auto|plain, lines=tup|per-line, " &
