@@ -2372,10 +2372,8 @@ proc buildProgressCounters(event: BuildProgressEvent): string =
     result.add(" exec=" & $event.completedExecutions & "/" &
       $event.plannedExecutions)
   elif event.plannedExecutions > 0 or event.running > 0:
-    result.add(" built=" & $settled & "/" & $event.total &
+    result.add(" settled=" & $settled & "/" & $event.total &
       " exec=" & $event.plannedExecutions)
-  else:
-    result.add(" built=" & $settled & "/" & $event.total)
 
 proc buildProgressOverlayBar(event: BuildProgressEvent; width: int;
                              color = false): string =
