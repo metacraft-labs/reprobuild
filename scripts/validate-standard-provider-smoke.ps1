@@ -118,13 +118,14 @@ if response.manifest.protocolVersion != ProviderProtocolVersion:
 if response.manifest.entryPoints.len == 0:
   echo "VERIFY-FAIL: manifest exposes no entry points"
   quit 5
-var placeholderFound = false
+var rootFound = false
 for descriptor in response.manifest.entryPoints:
-  if descriptor.id == "standardProvider.placeholder":
-    placeholderFound = true
+  if descriptor.id == StandardProviderRootEntryPointId:
+    rootFound = true
     break
-if not placeholderFound:
-  echo "VERIFY-FAIL: manifest is missing the M0 placeholder entry point"
+if not rootFound:
+  echo "VERIFY-FAIL: manifest is missing entry point ",
+    StandardProviderRootEntryPointId
   quit 6
 echo "VERIFY-OK: providerArtifactId=", response.manifest.providerArtifactId,
   " entryPoints=", response.manifest.entryPoints.len

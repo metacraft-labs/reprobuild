@@ -73,7 +73,7 @@ let projectRoot = paramStr(2)
 let request = ProviderGraphRequest(
   kind: prkGraphInvocation,
   providerArtifactId: StandardProviderArtifactId,
-  entryPointId: "standardProvider.placeholder",
+  entryPointId: StandardProviderRootEntryPointId,
   entryPointBodyHash: StandardProviderRootBodyHash,
   reason: girExplicitUserRequest,
   arguments: projectRoot,

@@ -9,8 +9,10 @@
 ## Per Provider-Compile-Tiering.md §"2b — repro-standard-provider" and
 ## Language-Conventions/README.md.
 ##
-## **M1 framework.** Manifest requests still return the M0 placeholder
-## entry point (the manifest's shape doesn't depend on conventions — see
+## **M1 framework.** Manifest requests advertise a single canonical
+## entry point — ``StandardProviderRootEntryPointId`` — from the shared
+## ``repro_standard_provider_protocol`` library (the manifest's shape
+## doesn't depend on conventions — see
 ## Standard-Provider-Implementation.milestones.org §M1). Graph requests
 ## dispatch through ``defaultConventionRegistry``; on the first
 ## ``recognize`` hit the convention's ``emitFragment`` produces the
@@ -42,14 +44,15 @@ proc parseEarlyFlags(args: openArray[string]): tuple[wantVersion: bool] =
       return
 
 proc placeholderManifest(providerArtifactId: string): ProviderManifest =
-  ## Manifest the standard provider advertises. M2 wires the engine
-  ## routing to dispatch on ``StandardProviderRootEntryPointId``, so we
-  ## advertise both that canonical id (root) and the legacy
-  ## ``standardProvider.placeholder`` alias the M0 smoke / M1 no-match
-  ## scripts still send. Engine validation requires the returned
-  ## ``providerArtifactId`` to match the request when the request
-  ## supplied one; falling back to ``StandardProviderArtifactId`` keeps
-  ## stand-alone smoke runs working when the caller leaves it empty.
+  ## Manifest the standard provider advertises. The single canonical
+  ## entry point uses ``StandardProviderRootEntryPointId`` — the engine
+  ## (M2) dispatches on that id, and the M0/M1 smoke + no-match scripts
+  ## now use it too (the legacy ``standardProvider.placeholder`` alias
+  ## was dropped after M3 once real conventions are registered). Engine
+  ## validation requires the returned ``providerArtifactId`` to match
+  ## the request when the request supplied one; falling back to
+  ## ``StandardProviderArtifactId`` keeps stand-alone smoke runs working
+  ## when the caller leaves it empty.
   ProviderManifest(
     providerArtifactId:
       if providerArtifactId.len > 0: providerArtifactId
@@ -58,13 +61,6 @@ proc placeholderManifest(providerArtifactId: string): ProviderManifest =
     entryPoints: @[
       GraphEntryPointDescriptor(
         id: StandardProviderRootEntryPointId,
-        kind: gpkProjectRoot,
-        stableName: StandardProviderPackageName,
-        bodyHash: StandardProviderRootBodyHash,
-        argumentSchemaId: "reprobuild.project-root.v1",
-        outputSchemaId: "reprobuild.graph-fragment.v1"),
-      GraphEntryPointDescriptor(
-        id: "standardProvider.placeholder",
         kind: gpkProjectRoot,
         stableName: StandardProviderPackageName,
         bodyHash: StandardProviderRootBodyHash,

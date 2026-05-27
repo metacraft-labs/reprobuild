@@ -7,6 +7,12 @@ nimcache/
 htmldocs/
 *.nimble-link
 
+# Standard-provider scratch path. ``ScratchDirName = ".repro/build"`` in
+# libs/repro_standard_provider; if anyone runs the Nim convention against
+# an in-tree fixture under this repo, the resulting ``.repro/`` tree
+# would otherwise show up as untracked noise.
+.repro/
+
 # Stray in-place `nim c` build artifacts (smoke tests / apps compiled
 # outside build/ during local iteration).
 *.exe
