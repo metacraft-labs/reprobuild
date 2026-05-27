@@ -705,6 +705,58 @@ windows.service {
             "sshd service did not appear within " &
             $SvcPollTimeoutSec & "s after capability was Installed")
         check svcFound
+        # POLL FOR DESIRED STATE: defence-in-depth alongside the
+        # driver-side post-apply re-probe added to `applyWindowsService`.
+        # The driver now fails closed when its own re-probe shows the
+        # SCM database disagreeing with the requested state. Even so,
+        # the gate keeps polling here on the off chance that the
+        # apply's re-probe caught the SCM mid-commit but the next
+        # observation has converged — and to give better diagnostic
+        # output when it does NOT converge. Each iteration captures the
+        # full `Get-Service` line with a timestamp; on timeout we dump
+        # the last few captured lines so the failure has actionable
+        # context (the prior version asserted on a single snapshot and
+        # gave the operator zero history).
+        const SvcStatePollTimeoutSec = 30
+        const SvcStatePollIntervalMs = 2_000
+        const SvcStateHistoryKeep = 8
+        var svcStateConverged = false
+        var svcStateHistory: seq[string] = @[]
+        let svcStateDeadline = epochTime() + SvcStatePollTimeoutSec.float
+        var svcStatePollIterations = 0
+        while epochTime() < svcStateDeadline:
+          let svcCheck = execCmdEx(
+            "powershell.exe -NoProfile -Command \"" &
+            "$s = Get-Service -Name sshd -ErrorAction SilentlyContinue; " &
+            "if ($s) { Write-Output ('StartType=' + $s.StartType + " &
+            "' Status=' + $s.Status) } else { Write-Output 'ABSENT' }\"")
+          svcLine = svcCheck.output.strip()
+          svcStatePollIterations.inc
+          let nowStr = $now()
+          let entry = "[" & nowStr & "] iter=" &
+            $svcStatePollIterations & " " & svcLine
+          svcStateHistory.add(entry)
+          # Keep the history bounded so a long poll doesn't flood the
+          # final dump.
+          if svcStateHistory.len > SvcStateHistoryKeep:
+            svcStateHistory.delete(0)
+          echo "  [state-poll " & $svcStatePollIterations &
+            "] service sshd: " & svcLine
+          if "StartType=Automatic" in svcLine and
+              "Status=Running" in svcLine:
+            svcStateConverged = true
+            break
+          sleep(SvcStatePollIntervalMs)
+        if not svcStateConverged:
+          echo "  sshd never reached StartType=Automatic Status=Running " &
+            "within " & $SvcStatePollTimeoutSec & "s (iter=" &
+            $svcStatePollIterations & "). Last captured probes:"
+          for h in svcStateHistory:
+            echo "    " & h
+          reportScenario("openssh-capability-and-sshd-service", false,
+            "sshd state did not converge to Automatic/Running within " &
+            $SvcStatePollTimeoutSec & "s; last observed: " & svcLine)
+        check svcStateConverged
         check "StartType=Automatic" in svcLine
         check "Status=Running" in svcLine
         # Idempotent re-apply.

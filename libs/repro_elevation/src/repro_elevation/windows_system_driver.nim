@@ -413,6 +413,23 @@ proc applyWindowsService*(op: PrivilegedOperation): ObservedOperationState =
   ## Configure the service's start-type, then converge its runtime
   ## state. Does NOT install or remove the service — a missing
   ## service is a hard error (the capability/package owns install).
+  ##
+  ## CONTRACT (tightened after the M69 sshd gate failure): when this
+  ## proc returns without raising, the post-apply `Get-Service` probe
+  ## has been re-read and its `StartType` + `Status` match what the
+  ## operation asked for. Set-Service / Start-Service / Stop-Service
+  ## each shell out to PowerShell, and each returns exit-0 even when
+  ## the SCM-visible state has not yet caught up to the cmdlet (the
+  ## sshd scenario observed exactly this: `Set-Service -StartupType
+  ## Automatic` returned 0, the SCM event log recorded the start-type
+  ## change, but the immediate next `Get-Service` read `StartType=
+  ## Manual Status=Stopped`). Rather than paper over the transient
+  ## with a sleep-and-retry, the driver now re-probes after the
+  ## cmdlets and raises `EProtocol` if the observed state disagrees
+  ## with the desired state. Downstream consumers therefore see
+  ## either `errorCount > 0` with an actionable diagnostic OR a fully
+  ## converged service — never a silent disagreement between exit-0
+  ## and the SCM database.
   when defined(windows):
     let probe = runPowerShell(serviceProbeScript(op.serviceName))
     let before = parseServiceQuery(probe.output)
@@ -440,6 +457,26 @@ proc applyWindowsService*(op: PrivilegedOperation): ObservedOperationState =
       if rsCode != 0:
         raiseProtocol("windows.service Stop-Service of '" &
           op.serviceName & "' failed: " & rsOut.strip())
-    result = observeWindowsService(op)
+    # Post-apply re-probe — see the contract comment above. Uses the
+    # same deterministic `key=value` shape `observeWindowsService`
+    # parses, so a parser regression flags both paths.
+    let (postOutput, _) = runPowerShell(serviceProbeScript(op.serviceName))
+    let after = parseServiceQuery(postOutput)
+    if not serviceMatchesDesired(after, op.serviceStartType, op.serviceRunning):
+      raiseProtocol("windows.service '" & op.serviceName &
+        "' post-apply observation disagrees with desired state: " &
+        "observed StartType=" & after.startType &
+        " Status=" & (if after.running: "Running" else: "Stopped") &
+        " present=" & $after.present &
+        "; desired StartType=" & op.serviceStartType &
+        " Status=" & (if op.serviceRunning: "Running" else: "Stopped") &
+        ". The Set-Service / Start-Service / Stop-Service cmdlets all " &
+        "returned exit 0 but the SCM database does not reflect the " &
+        "change — the driver fails closed rather than reporting a " &
+        "spurious success.")
+    result.present = after.present
+    result.digestHex =
+      if not after.present: ZeroDigestHex
+      else: digestHexOfText(canonicalServiceState(after))
   else:
     raiseNotImplementedPlatform("windows.service apply")
