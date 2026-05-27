@@ -16,6 +16,17 @@ proc stringLiteral(node: NimNode): string =
   else:
     result = node.repr
 
+proc stringSeqLiteral(node: NimNode): seq[string] =
+  let values =
+    if node.kind == nnkPrefix and node.len == 2 and node[0].eqIdent("@"):
+      node[1]
+    else:
+      node
+  if values.kind notin {nnkBracket, nnkPar}:
+    error("expected a string sequence literal", node)
+  for item in values:
+    result.add(stringLiteral(item))
+
 proc intLiteral(node: NimNode; fallback: int): int =
   case node.kind
   of nnkIntLit..nnkUInt64Lit:
@@ -190,6 +201,9 @@ proc parseCommandDependencyPolicy(node: NimNode;
     let depfileValue = namedValue(node[i], "depfile")
     if not depfileValue.isNil:
       result.depfile = stringLiteral(depfileValue)
+    let ignoredValue = namedValue(node[i], "ignoredInputPrefixes")
+    if not ignoredValue.isNil:
+      result.ignoredInputPrefixes = stringSeqLiteral(ignoredValue)
 
 proc parseCommand(packageName, executableName: string; node: NimNode;
                   defaultPolicy: BuildActionDependencyPolicy;
@@ -622,7 +636,7 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
   proc ignoredCode(): string =
     if policy.ignoredInputPrefixes.len == 0:
       return ""
-    result = "ignoredInputPrefixes: @["
+    result = "ignoredInputPrefixes = @["
     for i, prefix in policy.ignoredInputPrefixes:
       if i > 0:
         result.add(", ")
