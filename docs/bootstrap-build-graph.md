@@ -56,14 +56,22 @@ pre-scheduler work visible and cacheable.
 
 The codebase already has pieces of this model:
 
-- Interface extraction has metadata and fingerprint caches, but it is not yet a
-  normal monitored action.
+- Interface extraction has a binary metadata cache beside
+  `project-interface.rbsz`. On a cache hit, the CLI loads the previously
+  recorded project/Reprobuild input file lists from that artifact and restats
+  those paths before reusing the interface, avoiding runner compilation and
+  content hashing. It is not yet a normal monitored action.
 - Tool identity resolution has a cache keyed by interface/tool metadata, but it
   is not yet recorded as an action-cache entry with dependency evidence.
 - Provider compilation is already represented as a build action.
-- Provider graph refresh stores a binary snapshot and tracks provider evaluation
-  inputs, but the refresh itself is not yet an action-cache entry.
-- Lowered graph caching currently exists only for a narrow CMake/path fast path.
+- Provider graph refresh stores a binary snapshot and tracks provider
+  evaluation file reads and directory enumerations. The CLI can reuse this
+  snapshot after validating those recorded inputs instead of invoking the
+  provider again, but the refresh itself is not yet an action-cache entry.
+- Lowered graph caching stores the lowered action graph as a binary artifact
+  keyed by the interface fingerprint, tool identity, provider artifact,
+  provider snapshot digest, lowering algorithm version, and PATH profile when
+  relevant.
 
 Future optimization work should converge these partial caches into the bootstrap
 graph rather than adding more ad hoc fast paths.

@@ -167,6 +167,7 @@ type
   InterfaceExtractionCacheRecord = object
     context: InterfaceExtractionContext
     sourceStamps: seq[FileStamp]
+    reproLibStamps: seq[FileStamp]
     inputFingerprint: ContentDigest
 
   ProviderFreshnessCacheRecord = object
@@ -737,6 +738,7 @@ proc writeInterfaceContext(outp: var seq[byte];
   outp.writeString(context.workDir)
   outp.writeString(context.nimCompiler)
   outp.writeStringSeq(context.libPathFlags)
+  outp.writeString(context.reproLibFingerprint)
   outp.writeStringSeq(context.sources)
 
 proc readInterfaceContext(bytes: openArray[byte]; pos: var int):
@@ -745,6 +747,7 @@ proc readInterfaceContext(bytes: openArray[byte]; pos: var int):
   result.workDir = readString(bytes, pos)
   result.nimCompiler = readString(bytes, pos)
   result.libPathFlags = readStringSeq(bytes, pos)
+  result.reproLibFingerprint = readString(bytes, pos)
   result.sources = readStringSeq(bytes, pos)
 
 proc encodeInterfaceExtractionCacheRecord(
@@ -752,6 +755,7 @@ proc encodeInterfaceExtractionCacheRecord(
   result.writeString(InterfaceExtractionCacheRecordMagic)
   result.writeInterfaceContext(record.context)
   result.writeFileStamps(record.sourceStamps)
+  result.writeFileStamps(record.reproLibStamps)
   result.writeDigest(record.inputFingerprint)
 
 proc decodeInterfaceExtractionCacheRecord(bytes: openArray[byte]):
@@ -762,6 +766,7 @@ proc decodeInterfaceExtractionCacheRecord(bytes: openArray[byte]):
     raiseEnvelopeError(eeUnknownType, "not an interface extraction cache record")
   result.context = readInterfaceContext(bytes, pos)
   result.sourceStamps = readFileStamps(bytes, pos)
+  result.reproLibStamps = readFileStamps(bytes, pos)
   result.inputFingerprint = readDigest(bytes, pos)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed,
@@ -1357,11 +1362,10 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
 proc normalizedStampPath(path: string): string =
   os.normalizedPath(path).replace('\\', '/')
 
-proc reproLibSourceFingerprint(workDir: string): string =
+proc reproLibSources(workDir: string): seq[string] =
   let libsRoot = workDir / "libs"
   if not dirExists(extendedPath(libsRoot)):
-    return ""
-  var paths: seq[string] = @[]
+    return
   # NOTE: pass the *non*-extended ``libsRoot`` to ``walkDirRec`` here.
   # On Windows ``walkDirRec`` propagates whatever path it was handed,
   # so feeding it ``\\?\D:\...`` produces ``\\?\D:\...`` children. Those
@@ -1371,8 +1375,11 @@ proc reproLibSourceFingerprint(workDir: string): string =
   # well under MAX_PATH so the raw form is safe.
   for path in walkDirRec(libsRoot):
     if path.endsWith(".nim") or path.endsWith(".nims"):
-      paths.add(normalizedStampPath(path))
-  paths.sort(system.cmp[string])
+      result.add(normalizedStampPath(path))
+  result.sort(system.cmp[string])
+
+proc reproLibSourceFingerprint(workDir: string): string =
+  let paths = reproLibSources(workDir)
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.lib-sources.v1")
   for path in paths:
@@ -1405,8 +1412,15 @@ proc fileStamps(paths: openArray[string]): seq[FileStamp] =
   result.sort do (a, b: FileStamp) -> int:
     cmp(a.path, b.path)
 
+proc restampRecordedInputs(stamps: openArray[FileStamp]): seq[FileStamp] =
+  for stamp in stamps:
+    result.add(fileStamp(stamp.path))
+  result.sort do (a, b: FileStamp) -> int:
+    cmp(a.path, b.path)
+
 proc interfaceExtractionContext(modulePath: string;
-                                workDir = getCurrentDir()):
+                                workDir = getCurrentDir();
+                                includeReproLibFingerprint = true):
     InterfaceExtractionContext =
   let sources = discoverNimSources(modulePath).mapIt(normalizedStampPath(it))
   InterfaceExtractionContext(
@@ -1414,8 +1428,27 @@ proc interfaceExtractionContext(modulePath: string;
     workDir: normalizedStampPath(workDir),
     nimCompiler: nimCompilerPath(),
     libPathFlags: reproLibPathFlags(workDir),
-    reproLibFingerprint: reproLibSourceFingerprint(workDir),
+    reproLibFingerprint:
+      if includeReproLibFingerprint: reproLibSourceFingerprint(workDir)
+      else: "",
     sources: sources)
+
+proc interfaceExtractionCacheContext(modulePath: string;
+                                     workDir = getCurrentDir()):
+    InterfaceExtractionContext =
+  InterfaceExtractionContext(
+    modulePath: normalizedStampPath(modulePath),
+    workDir: normalizedStampPath(workDir),
+    nimCompiler: nimCompilerPath(),
+    libPathFlags: reproLibPathFlags(workDir),
+    reproLibFingerprint: "",
+    sources: @[])
+
+proc interfaceContextsMatchForCache(a, b: InterfaceExtractionContext): bool =
+  a.modulePath == b.modulePath and
+    a.workDir == b.workDir and
+    a.nimCompiler == b.nimCompiler and
+    a.libPathFlags == b.libPathFlags
 
 proc interfaceExtractionFingerprint(context: InterfaceExtractionContext):
     ContentDigest =
@@ -1448,6 +1481,7 @@ proc writeInterfaceExtractionCacheRecord(artifactPath: string;
   let record = InterfaceExtractionCacheRecord(
     context: context,
     sourceStamps: fileStamps(context.sources),
+    reproLibStamps: fileStamps(reproLibSources(context.workDir)),
     inputFingerprint: fingerprint)
   try:
     writeFile(extendedPath(interfaceExtractionMetadataPath(artifactPath)),
@@ -1474,9 +1508,11 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
   if record.isNone:
     return none(ProjectInterfaceArtifact)
   let cached = record.get()
-  if cached.context != context:
+  if not interfaceContextsMatchForCache(cached.context, context):
     return none(ProjectInterfaceArtifact)
-  if cached.sourceStamps != fileStamps(context.sources):
+  if cached.sourceStamps != restampRecordedInputs(cached.sourceStamps):
+    return none(ProjectInterfaceArtifact)
+  if cached.reproLibStamps != restampRecordedInputs(cached.reproLibStamps):
     return none(ProjectInterfaceArtifact)
   try:
     let artifact = readInterfaceArtifact(artifactPath)
@@ -1671,17 +1707,19 @@ proc buildScratchRoot(workDir, scratchDir: string): string =
 proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  workDir = getCurrentDir();
                                  scratchDir = ""): ProjectInterfaceArtifact =
-  let extractionContext = interfaceExtractionContext(modulePath, workDir)
+  let extractionContext = interfaceExtractionCacheContext(modulePath, workDir)
   let metadataCached = cachedInterfaceArtifactByMetadata(artifactPath,
     stubPath, extractionContext)
   if metadataCached.isSome:
     return metadataCached.get()
 
-  let inputFingerprint = interfaceExtractionFingerprint(extractionContext)
+  let fingerprintContext = interfaceExtractionContext(modulePath, workDir,
+    includeReproLibFingerprint = true)
+  let inputFingerprint = interfaceExtractionFingerprint(fingerprintContext)
   let cached = cachedInterfaceArtifactByFingerprint(artifactPath, stubPath,
     inputFingerprint)
   if cached.isSome:
-    writeInterfaceExtractionCacheRecord(artifactPath, extractionContext,
+    writeInterfaceExtractionCacheRecord(artifactPath, fingerprintContext,
       inputFingerprint)
     return cached.get()
 
@@ -1769,7 +1807,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   result = readInterfaceArtifact(artifactPath)
   writeFile(extendedPath(interfaceExtractionCachePath(artifactPath)), toHex(
       inputFingerprint.bytes))
-  writeInterfaceExtractionCacheRecord(artifactPath, extractionContext,
+  writeInterfaceExtractionCacheRecord(artifactPath, fingerprintContext,
     inputFingerprint)
 
 proc providerFingerprintFor*(inputSources: openArray[string];

@@ -1186,7 +1186,8 @@ proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
 
 const
   LoweredGraphCacheMagic = "RBLG"
-  LoweredGraphCacheVersion = 2'u16
+  LoweredGraphCacheVersion = 3'u16
+  LoweredGraphAlgorithmVersion = "reprobuild.loweredGraph.v1"
 
 type
   LoweredGraphCacheRecord = object
@@ -1194,6 +1195,7 @@ type
     projectRoot: string
     selectedActionId: string
     pathEnv: string
+    cacheKey: string
     actions: seq[BuildAction]
     pools: seq[BuildPool]
 
@@ -1420,6 +1422,7 @@ proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(record.projectRoot)
   result.writeString(record.selectedActionId)
   result.writeString(record.pathEnv)
+  result.writeString(record.cacheKey)
   result.writeU32Le(uint32(record.pools.len))
   for pool in record.pools:
     result.writeString(pool.name)
@@ -1440,6 +1443,7 @@ proc decodeLoweredGraphCache(bytes: openArray[byte]): LoweredGraphCacheRecord =
   result.projectRoot = readString(bytes, pos)
   result.selectedActionId = readString(bytes, pos)
   result.pathEnv = readString(bytes, pos)
+  result.cacheKey = readString(bytes, pos)
   let poolCount = int(readU32Le(bytes, pos))
   result.pools = newSeq[BuildPool](poolCount)
   for i in 0 ..< poolCount:
@@ -1463,21 +1467,22 @@ proc loweredGraphCachePath(outDir, selectedActionId: string): string =
       toHex(weakFingerprintFromText(label).bytes)[0 .. 15] & ".rbbg")
 
 proc readFreshLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
-                                pathEnv: string):
+                                pathEnv, cacheKey: string):
     Option[tuple[actions: seq[BuildAction]; pools: seq[BuildPool]]] =
   if not fileExists(extendedPath(path)):
     return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
   try:
     let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
     if record.modulePath != modulePath or record.projectRoot != projectRoot or
-        record.selectedActionId != selectedActionId or record.pathEnv != pathEnv:
+        record.selectedActionId != selectedActionId or record.pathEnv != pathEnv or
+        record.cacheKey != cacheKey:
       return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
     return some((actions: record.actions, pools: record.pools))
   except CatchableError:
     return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
 
 proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
-                            pathEnv: string;
+                            pathEnv, cacheKey: string;
                             lowered: tuple[actions: seq[BuildAction];
                                            pools: seq[BuildPool]]) =
   createDir(extendedPath(parentDir(path)))
@@ -1486,6 +1491,7 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
     projectRoot: projectRoot,
     selectedActionId: selectedActionId,
     pathEnv: pathEnv,
+    cacheKey: cacheKey,
     actions: lowered.actions,
     pools: lowered.pools)
   writeFile(extendedPath(path), fromBytes(encodeLoweredGraphCache(record)))
@@ -1911,6 +1917,56 @@ proc writeToolIdentityCache(outDir: string; mode: ToolProvisioningMode;
   let cacheDir = outDir / "tool-identity-cache"
   writePathOnlyBuildIdentity(cacheDir / (key & ".rbtp"), identity)
   writeInspectionJson(cacheDir / (key & ".inspect.json"), identity)
+
+proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
+  if snapshot.fragments.len == 0:
+    return false
+  for fragment in snapshot.fragments:
+    for input in fragment.evaluationInputs:
+      case input.kind
+      of gevFileRead:
+        if fileContentDigest(input.identity) != input.digest:
+          return false
+      of gevDirectoryEnumeration:
+        if directoryMemberNames(input.identity) != input.directoryMembers:
+          return false
+      else:
+        return false
+  true
+
+proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId: string):
+    Option[ProviderGraphSnapshot] =
+  if not fileExists(extendedPath(providerSnapshotPath(storeRoot))):
+    return none(ProviderGraphSnapshot)
+  try:
+    let snapshot = loadProviderGraphSnapshot(storeRoot)
+    if snapshot.providerArtifactId != providerArtifactId:
+      return none(ProviderGraphSnapshot)
+    if not providerSnapshotInputsFresh(snapshot):
+      return none(ProviderGraphSnapshot)
+    return some(snapshot)
+  except CatchableError:
+    return none(ProviderGraphSnapshot)
+
+proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
+                          mode: ToolProvisioningMode;
+                          providerArtifactId, providerSnapshotPath,
+                          pathEnv: string): string =
+  var payload = ""
+  payload.addCacheField(LoweredGraphAlgorithmVersion)
+  payload.addCacheField(mode.modeName)
+  payload.addCacheField(artifact.projectInterface.projectName)
+  payload.addCacheField(artifact.projectInterface.packageName)
+  payload.addCacheField(digestHex(artifact.interfaceFingerprint))
+  payload.addCacheField(toolIdentityCacheKey(artifact, mode))
+  payload.addCacheField(providerArtifactId)
+  if fileExists(extendedPath(providerSnapshotPath)):
+    payload.addCacheField(fileContentDigest(providerSnapshotPath))
+  else:
+    payload.addCacheField("")
+  if mode == tpmPathOnly:
+    payload.addCacheField(pathEnv)
+  digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
 proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
                              outDir: string;
@@ -2943,7 +2999,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     progressRenderer.renderPhase("reading lowered graph cache")
     let loweredCache = readFreshLoweredGraphCache(
       loweredGraphCachePath(outDir, cacheSelectedActionId), modulePath,
-      result.projectRoot, cacheSelectedActionId, pathEnv)
+      result.projectRoot, cacheSelectedActionId, pathEnv, "cmake-pre-provider")
     finishStat(buildStats, statsEnabled, "repro lowered graph cache read",
       loweredCacheStart)
     if loweredCache.isSome:
@@ -3218,18 +3274,30 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logSummary("providerArtifact: " & providerArtifactId)
 
     let projectRoot = result.projectRoot
+    let providerGraphStore = outDir / "provider-graph"
     let providerGraphStart = statStart(statsEnabled)
-    progressRenderer.renderPhase("refreshing project provider graph")
-    let refresh = refreshProviderGraph(RefreshConfig(
-      storeRoot: outDir / "provider-graph",
-      providerBinaryPath: provider.outputBinaryPath,
-      providerArtifactId: providerArtifactId,
-      rootEntryPointId: artifact.projectInterface.packageName & ".root",
-      rootArguments: projectRoot,
-      namespace: "project",
-      lockSliceId: digestHex(artifact.interfaceFingerprint),
-      activity: "build",
-      providerWorkingDir: projectRoot))
+    var refresh: ProviderRefreshReport
+    progressRenderer.renderPhase("checking project provider graph snapshot")
+    let freshSnapshot =
+      if forceRebuild or dryRun:
+        none(ProviderGraphSnapshot)
+      else:
+        readFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId)
+    if freshSnapshot.isSome:
+      refresh.snapshot = freshSnapshot.get()
+      refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
+    else:
+      progressRenderer.renderPhase("refreshing project provider graph")
+      refresh = refreshProviderGraph(RefreshConfig(
+        storeRoot: providerGraphStore,
+        providerBinaryPath: provider.outputBinaryPath,
+        providerArtifactId: providerArtifactId,
+        rootEntryPointId: artifact.projectInterface.packageName & ".root",
+        rootArguments: projectRoot,
+        namespace: "project",
+        lockSliceId: digestHex(artifact.interfaceFingerprint),
+        activity: "build",
+        providerWorkingDir: projectRoot))
     finishStat(buildStats, statsEnabled, "repro provider graph refresh",
       providerGraphStart)
     logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
@@ -3241,20 +3309,38 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if selectedActionId.len > 0:
         logSummary("defaultTarget: " & selectedActionId)
 
-    let graphLowerStart = statStart(statsEnabled)
-    progressRenderer.renderPhase("lowering project graph")
-    let lowered = lowerProviderSnapshot(refresh.snapshot, identity, projectRoot,
-      selectedActionId)
-    finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
-    if cmakeMeta.enabled and effectiveMode == tpmPathOnly and selectedActionId.len > 0:
-      let cacheWriteStart = statStart(statsEnabled)
-      writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
-        modulePath, projectRoot, selectedActionId, pathEnv, lowered)
-      if selectDefaultAction and parsedTarget.selectedActionId.len == 0:
-        writeLoweredGraphCache(loweredGraphCachePath(outDir, ""), modulePath,
-          projectRoot, "", pathEnv, lowered)
-      finishStat(buildStats, statsEnabled, "repro lowered graph cache write",
-        cacheWriteStart)
+    let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
+      providerArtifactId, refresh.persistedSnapshotPath, pathEnv)
+    let graphCacheReadStart = statStart(statsEnabled)
+    progressRenderer.renderPhase("reading lowered graph cache")
+    let cachedLowered =
+      if forceRebuild:
+        none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
+      else:
+        readFreshLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
+          modulePath, projectRoot, selectedActionId, pathEnv, graphCacheKey)
+    finishStat(buildStats, statsEnabled, "repro lowered graph cache read",
+      graphCacheReadStart)
+    let lowered =
+      if cachedLowered.isSome:
+        logSummary("loweredGraphCache: hit")
+        cachedLowered.get()
+      else:
+        let graphLowerStart = statStart(statsEnabled)
+        progressRenderer.renderPhase("lowering project graph")
+        let computed = lowerProviderSnapshot(refresh.snapshot, identity,
+          projectRoot, selectedActionId)
+        finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
+        let cacheWriteStart = statStart(statsEnabled)
+        writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
+          modulePath, projectRoot, selectedActionId, pathEnv, graphCacheKey,
+          computed)
+        if selectDefaultAction and parsedTarget.selectedActionId.len == 0:
+          writeLoweredGraphCache(loweredGraphCachePath(outDir, ""), modulePath,
+            projectRoot, "", pathEnv, graphCacheKey, computed)
+        finishStat(buildStats, statsEnabled, "repro lowered graph cache write",
+          cacheWriteStart)
+        computed
     if prepareOnly:
       if cmakeMeta.enabled:
         createDir(extendedPath(parentDir(cmakeMeta.providerStateFile)))
