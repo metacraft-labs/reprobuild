@@ -2151,7 +2151,13 @@ proc buildProgressInvocation(event: BuildProgressEvent): string =
       event.command
     else:
       event.actionId
-  statusLabel(event) & " " & invocation
+  var singleLine = invocation
+  for i in 0 ..< singleLine.len:
+    if singleLine[i] in {'\r', '\n', '\t'}:
+      singleLine[i] = ' '
+  while singleLine.contains("  "):
+    singleLine = singleLine.replace("  ", " ")
+  statusLabel(event) & " " & singleLine.strip()
 
 proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
                               includeBar = true; barWidth = 20): string =

@@ -1343,7 +1343,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         for action in buildGraph.actions:
           fastResult.results.add(ActionResult(
             id: action.id,
-            status: asCacheHit,
+            status: asUpToDate,
             cacheDecision: cdHit,
             dependencyPolicyKind: action.dependencyPolicy.kind))
         finishStat("repro cache hit result materialize", resultMaterializeStart)
@@ -1396,7 +1396,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         else: hotRecords[i]
       fastResult.results.add(ActionResult(
         id: action.id,
-        status: asCacheHit,
+        status: asUpToDate,
         cacheDecision: cdHit,
         dependencyPolicyKind: action.dependencyPolicy.kind,
         evidence: cacheHitEvidence(action, record)))
@@ -1735,7 +1735,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
-              completeSuccess(id, asCacheHit, cdHit, false, "outputs-present")
+              completeSuccess(id, asUpToDate, cdHit, false, "outputs-present")
               inc completed
               launchedAny = true
               continue
@@ -1760,7 +1760,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
-              completeSuccess(id, asCacheHit, cdHybridCutoff, false,
+              completeSuccess(id, asUpToDate, cdHybridCutoff, false,
                 "outputs-present")
               inc completed
               launchedAny = true
