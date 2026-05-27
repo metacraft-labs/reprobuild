@@ -212,6 +212,23 @@ proc requireFailure(command: string; cwd = getCurrentDir()): string =
   check res.code != 0
   res.output
 
+proc hasInlineFlag(args: openArray[string]; prefix: string): bool =
+  for arg in args:
+    if arg == prefix or arg.startsWith(prefix & "="):
+      return true
+
+proc requestsQuietProgress(args: openArray[string]): bool =
+  for arg in args:
+    if arg.startsWith("--progress="):
+      let value = arg.split("=", maxsplit = 1)[1].toLowerAscii()
+      if value in ["quiet", "silent", "none", "off"]:
+        return true
+
+proc addDefaultTestBuildLog(args: var seq[string];
+                            extraArgs: openArray[string]) =
+  if not hasInlineFlag(extraArgs, "--log") and not requestsQuietProgress(extraArgs):
+    args.add("--log=actions")
+
 proc pathExists(path: string): bool =
   try:
     discard getFileInfo(path, followSymlink = false)
@@ -921,6 +938,7 @@ proc build(reproBin, target, repoRoot, pathValue: string;
   for item in env:
     entries.add(item)
   var args = @[reproBin, "build", target, "--tool-provisioning=path"]
+  addDefaultTestBuildLog(args, extraArgs)
   for arg in extraArgs:
     args.add(arg)
   requireSuccess(shellCommand(args, entries), repoRoot)
@@ -932,6 +950,7 @@ proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
   for item in env:
     entries.add(item)
   var args = @[reproBin, "build", "--tool-provisioning=path"]
+  addDefaultTestBuildLog(args, extraArgs)
   for arg in extraArgs:
     args.add(arg)
   requireSuccess(shellCommand(args, entries), projectRoot)
@@ -1472,11 +1491,28 @@ suite "e2e_local_reprobuild_project_build":
       getElems().anyIt(it.getStr() == "out/stamp.txt")
 
     let progressOutput = buildCurrentProject(reproBin, projectRoot,
-      getEnv("PATH"), extraArgs = ["--progress=plain"])
+      getEnv("PATH"), extraArgs = ["--progress=bar-line"])
     check not progressOutput.contains(
       "providerCompileAction: __repro_provider_compile")
     check progressOutput.contains("repro [")
     check progressOutput.contains("4/4 100%")
+
+    let quietOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
+      extraArgs = ["--progress=quiet", "--report=none"])
+    check quietOutput.strip() == ""
+
+    let diagnosticsPath = projectRoot / ".repro" / "progress-diagnostics.log"
+    let quietDiagnosticsOutput = buildCurrentProject(reproBin, projectRoot,
+      getEnv("PATH"), extraArgs = ["--progress=quiet", "--report=none",
+        "--diagnostics=" & diagnosticsPath])
+    check quietDiagnosticsOutput.strip() == ""
+    let diagnostics = readFile(diagnosticsPath)
+    check diagnostics.contains("scheduler: actions=4")
+    check diagnostics.contains("action: stamp status=")
+
+    let dotsOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
+      extraArgs = ["--progress=dots", "--log=quiet", "--report=none"])
+    check dotsOutput.contains("....")
 
     let statsOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
       extraArgs = ["--stats"])
@@ -1585,7 +1621,7 @@ suite "e2e_local_reprobuild_project_build":
 
     let selected = requireSuccess(shellCommand([
       "build/test-bin/repro", "build", projectRoot & "#consume",
-      "--tool-provisioning=path"
+      "--tool-provisioning=path", "--log=actions"
     ], [("PATH", pathValue)]), repoRoot)
     check selected.contains("selectedTarget: consume")
     check selected.contains("scheduler: actions=2")
@@ -1626,7 +1662,8 @@ suite "e2e_local_reprobuild_project_build":
 
     let target = projectRoot & "#aggregate"
     let first = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+      "--log=actions"
     ], [("PATH", pathValue)]), repoRoot)
     check first.contains("selectedTarget: aggregate")
     check first.contains("providerInvocations: 1")
@@ -1639,7 +1676,8 @@ suite "e2e_local_reprobuild_project_build":
 
     writeFile(projectRoot / "src" / "resources" / "gamma.txt", "gamma\n")
     let added = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+      "--log=actions"
     ], [("PATH", pathValue)]), repoRoot)
     check added.contains("providerInvocations: 1")
     check added.contains("scheduler: actions=4")
@@ -1649,7 +1687,8 @@ suite "e2e_local_reprobuild_project_build":
 
     removeFile(projectRoot / "src" / "resources" / "beta.txt")
     let removed = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+      "--log=actions"
     ], [("PATH", pathValue)]), repoRoot)
     check removed.contains("providerInvocations: 1")
     check removed.contains("scheduler: actions=3")
@@ -1689,7 +1728,8 @@ suite "e2e_local_reprobuild_project_build":
     let traceEnv = [("PATH", pathValue), ("REPRO_PROVIDER_TRACE", tracePath)]
 
     let first = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+      "--log=actions"
     ], traceEnv), repoRoot)
     check first.contains("providerInvocations: 3")
     check first.contains("scheduler: actions=2")
@@ -1702,7 +1742,8 @@ suite "e2e_local_reprobuild_project_build":
 
     resetTrace(tracePath)
     let second = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+      "--log=actions"
     ], traceEnv), repoRoot)
     check second.contains("providerInvocations: 0")
     check second.contains("action: style-alpha status=asCacheHit launched=false")
@@ -1712,7 +1753,8 @@ suite "e2e_local_reprobuild_project_build":
     writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v2\n")
     resetTrace(tracePath)
     let contentChanged = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+      "--log=actions"
     ], traceEnv), repoRoot)
     check contentChanged.contains("providerInvocations: 0")
     check contentChanged.contains(
@@ -1725,7 +1767,8 @@ suite "e2e_local_reprobuild_project_build":
     writeFile(projectRoot / "styles" / "gamma.styl", "gamma-v1\n")
     resetTrace(tracePath)
     let added = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+      "--log=actions"
     ], traceEnv), repoRoot)
     check added.contains("providerInvocations: 1")
     check added.contains("scheduler: actions=3")
@@ -1738,7 +1781,8 @@ suite "e2e_local_reprobuild_project_build":
     removeFile(projectRoot / "styles" / "beta.styl")
     resetTrace(tracePath)
     let removed = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path"
+      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+      "--log=actions"
     ], traceEnv), repoRoot)
     check removed.contains("providerInvocations: 0")
     check removed.contains("scheduler: actions=2")

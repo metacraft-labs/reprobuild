@@ -42,7 +42,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=auto|plain|none] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [--prepare-only] [--no-runquota]\n       " &
+      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--no-runquota]\n       " &
           programName &
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
@@ -1973,9 +1973,12 @@ proc siblingStandardProviderPath(publicCliPath: string): string =
 
 type
   BuildProgressMode = enum
-    bpmAuto
-    bpmPlain
-    bpmNone
+    bpmQuiet
+    bpmLine
+    bpmBarLine
+    bpmLines
+    bpmLinesBar
+    bpmDots
 
   BuildStatsMode = enum
     bsmNone
@@ -1992,6 +1995,8 @@ type
 
   BuildProgressRenderer = object
     enabled: bool
+    mode: BuildProgressMode
+    ansi: bool
     lastLen: int
 
   BuildCommandOutcome = object
@@ -2003,20 +2008,27 @@ type
 
 proc parseBuildProgressMode(value: string): BuildProgressMode =
   case value.toLowerAscii()
-  of "auto":
-    bpmAuto
-  of "plain", "line":
-    bpmPlain
-  of "none", "off":
-    bpmNone
+  of "quiet", "silent", "none", "off":
+    bpmQuiet
+  of "line", "ninja", "single-line":
+    bpmLine
+  of "bar-line", "bar", "ninja-bar", "auto", "plain":
+    bpmBarLine
+  of "lines", "tup", "per-line":
+    bpmLines
+  of "lines-bar", "tup-bar", "per-line-bar":
+    bpmLinesBar
+  of "dots", "dot":
+    bpmDots
   else:
     raise newException(ValueError,
-      "unsupported --progress=" & value & " (expected auto, plain, or none)")
+      "unsupported --progress=" & value &
+        " (expected quiet, line, bar-line, lines, lines-bar, or dots)")
 
 proc configuredBuildProgressMode(): BuildProgressMode =
   let configured = getEnv("REPROBUILD_PROGRESS", "")
   if configured.len == 0:
-    return bpmAuto
+    return bpmBarLine
   parseBuildProgressMode(configured)
 
 proc parseBuildStatsMode(value: string): BuildStatsMode =
@@ -2066,22 +2078,27 @@ proc parseBuildLogMode(value: string): BuildLogMode =
 proc configuredBuildLogMode(): BuildLogMode =
   let configured = getEnv("REPROBUILD_LOG", "")
   if configured.len == 0:
-    return blmActions
+    return blmQuiet
   parseBuildLogMode(configured)
+
+proc supportsAnsiProgress(): bool =
+  isatty(stderr) and getEnv("NO_COLOR", "").len == 0 and
+    getEnv("TERM", "") != "dumb"
 
 proc newBuildProgressRenderer(mode: BuildProgressMode): BuildProgressRenderer =
   BuildProgressRenderer(
-    enabled:
-      case mode
-      of bpmAuto:
-        isatty(stderr)
-      of bpmPlain:
-        true
-      of bpmNone:
-        false,
+    enabled: mode != bpmQuiet,
+    mode: mode,
+    ansi: supportsAnsiProgress(),
     lastLen: 0)
 
-proc progressBar(completed, total, width: int): string =
+proc progressBar(completed, total, width: int; pretty = false): string =
+  const
+    FullBlock = "\226\150\136"
+    EmptyBlock = "\226\150\145"
+    Green = "\27[38;5;35m"
+    Dim = "\27[38;5;238m"
+    Reset = "\27[0m"
   let safeWidth = max(width, 1)
   let clampedCompleted =
     if total <= 0:
@@ -2095,7 +2112,13 @@ proc progressBar(completed, total, width: int): string =
       min(safeWidth, (clampedCompleted * safeWidth) div total)
   result = "["
   for i in 0 ..< safeWidth:
-    result.add(if i < filled: '#' else: '.')
+    if pretty:
+      if i < filled:
+        result.add(Green & FullBlock & Reset)
+      else:
+        result.add(Dim & EmptyBlock & Reset)
+    else:
+      result.add(if i < filled: '#' else: '.')
   result.add("]")
 
 proc fitProgressLine(line: string; width: int): string =
@@ -2124,29 +2147,93 @@ proc statusLabel(event: BuildProgressEvent): string =
     else:
       $event.status
 
-proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80): string =
-  let percent =
-    if event.total <= 0:
-      100
+proc buildProgressPercent(event: BuildProgressEvent): int =
+  if event.total <= 0:
+    100
+  else:
+    min(100, (max(event.completed, 0) * 100) div event.total)
+
+proc buildProgressCounters(event: BuildProgressEvent): string =
+  $event.completed & "/" & $event.total & " " &
+    $buildProgressPercent(event) & "%"
+
+proc buildProgressInvocation(event: BuildProgressEvent): string =
+  let invocation =
+    if event.command.len > 0:
+      event.command
     else:
-      min(100, (max(event.completed, 0) * 100) div event.total)
-  let prefix = "repro " & progressBar(event.completed, event.total, 20) & " " &
-    $event.completed & "/" & $event.total & " " & $percent & "%"
+      event.actionId
+  statusLabel(event) & " " & invocation
+
+proc formatBuildProgressLine*(event: BuildProgressEvent; width = 80;
+                              includeBar = true; barWidth = 20;
+                              pretty = false): string =
+  let prefix =
+    if includeBar:
+      "repro " & progressBar(event.completed, event.total, barWidth, pretty) &
+        " " & buildProgressCounters(event)
+    else:
+      "repro " & buildProgressCounters(event)
   let counters = " running=" & $event.running & " ready=" & $event.ready
-  let tail = " " & statusLabel(event) & " " & event.actionId
+  let tail = " " & buildProgressInvocation(event)
   fitProgressLine(prefix & counters & tail, max(width, 20))
+
+proc formatBuildProgressBarLine(event: BuildProgressEvent; width: int;
+                                pretty = false): string =
+  let suffix = " " & buildProgressCounters(event) &
+    " running=" & $event.running & " ready=" & $event.ready
+  let barWidth = max(10, width - suffix.len - "repro ".len - 2)
+  fitProgressLine("repro " & progressBar(event.completed, event.total,
+    barWidth, pretty) & suffix, max(width, 20))
+
+proc progressLineWidth(): int =
+  min(max(terminalWidth(), 40), 160)
+
+proc clearProgressLine(renderer: BuildProgressRenderer) =
+  if renderer.ansi:
+    stderr.write("\r\27[2K")
+  else:
+    stderr.write("\r")
+
+proc writeRedrawnProgress(renderer: var BuildProgressRenderer; line: string) =
+  renderer.clearProgressLine()
+  var outLine = line
+  if not renderer.ansi and outLine.len < renderer.lastLen:
+    outLine.add(repeat(' ', renderer.lastLen - outLine.len))
+  stderr.write(outLine)
+  stderr.flushFile()
+  renderer.lastLen = line.len
+
+proc shouldEmitProgressUnit(event: BuildProgressEvent): bool =
+  event.kind == bpkActionCompleted
 
 proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEvent) =
   if not renderer.enabled:
     return
-  let width = min(max(terminalWidth(), 40), 120)
-  var line = formatBuildProgressLine(event, width)
-  let visibleLen = line.len
-  if visibleLen < renderer.lastLen:
-    line.add(repeat(' ', renderer.lastLen - visibleLen))
-  stderr.write("\r" & line)
-  stderr.flushFile()
-  renderer.lastLen = visibleLen
+  let width = progressLineWidth()
+  case renderer.mode
+  of bpmQuiet:
+    discard
+  of bpmLine:
+    renderer.writeRedrawnProgress(formatBuildProgressLine(event, width,
+      includeBar = false, pretty = renderer.ansi))
+  of bpmBarLine:
+    renderer.writeRedrawnProgress(formatBuildProgressLine(event, width,
+      includeBar = true, barWidth = 24, pretty = renderer.ansi))
+  of bpmLines:
+    stderr.writeLine(formatBuildProgressLine(event, width, includeBar = false))
+    stderr.flushFile()
+    renderer.lastLen = 0
+  of bpmLinesBar:
+    renderer.clearProgressLine()
+    stderr.writeLine(formatBuildProgressLine(event, width, includeBar = false))
+    renderer.writeRedrawnProgress(formatBuildProgressBarLine(event, width,
+      pretty = renderer.ansi))
+  of bpmDots:
+    if shouldEmitProgressUnit(event):
+      stderr.write(".")
+      stderr.flushFile()
+      renderer.lastLen.inc
 
 proc finishProgress(renderer: var BuildProgressRenderer) =
   if renderer.enabled and renderer.lastLen > 0:
@@ -2252,10 +2339,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
                         workRoot = "";
-                        progressMode = bpmAuto;
+                        progressMode = bpmBarLine;
                         statsMode = bsmNone;
                         reportMode = brmFull;
                         logMode = blmActions;
+                        diagnosticsPath = "";
                         prepareOnly = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false):
@@ -2277,6 +2365,22 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let buildTotalStart = statStart(statsEnabled)
   let invocationWallStart = epochTime()
   var invocationFastPath = ""
+  var diagnosticLines: seq[string] = @[]
+  proc appendDiagnostic(line: string) =
+    if diagnosticsPath.len > 0:
+      diagnosticLines.add(line)
+  defer:
+    if diagnosticsPath.len > 0:
+      try:
+        let diagnosticsDir = parentDir(diagnosticsPath)
+        if diagnosticsDir.len > 0:
+          createDir(extendedPath(diagnosticsDir))
+        var body = diagnosticLines.join("\n")
+        if body.len > 0:
+          body.add("\n")
+        writeFile(extendedPath(diagnosticsPath), body)
+      except CatchableError:
+        discard
   defer:
     if configureStatsDir.len > 0:
       try:
@@ -2334,10 +2438,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   var warnedRunQuotaBypass = false
 
   template logSummary(line: string) =
+    appendDiagnostic(line)
     if logMode != blmQuiet:
       echo line
 
   template logAction(line: string) =
+    appendDiagnostic(line)
     if logMode == blmActions:
       echo line
 
@@ -2918,8 +3024,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         0
     return
 
-  echo "repro build: no external tools requested"
-  echo "interface: " & interfacePath
+  logSummary("repro build: no external tools requested")
+  logSummary("interface: " & interfacePath)
   result.exitCode = 0
 
 proc isUnderReproDir(path: string): bool =
@@ -5150,8 +5256,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var statsMode = configuredBuildStatsMode()
   var reportMode = configuredBuildReportMode()
   var logMode = configuredBuildLogMode()
+  var diagnosticsPath = ""
   var prepareOnly = false
   var skipCmakeRegeneration = false
+  var logModeExplicit = false
+  var statsModeExplicit = false
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
@@ -5181,11 +5290,19 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       progressMode = parseBuildProgressMode(arg.split("=", maxsplit = 1)[1])
     elif arg == "--progress":
       raise newException(ValueError,
-        "--progress requires an inline value, for example --progress=auto")
+        "--progress requires an inline value, for example --progress=bar-line")
+    elif arg.startsWith("--diagnostics="):
+      diagnosticsPath = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--diagnostics":
+      raise newException(ValueError,
+        "--diagnostics requires an inline value, for example " &
+          "--diagnostics=.repro/build/reprobuild/diagnostics.log")
     elif arg.startsWith("--stats="):
       statsMode = parseBuildStatsMode(arg.split("=", maxsplit = 1)[1])
+      statsModeExplicit = true
     elif arg == "--stats":
       statsMode = bsmText
+      statsModeExplicit = true
     elif arg.startsWith("--report="):
       reportMode = parseBuildReportMode(arg.split("=", maxsplit = 1)[1])
     elif arg == "--report":
@@ -5193,9 +5310,16 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
         "--report requires an inline value, for example --report=full")
     elif arg.startsWith("--log="):
       logMode = parseBuildLogMode(arg.split("=", maxsplit = 1)[1])
+      logModeExplicit = true
     elif arg == "--log":
       raise newException(ValueError,
         "--log requires an inline value, for example --log=summary")
+    elif arg == "-v" or arg == "--verbose":
+      logMode = blmSummary
+      logModeExplicit = true
+    elif arg == "-vv" or arg == "--very-verbose":
+      logMode = blmActions
+      logModeExplicit = true
     elif arg == "--prepare-only":
       prepareOnly = true
     elif arg == "--skip-cmake-regeneration":
@@ -5215,6 +5339,12 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   if targetWasOmitted:
     target = "."
 
+  if progressMode == bpmQuiet:
+    if not logModeExplicit:
+      logMode = blmQuiet
+    if not statsModeExplicit:
+      statsMode = bsmNone
+
   executeBuildTarget(target, mode, publicCliPath,
     selectDefaultAction = targetWasOmitted,
     workRoot = workRoot,
@@ -5222,6 +5352,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     statsMode = statsMode,
     reportMode = reportMode,
     logMode = logMode,
+    diagnosticsPath = diagnosticsPath,
     prepareOnly = prepareOnly,
     skipCmakeRegeneration = skipCmakeRegeneration,
     bypassRunQuotaExplicit = bypassRunQuota).exitCode
