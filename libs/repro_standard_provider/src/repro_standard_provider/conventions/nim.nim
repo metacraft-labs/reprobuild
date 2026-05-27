@@ -23,16 +23,26 @@
 ##       <linker-flags-from-manifest>``
 ##     depends on every phase-2 action.
 ##
-## **Design decision (M3 Option 1 — eager).** The convention invokes
-## ``nim c --compileOnly`` from ``emitFragment`` itself (via
-## ``osproc.execProcess``) so it can read the manifest and enumerate the
-## per-file compile actions *at convention-emit time*. The alternative —
-## a generator action that produces a ``dyndep`` file the engine reads at
-## build time — is captured in the milestone's M3+1 outstanding work and
-## is the natural follow-up once a project's source layout starts churning
-## enough that the cost of re-running ``nim c`` per provider invocation
-## hurts. For the M3 fixtures (single binary, stable source set) eager
-## emit produces a static graph and is the cleanest path.
+## **Design decision (M3 Option 1 — eager + M18 fingerprint cache).** The
+## convention invokes ``nim c --compileOnly`` from ``emitFragment`` itself
+## (via ``osproc.execCmdEx``) so it can read the manifest and enumerate
+## the per-file compile actions *at convention-emit time*. The pure-
+## dyndep alternative — a generator action that produces a ``dyndep``
+## file the engine reads at build time, with the engine SYNTHESISING per-
+## ``.c`` actions from the fragment — would require extending the engine's
+## current dyndep contract (which can only attach extra deps/outputs to
+## actions that already exist, not create new ones). That refactor is
+## deferred to a follow-on milestone.
+##
+## M18 lands the headline perf goal (the eager subprocess no longer fires
+## on every ``repro build``) via a pragmatic fingerprint sidecar in
+## ``conventions/emit_cache.nim``: ``runNimCompileOnly`` hashes the
+## ``.nim`` source set + the entry source + the ``--app:lib`` toggle +
+## the nim driver path, compares against
+## ``<nimcacheDir>/nim-c-compileonly.repro-emit-fingerprint``, and skips
+## the subprocess on a match (the previous run's manifest is reused).
+## This keeps a static-graph emit shape while making cold-snapshot
+## re-emits cheap when the source set is unchanged.
 ##
 ## The eager ``nim c`` run also doubles as the Phase 1 action: we encode
 ## the *same* command line into the inline-exec call so the engine's
@@ -54,6 +64,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/emit_cache
 
 const
   ScratchDirName* = ".repro/build"
@@ -392,7 +403,49 @@ proc nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource: string;
     result.add("--app:lib")
   result.add(entrySource)
 
+const
+  NimEmitCacheBaseName = "nim-c-compileonly"
+    ## Sidecar file basename for the M18 emit-time fingerprint cache.
+    ## See ``emit_cache.nim`` for the contract.
+
+proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
+                             nimSources: openArray[string];
+                             appLib: bool): string =
+  ## Fingerprint key for the nim-c-compileonly cache.
+  ##
+  ## Inputs that participate in the key:
+  ##   * the Nim driver path (``findExe("nim")`` resolved on this run);
+  ##   * the entry source path (which entry we're compiling);
+  ##   * the ``appLib`` toggle (controls whether ``--app:lib`` is emitted,
+  ##     which materially changes the nimcache linkcmd);
+  ##   * the manifest output path (so two scratch dirs can't share a
+  ##     fingerprint sidecar even if their source set is identical);
+  ##   * every ``.nim`` source file under ``<projectRoot>/src/`` plus the
+  ##     entry source itself — content digest folded in via
+  ##     ``fileInput``.
+  ##
+  ## Not in the key today:
+  ##   * the ``nim`` binary's bytes (only its path). On a managed dev
+  ##     shell the path includes the version, which is good enough; a
+  ##     paranoid future M can fold in ``nim --version`` output if a
+  ##     same-path-different-binary case crops up.
+  ##   * environment variables. The convention's argv is hermetic at
+  ##     the source level — Nim doesn't read ``NIMCACHE_DIR`` etc. when
+  ##     ``--nimcache:`` is set on the command line.
+  var inputs: seq[EmitCacheInput] = @[
+    textInput("nim-exe:" & nimExe),
+    textInput("entry-source:" & entrySource),
+    textInput("manifest:" & manifestPath),
+    textInput("app-lib:" & (if appLib: "true" else: "false")),
+    fileInput(entrySource),
+  ]
+  for source in nimSources:
+    inputs.add(fileInput(source))
+  computeEmitCacheFingerprint(inputs)
+
 proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
+                       nimSources: openArray[string];
+                       manifestPath: string;
                        appLib = false) =
   ## Execute the eager Phase 1 run and surface any failure as a
   ## ``ValueError`` carrying the captured stderr. The standard provider
@@ -412,7 +465,21 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
   ## diagnostic; the actual graph data is parsed from the on-disk
   ## ``nimcache.json`` manifest after the process exits, so any progress
   ## chatter in the merged stdout/stderr is harmless here.
+  ##
+  ## **M18 emit-cache fast path**: when a sidecar fingerprint at
+  ## ``<nimcacheDir>/nim-c-compileonly.repro-emit-fingerprint`` matches
+  ## the current source-set fingerprint AND the nimcache manifest is on
+  ## disk, we skip the subprocess entirely — the previous run's manifest
+  ## is still valid. The convention's caller re-parses the manifest
+  ## unconditionally; that work is cheap (~10 KB JSON) compared to the
+  ## ~1-2 s ``nim c`` invocation. The sidecar is refreshed on every
+  ## subprocess success so a partial run never poisons the cache.
   createDir(extendedPath(nimcacheDir))
+  let fingerprint = nimEmitCacheFingerprint(nimExe, entrySource,
+    manifestPath, nimSources, appLib)
+  if emitCacheIsUsable(nimcacheDir, NimEmitCacheBaseName, fingerprint,
+      [manifestPath]):
+    return
   let argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource, appLib)
   let cmd = quoteShellCommand(argv)
   let (output, exitCode) = execCmdEx(cmd,
@@ -421,6 +488,7 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
     raise newException(ValueError,
       "nim convention: 'nim c --compileOnly' exited " & $exitCode &
         " for " & entrySource & ":\n" & output)
+  writeEmitCacheFingerprint(nimcacheDir, NimEmitCacheBaseName, fingerprint)
 
 proc parseNimcacheManifest(manifestPath: string): NimcacheManifest =
   ## Decode the nimcache ``<entry>.json`` Nim writes alongside the
@@ -541,20 +609,25 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
                                                   phase3: BuildActionDef] =
   ## Materialise the three-phase graph for a single ``executable``.
   ## Eagerly runs ``nim c --compileOnly`` so the manifest is on disk
-  ## before we register Phase 2/3.
+  ## before we register Phase 2/3 — or skips the run when the M18
+  ## emit-time fingerprint cache says the previous manifest is still
+  ## current.
   let nimcacheDir = nimcachePathFor(projectRoot, entry.name)
   let objDir = objDirFor(projectRoot, entry.name)
   let binaryOutput = binaryPathFor(projectRoot, entry.name)
   let manifestPath = nimcacheManifestPathFor(projectRoot, entry.name)
   createDir(extendedPath(objDir))
-  runNimCompileOnly(nimExe, nimcacheDir, entry.sourceFile)
+  # M18: collect the full ``src/`` source set ONCE so the same fingerprint
+  # serves the cache check AND the Phase 1 action's declared inputs.
+  let nimSources = collectNimSources(projectRoot / "src")
+  runNimCompileOnly(nimExe, nimcacheDir, entry.sourceFile, nimSources,
+    manifestPath)
   let manifest = parseNimcacheManifest(manifestPath)
   if manifest.compile.len == 0:
     raise newException(ValueError,
       "nim convention: nimcache manifest carries no compile steps for " &
         entry.name)
 
-  let nimSources = collectNimSources(projectRoot / "src")
   let phase1Outputs = block:
     var outs = @[nimcacheDir, manifestPath]
     for step in manifest.compile:
@@ -688,14 +761,17 @@ proc emitForLibrary(projectRoot, nimExe: string;
   let objDir = objDirFor(projectRoot, lib.name)
   let manifestPath = nimcacheManifestPathFor(projectRoot, lib.name)
   createDir(extendedPath(objDir))
-  runNimCompileOnly(nimExe, nimcacheDir, lib.sourceFile, useAppLib)
+  # M18: collect the ``src/`` source set ONCE so the same fingerprint
+  # serves the emit-cache check AND the Phase 1 action's declared inputs.
+  let nimSources = collectNimSources(projectRoot / "src")
+  runNimCompileOnly(nimExe, nimcacheDir, lib.sourceFile, nimSources,
+    manifestPath, useAppLib)
   let manifest = parseNimcacheManifest(manifestPath)
   if manifest.compile.len == 0:
     raise newException(ValueError,
       "nim convention: nimcache manifest carries no compile steps for " &
         lib.name)
 
-  let nimSources = collectNimSources(projectRoot / "src")
   let phase1Outputs = block:
     var outs = @[nimcacheDir, manifestPath]
     for step in manifest.compile:

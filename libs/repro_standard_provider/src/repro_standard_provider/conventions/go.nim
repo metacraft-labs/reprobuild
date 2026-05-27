@@ -32,9 +32,27 @@
 ## directives — one for every package imported by P (direct imports only;
 ## the link-time ``importcfg.link`` carries the full transitive set).
 ##
-## **Design decision (M5 Option 1 — eager).** Like the M3 Nim and M4 Rust
-## conventions, this plugin invokes the upstream tooling eagerly at emit
-## time:
+## **Design decision (M5 Option 1 — eager + M18 fingerprint cache).** Like
+## the M3 Nim and M4 Rust conventions, this plugin invokes the upstream
+## tooling eagerly at emit time, then layers an emit-time fingerprint
+## sidecar (see ``conventions/emit_cache.nim``) on top so the upstream
+## call doesn't fire on every ``repro build``:
+##
+##   * ``runGoListExport`` hashes every ``go.mod``/``go.sum``/``.go`` file
+##     under the project root + the ``go`` driver path, compares against
+##     ``<projectRoot>/.repro/build/.emit-cache/go-list-export.repro-emit-fingerprint``,
+##     and on a hit re-parses the persisted raw output instead of
+##     re-spawning ``go list``.
+##
+## The eager-at-emit-time shape is preserved (the convention still
+## produces a static graph from the parsed package list); only the
+## subprocess invocation moves behind the cache. True Option 2 dyndep
+## (where the engine synthesises per-package compile actions from a
+## generator-produced fragment) is deferred to a follow-on milestone
+## because the engine's current dyndep contract can only attach
+## extra deps/outputs to actions that already exist.
+##
+## **Original-M5 eager rationale (preserved):**
 ##
 ##   * ``go list -export -json -deps ./...`` runs once per
 ##     ``emitFragment`` call. The ``-export`` flag is the key — it triggers
@@ -105,6 +123,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/emit_cache
 
 const
   ScratchDirName* = ".repro/build"
@@ -398,37 +417,56 @@ proc splitJsonObjects(blob: string): seq[JsonNode] =
         discard
     inc i
 
-proc runGoListExport(projectRoot, goExe: string): seq[GoPackage] =
-  ## Execute ``go list -export -json -deps ./...`` and parse the
-  ## resulting concatenated-JSON output. ``-export`` triggers the Go
-  ## toolchain to populate ``GOCACHE`` with stdlib archives and report
-  ## the cache paths via the ``Export`` field.
-  ##
-  ## The output is large (~100 KB for a "hello world" — every transitive
-  ## stdlib package gets a JSON record). On Windows the default pipe
-  ## buffer is ~64 KB so the naïve ``readAll`` pattern that works for
-  ## ``cargo metadata`` (a few KB) deadlocks here: Go fills the pipe
-  ## faster than we drain it. ``execCmdEx`` reads stdout line-by-line
-  ## while polling the exit code, which is exactly the drain pattern we
-  ## need. ``poStdErrToStdOut`` merges any progress chatter Go writes
-  ## (e.g. ``# downloading``) into the captured output, which becomes
-  ## the diagnostic on exit-code != 0.
-  let argv = @[
-    goExe,
-    "list",
-    "-export",
-    "-json",
-    "-deps",
-    "./...",
+const
+  GoEmitCacheBaseName = "go-list-export"
+    ## Sidecar file basename for the M18 emit-time fingerprint cache.
+  GoEmitCacheOutputName = "go-list-export.cached.json"
+    ## Cached raw ``go list -export -json -deps ./...`` output. Lives
+    ## next to the fingerprint sidecar.
+
+proc goEmitCacheScratchDir(projectRoot: string): string =
+  ## Per-project emit-cache scratch — same shape as the Rust convention.
+  projectRoot / ScratchDirName / ".emit-cache"
+
+proc collectGoInputs(projectRoot: string): seq[string] =
+  ## Every input file ``go list`` could possibly inspect on this
+  ## project: ``go.mod``, ``go.sum``, every ``.go`` file (recursively),
+  ## skipping ``.repro/`` scratch + any ``vendor/`` tree (vendor is
+  ## immutable cargo-cult input, but folding it in is correct — a
+  ## ``vendor/`` edit IS a real input change, just rare in practice).
+  ## We DO skip the obvious "build scratch" dirs the convention itself
+  ## owns so we don't get fingerprint feedback loops.
+  if not dirExists(extendedPath(projectRoot)):
+    return @[]
+  for entry in walkDirRec(projectRoot, yieldFilter = {pcFile}):
+    let rel = entry.relativePath(projectRoot)
+    let lowered = rel.replace('\\', '/').toLowerAscii
+    if lowered.startsWith(".repro/"):
+      continue
+    let basename = extractFilename(entry).toLowerAscii
+    let ext = splitFile(entry).ext.toLowerAscii
+    if basename == "go.mod" or basename == "go.sum" or ext == ".go":
+      result.add(entry)
+  result.sort(system.cmp[string])
+
+proc goEmitCacheFingerprint(projectRoot, goExe: string;
+                            sources: openArray[string]): string =
+  ## Fingerprint key for the go-list-export cache. See the analogous
+  ## comment in ``nim.nim``/``rust.nim`` for the rationale.
+  var inputs: seq[EmitCacheInput] = @[
+    textInput("go-exe:" & goExe),
+    textInput("project-root:" & projectRoot),
+    textInput("cmd:go list -export -json -deps ./..."),
   ]
-  let cmd = quoteShellCommand(argv)
-  let (output, exitCode) = execCmdEx(cmd,
-    options = {poStdErrToStdOut, poUsePath},
-    workingDir = projectRoot)
-  if exitCode != 0:
-    raise newException(ValueError,
-      "go convention: 'go list -export -json -deps ./...' exited " &
-        $exitCode & " for " & projectRoot & ":\n" & output)
+  for source in sources:
+    inputs.add(fileInput(source))
+  computeEmitCacheFingerprint(inputs)
+
+proc parseGoListExportOutput(output: string): seq[GoPackage] =
+  ## Decode the raw ``go list -export -json -deps ./...`` text into the
+  ## convention's reduced-shape ``GoPackage`` records. Pulled out of
+  ## ``runGoListExport`` so the M18 cache-hit path can re-parse the
+  ## persisted output without copy-pasting the JSON shape.
   for node in splitJsonObjects(output):
     if node.kind != JObject:
       continue
@@ -452,6 +490,70 @@ proc runGoListExport(projectRoot, goExe: string): seq[GoPackage] =
       for item in node["Imports"]:
         pkg.imports.add(item.getStr())
     result.add(pkg)
+
+proc runGoListExport(projectRoot, goExe: string): seq[GoPackage] =
+  ## Execute ``go list -export -json -deps ./...`` and parse the
+  ## resulting concatenated-JSON output. ``-export`` triggers the Go
+  ## toolchain to populate ``GOCACHE`` with stdlib archives and report
+  ## the cache paths via the ``Export`` field.
+  ##
+  ## The output is large (~100 KB for a "hello world" — every transitive
+  ## stdlib package gets a JSON record). On Windows the default pipe
+  ## buffer is ~64 KB so the naïve ``readAll`` pattern that works for
+  ## ``cargo metadata`` (a few KB) deadlocks here: Go fills the pipe
+  ## faster than we drain it. ``execCmdEx`` reads stdout line-by-line
+  ## while polling the exit code, which is exactly the drain pattern we
+  ## need. ``poStdErrToStdOut`` merges any progress chatter Go writes
+  ## (e.g. ``# downloading``) into the captured output, which becomes
+  ## the diagnostic on exit-code != 0.
+  ##
+  ## **M18 emit-cache fast path**: hash every ``go.mod``/``go.sum``/``.go``
+  ## file under the project root and, when the fingerprint matches a
+  ## sidecar AND a cached output is on disk, re-parse the cached output
+  ## instead of re-spawning ``go list``. The headline win isn't ``go
+  ## list``'s wall-time (~200-400 ms) — it's that the convention's emit
+  ## becomes purely on-disk I/O when nothing has changed.
+  let scratchDir = goEmitCacheScratchDir(projectRoot)
+  let sources = collectGoInputs(projectRoot)
+  let fingerprint = goEmitCacheFingerprint(projectRoot, goExe, sources)
+  let cachedOutputPath = scratchDir / GoEmitCacheOutputName
+  if emitCacheIsUsable(scratchDir, GoEmitCacheBaseName, fingerprint,
+      [cachedOutputPath]):
+    try:
+      let cached = readFile(extendedPath(cachedOutputPath))
+      let parsed = parseGoListExportOutput(cached)
+      if parsed.len > 0:
+        return parsed
+    except CatchableError:
+      # Stale cache — fall through to the subprocess.
+      discard
+  let argv = @[
+    goExe,
+    "list",
+    "-export",
+    "-json",
+    "-deps",
+    "./...",
+  ]
+  let cmd = quoteShellCommand(argv)
+  let (output, exitCode) = execCmdEx(cmd,
+    options = {poStdErrToStdOut, poUsePath},
+    workingDir = projectRoot)
+  if exitCode != 0:
+    raise newException(ValueError,
+      "go convention: 'go list -export -json -deps ./...' exited " &
+        $exitCode & " for " & projectRoot & ":\n" & output)
+  result = parseGoListExportOutput(output)
+  # Persist the cache. As with the Rust path, write the output BEFORE
+  # the fingerprint so a partial-write crash leaves the sidecar
+  # mismatched (which is correct — a miss) rather than matched-but-
+  # stale.
+  try:
+    createDir(extendedPath(scratchDir))
+    writeFile(extendedPath(cachedOutputPath), output)
+    writeEmitCacheFingerprint(scratchDir, GoEmitCacheBaseName, fingerprint)
+  except CatchableError:
+    discard
 
 proc sanitizeImportPath(importPath: string): string =
   ## Map a Go import path (``example.com/foo/bar``) to a filesystem-safe

@@ -44,16 +44,25 @@
 ##     after the convention's offline run, which is sufficient for the
 ##     M13 fixtures whose workspace deps are purely path-local).
 ##
-## **Design decision (M4 Option 1 — eager metadata extraction).** Like the
-## M3 Nim convention's Option 1, we invoke ``cargo metadata
-## --format-version=1 --no-deps --offline`` at emit time to extract each
-## crate's manifest info (package name, edition, target list,
-## dependencies). The alternative — driving the manifest read entirely
-## from a hand-rolled TOML parser — would let us recognise without a
-## working ``cargo`` on PATH, but the convention spec already requires
-## ``cargo`` for workspace resolution anyway and Cargo.toml syntax is
-## rich enough that re-implementing the TOML edge-cases buys nothing
-## here.
+## **Design decision (M4 Option 1 — eager metadata extraction + M18
+## fingerprint cache).** Like the M3 Nim convention's Option 1, we
+## invoke ``cargo metadata --format-version=1 --no-deps --offline`` at
+## emit time to extract each crate's manifest info (package name,
+## edition, target list, dependencies). The alternative — driving the
+## manifest read entirely from a hand-rolled TOML parser — would let us
+## recognise without a working ``cargo`` on PATH, but the convention
+## spec already requires ``cargo`` for workspace resolution anyway and
+## Cargo.toml syntax is rich enough that re-implementing the TOML
+## edge-cases buys nothing here.
+##
+## M18 lands a fingerprint sidecar (see
+## ``conventions/emit_cache.nim``): the convention hashes every
+## ``Cargo.toml``/``Cargo.lock``/``.rs`` file in the project tree plus
+## the cargo driver path, compares against
+## ``<projectRoot>/.repro/build/.emit-cache/cargo-metadata.repro-emit-fingerprint``,
+## and on a hit reads the cached JSON output (``cargo-metadata.cached.json``
+## next to the sidecar) instead of re-spawning cargo. Cold-snapshot
+## re-emits become pure on-disk I/O when nothing has changed.
 ##
 ## **Still deferred** (post-M13):
 ##   * ``build.rs`` crates — they keep routing through the Mode B crude
@@ -85,6 +94,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/emit_cache
 import repro_standard_provider/crude
 
 const
@@ -296,6 +306,63 @@ proc extractFirstJsonObject(blob: string): string =
         discard
   ""
 
+const
+  RustEmitCacheBaseName = "cargo-metadata"
+    ## Sidecar file basename for the M18 emit-time fingerprint cache.
+    ## See ``emit_cache.nim`` for the contract.
+  RustEmitCacheJsonName = "cargo-metadata.cached.json"
+    ## Cached ``cargo metadata`` JSON output. Lives next to the
+    ## fingerprint sidecar so the convention can rehydrate the same
+    ## ``JsonNode`` without re-running the subprocess.
+
+proc rustEmitCacheScratchDir(projectRoot: string): string =
+  ## The convention's M18 emit-cache scratch lives under
+  ## ``<projectRoot>/.repro/build/.emit-cache`` — out of the way of the
+  ## per-target scratch subdirs the build engine writes into. Created
+  ## on demand by ``writeEmitCacheFingerprint``.
+  projectRoot / ScratchDirName / ".emit-cache"
+
+proc collectRustSources(projectRoot: string): seq[string] =
+  ## Every input file ``cargo metadata`` could possibly inspect on a
+  ## ``--no-deps --offline`` run:
+  ##
+  ##   * the workspace ``Cargo.toml`` and (optionally) ``Cargo.lock``
+  ##   * every member's ``Cargo.toml``
+  ##   * every ``.rs`` source under ``src/``, ``examples/``, ``tests/``,
+  ##     ``benches/``, ``build.rs``, ``bin/`` (these are NOT
+  ##     interpreted by cargo metadata, but they DO determine the set
+  ##     of bin/lib targets when ``[[bin]]`` entries auto-discover from
+  ##     the filesystem — auto-discovery is on by default).
+  ##
+  ## We walk recursively but skip ``target/`` and ``.repro/`` so build
+  ## scratch doesn't pollute the fingerprint.
+  if not dirExists(extendedPath(projectRoot)):
+    return @[]
+  for entry in walkDirRec(projectRoot, yieldFilter = {pcFile}):
+    let rel = entry.relativePath(projectRoot)
+    let lowered = rel.replace('\\', '/').toLowerAscii
+    if lowered.startsWith("target/") or lowered.startsWith(".repro/"):
+      continue
+    let basename = extractFilename(entry).toLowerAscii
+    let ext = splitFile(entry).ext.toLowerAscii
+    if basename == "cargo.toml" or basename == "cargo.lock" or ext == ".rs":
+      result.add(entry)
+  result.sort(system.cmp[string])
+
+proc rustEmitCacheFingerprint(projectRoot, cargoExe: string;
+                              sources: openArray[string]): string =
+  ## Fingerprint key for the cargo-metadata cache. See the analogous
+  ## comment in ``nim.nim`` for the rationale around what is and isn't
+  ## folded in.
+  var inputs: seq[EmitCacheInput] = @[
+    textInput("cargo-exe:" & cargoExe),
+    textInput("project-root:" & projectRoot),
+    textInput("cmd:cargo metadata --format-version=1 --no-deps --offline"),
+  ]
+  for source in sources:
+    inputs.add(fileInput(source))
+  computeEmitCacheFingerprint(inputs)
+
 proc runCargoMetadata(projectRoot, cargoExe: string): JsonNode =
   ## Execute ``cargo metadata --format-version=1 --no-deps --offline`` and
   ## parse the resulting JSON. ``--no-deps`` skips dependency resolution
@@ -307,6 +374,29 @@ proc runCargoMetadata(projectRoot, cargoExe: string): JsonNode =
   ## merged stream so workspaces with hundreds of crates don't deadlock
   ## the Windows OS pipe. See the original M4 commit message for the
   ## rationale.
+  ##
+  ## **M18 emit-cache fast path**: hash the project's Cargo manifests +
+  ## ``.rs`` sources and, when the fingerprint matches a sidecar in the
+  ## convention's emit-cache scratch dir AND a cached JSON output is on
+  ## disk, return the cached parse directly without re-running cargo.
+  ## ``cargo metadata`` is fast (~200 ms locally) but the bigger win is
+  ## that the convention's emit becomes purely-on-disk-I/O when nothing
+  ## has changed — important when the provider snapshot is wiped (e.g.,
+  ## the build engine cache is cleared but the convention's manifests
+  ## are still on disk).
+  let scratchDir = rustEmitCacheScratchDir(projectRoot)
+  let sources = collectRustSources(projectRoot)
+  let fingerprint = rustEmitCacheFingerprint(projectRoot, cargoExe, sources)
+  let cachedJsonPath = scratchDir / RustEmitCacheJsonName
+  if emitCacheIsUsable(scratchDir, RustEmitCacheBaseName, fingerprint,
+      [cachedJsonPath]):
+    try:
+      return parseFile(extendedPath(cachedJsonPath))
+    except CatchableError:
+      # Stale cache (corrupted JSON, partial write). Fall through to the
+      # subprocess; the writeFile at the bottom of this proc rewrites
+      # both sidecar + JSON together.
+      discard
   let argv = @[
     cargoExe,
     "metadata",
@@ -334,6 +424,15 @@ proc runCargoMetadata(projectRoot, cargoExe: string): JsonNode =
     raise newException(ValueError,
       "rust convention: failed to parse 'cargo metadata' JSON output for " &
         projectRoot & ": " & err.msg)
+  # Persist the cached output BEFORE the fingerprint sidecar so a crash
+  # between the two writes leaves the cache miss-but-correct, not
+  # hit-but-stale.
+  try:
+    createDir(extendedPath(scratchDir))
+    writeFile(extendedPath(cachedJsonPath), jsonText)
+    writeEmitCacheFingerprint(scratchDir, RustEmitCacheBaseName, fingerprint)
+  except CatchableError:
+    discard
 
 proc normalisedManifestDir(path: string): string =
   ## Canonicalise a manifest directory path for cross-package comparison:
