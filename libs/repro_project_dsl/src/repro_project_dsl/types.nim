@@ -53,6 +53,18 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  LibraryKind* = enum
+    lkStatic        ## Default — produces a .a / .lib archive
+    lkShared        ## Produces a .so / .dylib / .dll
+    lkBoth          ## Both static and shared (rare)
+    lkHeaderOnly    ## No compile/link — just header export
+
+  LibraryDef* = object
+    name*: string
+    kind*: LibraryKind
+    sourceFile*: string
+    sourceLine*: int
+
   PackageUseDef* = object
     rawConstraint*: string
     packageSelector*: string
@@ -103,6 +115,7 @@ type
     packageName*: string
     defaultToolProvisioning*: string
     executables*: seq[ExecutableDef]
+    libraries*: seq[LibraryDef]
     toolUses*: seq[PackageUseDef]
     nixProvisioning*: seq[NixPackageProvisioningDef]
     tarballProvisioning*: seq[TarballProvisioningDef]

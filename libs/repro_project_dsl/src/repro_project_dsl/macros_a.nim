@@ -269,6 +269,86 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
     else:
       discard
 
+proc libraryKindLiteral(node: NimNode; fallback: LibraryKind): LibraryKind =
+  ## Parse a ``kind:`` value inside a ``library foo:`` body. Accepts
+  ## either an identifier (``static``, ``shared``, ``both``,
+  ## ``header-only`` / ``headerOnly``), an ``AccQuoted`` form (e.g.
+  ## `` `header-only` ``), or a string literal of the same tokens. Raises
+  ## a compile-time error for unrecognised inputs so typos surface early
+  ## instead of silently producing ``lkStatic``.
+  discard fallback
+  var text: string
+  case node.kind
+  of nnkStrLit..nnkTripleStrLit:
+    text = node.strVal
+  of nnkAccQuoted:
+    # `` `header-only` `` parses to ``AccQuoted(header, -, only)``.
+    # Reconstruct the original token by concatenating the children.
+    text = ""
+    for child in node:
+      text.add(identText(child))
+  else:
+    text = identText(node)
+  let norm = text.normalize
+  case norm
+  of "static", "lkstatic":
+    lkStatic
+  of "shared", "lkshared", "dynamic":
+    lkShared
+  of "both", "lkboth":
+    lkBoth
+  of "header-only", "headeronly", "lkheaderonly":
+    lkHeaderOnly
+  else:
+    error("library kind must be one of: static, shared, both, header-only " &
+      "(got '" & text & "')", node)
+    lkStatic
+
+proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
+  ## Mirrors ``parseExecutable``. Accepts two shapes:
+  ##
+  ##   ``library foo``                — bare command, no body. Defaults
+  ##                                    to ``kind = lkStatic``.
+  ##   ``library foo:`` + indented body — body may be ``discard`` or
+  ##                                       carry a ``kind: <name>`` line.
+  ##
+  ## The body grammar deliberately stays minimal in M12: a single
+  ## ``kind:`` setter is the only recognised field. Future fields plug in
+  ## here without breaking older sources.
+  discard packageName
+  let loc = lineFile(node)
+  if node.len < 2:
+    error("library expects a name", node)
+  result.name = identText(node[1])
+  result.kind = lkStatic
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  if node.len < 3:
+    return
+  let body = node[2]
+  if body.kind != nnkStmtList:
+    return
+  for stmt in body:
+    case calleeName(stmt).normalize
+    of "kind":
+      if stmt.len < 2:
+        error("library kind: requires a value", stmt)
+      # ``kind: shared`` parses to ``Call(kind, StmtList(shared))``; the
+      # ``StmtList`` wraps a single identifier (or AccQuoted for
+      # ``header-only``). Walk through to the leaf so
+      # ``libraryKindLiteral`` sees the bare ident/literal.
+      var valueNode = stmt[1]
+      while valueNode.kind == nnkStmtList and valueNode.len == 1:
+        valueNode = valueNode[0]
+      result.kind = libraryKindLiteral(valueNode, result.kind)
+    of "discard":
+      discard
+    else:
+      # Unknown body member — ignore for forward compatibility but the
+      # bare ``discard`` and a ``kind:`` setter are the only recognised
+      # forms in M12.
+      discard
+
 proc selectorFromConstraint(value: string): string =
   let parts = value.strip().splitWhitespace()
   if parts.len == 0:
@@ -603,6 +683,8 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   for stmt in body:
     if calleeName(stmt).normalize == "executable":
       result.executables.add(parseExecutable(result.packageName, stmt))
+    elif calleeName(stmt).normalize == "library":
+      result.libraries.add(parseLibrary(result.packageName, stmt))
     elif calleeName(stmt).normalize in ["defaulttoolprovisioning", "toolprovisioning"]:
       if stmt.len != 2:
         error("defaultToolProvisioning expects exactly one string literal", stmt)
@@ -766,6 +848,14 @@ proc packageLiteral(pkg: PackageDef): string =
           ", sourceLine: " & $param.sourceLine & ")")
       result.add("])")
     result.add("])")
+  result.add("], libraries: @[")
+  for libIndex, lib in pkg.libraries:
+    if libIndex > 0:
+      result.add(", ")
+    result.add("LibraryDef(name: " & escForCode(lib.name) &
+      ", kind: " & $lib.kind &
+      ", sourceFile: " & escForCode(lib.sourceFile) &
+      ", sourceLine: " & $lib.sourceLine & ")")
   result.add("])")
 
 proc nimDefault(nimType: string): string =

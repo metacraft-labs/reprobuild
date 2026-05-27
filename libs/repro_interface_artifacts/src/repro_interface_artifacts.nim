@@ -47,6 +47,11 @@ type
     commands*: seq[InterfaceCommand]
     location*: SourceLocation
 
+  InterfaceLibrary* = object
+    name*: string
+    kind*: LibraryKind
+    location*: SourceLocation
+
   InterfaceNixProvisioning* = object
     packageName*: string
     selector*: string
@@ -100,6 +105,7 @@ type
     packageName*: string
     defaultToolProvisioning*: string
     publicExecutables*: seq[InterfaceExecutable]
+    publicLibraries*: seq[InterfaceLibrary]
     toolUses*: seq[InterfaceToolUse]
     publicSignatureDependencies*: seq[string]
     location*: SourceLocation
@@ -181,13 +187,19 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 8'u16
-    ## v8 (current): adds ``ProjectInterface.standardBuildEligible``, a
-    ##               single byte at the tail of the interface payload.
-    ##               v7 readers reject v8 envelopes (the version >
-    ##               EnvelopeVersion check below). v8 readers accept v7
-    ##               by treating ``standardBuildEligible`` as false — so
-    ##               existing on-disk artifacts continue to load.
+  EnvelopeVersion = 9'u16
+    ## v9 (current): adds ``ProjectInterface.publicLibraries`` — the M12
+    ##               DSL ``library`` member enumerates here. Encoded as a
+    ##               ``u32`` count + per-entry ``InterfaceLibrary`` rows
+    ##               appended to the interface payload BEFORE the
+    ##               ``toolUses`` block. v8 readers reject v9 envelopes
+    ##               (the version > EnvelopeVersion check below). v9
+    ##               readers accept v8 by treating ``publicLibraries`` as
+    ##               an empty seq — see ``decodeInterfacePayload``.
+    ## v8: adds ``ProjectInterface.standardBuildEligible``, a single byte
+    ##     at the tail of the interface payload (outside the fingerprint).
+    ##     v7 readers reject v8; v8 readers accept v7 by defaulting the
+    ##     flag to false.
   InterfaceExtractionCacheRecordMagic =
     "reprobuild.interfaceExtractionCache.v1"
   ProviderFreshnessCacheRecordMagic =
@@ -394,6 +406,19 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
 
+proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary) =
+  outp.writeString(lib.name)
+  outp.writeByte(byte(ord(lib.kind)))
+  outp.writeLocation(lib.location)
+
+proc readLibrary(bytes: openArray[byte]; pos: var int): InterfaceLibrary =
+  result.name = readString(bytes, pos)
+  let kind = readByte(bytes, pos)
+  if kind > byte(ord(lkHeaderOnly)):
+    raiseEnvelopeError(eeMalformed, "invalid interface library kind")
+  result.kind = LibraryKind(kind)
+  result.location = readLocation(bytes, pos)
+
 proc writeNixProvisioning(outp: var seq[byte];
                           provisioning: InterfaceNixProvisioning) =
   outp.writeString(provisioning.packageName)
@@ -537,6 +562,15 @@ proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
   result.writeU32Le(uint32(value.publicExecutables.len))
   for exe in value.publicExecutables:
     result.writeExecutable(exe)
+  # v9: publicLibraries are encoded AFTER publicExecutables and BEFORE
+  # toolUses so the field order matches the source-of-truth in the
+  # ``ProjectInterface`` object literal above. v8 envelopes encode no
+  # libraries block at all; ``decodeInterfacePayload`` gates this read
+  # on ``version >= 9'u16`` so v8 on-disk artifacts load cleanly under
+  # the v9 reader.
+  result.writeU32Le(uint32(value.publicLibraries.len))
+  for lib in value.publicLibraries:
+    result.writeLibrary(lib)
   result.writeU32Le(uint32(value.toolUses.len))
   for useDef in value.toolUses:
     result.writeToolUse(useDef)
@@ -554,6 +588,13 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
   result.publicExecutables = newSeq[InterfaceExecutable](count)
   for i in 0 ..< count:
     result.publicExecutables[i] = readExecutable(bytes, pos)
+  # v9 added publicLibraries between executables and toolUses. v<9
+  # envelopes have no library block — leave the seq empty.
+  if version >= 9'u16:
+    let libCount = int(readU32Le(bytes, pos))
+    result.publicLibraries = newSeq[InterfaceLibrary](libCount)
+    for i in 0 ..< libCount:
+      result.publicLibraries[i] = readLibrary(bytes, pos)
   let useCount = int(readU32Le(bytes, pos))
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
@@ -904,6 +945,11 @@ proc toProjectInterface*(pkg: PackageDef;
         normalizedCmd.params.add(toInterfaceParam(param))
       normalizedExe.commands.add(normalizedCmd)
     result.publicExecutables.add(normalizedExe)
+  for lib in pkg.libraries:
+    result.publicLibraries.add(InterfaceLibrary(
+      name: lib.name,
+      kind: lib.kind,
+      location: SourceLocation(file: lib.sourceFile, line: lib.sourceLine)))
 
 proc sameSourceFile(a, b: string): bool =
   if a.len == 0 or b.len == 0:
@@ -1030,8 +1076,15 @@ proc detectStandardBuildEligible(sourceFile: string;
   for line in content.splitLines:
     if line.strip() == "build:":
       return false
-  if pkg.executables.len == 0:
+  if pkg.executables.len == 0 and pkg.libraries.len == 0:
     return true
+  # Library-only packages (no executable members) need the same
+  # registered-convention gate as executable-bearing packages: routing a
+  # ``library foo`` declaration through the standard provider only makes
+  # sense when the convention plugin in question knows how to emit a
+  # library link action. The Nim convention's M12 ``emitFragment`` covers
+  # ``lkStatic``/``lkShared``/``lkBoth``/``lkHeaderOnly`` — see
+  # ``conventions/nim.nim``.
   usesIncludesRegisteredConvention(sourceFile)
 
 proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =

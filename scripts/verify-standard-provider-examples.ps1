@@ -22,20 +22,20 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set):
+# Expected to PASS (the known-working set, post-M12):
 #   nim/binary, nim/multi-binary,
+#   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
 #   go/binary
 #
-# Expected to KNOWN-FAIL (documented coverage gaps in M3-M8 outstanding work):
-#   nim/library, nim/library-with-tests        -- DSL has no `library` macro
+# Expected to KNOWN-FAIL (documented coverage gaps in M3-M11 outstanding work):
 #   rust/library, rust/library-with-tests      -- Rust convention rejects
-#                                                  library-only crates
-#   rust/workspace                              -- workspaces deferred (M4)
+#                                                  library-only crates (M13)
+#   rust/workspace                              -- workspaces deferred (M13)
 #   go/library                                  -- Go convention only matches
-#                                                  root main.go (M5)
+#                                                  root main.go (M14)
 #   go/multi-binary                             -- cmd/<name>/main.go layout
-#                                                  not recognised yet (M5)
+#                                                  not recognised yet (M14)
 #
 # Expected to SKIP (no Mode A convention exists in M3-M8):
 #   python/library-pure, python/console-script,
@@ -200,8 +200,12 @@ function Probe-Toolchain([string]$language) {
 # accepting a non-zero exit as KNOWN-FAIL.
 function Get-KnownFailReason([string]$rel) {
   switch ($rel) {
-    'nim/library'              { return 'DSL has no `library` macro yet (M8 outstanding)' }
-    'nim/library-with-tests'   { return 'DSL has no `library` macro yet (M8 outstanding)' }
+    # M12 (2026-05-27): nim/library + nim/library-with-tests graduated
+    # from KNOWN-FAIL to PASS. The DSL ``library`` macro lives in
+    # libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim and the
+    # Nim convention's emitFragment branches on ``LibraryKind`` to emit
+    # ``ar rcs`` (static) / ``gcc -shared`` (shared) / both / nothing
+    # (header-only).
     'rust/library'             { return 'Rust convention rejects library-only crates (M4 outstanding)' }
     'rust/library-with-tests'  { return 'Rust convention rejects library-only crates (M4 outstanding)' }
     'rust/workspace'           { return 'Rust workspaces deferred (M4 outstanding)' }
@@ -234,6 +238,27 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{ Path = $alpha; Greeting = 'hello from alpha' },
         @{ Path = $beta;  Greeting = 'hello from beta'  }
       )
+    }
+    'nim/library' {
+      # M12: ``library nim_library_example`` (no kind:) defaults to
+      # lkStatic; the Nim convention emits ``ar rcs lib<name>.a`` as
+      # phase 3. No greeting — a static archive isn't a runnable binary.
+      $entry = 'nim_library_example'
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $entry ("lib" + $entry + ".a")))
+        Greeting = $null
+      })
+    }
+    'nim/library-with-tests' {
+      # M12: same shape as nim/library — the ``tests/`` directory exists
+      # but the convention's M3 surface only links the library itself.
+      # Per-test compile actions are deferred to a later milestone (see
+      # Nim.md §"Test commands").
+      $entry = 'nim_library_with_tests_example'
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $entry ("lib" + $entry + ".a")))
+        Greeting = $null
+      })
     }
     'rust/binary' {
       $crate = 'rust_binary_example'
