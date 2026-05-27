@@ -1,4 +1,5 @@
-import std/[algorithm, options, os, osproc, sequtils, streams, strutils, times]
+import std/[algorithm, options, os, osproc, sequtils, sets, streams, strutils,
+            times]
 
 import cbor
 import repro_core
@@ -201,7 +202,7 @@ const
     ##     v7 readers reject v8; v8 readers accept v7 by defaulting the
     ##     flag to false.
   InterfaceExtractionCacheRecordMagic =
-    "reprobuild.interfaceExtractionCache.v1"
+    "reprobuild.interfaceExtractionCache.v2"
   ProviderFreshnessCacheRecordMagic =
     "reprobuild.providerFreshnessCache.v1"
 
@@ -1339,6 +1340,9 @@ proc nimCompilerPath(): string =
     candidates.addUnique(BuiltNimCompilerPath)
   candidates.addUnique("nim")
   for candidate in candidates:
+    if candidate.startsWith("/nix/store/"):
+      cachedNimCompilerPath = candidate
+      return candidate
     if looksLikeNimCompiler(candidate):
       cachedNimCompilerPath = candidate
       return candidate
@@ -1393,27 +1397,115 @@ proc reproLibPathFlags(workDir: string): seq[string] =
           result.add("--path:" & src)
   result.sort(system.cmp[string])
 
-proc discoverNimSources*(rootModulePath: string): seq[string] =
-  let root = parentDir(rootModulePath)
-  var dirs = @[root]
-  while dirs.len > 0:
-    let dir = dirs.pop()
-    # TODO(win-longpath): walk results escape; needs review
-    for kind, path in walkDir(dir):
-      let tail = splitPath(path).tail
-      case kind
-      of pcDir:
-        if tail notin [".git", ".repro", "CMakeFiles", "nimcache-provider"]:
-          dirs.add(path)
-      of pcFile:
-        if path.endsWith(".nim"):
-          result.add(path)
-      else:
-        discard
-  result.sort(system.cmp[string])
-
 proc normalizedStampPath(path: string): string =
   os.normalizedPath(path).replace('\\', '/')
+
+proc stripNimLineComment(line: string): string =
+  let pos = line.find('#')
+  if pos >= 0:
+    line[0 ..< pos]
+  else:
+    line
+
+proc splitImportSpecs(text: string): seq[string] =
+  var current = ""
+  var bracketDepth = 0
+  for ch in text:
+    case ch
+    of '[':
+      bracketDepth.inc
+      current.add(ch)
+    of ']':
+      bracketDepth.dec
+      current.add(ch)
+    of ',':
+      if bracketDepth == 0:
+        let item = current.strip()
+        if item.len > 0:
+          result.add(item)
+        current.setLen(0)
+      else:
+        current.add(ch)
+    else:
+      current.add(ch)
+  let item = current.strip()
+  if item.len > 0:
+    result.add(item)
+
+proc expandImportSpec(spec: string): seq[string] =
+  var value = spec.strip()
+  if value.len == 0:
+    return
+  let aliasPos = value.find(" as ")
+  if aliasPos >= 0:
+    value = value[0 ..< aliasPos].strip()
+  if value.startsWith("\"") and value.endsWith("\"") and value.len >= 2:
+    value = value[1 .. ^2]
+  let openPos = value.find('[')
+  let closePos = value.rfind(']')
+  if openPos >= 0 and closePos > openPos:
+    let prefix = value[0 ..< openPos].strip().strip(chars = {'/'})
+    for item in splitImportSpecs(value[openPos + 1 ..< closePos]):
+      let suffix = item.strip()
+      if suffix.len > 0:
+        if prefix.len > 0:
+          result.add(prefix & "/" & suffix)
+        else:
+          result.add(suffix)
+  else:
+    result.add(value)
+
+proc localNimModulePath(currentFile, projectRoot, spec: string): string =
+  if spec.len == 0 or spec.startsWith("std/") or spec == "std" or
+      spec.startsWith("pkg/") or spec == "pkg":
+    return ""
+  var module = spec
+  if module.startsWith("./") or module.startsWith("../"):
+    module = parentDir(currentFile) / module
+  elif module.isAbsolute:
+    discard
+  else:
+    module = projectRoot / module
+  if not module.endsWith(".nim") and not module.endsWith(".nims"):
+    module.add(".nim")
+  module = normalizedStampPath(module)
+  let normalizedRoot = normalizedStampPath(projectRoot)
+  if module == normalizedRoot or module.startsWith(normalizedRoot & "/"):
+    if fileExists(extendedPath(module)):
+      return module
+  ""
+
+proc nimImportSpecs(line: string): seq[string] =
+  let stripped = stripNimLineComment(line).strip()
+  if stripped.startsWith("import "):
+    return splitImportSpecs(stripped["import ".len .. ^1])
+  if stripped.startsWith("include "):
+    return splitImportSpecs(stripped["include ".len .. ^1])
+  if stripped.startsWith("from "):
+    let rest = stripped["from ".len .. ^1]
+    let pos = rest.find(" import ")
+    if pos > 0:
+      return @[rest[0 ..< pos].strip()]
+
+proc discoverNimSources*(rootModulePath: string): seq[string] =
+  let projectRoot = normalizedStampPath(parentDir(rootModulePath))
+  var pending = @[normalizedStampPath(rootModulePath)]
+  var seen = initHashSet[string]()
+  while pending.len > 0:
+    let path = pending.pop()
+    if path in seen:
+      continue
+    seen.incl(path)
+    result.add(path)
+    if not fileExists(extendedPath(path)):
+      continue
+    for line in readFile(extendedPath(path)).splitLines:
+      for spec in nimImportSpecs(line):
+        for expanded in expandImportSpec(spec):
+          let localPath = localNimModulePath(path, projectRoot, expanded)
+          if localPath.len > 0 and localPath notin seen:
+            pending.add(localPath)
+  result.sort(system.cmp[string])
 
 proc reproLibSources(workDir: string): seq[string] =
   let libsRoot = workDir / "libs"
@@ -1471,6 +1563,14 @@ proc restampRecordedInputs(stamps: openArray[FileStamp]): seq[FileStamp] =
   result.sort do (a, b: FileStamp) -> int:
     cmp(a.path, b.path)
 
+proc immutableStorePath(path: string): bool =
+  normalizedStampPath(path).startsWith("/nix/store/")
+
+proc reproLibStampsForCache(workDir: string): seq[FileStamp] =
+  if immutableStorePath(workDir):
+    return @[]
+  fileStamps(reproLibSources(workDir))
+
 proc interfaceExtractionContext(modulePath: string;
                                 workDir = getCurrentDir();
                                 includeReproLibFingerprint = true):
@@ -1493,7 +1593,9 @@ proc interfaceExtractionCacheContext(modulePath: string;
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
     nimCompiler: nimCompilerPath(),
-    libPathFlags: reproLibPathFlags(workDir),
+    libPathFlags:
+      if immutableStorePath(workDir): @[]
+      else: reproLibPathFlags(workDir),
     reproLibFingerprint: "",
     sources: @[])
 
@@ -1501,7 +1603,7 @@ proc interfaceContextsMatchForCache(a, b: InterfaceExtractionContext): bool =
   a.modulePath == b.modulePath and
     a.workDir == b.workDir and
     a.nimCompiler == b.nimCompiler and
-    a.libPathFlags == b.libPathFlags
+    (a.libPathFlags == b.libPathFlags or immutableStorePath(a.workDir))
 
 proc interfaceExtractionFingerprint(context: InterfaceExtractionContext):
     ContentDigest =
@@ -1534,7 +1636,7 @@ proc writeInterfaceExtractionCacheRecord(artifactPath: string;
   let record = InterfaceExtractionCacheRecord(
     context: context,
     sourceStamps: fileStamps(context.sources),
-    reproLibStamps: fileStamps(reproLibSources(context.workDir)),
+    reproLibStamps: reproLibStampsForCache(context.workDir),
     inputFingerprint: fingerprint)
   try:
     writeFile(extendedPath(interfaceExtractionMetadataPath(artifactPath)),
