@@ -561,16 +561,23 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       })
     }
     'javascript-typescript/typescript-cli' {
-      # M16: TS CLI. The tsc compile mirrors the source tree under dist,
-      # so src/bin/cli.ts -> dist/bin/cli.js. The hashbang from cli.ts is
-      # preserved verbatim. No greeting check here — the CLI isn't
-      # directly runnable on Windows without a .cmd shim (A6 deferred);
-      # the validate-standard-provider-typescript-cli.ps1 script
-      # explicitly invokes ``node dist/bin/cli.js`` and checks stdout.
-      return @(@{
-        Path     = Join-Path $fixtureDir '.repro\build\dist\bin\cli.js'
-        Greeting = $null
-      })
+      # M21: TS CLI. The M21 convention emits npm-ci + tsc + esbuild
+      # bundle + .cmd shim. The bundle lands at dist/bin/cli.js (esbuild
+      # writes here; tsc's --outDir output excludes this path so the two
+      # actions don't collide on declared outputs). The Windows .cmd
+      # launcher shim lives at <scratch>/bin/typescript-cli-example.cmd.
+      # The shim is the load-bearing runnable artefact at M21 — the
+      # harness runs it directly and checks for the greeting.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir '.repro\build\dist\bin\cli.js'
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir '.repro\build\bin\typescript-cli-example.cmd'
+          Greeting = 'hello from typescript-cli-example'
+        }
+      )
     }
     'javascript-typescript/node-server' {
       # M16: pure-JS node application. The convention emits one

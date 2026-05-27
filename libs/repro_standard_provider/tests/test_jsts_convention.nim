@@ -1,4 +1,4 @@
-## M16 verification: JavaScript / TypeScript language convention.
+## M16 + M21 verification: JavaScript / TypeScript language convention.
 ##
 ## Tests against the in-tree fixtures under
 ## ``reprobuild-examples/javascript-typescript/``:
@@ -6,14 +6,15 @@
 ##   * ``javascript-typescript/typescript-library`` — TS library, single
 ##     ``src/index.ts``
 ##   * ``javascript-typescript/typescript-cli``     — TS CLI, ``bin``
-##     entry pointing at ``src/bin/cli.ts``
+##     entry pointing at ``src/bin/cli.ts``, ``package-lock.json``
+##     present (M21), test file under ``test/cli.test.ts`` (M21)
 ##   * ``javascript-typescript/node-server``        — pure JS, no
 ##     TypeScript, ``src/index.js`` entry
 ##
 ## Negative recognise cases are materialised as tiny scratch projects
 ## under the test's temp directory so each case is hermetic.
 ##
-## Coverage:
+## Coverage (M16):
 ##   * ``recognize`` returns true for each of the three fixtures (with
 ##     node on PATH).
 ##   * ``recognize`` returns false when:
@@ -33,6 +34,23 @@
 ##     PATH):
 ##     - at least one ``jsts-copy-js-*`` action exists
 ##     - the action's outputs land under ``.repro/build/dist/``
+##
+## Coverage (M21 — A1 / A5 / A6 / A7 graduations):
+##   * ``emitFragment`` against ``typescript-cli`` (lockfile + test
+##     fixture, skipped if node not on PATH):
+##     - exactly one ``jsts-npm-ci`` action with ``npm ci`` in argv,
+##       ``node_modules`` in outputs, ``package-lock.json`` in inputs
+##     - exactly one ``jsts-esbuild-bundle-*`` action per bin entry;
+##       argv carries ``esbuild`` + ``--bundle`` + ``--format=esm``;
+##       outputs include the bundle ``.js`` + ``.meta.json`` metafile
+##     - exactly one ``jsts-shim-*`` action per bin entry; output path
+##       ends in ``.cmd`` (Windows) or has no extension (POSIX); the
+##       shim's parent dir is the convention's ``<scratch>/bin/``
+##     - a non-default ``test`` target exists with at least one
+##       ``jsts-test-run`` action; argv carries ``--test`` + ``--import=tsx``
+##   * ``emitFragment`` against ``typescript-library`` (no lockfile, no
+##     tests): no ``jsts-npm-ci`` / ``jsts-esbuild-*`` / ``jsts-shim-*``
+##     / ``jsts-test-run`` actions emitted.
 
 import std/[os, strutils, unittest]
 
@@ -309,3 +327,152 @@ suite "javascript/typescript convention M16":
             check ".repro" in outPath.replace('\\', '/')
             check "/dist/" in outPath.replace('\\', '/')
       check sawJs
+
+  test "emitFragment M21: typescript-cli emits npm-ci + esbuild + shim + test-run":
+    # Verifies the M21 A1/A5/A6/A7 graduations against the canonical
+    # typescript-cli fixture. The fixture ships a lockfile (so A1 fires),
+    # one bin entry (so A5+A6 fire once), and one test file under
+    # ``test/`` (so A7 fires).
+    if not nodeOnPath():
+      skip()
+    elif not fileExists(CliFixture / "package-lock.json"):
+      checkpoint "typescript-cli fixture missing package-lock.json — " &
+        "M21 A1 won't fire; ensure 'npm install --package-lock-only' was " &
+        "run on the fixture"
+      skip()
+    else:
+      let conv = jsts_convention.javaScriptTypeScriptConvention()
+      let request = dummyRequest(CliFixture)
+      require conv.recognize(CliFixture, request)
+      let fragment = conv.emitFragment(CliFixture, request)
+
+      var npmCi: seq[BuildActionDef] = @[]
+      var esbuild: seq[BuildActionDef] = @[]
+      var shim: seq[BuildActionDef] = @[]
+      var testRun: seq[BuildActionDef] = @[]
+      var tsc: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id == "jsts-npm-ci":
+          npmCi.add(action)
+        elif action.id.startsWith("jsts-esbuild-bundle-"):
+          esbuild.add(action)
+        elif action.id.startsWith("jsts-shim-"):
+          shim.add(action)
+        elif action.id == "jsts-test-run":
+          testRun.add(action)
+        elif action.id == "jsts-tsc-compile":
+          tsc.add(action)
+
+      # M21 A1: exactly one npm-ci action with the expected argv shape
+      # and node_modules + package-lock.json wired up.
+      check npmCi.len == 1
+      let ci = npmCi[0]
+      let ciArgv = inlineArgvOf(ci)
+      check ciArgv.len >= 2
+      check ciArgv[1] == "ci"
+      var sawNodeModules = false
+      for o in ci.outputs:
+        if extractFilename(o) == "node_modules":
+          sawNodeModules = true
+      check sawNodeModules
+      var sawLockfileInput = false
+      for i in ci.inputs:
+        if extractFilename(i) == "package-lock.json":
+          sawLockfileInput = true
+      check sawLockfileInput
+
+      # tsc still runs (whole-project type-check + .d.ts emit) and
+      # carries the npm-ci action in its deps so the install lands
+      # before tsc fires.
+      check tsc.len == 1
+      check "jsts-npm-ci" in tsc[0].deps
+
+      # M21 A5: one esbuild action per bin entry. The typescript-cli
+      # fixture declares exactly one bin ("typescript-cli-example").
+      check esbuild.len == 1
+      let bundle = esbuild[0]
+      let bundleArgv = inlineArgvOf(bundle)
+      check "--bundle" in bundleArgv
+      var sawFormatEsm = false
+      var sawPlatformNode = false
+      var sawOutfile = false
+      var sawMetafile = false
+      for arg in bundleArgv:
+        if arg == "--format=esm":
+          sawFormatEsm = true
+        elif arg == "--platform=node":
+          sawPlatformNode = true
+        elif arg.startsWith("--outfile="):
+          sawOutfile = true
+        elif arg.startsWith("--metafile="):
+          sawMetafile = true
+      check sawFormatEsm
+      check sawPlatformNode
+      check sawOutfile
+      check sawMetafile
+      # Bundle outputs include the .js + .meta.json.
+      var sawBundleJs = false
+      var sawBundleMeta = false
+      for o in bundle.outputs:
+        let lower = o.toLowerAscii
+        if lower.endsWith(".meta.json"):
+          sawBundleMeta = true
+        elif lower.endsWith(".js"):
+          sawBundleJs = true
+      check sawBundleJs
+      check sawBundleMeta
+      # The esbuild action carries the npm-ci action in its deps so
+      # local node_modules/.bin/esbuild is installed first.
+      check "jsts-npm-ci" in bundle.deps
+
+      # M21 A6: one shim action per bin entry. The shim writes a
+      # platform-specific launcher under <scratch>/bin/. Output ends in
+      # .cmd on Windows; no extension on POSIX.
+      check shim.len == 1
+      let sh = shim[0]
+      check sh.outputs.len == 1
+      let shimPath = sh.outputs[0].replace('\\', '/')
+      check "/.repro/build/bin/" in shimPath
+      when defined(windows):
+        check shimPath.toLowerAscii.endsWith(".cmd")
+      # The shim depends on the esbuild action so the bundle exists
+      # when the launcher's text is materialised.
+      check bundle.id in sh.deps
+
+      # M21 A7: one test-runner action. Argv carries ``node --test``
+      # + ``--import=tsx`` + the test file paths. The action declares
+      # NO file outputs (it's a verification action).
+      check testRun.len == 1
+      let tr = testRun[0]
+      let trArgv = inlineArgvOf(tr)
+      check "--test" in trArgv
+      check "--import=tsx" in trArgv
+      check tr.outputs.len == 0
+      var sawTestFile = false
+      for i in tr.inputs:
+        let lower = i.toLowerAscii
+        if lower.endsWith(".test.ts") or lower.endsWith(".test.js"):
+          sawTestFile = true
+      check sawTestFile
+
+  test "emitFragment M21: typescript-library has no npm-ci / esbuild / shim / test actions":
+    # Inverse cohort: the typescript-library fixture has no lockfile
+    # and no bins / tests, so M21's new sub-graphs must not fire.
+    if not nodeOnPath():
+      skip()
+    else:
+      let conv = jsts_convention.javaScriptTypeScriptConvention()
+      let request = dummyRequest(LibraryFixture)
+      require conv.recognize(LibraryFixture, request)
+      let fragment = conv.emitFragment(LibraryFixture, request)
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        check action.id != "jsts-npm-ci"
+        check not action.id.startsWith("jsts-esbuild-bundle-")
+        check not action.id.startsWith("jsts-shim-")
+        check action.id != "jsts-test-run"

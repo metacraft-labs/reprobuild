@@ -1,21 +1,24 @@
 #requires -Version 5
-# End-to-end M16 verification: build the TypeScript CLI example via the
-# Tier 2b dispatch path and assert the produced ``dist/bin/cli.js`` runs.
+# End-to-end M21 verification: build the TypeScript CLI example via the
+# Tier 2b dispatch path and assert the produced launcher shim runs.
 #
-# **Scope at M16**: the JS/TS convention emits a single whole-project
-# ``npx tsc`` compile that transpiles every ``src/**/*.ts`` (including
-# ``src/bin/cli.ts``) to a matching ``.js``. The hashbang on line 1 of
-# ``cli.ts`` is preserved into ``dist/bin/cli.js`` (tsc copies it
-# verbatim). The Mode A spec's A5 ``esbuild --bundle`` step that would
-# emit a single self-contained bundle per ``bin`` entry is **deferred**;
-# the fixture has no runtime ``node_modules`` deps so the plain
-# transpile is enough to produce a runnable file.
+# **Scope at M21**: the JS/TS convention now emits (in addition to the
+# M16 tsc-compile action):
 #
-# A6 launcher-shim emission (``.cmd`` on Windows / chmod +x on POSIX) is
-# also deferred — this script invokes the produced JS via ``node
-# dist/bin/cli.js`` directly. The package.json's ``"bin"`` map points at
-# ``./dist/bin/cli.js`` so once A6 lands the shim will resolve to that
-# exact file.
+#   * A1 ``npm ci`` — installs ``typescript`` + ``tsx`` + ``esbuild``
+#     into ``<fixture>/node_modules/`` from ``package-lock.json``.
+#   * A5 ``esbuild --bundle src/bin/cli.ts --format=esm --platform=node
+#     --outfile=<scratch>/dist/bin/cli.js --metafile=<...>.meta.json``.
+#   * A6 launcher shim — ``<scratch>/bin/typescript-cli-example.cmd``
+#     (Windows) that exec-spawns ``node <bundle> %*``.
+#
+# This script asserts:
+#   1. The build's bundle ``dist/bin/cli.js`` exists.
+#   2. The esbuild metafile ``dist/bin/cli.js.meta.json`` exists.
+#   3. The Windows ``.cmd`` shim exists under ``<scratch>/bin/``.
+#   4. Invoking the shim directly via ``& <path>.cmd`` prints the
+#      expected greeting (load-bearing — proves the launcher works end
+#      to end, not just that the file is on disk).
 #
 # Mechanics:
 #
@@ -24,9 +27,8 @@
 #   3. Wipe any prior .repro/ scratch.
 #   4. Invoke repro.exe build <fixture>#default.
 #   5. Assert exit code 0.
-#   6. Confirm dist/bin/cli.js exists.
-#   7. Run ``node dist/bin/cli.js`` and assert stdout contains the
-#      expected greeting.
+#   6. Confirm bundle + metafile + shim exist.
+#   7. Run the shim and assert stdout contains the expected greeting.
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\..\env.ps1"
@@ -129,8 +131,9 @@ if ($exitCode -ne 0) {
   exit 1
 }
 
-# --- step 3: assert dist/bin/cli.js exists ---
-$expectedJs = Join-Path $expectedDistDir 'bin\cli.js'
+# --- step 3: assert dist/bin/cli.js + metafile exist (M21 A5) ---
+$expectedJs       = Join-Path $expectedDistDir 'bin\cli.js'
+$expectedMetafile = Join-Path $expectedDistDir 'bin\cli.js.meta.json'
 if (-not (Test-Path -LiteralPath $expectedJs)) {
   Write-Host "FAIL: missing $expectedJs"
   Write-Host "--- recursive contents of ${expectedDistDir}:"
@@ -142,23 +145,46 @@ if (-not (Test-Path -LiteralPath $expectedJs)) {
   }
   exit 1
 }
-Write-Host "produced: $expectedJs"
+if (-not (Test-Path -LiteralPath $expectedMetafile)) {
+  Write-Host "FAIL: missing esbuild metafile $expectedMetafile"
+  exit 1
+}
+Write-Host "produced bundle:   $expectedJs"
+Write-Host "produced metafile: $expectedMetafile"
 
-# --- step 4: run the CLI and assert greeting ---
-$cliOutput = & $nodeCmd.Source $expectedJs 2>&1
+# --- step 4: assert .cmd shim exists (M21 A6) ---
+$expectedShimDir = Join-Path $fixture '.repro\build\bin'
+$expectedShim    = Join-Path $expectedShimDir 'typescript-cli-example.cmd'
+if (-not (Test-Path -LiteralPath $expectedShim)) {
+  Write-Host "FAIL: missing launcher shim $expectedShim"
+  Write-Host "--- contents of ${expectedShimDir}:"
+  if (Test-Path -LiteralPath $expectedShimDir) {
+    Get-ChildItem -LiteralPath $expectedShimDir -ErrorAction SilentlyContinue |
+      ForEach-Object { Write-Host "  $($_.FullName)  $($_.Length) bytes" }
+  } else {
+    Write-Host "  (shim dir does not exist)"
+  }
+  exit 1
+}
+Write-Host "produced shim:     $expectedShim"
+Write-Host "--- shim contents:"
+Get-Content -LiteralPath $expectedShim | ForEach-Object { Write-Host "  $_" }
+
+# --- step 5: run the shim and assert greeting (M21 A6 load-bearing) ---
+$cliOutput = & $expectedShim 2>&1
 $cliExit = $LASTEXITCODE
 $cliText = ($cliOutput | Out-String).Trim()
-Write-Host "--- node $expectedJs output:"
+Write-Host "--- shim invocation output:"
 Write-Host $cliText
 if ($cliExit -ne 0) {
-  Write-Host "FAIL: 'node $expectedJs' exited $cliExit"
+  Write-Host "FAIL: shim '$expectedShim' exited $cliExit"
   exit 1
 }
 if ($cliText -notmatch 'hello from typescript-cli-example') {
-  Write-Host "FAIL: CLI stdout missing 'hello from typescript-cli-example'; got: $cliText"
+  Write-Host "FAIL: shim stdout missing 'hello from typescript-cli-example'; got: $cliText"
   exit 1
 }
 
 Write-Host ""
-Write-Host "PASS: javascript-typescript/typescript-cli built via standard provider; node dist/bin/cli.js prints the expected greeting"
+Write-Host "PASS: javascript-typescript/typescript-cli built via standard provider; .cmd shim runs and prints the expected greeting"
 exit 0

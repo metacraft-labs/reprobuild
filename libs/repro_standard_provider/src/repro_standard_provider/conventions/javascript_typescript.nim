@@ -11,8 +11,53 @@
 ## (A1 npm ci, A2 per-``.ts`` swc/esbuild transform, A3 whole-project
 ## ``tsc --emitDeclarationOnly``, A4 ``tsc --noEmit`` typecheck,
 ## A5 per-bin ``esbuild --bundle``, A6 dist assembly, A7 per-test-file
-## ``node --test --import=tsx``). The M16 surface focuses on the headline
-## "fixtures build to a runnable artifact":
+## ``node --test --import=tsx``).
+##
+## **M21 graduations** (this milestone closes M16's deferred sub-graphs):
+##
+##   * **A1 npm ci** — when ``<projectRoot>/package-lock.json`` exists, the
+##     convention emits a single ``npm ci --prefer-offline --no-audit
+##     --no-fund --no-progress`` action BEFORE the tsc action. The action
+##     declares ``package.json`` + ``package-lock.json`` as inputs, lists
+##     ``node_modules/`` as an opaque directory output, and uses
+##     ``automaticMonitorPolicy()`` because npm reads many internal files
+##     that aren't worth enumerating. Downstream actions (tsc, esbuild)
+##     list this action's id in their ``deps`` so the engine orders the
+##     install before any consumer. When the lockfile is ABSENT the
+##     convention falls back to the M16 ``npx --yes --package
+##     typescript@5.6 tsc`` on-demand path.
+##
+##   * **A5 per-bin esbuild bundle** — for each entry in ``package.json``'s
+##     ``"bin"`` map, the convention emits an ``esbuild --bundle <entry>
+##     --format=esm --platform=node --outfile=<dist/bin/<name>.js>
+##     --metafile=<dist/bin/<name>.js.meta.json>`` action. The metafile
+##     lists every file esbuild touched; future incremental rebuild logic
+##     can consume it for dep capture. The tsc action still runs (whole-
+##     project type-check + ``.d.ts`` emit) but produces ``.js`` outputs
+##     into a separate ``--outDir <scratch>/tsc-out`` so the per-bin
+##     esbuild bundle (which writes into ``<scratch>/dist/bin/``) is the
+##     authoritative consumer-runnable artefact.
+##
+##   * **A6 launcher shim** — for each bin entry, after esbuild produces
+##     the bundle, the convention emits an ``fs.writeText`` shim action
+##     under ``<scratch>/bin/<name>.cmd`` (Windows) or ``<scratch>/bin/
+##     <name>`` (POSIX, hashbang + chmod-equivalent). The shim invokes
+##     ``node "<dist/bin/<name>.js>" %*`` (Windows) / ``node
+##     "<dist/bin/<name>.js>" "$@"`` (POSIX). The validate scripts run
+##     the shim directly to prove the convention's runnable artefact
+##     surface, not just the bundled JS.
+##
+##   * **A7 test runner** — the convention discovers ``test/**/*.test.{ts,
+##     js}`` (and ``src/**/*.test.{ts,js}``, though the M21 fixtures keep
+##     tests under ``test/`` only) and emits a single ``node --test
+##     --import=tsx <test files>`` action under a NON-DEFAULT ``test``
+##     target. ``repro build .#test`` builds the test target; the default
+##     target stays bundle+shim-only. When the fixture has zero test
+##     files the test target isn't emitted (current behaviour is
+##     unchanged for the typescript-library + node-server fixtures).
+##
+## The M16 surface focuses on the headline "fixtures build to a runnable
+## artifact":
 ##
 ##   * **TypeScript library / Node application**: a single
 ##     ``npx tsc -p tsconfig.json`` action compiles every ``.ts`` to a
@@ -600,6 +645,11 @@ proc npxExecutable(): string =
   ## declare it locally.
   findExe("npx")
 
+proc npmExecutable(): string =
+  ## Resolve ``npm`` on PATH or return ``""``. M21 A1 routes the dependency
+  ## install through ``npm ci`` when a ``package-lock.json`` is present.
+  findExe("npm")
+
 proc hasModeBConfig(projectRoot: string): bool =
   for name in ModeBConfigFiles:
     if fileExists(extendedPath(projectRoot / name)):
@@ -724,7 +774,8 @@ proc emitTscCompileAction(projectRoot, npxExe: string;
                           tsSources, jsSources: seq[string];
                           tsConfigPath: string;
                           distDir: string;
-                          expectedOutputs: seq[string]):
+                          expectedOutputs: seq[string];
+                          deps: seq[string] = @[]):
                             BuildActionDef =
   ## Emit the single ``npx tsc -p tsconfig.json --outDir <distDir>``
   ## action. ``--outDir`` on the command line wins over the
@@ -762,6 +813,7 @@ proc emitTscCompileAction(projectRoot, npxExe: string;
   let action = buildAction(
     id = "jsts-tsc-compile",
     call = inlineExecCall(argv, projectRoot),
+    deps = deps,
     inputs = inputs,
     outputs = expectedOutputs,
     pool = "compile",
@@ -801,6 +853,252 @@ proc predictedTscOutputs(projectRoot, distDir: string;
     result.add(distDir / (stem & ".d.ts"))
   discard jsSources  # reserved — see comment above
   result.sort(system.cmp[string])
+
+proc hasLockfile(projectRoot: string): bool =
+  ## M21 A1 gate: ``npm ci`` requires a ``package-lock.json`` (or
+  ## ``npm-shrinkwrap.json``) at the project root. The convention only
+  ## emits the A1 action when this gate fires; absent a lockfile the
+  ## M16 ``npx --yes`` on-demand path remains in effect.
+  fileExists(extendedPath(projectRoot / "package-lock.json")) or
+    fileExists(extendedPath(projectRoot / "npm-shrinkwrap.json"))
+
+proc emitNpmCiAction(projectRoot, npmExe: string): BuildActionDef =
+  ## M21 A1: emit the dep-install action. ``npm ci`` is preferred over
+  ## ``npm install`` because it bypasses the dependency solver and
+  ## installs the exact tree the lockfile records. Flags:
+  ##
+  ##   * ``--prefer-offline`` — use the local npm cache when entries
+  ##     exist; only hit the network for misses. Cheap on warm runs.
+  ##   * ``--no-audit`` — skip the post-install vulnerability scan
+  ##     (would phone home; not part of the build contract).
+  ##   * ``--no-fund`` — skip the "please fund us" footer printed to
+  ##     stdout. Reduces noise in repro logs.
+  ##   * ``--no-progress`` — disable the progress bar (TTY mangling
+  ##     under captured output).
+  ##
+  ## The action's declared output is the ``node_modules/`` directory at
+  ## the project root. The engine treats directory outputs opaquely —
+  ## the action's success condition is "directory exists after the
+  ## command runs"; individual file enumeration happens via
+  ## ``automaticMonitorPolicy()`` (the FS-snoop attaches the actually-
+  ## read/written file set after the fact). Consumer actions (tsc,
+  ## esbuild) reference the action's id in their ``deps``.
+  let nodeModulesDir = projectRoot / "node_modules"
+  let argv = @[
+    npmExe,
+    "ci",
+    "--prefer-offline",
+    "--no-audit",
+    "--no-fund",
+    "--no-progress",
+  ]
+  let inputs = @[
+    projectRoot / "package.json",
+    projectRoot / "package-lock.json",
+  ]
+  buildAction(
+    id = "jsts-npm-ci",
+    call = inlineExecCall(argv, projectRoot),
+    inputs = inputs,
+    outputs = @[nodeModulesDir],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "jsts.npm-ci")
+
+proc deriveEntrySourceForBin(projectRoot: string;
+                             binTarget: string): string =
+  ## Map a ``"bin": { "<name>": "./dist/bin/<x>.js" }`` value back to
+  ## the corresponding ``src/bin/<x>.ts`` (preferred) or ``src/bin/<x>.js``
+  ## source. Returns ``""`` when no source candidate exists on disk.
+  let normalised = binTarget.replace('\\', '/')
+  var stem = normalised
+  if stem.startsWith("./"):
+    stem = stem[2 .. ^1]
+  if stem.startsWith("dist/"):
+    stem = stem[5 .. ^1]
+  if stem.endsWith(".js"):
+    stem = stem[0 ..< stem.len - 3]
+  elif stem.endsWith(".mjs"):
+    stem = stem[0 ..< stem.len - 4]
+  let tsCandidate = projectRoot / "src" / stem & ".ts"
+  if fileExists(extendedPath(tsCandidate)):
+    return tsCandidate
+  let jsCandidate = projectRoot / "src" / stem & ".js"
+  if fileExists(extendedPath(jsCandidate)):
+    return jsCandidate
+  ""
+
+proc emitEsbuildAction(projectRoot, npxExe, entrySource, outFile,
+                       metafile: string;
+                       binName: string;
+                       deps: seq[string]): BuildActionDef =
+  ## M21 A5: emit one ``esbuild --bundle`` action per ``"bin"`` entry.
+  ## The bundle collapses the entry source + every transitive import
+  ## (from ``node_modules/`` and the rest of ``src/``) into a single
+  ## self-contained ``.js`` file.
+  ##
+  ## Routed through ``npx --yes esbuild@0.24.0`` so the convention works
+  ## both with a ``devDependency`` pin (``npm ci`` installed the matching
+  ## bin under ``node_modules/.bin/esbuild``; npx prefers it) and on a
+  ## fresh checkout that never ran ``npm ci`` (npx downloads
+  ## ``esbuild@0.24.0`` into ``~/.npm/_npx/...``). The version pin keeps
+  ## the bundle byte-stable across machines.
+  ##
+  ## ``--format=esm`` matches the ``"type": "module"`` package contract.
+  ## ``--platform=node`` keeps node built-ins external (no shimming
+  ## fs/path/etc. into the bundle). ``--metafile`` writes a JSON sidecar
+  ## listing every file esbuild visited; a future incremental rebuild
+  ## pass can consume this for fine-grained dep capture.
+  let argv = @[
+    npxExe,
+    "--yes",
+    "--package", "esbuild@0.24.0",
+    "esbuild",
+    "--bundle",
+    entrySource,
+    "--format=esm",
+    "--platform=node",
+    "--outfile=" & outFile,
+    "--metafile=" & metafile,
+  ]
+  buildAction(
+    id = "jsts-esbuild-bundle-" & sanitizeNamePart(binName),
+    call = inlineExecCall(argv, projectRoot),
+    deps = deps,
+    inputs = @[entrySource, projectRoot / "package.json"],
+    outputs = @[outFile, metafile],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "jsts.esbuild-bundle")
+
+proc renderWindowsShim(bundlePath: string): string {.used.} =
+  ## Render a ``.cmd`` launcher that ``node``-spawns ``bundlePath`` and
+  ## forwards all command-line arguments. ``%*`` expands to the full
+  ## argv after the script name. Quoted to handle paths with spaces.
+  ## Uses ``@echo off`` so the shim doesn't echo each command to stdout
+  ## under TTY (matches what npm's bin shims look like).
+  "@echo off\r\nnode \"" & bundlePath.replace('/', '\\') & "\" %*\r\n"
+
+proc renderPosixShim(bundlePath: string): string {.used.} =
+  ## Render a POSIX hashbang shim. The shim exec-replaces itself with
+  ## node so the launcher's process tree is single-level (no shell
+  ## intermediate). ``"$@"`` passthrough quotes embedded spaces in the
+  ## individual argv entries.
+  "#!/usr/bin/env bash\nexec node \"" & bundlePath & "\" \"$@\"\n"
+
+proc shimFilename(binName: string): string =
+  when defined(windows):
+    binName & ".cmd"
+  else:
+    binName
+
+proc emitShimAction(projectRoot, shimDir, bundlePath: string;
+                    binName: string;
+                    esbuildActionId: string):
+                      tuple[action: BuildActionDef; shimPath: string] =
+  ## M21 A6: emit an ``fs.writeText`` action that materialises the
+  ## launcher shim. The shim's text is fully resolved at convention-emit
+  ## time (it embeds the absolute ``bundlePath``); the action exists so
+  ## the engine tracks the file as a declared output and re-creates it
+  ## after a scratch wipe.
+  ##
+  ## ``deps`` references the esbuild action so the engine schedules the
+  ## shim AFTER the bundle is written; otherwise the shim could be
+  ## emitted first and the launcher's target wouldn't exist at the
+  ## moment of writeText (it does on second invocation but the action
+  ## order is determined by the deps graph, not by FS state).
+  let shimPath = shimDir / shimFilename(binName)
+  createDir(extendedPath(parentDir(shimPath)))
+  let text =
+    when defined(windows): renderWindowsShim(bundlePath)
+    else:                  renderPosixShim(bundlePath)
+  let action = fs.writeText(
+    output = shimPath,
+    text = text,
+    actionId = "jsts-shim-" & sanitizeNamePart(binName),
+    deps = [esbuildActionId],
+    commandStatsId = "jsts.shim")
+  (action, shimPath)
+
+proc collectTestFiles(projectRoot: string): seq[string] =
+  ## M21 A7: walk ``<projectRoot>/test/`` and ``<projectRoot>/src/`` for
+  ## files ending in ``.test.ts``, ``.test.tsx``, ``.test.mts``,
+  ## ``.test.cts``, ``.test.js``, ``.test.mjs``, ``.test.cjs``. Files
+  ## under ``node_modules/`` and ``.repro/`` are skipped. The result is
+  ## deterministically sorted so the test-runner action's argv (and
+  ## therefore its cache fingerprint) is stable across emits.
+  let testRoots = @[projectRoot / "test", projectRoot / "src"]
+  for root in testRoots:
+    if not dirExists(extendedPath(root)):
+      continue
+    for entry in walkDirRec(root):
+      let normalised = entry.replace('\\', '/')
+      if "/node_modules/" in normalised:
+        continue
+      if "/.repro/" in normalised:
+        continue
+      let lower = entry.toLowerAscii
+      if lower.endsWith(".test.ts") or lower.endsWith(".test.tsx") or
+         lower.endsWith(".test.mts") or lower.endsWith(".test.cts") or
+         lower.endsWith(".test.js") or lower.endsWith(".test.mjs") or
+         lower.endsWith(".test.cjs"):
+        result.add(entry)
+  result.sort(system.cmp[string])
+
+proc emitTestRunnerAction(projectRoot, nodeExe: string;
+                          testFiles: seq[string];
+                          deps: seq[string]): BuildActionDef =
+  ## M21 A7: emit a single ``node --test --import=tsx <files...>`` action
+  ## that runs every discovered test file under the node test runner with
+  ## the ``tsx`` loader (so ``.test.ts`` files run without a separate
+  ## tsc step).
+  ##
+  ## The action declares the test files as inputs and produces NO file
+  ## outputs (it's a verification action — its success condition is
+  ## ``exit 0``). ``automaticMonitorPolicy()`` covers transitive source
+  ## reads under ``src/`` (the tests typically ``import`` the
+  ## implementation under test).
+  ##
+  ## ``tsx`` is invoked via ``--import=tsx`` (the modern ``--loader``
+  ## replacement) which registers tsx as the ESM loader hook. The
+  ## convention assumes ``tsx`` is installed locally (via ``npm ci``)
+  ## OR globally; the M21 typescript-cli fixture declares it as a
+  ## devDependency so ``npm ci`` makes it available via
+  ## ``node_modules/.bin/tsx``. node's --import resolves bare specifiers
+  ## via Node's module-resolution algorithm so the local install lights
+  ## up automatically.
+  var argv = @[
+    nodeExe,
+    "--test",
+    "--import=tsx",
+  ]
+  for f in testFiles:
+    argv.add(f)
+  var inputs = @[projectRoot / "package.json"]
+  for f in testFiles:
+    inputs.add(f)
+  buildAction(
+    id = "jsts-test-run",
+    call = inlineExecCall(argv, projectRoot),
+    deps = deps,
+    inputs = inputs,
+    outputs = @[],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "jsts.test-run")
+
+proc filteredTscOutputs(rawOutputs: seq[string];
+                        excludedJsOutputs: seq[string]): seq[string] =
+  ## Drop entries in ``excludedJsOutputs`` from ``rawOutputs`` so the
+  ## convention's tsc action doesn't redundantly declare a ``.js`` path
+  ## that an esbuild bundle action also declares (the engine forbids
+  ## two actions declaring the same output). Equality is path-string
+  ## exact match — the predicted outputs and the excluded list are both
+  ## generated by the convention, so the strings line up.
+  for o in rawOutputs:
+    if o in excludedJsOutputs:
+      continue
+    result.add(o)
 
 proc syntheticPackage(projectRoot: string;
                       members: seq[JsTsMember];
@@ -842,8 +1140,9 @@ proc jsTsEmitFragment(projectRoot: string;
                         GraphFragment {.gcsafe.} =
   ## Convention entry — parse ``package.json`` + (optional)
   ## ``tsconfig.json``, classify the project as TS-bearing vs JS-only,
-  ## emit either a single ``npx tsc`` action (TS) or one ``fs.copyFile``
-  ## action per JS source (JS-only). Hand the whole thing to
+  ## emit the appropriate per-action sub-graph (A1 npm-ci + tsc + A5
+  ## esbuild + A6 shim + A7 test runner, or a flat ``fs.copyFile`` per
+  ## JS source for JS-only). Hand the whole thing to
   ## ``buildPackageFragment``.
   {.cast(gcsafe).}:
     let source = readReprobuildSource(projectRoot)
@@ -868,10 +1167,33 @@ proc jsTsEmitFragment(projectRoot: string;
           "PATH; cannot run the tooling")
     let synthetic = syntheticPackage(projectRoot, members, pkg)
     let distDir = distDirFor(projectRoot)
+    let shimDir = scratchPathFor(projectRoot) / "bin"
+    let testFiles = collectTestFiles(projectRoot)
+    let projectHasLockfile = hasLockfile(projectRoot)
     createDir(extendedPath(distDir))
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]
+      var testActions: seq[BuildActionDef] = @[]
+
+      # M21 A1: npm ci action — only when a lockfile is present. The
+      # action's id is referenced by every downstream consumer's
+      # ``deps`` list so the engine schedules the install first.
+      var npmCiActionId = ""
+      if projectHasLockfile:
+        let npmExe = npmExecutable()
+        if npmExe.len == 0:
+          raise newException(ValueError,
+            "javascript-typescript convention: 'npm' not on PATH; " &
+              "package-lock.json present but cannot run 'npm ci'")
+        let action = emitNpmCiAction(projectRoot, npmExe)
+        allActions.add(action)
+        npmCiActionId = action.id
+
+      var commonDeps: seq[string] = @[]
+      if npmCiActionId.len > 0:
+        commonDeps.add(npmCiActionId)
+
       if tsSources.len > 0:
         if not hasTsConfig:
           raise newException(ValueError,
@@ -883,11 +1205,63 @@ proc jsTsEmitFragment(projectRoot: string;
           raise newException(ValueError,
             "javascript-typescript convention: 'npx' not on PATH; " &
               "cannot resolve tsc for TypeScript compile")
-        let outputs = predictedTscOutputs(projectRoot, distDir,
+
+        # M21: pre-compute which ``.js`` outputs the bin-bundle actions
+        # are about to declare so the tsc action's predicted-output list
+        # can exclude them. tsc still writes the file to disk (no flag
+        # to disable .js emit for a specific source); the engine's
+        # output-declaration uniqueness check only inspects the
+        # declared sets.
+        var binBundleJsOutputs: seq[string] = @[]
+        var binEsbuildPlans: seq[tuple[binName, entrySource, outFile,
+          metafile: string]] = @[]
+        for entry in pkg.binEntries:
+          let entrySource = deriveEntrySourceForBin(projectRoot,
+            entry.target)
+          if entrySource.len == 0:
+            continue
+          # The bundle output mirrors the bin's declared
+          # ``./dist/bin/<x>.js`` location under the convention's scratch.
+          var stem = entry.target.replace('\\', '/')
+          if stem.startsWith("./"):
+            stem = stem[2 .. ^1]
+          if stem.startsWith("dist/"):
+            stem = stem[5 .. ^1]
+          if not stem.endsWith(".js"):
+            stem.add(".js")
+          let outFile = distDir / stem
+          let metafile = outFile & ".meta.json"
+          binBundleJsOutputs.add(outFile)
+          binEsbuildPlans.add((binName: entry.name,
+                               entrySource: entrySource,
+                               outFile: outFile,
+                               metafile: metafile))
+
+        let rawTscOutputs = predictedTscOutputs(projectRoot, distDir,
           tsSources, jsSources)
-        let action = emitTscCompileAction(projectRoot, npxExe,
-          tsSources, jsSources, tsConfigPath, distDir, outputs)
-        allActions.add(action)
+        let tscOutputs = filteredTscOutputs(rawTscOutputs, binBundleJsOutputs)
+
+        let tscAction = emitTscCompileAction(projectRoot, npxExe,
+          tsSources, jsSources, tsConfigPath, distDir, tscOutputs,
+          deps = commonDeps)
+        allActions.add(tscAction)
+
+        # M21 A5 + A6: per-bin esbuild bundle + launcher shim. The
+        # esbuild action depends on the npm-ci action (so the local
+        # ``node_modules/.bin/esbuild`` is available when present) but
+        # NOT on the tsc action — esbuild does its own type-stripping
+        # via the bundler's TS support, so the two run in parallel on
+        # the compile pool.
+        for plan in binEsbuildPlans:
+          createDir(extendedPath(parentDir(plan.outFile)))
+          let esbuildAction = emitEsbuildAction(projectRoot, npxExe,
+            plan.entrySource, plan.outFile, plan.metafile, plan.binName,
+            deps = commonDeps)
+          allActions.add(esbuildAction)
+          let emitted = emitShimAction(projectRoot, shimDir,
+            plan.outFile, plan.binName, esbuildAction.id)
+          allActions.add(emitted.action)
+
       if jsSources.len > 0 and tsSources.len == 0:
         # JS-only: file-copy each .js into dist/. We skip JS copy when
         # TS sources are present because tsc already covers the project
@@ -900,11 +1274,26 @@ proc jsTsEmitFragment(projectRoot: string;
             copyIndex)
           allActions.add(emitted.action)
           inc copyIndex
+
+      # M21 A7: test runner — emit only when the project ships test
+      # files. The test target is non-default; ``repro build .#test``
+      # runs it.
+      if testFiles.len > 0:
+        let testAction = emitTestRunnerAction(projectRoot, nodeExe,
+          testFiles, deps = commonDeps)
+        testActions.add(testAction)
+
       if allActions.len == 0:
         raise newException(ValueError,
           "javascript-typescript convention: produced no actions for " &
             projectRoot)
       defaultTarget(target("default", allActions))
+      if testActions.len > 0:
+        # The test target is independent from the default build target
+        # so ``repro build .#test`` runs without waiting on the
+        # bundle/shim sub-graph. Each test runner action is its own
+        # sub-graph entry; the target alias is purely organisational.
+        discard target("test", testActions)
     result = buildPackageFragment(synthetic, request, registerAll,
       includeDefault = false)
 
