@@ -1121,6 +1121,24 @@ e2e_repro_infra_depends_on_topological:
         tests/e2e/m69/t_e2e_repro_infra_depends_on_topological.nim \
         2>&1 | tee test-logs/e2e_repro_infra_depends_on_topological.log
 
+# M82 Phase C verification gate — pure logic, runs on every host. The
+# DRIFT HALF of `integration_intra_batch_capability_to_service`: the
+# planner's plan-time external-drift detection seen end-to-end across
+# a synthesized cycle (apply -> out-of-band mutator -> re-plan). The
+# capability/service intra-batch half lives in `tools/hyperv-m69-system/`
+# and is run by the reviewer; this gate covers the drift-surface
+# regressions on every CI run without a VM.
+e2e_repro_infra_plan_time_external_drift:
+    mkdir -p test-logs build/test-bin build/nimcache build/test-tmp
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_repro_infra_plan_time_external_drift \
+        --out:build/test-bin/e2e_repro_infra_plan_time_external_drift \
+        tests/e2e/m69/t_e2e_repro_infra_plan_time_external_drift.nim \
+        2>&1 | tee test-logs/e2e_repro_infra_plan_time_external_drift.log
+
 repomix *args:
     mkdir -p {{REPOMIX_OUT_DIR}}
     repomix \

@@ -39,7 +39,17 @@ type
     noPreview: bool
     acceptFeatureDestroy: bool
     acceptPasswdDestroy: bool
-    reconcileDrift: bool
+    reconcileDrift: bool                  ## also set by `--accept-drift`
+    acceptDrift: bool
+      ## M82 Phase C: a plan-time flag. When the planner detects
+      ## external drift since the previously-applied generation,
+      ## passing this flag annotates the drift findings as accepted
+      ## (the apply proceeds under M82 Phase A's live-state-refresh
+      ## model in either case; the flag's effect is the annotation
+      ## that the operator acknowledged the drift). `--reconcile-drift`
+      ## is the spelling `repro system rollback` already accepts;
+      ## under M82 Phase C the two are aliases at plan time so the
+      ## same flag works across `repro infra plan` and rollback.
 
 proc hostIdentity(explicit: string): string =
   if explicit.len > 0:
@@ -86,6 +96,19 @@ proc parseInfraFlags(args: openArray[string]):
     elif a == "--accept-passwd-destroy":
       result.flags.acceptPasswdDestroy = true
     elif a == "--reconcile-drift":
+      # M82 Phase C: at plan time `--reconcile-drift` is an alias for
+      # `--accept-drift` — the planner records "operator acknowledged
+      # external drift" on every finding. The flag retains its original
+      # semantics for `repro system rollback` (where rollback ALWAYS
+      # confirms drift), so we set BOTH bits so the rollback path keeps
+      # working unchanged.
+      result.flags.reconcileDrift = true
+      result.flags.acceptDrift = true
+    elif a == "--accept-drift":
+      # The canonical M82 Phase C spelling. The reconcileDrift bit is
+      # set in lockstep because the rollback path still consumes the
+      # historical name.
+      result.flags.acceptDrift = true
       result.flags.reconcileDrift = true
     elif a.startsWith("--"):
       raise newException(ValueError, "unknown flag: " & a)
@@ -108,9 +131,15 @@ proc runInfraPlan(args: openArray[string]): int =
     return 1
   let profileText = readFile(profilePath)
   let host = hostIdentity(flags.host)
-  let planResult = producePlan(profileText, host)
-  let env = planResult.envelope
   ensureSystemStateDir(stateDir)
+  # M82 Phase C: pass the state dir so the planner can read the
+  # previously-applied generation's recorded `postWriteDigest` per
+  # resource and surface external drift. The `--accept-drift` /
+  # `--reconcile-drift` flag annotates findings as operator-accepted.
+  let planResult = producePlan(profileText, host,
+    opts = PlannerOptions(stateDir: stateDir,
+                          acceptDrift: flags.acceptDrift))
+  let env = planResult.envelope
   writePlanFile(planPath(stateDir, env.planId), env)
 
   echo "repro infra plan"
@@ -127,6 +156,11 @@ proc runInfraPlan(args: openArray[string]): int =
     echo "  (no changes — apply would be a no-op)"
   else:
     echo "  " & $changeCount & " operation(s) would change the system."
+  # M82 Phase C: surface plan-time external drift, if any.
+  let driftText = renderDriftFindings(planResult.driftFindings)
+  if driftText.len > 0:
+    echo ""
+    echo driftText
   # Name the privileged operations and state the single prompt is
   # coming and why (the M81 partition notice).
   let partition = planPartition(profileText, env)
@@ -435,6 +469,17 @@ proc runSystemSync(args: openArray[string]): int =
       "progress (lock held at " & applyLockPath(stateDir) & ").")
     return 1
   defer: releaseApplyLock(stateDir)
+  # M82 Phase C: surface plan-time drift BEFORE the apply runs. `sync`
+  # has `--no-preview` baked in, so we synthesize the same drift output
+  # the explicit `infra plan` flow prints; the apply itself then
+  # proceeds (drift is REPORTED, not blocking).
+  let driftPreview = producePlan(profileText, host,
+    opts = PlannerOptions(stateDir: stateDir,
+                          acceptDrift: flags.acceptDrift))
+  let driftText = renderDriftFindings(driftPreview.driftFindings)
+  if driftText.len > 0:
+    echo driftText
+    echo ""
   var opts: ApplyOptions
   opts.stateDir = stateDir
   opts.hostIdentity = host

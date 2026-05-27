@@ -22,9 +22,11 @@ import std/[algorithm, os, sets, strutils, tables, times]
 import blake3
 import repro_elevation
 
+import ./audit_log
 import ./errors
 import ./plan_envelope
 import ./profile
+import ./state_dir
 
 type
   ResourceObservation* = object
@@ -34,10 +36,83 @@ type
     present*: bool
     observedDigestHex*: string
 
+  DriftClassification* = enum
+    ## M82 Phase C: classification of plan-time external drift.
+    ##
+    ## The planner compares THREE digests for each resource:
+    ##
+    ##   * `recorded`  — the `postWriteDigest` from the previously-
+    ##                   applied generation's audit log (RBSL record).
+    ##                   Absent for a first-ever apply.
+    ##   * `observed`  — the live state the planner just observed.
+    ##   * `desired`   — the digest derived from the current profile.
+    ##
+    ## With `recorded` present and `recorded != observed`, two cases
+    ## emerge:
+    dcInformational = "informational"
+      ## The world changed since the last apply, BUT it now matches
+      ## desired. Surface as a heads-up; the apply will no-op the
+      ## resource. (E.g. an operator manually applied the same change
+      ## the profile asks for.)
+    dcActionable = "actionable"
+      ## The world changed since the last apply AND it does not match
+      ## desired either. A third party modified state out of band.
+      ## The apply will overwrite the third-party change with the
+      ## profile's desired state. The operator should review.
+
+  DriftFinding* = object
+    ## One per-resource plan-time external-drift finding (M82 Phase C).
+    ## A `DriftFinding` is REPORTING ONLY: its presence does NOT cause
+    ## the planner to refuse a plan. Operator-facing flags
+    ## (`--accept-drift` / `--reconcile-drift`) translate findings into
+    ## a plan-time baseline rewrite; a future `--strict-no-drift` flag
+    ## (not yet wired) would refuse plan emission.
+    address*: string
+    kind*: string                          ## resource kindTag
+    recordedDigestHex*: string             ## previously-applied postWriteDigest
+    observedDigestHex*: string             ## live digest the planner just saw
+    desiredDigestHex*: string              ## desired digest from the profile
+    classification*: DriftClassification
+    accepted*: bool
+      ## True when `--accept-drift` / `--reconcile-drift` was supplied
+      ## at plan time and the planner rewrote the plan's baseline to
+      ## the observed state. The finding is still emitted (so the audit
+      ## log + plan output record what was accepted), but the plan
+      ## itself proceeds as if the new state were the recorded baseline.
+
+  PlannerOptions* = object
+    ## M82 Phase C: knobs that influence `producePlan`'s drift handling.
+    ## All fields default to the conservative behavior — drift is
+    ## SURFACED in `result.driftFindings` but never blocks plan
+    ## emission, and the plan's baselines reflect what the planner
+    ## observed (which is what apply-time live-state refresh needs
+    ## per M82 Phase A).
+    stateDir*: string
+      ## When non-empty, the planner reads the previously-applied
+      ## generation's RBSL audit log and uses its per-resource
+      ## `postWriteDigest` as the `recorded` digest for drift
+      ## comparison. An empty `stateDir`, or a state dir with no
+      ## active generation, means "first apply ever" — no drift
+      ## comparison is performed.
+    acceptDrift*: bool
+      ## The plan-time `--accept-drift` / `--reconcile-drift` flag.
+      ## When set, every actionable `DriftFinding` is marked
+      ## `accepted = true` for the audit record; functionally the
+      ## planner's baseline ALWAYS reflects the observed state under
+      ## M82 Phase A's live-state-refresh model, so the flag's
+      ## behavior is symmetric with the no-flag case — the difference
+      ## is the annotation, which lets `repro infra apply` and the
+      ## RBSL audit log record whether the operator acknowledged the
+      ## drift or simply did not see it.
+
   PlanResult* = object
     ## The full output of `repro infra plan`.
     envelope*: PlanEnvelope
     observations*: seq[ResourceObservation]
+    driftFindings*: seq[DriftFinding]
+      ## M82 Phase C: per-resource plan-time external-drift findings.
+      ## Emitted even when no flag is set; consumed by the CLI for
+      ## human-readable output and (transitively) the RBSL audit log.
 
 proc digestProfileText*(profileText: string): string =
   ## BLAKE3 hex of the raw profile text — pins the plan to the exact
@@ -399,11 +474,95 @@ proc topologicallyOrder*(profile: SystemProfile;
     raisePlanCyclicDependency(traceCycle(profile, graph, inDegree))
 
 # ---------------------------------------------------------------------------
+# M82 Phase C — plan-time external drift detection.
+#
+# Per Planner-Apply-Refresh-Model.md "Layer 2 — External drift at plan
+# time": the planner reads the previously-applied generation's recorded
+# state and compares it against current observation. The recorded state
+# lives in the RBSL audit log of the active generation; the
+# `postWriteDigest` of the most recent record per resource address is
+# the "what we LAST left it at" digest. (M62/M63/M68 home-scope and
+# M69 system-scope manifests already record this; M82 Phase C READS
+# it without changing the on-disk format.)
+#
+# The classification is a three-way digest comparison:
+#
+#   * recorded == observed                    -> no drift
+#   * recorded != observed AND observed == desired
+#                                             -> informational drift
+#                                                (world changed, but
+#                                                 the change agrees
+#                                                 with the profile)
+#   * recorded != observed AND observed != desired
+#                                             -> actionable drift
+#                                                (third-party out-of-band
+#                                                 modification; the apply
+#                                                 will overwrite it)
+#   * recorded absent (first apply ever)      -> no drift
+#
+# The drift findings are REPORTED in the `PlanResult` — they do not
+# block plan emission. A future `--strict-no-drift` flag (not yet
+# wired; the hook is `PlannerOptions.acceptDrift`) would refuse plan
+# emission when an actionable finding is present.
+# ---------------------------------------------------------------------------
+
+proc loadRecordedDigests*(stateDir: string): Table[string, string] =
+  ## Return the per-resource `postWriteDigest` of the most-recent
+  ## record (the "what we LAST left it at" snapshot) for the active
+  ## generation in `stateDir`. An empty result is returned for:
+  ##
+  ##   * an empty `stateDir`;
+  ##   * a state dir with no `current` pointer (first apply ever);
+  ##   * a state dir whose active generation has no apply.log yet.
+  ##
+  ## A corrupt or unreadable log degrades silently to "no recorded
+  ## state" — drift detection is advisory and the alternative would be
+  ## an unrecoverable plan-time failure on an audit-log issue
+  ## orthogonal to the planner's purpose.
+  if stateDir.len == 0:
+    return
+  let genId = readCurrentGenerationId(stateDir)
+  if genId.len == 0:
+    return
+  let logPath = applyLogPath(stateDir, genId)
+  if not fileExists(logPath):
+    return
+  var records: AuditReadResult
+  try:
+    records = readAuditLog(logPath)
+  except EAuditLogCorrupt:
+    return                                # advisory; degrade silently
+  except CatchableError:
+    return
+  for rec in records.records:
+    if rec.resourceAddress.len == 0:
+      continue
+    # `appendAuditRecord` is append-only; later records for the same
+    # address (e.g. a re-apply that turned a no-op into an applied)
+    # overwrite earlier ones — that matches the desired "what we LAST
+    # left it at" semantics.
+    result[rec.resourceAddress] = rec.postDigestHex
+
+proc classifyDrift*(recorded, observed, desired: string): DriftClassification =
+  ## Pure three-way digest comparison. The caller has already filtered
+  ## out the "no recorded state" case (a first apply ever); both
+  ## non-drift outcomes (`recorded == observed`, and the "no recorded
+  ## state" case the caller handles) yield no `DriftFinding` and are
+  ## therefore not represented in the enum. This proc is only invoked
+  ## when `recorded != observed`, where exactly two classifications
+  ## remain.
+  if observed == desired:
+    dcInformational
+  else:
+    dcActionable
+
+# ---------------------------------------------------------------------------
 # The planner.
 # ---------------------------------------------------------------------------
 
 proc producePlan*(profileText: string; hostIdentity: string;
-                  now: int64 = -1): PlanResult =
+                  now: int64 = -1;
+                  opts = PlannerOptions()): PlanResult =
   ## Build a plan from a `system.nim` profile text. Parses the
   ## profile, observes every resource's live state, decides per-
   ## resource actions, builds the M82 Phase B dependency graph
@@ -416,11 +575,24 @@ proc producePlan*(profileText: string; hostIdentity: string;
   ## is byte-comparable across runs of the same profile text. A cycle
   ## in the graph raises `EPlanCyclicDependency` with the cycle's
   ## resource-address path.
+  ##
+  ## M82 Phase C: when `opts.stateDir` points at a previously-applied
+  ## generation, the planner additionally compares each resource's
+  ## recorded `postWriteDigest` (from the active generation's RBSL
+  ## audit log) against current observation and surfaces external
+  ## drift in `result.driftFindings`. The findings are REPORTING
+  ## ONLY — they do not block plan emission. `opts.acceptDrift`
+  ## annotates the findings with `accepted = true` so the audit
+  ## record shows the operator acknowledged the drift; the plan's
+  ## baselines reflect the observed state in either case (M82
+  ## Phase A's live-state-refresh model means the recorded baseline
+  ## is advisory, not load-bearing, at apply time).
   let profile = parseSystemProfile(profileText)
   let graph = buildDependencyGraph(profile)
   let order = topologicallyOrder(profile, graph)
   let createdTs = if now >= 0: now else: getTime().toUnix()
   let profileDigest = digestProfileText(profileText)
+  let recordedDigests = loadRecordedDigests(opts.stateDir)
   var env: PlanEnvelope
   env.schemaVersion = PlanSchemaVersion
   env.createdTimestamp = createdTs
@@ -441,8 +613,63 @@ proc producePlan*(profileText: string; hostIdentity: string;
       baselineDigestHex: obs.observedDigestHex,
       desiredDigestHex: desired,
       summary: summaryLine(r, action)))
+    # Drift detection — M82 Phase C. Skip on no-recorded-state (first
+    # apply, missing audit entry). Skip when recorded == observed
+    # (the world matches what we LAST left it at).
+    if r.address in recordedDigests:
+      let recorded = recordedDigests[r.address]
+      if recorded.len > 0 and recorded != obs.observedDigestHex:
+        result.driftFindings.add(DriftFinding(
+          address: r.address,
+          kind: $op.kind,
+          recordedDigestHex: recorded,
+          observedDigestHex: obs.observedDigestHex,
+          desiredDigestHex: desired,
+          classification: classifyDrift(recorded, obs.observedDigestHex,
+                                        desired),
+          accepted: opts.acceptDrift))
   env.planId = computePlanId(profileDigest, hostIdentity, createdTs)
   result.envelope = env
+
+# ---------------------------------------------------------------------------
+# Human-readable drift output (CLI surface).
+# ---------------------------------------------------------------------------
+
+proc renderDriftFindings*(findings: seq[DriftFinding]): string =
+  ## Format a non-empty `driftFindings` seq into the lines
+  ## `repro infra plan` / `repro system sync` print verbatim. Empty
+  ## input yields an empty string so the caller can guard on length.
+  if findings.len == 0:
+    return ""
+  var lines: seq[string]
+  var actionable = 0
+  var informational = 0
+  for f in findings:
+    if f.classification == dcActionable: inc actionable
+    else: inc informational
+  lines.add("External drift detected since the previously-applied " &
+    "generation:")
+  for f in findings:
+    let label =
+      case f.classification
+      of dcActionable: "actionable"
+      of dcInformational: "informational"
+    let acc = if f.accepted: " (accepted via --accept-drift)" else: ""
+    lines.add("  - " & f.address & "  [" & label & "]" & acc)
+    lines.add("      kind     : " & f.kind)
+    lines.add("      recorded : " & f.recordedDigestHex)
+    lines.add("      observed : " & f.observedDigestHex)
+    lines.add("      desired  : " & f.desiredDigestHex)
+  if actionable > 0:
+    lines.add("  " & $actionable & " actionable drift finding(s) — " &
+      "review before re-running `repro infra apply`.")
+    lines.add("  Pass --accept-drift to acknowledge the drift; the " &
+      "apply will overwrite it with the profile's desired state.")
+  if informational > 0:
+    lines.add("  " & $informational & " informational drift finding(s) — " &
+      "the world changed but already matches desired; the apply " &
+      "will no-op these.")
+  lines.join("\n")
 
 # ---------------------------------------------------------------------------
 # Plan -> partition. The privileged operations the broker (or the

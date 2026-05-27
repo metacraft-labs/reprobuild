@@ -189,7 +189,13 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       raisePlanStale(opts.planId, stale)
   else:
     # No plan id: compute a fresh plan and proceed without preview.
-    let fresh = producePlan(profileText, opts.hostIdentity)
+    # M82 Phase C: pass the state dir so the planner can detect
+    # plan-time external drift. The drift findings are advisory at
+    # apply time — the per-driver post-apply re-probe (M82 Phase A)
+    # is the integrity check.
+    let fresh = producePlan(profileText, opts.hostIdentity,
+      opts = PlannerOptions(stateDir: opts.stateDir,
+                            acceptDrift: false))
     env = fresh.envelope
     # Persist the fresh plan so the apply is auditable by id.
     writePlanFile(planPath(opts.stateDir, env.planId), env)

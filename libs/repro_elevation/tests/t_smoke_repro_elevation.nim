@@ -233,42 +233,56 @@ suite "repro_elevation: fixture file driver + drift contract":
     check readFile(targetPath) == "settled content"
 
   test "broker fails closed on a drifted file":
-    # M82 Phase A removes the dispatch-layer apply-time drift gate that
-    # this test exercises (the `raiseBrokerDrift` on
-    # observed != recorded-baseline AND observed != desired in
-    # `dispatch.dispatchOperation`). The contract it documents — refuse
-    # to overwrite a third-party out-of-band edit — does NOT go away;
-    # it migrates to plan time per Planner-Apply-Refresh-Model.md and
-    # the M82 milestone entry: `repro infra plan` / `repro home plan`
-    # will compare observed state against the previously-applied
-    # generation's recorded state and surface external drift with a
-    # user-confirmation flow before any apply runs. The integrity
-    # check at apply time is the driver's post-apply re-probe (the
-    # `applyWindowsService` precedent from `f19a0ed`, extended to the
-    # rest of the system-scope drivers in M82 Phase A Deliverable 1).
-    # This test is preserved (not deleted) because it documents the
-    # contract; it migrates to plan-time external-drift detection in
-    # M82 Phase C.
-    skip()
-    # Phase A removes apply-time drift gate; this scenario migrates to
-    # plan-time external-drift detection in M82 Phase C.
-    when false:
-      let prefix = createTempDir("repro-elev-unit-", "")
-      defer: removeDir(prefix)
-      let ctx = FixtureContext(filePrefix: prefix)
-      let op = PrivilegedOperation(kind: pokFixtureFile, address: "f2",
-        fileRelPath: "data.txt", fileContent: "desired content")
-      # The plan's baseline says the target held "plan-time content".
-      let planBaseline = desiredDigestHex(PrivilegedOperation(
-        kind: pokFixtureFile, address: "f2", fileRelPath: "data.txt",
-        fileContent: "plan-time content"))
-      # But the real world now holds something a third party changed.
-      writeFile(prefix / "data.txt", "a hostile out-of-band edit")
-      expect EBrokerDrift:
-        discard dispatchOperation(ctx,
-          PlannedOperation(operation: op, baselineDigestHex: planBaseline))
-      # The drifted file was NOT overwritten.
-      check readFile(prefix / "data.txt") == "a hostile out-of-band edit"
+    # M82 Phase C migration of the original "broker fails closed on a
+    # drifted file" assertion. Phase A removed the apply-time drift
+    # gate (`raiseBrokerDrift` on observed != recorded baseline AND
+    # observed != desired in `dispatch.dispatchOperation`) — that
+    # apply-time fail-closed behavior is GONE. Phase C re-homes the
+    # contract at plan time: the planner classifies a third-party
+    # out-of-band edit as ACTIONABLE drift, the user sees it in the
+    # plan output, and decides whether to proceed. The test exercises
+    # the new plan-time surface: drift a previously-applied file
+    # out-of-band, run the planner, and assert that the planner reports
+    # an actionable `DriftFinding` for the address — the very signal
+    # the apply-time gate used to translate into `EBrokerDrift`.
+    #
+    # The fixture-file driver is too narrow to drive the M82-Phase-C
+    # `repro_infra.producePlan` API (it has no `fs.systemFile`
+    # observation backing). The end-to-end plan-time-drift assertion
+    # therefore lives in the new integration test under
+    # `tests/e2e/m69/t_e2e_repro_infra_plan_time_external_drift.nim`,
+    # which drives the real planner against `fs.systemFile` resources
+    # whose observed digest is read from disk. This unit-level test
+    # documents the migration and asserts the apply-time path is now
+    # the "observe, apply, re-probe" loop with no plan-time-baseline
+    # gate — so the third-party edit is NOT silently preserved at
+    # dispatch time (the integrity check moved to the driver's
+    # post-apply re-probe).
+    let prefix = createTempDir("repro-elev-unit-", "")
+    defer: removeDir(prefix)
+    let ctx = FixtureContext(filePrefix: prefix)
+    let op = PrivilegedOperation(kind: pokFixtureFile, address: "f2",
+      fileRelPath: "data.txt", fileContent: "desired content")
+    # The plan's baseline says the target held "plan-time content"
+    # (the historic apply-time-baseline drift trigger).
+    let planBaseline = desiredDigestHex(PrivilegedOperation(
+      kind: pokFixtureFile, address: "f2", fileRelPath: "data.txt",
+      fileContent: "plan-time content"))
+    # The real world now holds something a third party changed.
+    writeFile(prefix / "data.txt", "a hostile out-of-band edit")
+    let r = dispatchOperation(ctx,
+      PlannedOperation(operation: op, baselineDigestHex: planBaseline))
+    # M82 Phase A contract: the dispatch layer no longer fails closed
+    # on the plan-time-baseline mismatch. It re-observes, sees
+    # observed != desired, applies, and re-probes. The post-apply
+    # re-probe confirms `desired content` landed; the third-party
+    # edit was overwritten. Plan-time drift detection (the test in
+    # `tests/e2e/m69/t_e2e_repro_infra_plan_time_external_drift.nim`)
+    # is what gives the operator a chance to STOP this apply before
+    # it runs — that is the protection the original apply-time gate
+    # was approximating, now correctly homed at plan time.
+    check r.outcome == doApplied
+    check readFile(prefix / "data.txt") == "desired content"
 
   test "an apply that needs to update the live state proceeds":
     # Pre-M82-Phase-A this test was titled "a safe update
