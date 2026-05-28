@@ -30,6 +30,7 @@ import ./drivers/managed_block
 import ./drivers/registry
 import ./drivers/shell_integration
 import ./drivers/systemd_user
+import ./drivers/user_file
 import ./drivers/windows_startup
 import ./lifecycle
 import ./manifest_record
@@ -102,6 +103,8 @@ proc observeResource*(r: Resource): ObservedState =
     return observeUserDefault(r.defaultsDomain, r.defaultsKey)
   of rkLaunchdUserAgent:
     return observeLaunchAgent(getHomeDir(), r.launchdLabel)
+  of rkFsUserFile:
+    return observeUserFile(r.userFileHostPath)
 
 proc observeRecorded*(address: string; binding: RecordedBinding):
     ObservedState =
@@ -171,6 +174,10 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
       return observeLaunchAgent(getHomeDir(), binding.resourceId[prefix.len .. ^1])
     result.present = false
     result.digest = zeroDigest()
+  of rkFsUserFile:
+    # The resourceId IS the resolved host path verbatim (no suffix),
+    # per `realWorldIdentity`. Probe the file directly.
+    return observeUserFile(binding.resourceId)
   discard address
 
 # ---------------------------------------------------------------------------

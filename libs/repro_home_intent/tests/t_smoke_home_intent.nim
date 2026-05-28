@@ -255,3 +255,81 @@ profile "x":
     check "git" in cfg.overrides
     check "userName" in cfg.overrides["git"]
     check cfg.inertOverrides.len == 0
+
+  # ---------------------------------------------------------------------
+  # fs.userFile resource kind acceptance — the parser must accept the
+  # new home-scope kind in `KnownResourceKinds` and refuse a typo'd
+  # variant (`fs.userFiles`). The parser does NOT validate the per-kind
+  # attribute closed-set today; that lives in `resourceFromEntry` in
+  # the apply pipeline (where the dispatch knows which kind requires
+  # which attributes). The parser exists to ensure the SHAPE compiles.
+  # ---------------------------------------------------------------------
+
+  test "fs.userFile: parser accepts a minimal stanza":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    fs.userFile gpgConf:
+      hostFile = "~/.gnupg/gpg.conf"
+      content = "default-key F8A8\nkeyserver hkps://keys.openpgp.org\n"
+      mode = "0600"
+"""
+    let dir = createTempDir("repro-home-userfile-accept-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    let prof = loadProfile(path)
+    # No exception — the parser recognized the kind. The body of the
+    # stanza is preserved as raw nkResourceAttr lines; no per-kind
+    # validation here.
+    check prof.root.kind == nkProfileRoot
+
+  test "fs.userFile: parser rejects a typo'd kind":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    fs.userFiles bad:
+      hostFile = "~/x"
+      content = "y"
+"""
+    let dir = createTempDir("repro-home-userfile-typo-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    expect EUnstructured:
+      discard loadProfile(path)
+
+  test "fs.userFile: parser accepts the executable shorthand attribute":
+    # `executable = true` is just one more attribute key — the parser
+    # accepts ANY `<key> = <value>` line, with the per-kind closed-set
+    # enforced downstream in `resourceFromEntry`.
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    fs.userFile codexWrapper:
+      hostFile = "~/.local/bin/codex-no-sandbox"
+      content = "#!/usr/bin/env bash\nexec codex --no-sandbox \"$@\"\n"
+      mode = "0755"
+      executable = true
+"""
+    let dir = createTempDir("repro-home-userfile-exec-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    let prof = loadProfile(path)
+    check prof.root.kind == nkProfileRoot

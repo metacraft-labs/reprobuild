@@ -694,6 +694,60 @@ proc resourceFromEntry(profilePath, homeDir: string;
       lifecyclePolicy: lpDefault,
       startupName: requireAttr(profilePath, entry, "name"),
       startupCommand: requireAttr(profilePath, entry, "command"))
+  of "fs.userFile":
+    # Closed-set attribute validation: `fs.userFile` accepts exactly
+    # `hostFile`, `content`, `mode`, `executable`, plus the
+    # cross-kind `depends_on`. An unknown key is refused so a typo
+    # ("modee", "execable") never silently degrades to its default —
+    # it surfaces as `EUnstructured` naming the offending key.
+    const userFileAllowedKeys = ["hostFile", "content", "mode",
+      "executable", "depends_on"]
+    for a in entry.resourceAttrs:
+      if a.kind == nkResourceAttr and a.resourceAttrKey notin userFileAllowedKeys:
+        resourceProfileError(profilePath, a.resourceAttrLine,
+          "resource `fs.userFile " & address &
+          "` has unknown attribute `" & a.resourceAttrKey &
+          "`; expected one of: " & userFileAllowedKeys.join(", "))
+    # `~`-relative path expansion against the per-run home dir. Also
+    # honor `${HOME}` / `${USERPROFILE}` so the same `home.nim` text
+    # works under POSIX (`$HOME`) and Windows (`$USERPROFILE`)
+    # without per-OS conditionals on the operator's side.
+    var hostFile = requireAttr(profilePath, entry, "hostFile")
+    if hostFile.startsWith("~"):
+      hostFile = homeDir & hostFile[1 .. ^1]
+    elif hostFile.startsWith("${HOME}"):
+      hostFile = homeDir & hostFile["${HOME}".len .. ^1]
+    elif hostFile.startsWith("${USERPROFILE}"):
+      hostFile = homeDir & hostFile["${USERPROFILE}".len .. ^1]
+    let content = requireAttr(profilePath, entry, "content")
+    let executable =
+      hasAttr(entry, "executable") and
+      attrOf(entry, "executable") == "true"
+    var mode = ""
+    if hasAttr(entry, "mode"):
+      mode = attrOf(entry, "mode")
+    elif executable:
+      mode = "0755"
+    else:
+      mode = "0644"
+    # Closed-set mode validation: parse-test the octal here so an
+    # invalid `mode` ("rwx", "0999", "12345") is rejected at parse
+    # time rather than mid-apply when the driver tries to use it.
+    # The empty string is permitted (defence in depth — the default
+    # path above always sets a non-empty value).
+    if mode.len > 0:
+      try:
+        discard parseModeOctal(mode)
+      except ValueError as e:
+        resourceProfileError(profilePath, entry.resourceHeaderLine,
+          "resource `fs.userFile " & address &
+          "` has invalid mode `" & mode & "`: " & e.msg)
+    result = Resource(kind: rkFsUserFile, address: address,
+      lifecyclePolicy: lpDefault,
+      userFileHostPath: hostFile,
+      userFileContent: content,
+      userFileMode: mode,
+      userFileExecutable: executable)
   else:
     # The parser already rejects unknown kinds; this is a defensive
     # guard for any kind added to the model but not wired here.
@@ -793,6 +847,17 @@ proc resourceSeedString*(desired: DesiredSet): string =
       result.add(r.defaultsValueLiteral)
     of rkLaunchdUserAgent:
       result.add(r.launchdPlistContent)
+    of rkFsUserFile:
+      # Composite seed: host path + mode + content. The seed is fed
+      # into the generation-id derivation, so a mode-only or path-only
+      # change ALSO bumps the id (the lifecycle's per-resource digest
+      # is content-only — mode-only changes are intentionally not
+      # treated as drift — but the generation id is content-addressed
+      # over the FULL declared shape, including bookkeeping fields,
+      # so the no-op short-circuit fires only when the inputs are
+      # bytewise identical).
+      result.add(r.userFileHostPath & "\x1e" & r.userFileMode &
+        "\x1e" & r.userFileContent)
     result.add('\x1d')
 
 proc composeDesiredResources*(profile: Profile; homeDir, host: string):
@@ -1055,6 +1120,10 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
         if rb.realWorldIdentity.startsWith(lcPrefix):
           live = observeLaunchAgent(homeDir,
             rb.realWorldIdentity[lcPrefix.len .. ^1])
+      of rkFsUserFile:
+        # `realWorldIdentity` for `fs.userFile` IS the resolved host
+        # path — no suffix to strip. Probe the file directly.
+        live = observeUserFile(rb.realWorldIdentity)
     except CatchableError:
       return false
     if not live.present:
@@ -1847,6 +1916,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               of rkSystemdUserUnit: "unit-content"
               of rkMacosUserDefault: "defaults-literal"
               of rkLaunchdUserAgent: "plist-content"
+              of rkFsUserFile: "user-file"
             rb = toResourceBinding(action.address, desired.kind,
               identity, observed, observed.rawBytes,
               adoptPayloadKind, desired.lifecyclePolicy)
@@ -1947,6 +2017,15 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               desired.launchdLabel, desired.launchdPlistContent,
               desired.launchdRunAtLoad)
             payloadKindStr = "plist-content"
+          of rkFsUserFile:
+            # `applyUserFileResource` does the create / overwrite,
+            # applies POSIX mode on POSIX hosts, no-ops mode on
+            # Windows, and re-probes via `observeUserFile`. The
+            # returned bytes are exactly what's on disk after the
+            # write — used as the recorded payload.
+            postWriteBytes = applyUserFileResource(desired.userFileHostPath,
+              desired.userFileContent, desired.userFileMode)
+            payloadKindStr = "user-file"
           let rb = toResourceBinding(action.address, desired.kind,
             identity, preWrite, postWriteBytes, payloadKindStr,
             desired.lifecyclePolicy)
@@ -2018,6 +2097,13 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             if prev.resourceId.startsWith(lcPrefix):
               destroyLaunchAgent(opts.homeDir,
                 prev.resourceId[lcPrefix.len .. ^1])
+          of rkFsUserFile:
+            # `resourceId` is the resolved host path verbatim. The
+            # destroy direction deletes the file; the pre-write
+            # observation captures the bytes we destroyed so rollback
+            # can restore them.
+            preWrite = observeRecorded(action.address, prev)
+            destroyUserFileResource(prev.resourceId)
           let rb = toDestroyBinding(action.address, prev.kind,
             prev.resourceId, preWrite, prev.payloadKind,
             prev.lifecyclePolicy)

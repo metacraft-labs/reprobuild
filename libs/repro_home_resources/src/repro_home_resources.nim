@@ -40,6 +40,7 @@ import repro_home_resources/drivers/defaults
 import repro_home_resources/drivers/gsettings
 import repro_home_resources/drivers/launchd_user
 import repro_home_resources/drivers/systemd_user
+import repro_home_resources/drivers/user_file
 
 export errors
 export types
@@ -56,3 +57,4 @@ export defaults
 export gsettings
 export launchd_user
 export systemd_user
+export user_file

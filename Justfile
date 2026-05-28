@@ -1139,6 +1139,24 @@ e2e_repro_home_depends_on_topological:
         tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim \
         2>&1 | tee test-logs/e2e_repro_home_depends_on_topological.log
 
+# M68 home-scope follow-up verification gate — pure logic, runs on
+# every host. End-to-end exercise of the `fs.userFile` driver — the
+# home-scope analogue of system-scope `fs.systemFile` (M69 Phase C).
+# Verifies fresh write, cache-hit no-op on re-apply, drift overwrite,
+# atomic-write recovery, POSIX mode application (POSIX-only), and the
+# `${HOME}` prefix expansion. Cross-platform; mode assertions guarded
+# by `when not defined(windows)`.
+e2e_repro_home_fs_user_file:
+    mkdir -p test-logs build/test-bin build/nimcache build/test-tmp
+    nim c -r \
+        --threads:on \
+        --warning:UnusedImport:off \
+        --warning:CaseTransition:off \
+        --nimcache:build/nimcache/e2e_repro_home_fs_user_file \
+        --out:build/test-bin/e2e_repro_home_fs_user_file \
+        tests/e2e/m68/t_e2e_repro_home_fs_user_file.nim \
+        2>&1 | tee test-logs/e2e_repro_home_fs_user_file.log
+
 # M82 Phase C verification gate — pure logic, runs on every host. The
 # DRIFT HALF of `integration_intra_batch_capability_to_service`: the
 # planner's plan-time external-drift detection seen end-to-end across

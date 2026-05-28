@@ -581,6 +581,11 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
               destroyManagedBlockResource(
                 rec.realWorldIdentity[0 ..< hash],
                 rec.realWorldIdentity[hash + 1 .. ^1])
+          of rkFsUserFile:
+            # The whole-file owner: rolling away from a generation
+            # that created this file means deleting it. The recorded
+            # `realWorldIdentity` is the resolved host path verbatim.
+            destroyUserFileResource(rec.realWorldIdentity)
           else: discard
         of rokRestoreResource, rokUpdateResource:
           # Re-apply the target generation's recorded bytes.
@@ -642,6 +647,21 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
               discard applyManagedBlockResource(
                 rec.realWorldIdentity[0 ..< hash],
                 rec.realWorldIdentity[hash + 1 .. ^1], content)
+          of rkFsUserFile:
+            # Re-apply the target generation's recorded bytes. The
+            # mode is not currently round-tripped through the
+            # binding (the manifest record carries `payloadKind`
+            # and `payloadBytes` only — extending the binding to
+            # carry per-kind metadata like the mode is a future
+            # refinement); rollback restores the bytes and leaves
+            # the mode unchanged from whatever the file system has
+            # currently. The next forward apply re-converges the
+            # mode against the target generation's source-of-truth.
+            var content = newString(rec.payloadBytes.len)
+            for i, b in rec.payloadBytes:
+              content[i] = char(b)
+            discard applyUserFileResource(
+              rec.realWorldIdentity, content, "")
           else: discard
         else: discard
         inc result.resourceOpsApplied

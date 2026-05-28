@@ -10,7 +10,7 @@
 ##   - the registry-typed value encodings round-trip through the
 ##     payload byte representation
 
-import std/[strutils, tables, unittest]
+import std/[os, strutils, tables, tempfiles, unittest]
 
 import repro_home_resources
 
@@ -509,3 +509,266 @@ suite "M68 security: shell-injection field validation":
     check resourceValidationError(Resource(kind: rkSystemdUserUnit,
       address: "u:empty", unitName: "", unitContent: "",
       unitEnabled: false)).len > 0
+
+# ---------------------------------------------------------------------------
+# fs.userFile driver: whole-file ownership at a `~`-relative `$HOME`
+# path. These tests are platform-pure — `applyUserFileResource` and
+# `observeUserFile` only touch the filesystem.
+# ---------------------------------------------------------------------------
+
+suite "M68 fs.userFile driver":
+
+  test "parseModeOctal: accepts well-formed permission strings":
+    check parseModeOctal("0600") == 0o600
+    check parseModeOctal("0644") == 0o644
+    check parseModeOctal("0755") == 0o755
+    # Bare 3-digit form is accepted (chmod also accepts `chmod 644`).
+    check parseModeOctal("644") == 0o644
+    check parseModeOctal("755") == 0o755
+
+  test "parseModeOctal: rejects malformed mode strings":
+    # Empty.
+    expect ValueError:
+      discard parseModeOctal("")
+    # Non-octal digit (8/9).
+    expect ValueError:
+      discard parseModeOctal("0888")
+    expect ValueError:
+      discard parseModeOctal("0999")
+    # Non-digit character.
+    expect ValueError:
+      discard parseModeOctal("rwx")
+    expect ValueError:
+      discard parseModeOctal("0o644")
+    # Too long.
+    expect ValueError:
+      discard parseModeOctal("12345")
+
+  test "filePermissionsFromMode: 0644 maps to rw-r--r--":
+    let p = filePermissionsFromMode("0644")
+    check fpUserRead in p
+    check fpUserWrite in p
+    check fpUserExec notin p
+    check fpGroupRead in p
+    check fpGroupWrite notin p
+    check fpGroupExec notin p
+    check fpOthersRead in p
+    check fpOthersWrite notin p
+    check fpOthersExec notin p
+
+  test "filePermissionsFromMode: 0755 maps to rwxr-xr-x":
+    let p = filePermissionsFromMode("0755")
+    check fpUserRead in p
+    check fpUserWrite in p
+    check fpUserExec in p
+    check fpGroupRead in p
+    check fpGroupWrite notin p
+    check fpGroupExec in p
+    check fpOthersRead in p
+    check fpOthersWrite notin p
+    check fpOthersExec in p
+
+  test "filePermissionsFromMode: 0600 maps to rw-------":
+    let p = filePermissionsFromMode("0600")
+    check fpUserRead in p
+    check fpUserWrite in p
+    check fpUserExec notin p
+    check fpGroupRead notin p
+    check fpOthersRead notin p
+
+  test "applyUserFileResource: fresh write creates the file":
+    let dir = createTempDir("repro-userfile-fresh-", "")
+    defer: removeDir(dir)
+    let target = dir / "config.txt"
+    let content = "hello\nfs.userFile\n"
+    let bytes = applyUserFileResource(target, content, "0644")
+    check fileExists(target)
+    check readFile(target) == content
+    check bytes.len == content.len
+
+  test "applyUserFileResource: cache-hit pattern via observeUserFile":
+    let dir = createTempDir("repro-userfile-noop-", "")
+    defer: removeDir(dir)
+    let target = dir / "config.txt"
+    let content = "stable content"
+    discard applyUserFileResource(target, content, "0644")
+    # Re-observe: digest must equal the desired-content digest.
+    let observed = observeUserFile(target)
+    check observed.present
+    var buf = newSeq[byte](content.len)
+    for i, ch in content:
+      buf[i] = byte(ord(ch))
+    check observed.digest == digestOfBytes(buf)
+
+  test "applyUserFileResource: drift overwrite":
+    let dir = createTempDir("repro-userfile-drift-", "")
+    defer: removeDir(dir)
+    let target = dir / "config.txt"
+    discard applyUserFileResource(target, "old", "0644")
+    discard applyUserFileResource(target, "new", "0644")
+    check readFile(target) == "new"
+
+  test "applyUserFileResource: creates parent directories as needed":
+    let dir = createTempDir("repro-userfile-parent-", "")
+    defer: removeDir(dir)
+    let target = dir / "nested" / "deeper" / "config.txt"
+    let bytes = applyUserFileResource(target, "x", "0644")
+    check fileExists(target)
+    check readFile(target) == "x"
+    check bytes.len == 1
+
+  test "applyUserFileResource: post-apply re-probe fails closed on bad mode":
+    # An invalid mode is caught and reported through IOError. The
+    # pre-write atomic rename has already happened, so the file is
+    # present, but the operator gets a clear failure rather than a
+    # silent skipped permission set.
+    let dir = createTempDir("repro-userfile-badmode-", "")
+    defer: removeDir(dir)
+    let target = dir / "x"
+    when not defined(windows):
+      expect IOError:
+        discard applyUserFileResource(target, "x", "rwx")
+    else:
+      # On Windows the mode field is a no-op, so even an invalid
+      # mode string is accepted (and recorded but not applied).
+      discard applyUserFileResource(target, "x", "rwx")
+      check fileExists(target)
+
+  test "destroyUserFileResource: removes the file":
+    let dir = createTempDir("repro-userfile-destroy-", "")
+    defer: removeDir(dir)
+    let target = dir / "config.txt"
+    discard applyUserFileResource(target, "bye", "0644")
+    check fileExists(target)
+    destroyUserFileResource(target)
+    check not fileExists(target)
+
+  test "destroyUserFileResource: cleans orphan .repro.tmp":
+    # Simulate a crash mid-write: a `.repro.tmp` sibling exists but
+    # no real file. The destroy direction must clean both so the
+    # next apply does not see a confusing stale tmp.
+    let dir = createTempDir("repro-userfile-orphan-", "")
+    defer: removeDir(dir)
+    let target = dir / "config.txt"
+    writeFile(target & ".repro.tmp", "partial")
+    destroyUserFileResource(target)
+    check not fileExists(target & ".repro.tmp")
+
+  test "applyUserFileResource: atomic-write recovery after crash":
+    # The previous apply was interrupted between writing the tmp and
+    # renaming it, so a `.repro.tmp` orphan sits alongside no real
+    # file (or alongside an old real file). The next apply opens
+    # tmp with fmWrite (truncate) and renames it over the target —
+    # the orphan does not confuse the next run.
+    let dir = createTempDir("repro-userfile-crash-", "")
+    defer: removeDir(dir)
+    let target = dir / "config.txt"
+    writeFile(target & ".repro.tmp", "old partial junk")
+    discard applyUserFileResource(target, "fresh", "0644")
+    check fileExists(target)
+    check readFile(target) == "fresh"
+    # The tmp has been renamed away — it should no longer exist.
+    check not fileExists(target & ".repro.tmp")
+
+  test "observeUserFile: absent file yields not-present":
+    let dir = createTempDir("repro-userfile-absent-", "")
+    defer: removeDir(dir)
+    let target = dir / "never-created.txt"
+    let observed = observeUserFile(target)
+    check not observed.present
+    check observed.digest == zeroDigest()
+
+  when not defined(windows):
+    test "applyUserFileResource: POSIX mode application":
+      let dir = createTempDir("repro-userfile-mode-", "")
+      defer: removeDir(dir)
+      let target = dir / "exec.sh"
+      discard applyUserFileResource(target,
+        "#!/bin/sh\necho hi\n", "0755")
+      let perms = getFilePermissions(target)
+      check fpUserExec in perms
+      check fpGroupExec in perms
+      check fpOthersExec in perms
+      # And the read-write bits.
+      check fpUserRead in perms
+      check fpUserWrite in perms
+
+    test "applyUserFileResource: POSIX mode 0600 is restrictive":
+      let dir = createTempDir("repro-userfile-secret-", "")
+      defer: removeDir(dir)
+      let target = dir / "secret"
+      discard applyUserFileResource(target, "shh", "0600")
+      let perms = getFilePermissions(target)
+      check fpUserRead in perms
+      check fpUserWrite in perms
+      check fpUserExec notin perms
+      check fpGroupRead notin perms
+      check fpOthersRead notin perms
+
+  when defined(windows):
+    test "applyUserFileResource: Windows ignores mode field":
+      # The mode is RECORDED (the resource carries it through to the
+      # manifest) but the driver does not apply it on Windows. A
+      # legitimate octal mode is accepted; the file exists after
+      # apply regardless.
+      let dir = createTempDir("repro-userfile-win-mode-", "")
+      defer: removeDir(dir)
+      let target = dir / "config.txt"
+      discard applyUserFileResource(target, "x", "0600")
+      check fileExists(target)
+      check readFile(target) == "x"
+
+  test "digestOfResource: fs.userFile digests content bytes verbatim":
+    var r = Resource(kind: rkFsUserFile, address: "uf:test",
+      lifecyclePolicy: lpDefault,
+      userFileHostPath: "/dev/null/ignored",
+      userFileContent: "abc",
+      userFileMode: "0644")
+    let expected = digestOfBytes(@[byte('a'), byte('b'), byte('c')])
+    check digestOfResource(r) == expected
+    # Empty content: digests the empty byte sequence (consistent with
+    # the rest of the family).
+    r.userFileContent = ""
+    var empty: seq[byte] = @[]
+    check digestOfResource(r) == digestOfBytes(empty)
+
+  test "realWorldIdentity: fs.userFile is the host path verbatim":
+    let r = Resource(kind: rkFsUserFile, address: "uf:id",
+      lifecyclePolicy: lpDefault,
+      userFileHostPath: "/home/u/.config/x",
+      userFileContent: "",
+      userFileMode: "0644")
+    check realWorldIdentity(r) == "/home/u/.config/x"
+
+  test "lifecycle: no-op for unchanged fs.userFile content":
+    # The lifecycle algorithm collapses (desired == observed) to
+    # rakNoOp; the resource kind tag travels through unchanged.
+    var desired = Resource(kind: rkFsUserFile, address: "uf:noop",
+      lifecyclePolicy: lpDefault,
+      userFileHostPath: "/host/x",
+      userFileContent: "stable",
+      userFileMode: "0644")
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfResource(desired)
+    let action = decideAction(state)
+    check action.kind == rakNoOp
+    check action.resourceKind == rkFsUserFile
+
+  test "lifecycle: create for absent fs.userFile":
+    var desired = Resource(kind: rkFsUserFile, address: "uf:create",
+      lifecyclePolicy: lpDefault,
+      userFileHostPath: "/host/x",
+      userFileContent: "new",
+      userFileMode: "0644")
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = false
+    let action = decideAction(state)
+    check action.kind == rakCreate
+    check action.resourceKind == rkFsUserFile

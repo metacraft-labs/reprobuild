@@ -38,11 +38,13 @@ const
 
   KnownResourceKinds* = ["env.userPath", "fs.managedBlock",
     "shell.integration", "env.userVariable", "windows.registryValue",
-    "windows.startup"]
+    "windows.startup", "fs.userFile"]
     ## M78: the home-scope, elevation-free resource kinds whose M68
     ## drivers exist and that a `home.nim` `resources:` block may
     ## declare. An unrecognized kind is rejected with `EUnstructured`
-    ## (the parser MUST NOT silently skip it).
+    ## (the parser MUST NOT silently skip it). `fs.userFile` is the
+    ## home-scope analogue of system-scope `fs.systemFile`; it writes
+    ## a whole file at a `~`-relative `$HOME` path.
 
 type
   ParseCtx = object

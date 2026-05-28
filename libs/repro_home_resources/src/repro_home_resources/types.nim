@@ -32,6 +32,16 @@ type
     rkSystemdUserUnit = "systemd.userUnit"
     rkMacosUserDefault = "macos.userDefault"
     rkLaunchdUserAgent = "launchd.userAgent"
+    rkFsUserFile = "fs.userFile"
+      ## M68 home-scope analogue of system-scope `fs.systemFile`
+      ## (M69). Writes a whole file at a `~`-relative `$HOME` path
+      ## with declared content + POSIX mode. Idempotent: a re-apply
+      ## with unchanged content takes the cache-hit no-op via
+      ## digest comparison. On Windows, the mode field is RECORDED
+      ## but not applied — Windows uses extensions for executable
+      ## status, not POSIX permission bits. See the
+      ## `Home-Profile-Resource-Lifecycle.md` "`fs.userFile`"
+      ## section for the full contract.
 
   RegistryValueKind* = enum
     ## The 6 typed value kinds the `windows.registryValue` driver
@@ -147,6 +157,29 @@ type
       launchdLabel*: string
       launchdPlistContent*: string
       launchdRunAtLoad*: bool
+    of rkFsUserFile:
+      userFileHostPath*: string
+        ## `$HOME`-resolved absolute path. The intent-layer parser
+        ## accepts `~/...`, `${HOME}/...`, `${USERPROFILE}/...`
+        ## prefixes; `resourceFromEntry` expands them against the
+        ## per-run home directory BEFORE constructing the resource.
+      userFileContent*: string
+        ## Whole-file content (verbatim bytes — the driver writes
+        ## them in binary mode so Windows CRLF translation does not
+        ## introduce constant-false-positive drift).
+      userFileMode*: string
+        ## POSIX permission octal as a string ("0600", "0644",
+        ## "0755", ...). On Windows the field is RECORDED in the
+        ## audit binding but the driver does not apply it. The
+        ## default applied when the source omits both `mode` and
+        ## `executable` is "0644"; when `executable=true` and
+        ## `mode` is absent, the default is "0755".
+      userFileExecutable*: bool
+        ## POSIX-only convenience flag. Mirrors the `executable`
+        ## attribute on the source stanza so the audit binding
+        ## reflects the operator's intent. When `mode` is also
+        ## present, `mode` wins (the driver applies `mode` and
+        ## ignores `executable` beyond bookkeeping).
 
   ResourceActionKind* = enum
     ## Output of the lifecycle decision algorithm.
@@ -249,6 +282,7 @@ proc resourceKindFromString*(s: string): ResourceKind =
   of $rkSystemdUserUnit: rkSystemdUserUnit
   of $rkMacosUserDefault: rkMacosUserDefault
   of $rkLaunchdUserAgent: rkLaunchdUserAgent
+  of $rkFsUserFile: rkFsUserFile
   else:
     raise newException(ValueError,
       "unknown resource kind tag: '" & s & "'")
@@ -356,3 +390,10 @@ proc realWorldIdentity*(r: Resource): string =
     return "defaults:" & r.defaultsDomain & ":" & r.defaultsKey
   of rkLaunchdUserAgent:
     return "launchd:user:" & r.launchdLabel
+  of rkFsUserFile:
+    # Whole-file ownership: the absolute resolved host path uniquely
+    # identifies the real-world object. No suffix is appended — the
+    # driver owns the file in full (unlike `fs.managedBlock` which
+    # owns a SLICE of the file and therefore qualifies the host path
+    # with `#<blockId>`).
+    return r.userFileHostPath

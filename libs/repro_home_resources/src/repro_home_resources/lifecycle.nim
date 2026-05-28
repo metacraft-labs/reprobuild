@@ -147,6 +147,16 @@ proc digestOfResource*(desired: Resource): Digest256 =
     for i, ch in desired.launchdPlistContent:
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
+  of rkFsUserFile:
+    # Whole-file: the digest is over the raw declared content bytes
+    # (verbatim — no trailing-newline normalization, unlike
+    # `fs.managedBlock` whose sentinel writer appends `\n`). On
+    # re-observation `observeUserFile` digests the same raw bytes,
+    # so a cache-hit re-apply compares equal byte-for-byte.
+    var buf = newSeq[byte](desired.userFileContent.len)
+    for i, ch in desired.userFileContent:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
 
 proc summarize*(action: ResourceActionKind; address: string;
                 kind: ResourceKind): string =
