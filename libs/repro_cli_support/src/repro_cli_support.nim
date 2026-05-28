@@ -56,7 +56,7 @@ proc renderUsage*(programName: string): string =
       " capabilities [--format=json|text]\n       " & programName &
       " build [target[#name]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
           programName &
-      " graph [target[#name]] [--build] [--focus=ACTION] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
+      " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
       " why <package-or-action> [target[#name]] [--action=ACTION] [--format=text|json] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
@@ -94,7 +94,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " daemon {status | start | stop | restart | logs | sessions} [--endpoint=PATH] [--state-dir=PATH] [--log=PATH]\n       " &
           programName &
-      " stats [status|overview]\n       " &
+      " stats [status|overview|rank|show|snapshot|compare]\n       " &
           programName &
       " store {gc | recover | roots | list | daemon} ...\n       " &
           programName &
@@ -7283,33 +7283,6 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         "direct mode: " & err.msg)
     return runDirectBuild()
 
-proc runStatsCommand(args: openArray[string]): int =
-  var view = "overview"
-  var projectRoot = getCurrentDir()
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "status" or arg == "overview":
-      view = arg
-    elif arg == "--project-root" or arg.startsWith("--project-root="):
-      projectRoot = valueFromFlag(args, i, "--project-root")
-    elif arg == "--help" or arg == "-h":
-      echo "usage: repro stats [status|overview] [--project-root=PATH]"
-      return 0
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported stats flag: " & arg)
-    else:
-      raise newException(ValueError, "unsupported stats view: " & arg)
-    inc i
-  case view
-  of "status":
-    stdout.write(statsStatusText(projectRoot))
-  of "overview":
-    stdout.write(statsOverviewText(projectRoot))
-  else:
-    raise newException(ValueError, "unsupported stats view: " & view)
-  0
-
 type
   GraphOutputFormat = enum
     gofText
@@ -7808,9 +7781,1160 @@ proc renderFocusedGraphJson(info: BuildGraphInspection; focus: string): JsonNode
     "directDependents": jsonStringSeq(directDependents(info.actions, focus))
   }
 
+type
+  StatsOutputFormat = enum
+    sofText
+    sofJson
+
+  StatsActionRollup = object
+    actionId: string
+    target: string
+    resultSamples: int
+    cacheSamples: int
+    cacheHits: int
+    cacheMisses: int
+    launched: int
+    inputSamples: int
+    maxInputCount: int
+    maxOutputCount: int
+
+  StatsTargetRollup = object
+    target: string
+    runIds: HashSet[string]
+    observations: int
+    actionSamples: int
+    launched: int
+    cacheSamples: int
+    cacheHits: int
+    cacheMisses: int
+    buildTotalUs: float
+    buildTotalSamples: int
+
+  StatsWindow = object
+    observationCount: int
+    runIds: HashSet[string]
+    firstMs: int64
+    lastMs: int64
+
+proc nowUnixMsCli(): int64 =
+  let current = getTime()
+  current.toUnix * 1000 + int64(current.nanosecond div 1_000_000)
+
+proc parseStatsOutputFormat(value: string): StatsOutputFormat =
+  case value.normalize()
+  of "text":
+    sofText
+  of "json":
+    sofJson
+  else:
+    raise newException(ValueError,
+      "unsupported stats format: " & value & " (expected text or json)")
+
+proc safeSnapshotLabel(label: string): string =
+  if label.len == 0:
+    raise newException(ValueError, "--label requires a non-empty value")
+  for ch in label:
+    if not (ch.isAlphaNumeric or ch in {'-', '_', '.'}):
+      raise newException(ValueError,
+        "unsupported snapshot label: " & label &
+          " (use letters, digits, '.', '-', or '_')")
+  if label == "." or label == ".." or label.contains(".."):
+    raise newException(ValueError, "unsupported snapshot label: " & label)
+  label
+
+proc statsSnapshotPath(projectRoot, label: string): string =
+  defaultStatsSnapshotDir(projectRoot) / (safeSnapshotLabel(label) & ".json")
+
+proc statsWindow(nodes: openArray[JsonNode]): StatsWindow =
+  result.firstMs = int64.high
+  for node in nodes:
+    inc result.observationCount
+    let runId = node{"runId"}.getStr()
+    if runId.len > 0:
+      result.runIds.incl(runId)
+    let occurred = node{"occurredAtUnixMs"}.getBiggestInt(0)
+    if occurred > 0:
+      result.firstMs = min(result.firstMs, occurred)
+      result.lastMs = max(result.lastMs, occurred)
+  if result.firstMs == int64.high:
+    result.firstMs = 0
+
+proc statsWindowJson(window: StatsWindow): JsonNode =
+  %*{
+    "observationCount": window.observationCount,
+    "runCount": window.runIds.len,
+    "firstObservationUnixMs": window.firstMs,
+    "lastObservationUnixMs": window.lastMs
+  }
+
+proc cacheDecisionKind(value: string): string =
+  let v = value.normalize()
+  if v.contains("hit"):
+    "hit"
+  elif v.contains("miss"):
+    "miss"
+  elif v.contains("reject"):
+    "rejected"
+  elif v.contains("notcache"):
+    "not-cacheable"
+  else:
+    "other"
+
+proc actionRollups(nodes: openArray[JsonNode]): Table[string, StatsActionRollup] =
+  for node in nodes:
+    let fields = node{"fields"}
+    let actionId = fields{"actionId"}.getStr()
+    if actionId.len == 0:
+      continue
+    var item = result.getOrDefault(actionId)
+    item.actionId = actionId
+    if item.target.len == 0:
+      item.target = node{"target"}.getStr()
+    case node{"kind"}.getStr()
+    of "action-result":
+      inc item.resultSamples
+      if fields{"launched"}.getBool(false):
+        inc item.launched
+    of "cache-decision":
+      inc item.cacheSamples
+      case cacheDecisionKind(fields{"cacheDecision"}.getStr())
+      of "hit":
+        inc item.cacheHits
+      of "miss":
+        inc item.cacheMisses
+      else:
+        discard
+    of "dependency-evidence":
+      inc item.inputSamples
+      let inputCount =
+        fields{"declaredInputs"}.getInt(0) +
+        fields{"depfileInputs"}.getInt(0) +
+        fields{"monitorReads"}.getInt(0) +
+        fields{"monitorProbes"}.getInt(0)
+      item.maxInputCount = max(item.maxInputCount, inputCount)
+      item.maxOutputCount = max(item.maxOutputCount,
+        fields{"declaredOutputs"}.getInt(0) +
+        fields{"monitorWrites"}.getInt(0))
+    else:
+      discard
+    result[actionId] = item
+
+proc targetRollups(nodes: openArray[JsonNode]): Table[string, StatsTargetRollup] =
+  for node in nodes:
+    let target = node{"target"}.getStr("default")
+    var item = result.getOrDefault(target)
+    item.target = target
+    inc item.observations
+    let runId = node{"runId"}.getStr()
+    if runId.len > 0:
+      item.runIds.incl(runId)
+    let fields = node{"fields"}
+    case node{"kind"}.getStr()
+    of "action-result":
+      inc item.actionSamples
+      if fields{"launched"}.getBool(false):
+        inc item.launched
+    of "cache-decision":
+      inc item.cacheSamples
+      case cacheDecisionKind(fields{"cacheDecision"}.getStr())
+      of "hit":
+        inc item.cacheHits
+      of "miss":
+        inc item.cacheMisses
+      else:
+        discard
+    of "metric":
+      if fields{"name"}.getStr() == "repro build total":
+        item.buildTotalUs += fields{"totalUs"}.getFloat(0.0)
+        inc item.buildTotalSamples
+    else:
+      discard
+    result[target] = item
+
+proc graphActionMap(info: BuildGraphInspection): Table[string, BuildAction] =
+  for action in info.actions:
+    result[action.id] = action
+
+proc graphMetadataJson(info: BuildGraphInspection): JsonNode =
+  %*{
+    "target": info.target,
+    "projectRoot": info.projectRoot,
+    "modulePath": info.modulePath,
+    "outDir": info.outDir,
+    "providerCompileCacheHit": info.providerCompileCacheHit,
+    "providerGraphCacheHit": info.providerGraphCacheHit,
+    "loweredGraphCacheHit": info.loweredGraphCacheHit,
+    "loweredGraphCachePath": info.loweredGraphCachePath
+  }
+
+proc unavailableStatsJson(command, scope, metric, projectRoot, storePath,
+                          reason: string; window: StatsWindow): JsonNode =
+  %*{
+    "schemaId": "reprobuild.stats.rank.v1",
+    "command": command,
+    "scope": scope,
+    "metric": metric,
+    "projectRoot": projectRoot,
+    "storePath": storePath,
+    "window": statsWindowJson(window),
+    "sampleCount": 0,
+    "availability": {"available": false, "reason": reason},
+    "rows": newJArray()
+  }
+
+proc outputSizeForAction(projectRoot: string; action: BuildAction): BiggestInt =
+  for output in action.outputs:
+    let path = materialProjectPath(projectRoot, output)
+    if fileExists(extendedPath(path)):
+      result += getFileSize(extendedPath(path))
+
+proc actionRankJson(projectRoot, storePath, metric: string; top: int;
+                    nodes: openArray[JsonNode];
+                    graphInfo: Option[BuildGraphInspection]): JsonNode =
+  let window = statsWindow(nodes)
+  let rollups = actionRollups(nodes)
+  let graphById =
+    if graphInfo.isSome: graphActionMap(graphInfo.get())
+    else: initTable[string, BuildAction]()
+  let unavailable = {
+    "build-time": "M7 records run-level timing but not per-action durations",
+    "critical-path": "critical-path contribution needs per-action dynamic timings",
+    "duration-variance": "duration variance needs multiple per-action duration samples",
+    "peak-memory": "peak memory is not captured by the M7 stats store",
+    "queue-time": "queue time is not captured by the M7 stats store"
+  }.toTable
+  if unavailable.hasKey(metric):
+    return unavailableStatsJson("stats rank", "actions", metric, projectRoot,
+      storePath, unavailable[metric], window)
+
+  var rows = newJArray()
+  type Row = tuple[id: string; value: float; samples: int; evidence: JsonNode]
+  var raw: seq[Row] = @[]
+  case metric
+  of "cache-hit-ratio":
+    for id, item in rollups:
+      if item.cacheSamples > 0:
+        raw.add((id, float(item.cacheHits) / float(item.cacheSamples),
+          item.cacheSamples, %*{
+            "cacheHits": item.cacheHits,
+            "cacheMisses": item.cacheMisses,
+            "cacheSamples": item.cacheSamples
+          }))
+    raw.sort(proc(a, b: Row): int = cmp(a.value, b.value))
+  of "cache-miss-count":
+    for id, item in rollups:
+      raw.add((id, float(item.cacheMisses), item.cacheSamples, %*{
+        "cacheMisses": item.cacheMisses,
+        "cacheSamples": item.cacheSamples
+      }))
+    raw.sort(proc(a, b: Row): int = cmp(b.value, a.value))
+  of "input-count":
+    for id, item in rollups:
+      raw.add((id, float(item.maxInputCount), item.inputSamples, %*{
+        "maxInputCount": item.maxInputCount,
+        "inputSamples": item.inputSamples
+      }))
+    raw.sort(proc(a, b: Row): int = cmp(b.value, a.value))
+  of "output-size":
+    if graphInfo.isNone:
+      return unavailableStatsJson("stats rank", "actions", metric, projectRoot,
+        storePath, "output-size needs a materialized build graph", window)
+    for id, action in graphById:
+      raw.add((id, float(outputSizeForAction(projectRoot, action)), 1, %*{
+        "outputs": jsonStringSeq(action.outputs)
+      }))
+    raw.sort(proc(a, b: Row): int = cmp(b.value, a.value))
+  else:
+    raise newException(ValueError,
+      "unsupported actions metric: " & metric)
+
+  let limit = if top <= 0: raw.len else: min(top, raw.len)
+  for index in 0 ..< limit:
+    let row = raw[index]
+    var node = %*{
+      "rank": index + 1,
+      "id": row.id,
+      "actionId": row.id,
+      "value": row.value,
+      "sampleCount": row.samples,
+      "evidence": row.evidence,
+      "nextCommand": "repro stats show --scope=actions --id " & row.id
+    }
+    if graphById.hasKey(row.id):
+      node["commandStatsId"] = %graphById[row.id].commandStatsId
+      node["graphCommand"] = %("repro graph --view=neighborhood --focus " & row.id)
+    rows.add(node)
+  result = %*{
+    "schemaId": "reprobuild.stats.rank.v1",
+    "command": "stats rank",
+    "scope": "actions",
+    "metric": metric,
+    "projectRoot": projectRoot,
+    "storePath": storePath,
+    "window": statsWindowJson(window),
+    "sampleCount": rows.len,
+    "availability": {"available": rows.len > 0, "reason": ""},
+    "rows": rows
+  }
+  if graphInfo.isSome:
+    result["graph"] = graphMetadataJson(graphInfo.get())
+  if rows.len == 0:
+    result["availability"]["reason"] = %"no matching action observations"
+
+proc inputDependents(info: BuildGraphInspection; path: string): HashSet[string]
+proc downstreamClosure(info: BuildGraphInspection; roots: HashSet[string]): HashSet[string]
+
+proc inputRankJson(projectRoot, storePath, metric: string; top: int;
+                   nodes: openArray[JsonNode];
+                   graphInfo: Option[BuildGraphInspection]): JsonNode =
+  let window = statsWindow(nodes)
+  if metric in ["change-frequency", "critical-path-impact"]:
+    return unavailableStatsJson("stats rank", "inputs", metric, projectRoot,
+      storePath,
+      if metric == "change-frequency":
+        "M7 records dependency evidence counts but not changed input paths"
+      else:
+        "critical-path impact needs per-action dynamic timings and input paths",
+      window)
+  if graphInfo.isNone:
+    return unavailableStatsJson("stats rank", "inputs", metric, projectRoot,
+      storePath, "input ranking needs a materialized build graph", window)
+  if metric notin ["blast-radius", "fanout"]:
+    raise newException(ValueError, "unsupported inputs metric: " & metric)
+
+  let info = graphInfo.get()
+  var paths = initHashSet[string]()
+  for action in info.actions:
+    for input in action.inputs:
+      if input.len > 0:
+        paths.incl(input)
+  type Row = tuple[path: string; value: int; direct: int]
+  var raw: seq[Row] = @[]
+  for path in paths:
+    let direct = inputDependents(info, path)
+    let closure = downstreamClosure(info, direct)
+    raw.add((path, if metric == "fanout": direct.len else: closure.len,
+      direct.len))
+  raw.sort(proc(a, b: Row): int =
+    let byValue = cmp(b.value, a.value)
+    if byValue != 0: byValue else: cmp(a.path, b.path))
+  let limit = if top <= 0: raw.len else: min(top, raw.len)
+  var rows = newJArray()
+  for index in 0 ..< limit:
+    let row = raw[index]
+    rows.add(%*{
+      "rank": index + 1,
+      "path": row.path,
+      "value": row.value,
+      "sampleCount": 1,
+      "evidence": {
+        "directDependents": row.direct,
+        "source": "build-graph-structure"
+      },
+      "graphCommand": "repro graph --view=blast-radius --path " & row.path
+    })
+  %*{
+    "schemaId": "reprobuild.stats.rank.v1",
+    "command": "stats rank",
+    "scope": "inputs",
+    "metric": metric,
+    "projectRoot": projectRoot,
+    "storePath": storePath,
+    "window": statsWindowJson(window),
+    "sampleCount": rows.len,
+    "availability": {
+      "available": rows.len > 0,
+      "reason": if rows.len == 0: "graph contains no declared inputs" else: ""
+    },
+    "graph": graphMetadataJson(info),
+    "rows": rows
+  }
+
+proc targetRankJson(projectRoot, storePath, metric: string; top: int;
+                    nodes: openArray[JsonNode]): JsonNode =
+  let window = statsWindow(nodes)
+  if metric == "critical-path":
+    return unavailableStatsJson("stats rank", "targets", metric, projectRoot,
+      storePath, "critical path needs per-action dynamic timings", window)
+  let rollups = targetRollups(nodes)
+  type Row = tuple[target: string; value: float; samples: int; evidence: JsonNode]
+  var raw: seq[Row] = @[]
+  case metric
+  of "build-time":
+    for target, item in rollups:
+      if item.buildTotalSamples > 0:
+        raw.add((target, item.buildTotalUs / float(item.buildTotalSamples),
+          item.buildTotalSamples, %*{
+            "buildTotalUs": item.buildTotalUs,
+            "buildTotalSamples": item.buildTotalSamples
+          }))
+    raw.sort(proc(a, b: Row): int = cmp(b.value, a.value))
+  of "cache-hit-ratio":
+    for target, item in rollups:
+      if item.cacheSamples > 0:
+        raw.add((target, float(item.cacheHits) / float(item.cacheSamples),
+          item.cacheSamples, %*{
+            "cacheHits": item.cacheHits,
+            "cacheMisses": item.cacheMisses,
+            "cacheSamples": item.cacheSamples
+          }))
+    raw.sort(proc(a, b: Row): int = cmp(a.value, b.value))
+  of "rebuild-count":
+    for target, item in rollups:
+      raw.add((target, float(item.launched), item.actionSamples, %*{
+        "launchedActions": item.launched,
+        "actionSamples": item.actionSamples
+      }))
+    raw.sort(proc(a, b: Row): int = cmp(b.value, a.value))
+  else:
+    raise newException(ValueError, "unsupported targets metric: " & metric)
+  let limit = if top <= 0: raw.len else: min(top, raw.len)
+  var rows = newJArray()
+  for index in 0 ..< limit:
+    let row = raw[index]
+    rows.add(%*{
+      "rank": index + 1,
+      "target": row.target,
+      "value": row.value,
+      "sampleCount": row.samples,
+      "evidence": row.evidence
+    })
+  %*{
+    "schemaId": "reprobuild.stats.rank.v1",
+    "command": "stats rank",
+    "scope": "targets",
+    "metric": metric,
+    "projectRoot": projectRoot,
+    "storePath": storePath,
+    "window": statsWindowJson(window),
+    "sampleCount": rows.len,
+    "availability": {
+      "available": rows.len > 0,
+      "reason": if rows.len == 0: "no target observations for metric" else: ""
+    },
+    "rows": rows
+  }
+
+proc toolRankJson(projectRoot, storePath, metric: string; top: int;
+                  nodes: openArray[JsonNode];
+                  graphInfo: Option[BuildGraphInspection]): JsonNode =
+  let window = statsWindow(nodes)
+  if metric in ["build-time", "queue-time", "duration-variance", "peak-memory"]:
+    return unavailableStatsJson("stats rank", "tools", metric, projectRoot,
+      storePath, "M7 does not capture per-action resource/timing by tool", window)
+  if metric != "cache-hit-ratio":
+    raise newException(ValueError, "unsupported tools metric: " & metric)
+  if graphInfo.isNone:
+    return unavailableStatsJson("stats rank", "tools", metric, projectRoot,
+      storePath, "tool ranking needs a materialized build graph", window)
+  let actions = actionRollups(nodes)
+  let graphById = graphActionMap(graphInfo.get())
+  type Tool = object
+    id: string
+    samples: int
+    hits: int
+    misses: int
+    actions: HashSet[string]
+  var tools = initTable[string, Tool]()
+  for actionId, rollup in actions:
+    if not graphById.hasKey(actionId) or rollup.cacheSamples == 0:
+      continue
+    var toolId = graphById[actionId].commandStatsId
+    if toolId.len == 0:
+      toolId = "unknown-command-shape"
+    var item = tools.getOrDefault(toolId)
+    item.id = toolId
+    item.samples += rollup.cacheSamples
+    item.hits += rollup.cacheHits
+    item.misses += rollup.cacheMisses
+    item.actions.incl(actionId)
+    tools[toolId] = item
+  type Row = tuple[id: string; value: float; item: Tool]
+  var raw: seq[Row] = @[]
+  for id, item in tools:
+    if item.samples > 0:
+      raw.add((id, float(item.hits) / float(item.samples), item))
+  raw.sort(proc(a, b: Row): int = cmp(a.value, b.value))
+  let limit = if top <= 0: raw.len else: min(top, raw.len)
+  var rows = newJArray()
+  for index in 0 ..< limit:
+    let row = raw[index]
+    var actionIds: seq[string] = @[]
+    for actionId in row.item.actions:
+      actionIds.add(actionId)
+    actionIds.sort()
+    rows.add(%*{
+      "rank": index + 1,
+      "toolId": row.id,
+      "value": row.value,
+      "sampleCount": row.item.samples,
+      "evidence": {
+        "cacheHits": row.item.hits,
+        "cacheMisses": row.item.misses,
+        "actions": jsonStringSeq(actionIds)
+      }
+    })
+  %*{
+    "schemaId": "reprobuild.stats.rank.v1",
+    "command": "stats rank",
+    "scope": "tools",
+    "metric": metric,
+    "projectRoot": projectRoot,
+    "storePath": storePath,
+    "window": statsWindowJson(window),
+    "sampleCount": rows.len,
+    "availability": {
+      "available": rows.len > 0,
+      "reason": if rows.len == 0: "no tool/cache observations" else: ""
+    },
+    "graph": graphMetadataJson(graphInfo.get()),
+    "rows": rows
+  }
+
+proc renderStatsRankText(node: JsonNode): string =
+  var lines: seq[string] = @[]
+  let scope = node{"scope"}.getStr()
+  let metric = node{"metric"}.getStr()
+  let window = node{"window"}
+  lines.add("Stats rank: scope=" & scope & " by=" & metric &
+    " runs=" & $window{"runCount"}.getInt(0) &
+    " observations=" & $window{"observationCount"}.getInt(0))
+  if not node{"availability"}{"available"}.getBool(false):
+    lines.add("unavailable: " & node{"availability"}{"reason"}.getStr())
+    return lines.join("\n") & "\n"
+  for row in node{"rows"}:
+    let name =
+      if row.hasKey("actionId"): row{"actionId"}.getStr()
+      elif row.hasKey("path"): row{"path"}.getStr()
+      elif row.hasKey("target"): row{"target"}.getStr()
+      elif row.hasKey("toolId"): row{"toolId"}.getStr()
+      else: row{"id"}.getStr()
+    lines.add(align($row{"rank"}.getInt(), 2) & "  " & name &
+      "  value=" & formatFloat(row{"value"}.getFloat(), ffDecimal, 3) &
+      "  samples=" & $row{"sampleCount"}.getInt(0))
+  if node{"rows"}.len > 0:
+    let first = node{"rows"}[0]
+    if first.hasKey("graphCommand"):
+      lines.add("next: " & first{"graphCommand"}.getStr())
+    elif first.hasKey("nextCommand"):
+      lines.add("next: " & first{"nextCommand"}.getStr())
+  lines.join("\n") & "\n"
+
+proc showActionStatsJson(projectRoot, storePath, actionId: string;
+                         nodes: openArray[JsonNode];
+                         graphInfo: Option[BuildGraphInspection]): JsonNode =
+  let window = statsWindow(nodes)
+  let rollups = actionRollups(nodes)
+  if not rollups.hasKey(actionId):
+    raise newException(ValueError, "unknown action in stats store: " & actionId)
+  let item = rollups[actionId]
+  var recent = newJArray()
+  for node in nodes:
+    if node{"fields"}{"actionId"}.getStr() == actionId:
+      recent.add(node)
+  result = %*{
+    "schemaId": "reprobuild.stats.show.v1",
+    "command": "stats show",
+    "scope": "actions",
+    "projectRoot": projectRoot,
+    "storePath": storePath,
+    "window": statsWindowJson(window),
+    "id": actionId,
+    "actionId": actionId,
+    "rollup": {
+      "resultSamples": item.resultSamples,
+      "cacheSamples": item.cacheSamples,
+      "cacheHits": item.cacheHits,
+      "cacheMisses": item.cacheMisses,
+      "launched": item.launched,
+      "maxInputCount": item.maxInputCount,
+      "maxOutputCount": item.maxOutputCount,
+      "cacheHitRatio": if item.cacheSamples > 0:
+        float(item.cacheHits) / float(item.cacheSamples) else: 0.0
+    },
+    "recentObservations": recent,
+    "unavailableMetrics": jsonStringSeq([
+      "per-action build-time",
+      "critical-path contribution",
+      "duration variance",
+      "peak memory",
+      "queue time"
+    ]),
+    "graphCommand": "repro graph --view=neighborhood --focus " & actionId
+  }
+  if graphInfo.isSome:
+    let byId = graphActionMap(graphInfo.get())
+    if byId.hasKey(actionId):
+      result["graph"] = graphMetadataJson(graphInfo.get())
+      result["action"] = buildActionJson(byId[actionId])
+
+proc renderStatsShowText(node: JsonNode): string =
+  var lines: seq[string] = @[]
+  if node{"scope"}.getStr() == "actions":
+    let rollup = node{"rollup"}
+    lines.add("Stats action: " & node{"actionId"}.getStr())
+    lines.add("samples: results=" & $rollup{"resultSamples"}.getInt(0) &
+      " cache=" & $rollup{"cacheSamples"}.getInt(0) &
+      " launched=" & $rollup{"launched"}.getInt(0))
+    lines.add("cache: hits=" & $rollup{"cacheHits"}.getInt(0) &
+      " misses=" & $rollup{"cacheMisses"}.getInt(0) &
+      " ratio=" & formatFloat(rollup{"cacheHitRatio"}.getFloat(0.0),
+        ffDecimal, 3))
+    lines.add("dependency counts: inputs=" & $rollup{"maxInputCount"}.getInt(0) &
+      " outputs=" & $rollup{"maxOutputCount"}.getInt(0))
+    lines.add("next: " & node{"graphCommand"}.getStr())
+  else:
+    lines.add("Stats input: " & node{"path"}.getStr())
+    lines.add("directDependents: " &
+      $node{"rollup"}{"directDependents"}.getInt(0) &
+      " blastRadius: " & $node{"rollup"}{"blastRadius"}.getInt(0))
+    lines.add("observed change frequency: unavailable (M7 does not record changed input paths)")
+    lines.add("next: " & node{"graphCommand"}.getStr())
+  lines.join("\n") & "\n"
+
+proc actionIdsJson(values: HashSet[string]): JsonNode =
+  var ids: seq[string] = @[]
+  for value in values:
+    ids.add(value)
+  ids.sort()
+  jsonStringSeq(ids)
+
+proc showInputStatsJson(projectRoot, storePath, path: string;
+                        nodes: openArray[JsonNode];
+                        graphInfo: Option[BuildGraphInspection]): JsonNode =
+  let window = statsWindow(nodes)
+  if graphInfo.isNone:
+    return %*{
+      "schemaId": "reprobuild.stats.show.v1",
+      "command": "stats show",
+      "scope": "inputs",
+      "projectRoot": projectRoot,
+      "storePath": storePath,
+      "window": statsWindowJson(window),
+      "path": path,
+      "availability": {
+        "available": false,
+        "reason": "input show needs a materialized build graph"
+      }
+    }
+  let direct = inputDependents(graphInfo.get(), path)
+  let closure = downstreamClosure(graphInfo.get(), direct)
+  %*{
+    "schemaId": "reprobuild.stats.show.v1",
+    "command": "stats show",
+    "scope": "inputs",
+    "projectRoot": projectRoot,
+    "storePath": storePath,
+    "window": statsWindowJson(window),
+    "path": path,
+    "availability": {"available": true, "reason": ""},
+    "rollup": {
+      "directDependents": direct.len,
+      "blastRadius": closure.len,
+      "observedChangeFrequency": newJNull(),
+      "observedCriticalPathImpact": newJNull()
+    },
+    "directDependentActionIds": actionIdsJson(direct),
+    "blastRadiusActionIds": actionIdsJson(closure),
+    "graph": graphMetadataJson(graphInfo.get()),
+    "graphCommand": "repro graph --view=blast-radius --path " & path
+  }
+
+proc snapshotJson(projectRoot, storePath, label: string;
+                  nodes: openArray[JsonNode];
+                  graphInfo: Option[BuildGraphInspection]): JsonNode =
+  let window = statsWindow(nodes)
+  let actions = actionRankJson(projectRoot, storePath, "cache-miss-count", 0,
+    nodes, graphInfo)
+  let targets = targetRankJson(projectRoot, storePath, "build-time", 0, nodes)
+  result = %*{
+    "schemaId": "reprobuild.stats.snapshot.v1",
+    "label": label,
+    "createdAtUnixMs": nowUnixMsCli(),
+    "projectRoot": projectRoot,
+    "storePath": storePath,
+    "window": statsWindowJson(window),
+    "rollups": {
+      "actionsByCacheMissCount": actions{"rows"},
+      "targetsByBuildTime": targets{"rows"}
+    },
+    "unavailableMetrics": jsonStringSeq([
+      "per-action build-time",
+      "critical-path",
+      "duration-variance",
+      "peak-memory",
+      "queue-time",
+      "input change-frequency",
+      "input critical-path-impact"
+    ])
+  }
+  if graphInfo.isSome:
+    result["graph"] = graphMetadataJson(graphInfo.get())
+
+proc renderSnapshotText(node: JsonNode; path: string): string =
+  "stats snapshot: " & node{"label"}.getStr() &
+    " observations=" & $node{"window"}{"observationCount"}.getInt(0) &
+    " runs=" & $node{"window"}{"runCount"}.getInt(0) &
+    "\npath: " & path & "\n"
+
+proc rollupDeltaRows(baseRows, candRows: JsonNode; keyField: string): JsonNode =
+  var baseByKey = initTable[string, JsonNode]()
+  var candByKey = initTable[string, JsonNode]()
+  var keys: seq[string] = @[]
+  proc remember(key: string) =
+    if key.len > 0 and keys.find(key) < 0:
+      keys.add(key)
+  if baseRows.kind == JArray:
+    for row in baseRows:
+      let key = row{keyField}.getStr()
+      if key.len > 0:
+        baseByKey[key] = row
+        remember(key)
+  if candRows.kind == JArray:
+    for row in candRows:
+      let key = row{keyField}.getStr()
+      if key.len > 0:
+        candByKey[key] = row
+        remember(key)
+  keys.sort()
+  result = newJArray()
+  for key in keys:
+    let hasBase = baseByKey.hasKey(key)
+    let hasCand = candByKey.hasKey(key)
+    let baseValue = if hasBase: baseByKey[key]{"value"}.getFloat(0.0) else: 0.0
+    let candValue = if hasCand: candByKey[key]{"value"}.getFloat(0.0) else: 0.0
+    let baseSamples =
+      if hasBase: baseByKey[key]{"sampleCount"}.getInt(0) else: 0
+    let candSamples =
+      if hasCand: candByKey[key]{"sampleCount"}.getInt(0) else: 0
+    var row = newJObject()
+    row[keyField] = %key
+    row["baselineValue"] = if hasBase: %baseValue else: newJNull()
+    row["candidateValue"] = if hasCand: %candValue else: newJNull()
+    row["deltaValue"] = if hasBase and hasCand: %(candValue - baseValue) else: newJNull()
+    row["baselineSampleCount"] = %baseSamples
+    row["candidateSampleCount"] = %candSamples
+    row["deltaSampleCount"] = %(candSamples - baseSamples)
+    result.add(row)
+
+proc compareSnapshotsJson(projectRoot, baseline, candidate: string): JsonNode =
+  let baselinePath = statsSnapshotPath(projectRoot, baseline)
+  let candidatePath = statsSnapshotPath(projectRoot, candidate)
+  if not fileExists(baselinePath):
+    raise newException(IOError, "stats snapshot not found: " & baseline)
+  if not fileExists(candidatePath):
+    raise newException(IOError, "stats snapshot not found: " & candidate)
+  let base = parseFile(baselinePath)
+  let cand = parseFile(candidatePath)
+  %*{
+    "schemaId": "reprobuild.stats.compare.v1",
+    "command": "stats compare",
+    "projectRoot": projectRoot,
+    "baseline": {
+      "label": baseline,
+      "path": baselinePath,
+      "window": base{"window"}
+    },
+    "candidate": {
+      "label": candidate,
+      "path": candidatePath,
+      "window": cand{"window"}
+    },
+    "deltas": {
+      "observationCount": cand{"window"}{"observationCount"}.getInt(0) -
+        base{"window"}{"observationCount"}.getInt(0),
+      "runCount": cand{"window"}{"runCount"}.getInt(0) -
+        base{"window"}{"runCount"}.getInt(0),
+      "actionCacheMissRows": cand{"rollups"}{"actionsByCacheMissCount"}.len -
+        base{"rollups"}{"actionsByCacheMissCount"}.len,
+      "targetBuildTimeRows": cand{"rollups"}{"targetsByBuildTime"}.len -
+        base{"rollups"}{"targetsByBuildTime"}.len
+    },
+    "rollupDeltas": {
+      "actionsByCacheMissCount": rollupDeltaRows(
+        base{"rollups"}{"actionsByCacheMissCount"},
+        cand{"rollups"}{"actionsByCacheMissCount"},
+        "actionId"),
+      "targetsByBuildTime": rollupDeltaRows(
+        base{"rollups"}{"targetsByBuildTime"},
+        cand{"rollups"}{"targetsByBuildTime"},
+        "target")
+    },
+    "notes": jsonStringSeq([
+      "Compare uses current M7 rollups; per-action timing/resource deltas are unavailable until those metrics are captured."
+    ])
+  }
+
+proc renderCompareText(node: JsonNode): string =
+  let deltas = node{"deltas"}
+  "stats compare: " & node{"baseline"}{"label"}.getStr() & " -> " &
+    node{"candidate"}{"label"}.getStr() & "\n" &
+    "delta observations: " & $deltas{"observationCount"}.getInt(0) & "\n" &
+    "delta runs: " & $deltas{"runCount"}.getInt(0) & "\n" &
+    "note: " & node{"notes"}[0].getStr() & "\n"
+
+proc maybePrepareStatsGraph(projectRoot, target, publicCliPath, workRoot: string;
+                            mode: ToolProvisioningMode): Option[BuildGraphInspection] =
+  let graphTarget = if target.len > 0: target else: projectRoot
+  try:
+    return some(prepareBuildGraphInspection(graphTarget, mode, publicCliPath,
+      selectDefaultAction = true, workRoot = workRoot))
+  except CatchableError:
+    return none(BuildGraphInspection)
+
+proc defaultMetricForScope(scope: string): string =
+  case scope
+  of "actions":
+    "cache-miss-count"
+  of "inputs":
+    "blast-radius"
+  of "targets":
+    "build-time"
+  of "tools":
+    "cache-hit-ratio"
+  else:
+    raise newException(ValueError, "unsupported stats scope: " & scope)
+
+proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
+  var view = "overview"
+  var scope = ""
+  var metric = ""
+  var actionId = ""
+  var inputPath = ""
+  var label = ""
+  var baseline = ""
+  var candidate = ""
+  var projectRoot = getCurrentDir()
+  var target = ""
+  var workRoot = ""
+  var mode = tpmUnspecified
+  var top = 10
+  var format = sofText
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg in ["status", "overview", "rank", "show", "snapshot", "compare"]:
+      view = arg
+    elif arg == "--scope" or arg.startsWith("--scope="):
+      scope = valueFromFlag(args, i, "--scope")
+    elif arg == "--by" or arg.startsWith("--by="):
+      metric = valueFromFlag(args, i, "--by")
+    elif arg == "--id" or arg.startsWith("--id="):
+      actionId = valueFromFlag(args, i, "--id")
+    elif arg == "--path" or arg.startsWith("--path="):
+      inputPath = valueFromFlag(args, i, "--path")
+    elif arg == "--label" or arg.startsWith("--label="):
+      label = valueFromFlag(args, i, "--label")
+    elif arg == "--baseline" or arg.startsWith("--baseline="):
+      baseline = valueFromFlag(args, i, "--baseline")
+    elif arg == "--candidate" or arg.startsWith("--candidate="):
+      candidate = valueFromFlag(args, i, "--candidate")
+    elif arg == "--project-root" or arg.startsWith("--project-root="):
+      projectRoot = valueFromFlag(args, i, "--project-root")
+    elif arg == "--target" or arg.startsWith("--target="):
+      target = valueFromFlag(args, i, "--target")
+    elif arg == "--work-root" or arg.startsWith("--work-root="):
+      workRoot = valueFromFlag(args, i, "--work-root")
+    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--action-cache-root" or arg.startsWith("--action-cache-root="):
+      setActionCacheRootOverride(valueFromFlag(args, i, "--action-cache-root"))
+    elif arg == "--top" or arg.startsWith("--top="):
+      top = parseInt(valueFromFlag(args, i, "--top"))
+    elif arg == "--json":
+      format = sofJson
+    elif arg == "--format" or arg.startsWith("--format="):
+      format = parseStatsOutputFormat(valueFromFlag(args, i, "--format"))
+    elif arg == "--help" or arg == "-h":
+      echo "usage: repro stats [status|overview|rank|show|snapshot|compare] [--format=text|json] [--project-root=PATH]"
+      return 0
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported stats flag: " & arg)
+    else:
+      raise newException(ValueError, "unsupported stats view: " & arg)
+    inc i
+
+  projectRoot = absolutePath(projectRoot)
+  let storePath = defaultStatsStorePath(projectRoot)
+  let nodes = readStatsObservations(projectRoot)
+  case view
+  of "status":
+    stdout.write(statsStatusText(projectRoot))
+  of "overview":
+    stdout.write(statsOverviewText(projectRoot))
+  of "rank":
+    if scope.len == 0:
+      raise newException(ValueError, "stats rank requires --scope")
+    if metric.len == 0:
+      metric = defaultMetricForScope(scope)
+    let needsGraph = scope in ["inputs", "tools"] or
+      (scope == "actions" and metric == "output-size")
+    let graphInfo =
+      if needsGraph:
+        maybePrepareStatsGraph(projectRoot, target, publicCliPath, workRoot, mode)
+      else:
+        none(BuildGraphInspection)
+    let outputNode =
+      case scope
+      of "actions":
+        actionRankJson(projectRoot, storePath, metric, top, nodes, graphInfo)
+      of "inputs":
+        inputRankJson(projectRoot, storePath, metric, top, nodes, graphInfo)
+      of "targets":
+        targetRankJson(projectRoot, storePath, metric, top, nodes)
+      of "tools":
+        toolRankJson(projectRoot, storePath, metric, top, nodes, graphInfo)
+      else:
+        raise newException(ValueError, "unsupported stats scope: " & scope)
+    if format == sofJson:
+      echo $outputNode
+    else:
+      stdout.write(renderStatsRankText(outputNode))
+  of "show":
+    if scope.len == 0:
+      raise newException(ValueError, "stats show requires --scope")
+    let needsGraph = scope == "inputs"
+    let graphInfo =
+      if needsGraph or actionId.len > 0:
+        maybePrepareStatsGraph(projectRoot, target, publicCliPath, workRoot, mode)
+      else:
+        none(BuildGraphInspection)
+    let outputNode =
+      case scope
+      of "actions":
+        if actionId.len == 0:
+          raise newException(ValueError, "stats show --scope=actions requires --id")
+        showActionStatsJson(projectRoot, storePath, actionId, nodes, graphInfo)
+      of "inputs":
+        if inputPath.len == 0:
+          raise newException(ValueError, "stats show --scope=inputs requires --path")
+        showInputStatsJson(projectRoot, storePath, inputPath, nodes, graphInfo)
+      else:
+        raise newException(ValueError, "unsupported stats show scope: " & scope)
+    if format == sofJson:
+      echo $outputNode
+    else:
+      stdout.write(renderStatsShowText(outputNode))
+  of "snapshot":
+    if label.len == 0:
+      raise newException(ValueError, "stats snapshot requires --label")
+    let graphInfo = maybePrepareStatsGraph(projectRoot, target, publicCliPath,
+      workRoot, mode)
+    let outputNode = snapshotJson(projectRoot, storePath, safeSnapshotLabel(label),
+      nodes, graphInfo)
+    let path = statsSnapshotPath(projectRoot, label)
+    createDir(parentDir(path))
+    writeFile(path, pretty(outputNode))
+    if format == sofJson:
+      echo $outputNode
+    else:
+      stdout.write(renderSnapshotText(outputNode, path))
+  of "compare":
+    if baseline.len == 0 or candidate.len == 0:
+      raise newException(ValueError,
+        "stats compare requires --baseline and --candidate")
+    let outputNode = compareSnapshotsJson(projectRoot, baseline, candidate)
+    if format == sofJson:
+      echo $outputNode
+    else:
+      stdout.write(renderCompareText(outputNode))
+  else:
+    raise newException(ValueError, "unsupported stats view: " & view)
+  0
+
+proc normalizedGraphPath(projectRoot, path: string): string =
+  let material = materialProjectPath(projectRoot, path)
+  try:
+    os.normalizedPath(material)
+  except CatchableError:
+    material.replace('\\', '/')
+
+proc pathMatches(projectRoot, candidate, query: string): bool =
+  if candidate == query:
+    return true
+  normalizedGraphPath(projectRoot, candidate) == normalizedGraphPath(projectRoot, query)
+
+proc actionUsesPath(info: BuildGraphInspection; action: BuildAction;
+                    path: string): bool =
+  for input in action.inputs:
+    if pathMatches(info.projectRoot, input, path):
+      return true
+  if action.depfile.len > 0 and pathMatches(info.projectRoot, action.depfile, path):
+    return true
+  if action.dynamicDepsFile.len > 0 and
+      pathMatches(info.projectRoot, action.dynamicDepsFile, path):
+    return true
+  if action.monitorDepfile.len > 0 and
+      pathMatches(info.projectRoot, action.monitorDepfile, path):
+    return true
+
+proc inputDependents(info: BuildGraphInspection; path: string): HashSet[string] =
+  for action in info.actions:
+    if actionUsesPath(info, action, path):
+      result.incl(action.id)
+
+proc downstreamClosure(info: BuildGraphInspection; roots: HashSet[string]): HashSet[string] =
+  var queue: seq[string] = @[]
+  for root in roots:
+    if not result.contains(root):
+      result.incl(root)
+      queue.add(root)
+  var head = 0
+  while head < queue.len:
+    let current = queue[head]
+    inc head
+    for dependent in directDependents(info.actions, current):
+      if not result.contains(dependent):
+        result.incl(dependent)
+        queue.add(dependent)
+
+proc edgeJson(fromId, toId, kind: string): JsonNode =
+  %*{"from": fromId, "to": toId, "kind": kind}
+
+proc analysisBaseJson(info: BuildGraphInspection; view: string): JsonNode =
+  %*{
+    "schemaId": "reprobuild.graph.analysis-view.v1",
+    "command": "graph",
+    "view": view,
+    "target": info.target,
+    "projectRoot": info.projectRoot,
+    "graph": graphMetadataJson(info)
+  }
+
+proc graphNeighborhoodJson(info: BuildGraphInspection; focus: string): JsonNode =
+  let action = requireAction(info.actions, focus)
+  let deps = directDependencies(info.actions, focus)
+  let dependents = directDependents(info.actions, focus)
+  var nodes = newJArray()
+  var edges = newJArray()
+  nodes.add(buildActionJson(action))
+  for dep in deps:
+    nodes.add(buildActionJson(requireAction(info.actions, dep)))
+    edges.add(edgeJson(dep, focus, "dependency"))
+  for dependent in dependents:
+    nodes.add(buildActionJson(requireAction(info.actions, dependent)))
+    edges.add(edgeJson(focus, dependent, "dependency"))
+  result = analysisBaseJson(info, "neighborhood")
+  result["focus"] = %focus
+  result["actions"] = nodes
+  result["edges"] = edges
+  result["directDependencies"] = jsonStringSeq(deps)
+  result["directDependents"] = jsonStringSeq(dependents)
+
+proc graphInputsJson(info: BuildGraphInspection; focus: string): JsonNode =
+  let action = requireAction(info.actions, focus)
+  result = analysisBaseJson(info, "inputs")
+  result["focus"] = %focus
+  result["actionId"] = %focus
+  result["inputs"] = jsonStringSeq(action.inputs)
+  result["outputs"] = jsonStringSeq(action.outputs)
+  result["depfile"] = %action.depfile
+  result["dynamicDepsFile"] = %action.dynamicDepsFile
+  result["monitorDepfile"] = %action.monitorDepfile
+  result["dependencyPolicy"] = dependencyPolicyJson(action.dependencyPolicy)
+  result["note"] = %"This graph view reports static graph inputs and dependency policy; dynamic path identities require captured dependency reports."
+
+proc graphDependentsJson(info: BuildGraphInspection; path: string): JsonNode =
+  let direct = inputDependents(info, path)
+  let closure = downstreamClosure(info, direct)
+  result = analysisBaseJson(info, "dependents")
+  result["path"] = %path
+  result["directDependentActionIds"] = actionIdsJson(direct)
+  result["dependentActionIds"] = actionIdsJson(closure)
+  result["directDependentCount"] = %direct.len
+  result["dependentCount"] = %closure.len
+
+proc graphBlastRadiusJson(info: BuildGraphInspection; path: string): JsonNode =
+  let direct = inputDependents(info, path)
+  let closure = downstreamClosure(info, direct)
+  var targetOutputs = newJArray()
+  for action in info.actions:
+    if closure.contains(action.id):
+      for output in action.outputs:
+        targetOutputs.add(%*{"actionId": action.id, "path": output})
+  result = analysisBaseJson(info, "blast-radius")
+  result["path"] = %path
+  result["directDependentActionIds"] = actionIdsJson(direct)
+  result["blastRadiusActionIds"] = actionIdsJson(closure)
+  result["directDependentCount"] = %direct.len
+  result["blastRadiusCount"] = %closure.len
+  result["affectedOutputs"] = targetOutputs
+  result["note"] = %"Structural graph blast radius; historical observed impact belongs to repro stats rank --scope=inputs --by=blast-radius."
+
+proc latestStatsRunId(projectRoot: string): string =
+  for node in readStatsObservations(projectRoot):
+    let runId = node{"runId"}.getStr()
+    if runId.len > 0:
+      result = runId
+
+proc graphCriticalPathJson(info: BuildGraphInspection; run: string): JsonNode =
+  let selectedRun =
+    if run == "last": latestStatsRunId(info.projectRoot) else: run
+  result = analysisBaseJson(info, "critical-path")
+  result["run"] = %run
+  result["selectedRunId"] = %selectedRun
+  result["availability"] = %*{
+    "available": false,
+    "reason": "M7 stats do not capture per-action dynamic durations required for critical path reconstruction"
+  }
+  result["criticalPath"] = newJArray()
+  result["sampleCount"] = %0
+
+proc graphPartitionCandidatesJson(info: BuildGraphInspection; kind: string): JsonNode =
+  result = analysisBaseJson(info, "partition-candidates")
+  result["kind"] = %kind
+  result["availability"] = %*{
+    "available": false,
+    "reason": "deferred/experimental: linker-level object and symbol evidence is not collected yet"
+  }
+  result["candidates"] = newJArray()
+
+proc renderGraphAnalysisText(node: JsonNode): string =
+  var lines: seq[string] = @[]
+  let view = node{"view"}.getStr()
+  lines.add("graph view: " & view)
+  case view
+  of "neighborhood":
+    lines.add("focus: " & node{"focus"}.getStr())
+    lines.add("directDependencies: " &
+      (if node{"directDependencies"}.len > 0:
+        node{"directDependencies"}.getElems().mapIt(it.getStr()).join(", ")
+      else: "-"))
+    lines.add("directDependents: " &
+      (if node{"directDependents"}.len > 0:
+        node{"directDependents"}.getElems().mapIt(it.getStr()).join(", ")
+      else: "-"))
+  of "inputs":
+    lines.add("focus: " & node{"focus"}.getStr())
+    lines.add("inputs: " & $node{"inputs"}.len)
+    for item in node{"inputs"}:
+      lines.add("  input: " & item.getStr())
+    lines.add("outputs: " & $node{"outputs"}.len)
+  of "dependents":
+    lines.add("path: " & node{"path"}.getStr())
+    lines.add("directDependents: " & $node{"directDependentCount"}.getInt(0))
+    lines.add("dependents: " & $node{"dependentCount"}.getInt(0))
+  of "blast-radius":
+    lines.add("path: " & node{"path"}.getStr())
+    lines.add("directDependents: " & $node{"directDependentCount"}.getInt(0))
+    lines.add("blastRadius: " & $node{"blastRadiusCount"}.getInt(0))
+  of "critical-path":
+    lines.add("run: " & node{"selectedRunId"}.getStr())
+    lines.add("unavailable: " & node{"availability"}{"reason"}.getStr())
+  of "partition-candidates":
+    lines.add("kind: " & node{"kind"}.getStr())
+    lines.add("deferred: " & node{"availability"}{"reason"}.getStr())
+  else:
+    lines.add("unsupported view")
+  lines.join("\n") & "\n"
+
 proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
   var target = ""
+  var view = "actions"
   var focus = ""
+  var path = ""
+  var runId = ""
+  var kind = ""
   var mode = tpmUnspecified
   var workRoot = ""
   var format = gofText
@@ -7819,6 +8943,9 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
   while i < args.len:
     let arg = args[i]
     if arg == "--build":
+      inc i
+    elif arg == "--view" or arg.startsWith("--view="):
+      view = valueFromFlag(args, i, "--view")
       inc i
     elif arg in ["--lock", "--infra", "--all"]:
       raise newException(ValueError,
@@ -7832,6 +8959,18 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
         raise newException(ValueError, "--focus requires a value")
       focus = args[i + 1]
       inc i, 2
+    elif arg == "--path" or arg.startsWith("--path="):
+      path = valueFromFlag(args, i, "--path")
+      inc i
+    elif arg == "--run" or arg.startsWith("--run="):
+      runId = valueFromFlag(args, i, "--run")
+      inc i
+    elif arg == "--kind" or arg.startsWith("--kind="):
+      kind = valueFromFlag(args, i, "--kind")
+      inc i
+    elif arg == "--target" or arg.startsWith("--target="):
+      target = valueFromFlag(args, i, "--target")
+      inc i
     elif arg == "--json":
       format = gofJson
       inc i
@@ -7893,6 +9032,80 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
     let info = prepareBuildGraphInspection(target, mode, publicCliPath,
       selectDefaultAction = targetWasOmitted,
       workRoot = workRoot)
+    if view == "actions":
+      discard
+    elif view == "neighborhood":
+      if focus.len == 0:
+        focus = info.selectedActionId
+      if focus.len == 0:
+        raise newException(ValueError, "--view=neighborhood requires --focus")
+      let outputNode = graphNeighborhoodJson(info, focus)
+      if format == gofJson:
+        echo $outputNode
+      elif format == gofDot:
+        echo renderBuildGraphDot(info, focus)
+      else:
+        stdout.write(renderGraphAnalysisText(outputNode))
+      return 0
+    elif view == "inputs":
+      if focus.len == 0:
+        focus = info.selectedActionId
+      if focus.len == 0:
+        raise newException(ValueError, "--view=inputs requires --focus")
+      let outputNode = graphInputsJson(info, focus)
+      if format == gofJson:
+        echo $outputNode
+      elif format == gofDot:
+        raise newException(ValueError, "dot format is not supported for --view=inputs")
+      else:
+        stdout.write(renderGraphAnalysisText(outputNode))
+      return 0
+    elif view == "dependents":
+      if path.len == 0:
+        raise newException(ValueError, "--view=dependents requires --path")
+      let outputNode = graphDependentsJson(info, path)
+      if format == gofJson:
+        echo $outputNode
+      elif format == gofDot:
+        raise newException(ValueError, "dot format is not supported for --view=dependents")
+      else:
+        stdout.write(renderGraphAnalysisText(outputNode))
+      return 0
+    elif view == "blast-radius":
+      if path.len == 0:
+        raise newException(ValueError, "--view=blast-radius requires --path")
+      let outputNode = graphBlastRadiusJson(info, path)
+      if format == gofJson:
+        echo $outputNode
+      elif format == gofDot:
+        raise newException(ValueError, "dot format is not supported for --view=blast-radius")
+      else:
+        stdout.write(renderGraphAnalysisText(outputNode))
+      return 0
+    elif view == "critical-path":
+      if runId.len == 0:
+        raise newException(ValueError, "--view=critical-path requires --run")
+      let outputNode = graphCriticalPathJson(info, runId)
+      if format == gofJson:
+        echo $outputNode
+      elif format == gofDot:
+        raise newException(ValueError, "dot format is not supported for --view=critical-path")
+      else:
+        stdout.write(renderGraphAnalysisText(outputNode))
+      return 0
+    elif view == "partition-candidates":
+      if kind.len == 0:
+        kind = "dylib"
+      let outputNode = graphPartitionCandidatesJson(info, kind)
+      if format == gofJson:
+        echo $outputNode
+      elif format == gofDot:
+        raise newException(ValueError, "dot format is not supported for --view=partition-candidates")
+      else:
+        stdout.write(renderGraphAnalysisText(outputNode))
+      return 0
+    else:
+      raise newException(ValueError, "unsupported graph view: " & view)
     case format
     of gofText:
       echo renderBuildGraphText(info, focus)
@@ -10060,7 +11273,7 @@ proc runThinApp*(programName: string): int =
           args[1 .. ^1]
         else:
           @[]
-      return runStatsCommand(statsArgs)
+      return runStatsCommand(statsArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro stats: error: " & err.msg)
       return 1

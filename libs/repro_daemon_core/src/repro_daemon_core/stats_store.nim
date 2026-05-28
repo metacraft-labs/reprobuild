@@ -186,6 +186,12 @@ proc readJsonLines(path: string): seq[JsonNode] =
     except JsonParsingError:
       discard
 
+proc readStatsObservations*(projectRoot: string): seq[JsonNode] =
+  readJsonLines(defaultStatsStorePath(projectRoot))
+
+proc defaultStatsSnapshotDir*(projectRoot: string): string =
+  projectRoot / ".repro" / "stats" / "snapshots"
+
 proc writeJsonLines(path: string; nodes: openArray[JsonNode]) =
   createDir(parentDir(path))
   var file = open(path, fmWrite)
