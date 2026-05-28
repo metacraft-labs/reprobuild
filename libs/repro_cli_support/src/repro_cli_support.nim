@@ -16,6 +16,7 @@ import repro_runquota
 import repro_hash
 import repro_tool_profiles
 import repro_local_store
+import repro_store_daemon
 import repro_launch_plan
 import repro_hcr_agent
 import repro_hcr_linkgraph
@@ -89,6 +90,8 @@ proc renderUsage*(programName: string): string =
       " debug artifact <path> [--format=text|json]\n       " &
           programName &
       " home {add | remove | enable | disable | list | why | history | apply | plan | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n       " &
+          programName &
+      " store {gc | recover | roots | list | daemon} ...\n       " &
           programName &
       " infra {plan | apply} ...\n       " &
           programName &
@@ -8358,6 +8361,50 @@ proc runDevelopCommand(args: openArray[string]): int =
     resolved.identity, resolved.identityPath, resolved.inspectionPath,
     interfacePath)
 
+proc runStoreDaemonCommand(args: seq[string]): int =
+  if args.len == 0:
+    echo "usage: repro store daemon {start | status | stop} --dev " &
+      "[--store-root <path>]"
+    return 2
+  let action = args[0]
+  let rest = if args.len > 1: args[1 .. ^1] else: @[]
+  if "--dev" notin rest:
+    stderr.writeLine("repro store daemon: only --dev is implemented in " &
+      "this pass; production service hardening is not implemented")
+    return 2
+  var filtered: seq[string] = @[]
+  for arg in rest:
+    if arg != "--dev":
+      filtered.add(arg)
+  try:
+    let parsed = parseDevConfig(filtered)
+    if parsed.rest.len > 0:
+      stderr.writeLine("repro store daemon: unexpected argument: " &
+        parsed.rest[0])
+      return 2
+    case action
+    of "start":
+      let status = startDevDaemon(stablePublicCliPath(), parsed.config)
+      echo renderStatus(status)
+      return 0
+    of "status":
+      echo renderStatus(queryDevStatus(parsed.config.endpoint))
+      return 0
+    of "stop":
+      let status = queryDevStatus(parsed.config.endpoint)
+      if not status.running:
+        echo renderStatus(status)
+        return 0
+      stopDevDaemon(parsed.config.endpoint)
+      echo "repro store daemon: stopped"
+      return 0
+    else:
+      stderr.writeLine("repro store daemon: unknown action: " & action)
+      return 2
+  except CatchableError as err:
+    stderr.writeLine("repro store daemon " & action & ": error: " & err.msg)
+    return 1
+
 proc runStoreCommand*(args: seq[string]): int =
   ## Implements `repro store <subcommand>` for the M56 unified local
   ## content-addressed store. Supported subcommands:
@@ -8378,6 +8425,9 @@ proc runStoreCommand*(args: seq[string]): int =
     echo "usage: repro store {gc | recover | roots | list} " &
       "[--store-root=PATH] [--grace-seconds=N]"
     return 2
+  if args[0] == "daemon":
+    let daemonArgs = if args.len > 1: args[1 .. ^1] else: @[]
+    return runStoreDaemonCommand(daemonArgs)
   var storeRootOverride = ""
   var graceSeconds = DefaultGcGraceSeconds
   var sub = ""
@@ -8804,6 +8854,8 @@ proc runThinApp*(programName: string): int =
     # proc.
     echo renderUsage(programName)
     return 0
+  if programName == "reprostored":
+    return runReprostoredCommand(args)
   if programName == "repro-fs-snoop":
     return runFsSnoopCli(programName, args)
   if args.len > 0 and args[0] == "__repro-runquota-helper":

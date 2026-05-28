@@ -699,7 +699,8 @@ proc materializeViaHardlinkOrCopy*(srcDir, dstDir: string;
 proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
                     hint: StoreReceiptHint;
                     populate: proc (stagingDir: string;
-                                    mechanism: var string)): RealizeResult =
+                                    mechanism: var string);
+                    writerMode = "direct"): RealizeResult =
   ## Materializes a prefix using the spec's stage → rename → INSERT OR
   ## IGNORE protocol.
   ##
@@ -746,7 +747,7 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
         else: mechanism,
       createdAtUnix: getTime().toUnix,
       writerProcessId: int64(getCurrentProcessId()),
-      writerMode: "direct")
+      writerMode: writerMode)
     writeReceiptFile(stage / ReceiptFileName, receipt)
     let digest = receiptDigest(receipt)
     # Publish (atomic rename):

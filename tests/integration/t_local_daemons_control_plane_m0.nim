@@ -40,6 +40,9 @@ proc publicReproBin(): string =
 proc userDaemonBin(): string =
   repoRoot() / "build" / "bin" / "repro-daemon"
 
+proc storeDaemonBin(): string =
+  repoRoot() / "build" / "bin" / "reprostored"
+
 proc requireReproFailure(args: openArray[string]): string =
   requireFailure(shellCommand(@[publicReproBin()] & @args), repoRoot())
 
@@ -61,6 +64,11 @@ suite "Local daemons/control-plane M0 current-state gates":
     let output = requireSuccess(shellCommand([userDaemonBin(), "--version"]),
       repoRoot())
     check output.strip().startsWith("repro-daemon ")
+    check "reprostored" in entrypointNames()
+    check fileExists(storeDaemonBin())
+    let storeOutput = requireSuccess(shellCommand([storeDaemonBin(),
+      "--version"]), repoRoot())
+    check storeOutput.strip().startsWith("reprostored ")
 
   test "test_daemon_track_current_surface_inventory":
     check fileExists(publicReproBin())
@@ -86,10 +94,8 @@ suite "Local daemons/control-plane M0 current-state gates":
     let tempRoot = createTempDir("repro-daemon-m0-inventory", "")
     defer: removeDir(tempRoot)
     let storeDaemon = requireReproFailure([
-      "store", "daemon", "--store-root=" & tempRoot / "store"])
-    check storeDaemon.contains("repro store: unknown subcommand: daemon")
-    check "reprostored" notin entrypointNames()
-    check not fileExists(repoRoot() / "build" / "bin" / "reprostored")
+      "store", "daemon", "status", "--store-root=" & tempRoot / "store"])
+    check storeDaemon.contains("only --dev is implemented")
 
   test "direct-mode parity fixture builds through current direct path":
     let tempRoot = createTempDir("repro-daemon-m0-parity", "")

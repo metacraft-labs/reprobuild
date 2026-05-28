@@ -37,6 +37,7 @@ for libName in [
   "repro_dev_env_engine",
   "repro_tool_profiles",
   "repro_local_store",
+  "repro_store_daemon",
   "repro_launch_plan",
   "repro_runquota",
   "repro_build_engine",
