@@ -139,26 +139,26 @@ suite "Local daemons/control-plane M3 build routing":
     copyFixtureProject(autoProject)
     let autoOutput = requireSuccess(buildCommand(autoProject, tempRoot,
       ["--daemon=auto"]), repoRoot())
-    check autoOutput.contains("daemon build unsupported; falling back")
+    check not autoOutput.contains("daemon build unsupported")
     check autoOutput.contains("project: localDaemonParity")
     check readFile(autoProject / "dist" / "copied.txt") ==
       "direct-mode fixture\n"
-    waitForLogContains(daemonLogPath(tempRoot),
-      "build request unsupported session=")
 
     let requireProject = tempRoot / "require-project"
     copyFixtureProject(requireProject)
-    let required = requireFailure(buildCommand(requireProject, tempRoot,
+    let required = requireSuccess(buildCommand(requireProject, tempRoot,
       ["--daemon=require"]), repoRoot())
-    check required.contains("daemon mode required")
-    check required.contains("cannot execute builds")
-    check not dirExists(requireProject / "dist")
+    check required.contains("project: localDaemonParity")
+    check readFile(requireProject / "dist" / "copied.txt") ==
+      "direct-mode fixture\n"
 
     let envRequireProject = tempRoot / "env-require-project"
     copyFixtureProject(envRequireProject)
-    let envRequire = requireFailure(buildCommand(envRequireProject, tempRoot,
+    let envRequire = requireSuccess(buildCommand(envRequireProject, tempRoot,
       env = [("REPRO_DAEMON", "require")]), repoRoot())
-    check envRequire.contains("daemon mode required")
+    check envRequire.contains("project: localDaemonParity")
+    check readFile(envRequireProject / "dist" / "copied.txt") ==
+      "direct-mode fixture\n"
 
   test "integration_repro_build_attached_client_disconnect_cancels":
     when defined(posix):

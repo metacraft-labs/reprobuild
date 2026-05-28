@@ -66,6 +66,9 @@ type
     mode*: string
     state*: string
     startedAtUnix*: int64
+    endedAtUnix*: int64
+    exitCode*: int
+    message*: string
 
   UserDaemonBuildRequest* = object
     runId*: string
@@ -74,7 +77,9 @@ type
     projectRoot*: string
     toolProvisioning*: string
     workRoot*: string
+    publicCliPath*: string
     rawArgs*: seq[string]
+    environment*: seq[string]
     attached*: bool
     cancelOnDisconnect*: bool
 
@@ -117,7 +122,13 @@ proc writeI64(buf: var seq[byte]; value: int64) =
   buf.writeU64Le(uint64(value))
 
 proc readI64(buf: openArray[byte]; pos: var int): int64 =
-  int64(buf.readU64Le(pos))
+  let raw = buf.readU64Le(pos)
+  if raw <= uint64(int64.high):
+    int64(raw)
+  elif raw == 0x8000000000000000'u64:
+    int64.low
+  else:
+    -int64((not raw) + 1'u64)
 
 proc safePathSegment(value, fallback: string): string =
   for ch in value:
@@ -210,6 +221,9 @@ proc writeSession(buf: var seq[byte]; session: UserDaemonSession) =
   buf.writeString(session.mode)
   buf.writeString(session.state)
   buf.writeI64(session.startedAtUnix)
+  buf.writeI64(session.endedAtUnix)
+  buf.writeI64(int64(session.exitCode))
+  buf.writeString(session.message)
 
 proc readSession(buf: openArray[byte]; pos: var int): UserDaemonSession =
   result.sessionId = buf.readString(pos)
@@ -217,6 +231,9 @@ proc readSession(buf: openArray[byte]; pos: var int): UserDaemonSession =
   result.mode = buf.readString(pos)
   result.state = buf.readString(pos)
   result.startedAtUnix = buf.readI64(pos)
+  result.endedAtUnix = buf.readI64(pos)
+  result.exitCode = int(buf.readI64(pos))
+  result.message = buf.readString(pos)
 
 proc writeStringSeq(buf: var seq[byte]; values: openArray[string]) =
   buf.writeU32Le(uint32(values.len))
@@ -353,7 +370,9 @@ proc buildRequestBody*(request: UserDaemonBuildRequest): seq[byte] =
   result.writeString(request.projectRoot)
   result.writeString(request.toolProvisioning)
   result.writeString(request.workRoot)
+  result.writeString(request.publicCliPath)
   result.writeStringSeq(request.rawArgs)
+  result.writeStringSeq(request.environment)
   result.writeBool(request.attached)
   result.writeBool(request.cancelOnDisconnect)
 
@@ -365,7 +384,9 @@ proc parseBuildRequestBody*(body: openArray[byte]): UserDaemonBuildRequest =
   result.projectRoot = body.readString(pos)
   result.toolProvisioning = body.readString(pos)
   result.workRoot = body.readString(pos)
+  result.publicCliPath = body.readString(pos)
   result.rawArgs = body.readStringSeq(pos)
+  result.environment = body.readStringSeq(pos)
   result.attached = body.readBool(pos)
   result.cancelOnDisconnect = body.readBool(pos)
 

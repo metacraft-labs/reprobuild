@@ -26,6 +26,18 @@ type
     devMode*: bool
     daemonExe*: string
 
+  UserDaemonBuildEmit* = proc(kind: UserDaemonBuildEventKind;
+                              message: string;
+                              terminal: bool;
+                              exitCode: int;
+                              severity: string;
+                              payloadJson: string)
+  UserDaemonBuildCancelCheck* = proc(): bool
+  UserDaemonBuildExecutor* = proc(request: UserDaemonBuildRequest;
+                                  emit: UserDaemonBuildEmit;
+                                  cancelCheck: UserDaemonBuildCancelCheck):
+                                  int
+
   UserDaemonLock = object
     held: bool
     lockPath: string
@@ -34,6 +46,11 @@ type
       fd: cint
 
 const UserDaemonLockFileName = ".repro-daemon.lock"
+
+var userDaemonBuildExecutor: UserDaemonBuildExecutor
+
+proc setUserDaemonBuildExecutor*(executor: UserDaemonBuildExecutor) =
+  userDaemonBuildExecutor = executor
 
 proc safePathSegment(value, fallback: string): string =
   for ch in value:
@@ -142,6 +159,78 @@ proc statusPath(config: UserDaemonConfig): string =
   config.stateDir / "status" /
     (safePathSegment(config.endpoint.extractFilename, "repro-daemon") &
       ".status")
+
+proc sessionRecordsDir(config: UserDaemonConfig): string =
+  config.stateDir / "sessions"
+
+proc sessionRecordPath(config: UserDaemonConfig; sessionId: string): string =
+  sessionRecordsDir(config) / (safePathSegment(sessionId, "session") & ".session")
+
+proc flattenRecordValue(value: string): string =
+  value.replace("\n", "\\n").replace("\r", "\\r")
+
+proc expandRecordValue(value: string): string =
+  value.replace("\\n", "\n").replace("\\r", "\r")
+
+proc writeSessionRecord(config: UserDaemonConfig; session: UserDaemonSession) =
+  createDir(sessionRecordsDir(config))
+  writeFile(sessionRecordPath(config, session.sessionId),
+    "sessionId=" & flattenRecordValue(session.sessionId) & "\n" &
+    "projectRoot=" & flattenRecordValue(session.projectRoot) & "\n" &
+    "mode=" & flattenRecordValue(session.mode) & "\n" &
+    "state=" & flattenRecordValue(session.state) & "\n" &
+    "startedAtUnix=" & $session.startedAtUnix & "\n" &
+    "endedAtUnix=" & $session.endedAtUnix & "\n" &
+    "exitCode=" & $session.exitCode & "\n" &
+    "message=" & flattenRecordValue(session.message) & "\n")
+
+proc readSessionRecord(path: string): UserDaemonSession =
+  for line in readFile(path).splitLines:
+    let split = line.find('=')
+    if split < 0:
+      continue
+    let key = line[0 ..< split]
+    let value = expandRecordValue(line[split + 1 .. ^1])
+    case key
+    of "sessionId":
+      result.sessionId = value
+    of "projectRoot":
+      result.projectRoot = value
+    of "mode":
+      result.mode = value
+    of "state":
+      result.state = value
+    of "startedAtUnix":
+      try: result.startedAtUnix = parseBiggestInt(value)
+      except ValueError: discard
+    of "endedAtUnix":
+      try: result.endedAtUnix = parseBiggestInt(value)
+      except ValueError: discard
+    of "exitCode":
+      try: result.exitCode = int(parseBiggestInt(value))
+      except ValueError: discard
+    of "message":
+      result.message = value
+    else:
+      discard
+
+proc loadSessionRecords(config: UserDaemonConfig): seq[UserDaemonSession] =
+  if not dirExists(sessionRecordsDir(config)):
+    return
+  for kind, path in walkDir(sessionRecordsDir(config)):
+    if kind != pcFile or not path.endsWith(".session"):
+      continue
+    try:
+      let session = readSessionRecord(path)
+      if session.sessionId.len > 0:
+        result.add(session)
+    except CatchableError:
+      discard
+
+proc countActiveSessionRecords(config: UserDaemonConfig): int =
+  for session in loadSessionRecords(config):
+    if session.state in ["accepted", "running", "cancelling"]:
+      inc result
 
 proc removeStatusFile(config: UserDaemonConfig) =
   try:
@@ -261,6 +350,24 @@ proc removeSession(sessions: var seq[UserDaemonSession]; sessionId: string) =
       kept.add(session)
   sessions = kept
 
+proc sessionStateAccepted(sessionId, projectRoot: string; started: Time):
+    UserDaemonSession =
+  UserDaemonSession(sessionId: sessionId,
+    projectRoot: projectRoot, mode: "build", state: "accepted",
+    startedAtUnix: started.toUnix,
+    exitCode: -1,
+    message: "build request accepted by repro-daemon")
+
+proc updateSessionState(config: UserDaemonConfig; session: var UserDaemonSession;
+                        state: string; exitCode = -1; message = "") =
+  session.state = state
+  session.exitCode = exitCode
+  if message.len > 0:
+    session.message = message
+  if state notin ["accepted", "running", "cancelling"]:
+    session.endedAtUnix = getTime().toUnix
+  writeSessionRecord(config, session)
+
 proc buildResponseDelayMs(): int =
   let raw = getEnv("REPRO_DAEMON_M3_BUILD_RESPONSE_DELAY_MS", "")
   if raw.len == 0:
@@ -272,16 +379,18 @@ proc buildResponseDelayMs(): int =
 
 proc clientDisconnected(socket: Socket): bool =
   when defined(posix):
-    var fds = TPollfd(fd: cast[cint](socket.getFd()), events: POLLIN,
-      revents: 0)
+    let fd = socket.getFd()
+    var fds = TPollfd(fd: cast[cint](fd), events: POLLIN, revents: 0)
     let rc = poll(addr(fds), Tnfds(1), 0.cint)
     if rc <= 0:
       return false
-    if (fds.revents and POLLHUP) != 0 or (fds.revents and POLLERR) != 0:
+    if (fds.revents and POLLHUP) != 0 or (fds.revents and POLLERR) != 0 or
+        (fds.revents and POLLNVAL) != 0:
       return true
     if (fds.revents and POLLIN) != 0:
-      let peeked = socket.recv(1)
-      return peeked.len == 0
+      var ch: char
+      let n = recv(fd, addr(ch), 1, MSG_PEEK)
+      return n == 0
     false
   else:
     false
@@ -295,6 +404,65 @@ proc waitForBuildUnsupportedOrDisconnect(socket: Socket; delayMs: int): bool =
       return true
     sleep(25)
   socket.clientDisconnected()
+
+proc runBuildRequestWorker(socket: Socket; config: UserDaemonConfig;
+                           request: UserDaemonBuildRequest;
+                           session: var UserDaemonSession) =
+  var eventId = 1'u64
+  var terminalSent = false
+  let sessionId = session.sessionId
+  let projectRoot = session.projectRoot
+  proc emit(kind: UserDaemonBuildEventKind; message: string; terminal: bool;
+            exitCode: int; severity: string; payloadJson: string) =
+    inc eventId
+    socket.writeFrame(udkBuildEvent, buildEventBody(nextBuildEvent(
+      request.runId, sessionId, projectRoot, eventId, kind,
+      message, terminal = terminal, exitCode = exitCode,
+      severity = severity, payloadJson = payloadJson)))
+    terminalSent = terminalSent or terminal
+
+  proc cancelCheck(): bool =
+    request.attached and request.cancelOnDisconnect and socket.clientDisconnected()
+
+  try:
+    updateSessionState(config, session, "running",
+      message = "daemon-hosted build running")
+    if userDaemonBuildExecutor == nil:
+      let message =
+        "daemon-hosted build executor is not registered in repro-daemon"
+      updateSessionState(config, session, "unsupported", 64, message)
+      emit(bekUnsupported, message, true, 64, "warning",
+        "{\"fallbackAllowed\":true,\"deferredMilestone\":\"M4\"}")
+      return
+    let exitCode = userDaemonBuildExecutor(request, emit, cancelCheck)
+    let message =
+      if exitCode == 0: "daemon-hosted build succeeded"
+      else: "daemon-hosted build failed"
+    updateSessionState(config, session,
+      if exitCode == 0: "succeeded" else: "failed", exitCode, message)
+    emit(bekFinished, message, true, exitCode,
+      if exitCode == 0: "info" else: "error",
+      "{\"executor\":\"direct-build-entrypoint\"}")
+    logLine(config.logPath, "build request finished session=" &
+      session.sessionId & " exitCode=" & $exitCode)
+  except CatchableError as err:
+    let cancelled = cancelCheck()
+    let kind = if cancelled: bekCancelled else: bekFinished
+    let state = if cancelled: "cancelled" else: "failed"
+    let code = if cancelled: 130 else: 1
+    let message =
+      if cancelled: "daemon-hosted build cancelled after client disconnect"
+      else: "daemon-hosted build failed: " & err.msg
+    updateSessionState(config, session, state, code, message)
+    if not terminalSent:
+      try:
+        emit(kind, message, true, code,
+          if cancelled: "warning" else: "error",
+          "{\"executor\":\"direct-build-entrypoint\"}")
+      except CatchableError:
+        discard
+    logLine(config.logPath, "build request " & state & " session=" &
+      session.sessionId & " message=" & message)
 
 proc handleBuildRequest(socket: Socket; config: UserDaemonConfig;
                         request: UserDaemonBuildRequest;
@@ -311,9 +479,9 @@ proc handleBuildRequest(socket: Socket; config: UserDaemonConfig;
       request.projectRoot
     else:
       request.workingDir
-  sessions.add(UserDaemonSession(sessionId: sessionId,
-    projectRoot: projectRoot, mode: "build", state: "accepted",
-    startedAtUnix: started.toUnix))
+  var session = sessionStateAccepted(sessionId, projectRoot, started)
+  sessions.add(session)
+  writeSessionRecord(config, session)
   logLine(config.logPath, "build request accepted session=" & sessionId &
     " projectRoot=" & projectRoot & " attached=" & $request.attached &
     " cancelOnDisconnect=" & $request.cancelOnDisconnect)
@@ -326,16 +494,27 @@ proc handleBuildRequest(socket: Socket; config: UserDaemonConfig;
       if waitForBuildUnsupportedOrDisconnect(socket, delayMs):
         logLine(config.logPath, "build request cancelled session=" &
           sessionId & " reason=client-disconnect")
+        updateSessionState(config, session, "cancelled", 130,
+          "daemon-hosted build cancelled before scheduling")
         return
-    let message =
-      "daemon-hosted build execution is not implemented until " &
-      "Local-Daemons-And-Control-Plane M4"
-    socket.writeFrame(udkBuildEvent, buildEventBody(nextBuildEvent(
-      request.runId, sessionId, projectRoot, 2'u64, bekUnsupported,
-      message, terminal = true, exitCode = 64, severity = "warning",
-      payloadJson = "{\"fallbackAllowed\":true,\"deferredMilestone\":\"M4\"}")))
-    logLine(config.logPath, "build request unsupported session=" & sessionId &
-      " deferredMilestone=M4")
+    when defined(posix):
+      let pid = fork()
+      if pid < 0:
+        raise newException(UserDaemonRuntimeError,
+          "failed to fork daemon build worker")
+      if pid == 0:
+        try:
+          signal(SIGCHLD, SIG_DFL)
+          runBuildRequestWorker(socket, config, request, session)
+        except CatchableError as err:
+          logLine(config.logPath, "build worker fatal session=" & sessionId &
+            " error=" & err.msg)
+        try: socket.close() except CatchableError: discard
+        quit(0)
+      logLine(config.logPath, "build worker started session=" & sessionId &
+        " pid=" & $pid)
+    else:
+      runBuildRequestWorker(socket, config, request, session)
   finally:
     sessions.removeSession(sessionId)
 
@@ -354,13 +533,15 @@ proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
   case frame.kind
   of udkStatus:
     socket.writeFrame(udkStatusResponse,
-      statusBody(statusFor(config, startedAt, generation, sessions.len)))
+      statusBody(statusFor(config, startedAt, generation,
+        countActiveSessionRecords(config))))
   of udkShutdown:
     shuttingDown = true
     socket.writeFrame(udkShutdownAck)
     logLine(config.logPath, "shutdown requested")
   of udkSessions:
-    socket.writeFrame(udkSessionsResponse, sessionsBody(sessions))
+    socket.writeFrame(udkSessionsResponse,
+      sessionsBody(loadSessionRecords(config)))
   of udkBuildRequest:
     handleBuildRequest(socket, config, parseBuildRequestBody(frame.body),
       sessions)
@@ -641,7 +822,10 @@ proc renderUserDaemonSessions*(sessions: openArray[UserDaemonSession]):
   result = "repro daemon sessions: " & $sessions.len
   for session in sessions:
     result.add("\n" & session.sessionId & "\t" & session.mode & "\t" &
-      session.state & "\t" & session.projectRoot)
+      session.state & "\t" & $session.exitCode & "\t" &
+      session.projectRoot)
+    if session.message.len > 0:
+      result.add("\t" & session.message)
 
 proc parseUserDaemonConfigFlags*(args: seq[string];
                                  base = defaultUserDaemonConfig()):

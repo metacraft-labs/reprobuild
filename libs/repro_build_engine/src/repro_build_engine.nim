@@ -115,6 +115,7 @@ type
     inlineRunQuota*: bool
     dryRun*: bool
     progressCallback*: BuildProgressCallback
+    cancelCallback*: BuildCancelCallback
     statsEnabled*: bool
     suppressTrace*: bool
     skipCacheHitEvidence*: bool
@@ -189,6 +190,7 @@ type
     ready*: int
 
   BuildProgressCallback* = proc(event: BuildProgressEvent)
+  BuildCancelCallback* = proc(): bool
 
   RunningProcessKind = enum
     rpkHelperProcess
@@ -1490,6 +1492,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro graph validate", validateStart)
 
   let maxParallel = if config.maxParallelism == 0'u32: 1'u32 else: config.maxParallelism
+
+  proc cancellationRequested(): bool =
+    config.cancelCallback != nil and config.cancelCallback()
+
+  proc raiseIfCancelled() =
+    if cancellationRequested():
+      raiseEngine("build cancelled")
   let initStart = statStart()
   let cacheRoot = if config.cacheRoot.len == 0:
       getCurrentDir() / ".repro" / "build-engine-cache"
@@ -1997,12 +2006,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
   try:
     while completed < buildGraph.actions.len:
+      raiseIfCancelled()
       ready.sort(readyCmp)
       var launchedAny = false
       var stagedInlineLaunches: seq[StagedInlineLaunch] = @[]
       var i = 0
       while i < ready.len and
           uint32(running.len + stagedInlineLaunches.len) < maxParallel:
+        raiseIfCancelled()
         let id = ready[i]
         var action = actionsById[id]
         let poolName = action.pool
@@ -2422,6 +2433,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let waitStart = statStart()
       var nextGrantPoll = 0.0
       while runIndex < 0:
+        raiseIfCancelled()
         if hasPendingInlineRunQuota() and epochTime() >= nextGrantPoll:
           runIndex = pollInlineRunQuotaGrants()
           nextGrantPoll = epochTime() + 0.025

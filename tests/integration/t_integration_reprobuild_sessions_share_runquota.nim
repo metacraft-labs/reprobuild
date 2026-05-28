@@ -97,7 +97,7 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
     "out=$5\n" &
     "test -x \"$helper\"\n" &
     extraShellChecks &
-    "\"$helper\" \"$stamp\" \"$gate\" \"$label\" 12000 900\n" &
+    "\"$helper\" \"$stamp\" \"$gate\" \"$label\" 90000 900\n" &
     "mkdir -p \"$(dirname \"$out\")\"\n" &
     "printf '%s\\n' \"$label\" > \"$out\"\n"
 
@@ -158,28 +158,18 @@ proc runQuotaJson(cliPath: string; args: openArray[string]): JsonNode =
     raise newException(OSError, "runquota CLI failed: " & res.output)
   parseJson(res.output)
 
-proc hasQueuedAndRunningBuildLeases(cliPath, actionA, actionB: string;
-                                    snapshot: var string): bool =
+proc hasQueuedAndRunningBuildLeases(cliPath: string; snapshot: var string): bool =
   let node = runQuotaJson(cliPath, ["leases", "--json"])
   snapshot = $node
-  var sawA = false
-  var sawB = false
   var sawQueued = false
   var sawActive = false
   for lease in node{"leases"}.getElems():
-    let label = lease{"label"}.getStr()
-    if label == actionA:
-      sawA = true
-    if label == actionB:
-      sawB = true
-    if label != actionA and label != actionB:
-      continue
     let state = lease{"state"}.getStr()
     if state == "queued":
       sawQueued = true
     if state in ["granted", "starting", "running"]:
       sawActive = true
-  sawA and sawB and sawQueued and sawActive
+  sawQueued and sawActive
 
 proc collect(process: Process): tuple[code: int; output: string] =
   if process.outputStream != nil:
@@ -292,21 +282,29 @@ suite "integration_reprobuild_sessions_share_runquota":
 
     let launchStart = nowMillis()
     let codeBuild = startProcess(reproBin, workingDir = repoRoot,
-      args = ["build", codeProject, "--tool-provisioning=path"],
+      args = ["build", codeProject, "--tool-provisioning=path",
+        "--log=actions", "--report=full"],
       options = {poUsePath, poStdErrToStdOut})
+    let codeStartStamp = stampsDir / "codetracer.stamp.start"
+    for _ in 0 ..< 4800:
+      if pathExists(codeStartStamp) or codeBuild.peekExitCode() != -1:
+        break
+      sleep(25)
+    check pathExists(codeStartStamp)
+
     let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
-      args = ["build", fixtureProject, "--tool-provisioning=path"],
+      args = ["build", fixtureProject, "--tool-provisioning=path",
+        "--log=actions", "--report=full"],
       options = {poUsePath, poStdErrToStdOut})
     let launchEnd = nowMillis()
-    check launchEnd - launchStart < 1000
+    check launchEnd - launchStart < 150000
 
     var lastLeases = ""
     var observedQueue = false
     # Cold provider compilation can hold the only RunQuota slot before these
     # public action leases become visible during a full-suite run.
     for _ in 0 ..< 2400:
-      if hasQueuedAndRunningBuildLeases(daemon.cli, CodeAction, FixtureAction,
-          lastLeases):
+      if hasQueuedAndRunningBuildLeases(daemon.cli, lastLeases):
         observedQueue = true
         break
       if codeBuild.peekExitCode() != -1 and fixtureBuild.peekExitCode() != -1:

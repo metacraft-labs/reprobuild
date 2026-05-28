@@ -2147,6 +2147,8 @@ type
     outDir: string
     buildReportPath: string
 
+  BuildCommandEventSink = proc(kind, message, payloadJson: string)
+
 proc parseBuildProgressMode(value: string): BuildProgressMode =
   case value.toLowerAscii()
   of "quiet", "silent", "none", "off":
@@ -2807,7 +2809,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         dryRun = false;
                         forceRebuild = false;
                         skipCmakeRegeneration = false;
-                        bypassRunQuotaExplicit = false):
+                        bypassRunQuotaExplicit = false;
+                        eventSink: BuildCommandEventSink = nil;
+                        cancelCheck: BuildCancelCallback = nil):
     BuildCommandOutcome =
   # Configure-level aggregation: when REPRO_STATS_DIR is set, each repro
   # build invocation drops a JSON record into that directory. The companion
@@ -2905,12 +2909,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
   template logSummary(line: string) =
     appendDiagnostic(line)
-    if logMode != blmQuiet:
+    if eventSink != nil:
+      eventSink("diagnostic", line, "{}")
+    elif logMode != blmQuiet:
       echo line
 
   template logAction(line: string) =
     appendDiagnostic(line)
-    if logMode == blmActions:
+    if eventSink != nil and logMode == blmActions:
+      eventSink("diagnostic", line, "{}")
+    elif logMode == blmActions:
       echo line
 
   proc usesRunQuotaBypass(runResult: BuildRunResult): bool =
@@ -2955,9 +2963,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       suppressTrace: reportMode == brmNone,
-      skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
+      skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
+      cancelCallback: cancelCheck)
     engineConfig.statsEnabled = statsEnabled
-    if progressRenderer.enabled:
+    if eventSink != nil:
+      engineConfig.progressCallback = proc(event: BuildProgressEvent) =
+        eventSink("diagnostic", "progress: " & $event.kind & " " &
+          event.actionId, $(%*{
+            "kind": $event.kind,
+            "actionId": event.actionId,
+            "status": $event.status,
+            "cacheDecision": $event.cacheDecision,
+            "total": event.total,
+            "completed": event.completed,
+            "running": event.running,
+            "ready": event.ready
+          }))
+    elif progressRenderer.enabled:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
@@ -2994,8 +3016,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # stderr with per-invocation tables.
     if statsMode == bsmText:
       let statsRenderStart = statStart(statsEnabled)
-      stderr.write(renderBuildStats(buildResult.stats))
-      stderr.flushFile()
+      if eventSink != nil:
+        eventSink("diagnostic", renderBuildStats(buildResult.stats), "{}")
+      else:
+        stderr.write(renderBuildStats(buildResult.stats))
+        stderr.flushFile()
       finishStat(buildStats, statsEnabled, "repro stats render",
         statsRenderStart)
     if buildResult.hasFailedActions():
@@ -3071,7 +3096,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         dryRun: false,
         forceRebuild: forceRebuild,
         suppressTrace: reportMode == brmNone,
-        skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
+        skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
+        cancelCallback: cancelCheck)
       cmakeRegenerationConfig.statsEnabled = statsEnabled
       cmakeRegenerationResult = runBuild(graph([cmakeRegenerationAction]),
         cmakeRegenerationConfig)
@@ -3084,10 +3110,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         $item.status & " launched=" & $item.launched & " cache=" &
         $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
         (if item.reason.len > 0: " reason=" & item.reason else: ""))
-      if logMode != blmQuiet and item.stdout.len > 0:
+      if eventSink != nil and logMode != blmQuiet and item.stdout.len > 0:
+        eventSink("diagnostic", item.stdout, "{\"stream\":\"stdout\"}")
+      elif logMode != blmQuiet and item.stdout.len > 0:
         stdout.write(item.stdout)
         stdout.flushFile()
-      if logMode != blmQuiet and item.stderr.len > 0:
+      if eventSink != nil and logMode != blmQuiet and item.stderr.len > 0:
+        eventSink("diagnostic", item.stderr, "{\"stream\":\"stderr\"}")
+      elif logMode != blmQuiet and item.stderr.len > 0:
         stderr.write(item.stderr)
         stderr.flushFile()
     if cmakeRegenerationResult.hasFailedActions():
@@ -3357,7 +3387,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         dryRun: false,
         forceRebuild: forceRebuild,
         suppressTrace: reportMode == brmNone,
-        skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
+        skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
+        cancelCallback: cancelCheck)
       providerCompileConfig.statsEnabled = statsEnabled
       providerCompileResult = runBuild(graph([providerCompileAction]),
         providerCompileConfig)
@@ -3465,8 +3496,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "repro cmake regeneration cache seed", seedStart)
       finishStat(buildStats, statsEnabled, "repro build total",
         buildTotalStart)
-      if statsMode == bsmText:
-        let statsRenderStart = statStart(statsEnabled)
+    if statsMode == bsmText:
+      let statsRenderStart = statStart(statsEnabled)
+      if eventSink != nil:
+        eventSink("diagnostic", renderBuildStats(buildStats), "{}")
+      else:
         stderr.write(renderBuildStats(buildStats))
         stderr.flushFile()
         finishStat(buildStats, statsEnabled, "repro stats render",
@@ -3497,9 +3531,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       suppressTrace: reportMode == brmNone,
-      skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet)
+      skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
+      cancelCallback: cancelCheck)
     engineConfig.statsEnabled = statsEnabled
-    if progressRenderer.enabled:
+    if eventSink != nil:
+      engineConfig.progressCallback = proc(event: BuildProgressEvent) =
+        eventSink("diagnostic", "progress: " & $event.kind & " " &
+          event.actionId, $(%*{
+            "kind": $event.kind,
+            "actionId": event.actionId,
+            "status": $event.status,
+            "cacheDecision": $event.cacheDecision,
+            "total": event.total,
+            "completed": event.completed,
+            "running": event.running,
+            "ready": event.ready
+          }))
+    elif progressRenderer.enabled:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
@@ -3542,8 +3590,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     buildResult.stats = buildStats
     if statsMode == bsmText:
       let statsRenderStart = statStart(statsEnabled)
-      stderr.write(renderBuildStats(buildResult.stats))
-      stderr.flushFile()
+      if eventSink != nil:
+        eventSink("diagnostic", renderBuildStats(buildResult.stats), "{}")
+      else:
+        stderr.write(renderBuildStats(buildResult.stats))
+        stderr.flushFile()
       finishStat(buildStats, statsEnabled, "repro stats render",
         statsRenderStart)
     result.exitCode =
@@ -6622,7 +6673,10 @@ proc runDepsCommand(args: openArray[string]): int =
     stderr.writeLine("repro deps: unknown subcommand: " & sub)
     return 2
 
-proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
+proc runBuildCommand(args: openArray[string]; publicCliPath: string;
+                     forceDirect = false;
+                     eventSink: BuildCommandEventSink = nil;
+                     cancelCheck: BuildCancelCallback = nil): int =
   let originalArgs = @args
   var target = ""
   var mode = tpmUnspecified
@@ -6777,7 +6831,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
         dryRun = dryRun,
         forceRebuild = forceRebuild,
         skipCmakeRegeneration = skipCmakeRegeneration,
-        bypassRunQuotaExplicit = bypassRunQuota).exitCode
+        bypassRunQuotaExplicit = bypassRunQuota,
+        eventSink = eventSink,
+        cancelCheck = cancelCheck).exitCode
     finally:
       if autoRunQuota != nil:
         try:
@@ -6798,6 +6854,15 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
     except CatchableError:
       getCurrentDir()
 
+  proc daemonBuildEnvironment(): seq[string] =
+    for key, value in envPairs():
+      if key in ["PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
+          "RUNQUOTA_SOCKET", "REPROBUILD_STORE_ROOT",
+          "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
+          "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
+          "REPROBUILD_AUTO_RUNQUOTA"]:
+        result.add(key & "=" & value)
+
   proc runDaemonBuild(): int =
     let config = defaultUserDaemonConfig()
     let projectRoot = requestProjectRoot()
@@ -6809,15 +6874,27 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       projectRoot: projectRoot,
       toolProvisioning: mode.modeName,
       workRoot: workRoot,
+      publicCliPath: publicCliPath,
       rawArgs: originalArgs,
+      environment: daemonBuildEnvironment(),
       attached: true,
       cancelOnDisconnect: true)
-    let daemonResult = requestUserDaemonBuild(request, config.endpoint)
+    let daemonResult = requestUserDaemonBuild(request, config.endpoint,
+      proc(event: UserDaemonBuildEvent) =
+        if event.kind == bekDiagnostic and event.message.len > 0:
+          if event.payloadJson.contains("\"stream\":\"stderr\""):
+            stderr.write(event.message)
+            if not event.message.endsWith("\n"):
+              stderr.writeLine("")
+          else:
+            stdout.write(event.message)
+            if not event.message.endsWith("\n"):
+              stdout.writeLine(""))
     if not daemonResult.supported:
       raise newException(DaemonBuildUnsupported, daemonResult.message)
     daemonResult.exitCode
 
-  if daemonMode == bdmOff:
+  if forceDirect or daemonMode == bdmOff:
     return runDirectBuild()
   try:
     return runDaemonBuild()
@@ -9004,6 +9081,51 @@ proc runPrivilegedBrokerMode(args: openArray[string]): int =
     stderr.writeLine("repro --privileged-broker: error: " & err.msg)
     return 7
 
+proc installUserDaemonBuildExecutor() =
+  setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
+      emit: UserDaemonBuildEmit;
+      cancelCheck: UserDaemonBuildCancelCheck): int =
+    let previousCwd = getCurrentDir()
+    var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
+    try:
+      for item in request.environment:
+        let split = item.find('=')
+        if split < 0:
+          continue
+        let key = item[0 ..< split]
+        let value = item[split + 1 .. ^1]
+        previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
+        putEnv(key, value)
+      if request.workingDir.len > 0:
+        setCurrentDir(request.workingDir)
+      let cliPath =
+        if request.publicCliPath.len > 0: request.publicCliPath
+        else: stablePublicCliPath()
+      proc emitBuildCommandEvent(kind, message, payloadJson: string) =
+        if cancelCheck != nil and cancelCheck():
+          raise newException(IOError, "build cancelled")
+        let eventKind =
+          case kind
+          of "diagnostic": bekDiagnostic
+          else: bekDiagnostic
+        emit(eventKind, message, false, 0, "info", payloadJson)
+      proc buildCancelRequested(): bool =
+        cancelCheck != nil and cancelCheck()
+      result = runBuildCommand(request.rawArgs, cliPath,
+        forceDirect = true,
+        eventSink = emitBuildCommandEvent,
+        cancelCheck = buildCancelRequested)
+    finally:
+      try:
+        setCurrentDir(previousCwd)
+      except CatchableError:
+        discard
+      for item in previousEnv:
+        if item.present:
+          putEnv(item.key, item.value)
+        else:
+          delEnv(item.key))
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -9023,6 +9145,7 @@ proc runThinApp*(programName: string): int =
   if programName == "reprostored":
     return runReprostoredCommand(args)
   if programName == "repro-daemon":
+    installUserDaemonBuildExecutor()
     return runUserDaemonCommand(args)
   if programName == "repro-fs-snoop":
     return runFsSnoopCli(programName, args)
