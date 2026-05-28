@@ -94,6 +94,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " daemon {status | start | stop | restart | logs | sessions} [--endpoint=PATH] [--state-dir=PATH] [--log=PATH]\n       " &
           programName &
+      " stats [status|overview]\n       " &
+          programName &
       " store {gc | recover | roots | list | daemon} ...\n       " &
           programName &
       " infra {plan | apply} ...\n       " &
@@ -2936,6 +2938,59 @@ proc renderBuildStats*(stats: BuildStats): string =
       align(formatFloat(avgUs, ffDecimal, 1), 8) & "        " &
       formatFloat(totalMs, ffDecimal, 1) & "\n")
 
+proc recordStatsForBuildRun(runResult: BuildRunResult) =
+  if not statsCaptureActive():
+    return
+  for metric in runResult.stats.metrics:
+    enqueueStatsObservation(scgTiming, "metric", %*{
+      "name": metric.name,
+      "count": metric.count,
+      "totalUs": metric.totalUs
+    })
+  for traceEvent in runResult.trace:
+    enqueueStatsObservation(scgTiming, "scheduler-trace", %*{
+      "seq": traceEvent.seq,
+      "actionId": traceEvent.actionId,
+      "event": traceEvent.event,
+      "detail": traceEvent.detail
+    })
+  for item in runResult.results:
+    enqueueStatsObservation(scgSessions, "action-result", %*{
+      "actionId": item.id,
+      "status": $item.status,
+      "launched": item.launched,
+      "wouldLaunch": item.wouldLaunch,
+      "exitCode": item.exitCode,
+      "reason": item.reason
+    })
+    enqueueStatsObservation(scgCache, "cache-decision", %*{
+      "actionId": item.id,
+      "cacheDecision": $item.cacheDecision,
+      "status": $item.status,
+      "launched": item.launched,
+      "reason": item.reason
+    })
+    enqueueStatsObservation(scgRunQuota, "lease-completion", %*{
+      "actionId": item.id,
+      "launched": item.launched,
+      "leaseId": item.leaseId,
+      "runQuotaBackend": item.runQuotaBackend,
+      "runQuotaSocket": item.runQuotaSocket,
+      "exitCode": item.exitCode,
+      "status": $item.status
+    })
+    enqueueStatsObservation(scgDeps, "dependency-evidence", %*{
+      "actionId": item.id,
+      "policy": $item.dependencyPolicyKind,
+      "declaredInputs": item.evidence.declaredInputs.len,
+      "declaredOutputs": item.evidence.declaredOutputs.len,
+      "depfileInputs": item.evidence.depfileInputs.len,
+      "monitorReads": item.evidence.monitorReads.len,
+      "monitorWrites": item.evidence.monitorWrites.len,
+      "monitorProbes": item.evidence.monitorProbes.len,
+      "diagnostics": item.evidence.diagnostics.len
+    })
+
 proc cliPathExists(path: string): bool =
   fileExists(extendedPath(path)) or dirExists(extendedPath(path))
 
@@ -3029,7 +3084,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let effectiveStatsMode =
     if configureStatsDir.len > 0 and statsMode == bsmNone: bsmText
     else: statsMode
-  let statsEnabled = effectiveStatsMode == bsmText or benchmarkPath.len > 0
+  let statsEnabled = effectiveStatsMode == bsmText or benchmarkPath.len > 0 or
+    statsGroupEnabled(scgTiming)
   var buildStats: BuildStats
   let buildTotalStart = statStart(statsEnabled)
   let invocationWallStart = epochTime()
@@ -3181,6 +3237,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     engineConfig.statsEnabled = statsEnabled
     if eventSink != nil:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
+        enqueueStatsObservation(scgSessions, "progress", %*{
+          "kind": $event.kind,
+          "actionId": event.actionId,
+          "status": $event.status,
+          "cacheDecision": $event.cacheDecision,
+          "total": event.total,
+          "completed": event.completed,
+          "running": event.running,
+          "ready": event.ready
+        })
         eventSink("diagnostic", "progress: " & $event.kind & " " &
           event.actionId, $(%*{
             "kind": $event.kind,
@@ -3194,6 +3260,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           }))
     elif progressRenderer.enabled:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
+        enqueueStatsObservation(scgSessions, "progress", %*{
+          "kind": $event.kind,
+          "actionId": event.actionId,
+          "status": $event.status,
+          "cacheDecision": $event.cacheDecision,
+          "total": event.total,
+          "completed": event.completed,
+          "running": event.running,
+          "ready": event.ready
+        })
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
     let engineStart = statStart(statsEnabled)
@@ -3227,6 +3303,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
+    recordStatsForBuildRun(buildResult)
     # Only dump the text-mode table to stderr when --stats=text was
     # requested explicitly. The implicit enable-via-REPRO_STATS_DIR path
     # uses the JSON dropfile and does not want to spam CMake's child
@@ -3753,6 +3830,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     engineConfig.statsEnabled = statsEnabled
     if eventSink != nil:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
+        enqueueStatsObservation(scgSessions, "progress", %*{
+          "kind": $event.kind,
+          "actionId": event.actionId,
+          "status": $event.status,
+          "cacheDecision": $event.cacheDecision,
+          "total": event.total,
+          "completed": event.completed,
+          "running": event.running,
+          "ready": event.ready
+        })
         eventSink("diagnostic", "progress: " & $event.kind & " " &
           event.actionId, $(%*{
             "kind": $event.kind,
@@ -3766,6 +3853,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           }))
     elif progressRenderer.enabled:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
+        enqueueStatsObservation(scgSessions, "progress", %*{
+          "kind": $event.kind,
+          "actionId": event.actionId,
+          "status": $event.status,
+          "cacheDecision": $event.cacheDecision,
+          "total": event.total,
+          "completed": event.completed,
+          "running": event.running,
+          "ready": event.ready
+        })
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
     let engineStart = statStart(statsEnabled)
@@ -3809,6 +3906,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
+    recordStatsForBuildRun(buildResult)
     if statsMode == bsmText:
       let statsRenderStart = statStart(statsEnabled)
       if eventSink != nil:
@@ -6896,6 +6994,7 @@ proc runDepsCommand(args: openArray[string]): int =
 
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
+                     daemonHosted = false;
                      eventSink: BuildCommandEventSink = nil;
                      cancelCheck: BuildCancelCallback = nil): int =
   let originalArgs = @args
@@ -6911,6 +7010,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var logMode = configuredBuildLogMode()
   var diagnosticsPath = ""
   var benchmarkPath = ""
+  var statsCapture = StatsCaptureConfig()
   var prepareOnly = false
   var dryRun = false
   var forceRebuild = false
@@ -6949,6 +7049,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       diagnosticsPath = valueFromFlag(args, i, "--diagnostics")
     elif arg == "--benchmark" or arg.startsWith("--benchmark="):
       benchmarkPath = valueFromFlag(args, i, "--benchmark")
+    elif arg == "--stats-capture" or arg.startsWith("--stats-capture="):
+      statsCapture = parseStatsCaptureGroups(valueFromFlag(args, i,
+        "--stats-capture"))
     elif arg.startsWith("--stats="):
       statsMode = parseBuildStatsMode(arg.split("=", maxsplit = 1)[1])
       statsModeExplicit = true
@@ -7039,10 +7142,31 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
           else:
             target = synth
 
+  if statsCapture.enabled and (forceDirect or daemonMode == bdmOff) and
+      not daemonHosted:
+    raise newException(ValueError,
+      "--stats-capture requires daemon-hosted build; direct-mode persistent " &
+        "capture is not implemented")
+
   proc runDirectBuild(): int =
+    if statsCapture.enabled and daemonHosted:
+      let nowTime = getTime()
+      let runId = "build-" & $getCurrentProcessId() & "-" &
+        $nowTime.toUnix & "-" & $nowTime.nanosecond
+      let projectRoot =
+        try:
+          projectRootForModule(absolutePath(parseBuildTarget(target).modulePath))
+        except CatchableError:
+          getCurrentDir()
+      beginStatsCapture(runId, runId, projectRoot, "build", target,
+        statsCapture)
+      enqueueStatsObservation(scgSessions, "build-start", %*{
+        "captureGroups": statsCapture.captureGroupsText,
+        "daemonHosted": true
+      })
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
     try:
-      executeBuildTarget(target, mode, publicCliPath,
+      result = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
         workRoot = workRoot,
         progressMode = progressMode,
@@ -7059,6 +7183,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck).exitCode
+      if statsCapture.enabled and daemonHosted:
+        enqueueStatsObservation(scgSessions, "build-finish", %*{
+          "exitCode": result
+        })
     finally:
       if autoRunQuota != nil:
         try:
@@ -7085,7 +7213,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
           "RUNQUOTA_SOCKET", "REPROBUILD_STORE_ROOT",
           "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
           "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
-          "REPROBUILD_AUTO_RUNQUOTA"]:
+          "REPROBUILD_AUTO_RUNQUOTA",
+          "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS"]:
         result.add(key & "=" & value)
 
   proc runDaemonBuild(): int =
@@ -7129,18 +7258,57 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       raise newException(ValueError,
         "daemon mode required but repro-daemon cannot execute builds: " &
           err.msg)
+    if statsCapture.enabled:
+      raise newException(ValueError,
+        "daemon-hosted stats capture requested but repro-daemon cannot " &
+          "execute builds: " & err.msg)
     if logMode != blmQuiet:
       stderr.writeLine("repro build: daemon build unsupported; falling " &
         "back to direct mode: " & err.msg)
+    if statsCapture.enabled:
+      raise newException(ValueError,
+        "daemon-hosted stats capture requested but repro-daemon is unavailable: " &
+          err.msg)
     return runDirectBuild()
   except CatchableError as err:
     if daemonMode == bdmRequire:
       raise newException(ValueError,
         "daemon mode required but repro-daemon is unavailable: " & err.msg)
+    if statsCapture.enabled:
+      raise newException(ValueError,
+        "daemon-hosted stats capture requested but repro-daemon is unavailable: " &
+          err.msg)
     if logMode != blmQuiet:
       stderr.writeLine("repro build: daemon unavailable; falling back to " &
         "direct mode: " & err.msg)
     return runDirectBuild()
+
+proc runStatsCommand(args: openArray[string]): int =
+  var view = "overview"
+  var projectRoot = getCurrentDir()
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "status" or arg == "overview":
+      view = arg
+    elif arg == "--project-root" or arg.startsWith("--project-root="):
+      projectRoot = valueFromFlag(args, i, "--project-root")
+    elif arg == "--help" or arg == "-h":
+      echo "usage: repro stats [status|overview] [--project-root=PATH]"
+      return 0
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported stats flag: " & arg)
+    else:
+      raise newException(ValueError, "unsupported stats view: " & arg)
+    inc i
+  case view
+  of "status":
+    stdout.write(statsStatusText(projectRoot))
+  of "overview":
+    stdout.write(statsOverviewText(projectRoot))
+  else:
+    raise newException(ValueError, "unsupported stats view: " & view)
+  0
 
 type
   GraphOutputFormat = enum
@@ -8502,6 +8670,7 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
 
 proc runWatchCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
+                     daemonHosted = false;
                      eventSink: WatchCommandEventSink = nil;
                      cancelCheck: BuildCancelCallback = nil): int =
   let originalArgs = @args
@@ -8516,6 +8685,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   var detach = false
   var attachSessionId = ""
   var stopSessionId = ""
+  var statsCapture = StatsCaptureConfig()
 
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
@@ -8544,6 +8714,12 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         "--daemon requires an inline value, for example --daemon=require")
     elif arg == "--detach":
       detach = true
+    elif arg.startsWith("--stats-capture="):
+      statsCapture = parseStatsCaptureGroups(arg.split("=", maxsplit = 1)[1])
+    elif arg == "--stats-capture":
+      raise newException(ValueError,
+        "--stats-capture requires an inline value, for example " &
+          "--stats-capture=timing,cache")
     elif arg.startsWith("--attach="):
       attachSessionId = arg.split("=", maxsplit = 1)[1]
     elif arg == "--attach":
@@ -8581,6 +8757,12 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
 
   if not daemonModeExplicit and getEnv("REPRO_DAEMON", "").len > 0:
     daemonMode = configuredBuildDaemonMode()
+
+  if statsCapture.enabled and (forceDirect or daemonMode == bdmOff) and
+      not daemonHosted:
+    raise newException(ValueError,
+      "--stats-capture requires daemon-hosted watch; direct-mode persistent " &
+        "capture is not implemented")
 
   proc renderDaemonWatchEvent(event: UserDaemonBuildEvent) =
     if event.message.len == 0 or event.kind == bekAccepted:
@@ -8645,7 +8827,8 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
           "RUNQUOTA_SOCKET", "REPROBUILD_STORE_ROOT",
           "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
           "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
-          "REPROBUILD_AUTO_RUNQUOTA"]:
+          "REPROBUILD_AUTO_RUNQUOTA",
+          "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS"]:
         result.add(key & "=" & value)
 
   proc runDaemonWatch(): int =
@@ -8687,6 +8870,15 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         watchedPaths, lastResult)
 
   proc runDirectWatch(): int =
+    if statsCapture.enabled and daemonHosted:
+      let runId = watchRunId()
+      beginStatsCapture(runId, runId, requestProjectRoot(), "watch", target,
+        statsCapture)
+      enqueueStatsObservation(scgSessions, "watch-start", %*{
+        "captureGroups": statsCapture.captureGroupsText,
+        "daemonHosted": true,
+        "maxCycles": maxCycles
+      })
     echo "repro watch: target=" & target & " tool-provisioning=" &
       mode.modeName & " debounceMs=" & $debounceMs &
       (if maxCycles > 0: " maxCycles=" & $maxCycles else: " maxCycles=unbounded") &
@@ -8726,6 +8918,12 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         emitWatchLine("repro watch: max cycles reached",
           payloadJson = "{\"watchEvent\":\"max-cycles\"}", terminal = true,
           watchedPaths = @[], lastResult = "max-cycles")
+        if statsCapture.enabled and daemonHosted:
+          enqueueStatsObservation(scgSessions, "watch-finish", %*{
+            "exitCode": 0,
+            "cycles": cycle,
+            "reason": "max-cycles"
+          })
         return 0
 
       let paths = watchPathsFromReport(outcome)
@@ -8767,6 +8965,10 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       raise newException(ValueError,
         "daemon mode required but repro-daemon cannot execute watch: " &
           err.msg)
+    if statsCapture.enabled:
+      raise newException(ValueError,
+        "daemon-hosted stats capture requested but repro-daemon cannot " &
+          "execute watch: " & err.msg)
     stderr.writeLine("repro watch: daemon watch unsupported; falling back " &
       "to direct mode: " & err.msg)
     return runDirectWatch()
@@ -8774,6 +8976,10 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     if daemonMode == bdmRequire:
       raise newException(ValueError,
         "daemon mode required but repro-daemon is unavailable: " & err.msg)
+    if statsCapture.enabled:
+      raise newException(ValueError,
+        "daemon-hosted stats capture requested but repro-daemon is unavailable: " &
+          err.msg)
     stderr.writeLine("repro watch: daemon unavailable; falling back to " &
       "direct mode: " & err.msg)
     return runDirectWatch()
@@ -9494,12 +9700,13 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
     elif arg == "--force-rebuild" or arg == "--rebuild" or arg == "--dry-run":
       forceRefresh = true
     elif arg in ["--daemon", "--progress", "--progress-bars", "--diagnostics",
-        "--stats", "--report", "--log", "--benchmark"]:
+        "--stats", "--report", "--log", "--benchmark", "--stats-capture"]:
       discard valueFromFlag(args, i, arg)
     elif arg.startsWith("--daemon=") or arg.startsWith("--progress=") or
         arg.startsWith("--progress-bars=") or arg.startsWith("--diagnostics=") or
         arg.startsWith("--stats=") or arg.startsWith("--report=") or
-        arg.startsWith("--log=") or arg.startsWith("--benchmark="):
+        arg.startsWith("--log=") or arg.startsWith("--benchmark=") or
+        arg.startsWith("--stats-capture="):
       discard
     elif arg in ["-v", "--verbose", "-vv", "--very-verbose",
         "--prepare-only", "--skip-cmake-regeneration", "--no-runquota",
@@ -9579,6 +9786,7 @@ proc installUserDaemonBuildExecutor() =
         cancelCheck != nil and cancelCheck()
       result = runBuildCommand(request.rawArgs, cliPath,
         forceDirect = true,
+        daemonHosted = true,
         eventSink = emitBuildCommandEvent,
         cancelCheck = buildCancelRequested)
     finally:
@@ -9629,6 +9837,7 @@ proc installUserDaemonWatchExecutor() =
         cancelCheck != nil and cancelCheck()
       result = runWatchCommand(request.rawArgs, cliPath,
         forceDirect = true,
+        daemonHosted = true,
         eventSink = emitWatchCommandEvent,
         cancelCheck = watchCancelRequested)
     finally:
@@ -9843,6 +10052,17 @@ proc runThinApp*(programName: string): int =
       return runBuildCommand(buildArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro build: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "stats":
+    try:
+      let statsArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runStatsCommand(statsArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro stats: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "exec":
     try:

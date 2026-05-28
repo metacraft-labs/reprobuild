@@ -4,6 +4,7 @@ import repro_core
 
 import ./client
 import ./protocol
+import ./stats_store
 
 when defined(posix):
   import std/posix except Time
@@ -534,6 +535,15 @@ proc waitForBuildUnsupportedOrDisconnect(socket: Socket; delayMs: int): bool =
     sleep(25)
   socket.clientDisconnected()
 
+proc flushStatsAfterTerminal(config: UserDaemonConfig; sessionId: string) =
+  let flush = flushStatsObservations()
+  if flush.flushed > 0:
+    logLine(config.logPath, "stats flushed session=" & sessionId &
+      " observations=" & $flush.flushed & " store=" & flush.storePath)
+  elif flush.lastError.len > 0:
+    logLine(config.logPath, "stats flush failed session=" & sessionId &
+      " error=" & flush.lastError)
+
 proc runBuildRequestWorker(socket: Socket; config: UserDaemonConfig;
                            request: UserDaemonBuildRequest;
                            session: var UserDaemonSession) =
@@ -572,6 +582,8 @@ proc runBuildRequestWorker(socket: Socket; config: UserDaemonConfig;
     emit(bekFinished, message, true, exitCode,
       if exitCode == 0: "info" else: "error",
       "{\"executor\":\"direct-build-entrypoint\"}")
+    try: socket.close() except CatchableError: discard
+    flushStatsAfterTerminal(config, session.sessionId)
     logLine(config.logPath, "build request finished session=" &
       session.sessionId & " exitCode=" & $exitCode)
   except CatchableError as err:
@@ -739,6 +751,8 @@ proc runWatchRequestWorker(socket: Socket; config: UserDaemonConfig;
       exitCode, if exitCode == 0: "info" else: "error",
       "{\"executor\":\"direct-watch-entrypoint\"}", sessionRef[].watchedPaths,
       "exitCode=" & $exitCode)
+    try: socket.close() except CatchableError: discard
+    flushStatsAfterTerminal(config, sessionRef[].sessionId)
     logLine(config.logPath, "watch request finished session=" &
       sessionRef[].sessionId & " exitCode=" & $exitCode)
   except CatchableError as err:

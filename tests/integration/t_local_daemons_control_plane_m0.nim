@@ -88,13 +88,15 @@ suite "Local daemons/control-plane M0 current-state gates":
       "repro build: error: unsupported --daemon=invalid")
 
     let statsCapture = requireReproFailure([
-      "build", "--stats-capture=decision,timing"])
+      "build", "--stats-capture=invalid"])
     check statsCapture.contains(
-      "repro build: error: unsupported build flag: --stats-capture=decision,timing")
+      "repro build: error: unsupported --stats-capture=invalid")
 
-    let stats = requireReproFailure(["stats"])
-    check stats.contains("usage: repro")
-    check not stats.contains("repro stats")
+    let stats = requireSuccess(shellCommand([
+      publicReproBin(), "stats", "status", "--project-root=" & tempRoot
+    ]), repoRoot())
+    check stats.contains("stats capture: disabled by default")
+    check stats.contains("flushed: 0")
 
     let storeDaemon = requireReproFailure([
       "store", "daemon", "status", "--store-root=" & tempRoot / "store"])
