@@ -54,7 +54,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
+      " build [target[#name]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
           programName &
       " graph [target[#name]] [--build] [--focus=ACTION] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
@@ -1240,6 +1240,55 @@ type
     actions: seq[BuildAction]
     pools: seq[BuildPool]
 
+  DurableFileEvidence = object
+    exists: bool
+    size: BiggestInt
+    mtimeUnix: int64
+    mtimeNs: int64
+
+  WarmToolIdentity = ref object
+    key: string
+    identityPath: string
+    inspectionPath: string
+    identityEvidence: DurableFileEvidence
+    keyEvidence: DurableFileEvidence
+    identity: PathOnlyBuildIdentity
+
+  WarmProviderSnapshot = ref object
+    providerArtifactId: string
+    snapshotPath: string
+    snapshotEvidence: DurableFileEvidence
+    snapshot: ProviderGraphSnapshot
+
+  WarmLoweredGraph = ref object
+    cachePath: string
+    modulePath: string
+    projectRoot: string
+    selectedActionId: string
+    pathEnv: string
+    cacheKey: string
+    cacheEvidence: DurableFileEvidence
+    actions: seq[BuildAction]
+    pools: seq[BuildPool]
+
+var warmToolIdentities = initTable[string, WarmToolIdentity]()
+var warmProviderSnapshots = initTable[string, WarmProviderSnapshot]()
+var warmLoweredGraphs = initTable[string, WarmLoweredGraph]()
+
+proc durableFileEvidence(path: string): DurableFileEvidence =
+  try:
+    if not fileExists(extendedPath(path)):
+      return DurableFileEvidence(exists: false)
+    let info = getFileInfo(extendedPath(path), followSymlink = false)
+    DurableFileEvidence(exists: true, size: info.size,
+      mtimeUnix: info.lastWriteTime.toUnix,
+      mtimeNs: int64(info.lastWriteTime.nanosecond))
+  except CatchableError:
+    DurableFileEvidence(exists: false)
+
+proc evidenceFresh(path: string; evidence: DurableFileEvidence): bool =
+  durableFileEvidence(path) == evidence
+
 proc readByteValue(bytes: openArray[byte]; pos: var int): byte =
   if pos >= bytes.len:
     raiseEnvelopeError(eeMalformed, "truncated byte")
@@ -1522,6 +1571,29 @@ proc readFreshLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
   except CatchableError:
     return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
 
+proc warmReadFreshLoweredGraphCache(path, modulePath, projectRoot,
+                                    selectedActionId, pathEnv,
+                                    cacheKey: string):
+    Option[tuple[actions: seq[BuildAction]; pools: seq[BuildPool]]] =
+  let tableKey = path & "\0" & cacheKey
+  if warmLoweredGraphs.hasKey(tableKey):
+    let warm = warmLoweredGraphs[tableKey]
+    if warm.cachePath == path and warm.modulePath == modulePath and
+        warm.projectRoot == projectRoot and
+        warm.selectedActionId == selectedActionId and
+        warm.pathEnv == pathEnv and warm.cacheKey == cacheKey and
+        evidenceFresh(path, warm.cacheEvidence):
+      return some((actions: warm.actions, pools: warm.pools))
+  result = readFreshLoweredGraphCache(path, modulePath, projectRoot,
+    selectedActionId, pathEnv, cacheKey)
+  if result.isSome:
+    let lowered = result.get()
+    warmLoweredGraphs[tableKey] = WarmLoweredGraph(cachePath: path,
+      modulePath: modulePath, projectRoot: projectRoot,
+      selectedActionId: selectedActionId, pathEnv: pathEnv,
+      cacheKey: cacheKey, cacheEvidence: durableFileEvidence(path),
+      actions: lowered.actions, pools: lowered.pools)
+
 proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
                             pathEnv, cacheKey: string;
                             lowered: tuple[actions: seq[BuildAction];
@@ -1536,6 +1608,11 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
     actions: lowered.actions,
     pools: lowered.pools)
   writeFile(extendedPath(path), fromBytes(encodeLoweredGraphCache(record)))
+  warmLoweredGraphs[path & "\0" & cacheKey] = WarmLoweredGraph(cachePath: path,
+    modulePath: modulePath, projectRoot: projectRoot,
+    selectedActionId: selectedActionId, pathEnv: pathEnv, cacheKey: cacheKey,
+    cacheEvidence: durableFileEvidence(path), actions: lowered.actions,
+    pools: lowered.pools)
 
 proc evidenceJson(evidence: PathSetEvidence): JsonNode =
   %*{
@@ -1573,6 +1650,19 @@ proc metricTotalUs(stats: BuildStats; name: string): float =
   for metric in stats.metrics:
     if metric.name == name:
       return metric.totalUs
+
+proc metricBucketUs(stats: BuildStats; names: openArray[string]): float =
+  for name in names:
+    result += stats.metricTotalUs(name)
+
+proc benchmarkMetricsJson(stats: BuildStats): JsonNode =
+  result = newJArray()
+  for metric in stats.metrics:
+    result.add(%*{
+      "name": metric.name,
+      "count": metric.count,
+      "totalUs": metric.totalUs
+    })
 
 proc fileSizeOrZero(path: string): BiggestInt =
   if path.len == 0 or not fileExists(extendedPath(path)):
@@ -1989,6 +2079,25 @@ proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId: string):
   except CatchableError:
     return none(ProviderGraphSnapshot)
 
+proc warmReadFreshProviderGraphSnapshot(storeRoot, providerArtifactId: string):
+    Option[ProviderGraphSnapshot] =
+  let path = providerSnapshotPath(storeRoot)
+  let key = storeRoot & "\0" & providerArtifactId
+  if warmProviderSnapshots.hasKey(key):
+    let warm = warmProviderSnapshots[key]
+    if warm.providerArtifactId == providerArtifactId and
+        evidenceFresh(path, warm.snapshotEvidence) and
+        warm.snapshot.providerArtifactId == providerArtifactId and
+        providerSnapshotInputsFresh(warm.snapshot):
+      return some(warm.snapshot)
+  result = readFreshProviderGraphSnapshot(storeRoot, providerArtifactId)
+  if result.isSome:
+    warmProviderSnapshots[key] = WarmProviderSnapshot(
+      providerArtifactId: providerArtifactId,
+      snapshotPath: path,
+      snapshotEvidence: durableFileEvidence(path),
+      snapshot: result.get())
+
 proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
                           mode: ToolProvisioningMode;
                           providerArtifactId, providerSnapshotPath,
@@ -2030,6 +2139,31 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
     toolIdentityCacheKey(artifact, mode) & "\n")
   (identity: identity, identityPath: paths.identityPath,
     inspectionPath: paths.inspectionPath)
+
+proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
+                                 outDir: string;
+                                 mode: ToolProvisioningMode):
+    tuple[identity: PathOnlyBuildIdentity; identityPath: string;
+      inspectionPath: string] =
+  let key = toolIdentityCacheKey(artifact, mode)
+  let paths = identityPaths(outDir, mode)
+  let tableKey = outDir & "\0" & mode.modeName & "\0" & key
+  let stableKeyPath = outDir / "tool-identity-cache" /
+    (mode.modeName & ".current-key")
+  if warmToolIdentities.hasKey(tableKey):
+    let warm = warmToolIdentities[tableKey]
+    if warm.key == key and warm.identity.interfaceFingerprint ==
+        artifact.interfaceFingerprint and
+        evidenceFresh(warm.identityPath, warm.identityEvidence) and
+        evidenceFresh(stableKeyPath, warm.keyEvidence) and
+        warm.identity.toolIdentityRealizationsUsable():
+      return (identity: warm.identity, identityPath: warm.identityPath,
+        inspectionPath: warm.inspectionPath)
+  result = resolveAndWriteIdentity(artifact, outDir, mode)
+  warmToolIdentities[tableKey] = WarmToolIdentity(key: key,
+    identityPath: result.identityPath, inspectionPath: result.inspectionPath,
+    identityEvidence: durableFileEvidence(result.identityPath),
+    keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
 
 proc runQuotaSocketDiagnostic(): string =
   let socket = getEnv("RUNQUOTA_SOCKET", "")
@@ -2151,6 +2285,72 @@ type
   WatchCommandEventSink = proc(kind, message, payloadJson: string;
                                terminal: bool; exitCode: int;
                                watchedPaths: seq[string]; lastResult: string)
+
+proc writeBuildBenchmark(path: string; outcome: BuildCommandOutcome;
+                         stats: BuildStats; modeName, fastPath: string;
+                         executedActions: int;
+                         daemonConnectionUs = 0.0) =
+  if path.len == 0:
+    return
+  let graphReadinessUs = stats.metricBucketUs([
+    "repro interface extract",
+    "repro tool identity resolve",
+    "repro provider compile",
+    "repro provider graph refresh",
+    "repro lowered graph cache read",
+    "repro graph lower",
+    "repro lowered graph cache write",
+    "repro graph infer deps",
+    "repro graph validate",
+    "repro cmake regeneration",
+    "repro cmake state check"])
+  let invalidationChecksUs = stats.metricBucketUs([
+    "repro output stat",
+    "repro fast noop scan",
+    "repro hot input scan",
+    "repro hot index navigator scan"])
+  let cacheChecksUs = stats.metricBucketUs([
+    "repro cas open",
+    "repro action cache open",
+    "repro cache lookup",
+    "repro hot record lookup",
+    "repro cache hit result materialize",
+    "repro cache restore",
+    "repro cache record"])
+  let node = %*{
+    "schemaId": "reprobuild.build.benchmark.v1",
+    "mode": modeName,
+    "fastPath": fastPath,
+    "modulePath": outcome.modulePath,
+    "projectRoot": outcome.projectRoot,
+    "outDir": outcome.outDir,
+    "exitCode": outcome.exitCode,
+    "phases": {
+      "daemonConnectionUs": daemonConnectionUs,
+      "graphReadinessUs": graphReadinessUs,
+      "invalidationChecksUs": invalidationChecksUs,
+      "cacheChecksUs": cacheChecksUs,
+      "executedActions": executedActions
+    },
+    "metrics": benchmarkMetricsJson(stats)
+  }
+  let dir = parentDir(path)
+  if dir.len > 0:
+    createDir(extendedPath(dir))
+  writeFile(extendedPath(path), $node)
+
+proc updateBenchmarkDaemonConnection(path: string; daemonConnectionUs: float) =
+  if path.len == 0 or not fileExists(extendedPath(path)):
+    return
+  try:
+    let node = parseFile(extendedPath(path))
+    if not node.hasKey("phases") or node["phases"].kind != JObject:
+      node["phases"] = newJObject()
+    node["mode"] = %"daemon"
+    node["phases"]["daemonConnectionUs"] = %daemonConnectionUs
+    writeFile(extendedPath(path), $node)
+  except CatchableError:
+    discard
 
 proc parseBuildProgressMode(value: string): BuildProgressMode =
   case value.toLowerAscii()
@@ -2813,6 +3013,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         forceRebuild = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false;
+                        benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil):
     BuildCommandOutcome =
@@ -2828,7 +3029,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let effectiveStatsMode =
     if configureStatsDir.len > 0 and statsMode == bsmNone: bsmText
     else: statsMode
-  let statsEnabled = effectiveStatsMode == bsmText
+  let statsEnabled = effectiveStatsMode == bsmText or benchmarkPath.len > 0
   var buildStats: BuildStats
   let buildTotalStart = statStart(statsEnabled)
   let invocationWallStart = epochTime()
@@ -2838,6 +3039,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   defer:
     progressRenderer.finishProgress()
   var invocationFastPath = ""
+  var benchmarkExecutedActions = 0
+  defer:
+    if benchmarkPath.len > 0:
+      try:
+        writeBuildBenchmark(benchmarkPath, result, buildStats,
+          if eventSink == nil: "direct" else: "daemon-worker",
+          invocationFastPath, benchmarkExecutedActions)
+      except CatchableError:
+        discard
   var diagnosticLines: seq[string] = @[]
   proc appendDiagnostic(line: string) =
     if diagnosticsPath.len > 0:
@@ -2996,6 +3206,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       raise
     finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
     buildStats.mergeStats(buildResult.stats)
+    benchmarkExecutedActions = 0
+    for item in buildResult.results:
+      if item.launched:
+        inc benchmarkExecutedActions
     warnRunQuotaBypassIfUsed(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
@@ -3144,7 +3358,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cacheSelectedActionId != "\0":
     let loweredCacheStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
-    let loweredCache = readFreshLoweredGraphCache(
+    let loweredCache = warmReadFreshLoweredGraphCache(
       loweredGraphCachePath(outDir, cacheSelectedActionId), modulePath,
       result.projectRoot, cacheSelectedActionId, pathEnv, "cmake-pre-provider")
     finishStat(buildStats, statsEnabled, "repro lowered graph cache read",
@@ -3312,7 +3526,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     let identityStart = statStart(statsEnabled)
     progressRenderer.renderPhase("resolving tool identities")
-    let resolved = resolveAndWriteIdentity(artifact, outDir, effectiveMode)
+    let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
@@ -3430,7 +3644,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if forceRebuild or dryRun:
         none(ProviderGraphSnapshot)
       else:
-        readFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId)
+        warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId)
     if freshSnapshot.isSome:
       refresh.snapshot = freshSnapshot.get()
       refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
@@ -3465,7 +3679,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if forceRebuild:
         none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
       else:
-        readFreshLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
+        warmReadFreshLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
           modulePath, projectRoot, selectedActionId, pathEnv, graphCacheKey)
     finishStat(buildStats, statsEnabled, "repro lowered graph cache read",
       graphCacheReadStart)
@@ -3564,6 +3778,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       raise
     finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
     buildStats.mergeStats(buildResult.stats)
+    benchmarkExecutedActions = 0
+    for item in buildResult.results:
+      if item.launched:
+        inc benchmarkExecutedActions
     warnRunQuotaBypassIfUsed(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
@@ -5808,7 +6026,7 @@ proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
   let interfacePath = outDir / "cmake-develop-interface.rbsz"
   let artifact = cmakeDevelopArtifact(sourceRoot)
   writeInterfaceArtifact(interfacePath, artifact)
-  let resolved = resolveAndWriteIdentity(artifact, outDir, mode)
+  let resolved = warmResolveAndWriteIdentity(artifact, outDir, mode)
   let toolchainPath = outDir / "reprobuild-cmake-toolchain.cmake"
   # Windows: filename includes .ps1 so PowerShell will execute it directly.
   let wrapperPath = outDir / "bin" / cmakeConfigureWrapperBaseName()
@@ -6692,6 +6910,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var reportMode = configuredBuildReportMode()
   var logMode = configuredBuildLogMode()
   var diagnosticsPath = ""
+  var benchmarkPath = ""
   var prepareOnly = false
   var dryRun = false
   var forceRebuild = false
@@ -6728,6 +6947,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         "--progress-bars"))
     elif arg == "--diagnostics" or arg.startsWith("--diagnostics="):
       diagnosticsPath = valueFromFlag(args, i, "--diagnostics")
+    elif arg == "--benchmark" or arg.startsWith("--benchmark="):
+      benchmarkPath = valueFromFlag(args, i, "--benchmark")
     elif arg.startsWith("--stats="):
       statsMode = parseBuildStatsMode(arg.split("=", maxsplit = 1)[1])
       statsModeExplicit = true
@@ -6835,6 +7056,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         forceRebuild = forceRebuild,
         skipCmakeRegeneration = skipCmakeRegeneration,
         bypassRunQuotaExplicit = bypassRunQuota,
+        benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck).exitCode
     finally:
@@ -6895,6 +7117,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
               stdout.writeLine(""))
     if not daemonResult.supported:
       raise newException(DaemonBuildUnsupported, daemonResult.message)
+    updateBenchmarkDaemonConnection(benchmarkPath, daemonResult.connectionUs)
     daemonResult.exitCode
 
   if forceDirect or daemonMode == bdmOff:
@@ -7287,7 +7510,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     projectName: artifact.projectInterface.projectName,
     interfaceFingerprint: artifact.interfaceFingerprint)
   if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
-    let resolved = resolveAndWriteIdentity(artifact, outDir, effectiveMode)
+    let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     identity = resolved.identity
     result.toolIdentityPath = resolved.identityPath
     result.toolInspectionPath = resolved.inspectionPath
@@ -7357,7 +7580,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     if forceRefresh:
       none(ProviderGraphSnapshot)
     else:
-      readFreshProviderGraphSnapshot(providerGraphStore, result.providerArtifactId)
+      warmReadFreshProviderGraphSnapshot(providerGraphStore, result.providerArtifactId)
   if freshSnapshot.isSome:
     refresh.snapshot = freshSnapshot.get()
     refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
@@ -7391,7 +7614,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     if forceRefresh:
       none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
     else:
-      readFreshLoweredGraphCache(cachePath, modulePath, projectRoot,
+      warmReadFreshLoweredGraphCache(cachePath, modulePath, projectRoot,
         selectedActionId, pathEnv, graphCacheKey)
   let lowered =
     if cachedLowered.isSome:
@@ -8681,7 +8904,7 @@ proc runDevelopCommand(args: openArray[string]): int =
     raise newException(ValueError,
       "unsupported develop tool provisioning mode: " & effectiveMode.modeName)
 
-  let resolved = resolveAndWriteIdentity(artifact, outDir, effectiveMode)
+  let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
   echo "repro develop: compatibility dev-env path active (provider-driven " &
     "artifact integration pending, tool-provisioning=" & effectiveMode.modeName & ")"
   echo "project: " & artifact.projectInterface.projectName
@@ -9251,6 +9474,79 @@ proc runPrivilegedBrokerMode(args: openArray[string]): int =
     stderr.writeLine("repro --privileged-broker: error: " & err.msg)
     return 7
 
+proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
+  var target = ""
+  var mode = tpmUnspecified
+  var workRoot = ""
+  var targetWasOmitted = true
+  var forceRefresh = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(valueFromFlag(args, i,
+        "--tool-provisioning"))
+    elif arg == "--work-root" or arg.startsWith("--work-root="):
+      workRoot = valueFromFlag(args, i, "--work-root")
+    elif arg == "--action-cache-root" or arg.startsWith("--action-cache-root="):
+      setActionCacheRootOverride(valueFromFlag(args, i,
+        "--action-cache-root"))
+    elif arg == "--force-rebuild" or arg == "--rebuild" or arg == "--dry-run":
+      forceRefresh = true
+    elif arg in ["--daemon", "--progress", "--progress-bars", "--diagnostics",
+        "--stats", "--report", "--log", "--benchmark"]:
+      discard valueFromFlag(args, i, arg)
+    elif arg.startsWith("--daemon=") or arg.startsWith("--progress=") or
+        arg.startsWith("--progress-bars=") or arg.startsWith("--diagnostics=") or
+        arg.startsWith("--stats=") or arg.startsWith("--report=") or
+        arg.startsWith("--log=") or arg.startsWith("--benchmark="):
+      discard
+    elif arg in ["-v", "--verbose", "-vv", "--very-verbose",
+        "--prepare-only", "--skip-cmake-regeneration", "--no-runquota",
+        "--runquota"]:
+      discard
+    elif not arg.startsWith("-") and target.len == 0:
+      target = arg
+      targetWasOmitted = false
+    inc i
+  if forceRefresh:
+    return
+  if target.len == 0:
+    target = "."
+  discard prepareBuildGraphInspection(target, mode, publicCliPath,
+    selectDefaultAction = targetWasOmitted, workRoot = workRoot,
+    forceRefresh = false)
+
+proc installUserDaemonBuildPrewarmer() =
+  setUserDaemonBuildPrewarmer(proc(request: UserDaemonBuildRequest) =
+    let previousCwd = getCurrentDir()
+    var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
+    try:
+      for item in request.environment:
+        let split = item.find('=')
+        if split < 0:
+          continue
+        let key = item[0 ..< split]
+        let value = item[split + 1 .. ^1]
+        previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
+        putEnv(key, value)
+      if request.workingDir.len > 0:
+        setCurrentDir(request.workingDir)
+      let cliPath =
+        if request.publicCliPath.len > 0: request.publicCliPath
+        else: stablePublicCliPath()
+      prewarmBuildCommand(request.rawArgs, cliPath)
+    finally:
+      try:
+        setCurrentDir(previousCwd)
+      except CatchableError:
+        discard
+      for item in previousEnv:
+        if item.present:
+          putEnv(item.key, item.value)
+        else:
+          delEnv(item.key))
+
 proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
       emit: UserDaemonBuildEmit;
@@ -9365,6 +9661,7 @@ proc runThinApp*(programName: string): int =
   if programName == "reprostored":
     return runReprostoredCommand(args)
   if programName == "repro-daemon":
+    installUserDaemonBuildPrewarmer()
     installUserDaemonBuildExecutor()
     installUserDaemonWatchExecutor()
     return runUserDaemonCommand(args)

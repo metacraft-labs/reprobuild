@@ -1,4 +1,4 @@
-import std/[net, os, strutils]
+import std/[net, os, strutils, times]
 
 import repro_core
 
@@ -12,6 +12,7 @@ type
     exitCode*: int
     message*: string
     events*: seq[UserDaemonBuildEvent]
+    connectionUs*: float
 
   UserDaemonWatchResult* = object
     supported*: bool
@@ -139,9 +140,11 @@ proc requestUserDaemonBuild*(request: UserDaemonBuildRequest;
                              endpoint = defaultUserDaemonEndpoint();
                              onEvent: proc(event: UserDaemonBuildEvent) = nil):
     UserDaemonBuildResult =
+  let connectStart = epochTime()
   var socket = connectUserDaemon(endpoint, commandMode = "build",
     projectRoot = request.projectRoot,
     requiredFeatures = ["build-routing", "build-events"])
+  result.connectionUs = (epochTime() - connectStart) * 1_000_000.0
   defer: socket.close()
   socket.writeFrame(udkBuildRequest, buildRequestBody(request))
   while true:

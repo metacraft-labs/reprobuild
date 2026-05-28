@@ -1465,6 +1465,37 @@ proc resultIndex(ids: Table[string, int]; id: string): int =
     raiseEngine("internal missing result id: " & id)
   ids[id]
 
+type
+  WarmActionCache = ref object
+    cache: ActionCache
+    evidence: string
+
+var processWarmActionCaches = initTable[string, WarmActionCache]()
+
+proc durableEvidence(path: string): string =
+  try:
+    if not fileExists(extendedPath(path)):
+      return "missing"
+    let info = getFileInfo(extendedPath(path), followSymlink = false)
+    $info.size & ":" & $info.lastWriteTime.toUnix & ":" &
+      $info.lastWriteTime.nanosecond
+  except CatchableError:
+    "unavailable"
+
+proc actionCacheDurableEvidence(root: string): string =
+  durableEvidence(root / "action-results.hot.records") & "|" &
+    durableEvidence(root / "action-results.hot.index") & "|" &
+    durableEvidence(root / "action-results.records")
+
+proc warmActionCacheFor(root: string): WarmActionCache =
+  let evidence = actionCacheDurableEvidence(root)
+  if processWarmActionCaches.hasKey(root):
+    let warm = processWarmActionCaches[root]
+    if warm.evidence == evidence:
+      return warm
+  result = WarmActionCache(cache: openActionCache(root), evidence: evidence)
+  processWarmActionCaches[root] = result
+
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var stats: BuildStats
   proc statStart(): float =
@@ -1516,10 +1547,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   let cas = openLocalCas(sharedRoot / "cas")
   finishStat("repro cas open", casOpenStart)
   let actionCacheOpenStart = statStart()
-  var cache = openActionCache(sharedRoot / "action-cache")
+  let warmCache = warmActionCacheFor(sharedRoot / "action-cache")
+  var cache = warmCache.cache
   finishStat("repro action cache open", actionCacheOpenStart)
   defer:
     cache.flushHotIndex()
+    warmCache.cache = cache
+    warmCache.evidence = actionCacheDurableEvidence(sharedRoot / "action-cache")
 
   proc cacheHitEvidence(action: BuildAction;
                         record: ActionResultRecord): PathSetEvidence =
@@ -1561,7 +1595,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         for action in buildGraph.actions:
           fastResult.results.add(ActionResult(
             id: action.id,
-            status: asUpToDate,
+            status: asCacheHit,
             cacheDecision: cdHit,
             dependencyPolicyKind: action.dependencyPolicy.kind))
         finishStat("repro cache hit result materialize", resultMaterializeStart)
@@ -1614,7 +1648,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         else: hotRecords[i]
       fastResult.results.add(ActionResult(
         id: action.id,
-        status: asUpToDate,
+        status: asCacheHit,
         cacheDecision: cdHit,
         dependencyPolicyKind: action.dependencyPolicy.kind,
         evidence: cacheHitEvidence(action, record)))

@@ -37,6 +37,7 @@ type
                                   emit: UserDaemonBuildEmit;
                                   cancelCheck: UserDaemonBuildCancelCheck):
                                   int
+  UserDaemonBuildPrewarmer* = proc(request: UserDaemonBuildRequest)
   UserDaemonWatchEmit* = proc(kind: UserDaemonBuildEventKind;
                               message: string;
                               terminal: bool;
@@ -61,10 +62,14 @@ type
 const UserDaemonLockFileName = ".repro-daemon.lock"
 
 var userDaemonBuildExecutor: UserDaemonBuildExecutor
+var userDaemonBuildPrewarmer: UserDaemonBuildPrewarmer
 var userDaemonWatchExecutor: UserDaemonWatchExecutor
 
 proc setUserDaemonBuildExecutor*(executor: UserDaemonBuildExecutor) =
   userDaemonBuildExecutor = executor
+
+proc setUserDaemonBuildPrewarmer*(prewarmer: UserDaemonBuildPrewarmer) =
+  userDaemonBuildPrewarmer = prewarmer
 
 proc setUserDaemonWatchExecutor*(executor: UserDaemonWatchExecutor) =
   userDaemonWatchExecutor = executor
@@ -621,6 +626,12 @@ proc handleBuildRequest(socket: Socket; config: UserDaemonConfig;
         updateSessionState(config, session, "cancelled", 130,
           "daemon-hosted build cancelled before scheduling")
         return
+    if userDaemonBuildPrewarmer != nil:
+      try:
+        userDaemonBuildPrewarmer(request)
+      except CatchableError as err:
+        logLine(config.logPath, "build prewarm skipped session=" &
+          sessionId & " error=" & err.msg)
     when defined(posix):
       let pid = fork()
       if pid < 0:
