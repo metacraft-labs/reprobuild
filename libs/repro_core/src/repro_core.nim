@@ -6,6 +6,7 @@ import repro_core/parallel
 import repro_core/codec
 import repro_core/dep_graph
 import repro_core/project_file
+import repro_core/nim_dep_scanner
 
 export types
 export paths
@@ -15,6 +16,7 @@ export parallel
 export codec
 export dep_graph
 export project_file
+export nim_dep_scanner
 
 const ReprobuildVersion* = "0.1.0"
 

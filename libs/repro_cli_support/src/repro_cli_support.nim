@@ -5792,6 +5792,139 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
   raise newException(OSError,
     "runquotad did not become reachable at " & socket)
 
+proc runDepsRefreshCommand(args: openArray[string]): int =
+  ## Implements ``repro deps refresh`` — the Mode 3 scanner CLI.
+  ##
+  ## Three behaviours, selected by flag:
+  ##   * default      : scan, write ``repro.scanned-deps.nim`` atomically
+  ##                    (temp file + rename), return 0.
+  ##   * ``--check``  : scan, compare to on-disk file, return 0 if
+  ##                    up-to-date or 1 if drifted. Never writes.
+  ##   * ``--dry-run``: scan, print what the new file would contain to
+  ##                    stdout (and the unified diff against the on-disk
+  ##                    file as a comment header). Never writes.
+  ##
+  ## Project resolution: a single positional argument (or ``--project=PATH``)
+  ## is used as the workspace root; default is the current working dir.
+  ## See ``reprobuild-specs/Three-Mode-Convention-System.md`` §"`repro
+  ## deps refresh` CLI" for the contract.
+  var projectArg = ""
+  var checkOnly = false
+  var dryRun = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--help" or arg == "-h":
+      echo "usage: repro deps refresh [--check] [--dry-run] [--project=PATH] [PATH]"
+      return 0
+    elif arg == "--check":
+      checkOnly = true
+    elif arg == "--dry-run":
+      dryRun = true
+    elif arg == "--project":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--project requires a value")
+      projectArg = args[i + 1]
+      inc i
+    elif arg.startsWith("--project="):
+      projectArg = arg["--project=".len .. ^1]
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported deps refresh flag: " & arg)
+    elif projectArg.len == 0:
+      projectArg = arg
+    else:
+      raise newException(ValueError,
+        "unexpected deps refresh argument: " & arg)
+    inc i
+
+  let workspaceRoot =
+    if projectArg.len == 0:
+      getCurrentDir()
+    else:
+      absolutePath(projectArg)
+  if not dirExists(workspaceRoot):
+    raise newException(ValueError,
+      "deps refresh: workspace root does not exist: " & workspaceRoot)
+
+  let scan = scanWorkspace(workspaceRoot)
+  let rendered = renderScannedDepsFile(scan.edges, ReprobuildVersion,
+    scan.members, workspaceRoot)
+
+  # The output file lives next to the project file; we honour
+  # whichever name the user has on disk (repro.nim vs reprobuild.nim).
+  let projectMatch = resolveProjectFile(workspaceRoot)
+  let outputPath = workspaceRoot / "repro.scanned-deps.nim"
+
+  if dryRun:
+    echo "# DRY RUN — would write to ", outputPath
+    if projectMatch.path.len == 0:
+      echo "# warning: no repro.nim / reprobuild.nim found at ",
+        workspaceRoot,
+        " — the generated file will only be useful once one is created."
+    stdout.write(rendered)
+    return 0
+
+  let existing = readExistingScannedDeps(outputPath)
+  if existing == rendered:
+    if checkOnly:
+      return 0
+    # Up-to-date already; nothing to write. Idempotent re-run.
+    return 0
+
+  if checkOnly:
+    stderr.writeLine("repro deps refresh --check: " &
+      "repro.scanned-deps.nim is out of date at " & outputPath)
+    stderr.writeLine("  run `repro deps refresh` to regenerate.")
+    return 1
+
+  # Atomic write: temp file in the same dir, then rename. The same-dir
+  # rule is what guarantees atomicity on Windows + POSIX (cross-volume
+  # renames silently fall back to copy+delete).
+  let tempPath = outputPath & ".tmp"
+  try:
+    writeFile(tempPath, rendered)
+    moveFile(tempPath, outputPath)
+  except CatchableError as err:
+    if fileExists(tempPath):
+      try:
+        removeFile(tempPath)
+      except CatchableError:
+        discard
+    raise newException(ValueError,
+      "deps refresh: failed to write " & outputPath & ": " & err.msg)
+
+  echo "wrote ", outputPath, " (", scan.edges.len, " edges across ",
+    scan.members.len, " targets)"
+  0
+
+proc runDepsCommand(args: openArray[string]): int =
+  ## Dispatch ``repro deps <subcommand>``. Today the only subcommand is
+  ## ``refresh``; the spec leaves room for ``deps show`` /
+  ## ``deps explain`` as part of the ``repro show-conventions`` follow-on
+  ## work (step 3 of the sequencing plan in
+  ## ``Three-Mode-Convention-System.md`` §"Sequencing plan").
+  if args.len == 0:
+    stderr.writeLine("repro deps: missing subcommand (expected: refresh)")
+    stderr.writeLine("usage: repro deps refresh [--check] [--dry-run] " &
+      "[--project=PATH] [PATH]")
+    return 2
+  let sub = args[0]
+  let rest =
+    if args.len > 1:
+      args[1 .. ^1]
+    else:
+      @[]
+  case sub
+  of "refresh":
+    return runDepsRefreshCommand(rest)
+  of "--help", "-h", "help":
+    echo "usage: repro deps refresh [--check] [--dry-run] " &
+      "[--project=PATH] [PATH]"
+    return 0
+  else:
+    stderr.writeLine("repro deps: unknown subcommand: " & sub)
+    return 2
+
 proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var target = ""
   var mode = tpmUnspecified
@@ -8107,6 +8240,17 @@ proc runThinApp*(programName: string): int =
       return runWhyCommand(whyArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro why: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "deps":
+    try:
+      let depsArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runDepsCommand(depsArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro deps: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "build":
     try:

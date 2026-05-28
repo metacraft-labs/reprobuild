@@ -4,6 +4,28 @@ var buildTargetRegistry: seq[BuildTargetDef] = @[]
 var buildPoolRegistry: seq[BuildPoolDef] = @[]
 var defaultBuildActionRegistry = ""
 
+type
+  WorkspaceDepEdge* = object
+    ## Mode 3 inter-package dependency edge.
+    ##
+    ## Recorded via the ``depends_on <pkg>: <dep1>, <dep2>`` macro (see
+    ## ``macros_b.nim``). Each call appends one edge per declared
+    ## dependency to ``workspaceDepRegistry``. The engine does NOT yet
+    ## consume these edges for graph wiring — the Mode 3 Nim pilot
+    ## (Three-Mode-Convention-System §"Open questions") establishes the
+    ## DSL surface and the scanner; consumption of the edges by the
+    ## standard provider is deferred to a follow-on milestone. The
+    ## registry is therefore inspection-only today: ``repro deps refresh
+    ## --check`` and tests read it back, but builds do not branch on it.
+    package*: string
+      ## The package the edge originates from. Matches the identifier
+      ## used in ``package <name>:`` declarations.
+    dependency*: string
+      ## The in-workspace package this one depends on. Same naming rule
+      ## as ``package``.
+
+var workspaceDepRegistry: seq[WorkspaceDepEdge] = @[]
+
 const fs* = ReproFs()
 const hcr* = ReproHcr()
 
@@ -36,6 +58,26 @@ proc registerPackageDef*(pkg: PackageDef) {.dynOrStatic.} =
 
 proc registeredPackages*(): seq[PackageDef] {.dynOrStatic.} =
   registry
+
+proc resetWorkspaceDepRegistry*() {.dynOrStatic.} =
+  ## Reset the Mode 3 ``depends_on`` registry. Test helpers call this
+  ## between scenarios so registry entries don't leak across cases.
+  workspaceDepRegistry.setLen(0)
+
+proc registerWorkspaceDep*(package, dependency: string) {.dynOrStatic.} =
+  ## Append one workspace dep edge. Called from the ``depends_on``
+  ## macro expansion (one call per ``<dep>`` listed). Duplicates are
+  ## NOT collapsed at registration time — the scanner emits a
+  ## deduplicated set, but manual edges in ``repro.nim`` may overlap
+  ## with scanned edges; downstream consumers (today: just the
+  ## test/inspection surface) are responsible for set-union semantics.
+  workspaceDepRegistry.add(WorkspaceDepEdge(
+    package: package,
+    dependency: dependency))
+
+proc registeredWorkspaceDeps*(): seq[WorkspaceDepEdge] {.dynOrStatic.} =
+  ## Return every ``depends_on`` edge recorded in evaluation order.
+  workspaceDepRegistry
 
 proc resetBuildActionRegistry*() {.dynOrStatic.} =
   buildActionRegistry.setLen(0)

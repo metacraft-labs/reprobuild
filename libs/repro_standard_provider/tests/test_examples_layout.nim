@@ -1,11 +1,12 @@
 ## M8 verification: every populated example dir under
-## ``reprobuild-examples/`` has a ``reprobuild.nim`` declaring at least
-## one member and carrying NO ``build:`` block (Tier 2b opt-in shape).
+## ``reprobuild-examples/`` has a project file (``repro.nim`` or the
+## legacy ``reprobuild.nim``) declaring at least one member and carrying
+## NO ``build:`` block (Tier 2b opt-in shape).
 ##
 ## The check is intentionally textual rather than DSL-aware: at this
 ## milestone the standard provider hasn't grown conventions for every
-## language yet, but the source tree + ``reprobuild.nim`` must already
-## be in place so M9's end-to-end harness can iterate the full list.
+## language yet, but the source tree + project file must already be in
+## place so M9's end-to-end harness can iterate the full list.
 ##
 ## Path math: ``currentSourcePath`` lands inside
 ## ``D:/metacraft/reprobuild/libs/repro_standard_provider/tests/``.
@@ -25,6 +26,7 @@ const PopulatedExamples = [
   "nim/binary",
   "nim/library",
   "nim/library-with-tests",
+  "nim/mode3-pilot",
   "nim/multi-binary",
   "rust/binary",
   "rust/library",
@@ -54,12 +56,22 @@ const PopulatedExamples = [
 
 suite "examples layout M8":
   for example in PopulatedExamples:
-    test "example " & example & " has minimal reprobuild.nim":
+    test "example " & example & " has minimal project file":
       let dir = ExamplesRoot / example
       check dirExists(dir)
-      let nim = dir / "reprobuild.nim"
-      check fileExists(nim)
-      let content = readFile(nim)
+      # Accept either the canonical ``repro.nim`` or the legacy
+      # ``reprobuild.nim`` alias, per
+      # ``Three-Mode-Convention-System.md`` §"`repro.nim` ↔
+      # `reprobuild.nim` alias". The fixture corpus today uses the
+      # legacy name everywhere except the Mode 3 pilot, which
+      # dogfoods the canonical name.
+      let canonical = dir / "repro.nim"
+      let legacy = dir / "reprobuild.nim"
+      check fileExists(canonical) or fileExists(legacy)
+      let projectFile =
+        if fileExists(canonical): canonical
+        else: legacy
+      let content = readFile(projectFile)
       # No `build:` block — Tier 2b opt-in requires the engine to
       # dispatch to the standard provider. Look for either an
       # indented ``  build:`` (the canonical DSL shape) or a

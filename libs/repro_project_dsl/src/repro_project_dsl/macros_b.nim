@@ -195,3 +195,70 @@ macro package*(name: untyped; body: untyped): untyped =
   result = newStmtList()
   result.add(generated)
   result.add(buildCode(pkg, body))
+
+proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
+  ## Flatten a ``depends_on`` body into a list of declared dep names.
+  ##
+  ## Accepted shapes (any combination, in any order):
+  ##
+  ##   ``depends_on hello: greet``
+  ##     parses to ``Command(depends_on, hello, StmtList(greet))``;
+  ##     the body's leaf is a single identifier.
+  ##
+  ##   ``depends_on hello: greet, logFmt``
+  ##     parses to ``Command(depends_on, hello, StmtList(Command(greet,
+  ##     logFmt)))``; the body's leaf is a ``Command`` whose head is
+  ##     ``greet`` and remaining children are the other deps.
+  ##
+  ##   ``depends_on hello:`` + indented body lines
+  ##     parses to ``Command(depends_on, hello, StmtList(greet, logFmt,
+  ##     ...))``; each child is one identifier (or a comma-separated
+  ##     inline ``Command`` per the rule above).
+  ##
+  ## String literals (``"greet"``) are also accepted so generated files
+  ## from external tooling can use either spelling. We don't error on
+  ## anything else — unknown shapes are silently skipped so forward
+  ## compatibility with future ``depends_on`` extensions stays open.
+  case node.kind
+  of nnkIdent, nnkSym:
+    output.add(identText(node))
+  of nnkStrLit..nnkTripleStrLit:
+    output.add(node.strVal)
+  of nnkStmtList, nnkBracket, nnkPar:
+    for child in node:
+      collectDependsOnEntries(child, output)
+  of nnkCommand, nnkCall:
+    for child in node:
+      collectDependsOnEntries(child, output)
+  of nnkAccQuoted:
+    output.add(identText(node))
+  else:
+    discard
+
+macro depends_on*(packageName: untyped; deps: untyped): untyped =
+  ## Mode 3 DSL: declare in-workspace dep edges from ``packageName`` to
+  ## every entry in ``deps``. Used both in hand-authored ``repro.nim``
+  ## (for scanner-blind deps) and in generated ``repro.scanned-deps.nim``
+  ## (the ``repro deps refresh`` output).
+  ##
+  ## Expansion emits one ``registerWorkspaceDep(<pkg>, <dep>)`` runtime
+  ## call per declared dep. The runtime registry is inspection-only today
+  ## (see ``WorkspaceDepEdge`` in ``runtime_core.nim``); the standard
+  ## provider does NOT yet consume these edges for graph wiring. The
+  ## Mode 3 Nim pilot establishes the DSL surface; consumption is
+  ## deferred to a follow-on milestone, per
+  ## ``reprobuild-specs/Three-Mode-Convention-System.md`` §"Honest scope".
+  let pkgName = identText(packageName)
+  if pkgName.len == 0:
+    error("depends_on expects a package identifier as its first argument",
+      packageName)
+  var entries: seq[string] = @[]
+  collectDependsOnEntries(deps, entries)
+  result = newStmtList()
+  for entry in entries:
+    if entry.len == 0:
+      continue
+    let pkgLit = newLit(pkgName)
+    let depLit = newLit(entry)
+    result.add(quote do:
+      registerWorkspaceDep(`pkgLit`, `depLit`))
