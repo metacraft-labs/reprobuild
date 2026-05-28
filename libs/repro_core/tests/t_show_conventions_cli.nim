@@ -166,26 +166,33 @@ suite "repro show-conventions: CLI smoke":
       check sawAppPkg
       check sawLibPkg
       check doc["conventions"].kind == JArray
-      check doc["conventions"].len == 7
+      check doc["conventions"].len == 8
       # First convention is "nim" — pins the dispatch order.
       check doc["conventions"][0].getStr == "nim"
-      # c-cpp-autotools must come BEFORE c-cpp-make in the registry
-      # mirror; the order is documented in
-      # ``apps/repro-standard-provider/repro_standard_provider.nim``
-      # (a project carrying both a Makefile and configure.ac routes
-      # through Autotools because it recognise-matches first). If
-      # this assertion flips the static mirror has drifted from the
+      # c-cpp-autotools must come BEFORE c-cpp-make BEFORE c-cpp-direct
+      # in the registry mirror; the order is documented in
+      # ``apps/repro-standard-provider/repro_standard_provider.nim``.
+      # A project carrying both a Makefile and configure.ac routes
+      # through Autotools because it recognise-matches first; a
+      # project with a Makefile but no autotools artefacts routes
+      # through Make; only a project with NO Makefile / CMakeLists /
+      # configure.ac falls through to the Mode 3 c-cpp-direct. If this
+      # assertion flips the static mirror has drifted from the
       # standard-provider's registration order.
       var autotoolsIdx = -1
       var makeIdx = -1
+      var directIdx = -1
       for i in 0 ..< doc["conventions"].len:
         case doc["conventions"][i].getStr
         of "c-cpp-autotools": autotoolsIdx = i
         of "c-cpp-make":      makeIdx = i
+        of "c-cpp-direct":    directIdx = i
         else: discard
       check autotoolsIdx >= 0
       check makeIdx >= 0
+      check directIdx >= 0
       check autotoolsIdx < makeIdx
+      check makeIdx < directIdx
       removeDir(dir)
 
   test "--target=NAME filters to a single member":
@@ -275,7 +282,7 @@ suite "repro show-conventions: registry mirror sanity":
       #      as <alias>`` lines to build an alias -> filename map. The
       #      filename (e.g. ``c_cpp_autotools``) converted underscore ->
       #      hyphen IS the canonical convention name (the ``name:``
-      #      field each plugin sets — verified for all 7 plugins).
+      #      field each plugin sets — verified for all 8 plugins).
       #   2. Walk the ``addDefaultConvention(<alias>.<factory>())`` lines
       #      in source order, resolving each alias to its kebab name.
       #
@@ -324,6 +331,6 @@ suite "repro show-conventions: registry mirror sanity":
         let trimmed = stripped.strip(chars = {',', ' ', '"'})
         if trimmed.len > 0:
           mirror.add(trimmed)
-      check registered.len == 7
-      check mirror.len == 7
+      check registered.len == 8
+      check mirror.len == 8
       check registered == mirror

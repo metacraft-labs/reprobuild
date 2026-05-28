@@ -52,6 +52,7 @@ const PopulatedExamples = [
   "c-cpp-make/binary",
   "c-cpp-make/library-static",
   "c-cpp-autotools/hello-binary",
+  "c-cpp-mode3/binary-with-library",
 ]
 
 suite "examples layout M8":

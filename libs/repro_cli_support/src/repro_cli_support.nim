@@ -5847,7 +5847,12 @@ proc runDepsRefreshCommand(args: openArray[string]): int =
     raise newException(ValueError,
       "deps refresh: workspace root does not exist: " & workspaceRoot)
 
-  let scan = scanWorkspace(workspaceRoot)
+  # Mode 3 multi-language scan: combine the Nim and the C/C++ scanner
+  # outputs into a single deterministic ``ScanResult``. ``scanWorkspaceAll``
+  # lives in ``repro_core/cpp_dep_scanner`` and unions both scanners'
+  # member + edge seqs with per-key dedup so a mixed-language workspace
+  # produces a byte-stable ``repro.scanned-deps.nim``.
+  let scan = scanWorkspaceAll(workspaceRoot)
   let rendered = renderScannedDepsFile(scan.edges, ReprobuildVersion,
     scan.members, workspaceRoot)
 
@@ -5907,6 +5912,7 @@ const
     "javascript-typescript",
     "c-cpp-autotools",
     "c-cpp-make",
+    "c-cpp-direct",
   ]
     ## The convention list ``repro show-conventions`` prints when asked
     ## for the registry order. Mirrors the registration order in
@@ -6326,7 +6332,9 @@ proc runShowConventionsCommand(args: openArray[string]): int =
       "show-conventions: workspace root does not exist: " & workspaceRoot)
 
   let projectMatch = resolveProjectFile(workspaceRoot)
-  let scan = scanWorkspace(workspaceRoot)
+  # ``scanWorkspaceAll`` unions the Nim + C/C++ scanners so a mixed-
+  # language workspace surfaces every member, not just the Nim ones.
+  let scan = scanWorkspaceAll(workspaceRoot)
   # Collect manual ``depends_on`` edges from every project file the
   # scanner discovered (a workspace can hold several — apps/<name>/
   # repro.nim, libs/<name>/repro.nim, ...). We dedup by project-file

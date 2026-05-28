@@ -275,6 +275,22 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
     if v > bestCount or (v == bestCount and k < bestName):
       bestName = k
       bestCount = v
+  # Refinement for Mode 3 C/C++: when the extension census picks
+  # ``c-cpp-make`` but NO Makefile (or CMakeLists / configure.ac) is
+  # present at the target root, the project actually routes to the
+  # Mode 3 ``c-cpp-direct`` convention. Re-attribute so
+  # ``repro show-conventions`` reflects what the standard-provider
+  # dispatch will actually do at build time.
+  if bestName == "c-cpp-make":
+    let hasMakefile = fileExists(targetDir / "Makefile") or
+      fileExists(targetDir / "GNUmakefile") or
+      fileExists(targetDir / "makefile")
+    let hasCmake = fileExists(targetDir / "CMakeLists.txt")
+    let hasAutotools = fileExists(targetDir / "configure.ac") or
+      fileExists(targetDir / "configure.in") or
+      fileExists(targetDir / "Makefile.am")
+    if not hasMakefile and not hasCmake and not hasAutotools:
+      bestName = "c-cpp-direct"
   result.convention = bestName
   result.evidence = "extension census: " & $bestCount & "/" &
     $census.total & " files match " & bestName
@@ -495,7 +511,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[7, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[8, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -515,6 +531,9 @@ const
                        exeName: "autoconf",
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "c-cpp-make",
+                       exeName: "gcc",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "c-cpp-direct",
                        exeName: "gcc",
                        versionArgs: @["--version"]),
   ]

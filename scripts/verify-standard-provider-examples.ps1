@@ -137,7 +137,8 @@ $PopulatedExamples = @(
   'javascript-typescript/webpack-app',
   'c-cpp-make/binary',
   'c-cpp-make/library-static',
-  'c-cpp-autotools/hello-binary'
+  'c-cpp-autotools/hello-binary',
+  'c-cpp-mode3/binary-with-library'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -308,6 +309,23 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "neither 'make' nor 'mingw32-make' on PATH" }
       }
       return @{ Available = $true; Reason = "cc=$($ccCmd.Source); ar=$($arCmd.Source); make=$($makeCmd.Source)" }
+    }
+    'c-cpp-mode3' {
+      # Mode 3 C/C++ — same toolchain as c-cpp-make minus ``make``
+      # (the convention emits compile + link argv directly; no Makefile
+      # is consulted). Probe for a C compiler (gcc or clang) plus ar.
+      $ccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $ccCmd) {
+        $ccCmd = Get-Command clang -ErrorAction SilentlyContinue
+      }
+      if (-not $ccCmd) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH" }
+      }
+      $arCmd = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $arCmd) {
+        return @{ Available = $false; Reason = "'ar' not on PATH" }
+      }
+      return @{ Available = $true; Reason = "cc=$($ccCmd.Source); ar=$($arCmd.Source)" }
     }
     'c-cpp-autotools' {
       # M17: the C/C++ Autotools convention is registered. Probe for
@@ -952,6 +970,20 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ('lib' + $member + '.a')))
         Greeting = $null
+      })
+    }
+    'c-cpp-mode3/binary-with-library' {
+      # Mode 3 C/C++: the workspace declares a library ``mathlib`` and an
+      # executable ``calc`` in a single ``repro.nim``. The Mode 3
+      # ``c-cpp-direct`` convention emits per-source compile actions,
+      # ``ar rcs libmathlib.a``, then ``gcc -o calc[.exe]`` linking the
+      # archive. The link action is sequenced strictly after the archive
+      # action via Mode 3 ``depends_on`` wiring. Both outputs land under
+      # ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'calc'
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
+        Greeting = 'hello from c-cpp-mode3-binary-with-library, 2 + 3 = 5'
       })
     }
     'c-cpp-autotools/hello-binary' {

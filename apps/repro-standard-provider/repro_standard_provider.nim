@@ -32,6 +32,7 @@ import repro_standard_provider/conventions/python as python_convention
 import repro_standard_provider/conventions/javascript_typescript as jsts_convention
 import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
 import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_convention
+import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -154,6 +155,12 @@ when defined(reproProviderMode):
   addDefaultConvention(jsts_convention.javaScriptTypeScriptConvention())
   addDefaultConvention(c_cpp_autotools_convention.cCppAutotoolsConvention())
   addDefaultConvention(c_cpp_make_convention.cCppMakeConvention())
+  # c_cpp_direct (Mode 3 / no-Makefile) is registered LAST among the
+  # C/C++ conventions so a project shipping a Makefile routes through
+  # the Make convention first; Mode 3 picks up the no-Makefile case
+  # where the user declared their project shape in ``repro.nim`` with
+  # no ecosystem manifest at all.
+  addDefaultConvention(c_cpp_direct_convention.cCppDirectConvention())
 
   proc runStandardProvider(): int =
     try:
