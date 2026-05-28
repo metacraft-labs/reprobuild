@@ -96,6 +96,15 @@ addPackagePath("STINT_SRC", [
   "libs" / "stint" / "src",
 ], "stint.nim")
 
+# M26: ct_interpose's hook_registry powers the Windows monitor shim's
+# hook chain. Prefer an explicit CT_INTERPOSE_SRC, then the
+# codetracer-native-recorder sibling checkout, then a vendored copy under
+# libs/repro_monitor_shim/vendor/ct_interpose if present.
+addPackagePath("CT_INTERPOSE_SRC", [
+  ".." / "codetracer-native-recorder" / "ct_interpose" / "src",
+  "libs" / "repro_monitor_shim" / "vendor" / "ct_interpose" / "src",
+], "ct_interpose" / "hook_registry.nim")
+
 let runquotaRoot = block:
   let fromEnv = getEnv("RUNQUOTA_SRC")
   if fromEnv.len > 0:

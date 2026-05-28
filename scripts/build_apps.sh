@@ -40,6 +40,17 @@ fi
 # Detect MSYS/Cygwin/Git Bash builds running under Windows by checking uname.
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    # M26: the monitor shim now imports ct_interpose/hook_registry. The
+    # ct_interpose sibling lives at $CT_INTERPOSE_SRC or, by default, at
+    # ../codetracer-native-recorder/ct_interpose/src relative to the
+    # reprobuild repo root. If the sibling is absent the build falls back
+    # to a vendored copy that ships under
+    # libs/repro_monitor_shim/vendor/ct_interpose; CI provisions the
+    # codetracer-native-recorder sibling.
+    ct_interpose_src="${CT_INTERPOSE_SRC:-../codetracer-native-recorder/ct_interpose/src}"
+    if [ ! -d "${ct_interpose_src}" ]; then
+      ct_interpose_src="libs/repro_monitor_shim/vendor/ct_interpose/src"
+    fi
     nim c \
       "${nim_mode_flags[@]}" \
       --app:lib \
@@ -51,6 +62,7 @@ case "$(uname -s)" in
       --path:libs/repro_monitor_depfile/src \
       --path:libs/repro_core/src \
       --path:libs/repro_monitor_shim/src \
+      --path:"${ct_interpose_src}" \
       --nimcache:build/nimcache/repro-monitor-shim-dll \
       --out:build/lib/librepro_monitor_shim.dll \
       libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim
