@@ -2,6 +2,7 @@
 repro_core
 repro_platform
 repro_diagnostics
+repro_daemon_core
 repro_cli_support
 blake3
 xxh3

@@ -73,9 +73,15 @@ suite "Local daemons/control-plane M0 current-state gates":
   test "test_daemon_track_current_surface_inventory":
     check fileExists(publicReproBin())
 
-    let daemon = requireReproFailure(["daemon"])
-    check daemon.contains("usage: repro")
-    check not daemon.contains("repro daemon status")
+    let tempRoot = createTempDir("repro-daemon-m0-inventory", "")
+    defer: removeDir(tempRoot)
+    let daemon = requireSuccess(shellCommand([
+      publicReproBin(), "daemon", "status",
+      "--endpoint", tempRoot / "repro-daemon-m0-inventory.sock",
+      "--state-dir", tempRoot / "state"
+    ]), repoRoot())
+    check daemon.contains("repro daemon: not-running")
+    check not daemon.contains("repro store daemon")
 
     for value in ["auto", "require", "off"]:
       let output = requireReproFailure(["build", "--daemon=" & value])
@@ -91,8 +97,6 @@ suite "Local daemons/control-plane M0 current-state gates":
     check stats.contains("usage: repro")
     check not stats.contains("repro stats")
 
-    let tempRoot = createTempDir("repro-daemon-m0-inventory", "")
-    defer: removeDir(tempRoot)
     let storeDaemon = requireReproFailure([
       "store", "daemon", "status", "--store-root=" & tempRoot / "store"])
     check storeDaemon.contains("only --dev is implemented")

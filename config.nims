@@ -7,6 +7,7 @@ for libName in [
   "repro_platform",
   "repro_diagnostics",
   "repro_cli_support",
+  "repro_daemon_core",
   "blake3",
   "xxh3",
   "gxhash",

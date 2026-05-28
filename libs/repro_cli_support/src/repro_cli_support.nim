@@ -17,6 +17,7 @@ import repro_hash
 import repro_tool_profiles
 import repro_local_store
 import repro_store_daemon
+import repro_daemon_core
 import repro_launch_plan
 import repro_hcr_agent
 import repro_hcr_linkgraph
@@ -90,6 +91,8 @@ proc renderUsage*(programName: string): string =
       " debug artifact <path> [--format=text|json]\n       " &
           programName &
       " home {add | remove | enable | disable | list | why | history | apply | plan | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n       " &
+          programName &
+      " daemon {status | start | stop | restart | logs} [--endpoint=PATH] [--state-dir=PATH] [--log=PATH]\n       " &
           programName &
       " store {gc | recover | roots | list | daemon} ...\n       " &
           programName &
@@ -8493,6 +8496,64 @@ proc runStoreCommand*(args: seq[string]): int =
     stderr.writeLine("repro store " & sub & ": error: " & err.msg)
     return 1
 
+proc runUserDaemonCliCommand(args: seq[string]): int =
+  if args.len == 0:
+    echo "usage: repro daemon {status | start | stop | restart | logs} " &
+      "[--foreground] [--dev] [--endpoint PATH] [--state-dir PATH] " &
+      "[--log PATH]"
+    return 2
+  let action = args[0]
+  let rest = if args.len > 1: args[1 .. ^1] else: @[]
+  try:
+    let parsed = parseUserDaemonConfigFlags(rest)
+    if parsed.rest.len > 0:
+      stderr.writeLine("repro daemon: unexpected argument: " &
+        parsed.rest[0])
+      return 2
+    let config = parsed.config
+    case action
+    of "status":
+      echo renderUserDaemonStatus(queryUserDaemonStatus(config.endpoint))
+      return 0
+    of "start":
+      if config.foreground:
+        return runUserDaemonForeground(config)
+      let status = startUserDaemon(stablePublicCliPath(), config)
+      echo renderUserDaemonStatus(status)
+      return 0
+    of "stop":
+      let status = queryUserDaemonStatus(config.endpoint)
+      if not status.running:
+        echo renderUserDaemonStatus(status)
+        return 0
+      stopUserDaemon(config.endpoint)
+      echo "repro daemon: stopped"
+      return 0
+    of "restart":
+      let status = queryUserDaemonStatus(config.endpoint)
+      if status.running:
+        stopUserDaemon(config.endpoint)
+        let deadline = epochTime() + 10.0
+        while epochTime() < deadline:
+          if not queryUserDaemonStatus(config.endpoint).running:
+            break
+          sleep(25)
+      let started = startUserDaemon(stablePublicCliPath(), config)
+      echo renderUserDaemonStatus(started)
+      return 0
+    of "logs":
+      let logs = renderUserDaemonLogs(config)
+      stdout.write(logs)
+      if not logs.endsWith("\n"):
+        stdout.writeLine("")
+      return 0
+    else:
+      stderr.writeLine("repro daemon: unknown action: " & action)
+      return 2
+  except CatchableError as err:
+    stderr.writeLine("repro daemon " & action & ": error: " & err.msg)
+    return 1
+
 proc runLaunchPlanCommand*(args: seq[string]): int =
   ## Implements `repro launch-plan <subcommand>`. v1 subcommands:
   ##
@@ -8856,6 +8917,8 @@ proc runThinApp*(programName: string): int =
     return 0
   if programName == "reprostored":
     return runReprostoredCommand(args)
+  if programName == "repro-daemon":
+    return runUserDaemonCommand(args)
   if programName == "repro-fs-snoop":
     return runFsSnoopCli(programName, args)
   if args.len > 0 and args[0] == "__repro-runquota-helper":
@@ -9141,6 +9204,13 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runStoreCommand(storeArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "daemon":
+    let daemonArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runUserDaemonCliCommand(daemonArgs)
   if programName == "repro" and args.len > 0 and args[0] == "launch-plan":
     let lpArgs =
       if args.len > 1:
