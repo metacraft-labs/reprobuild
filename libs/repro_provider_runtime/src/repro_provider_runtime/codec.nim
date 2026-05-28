@@ -129,14 +129,14 @@ proc readNode(bytes: openArray[byte]; pos: var int): GraphNode =
     stableName: readString(bytes, pos),
     payload: readString(bytes, pos))
 
-proc writeEdge(outp: var seq[byte]; value: GraphEdge) =
+proc writeEdge(outp: var seq[byte]; value: types.GraphEdge) =
   outp.writeString(value.id)
   outp.writeByte(byte(ord(value.kind)))
   outp.writeString(value.fromNode)
   outp.writeString(value.toNode)
 
-proc readEdge(bytes: openArray[byte]; pos: var int): GraphEdge =
-  GraphEdge(
+proc readEdge(bytes: openArray[byte]; pos: var int): types.GraphEdge =
+  types.GraphEdge(
     id: readString(bytes, pos),
     kind: edgeKind(readByte(bytes, pos)),
     fromNode: readString(bytes, pos),
@@ -228,7 +228,7 @@ proc readFragment(bytes: openArray[byte]; pos: var int): GraphFragment =
   for i in 0 ..< count:
     result.nodes[i] = readNode(bytes, pos)
   count = int(readU32Le(bytes, pos))
-  result.edges = newSeq[GraphEdge](count)
+  result.edges = newSeq[types.GraphEdge](count)
   for i in 0 ..< count:
     result.edges[i] = readEdge(bytes, pos)
   count = int(readU32Le(bytes, pos))
@@ -437,7 +437,7 @@ proc readStoredFragment(bytes: openArray[byte]; pos: var int):
   for i in 0 ..< count:
     result.nodes[i] = readNode(bytes, pos)
   count = int(readU32Le(bytes, pos))
-  result.edges = newSeq[GraphEdge](count)
+  result.edges = newSeq[types.GraphEdge](count)
   for i in 0 ..< count:
     result.edges[i] = readEdge(bytes, pos)
   count = int(readU32Le(bytes, pos))

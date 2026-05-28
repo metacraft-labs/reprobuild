@@ -197,7 +197,7 @@ proc namespacePrefix(namespace: string): string =
 proc effectKey(claim: OwnedEffectClaim): string =
   $claim.kind & "|" & claim.identity & "|" & claim.stableName
 
-proc edgeKey(edge: GraphEdge): string =
+proc edgeKey(edge: types.GraphEdge): string =
   edge.id & "|" & $edge.kind & "|" & edge.fromNode & "|" & edge.toNode
 
 proc validateFragment(fragment: GraphFragment; request: ProviderGraphRequest;
