@@ -344,10 +344,14 @@ function Probe-Toolchain([string]$language) {
       # The M17 hello-binary fixture is repo-checkout shape (no
       # committed ``configure``), so autoreconf is REQUIRED to
       # regenerate the GNU build machinery before configure can run.
-      # When autoreconf is missing the harness SKIPs cleanly.
+      # When autoreconf is missing the harness SKIPs cleanly. MSYS2
+      # ships ``autoreconf`` as an extensionless POSIX shell script
+      # which Get-Command resolves natively on PATH; on Windows hosts
+      # without MSYS2 autotools provisioned the message names the
+      # precise dev-deps step that's outstanding.
       $autoreconfCmd = Get-Command autoreconf -ErrorAction SilentlyContinue
       if (-not $autoreconfCmd) {
-        return @{ Available = $false; Reason = "'autoreconf' not on PATH (autoconf + automake required for repo-checkout shape)" }
+        return @{ Available = $false; Reason = "'autoreconf' not on PATH (run windows/ensure-msys2-autotools.ps1 — sources autoconf + automake into D:/metacraft-dev-deps/msys2/msys64/usr/bin)" }
       }
       return @{ Available = $true; Reason = "cc=$($ccCmd.Source); make=$($makeCmd.Source); sh=$($shCmd.Source); autoreconf=$($autoreconfCmd.Source)" }
     }
@@ -925,13 +929,19 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       })
     }
     'c-cpp-autotools/hello-binary' {
-      # M17: c-cpp-autotools/hello-binary. The convention emits a
-      # configure action + a make action; in-tree automake build leaves
-      # the executable at the project root.
-      $candidates = @('hello.exe', 'hello')
+      # M28: c-cpp-autotools/hello-binary. The per-source lift emits
+      # configure + per-source ``gcc -c`` + ``gcc -o`` link actions.
+      # The link action drops the executable under the per-member
+      # scratch directory ``<projectRoot>/.repro/build/hello/`` so two
+      # members with the same target name don't stomp each other (same
+      # shape as the c_cpp_make convention).
+      $member = 'hello'
+      $candidates = @(
+        (Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member 'hello.exe'))),
+        (Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member 'hello')))
+      )
       $output = $null
-      foreach ($candidate in $candidates) {
-        $candidatePath = Join-Path $fixtureDir $candidate
+      foreach ($candidatePath in $candidates) {
         if (Test-Path -LiteralPath $candidatePath) {
           $output = $candidatePath
           break
@@ -941,7 +951,7 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       # anything yet — the harness re-checks existence after the build
       # runs.
       if (-not $output) {
-        $output = Join-Path $fixtureDir 'hello.exe'
+        $output = $candidates[0]
       }
       return @(@{
         Path     = $output

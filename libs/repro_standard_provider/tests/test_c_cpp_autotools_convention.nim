@@ -1,11 +1,14 @@
-## M17 verification: C/C++ Autotools language convention.
+## M17 / M28 verification: C/C++ Autotools language convention.
 ##
 ## Tests against the in-tree fixture under
 ## ``reprobuild-examples/c-cpp-autotools/``:
 ##
 ##   * ``c-cpp-autotools/hello-binary`` — single ``executable hello``
-##                                        built via autoreconf + configure
-##                                        + make.
+##                                        built via the M28 per-source
+##                                        lift (per-source ``gcc -c`` +
+##                                        ``gcc -o`` link, configure
+##                                        action retained as a
+##                                        prerequisite).
 ##
 ## Negative recognise cases are materialised as tiny scratch projects
 ## under the test's temp directory so each case is hermetic.
@@ -24,9 +27,12 @@
 ##     - no executable / library member is declared
 ##   * ``emitFragment`` against the hello-binary fixture (skipped when
 ##     any required tool is missing):
-##     - the convention emits exactly two actions
-##       (``ccpp-autotools-configure`` + ``ccpp-autotools-build``).
-##     - the build action lists the configure action as a dependency.
+##     - the convention emits a ``ccpp-autotools-configure`` action.
+##     - M28: at least one ``ccpp-autotools-compile-*`` per-source
+##       action is present.
+##     - M28: a ``ccpp-autotools-link-hello`` link action is present,
+##       its ``deps`` list contains every compile action id, and the
+##       compile actions depend on the configure action.
 
 import std/[os, strutils, unittest]
 
@@ -52,6 +58,25 @@ proc dummyRequest(projectRoot: string): ProviderGraphRequest =
     arguments: projectRoot,
     namespace: "project")
 
+proc findExeAnyExt(exe: string): string =
+  ## Mirror of the convention's findExeAnyExt: stock findExe with a
+  ## fallback extensionless probe so MSYS2's POSIX shell scripts
+  ## (autoreconf, automake) resolve on Windows.
+  if exe.len == 0:
+    return ""
+  let stock = findExe(exe)
+  if stock.len > 0:
+    return stock
+  when defined(windows):
+    for candidate in getEnv("PATH").split(';'):
+      let stripped = candidate.strip(chars = {' ', '"'})
+      if stripped.len == 0:
+        continue
+      let probe = stripped / exe
+      if fileExists(probe):
+        return probe
+  return ""
+
 proc autotoolsAvailable(projectRoot: string): bool =
   ## True when every tool the convention demands at recognise time is
   ## present. ``autoreconf`` is only required when no ``configure`` is
@@ -65,7 +90,7 @@ proc autotoolsAvailable(projectRoot: string): bool =
   if findExe("sh").len == 0:
     return false
   if not fileExists(projectRoot / "configure"):
-    if findExe("autoreconf").len == 0:
+    if findExeAnyExt("autoreconf").len == 0:
       return false
   true
 
@@ -188,7 +213,7 @@ suite "c-cpp-autotools convention M17":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "emitFragment: configure + build actions, dependency wired":
+  test "emitFragment: M28 per-source lift (configure + compile(s) + link)":
     if not autotoolsAvailable(HelloBinaryFixture):
       skip()
     else:
@@ -198,9 +223,11 @@ suite "c-cpp-autotools convention M17":
       let fragment = conv.emitFragment(HelloBinaryFixture, request)
 
       var configureAction: BuildActionDef
-      var buildAction: BuildActionDef
+      var linkAction: BuildActionDef
+      var compileActions: seq[BuildActionDef] = @[]
       var sawConfigure = false
-      var sawBuild = false
+      var sawLink = false
+      var sawCoarseMake = false
       for node in fragment.nodes:
         if node.kind != gnkAction:
           continue
@@ -208,12 +235,30 @@ suite "c-cpp-autotools convention M17":
         if action.id == "ccpp-autotools-configure":
           configureAction = action
           sawConfigure = true
+        elif action.id.startsWith("ccpp-autotools-compile-"):
+          compileActions.add(action)
+        elif action.id.startsWith("ccpp-autotools-link-"):
+          linkAction = action
+          sawLink = true
         elif action.id == "ccpp-autotools-build":
-          buildAction = action
-          sawBuild = true
+          # M28 retires the coarse ``ccpp-autotools-build`` action.
+          # Catching it here fails the test loudly so a regression is
+          # easy to spot.
+          sawCoarseMake = true
 
       check sawConfigure
-      check sawBuild
+      check compileActions.len >= 1
+      check sawLink
+      check not sawCoarseMake
       check configureAction.pool == "compile"
-      check buildAction.pool == "compile"
-      check configureAction.id in buildAction.deps
+      check linkAction.pool == "compile"
+      # Every compile action must depend on configure (so a stale
+      # configure forces a recompile) and the link action must depend on
+      # every compile action (full per-source DAG).
+      for compileAction in compileActions:
+        check configureAction.id in compileAction.deps
+        check compileAction.id in linkAction.deps
+      # The hello-binary fixture's Makefile.am declares
+      # ``hello_SOURCES = src/main.c`` — exactly one .c source. The
+      # convention should produce exactly one compile action.
+      check compileActions.len == 1

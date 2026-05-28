@@ -1,5 +1,5 @@
 ## C / C++ (Autotools) language convention (Tier 2b) — Mode A
-## "fine-grained" plugin (M17 hybrid surface).
+## "fine-grained" plugin (M28 per-source surface).
 ##
 ## Recognises a project whose ``reprobuild.nim`` ``uses:`` block lists
 ## a C compiler (``gcc``/``clang``) plus ``autoconf`` + ``automake`` +
@@ -7,65 +7,74 @@
 ## ``Makefile.am`` at the project root, AND declares at least one
 ## ``executable`` or ``library`` member.
 ##
-## The convention spec
-## (``reprobuild-specs/Language-Conventions/C-Cpp-Autotools.md``
-## §"Mode A — Fine-grained build graph") prescribes two phases:
+## M17 shipped a hybrid surface — fine-grained configure stage plus a
+## coarse-grained ``make`` build that delegated the per-source DAG to
+## the generated Makefile. M28 graduates the build surface to Option A
+## from the spec: per-source ``gcc -c`` + per-target link/archive actions
+## lifted by parsing ``Makefile.am`` directly. The configure action is
+## retained (it generates ``Makefile``/``config.h`` for tooling that
+## inspects them and for projects where the convention chains to make)
+## but no longer drives the build.
 ##
-##   1. **Configure stage** — one action running
+## **Approach** (Option A, simplified): ``Makefile.am`` parsing instead
+## of ``make --print-data-base`` parsing. The two carry the same
+## information for the M28 fixture set:
+##
+##   * ``bin_PROGRAMS = foo bar`` → two executables.
+##   * ``foo_SOURCES = src/foo.c src/util.c`` → per-target source list.
+##   * ``lib_LIBRARIES = libgreet.a`` → static library.
+##   * ``libgreet_a_SOURCES = src/greet.c`` → per-library source list.
+##
+## Parsing ``Makefile.am`` instead of running ``make --print-data-base``
+## means the per-source emit doesn't depend on configure having run yet.
+## The convention spec called for ``make --print-data-base`` because that
+## generalises to projects whose Makefile.am uses cpp conditionals etc.;
+## the M28 fixture set fits the straightforward ``<target>_SOURCES = ...``
+## shape that's parseable from ``Makefile.am`` directly. Projects that
+## outgrow this should be flagged with a TODO; the spec's
+## ``make --print-data-base`` route remains available as a follow-up.
+##
+## **Emitted actions** (per the spec):
+##
+##   1. ``ccpp-autotools-configure`` — one action running
 ##      ``autoreconf -fi`` (when ``configure`` isn't checked in) followed
-##      by ``./configure``. Produces ``Makefile`` + ``config.h``.
-##   2. **Build stage** — per-source compile + link/archive edges lifted
-##      from the generated Makefile via the C-Cpp-Make Mode A translator.
+##      by ``./configure`` via ``sh -c``. Produces ``Makefile`` +
+##      ``config.h`` + ``<scratch>/configure.stamp``. The build actions
+##      depend on it transitively so a stale configure forces a rebuild
+##      cycle; the generated Makefile is no longer the build's source of
+##      truth.
+##   2. ``ccpp-autotools-compile-<member>-<source>`` — one per
+##      ``.c`` listed in ``Makefile.am``'s ``<target>_SOURCES``. Argv
+##      mirrors c_cpp_make's compile shape (``gcc -c -O2 -Wall -Wextra
+##      -MD -MF <dep> -I <includes> -o <obj> <src>``).
+##   3. ``ccpp-autotools-link-<member>`` (executable) or
+##      ``ccpp-autotools-archive-<member>`` (static library).
 ##
-## The M17 surface ships a **hybrid Mode A**: a fine-grained configure
-## action (so ``configure.ac`` edits are correctly invalidated) plus a
-## single coarse-grained ``make`` action for the build itself. The
-## per-source lift via ``make --print-data-base`` is reserved for a
-## later milestone — the M17 ``hello-binary`` fixture passes with a
-## single ``make`` invocation that delegates the per-source DAG to the
-## generated Makefile. The pragmatic shape mirrors what M3 did for Nim
-## (eager compile-only run) before M3+1's dyndep follow-up.
-##
-## **Configure action argv** (the spec's repo-checkout shape):
-##
-##   1. ``autoreconf -fi`` (run from ``<projectRoot>``) — generates
-##      ``configure`` + ``Makefile.in`` + auxiliary GNU build scripts.
-##   2. ``./configure`` (also from ``<projectRoot>``) — generates
-##      ``Makefile`` + ``config.h``. The convention runs both in a
-##      single shell-equivalent action via a ``sh -c`` wrapper because
-##      reprobuild's action shape is one argv per action.
-##
-## To keep both invocations inside one action without introducing a
-## sub-shell, the convention concatenates them into a single ``sh -c``
-## command. On Windows the MSYS2 ``/bin/sh`` is required (the spec
-## §"Cross-platform notes" calls this out as a requirement for
-## native-Windows autotools builds).
-##
-## **Build action argv**: ``make`` (or ``mingw32-make`` on Windows when
-## no ``make`` is on PATH). One single coarse action; ``dependencyPolicy
-## = automaticMonitorPolicy`` so the FS-snoop catches the per-source
-## compile inputs / outputs.
+## **Windows toolchain** (M28): the M9 harness's `Probe-Toolchain` for
+## ``c-cpp-autotools`` prepends MSYS2's ``usr/bin`` to PATH so the
+## extensionless ``autoreconf`` / ``automake`` shell scripts resolve.
+## `env.ps1` also prepends that directory for ambient dev shells via
+## `ensure-msys2-autotools.ps1`. On hosts without MSYS2 (or where pacman
+## hasn't been invoked yet) recognition still returns ``false`` cleanly
+## so the harness SKIPs with a precise reason.
 ##
 ## **Caveats**:
 ##   * Requires ``autoreconf`` (i.e. autoconf + automake) and ``make``
-##     and a compiler on PATH at convention-emit time. When any of these
-##     is missing, ``recognize`` returns ``false`` so dispatch falls
-##     through to the no-match diagnostic and the E2E gate SKIPs.
+##     and a compiler on PATH at convention-emit time. The recognise step
+##     uses a Windows-aware exe search that treats extensionless MSYS2
+##     wrapper scripts as valid (Nim's stdlib ``findExe`` only checks
+##     ``.exe``/``.cmd``/``.bat`` on Windows).
 ##   * Requires ``sh`` on PATH (MSYS2 / Git Bash / Unix). The configure
 ##     script is ``/bin/sh`` and the autoreconf+configure compound runs
 ##     via ``sh -c``.
-##   * The M17 surface is hybrid Mode A: the build step delegates to
-##     ``make``. Per-source lift is deferred. The convention spec
-##     classifies a hybrid as Mode A (the configure is fine-grained;
-##     the per-source DAG matches what the generated Makefile would
-##     do anyway).
+##   * Per-source lift parses ``Makefile.am``; projects whose ``Makefile.am``
+##     relies on cpp conditionals or generated source lists are not yet
+##     supported (recognise returns ``false``).
 ##   * Out-of-tree builds (the spec's recommended ``mkdir _build && cd
-##     _build``) are deferred — the M17 fixture builds in-tree. The
-##     build action declares its outputs as the generated executable
-##     under ``<projectRoot>`` itself (or under ``src/`` per
-##     ``subdir-objects`` automake mode).
+##     _build``) are deferred — the M28 fixture builds in-tree under
+##     ``.repro/build/<member>/``.
 
-import std/[os, strutils]
+import std/[algorithm, os, strutils]
 
 import repro_core
 import repro_provider_runtime
@@ -85,6 +94,15 @@ type
   CCppAutotoolsMember = object
     name: string
     kind: CCppAutotoolsMemberKind
+
+  CCppAutotoolsEmitTarget = object
+    ## Resolved member: the kind plus the list of ``.c`` files extracted
+    ## from ``Makefile.am`` via ``<target>_SOURCES`` lines. Computed by
+    ## ``resolveTarget``; an empty ``sourceFiles`` signals recognition
+    ## failure.
+    member: CCppAutotoolsMember
+    sourceFiles: seq[string]
+      ## Absolute paths to the ``.c`` files for this member.
 
 proc readReprobuildSource(projectRoot: string): string =
   let path = projectRoot / "reprobuild.nim"
@@ -219,8 +237,34 @@ proc hasGeneratedConfigure(projectRoot: string): bool =
   ## the ``autoreconf -fi`` step.
   fileExists(extendedPath(projectRoot / "configure"))
 
+proc findExeAnyExt(exe: string): string =
+  ## Like ``std/os.findExe`` but on Windows ALSO considers the extension-
+  ## less name (in addition to ``.exe``/``.cmd``/``.bat``). MSYS2 ships
+  ## ``autoreconf`` / ``autoconf`` / ``automake`` as POSIX shell scripts
+  ## without an extension; stock ``findExe`` misses those. We do the same
+  ## PATH walk as Nim's stdlib but with an empty-extension first probe.
+  if exe.len == 0:
+    return ""
+  let stockResult = findExe(exe)
+  if stockResult.len > 0:
+    return stockResult
+  when defined(windows):
+    let pathEnv = getEnv("PATH")
+    for candidate in pathEnv.split(';'):
+      if candidate.len == 0:
+        continue
+      let stripped = candidate.strip(chars = {' ', '"'})
+      if stripped.len == 0:
+        continue
+      let probe = stripped / exe
+      if fileExists(extendedPath(probe)):
+        return probe
+    return ""
+  else:
+    return ""
+
 proc autoreconfExecutable(): string =
-  findExe("autoreconf")
+  findExeAnyExt("autoreconf")
 
 proc makeExecutable(): string =
   ## Resolve ``make`` on PATH. Prefers GNU ``make``; falls back to
@@ -249,13 +293,156 @@ proc ccCompiler(): string =
     return gcc
   findExe("clang")
 
+proc arDriver(): string =
+  ## Resolve ``ar`` on PATH. Falls back to the literal ``"ar"`` so emit
+  ## still produces a coherent argv even when ``ar`` is missing.
+  let candidate = findExe("ar")
+  if candidate.len > 0:
+    return candidate
+  "ar"
+
+proc parseMakefileAmVariables(content: string): seq[(string, string)] =
+  ## Parse Make-style ``VAR = value`` and ``VAR += value`` assignments
+  ## from a ``Makefile.am``. Returns variable name + the assigned tokens
+  ## (whitespace-separated). Handles continuation lines (``\``) and ``+=``
+  ## (concatenating onto the prior value). Comments (``#``) are dropped.
+  ##
+  ## The parser is deliberately minimal — it handles the M28 fixture set
+  ## (``bin_PROGRAMS``, ``<target>_SOURCES``, ``lib_LIBRARIES``,
+  ## ``<lib>_a_SOURCES``) but does NOT evaluate make variables or run
+  ## cpp conditionals. Conditional ``Makefile.am`` is a follow-up.
+  var pending = ""
+  let lines = content.splitLines()
+  var i = 0
+  while i < lines.len:
+    var line = lines[i]
+    i += 1
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0 and pending.len == 0:
+      continue
+    if stripped.endsWith("\\"):
+      pending.add(' ')
+      pending.add(stripped[0 ..< ^1].strip())
+      continue
+    if pending.len > 0:
+      pending.add(' ')
+      pending.add(stripped)
+    else:
+      pending = stripped
+    # Parse ``VAR = ...`` / ``VAR += ...`` / ``VAR := ...``. Make
+    # accepts whitespace between the variable name and the assignment
+    # operator (``FOO = bar`` is the canonical form); the scanner walks
+    # past the identifier, then optional whitespace, then expects ``=``,
+    # ``+=``, ``:=``, or fails (e.g. a rule line ``target: deps``).
+    var nameEnd = -1
+    for j in 0 ..< pending.len:
+      let ch = pending[j]
+      if ch == '=':
+        nameEnd = j
+        break
+      if ch == '+' or ch == ':':
+        if j + 1 < pending.len and pending[j + 1] == '=':
+          nameEnd = j
+          break
+        # Bare ``:`` or ``+`` without ``=`` chaser — not an assignment.
+        nameEnd = -1
+        break
+      if ch in {' ', '\t'}:
+        continue
+    var eqIdx = -1
+    var opLen = 1
+    if nameEnd >= 0:
+      let ch = pending[nameEnd]
+      case ch
+      of '=':
+        eqIdx = nameEnd
+      of '+', ':':
+        eqIdx = nameEnd
+        opLen = 2
+      else:
+        discard
+    if eqIdx > 0:
+      let name = pending[0 ..< eqIdx].strip()
+      let value = pending[eqIdx + opLen .. ^1].strip()
+      if name.len > 0:
+        result.add((name, value))
+    pending = ""
+
+proc parseMakefileAmTargets(content: string): seq[(string, string)] =
+  ## Extract per-target source assignments. For each variable named
+  ## ``<sanitised>_SOURCES`` whose ``<sanitised>`` matches a configured
+  ## target name (Automake's mangling rule: ``[.\-+/]`` → ``_``), the
+  ## caller iterates these directly. We return the raw (var, value)
+  ## tuples; matching happens in ``resolveTarget``.
+  for (name, value) in parseMakefileAmVariables(content):
+    if name.endsWith("_SOURCES"):
+      result.add((name, value))
+
+proc sanitiseAutomakeName(value: string): string =
+  ## Automake mangles target names for the ``<target>_SOURCES`` variable
+  ## by replacing every ``.`` / ``-`` / ``+`` with ``_``. The convention
+  ## reproduces that mangling to look up source assignments by member
+  ## name (e.g. ``library greet`` => archive ``libgreet.a`` => variable
+  ## ``libgreet_a_SOURCES``).
+  for ch in value:
+    if ch in {'.', '-', '+', '/'}:
+      result.add('_')
+    else:
+      result.add(ch)
+
+proc resolveAutotoolsTarget(projectRoot, makefileAmContent: string;
+                            member: CCppAutotoolsMember):
+                              CCppAutotoolsEmitTarget =
+  ## Locate the source files for a single member by scanning
+  ## ``Makefile.am`` for the matching ``<sanitised>_SOURCES`` line.
+  ##
+  ## Lookup keys:
+  ##   * executable ``foo`` → ``foo_SOURCES``
+  ##   * library ``greet`` → ``libgreet_a_SOURCES`` (matches automake's
+  ##     ``lib_LIBRARIES = libgreet.a`` convention)
+  result.member = member
+  let sources = parseMakefileAmTargets(makefileAmContent)
+  let keys = case member.kind
+    of catmkExecutable:
+      @[sanitiseAutomakeName(member.name) & "_SOURCES"]
+    of catmkLibraryStatic:
+      # Try the ``lib<name>.a`` mangling first (the convention's default)
+      # then the bare ``<name>`` mangling (some projects declare
+      # ``<name>_LIBRARIES`` directly).
+      @[
+        sanitiseAutomakeName("lib" & member.name & ".a") & "_SOURCES",
+        sanitiseAutomakeName(member.name) & "_SOURCES",
+      ]
+  for key in keys:
+    for (varName, value) in sources:
+      if varName != key:
+        continue
+      var collected: seq[string] = @[]
+      for raw in value.split({' ', '\t'}):
+        let entry = raw.strip()
+        if entry.len == 0:
+          continue
+        if entry.startsWith("$"):
+          # Skip make-variable references; the parser doesn't evaluate
+          # them. Future enhancement: chase simple ``$(FOO)`` indirection.
+          continue
+        let abs = projectRoot / entry
+        collected.add(abs)
+      collected.sort(system.cmp[string])
+      result.sourceFiles = collected
+      return
+
 proc cCppAutotoolsRecognize(projectRoot: string;
                             request: ProviderGraphRequest):
                               bool {.gcsafe.} =
-  ## Recognition contract (M17):
+  ## Recognition contract (M28):
   ##   * ``<projectRoot>/configure.ac`` (or legacy ``configure.in``)
   ##     exists.
-  ##   * ``<projectRoot>/Makefile.am`` exists.
+  ##   * ``<projectRoot>/Makefile.am`` exists and resolves at least one
+  ##     declared member to a non-empty source-file list.
   ##   * ``<projectRoot>/reprobuild.nim`` exists AND ``uses:`` lists
   ##     ``autoconf`` (or ``automake``) AND a compiler AND ``make``.
   ##   * at least one ``executable`` or ``library`` member is declared.
@@ -286,10 +473,35 @@ proc cCppAutotoolsRecognize(projectRoot: string;
   if not hasGeneratedConfigure(projectRoot):
     if autoreconfExecutable().len == 0:
       return false
+  # M28 per-source lift: every declared member must resolve to at least
+  # one source file from ``Makefile.am``.
+  let makefileAmPath = projectRoot / "Makefile.am"
+  let makefileAm = try: readFile(extendedPath(makefileAmPath)) except CatchableError: ""
+  if makefileAm.len == 0:
+    return false
+  for member in members:
+    let resolved = resolveAutotoolsTarget(projectRoot, makefileAm, member)
+    if resolved.sourceFiles.len == 0:
+      return false
   true
 
 proc scratchPathFor(projectRoot: string): string =
   projectRoot / ScratchDirName
+
+proc memberScratchPath(projectRoot, member: string): string =
+  scratchPathFor(projectRoot) / member
+
+proc objDirFor(projectRoot, member: string): string =
+  memberScratchPath(projectRoot, member) / "obj"
+
+proc binaryPathFor(projectRoot, member: string): string =
+  when defined(windows):
+    memberScratchPath(projectRoot, member) / (member & ".exe")
+  else:
+    memberScratchPath(projectRoot, member) / member
+
+proc staticLibraryPathFor(projectRoot, member: string): string =
+  memberScratchPath(projectRoot, member) / ("lib" & member & ".a")
 
 proc sanitizeNamePart(value: string): string =
   for ch in value:
@@ -299,6 +511,13 @@ proc sanitizeNamePart(value: string): string =
       result.add('_')
   if result.len == 0:
     result = "x"
+
+proc objFileFor(objDir, source: string): string =
+  let base = extractFilename(source)
+  let stem =
+    if base.endsWith(".c"): base[0 ..< base.len - 2]
+    else: base
+  objDir / (sanitizeNamePart(stem) & ".o")
 
 proc configureStampPath(projectRoot: string): string =
   ## The configure action's declared output. ``Makefile`` + ``config.h``
@@ -314,9 +533,7 @@ proc collectAutotoolsSources(projectRoot: string): seq[string] =
   ## Every file relevant to the configure stage's invalidation set:
   ## ``configure.ac`` / ``configure.in``, every ``Makefile.am`` / ``*.m4``
   ## anywhere under ``projectRoot``, the checked-in ``configure`` script
-  ## if present, and ``aclocal.m4`` / ``config.h.in`` when present. The
-  ## list scopes the action's cache fingerprint; the build action uses
-  ## ``automaticMonitor`` for the broader source-tree set.
+  ## if present, and ``aclocal.m4`` / ``config.h.in`` when present.
   if not dirExists(extendedPath(projectRoot)):
     return @[]
   for path in [projectRoot / "configure.ac",
@@ -343,37 +560,10 @@ proc collectAutotoolsSources(projectRoot: string): seq[string] =
       seen.add(path)
   result = seen
 
-proc collectBuildInputs(projectRoot: string): seq[string] =
-  ## Source-tree inputs for the build action: every ``.c`` / ``.h`` file
-  ## under ``projectRoot/src``. The build action declares these so
-  ## per-source edits invalidate the action; FS-snoop covers anything
-  ## else the make recipe reads.
-  let srcDir = projectRoot / "src"
-  if not dirExists(extendedPath(srcDir)):
-    return @[]
-  for entry in walkDirRec(srcDir):
-    let lower = entry.toLowerAscii
-    if lower.endsWith(".c") or lower.endsWith(".h") or
-       lower.endsWith(".cc") or lower.endsWith(".cpp") or
-       lower.endsWith(".cxx") or lower.endsWith(".hpp"):
-      result.add(entry)
-
 proc renderConfigureScript(needAutoreconf: bool): string =
   ## sh-c command running ``autoreconf -fi`` (optionally) then
   ## ``./configure --prefix=/ --disable-dependency-tracking
-  ## --disable-maintainer-mode`` then touching the stamp. The stamp is
-  ## a separate file so subsequent ``make`` invocations rewriting
-  ## ``Makefile`` don't break the action's cache hit signature.
-  ##
-  ## ``--disable-dependency-tracking`` collapses automake's
-  ## ``.deps/*.Po`` machinery away (the convention spec calls it out as
-  ## a soft requirement for the Mode A lift; even at M17's hybrid surface
-  ## it makes the eventual Mode A graduation cheaper). Forcing
-  ## ``--disable-maintainer-mode`` keeps autoreconf-rebuilds from
-  ## triggering inside ``make``.
-  ##
-  ## ``set -e`` makes the compound abort on any non-zero exit — without
-  ## it the stamp would be written even when ``configure`` failed.
+  ## --disable-maintainer-mode`` then touching the stamp.
   var parts: seq[string] = @[]
   parts.add("set -e")
   if needAutoreconf:
@@ -389,11 +579,6 @@ proc emitConfigureAction(projectRoot, shExe: string;
   let stamp = configureStampPath(projectRoot)
   createDir(extendedPath(parentDir(stamp)))
   let script = renderConfigureScript(needAutoreconf)
-  # Pass the stamp path through an env var to dodge embedded-quoting
-  # hazards in the sh-c script: ``REPRO_CONFIGURE_STAMP`` is set on the
-  # action's environment via a leading shell assignment ``REPRO_CONFIGURE_STAMP=...
-  # set -e; ...``. Building the full sh-c argv with the var inline keeps
-  # the action argv self-contained.
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let fullScript = "REPRO_CONFIGURE_STAMP=\"" & escapedStamp & "\"; " & script
   let argv = @[shExe, "-c", fullScript]
@@ -405,59 +590,137 @@ proc emitConfigureAction(projectRoot, shExe: string;
     inputs = inputs,
     outputs = outputs,
     pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
+    # M28 note: declaredOnlyDependencyPolicy() rather than
+    # automaticMonitorPolicy() because the configure compound
+    # (autoreconf + ./configure) spawns a fan-out of perl/m4/sh
+    # subprocesses that FS-snoop's DLL-interpose handles unreliably
+    # on Windows (the second-level child of MSYS2's sh.exe deadlocks
+    # waiting on a pipe that never drains). The configure action's
+    # inputs list explicitly enumerates configure.ac + configure.in +
+    # Makefile.am + every .m4 / aclocal.m4 / config.h.in under the
+    # project root via ``collectAutotoolsSources`` so per-file
+    # invalidation still works without monitoring.
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
     commandStatsId = "ccpp-autotools.configure")
   (action, stamp)
 
-proc binaryOutputs(projectRoot: string;
-                   members: seq[CCppAutotoolsMember]): seq[string] =
-  ## Predict the executable outputs the build will produce.  Automake's
-  ## default in-tree shape puts ``bin_PROGRAMS = hello`` next to
-  ## ``Makefile`` (with ``.exe`` suffix on Windows). Library outputs
-  ## (``lib_LIBRARIES``) would land at the same level. The convention
-  ## predicts the typical case; ``automaticMonitor`` would pick up the
-  ## difference for any deviation.
-  for member in members:
-    case member.kind
-    of catmkExecutable:
-      when defined(windows):
-        result.add(projectRoot / (member.name & ".exe"))
-      else:
-        result.add(projectRoot / member.name)
-    of catmkLibraryStatic:
-      result.add(projectRoot / ("lib" & member.name & ".a"))
-
-proc emitBuildAction(projectRoot, makeExe, shExe: string;
-                     configureActionId: string;
-                     configureStamp: string;
-                     members: seq[CCppAutotoolsMember]):
-                       BuildActionDef =
-  ## Single ``make`` action delegated to the generated Makefile. Inputs
-  ## include the configure stamp (so a stale configure forces a rebuild)
-  ## plus every source under ``src/``; outputs are the predicted
-  ## binaries.
-  ##
-  ## On Windows we drive ``make`` via ``sh -c "make"`` so MSYS2's
-  ## ``make`` finds its busybox ``cp`` / ``rm`` siblings on PATH (the
-  ## convention spec §"Cross-platform notes" §"Windows" calls this out).
-  ## On POSIX the direct ``make`` argv works without the shell wrap.
-  let outputs = binaryOutputs(projectRoot, members)
-  var inputs = @[configureStamp, projectRoot / "Makefile"]
-  for src in collectBuildInputs(projectRoot):
-    inputs.add(src)
-  when defined(windows):
-    let argv = @[shExe, "-c", "make"]
-  else:
-    let argv = @[makeExe]
+proc emitCompileAction(projectRoot, ccExe: string;
+                       member: CCppAutotoolsMember;
+                       source, objFile, depFile: string;
+                       configureStamp: string;
+                       configureActionId: string): BuildActionDef =
+  ## One ``gcc -c`` action for a single C source extracted from
+  ## ``Makefile.am``.
+  # ``-I projectRoot`` so generated headers (``config.h``) end up on
+  # the include search path even though M28's fixture set doesn't use
+  # one. Mirrors what automake does for in-tree builds.
+  let includeFlags = block:
+    var flags: seq[string] = @[]
+    flags.add("-I")
+    flags.add(projectRoot)
+    let srcDir = projectRoot / "src"
+    if dirExists(extendedPath(srcDir)):
+      flags.add("-I")
+      flags.add(srcDir)
+    let topIncludeDir = projectRoot / "include"
+    if dirExists(extendedPath(topIncludeDir)):
+      flags.add("-I")
+      flags.add(topIncludeDir)
+    flags
+  var argv = @[ccExe, "-c", "-O2", "-Wall", "-Wextra",
+    "-MD", "-MF", depFile]
+  for flag in includeFlags:
+    argv.add(flag)
+  argv.add("-o")
+  argv.add(objFile)
+  argv.add(source)
+  let actionId = "ccpp-autotools-compile-" & sanitizeNamePart(member.name) &
+    "-" & sanitizeNamePart(extractFilename(source))
+  let kindTag = case member.kind
+    of catmkExecutable: "executable"
+    of catmkLibraryStatic: "library-static"
+  # The compile depends on the configure stage having run so generated
+  # headers (config.h) are available.  Inputs include both the source
+  # AND the configure stamp so a stale configure forces a recompile.
   buildAction(
-    id = "ccpp-autotools-build",
+    id = actionId,
     call = inlineExecCall(argv, projectRoot),
     deps = @[configureActionId],
-    inputs = inputs,
-    outputs = outputs,
+    inputs = @[source, configureStamp],
+    outputs = @[objFile],
     pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-autotools.build")
+    depfile = depFile,
+    dependencyPolicy = makeDepfilePolicy(depFile),
+    commandStatsId = "ccpp-autotools." & kindTag & ".compile")
+
+proc emitLinkAction(projectRoot, ccExe: string;
+                    member: CCppAutotoolsMember;
+                    objFiles: seq[string];
+                    compileActionIds: seq[string]): BuildActionDef =
+  ## ``gcc -o <bin> <objs>`` link action for an ``executable`` member.
+  let binaryOutput = binaryPathFor(projectRoot, member.name)
+  createDir(extendedPath(parentDir(binaryOutput)))
+  var argv = @[ccExe, "-o", binaryOutput]
+  for obj in objFiles:
+    argv.add(obj)
+  buildAction(
+    id = "ccpp-autotools-link-" & sanitizeNamePart(member.name),
+    call = inlineExecCall(argv, projectRoot),
+    deps = compileActionIds,
+    inputs = objFiles,
+    outputs = @[binaryOutput],
+    pool = "compile",
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    commandStatsId = "ccpp-autotools.executable.link")
+
+proc emitArchiveAction(projectRoot, arExe: string;
+                       member: CCppAutotoolsMember;
+                       objFiles: seq[string];
+                       compileActionIds: seq[string]): BuildActionDef =
+  ## ``ar rcs lib<name>.a <objs>`` archive action for a static library.
+  let archiveOutput = staticLibraryPathFor(projectRoot, member.name)
+  createDir(extendedPath(parentDir(archiveOutput)))
+  var argv = @[arExe, "rcs", archiveOutput]
+  for obj in objFiles:
+    argv.add(obj)
+  buildAction(
+    id = "ccpp-autotools-archive-" & sanitizeNamePart(member.name),
+    call = inlineExecCall(argv, projectRoot),
+    deps = compileActionIds,
+    inputs = objFiles,
+    outputs = @[archiveOutput],
+    pool = "compile",
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    commandStatsId = "ccpp-autotools.library-static.archive")
+
+proc emitForMember(projectRoot, ccExe, arExe: string;
+                   target: CCppAutotoolsEmitTarget;
+                   configureStamp: string;
+                   configureActionId: string):
+                     tuple[compiles: seq[BuildActionDef];
+                           terminal: BuildActionDef] =
+  let objDir = objDirFor(projectRoot, target.member.name)
+  createDir(extendedPath(objDir))
+  var compileActions: seq[BuildActionDef] = @[]
+  var objFiles: seq[string] = @[]
+  var compileIds: seq[string] = @[]
+  for source in target.sourceFiles:
+    let objFile = objFileFor(objDir, source)
+    let depFile = objFile & ".d"
+    objFiles.add(objFile)
+    let action = emitCompileAction(projectRoot, ccExe, target.member,
+      source, objFile, depFile, configureStamp, configureActionId)
+    compileActions.add(action)
+    compileIds.add(action.id)
+  case target.member.kind
+  of catmkExecutable:
+    let link = emitLinkAction(projectRoot, ccExe, target.member, objFiles,
+      compileIds)
+    (compileActions, link)
+  of catmkLibraryStatic:
+    let archive = emitArchiveAction(projectRoot, arExe, target.member,
+      objFiles, compileIds)
+    (compileActions, archive)
 
 proc syntheticPackage(projectRoot: string;
                       members: seq[CCppAutotoolsMember]): PackageDef =
@@ -474,9 +737,8 @@ proc syntheticPackage(projectRoot: string;
 proc cCppAutotoolsEmitFragment(projectRoot: string;
                                request: ProviderGraphRequest):
                                  GraphFragment {.gcsafe.} =
-  ## Convention entry — emit two actions (configure + build), hand to
-  ## ``buildPackageFragment``. The build action depends on the configure
-  ## action via ``deps``.
+  ## Convention entry — emit configure + per-source + link/archive
+  ## actions, hand the bundle to ``buildPackageFragment``.
   {.cast(gcsafe).}:
     let source = readReprobuildSource(projectRoot)
     let members = extractMembers(source)
@@ -488,6 +750,7 @@ proc cCppAutotoolsEmitFragment(projectRoot: string;
     if ccExe.len == 0:
       raise newException(ValueError,
         "c-cpp-autotools convention: no C compiler on PATH")
+    let arExe = arDriver()
     let makeExe = makeExecutable()
     if makeExe.len == 0:
       raise newException(ValueError,
@@ -504,14 +767,35 @@ proc cCppAutotoolsEmitFragment(projectRoot: string;
         "c-cpp-autotools convention: no 'autoreconf' on PATH and no " &
           "checked-in 'configure' script — cannot generate the build " &
           "scaffolding")
+    let makefileAmPath = projectRoot / "Makefile.am"
+    let makefileAm = try: readFile(extendedPath(makefileAmPath)) except CatchableError: ""
+    if makefileAm.len == 0:
+      raise newException(ValueError,
+        "c-cpp-autotools convention: Makefile.am missing at " &
+          makefileAmPath)
+    var targets: seq[CCppAutotoolsEmitTarget] = @[]
+    for member in members:
+      let target = resolveAutotoolsTarget(projectRoot, makefileAm, member)
+      if target.sourceFiles.len == 0:
+        raise newException(ValueError,
+          "c-cpp-autotools convention: no .c sources resolved for " &
+            "member '" & member.name & "' under " & projectRoot &
+            " (looked for a matching <target>_SOURCES line in " &
+            makefileAmPath & ")")
+      targets.add(target)
     let pkg = syntheticPackage(projectRoot, members)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       let configurePair = emitConfigureAction(projectRoot, shExe,
         needAutoreconf)
-      let buildAction = emitBuildAction(projectRoot, makeExe, shExe,
-        configurePair.action.id, configurePair.stamp, members)
-      defaultTarget(target("default", @[configurePair.action, buildAction]))
+      var allActions: seq[BuildActionDef] = @[configurePair.action]
+      for target in targets:
+        let emitted = emitForMember(projectRoot, ccExe, arExe, target,
+          configurePair.stamp, configurePair.action.id)
+        for a in emitted.compiles:
+          allActions.add(a)
+        allActions.add(emitted.terminal)
+      defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)
 

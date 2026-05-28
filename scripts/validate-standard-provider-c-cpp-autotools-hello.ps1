@@ -1,5 +1,5 @@
 #requires -Version 5
-# End-to-end M17 verification: build the c-cpp-autotools/hello-binary
+# End-to-end M17/M28 verification: build the c-cpp-autotools/hello-binary
 # example via the Tier 2b dispatch path and run the produced executable.
 #
 # Mechanics:
@@ -11,12 +11,14 @@
 #      machinery so the build runs cold.
 #   4. Invoke repro.exe build <fixture>#default --tool-provisioning=path.
 #   5. Assert exit code 0.
-#   6. Locate the produced ``hello`` (or ``hello.exe``) under the
-#      fixture root (in-tree automake build) and run it; assert stdout
+#   6. M28: locate the produced ``hello.exe`` under the per-member
+#      scratch directory ``<fixture>/.repro/build/hello/`` (the per-
+#      source lift's link-action output) and run it; assert stdout
 #      contains ``hello from c-cpp-autotools-hello-binary``.
 #
 # Per reprobuild-specs/Standard-Provider-Implementation.milestones.org
-# §M17 verification "e2e_c_cpp_autotools_hello_binary_builds_via_standard_provider".
+# §M17 + §M28 verifications "e2e_c_cpp_autotools_hello_binary_builds_via_standard_provider"
+# and "e2e_autotools_per_source_lift".
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\..\env.ps1"
@@ -84,7 +86,7 @@ if (-not $sh) {
 $hasConfigure = Test-Path -LiteralPath (Join-Path $fixture 'configure')
 $autoreconf = Get-Command autoreconf -ErrorAction SilentlyContinue
 if (-not $hasConfigure -and -not $autoreconf) {
-  Write-Host "SKIP: no checked-in 'configure' script and 'autoreconf' not on PATH"
+  Write-Host "SKIP: no checked-in 'configure' script and 'autoreconf' not on PATH (run windows/ensure-msys2-autotools.ps1 to provision autoconf + automake into D:/metacraft-dev-deps/msys2/msys64/usr/bin)"
   exit 0
 }
 # M17 fixture is repo-checkout shape (no committed configure); the
@@ -158,7 +160,16 @@ if ($exitCode -ne 0) {
 }
 
 # --- step 3: locate produced binary ---
+# M28 per-source lift drops the executable under the per-member scratch
+# dir (mirroring c-cpp-make's layout); the in-tree generated Makefile
+# location used by the previous coarse-make surface is no longer
+# authoritative.
+$memberScratch = Join-Path $fixture (Join-Path '.repro\build' 'hello')
 $candidates = @(
+  Join-Path $memberScratch 'hello.exe'
+  Join-Path $memberScratch 'hello'
+  # Fallback: pre-M28 in-tree shape, in case a stale generated Makefile
+  # still drops the binary at the fixture root.
   Join-Path $fixture 'hello.exe'
   Join-Path $fixture 'hello'
 )
@@ -172,12 +183,36 @@ foreach ($candidate in $candidates) {
 if (-not $producedBinary) {
   Write-Host "FAIL: expected binary not found at any of:"
   foreach ($c in $candidates) { Write-Host "    $c" }
+  Write-Host "--- contents of ${memberScratch}:"
+  if (Test-Path -LiteralPath $memberScratch) {
+    Get-ChildItem -LiteralPath $memberScratch | ForEach-Object { Write-Host "  $($_.Name)" }
+  } else {
+    Write-Host "  (directory does not exist)"
+  }
   Write-Host "--- contents of $fixture (depth 1):"
   Get-ChildItem -LiteralPath $fixture | ForEach-Object { Write-Host "  $($_.Name)" }
   exit 1
 }
 Write-Host "produced binary: $producedBinary"
 Write-Host "  size: $((Get-Item $producedBinary).Length) bytes"
+
+# --- step 3b: M28 per-source lift assertion ---
+# Verify the convention emitted a per-source compile artefact (the obj
+# directory exists with at least one .o file) — i.e. the lift didn't
+# silently fall back to a coarse ``make`` invocation.
+$objDir = Join-Path $memberScratch 'obj'
+if (Test-Path -LiteralPath $objDir) {
+  $objs = @(Get-ChildItem -LiteralPath $objDir -Filter '*.o' -ErrorAction SilentlyContinue)
+  if ($objs.Count -lt 1) {
+    Write-Host "FAIL: M28 per-source lift expected >= 1 .o under $objDir; got 0"
+    exit 1
+  }
+  Write-Host "M28 per-source lift artefacts:"
+  foreach ($o in $objs) { Write-Host "  $($o.Name) ($($o.Length) bytes)" }
+} else {
+  Write-Host "FAIL: M28 per-source obj/ directory missing at $objDir"
+  exit 1
+}
 
 # --- step 4: run and assert greeting ---
 Write-Host "==> running $producedBinary"
