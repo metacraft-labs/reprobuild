@@ -1,6 +1,7 @@
 import std/[net, os, osproc, strtabs, strutils, times]
 
 import repro_core
+import blake3
 
 import ./client
 import ./protocol
@@ -26,6 +27,10 @@ type
     foreground*: bool
     devMode*: bool
     daemonExe*: string
+    sourceExe*: string
+    stagedGenerationDir*: string
+    previousStagedGenerationDir*: string
+    restartRunId*: string
 
   UserDaemonBuildEmit* = proc(kind: UserDaemonBuildEventKind;
                               message: string;
@@ -59,6 +64,21 @@ type
     token: string
     when defined(posix):
       fd: cint
+
+  DevRestartState = object
+    enabled: bool
+    sourceImagePath: string
+    runningImagePath: string
+    sourceHash: string
+    runningHash: string
+    protocolGeneration: string
+    restartRunId: string
+    stagedGenerationDir: string
+    previousStagedGenerationDir: string
+    candidateHash: string
+    candidateSinceMs: int64
+    lastCheckMs: int64
+    restartPending: bool
 
 const UserDaemonLockFileName = ".repro-daemon.lock"
 
@@ -101,6 +121,30 @@ proc xmlEscape(value: string): string =
     else:
       result.add(ch)
 
+proc fileDigestHex(path: string): string =
+  if path.len == 0 or not fileExists(path):
+    return ""
+  let hasher = initHasher()
+  defer: hasher.close()
+  var file = open(path, fmRead)
+  defer: file.close()
+  var buffer = newString(64 * 1024)
+  while true:
+    let readCount = file.readBuffer(addr buffer[0], buffer.len)
+    if readCount <= 0:
+      break
+    hasher.update(buffer[0].addr, readCount)
+  "blake3-256:" & hasher.finalize().toHex()
+
+proc nowUnixMs(): int64 =
+  let current = getTime()
+  current.toUnix * 1000 + int64(current.nanosecond div 1_000_000)
+
+proc newRestartRunId(prefix = "dev-restart"): string =
+  let current = getTime()
+  prefix & "-" & $getCurrentProcessId() & "-" & $current.toUnix & "-" &
+    $current.nanosecond
+
 proc defaultUserDaemonConfig*(daemonExe = ""; foreground = false;
                               devMode = false): UserDaemonConfig =
   UserDaemonConfig(endpoint: defaultUserDaemonEndpoint(),
@@ -109,6 +153,80 @@ proc defaultUserDaemonConfig*(daemonExe = ""; foreground = false;
     foreground: foreground,
     devMode: devMode,
     daemonExe: daemonExe)
+
+proc absoluteNormalized(path: string): string =
+  if path.len == 0:
+    return ""
+  if path.isAbsolute:
+    os.normalizedPath(path)
+  else:
+    os.normalizedPath(getCurrentDir() / path)
+
+proc reconnectLimitationsText(): string =
+  "watch sessions can be reattached by run id/session id; completed build " &
+    "session diagnostics and stats persist; attached build event streams are " &
+    "not replayed after a dev self-restart"
+
+proc initDevRestartState(config: UserDaemonConfig): DevRestartState =
+  result.enabled = config.devMode
+  result.sourceImagePath =
+    if config.sourceExe.len > 0: absoluteNormalized(config.sourceExe)
+    else: absoluteNormalized(getAppFilename())
+  result.runningImagePath = absoluteNormalized(getAppFilename())
+  result.sourceHash = fileDigestHex(result.sourceImagePath)
+  result.runningHash = fileDigestHex(result.runningImagePath)
+  result.protocolGeneration = $UserDaemonProtocolMajor & "." &
+    $UserDaemonProtocolMinor
+  result.restartRunId =
+    if config.restartRunId.len > 0: config.restartRunId
+    else: newRestartRunId("dev-start")
+  result.stagedGenerationDir = config.stagedGenerationDir
+  result.previousStagedGenerationDir = config.previousStagedGenerationDir
+
+proc devBinRoot(config: UserDaemonConfig): string =
+  config.stateDir / "dev-bin"
+
+proc stageDevDaemonBinary*(sourceExe: string; config: UserDaemonConfig;
+                           restartRunId = ""):
+    tuple[imagePath: string; generationDir: string; runId: string;
+          sourceHash: string] =
+  result.sourceHash = fileDigestHex(sourceExe)
+  if result.sourceHash.len == 0:
+    raise newException(UserDaemonRuntimeError,
+      "cannot stage missing repro-daemon source executable: " & sourceExe)
+  result.runId =
+    if restartRunId.len > 0: restartRunId else: newRestartRunId()
+  let hashSegment = safePathSegment(result.sourceHash.replace(":", "-"),
+    "unknown")
+  result.generationDir = devBinRoot(config) /
+    safePathSegment(result.runId & "-" & hashSegment[0 .. min(23,
+      hashSegment.high)], "generation")
+  createDir(result.generationDir)
+  result.imagePath = result.generationDir / addFileExt("repro-daemon", ExeExt)
+  copyFile(sourceExe, result.imagePath)
+  try:
+    setFilePermissions(result.imagePath, {fpUserRead, fpUserWrite,
+      fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+  except CatchableError:
+    discard
+
+proc logLine(path, message: string)
+
+proc cleanupPreviousStagedGeneration(config: UserDaemonConfig) =
+  if not config.devMode or config.previousStagedGenerationDir.len == 0:
+    return
+  let root = absoluteNormalized(devBinRoot(config))
+  let previous = absoluteNormalized(config.previousStagedGenerationDir)
+  if previous.len == 0 or previous == root or not previous.startsWith(root):
+    return
+  try:
+    if dirExists(previous):
+      removeDir(previous)
+      logLine(config.logPath, "cleaned previous dev staged generation=" &
+        previous)
+  except CatchableError as err:
+    logLine(config.logPath, "previous dev staged generation cleanup failed=" &
+      previous & " error=" & err.msg)
 
 proc logLine(path, message: string) =
   try:
@@ -327,7 +445,9 @@ proc generationFor(startedAt: Time): string =
   $getCurrentProcessId() & "-" & $startedAt.toUnix & "-" & $startedAt.nanosecond
 
 proc statusFor(config: UserDaemonConfig; startedAt: Time;
-               generation: string; activeSessionCount = 0): UserDaemonStatus =
+               generation: string; activeSessionCount = 0;
+               devRestart: DevRestartState = DevRestartState()):
+    UserDaemonStatus =
   UserDaemonStatus(
     running: true,
     role: UserDaemonRole,
@@ -342,7 +462,25 @@ proc statusFor(config: UserDaemonConfig; startedAt: Time;
     featureFlags: UserDaemonFeatureFlags,
     generation: generation,
     activeSessionCount: activeSessionCount,
-    devMode: config.devMode)
+    devMode: config.devMode,
+    sourceImagePath: devRestart.sourceImagePath,
+    runningImagePath:
+      if devRestart.runningImagePath.len > 0:
+        devRestart.runningImagePath
+      else:
+        getAppFilename(),
+    sourceHash: devRestart.sourceHash,
+    runningHash: devRestart.runningHash,
+    protocolGeneration:
+      if devRestart.protocolGeneration.len > 0:
+        devRestart.protocolGeneration
+      else:
+        $UserDaemonProtocolMajor & "." & $UserDaemonProtocolMinor,
+    restartRunId: devRestart.restartRunId,
+    stagedGenerationDir: devRestart.stagedGenerationDir,
+    previousStagedGenerationDir: devRestart.previousStagedGenerationDir,
+    reconnectLimitations:
+      if config.devMode: reconnectLimitationsText() else: "")
 
 proc writeStatusFile(config: UserDaemonConfig; status: UserDaemonStatus) =
   let path = statusPath(config)
@@ -357,6 +495,15 @@ proc writeStatusFile(config: UserDaemonConfig; status: UserDaemonStatus) =
       "\n" &
     "binary=" & status.binary.path & "\n" &
     "generation=" & status.generation & "\n" &
+    "sourceImagePath=" & status.sourceImagePath & "\n" &
+    "runningImagePath=" & status.runningImagePath & "\n" &
+    "sourceHash=" & status.sourceHash & "\n" &
+    "runningHash=" & status.runningHash & "\n" &
+    "protocolGeneration=" & status.protocolGeneration & "\n" &
+    "restartRunId=" & status.restartRunId & "\n" &
+    "stagedGenerationDir=" & status.stagedGenerationDir & "\n" &
+    "previousStagedGenerationDir=" &
+      status.previousStagedGenerationDir & "\n" &
     "featureFlags=" & status.featureFlags & "\n")
 
 proc handleHello(socket: Socket; config: UserDaemonConfig; generation: string;
@@ -374,10 +521,6 @@ proc handleHello(socket: Socket; config: UserDaemonConfig; generation: string;
     " mode=" & hello.commandMode & " client-protocol=" & $hello.major &
     "." & $hello.minor)
   true
-
-proc nowUnixMs(): int64 =
-  let current = getTime()
-  current.toUnix * 1000 + int64(current.nanosecond div 1_000_000)
 
 proc nextBuildEvent(runId, sessionId, projectRoot: string;
                     eventId: uint64;
@@ -912,7 +1055,8 @@ proc handleWatchDetach(socket: Socket; config: UserDaemonConfig;
 
 proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
                   generation: string; shuttingDown: var bool;
-                  sessions: var seq[UserDaemonSession]) =
+                  sessions: var seq[UserDaemonSession];
+                  devRestart: DevRestartState) =
   let helloFrame = socket.readFrame()
   if helloFrame.kind != udkHello:
     socket.writeFrame(udkError, errorBody(
@@ -926,7 +1070,7 @@ proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
   of udkStatus:
     socket.writeFrame(udkStatusResponse,
       statusBody(statusFor(config, startedAt, generation,
-        countActiveSessionRecords(config))))
+        countActiveSessionRecords(config), devRestart)))
   of udkShutdown:
     for session in loadSessionRecords(config):
       if session.mode == "watch" and session.state in ["accepted", "running",
@@ -946,9 +1090,19 @@ proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
         watchSessions.add(session)
     socket.writeFrame(udkSessionsResponse, sessionsBody(watchSessions))
   of udkBuildRequest:
+    if devRestart.restartPending:
+      socket.writeFrame(udkError, errorBody(
+        "repro-daemon development restart is in progress; retry by run id " &
+        "after reconnect where supported"))
+      return
     handleBuildRequest(socket, config, parseBuildRequestBody(frame.body),
       sessions)
   of udkWatchStartRequest:
+    if devRestart.restartPending:
+      socket.writeFrame(udkError, errorBody(
+        "repro-daemon development restart is in progress; retry by run id " &
+        "after reconnect where supported"))
+      return
     handleWatchStart(socket, config, parseWatchRequestBody(frame.body),
       sessions)
   of udkWatchAttachRequest:
@@ -961,6 +1115,82 @@ proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
     socket.writeFrame(udkError, errorBody(
       "unsupported user-daemon message in lifecycle server: " &
       $frame.kind))
+
+proc devRestartPollIntervalMs(): int64 =
+  try:
+    max(50, parseInt(getEnv("REPRO_DAEMON_DEV_RESTART_POLL_MS", "250")))
+  except ValueError:
+    250
+
+proc devRestartStableMs(): int64 =
+  try:
+    max(50, parseInt(getEnv("REPRO_DAEMON_DEV_RESTART_STABLE_MS", "750")))
+  except ValueError:
+    750
+
+proc restartCandidateReady(config: UserDaemonConfig;
+                           state: var DevRestartState): bool =
+  if not state.enabled or state.sourceImagePath.len == 0 or
+      not fileExists(state.sourceImagePath):
+    return false
+  let nowMs = nowUnixMs()
+  if nowMs - state.lastCheckMs < devRestartPollIntervalMs():
+    return false
+  state.lastCheckMs = nowMs
+  let currentHash = fileDigestHex(state.sourceImagePath)
+  if currentHash.len == 0 or currentHash == state.runningHash:
+    state.candidateHash = ""
+    state.candidateSinceMs = 0
+    return false
+  if currentHash != state.candidateHash:
+    state.candidateHash = currentHash
+    state.candidateSinceMs = nowMs
+    logLine(config.logPath, "dev restart candidate source=" &
+      state.sourceImagePath & " hash=" & currentHash)
+    return false
+  if nowMs - state.candidateSinceMs < devRestartStableMs():
+    return false
+  let active = countActiveSessionRecords(config)
+  if active > 0:
+    logLine(config.logPath, "dev restart deferred active-sessions=" & $active)
+    return false
+  true
+
+proc daemonProcessArgs(config: UserDaemonConfig): seq[string]
+
+proc performDevSelfRestart(config: UserDaemonConfig;
+                           listener: var Socket;
+                           daemonLock: var UserDaemonLock;
+                           state: var DevRestartState): bool =
+  state.restartPending = true
+  discard flushStatsObservations()
+  let runId = newRestartRunId()
+  let staged = stageDevDaemonBinary(state.sourceImagePath, config, runId)
+  var nextConfig = config
+  nextConfig.daemonExe = staged.imagePath
+  nextConfig.sourceExe = state.sourceImagePath
+  nextConfig.stagedGenerationDir = staged.generationDir
+  nextConfig.previousStagedGenerationDir = state.stagedGenerationDir
+  nextConfig.restartRunId = runId
+  logLine(config.logPath, "dev restart launching source=" &
+    state.sourceImagePath & " running=" & staged.imagePath & " runId=" &
+    runId)
+  try: listener.close() except CatchableError: discard
+  removeEndpointFiles(config)
+  releaseUserDaemonLock(daemonLock)
+  let process = startProcess(staged.imagePath,
+    args = daemonProcessArgs(nextConfig),
+    options = {poUsePath, poDaemon})
+  process.close()
+  logLine(config.logPath, "dev restart old process exiting runId=" & runId)
+  true
+
+when defined(posix):
+  proc listenerHasClient(listener: Socket; timeoutMs: int): bool =
+    let fd = listener.getFd()
+    var fds = TPollfd(fd: cast[cint](fd), events: POLLIN, revents: 0)
+    poll(addr(fds), Tnfds(1), cint(timeoutMs)) > 0 and
+      (fds.revents and POLLIN) != 0
 
 proc runUserDaemonForeground*(config: UserDaemonConfig): int =
   when defined(posix):
@@ -983,28 +1213,43 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
     discard cleanupStaleUserDaemonDiscovery(config)
     removeEndpointFiles(config)
     var listener = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
+    var selfRestarting = false
     defer:
       listener.close()
-      removeEndpointFiles(config)
-      logLine(config.logPath, "stopped")
+      if not selfRestarting:
+        removeEndpointFiles(config)
+        logLine(config.logPath, "stopped")
     listener.bindUnix(config.endpoint)
     listener.listen()
 
     let startedAt = getTime()
     let generation = generationFor(startedAt)
+    var devRestart = initDevRestartState(config)
+    cleanupPreviousStagedGeneration(config)
     var sessions: seq[UserDaemonSession] = @[]
     writeStatusFile(config, statusFor(config, startedAt, generation,
-      sessions.len))
+      sessions.len, devRestart))
     logLine(config.logPath, "started role=" & UserDaemonRole &
-      " endpoint=" & config.endpoint & " generation=" & generation)
+      " endpoint=" & config.endpoint & " generation=" & generation &
+      " devMode=" & $config.devMode & " source=" &
+      devRestart.sourceImagePath & " running=" & devRestart.runningImagePath &
+      " restartRunId=" & devRestart.restartRunId)
 
     var shuttingDown = false
     while not shuttingDown:
+      if restartCandidateReady(config, devRestart):
+        writeStatusFile(config, statusFor(config, startedAt, generation,
+          countActiveSessionRecords(config), devRestart))
+        if performDevSelfRestart(config, listener, daemonLock, devRestart):
+          selfRestarting = true
+          return 0
       var client: owned(Socket)
+      if not listenerHasClient(listener, int(devRestartPollIntervalMs())):
+        continue
       listener.accept(client)
       try:
         handleClient(client, config, startedAt, generation, shuttingDown,
-          sessions)
+          sessions, devRestart)
       except CatchableError as err:
         logLine(config.logPath, "client error: " & err.msg)
         try:
@@ -1025,6 +1270,24 @@ proc siblingUserDaemonPath*(publicCliPath: string): string =
   else:
     addFileExt("repro-daemon", ExeExt)
 
+proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
+  result = @["--foreground", "--endpoint", config.endpoint,
+    "--state-dir", config.stateDir, "--log", config.logPath]
+  if config.devMode:
+    result.add("--dev")
+  if config.sourceExe.len > 0:
+    result.add("--source-exe")
+    result.add(config.sourceExe)
+  if config.stagedGenerationDir.len > 0:
+    result.add("--staged-generation")
+    result.add(config.stagedGenerationDir)
+  if config.previousStagedGenerationDir.len > 0:
+    result.add("--previous-staged-generation")
+    result.add(config.previousStagedGenerationDir)
+  if config.restartRunId.len > 0:
+    result.add("--restart-run-id")
+    result.add(config.restartRunId)
+
 proc launchdLabel(config: UserDaemonConfig): string =
   "org.reprobuild.repro-daemon." &
     safePathSegment(config.endpoint.extractFilename, "user")
@@ -1034,10 +1297,7 @@ proc launchdPlistPath(config: UserDaemonConfig): string =
 
 proc renderLaunchdUserAgentPlist*(exe: string; config: UserDaemonConfig):
     string =
-  var args = @[exe, "--foreground", "--endpoint", config.endpoint,
-    "--state-dir", config.stateDir, "--log", config.logPath]
-  if config.devMode:
-    args.add("--dev")
+  var args = @[exe] & daemonProcessArgs(config)
   result = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" &
     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" " &
     "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" &
@@ -1098,11 +1358,7 @@ proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
   when defined(linux):
     try:
       var args = @["systemd-run", "--user", "--unit=" & systemdUnitName(config),
-        "--collect", "--quiet", exe, "--foreground", "--endpoint",
-        config.endpoint, "--state-dir", config.stateDir, "--log",
-        config.logPath]
-      if config.devMode:
-        args.add("--dev")
+        "--collect", "--quiet", exe] & daemonProcessArgs(config)
       let res = execCmdEx(quoteCommand(args))
       if res.exitCode == 0:
         logLine(config.logPath, "launch requested backend=systemd-user unit=" &
@@ -1135,10 +1391,7 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
         discard dup2(logFd, 2)
       for fd in 3.cint .. 255.cint:
         discard posix.close(fd)
-      var argv = @[exe, "--foreground", "--endpoint", config.endpoint,
-        "--state-dir", config.stateDir, "--log", config.logPath]
-      if config.devMode:
-        argv.add("--dev")
+      var argv = @[exe] & daemonProcessArgs(config)
       let cargv = allocCStringArray(argv)
       discard execv(cstring(exe), cargv)
       quit(127)
@@ -1171,34 +1424,45 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
   if existing.running:
     return existing
   discard cleanupStaleUserDaemonDiscovery(config)
-  let exe =
+  let sourceExe =
     if config.daemonExe.len > 0: config.daemonExe
     else: siblingUserDaemonPath(publicCliPath)
+  var launchConfig = config
+  var exe = sourceExe
+  if config.devMode:
+    let staged = stageDevDaemonBinary(sourceExe, config,
+      if config.restartRunId.len > 0: config.restartRunId else: newRestartRunId(
+        "dev-start"))
+    exe = staged.imagePath
+    launchConfig.sourceExe = absoluteNormalized(sourceExe)
+    launchConfig.stagedGenerationDir = staged.generationDir
+    launchConfig.restartRunId = staged.runId
+    logLine(config.logPath, "dev start staged source=" & sourceExe &
+      " running=" & exe & " runId=" & staged.runId)
   when defined(posix):
-    createDir(parentDir(config.endpoint))
-    createDir(config.stateDir)
-    createDir(parentDir(config.logPath))
+    createDir(parentDir(launchConfig.endpoint))
+    createDir(launchConfig.stateDir)
+    createDir(parentDir(launchConfig.logPath))
     when defined(macosx):
-      if not launchWithLaunchd(exe, config):
-        launchWithFork(exe, config)
+      if not launchWithLaunchd(exe, launchConfig):
+        launchWithFork(exe, launchConfig)
     elif defined(linux):
-      if not launchWithSystemdUser(exe, config):
-        launchWithFork(exe, config)
+      if not launchWithSystemdUser(exe, launchConfig):
+        launchWithFork(exe, launchConfig)
     else:
-      launchWithFork(exe, config)
+      launchWithFork(exe, launchConfig)
   else:
     var env = newStringTable()
     for key, value in envPairs():
       env[key] = value
-    env["REPRO_DAEMON_ENDPOINT"] = config.endpoint
-    env["REPRO_DAEMON_STATE_DIR"] = config.stateDir
+    env["REPRO_DAEMON_ENDPOINT"] = launchConfig.endpoint
+    env["REPRO_DAEMON_STATE_DIR"] = launchConfig.stateDir
     let process = startProcess(exe,
-      args = @["--foreground", "--endpoint", config.endpoint,
-        "--state-dir", config.stateDir, "--log", config.logPath],
+      args = daemonProcessArgs(launchConfig),
       env = env,
       options = {poUsePath, poDaemon})
     process.close()
-  waitForUserDaemonStatus(config.endpoint)
+  waitForUserDaemonStatus(launchConfig.endpoint)
 
 proc stopUserDaemon*(endpoint = defaultUserDaemonEndpoint()) =
   requestUserDaemonShutdown(endpoint)
@@ -1220,7 +1484,17 @@ proc renderUserDaemonStatus*(status: UserDaemonStatus): string =
     "pid: " & $status.pid & "\n" &
     "uptime-seconds: " & $status.uptimeSeconds & "\n" &
     "active-sessions: " & $status.activeSessionCount & "\n" &
-    "dev-mode: " & $status.devMode
+    "dev-mode: " & $status.devMode & "\n" &
+    "source-image-path: " & status.sourceImagePath & "\n" &
+    "running-image-path: " & status.runningImagePath & "\n" &
+    "source-hash: " & status.sourceHash & "\n" &
+    "running-hash: " & status.runningHash & "\n" &
+    "protocol-generation: " & status.protocolGeneration & "\n" &
+    "restart-run-id: " & status.restartRunId & "\n" &
+    "staged-generation-dir: " & status.stagedGenerationDir & "\n" &
+    "previous-staged-generation-dir: " &
+      status.previousStagedGenerationDir & "\n" &
+    "reconnect-limitations: " & status.reconnectLimitations
 
 proc renderUserDaemonLogs*(config: UserDaemonConfig): string =
   if not fileExists(config.logPath):
@@ -1268,6 +1542,19 @@ proc parseUserDaemonConfigFlags*(args: seq[string];
       result.config.foreground = true
     elif raw == "--dev":
       result.config.devMode = true
+    elif raw == "--daemon-exe" or raw.startsWith("--daemon-exe="):
+      result.config.daemonExe = valueFor("--daemon-exe")
+    elif raw == "--source-exe" or raw.startsWith("--source-exe="):
+      result.config.sourceExe = valueFor("--source-exe")
+    elif raw == "--staged-generation" or
+        raw.startsWith("--staged-generation="):
+      result.config.stagedGenerationDir = valueFor("--staged-generation")
+    elif raw == "--previous-staged-generation" or
+        raw.startsWith("--previous-staged-generation="):
+      result.config.previousStagedGenerationDir =
+        valueFor("--previous-staged-generation")
+    elif raw == "--restart-run-id" or raw.startsWith("--restart-run-id="):
+      result.config.restartRunId = valueFor("--restart-run-id")
     elif raw == "--endpoint" or raw.startsWith("--endpoint="):
       result.config.endpoint = valueFor("--endpoint")
     elif raw == "--state-dir" or raw.startsWith("--state-dir="):

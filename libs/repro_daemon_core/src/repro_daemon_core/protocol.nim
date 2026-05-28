@@ -11,7 +11,7 @@ const
   UserDaemonRole* = "repro-daemon/user"
   UserDaemonFeatureFlags* =
     "lifecycle,status,logs,shutdown,sessions,build-routing,build-events," &
-    "watch-routing,watch-events,watch-sessions"
+    "watch-routing,watch-events,watch-sessions,dev-self-restart"
   BuildEventSchemaId* = "reprobuild.daemon.build-event.v1"
   BuildEventSchemaVersion* = 1'u16
   FrameMagic = "RBUD"
@@ -66,6 +66,15 @@ type
     generation*: string
     activeSessionCount*: int
     devMode*: bool
+    sourceImagePath*: string
+    runningImagePath*: string
+    sourceHash*: string
+    runningHash*: string
+    protocolGeneration*: string
+    restartRunId*: string
+    stagedGenerationDir*: string
+    previousStagedGenerationDir*: string
+    reconnectLimitations*: string
 
   UserDaemonSession* = object
     sessionId*: string
@@ -377,6 +386,15 @@ proc statusBody*(status: UserDaemonStatus): seq[byte] =
   result.writeString(status.generation)
   result.writeU32Le(uint32(status.activeSessionCount))
   result.writeBool(status.devMode)
+  result.writeString(status.sourceImagePath)
+  result.writeString(status.runningImagePath)
+  result.writeString(status.sourceHash)
+  result.writeString(status.runningHash)
+  result.writeString(status.protocolGeneration)
+  result.writeString(status.restartRunId)
+  result.writeString(status.stagedGenerationDir)
+  result.writeString(status.previousStagedGenerationDir)
+  result.writeString(status.reconnectLimitations)
 
 proc parseStatusBody*(body: openArray[byte]): UserDaemonStatus =
   var pos = 0
@@ -394,6 +412,16 @@ proc parseStatusBody*(body: openArray[byte]): UserDaemonStatus =
   result.generation = body.readString(pos)
   result.activeSessionCount = int(body.readU32Le(pos))
   result.devMode = body.readBool(pos)
+  if pos < body.len:
+    result.sourceImagePath = body.readString(pos)
+    result.runningImagePath = body.readString(pos)
+    result.sourceHash = body.readString(pos)
+    result.runningHash = body.readString(pos)
+    result.protocolGeneration = body.readString(pos)
+    result.restartRunId = body.readString(pos)
+    result.stagedGenerationDir = body.readString(pos)
+    result.previousStagedGenerationDir = body.readString(pos)
+    result.reconnectLimitations = body.readString(pos)
 
 proc sessionsBody*(sessions: openArray[UserDaemonSession]): seq[byte] =
   result.writeU32Le(uint32(sessions.len))
