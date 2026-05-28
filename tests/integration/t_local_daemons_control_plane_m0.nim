@@ -83,10 +83,9 @@ suite "Local daemons/control-plane M0 current-state gates":
     check daemon.contains("repro daemon: not-running")
     check not daemon.contains("repro store daemon")
 
-    for value in ["auto", "require", "off"]:
-      let output = requireReproFailure(["build", "--daemon=" & value])
-      check output.contains(
-        "repro build: error: unsupported build flag: --daemon=" & value)
+    let invalidDaemon = requireReproFailure(["build", "--daemon=invalid"])
+    check invalidDaemon.contains(
+      "repro build: error: unsupported --daemon=invalid")
 
     let statsCapture = requireReproFailure([
       "build", "--stats-capture=decision,timing"])
@@ -112,6 +111,7 @@ suite "Local daemons/control-plane M0 current-state gates":
     let storeRoot = tempRoot / "store"
     let buildOutput = requireSuccess(shellCommand([
       publicReproBin(), "build", projectRoot,
+      "--daemon=off",
       "--tool-provisioning=path",
       "--work-root=" & tempRoot / "work",
       "--action-cache-root=" & tempRoot / "action-cache",

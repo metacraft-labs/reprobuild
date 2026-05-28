@@ -178,7 +178,7 @@ proc generationFor(startedAt: Time): string =
   $getCurrentProcessId() & "-" & $startedAt.toUnix & "-" & $startedAt.nanosecond
 
 proc statusFor(config: UserDaemonConfig; startedAt: Time;
-               generation: string): UserDaemonStatus =
+               generation: string; activeSessionCount = 0): UserDaemonStatus =
   UserDaemonStatus(
     running: true,
     role: UserDaemonRole,
@@ -192,7 +192,7 @@ proc statusFor(config: UserDaemonConfig; startedAt: Time;
     binary: binaryIdentity("repro-daemon", getAppFilename(), versionString()),
     featureFlags: UserDaemonFeatureFlags,
     generation: generation,
-    activeSessionCount: 0,
+    activeSessionCount: activeSessionCount,
     devMode: config.devMode)
 
 proc writeStatusFile(config: UserDaemonConfig; status: UserDaemonStatus) =
@@ -226,8 +226,122 @@ proc handleHello(socket: Socket; config: UserDaemonConfig; generation: string;
     "." & $hello.minor)
   true
 
+proc nowUnixMs(): int64 =
+  let current = getTime()
+  current.toUnix * 1000 + int64(current.nanosecond div 1_000_000)
+
+proc nextBuildEvent(runId, sessionId, projectRoot: string;
+                    eventId: uint64;
+                    kind: UserDaemonBuildEventKind;
+                    message: string;
+                    terminal = false;
+                    exitCode = 0;
+                    severity = "info";
+                    payloadJson = ""): UserDaemonBuildEvent =
+  UserDaemonBuildEvent(
+    schemaId: BuildEventSchemaId,
+    schemaVersion: BuildEventSchemaVersion,
+    eventId: eventId,
+    occurredAtUnixMs: nowUnixMs(),
+    runId: runId,
+    sessionId: sessionId,
+    projectRoot: projectRoot,
+    command: "build",
+    kind: kind,
+    severity: severity,
+    message: message,
+    terminal: terminal,
+    exitCode: exitCode,
+    payloadJson: payloadJson)
+
+proc removeSession(sessions: var seq[UserDaemonSession]; sessionId: string) =
+  var kept: seq[UserDaemonSession] = @[]
+  for session in sessions:
+    if session.sessionId != sessionId:
+      kept.add(session)
+  sessions = kept
+
+proc buildResponseDelayMs(): int =
+  let raw = getEnv("REPRO_DAEMON_M3_BUILD_RESPONSE_DELAY_MS", "")
+  if raw.len == 0:
+    return 0
+  try:
+    max(0, parseInt(raw))
+  except ValueError:
+    0
+
+proc clientDisconnected(socket: Socket): bool =
+  when defined(posix):
+    var fds = TPollfd(fd: cast[cint](socket.getFd()), events: POLLIN,
+      revents: 0)
+    let rc = poll(addr(fds), Tnfds(1), 0.cint)
+    if rc <= 0:
+      return false
+    if (fds.revents and POLLHUP) != 0 or (fds.revents and POLLERR) != 0:
+      return true
+    if (fds.revents and POLLIN) != 0:
+      let peeked = socket.recv(1)
+      return peeked.len == 0
+    false
+  else:
+    false
+
+proc waitForBuildUnsupportedOrDisconnect(socket: Socket; delayMs: int): bool =
+  ## Returns true when the attached client disconnected before the placeholder
+  ## M3 unsupported response was sent.
+  let deadline = epochTime() + float(delayMs) / 1000.0
+  while epochTime() < deadline:
+    if socket.clientDisconnected():
+      return true
+    sleep(25)
+  socket.clientDisconnected()
+
+proc handleBuildRequest(socket: Socket; config: UserDaemonConfig;
+                        request: UserDaemonBuildRequest;
+                        sessions: var seq[UserDaemonSession]) =
+  let started = getTime()
+  let sessionId =
+    if request.runId.len > 0:
+      request.runId
+    else:
+      $getCurrentProcessId() & "-" & $started.toUnix & "-" &
+        $started.nanosecond
+  let projectRoot =
+    if request.projectRoot.len > 0:
+      request.projectRoot
+    else:
+      request.workingDir
+  sessions.add(UserDaemonSession(sessionId: sessionId,
+    projectRoot: projectRoot, mode: "build", state: "accepted",
+    startedAtUnix: started.toUnix))
+  logLine(config.logPath, "build request accepted session=" & sessionId &
+    " projectRoot=" & projectRoot & " attached=" & $request.attached &
+    " cancelOnDisconnect=" & $request.cancelOnDisconnect)
+  try:
+    socket.writeFrame(udkBuildEvent, buildEventBody(nextBuildEvent(
+      request.runId, sessionId, projectRoot, 1'u64, bekAccepted,
+      "build request accepted by repro-daemon")))
+    let delayMs = buildResponseDelayMs()
+    if delayMs > 0 and request.attached and request.cancelOnDisconnect:
+      if waitForBuildUnsupportedOrDisconnect(socket, delayMs):
+        logLine(config.logPath, "build request cancelled session=" &
+          sessionId & " reason=client-disconnect")
+        return
+    let message =
+      "daemon-hosted build execution is not implemented until " &
+      "Local-Daemons-And-Control-Plane M4"
+    socket.writeFrame(udkBuildEvent, buildEventBody(nextBuildEvent(
+      request.runId, sessionId, projectRoot, 2'u64, bekUnsupported,
+      message, terminal = true, exitCode = 64, severity = "warning",
+      payloadJson = "{\"fallbackAllowed\":true,\"deferredMilestone\":\"M4\"}")))
+    logLine(config.logPath, "build request unsupported session=" & sessionId &
+      " deferredMilestone=M4")
+  finally:
+    sessions.removeSession(sessionId)
+
 proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
-                  generation: string; shuttingDown: var bool) =
+                  generation: string; shuttingDown: var bool;
+                  sessions: var seq[UserDaemonSession]) =
   let helloFrame = socket.readFrame()
   if helloFrame.kind != udkHello:
     socket.writeFrame(udkError, errorBody(
@@ -240,14 +354,16 @@ proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
   case frame.kind
   of udkStatus:
     socket.writeFrame(udkStatusResponse,
-      statusBody(statusFor(config, startedAt, generation)))
+      statusBody(statusFor(config, startedAt, generation, sessions.len)))
   of udkShutdown:
     shuttingDown = true
     socket.writeFrame(udkShutdownAck)
     logLine(config.logPath, "shutdown requested")
   of udkSessions:
-    let sessions: seq[UserDaemonSession] = @[]
     socket.writeFrame(udkSessionsResponse, sessionsBody(sessions))
+  of udkBuildRequest:
+    handleBuildRequest(socket, config, parseBuildRequestBody(frame.body),
+      sessions)
   else:
     socket.writeFrame(udkError, errorBody(
       "unsupported user-daemon message in lifecycle server: " &
@@ -283,7 +399,9 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
 
     let startedAt = getTime()
     let generation = generationFor(startedAt)
-    writeStatusFile(config, statusFor(config, startedAt, generation))
+    var sessions: seq[UserDaemonSession] = @[]
+    writeStatusFile(config, statusFor(config, startedAt, generation,
+      sessions.len))
     logLine(config.logPath, "started role=" & UserDaemonRole &
       " endpoint=" & config.endpoint & " generation=" & generation)
 
@@ -292,7 +410,8 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
       var client: owned(Socket)
       listener.accept(client)
       try:
-        handleClient(client, config, startedAt, generation, shuttingDown)
+        handleClient(client, config, startedAt, generation, shuttingDown,
+          sessions)
       except CatchableError as err:
         logLine(config.logPath, "client error: " & err.msg)
         try:

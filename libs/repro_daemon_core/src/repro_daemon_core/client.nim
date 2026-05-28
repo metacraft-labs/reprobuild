@@ -7,6 +7,12 @@ import ./protocol
 type
   UserDaemonClientError* = object of CatchableError
 
+  UserDaemonBuildResult* = object
+    supported*: bool
+    exitCode*: int
+    message*: string
+    events*: seq[UserDaemonBuildEvent]
+
 proc endpointExists(endpoint: string): bool =
   try:
     discard getFileInfo(endpoint, followSymlink = false)
@@ -107,3 +113,29 @@ proc requestUserDaemonSessions*(endpoint = defaultUserDaemonEndpoint()):
     raise newException(UserDaemonClientError, parseErrorBody(frame.body))
   raise newException(UserDaemonClientError,
     "unexpected user-daemon sessions frame: " & $frame.kind)
+
+proc requestUserDaemonBuild*(request: UserDaemonBuildRequest;
+                             endpoint = defaultUserDaemonEndpoint();
+                             onEvent: proc(event: UserDaemonBuildEvent) = nil):
+    UserDaemonBuildResult =
+  var socket = connectUserDaemon(endpoint, commandMode = "build",
+    projectRoot = request.projectRoot)
+  defer: socket.close()
+  socket.writeFrame(udkBuildRequest, buildRequestBody(request))
+  while true:
+    let frame = socket.readFrame()
+    if frame.kind == udkBuildEvent:
+      let event = parseBuildEventBody(frame.body)
+      result.events.add(event)
+      if onEvent != nil:
+        onEvent(event)
+      if event.terminal:
+        result.exitCode = event.exitCode
+        result.message = event.message
+        result.supported = event.kind != bekUnsupported
+        return
+    elif frame.kind == udkError:
+      raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+    else:
+      raise newException(UserDaemonClientError,
+        "unexpected user-daemon build frame: " & $frame.kind)

@@ -54,7 +54,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
+      " build [target[#name]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
           programName &
       " graph [target[#name]] [--build] [--focus=ACTION] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
@@ -2124,6 +2124,13 @@ type
     blmSummary
     blmQuiet
 
+  BuildDaemonMode = enum
+    bdmAuto
+    bdmRequire
+    bdmOff
+
+  DaemonBuildUnsupported = object of CatchableError
+
   BuildProgressRenderer = object
     enabled: bool
     mode: BuildProgressMode
@@ -2231,6 +2238,25 @@ proc configuredBuildLogMode(): BuildLogMode =
   if configured.len == 0:
     return blmQuiet
   parseBuildLogMode(configured)
+
+proc parseBuildDaemonMode(value, source: string): BuildDaemonMode =
+  case value.normalize
+  of "auto":
+    bdmAuto
+  of "require":
+    bdmRequire
+  of "off":
+    bdmOff
+  else:
+    raise newException(ValueError,
+      "unsupported " & source & "=" & value &
+        " (expected auto, require, or off)")
+
+proc configuredBuildDaemonMode(): BuildDaemonMode =
+  let configured = getEnv("REPRO_DAEMON", "")
+  if configured.len == 0:
+    return bdmAuto
+  parseBuildDaemonMode(configured, "REPRO_DAEMON")
 
 proc supportsAnsiProgress(): bool =
   isatty(stderr) and getEnv("NO_COLOR", "").len == 0 and
@@ -6597,9 +6623,12 @@ proc runDepsCommand(args: openArray[string]): int =
     return 2
 
 proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
+  let originalArgs = @args
   var target = ""
   var mode = tpmUnspecified
   var workRoot = ""
+  var daemonMode = bdmAuto
+  var daemonModeExplicit = false
   var progressMode = configuredBuildProgressMode()
   var progressBarStyle = configuredBuildProgressBarStyle()
   var statsMode = configuredBuildStatsMode()
@@ -6618,7 +6647,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   var i = 0
   while i < args.len:
     let arg = args[i]
-    if arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+    if arg == "--daemon" or arg.startsWith("--daemon="):
+      daemonMode = parseBuildDaemonMode(valueFromFlag(args, i, "--daemon"),
+        "--daemon")
+      daemonModeExplicit = true
+    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(valueFromFlag(args, i,
         "--tool-provisioning"))
     elif arg == "--work-root" or arg.startsWith("--work-root="):
@@ -6683,6 +6716,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
   if targetWasOmitted:
     target = "."
 
+  if not daemonModeExplicit:
+    daemonMode = configuredBuildDaemonMode()
+
   if progressMode == bpmQuiet:
     if not logModeExplicit:
       logMode = blmQuiet
@@ -6725,30 +6761,83 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
           else:
             target = synth
 
-  var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+  proc runDirectBuild(): int =
+    var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+    try:
+      executeBuildTarget(target, mode, publicCliPath,
+        selectDefaultAction = targetWasOmitted,
+        workRoot = workRoot,
+        progressMode = progressMode,
+        progressBarStyle = progressBarStyle,
+        statsMode = statsMode,
+        reportMode = reportMode,
+        logMode = logMode,
+        diagnosticsPath = diagnosticsPath,
+        prepareOnly = prepareOnly,
+        dryRun = dryRun,
+        forceRebuild = forceRebuild,
+        skipCmakeRegeneration = skipCmakeRegeneration,
+        bypassRunQuotaExplicit = bypassRunQuota).exitCode
+    finally:
+      if autoRunQuota != nil:
+        try:
+          autoRunQuota.terminate()
+          discard autoRunQuota.waitForExit()
+          autoRunQuota.close()
+        except CatchableError:
+          discard
+
+  proc buildRunId(): string =
+    let nowTime = getTime()
+    "build-" & $getCurrentProcessId() & "-" & $nowTime.toUnix & "-" &
+      $nowTime.nanosecond
+
+  proc requestProjectRoot(): string =
+    try:
+      projectRootForModule(absolutePath(parseBuildTarget(target).modulePath))
+    except CatchableError:
+      getCurrentDir()
+
+  proc runDaemonBuild(): int =
+    let config = defaultUserDaemonConfig()
+    let projectRoot = requestProjectRoot()
+    discard startUserDaemon(publicCliPath, config)
+    let request = UserDaemonBuildRequest(
+      runId: buildRunId(),
+      target: target,
+      workingDir: getCurrentDir(),
+      projectRoot: projectRoot,
+      toolProvisioning: mode.modeName,
+      workRoot: workRoot,
+      rawArgs: originalArgs,
+      attached: true,
+      cancelOnDisconnect: true)
+    let daemonResult = requestUserDaemonBuild(request, config.endpoint)
+    if not daemonResult.supported:
+      raise newException(DaemonBuildUnsupported, daemonResult.message)
+    daemonResult.exitCode
+
+  if daemonMode == bdmOff:
+    return runDirectBuild()
   try:
-    executeBuildTarget(target, mode, publicCliPath,
-      selectDefaultAction = targetWasOmitted,
-      workRoot = workRoot,
-      progressMode = progressMode,
-      progressBarStyle = progressBarStyle,
-      statsMode = statsMode,
-      reportMode = reportMode,
-      logMode = logMode,
-      diagnosticsPath = diagnosticsPath,
-      prepareOnly = prepareOnly,
-      dryRun = dryRun,
-      forceRebuild = forceRebuild,
-      skipCmakeRegeneration = skipCmakeRegeneration,
-      bypassRunQuotaExplicit = bypassRunQuota).exitCode
-  finally:
-    if autoRunQuota != nil:
-      try:
-        autoRunQuota.terminate()
-        discard autoRunQuota.waitForExit()
-        autoRunQuota.close()
-      except CatchableError:
-        discard
+    return runDaemonBuild()
+  except DaemonBuildUnsupported as err:
+    if daemonMode == bdmRequire:
+      raise newException(ValueError,
+        "daemon mode required but repro-daemon cannot execute builds: " &
+          err.msg)
+    if logMode != blmQuiet:
+      stderr.writeLine("repro build: daemon build unsupported; falling " &
+        "back to direct mode: " & err.msg)
+    return runDirectBuild()
+  except CatchableError as err:
+    if daemonMode == bdmRequire:
+      raise newException(ValueError,
+        "daemon mode required but repro-daemon is unavailable: " & err.msg)
+    if logMode != blmQuiet:
+      stderr.writeLine("repro build: daemon unavailable; falling back to " &
+        "direct mode: " & err.msg)
+    return runDirectBuild()
 
 type
   GraphOutputFormat = enum

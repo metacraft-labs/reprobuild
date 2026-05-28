@@ -9,7 +9,10 @@ const
   UserDaemonProtocolMajor* = 1'u16
   UserDaemonProtocolMinor* = 0'u16
   UserDaemonRole* = "repro-daemon/user"
-  UserDaemonFeatureFlags* = "lifecycle,status,logs,shutdown,sessions"
+  UserDaemonFeatureFlags* =
+    "lifecycle,status,logs,shutdown,sessions,build-routing,build-events"
+  BuildEventSchemaId* = "reprobuild.daemon.build-event.v1"
+  BuildEventSchemaVersion* = 1'u16
   FrameMagic = "RBUD"
 
 type
@@ -22,7 +25,17 @@ type
     udkShutdownAck = 6
     udkSessions = 7
     udkSessionsResponse = 8
+    udkBuildRequest = 9
+    udkBuildEvent = 10
+    udkBuildCancel = 11
     udkError = 255
+
+  UserDaemonBuildEventKind* = enum
+    bekAccepted = "accepted"
+    bekDiagnostic = "diagnostic"
+    bekUnsupported = "unsupported"
+    bekCancelled = "cancelled"
+    bekFinished = "finished"
 
   BinaryIdentity* = object
     name*: string
@@ -53,6 +66,33 @@ type
     mode*: string
     state*: string
     startedAtUnix*: int64
+
+  UserDaemonBuildRequest* = object
+    runId*: string
+    target*: string
+    workingDir*: string
+    projectRoot*: string
+    toolProvisioning*: string
+    workRoot*: string
+    rawArgs*: seq[string]
+    attached*: bool
+    cancelOnDisconnect*: bool
+
+  UserDaemonBuildEvent* = object
+    schemaId*: string
+    schemaVersion*: uint16
+    eventId*: uint64
+    occurredAtUnixMs*: int64
+    runId*: string
+    sessionId*: string
+    projectRoot*: string
+    command*: string
+    kind*: UserDaemonBuildEventKind
+    severity*: string
+    message*: string
+    terminal*: bool
+    exitCode*: int
+    payloadJson*: string
 
 proc bytesOf(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -178,6 +218,17 @@ proc readSession(buf: openArray[byte]; pos: var int): UserDaemonSession =
   result.state = buf.readString(pos)
   result.startedAtUnix = buf.readI64(pos)
 
+proc writeStringSeq(buf: var seq[byte]; values: openArray[string]) =
+  buf.writeU32Le(uint32(values.len))
+  for value in values:
+    buf.writeString(value)
+
+proc readStringSeq(buf: openArray[byte]; pos: var int): seq[string] =
+  let count = int(buf.readU32Le(pos))
+  result = newSeq[string](count)
+  for i in 0 ..< count:
+    result[i] = buf.readString(pos)
+
 proc writeFrame*(socket: Socket; kind: UserDaemonMessageKind;
                  body: openArray[byte] = []) =
   var frame: seq[byte] = @[]
@@ -294,6 +345,78 @@ proc parseSessionsBody*(body: openArray[byte]): seq[UserDaemonSession] =
   result = newSeq[UserDaemonSession](count)
   for i in 0 ..< count:
     result[i] = body.readSession(pos)
+
+proc buildRequestBody*(request: UserDaemonBuildRequest): seq[byte] =
+  result.writeString(request.runId)
+  result.writeString(request.target)
+  result.writeString(request.workingDir)
+  result.writeString(request.projectRoot)
+  result.writeString(request.toolProvisioning)
+  result.writeString(request.workRoot)
+  result.writeStringSeq(request.rawArgs)
+  result.writeBool(request.attached)
+  result.writeBool(request.cancelOnDisconnect)
+
+proc parseBuildRequestBody*(body: openArray[byte]): UserDaemonBuildRequest =
+  var pos = 0
+  result.runId = body.readString(pos)
+  result.target = body.readString(pos)
+  result.workingDir = body.readString(pos)
+  result.projectRoot = body.readString(pos)
+  result.toolProvisioning = body.readString(pos)
+  result.workRoot = body.readString(pos)
+  result.rawArgs = body.readStringSeq(pos)
+  result.attached = body.readBool(pos)
+  result.cancelOnDisconnect = body.readBool(pos)
+
+proc parseBuildEventKind(value: string): UserDaemonBuildEventKind =
+  case value
+  of "accepted":
+    bekAccepted
+  of "diagnostic":
+    bekDiagnostic
+  of "unsupported":
+    bekUnsupported
+  of "cancelled":
+    bekCancelled
+  of "finished":
+    bekFinished
+  else:
+    raise newException(ValueError,
+      "unknown user-daemon build event kind: " & value)
+
+proc buildEventBody*(event: UserDaemonBuildEvent): seq[byte] =
+  result.writeString(event.schemaId)
+  result.writeU16Le(event.schemaVersion)
+  result.writeU64Le(event.eventId)
+  result.writeI64(event.occurredAtUnixMs)
+  result.writeString(event.runId)
+  result.writeString(event.sessionId)
+  result.writeString(event.projectRoot)
+  result.writeString(event.command)
+  result.writeString($event.kind)
+  result.writeString(event.severity)
+  result.writeString(event.message)
+  result.writeBool(event.terminal)
+  result.writeI64(int64(event.exitCode))
+  result.writeString(event.payloadJson)
+
+proc parseBuildEventBody*(body: openArray[byte]): UserDaemonBuildEvent =
+  var pos = 0
+  result.schemaId = body.readString(pos)
+  result.schemaVersion = body.readU16Le(pos)
+  result.eventId = body.readU64Le(pos)
+  result.occurredAtUnixMs = body.readI64(pos)
+  result.runId = body.readString(pos)
+  result.sessionId = body.readString(pos)
+  result.projectRoot = body.readString(pos)
+  result.command = body.readString(pos)
+  result.kind = parseBuildEventKind(body.readString(pos))
+  result.severity = body.readString(pos)
+  result.message = body.readString(pos)
+  result.terminal = body.readBool(pos)
+  result.exitCode = int(body.readI64(pos))
+  result.payloadJson = body.readString(pos)
 
 proc errorBody*(message: string): seq[byte] =
   result.writeString(message)
