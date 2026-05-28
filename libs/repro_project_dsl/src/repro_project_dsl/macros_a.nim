@@ -974,7 +974,16 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
   result = "{.experimental: \"callOperator\".}\n"
   result.add("type\n  " & typeName & "* = object\n")
   result.add("const " & valueName & "* = " & typeName & "()\n")
-  result.add("proc reprobuildPackageMarker*() = discard\n")
+  # The marker is a uniqueness sentinel that ``usesImportCode`` queries
+  # via ``when compiles(<mod>.reprobuildPackageMarker())`` to confirm an
+  # imported module is a reprobuild project. Guarded by ``when not
+  # declared`` so a single Nim file containing multiple ``package``
+  # blocks emits the proc exactly once (the second/third expansion is a
+  # no-op). See ``wrapperCode`` and ``defineCliInterfaceCode`` below for
+  # the matching guards on the other two emission sites.
+  result.add(
+    "when not declared(reprobuildPackageMarker):\n" &
+    "  proc reprobuildPackageMarker*() = discard\n")
   if pkg.executables.len != 1:
     return
   let exe = pkg.executables[0]
@@ -1029,7 +1038,12 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
     "  " & exeTypeName & "* = object\n" &
     "    value*: SelectedExecutable\n" &
     "const " & valueName & "* = " & typeName & "()\n" &
-    "proc reprobuildPackageMarker*() = discard\n" &
+    # Marker is a uniqueness sentinel queried via ``when compiles(...)``
+    # by ``usesImportCode``; guarded so multiple ``package`` blocks in
+    # the same Nim file don't redeclare the proc (see
+    # ``toolActionWrapperCode`` for the matching guard).
+    "when not declared(reprobuildPackageMarker):\n" &
+    "  proc reprobuildPackageMarker*() = discard\n" &
     "proc executable*(pkg: " & typeName & "; name: string): " &
       exeTypeName & " =\n" &
     "  discard pkg\n" &
@@ -1405,7 +1419,13 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
   result = "{.experimental: \"callOperator\".}\n"
   result.add("const " & toolSymbol & "* = Tool[" & escForCode(toolId) &
     "]()\n")
-  result.add("proc reprobuildPackageMarker*() = discard\n")
+  # Marker is a uniqueness sentinel queried via ``when compiles(...)`` by
+  # ``usesImportCode``. Guarded so a file declaring multiple
+  # ``cliInterface`` blocks (or mixing them with ``package`` blocks)
+  # emits the proc exactly once.
+  result.add(
+    "when not declared(reprobuildPackageMarker):\n" &
+    "  proc reprobuildPackageMarker*() = discard\n")
   for command in commands:
     var formals = @["tool: Tool[" & escForCode(toolId) & "]"]
     for param in command.params:

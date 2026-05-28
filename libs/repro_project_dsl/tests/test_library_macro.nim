@@ -6,11 +6,13 @@
 ## contains ``library`` members, and then inspect ``registeredPackages()``
 ## from runtime code to assert the parsed shape.
 ##
-## The ``package`` macro generates a top-level
+## Historically the ``package`` macro generated an unguarded top-level
 ## ``reprobuildPackageMarker`` proc, so successive ``package`` blocks in
-## the same module conflict. We sidestep that by piling every test case
-## into a single ``package`` block — multiple ``library`` members in one
-## package are exactly what M12 promises.
+## the same module conflicted. That marker is now guarded by ``when not
+## declared(...)`` (see ``t_multi_package_macro.nim``), but this test
+## file pre-dates the fix and intentionally exercises a SINGLE package
+## with multiple ``library`` members — exactly what M12 promises. The
+## multi-package shape is covered by ``t_multi_package_macro.nim``.
 ##
 ## Compile with ``-d:reproProviderMode`` so the provider-mode runtime
 ## glue (which the DSL exports unconditionally) is on the link line.

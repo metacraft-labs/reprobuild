@@ -1098,6 +1098,75 @@ proc detectStandardBuildEligible(sourceFile: string;
   # ``conventions/nim.nim``.
   usesIncludesRegisteredConvention(sourceFile)
 
+proc mergeProjectInterfaces(matches: openArray[PackageDef];
+                            packages: openArray[PackageDef]): ProjectInterface =
+  ## Combine the ``ProjectInterface`` projections of every package
+  ## declared in the same Nim project file into a single envelope.
+  ##
+  ## Background: the on-disk interface artifact carries ONE
+  ## ``ProjectInterface`` per project file (one ``ProjectInterfaceArtifact``
+  ## per ``repro.nim``). When multiple ``package`` blocks share a file —
+  ## the "one workspace, many packages, single file" Mode 3 shape —
+  ## downstream consumers (the engine, ``repro-standard-provider``, the
+  ## CMake generator) still expect a single envelope. We project the
+  ## multi-package shape into the single-envelope shape by:
+  ##
+  ##   * keeping the FIRST package's ``projectName`` /
+  ##     ``packageName`` / ``defaultToolProvisioning`` /
+  ##     ``location`` as the "root" — preserving the
+  ##     single-package shape byte-for-byte when ``matches.len == 1``;
+  ##   * concatenating ``publicExecutables`` and ``publicLibraries``
+  ##     across every package in source order (the DSL itself
+  ##     guarantees member-name uniqueness within a package, and
+  ##     multi-package files almost always partition members one per
+  ##     package, so duplicates are not expected here);
+  ##   * deduplicating ``toolUses`` by
+  ##     ``(packageSelector, executableName)`` so a constraint listed in
+  ##     two ``uses:`` blocks (typical for shared toolchains like
+  ##     ``"nim >=2.2 <3.0"``) doesn't surface twice;
+  ##   * unioning ``publicSignatureDependencies``.
+  ##
+  ## The per-target ``packageName`` distinction is preserved at the
+  ## DSL level (each ``InterfaceExecutable.binaryName`` /
+  ## ``InterfaceLibrary.name`` plus its source location still maps
+  ## back to its owning package); the merged envelope just doesn't
+  ## carry the per-target package label in the v9 wire format. The
+  ## scanner, ``repro show-conventions``, ``repro deps refresh``, and
+  ## the multi-package unit tests all consult ``registeredPackages()``
+  ## directly so they retain full per-package attribution.
+  result.projectName = matches[0].packageName
+  result.packageName = matches[0].packageName
+  result.defaultToolProvisioning = matches[0].defaultToolProvisioning
+  result.location = SourceLocation(
+    file: matches[0].sourceFile,
+    line: matches[0].sourceLine)
+  var seenToolUses: seq[string] = @[]
+  var seenSigDeps: seq[string] = @[]
+  for pkg in matches:
+    let projection = toProjectInterface(pkg, packages)
+    for exe in projection.publicExecutables:
+      result.publicExecutables.add(exe)
+    for lib in projection.publicLibraries:
+      result.publicLibraries.add(lib)
+    for use in projection.toolUses:
+      let key = use.packageSelector & "\x1f" & use.executableName
+      if seenToolUses.find(key) >= 0:
+        continue
+      seenToolUses.add(key)
+      result.toolUses.add(use)
+    for dep in projection.publicSignatureDependencies:
+      if seenSigDeps.find(dep) >= 0:
+        continue
+      seenSigDeps.add(dep)
+      result.publicSignatureDependencies.add(dep)
+    # ``defaultToolProvisioning`` resolution: the first non-empty wins.
+    # An explicit value on a later package overrides a default-empty
+    # earlier one, matching the "first explicit declaration in source
+    # order" rule the spec hints at.
+    if result.defaultToolProvisioning.len == 0 and
+        pkg.defaultToolProvisioning.len > 0:
+      result.defaultToolProvisioning = pkg.defaultToolProvisioning
+
 proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   let packages = registeredPackages()
   if rootSourceFile.len > 0:
@@ -1111,12 +1180,36 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
         detectStandardBuildEligible(rootSourceFile, matches[0])
       return artifactFor(pi)
     if matches.len > 1:
-      raise newException(ValueError,
-        "expected one root package in " & rootSourceFile & ", got " &
-          $matches.len)
+      # Multi-package single-file (Mode 3 + the upcoming C/C++ work):
+      # collapse every package declared in the same Nim file into one
+      # interface envelope. The marker collision that previously blocked
+      # this at compile-time is fixed in
+      # ``libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim``;
+      # the merge logic here is the artifact-layer side of the same
+      # change.
+      var pi = mergeProjectInterfaces(matches, packages)
+      var allEligible = true
+      for pkg in matches:
+        if not detectStandardBuildEligible(rootSourceFile, pkg):
+          allEligible = false
+          break
+      pi.standardBuildEligible = allEligible
+      return artifactFor(pi)
   if packages.len != 1:
-    raise newException(ValueError, "expected exactly one registered package, got " &
-      $packages.len)
+    # Same multi-package fallback as the rootSourceFile branch above,
+    # for callers that don't pass a root hint. The merge preserves the
+    # ``packages.len == 1`` shape exactly (single-element ``matches`` →
+    # ``mergeProjectInterfaces`` reproduces the legacy
+    # ``toProjectInterface`` output), so this branch only kicks in when
+    # two or more packages were registered without an explicit root.
+    var pi = mergeProjectInterfaces(packages, packages)
+    var allEligible = true
+    for pkg in packages:
+      if not detectStandardBuildEligible(pkg.sourceFile, pkg):
+        allEligible = false
+        break
+    pi.standardBuildEligible = allEligible
+    return artifactFor(pi)
   var pi = toProjectInterface(packages[0], packages)
   pi.standardBuildEligible =
     detectStandardBuildEligible(packages[0].sourceFile, packages[0])

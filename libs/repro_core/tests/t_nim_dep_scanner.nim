@@ -61,12 +61,14 @@ package mode3Pilot:
     removeDir(dir)
 
   test "two `package` blocks in one project file: scanner partitions members":
-    # The DSL today emits a duplicate ``reprobuildPackageMarker`` when
-    # two ``package`` blocks share a file (so the Nim compiler rejects
-    # such a file), but the SCANNER reads the project file as text and
-    # produces correctly-partitioned members regardless. This test
-    # pins that partitioning so a future DSL fix doesn't break the
-    # scanner contract.
+    # The scanner reads project files as text and partitions members
+    # by the preceding ``package`` keyword. Independent of whether the
+    # DSL macro layer can compile the same file: the marker collision
+    # that historically prevented that has been fixed (see
+    # ``libs/repro_project_dsl/tests/t_multi_package_macro.nim``) by
+    # guarding the marker emission behind ``when not declared(...)``.
+    # This test pins the scanner side of the contract; the DSL side is
+    # pinned by the macro-layer test referenced above.
     let dir = makeScratch("multi-package")
     writeFile(dir / "repro.nim", """
 import repro_project_dsl
