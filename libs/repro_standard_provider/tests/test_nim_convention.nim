@@ -281,3 +281,163 @@ suite "nim convention M3":
       let action = decodeBuildActionPayload(toBytes(node.payload))
       check not action.id.startsWith("nim-test-run-")
       check not action.id.startsWith("nim-test-stamp-")
+
+# ---------------------------------------------------------------------------
+# Mode 3 ``depends_on`` engine-consumption suite.
+#
+# These tests pin the convention's response to the workspace-dep registry:
+#   * the converted ``mode3-pilot`` fixture produces an executable link
+#     action whose ``inputs``/``deps``/argv reference the dep library's
+#     archive (the action graph carries the cross-package edge);
+#   * a cycle in a hand-rolled scratch fixture is rejected with a clear
+#     diagnostic;
+#   * an ``depends_on <pkg>: <missing>`` referencing a non-declared
+#     package is rejected with a clear diagnostic;
+#   * single-package fixtures (no ``depends_on``) are unaffected.
+# ---------------------------------------------------------------------------
+
+const
+  ## ``nim/mode3-pilot`` carries the canonical two-package shape: one
+  ## library package (``mode3PilotGreet``), one executable package
+  ## (``mode3PilotHello``), and a scanner-emitted ``depends_on`` edge.
+  Mode3PilotRoot =
+    MetacraftRoot / "reprobuild-examples" / "nim" / "mode3-pilot"
+
+proc actionByPrefix(fragment: GraphFragment; prefix: string):
+    seq[BuildActionDef] =
+  for node in fragment.nodes:
+    if node.kind != gnkAction:
+      continue
+    let action = decodeBuildActionPayload(toBytes(node.payload))
+    if action.id.startsWith(prefix):
+      result.add(action)
+
+suite "nim convention Mode 3 depends_on":
+
+  test "emitFragment: mode3-pilot wires hello -> greet via dep library":
+    let conv = nim_convention.nimConvention()
+    if not fileExists(Mode3PilotRoot / "repro.nim"):
+      checkpoint "fixture missing — looked at " & Mode3PilotRoot
+      fail()
+    let request = dummyRequest(Mode3PilotRoot)
+    require conv.recognize(Mode3PilotRoot, request)
+    let fragment = conv.emitFragment(Mode3PilotRoot, request)
+
+    # The convention emits one ``ar`` archive action for the greet
+    # library and one ``gcc -o hello.exe`` link action for the
+    # executable. The hello link must declare both an ``inputs`` entry
+    # for the archive and a ``deps`` entry for the archive's action id.
+    var greetArchive: BuildActionDef
+    var greetFound = false
+    for action in actionByPrefix(fragment, "ar-archive-greet-"):
+      greetArchive = action
+      greetFound = true
+      break
+    check greetFound
+    check greetArchive.outputs.len == 1
+    let archivePath = greetArchive.outputs[0]
+    check archivePath.replace('\\', '/').endsWith("libgreet.a")
+
+    var helloLink: BuildActionDef
+    var helloFound = false
+    for action in actionByPrefix(fragment, "gcc-link-hello-"):
+      helloLink = action
+      helloFound = true
+      break
+    check helloFound
+
+    # Build-sequencing: hello's link depends on greet's ar action id.
+    check greetArchive.id in helloLink.deps
+    # Link-input wiring: archive is declared as an input of the link.
+    check archivePath in helloLink.inputs
+    # Argv wiring: the archive appears as a positional on the link argv.
+    let helloArgv = inlineArgvOf(helloLink)
+    check archivePath in helloArgv
+
+  test "emitFragment: cycle in depends_on is rejected":
+    let scratch = getTempDir() / "test_nim_convention_cycle"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "src" / "alpha.nim", "## alpha library\n")
+    writeFile(scratch / "src" / "beta.nim", "## beta library\n")
+    writeFile(scratch / "repro.nim",
+      "import repro_project_dsl\n" &
+      "package alphaPkg:\n" &
+      "  uses:\n" &
+      "    \"nim >=2.2 <3.0\"\n" &
+      "  library alpha\n" &
+      "\n" &
+      "package betaPkg:\n" &
+      "  uses:\n" &
+      "    \"nim >=2.2 <3.0\"\n" &
+      "  library beta\n" &
+      "\n" &
+      "depends_on alphaPkg: betaPkg\n" &
+      "depends_on betaPkg: alphaPkg\n")
+    defer:
+      removeDir(scratch)
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    require conv.recognize(scratch, request)
+    var raised = false
+    var message = ""
+    try:
+      discard conv.emitFragment(scratch, request)
+    except ValueError as err:
+      raised = true
+      message = err.msg
+    check raised
+    check "cycle" in message.toLowerAscii()
+
+  test "emitFragment: depends_on referencing undeclared package is rejected":
+    let scratch = getTempDir() / "test_nim_convention_undeclared"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "src" / "hello.nim",
+      "echo \"hello from undeclared-test\"\n")
+    writeFile(scratch / "repro.nim",
+      "import repro_project_dsl\n" &
+      "package undeclaredHello:\n" &
+      "  uses:\n" &
+      "    \"nim >=2.2 <3.0\"\n" &
+      "  executable hello:\n" &
+      "    discard\n" &
+      "\n" &
+      "depends_on undeclaredHello: nonexistentPackage\n")
+    defer:
+      removeDir(scratch)
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    require conv.recognize(scratch, request)
+    var raised = false
+    var message = ""
+    try:
+      discard conv.emitFragment(scratch, request)
+    except ValueError as err:
+      raised = true
+      message = err.msg
+    check raised
+    check "nonexistentPackage" in message
+
+  test "emitFragment: nim/binary unaffected by Mode 3 wiring":
+    # Regression check: a single-package fixture with NO ``depends_on``
+    # at all must still emit the same link-action shape (no extra
+    # archive inputs, no extra dep edges between targets).
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(FixtureRoot)
+    require conv.recognize(FixtureRoot, request)
+    let fragment = conv.emitFragment(FixtureRoot, request)
+    var phase3: BuildActionDef
+    var found = false
+    for action in actionByPrefix(fragment, "gcc-link-"):
+      phase3 = action
+      found = true
+      break
+    check found
+    # No archive inputs (the fixture declares no library).
+    for input in phase3.inputs:
+      check not input.endsWith(".a")
+      check not input.endsWith(".so")
+      check not input.endsWith(".dylib")

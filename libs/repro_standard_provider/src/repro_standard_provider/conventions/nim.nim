@@ -70,7 +70,7 @@
 ##     compiler's default on Linux/MinGW. M3+ should consult ``uses:``
 ##     for ``msvc``/``clang`` pins and pick the matching compiler driver.
 
-import std/[algorithm, json, os, osproc, strutils]
+import std/[algorithm, json, os, osproc, strutils, tables]
 
 import repro_core
 import repro_provider_runtime
@@ -93,6 +93,13 @@ type
     name: string
     sourceFile: string
       ## Absolute path to ``<projectRoot>/src/<name>.nim``.
+    package: string
+      ## Mode 3: the ``package <name>:`` block this entrypoint is
+      ## declared inside. Empty when the convention can't attribute the
+      ## member (single-package fixtures or a parse failure). Used by
+      ## the workspace-dep wiring to map ``depends_on <pkg>: <dep>``
+      ## edges back to the link-action that needs the dep's library
+      ## output threaded through.
 
   NimLibraryKind = enum
     nlkStatic
@@ -106,6 +113,21 @@ type
     name: string
     sourceFile: string
       ## Absolute path to ``<projectRoot>/src/<name>.nim``.
+    kind: NimLibraryKind
+    package: string
+      ## Mode 3: the ``package <name>:`` block this library is declared
+      ## inside. Same contract as ``NimEntrypoint.package``.
+
+  NimWorkspaceLibrary = object
+    ## A library target after it has been emitted: holds the link-action
+    ## id (the convention's Phase 3 ``ar rcs`` or ``gcc -shared`` action)
+    ## plus the resulting library output path. The
+    ## ``depends_on`` consumer uses this to add a library to a downstream
+    ## executable's link inputs + argv.
+    libraryName: string
+    package: string
+    linkActionId: string
+    outputPath: string
     kind: NimLibraryKind
 
   NimcacheCompileStep = object
@@ -293,6 +315,111 @@ proc extractLibraries(source: string): seq[NimLibraryTarget] =
       libraryColumn = indent
   if current != nil:
     result.add(current[])
+
+type
+  NimMemberOwnership = object
+    ## Map a member name (``executable foo`` / ``library bar``) back to
+    ## the ``package <name>:`` block it was declared inside. The Mode 3
+    ## ``depends_on`` macro names packages, not members, so the
+    ## convention needs the owning-package mapping to wire dep edges
+    ## from a downstream package's link action to an upstream package's
+    ## library output.
+    package*: string
+    member*: string
+    kind*: string  ## "executable" or "library"
+
+proc extractPackageMembers*(source: string): seq[NimMemberOwnership] =
+  ## Walk the project source text and emit ``(package, member, kind)``
+  ## tuples in declaration order. Diagnostic-grade text scan — same
+  ## scope as ``extractEntrypoints``/``extractLibraries``. Recognises
+  ## the canonical Mode 3 shape:
+  ##
+  ##   package <pkg>:
+  ##     uses: ...
+  ##     library <name>            # static (default)
+  ##     library <name>:
+  ##       kind: shared
+  ##     executable <name>:
+  ##       discard
+  ##
+  ## Indentation tracking: a ``package <pkg>:`` opens a body at the
+  ## first non-blank line that's MORE indented than ``package``. Any
+  ## member declaration encountered while the body is open is attributed
+  ## to ``<pkg>``. A line that un-indents back to ``package``'s column
+  ## closes the package body.
+  ##
+  ## Members declared at top level (outside any ``package`` block) are
+  ## emitted with an empty ``package`` field — they exist in the
+  ## fixtures the M3 baseline tests cover (``reprobuild-examples/nim/binary``
+  ## etc., where the whole project is one ``package`` block) and the
+  ## consumer treats empty ownership as "ambient/single-package".
+  var currentPackage = ""
+  var packageColumn = -1
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      continue
+    var indent = 0
+    for ch in line:
+      if ch == ' ':
+        inc indent
+      elif ch == '\t':
+        indent += 8
+      else:
+        break
+    if currentPackage.len > 0 and indent <= packageColumn:
+      currentPackage = ""
+      packageColumn = -1
+    if stripped.startsWith("package") and
+        (stripped.len == len("package") or
+         stripped[len("package")] in {' ', '\t'}):
+      let rest = stripped[len("package") .. ^1].strip()
+      if rest.len == 0:
+        continue
+      var name = ""
+      for ch in rest:
+        if ch in {' ', '\t', ':', ','}:
+          break
+        name.add(ch)
+      if name.len == 0:
+        continue
+      currentPackage = name
+      packageColumn = indent
+      continue
+    if stripped.startsWith("executable") and
+        (stripped.len == len("executable") or
+         stripped[len("executable")] in {' ', '\t'}):
+      let rest = stripped[len("executable") .. ^1].strip()
+      if rest.len == 0:
+        continue
+      var name = ""
+      for ch in rest:
+        if ch in {' ', '\t', ':', ','}:
+          break
+        name.add(ch)
+      if name.len > 0:
+        result.add(NimMemberOwnership(
+          package: currentPackage, member: name, kind: "executable"))
+      continue
+    if stripped.startsWith("library") and
+        (stripped.len == len("library") or
+         stripped[len("library")] in {' ', '\t'}):
+      let rest = stripped[len("library") .. ^1].strip()
+      if rest.len == 0:
+        continue
+      var name = ""
+      for ch in rest:
+        if ch in {' ', '\t', ':', ','}:
+          break
+        name.add(ch)
+      if name.len > 0:
+        result.add(NimMemberOwnership(
+          package: currentPackage, member: name, kind: "library"))
+      continue
 
 proc hasAnyMember(source: string): bool =
   ## True when the package declares at least one ``executable`` or
@@ -627,14 +754,25 @@ proc collectNimSources(srcDir: string): seq[string] =
   result.sort(system.cmp[string])
 
 proc emitForEntrypoint(projectRoot, nimExe: string;
-                      entry: NimEntrypoint): tuple[phase1: BuildActionDef;
-                                                  phase2: seq[BuildActionDef];
-                                                  phase3: BuildActionDef] =
+                      entry: NimEntrypoint;
+                      depLibraries: openArray[NimWorkspaceLibrary] = []):
+                        tuple[phase1: BuildActionDef;
+                              phase2: seq[BuildActionDef];
+                              phase3: BuildActionDef] =
   ## Materialise the three-phase graph for a single ``executable``.
   ## Eagerly runs ``nim c --compileOnly`` so the manifest is on disk
   ## before we register Phase 2/3 — or skips the run when the M18
   ## emit-time fingerprint cache says the previous manifest is still
   ## current.
+  ##
+  ## **Mode 3 dep wiring**: ``depLibraries`` enumerates the workspace
+  ## libraries this entrypoint's package depends on (resolved from the
+  ## ``depends_on`` registry / ``repro.scanned-deps.nim``). Each library's
+  ## ``outputPath`` is added to the Phase 3 link action's ``inputs`` AND
+  ## to its argv as a trailing positional, and its ``linkActionId`` is
+  ## added to the Phase 3 ``deps`` list. Net effect: the engine sequences
+  ## the entrypoint's link strictly after the dep library's link action,
+  ## and the resulting executable links the static archive into its image.
   let nimcacheDir = nimcachePathFor(projectRoot, entry.name)
   let objDir = objDirFor(projectRoot, entry.name)
   let binaryOutput = binaryPathFor(projectRoot, entry.name)
@@ -725,17 +863,35 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
   for j in 1 ..< linkerArgv.len:
     finalArgv.add(linkerArgv[j])
 
+  # Mode 3 dep-library wiring: thread each upstream library's archive
+  # onto the link line so the dynamic loader sees the symbols at
+  # runtime. Static archives go at the END of the argv — gcc/ld resolve
+  # symbols left-to-right, so the .a must follow the .o files that
+  # reference it. Shared libraries land in the same slot for the M-
+  # baseline (we can teach the link argv to use ``-L<dir> -l<name>``
+  # later; absolute-path positionals are unambiguous enough for now).
+  for lib in depLibraries:
+    finalArgv.add(lib.outputPath)
+
   let phase2Ids = block:
     var ids: seq[string] = @[]
     for action in phase2:
       ids.add(action.id)
     ids
 
+  var phase3Deps = phase2Ids
+  var phase3Inputs = objFiles
+  for lib in depLibraries:
+    if phase3Deps.find(lib.linkActionId) < 0:
+      phase3Deps.add(lib.linkActionId)
+    if phase3Inputs.find(lib.outputPath) < 0:
+      phase3Inputs.add(lib.outputPath)
+
   let phase3Action = buildAction(
     id = actionIdFor("gcc-link", entry.name, "binary"),
     call = inlineExecCall(finalArgv, projectRoot),
-    deps = phase2Ids,
-    inputs = objFiles,
+    deps = phase3Deps,
+    inputs = phase3Inputs,
     outputs = @[binaryOutput],
     pool = "compile",
     dependencyPolicy = declaredOnlyDependencyPolicy(),
@@ -923,11 +1079,27 @@ proc emitForLibrary(projectRoot, nimExe: string;
 
   (phase1Action, phase2, phase3)
 
+proc memberOwner(ownership: openArray[NimMemberOwnership];
+                 kind, member: string): string =
+  ## Look up the ``package`` field of the first ownership entry that
+  ## matches ``(kind, member)``. Returns the empty string when none
+  ## match — used as a "single-package fallback" by the entrypoint and
+  ## library collectors so the baseline single-``package`` fixtures
+  ## continue to work unchanged.
+  for entry in ownership:
+    if entry.kind == kind and entry.member == member:
+      return entry.package
+  ""
+
 proc collectEntrypoints(projectRoot, source: string): seq[NimEntrypoint] =
+  let ownership = extractPackageMembers(source)
   for name in extractEntrypoints(source):
     let path = projectRoot / "src" / (name & ".nim")
     if fileExists(extendedPath(path)):
-      result.add(NimEntrypoint(name: name, sourceFile: path))
+      result.add(NimEntrypoint(
+        name: name,
+        sourceFile: path,
+        package: memberOwner(ownership, "executable", name)))
 
 proc collectNimTestFiles(projectRoot: string): seq[string] =
   ## M22: walk ``<projectRoot>/tests/`` for files named ``test_*.nim``.
@@ -1025,13 +1197,147 @@ proc emitTestAction(projectRoot, nimExe, testFile: string;
   (runAction, stampAction)
 
 proc collectLibraries(projectRoot, source: string): seq[NimLibraryTarget] =
+  let ownership = extractPackageMembers(source)
   for lib in extractLibraries(source):
     let path = projectRoot / "src" / (lib.name & ".nim")
     if fileExists(extendedPath(path)):
       result.add(NimLibraryTarget(
         name: lib.name,
         sourceFile: path,
-        kind: lib.kind))
+        kind: lib.kind,
+        package: memberOwner(ownership, "library", lib.name)))
+
+proc readScannedDepsSource(projectRoot: string): string =
+  ## Read ``<projectRoot>/repro.scanned-deps.nim`` when present and the
+  ## project file ``include``s it. Returns the empty string in every
+  ## other case — there is no scanned-deps file, the file is unreadable,
+  ## or the project file doesn't ``include`` it. Used to fold the
+  ## machine-authored ``depends_on`` edges into the convention's
+  ## workspace-dep resolution alongside any hand-written edges in
+  ## ``repro.nim``.
+  let scannedPath = projectRoot / "repro.scanned-deps.nim"
+  if not fileExists(extendedPath(scannedPath)):
+    return ""
+  let projectFile = resolveProjectFile(projectRoot).path
+  if projectFile.len == 0:
+    return ""
+  if not scannedDepsArePresent(projectFile):
+    return ""
+  try:
+    readFile(extendedPath(scannedPath))
+  except CatchableError:
+    ""
+
+proc collectWorkspaceDepEdges(projectRoot, source: string):
+    seq[ManualDepEdge] =
+  ## Aggregate every ``depends_on`` edge declared in ``repro.nim`` plus
+  ## (optionally) the included ``repro.scanned-deps.nim`` text. The two
+  ## sources are unioned as a multiset; ``extractManualDependsOnFromText``
+  ## returns edges in source order so the caller's later dedup pass
+  ## preserves a deterministic ordering.
+  result = extractManualDependsOnFromText(source)
+  let scanned = readScannedDepsSource(projectRoot)
+  if scanned.len > 0:
+    for edge in extractManualDependsOnFromText(scanned):
+      result.add(edge)
+
+proc dedupDepEdges(edges: openArray[ManualDepEdge]): seq[ManualDepEdge] =
+  ## Collapse identical ``(fromPackage, toPackage)`` pairs into one
+  ## entry. Source-line metadata of the first occurrence wins so error
+  ## messages point at the earliest evidence the operator can see.
+  var seen: seq[string] = @[]
+  for edge in edges:
+    let key = edge.fromPackage & "\x1f" & edge.toPackage
+    if seen.find(key) >= 0:
+      continue
+    seen.add(key)
+    result.add(edge)
+
+proc detectDepCycle(edges: openArray[ManualDepEdge];
+                    packages: openArray[string]): seq[string] =
+  ## Return one cycle path (in declaration order) if the dep graph
+  ## contains a cycle, else the empty seq. Standard Tarjan-style DFS
+  ## using three-state colouring; the returned path starts and ends at
+  ## the same node so the caller can rendering "A -> B -> A".
+  ##
+  ## Edges referencing packages NOT in ``packages`` are ignored here —
+  ## the undeclared-dep check runs separately and produces a more
+  ## helpful diagnostic. We don't want a missing-dep typo to also
+  ## report a spurious "no cycle found" outcome.
+  var adj = initTable[string, seq[string]]()
+  for pkg in packages:
+    adj[pkg] = @[]
+  for edge in edges:
+    if adj.hasKey(edge.fromPackage) and adj.hasKey(edge.toPackage):
+      adj[edge.fromPackage].add(edge.toPackage)
+  const White = 0
+  const Gray = 1
+  const Black = 2
+  var colour = initTable[string, int]()
+  for pkg in packages:
+    colour[pkg] = White
+  var stack: seq[string] = @[]
+  proc dfs(node: string): seq[string] =
+    colour[node] = Gray
+    stack.add(node)
+    for nxt in adj[node]:
+      if not colour.hasKey(nxt):
+        continue
+      case colour[nxt]
+      of Gray:
+        # Found a cycle; rewind stack to the first occurrence of nxt.
+        var cycle: seq[string] = @[]
+        var started = false
+        for item in stack:
+          if started or item == nxt:
+            started = true
+            cycle.add(item)
+        cycle.add(nxt)
+        return cycle
+      of White:
+        let nested = dfs(nxt)
+        if nested.len > 0:
+          return nested
+      else:
+        discard
+    discard stack.pop()
+    colour[node] = Black
+    return @[]
+  for pkg in packages:
+    if colour[pkg] == White:
+      let cycle = dfs(pkg)
+      if cycle.len > 0:
+        return cycle
+  @[]
+
+proc validateWorkspaceDeps*(edges: openArray[ManualDepEdge];
+                            declaredPackages: openArray[string]) =
+  ## Mode 3 dep-graph validation. Raises ``ValueError`` with a
+  ## human-readable diagnostic when:
+  ##
+  ##   * an edge names a ``fromPackage`` or ``toPackage`` that doesn't
+  ##     match any declared workspace package, OR
+  ##   * the resulting graph contains a cycle.
+  ##
+  ## The standard provider binary turns the ``ValueError`` into a
+  ## non-zero exit + a "repro-standard-provider:" prefixed message — see
+  ## ``apps/repro-standard-provider/repro_standard_provider.nim``.
+  for edge in edges:
+    if declaredPackages.find(edge.fromPackage) < 0:
+      raise newException(ValueError,
+        "nim convention: depends_on references undeclared package '" &
+          edge.fromPackage & "' (line " & $edge.sourceLine & ")")
+    if declaredPackages.find(edge.toPackage) < 0:
+      raise newException(ValueError,
+        "nim convention: depends_on " & edge.fromPackage &
+          ": '" & edge.toPackage &
+          "' references a package that is not declared in this workspace " &
+          "(line " & $edge.sourceLine & ")")
+  let cycle = detectDepCycle(edges, declaredPackages)
+  if cycle.len > 0:
+    raise newException(ValueError,
+      "nim convention: depends_on graph contains a cycle: " &
+        cycle.join(" -> "))
 
 proc syntheticPackage(projectRoot: string;
                       entrypoints: seq[NimEntrypoint];
@@ -1094,6 +1400,24 @@ proc nimEmitFragment(projectRoot: string;
       raise newException(ValueError,
         "nim convention: 'nim' executable not on PATH; cannot run Phase 1")
     let pkg = syntheticPackage(projectRoot, entrypoints, buildableLibraries)
+    # Mode 3 ``depends_on`` resolution: collect every workspace dep edge
+    # (manual + scanner-emitted) and validate them against the set of
+    # packages the project file actually declares. Validation rejects
+    # cycles and references to undeclared packages BEFORE any expensive
+    # ``nim c`` invocation runs — the diagnostic is immediate, and
+    # nothing in ``.repro/build`` is touched on failure.
+    let rawDepEdges = collectWorkspaceDepEdges(projectRoot, source)
+    let depEdges = dedupDepEdges(rawDepEdges)
+    var declaredPackages: seq[string] = @[]
+    for entry in entrypoints:
+      if entry.package.len > 0 and
+          declaredPackages.find(entry.package) < 0:
+        declaredPackages.add(entry.package)
+    for lib in buildableLibraries:
+      if lib.package.len > 0 and
+          declaredPackages.find(lib.package) < 0:
+        declaredPackages.add(lib.package)
+    validateWorkspaceDeps(depEdges, declaredPackages)
     # M22: discover ``tests/test_*.nim`` once at the top so registerAll
     # only walks the filesystem a single time per emit.
     let testFiles = collectNimTestFiles(projectRoot)
@@ -1101,13 +1425,13 @@ proc nimEmitFragment(projectRoot: string;
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]
       var testActions: seq[BuildActionDef] = @[]
-      for entry in entrypoints:
-        let triple = emitForEntrypoint(projectRoot, nimExe, entry)
-        allActions.add(triple.phase1)
-        for a in triple.phase2:
-          allActions.add(a)
-        allActions.add(triple.phase3)
-        discard target(entry.name, allActions)
+      # Mode 3 dep wiring: emit LIBRARIES first so their link-action ids
+      # + archive output paths are known by the time we reach each
+      # executable's Phase 3. Index libraries by owning package so
+      # ``depends_on hello: greet`` can resolve to "every library member
+      # of the greet package". A package may declare multiple libraries
+      # — the executable's link gets all of them on its argv.
+      var packageLibraries = initTable[string, seq[NimWorkspaceLibrary]]()
       for lib in buildableLibraries:
         let bundle = emitForLibrary(projectRoot, nimExe, lib)
         allActions.add(bundle.phase1)
@@ -1115,7 +1439,52 @@ proc nimEmitFragment(projectRoot: string;
           allActions.add(a)
         for a in bundle.phase3:
           allActions.add(a)
+        if lib.package.len > 0:
+          # Pick the first Phase 3 action's output as the canonical
+          # library artefact for the dep-wiring layer. Static
+          # libraries always emit a single ``ar`` action; ``both``
+          # libraries emit static + shared and we prefer the static
+          # archive for link-line wiring (mirrors the executable
+          # default ``-Bstatic`` behaviour). Shared-only libraries
+          # use their ``.so``/``.dll``/``.dylib`` output.
+          if bundle.phase3.len > 0:
+            let chosen = bundle.phase3[0]
+            if chosen.outputs.len > 0:
+              let entry = NimWorkspaceLibrary(
+                libraryName: lib.name,
+                package: lib.package,
+                linkActionId: chosen.id,
+                outputPath: chosen.outputs[0],
+                kind: lib.kind)
+              if not packageLibraries.hasKey(lib.package):
+                packageLibraries[lib.package] = @[]
+              packageLibraries[lib.package].add(entry)
         discard target(lib.name, allActions)
+      # Resolve dep edges for each entrypoint: the set of libraries
+      # imported by the executable's package, in declaration order.
+      for entry in entrypoints:
+        var entryDeps: seq[NimWorkspaceLibrary] = @[]
+        if entry.package.len > 0:
+          for edge in depEdges:
+            if edge.fromPackage != entry.package:
+              continue
+            if not packageLibraries.hasKey(edge.toPackage):
+              # The validation pass above rejects undeclared packages,
+              # but a dep on a package that's declared yet ships no
+              # library member (executable-only package) is legal — we
+              # still sequence build ordering on it once executable-
+              # producing deps land. Today it's a silent no-op for the
+              # link-line because there's nothing to link against.
+              continue
+            for lib in packageLibraries[edge.toPackage]:
+              entryDeps.add(lib)
+        let triple = emitForEntrypoint(projectRoot, nimExe, entry,
+          entryDeps)
+        allActions.add(triple.phase1)
+        for a in triple.phase2:
+          allActions.add(a)
+        allActions.add(triple.phase3)
+        discard target(entry.name, allActions)
       if entrypoints.len > 0 or buildableLibraries.len > 0:
         defaultTarget(target("default", allActions))
       # M22 test-target emission. Each ``tests/test_*.nim`` file becomes
