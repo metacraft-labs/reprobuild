@@ -316,13 +316,17 @@ $checkSizeResult = Invoke-Fixture `
 # configure step failed at ``check_type_size``; after M19 the configure
 # passes and ``HAVE_OFF64_T`` lands in CMakeCache.
 #
-# Build of zlib's SHARED target itself currently trips an orthogonal
-# Reprobuild bug (``add_custom_command`` outputs like MinGW's
-# ``zlib1rc.obj`` get config-prefixed in the link line but written without
-# the prefix in the binary dir — Ninja Multi-Config does not show this
-# bug), so the build step is left optional. The M19 deliverable is the
-# configure-side COPY_FILE fix; the build-side custom-command path bug is
-# tracked separately.
+# M27 (closed): the ``add_custom_command`` config-prefix bug that blocked
+# zlib's MinGW ``zlib1rc.obj`` resource-compile path is fixed —
+# ``cmGlobalReprobuildGenerator.cxx`` no longer config-prefixes
+# custom-command OUTPUT/BYPRODUCTS or the link-line external-object
+# input, so the file the COMMAND writes and the path the link line
+# references are now in agreement. Build of zlib's SHARED target still
+# trips a separate, orthogonal bug: the import library ``libzlib.dll.a``
+# is written at ``<config>/libzlib.dll.a`` but the link-line text
+# computed by ``cmComputeLinkInformation`` references it unprefixed.
+# That second bug is tracked under M27 Outstanding Tasks; it is not in
+# scope for the M19/M27 deliverable.
 $zlibSrc = Join-Path $repoRoot 'build\cmake-generator-competitiveness\projects\zlib\direct\source'
 $zlibResult = $null
 if (Test-Path -LiteralPath (Join-Path $zlibSrc 'CMakeLists.txt')) {
