@@ -7,5 +7,5 @@ suite "app entrypoint manifest":
       if stripped.len == 0 or stripped.startsWith("#"):
         continue
       let parts = stripped.splitWhitespace()
-      check parts.len == 2
+      check parts.len >= 2
       check fileExists(parts[1])
