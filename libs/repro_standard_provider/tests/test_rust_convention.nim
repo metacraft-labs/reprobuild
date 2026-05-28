@@ -1,4 +1,4 @@
-## M4 + M13 verification: Rust language convention.
+## M4 + M13 + M22 verification: Rust language convention.
 ##
 ## Tests against the in-tree fixture at
 ## ``reprobuild-examples/rust/binary/`` for the positive recognise path
@@ -65,6 +65,8 @@ const
   MetacraftRoot = ReprobuildRoot.parentDir
   FixtureRoot = MetacraftRoot / "reprobuild-examples" / "rust" / "binary"
   FixtureCrateName = "rust_binary_example"
+  TestFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "rust" / "library-with-tests"
 
 proc dummyRequest(projectRoot: string): ProviderGraphRequest =
   ProviderGraphRequest(
@@ -385,3 +387,96 @@ suite "rust convention M4":
           sawRmetaInput = true
           break
       check sawRmetaInput
+
+  # --- M22: integration-test discovery -------------------------------------
+
+  test "emitFragment M22: library-with-tests emits a non-default test target":
+    # The library-with-tests fixture ships exactly one
+    # ``tests/test_greet.rs`` integration test. The M22 surface asks
+    # cargo metadata to surface the ``kind=["test"]`` target, then emits
+    # a (compile, run, stamp) action triple per test under a
+    # non-default ``test`` target. The default target stays bin/lib-only.
+    if not rustToolchainAvailable():
+      skip()
+    elif not fileExists(TestFixtureRoot / "reprobuild.nim"):
+      checkpoint "fixture missing — looked at " & TestFixtureRoot
+      fail()
+    else:
+      let conv = rust_convention.rustConvention()
+      let request = dummyRequest(TestFixtureRoot)
+      require conv.recognize(TestFixtureRoot, request)
+      let fragment = conv.emitFragment(TestFixtureRoot, request)
+
+      var compileActions: seq[BuildActionDef] = @[]
+      var runActions: seq[BuildActionDef] = @[]
+      var stampActions: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("rustc-test-compile-"):
+          compileActions.add(action)
+        elif action.id.startsWith("rustc-test-run-"):
+          runActions.add(action)
+        elif action.id.startsWith("rustc-test-stamp-"):
+          stampActions.add(action)
+
+      check compileActions.len == 1
+      check runActions.len == 1
+      check stampActions.len == 1
+
+      let compileAction = compileActions[0]
+      let compileArgv = inlineArgvOf(compileAction)
+      check "--test" in compileArgv
+      check "--crate-name" in compileArgv
+      check "--edition" in compileArgv
+      check "--emit=link" in compileArgv
+      # The lib's rlib must be threaded as ``--extern <name>=<path>`` so
+      # the test can ``use rust_library_with_tests_example::greet``.
+      var sawExtern = false
+      for arg in compileArgv:
+        if arg.startsWith("rust_library_with_tests_example=") and
+            arg.endsWith(".rlib"):
+          sawExtern = true
+          break
+      check sawExtern
+      check compileArgv[^1].endsWith("test_greet.rs")
+      # Output is the test harness binary under ``<scratch>/<crate>/tests/``.
+      check compileAction.outputs.len == 1
+      let binaryOut = compileAction.outputs[0].replace('\\', '/')
+      check "/tests/test_greet" in binaryOut
+      when defined(windows):
+        check binaryOut.endsWith(".exe")
+
+      # Run action: depends on the compile, argv is just the binary.
+      let runAction = runActions[0]
+      check compileAction.id in runAction.deps
+      let runArgv = inlineArgvOf(runAction)
+      check runArgv.len == 1
+      check runArgv[0] == compileAction.outputs[0]
+
+      # Stamp action: depends on the run; output ends in .stamp.
+      let stampAction = stampActions[0]
+      check runAction.id in stampAction.deps
+      check stampAction.outputs.len == 1
+      let stampOut = stampAction.outputs[0].replace('\\', '/')
+      check stampOut.endsWith("test_greet.stamp")
+      check "/tests/" in stampOut
+
+  test "emitFragment M22: rust/binary has no test actions":
+    # Inverse cohort: the rust/binary fixture has no ``tests/`` directory
+    # so the convention must not emit any ``rustc-test-*`` actions.
+    if not rustToolchainAvailable():
+      skip()
+    else:
+      let conv = rust_convention.rustConvention()
+      let request = dummyRequest(FixtureRoot)
+      require conv.recognize(FixtureRoot, request)
+      let fragment = conv.emitFragment(FixtureRoot, request)
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        check not action.id.startsWith("rustc-test-compile-")
+        check not action.id.startsWith("rustc-test-run-")
+        check not action.id.startsWith("rustc-test-stamp-")

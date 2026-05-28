@@ -49,6 +49,18 @@
 ## action cache fingerprints the work and skips a re-run when nothing has
 ## changed.
 ##
+## **M22 test discovery**: when a recognised project ships
+## ``tests/test_*.nim`` files, the convention also emits a per-test
+## ``nim c -r`` action under a non-default ``test`` target. Each test
+## file becomes one verification action that compiles AND runs the
+## test; success is signalled by a companion ``fs.stamp`` writing a
+## ``<scratch>/tests/<name>.stamp`` file. The stamp gives the engine
+## something to declare as the test's output (so a re-run of
+## ``repro build .#test`` becomes a no-op when sources are unchanged)
+## without forcing the convention to mutate the test action's argv into
+## a multi-step shell pipeline. ``repro build .#test`` builds the test
+## target; ``repro build .#default`` stays library/executable-only.
+##
 ## **Caveats**:
 ##   * Requires ``nim`` on ``PATH`` at convention-emit time (the same
 ##     condition Phase 1 needs at build time). When ``nim`` is missing,
@@ -906,6 +918,101 @@ proc collectEntrypoints(projectRoot, source: string): seq[NimEntrypoint] =
     if fileExists(extendedPath(path)):
       result.add(NimEntrypoint(name: name, sourceFile: path))
 
+proc collectNimTestFiles(projectRoot: string): seq[string] =
+  ## M22: walk ``<projectRoot>/tests/`` for files named ``test_*.nim``.
+  ## Returns a deterministically-sorted list of absolute paths so the
+  ## per-test action ids (and therefore the engine's action-cache
+  ## fingerprint set) are stable across emits. The convention skips
+  ## ``test_*.nim`` files under ``node_modules/`` / ``.repro/`` — neither
+  ## should exist in a Nim project but the filter is defensive in case
+  ## a future fixture grows a vendor dir.
+  let testsDir = projectRoot / "tests"
+  if not dirExists(extendedPath(testsDir)):
+    return @[]
+  for entry in walkDirRec(testsDir):
+    let normalised = entry.replace('\\', '/')
+    if "/.repro/" in normalised:
+      continue
+    let basename = extractFilename(entry)
+    if not basename.toLowerAscii.endsWith(".nim"):
+      continue
+    if not basename.toLowerAscii.startsWith("test_"):
+      continue
+    result.add(entry)
+  result.sort(system.cmp[string])
+
+proc testStampPathFor(projectRoot, testStem: string): string =
+  ## M22: per-test stamp file under ``<scratch>/tests/<stem>.stamp``.
+  ## The stem is the test file's basename without the ``.nim`` suffix —
+  ## matches Nim's own convention for naming compiled artefacts.
+  projectRoot / ScratchDirName / "tests" / (testStem & ".stamp")
+
+proc nimTestStem(testFile: string): string =
+  ## Map ``tests/test_greet.nim`` to ``test_greet``. Used as the action
+  ## id suffix and the stamp file basename.
+  var name = extractFilename(testFile)
+  if name.toLowerAscii.endsWith(".nim"):
+    name = name[0 ..< name.len - len(".nim")]
+  name
+
+proc emitTestAction(projectRoot, nimExe, testFile: string;
+                    nimSources: seq[string]):
+                      tuple[run: BuildActionDef; stamp: BuildActionDef] =
+  ## M22: emit the per-test ``nim c -r`` action + a chained
+  ## ``fs.stamp`` companion. The run action compiles AND executes the
+  ## test (``-r`` is "run after compile"); ``--hints:off --warnings:off``
+  ## keep the captured output focused on test failures; ``--path:src``
+  ## adds the project's library source root to the import search path
+  ## so the test can ``import <library_module>`` without a ``..``
+  ## relative path.
+  ##
+  ## The action declares the test file + every ``.nim`` under ``src/``
+  ## as inputs (same set used by the Phase 1 library/executable actions)
+  ## so a library-source edit invalidates the test action. Outputs are
+  ## empty — the test produces a temporary binary that's discarded after
+  ## ``-r`` runs it. ``automaticMonitorPolicy()`` lets the FS-snoop pick
+  ## up any transitive source reads the eager input list missed.
+  ##
+  ## The chained ``fs.stamp`` writes ``<scratch>/tests/<stem>.stamp``
+  ## after the run succeeds. The stamp file gives the engine a declared
+  ## output to track so ``repro build .#test`` becomes a no-op on a
+  ## re-run when nothing has changed. The stamp's text is the test
+  ## stem — purely diagnostic; the engine only cares about file
+  ## existence + mtime.
+  let stem = nimTestStem(testFile)
+  let argv = @[
+    nimExe,
+    "c",
+    "-r",
+    "--skipParentCfg",
+    "--skipUserCfg",
+    "--hints:off",
+    "--warnings:off",
+    "--path:" & (projectRoot / "src"),
+    testFile,
+  ]
+  var inputs: seq[string] = @[testFile]
+  for src in nimSources:
+    inputs.add(src)
+  let runAction = buildAction(
+    id = actionIdFor("nim-test-run", stem, "run"),
+    call = inlineExecCall(argv, projectRoot),
+    inputs = inputs,
+    outputs = @[],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "nim.c.test-run")
+  let stampPath = testStampPathFor(projectRoot, stem)
+  createDir(extendedPath(parentDir(stampPath)))
+  let stampAction = fs.stamp(
+    output = stampPath,
+    title = "nim-test:" & stem,
+    entries = @[stem],
+    actionId = actionIdFor("nim-test-stamp", stem, "stamp"),
+    deps = @[runAction.id],
+    commandStatsId = "nim.c.test-stamp")
+  (runAction, stampAction)
+
 proc collectLibraries(projectRoot, source: string): seq[NimLibraryTarget] =
   for lib in extractLibraries(source):
     let path = projectRoot / "src" / (lib.name & ".nim")
@@ -972,9 +1079,13 @@ proc nimEmitFragment(projectRoot: string;
       raise newException(ValueError,
         "nim convention: 'nim' executable not on PATH; cannot run Phase 1")
     let pkg = syntheticPackage(projectRoot, entrypoints, buildableLibraries)
+    # M22: discover ``tests/test_*.nim`` once at the top so registerAll
+    # only walks the filesystem a single time per emit.
+    let testFiles = collectNimTestFiles(projectRoot)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]
+      var testActions: seq[BuildActionDef] = @[]
       for entry in entrypoints:
         let triple = emitForEntrypoint(projectRoot, nimExe, entry)
         allActions.add(triple.phase1)
@@ -992,6 +1103,20 @@ proc nimEmitFragment(projectRoot: string;
         discard target(lib.name, allActions)
       if entrypoints.len > 0 or buildableLibraries.len > 0:
         defaultTarget(target("default", allActions))
+      # M22 test-target emission. Each ``tests/test_*.nim`` file becomes
+      # a (nim c -r, fs.stamp) action pair. The test target is non-
+      # default so ``repro build .#default`` doesn't run the tests; the
+      # operator opts in via ``repro build .#test``. When no test files
+      # are present the target isn't emitted at all (current behaviour
+      # for nim/binary, nim/multi-binary, nim/library stays unchanged).
+      if testFiles.len > 0:
+        let nimSources = collectNimSources(projectRoot / "src")
+        for testFile in testFiles:
+          let pair = emitTestAction(projectRoot, nimExe, testFile,
+            nimSources)
+          testActions.add(pair.run)
+          testActions.add(pair.stamp)
+        discard target("test", testActions)
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)
 

@@ -149,6 +149,15 @@ type
     goFiles: seq[string]
       ## Source ``.go`` files (excludes ``_test.go``). Listed by name only
       ## relative to ``dir`` per ``go list``'s output.
+    testGoFiles: seq[string]
+      ## M22: ``_test.go`` files INSIDE the package's own ``package``
+      ## declaration (white-box tests). Reported by ``go list``'s
+      ## ``TestGoFiles`` field. Listed by name only relative to ``dir``.
+    xTestGoFiles: seq[string]
+      ## M22: ``_test.go`` files under ``package <name>_test`` (black-
+      ## box tests) — same directory, different package declaration.
+      ## Reported by ``go list``'s ``XTestGoFiles`` field. Listed by name
+      ## only relative to ``dir``.
     imports: seq[string]
       ## Direct ``import "..."`` strings. Used to derive the per-package
       ## ``importcfg``.
@@ -486,6 +495,12 @@ proc parseGoListExportOutput(output: string): seq[GoPackage] =
     if "GoFiles" in node and node["GoFiles"].kind == JArray:
       for item in node["GoFiles"]:
         pkg.goFiles.add(item.getStr())
+    if "TestGoFiles" in node and node["TestGoFiles"].kind == JArray:
+      for item in node["TestGoFiles"]:
+        pkg.testGoFiles.add(item.getStr())
+    if "XTestGoFiles" in node and node["XTestGoFiles"].kind == JArray:
+      for item in node["XTestGoFiles"]:
+        pkg.xTestGoFiles.add(item.getStr())
     if "Imports" in node and node["Imports"].kind == JArray:
       for item in node["Imports"]:
         pkg.imports.add(item.getStr())
@@ -950,6 +965,92 @@ proc collectMainPackages(packages: seq[GoPackage]): seq[GoPackage] =
     if pkg.name == "main":
       result.add(pkg)
 
+proc packageHasTests(pkg: GoPackage): bool =
+  ## M22: true when the package ships at least one ``_test.go`` file
+  ## (either white-box ``TestGoFiles`` or black-box ``XTestGoFiles``).
+  ## We don't recurse — ``go list`` already enumerates every package in
+  ## the module, so the caller iterates over packages directly.
+  pkg.testGoFiles.len > 0 or pkg.xTestGoFiles.len > 0
+
+proc testStampPathFor(projectRoot, projectEntry, importPath: string):
+    string =
+  ## M22: per-package test-run stamp under
+  ## ``<scratch>/<projectEntry>/tests/<sanitized>.stamp``. Mirrors the
+  ## shape of the per-package compile archive's path; one stamp per
+  ## test-bearing package keeps the cache invalidation granular without
+  ## fragmenting the scratch tree.
+  scratchPathFor(projectRoot, projectEntry) / "tests" /
+    (sanitizeImportPath(importPath) & ".stamp")
+
+proc collectTestSources(pkg: GoPackage): seq[string] =
+  ## Absolute paths of every ``_test.go`` file in the package. Used as
+  ## inputs of the ``go test`` action so a test-source edit invalidates
+  ## the action.
+  for relative in pkg.testGoFiles:
+    result.add(pkg.dir / relative)
+  for relative in pkg.xTestGoFiles:
+    result.add(pkg.dir / relative)
+  result.sort(system.cmp[string])
+
+proc emitTestAction(projectRoot, projectEntry, goExe: string;
+                    pkg: GoPackage;
+                    nonStdlibArchives: seq[string]):
+                      tuple[run: BuildActionDef; stamp: BuildActionDef] =
+  ## M22: emit a single ``go test -count=1 <importPath>`` action per
+  ## test-bearing package, paired with an ``fs.stamp`` companion that
+  ## marks success.
+  ##
+  ## Why ``-count=1``: by default ``go test`` caches results across
+  ## invocations under ``$GOCACHE``. ``-count=1`` is the official knob
+  ## that disables the cache without invalidating it (vs ``go clean
+  ## -testcache``). Reprobuild's own action cache is the source of truth
+  ## for "should we re-run?"; we want every invocation that does fire
+  ## to actually re-run the binary.
+  ##
+  ## Inputs include the package's regular ``.go`` files + its
+  ## ``_test.go`` files + every non-stdlib archive in the module
+  ## (those are the compile outputs the test could possibly link
+  ## against). Stdlib archives live in ``GOCACHE`` and are not declared
+  ## inputs — same trade-off the per-package compile action makes.
+  ##
+  ## ``automaticMonitorPolicy()`` covers transitive package reads the
+  ## eager input enumeration missed (e.g. a test that uses ``runtime``
+  ## reflection to load extra files).
+  let sourceFiles = collectGoSources(pkg)
+  let testFiles = collectTestSources(pkg)
+  let argv = @[
+    goExe,
+    "test",
+    "-count=1",
+    pkg.importPath,
+  ]
+  var inputs: seq[string] = @[]
+  for src in sourceFiles:
+    inputs.add(src)
+  for src in testFiles:
+    inputs.add(src)
+  for archive in nonStdlibArchives:
+    inputs.add(archive)
+  let runAction = buildAction(
+    id = actionIdFor("go-test-run", projectEntry, pkg.importPath),
+    call = inlineExecCall(argv, projectRoot),
+    inputs = inputs,
+    outputs = @[],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "go.test-run")
+  let stampPath =
+    testStampPathFor(projectRoot, projectEntry, pkg.importPath)
+  createDir(extendedPath(parentDir(stampPath)))
+  let stampAction = fs.stamp(
+    output = stampPath,
+    title = "go-test:" & pkg.importPath,
+    entries = @[pkg.importPath],
+    actionId = actionIdFor("go-test-stamp", projectEntry, pkg.importPath),
+    deps = @[runAction.id],
+    commandStatsId = "go.test-stamp")
+  (runAction, stampAction)
+
 proc goEmitFragment(projectRoot: string;
                     request: ProviderGraphRequest):
                       GraphFragment {.gcsafe.} =
@@ -1049,6 +1150,29 @@ proc goEmitFragment(projectRoot: string;
       # the single-binary case.
       discard target(projectEntry, allActions)
       defaultTarget(target("default", allActions))
+
+      # M22 test discovery. For each non-stdlib package that ships
+      # ``_test.go`` files (``TestGoFiles`` or ``XTestGoFiles`` non-empty
+      # in ``go list -json``), emit one ``go test -count=1 <importPath>``
+      # action under a non-default ``test`` target.
+      var testActions: seq[BuildActionDef] = @[]
+      # Pre-collect the module's non-stdlib archive paths so each test
+      # action's input list can declare them — captures the edge that
+      # ``go test`` may link against any of these.
+      var nonStdlibArchives: seq[string] = @[]
+      for ca in compileActions:
+        nonStdlibArchives.add(ca.archivePath)
+      for srcPkg in packages:
+        if srcPkg.standard:
+          continue
+        if not packageHasTests(srcPkg):
+          continue
+        let pair = emitTestAction(projectRoot, projectEntry, goExe,
+          srcPkg, nonStdlibArchives)
+        testActions.add(pair.run)
+        testActions.add(pair.stamp)
+      if testActions.len > 0:
+        discard target("test", testActions)
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)
 

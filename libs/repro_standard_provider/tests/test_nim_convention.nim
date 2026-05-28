@@ -1,10 +1,16 @@
-## M3 verification: Nim language convention.
+## M3 + M22 verification: Nim language convention.
 ##
 ## Tests against the in-tree fixture at
 ## ``reprobuild-examples/nim/binary/`` for the positive path. For the
 ## negative cases (no executable, wrong language, missing source file)
 ## we materialise tiny scratch projects under the test's temp directory
 ## so each case is hermetic.
+##
+## **M22 additions**: emit-fragment coverage against
+## ``reprobuild-examples/nim/library-with-tests/`` asserts that the
+## convention emits a non-default ``test`` target with one ``nim c -r``
+## verification action per discovered ``tests/test_*.nim`` file, each
+## paired with a chained ``fs.stamp`` companion.
 ##
 ## Coverage:
 ##   * ``recognize`` returns true for the canonical fixture
@@ -43,6 +49,8 @@ const
   MetacraftRoot = ReprobuildRoot.parentDir
   FixtureRoot = MetacraftRoot / "reprobuild-examples" / "nim" / "binary"
   FixtureEntry = "nim_binary_example"
+  TestFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "nim" / "library-with-tests"
 
 proc dummyRequest(projectRoot: string): ProviderGraphRequest =
   ProviderGraphRequest(
@@ -199,3 +207,77 @@ suite "nim convention M3":
       check outputBinary.endsWith(FixtureEntry & ".exe")
     else:
       check outputBinary.endsWith(FixtureEntry)
+
+  # --- M22: test discovery -------------------------------------------------
+
+  test "emitFragment M22: library-with-tests emits a non-default test target":
+    # The library-with-tests fixture ships exactly one
+    # ``tests/test_greet.nim`` file. The Nim convention's M22 surface
+    # walks ``tests/`` for ``test_*.nim`` files and emits a non-default
+    # ``test`` target with a (nim c -r, fs.stamp) pair per file. The
+    # default target still builds the library only — tests are opt-in
+    # via ``repro build .#test``.
+    let conv = nim_convention.nimConvention()
+    if not fileExists(TestFixtureRoot / "reprobuild.nim"):
+      checkpoint "fixture missing — looked at " & TestFixtureRoot
+      fail()
+    let request = dummyRequest(TestFixtureRoot)
+    require conv.recognize(TestFixtureRoot, request)
+    let fragment = conv.emitFragment(TestFixtureRoot, request)
+
+    var testRunActions: seq[BuildActionDef] = @[]
+    var testStampActions: seq[BuildActionDef] = @[]
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.id.startsWith("nim-test-run-"):
+        testRunActions.add(action)
+      elif action.id.startsWith("nim-test-stamp-"):
+        testStampActions.add(action)
+
+    check testRunActions.len == 1
+    check testStampActions.len == 1
+    let runAction = testRunActions[0]
+    let runArgv = inlineArgvOf(runAction)
+    # The run action's argv must invoke nim with ``c -r`` and the test
+    # file as the final positional. ``--path:src`` exposes the library
+    # source root to the test's imports.
+    check runArgv.len >= 4
+    check runArgv[1] == "c"
+    check "-r" in runArgv
+    check "--hints:off" in runArgv
+    check "--warnings:off" in runArgv
+    var sawPathFlag = false
+    for arg in runArgv:
+      if arg.startsWith("--path:") and arg.endsWith("src"):
+        sawPathFlag = true
+        break
+    check sawPathFlag
+    check runArgv[^1].endsWith("test_greet.nim")
+    check runAction.outputs.len == 0
+    check runAction.pool == "compile"
+
+    # Stamp action: depends on the run; its output is the convention's
+    # canonical stamp path under ``<scratch>/tests/``.
+    let stampAction = testStampActions[0]
+    check runAction.id in stampAction.deps
+    check stampAction.outputs.len == 1
+    let stampPath = stampAction.outputs[0].replace('\\', '/')
+    check stampPath.endsWith("/tests/test_greet.stamp")
+    check ".repro/build" in stampPath
+
+  test "emitFragment M22: nim/binary has no test actions":
+    # Inverse cohort: the nim/binary fixture has no ``tests/`` directory
+    # so the convention must not emit a ``test`` target nor any
+    # ``nim-test-*`` actions.
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(FixtureRoot)
+    require conv.recognize(FixtureRoot, request)
+    let fragment = conv.emitFragment(FixtureRoot, request)
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      check not action.id.startsWith("nim-test-run-")
+      check not action.id.startsWith("nim-test-stamp-")

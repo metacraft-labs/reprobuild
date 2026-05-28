@@ -22,12 +22,12 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set, post-M20):
+# Expected to PASS (the known-working set, post-M22):
 #   nim/binary, nim/multi-binary,
 #   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
 #   rust/library, rust/library-with-tests, rust/workspace,
-#   go/binary, go/library, go/multi-binary,
+#   go/binary, go/library, go/library-with-tests, go/multi-binary,
 #   python/library-pure,
 #   python/console-script    (M20: byte-compile + sdist + runnable shim),
 #   javascript-typescript/typescript-library,
@@ -35,6 +35,15 @@
 #   javascript-typescript/node-server,
 #   c-cpp-make/binary, c-cpp-make/library-static,
 #   c-cpp-autotools/hello-binary (when autotools toolchain available)
+#
+# M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
+# in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
+# go/library-with-tests). Each successful #test invocation records its own
+# PASS row keyed ``<fixture>#test``; failures surface as FAIL rows. The
+# typescript-cli #test path is covered by the dedicated
+# validate-standard-provider-typescript-cli-tests.ps1 script (not by this
+# harness) because that path requires an npm install which is expensive
+# enough that re-paying it per harness run would dominate wall time.
 #
 # Expected to KNOWN-FAIL: (none — M14 graduated go/library + go/multi-binary;
 #   M15 graduated python/library-pure + python/console-script;
@@ -84,7 +93,7 @@ if (Test-Path -LiteralPath $harnessScratch) {
 New-Item -ItemType Directory -Force -Path $logsDir     | Out-Null
 New-Item -ItemType Directory -Force -Path $statsRootDir | Out-Null
 
-# --- the canonical list of 20 populated examples ----------------------------
+# --- the canonical list of 21 populated examples ----------------------------
 # Mirrors libs/repro_standard_provider/tests/test_examples_layout.nim verbatim;
 # changing the canonical list there must trigger a matching update here.
 $PopulatedExamples = @(
@@ -99,6 +108,7 @@ $PopulatedExamples = @(
   'rust/binary-with-build-rs',
   'go/binary',
   'go/library',
+  'go/library-with-tests',
   'go/multi-binary',
   'python/library-pure',
   'python/console-script',
@@ -108,6 +118,29 @@ $PopulatedExamples = @(
   'c-cpp-make/binary',
   'c-cpp-make/library-static',
   'c-cpp-autotools/hello-binary'
+)
+
+# --- M22 test-target probes ------------------------------------------------
+# Examples that ship test files AND that the M22 conventions surface as a
+# non-default ``test`` target. After the default build succeeds, the harness
+# additionally invokes ``repro build <fixture>#test`` and asserts exit 0
+# plus the presence of at least one ``<scratch>/.../tests/*.stamp`` file
+# (the convention's load-bearing signal that the test action actually fired).
+# Keep this list in sync with the per-language conventions:
+#   * Nim   : conventions/nim.nim         (emitTestAction)
+#   * Rust  : conventions/rust.nim        (emitForTestTarget)
+#   * Go    : conventions/go.nim          (emitTestAction)
+#   * JS/TS : conventions/javascript_typescript.nim (emitTestRunnerAction)
+# A typescript-cli probe is intentionally NOT added here because that
+# fixture's ``#test`` target requires a populated ``node_modules/`` (M21
+# A1 ``npm ci`` running before A7 test runner). The dedicated
+# validate-standard-provider-typescript-cli-tests.ps1 script covers that
+# path end-to-end and keeps the harness from re-paying the ~5-30s npm
+# install cost per harness run.
+$TestTargetProbes = @(
+  'nim/library-with-tests',
+  'rust/library-with-tests',
+  'go/library-with-tests'
 )
 
 function Get-Language([string]$rel) {
@@ -501,6 +534,22 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         Greeting = $null
       })
     }
+    'go/library-with-tests' {
+      # M22: library-with-tests fixture. Default target builds the
+      # package's ``.a`` archive (same shape as go/library); the
+      # ``#test`` target additionally runs ``go test -count=1`` per
+      # test-bearing package. The harness's $TestTargetProbes loop
+      # covers the #test invocation separately; the default-target
+      # check here only verifies the archive is produced.
+      $entry = 'go_library_with_tests_example'
+      return @(@{
+        PathGlob = @{
+          Dir    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $entry 'pkg'))
+          Filter = '*.a'
+        }
+        Greeting = $null
+      })
+    }
     'python/library-pure' {
       # M15: pure-Python library. Mode A's PEP 517 ``build_wheel`` hook
       # produces ``<dist_name>-<version>-py3-none-any.whl`` under
@@ -827,6 +876,56 @@ foreach ($rel in $PopulatedExamples) {
     if ($allOk) {
       Write-Host "    PASS"
       Add-Result 'PASS' $rel ''
+      # --- M22 test-target probe ---------------------------------------
+      # When the fixture is in $TestTargetProbes, additionally invoke
+      # ``repro build <fixture>#test`` and assert exit 0 + at least one
+      # ``*.stamp`` file under the convention's ``tests/`` scratch dir.
+      # The probe is independent of the PASS/FAIL accounting above — a
+      # test-target failure surfaces as its own row keyed on
+      # ``<rel>#test`` so the operator sees both the default build's
+      # PASS and the test target's outcome.
+      if ($TestTargetProbes -contains $rel) {
+        $testStdout = Join-Path $logsDir ("$exampleName-test.stdout.txt")
+        $testStderr = Join-Path $logsDir ("$exampleName-test.stderr.txt")
+        $testReproTarget = "$fixtureDir#test"
+        Write-Host "    [M22] invoking repro build $testReproTarget"
+        try {
+          $env:REPRO_STATS_DIR = $statsDir
+          $tProc = Start-Process -FilePath $reproExe -ArgumentList @(
+              'build', $testReproTarget,
+              '--tool-provisioning=path',
+              '--log=summary'
+            ) -NoNewWindow -PassThru -Wait `
+            -WorkingDirectory $repoRoot `
+            -RedirectStandardOutput $testStdout `
+            -RedirectStandardError  $testStderr
+          $tExit = $tProc.ExitCode
+        } finally {
+          Remove-Item Env:REPRO_STATS_DIR -ErrorAction SilentlyContinue
+        }
+        Write-Host "      [M22] #test exit=$tExit"
+        if ($tExit -ne 0) {
+          $tStderrText = if (Test-Path $testStderr) { Get-Content -LiteralPath $testStderr -Raw } else { '' }
+          $tFirstErr = ($tStderrText -split "`n" | Where-Object { $_ -ne '' } | Select-Object -First 1)
+          Add-Result 'FAIL' "$rel#test" "exit=$tExit; stderr: $tFirstErr"
+        } else {
+          # Locate the convention's tests scratch dir. Each language
+          # owns a slightly different prefix — collapse to a recursive
+          # glob under ``.repro/build`` for ``*.stamp`` so the probe
+          # stays convention-agnostic.
+          $stampRoot = Join-Path $fixtureDir '.repro\build'
+          $stamps = @()
+          if (Test-Path -LiteralPath $stampRoot) {
+            $stamps = @(Get-ChildItem -LiteralPath $stampRoot -Recurse -Filter '*.stamp' -ErrorAction SilentlyContinue)
+          }
+          if ($stamps.Count -lt 1) {
+            Add-Result 'FAIL' "$rel#test" "no *.stamp files under $stampRoot"
+          } else {
+            Write-Host "      [M22] PASS: $($stamps.Count) stamp(s) produced"
+            Add-Result 'PASS' "$rel#test" ''
+          }
+        }
+      }
     }
     continue
   }

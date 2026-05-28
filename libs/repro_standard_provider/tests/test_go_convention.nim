@@ -1,4 +1,4 @@
-## M5 + M14 verification: Go language convention.
+## M5 + M14 + M22 verification: Go language convention.
 ##
 ## Tests against the in-tree fixtures under ``reprobuild-examples/go/``:
 ##
@@ -66,6 +66,8 @@ const
     MetacraftRoot / "reprobuild-examples" / "go" / "multi-binary"
   LibraryFixtureRoot =
     MetacraftRoot / "reprobuild-examples" / "go" / "library"
+  LibraryWithTestsFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "go" / "library-with-tests"
 
 proc dummyRequest(projectRoot: string): ProviderGraphRequest =
   ProviderGraphRequest(
@@ -393,3 +395,88 @@ suite "go convention M5 + M14":
         if sawArchiveOutput:
           break
       check sawArchiveOutput
+
+  # --- M22: per-package test discovery -------------------------------------
+
+  test "recognize: positive — library-with-tests fixture":
+    let conv = go_convention.goConvention()
+    if not fileExists(LibraryWithTestsFixtureRoot / "reprobuild.nim"):
+      checkpoint "fixture missing — looked at " & LibraryWithTestsFixtureRoot
+      fail()
+    let request = dummyRequest(LibraryWithTestsFixtureRoot)
+    if not goToolchainAvailable():
+      check not conv.recognize(LibraryWithTestsFixtureRoot, request)
+    else:
+      check conv.recognize(LibraryWithTestsFixtureRoot, request)
+
+  test "emitFragment M22: library-with-tests emits a non-default test target":
+    # The library-with-tests fixture ships a single package with both
+    # ``greet.go`` and ``greet_test.go``. The Go convention's M22
+    # surface walks ``go list``'s ``TestGoFiles`` array and emits one
+    # ``go test -count=1 <importPath>`` action per test-bearing
+    # package, paired with an ``fs.stamp`` companion. Default target
+    # stays compile-only; tests opt in via ``repro build .#test``.
+    if not goToolchainAvailable():
+      skip()
+    else:
+      let conv = go_convention.goConvention()
+      let request = dummyRequest(LibraryWithTestsFixtureRoot)
+      require conv.recognize(LibraryWithTestsFixtureRoot, request)
+      let fragment = conv.emitFragment(LibraryWithTestsFixtureRoot, request)
+
+      var testRunActions: seq[BuildActionDef] = @[]
+      var testStampActions: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("go-test-run-"):
+          testRunActions.add(action)
+        elif action.id.startsWith("go-test-stamp-"):
+          testStampActions.add(action)
+
+      check testRunActions.len == 1
+      check testStampActions.len == 1
+      let runAction = testRunActions[0]
+      let runArgv = inlineArgvOf(runAction)
+      # ``go test -count=1 <importPath>`` — three positional args
+      # past argv[0] (the go driver). ``-count=1`` is the official knob
+      # that disables go's per-process test cache (we want reprobuild's
+      # action cache to be the source of truth).
+      check runArgv.len >= 4
+      check "test" in runArgv
+      check "-count=1" in runArgv
+      var sawImportPath = false
+      for arg in runArgv:
+        if arg == "example.com/go-library-with-tests-example":
+          sawImportPath = true
+          break
+      check sawImportPath
+      check runAction.outputs.len == 0
+      check runAction.pool == "compile"
+
+      # Stamp action: depends on the run; output ends in .stamp under
+      # the convention's ``<scratch>/<entry>/tests/`` directory.
+      let stampAction = testStampActions[0]
+      check runAction.id in stampAction.deps
+      check stampAction.outputs.len == 1
+      let stampPath = stampAction.outputs[0].replace('\\', '/')
+      check stampPath.endsWith(".stamp")
+      check "/tests/" in stampPath
+
+  test "emitFragment M22: go/library (no tests) emits no test actions":
+    # Inverse cohort: the go/library fixture has no ``*_test.go`` files
+    # so the convention must not emit any ``go-test-*`` actions.
+    if not goToolchainAvailable():
+      skip()
+    else:
+      let conv = go_convention.goConvention()
+      let request = dummyRequest(LibraryFixtureRoot)
+      require conv.recognize(LibraryFixtureRoot, request)
+      let fragment = conv.emitFragment(LibraryFixtureRoot, request)
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        check not action.id.startsWith("go-test-run-")
+        check not action.id.startsWith("go-test-stamp-")

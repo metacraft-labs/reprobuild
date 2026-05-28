@@ -33,6 +33,7 @@ const PopulatedExamples = [
   "rust/binary-with-build-rs",
   "go/binary",
   "go/library",
+  "go/library-with-tests",
   "go/multi-binary",
   "python/library-pure",
   "python/console-script",
