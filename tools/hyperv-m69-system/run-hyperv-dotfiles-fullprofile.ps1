@@ -640,6 +640,13 @@ try {
   Info "harvesting verification artifacts from VM"
   try {
     $harvestScript = {
+      # The fresh Win11 VHDX ships with ExecutionPolicy=Restricted; the
+      # scoop bootstrap set Process-scope Bypass in its own PSDirect
+      # session, but a NEW Invoke-Command session does not inherit
+      # that, so `scoop list` (which resolves via the `scoop.ps1`
+      # shim) gets ExecutionPolicy-blocked. Re-apply here so every
+      # harvest step has the same policy.
+      Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
       $diagDir = Join-Path $env:TEMP 'fullprofile-diag'
       New-Item -ItemType Directory -Force -Path $diagDir | Out-Null
       $summary = @()
@@ -701,12 +708,26 @@ try {
         S "sshd-config: ERROR $_"
       }
 
-      # 5. HKCU\Environment user PATH (home.nim env.userPath)
+      # 5. HKCU\Environment user PATH (home.nim env.userPath).
+      # The M68 env.userPath driver writes either the token form
+      # (%LOCALAPPDATA%\...) when the existing HKCU Path is
+      # REG_EXPAND_SZ, or the RESOLVED-ABSOLUTE form when the
+      # existing Path is REG_SZ. A fresh Win11 VHDX ships HKCU
+      # Path as REG_SZ (no expand-string), so on a clean VM the
+      # driver writes the resolved form. The host check below
+      # accepts EITHER form so it works against both fresh-VM and
+      # real-host states.
       try {
         $envPath = (Get-ItemProperty -Path 'HKCU:\Environment' -Name 'Path' -ErrorAction Stop).Path
         $envPath | Out-File (Join-Path $diagDir 'hkcu-env-path.txt') -Encoding utf8
-        $hasLauncher = $envPath -match [regex]::Escape('%LOCALAPPDATA%\repro\home\bin')
-        $hasGitBash  = $envPath -match [regex]::Escape('%USERPROFILE%\scoop\apps\git\current\usr\bin')
+        $launcherToken = '%LOCALAPPDATA%\repro\home\bin'
+        $launcherResolved = Join-Path $env:LOCALAPPDATA 'repro\home\bin'
+        $gitBashToken = '%USERPROFILE%\scoop\apps\git\current\usr\bin'
+        $gitBashResolved = Join-Path $env:USERPROFILE 'scoop\apps\git\current\usr\bin'
+        $hasLauncher = ($envPath -match [regex]::Escape($launcherToken)) -or
+                       ($envPath -match [regex]::Escape($launcherResolved))
+        $hasGitBash  = ($envPath -match [regex]::Escape($gitBashToken)) -or
+                       ($envPath -match [regex]::Escape($gitBashResolved))
         S "hkcu-env-path: launcherDir=$hasLauncher gitBash=$hasGitBash"
       } catch {
         "ERROR: $_" | Out-File (Join-Path $diagDir 'hkcu-env-path.txt') -Encoding utf8
