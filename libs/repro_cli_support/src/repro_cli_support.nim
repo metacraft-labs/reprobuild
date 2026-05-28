@@ -72,7 +72,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [path]\n       " &
           programName &
-      " watch [target[#name]] --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]]\n       " &
+      " watch [target[#name]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]]\n       " &
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
           programName &
@@ -2148,6 +2148,9 @@ type
     buildReportPath: string
 
   BuildCommandEventSink = proc(kind, message, payloadJson: string)
+  WatchCommandEventSink = proc(kind, message, payloadJson: string;
+                               terminal: bool; exitCode: int;
+                               watchedPaths: seq[string]; lastResult: string)
 
 proc parseBuildProgressMode(value: string): BuildProgressMode =
   case value.toLowerAscii()
@@ -8274,13 +8277,22 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
   echo "repro watch: hcr patch applied patchId=" & request.patchId
   flushStdout()
 
-proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
+proc runWatchCommand(args: openArray[string]; publicCliPath: string;
+                     forceDirect = false;
+                     eventSink: WatchCommandEventSink = nil;
+                     cancelCheck: BuildCancelCallback = nil): int =
+  let originalArgs = @args
   var target = ""
   var mode = tpmUnspecified
   var maxCycles = 0
   var debounceMs = 250
   var workRoot = ""
   var hcrConfig: HcrWatchConfig
+  var daemonMode = bdmOff
+  var daemonModeExplicit = false
+  var detach = false
+  var attachSessionId = ""
+  var stopSessionId = ""
 
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
@@ -8300,6 +8312,25 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
     elif arg.startsWith("--debounce-ms="):
       debounceMs = parsePositiveIntFlag("--debounce-ms",
         arg.split("=", maxsplit = 1)[1])
+    elif arg.startsWith("--daemon="):
+      daemonMode = parseBuildDaemonMode(arg.split("=", maxsplit = 1)[1],
+        "--daemon")
+      daemonModeExplicit = true
+    elif arg == "--daemon":
+      raise newException(ValueError,
+        "--daemon requires an inline value, for example --daemon=require")
+    elif arg == "--detach":
+      detach = true
+    elif arg.startsWith("--attach="):
+      attachSessionId = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--attach":
+      raise newException(ValueError,
+        "--attach requires an inline session id, for example --attach=watch-...")
+    elif arg.startsWith("--stop="):
+      stopSessionId = arg.split("=", maxsplit = 1)[1]
+    elif arg == "--stop":
+      raise newException(ValueError,
+        "--stop requires an inline session id, for example --stop=watch-...")
     elif arg.startsWith("--hcr-agent-socket="):
       hcrConfig.socketPath = arg.split("=", maxsplit = 1)[1]
     elif arg == "--hcr-agent-socket":
@@ -8325,6 +8356,45 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
     else:
       raise newException(ValueError, "unexpected watch argument: " & arg)
 
+  if not daemonModeExplicit and getEnv("REPRO_DAEMON", "").len > 0:
+    daemonMode = configuredBuildDaemonMode()
+
+  proc renderDaemonWatchEvent(event: UserDaemonBuildEvent) =
+    if event.message.len == 0 or event.kind == bekAccepted:
+      return
+    if event.message.startsWith("repro watch: "):
+      stdout.writeLine(event.message)
+    else:
+      stdout.writeLine("repro watch: " & event.message)
+    flushStdout()
+
+  proc runDaemonAttach(): int =
+    let config = defaultUserDaemonConfig()
+    discard startUserDaemon(publicCliPath, config)
+    let result = requestUserDaemonWatchAttach(attachSessionId, config.endpoint,
+      renderDaemonWatchEvent)
+    if result.message == "daemon-hosted watch stopped":
+      return 0
+    result.exitCode
+
+  proc runDaemonStop(): int =
+    let config = defaultUserDaemonConfig()
+    discard startUserDaemon(publicCliPath, config)
+    let result = requestUserDaemonWatchStop(stopSessionId, config.endpoint)
+    echo "repro watch: " & result.message & " session=" & result.sessionId
+    0
+
+  if attachSessionId.len > 0:
+    if daemonMode == bdmOff:
+      raise newException(ValueError,
+        "--attach requires --daemon=auto|require or REPRO_DAEMON=auto|require")
+    return runDaemonAttach()
+  if stopSessionId.len > 0:
+    if daemonMode == bdmOff:
+      raise newException(ValueError,
+        "--stop requires --daemon=auto|require or REPRO_DAEMON=auto|require")
+    return runDaemonStop()
+
   let targetWasOmitted = target.len == 0
   if targetWasOmitted:
     target = "."
@@ -8335,55 +8405,155 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string): int =
   # via ReadDirectoryChangesW in repro_cli_support/watch. Linux still
   # surfaces the deferred-backend OSError from openFilesystemWatcher.
 
-  echo "repro watch: target=" & target & " tool-provisioning=" &
-    mode.modeName & " debounceMs=" & $debounceMs &
-    (if maxCycles > 0: " maxCycles=" & $maxCycles else: " maxCycles=unbounded") &
-    (if hcrConfig.hcrWatchEnabled: " hcr=enabled" else: " hcr=disabled")
-  flushStdout()
+  proc watchRunId(): string =
+    let nowTime = getTime()
+    "watch-" & $getCurrentProcessId() & "-" & $nowTime.toUnix & "-" &
+      $nowTime.nanosecond
 
-  var hcrSession = initHcrWatchSession(hcrConfig)
-  defer:
-    hcrSession.closeHcrWatchSession()
-
-  var cycle = 0
-  while true:
-    cycle.inc
-    echo "repro watch: cycle " & $cycle & " start" &
-      (if cycle == 1: " initial" else: " rebuild")
-    flushStdout()
-    let outcome = executeBuildTarget(target, mode, publicCliPath,
-      selectDefaultAction = targetWasOmitted,
-      workRoot = workRoot)
-    echo "repro watch: cycle " & $cycle & " result exitCode=" &
-      $outcome.exitCode
-    flushStdout()
-    if outcome.exitCode != 0:
-      return outcome.exitCode
-    if hcrSession.enabled:
-      if cycle == 1:
-        hcrSession.captureHcrWatchBaseline(outcome)
-      else:
-        hcrSession.deliverHcrWatchPatch(outcome, cycle)
-    if maxCycles > 0 and cycle >= maxCycles:
-      echo "repro watch: max cycles reached"
-      flushStdout()
-      return 0
-
-    let paths = watchPathsFromReport(outcome)
-    var watcher = openFilesystemWatcher(paths)
+  proc requestProjectRoot(): string =
     try:
-      echo "repro watch: watching paths=" & $watcher.watchedPathCount
-      flushStdout()
-      let event = watcher.waitForEvent()
-      echo "repro watch: event seen path=" & event.path &
-        " detail=" & event.detail
-      flushStdout()
-      let coalesced = watcher.drainDebouncedEvents(debounceMs)
-      echo "repro watch: debounce complete coalesced=" & $coalesced
-      echo "repro watch: rebuild cycle after filesystem event"
-      flushStdout()
-    finally:
-      watcher.closeFilesystemWatcher()
+      projectRootForModule(absolutePath(parseBuildTarget(target).modulePath))
+    except CatchableError:
+      getCurrentDir()
+
+  proc daemonWatchEnvironment(): seq[string] =
+    for key, value in envPairs():
+      if key in ["PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
+          "RUNQUOTA_SOCKET", "REPROBUILD_STORE_ROOT",
+          "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
+          "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
+          "REPROBUILD_AUTO_RUNQUOTA"]:
+        result.add(key & "=" & value)
+
+  proc runDaemonWatch(): int =
+    if hcrConfig.hcrWatchEnabled:
+      raise newException(DaemonBuildUnsupported,
+        "daemon-hosted HCR watch is deferred; use --daemon=off")
+    let config = defaultUserDaemonConfig()
+    let projectRoot = requestProjectRoot()
+    discard startUserDaemon(publicCliPath, config)
+    let request = UserDaemonWatchRequest(
+      runId: watchRunId(),
+      target: target,
+      workingDir: getCurrentDir(),
+      projectRoot: projectRoot,
+      toolProvisioning: mode.modeName,
+      workRoot: workRoot,
+      publicCliPath: publicCliPath,
+      rawArgs: originalArgs,
+      environment: daemonWatchEnvironment(),
+      attached: not detach,
+      detached: detach,
+      cancelOnDisconnect: not detach,
+      debounceMs: debounceMs,
+      maxCycles: maxCycles,
+      selectedRoots: @[target])
+    let daemonResult = requestUserDaemonWatchStart(request, config.endpoint,
+      renderDaemonWatchEvent)
+    if detach:
+      echo "repro watch: detached session=" & daemonResult.sessionId
+    daemonResult.exitCode
+
+  proc emitWatchLine(line: string; payloadJson = ""; terminal = false;
+                     exitCode = 0; watchedPaths: seq[string] = @[];
+                     lastResult = "") =
+    echo line
+    flushStdout()
+    if eventSink != nil:
+      eventSink("diagnostic", line, payloadJson, terminal, exitCode,
+        watchedPaths, lastResult)
+
+  proc runDirectWatch(): int =
+    echo "repro watch: target=" & target & " tool-provisioning=" &
+      mode.modeName & " debounceMs=" & $debounceMs &
+      (if maxCycles > 0: " maxCycles=" & $maxCycles else: " maxCycles=unbounded") &
+      (if hcrConfig.hcrWatchEnabled: " hcr=enabled" else: " hcr=disabled")
+    flushStdout()
+
+    var hcrSession = initHcrWatchSession(hcrConfig)
+    defer:
+      hcrSession.closeHcrWatchSession()
+
+    var cycle = 0
+    while true:
+      if cancelCheck != nil and cancelCheck():
+        return 130
+      cycle.inc
+      emitWatchLine("repro watch: cycle " & $cycle & " start" &
+        (if cycle == 1: " initial" else: " rebuild"),
+        payloadJson = "{\"watchEvent\":\"cycle-start\",\"cycle\":" & $cycle &
+          "}")
+      let outcome = executeBuildTarget(target, mode, publicCliPath,
+        selectDefaultAction = targetWasOmitted,
+        workRoot = workRoot)
+      emitWatchLine("repro watch: cycle " & $cycle & " result exitCode=" &
+        $outcome.exitCode,
+        payloadJson = "{\"watchEvent\":\"cycle-result\",\"cycle\":" & $cycle &
+          ",\"exitCode\":" & $outcome.exitCode & "}",
+        exitCode = outcome.exitCode,
+        lastResult = "cycle=" & $cycle & " exitCode=" & $outcome.exitCode)
+      if outcome.exitCode != 0:
+        return outcome.exitCode
+      if hcrSession.enabled:
+        if cycle == 1:
+          hcrSession.captureHcrWatchBaseline(outcome)
+        else:
+          hcrSession.deliverHcrWatchPatch(outcome, cycle)
+      if maxCycles > 0 and cycle >= maxCycles:
+        emitWatchLine("repro watch: max cycles reached",
+          payloadJson = "{\"watchEvent\":\"max-cycles\"}", terminal = true,
+          watchedPaths = @[], lastResult = "max-cycles")
+        return 0
+
+      let paths = watchPathsFromReport(outcome)
+      var watcher = openFilesystemWatcher(paths)
+      try:
+        emitWatchLine("repro watch: watching paths=" &
+          $watcher.watchedPathCount,
+          payloadJson = "{\"watchEvent\":\"watching\",\"pathCount\":" &
+            $watcher.watchedPathCount & "}",
+          watchedPaths = paths)
+        let event = watcher.waitForEvent(
+          proc(): bool = cancelCheck != nil and cancelCheck())
+        emitWatchLine("repro watch: event seen path=" & event.path &
+          " detail=" & event.detail,
+          payloadJson = "{\"watchEvent\":\"filesystem\",\"path\":\"" &
+            event.path.replace("\\", "\\\\").replace("\"", "\\\"") &
+            "\",\"detail\":\"" &
+            event.detail.replace("\\", "\\\\").replace("\"", "\\\"") &
+            "\"}",
+          watchedPaths = paths)
+        let coalesced = watcher.drainDebouncedEvents(debounceMs)
+        emitWatchLine("repro watch: debounce complete coalesced=" & $coalesced,
+          payloadJson = "{\"watchEvent\":\"debounce\",\"coalesced\":" &
+            $coalesced & "}",
+          watchedPaths = paths)
+        emitWatchLine("repro watch: rebuild cycle after filesystem event",
+          payloadJson = "{\"watchEvent\":\"rebuild-queued\"}",
+          watchedPaths = paths)
+      finally:
+        watcher.closeFilesystemWatcher()
+
+  if forceDirect or daemonMode == bdmOff:
+    return runDirectWatch()
+
+  try:
+    return runDaemonWatch()
+  except DaemonBuildUnsupported as err:
+    if daemonMode == bdmRequire:
+      raise newException(ValueError,
+        "daemon mode required but repro-daemon cannot execute watch: " &
+          err.msg)
+    stderr.writeLine("repro watch: daemon watch unsupported; falling back " &
+      "to direct mode: " & err.msg)
+    return runDirectWatch()
+  except CatchableError as err:
+    if daemonMode == bdmRequire:
+      raise newException(ValueError,
+        "daemon mode required but repro-daemon is unavailable: " & err.msg)
+    stderr.writeLine("repro watch: daemon unavailable; falling back to " &
+      "direct mode: " & err.msg)
+    return runDirectWatch()
 
 proc runDevelopCommand(args: openArray[string]): int =
   var target = ""
@@ -9126,6 +9296,56 @@ proc installUserDaemonBuildExecutor() =
         else:
           delEnv(item.key))
 
+proc installUserDaemonWatchExecutor() =
+  setUserDaemonWatchExecutor(proc(request: UserDaemonWatchRequest;
+      emit: UserDaemonWatchEmit;
+      cancelCheck: UserDaemonWatchCancelCheck): int =
+    let previousCwd = getCurrentDir()
+    var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
+    try:
+      for item in request.environment:
+        let split = item.find('=')
+        if split < 0:
+          continue
+        let key = item[0 ..< split]
+        let value = item[split + 1 .. ^1]
+        previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
+        putEnv(key, value)
+      if request.workingDir.len > 0:
+        setCurrentDir(request.workingDir)
+      let cliPath =
+        if request.publicCliPath.len > 0: request.publicCliPath
+        else: stablePublicCliPath()
+      proc emitWatchCommandEvent(kind, message, payloadJson: string;
+                                 terminal: bool; exitCode: int;
+                                 watchedPaths: seq[string];
+                                 lastResult: string) =
+        if cancelCheck != nil and cancelCheck():
+          raise newException(IOError, "watch cancelled")
+        let eventKind =
+          if kind == "accepted":
+            bekAccepted
+          else:
+            bekDiagnostic
+        emit(eventKind, message, false, exitCode, "info", payloadJson,
+          watchedPaths, lastResult)
+      proc watchCancelRequested(): bool =
+        cancelCheck != nil and cancelCheck()
+      result = runWatchCommand(request.rawArgs, cliPath,
+        forceDirect = true,
+        eventSink = emitWatchCommandEvent,
+        cancelCheck = watchCancelRequested)
+    finally:
+      try:
+        setCurrentDir(previousCwd)
+      except CatchableError:
+        discard
+      for item in previousEnv:
+        if item.present:
+          putEnv(item.key, item.value)
+        else:
+          delEnv(item.key))
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -9146,6 +9366,7 @@ proc runThinApp*(programName: string): int =
     return runReprostoredCommand(args)
   if programName == "repro-daemon":
     installUserDaemonBuildExecutor()
+    installUserDaemonWatchExecutor()
     return runUserDaemonCommand(args)
   if programName == "repro-fs-snoop":
     return runFsSnoopCli(programName, args)

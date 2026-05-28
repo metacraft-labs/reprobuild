@@ -7,10 +7,11 @@ when defined(posix):
 
 const
   UserDaemonProtocolMajor* = 1'u16
-  UserDaemonProtocolMinor* = 0'u16
+  UserDaemonProtocolMinor* = 1'u16
   UserDaemonRole* = "repro-daemon/user"
   UserDaemonFeatureFlags* =
-    "lifecycle,status,logs,shutdown,sessions,build-routing,build-events"
+    "lifecycle,status,logs,shutdown,sessions,build-routing,build-events," &
+    "watch-routing,watch-events,watch-sessions"
   BuildEventSchemaId* = "reprobuild.daemon.build-event.v1"
   BuildEventSchemaVersion* = 1'u16
   FrameMagic = "RBUD"
@@ -28,6 +29,12 @@ type
     udkBuildRequest = 9
     udkBuildEvent = 10
     udkBuildCancel = 11
+    udkWatchStartRequest = 12
+    udkWatchAttachRequest = 13
+    udkWatchDetachRequest = 14
+    udkWatchStopRequest = 15
+    udkWatchEvent = 16
+    udkWatchListRequest = 17
     udkError = 255
 
   UserDaemonBuildEventKind* = enum
@@ -69,6 +76,11 @@ type
     endedAtUnix*: int64
     exitCode*: int
     message*: string
+    selectedRoots*: seq[string]
+    debounceMs*: int
+    watchedPaths*: seq[string]
+    tierState*: string
+    lastResult*: string
 
   UserDaemonBuildRequest* = object
     runId*: string
@@ -81,6 +93,27 @@ type
     rawArgs*: seq[string]
     environment*: seq[string]
     attached*: bool
+    cancelOnDisconnect*: bool
+
+  UserDaemonWatchRequest* = object
+    runId*: string
+    target*: string
+    workingDir*: string
+    projectRoot*: string
+    toolProvisioning*: string
+    workRoot*: string
+    publicCliPath*: string
+    rawArgs*: seq[string]
+    environment*: seq[string]
+    attached*: bool
+    detached*: bool
+    cancelOnDisconnect*: bool
+    debounceMs*: int
+    maxCycles*: int
+    selectedRoots*: seq[string]
+
+  UserDaemonWatchSessionRequest* = object
+    sessionId*: string
     cancelOnDisconnect*: bool
 
   UserDaemonBuildEvent* = object
@@ -215,26 +248,6 @@ proc readBinaryIdentity(buf: openArray[byte]; pos: var int): BinaryIdentity =
   result.sizeBytes = buf.readI64(pos)
   result.mtimeUnix = buf.readI64(pos)
 
-proc writeSession(buf: var seq[byte]; session: UserDaemonSession) =
-  buf.writeString(session.sessionId)
-  buf.writeString(session.projectRoot)
-  buf.writeString(session.mode)
-  buf.writeString(session.state)
-  buf.writeI64(session.startedAtUnix)
-  buf.writeI64(session.endedAtUnix)
-  buf.writeI64(int64(session.exitCode))
-  buf.writeString(session.message)
-
-proc readSession(buf: openArray[byte]; pos: var int): UserDaemonSession =
-  result.sessionId = buf.readString(pos)
-  result.projectRoot = buf.readString(pos)
-  result.mode = buf.readString(pos)
-  result.state = buf.readString(pos)
-  result.startedAtUnix = buf.readI64(pos)
-  result.endedAtUnix = buf.readI64(pos)
-  result.exitCode = int(buf.readI64(pos))
-  result.message = buf.readString(pos)
-
 proc writeStringSeq(buf: var seq[byte]; values: openArray[string]) =
   buf.writeU32Le(uint32(values.len))
   for value in values:
@@ -245,6 +258,37 @@ proc readStringSeq(buf: openArray[byte]; pos: var int): seq[string] =
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = buf.readString(pos)
+
+proc writeSession(buf: var seq[byte]; session: UserDaemonSession) =
+  buf.writeString(session.sessionId)
+  buf.writeString(session.projectRoot)
+  buf.writeString(session.mode)
+  buf.writeString(session.state)
+  buf.writeI64(session.startedAtUnix)
+  buf.writeI64(session.endedAtUnix)
+  buf.writeI64(int64(session.exitCode))
+  buf.writeString(session.message)
+  buf.writeStringSeq(session.selectedRoots)
+  buf.writeI64(int64(session.debounceMs))
+  buf.writeStringSeq(session.watchedPaths)
+  buf.writeString(session.tierState)
+  buf.writeString(session.lastResult)
+
+proc readSession(buf: openArray[byte]; pos: var int): UserDaemonSession =
+  result.sessionId = buf.readString(pos)
+  result.projectRoot = buf.readString(pos)
+  result.mode = buf.readString(pos)
+  result.state = buf.readString(pos)
+  result.startedAtUnix = buf.readI64(pos)
+  result.endedAtUnix = buf.readI64(pos)
+  result.exitCode = int(buf.readI64(pos))
+  result.message = buf.readString(pos)
+  if pos < buf.len:
+    result.selectedRoots = buf.readStringSeq(pos)
+    result.debounceMs = int(buf.readI64(pos))
+    result.watchedPaths = buf.readStringSeq(pos)
+    result.tierState = buf.readString(pos)
+    result.lastResult = buf.readString(pos)
 
 proc writeFrame*(socket: Socket; kind: UserDaemonMessageKind;
                  body: openArray[byte] = []) =
@@ -388,6 +432,51 @@ proc parseBuildRequestBody*(body: openArray[byte]): UserDaemonBuildRequest =
   result.rawArgs = body.readStringSeq(pos)
   result.environment = body.readStringSeq(pos)
   result.attached = body.readBool(pos)
+  result.cancelOnDisconnect = body.readBool(pos)
+
+proc watchRequestBody*(request: UserDaemonWatchRequest): seq[byte] =
+  result.writeString(request.runId)
+  result.writeString(request.target)
+  result.writeString(request.workingDir)
+  result.writeString(request.projectRoot)
+  result.writeString(request.toolProvisioning)
+  result.writeString(request.workRoot)
+  result.writeString(request.publicCliPath)
+  result.writeStringSeq(request.rawArgs)
+  result.writeStringSeq(request.environment)
+  result.writeBool(request.attached)
+  result.writeBool(request.detached)
+  result.writeBool(request.cancelOnDisconnect)
+  result.writeI64(int64(request.debounceMs))
+  result.writeI64(int64(request.maxCycles))
+  result.writeStringSeq(request.selectedRoots)
+
+proc parseWatchRequestBody*(body: openArray[byte]): UserDaemonWatchRequest =
+  var pos = 0
+  result.runId = body.readString(pos)
+  result.target = body.readString(pos)
+  result.workingDir = body.readString(pos)
+  result.projectRoot = body.readString(pos)
+  result.toolProvisioning = body.readString(pos)
+  result.workRoot = body.readString(pos)
+  result.publicCliPath = body.readString(pos)
+  result.rawArgs = body.readStringSeq(pos)
+  result.environment = body.readStringSeq(pos)
+  result.attached = body.readBool(pos)
+  result.detached = body.readBool(pos)
+  result.cancelOnDisconnect = body.readBool(pos)
+  result.debounceMs = int(body.readI64(pos))
+  result.maxCycles = int(body.readI64(pos))
+  result.selectedRoots = body.readStringSeq(pos)
+
+proc watchSessionRequestBody*(request: UserDaemonWatchSessionRequest): seq[byte] =
+  result.writeString(request.sessionId)
+  result.writeBool(request.cancelOnDisconnect)
+
+proc parseWatchSessionRequestBody*(body: openArray[byte]):
+    UserDaemonWatchSessionRequest =
+  var pos = 0
+  result.sessionId = body.readString(pos)
   result.cancelOnDisconnect = body.readBool(pos)
 
 proc parseBuildEventKind(value: string): UserDaemonBuildEventKind =

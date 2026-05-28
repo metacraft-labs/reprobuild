@@ -83,7 +83,7 @@ suite "Local daemons/control-plane M1 user-daemon lifecycle":
       repoRoot())
     check started.contains("repro daemon: running")
     check started.contains("role: repro-daemon/user")
-    check started.contains("protocol: 1.0")
+    check started.contains("protocol: 1.1")
     check started.contains("features: lifecycle,status,logs,shutdown")
     check started.contains("active-sessions: 0")
     check not started.contains("reprostored")

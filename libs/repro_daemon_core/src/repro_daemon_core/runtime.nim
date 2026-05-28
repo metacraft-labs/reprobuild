@@ -37,6 +37,19 @@ type
                                   emit: UserDaemonBuildEmit;
                                   cancelCheck: UserDaemonBuildCancelCheck):
                                   int
+  UserDaemonWatchEmit* = proc(kind: UserDaemonBuildEventKind;
+                              message: string;
+                              terminal: bool;
+                              exitCode: int;
+                              severity: string;
+                              payloadJson: string;
+                              watchedPaths: seq[string];
+                              lastResult: string)
+  UserDaemonWatchCancelCheck* = proc(): bool
+  UserDaemonWatchExecutor* = proc(request: UserDaemonWatchRequest;
+                                  emit: UserDaemonWatchEmit;
+                                  cancelCheck: UserDaemonWatchCancelCheck):
+                                  int
 
   UserDaemonLock = object
     held: bool
@@ -48,9 +61,13 @@ type
 const UserDaemonLockFileName = ".repro-daemon.lock"
 
 var userDaemonBuildExecutor: UserDaemonBuildExecutor
+var userDaemonWatchExecutor: UserDaemonWatchExecutor
 
 proc setUserDaemonBuildExecutor*(executor: UserDaemonBuildExecutor) =
   userDaemonBuildExecutor = executor
+
+proc setUserDaemonWatchExecutor*(executor: UserDaemonWatchExecutor) =
+  userDaemonWatchExecutor = executor
 
 proc safePathSegment(value, fallback: string): string =
   for ch in value:
@@ -166,11 +183,31 @@ proc sessionRecordsDir(config: UserDaemonConfig): string =
 proc sessionRecordPath(config: UserDaemonConfig; sessionId: string): string =
   sessionRecordsDir(config) / (safePathSegment(sessionId, "session") & ".session")
 
+proc sessionEventLogPath(config: UserDaemonConfig; sessionId: string): string =
+  sessionRecordsDir(config) /
+    (safePathSegment(sessionId, "session") & ".events")
+
+proc sessionStopRequestPath(config: UserDaemonConfig; sessionId: string): string =
+  sessionRecordsDir(config) /
+    (safePathSegment(sessionId, "session") & ".stop")
+
 proc flattenRecordValue(value: string): string =
   value.replace("\n", "\\n").replace("\r", "\\r")
 
 proc expandRecordValue(value: string): string =
   value.replace("\\n", "\n").replace("\\r", "\r")
+
+proc flattenRecordSeq(values: openArray[string]): string =
+  var escaped: seq[string] = @[]
+  for value in values:
+    escaped.add(flattenRecordValue(value).replace("\t", "\\t"))
+  escaped.join("\t")
+
+proc expandRecordSeq(value: string): seq[string] =
+  if value.len == 0:
+    return
+  for item in value.split('\t'):
+    result.add(expandRecordValue(item.replace("\\t", "\t")))
 
 proc writeSessionRecord(config: UserDaemonConfig; session: UserDaemonSession) =
   createDir(sessionRecordsDir(config))
@@ -182,7 +219,12 @@ proc writeSessionRecord(config: UserDaemonConfig; session: UserDaemonSession) =
     "startedAtUnix=" & $session.startedAtUnix & "\n" &
     "endedAtUnix=" & $session.endedAtUnix & "\n" &
     "exitCode=" & $session.exitCode & "\n" &
-    "message=" & flattenRecordValue(session.message) & "\n")
+    "message=" & flattenRecordValue(session.message) & "\n" &
+    "selectedRoots=" & flattenRecordSeq(session.selectedRoots) & "\n" &
+    "debounceMs=" & $session.debounceMs & "\n" &
+    "watchedPaths=" & flattenRecordSeq(session.watchedPaths) & "\n" &
+    "tierState=" & flattenRecordValue(session.tierState) & "\n" &
+    "lastResult=" & flattenRecordValue(session.lastResult) & "\n")
 
 proc readSessionRecord(path: string): UserDaemonSession =
   for line in readFile(path).splitLines:
@@ -211,6 +253,17 @@ proc readSessionRecord(path: string): UserDaemonSession =
       except ValueError: discard
     of "message":
       result.message = value
+    of "selectedRoots":
+      result.selectedRoots = expandRecordSeq(value)
+    of "debounceMs":
+      try: result.debounceMs = int(parseBiggestInt(value))
+      except ValueError: discard
+    of "watchedPaths":
+      result.watchedPaths = expandRecordSeq(value)
+    of "tierState":
+      result.tierState = value
+    of "lastResult":
+      result.lastResult = value
     else:
       discard
 
@@ -229,7 +282,8 @@ proc loadSessionRecords(config: UserDaemonConfig): seq[UserDaemonSession] =
 
 proc countActiveSessionRecords(config: UserDaemonConfig): int =
   for session in loadSessionRecords(config):
-    if session.state in ["accepted", "running", "cancelling"]:
+    if session.state in ["accepted", "running", "cancelling", "watching",
+        "idle"]:
       inc result
 
 proc removeStatusFile(config: UserDaemonConfig) =
@@ -343,6 +397,63 @@ proc nextBuildEvent(runId, sessionId, projectRoot: string;
     exitCode: exitCode,
     payloadJson: payloadJson)
 
+proc bytesToString(bytes: openArray[byte]): string =
+  result = newString(bytes.len)
+  for i, b in bytes:
+    result[i] = char(b)
+
+proc stringToBytes(text: string): seq[byte] =
+  result = newSeq[byte](text.len)
+  for i, ch in text:
+    result[i] = byte(ord(ch))
+
+proc appendWatchEventRecord(config: UserDaemonConfig; sessionId: string;
+                            event: UserDaemonBuildEvent) =
+  createDir(sessionRecordsDir(config))
+  let body = buildEventBody(event)
+  var record: seq[byte] = @[]
+  record.writeU32Le(uint32(body.len))
+  record.add(body)
+  var file = open(sessionEventLogPath(config, sessionId), fmAppend)
+  defer: file.close()
+  file.write(record.bytesToString())
+
+proc readU32LeFromString(raw: string; pos: var int): uint32 =
+  if pos + 4 > raw.len:
+    raise newException(ValueError, "truncated watch event length")
+  result =
+    uint32(ord(raw[pos])) or
+    (uint32(ord(raw[pos + 1])) shl 8) or
+    (uint32(ord(raw[pos + 2])) shl 16) or
+    (uint32(ord(raw[pos + 3])) shl 24)
+  pos += 4
+
+proc readWatchEventsFrom(config: UserDaemonConfig; sessionId: string;
+                         offset: var int64): seq[UserDaemonBuildEvent] =
+  let path = sessionEventLogPath(config, sessionId)
+  if not fileExists(path):
+    return
+  let raw = readFile(path)
+  var pos = int(offset)
+  while pos + 4 <= raw.len:
+    let start = pos
+    let length = int(readU32LeFromString(raw, pos))
+    if length < 0 or pos + length > raw.len:
+      pos = start
+      break
+    let body = raw[pos ..< pos + length].stringToBytes()
+    result.add(parseBuildEventBody(body))
+    pos += length
+  offset = int64(pos)
+
+proc latestSessionRecord(config: UserDaemonConfig;
+                         sessionId: string): UserDaemonSession =
+  let path = sessionRecordPath(config, sessionId)
+  if fileExists(path):
+    return readSessionRecord(path)
+  UserDaemonSession(sessionId: sessionId, state: "missing", exitCode: 1,
+    message: "watch session not found")
+
 proc removeSession(sessions: var seq[UserDaemonSession]; sessionId: string) =
   var kept: seq[UserDaemonSession] = @[]
   for session in sessions:
@@ -358,13 +469,26 @@ proc sessionStateAccepted(sessionId, projectRoot: string; started: Time):
     exitCode: -1,
     message: "build request accepted by repro-daemon")
 
+proc watchSessionStateAccepted(sessionId, projectRoot: string; started: Time;
+                               request: UserDaemonWatchRequest):
+    UserDaemonSession =
+  UserDaemonSession(sessionId: sessionId,
+    projectRoot: projectRoot, mode: "watch", state: "accepted",
+    startedAtUnix: started.toUnix,
+    exitCode: -1,
+    message: "watch request accepted by repro-daemon",
+    selectedRoots: request.selectedRoots,
+    debounceMs: request.debounceMs,
+    tierState: "single-tier",
+    lastResult: "pending")
+
 proc updateSessionState(config: UserDaemonConfig; session: var UserDaemonSession;
                         state: string; exitCode = -1; message = "") =
   session.state = state
   session.exitCode = exitCode
   if message.len > 0:
     session.message = message
-  if state notin ["accepted", "running", "cancelling"]:
+  if state notin ["accepted", "running", "cancelling", "watching", "idle"]:
     session.endedAtUnix = getTime().toUnix
   writeSessionRecord(config, session)
 
@@ -518,6 +642,249 @@ proc handleBuildRequest(socket: Socket; config: UserDaemonConfig;
   finally:
     sessions.removeSession(sessionId)
 
+proc watchStopRequested(config: UserDaemonConfig; sessionId: string): bool =
+  fileExists(sessionStopRequestPath(config, sessionId))
+
+proc writeWatchStopRequest(config: UserDaemonConfig; sessionId, reason: string) =
+  createDir(sessionRecordsDir(config))
+  writeFile(sessionStopRequestPath(config, sessionId), reason & "\n")
+
+proc nextWatchEvent(runId, sessionId, projectRoot: string;
+                    eventId: uint64;
+                    kind: UserDaemonBuildEventKind;
+                    message: string;
+                    terminal = false;
+                    exitCode = 0;
+                    severity = "info";
+                    payloadJson = ""): UserDaemonBuildEvent =
+  result = nextBuildEvent(runId, sessionId, projectRoot, eventId, kind,
+    message, terminal = terminal, exitCode = exitCode, severity = severity,
+    payloadJson = payloadJson)
+  result.command = "watch"
+
+proc runWatchRequestWorker(socket: Socket; config: UserDaemonConfig;
+                           request: UserDaemonWatchRequest;
+                           session: var UserDaemonSession;
+                           streamToSocket: bool) =
+  var eventId = 1'u64
+  var terminalSent = false
+  let sessionId = session.sessionId
+  let projectRoot = session.projectRoot
+  let sessionRef = new(UserDaemonSession)
+  sessionRef[] = session
+  proc emitEvent(kind: UserDaemonBuildEventKind; message: string;
+                 terminal: bool; exitCode: int; severity: string;
+                 payloadJson: string; watchedPaths: seq[string];
+                 lastResult: string) =
+    inc eventId
+    if watchedPaths.len > 0:
+      sessionRef[].watchedPaths = watchedPaths
+    if lastResult.len > 0:
+      sessionRef[].lastResult = lastResult
+    if terminal:
+      terminalSent = true
+    elif sessionRef[].state == "running":
+      sessionRef[].state = "watching"
+    if message.len > 0:
+      sessionRef[].message = message
+    writeSessionRecord(config, sessionRef[])
+    let event = nextWatchEvent(request.runId, sessionId, projectRoot, eventId,
+      kind, message, terminal = terminal, exitCode = exitCode,
+      severity = severity, payloadJson = payloadJson)
+    appendWatchEventRecord(config, sessionId, event)
+    if streamToSocket:
+      socket.writeFrame(udkWatchEvent, buildEventBody(event))
+
+  proc cancelCheck(): bool =
+    if watchStopRequested(config, sessionId):
+      return true
+    streamToSocket and request.cancelOnDisconnect and
+      socket.clientDisconnected()
+
+  try:
+    updateSessionState(config, sessionRef[], "running",
+      message = "daemon-hosted watch running")
+    if userDaemonWatchExecutor == nil:
+      let message =
+        "daemon-hosted watch executor is not registered in repro-daemon"
+      updateSessionState(config, sessionRef[], "unsupported", 64, message)
+      emitEvent(bekUnsupported, message, true, 64, "warning",
+        "{\"fallbackAllowed\":true,\"deferredMilestone\":\"M5\"}", @[],
+        "unsupported")
+      return
+    let exitCode = userDaemonWatchExecutor(request, emitEvent, cancelCheck)
+    let stopped = watchStopRequested(config, sessionId) or
+      (streamToSocket and request.cancelOnDisconnect and socket.clientDisconnected())
+    let state =
+      if stopped: "stopped"
+      elif exitCode == 0: "succeeded"
+      else: "failed"
+    let message =
+      if stopped: "daemon-hosted watch stopped"
+      elif exitCode == 0: "daemon-hosted watch finished"
+      else: "daemon-hosted watch failed"
+    updateSessionState(config, sessionRef[], state, exitCode, message)
+    emitEvent(if stopped: bekCancelled else: bekFinished, message, true,
+      exitCode, if exitCode == 0: "info" else: "error",
+      "{\"executor\":\"direct-watch-entrypoint\"}", sessionRef[].watchedPaths,
+      "exitCode=" & $exitCode)
+    logLine(config.logPath, "watch request finished session=" &
+      sessionRef[].sessionId & " exitCode=" & $exitCode)
+  except CatchableError as err:
+    let cancelled = cancelCheck()
+    let kind = if cancelled: bekCancelled else: bekFinished
+    let state = if cancelled: "stopped" else: "failed"
+    let code = if cancelled: 130 else: 1
+    let message =
+      if cancelled: "daemon-hosted watch stopped"
+      else: "daemon-hosted watch failed: " & err.msg
+    updateSessionState(config, sessionRef[], state, code, message)
+    if not terminalSent:
+      try:
+        emitEvent(kind, message, true, code,
+          if cancelled: "warning" else: "error",
+          "{\"executor\":\"direct-watch-entrypoint\"}",
+          sessionRef[].watchedPaths,
+          "exitCode=" & $code)
+      except CatchableError:
+        discard
+    logLine(config.logPath, "watch request " & state & " session=" &
+      sessionRef[].sessionId & " message=" & message)
+
+proc streamWatchSession(socket: Socket; config: UserDaemonConfig;
+                        sessionId: string; stopOnDisconnect: bool) =
+  var offset = 0'i64
+  var sawAny = false
+  while true:
+    for event in readWatchEventsFrom(config, sessionId, offset):
+      sawAny = true
+      socket.writeFrame(udkWatchEvent, buildEventBody(event))
+      if event.terminal:
+        return
+    let session = latestSessionRecord(config, sessionId)
+    if session.sessionId.len == 0 or session.state == "missing":
+      socket.writeFrame(udkError, errorBody("watch session not found: " &
+        sessionId))
+      return
+    if session.state notin ["accepted", "running", "watching", "idle",
+        "cancelling"] and sawAny:
+      return
+    if stopOnDisconnect and socket.clientDisconnected():
+      writeWatchStopRequest(config, sessionId, "attached client disconnected")
+      return
+    sleep(50)
+
+proc handleWatchStart(socket: Socket; config: UserDaemonConfig;
+                      request: UserDaemonWatchRequest;
+                      sessions: var seq[UserDaemonSession]) =
+  let started = getTime()
+  let sessionId =
+    if request.runId.len > 0:
+      request.runId
+    else:
+      "watch-" & $getCurrentProcessId() & "-" & $started.toUnix & "-" &
+        $started.nanosecond
+  let projectRoot =
+    if request.projectRoot.len > 0:
+      request.projectRoot
+    else:
+      request.workingDir
+  var session = watchSessionStateAccepted(sessionId, projectRoot, started,
+    request)
+  sessions.add(session)
+  writeSessionRecord(config, session)
+  try: removeFile(sessionStopRequestPath(config, sessionId)) except OSError: discard
+  logLine(config.logPath, "watch request accepted session=" & sessionId &
+    " projectRoot=" & projectRoot & " attached=" & $request.attached &
+    " detached=" & $request.detached)
+  let accepted = nextWatchEvent(request.runId, sessionId, projectRoot, 1'u64,
+    bekAccepted, "watch request accepted by repro-daemon",
+    payloadJson = "{\"detached\":" & $request.detached & "}")
+  appendWatchEventRecord(config, sessionId, accepted)
+  socket.writeFrame(udkWatchEvent, buildEventBody(accepted))
+  when defined(posix):
+    let pid = fork()
+    if pid < 0:
+      raise newException(UserDaemonRuntimeError,
+        "failed to fork daemon watch worker")
+    if pid == 0:
+      try:
+        signal(SIGCHLD, SIG_DFL)
+        runWatchRequestWorker(socket, config, request, session,
+          streamToSocket = request.attached and not request.detached)
+      except CatchableError as err:
+        logLine(config.logPath, "watch worker fatal session=" & sessionId &
+          " error=" & err.msg)
+      try: socket.close() except CatchableError: discard
+      quit(0)
+    logLine(config.logPath, "watch worker started session=" & sessionId &
+      " pid=" & $pid)
+    if request.detached:
+      discard
+  else:
+    runWatchRequestWorker(socket, config, request, session,
+      streamToSocket = request.attached and not request.detached)
+  sessions.removeSession(sessionId)
+
+proc handleWatchAttach(socket: Socket; config: UserDaemonConfig;
+                       request: UserDaemonWatchSessionRequest) =
+  if request.sessionId.len == 0:
+    socket.writeFrame(udkError, errorBody("watch attach requires a session id"))
+    return
+  when defined(posix):
+    let pid = fork()
+    if pid < 0:
+      raise newException(UserDaemonRuntimeError,
+        "failed to fork daemon watch attach worker")
+    if pid == 0:
+      try:
+        signal(SIGCHLD, SIG_DFL)
+        streamWatchSession(socket, config, request.sessionId,
+          request.cancelOnDisconnect)
+      except CatchableError as err:
+        logLine(config.logPath, "watch attach fatal session=" &
+          request.sessionId & " error=" & err.msg)
+      try: socket.close() except CatchableError: discard
+      quit(0)
+  else:
+    streamWatchSession(socket, config, request.sessionId,
+      request.cancelOnDisconnect)
+
+proc handleWatchStop(socket: Socket; config: UserDaemonConfig;
+                     request: UserDaemonWatchSessionRequest) =
+  if request.sessionId.len == 0:
+    socket.writeFrame(udkError, errorBody("watch stop requires a session id"))
+    return
+  let session = latestSessionRecord(config, request.sessionId)
+  if session.sessionId.len == 0 or session.state == "missing":
+    socket.writeFrame(udkError, errorBody("watch session not found: " &
+      request.sessionId))
+    return
+  writeWatchStopRequest(config, request.sessionId, "stop requested")
+  let event = nextWatchEvent(request.sessionId, request.sessionId,
+    session.projectRoot, 1'u64, bekCancelled,
+    "watch stop requested", terminal = false,
+    payloadJson = "{\"stopRequested\":true}")
+  appendWatchEventRecord(config, request.sessionId, event)
+  socket.writeFrame(udkWatchEvent, buildEventBody(event))
+
+proc handleWatchDetach(socket: Socket; config: UserDaemonConfig;
+                       request: UserDaemonWatchSessionRequest) =
+  if request.sessionId.len == 0:
+    socket.writeFrame(udkError, errorBody("watch detach requires a session id"))
+    return
+  let session = latestSessionRecord(config, request.sessionId)
+  if session.sessionId.len == 0 or session.state == "missing":
+    socket.writeFrame(udkError, errorBody("watch session not found: " &
+      request.sessionId))
+    return
+  let event = nextWatchEvent(request.sessionId, request.sessionId,
+    session.projectRoot, 1'u64, bekDiagnostic,
+    "watch client detached; session remains running", terminal = false,
+    payloadJson = "{\"detached\":true}")
+  appendWatchEventRecord(config, request.sessionId, event)
+  socket.writeFrame(udkWatchEvent, buildEventBody(event))
+
 proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
                   generation: string; shuttingDown: var bool;
                   sessions: var seq[UserDaemonSession]) =
@@ -536,15 +903,35 @@ proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
       statusBody(statusFor(config, startedAt, generation,
         countActiveSessionRecords(config))))
   of udkShutdown:
+    for session in loadSessionRecords(config):
+      if session.mode == "watch" and session.state in ["accepted", "running",
+          "watching", "idle", "cancelling"]:
+        writeWatchStopRequest(config, session.sessionId,
+          "daemon shutdown requested")
     shuttingDown = true
     socket.writeFrame(udkShutdownAck)
     logLine(config.logPath, "shutdown requested")
   of udkSessions:
     socket.writeFrame(udkSessionsResponse,
       sessionsBody(loadSessionRecords(config)))
+  of udkWatchListRequest:
+    var watchSessions: seq[UserDaemonSession] = @[]
+    for session in loadSessionRecords(config):
+      if session.mode == "watch":
+        watchSessions.add(session)
+    socket.writeFrame(udkSessionsResponse, sessionsBody(watchSessions))
   of udkBuildRequest:
     handleBuildRequest(socket, config, parseBuildRequestBody(frame.body),
       sessions)
+  of udkWatchStartRequest:
+    handleWatchStart(socket, config, parseWatchRequestBody(frame.body),
+      sessions)
+  of udkWatchAttachRequest:
+    handleWatchAttach(socket, config, parseWatchSessionRequestBody(frame.body))
+  of udkWatchStopRequest:
+    handleWatchStop(socket, config, parseWatchSessionRequestBody(frame.body))
+  of udkWatchDetachRequest:
+    handleWatchDetach(socket, config, parseWatchSessionRequestBody(frame.body))
   else:
     socket.writeFrame(udkError, errorBody(
       "unsupported user-daemon message in lifecycle server: " &
@@ -824,6 +1211,12 @@ proc renderUserDaemonSessions*(sessions: openArray[UserDaemonSession]):
     result.add("\n" & session.sessionId & "\t" & session.mode & "\t" &
       session.state & "\t" & $session.exitCode & "\t" &
       session.projectRoot)
+    if session.mode == "watch":
+      result.add("\tselectedRoots=" & session.selectedRoots.join(",") &
+        "\tdebounceMs=" & $session.debounceMs &
+        "\t watchedPaths=" & $session.watchedPaths.len &
+        "\ttierState=" & session.tierState &
+        "\tlastResult=" & session.lastResult)
     if session.message.len > 0:
       result.add("\t" & session.message)
 
