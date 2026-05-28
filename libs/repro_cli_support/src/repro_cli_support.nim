@@ -5938,6 +5938,17 @@ proc renderShowConventionsText(workspaceRoot: string;
   ## documented in ``reprobuild-specs/Three-Mode-Convention-System.md``
   ## §"Observability"; this is the human-readable projection (the JSON
   ## projection lives in ``renderShowConventionsJson``).
+  ##
+  ## **Attribution / toolchain / no-match** (the three M-deferred items):
+  ## the "Language convention" line for each target is now computed by
+  ## ``attributeConvention`` (manifest detection + extension census; the
+  ## heuristic is documented in ``repro_core/convention_attribution.nim``,
+  ## option 1c — the pragmatic CLI-side approximation). After the
+  ## per-target section, ``findUnclaimedDirectories`` adds a "No-match
+  ## diagnostics" block listing target-shaped dirs the heuristic couldn't
+  ## claim. Each detected convention's toolchain version is probed (at
+  ## most once per convention per process) via ``probeToolchain`` and
+  ## printed next to the target's convention line.
   result = "Project: " & workspaceRoot & "\n"
   if projectMatch.path.len == 0:
     result.add("Project file: (none — no repro.nim or reprobuild.nim " &
@@ -5947,6 +5958,10 @@ proc renderShowConventionsText(workspaceRoot: string;
     let suffix = if canonical: " (canonical)" else: " (legacy alias)"
     result.add("Project file: " & projectMatch.fileName & suffix & "\n")
   result.add("\n")
+
+  # Track which conventions appeared at least once so the toolchain
+  # probe summary can iterate the right set.
+  var conventionsSeen: HashSet[string]
 
   if members.len == 0:
     result.add("No targets discovered.\n")
@@ -5968,8 +5983,24 @@ proc renderShowConventionsText(workspaceRoot: string;
           member.package != targetFilter:
         continue
       inc matched
+      # Attribute the convention from the member's project-root
+      # directory. Default to ``"nim"`` when the heuristic abstains
+      # (the scanner only finds Nim-declared members today, so an
+      # abstain on a discovered member means "no clearer signal than
+      # the existence of repro.nim itself" — fall back to ``nim``).
+      let attribution = attributeConvention(member.projectRoot)
+      let conventionName =
+        if attribution.convention.len > 0:
+          attribution.convention
+        else:
+          "nim"
+      conventionsSeen.incl(conventionName)
       result.add("Target: " & member.package & "." & member.member & "\n")
-      result.add("  Language convention: nim\n")
+      if attribution.evidence.len > 0:
+        result.add("  Language convention: " & conventionName &
+          " (" & attribution.evidence & ")\n")
+      else:
+        result.add("  Language convention: " & conventionName & "\n")
       if member.sourceFile.len > 0:
         var relSource =
           try:
@@ -6022,15 +6053,62 @@ proc renderShowConventionsText(workspaceRoot: string;
       result.add("(no target named ``" & targetFilter &
         "`` discovered in this workspace)\n\n")
 
+  # No-match diagnostics. Only when the user didn't ask for a single
+  # target (the diagnostic is workspace-wide).
+  if targetFilter.len == 0:
+    var claimedPaths: seq[string] = @[]
+    for member in members:
+      if member.projectRoot.len > 0:
+        claimedPaths.add(member.projectRoot)
+    let unclaimed = findUnclaimedDirectories(workspaceRoot, claimedPaths)
+    result.add("No-match diagnostics:\n")
+    if unclaimed.len == 0:
+      result.add("  (no unclaimed target-shaped directories)\n")
+    else:
+      for entry in unclaimed:
+        var line = "  " & entry.relPath & "/ — " & entry.reason
+        if entry.sampleFiles.len > 0:
+          line.add(" (files: ")
+          for i, f in entry.sampleFiles:
+            if i > 0: line.add(", ")
+            line.add(f)
+          line.add(")")
+        line.add("\n")
+        result.add(line)
+    result.add("\n")
+
+  # Toolchain probe summary. We probe each convention that appeared as
+  # a per-target claim. Misses print the "not on PATH (skipped)"
+  # variant, matching the spec's example output.
+  if targetFilter.len == 0 and conventionsSeen.len > 0:
+    result.add("Toolchain probes:\n")
+    # Iterate the known registry order so the output is deterministic
+    # across runs even if the conventions hash to different buckets.
+    for name in KnownConventionRegistry:
+      if name notin conventionsSeen:
+        continue
+      let probe = probeToolchain(name)
+      if probe.available:
+        let suffix =
+          if probe.path.len > 0:
+            " [" & probe.path.replace('\\', '/') & "]"
+          else:
+            ""
+        result.add("  " & name & ": " & probe.version & suffix & "\n")
+      else:
+        result.add("  " & name & ": not on PATH (skipped)\n")
+    result.add("\n")
+
   result.add("Conventions registered (in dispatch order):\n")
   for name in KnownConventionRegistry:
     result.add("  - " & name & "\n")
   result.add("\n")
   result.add("Note: the convention registry above is the static list " &
     "the standard-provider binary registers at startup; the per-target " &
-    "claim attribution above is the Nim scanner's inference " &
-    "(Mode 3 pilot). Cross-language per-target attribution lands as " &
-    "convention plugins are folded into a shared introspection surface.\n")
+    "claim attribution above is a CLI-side heuristic (manifest detection " &
+    "plus extension census; see ``repro_core/convention_attribution.nim`` " &
+    "option 1c). The standard-provider's actual ``recognize`` is the " &
+    "source of truth at build time.\n")
 
 proc renderShowConventionsJson(workspaceRoot: string;
                                projectMatch: ProjectFileMatch;
@@ -6057,6 +6135,7 @@ proc renderShowConventionsJson(workspaceRoot: string;
   var manualByFrom: Table[string, seq[ManualDepEdge]]
   for edge in manual:
     manualByFrom.mgetOrPut(edge.fromPackage, @[]).add(edge)
+  var conventionsSeen: HashSet[string]
   let targets = newJArray()
   for member in members:
     if targetFilter.len > 0 and member.member != targetFilter and
@@ -6065,7 +6144,24 @@ proc renderShowConventionsJson(workspaceRoot: string;
     let entry = newJObject()
     entry["package"] = %member.package
     entry["member"] = %member.member
-    entry["convention"] = %"nim"
+    # Per-target convention attribution (manifest detection + extension
+    # census; see ``repro_core/convention_attribution.nim`` option 1c).
+    # The heuristic abstains for projects with only a project file (no
+    # manifest, no source extensions matched); fall back to ``"nim"``
+    # for the scanner-discovered targets because the scanner itself is
+    # the Nim-only Mode-3 pilot today.
+    let attribution = attributeConvention(member.projectRoot)
+    let conventionName =
+      if attribution.convention.len > 0:
+        attribution.convention
+      else:
+        "nim"
+    conventionsSeen.incl(conventionName)
+    entry["convention"] = %conventionName
+    let attrNode = newJObject()
+    attrNode["convention"] = %conventionName
+    attrNode["evidence"] = %attribution.evidence
+    entry["attribution"] = attrNode
     if member.sourceFile.len > 0:
       var relSource =
         try:
@@ -6109,6 +6205,40 @@ proc renderShowConventionsJson(workspaceRoot: string;
     entry["manualDeps"] = manualNode
     targets.add(entry)
   result["targets"] = targets
+  # No-match diagnostics (only when not filtering to a single target).
+  let unclaimedNode = newJArray()
+  if targetFilter.len == 0:
+    var claimedPaths: seq[string] = @[]
+    for member in members:
+      if member.projectRoot.len > 0:
+        claimedPaths.add(member.projectRoot)
+    for entry in findUnclaimedDirectories(workspaceRoot, claimedPaths):
+      let n = newJObject()
+      n["path"] = %entry.relPath
+      n["reason"] = %entry.reason
+      let samples = newJArray()
+      for s in entry.sampleFiles:
+        samples.add(%s)
+      n["sampleFiles"] = samples
+      unclaimedNode.add(n)
+  result["unclaimedDirectories"] = unclaimedNode
+  # Toolchain probes (only when not filtering to a single target).
+  let toolchainNode = newJArray()
+  if targetFilter.len == 0:
+    for name in KnownConventionRegistry:
+      if name notin conventionsSeen:
+        continue
+      let probe = probeToolchain(name)
+      let n = newJObject()
+      n["convention"] = %name
+      n["available"] = %probe.available
+      n["version"] = %probe.version
+      if probe.path.len > 0:
+        n["path"] = %probe.path.replace('\\', '/')
+      else:
+        n["path"] = newJNull()
+      toolchainNode.add(n)
+  result["toolchainProbes"] = toolchainNode
   let conventionsNode = newJArray()
   for name in KnownConventionRegistry:
     conventionsNode.add(%name)
@@ -6130,23 +6260,26 @@ proc runShowConventionsCommand(args: openArray[string]): int =
   ##   * ``--json``         — emit a JSON document instead of the
   ##     human-readable text shape.
   ##
-  ## Honest scope (per the spec §"Honest scope"):
-  ##   * The "language convention" for every discovered target is
-  ##     hardcoded to ``"nim"`` because today's introspection plumbs
-  ##     through the Nim scanner only. Cross-language convention
-  ##     attribution lands when the convention registry exposes a
-  ##     uniform "which convention claims this dir" introspection
-  ##     surface (the ``recognize`` proc is callable but only inside
-  ##     the standard-provider binary, which has the per-language
-  ##     plugins linked).
+  ## Honest scope:
+  ##   * Per-target convention attribution uses the heuristic from
+  ##     ``repro_core/convention_attribution.nim`` (option 1c — manifest
+  ##     detection plus extension census). The standard-provider's
+  ##     actual ``recognize`` remains the source of truth at build time;
+  ##     this is a CLI-side approximation good enough for the 95% case
+  ##     (``Cargo.toml`` → Rust, ``pyproject.toml`` → Python, ...). The
+  ##     follow-on milestone replaces the heuristic with either a shared
+  ##     introspection library (option 1b) or a query-mode IPC to the
+  ##     standard-provider binary (option 1a).
   ##   * The ``Conventions registered`` list is a static mirror of
   ##     the standard-provider binary's registration order. A test
   ##     fails loudly if the two drift.
-  ##   * No-match diagnostics ("apps/asset-pack/ — no convention
-  ##     claimed it") are deferred to the cross-language introspection
-  ##     milestone — emitting them today would require running each
-  ##     convention's ``recognize`` per dir, which the CLI binary
-  ##     cannot do without linking the standard provider.
+  ##   * No-match diagnostics surface every target-shaped directory
+  ##     (``apps/<x>``, ``libs/<x>``, ``cmd/<x>``, ``tools/<x>``,
+  ##     ``pkg/<x>``, plus the workspace root when no parent directory
+  ##     contains target slots) the heuristic couldn't claim.
+  ##   * Toolchain probes run ``<tool> --version`` (or ``go version``)
+  ##     for every convention that appears as a per-target claim, at
+  ##     most once per convention per process invocation.
   var projectArg = ""
   var jsonOut = false
   var targetFilter = ""
