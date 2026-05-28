@@ -217,9 +217,10 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
           fragmentKind: tfkModule)
       # Project-file alias: prefer ``repro.nim``, fall back to
       # ``reprobuild.nim``. See repro_core/project_file.nim and
-      # reprobuild-specs/Three-Mode-Convention-System.md.
+      # reprobuild-specs/Three-Mode-Convention-System.md. Having both
+      # files in the same directory raises ``ProjectFileAmbiguousError``
+      # which propagates to the CLI top-level handler.
       let projectMatch = resolveProjectFile(parts.base)
-      warnIfAmbiguous(projectMatch, parts.base)
       if projectMatch.path.len > 0:
         return ParsedBuildTarget(
           modulePath: projectMatch.path,
@@ -240,9 +241,8 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
       # Project-file alias: prefer ``repro.nim``, fall back to
       # ``reprobuild.nim``. Empty match falls through to legacy name so
       # downstream "file not found" diagnostics still mention a concrete
-      # filename.
+      # filename. Both-files-present raises ``ProjectFileAmbiguousError``.
       let match = resolveProjectFile(parts.base)
-      warnIfAmbiguous(match, parts.base)
       if match.path.len > 0: match.path
       else: parts.base / LegacyProjectFileName
     else:
@@ -4782,7 +4782,6 @@ proc findDevEnvProjectRoot(startPath: string): string =
     # ``reprobuild.nim`` is a valid project root.
     let match = resolveProjectFile(cursor)
     if match.path.len > 0:
-      warnIfAmbiguous(match, cursor)
       return cursor
     let parent = parentDir(cursor)
     if parent == cursor or parent.len == 0:
@@ -5947,9 +5946,6 @@ proc renderShowConventionsText(workspaceRoot: string;
     let canonical = projectMatch.fileName == CanonicalProjectFileName
     let suffix = if canonical: " (canonical)" else: " (legacy alias)"
     result.add("Project file: " & projectMatch.fileName & suffix & "\n")
-    if projectMatch.ambiguous:
-      result.add("  warning: both repro.nim and reprobuild.nim present; " &
-        "remove one\n")
   result.add("\n")
 
   if members.len == 0:
@@ -6054,7 +6050,6 @@ proc renderShowConventionsJson(workspaceRoot: string;
     let pfNode = newJObject()
     pfNode["fileName"] = %projectMatch.fileName
     pfNode["canonical"] = %(projectMatch.fileName == CanonicalProjectFileName)
-    pfNode["ambiguous"] = %projectMatch.ambiguous
     result["projectFile"] = pfNode
   var scannedByFrom: Table[string, seq[DepEdge]]
   for edge in scanned:

@@ -20,8 +20,9 @@
 ##   convention recognised the project and produced *some* graph).
 ##
 ## We also exercise the "ambiguous" case end-to-end by writing both
-## files into the scratch fixture and asserting ``recognize`` still
-## passes (precedence rule: ``repro.nim`` wins).
+## files into the scratch fixture and asserting that the convention
+## path raises ``ProjectFileAmbiguousError`` — having both files in
+## the same directory is a HARD ERROR per the spec, not a warning.
 
 import std/[os, strutils, unittest]
 
@@ -119,11 +120,14 @@ suite "standard-provider project-file alias integration":
         # simply that emit succeeded without the project file present
         # at the legacy name.
 
-  test "both files: precedence rule (repro.nim wins) on the convention path":
-    # Materialise the same fixture but keep BOTH files. The convention
-    # must still recognise it (``repro.nim`` wins precedence) and emit
-    # successfully. The warning text reaches stderr; the resolver's
-    # own unit tests pin the cross-process warning capture.
+  test "both files: convention path raises ProjectFileAmbiguousError":
+    # Materialise the same fixture with BOTH files present. The spec
+    # (Three-Mode-Convention-System.md line 211) declares this a hard
+    # error: the convention path MUST raise rather than silently pick
+    # one of the two files. We assert the error surfaces at the
+    # resolver layer AND propagates through the convention's
+    # ``recognize`` entry point (which calls ``resolveProjectFile``
+    # via ``readReprobuildSource``).
     if not fileExists(CanonicalFixtureRoot / "reprobuild.nim"):
       checkpoint "fixture missing — looked at " & CanonicalFixtureRoot
       skip()
@@ -137,22 +141,28 @@ suite "standard-provider project-file alias integration":
       copyFile(scratch / "reprobuild.nim", scratch / "repro.nim")
       check fileExists(scratch / "repro.nim")
       check fileExists(scratch / "reprobuild.nim")
-      let match = resolveProjectFile(scratch)
-      check match.ambiguous
-      check match.fileName == CanonicalProjectFileName
+      # Resolver-layer: raises.
+      var resolverRaised = false
+      var resolverMsg = ""
+      try:
+        discard resolveProjectFile(scratch)
+      except ProjectFileAmbiguousError as err:
+        resolverRaised = true
+        resolverMsg = err.msg
+      check resolverRaised
+      check resolverMsg.contains(CanonicalProjectFileName)
+      check resolverMsg.contains(LegacyProjectFileName)
+      check resolverMsg.contains(scratch)
+      # Convention path: ``recognize`` calls ``readReprobuildSource`` →
+      # ``resolveProjectFile``; the error propagates up.
       let conv = nim_convention.nimConvention()
       let request = dummyRequest(scratch)
-      check conv.recognize(scratch, request)
-      var emitOk = false
-      var fragment: GraphFragment
+      var conventionRaised = false
       try:
-        fragment = conv.emitFragment(scratch, request)
-        emitOk = true
-      except CatchableError as err:
-        checkpoint "emitFragment raised: " & err.msg
-        fail()
-      if emitOk:
-        check fragment.nodes.len > 0
+        discard conv.recognize(scratch, request)
+      except ProjectFileAmbiguousError:
+        conventionRaised = true
+      check conventionRaised
 
   test "legacy reprobuild.nim only: existing fixtures keep working":
     # The unchanged canonical fixture. This is the regression: the M0-M29

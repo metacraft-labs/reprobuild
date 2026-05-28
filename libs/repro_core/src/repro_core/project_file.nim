@@ -9,9 +9,11 @@
 ## See ``reprobuild-specs/Three-Mode-Convention-System.md`` §"`repro.nim`
 ## ↔ `reprobuild.nim` alias" for the contract.
 ##
-## Precedence: if both files exist in the same directory, ``repro.nim``
-## wins and a one-line warning is emitted to stderr explaining that the
-## ambiguity should be resolved by removing one of the two.
+## Precedence: it is an error to have BOTH files in the same directory.
+## ``resolveProjectFile`` raises ``ProjectFileAmbiguousError`` when both
+## names exist; callers either let the error propagate to the CLI's
+## top-level handler (which prints the message and exits non-zero) or
+## catch it explicitly.
 ##
 ## This module is the single resolver every callsite that needs to find
 ## a project file in a directory should go through. The two filename
@@ -52,12 +54,13 @@ type
       ## The bare filename that matched (one of ``ProjectFileNames``),
       ## or the empty string when none was found. Callers can use this
       ## to print ``"<dir>/<fileName>"`` without re-computing the join.
-    ambiguous*: bool
-      ## ``true`` when BOTH ``repro.nim`` and ``reprobuild.nim`` exist in
-      ## the same directory. The resolver picked ``repro.nim`` per the
-      ## precedence rule; the caller is responsible for surfacing the
-      ## ambiguity to the user (typically by calling
-      ## ``warnIfAmbiguous``).
+
+  ProjectFileAmbiguousError* = object of CatchableError
+    ## Raised by ``resolveProjectFile`` when both ``repro.nim`` and
+    ## ``reprobuild.nim`` exist in the same directory. The message text
+    ## names both files plus the directory and tells the user to remove
+    ## the legacy ``reprobuild.nim`` (we are migrating toward
+    ## ``repro.nim`` as the canonical name).
 
 proc projectFileExists(path: string): bool =
   ## fileExists wrapper that consults the long-path-friendly form on
@@ -68,50 +71,50 @@ proc projectFileExists(path: string): bool =
   else:
     fileExists(path)
 
+proc ambiguousProjectFileMessage*(projectRoot: string): string =
+  ## The exact text raised when both ``repro.nim`` and ``reprobuild.nim``
+  ## are present. Exposed as a proc so tests can match against it without
+  ## duplicating the wording. NOTE: no leading ``"error: "`` — the CLI
+  ## top-level handler already prefixes ``"repro <subcommand>: error: "``
+  ## when it catches a propagated ``CatchableError``; including ``error:``
+  ## here would surface as a confusing ``"error: error: ..."`` to the
+  ## user. Pure-library callers that want a leading ``error:`` should add
+  ## one explicitly.
+  "both " & CanonicalProjectFileName & " and " &
+    LegacyProjectFileName & " exist in " & projectRoot &
+    "; remove " & LegacyProjectFileName &
+    " (the canonical name is " & CanonicalProjectFileName & ")"
+
 proc resolveProjectFile*(projectRoot: string): ProjectFileMatch =
   ## Probe ``projectRoot`` for a project file. Returns a populated
   ## ``ProjectFileMatch`` if either ``repro.nim`` or ``reprobuild.nim``
-  ## exists, with ``ambiguous=true`` when BOTH exist. Returns a
-  ## default-initialised ``ProjectFileMatch`` (empty ``path`` / empty
-  ## ``fileName``) when neither file is present.
+  ## exists. Returns a default-initialised ``ProjectFileMatch`` (empty
+  ## ``path`` / empty ``fileName``) when neither file is present.
+  ##
+  ## **Raises** ``ProjectFileAmbiguousError`` when BOTH files exist —
+  ## the spec (Three-Mode-Convention-System.md §"`repro.nim` ↔
+  ## `reprobuild.nim` alias") declares this an error, not a warning.
   let canonical = projectRoot / CanonicalProjectFileName
   let legacy = projectRoot / LegacyProjectFileName
   let hasCanonical = projectFileExists(canonical)
   let hasLegacy = projectFileExists(legacy)
+  if hasCanonical and hasLegacy:
+    raise newException(ProjectFileAmbiguousError,
+      ambiguousProjectFileMessage(projectRoot))
   if hasCanonical:
     ProjectFileMatch(
       path: canonical,
-      fileName: CanonicalProjectFileName,
-      ambiguous: hasLegacy)
+      fileName: CanonicalProjectFileName)
   elif hasLegacy:
     ProjectFileMatch(
       path: legacy,
-      fileName: LegacyProjectFileName,
-      ambiguous: false)
+      fileName: LegacyProjectFileName)
   else:
     ProjectFileMatch()
 
 proc projectFileIn*(projectRoot: string): string =
   ## Convenience wrapper around ``resolveProjectFile`` for callsites
   ## that only need the resolved path. Returns the empty string when no
-  ## project file is present. Does NOT emit any warning even when both
-  ## files exist — that's the caller's responsibility (call
-  ## ``warnIfAmbiguous`` on the ``ProjectFileMatch`` if you want it).
+  ## project file is present. Raises ``ProjectFileAmbiguousError`` when
+  ## both names coexist (same contract as ``resolveProjectFile``).
   resolveProjectFile(projectRoot).path
-
-proc ambiguousProjectFileMessage*(projectRoot: string): string =
-  ## The exact warning text emitted when both ``repro.nim`` and
-  ## ``reprobuild.nim`` are present. Exposed as a proc so tests can
-  ## match against it without duplicating the wording.
-  "warning: both " & CanonicalProjectFileName & " and " &
-    LegacyProjectFileName & " exist in " & projectRoot &
-    "; using " & CanonicalProjectFileName &
-    " (ambiguous; remove one of these files)"
-
-proc warnIfAmbiguous*(match: ProjectFileMatch; projectRoot: string) =
-  ## Emit the canonical "both files present" warning to stderr when
-  ## ``match.ambiguous`` is set. No-op otherwise. Idempotent at the
-  ## call-site level — callers MAY de-duplicate per ``projectRoot`` if
-  ## they expect to probe the same directory more than once.
-  if match.ambiguous:
-    stderr.writeLine(ambiguousProjectFileMessage(projectRoot))

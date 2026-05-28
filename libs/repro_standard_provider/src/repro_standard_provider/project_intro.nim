@@ -74,10 +74,13 @@ proc readUsesHint*(projectRoot: string): seq[string] =
   ## Returns an empty seq on any error — missing file, IO failure,
   ## malformed block. Callers MUST treat the output as a diagnostic
   ## hint, never as authoritative input to dispatch.
+  ##
+  ## Raises ``ProjectFileAmbiguousError`` (from ``resolveProjectFile``)
+  ## when both ``repro.nim`` and ``reprobuild.nim`` exist in the same
+  ## directory — that's a spec-defined hard error, not a hint failure.
   let match = resolveProjectFile(projectRoot)
   if match.path.len == 0:
     return @[]
-  warnIfAmbiguous(match, projectRoot)
   var raw: string
   try:
     raw = readFile(match.path)
