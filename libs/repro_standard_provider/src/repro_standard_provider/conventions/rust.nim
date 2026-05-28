@@ -424,8 +424,14 @@ proc rustEmitCacheFingerprint(projectRoot, cargoExe: string;
   ## Fingerprint key for the cargo-metadata cache. See the analogous
   ## comment in ``nim.nim`` for the rationale around what is and isn't
   ## folded in.
+  ##
+  ## **M29 Part A**: ``cargo --version`` output is folded in via
+  ## ``toolVersionInput``. An in-place ``cargo`` upgrade (or a host
+  ## ``rustup`` toolchain switch keeping the same shim path) flips the
+  ## reported version and naturally misses the cache.
   var inputs: seq[EmitCacheInput] = @[
     textInput("cargo-exe:" & cargoExe),
+    toolVersionInput(cargoExe),
     textInput("project-root:" & projectRoot),
     textInput("cmd:cargo metadata --format-version=1 --no-deps --offline"),
   ]

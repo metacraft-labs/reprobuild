@@ -462,8 +462,14 @@ proc goEmitCacheFingerprint(projectRoot, goExe: string;
                             sources: openArray[string]): string =
   ## Fingerprint key for the go-list-export cache. See the analogous
   ## comment in ``nim.nim``/``rust.nim`` for the rationale.
+  ##
+  ## **M29 Part A**: ``go version`` output is folded in via
+  ## ``toolVersionInput`` (note: ``go version`` without a leading dash —
+  ## the Go toolchain doesn't speak ``--version``). An in-place Go
+  ## upgrade therefore misses the cache and re-runs ``go list``.
   var inputs: seq[EmitCacheInput] = @[
     textInput("go-exe:" & goExe),
+    toolVersionInput(goExe, ["version"]),
     textInput("project-root:" & projectRoot),
     textInput("cmd:go list -export -json -deps ./..."),
   ]

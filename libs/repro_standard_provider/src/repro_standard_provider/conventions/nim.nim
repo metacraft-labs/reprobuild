@@ -436,16 +436,25 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
   ##     entry source itself — content digest folded in via
   ##     ``fileInput``.
   ##
+  ## **M29 Part A**: the Nim driver's reported version is now folded in
+  ## via ``toolVersionInput`` (running ``nim --version`` once per emit
+  ## process, with the result cached). The same-path-different-binary
+  ## case (e.g. ``choosenim`` swapping the resolved binary, or a system
+  ## ``nim`` upgraded in place) is therefore handled directly: the
+  ## reported version string changes and the cache misses naturally.
+  ##
   ## Not in the key today:
-  ##   * the ``nim`` binary's bytes (only its path). On a managed dev
-  ##     shell the path includes the version, which is good enough; a
-  ##     paranoid future M can fold in ``nim --version`` output if a
-  ##     same-path-different-binary case crops up.
+  ##   * the ``nim`` binary's raw bytes (hash). Version output is the
+  ##     pragmatic stand-in — it changes whenever Nim's behaviour
+  ##     materially changes and is cheap to compute. A future M can
+  ##     fold in the full binary hash if a same-version-different-bytes
+  ##     case crops up.
   ##   * environment variables. The convention's argv is hermetic at
   ##     the source level — Nim doesn't read ``NIMCACHE_DIR`` etc. when
   ##     ``--nimcache:`` is set on the command line.
   var inputs: seq[EmitCacheInput] = @[
     textInput("nim-exe:" & nimExe),
+    toolVersionInput(nimExe),
     textInput("entry-source:" & entrySource),
     textInput("manifest:" & manifestPath),
     textInput("app-lib:" & (if appLib: "true" else: "false")),

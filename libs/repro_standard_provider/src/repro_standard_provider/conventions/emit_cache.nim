@@ -54,17 +54,33 @@
 ## milestone budget. See the M18 milestone hand-off for the deferred
 ## work list.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, osproc, strutils, tables]
 
 import repro_core
 import repro_provider_runtime
 
 const
-  EmitCacheVersion* = "1"
+  EmitCacheVersion* = "2"
     ## Bump this when the fingerprint layout changes in a way the cache
     ## can't reconcile (e.g., a new input class becomes load-bearing).
     ## Pre-existing sidecars with a different version are treated as
     ## misses and overwritten.
+    ##
+    ## **v2 (M29)**: tool-version fingerprinting. Each Tier 2b convention
+    ## now folds ``<tool> --version`` (or ``go version``) output into the
+    ## cache key via ``toolVersionFingerprint``. An on-host toolchain
+    ## upgrade (e.g. ``nim 2.0.0 → 2.2.0`` at the same absolute path)
+    ## therefore reliably misses the cache and re-runs the eager
+    ## subprocess. Pre-existing v1 sidecars are mismatched (the leading
+    ## ``repro-emit-cache-v2`` line differs from ``repro-emit-cache-v1``)
+    ## and overwritten on the next emit.
+
+  ToolVersionProbeUnknown* = "unknown"
+    ## Sentinel returned by ``toolVersionFingerprint`` when the version
+    ## probe fails (missing binary, non-zero exit, timeout). The sentinel
+    ## is itself folded into the fingerprint so the cache key stays
+    ## deterministic — repeated misses on a broken toolchain still hit
+    ## the same cache slot.
 
 type
   EmitCacheInputKind* = enum
@@ -122,6 +138,91 @@ proc computeEmitCacheFingerprint*(inputs: openArray[EmitCacheInput]): string =
   for entry in fileEntries:
     buf.add("file:" & entry.path & "\t" & entry.digest & "\n")
   buf
+
+var toolVersionCache: Table[string, string]
+  ## Process-local cache of ``<tool> <args>`` outputs. The key is the
+  ## tool path plus the argv tail (separated by NUL); the value is the
+  ## raw captured output or ``ToolVersionProbeUnknown``. The cache lives
+  ## for the lifetime of the standard-provider process — a single emit
+  ## may consult several conventions and each ``cargo metadata`` /
+  ## ``nim c`` /``go list`` invocation pays for ``cargo --version`` /
+  ## ``nim --version`` / ``go version`` exactly once.
+
+proc toolVersionProbeKey(toolExe: string; versionArgs: openArray[string]):
+    string =
+  ## Deterministic in-memory cache key — the same (exe, args) tuple
+  ## resolves to the same slot regardless of caller.
+  result = toolExe & "\0"
+  for arg in versionArgs:
+    result.add(arg)
+    result.add('\0')
+
+proc toolVersionFingerprint*(toolExe: string;
+                             versionArgs: openArray[string] = ["--version"]):
+    string =
+  ## Run ``<toolExe> <versionArgs...>`` once per process and return the
+  ## merged stdout/stderr verbatim — or ``ToolVersionProbeUnknown`` if
+  ## the subprocess can't be spawned, exits non-zero, or returns an
+  ## empty payload. Result is cached per (exe, args) tuple for the
+  ## lifetime of the standard-provider process.
+  ##
+  ## **Why the raw output and not a hash**: ``computeEmitCacheFingerprint``
+  ## already hashes (well, concatenates + relies on text identity) the
+  ## whole assembled key. Folding in the raw version string keeps the
+  ## sidecar human-readable on inspection, which has saved a debug cycle
+  ## or two during M9 harness triage.
+  ##
+  ## **Args default**: ``["--version"]`` is the universal POSIX
+  ## convention. Go's ``go version`` (no leading dash) and a handful of
+  ## other tools need a custom argv — pass it explicitly.
+  ##
+  ## **Cache invalidation contract**: when the user upgrades a tool in
+  ## place (``nim`` stays at the same absolute path but goes from
+  ## ``2.0.0`` to ``2.2.0``), the version string changes; the
+  ## convention's fingerprint changes; the M18 sidecar mismatches; the
+  ## eager subprocess re-runs. This is the headline M29 Part A fix.
+  if toolExe.len == 0:
+    return ToolVersionProbeUnknown
+  let key = toolVersionProbeKey(toolExe, versionArgs)
+  if toolVersionCache.hasKey(key):
+    return toolVersionCache[key]
+  var argv = @[toolExe]
+  for arg in versionArgs:
+    argv.add(arg)
+  let cmd = quoteShellCommand(argv)
+  var captured = ToolVersionProbeUnknown
+  try:
+    let (output, exitCode) = execCmdEx(cmd,
+      options = {poStdErrToStdOut, poUsePath})
+    if exitCode == 0 and output.len > 0:
+      captured = output.strip()
+      if captured.len == 0:
+        captured = ToolVersionProbeUnknown
+  except CatchableError:
+    captured = ToolVersionProbeUnknown
+  toolVersionCache[key] = captured
+  captured
+
+proc toolVersionInput*(toolExe: string;
+                       versionArgs: openArray[string] = ["--version"]):
+    EmitCacheInput =
+  ## Convenience wrapper: probes the tool's version (with caching) and
+  ## returns the version text as a labelled ``textInput`` ready to drop
+  ## into ``computeEmitCacheFingerprint`` input lists. The label
+  ## (``tool-version:<basename>``) makes the sidecar self-documenting
+  ## without leaking the full exe path twice (the convention typically
+  ## already includes ``<lang>-exe:<path>`` separately).
+  let label = "tool-version:" & extractFilename(toolExe) & ":" &
+    toolVersionFingerprint(toolExe, versionArgs)
+  textInput(label)
+
+proc resetToolVersionCache*() =
+  ## Test hook only: drop the process-local version cache so unit tests
+  ## can probe a tool whose output changes between calls (by swapping
+  ## the on-disk binary). Production code never needs this — the version
+  ## of an already-resolved tool can't change mid-process under any
+  ## supported install topology.
+  toolVersionCache = initTable[string, string]()
 
 proc emitCacheFingerprintPath*(scratchDir, cacheBaseName: string): string =
   ## The on-disk sidecar path. The convention picks a scratch directory
