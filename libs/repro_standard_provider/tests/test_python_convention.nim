@@ -127,7 +127,10 @@ suite "python convention M15":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "recognize: negative — maturin backend (unsupported)":
+  test "recognize: positive M24 — maturin backend routes to Mode B":
+    # M24: maturin is now in the Mode B catalog; the convention claims
+    # the project rather than declining. ``emitFragment`` then routes
+    # to ``pythonCrudeFallback`` which delegates to ``python -m build``.
     let scratch = getTempDir() / "test_python_convention_maturin"
     if dirExists(scratch):
       removeDir(scratch)
@@ -151,7 +154,10 @@ suite "python convention M15":
       removeDir(scratch)
     let conv = python_convention.pythonConvention()
     let request = dummyRequest(scratch)
-    check not conv.recognize(scratch, request)
+    if not pythonOnPath():
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
 
   test "recognize: negative — uses lacks python":
     let scratch = getTempDir() / "test_python_convention_rust_uses"
@@ -374,3 +380,150 @@ suite "python convention M15":
           else:
             check "/bin/" in normalised
       check sawLauncher
+
+  test "recognize: positive M24 — scikit_build_core.build routes to Mode B":
+    let scratch = getTempDir() / "test_python_convention_skbuild"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch)
+    writeFile(scratch / "pyproject.toml",
+      "[project]\n" &
+      "name = \"fake-skbuild\"\n" &
+      "version = \"0.1.0\"\n" &
+      "\n" &
+      "[build-system]\n" &
+      "requires = [\"scikit-build-core\"]\n" &
+      "build-backend = \"scikit_build_core.build\"\n")
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package fakeSkBuild:\n" &
+      "  uses:\n" &
+      "    \"python3 >=3.11\"\n" &
+      "\n" &
+      "  library fake_skbuild\n")
+    defer:
+      removeDir(scratch)
+    let conv = python_convention.pythonConvention()
+    let request = dummyRequest(scratch)
+    if not pythonOnPath():
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
+
+  test "recognize: positive M24 — poetry-core / pdm-backend / uv_build":
+    # Sanity that ``isModeBBackend`` accepts the full catalog.
+    let backends = [
+      ("poetry.core.masonry.api", "fakePoetry", "fake_poetry"),
+      ("pdm.backend",             "fakePdm",    "fake_pdm"),
+      ("uv_build",                "fakeUv",     "fake_uv"),
+    ]
+    for (backend, pkgName, libName) in backends:
+      let scratch = getTempDir() / ("test_python_convention_" & libName)
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(scratch)
+      writeFile(scratch / "pyproject.toml",
+        "[project]\n" &
+        "name = \"" & libName & "\"\n" &
+        "version = \"0.1.0\"\n" &
+        "\n" &
+        "[build-system]\n" &
+        "requires = [\"" & backend & "\"]\n" &
+        "build-backend = \"" & backend & "\"\n")
+      writeFile(scratch / "reprobuild.nim",
+        "import repro_project_dsl\n" &
+        "package " & pkgName & ":\n" &
+        "  uses:\n" &
+        "    \"python3 >=3.11\"\n" &
+        "\n" &
+        "  library " & libName & "\n")
+      try:
+        let conv = python_convention.pythonConvention()
+        let request = dummyRequest(scratch)
+        if not pythonOnPath():
+          check not conv.recognize(scratch, request)
+        else:
+          check conv.recognize(scratch, request)
+      finally:
+        removeDir(scratch)
+
+  test "emitFragment M24: maturin scratch project emits a single crude action":
+    # Materialise a tiny scratch maturin-shaped project (NO Cargo.toml /
+    # src/lib.rs needed — the crude fallback enumerates the source tree
+    # but doesn't validate Rust crate shape at emit time; the Python
+    # convention just needs to detect maturin and route to crude). The
+    # emitted fragment must carry exactly one ``crude-build-*`` action
+    # whose argv invokes ``python -m build --wheel --no-isolation`` and
+    # whose declared outputs include ``dist``.
+    if not pythonOnPath():
+      skip()
+    else:
+      let scratch = getTempDir() / "test_python_convention_maturin_emit"
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(scratch)
+      writeFile(scratch / "pyproject.toml",
+        "[project]\n" &
+        "name = \"fake-maturin-emit\"\n" &
+        "version = \"0.1.0\"\n" &
+        "\n" &
+        "[build-system]\n" &
+        "requires = [\"maturin\"]\n" &
+        "build-backend = \"maturin\"\n")
+      writeFile(scratch / "reprobuild.nim",
+        "import repro_project_dsl\n" &
+        "package fakeMaturinEmit:\n" &
+        "  uses:\n" &
+        "    \"python3 >=3.11\"\n" &
+        "\n" &
+        "  library fake_maturin_emit\n")
+      defer:
+        removeDir(scratch)
+      let conv = python_convention.pythonConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+
+      var crudeActions: seq[BuildActionDef] = @[]
+      var wheelActions: seq[BuildActionDef] = @[]
+      var sdistActions: seq[BuildActionDef] = @[]
+      var byteCompiles: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("crude-build-"):
+          crudeActions.add(action)
+        elif action.id.startsWith("python-build-wheel-"):
+          wheelActions.add(action)
+        elif action.id.startsWith("python-build-sdist-"):
+          sdistActions.add(action)
+        elif action.id.startsWith("python-byte-compile-"):
+          byteCompiles.add(action)
+
+      # Exactly one crude action and zero Mode A actions — the M24
+      # routing must replace the entire Mode A sub-graph.
+      check crudeActions.len == 1
+      check wheelActions.len == 0
+      check sdistActions.len == 0
+      check byteCompiles.len == 0
+
+      let crude = crudeActions[0]
+      let argv = inlineArgvOf(crude)
+      check argv.len == 5
+      let arg0Base = extractFilename(argv[0]).toLowerAscii
+      check arg0Base.startsWith("python3") or arg0Base.startsWith("python")
+      check argv[1] == "-m"
+      check argv[2] == "build"
+      check argv[3] == "--wheel"
+      check argv[4] == "--no-isolation"
+      check crude.pool == "compile"
+
+      # ``dist`` declared as an opaque output dir. The path is absolute
+      # — the crude emitter joins it against the project root.
+      var sawDist = false
+      for outPath in crude.outputs:
+        let normalised = outPath.replace('\\', '/')
+        if normalised.endsWith("/dist") or normalised.endsWith("\\dist"):
+          sawDist = true
+      check sawDist

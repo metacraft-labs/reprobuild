@@ -1,20 +1,34 @@
-## Python language convention (Tier 2b) — Mode A "fine-grained" plugin.
+## Python language convention (Tier 2b) — Mode A "fine-grained" plugin
+## with M24 Mode B crude fallback.
 ##
 ## Recognises a project whose ``reprobuild.nim`` declares ``uses:``
 ## containing ``python3`` (or ``python``) AND ships a conventional
-## ``pyproject.toml`` whose ``[build-system].build-backend`` is one of
-## the supported PEP 517 backends with stable, well-understood internal
-## action graphs:
+## ``pyproject.toml``.
+##
+## **Mode A backends** (well-understood, fine-grained PEP 517 action
+## graph emitted directly via the configured backend's ``build_wheel``
+## hook):
 ##
 ##   * ``hatchling.build``
 ##   * ``flit_core.buildapi``
 ##   * ``setuptools.build_meta``
 ##   * ``setuptools.build_meta:__legacy__``
 ##
-## Other backends (``maturin``, ``scikit-build-core``, ``poetry.core.*``,
-## ``pdm.backend``, ``uv_build``) are NOT recognised at M15. They would
-## route to a future Mode B crude fallback that delegates to
-## ``uv build`` / ``python -m build``.
+## **Mode B backends** (M24 — recognised, routed to the crude fallback
+## which delegates to ``python -m build --wheel --no-isolation`` under
+## FS-snoop). These backends need their own toolchains (a Rust compiler
+## for maturin, a CMake-driven C/C++ compiler for scikit-build-core, an
+## opinionated PEP 517 frontend for poetry-core / pdm-backend / uv_build)
+## and have manifest shapes that don't reduce cleanly to the four PEP 517
+## hooks Mode A exercises. The Mode B path treats the project as a
+## black box and trusts the backend's frontend to handle isolation,
+## dep resolution, native toolchain orchestration, etc.:
+##
+##   * ``maturin``                          (Rust-backed PyO3 extensions)
+##   * ``scikit_build_core.build``          (CMake-driven C/C++ extensions)
+##   * ``poetry.core.masonry.api``          (poetry-core)
+##   * ``pdm.backend``
+##   * ``uv_build``
 ##
 ## ``Standard-Provider-Implementation.milestones.org §M15`` (Tier 2b
 ## landing) and ``§M20`` (deferred A1/A4/A5 graduations) are the canonical
@@ -90,6 +104,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/crude
 
 const
   ScratchDirName* = ".repro/build"
@@ -105,9 +120,33 @@ const
     "setuptools.build_meta:__legacy__",
   ]
     ## Build backends whose internal action graph is stable and
-    ## well-understood enough to drive directly via PEP 517 hooks. Other
-    ## backends (poetry, pdm, maturin, scikit-build-core, uv_build) need
-    ## a Mode B frontend; the M15 surface rejects them at recognise time.
+    ## well-understood enough to drive directly via PEP 517 hooks
+    ## (Mode A). The convention emits the full byte-compile + wheel +
+    ## sdist (+ installer) sub-graph for these.
+
+  ModeBBackends = [
+    "maturin",
+    "scikit_build_core.build",
+    "scikit-build-core.build",
+    "poetry.core.masonry.api",
+    "poetry.masonry.api",
+    "pdm.backend",
+    "pdm-backend",
+    "uv_build",
+    "uv-build",
+  ]
+    ## M24: build backends that the convention RECOGNISES but routes to
+    ## the Mode B crude fallback. These backends need extra toolchains
+    ## (Rust compiler for maturin, CMake for scikit-build-core, etc.)
+    ## and don't reduce cleanly to the four PEP 517 hooks Mode A uses.
+    ## The fallback invokes ``python -m build --wheel --no-isolation``
+    ## which delegates to the configured backend; the backend is expected
+    ## to already be importable (provisioned via the dev environment).
+    ##
+    ## Both hyphen-spelled and underscore-spelled forms are listed
+    ## because some projects historically wrote the dotted Python path
+    ## with hyphens — pip + the PEP 517 frontend are forgiving but our
+    ## TOML scan reads the literal string.
 
 type
   PythonMemberKind = enum
@@ -334,6 +373,16 @@ proc isSupportedBackend(backend: string): bool =
       return true
   false
 
+proc isModeBBackend(backend: string): bool =
+  ## M24: True when ``backend`` is one of the Mode B-eligible PEP 517
+  ## backends (maturin / scikit-build-core / poetry-core / pdm-backend /
+  ## uv_build). The convention claims projects with these backends and
+  ## routes them through ``pythonCrudeFallback``.
+  for entry in ModeBBackends:
+    if entry == backend:
+      return true
+  false
+
 proc pythonExecutable(): string =
   ## Resolve ``python3`` (preferred) or ``python`` on PATH. Recognise time:
   ## avoids declaring a match we can't fulfil at emit. M15 only uses this
@@ -347,21 +396,26 @@ proc pythonExecutable(): string =
 
 proc pythonRecognize(projectRoot: string;
                      request: ProviderGraphRequest): bool {.gcsafe.} =
-  ## Recognition contract (M15):
+  ## Recognition contract (M15 + M24):
   ##   * ``<projectRoot>/pyproject.toml`` exists
   ##   * ``<projectRoot>/reprobuild.nim`` exists AND its ``uses:`` lists
   ##     ``python3`` or ``python``
-  ##   * ``pyproject.toml`` declares a ``[build-system].build-backend`` in
-  ##     the supported list (hatchling.build / flit_core.buildapi /
-  ##     setuptools.build_meta / setuptools.build_meta:__legacy__)
   ##   * the package declares at least one ``library`` or ``executable``
   ##     member
-  ##   * ``python3`` (or ``python``) is on PATH (so emit can run the
-  ##     PEP 517 hook script)
+  ##   * ``pyproject.toml`` declares a ``[build-system].build-backend``
+  ##     EITHER in the Mode A supported list (hatchling.build /
+  ##     flit_core.buildapi / setuptools.build_meta /
+  ##     setuptools.build_meta:__legacy__) OR in the M24 Mode B list
+  ##     (maturin / scikit_build_core.build / poetry.core.* /
+  ##     pdm.backend / uv_build)
+  ##   * ``python3`` (or ``python``) is on PATH (so emit can run either
+  ##     the Mode A PEP 517 hook script or the Mode B
+  ##     ``python -m build`` frontend)
   ##
-  ## Other backends (maturin / scikit-build-core / poetry-core / pdm /
-  ## uv_build) fall through to no-match — a future M would route them
-  ## to a Mode B crude path.
+  ## Unknown backends still fall through to no-match — only the explicit
+  ## Mode A + Mode B catalog is claimed. ``emitFragment`` then dispatches
+  ## to ``pythonCrudeFallback`` for Mode B backends and to the Mode A
+  ## sub-graph emitter otherwise.
   if not fileExists(extendedPath(projectRoot / "pyproject.toml")):
     return false
   let source = readReprobuildSource(projectRoot)
@@ -372,7 +426,8 @@ proc pythonRecognize(projectRoot: string;
   if extractMembers(source).len == 0:
     return false
   let info = parsePyprojectToml(projectRoot / "pyproject.toml")
-  if not isSupportedBackend(info.buildBackend):
+  if not isSupportedBackend(info.buildBackend) and
+     not isModeBBackend(info.buildBackend):
     return false
   if pythonExecutable().len == 0:
     return false
@@ -969,6 +1024,77 @@ proc syntheticPackage(projectRoot: string;
     devEnvBodyHash: "",
     toolUses: @[])
 
+proc pythonCrudeFallback(projectRoot: string;
+                         request: ProviderGraphRequest;
+                         info: PythonProjectInfo):
+                           GraphFragment {.gcsafe.} =
+  ## M24: Mode B emitter for Python projects whose ``[build-system]
+  ## .build-backend`` is in the ``ModeBBackends`` catalog (maturin,
+  ## scikit-build-core, poetry-core, pdm-backend, uv_build). Delegates
+  ## to ``python -m build --wheel --no-isolation`` under FS-snoop
+  ## monitoring per the M6 spec.
+  ##
+  ## **Design decision — why ``python -m build --wheel --no-isolation``
+  ## over ``python -m pip wheel --no-build-isolation --no-deps .``**:
+  ##
+  ##   * ``python -m build`` is the PyPA-blessed PEP 517 frontend
+  ##     (vendored as the ``build`` distribution on PyPI). It is the
+  ##     intended frontend for direct backend invocation — pip is the
+  ##     installer-frontend and treats wheel-building as an
+  ##     internal-implementation detail of ``pip install <sdist>``.
+  ##   * ``--no-isolation`` makes ``build`` skip the implicit
+  ##     ``venv + pip install build-backend`` dance and use the
+  ##     ambient Python's already-installed backend. This is what we
+  ##     want under Reprobuild: the dev environment is expected to
+  ##     have already provisioned the configured backend (maturin /
+  ##     scikit-build-core / poetry-core / pdm-backend / uv) — a venv
+  ##     spun up per build would re-install it on every invocation.
+  ##   * ``--wheel`` restricts to wheel output (skip sdist). The Mode A
+  ##     path emits both wheel + sdist actions but the Mode B path
+  ##     prioritises the runnable wheel because that's the load-bearing
+  ##     artefact for downstream consumers and Mode B's headline goal
+  ##     ("graceful handling, ANY working artefact") doesn't require
+  ##     sdist parity.
+  ##
+  ## ``python -m pip wheel --no-build-isolation --no-deps .`` is the
+  ## documented fallback for hosts that don't ship ``build`` — same
+  ## end-state (a ``.whl`` under ``dist/`` or a configured output dir)
+  ## but the wheel landing path is less predictable (pip writes to the
+  ## CWD by default; ``-w`` can redirect). We pick ``python -m build``
+  ## here because every supported dev environment already includes the
+  ## ``build`` distribution alongside the backend.
+  ##
+  ## The wheel lands under ``<projectRoot>/dist/`` (``python -m build``
+  ## default). The crude fragment declares ``dist`` as an opaque output
+  ## directory and the project root as the input root; FS-snoop
+  ## promotes any read/written file the backend touches at runtime.
+  {.cast(gcsafe).}:
+    let pythonExe = pythonExecutable()
+    if pythonExe.len == 0:
+      raise newException(ValueError,
+        "python convention: neither 'python3' nor 'python' on PATH; " &
+          "cannot run the Mode B 'python -m build' frontend")
+    var packageName = info.distributionName
+    if packageName.len > 0:
+      packageName = normalizeDistName(packageName)
+    if packageName.len == 0:
+      packageName = projectRoot.extractFilename
+    if packageName.len == 0:
+      packageName = "python-crude"
+    let argv = @[
+      pythonExe,
+      "-m",
+      "build",
+      "--wheel",
+      "--no-isolation",
+    ]
+    result = emitCrudeFragment(
+      projectRoot = projectRoot,
+      request = request,
+      packageName = packageName,
+      nativeBuildArgv = argv,
+      outputDirs = ["dist"])
+
 proc pythonEmitFragment(projectRoot: string;
                         request: ProviderGraphRequest):
                           GraphFragment {.gcsafe.} =
@@ -976,6 +1102,11 @@ proc pythonEmitFragment(projectRoot: string;
   ## members, emit per-member action sub-graphs covering byte-compile +
   ## wheel + sdist + (when applicable) installer, then hand the whole
   ## thing to ``buildPackageFragment``.
+  ##
+  ## **M24 routing**: when the project's ``[build-system].build-backend``
+  ## is in the Mode B catalog (maturin / scikit-build-core /
+  ## poetry-core / pdm-backend / uv_build), delegate to
+  ## ``pythonCrudeFallback`` rather than emit the Mode A sub-graph.
   ##
   ## The DSL runtime mutates module-level registries that aren't annotated
   ## ``gcsafe`` (they predate the provider host). Same shape as the
@@ -996,11 +1127,20 @@ proc pythonEmitFragment(projectRoot: string;
       raise newException(ValueError,
         "python convention: pyproject.toml has no [project].version " &
           "field (under " & projectRoot & ")")
+    # M24 Mode B routing: maturin / scikit-build-core / poetry-core /
+    # pdm-backend / uv_build all need their own toolchains (Rust
+    # compiler, CMake, etc.) and have manifest shapes that don't
+    # reduce cleanly to the four PEP 517 hooks Mode A drives.
+    # Delegate to the crude fallback which calls ``python -m build``.
+    if isModeBBackend(info.buildBackend):
+      return pythonCrudeFallback(projectRoot, request, info)
     if not isSupportedBackend(info.buildBackend):
       raise newException(ValueError,
         "python convention: unsupported [build-system].build-backend '" &
           info.buildBackend & "' (recognised: hatchling.build / " &
-          "flit_core.buildapi / setuptools.build_meta)")
+          "flit_core.buildapi / setuptools.build_meta or one of the " &
+          "Mode B backends: maturin / scikit_build_core.build / " &
+          "poetry.core.masonry.api / pdm.backend / uv_build)")
     let pythonExe = pythonExecutable()
     if pythonExe.len == 0:
       raise newException(ValueError,

@@ -22,7 +22,7 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set, post-M23):
+# Expected to PASS (the known-working set, post-M24):
 #   nim/binary, nim/multi-binary,
 #   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
@@ -34,9 +34,17 @@
 #   go/binary, go/library, go/library-with-tests, go/multi-binary,
 #   python/library-pure,
 #   python/console-script    (M20: byte-compile + sdist + runnable shim),
+#   python/pep517-maturin    (M24: maturin backend → Mode B; SKIP when host
+#                             Python lacks libs/python<MAJ><MIN>.lib),
+#   python/pep517-scikit-build-core
+#                            (M24: scikit_build_core.build → Mode B; SKIP when
+#                             host Python lacks dev headers + import library),
 #   javascript-typescript/typescript-library,
 #   javascript-typescript/typescript-cli,
 #   javascript-typescript/node-server,
+#   javascript-typescript/vite-app           (M24: vite.config.* → Mode B
+#                                             "npm install && npm run build"),
+#   javascript-typescript/webpack-app        (M24: webpack.config.* → Mode B),
 #   c-cpp-make/binary, c-cpp-make/library-static,
 #   c-cpp-autotools/hello-binary (when autotools toolchain available)
 #
@@ -119,9 +127,13 @@ $PopulatedExamples = @(
   'go/multi-binary',
   'python/library-pure',
   'python/console-script',
+  'python/pep517-maturin',
+  'python/pep517-scikit-build-core',
   'javascript-typescript/typescript-library',
   'javascript-typescript/typescript-cli',
   'javascript-typescript/node-server',
+  'javascript-typescript/vite-app',
+  'javascript-typescript/webpack-app',
   'c-cpp-make/binary',
   'c-cpp-make/library-static',
   'c-cpp-autotools/hello-binary'
@@ -341,6 +353,143 @@ function Probe-Toolchain([string]$language) {
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
+    }
+  }
+}
+
+# --- per-fixture toolchain probe -------------------------------------------
+# Returns a hashtable: { Available = $true/$false; Reason = string }
+#
+# Some M24 fixtures route to Mode B (``python -m build`` / ``npm install
+# && npm run build``) and need extra toolchains beyond the language
+# probe: maturin needs a Rust compiler + the ``maturin`` + ``build``
+# Python modules; scikit-build-core needs CMake + a C compiler + the
+# ``scikit_build_core`` + ``build`` modules; the vite/webpack fixtures
+# need ``npm`` + (typically) network access for the install step. When
+# any prerequisite is missing the harness SKIPs cleanly with a clear
+# reason rather than failing — matching the M23 binary-with-crates-io
+# pattern.
+function Probe-Fixture([string]$rel) {
+  switch ($rel) {
+    'python/pep517-maturin' {
+      # Need rustc + cargo for maturin, plus the ``maturin`` and
+      # ``build`` Python distributions importable from the convention's
+      # python3.
+      $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+      if (-not $rustc) {
+        $rustupStableBin = 'D:\metacraft-dev-deps\rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
+        if (Test-Path -LiteralPath (Join-Path $rustupStableBin 'rustc.exe')) {
+          $env:PATH = "$rustupStableBin;$env:PATH"
+          $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+        }
+      }
+      if (-not $rustc) {
+        return @{ Available = $false; Reason = "rustc not on PATH — maturin needs a Rust toolchain" }
+      }
+      $pythonCmd = $null
+      foreach ($n in @('python3', 'python')) {
+        $cand = Get-Command $n -ErrorAction SilentlyContinue
+        if ($cand) { $pythonCmd = $cand; break }
+      }
+      if (-not $pythonCmd) {
+        return @{ Available = $false; Reason = "python3/python not on PATH" }
+      }
+      foreach ($mod in @('maturin', 'build')) {
+        & $pythonCmd.Source -c "import $mod" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+          return @{ Available = $false; Reason = "python module '$mod' not importable; install via pip" }
+        }
+      }
+      # maturin's bundled maturin.exe lives under <python>/Scripts/
+      # which isn't always on PATH; prepend so the action can spawn it.
+      $pythonScripts = Join-Path (Split-Path $pythonCmd.Source -Parent) 'Scripts'
+      if ((Test-Path -LiteralPath (Join-Path $pythonScripts 'maturin.exe')) -and
+          -not ($env:PATH -split ';' | Where-Object { $_ -ieq $pythonScripts })) {
+        $env:PATH = "$pythonScripts;$env:PATH"
+      }
+      # PyO3 needs python<MAJ><MIN>.lib for linking. The embeddable
+      # Windows Python omits libs/; SKIP cleanly.
+      $pythonPrefix = Split-Path $pythonCmd.Source -Parent
+      $pythonLibsDir = Join-Path $pythonPrefix 'libs'
+      $hasImportLib = $false
+      if (Test-Path -LiteralPath $pythonLibsDir) {
+        $importLibs = @(Get-ChildItem -LiteralPath $pythonLibsDir -Filter 'python*.lib' -ErrorAction SilentlyContinue)
+        if ($importLibs.Count -gt 0) { $hasImportLib = $true }
+      }
+      if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
+        $hasImportLib = $true
+      }
+      if (-not $hasImportLib) {
+        return @{ Available = $false; Reason = "Python install lacks the import library under $pythonLibsDir (embeddable Windows Python omits it); maturin needs a full install" }
+      }
+      return @{ Available = $true; Reason = "rustc=$($rustc.Source); python=$($pythonCmd.Source); maturin + build + import-lib present" }
+    }
+    'python/pep517-scikit-build-core' {
+      # Need cmake + a C compiler (gcc/clang/MSVC) + the
+      # ``scikit_build_core`` and ``build`` Python distributions.
+      $cmake = Get-Command cmake -ErrorAction SilentlyContinue
+      if (-not $cmake) {
+        return @{ Available = $false; Reason = "cmake not on PATH — scikit-build-core needs CMake" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) { $cc = Get-Command cl -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "no C compiler (gcc/clang/cl) on PATH" }
+      }
+      $pythonCmd = $null
+      foreach ($n in @('python3', 'python')) {
+        $cand = Get-Command $n -ErrorAction SilentlyContinue
+        if ($cand) { $pythonCmd = $cand; break }
+      }
+      if (-not $pythonCmd) {
+        return @{ Available = $false; Reason = "python3/python not on PATH" }
+      }
+      foreach ($mod in @('scikit_build_core', 'build')) {
+        & $pythonCmd.Source -c "import $mod" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+          return @{ Available = $false; Reason = "python module '$mod' not importable; install via pip" }
+        }
+      }
+      # CMake's find_package(Python Development.Module) needs Python.h
+      # + python<MAJ><MIN>.lib. The embeddable Windows Python omits
+      # both; SKIP cleanly.
+      $pythonPrefix = Split-Path $pythonCmd.Source -Parent
+      $pythonLibsDir = Join-Path $pythonPrefix 'libs'
+      $pythonIncludeDir = Join-Path $pythonPrefix 'include'
+      $hasDevHeaders = (Test-Path -LiteralPath $pythonLibsDir) -and
+        (Test-Path -LiteralPath $pythonIncludeDir)
+      if ($hasDevHeaders) {
+        $importLibs = @(Get-ChildItem -LiteralPath $pythonLibsDir -Filter 'python*.lib' -ErrorAction SilentlyContinue)
+        $headerFiles = @(Get-ChildItem -LiteralPath $pythonIncludeDir -Filter 'Python.h' -ErrorAction SilentlyContinue)
+        $hasDevHeaders = ($importLibs.Count -gt 0) -and ($headerFiles.Count -gt 0)
+      }
+      if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
+        $hasDevHeaders = $true
+      }
+      if (-not $hasDevHeaders) {
+        return @{ Available = $false; Reason = "Python install lacks development headers + import library under $pythonPrefix; scikit-build-core needs a full install" }
+      }
+      return @{ Available = $true; Reason = "cmake=$($cmake.Source); cc=$($cc.Source); python=$($pythonCmd.Source); dev headers present" }
+    }
+    'javascript-typescript/vite-app' {
+      # npm install + npm run build for vite. ``npm install`` will hit
+      # the network for the vite + dep tree on a cold cache.
+      $npm = Get-Command npm -ErrorAction SilentlyContinue
+      if (-not $npm) {
+        return @{ Available = $false; Reason = "'npm' not on PATH; vite Mode B needs npm to drive the install + bundler" }
+      }
+      return @{ Available = $true; Reason = "npm=$($npm.Source) (M24 Mode B will run 'npm install && npm run build')" }
+    }
+    'javascript-typescript/webpack-app' {
+      $npm = Get-Command npm -ErrorAction SilentlyContinue
+      if (-not $npm) {
+        return @{ Available = $false; Reason = "'npm' not on PATH; webpack Mode B needs npm to drive the install + bundler" }
+      }
+      return @{ Available = $true; Reason = "npm=$($npm.Source) (M24 Mode B will run 'npm install && npm run build')" }
+    }
+    default {
+      return @{ Available = $true; Reason = '' }
     }
   }
 }
@@ -665,6 +814,51 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         }
       )
     }
+    'python/pep517-maturin' {
+      # M24 Mode B fallback. ``python -m build --wheel --no-isolation``
+      # invokes maturin which writes the platform-tagged wheel under
+      # ``<fixture>/dist/``. The wheel filename carries the ABI + platform
+      # tag (e.g. ``cp312-cp312-win_amd64``) so we glob rather than
+      # hard-coding.
+      return @(@{
+        PathGlob = @{
+          Dir    = Join-Path $fixtureDir 'dist'
+          Filter = '*.whl'
+        }
+        Greeting = $null
+      })
+    }
+    'python/pep517-scikit-build-core' {
+      # M24 Mode B fallback — same shape as maturin, but
+      # scikit-build-core drives CMake to compile the C extension.
+      return @(@{
+        PathGlob = @{
+          Dir    = Join-Path $fixtureDir 'dist'
+          Filter = '*.whl'
+        }
+        Greeting = $null
+      })
+    }
+    'javascript-typescript/vite-app' {
+      # M24 Mode B fallback — ``npm install && npm run build`` invokes
+      # ``vite build`` which writes the library-mode bundle to
+      # ``<fixture>/dist/index.js`` (matches the ``lib.fileName`` in
+      # ``vite.config.js``). No greeting — running a library entry is
+      # the validate script's job.
+      return @(@{
+        Path     = Join-Path $fixtureDir 'dist\index.js'
+        Greeting = $null
+      })
+    }
+    'javascript-typescript/webpack-app' {
+      # M24 Mode B fallback — ``npm install && npm run build`` invokes
+      # ``webpack --mode production`` which writes the bundle to
+      # ``<fixture>/dist/index.js``.
+      return @(@{
+        Path     = Join-Path $fixtureDir 'dist\index.js'
+        Greeting = $null
+      })
+    }
     'javascript-typescript/typescript-library' {
       # M16: TS library. The JS/TS convention emits a flat
       # ``.repro/build/dist/`` tree (no per-member subdir) with one
@@ -805,6 +999,15 @@ foreach ($rel in $PopulatedExamples) {
     Add-Result 'SKIP' $rel $probe.Reason
     continue
   }
+  # M24: per-fixture toolchain probe for Mode B fixtures that need
+  # extras beyond the language baseline (rustc for maturin, cmake for
+  # scikit-build-core, npm for vite/webpack).
+  $fixtureProbe = Probe-Fixture $rel
+  if (-not $fixtureProbe.Available) {
+    Write-Host "  SKIP: $($fixtureProbe.Reason)"
+    Add-Result 'SKIP' $rel $fixtureProbe.Reason
+    continue
+  }
 
   # Wipe scratch BEFORE each invocation. Junction-aware ops not needed here
   # because example .repro/build/ is plain scratch that never contains
@@ -819,6 +1022,25 @@ foreach ($rel in $PopulatedExamples) {
     $cargoTarget = Join-Path $fixtureDir 'target'
     if (Test-Path -LiteralPath $cargoTarget) {
       Remove-Item -LiteralPath $cargoTarget -Recurse -Force
+    }
+  }
+  # M24 Mode B fixtures (python maturin/scikit-build-core, jsts
+  # vite/webpack) write their build output to the fixture's own
+  # ``dist/`` / ``build/`` / ``node_modules/`` directories. Wipe them
+  # so every gate runs cold.
+  $modeBFixtures = @(
+    'python/pep517-maturin',
+    'python/pep517-scikit-build-core',
+    'javascript-typescript/vite-app',
+    'javascript-typescript/webpack-app'
+  )
+  if ($modeBFixtures -contains $rel) {
+    foreach ($leftover in @('dist', 'build', 'node_modules',
+                            'target', 'package-lock.json')) {
+      $leftoverPath = Join-Path $fixtureDir $leftover
+      if (Test-Path -LiteralPath $leftoverPath) {
+        Remove-Item -LiteralPath $leftoverPath -Recurse -Force -ErrorAction SilentlyContinue
+      }
     }
   }
   # M23: warm the CARGO_HOME registry for rust/binary-with-crates-io

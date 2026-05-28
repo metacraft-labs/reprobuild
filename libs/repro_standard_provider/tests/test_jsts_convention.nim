@@ -154,7 +154,11 @@ suite "javascript/typescript convention M16":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "recognize: negative — vite.config.ts at root forces Mode B":
+  test "recognize: positive M24 — vite.config.ts at root routes to Mode B":
+    # M24: a vite.config.* file at the project root now routes the
+    # project to the crude fallback rather than declining recognition.
+    # The fixture must additionally declare a non-empty
+    # ``scripts.build`` so the convention knows what to invoke.
     let scratch = getTempDir() / "test_jsts_convention_vite"
     if dirExists(scratch):
       removeDir(scratch)
@@ -164,7 +168,8 @@ suite "javascript/typescript convention M16":
       "{\n" &
       "  \"name\": \"fake-vite\",\n" &
       "  \"version\": \"0.1.0\",\n" &
-      "  \"type\": \"module\"\n" &
+      "  \"type\": \"module\",\n" &
+      "  \"scripts\": { \"build\": \"vite build\" }\n" &
       "}\n")
     writeFile(scratch / "tsconfig.json",
       "{\n" &
@@ -187,6 +192,40 @@ suite "javascript/typescript convention M16":
       "    \"typescript >=5\"\n" &
       "\n" &
       "  library fake_vite_app\n")
+    defer:
+      removeDir(scratch)
+    let conv = jsts_convention.javaScriptTypeScriptConvention()
+    let request = dummyRequest(scratch)
+    if not nodeOnPath():
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
+
+  test "recognize: negative M24 — Mode B project missing scripts.build":
+    # Inverse: a Mode B-shaped project that ships no ``scripts.build``
+    # has nothing for the crude fallback to invoke. The convention
+    # declines so the diagnostic stays clean ("no convention matched")
+    # rather than emitting a guaranteed-to-fail fragment.
+    let scratch = getTempDir() / "test_jsts_convention_vite_no_build"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "package.json",
+      "{\n" &
+      "  \"name\": \"fake-vite-nobuild\",\n" &
+      "  \"version\": \"0.1.0\",\n" &
+      "  \"type\": \"module\"\n" &
+      "}\n")
+    writeFile(scratch / "src" / "index.js", "export const x = 1;\n")
+    writeFile(scratch / "vite.config.js", "export default {};\n")
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package fakeViteNoBuild:\n" &
+      "  uses:\n" &
+      "    \"node >=20\"\n" &
+      "\n" &
+      "  library fake_vite_nobuild\n")
     defer:
       removeDir(scratch)
     let conv = jsts_convention.javaScriptTypeScriptConvention()
@@ -476,3 +515,243 @@ suite "javascript/typescript convention M16":
         check not action.id.startsWith("jsts-esbuild-bundle-")
         check not action.id.startsWith("jsts-shim-")
         check action.id != "jsts-test-run"
+
+  test "recognize: positive M24 — webpack.config.cjs routes to Mode B":
+    let scratch = getTempDir() / "test_jsts_convention_webpack"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "package.json",
+      "{\n" &
+      "  \"name\": \"fake-webpack\",\n" &
+      "  \"version\": \"0.1.0\",\n" &
+      "  \"type\": \"module\",\n" &
+      "  \"scripts\": { \"build\": \"webpack --mode production\" }\n" &
+      "}\n")
+    writeFile(scratch / "src" / "index.js", "export const x = 1;\n")
+    writeFile(scratch / "webpack.config.cjs",
+      "module.exports = { entry: './src/index.js' };\n")
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package fakeWebpack:\n" &
+      "  uses:\n" &
+      "    \"node >=20\"\n" &
+      "\n" &
+      "  library fake_webpack\n")
+    defer:
+      removeDir(scratch)
+    let conv = jsts_convention.javaScriptTypeScriptConvention()
+    let request = dummyRequest(scratch)
+    if not nodeOnPath():
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
+
+  test "recognize: positive M24 — workspaces field forces Mode B":
+    # ``workspaces`` is one of the Mode B triggers — even when no
+    # bundler config is present. The fixture ships a build script so
+    # recognition succeeds.
+    let scratch = getTempDir() / "test_jsts_convention_workspaces"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch)
+    createDir(scratch / "packages")
+    writeFile(scratch / "package.json",
+      "{\n" &
+      "  \"name\": \"fake-monorepo\",\n" &
+      "  \"version\": \"0.1.0\",\n" &
+      "  \"private\": true,\n" &
+      "  \"workspaces\": [\"packages/*\"],\n" &
+      "  \"scripts\": { \"build\": \"echo monorepo build\" }\n" &
+      "}\n")
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package fakeMonorepo:\n" &
+      "  uses:\n" &
+      "    \"node >=20\"\n" &
+      "\n" &
+      "  library fake_monorepo\n")
+    defer:
+      removeDir(scratch)
+    let conv = jsts_convention.javaScriptTypeScriptConvention()
+    let request = dummyRequest(scratch)
+    if not nodeOnPath():
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
+
+  test "recognize: positive M24 — scripts.build invoking vite without config":
+    # Vite can run without a ``vite.config.*`` file (it picks
+    # convention-based defaults). The ``scripts.build`` detection covers
+    # this case independently of the root-config check.
+    let scratch = getTempDir() / "test_jsts_convention_vite_no_config"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "package.json",
+      "{\n" &
+      "  \"name\": \"fake-vite-no-config\",\n" &
+      "  \"version\": \"0.1.0\",\n" &
+      "  \"type\": \"module\",\n" &
+      "  \"scripts\": { \"build\": \"vite build\" }\n" &
+      "}\n")
+    writeFile(scratch / "src" / "index.js", "export const x = 1;\n")
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package fakeViteNoConfig:\n" &
+      "  uses:\n" &
+      "    \"node >=20\"\n" &
+      "\n" &
+      "  library fake_vite_no_config\n")
+    defer:
+      removeDir(scratch)
+    let conv = jsts_convention.javaScriptTypeScriptConvention()
+    let request = dummyRequest(scratch)
+    if not nodeOnPath():
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
+
+  test "emitFragment M24: vite scratch project emits a single crude action":
+    # Materialise a tiny scratch vite-shaped project and verify the
+    # emitted fragment carries exactly one ``crude-build-*`` action
+    # whose argv invokes the platform shell with
+    # ``npm install && npm run build`` (no lockfile present, so
+    # ``install`` not ``ci``).
+    if not nodeOnPath():
+      skip()
+    else:
+      let scratch = getTempDir() / "test_jsts_convention_vite_emit"
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(scratch)
+      createDir(scratch / "src")
+      writeFile(scratch / "package.json",
+        "{\n" &
+        "  \"name\": \"fake-vite-emit\",\n" &
+        "  \"version\": \"0.1.0\",\n" &
+        "  \"type\": \"module\",\n" &
+        "  \"scripts\": { \"build\": \"vite build\" }\n" &
+        "}\n")
+      writeFile(scratch / "src" / "index.js", "export const x = 1;\n")
+      writeFile(scratch / "vite.config.js", "export default {};\n")
+      writeFile(scratch / "reprobuild.nim",
+        "import repro_project_dsl\n" &
+        "package fakeViteEmit:\n" &
+        "  uses:\n" &
+        "    \"node >=20\"\n" &
+        "\n" &
+        "  library fake_vite_emit\n")
+      defer:
+        removeDir(scratch)
+      let conv = jsts_convention.javaScriptTypeScriptConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+
+      var crudeActions: seq[BuildActionDef] = @[]
+      var tscActions: seq[BuildActionDef] = @[]
+      var copyActions: seq[BuildActionDef] = @[]
+      var npmCiActions: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("crude-build-"):
+          crudeActions.add(action)
+        elif action.id == "jsts-tsc-compile":
+          tscActions.add(action)
+        elif action.id.startsWith("jsts-copy-js-"):
+          copyActions.add(action)
+        elif action.id == "jsts-npm-ci":
+          npmCiActions.add(action)
+
+      # Exactly one crude action and zero Mode A actions — the M24
+      # routing must replace the entire Mode A sub-graph.
+      check crudeActions.len == 1
+      check tscActions.len == 0
+      check copyActions.len == 0
+      check npmCiActions.len == 0
+
+      let crude = crudeActions[0]
+      let argv = inlineArgvOf(crude)
+      # Windows: ``cmd.exe /d /s /c "npm install && npm run build"``.
+      # POSIX:   ``sh -c "npm install && npm run build"``.
+      check argv.len >= 3
+      let arg0Base = extractFilename(argv[0]).toLowerAscii
+      when defined(windows):
+        check arg0Base.startsWith("cmd")
+      else:
+        check arg0Base == "sh"
+      # The full shell command lands in the last argv entry. ``npm`` is
+      # interpolated as an absolute path (``findExe`` result) so we look
+      # for the resolved executable basename + the install verb tokens.
+      let shellLine = argv[^1]
+      let shellLower = shellLine.toLowerAscii
+      check "npm" in shellLower  # matches "npm.cmd" / "npm" basename
+      check " install " in shellLine
+      check "run build" in shellLine
+      check "&&" in shellLine
+      check crude.pool == "compile"
+
+      # ``dist`` declared as an opaque output dir.
+      var sawDist = false
+      for outPath in crude.outputs:
+        let normalised = outPath.replace('\\', '/')
+        if normalised.endsWith("/dist") or normalised.endsWith("\\dist"):
+          sawDist = true
+      check sawDist
+
+  test "emitFragment M24: vite scratch project with lockfile uses npm ci":
+    # Same vite fixture as above but with a ``package-lock.json``
+    # present — the install verb must flip from ``install`` to ``ci``.
+    if not nodeOnPath():
+      skip()
+    else:
+      let scratch = getTempDir() / "test_jsts_convention_vite_emit_ci"
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(scratch)
+      createDir(scratch / "src")
+      writeFile(scratch / "package.json",
+        "{\n" &
+        "  \"name\": \"fake-vite-emit-ci\",\n" &
+        "  \"version\": \"0.1.0\",\n" &
+        "  \"type\": \"module\",\n" &
+        "  \"scripts\": { \"build\": \"vite build\" }\n" &
+        "}\n")
+      writeFile(scratch / "package-lock.json",
+        "{ \"name\": \"fake-vite-emit-ci\", \"lockfileVersion\": 3, \"requires\": true, \"packages\": {} }\n")
+      writeFile(scratch / "src" / "index.js", "export const x = 1;\n")
+      writeFile(scratch / "vite.config.js", "export default {};\n")
+      writeFile(scratch / "reprobuild.nim",
+        "import repro_project_dsl\n" &
+        "package fakeViteEmitCi:\n" &
+        "  uses:\n" &
+        "    \"node >=20\"\n" &
+        "\n" &
+        "  library fake_vite_emit_ci\n")
+      defer:
+        removeDir(scratch)
+      let conv = jsts_convention.javaScriptTypeScriptConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+
+      var crudeActions: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("crude-build-"):
+          crudeActions.add(action)
+      check crudeActions.len == 1
+      let argv = inlineArgvOf(crudeActions[0])
+      let shellLine = argv[^1]
+      # ``npm`` is interpolated as an absolute path (``findExe`` result).
+      # We assert the install verb is ``ci`` (not ``install``) by
+      # checking for the space-separated verb sentinel ``" ci "``.
+      check " ci " in shellLine
+      check " install " notin shellLine

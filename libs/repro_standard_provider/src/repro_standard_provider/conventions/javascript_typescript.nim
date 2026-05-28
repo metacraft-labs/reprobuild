@@ -1,5 +1,5 @@
 ## JavaScript / TypeScript language convention (Tier 2b) — Mode A
-## "fine-grained" plugin.
+## "fine-grained" plugin with M24 Mode B crude fallback.
 ##
 ## Recognises a project whose ``reprobuild.nim`` ``uses:`` block names
 ## ``node`` or ``typescript`` AND ships a conventional layout
@@ -122,6 +122,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/crude
 
 const
   ScratchDirName* = ".repro/build"
@@ -137,11 +138,37 @@ const
     "webpack.config.ts",
     "rollup.config.js", "rollup.config.mjs", "rollup.config.cjs",
     "rollup.config.ts",
+    "next.config.js", "next.config.mjs", "next.config.cjs",
+    "next.config.ts",
+    "nuxt.config.js", "nuxt.config.mjs", "nuxt.config.ts",
+    "parcel.config.js", "parcel.config.json",
+    "turbo.json",
+    "nx.json",
+    "lerna.json",
   ]
     ## Root-level config files that force Mode B per the spec
-    ## §"Mode selector". M16 doesn't implement Mode B, so the convention
-    ## simply declines to recognise these projects and lets the next
-    ## convention (or the no-match diagnostic) take over.
+    ## §"Mode selector". M24: instead of declining the project, the
+    ## convention claims it and routes to ``jsTsCrudeFallback`` which
+    ## delegates to ``npm ci && npm run build`` (or ``npm install &&
+    ## npm run build`` if no lockfile).
+
+  ModeBBuildScriptTools = [
+    "vite",
+    "webpack",
+    "rollup",
+    "parcel",
+    "next",
+    "nuxt",
+    "tsc -b",
+  ]
+    ## M24: substrings the convention scans for inside ``package.json``
+    ## ``scripts.build``. When the build script invokes any of these
+    ## tools, the project is routed to Mode B even if no top-level
+    ## ``<tool>.config.*`` file is present (rare but possible — Vite
+    ## works without a config file when the project layout matches
+    ## defaults; ``tsc -b`` is the TypeScript project-references flag
+    ## that drives a multi-package build outside what our Mode A
+    ## single-``tsc -p`` action handles).
 
 type
   JsTsMemberKind = enum
@@ -177,6 +204,17 @@ type
       ## The M16 surface accepts any value but a future Mode A rule will
       ## reject anything beyond a bare ``tsc -p .`` / ``swc ...`` /
       ## ``esbuild ...`` per the spec.
+    buildScriptText: string
+      ## M24: literal value of ``scripts.build``. Inspected by
+      ## ``buildScriptForcesModeB`` to detect bundler invocations
+      ## (vite / webpack / rollup / parcel / next / nuxt / ``tsc -b``)
+      ## even when no top-level config file is present.
+    hasWorkspaces: bool
+      ## M24: true when ``package.json`` carries a non-empty
+      ## ``"workspaces"`` field (either the array shape ``["packages/*"]``
+      ## or the object shape ``{"packages": ["packages/*"]}``).
+      ## Workspaces force Mode B because the convention's Mode A graph
+      ## is single-package-shaped.
 
   TsConfigInfo = object
     ## Subset of ``<projectRoot>/tsconfig.json`` relevant to recognition.
@@ -532,8 +570,30 @@ proc parsePackageJson(path: string): JsTsProjectInfo =
               let scriptValue = parseJsonString(raw, i)
               if scriptName == "build" and scriptValue.len > 0:
                 result.hasBuildScript = true
+                result.buildScriptText = scriptValue
             else:
               skipJsonValue(raw, i)
+      else:
+        skipJsonValue(raw, i)
+    of "workspaces":
+      # M24: workspaces force Mode B. Accept both shapes:
+      #   "workspaces": ["packages/*"]
+      #   "workspaces": { "packages": ["packages/*"] }
+      # Anything non-empty counts; we don't enumerate the entries.
+      if i < raw.len and raw[i] == '[':
+        let arrStart = i
+        skipJsonArray(raw, i)
+        for ch in raw[arrStart + 1 ..< min(i - 1, raw.len)]:
+          if ch notin {' ', '\t', '\r', '\n'}:
+            result.hasWorkspaces = true
+            break
+      elif i < raw.len and raw[i] == '{':
+        let objStart = i
+        skipJsonObject(raw, i)
+        for ch in raw[objStart + 1 ..< min(i - 1, raw.len)]:
+          if ch notin {' ', '\t', '\r', '\n'}:
+            result.hasWorkspaces = true
+            break
       else:
         skipJsonValue(raw, i)
     else:
@@ -656,6 +716,71 @@ proc hasModeBConfig(projectRoot: string): bool =
       return true
   false
 
+proc buildScriptForcesModeB(buildScript: string): bool =
+  ## M24: True when ``buildScript`` (the literal value of
+  ## ``package.json``'s ``scripts.build``) invokes a Mode B-only tool
+  ## (vite / webpack / rollup / parcel / next / nuxt) OR carries the
+  ## ``tsc -b`` project-references flag.
+  ##
+  ## Match shape: case-insensitive substring of a *space-delimited
+  ## token*. Bare substring matching would false-positive on things
+  ## like ``my-vite-plugin-foo``; we tokenise on whitespace and check
+  ## each token against the catalog. ``tsc -b`` is handled specially
+  ## (it's a flag-pair, not a single token) by a separate substring
+  ## probe.
+  if buildScript.len == 0:
+    return false
+  let lower = buildScript.toLowerAscii
+  # Explicit ``tsc -b`` / ``tsc --build`` probe (flag-pair, not a token).
+  if " tsc -b" in lower or lower.startsWith("tsc -b") or
+     " tsc --build" in lower or lower.startsWith("tsc --build"):
+    return true
+  # Tokenise on whitespace + the shell separators that npm splits on
+  # before exec. Each token is compared against the catalog modulo a
+  # leading ``./node_modules/.bin/`` prefix that some projects use.
+  for raw in lower.split({' ', '\t', '\n', '\r', '&', '|', ';'}):
+    var token = raw
+    # Strip leading shell-redirect / call markers.
+    while token.len > 0 and token[0] in {'(', '`', '$'}:
+      token = token[1 .. ^1]
+    # Strip a ``./node_modules/.bin/`` (or ``node_modules/.bin/``) prefix
+    # so the catalog match works regardless of how the project invokes
+    # its tool.
+    const NodeModulesBinPrefixes = [
+      "./node_modules/.bin/",
+      "node_modules/.bin/",
+    ]
+    for prefix in NodeModulesBinPrefixes:
+      if token.startsWith(prefix):
+        token = token[prefix.len .. ^1]
+        break
+    if token.len == 0:
+      continue
+    for tool in ModeBBuildScriptTools:
+      # ``tsc -b`` was already handled above.
+      if tool == "tsc -b":
+        continue
+      if token == tool:
+        return true
+  false
+
+proc projectRequiresModeB(projectRoot: string;
+                          info: JsTsProjectInfo): bool =
+  ## M24: True when the project should be routed to ``jsTsCrudeFallback``
+  ## instead of the Mode A sub-graph. Triggered by ANY of:
+  ##   * a root-level ``<tool>.config.*`` config file (vite / webpack /
+  ##     rollup / parcel / next / nuxt / turbo / nx / lerna)
+  ##   * ``package.json``'s ``scripts.build`` invokes one of those tools
+  ##     (or carries ``tsc -b`` for TypeScript project references)
+  ##   * ``package.json`` declares a non-empty ``workspaces`` field
+  if hasModeBConfig(projectRoot):
+    return true
+  if info.hasWorkspaces:
+    return true
+  if buildScriptForcesModeB(info.buildScriptText):
+    return true
+  false
+
 proc collectTsSources(srcDir: string): seq[string] =
   ## Walk ``<projectRoot>/src`` for ``.ts`` / ``.tsx`` / ``.mts`` / ``.cts``
   ## files. The convention's compile action declares these as inputs so
@@ -710,21 +835,31 @@ proc hasEntryPoint(projectRoot: string;
 
 proc jsTsRecognize(projectRoot: string;
                    request: ProviderGraphRequest): bool {.gcsafe.} =
-  ## Recognition contract (M16 Mode A subset):
+  ## Recognition contract (M16 Mode A + M24 Mode B):
+  ##
+  ## Common prerequisites (BOTH modes):
   ##   * ``<projectRoot>/package.json`` exists
   ##   * ``<projectRoot>/reprobuild.nim`` exists AND its ``uses:`` lists
   ##     ``node`` or ``typescript``
+  ##   * the package declares at least one ``library`` or ``executable``
+  ##     member
+  ##   * ``node`` is on PATH (so emit can spawn the tooling)
+  ##
+  ## M24 Mode B (when ``projectRequiresModeB`` fires — vite/webpack/
+  ## rollup/parcel/next/nuxt config file at root, ``scripts.build``
+  ## invokes one of those tools, ``tsc -b`` for project references,
+  ## or ``package.json`` carries a non-empty ``workspaces`` field):
+  ##   * a non-empty ``scripts.build`` MUST be present so the crude
+  ##     fallback knows what to invoke
+  ##
+  ## M16 Mode A (otherwise — pure-Node app or single-tsconfig.json TS
+  ## library/CLI):
   ##   * ``package.json`` declares ``"type": "module"`` (ESM)
   ##   * ``tsconfig.json`` (if present) does NOT carry ``paths`` aliases
   ##     or non-empty ``references`` (both force Mode B per the spec)
-  ##   * the package declares at least one ``library`` or ``executable``
-  ##     member
   ##   * at least one entry source exists (``src/index.ts`` /
   ##     ``src/index.js`` / a ``bin`` entry resolving to
   ##     ``src/bin/<name>.{ts,js}``)
-  ##   * no Mode-B config file (vite / webpack / rollup) at the project
-  ##     root
-  ##   * ``node`` is on PATH (so emit can spawn the tooling)
   if not fileExists(extendedPath(projectRoot / "package.json")):
     return false
   let source = readReprobuildSource(projectRoot)
@@ -735,18 +870,26 @@ proc jsTsRecognize(projectRoot: string;
   let members = extractMembers(source)
   if members.len == 0:
     return false
-  if hasModeBConfig(projectRoot):
+  if nodeExecutable().len == 0:
     return false
   let pkg = parsePackageJson(projectRoot / "package.json")
+  let ts = parseTsConfigJson(projectRoot / "tsconfig.json")
+  let needsModeB = projectRequiresModeB(projectRoot, pkg) or
+                   (ts.present and (ts.hasPathsAliases or ts.hasReferences))
+  if needsModeB:
+    # M24: Mode B claims the project. The convention needs a
+    # ``scripts.build`` entry so the crude fallback knows what to run —
+    # without it we can't synthesise a meaningful build command and
+    # would just fail at apply time. Declining recognition keeps the
+    # diagnostic clean ("no convention matched") rather than emitting
+    # a fragment that's guaranteed to fail.
+    if not pkg.hasBuildScript:
+      return false
+    return true
+  # Mode A prerequisites:
   if not pkg.isModule:
     return false
-  let ts = parseTsConfigJson(projectRoot / "tsconfig.json")
-  if ts.present:
-    if ts.hasPathsAliases or ts.hasReferences:
-      return false
   if not hasEntryPoint(projectRoot, pkg):
-    return false
-  if nodeExecutable().len == 0:
     return false
   true
 
@@ -1135,15 +1278,91 @@ proc emitJsCopyAction(projectRoot, distDir: string;
     commandStatsId = "jsts.copy-js")
   (action, dest)
 
+proc jsTsCrudeFallback(projectRoot: string;
+                       request: ProviderGraphRequest;
+                       pkg: JsTsProjectInfo):
+                         GraphFragment {.gcsafe.} =
+  ## M24: Mode B emitter for JS/TS projects that exercise tooling
+  ## outside the Mode A surface (vite / webpack / rollup / parcel /
+  ## next / nuxt config files, ``tsc -b`` project references,
+  ## non-empty ``workspaces`` field). Delegates to either
+  ## ``npm ci && npm run build`` (when a ``package-lock.json`` is
+  ## present) or ``npm install && npm run build`` (otherwise) under
+  ## FS-snoop monitoring per the M6 spec.
+  ##
+  ## **Design decision — npm ci vs npm install**:
+  ##
+  ##   * ``npm ci`` is strict-deterministic: it requires the lockfile
+  ##     to be in sync with ``package.json``, refuses to mutate either,
+  ##     and reinstalls ``node_modules/`` from scratch every time. This
+  ##     is exactly what reproducible-build semantics want; whenever a
+  ##     lockfile is available we prefer this path.
+  ##   * ``npm install`` falls back when no lockfile is present. It WILL
+  ##     resolve the dep tree freshly (potentially picking up patch
+  ##     bumps within the declared ranges) and update the lockfile.
+  ##     This loses some reproducibility but matches the project's
+  ##     intent: a project that ships package.json without a lockfile
+  ##     is explicitly opting out of pinning.
+  ##
+  ## The single argv runs ``cmd.exe /c "<install> && npm run build"`` on
+  ## Windows and ``sh -c "<install> && npm run build"`` on POSIX so the
+  ## two stages flow through a single shell process and ``&&`` chaining
+  ## is honoured. An alternative would be to emit two separate actions
+  ## (install + build) but that requires plumbing the install action's
+  ## id into the build action's deps, and the crude_fallback API
+  ## emits exactly one action by design — splitting would mean dropping
+  ## down to ``buildPackageFragment`` directly, which is gratuitous
+  ## complexity for the M24 scope.
+  ##
+  ## Outputs declared opaquely: ``dist`` (vite/webpack/rollup default),
+  ## ``build`` (next/parcel/CRA default), ``.next`` (Next.js prod
+  ## output), ``.nuxt`` (Nuxt prod output). The FS-snoop monitor
+  ## promotes whichever subset the build actually writes to.
+  {.cast(gcsafe).}:
+    let npmExe = npmExecutable()
+    if npmExe.len == 0:
+      raise newException(ValueError,
+        "javascript-typescript convention: 'npm' not on PATH; cannot " &
+          "run the Mode B crude fallback")
+    var packageName = pkg.packageName
+    if packageName.len == 0:
+      packageName = projectRoot.extractFilename
+    if packageName.len == 0:
+      packageName = "jsts-crude"
+    # Determine install verb based on lockfile presence.
+    let installVerb =
+      if hasLockfile(projectRoot): "ci"
+      else: "install"
+    # Construct a single shell command so the install + build chain
+    # through a single child process. ``npm`` itself doesn't accept
+    # chained subcommands; the shell does the chaining.
+    let shellLine = npmExe & " " & installVerb & " && " & npmExe &
+      " run build"
+    let argv =
+      when defined(windows):
+        @["cmd.exe", "/d", "/s", "/c", shellLine]
+      else:
+        @["sh", "-c", shellLine]
+    result = emitCrudeFragment(
+      projectRoot = projectRoot,
+      request = request,
+      packageName = packageName,
+      nativeBuildArgv = argv,
+      outputDirs = ["dist", "build", ".next", ".nuxt", "node_modules"])
+
 proc jsTsEmitFragment(projectRoot: string;
                       request: ProviderGraphRequest):
                         GraphFragment {.gcsafe.} =
   ## Convention entry — parse ``package.json`` + (optional)
-  ## ``tsconfig.json``, classify the project as TS-bearing vs JS-only,
-  ## emit the appropriate per-action sub-graph (A1 npm-ci + tsc + A5
-  ## esbuild + A6 shim + A7 test runner, or a flat ``fs.copyFile`` per
-  ## JS source for JS-only). Hand the whole thing to
+  ## ``tsconfig.json``, classify the project as TS-bearing vs JS-only
+  ## vs M24 Mode B, emit the appropriate sub-graph and hand it to
   ## ``buildPackageFragment``.
+  ##
+  ## **M24 routing**: when ``projectRequiresModeB`` fires (vite/webpack/
+  ## rollup/parcel/next/nuxt config file, ``scripts.build`` invokes one
+  ## of those tools, ``tsc -b``, or non-empty workspaces field) OR when
+  ## ``tsconfig.json`` carries ``paths``/``references``, delegate to
+  ## ``jsTsCrudeFallback`` rather than emit the Mode A sub-graph.
   {.cast(gcsafe).}:
     let source = readReprobuildSource(projectRoot)
     let members = extractMembers(source)
@@ -1152,6 +1371,14 @@ proc jsTsEmitFragment(projectRoot: string;
         "javascript-typescript convention: no library or executable " &
           "members declared in " & projectRoot / "reprobuild.nim")
     let pkg = parsePackageJson(projectRoot / "package.json")
+    # M24: route Mode B projects to the crude fallback first. The
+    # routing condition mirrors ``jsTsRecognize``'s Mode B branch so
+    # any project that recognises as Mode B emits as Mode B.
+    let tsModeB = block:
+      let ts = parseTsConfigJson(projectRoot / "tsconfig.json")
+      ts.present and (ts.hasPathsAliases or ts.hasReferences)
+    if projectRequiresModeB(projectRoot, pkg) or tsModeB:
+      return jsTsCrudeFallback(projectRoot, request, pkg)
     let tsConfigPath = projectRoot / "tsconfig.json"
     let hasTsConfig = fileExists(extendedPath(tsConfigPath))
     let tsSources = collectTsSources(projectRoot / "src")
