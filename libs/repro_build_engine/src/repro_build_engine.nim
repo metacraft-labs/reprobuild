@@ -221,6 +221,12 @@ type
   DynamicGraphFragment = object
     deps: Table[string, seq[string]]
     outputs: Table[string, seq[string]]
+    # M25: action-create records. Each entry describes a new BuildAction
+    # that the engine materialises into the running graph mid-build. The
+    # producer of the .rbdyn file emits one record per new action; the
+    # engine validates uniqueness + dep resolution + cycle freedom before
+    # inserting it into the schedule.
+    createdActions: seq[BuildAction]
 
 const
   RecognizedPolicyKinds = {
@@ -484,6 +490,75 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
+proc parseCreateActionRecord(payload, path: string; lineNo: int): BuildAction =
+  ## Decode an M25 ``create-action`` JSON payload into a BuildAction. The
+  ## payload format is a single-line JSON object; embedded newlines are
+  ## forbidden so the surrounding line-oriented fragment parser stays
+  ## simple.
+  proc fail(message: string) {.noreturn.} =
+    raiseEngine(path & ":" & $lineNo & ": create-action " & message)
+
+  var node: JsonNode
+  try:
+    node = parseJson(payload)
+  except JsonParsingError as err:
+    fail("malformed JSON payload: " & err.msg)
+  if node.kind != JObject:
+    fail("payload must be a JSON object")
+
+  proc stringField(name: string; required = true; default = ""): string =
+    if not node.hasKey(name):
+      if required:
+        fail("missing string field '" & name & "'")
+      return default
+    if node[name].kind != JString:
+      fail("field '" & name & "' must be a string")
+    node[name].getStr()
+
+  proc stringSeqField(name: string): seq[string] =
+    if not node.hasKey(name):
+      return @[]
+    if node[name].kind != JArray:
+      fail("field '" & name & "' must be an array of strings")
+    for item in node[name]:
+      if item.kind != JString:
+        fail("field '" & name & "' must contain only strings")
+      result.add(item.getStr())
+
+  proc boolField(name: string; default = false): bool =
+    if not node.hasKey(name):
+      return default
+    if node[name].kind != JBool:
+      fail("field '" & name & "' must be a boolean")
+    node[name].getBool()
+
+  proc uintField(name: string; default: uint32): uint32 =
+    if not node.hasKey(name):
+      return default
+    if node[name].kind != JInt:
+      fail("field '" & name & "' must be an integer")
+    uint32(node[name].getInt())
+
+  let id = stringField("id")
+  if id.len == 0:
+    fail("'id' must be non-empty")
+  let argv = stringSeqField("argv")
+  let cwd = stringField("cwd", required = false)
+  let inputs = stringSeqField("inputs")
+  let outputs = stringSeqField("outputs")
+  let deps = stringSeqField("deps")
+  let env = stringSeqField("env")
+  let pool = stringField("pool", required = false)
+  let poolUnits = uintField("poolUnits", 1'u32)
+  let cpuMilli = uintField("cpuMilli", 1000'u32)
+  let commandStatsId = stringField("commandStatsId", required = false)
+  let cacheable = boolField("cacheable", default = false)
+  let weakFingerprint = weakFingerprintFromText(id)
+  result = action(id, argv, cwd = cwd, deps = deps, inputs = inputs,
+    outputs = outputs, pool = pool, poolUnits = poolUnits, cpuMilli = cpuMilli,
+    commandStatsId = commandStatsId, cacheable = cacheable,
+    weakFingerprint = weakFingerprint, env = env)
+
 proc readDynamicGraphFragment(path: string): DynamicGraphFragment =
   if path.len == 0 or not fileExists(extendedPath(path)):
     raiseEngine("dynamic dependency fragment missing: " & path)
@@ -494,18 +569,35 @@ proc readDynamicGraphFragment(path: string): DynamicGraphFragment =
     let line = lines[lineNo]
     if line.len == 0:
       continue
-    let fields = line.split('\t')
-    if fields.len != 3:
+    # M25: the ``create-action`` record carries a single JSON payload that
+    # may itself contain TAB characters (escaped as ``\t``). Split on the
+    # first TAB only so the payload survives unchanged; the legacy 3-field
+    # records still validate via the explicit fields-length check below.
+    let firstTab = line.find('\t')
+    if firstTab < 0:
       raiseEngine(path & ":" & $(lineNo + 1) &
-        ": dynamic graph record must have 3 tab-separated fields")
-    case fields[0]
-    of "dep":
-      result.deps.mgetOrPut(fields[1], @[]).addUnique(fields[2])
-    of "output":
-      result.outputs.mgetOrPut(fields[1], @[]).addUnique(fields[2])
+        ": dynamic graph record must contain at least one tab")
+    let kind = line[0 ..< firstTab]
+    let rest = line[firstTab + 1 .. ^1]
+    case kind
+    of "dep", "output":
+      let fields = rest.split('\t')
+      if fields.len != 2:
+        raiseEngine(path & ":" & $(lineNo + 1) &
+          ": dynamic graph " & kind & " record must have 3 tab-separated fields")
+      if kind == "dep":
+        result.deps.mgetOrPut(fields[0], @[]).addUnique(fields[1])
+      else:
+        result.outputs.mgetOrPut(fields[0], @[]).addUnique(fields[1])
+    of "create-action":
+      # M25: action-create record. The payload is a single-line JSON
+      # object describing the BuildAction to materialise. Validation
+      # of cross-action invariants (unique id, no cycle, dep targets
+      # exist) happens at ingest time in applyDynamicDeps.
+      result.createdActions.add(parseCreateActionRecord(rest, path, lineNo + 1))
     else:
       raiseEngine(path & ":" & $(lineNo + 1) &
-        ": unsupported dynamic graph record kind: " & fields[0])
+        ": unsupported dynamic graph record kind: " & kind)
 
 proc expectedPath(action: BuildAction; file: ExpectedDependencyFile): string =
   materialPath(action.cwd, file.path)
@@ -1384,7 +1476,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
   let totalStart = statStart()
   let inferStart = statStart()
-  let buildGraph = inferDeclaredActionDeps(g)
+  # `var` because M25 ``create-action`` dyndep records grow ``buildGraph.actions``
+  # mid-build. ``applyDynamicDeps`` appends to it; downstream readers iterate
+  # over the growing slice, and the scheduler loop terminates against
+  # ``completed < buildGraph.actions.len`` so a freshly inserted action keeps
+  # the loop alive.
+  var buildGraph = inferDeclaredActionDeps(g)
   finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
   runResult.traceEnabled = not config.suppressTrace
@@ -1753,6 +1850,83 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         emitProgress(bpkActionCompleted, dep)
         blockClosure(dep, blocker)
 
+  # M25: a single declared output may not be claimed by two different
+  # actions. The static graph already enforces this in ``validateGraph``;
+  # for dynamically materialised actions we re-enforce the invariant by
+  # consulting a live set of declared outputs that's seeded from the
+  # static graph and grows as ``create-action`` records land.
+  var declaredOutputs = initHashSet[string]()
+  for action in buildGraph.actions:
+    for output in action.outputs:
+      declaredOutputs.incl(output)
+
+  proc registerDynamicAction(producerId: string; newAction: BuildAction) =
+    ## M25: materialise a ``create-action`` record into the running graph.
+    ## Validates uniqueness, dep-target existence, and self-cycle freedom
+    ## before threading the new action through every scheduler bookkeeping
+    ## structure. The producer id participates only in the trace message
+    ## so the materialisation can be attributed back to its source.
+    if newAction.id.len == 0:
+      raiseEngine("dynamic action-create record from " & producerId &
+        ": id must be non-empty")
+    if actionsById.hasKey(newAction.id):
+      raiseEngine("dynamic action-create record from " & producerId &
+        ": action id " & newAction.id & " already exists in the graph")
+    for output in newAction.outputs:
+      if declaredOutputs.contains(output):
+        raiseEngine("dynamic action-create record from " & producerId &
+          ": declared output " & output & " is already produced by another action")
+    for dep in newAction.deps:
+      if dep == newAction.id:
+        raiseEngine("dynamic action-create record from " & producerId &
+          ": action " & newAction.id & " depends on itself")
+      if not actionsById.hasKey(dep):
+        raiseEngine("dynamic action-create record from " & producerId &
+          ": action " & newAction.id & " depends on unknown action " & dep)
+
+    let newIndex = buildGraph.actions.len
+    buildGraph.actions.add(newAction)
+    idToIndex[newAction.id] = newIndex
+    actionsById[newAction.id] = newAction
+    statuses[newAction.id] = asPending
+    runResult.results.add(ActionResult(
+      id: newAction.id,
+      status: asPending,
+      dependencyPolicyKind: newAction.dependencyPolicy.kind,
+      cacheDecision: if newAction.cacheable: cdMiss else: cdNotCacheable))
+    for output in newAction.outputs:
+      declaredOutputs.incl(output)
+    # Compute initial ``remaining`` only against deps that are not yet
+    # terminal-success — the producer of the .rbdyn (which is the consumer
+    # action's eventual upstream) may already have succeeded by the time
+    # the record is ingested, so its dep edge must NOT contribute to the
+    # waiting count.
+    var waitingDeps = 0
+    var blockedBy = ""
+    for dep in newAction.deps:
+      dependents.mgetOrPut(dep, @[]).addUnique(newAction.id)
+      case statuses[dep]
+      of asSucceeded, asCacheHit, asUpToDate, asWouldRun:
+        discard
+      of asFailed, asBlocked:
+        blockedBy = dep
+      else:
+        inc waitingDeps
+    remaining[newAction.id] = waitingDeps
+    runResult.trace(newAction.id, "action-create", "producer=" & producerId)
+    if blockedBy.len > 0:
+      statuses[newAction.id] = asBlocked
+      let blockedIdx = idToIndex.resultIndex(newAction.id)
+      runResult.results[blockedIdx].status = asBlocked
+      runResult.results[blockedIdx].blockedBy = blockedBy
+      runResult.trace(newAction.id, "blocked", blockedBy)
+      emitProgress(bpkActionCompleted, newAction.id)
+      blockClosure(newAction.id, blockedBy)
+      return
+    if waitingDeps == 0:
+      ready.add(newAction.id)
+      ready.sort(readyCmp)
+
   proc applyDynamicDeps(id: string): bool =
     if dynamicDepsLoaded.contains(id):
       return true
@@ -1764,6 +1938,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let dyndepStart = statStart()
     let fragment = readDynamicGraphFragment(fragmentPath)
     finishStat("repro dynamic deps load", dyndepStart)
+    # M25: materialise any ``create-action`` records FIRST so subsequent
+    # ``dep`` edges can name them. The order in the fragment is preserved;
+    # each new action is fully threaded through scheduler state before the
+    # next record is processed.
+    for newAction in fragment.createdActions:
+      registerDynamicAction(id, newAction)
     var addedWaiting = 0
     for output in fragment.outputs.getOrDefault(id):
       action.outputs.addUnique(output)

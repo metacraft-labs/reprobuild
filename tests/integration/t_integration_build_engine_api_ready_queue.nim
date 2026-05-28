@@ -1,4 +1,4 @@
-import std/[algorithm, os, osproc, strutils, tempfiles, times, unittest]
+import std/[algorithm, json, os, osproc, strutils, tempfiles, times, unittest]
 
 import repro_build_engine
 import repro_hash
@@ -110,6 +110,15 @@ proc fixtureMain(args: seq[string]) =
         osPid: 100, threadId: 1, probeResult: prAbsent,
         path: args[2] & ".missing")
     ])
+  of "emit-dyndep":
+    # M25: copy a prepared dyndep fragment from <source-path> to
+    # <fragment-output-path>. The source file is staged by the test ahead
+    # of time so JSON payloads carrying Windows paths (``\\`` escapes) do
+    # not have to round-trip through argv-escape encoding. Argv layout:
+    # "emit-dyndep" <fragment-output-path> <source-path>
+    if args.len != 4:
+      quit 64
+    fixtureWrite(args[2], readFile(args[3]))
   else:
     quit 64
 
@@ -618,6 +627,287 @@ suite "integration_build_engine_api_ready_queue":
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024))
     check not fileExists(outputPath)
+
+  test "M25: engine materialises action-create dyndep records into the running graph":
+    # Standalone dyndep ingest scenario. ``producer`` writes a .rbdyn that
+    # carries one ``create-action`` record (``synth-copy``) plus a ``dep``
+    # edge wiring the consumer onto the new action. The engine must:
+    #   1. parse the create-action JSON,
+    #   2. materialise ``synth-copy`` into the graph,
+    #   3. schedule ``synth-copy`` so its output exists before the
+    #      consumer launches,
+    #   4. surface ``synth-copy``'s result in ``buildResult.results``.
+    let tempRoot = createTempDir("repro-m25-action-create", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let synthInput = workRoot / "src" / "synth.txt"
+    let synthOutput = workRoot / "build" / "synth.copy.txt"
+    let consumerOutput = workRoot / "build" / "consumer.txt"
+    let fragmentPath = workRoot / "build" / "consumer.rbdyn"
+    fixtureWrite(synthInput, "m25 synth payload\n")
+
+    # The dyndep-emitter ``producer`` writes a fragment shaped like:
+    #   repro-dynamic-graph-v1
+    #   create-action\t{"id":"synth-copy", "argv":[...], "outputs":[...]}
+    #   dep\tconsumer\tsynth-copy
+    let createJson = $(%*{
+      "id": "synth-copy",
+      "argv": [app, "fixture-action", "copy", "synth", synthInput,
+        synthOutput],
+      "cwd": workRoot,
+      "inputs": [synthInput],
+      "outputs": ["build/synth.copy.txt"],
+      "commandStatsId": "m25-synth-copy"
+    })
+    let fragmentSource = workRoot / "stage" / "consumer.rbdyn.src"
+    fixtureWrite(fragmentSource,
+      "repro-dynamic-graph-v1\n" &
+      "create-action\t" & createJson & "\n" &
+      "dep\tconsumer\tsynth-copy\n")
+
+    let buildResult = runBuild(graph([
+      action("producer", [app, "fixture-action", "emit-dyndep",
+        fragmentPath, fragmentSource],
+        cwd = workRoot, outputs = ["build/consumer.rbdyn"],
+        commandStatsId = "m25-producer"),
+      action("consumer", [app, "fixture-action", "copy", "consumer",
+        synthOutput, consumerOutput],
+        cwd = workRoot, deps = ["producer"],
+        outputs = ["build/consumer.txt"],
+        dynamicDepsFile = "build/consumer.rbdyn",
+        commandStatsId = "m25-consumer")
+    ]), BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 2'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      bypassRunQuota: true))
+
+    proc byId(id: string): ActionResult =
+      for item in buildResult.results:
+        if item.id == id:
+          return item
+      raise newException(ValueError, "missing result " & id)
+
+    proc traceIndex(id, event: string): int =
+      for i, item in buildResult.trace:
+        if item.actionId == id and item.event == event:
+          return i
+      -1
+
+    check byId("producer").status == asSucceeded
+    check byId("synth-copy").status == asSucceeded
+    check byId("consumer").status == asSucceeded
+    check fileExists(synthOutput)
+    check fileExists(consumerOutput)
+    check readFile(synthOutput).contains("synth:m25 synth payload")
+    check readFile(consumerOutput).contains("consumer:synth:m25 synth payload")
+
+    # action-create trace event attributes the materialisation back to
+    # the producer of the .rbdyn record.
+    let createIdx = traceIndex("synth-copy", "action-create")
+    check createIdx >= 0
+    check buildResult.trace[createIdx].detail == "producer=consumer"
+
+    # Scheduling order: synth-copy must succeed BEFORE consumer launches.
+    check traceIndex("synth-copy", "asSucceeded") >= 0
+    check traceIndex("consumer", "launched") >
+      traceIndex("synth-copy", "asSucceeded")
+
+  test "M25: engine rejects action-create records that reference unknown deps":
+    let tempRoot = createTempDir("repro-m25-action-create-bad-dep", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let consumerOutput = workRoot / "build" / "consumer.txt"
+    let fragmentPath = workRoot / "build" / "consumer.rbdyn"
+    # The created action declares a dep on ``ghost`` which is absent from
+    # the static graph AND not produced by any earlier ``create-action``
+    # record in the same fragment. The engine must reject the entire
+    # dyndep ingest as a closed-loop validation failure.
+    let createJson = $(%*{
+      "id": "orphan",
+      "argv": [app, "fixture-action", "wide", "orphan",
+        workRoot / "build" / "orphan.txt"],
+      "cwd": workRoot,
+      "outputs": ["build/orphan.txt"],
+      "deps": ["ghost"],
+      "commandStatsId": "m25-orphan"
+    })
+    fixtureWrite(fragmentPath,
+      "repro-dynamic-graph-v1\n" &
+      "create-action\t" & createJson & "\n")
+
+    expect BuildEngineError:
+      discard runBuild(graph([
+        action("consumer", [app, "fixture-action", "wide", "consumer",
+          consumerOutput], cwd = workRoot, outputs = ["build/consumer.txt"],
+          dynamicDepsFile = "build/consumer.rbdyn",
+          commandStatsId = "m25-bad-dep-consumer")
+      ]), BuildEngineConfig(
+        cacheRoot: cacheRoot,
+        runQuotaCliPath: app,
+        maxParallelism: 1'u32,
+        stdoutLimit: 256 * 1024,
+        stderrLimit: 256 * 1024,
+        bypassRunQuota: true))
+    check not fileExists(consumerOutput)
+
+  test "M25: engine rejects action-create records that duplicate an existing action id":
+    let tempRoot = createTempDir("repro-m25-action-create-dup", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let consumerOutput = workRoot / "build" / "consumer.txt"
+    let fragmentPath = workRoot / "build" / "consumer.rbdyn"
+    # The create-action record uses ``consumer`` as its id — which is
+    # already present in the static graph. Duplicate-id ingest must
+    # raise BuildEngineError and leave the consumer unscheduled.
+    let createJson = $(%*{
+      "id": "consumer",
+      "argv": [app, "fixture-action", "wide", "dup",
+        workRoot / "build" / "dup.txt"],
+      "cwd": workRoot,
+      "outputs": ["build/dup.txt"],
+      "commandStatsId": "m25-dup"
+    })
+    fixtureWrite(fragmentPath,
+      "repro-dynamic-graph-v1\n" &
+      "create-action\t" & createJson & "\n")
+
+    expect BuildEngineError:
+      discard runBuild(graph([
+        action("consumer", [app, "fixture-action", "wide", "consumer",
+          consumerOutput], cwd = workRoot, outputs = ["build/consumer.txt"],
+          dynamicDepsFile = "build/consumer.rbdyn",
+          commandStatsId = "m25-dup-consumer")
+      ]), BuildEngineConfig(
+        cacheRoot: cacheRoot,
+        runQuotaCliPath: app,
+        maxParallelism: 1'u32,
+        stdoutLimit: 256 * 1024,
+        stderrLimit: 256 * 1024,
+        bypassRunQuota: true))
+    check not fileExists(consumerOutput)
+
+  test "M25: malformed action-create JSON payload fails closed":
+    let tempRoot = createTempDir("repro-m25-action-create-bad-json", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let consumerOutput = workRoot / "build" / "consumer.txt"
+    let fragmentPath = workRoot / "build" / "consumer.rbdyn"
+    fixtureWrite(fragmentPath,
+      "repro-dynamic-graph-v1\n" &
+      "create-action\tthis is not json\n")
+
+    expect BuildEngineError:
+      discard runBuild(graph([
+        action("consumer", [app, "fixture-action", "wide", "consumer",
+          consumerOutput], cwd = workRoot, outputs = ["build/consumer.txt"],
+          dynamicDepsFile = "build/consumer.rbdyn",
+          commandStatsId = "m25-bad-json-consumer")
+      ]), BuildEngineConfig(
+        cacheRoot: cacheRoot,
+        runQuotaCliPath: app,
+        maxParallelism: 1'u32,
+        stdoutLimit: 256 * 1024,
+        stderrLimit: 256 * 1024,
+        bypassRunQuota: true))
+    check not fileExists(consumerOutput)
+
+  test "M25: two action-create records with a dep edge between them schedule in order":
+    # Validates the "second action references the first" path: one .rbdyn
+    # creates two new actions A and B and declares B depends on A. The
+    # scheduler must materialise both, run A before B, then run the
+    # consumer (which depends on B via a dep edge in the same fragment).
+    let tempRoot = createTempDir("repro-m25-two-create", "")
+    defer: removeDir(tempRoot)
+
+    let app = getAppFilename()
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / ".repro-cache"
+    createDir(workRoot)
+    let stageA = workRoot / "build" / "a.txt"
+    let stageB = workRoot / "build" / "b.txt"
+    let consumerOutput = workRoot / "build" / "consumer.txt"
+    let fragmentPath = workRoot / "build" / "consumer.rbdyn"
+    let inputPath = workRoot / "src" / "in.txt"
+    fixtureWrite(inputPath, "two-create input\n")
+
+    let createA = $(%*{
+      "id": "stage-a",
+      "argv": [app, "fixture-action", "copy", "a", inputPath, stageA],
+      "cwd": workRoot,
+      "outputs": ["build/a.txt"],
+      "commandStatsId": "m25-stage-a"
+    })
+    let createB = $(%*{
+      "id": "stage-b",
+      "argv": [app, "fixture-action", "copy", "b", stageA, stageB],
+      "cwd": workRoot,
+      "deps": ["stage-a"],
+      "outputs": ["build/b.txt"],
+      "commandStatsId": "m25-stage-b"
+    })
+    fixtureWrite(fragmentPath,
+      "repro-dynamic-graph-v1\n" &
+      "create-action\t" & createA & "\n" &
+      "create-action\t" & createB & "\n" &
+      "dep\tconsumer\tstage-b\n")
+
+    let buildResult = runBuild(graph([
+      action("consumer", [app, "fixture-action", "copy", "consumer",
+        stageB, consumerOutput], cwd = workRoot,
+        outputs = ["build/consumer.txt"],
+        dynamicDepsFile = "build/consumer.rbdyn",
+        commandStatsId = "m25-two-create-consumer")
+    ]), BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 2'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      bypassRunQuota: true))
+
+    proc byId(id: string): ActionResult =
+      for item in buildResult.results:
+        if item.id == id:
+          return item
+      raise newException(ValueError, "missing result " & id)
+
+    proc traceIndex(id, event: string): int =
+      for i, item in buildResult.trace:
+        if item.actionId == id and item.event == event:
+          return i
+      -1
+
+    check byId("stage-a").status == asSucceeded
+    check byId("stage-b").status == asSucceeded
+    check byId("consumer").status == asSucceeded
+    check readFile(stageA).contains("a:two-create input")
+    check readFile(stageB).contains("b:a:two-create input")
+    check readFile(consumerOutput).contains("consumer:b:a:two-create input")
+
+    # Ordering: stage-a → stage-b → consumer.
+    check traceIndex("stage-b", "launched") >
+      traceIndex("stage-a", "asSucceeded")
+    check traceIndex("consumer", "launched") >
+      traceIndex("stage-b", "asSucceeded")
 
   test "cache hit skips CAS verification only when outputs are present":
     let tempRoot = createTempDir("repro-cache-hit-present-output", "")
