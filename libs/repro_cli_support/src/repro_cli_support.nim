@@ -90,7 +90,9 @@ proc renderUsage*(programName: string): string =
           programName &
       " infra {plan | apply} ...\n       " &
           programName &
-      " system {add | remove | list | why | sync | history | rollback | audit} ...\n\n" &
+      " system {add | remove | list | why | sync | history | rollback | audit} ...\n       " &
+          programName &
+      " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n\n" &
       "build progress: default=bar-line; aliases: " &
       "quiet=silent|none|off, line=ninja|single-line, " &
       "bar-line=bar|ninja-bar|auto|plain, lines=tup|per-line, " &
@@ -5897,6 +5899,336 @@ proc runDepsRefreshCommand(args: openArray[string]): int =
     scan.members.len, " targets)"
   0
 
+const
+  KnownConventionRegistry* = [
+    "nim",
+    "rust",
+    "go",
+    "python",
+    "javascript-typescript",
+    "c-cpp-autotools",
+    "c-cpp-make",
+  ]
+    ## The convention list ``repro show-conventions`` prints when asked
+    ## for the registry order. Mirrors the registration order in
+    ## ``apps/repro-standard-provider/repro_standard_provider.nim`` (which
+    ## is the binary that actually holds the populated
+    ## ``defaultConventionRegistry`` — the ``repro`` CLI itself doesn't
+    ## link the per-language plugins, so we expose a static
+    ## hand-maintained list here for diagnostics rather than touching
+    ## the registry on disk).
+    ##
+    ## **Order matters.** The c-cpp pair must list ``c-cpp-autotools``
+    ## BEFORE ``c-cpp-make`` to mirror the registration order in the
+    ## standard-provider binary (a project carrying both a Makefile
+    ## and ``configure.ac`` is routed through Autotools because it
+    ## ``recognize``-matches first; the order documented here is the
+    ## order users see in ``repro show-conventions`` and must match
+    ## reality). If the standard-provider binary changes registration
+    ## order, update this constant to match — the pin test in
+    ## ``libs/repro_standard_provider/tests/test_known_convention_registry_pin.nim``
+    ## fails loudly when the two drift.
+
+proc renderShowConventionsText(workspaceRoot: string;
+                               projectMatch: ProjectFileMatch;
+                               members: seq[WorkspaceMember];
+                               scanned: seq[DepEdge];
+                               manual: seq[ManualDepEdge];
+                               targetFilter: string): string =
+  ## Pretty-printer for ``repro show-conventions``. Output shape is
+  ## documented in ``reprobuild-specs/Three-Mode-Convention-System.md``
+  ## §"Observability"; this is the human-readable projection (the JSON
+  ## projection lives in ``renderShowConventionsJson``).
+  result = "Project: " & workspaceRoot & "\n"
+  if projectMatch.path.len == 0:
+    result.add("Project file: (none — no repro.nim or reprobuild.nim " &
+      "in this directory)\n")
+  else:
+    let canonical = projectMatch.fileName == CanonicalProjectFileName
+    let suffix = if canonical: " (canonical)" else: " (legacy alias)"
+    result.add("Project file: " & projectMatch.fileName & suffix & "\n")
+    if projectMatch.ambiguous:
+      result.add("  warning: both repro.nim and reprobuild.nim present; " &
+        "remove one\n")
+  result.add("\n")
+
+  if members.len == 0:
+    result.add("No targets discovered.\n")
+    result.add("  (the scanner walks for ``executable`` / ``library`` " &
+      "declarations under apps/, libs/, or the workspace root; none " &
+      "matched)\n\n")
+  else:
+    # Index scanned edges + manual edges by source package for fast
+    # per-target rendering.
+    var scannedByFrom: Table[string, seq[DepEdge]]
+    for edge in scanned:
+      scannedByFrom.mgetOrPut(edge.fromPackage, @[]).add(edge)
+    var manualByFrom: Table[string, seq[ManualDepEdge]]
+    for edge in manual:
+      manualByFrom.mgetOrPut(edge.fromPackage, @[]).add(edge)
+    var matched = 0
+    for member in members:
+      if targetFilter.len > 0 and member.member != targetFilter and
+          member.package != targetFilter:
+        continue
+      inc matched
+      result.add("Target: " & member.package & "." & member.member & "\n")
+      result.add("  Language convention: nim\n")
+      if member.sourceFile.len > 0:
+        var relSource =
+          try:
+            relativePath(member.sourceFile, workspaceRoot)
+          except OSError:
+            member.sourceFile
+        relSource = relSource.replace('\\', '/')
+        result.add("  Source layout: " & relSource & "\n")
+      else:
+        result.add("  Source layout: (no src/" & member.member &
+          ".nim on disk)\n")
+      var relProjectFile =
+        try:
+          relativePath(member.projectFile, workspaceRoot)
+        except OSError:
+          member.projectFile
+      relProjectFile = relProjectFile.replace('\\', '/')
+      result.add("  Project file: " & relProjectFile & "\n")
+      let scannedEdges = scannedByFrom.getOrDefault(member.package, @[])
+      # The scanner emits edges keyed by package, not by member —
+      # filter to UNIQUE (toPackage, evidence) pairs so two members of
+      # the same package don't double-print every edge.
+      result.add("  Workspace deps (from scanner):\n")
+      if scannedEdges.len == 0:
+        result.add("    (no edges)\n")
+      else:
+        var seen: HashSet[string]
+        for edge in scannedEdges:
+          let key = edge.toPackage & "\x1f" & edge.evidence
+          if key in seen:
+            continue
+          seen.incl(key)
+          result.add("    - " & edge.toPackage & " (evidence: " &
+            edge.evidence & ")\n")
+      let manualEdges = manualByFrom.getOrDefault(member.package, @[])
+      result.add("  Workspace deps (manual, from project file):\n")
+      if manualEdges.len == 0:
+        result.add("    (none)\n")
+      else:
+        var seen: HashSet[string]
+        for edge in manualEdges:
+          let key = edge.toPackage & "\x1f" & $edge.sourceLine
+          if key in seen:
+            continue
+          seen.incl(key)
+          result.add("    - " & edge.toPackage & " (declared at " &
+            relProjectFile & ":" & $edge.sourceLine & ")\n")
+      result.add("\n")
+    if targetFilter.len > 0 and matched == 0:
+      result.add("(no target named ``" & targetFilter &
+        "`` discovered in this workspace)\n\n")
+
+  result.add("Conventions registered (in dispatch order):\n")
+  for name in KnownConventionRegistry:
+    result.add("  - " & name & "\n")
+  result.add("\n")
+  result.add("Note: the convention registry above is the static list " &
+    "the standard-provider binary registers at startup; the per-target " &
+    "claim attribution above is the Nim scanner's inference " &
+    "(Mode 3 pilot). Cross-language per-target attribution lands as " &
+    "convention plugins are folded into a shared introspection surface.\n")
+
+proc renderShowConventionsJson(workspaceRoot: string;
+                               projectMatch: ProjectFileMatch;
+                               members: seq[WorkspaceMember];
+                               scanned: seq[DepEdge];
+                               manual: seq[ManualDepEdge];
+                               targetFilter: string): JsonNode =
+  ## JSON projection of the same data the text renderer prints.
+  ## Stable shape: top-level object with ``project``, ``projectFile``,
+  ## ``targets[]``, ``conventions[]``. Each target carries its own
+  ## ``scannedDeps[]`` and ``manualDeps[]`` arrays.
+  result = newJObject()
+  result["project"] = %workspaceRoot
+  if projectMatch.path.len == 0:
+    result["projectFile"] = newJNull()
+  else:
+    let pfNode = newJObject()
+    pfNode["fileName"] = %projectMatch.fileName
+    pfNode["canonical"] = %(projectMatch.fileName == CanonicalProjectFileName)
+    pfNode["ambiguous"] = %projectMatch.ambiguous
+    result["projectFile"] = pfNode
+  var scannedByFrom: Table[string, seq[DepEdge]]
+  for edge in scanned:
+    scannedByFrom.mgetOrPut(edge.fromPackage, @[]).add(edge)
+  var manualByFrom: Table[string, seq[ManualDepEdge]]
+  for edge in manual:
+    manualByFrom.mgetOrPut(edge.fromPackage, @[]).add(edge)
+  let targets = newJArray()
+  for member in members:
+    if targetFilter.len > 0 and member.member != targetFilter and
+        member.package != targetFilter:
+      continue
+    let entry = newJObject()
+    entry["package"] = %member.package
+    entry["member"] = %member.member
+    entry["convention"] = %"nim"
+    if member.sourceFile.len > 0:
+      var relSource =
+        try:
+          relativePath(member.sourceFile, workspaceRoot)
+        except OSError:
+          member.sourceFile
+      relSource = relSource.replace('\\', '/')
+      entry["sourceFile"] = %relSource
+    else:
+      entry["sourceFile"] = newJNull()
+    var relProjectFile =
+      try:
+        relativePath(member.projectFile, workspaceRoot)
+      except OSError:
+        member.projectFile
+    relProjectFile = relProjectFile.replace('\\', '/')
+    entry["projectFile"] = %relProjectFile
+    let scannedNode = newJArray()
+    var seenScan: HashSet[string]
+    for edge in scannedByFrom.getOrDefault(member.package, @[]):
+      let key = edge.toPackage & "\x1f" & edge.evidence
+      if key in seenScan:
+        continue
+      seenScan.incl(key)
+      let e = newJObject()
+      e["to"] = %edge.toPackage
+      e["evidence"] = %edge.evidence
+      scannedNode.add(e)
+    entry["scannedDeps"] = scannedNode
+    let manualNode = newJArray()
+    var seenManual: HashSet[string]
+    for edge in manualByFrom.getOrDefault(member.package, @[]):
+      let key = edge.toPackage & "\x1f" & $edge.sourceLine
+      if key in seenManual:
+        continue
+      seenManual.incl(key)
+      let e = newJObject()
+      e["to"] = %edge.toPackage
+      e["sourceLine"] = %edge.sourceLine
+      manualNode.add(e)
+    entry["manualDeps"] = manualNode
+    targets.add(entry)
+  result["targets"] = targets
+  let conventionsNode = newJArray()
+  for name in KnownConventionRegistry:
+    conventionsNode.add(%name)
+  result["conventions"] = conventionsNode
+
+proc runShowConventionsCommand(args: openArray[string]): int =
+  ## Implements ``repro show-conventions`` — step 3 of the Three-Mode
+  ## Convention System sequencing plan
+  ## (``reprobuild-specs/Three-Mode-Convention-System.md``
+  ## §"Observability"). Prints the resolved convention stack for a
+  ## project: detected targets, the convention claiming each, the
+  ## scanner-inferred edges, and the manual ``depends_on`` overrides.
+  ##
+  ## Flags:
+  ##   * ``--project=PATH`` — workspace root (default: cwd; or a
+  ##     positional argument if present).
+  ##   * ``--target=NAME``  — only print details for the named member /
+  ##     package.
+  ##   * ``--json``         — emit a JSON document instead of the
+  ##     human-readable text shape.
+  ##
+  ## Honest scope (per the spec §"Honest scope"):
+  ##   * The "language convention" for every discovered target is
+  ##     hardcoded to ``"nim"`` because today's introspection plumbs
+  ##     through the Nim scanner only. Cross-language convention
+  ##     attribution lands when the convention registry exposes a
+  ##     uniform "which convention claims this dir" introspection
+  ##     surface (the ``recognize`` proc is callable but only inside
+  ##     the standard-provider binary, which has the per-language
+  ##     plugins linked).
+  ##   * The ``Conventions registered`` list is a static mirror of
+  ##     the standard-provider binary's registration order. A test
+  ##     fails loudly if the two drift.
+  ##   * No-match diagnostics ("apps/asset-pack/ — no convention
+  ##     claimed it") are deferred to the cross-language introspection
+  ##     milestone — emitting them today would require running each
+  ##     convention's ``recognize`` per dir, which the CLI binary
+  ##     cannot do without linking the standard provider.
+  var projectArg = ""
+  var jsonOut = false
+  var targetFilter = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--help" or arg == "-h":
+      echo "usage: repro show-conventions [--project=PATH] " &
+        "[--target=NAME] [--json] [PATH]"
+      return 0
+    elif arg == "--json":
+      jsonOut = true
+    elif arg == "--project":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--project requires a value")
+      projectArg = args[i + 1]
+      inc i
+    elif arg.startsWith("--project="):
+      projectArg = arg["--project=".len .. ^1]
+    elif arg == "--target":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--target requires a value")
+      targetFilter = args[i + 1]
+      inc i
+    elif arg.startsWith("--target="):
+      targetFilter = arg["--target=".len .. ^1]
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported show-conventions flag: " & arg)
+    elif projectArg.len == 0:
+      projectArg = arg
+    else:
+      raise newException(ValueError,
+        "unexpected show-conventions argument: " & arg)
+    inc i
+
+  let workspaceRoot =
+    if projectArg.len == 0:
+      getCurrentDir()
+    else:
+      absolutePath(projectArg)
+  if not dirExists(workspaceRoot):
+    raise newException(ValueError,
+      "show-conventions: workspace root does not exist: " & workspaceRoot)
+
+  let projectMatch = resolveProjectFile(workspaceRoot)
+  let scan = scanWorkspace(workspaceRoot)
+  # Collect manual ``depends_on`` edges from every project file the
+  # scanner discovered (a workspace can hold several — apps/<name>/
+  # repro.nim, libs/<name>/repro.nim, ...). We dedup by project-file
+  # path so we don't double-emit when two members share a file.
+  var manual: seq[ManualDepEdge] = @[]
+  var seenProjectFiles: HashSet[string]
+  for member in scan.members:
+    if member.projectFile.len == 0:
+      continue
+    if member.projectFile in seenProjectFiles:
+      continue
+    seenProjectFiles.incl(member.projectFile)
+    for edge in extractManualDependsOnFromProjectFile(member.projectFile):
+      manual.add(edge)
+  # Also consider the top-level project file in case there are no
+  # members discovered (manual-only configuration).
+  if projectMatch.path.len > 0 and
+      projectMatch.path notin seenProjectFiles:
+    for edge in extractManualDependsOnFromProjectFile(projectMatch.path):
+      manual.add(edge)
+
+  if jsonOut:
+    let doc = renderShowConventionsJson(workspaceRoot, projectMatch,
+      scan.members, scan.edges, manual, targetFilter)
+    echo doc.pretty()
+  else:
+    stdout.write(renderShowConventionsText(workspaceRoot, projectMatch,
+      scan.members, scan.edges, manual, targetFilter))
+  0
+
 proc runDepsCommand(args: openArray[string]): int =
   ## Dispatch ``repro deps <subcommand>``. Today the only subcommand is
   ## ``refresh``; the spec leaves room for ``deps show`` /
@@ -8251,6 +8583,18 @@ proc runThinApp*(programName: string): int =
       return runDepsCommand(depsArgs)
     except CatchableError as err:
       stderr.writeLine("repro deps: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and
+      args[0] == "show-conventions":
+    try:
+      let scArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runShowConventionsCommand(scArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro show-conventions: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "build":
     try:

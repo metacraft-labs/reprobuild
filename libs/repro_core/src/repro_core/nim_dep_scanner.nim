@@ -730,3 +730,142 @@ proc scannedDepsArePresent*(repoNimPath: string): bool =
     except CatchableError:
       return false
   text.contains("repro.scanned-deps.nim")
+
+# ----------------------------------------------------------------------
+# Manual ``depends_on`` extraction — read a project file as text and
+# return the declared inter-package edges WITHOUT evaluating any Nim
+# code. ``repro show-conventions`` uses this to surface manual overrides
+# alongside the scanner's auto-detected edges, per
+# ``reprobuild-specs/Three-Mode-Convention-System.md`` §"Observability".
+#
+# The shapes recognised match the macro's accepted shapes in
+# ``repro_project_dsl/macros_b.nim`` (``collectDependsOnEntries``):
+#
+#   ``depends_on <pkg>: <dep>``                 (single-line, single-dep)
+#   ``depends_on <pkg>: <dep1>, <dep2>``        (single-line, multi-dep)
+#   ``depends_on <pkg>:``  + indented body      (block form, one dep per
+#                                                line, dep may itself be
+#                                                a comma list)
+#
+# String-literal deps (``"greet"``) are accepted alongside identifiers.
+# Anything not on a recognised line is silently skipped — same forward-
+# compat policy as the macro.
+# ----------------------------------------------------------------------
+
+type
+  ManualDepEdge* = object
+    ## One manual ``depends_on`` edge as it appears textually in a
+    ## project file. ``sourceLine`` is the 1-based line number; the
+    ## evidence string used by ``repro show-conventions`` is
+    ## ``"<rel-path>:<line>: depends_on <pkg>: <dep>"``.
+    fromPackage*: string
+    toPackage*: string
+    sourceLine*: int
+
+proc indentationOf(line: string): int =
+  ## Count leading whitespace columns. Tabs count as one column —
+  ## matches what Nim's parser does for ``# of indentation`` accounting
+  ## here.
+  for ch in line:
+    if ch == ' ' or ch == '\t':
+      inc result
+    else:
+      break
+
+proc splitDepListPayload(payload: string): seq[string] =
+  ## Split a ``<dep1>, <dep2>, ...`` payload into normalised dep names.
+  ## Empty entries are dropped; quotes wrapping a string-literal name
+  ## are stripped so ``"foo"`` and ``foo`` produce the same edge.
+  for part in payload.split(','):
+    var token = part.strip()
+    if token.len == 0:
+      continue
+    # Drop trailing line-comment, if any (cleaned upstream typically,
+    # but the macro's collectDependsOnEntries also tolerates this).
+    let hashIdx = token.find('#')
+    if hashIdx >= 0:
+      token = token[0 ..< hashIdx].strip()
+      if token.len == 0:
+        continue
+    token = token.strip(chars = {'"', '\''})
+    if token.len == 0:
+      continue
+    result.add(token)
+
+proc extractManualDependsOnFromText*(text: string): seq[ManualDepEdge] =
+  ## Walk ``text`` (the on-disk content of a project file) line by line
+  ## and emit one ``ManualDepEdge`` per declared dep across every
+  ## ``depends_on <pkg>: ...`` block. The scanner mirrors the macro's
+  ## tolerance: unknown shapes are silently skipped, mixed inline and
+  ## indented forms are both accepted.
+  let lines = text.splitLines()
+  var i = 0
+  while i < lines.len:
+    let raw = lines[i]
+    let cleaned = stripLineComment(raw)
+    let stripped = cleaned.strip()
+    if not stripped.startsWith("depends_on"):
+      inc i
+      continue
+    let afterKeyword = stripped[len("depends_on") .. ^1]
+    if afterKeyword.len == 0 or
+        afterKeyword[0] notin {' ', '\t'}:
+      # ``depends_onSomething`` — not actually our macro.
+      inc i
+      continue
+    let body = afterKeyword.strip()
+    let colonIdx = body.find(':')
+    if colonIdx <= 0:
+      inc i
+      continue
+    let pkgName = body[0 ..< colonIdx].strip()
+    if pkgName.len == 0:
+      inc i
+      continue
+    let payload = body[colonIdx + 1 .. ^1].strip()
+    let headerLine = i + 1
+    if payload.len > 0:
+      # Inline form: ``depends_on pkg: dep1, dep2``. Any subsequent
+      # indented continuation lines are tolerated too (the macro
+      # accepts a mixed shape, so the text extractor does the same).
+      for entry in splitDepListPayload(payload):
+        result.add(ManualDepEdge(
+          fromPackage: pkgName,
+          toPackage: entry,
+          sourceLine: headerLine))
+    let headerIndent = indentationOf(raw)
+    inc i
+    # Block continuation: keep consuming lines that are MORE indented
+    # than the header. Blank/comment lines are skipped but do not break
+    # the block (matches how Nim's parser treats them inside a
+    # statement-list body).
+    while i < lines.len:
+      let contRaw = lines[i]
+      let contCleaned = stripLineComment(contRaw)
+      let contStripped = contCleaned.strip()
+      if contStripped.len == 0:
+        inc i
+        continue
+      if indentationOf(contRaw) <= headerIndent:
+        break
+      for entry in splitDepListPayload(contStripped):
+        result.add(ManualDepEdge(
+          fromPackage: pkgName,
+          toPackage: entry,
+          sourceLine: i + 1))
+      inc i
+
+proc extractManualDependsOnFromProjectFile*(projectFile: string):
+    seq[ManualDepEdge] =
+  ## Convenience wrapper over ``extractManualDependsOnFromText`` that
+  ## reads the file off disk. Missing/unreadable files return the empty
+  ## sequence — the caller's "no manual edges declared" message is the
+  ## same in either case.
+  if not fileExists(projectFile):
+    return @[]
+  let text =
+    try:
+      readFile(projectFile)
+    except CatchableError:
+      return @[]
+  extractManualDependsOnFromText(text)
