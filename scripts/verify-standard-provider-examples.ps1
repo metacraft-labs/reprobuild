@@ -22,11 +22,15 @@
 #
 # ---------------- Today's expected results (Mode A coverage) -------------------
 #
-# Expected to PASS (the known-working set, post-M22):
+# Expected to PASS (the known-working set, post-M23):
 #   nim/binary, nim/multi-binary,
 #   nim/library, nim/library-with-tests,
 #   rust/binary, rust/binary-with-build-rs,
 #   rust/library, rust/library-with-tests, rust/workspace,
+#   rust/workspace-lib-chain                 (M23: lib→lib edges + -L dependency),
+#   rust/cdylib                              (M23: crate-type cdylib variant),
+#   rust/binary-with-crates-io               (M23: external dep → Mode B fallback;
+#                                             SKIP when CARGO_HOME registry empty),
 #   go/binary, go/library, go/library-with-tests, go/multi-binary,
 #   python/library-pure,
 #   python/console-script    (M20: byte-compile + sdist + runnable shim),
@@ -105,6 +109,9 @@ $PopulatedExamples = @(
   'rust/library',
   'rust/library-with-tests',
   'rust/workspace',
+  'rust/workspace-lib-chain',
+  'rust/cdylib',
+  'rust/binary-with-crates-io',
   'rust/binary-with-build-rs',
   'go/binary',
   'go/library',
@@ -490,6 +497,65 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         }
       )
     }
+    'rust/workspace-lib-chain' {
+      # M23: three-crate workspace with a true lib→lib chain
+      # (``crate_a (lib) → crate_b (lib) → crate_c (bin)``). The
+      # transitive greeting comes from crate_a::greet wrapped in
+      # crate_b::banner; running crate_c proves the topological emit
+      # order + ``-L dependency=<bin_dir>`` search-path threading wire
+      # correctly. We additionally glob for crate_a + crate_b rlibs to
+      # confirm Pass A emitted both.
+      $alphaRlibDir = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'crate_a' 'bin'))
+      $betaRlibDir  = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'crate_b' 'bin'))
+      $crateCBin    = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'crate_c' (Join-Path 'bin' 'crate_c.exe')))
+      return @(
+        @{
+          PathGlob = @{ Dir = $alphaRlibDir; Filter = 'libcrate_a-*.rlib' }
+          Greeting = $null
+        },
+        @{
+          PathGlob = @{ Dir = $betaRlibDir;  Filter = 'libcrate_b-*.rlib' }
+          Greeting = $null
+        },
+        @{
+          Path     = $crateCBin
+          Greeting = '[chain] hello, rust-workspace-lib-chain-example'
+        }
+      )
+    }
+    'rust/cdylib' {
+      # M23: ``crate-type = ["cdylib"]`` in Cargo.toml. The convention
+      # emits ``rustc --crate-type cdylib --emit=link``; rustc produces
+      # ``<name>.dll`` on Windows / ``lib<name>.so`` on Linux /
+      # ``lib<name>.dylib`` on macOS. No greeting check — a cdylib
+      # isn't an executable; the dedicated
+      # validate-standard-provider-rust-cdylib.ps1 script additionally
+      # verifies the exported C-ABI symbol via dumpbin.
+      $crate = 'rust_cdylib_example'
+      $binDir = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $crate 'bin'))
+      $filename =
+        if ($IsWindows -or $env:OS -eq 'Windows_NT') { "$crate.dll" }
+        elseif ($IsMacOS) { "lib$crate.dylib" }
+        else { "lib$crate.so" }
+      return @(@{
+        Path     = Join-Path $binDir $filename
+        Greeting = $null
+      })
+    }
+    'rust/binary-with-crates-io' {
+      # M23 Part B (Mode B fallback scope): a project with a
+      # ``[dependencies]`` entry whose source resolves to crates.io is
+      # routed through the Mode B crude fallback (``cargo build
+      # --release --offline``). Mode B's cargo invocation writes to
+      # ``<fixture>/target/release/`` (not the convention scratch dir
+      # under ``.repro/build/``). The greeting check exercises the
+      # libc dep — successful run proves cargo resolved the dep
+      # against the host CARGO_HOME registry.
+      return @(@{
+        Path     = Join-Path $fixtureDir 'target\release\rust-binary-with-crates-io.exe'
+        Greeting = 'hello from rust-binary-with-crates-io'
+      })
+    }
     'rust/binary-with-build-rs' {
       # Mode B crude path: cargo writes to <fixture>/target/release/.
       return @(@{
@@ -753,6 +819,26 @@ foreach ($rel in $PopulatedExamples) {
     $cargoTarget = Join-Path $fixtureDir 'target'
     if (Test-Path -LiteralPath $cargoTarget) {
       Remove-Item -LiteralPath $cargoTarget -Recurse -Force
+    }
+  }
+  # M23: warm the CARGO_HOME registry for rust/binary-with-crates-io
+  # so the convention's Mode B fallback (``cargo build --offline``)
+  # can resolve libc. SKIP cleanly when ``cargo fetch`` fails
+  # (typically: offline host without the dep pre-cached).
+  if ($rel -eq 'rust/binary-with-crates-io') {
+    Push-Location -LiteralPath $fixtureDir
+    try {
+      $fetchOut = & cargo fetch 2>&1 | Out-String
+      $fetchExit = $LASTEXITCODE
+    } finally {
+      Pop-Location
+    }
+    if ($fetchExit -ne 0) {
+      Write-Host "  SKIP: 'cargo fetch' failed (exit $fetchExit) — Mode B fallback needs CARGO_HOME registry populated"
+      Write-Host "  --- cargo fetch tail:"
+      ($fetchOut -split "`n" | Select-Object -Last 5) | ForEach-Object { Write-Host "    $_" }
+      Add-Result 'SKIP' $rel "cargo fetch failed (exit $fetchExit) — CARGO_HOME registry not populated for libc"
+      continue
     }
   }
   # The autotools convention's actions run ``autoreconf -fi`` +

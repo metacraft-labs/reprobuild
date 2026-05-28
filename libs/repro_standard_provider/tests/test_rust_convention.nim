@@ -47,7 +47,7 @@
 ## but the rejection-reason coverage degrades; the e2e validator picks up
 ## that gap by exercising the full path against a real toolchain.
 
-import std/[os, strutils, unittest]
+import std/[os, strutils, tables, unittest]
 
 import repro_core
 import repro_provider_runtime
@@ -67,6 +67,12 @@ const
   FixtureCrateName = "rust_binary_example"
   TestFixtureRoot =
     MetacraftRoot / "reprobuild-examples" / "rust" / "library-with-tests"
+  WorkspaceChainFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "rust" / "workspace-lib-chain"
+  CdylibFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "rust" / "cdylib"
+  CratesIoFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "rust" / "binary-with-crates-io"
 
 proc dummyRequest(projectRoot: string): ProviderGraphRequest =
   ProviderGraphRequest(
@@ -480,3 +486,213 @@ suite "rust convention M4":
         check not action.id.startsWith("rustc-test-compile-")
         check not action.id.startsWith("rustc-test-run-")
         check not action.id.startsWith("rustc-test-stamp-")
+
+  # --- M23: workspace lib→lib chain ---------------------------------------
+
+  test "emitFragment M23: workspace-lib-chain topological order":
+    # M23 Part A: a workspace ``crate_a (lib) → crate_b (lib) → crate_c
+    # (bin)`` must emit Pass A in topological order so crate_b's
+    # metadata + link passes carry ``--extern crate_a=...`` flags
+    # pointing at crate_a's already-emitted rmeta + rlib. Pass B's
+    # crate_c bin similarly carries the full direct + transitive
+    # ``--extern`` set (plus the transitive ``-L dependency`` paths).
+    if not rustToolchainAvailable():
+      skip()
+    elif not fileExists(WorkspaceChainFixtureRoot / "reprobuild.nim"):
+      checkpoint "fixture missing — looked at " & WorkspaceChainFixtureRoot
+      fail()
+    else:
+      let conv = rust_convention.rustConvention()
+      let request = dummyRequest(WorkspaceChainFixtureRoot)
+      require conv.recognize(WorkspaceChainFixtureRoot, request)
+      let fragment = conv.emitFragment(WorkspaceChainFixtureRoot, request)
+
+      # Collect actions keyed on crate name (strip the
+      # ``rustc-metadata-`` / ``rustc-link-`` prefix + ``-umbrella``
+      # suffix).
+      var metadataByCrate = initTable[string, BuildActionDef]()
+      var linkByCrate = initTable[string, BuildActionDef]()
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("rustc-metadata-") and
+            action.id.endsWith("-umbrella"):
+          let crate = action.id["rustc-metadata-".len ..^ "-umbrella".len + 1]
+          metadataByCrate[crate] = action
+        elif action.id.startsWith("rustc-link-") and
+            action.id.endsWith("-umbrella"):
+          let crate = action.id["rustc-link-".len ..^ "-umbrella".len + 1]
+          linkByCrate[crate] = action
+
+      # All three crates should have both passes emitted.
+      check "crate_a" in metadataByCrate
+      check "crate_a" in linkByCrate
+      check "crate_b" in metadataByCrate
+      check "crate_b" in linkByCrate
+      check "crate_c" in metadataByCrate
+      check "crate_c" in linkByCrate
+
+      # M23 Part A: crate_b's metadata pass must reference crate_a's
+      # rmeta via ``--extern crate_a=...`` AND declare crate_a's
+      # metadata action id in its deps.
+      let crateBMetaArgv = inlineArgvOf(metadataByCrate["crate_b"])
+      var sawCrateAExternInB = false
+      for arg in crateBMetaArgv:
+        if arg.startsWith("crate_a=") and arg.endsWith(".rmeta"):
+          sawCrateAExternInB = true
+          break
+      check sawCrateAExternInB
+      check metadataByCrate["crate_a"].id in metadataByCrate["crate_b"].deps
+
+      # M23 Part A: crate_b's link pass must reference crate_a's rlib
+      # and depend on crate_a's link action.
+      let crateBLinkArgv = inlineArgvOf(linkByCrate["crate_b"])
+      var sawCrateAExternRlibInB = false
+      for arg in crateBLinkArgv:
+        if arg.startsWith("crate_a=") and arg.endsWith(".rlib"):
+          sawCrateAExternRlibInB = true
+          break
+      check sawCrateAExternRlibInB
+      check linkByCrate["crate_a"].id in linkByCrate["crate_b"].deps
+
+      # M23 transitive deps: crate_c (bin) directly depends on crate_b
+      # only; ``--extern crate_b=...`` must be present. The transitive
+      # crate_a is reached via ``-L dependency=<crate_a bin/deps dir>``
+      # so we check for a ``-L`` flag referencing crate_a's dirs.
+      let crateCMetaArgv = inlineArgvOf(metadataByCrate["crate_c"])
+      var sawCrateBExternInC = false
+      var sawCrateASearchPathInC = false
+      for arg in crateCMetaArgv:
+        if arg.startsWith("crate_b=") and arg.endsWith(".rmeta"):
+          sawCrateBExternInC = true
+        if arg.startsWith("dependency=") and arg.contains("crate_a"):
+          sawCrateASearchPathInC = true
+      check sawCrateBExternInC
+      check sawCrateASearchPathInC
+      # crate_c's metadata pass must list crate_b's actions in deps so
+      # the engine waits for crate_b before running rustc-metadata-crate_c.
+      check metadataByCrate["crate_b"].id in metadataByCrate["crate_c"].deps
+      check linkByCrate["crate_b"].id in metadataByCrate["crate_c"].deps
+
+  # --- M23: cdylib variant ------------------------------------------------
+
+  test "emitFragment M23: cdylib emits --crate-type cdylib link argv":
+    # M23 Part C: a crate with ``crate-type = ["cdylib"]`` in Cargo.toml
+    # must emit a rustc-link action whose argv carries ``--crate-type
+    # cdylib`` and whose primary output is the platform-named dynamic
+    # library (``<n>.dll`` on Windows, ``lib<n>.so/.dylib`` on POSIX).
+    if not rustToolchainAvailable():
+      skip()
+    elif not fileExists(CdylibFixtureRoot / "reprobuild.nim"):
+      checkpoint "fixture missing — looked at " & CdylibFixtureRoot
+      fail()
+    else:
+      let conv = rust_convention.rustConvention()
+      let request = dummyRequest(CdylibFixtureRoot)
+      require conv.recognize(CdylibFixtureRoot, request)
+      let fragment = conv.emitFragment(CdylibFixtureRoot, request)
+
+      var metadataAction: BuildActionDef
+      var linkAction: BuildActionDef
+      var sawMetadata = false
+      var sawLink = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id == "rustc-metadata-rust_cdylib_example-umbrella":
+          metadataAction = action
+          sawMetadata = true
+        elif action.id == "rustc-link-rust_cdylib_example-umbrella":
+          linkAction = action
+          sawLink = true
+
+      check sawMetadata
+      check sawLink
+
+      # Both passes must carry ``--crate-type cdylib`` (M23: per-target
+      # crate-type selection, not the M13-era ``lib`` lumping).
+      let metaArgv = inlineArgvOf(metadataAction)
+      let linkArgv = inlineArgvOf(linkAction)
+      var sawCdylibMeta = false
+      var sawCdylibLink = false
+      for i in 0 ..< metaArgv.len:
+        if metaArgv[i] == "--crate-type" and i + 1 < metaArgv.len and
+            metaArgv[i + 1] == "cdylib":
+          sawCdylibMeta = true
+          break
+      for i in 0 ..< linkArgv.len:
+        if linkArgv[i] == "--crate-type" and i + 1 < linkArgv.len and
+            linkArgv[i + 1] == "cdylib":
+          sawCdylibLink = true
+          break
+      check sawCdylibMeta
+      check sawCdylibLink
+
+      # Link action's primary output must be the platform-named .dll /
+      # .so / .dylib. We check basename rather than full path so the
+      # test is host-agnostic.
+      check linkAction.outputs.len >= 1
+      let primaryOut = linkAction.outputs[0].extractFilename
+      when defined(windows):
+        check primaryOut == "rust_cdylib_example.dll"
+      elif defined(macosx):
+        check primaryOut == "librust_cdylib_example.dylib"
+      else:
+        check primaryOut == "librust_cdylib_example.so"
+
+  # --- M23: external crates.io dep ----------------------------------------
+
+  test "emitFragment M23: project with crates.io dep routes to Mode B":
+    # M23 Part B (scoped-down): when a project pulls in a crates.io
+    # registry dep, the convention currently routes the WHOLE project
+    # through the Mode B crude fallback. The crude path emits exactly
+    # one ``cargo build --release --locked --offline`` action under a
+    # ``project:crude-rust_binary_with_crates_io`` (or similar) id. We
+    # don't assert the exact id (crude action ids encode the package
+    # name, which varies per fixture); we just check that NO
+    # ``rustc-metadata-*`` / ``rustc-link-*`` actions are emitted
+    # (those would mean the convention tried Mode A and would fail at
+    # rustc-resolve time).
+    if not rustToolchainAvailable():
+      skip()
+    elif not fileExists(CratesIoFixtureRoot / "reprobuild.nim"):
+      checkpoint "fixture missing — looked at " & CratesIoFixtureRoot
+      fail()
+    else:
+      # ``cargo metadata --no-deps --offline`` needs the crates.io
+      # registry index to resolve the version specifier. If the host's
+      # CARGO_HOME is empty (cold dev box) the convention's metadata
+      # call fails. Skip cleanly rather than fail loud so the test
+      # remains hermetic.
+      let conv = rust_convention.rustConvention()
+      let request = dummyRequest(CratesIoFixtureRoot)
+      if not conv.recognize(CratesIoFixtureRoot, request):
+        skip()
+      else:
+        var fragmentOk = true
+        var fragment: GraphFragment
+        try:
+          fragment = conv.emitFragment(CratesIoFixtureRoot, request)
+        except CatchableError:
+          # ``cargo metadata`` may fail offline if the crate isn't in
+          # the host's CARGO_HOME registry — that's a host-env gap, not
+          # a convention bug. Mark skip rather than fail loud.
+          fragmentOk = false
+        if not fragmentOk:
+          skip()
+        else:
+          var sawMode = false
+          for node in fragment.nodes:
+            if node.kind != gnkAction:
+              continue
+            let action = decodeBuildActionPayload(toBytes(node.payload))
+            # No Mode A rustc actions should be emitted.
+            check not action.id.startsWith("rustc-metadata-")
+            check not action.id.startsWith("rustc-link-")
+            # The crude fallback id is ``crude-build-<sanitized-name>``
+            # (per ``crudeActionIdFor`` in crude.nim).
+            if action.id.startsWith("crude-build-"):
+              sawMode = true
+          check sawMode
