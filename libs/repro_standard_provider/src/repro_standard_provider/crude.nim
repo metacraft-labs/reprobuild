@@ -232,9 +232,13 @@ proc syntheticPackage(projectRoot, packageName: string): PackageDef =
   ## Minimal ``PackageDef`` for ``buildPackageFragment``. Same shape
   ## the Mode A conventions use — the runtime only reads ``packageName``
   ## and ``sourceFile`` from it.
+  let projectMatch = resolveProjectFile(projectRoot)
+  let sourceFile =
+    if projectMatch.path.len > 0: projectMatch.path
+    else: projectRoot / LegacyProjectFileName
   PackageDef(
     packageName: packageName,
-    sourceFile: projectRoot / "reprobuild.nim",
+    sourceFile: sourceFile,
     hasDevEnv: false,
     devEnvBodyHash: "",
     toolUses: @[])

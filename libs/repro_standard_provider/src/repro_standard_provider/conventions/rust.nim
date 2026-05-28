@@ -219,13 +219,15 @@ type
       ## implementation is deferred).
 
 proc readReprobuildSource(projectRoot: string): string =
-  ## Read ``<projectRoot>/reprobuild.nim`` or return the empty string.
-  ## Used by ``recognize``; never raises.
-  let path = projectRoot / "reprobuild.nim"
-  if not fileExists(extendedPath(path)):
+  ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
+  ## under ``projectRoot``; return the empty string when neither is
+  ## present. Used by ``recognize``; never raises. See
+  ## ``repro_core/project_file`` for the alias contract.
+  let match = resolveProjectFile(projectRoot)
+  if match.path.len == 0:
     return ""
   try:
-    readFile(extendedPath(path))
+    readFile(extendedPath(match.path))
   except CatchableError:
     ""
 
@@ -1249,9 +1251,13 @@ proc syntheticPackage(projectRoot: string;
   var name = "rust_convention"
   if project.packages.len > 0:
     name = normaliseCrateName(project.packages[0].packageName)
+  let projectMatch = resolveProjectFile(projectRoot)
+  let sourceFile =
+    if projectMatch.path.len > 0: projectMatch.path
+    else: projectRoot / LegacyProjectFileName
   PackageDef(
     packageName: name,
-    sourceFile: projectRoot / "reprobuild.nim",
+    sourceFile: sourceFile,
     hasDevEnv: false,
     devEnvBodyHash: "",
     toolUses: @[])

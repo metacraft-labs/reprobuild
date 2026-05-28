@@ -111,12 +111,13 @@ type
       ## Absolute paths to the ``.c`` files for this member.
 
 proc readReprobuildSource(projectRoot: string): string =
-  ## Read ``<projectRoot>/reprobuild.nim`` or return the empty string.
-  let path = projectRoot / "reprobuild.nim"
-  if not fileExists(extendedPath(path)):
+  ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
+  ## or return the empty string. See ``repro_core/project_file``.
+  let match = resolveProjectFile(projectRoot)
+  if match.path.len == 0:
     return ""
   try:
-    readFile(extendedPath(path))
+    readFile(extendedPath(match.path))
   except CatchableError:
     ""
 
@@ -545,9 +546,13 @@ proc syntheticPackage(projectRoot: string;
   var name = "c_cpp_make_convention"
   if members.len > 0:
     name = sanitizeNamePart(members[0].name)
+  let projectMatch = resolveProjectFile(projectRoot)
+  let sourceFile =
+    if projectMatch.path.len > 0: projectMatch.path
+    else: projectRoot / LegacyProjectFileName
   PackageDef(
     packageName: name,
-    sourceFile: projectRoot / "reprobuild.nim",
+    sourceFile: sourceFile,
     hasDevEnv: false,
     devEnvBodyHash: "",
     toolUses: @[])
@@ -566,9 +571,13 @@ proc cCppMakeEmitFragment(projectRoot: string;
     let source = readReprobuildSource(projectRoot)
     let members = extractMembers(source)
     if members.len == 0:
+      let projectMatch = resolveProjectFile(projectRoot)
+      let projectFile =
+        if projectMatch.path.len > 0: projectMatch.path
+        else: projectRoot / LegacyProjectFileName
       raise newException(ValueError,
         "c-cpp-make convention: no executable or library members " &
-          "declared in " & projectRoot / "reprobuild.nim")
+          "declared in " & projectFile)
     let ccExe = ccCompiler()
     if ccExe.len == 0:
       raise newException(ValueError,

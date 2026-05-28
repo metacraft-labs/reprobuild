@@ -225,13 +225,15 @@ type
     hasReferences: bool
 
 proc readReprobuildSource(projectRoot: string): string =
-  ## Read ``<projectRoot>/reprobuild.nim`` or return the empty string.
-  ## Used by both ``recognize`` and ``emitFragment``; never raises.
-  let path = projectRoot / "reprobuild.nim"
-  if not fileExists(extendedPath(path)):
+  ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
+  ## under ``projectRoot``; return the empty string when neither is
+  ## present. Used by both ``recognize`` and ``emitFragment``; never
+  ## raises. See ``repro_core/project_file`` for the alias contract.
+  let match = resolveProjectFile(projectRoot)
+  if match.path.len == 0:
     return ""
   try:
-    readFile(extendedPath(path))
+    readFile(extendedPath(match.path))
   except CatchableError:
     ""
 
@@ -1252,9 +1254,13 @@ proc syntheticPackage(projectRoot: string;
     name = sanitizeNamePart(info.packageName)
   elif members.len > 0:
     name = members[0].name
+  let projectMatch = resolveProjectFile(projectRoot)
+  let sourceFile =
+    if projectMatch.path.len > 0: projectMatch.path
+    else: projectRoot / LegacyProjectFileName
   PackageDef(
     packageName: name,
-    sourceFile: projectRoot / "reprobuild.nim",
+    sourceFile: sourceFile,
     hasDevEnv: false,
     devEnvBodyHash: "",
     toolUses: @[])
@@ -1367,9 +1373,13 @@ proc jsTsEmitFragment(projectRoot: string;
     let source = readReprobuildSource(projectRoot)
     let members = extractMembers(source)
     if members.len == 0:
+      let projectMatch = resolveProjectFile(projectRoot)
+      let projectFile =
+        if projectMatch.path.len > 0: projectMatch.path
+        else: projectRoot / LegacyProjectFileName
       raise newException(ValueError,
         "javascript-typescript convention: no library or executable " &
-          "members declared in " & projectRoot / "reprobuild.nim")
+          "members declared in " & projectFile)
     let pkg = parsePackageJson(projectRoot / "package.json")
     # M24: route Mode B projects to the crude fallback first. The
     # routing condition mirrors ``jsTsRecognize``'s Mode B branch so

@@ -213,11 +213,15 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
           modulePath: fragmentModule,
           outputName: parts.fragment,
           fragmentKind: tfkModule)
-      let rootModule = parts.base / "reprobuild.nim"
-      if fileExists(extendedPath(rootModule)):
+      # Project-file alias: prefer ``repro.nim``, fall back to
+      # ``reprobuild.nim``. See repro_core/project_file.nim and
+      # reprobuild-specs/Three-Mode-Convention-System.md.
+      let projectMatch = resolveProjectFile(parts.base)
+      warnIfAmbiguous(projectMatch, parts.base)
+      if projectMatch.path.len > 0:
         return ParsedBuildTarget(
-          modulePath: rootModule,
-          outputName: splitFile(rootModule).name,
+          modulePath: projectMatch.path,
+          outputName: splitFile(projectMatch.path).name,
           selectedActionId: parts.fragment,
           fragmentKind: tfkActionSelection)
       return ParsedBuildTarget(
@@ -231,7 +235,14 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
 
   let modulePath =
     if dirExists(extendedPath(parts.base)):
-      parts.base / "reprobuild.nim"
+      # Project-file alias: prefer ``repro.nim``, fall back to
+      # ``reprobuild.nim``. Empty match falls through to legacy name so
+      # downstream "file not found" diagnostics still mention a concrete
+      # filename.
+      let match = resolveProjectFile(parts.base)
+      warnIfAmbiguous(match, parts.base)
+      if match.path.len > 0: match.path
+      else: parts.base / LegacyProjectFileName
     else:
       parts.base
   ParsedBuildTarget(
@@ -3919,7 +3930,9 @@ proc activeProjectRootFromCwd(): string =
   result = findDevEnvProjectRoot(getCurrentDir())
   if result.len == 0:
     raise newException(ValueError,
-      "repro develop requires a current project containing reprobuild.nim")
+      "repro develop requires a current project containing " &
+        CanonicalProjectFileName & " (or legacy " &
+        LegacyProjectFileName & ")")
 
 proc resolveDevelopOverrideCheckout(dependency, intoPath: string): string =
   if intoPath.len == 0:
@@ -3931,11 +3944,14 @@ proc resolveDevelopOverrideCheckout(dependency, intoPath: string): string =
   if tail != dependency:
     candidates.add(intoAbs / safePathSegment(dependency, "dependency"))
   for candidate in candidates:
-    if fileExists(extendedPath(candidate / "reprobuild.nim")):
+    # Project-file alias: probe for either ``repro.nim`` or
+    # ``reprobuild.nim``.
+    if resolveProjectFile(candidate).path.len > 0:
       return os.normalizedPath(candidate)
   raise newException(IOError,
     "develop override checkout for " & dependency &
-      " must already exist and contain reprobuild.nim under " &
+      " must already exist and contain " & CanonicalProjectFileName &
+      " (or legacy " & LegacyProjectFileName & ") under " &
       candidates.join(" or "))
 
 proc upsertDevelopOverride(projectRoot, dependency, localPath: string): string =
@@ -4760,7 +4776,11 @@ proc findDevEnvProjectRoot(startPath: string): string =
   if fileExists(extendedPath(cursor)) and not dirExists(extendedPath(cursor)):
     cursor = parentDir(cursor)
   while cursor.len > 0:
-    if fileExists(extendedPath(cursor / "reprobuild.nim")):
+    # Project-file alias: a directory containing either ``repro.nim`` or
+    # ``reprobuild.nim`` is a valid project root.
+    let match = resolveProjectFile(cursor)
+    if match.path.len > 0:
+      warnIfAmbiguous(match, cursor)
       return cursor
     let parent = parentDir(cursor)
     if parent == cursor or parent.len == 0:

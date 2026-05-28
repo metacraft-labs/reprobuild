@@ -7,12 +7,15 @@
 ## ``uses:`` list, because that's the single most useful clue for
 ## diagnosing "why didn't my project match?".
 ##
-## ``readUsesHint`` is a *heuristic* line scan over ``reprobuild.nim`` —
-## it does NOT evaluate the DSL. The output is purely diagnostic; the
-## convention dispatch logic itself never depends on it. Two failure
-## modes are accepted by design:
+## ``readUsesHint`` is a *heuristic* line scan over the project file
+## (``repro.nim`` or its alias ``reprobuild.nim`` — see
+## ``repro_core/project_file`` and
+## ``reprobuild-specs/Three-Mode-Convention-System.md``) — it does NOT
+## evaluate the DSL. The output is purely diagnostic; the convention
+## dispatch logic itself never depends on it. Two failure modes are
+## accepted by design:
 ##
-## * No ``reprobuild.nim`` → empty seq (the diagnostic falls back to
+## * No project file → empty seq (the diagnostic falls back to
 ##   reporting just the project root).
 ## * Malformed / unusual ``uses:`` block → best-effort; never raises.
 ##
@@ -31,10 +34,15 @@
 
 import std/[os, strutils]
 
+import repro_core/project_file
+
 const
-  UsesHintFile* = "reprobuild.nim"
-    ## Filename probed by ``readUsesHint``. Kept as a const so the
-    ## diagnostic and the test fixture stay in lockstep.
+  UsesHintFile* = LegacyProjectFileName
+    ## Filename probed by ``readUsesHint`` when only the legacy alias is
+    ## present. Retained for backwards-compatible test fixtures; the
+    ## canonical name is ``CanonicalProjectFileName`` (``repro.nim``).
+    ## Both names are accepted by the resolver — see
+    ## ``repro_core/project_file``.
 
 proc stripComment(line: string): string =
   ## Drop ``# ...`` trailing comments. Naive — doesn't understand
@@ -60,17 +68,19 @@ proc splitEntries(payload: string): seq[string] =
 
 proc readUsesHint*(projectRoot: string): seq[string] =
   ## Return a best-effort list of the languages / external systems the
-  ## project's ``reprobuild.nim`` declares in its ``uses:`` block.
+  ## project's ``repro.nim`` (or legacy ``reprobuild.nim``) declares in
+  ## its ``uses:`` block.
   ##
   ## Returns an empty seq on any error — missing file, IO failure,
   ## malformed block. Callers MUST treat the output as a diagnostic
   ## hint, never as authoritative input to dispatch.
-  let path = projectRoot / UsesHintFile
-  if not fileExists(path):
+  let match = resolveProjectFile(projectRoot)
+  if match.path.len == 0:
     return @[]
+  warnIfAmbiguous(match, projectRoot)
   var raw: string
   try:
-    raw = readFile(path)
+    raw = readFile(match.path)
   except CatchableError:
     return @[]
 
