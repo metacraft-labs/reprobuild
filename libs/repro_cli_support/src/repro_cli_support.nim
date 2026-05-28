@@ -34,6 +34,14 @@ export infra.runInfraCommand, infra.runSystemCommand
 proc wantsVersion*(args: openArray[string]): bool =
   args.len == 1 and args[0] in ["--version", "-V"]
 
+proc wantsHelp*(args: openArray[string]): bool =
+  ## True when the user explicitly asked for help via a top-level flag
+  ## or the `help` subcommand. Distinct from "unknown / missing command"
+  ## — an explicit help request prints to stdout and exits 0
+  ## (POSIX-shell-pipeable convention), while a missing or unknown
+  ## command keeps the older stderr / exit-2 path.
+  args.len > 0 and args[0] in ["help", "--help", "-h"]
+
 proc renderVersion*(programName: string): string =
   programName & " " & versionString()
 
@@ -7934,6 +7942,13 @@ proc runThinApp*(programName: string): int =
     return runPrivilegedBrokerMode(args)
   if wantsVersion(args):
     echo renderVersion(programName)
+    return 0
+  if wantsHelp(args):
+    # Explicit help request — print usage to stdout, exit 0 so the
+    # output is pipeable / scriptable. Bare / unknown commands still
+    # fall through to the stderr-+-exit-2 path at the end of this
+    # proc.
+    echo renderUsage(programName)
     return 0
   if programName == "repro-fs-snoop":
     return runFsSnoopCli(programName, args)
