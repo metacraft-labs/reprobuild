@@ -441,3 +441,148 @@ suite "nim convention Mode 3 depends_on":
       check not input.endsWith(".a")
       check not input.endsWith(".so")
       check not input.endsWith(".dylib")
+
+# ---------------------------------------------------------------------------
+# Cross-language (Mode 3 mixed-workspace) emit-fragment suite.
+#
+# Pins the Nim convention's response when a single ``repro.nim`` declares
+# packages from multiple toolchains:
+#   * The Nim convention claims the WHOLE workspace because it's
+#     registered first AND at least one package declares ``uses: nim``.
+#   * Only ``uses: nim`` packages contribute to the Nim three-phase
+#     pipeline; ``uses: gcc`` / ``uses: clang`` packages route through
+#     the embedded C/C++ archive helper inside the same fragment.
+#   * The Nim entrypoint's Phase 1 ``nim c`` argv carries
+#     ``--passC:-I<dep-include>`` per upstream C package.
+#   * The Nim entrypoint's Phase 3 link argv carries the C archive path
+#     as a trailing positional, its inputs include the archive path,
+#     and its deps include the archive action's id.
+#   * The schema-by-convention archive path matches what
+#     ``c_cpp_direct`` would emit if it had ownership instead, so a
+#     downstream user who graduates a project from mixed to pure C/C++
+#     observes no archive path change.
+# ---------------------------------------------------------------------------
+
+const
+  MixedFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "mixed" / "nim-uses-cpp-lib"
+
+suite "nim convention cross-language (Mode 3 mixed workspace)":
+
+  test "extractPackageUses: separates Nim and gcc packages by uses token":
+    let source = """
+import repro_project_dsl
+
+package mathlib:
+  uses:
+    "gcc >=11"
+  library mathlib
+
+package nimapp:
+  uses:
+    "nim >=2.2 <3.0"
+  executable nimapp:
+    discard
+"""
+    let entries = nim_convention.extractPackageUses(source)
+    check entries.len == 2
+    var mathlibTokens: seq[string] = @[]
+    var nimappTokens: seq[string] = @[]
+    for entry in entries:
+      if entry.package == "mathlib":
+        mathlibTokens = entry.tokens
+      elif entry.package == "nimapp":
+        nimappTokens = entry.tokens
+    check "gcc" in mathlibTokens
+    check "nim" notin mathlibTokens
+    check "nim" in nimappTokens
+    check "gcc" notin nimappTokens
+
+  test "emitFragment: mixed fixture wires Nim app -> C archive end-to-end":
+    let conv = nim_convention.nimConvention()
+    if not fileExists(MixedFixtureRoot / "repro.nim"):
+      checkpoint "fixture missing — looked at " & MixedFixtureRoot
+      fail()
+    elif not conv.recognize(MixedFixtureRoot, dummyRequest(MixedFixtureRoot)):
+      # Missing nim/gcc on PATH — the convention's recognize check
+      # short-circuits to false. Skip the assertions instead of failing
+      # the test in a stripped-down sandbox.
+      skip()
+    else:
+      let request = dummyRequest(MixedFixtureRoot)
+      let fragment = conv.emitFragment(MixedFixtureRoot, request)
+
+      # The convention must emit (a) the C archive action for the
+      # mathlib package and (b) the Nim Phase 3 link action for the
+      # nimapp package. Both live in the same fragment so file-path
+      # dep inference can wire them together.
+      var mathlibArchive: BuildActionDef
+      var sawArchive = false
+      for action in actionByPrefix(fragment, "nim-xlang-ccpp-archive-mathlib"):
+        mathlibArchive = action
+        sawArchive = true
+        break
+      check sawArchive
+      check mathlibArchive.outputs.len == 1
+      let archivePath = mathlibArchive.outputs[0]
+      check archivePath.replace('\\', '/').endsWith("libmathlib.a")
+
+      # The archive path schema must match what c_cpp_direct would
+      # emit for a same-named library member:
+      # ``.repro/build/mathlib/libmathlib.a``. This is the schema the
+      # cross-convention story relies on so downstream users can
+      # graduate to pure C/C++ without an archive-path migration.
+      let normalised = archivePath.replace('\\', '/')
+      check normalised.endsWith(".repro/build/mathlib/libmathlib.a")
+
+      # Per-source compile action exists for the C source.
+      var sawCCompile = false
+      for action in actionByPrefix(fragment, "nim-xlang-ccpp-compile-mathlib-"):
+        sawCCompile = true
+        break
+      check sawCCompile
+
+      # The Nim Phase 1 action's argv carries --passC:-I<mathlib-include>.
+      var nimPhase1: BuildActionDef
+      var sawPhase1 = false
+      for action in actionByPrefix(fragment, "nim-c-compileonly-nimapp-"):
+        nimPhase1 = action
+        sawPhase1 = true
+        break
+      check sawPhase1
+      let phase1Argv = inlineArgvOf(nimPhase1)
+      var sawPassCInclude = false
+      for token in phase1Argv:
+        let normTok = token.replace('\\', '/')
+        if normTok.startsWith("--passC:-I") and
+            normTok.endsWith("mathlib/include"):
+          sawPassCInclude = true
+          break
+      check sawPassCInclude
+
+      # The Nim Phase 3 link action's argv carries the C archive as a
+      # trailing positional, inputs include the archive, deps include
+      # the archive action's id.
+      var nimLink: BuildActionDef
+      var sawLink = false
+      for action in actionByPrefix(fragment, "gcc-link-nimapp-"):
+        nimLink = action
+        sawLink = true
+        break
+      check sawLink
+      let linkArgv = inlineArgvOf(nimLink)
+      check archivePath in linkArgv
+      check archivePath in nimLink.inputs
+      check mathlibArchive.id in nimLink.deps
+
+  test "emitFragment: pure-Nim fixture does NOT emit any cross-language archive":
+    # Regression: a single-language Nim project must not trigger the
+    # C/C++ emit path, otherwise the unit-test count for nim/binary
+    # diverges from the baseline.
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(FixtureRoot)
+    require conv.recognize(FixtureRoot, request)
+    let fragment = conv.emitFragment(FixtureRoot, request)
+    for action in actionByPrefix(fragment, "nim-xlang-ccpp-"):
+      checkpoint "unexpected cross-language action: " & action.id
+      fail()

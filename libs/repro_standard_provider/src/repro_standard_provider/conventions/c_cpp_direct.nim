@@ -180,6 +180,119 @@ proc usesIncludesCCppCompiler(source: string): bool =
           consume(firstToken)
   sawCompiler
 
+type
+  CCppPackageUses = object
+    package: string
+    tokens: seq[string]
+
+proc consumeCCppUsesToken(tokens: var seq[string]; token: string) =
+  let trimmed = token.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+  if trimmed.len == 0:
+    return
+  let firstToken = trimmed.split({' ', '\t', '>', '<', '='})[0]
+  if firstToken.len == 0:
+    return
+  if tokens.find(firstToken) < 0:
+    tokens.add(firstToken)
+
+proc extractCCppPackageUses(source: string): seq[CCppPackageUses] =
+  ## Local mirror of the Nim convention's ``extractPackageUses``. Used
+  ## for cross-language filtering — when a Mode 3 workspace declares
+  ## packages for both ``gcc``/``clang`` and other toolchains, this
+  ## convention should only emit actions for the ``gcc``/``clang``
+  ## packages. The first matching convention wins dispatch (Nim is
+  ## registered earlier and handles the mixed case end-to-end), so this
+  ## filter is mostly defensive — it keeps a pure C/C++ project's
+  ## semantics intact while allowing a mixed project that somehow
+  ## reaches this convention (e.g. via a test-time isolated registry)
+  ## to emit only the C/C++ subset.
+  var currentPackage = ""
+  var packageColumn = -1
+  var currentTokens: seq[string] = @[]
+  var inUsesBlock = false
+  var usesColumn = -1
+  template flushPackage() =
+    if currentPackage.len > 0:
+      result.add(CCppPackageUses(
+        package: currentPackage,
+        tokens: currentTokens))
+    currentPackage = ""
+    packageColumn = -1
+    currentTokens = @[]
+    inUsesBlock = false
+    usesColumn = -1
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      continue
+    var indent = 0
+    for ch in line:
+      if ch == ' ': inc indent
+      elif ch == '\t': indent += 8
+      else: break
+    if currentPackage.len > 0 and indent <= packageColumn:
+      flushPackage()
+    if inUsesBlock and indent <= usesColumn:
+      inUsesBlock = false
+      usesColumn = -1
+    if inUsesBlock:
+      for raw in stripped.split({',', ' ', '\t'}):
+        consumeCCppUsesToken(currentTokens, raw)
+      continue
+    if stripped.startsWith("package") and
+        (stripped.len == len("package") or
+         stripped[len("package")] in {' ', '\t'}):
+      let rest = stripped[len("package") .. ^1].strip()
+      if rest.len == 0:
+        continue
+      var name = ""
+      for ch in rest:
+        if ch in {' ', '\t', ':', ','}:
+          break
+        name.add(ch)
+      if name.len == 0:
+        continue
+      flushPackage()
+      currentPackage = name
+      packageColumn = indent
+      continue
+    if currentPackage.len > 0 and stripped.startsWith("uses:"):
+      let payload = stripped[len("uses:") .. ^1].strip()
+      if payload.len == 0:
+        inUsesBlock = true
+        usesColumn = indent
+      else:
+        var clean = payload
+        if clean.startsWith("["):
+          clean = clean[1 .. ^1]
+        if clean.endsWith("]"):
+          clean = clean[0 ..< ^1]
+        for raw in clean.split({',', ' ', '\t'}):
+          consumeCCppUsesToken(currentTokens, raw)
+      continue
+  flushPackage()
+
+proc packageUsesCCpp(usesEntries: openArray[CCppPackageUses];
+                     package, source: string): bool =
+  ## True when ``package``'s ``uses:`` block names ``gcc`` or ``clang``.
+  ## Empty ``package`` (member declared at top level, no enclosing
+  ## ``package`` block) falls back to the file-wide ``usesIncludesCCppCompiler``
+  ## hint so single-package fixtures continue to work unchanged.
+  if package.len == 0:
+    return usesIncludesCCppCompiler(source)
+  for entry in usesEntries:
+    if entry.package != package:
+      continue
+    for token in entry.tokens:
+      if token == "gcc" or token == "clang":
+        return true
+    return false
+  false
+
 proc extractMembersWithOwnership(source: string): seq[CCppMember] =
   ## Walk ``source`` text and emit ``CCppMember`` rows with the owning
   ## ``package <name>:`` block. Mirror of the Nim convention's
@@ -666,7 +779,19 @@ proc cCppDirectEmitFragment(projectRoot: string;
   ## DSL, hand the whole thing to ``buildPackageFragment``.
   {.cast(gcsafe).}:
     let source = readReprobuildSource(projectRoot)
-    let members = extractMembersWithOwnership(source)
+    let allMembers = extractMembersWithOwnership(source)
+    # Cross-language filter: in a mixed workspace this convention is
+    # never invoked (the Nim convention wins dispatch and emits both
+    # languages' actions inline), but the filter is defensive — it
+    # guarantees a pure C/C++ project's semantics stay identical while
+    # making the convention's output deterministic when a non-C/C++
+    # package shares the same ``repro.nim``.
+    let usesEntries = extractCCppPackageUses(source)
+    var members: seq[CCppMember] = @[]
+    for member in allMembers:
+      if not packageUsesCCpp(usesEntries, member.package, source):
+        continue
+      members.add(member)
     if members.len == 0:
       let projectMatch = resolveProjectFile(projectRoot)
       let projectFile =

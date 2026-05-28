@@ -287,3 +287,62 @@ depends_on onlyPkg: nonexistentPkg
       expect ValueError:
         discard conv.emitFragment(dir, request)
       removeDir(dir)
+
+# ---------------------------------------------------------------------------
+# Cross-language filter suite.
+#
+# Pins the convention's behaviour when a project file declares both
+# ``uses: gcc`` and other-toolchain packages: this convention only
+# emits actions for the C/C++ packages, and (defensively) does NOT
+# claim the project's Nim members as its own. In the live dispatch the
+# Nim convention's earlier registration claims a mixed workspace; this
+# filter is the guarantee that c_cpp_direct stays a no-op-for-Nim if a
+# test-time isolated registry invokes it on the same fixture.
+# ---------------------------------------------------------------------------
+
+suite "c-cpp-direct convention cross-language filtering":
+
+  test "emitFragment: ignores members from Nim-toolchain packages":
+    if not gccOnPath():
+      skip()
+    else:
+      let dir = makeScratch("xlang-filter")
+      writeFile(dir / "repro.nim", """
+import repro_project_dsl
+
+package mathlib:
+  uses:
+    "gcc >=11"
+  library mathlib
+
+package nimapp:
+  uses:
+    "nim >=2.2 <3.0"
+  executable nimapp:
+    discard
+""")
+      createDir(dir / "mathlib" / "src")
+      writeFile(dir / "mathlib" / "src" / "add.c", "int add(int a, int b) { return a + b; }\n")
+      createDir(dir / "mathlib" / "include" / "mathlib")
+      writeFile(dir / "mathlib" / "include" / "mathlib" / "add.h",
+        "int add(int a, int b);\n")
+      # nim member dir intentionally has no C source. The convention's
+      # filter must drop it before resolveTarget runs.
+      createDir(dir / "src")
+      writeFile(dir / "src" / "nimapp.nim",
+        "echo \"unused\"\n")
+      let conv = c_cpp_direct_convention.cCppDirectConvention()
+      let request = dummyRequest(dir)
+      check conv.recognize(dir, request)
+      # Must succeed (NOT raise about nimapp's missing C sources).
+      let fragment = conv.emitFragment(dir, request)
+      var sawArchive = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("ccpp-direct-archive-mathlib"):
+          sawArchive = true
+        check not action.id.contains("nimapp")
+      check sawArchive
+      removeDir(dir)

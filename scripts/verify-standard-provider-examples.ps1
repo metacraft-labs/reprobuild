@@ -138,7 +138,8 @@ $PopulatedExamples = @(
   'c-cpp-make/binary',
   'c-cpp-make/library-static',
   'c-cpp-autotools/hello-binary',
-  'c-cpp-mode3/binary-with-library'
+  'c-cpp-mode3/binary-with-library',
+  'mixed/nim-uses-cpp-lib'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -326,6 +327,30 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'ar' not on PATH" }
       }
       return @{ Available = $true; Reason = "cc=$($ccCmd.Source); ar=$($arCmd.Source)" }
+    }
+    'mixed' {
+      # Cross-language Mode 3 — needs BOTH the Nim toolchain (for the
+      # Nim entrypoint's three-phase build) AND a C compiler + ar (for
+      # the upstream C library archive the Nim convention emits inline).
+      # SKIP cleanly if any leg is missing.
+      $nimCmd    = Get-Command nim    -ErrorAction SilentlyContinue
+      $nimbleCmd = Get-Command nimble -ErrorAction SilentlyContinue
+      if (-not $nimCmd) {
+        return @{ Available = $false; Reason = "'nim' not on PATH (env.ps1 should provide it)" }
+      }
+      $ccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $ccCmd) {
+        $ccCmd = Get-Command clang -ErrorAction SilentlyContinue
+      }
+      if (-not $ccCmd) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (cross-language fixture needs both Nim and C toolchains)" }
+      }
+      $arCmd = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $arCmd) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (cross-language fixture needs an archiver for the upstream C library)" }
+      }
+      $nimbleSrc = if ($nimbleCmd) { $nimbleCmd.Source } else { '(not on PATH; fixture uses Layout A src/ only, so optional)' }
+      return @{ Available = $true; Reason = "nim=$($nimCmd.Source); nimble=$nimbleSrc; cc=$($ccCmd.Source); ar=$($arCmd.Source)" }
     }
     'c-cpp-autotools' {
       # M17: the C/C++ Autotools convention is registered. Probe for
@@ -985,6 +1010,30 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
         Greeting = 'hello from c-cpp-mode3-binary-with-library, 2 + 3 = 5'
       })
+    }
+    'mixed/nim-uses-cpp-lib' {
+      # Cross-language Mode 3: the workspace declares a C static library
+      # ``mathlib`` (``uses: gcc``) and a Nim executable ``nimapp``
+      # (``uses: nim``) in a single ``repro.nim`` with
+      # ``depends_on nimapp: mathlib``. The Nim convention claims the
+      # whole workspace (registered first; nimapp's uses block names
+      # nim), emits the upstream C archive in-line via the embedded
+      # C/C++ helper, threads --passC:-I<mathlib>/include onto Phase 1's
+      # nim c argv (so the generated .c files resolve
+      # ``#include "mathlib/add.h"``), and threads libmathlib.a onto
+      # Phase 3's gcc link argv (so the C ``add()`` symbol resolves at
+      # link time). The binary's first stdout line proves the
+      # cross-language round-trip succeeded.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'nimapp' 'nimapp.exe'))
+          Greeting = '1 + 2 = 3'
+        }
+      )
     }
     'c-cpp-autotools/hello-binary' {
       # M28: c-cpp-autotools/hello-binary. The per-source lift emits

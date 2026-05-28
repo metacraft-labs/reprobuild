@@ -130,6 +130,21 @@ type
     outputPath: string
     kind: NimLibraryKind
 
+  CCppUpstreamLibrary = object
+    ## Cross-language upstream archive provided by a C/C++ Mode 3 package
+    ## inside the same workspace. The Nim convention, when claiming a
+    ## mixed-language project, emits the per-source compile + ``ar``
+    ## archive actions for these in-line and then threads the archive
+    ## onto every downstream Nim executable's link. The include dir is
+    ## additionally pushed onto Phase 1's ``nim c`` invocation via
+    ## ``--passC:-I<dir>`` so the Nim compiler's generated ``.c`` files
+    ## can resolve user ``{.importc, header: "<pkg>/foo.h".}`` headers.
+    package*: string
+    libraryName*: string
+    linkActionId*: string
+    outputPath*: string
+    includeDir*: string
+
   NimcacheCompileStep = object
     ## One row of the ``compile`` array in ``<entry>.json``. The Nim
     ## compiler emits ``[<absolute c file>, <gcc command template>]``;
@@ -421,6 +436,148 @@ proc extractPackageMembers*(source: string): seq[NimMemberOwnership] =
           package: currentPackage, member: name, kind: "library"))
       continue
 
+type
+  PackageUsesEntry* = object
+    ## Per-package ``uses:`` block as captured by ``extractPackageUses``.
+    ## ``tokens`` lists the bare toolchain names (without version
+    ## constraints) the package opts into. The cross-language wiring
+    ## consumes this to bucket members by toolchain so the Nim
+    ## convention only emits Nim phases for ``uses: "nim"`` packages
+    ## and routes ``uses: "gcc"`` / ``uses: "clang"`` packages through
+    ## the embedded C/C++ helper.
+    package*: string
+    tokens*: seq[string]
+
+proc consumeUsesToken(tokens: var seq[string]; token: string) =
+  let trimmed = token.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+  if trimmed.len == 0:
+    return
+  let firstToken = trimmed.split({' ', '\t', '>', '<', '='})[0]
+  if firstToken.len == 0:
+    return
+  if tokens.find(firstToken) < 0:
+    tokens.add(firstToken)
+
+proc extractPackageUses*(source: string): seq[PackageUsesEntry] =
+  ## Walk ``source`` and emit one ``PackageUsesEntry`` per declared
+  ## ``package <name>:`` block, with the bare token list parsed from
+  ## the body's ``uses:`` block (inline or indented form). Diagnostic
+  ## -grade text scan — same scope as ``extractPackageMembers``.
+  ##
+  ## Recognised shapes::
+  ##
+  ##   package foo:
+  ##     uses:
+  ##       "nim >=2.2 <3.0"
+  ##       "gcc >=11"
+  ##
+  ##   package foo:
+  ##     uses: "nim >=2.2"
+  ##
+  ## The version constraint tail (``>=2.2 <3.0``) is dropped so the
+  ## ``tokens`` field carries only the bare toolchain identifier
+  ## (``"nim"``, ``"gcc"``, ``"clang"``, etc.). Members declared at top
+  ## level with no enclosing ``package`` block are not surfaced here —
+  ## ``hasUsesTokenAny`` consumers fall back to the file-wide
+  ## ``usesIncludesNim`` / ``usesIncludesCCppCompiler`` heuristics.
+  var currentPackage = ""
+  var packageColumn = -1
+  var currentTokens: seq[string] = @[]
+  var inUsesBlock = false
+  var usesColumn = -1
+  template flushPackage() =
+    if currentPackage.len > 0:
+      result.add(PackageUsesEntry(
+        package: currentPackage,
+        tokens: currentTokens))
+    currentPackage = ""
+    packageColumn = -1
+    currentTokens = @[]
+    inUsesBlock = false
+    usesColumn = -1
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      continue
+    var indent = 0
+    for ch in line:
+      if ch == ' ': inc indent
+      elif ch == '\t': indent += 8
+      else: break
+    # Close the prior package when un-indenting back to its column.
+    if currentPackage.len > 0 and indent <= packageColumn:
+      flushPackage()
+    # Track end of ``uses:`` block by un-indenting back to its column.
+    if inUsesBlock and indent <= usesColumn:
+      inUsesBlock = false
+      usesColumn = -1
+    if inUsesBlock:
+      for raw in stripped.split({',', ' ', '\t'}):
+        consumeUsesToken(currentTokens, raw)
+      continue
+    if stripped.startsWith("package") and
+        (stripped.len == len("package") or
+         stripped[len("package")] in {' ', '\t'}):
+      let rest = stripped[len("package") .. ^1].strip()
+      if rest.len == 0:
+        continue
+      var name = ""
+      for ch in rest:
+        if ch in {' ', '\t', ':', ','}:
+          break
+        name.add(ch)
+      if name.len == 0:
+        continue
+      # New package — flush the previous one (defensive; should already
+      # have been closed by the indent-check above when sibling packages
+      # share an indent column).
+      flushPackage()
+      currentPackage = name
+      packageColumn = indent
+      continue
+    if currentPackage.len > 0 and stripped.startsWith("uses:"):
+      let payload = stripped[len("uses:") .. ^1].strip()
+      if payload.len == 0:
+        inUsesBlock = true
+        usesColumn = indent
+      else:
+        var clean = payload
+        if clean.startsWith("["):
+          clean = clean[1 .. ^1]
+        if clean.endsWith("]"):
+          clean = clean[0 ..< ^1]
+        for raw in clean.split({',', ' ', '\t'}):
+          consumeUsesToken(currentTokens, raw)
+      continue
+  # Flush trailing package (no un-indent after the last block).
+  flushPackage()
+
+proc packageUsesToken*(entries: openArray[PackageUsesEntry];
+                      package: string): seq[string] =
+  ## Return ``package``'s ``uses:`` token list, or the empty seq when
+  ## the package is missing or the file is single-block (no ``package``
+  ## wrapper).
+  for entry in entries:
+    if entry.package == package:
+      return entry.tokens
+  @[]
+
+proc packageUsesAny*(entries: openArray[PackageUsesEntry];
+                    package: string; tokens: openArray[string]): bool =
+  ## True when any of ``tokens`` is named in ``package``'s ``uses:``
+  ## block. Convenience over ``packageUsesToken`` for the cross-language
+  ## bucketing.
+  let pkgTokens = packageUsesToken(entries, package)
+  for token in pkgTokens:
+    for needle in tokens:
+      if token == needle:
+        return true
+  false
+
 proc hasAnyMember(source: string): bool =
   ## True when the package declares at least one ``executable`` or
   ## ``library`` member. Delegates to the per-shape extractors so the
@@ -518,7 +675,8 @@ proc nimcacheManifestPathFor(projectRoot, entry: string): string =
   nimcachePathFor(projectRoot, entry) / (entry & ".json")
 
 proc nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource: string;
-                        appLib = false): seq[string] =
+                        appLib = false;
+                        cIncludeDirs: openArray[string] = []): seq[string] =
   ## The literal argv for both the eager (emit-time) and recorded
   ## (graph-action) Phase 1 invocation. Keeping these identical is the
   ## whole point of Option 1: the cached fingerprint of the recorded
@@ -529,6 +687,14 @@ proc nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource: string;
   ## ``ar``-based static linking ignores Nim's linkcmd entirely so the
   ## static path leaves ``appLib`` false (preserving the executable-mode
   ## linkcmd in the manifest, even though we discard it).
+  ##
+  ## **Cross-language**: ``cIncludeDirs`` lists upstream C/C++ Mode 3
+  ## package include directories. Each becomes a ``--passC:-I<dir>`` flag
+  ## so the C compiler Nim invokes on the manifest's emitted ``.c`` files
+  ## can resolve user-written ``{.importc, header: "<pkg>/foo.h".}``
+  ## headers. The flag is threaded into Phase 1's argv (not just Phase 2)
+  ## so the SAME argv is fingerprinted by the emit-cache: a new dep
+  ## include-dir flips the fingerprint and the cache miss is correct.
   result = @[
     nimExe,
     "c",
@@ -542,6 +708,10 @@ proc nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource: string;
   ]
   if appLib:
     result.add("--app:lib")
+  for incDir in cIncludeDirs:
+    if incDir.len == 0:
+      continue
+    result.add("--passC:-I" & incDir)
   result.add(entrySource)
 
 const
@@ -551,7 +721,8 @@ const
 
 proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
                              nimSources: openArray[string];
-                             appLib: bool): string =
+                             appLib: bool;
+                             cIncludeDirs: openArray[string] = []): string =
   ## Fingerprint key for the nim-c-compileonly cache.
   ##
   ## Inputs that participate in the key:
@@ -591,12 +762,15 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
   ]
   for source in nimSources:
     inputs.add(fileInput(source))
+  for incDir in cIncludeDirs:
+    inputs.add(textInput("c-inc-dir:" & incDir))
   computeEmitCacheFingerprint(inputs)
 
 proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
                        nimSources: openArray[string];
                        manifestPath: string;
-                       appLib = false) =
+                       appLib = false;
+                       cIncludeDirs: openArray[string] = []) =
   ## Execute the eager Phase 1 run and surface any failure as a
   ## ``ValueError`` carrying the captured stderr. The standard provider
   ## binary's outer ``try/except`` (in ``apps/repro-standard-provider``)
@@ -626,11 +800,12 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
   ## subprocess success so a partial run never poisons the cache.
   createDir(extendedPath(nimcacheDir))
   let fingerprint = nimEmitCacheFingerprint(nimExe, entrySource,
-    manifestPath, nimSources, appLib)
+    manifestPath, nimSources, appLib, cIncludeDirs)
   if emitCacheIsUsable(nimcacheDir, NimEmitCacheBaseName, fingerprint,
       [manifestPath]):
     return
-  let argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource, appLib)
+  let argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource, appLib,
+    cIncludeDirs)
   let cmd = quoteShellCommand(argv)
   let (output, exitCode) = execCmdEx(cmd,
     options = {poStdErrToStdOut, poUsePath})
@@ -755,7 +930,8 @@ proc collectNimSources(srcDir: string): seq[string] =
 
 proc emitForEntrypoint(projectRoot, nimExe: string;
                       entry: NimEntrypoint;
-                      depLibraries: openArray[NimWorkspaceLibrary] = []):
+                      depLibraries: openArray[NimWorkspaceLibrary] = [];
+                      cCppDepLibraries: openArray[CCppUpstreamLibrary] = []):
                         tuple[phase1: BuildActionDef;
                               phase2: seq[BuildActionDef];
                               phase3: BuildActionDef] =
@@ -773,6 +949,18 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
   ## added to the Phase 3 ``deps`` list. Net effect: the engine sequences
   ## the entrypoint's link strictly after the dep library's link action,
   ## and the resulting executable links the static archive into its image.
+  ##
+  ## **Cross-language dep wiring**: ``cCppDepLibraries`` enumerates the
+  ## C/C++ Mode 3 packages this entrypoint's package depends on (resolved
+  ## the same way as ``depLibraries`` but routed through the embedded
+  ## C/C++ archive helpers). For each such dep:
+  ##   * ``--passC:-I<includeDir>`` is threaded into Phase 1's ``nim c``
+  ##     argv so the generated ``.c`` files can resolve ``#include
+  ##     "<pkg>/foo.h"`` lines emitted by user
+  ##     ``{.importc, header: "<pkg>/foo.h".}`` declarations.
+  ##   * The archive path is added to Phase 3's link inputs + argv as a
+  ##     trailing positional, and the archive action's id is added to
+  ##     Phase 3's deps — identical wiring shape to the same-language case.
   let nimcacheDir = nimcachePathFor(projectRoot, entry.name)
   let objDir = objDirFor(projectRoot, entry.name)
   let binaryOutput = binaryPathFor(projectRoot, entry.name)
@@ -781,8 +969,16 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
   # M18: collect the full ``src/`` source set ONCE so the same fingerprint
   # serves the cache check AND the Phase 1 action's declared inputs.
   let nimSources = collectNimSources(projectRoot / "src")
+  # Cross-language: stable, deduplicated list of upstream include dirs to
+  # thread onto ``nim c``'s argv via ``--passC:-I<dir>``.
+  var cIncludeDirs: seq[string] = @[]
+  for lib in cCppDepLibraries:
+    if lib.includeDir.len == 0:
+      continue
+    if lib.includeDir notin cIncludeDirs:
+      cIncludeDirs.add(lib.includeDir)
   runNimCompileOnly(nimExe, nimcacheDir, entry.sourceFile, nimSources,
-    manifestPath)
+    manifestPath, false, cIncludeDirs)
   let manifest = parseNimcacheManifest(manifestPath)
   if manifest.compile.len == 0:
     raise newException(ValueError,
@@ -796,7 +992,8 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
     outs
 
   let phase1Id = actionIdFor("nim-c-compileonly", entry.name, "umbrella")
-  let phase1Argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entry.sourceFile)
+  let phase1Argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entry.sourceFile,
+    false, cIncludeDirs)
   let phase1Action = buildAction(
     id = phase1Id,
     call = inlineExecCall(phase1Argv, projectRoot),
@@ -872,6 +1069,13 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
   # later; absolute-path positionals are unambiguous enough for now).
   for lib in depLibraries:
     finalArgv.add(lib.outputPath)
+  # Cross-language: upstream C/C++ archives slot at the same position
+  # as same-language deps. Symbol resolution is unaffected because
+  # ``{.importc.}`` declarations in Nim sources don't disambiguate
+  # symbol origin at link time — the archives are interchangeable from
+  # gcc/ld's perspective.
+  for lib in cCppDepLibraries:
+    finalArgv.add(lib.outputPath)
 
   let phase2Ids = block:
     var ids: seq[string] = @[]
@@ -882,6 +1086,11 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
   var phase3Deps = phase2Ids
   var phase3Inputs = objFiles
   for lib in depLibraries:
+    if phase3Deps.find(lib.linkActionId) < 0:
+      phase3Deps.add(lib.linkActionId)
+    if phase3Inputs.find(lib.outputPath) < 0:
+      phase3Inputs.add(lib.outputPath)
+  for lib in cCppDepLibraries:
     if phase3Deps.find(lib.linkActionId) < 0:
       phase3Deps.add(lib.linkActionId)
     if phase3Inputs.find(lib.outputPath) < 0:
@@ -1091,15 +1300,37 @@ proc memberOwner(ownership: openArray[NimMemberOwnership];
       return entry.package
   ""
 
+proc packageOwnsNimToolchain(usesEntries: openArray[PackageUsesEntry];
+                             pkg: string; source: string): bool =
+  ## True when ``pkg``'s ``uses:`` block names a Nim toolchain. The
+  ## fallback applies to single-package fixtures where the member is
+  ## declared at top level (no ``package <name>:`` wrapper, so
+  ## ``ownership`` returns an empty package name): in that case the
+  ## convention treats the WHOLE file's ``uses:`` as the answer, mirroring
+  ## the pre-Mode-3 behaviour of the M0-M29 baseline fixtures.
+  if pkg.len == 0:
+    return usesIncludesNim(source)
+  packageUsesAny(usesEntries, pkg, ["nim"])
+
 proc collectEntrypoints(projectRoot, source: string): seq[NimEntrypoint] =
   let ownership = extractPackageMembers(source)
+  let usesEntries = extractPackageUses(source)
   for name in extractEntrypoints(source):
     let path = projectRoot / "src" / (name & ".nim")
-    if fileExists(extendedPath(path)):
-      result.add(NimEntrypoint(
-        name: name,
-        sourceFile: path,
-        package: memberOwner(ownership, "executable", name)))
+    if not fileExists(extendedPath(path)):
+      continue
+    let owningPackage = memberOwner(ownership, "executable", name)
+    # Cross-language filter: skip members the owning package does not
+    # delegate to the Nim toolchain. The single-package fallback (empty
+    # ``owningPackage``) collapses to the file-wide ``uses:`` hint, so
+    # M0-M29 fixtures whose member is declared at the top level continue
+    # to work unchanged.
+    if not packageOwnsNimToolchain(usesEntries, owningPackage, source):
+      continue
+    result.add(NimEntrypoint(
+      name: name,
+      sourceFile: path,
+      package: owningPackage))
 
 proc collectNimTestFiles(projectRoot: string): seq[string] =
   ## M22: walk ``<projectRoot>/tests/`` for files named ``test_*.nim``.
@@ -1198,14 +1429,270 @@ proc emitTestAction(projectRoot, nimExe, testFile: string;
 
 proc collectLibraries(projectRoot, source: string): seq[NimLibraryTarget] =
   let ownership = extractPackageMembers(source)
+  let usesEntries = extractPackageUses(source)
   for lib in extractLibraries(source):
     let path = projectRoot / "src" / (lib.name & ".nim")
-    if fileExists(extendedPath(path)):
-      result.add(NimLibraryTarget(
-        name: lib.name,
-        sourceFile: path,
-        kind: lib.kind,
-        package: memberOwner(ownership, "library", lib.name)))
+    if not fileExists(extendedPath(path)):
+      continue
+    let owningPackage = memberOwner(ownership, "library", lib.name)
+    if not packageOwnsNimToolchain(usesEntries, owningPackage, source):
+      continue
+    result.add(NimLibraryTarget(
+      name: lib.name,
+      sourceFile: path,
+      kind: lib.kind,
+      package: owningPackage))
+
+# ---------------------------------------------------------------------------
+# Cross-language C/C++ helpers (mixed-workspace support).
+#
+# When a Mode 3 workspace declares both Nim packages and C/C++ packages in
+# a single ``repro.nim`` (the user opted into the canonical pattern of one
+# project file per workspace), the Nim convention wins recognition because
+# it's registered first. It then takes responsibility for emitting the C/C++
+# upstream packages' archive actions in-line so the cross-package
+# ``depends_on nimApp: cppLib`` edge produces a coherent action graph
+# within a single ``buildPackageFragment`` call.
+#
+# The Nim convention only emits C/C++ STATIC ARCHIVE actions here — not
+# C/C++ executables. The mixed-workspace contract is "Nim binary uses C
+# library"; the reverse direction (C binary uses Nim library) is deferred
+# per the Mode 3 cross-language milestone scope and routes to a dedicated
+# milestone once Nim's ``--app:lib`` exports stabilise.
+#
+# These helpers intentionally MIRROR (not import from) the equivalent
+# logic in ``c_cpp_direct.nim`` so the two conventions stay independently
+# evolvable. The shared schema is:
+#
+#   archive path     : <root>/.repro/build/<libName>/lib<libName>.a
+#   obj dir          : <root>/.repro/build/<libName>/obj/
+#   per-source obj   : <root>/.repro/build/<libName>/obj/<sanitized-stem>.o
+#
+# which is identical to the path c_cpp_direct emits, so a downstream user
+# who graduates a package from mixed-workspace back to pure C/C++ does not
+# observe an archive path change.
+# ---------------------------------------------------------------------------
+
+type
+  CCppCrossMember = object
+    package*: string
+    libraryName*: string
+    srcDir*: string
+    includeDir*: string
+    sourceFiles*: seq[string]
+
+proc collectCCppSourceFiles(srcDir: string): seq[string] =
+  if not dirExists(extendedPath(srcDir)):
+    return @[]
+  for path in walkDirRec(srcDir):
+    let lower = path.toLowerAscii
+    if lower.endsWith(".c") or lower.endsWith(".cpp") or
+        lower.endsWith(".cc") or lower.endsWith(".cxx"):
+      result.add(path)
+  result.sort(system.cmp[string])
+
+proc resolveCCppMemberDirs(projectRoot, memberName: string):
+    tuple[srcDir, includeDir, entrySource: string] =
+  ## Local mirror of ``cpp_dep_scanner.resolveMemberDirs``. Tries
+  ## Layout B (``<root>/<memberName>/src/``) first then Layout A
+  ## (``<root>/src/``); returns empty strings when neither matches.
+  let subSrc = projectRoot / memberName / "src"
+  if dirExists(extendedPath(subSrc)):
+    for path in walkDirRec(subSrc):
+      let lower = path.toLowerAscii
+      if lower.endsWith(".c") or lower.endsWith(".cpp") or
+          lower.endsWith(".cc") or lower.endsWith(".cxx"):
+        result.srcDir = subSrc
+        let inc = projectRoot / memberName / "include"
+        if dirExists(extendedPath(inc)):
+          result.includeDir = inc
+        result.entrySource = path
+        return
+  let topSrc = projectRoot / "src"
+  if dirExists(extendedPath(topSrc)):
+    for path in walkDirRec(topSrc):
+      let lower = path.toLowerAscii
+      if lower.endsWith(".c") or lower.endsWith(".cpp") or
+          lower.endsWith(".cc") or lower.endsWith(".cxx"):
+        result.srcDir = topSrc
+        let inc = projectRoot / "include"
+        if dirExists(extendedPath(inc)):
+          result.includeDir = inc
+        result.entrySource = path
+        return
+
+proc ccCompilerCross(): string =
+  let gcc = findExe("gcc")
+  if gcc.len > 0:
+    return gcc
+  findExe("clang")
+
+proc collectCCppCrossMembers(projectRoot, source: string;
+                             usesEntries: openArray[PackageUsesEntry]):
+                               seq[CCppCrossMember] =
+  ## Walk the project file for ``library`` declarations inside packages
+  ## whose ``uses:`` block names ``gcc`` or ``clang``. Each resolvable
+  ## member is returned as a ``CCppCrossMember`` with its source set
+  ## (used downstream to emit ``gcc -c`` + ``ar rcs`` actions).
+  ## Executables in C/C++ packages are NOT surfaced — the mixed-
+  ## workspace contract emits only archives for cross-language
+  ## consumption.
+  let ownership = extractPackageMembers(source)
+  for entry in ownership:
+    if entry.kind != "library":
+      continue
+    if entry.package.len == 0:
+      continue
+    if not packageUsesAny(usesEntries, entry.package, ["gcc", "clang"]):
+      continue
+    let resolved = resolveCCppMemberDirs(projectRoot, entry.member)
+    if resolved.srcDir.len == 0:
+      continue
+    let sourceFiles = collectCCppSourceFiles(resolved.srcDir)
+    if sourceFiles.len == 0:
+      continue
+    result.add(CCppCrossMember(
+      package: entry.package,
+      libraryName: entry.member,
+      srcDir: resolved.srcDir,
+      includeDir: resolved.includeDir,
+      sourceFiles: sourceFiles))
+
+proc ccppCrossScratch(projectRoot, member: string): string =
+  projectRoot / ScratchDirName / member
+
+proc ccppCrossObjDir(projectRoot, member: string): string =
+  ccppCrossScratch(projectRoot, member) / "obj"
+
+proc ccppCrossArchivePath(projectRoot, member: string): string =
+  ccppCrossScratch(projectRoot, member) / ("lib" & member & ".a")
+
+proc ccppSanitize(value: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = "x"
+
+proc ccppCrossObjFor(objDir, source, srcDir: string): string =
+  var rel: string
+  try:
+    rel = relativePath(source, srcDir)
+  except OSError:
+    rel = extractFilename(source)
+  rel = rel.replace('\\', '/')
+  let stem =
+    if rel.toLowerAscii.endsWith(".cpp"): rel[0 ..< rel.len - 4]
+    elif rel.toLowerAscii.endsWith(".cxx"): rel[0 ..< rel.len - 4]
+    elif rel.toLowerAscii.endsWith(".cc"): rel[0 ..< rel.len - 3]
+    elif rel.toLowerAscii.endsWith(".c"): rel[0 ..< rel.len - 2]
+    else: rel
+  objDir / (ccppSanitize(stem) & ".o")
+
+proc isCxxSource(path: string): bool =
+  let lower = path.toLowerAscii
+  lower.endsWith(".cpp") or lower.endsWith(".cc") or lower.endsWith(".cxx")
+
+proc emitCCppCrossCompileAction(projectRoot, ccExe: string;
+                                member: CCppCrossMember;
+                                source, objFile, depFile: string):
+                                  BuildActionDef =
+  ## ``gcc -c`` action for one C/C++ source belonging to a cross-language
+  ## upstream library. Mirrors ``c_cpp_direct.emitCompileAction`` — kept
+  ## inline so the Nim convention doesn't import ``c_cpp_direct``.
+  ## The action id prefix is ``nim-xlang-ccpp-compile-`` so the test
+  ## surface can distinguish the cross-language emit shape from the
+  ## pure C/C++ convention's ``ccpp-direct-compile-`` shape.
+  var argv = @[ccExe, "-c", "-O2", "-Wall", "-Wextra",
+    "-MD", "-MF", depFile]
+  if isCxxSource(source):
+    argv.add("-std=c++20")
+  else:
+    argv.add("-std=c17")
+  if dirExists(extendedPath(member.srcDir)):
+    argv.add("-I")
+    argv.add(member.srcDir)
+  if member.includeDir.len > 0 and
+      dirExists(extendedPath(member.includeDir)):
+    argv.add("-I")
+    argv.add(member.includeDir)
+  argv.add("-o")
+  argv.add(objFile)
+  argv.add(source)
+  let actionId = "nim-xlang-ccpp-compile-" &
+    ccppSanitize(member.libraryName) & "-" &
+    ccppSanitize(extractFilename(source))
+  buildAction(
+    id = actionId,
+    call = inlineExecCall(argv, projectRoot),
+    inputs = @[source],
+    outputs = @[objFile],
+    pool = "compile",
+    depfile = depFile,
+    dependencyPolicy = makeDepfilePolicy(depFile),
+    commandStatsId = "nim.xlang.ccpp.compile")
+
+proc emitCCppCrossArchiveAction(projectRoot, arExe: string;
+                                member: CCppCrossMember;
+                                objFiles, compileIds: seq[string]):
+                                  BuildActionDef =
+  ## ``ar rcs lib<name>.a <objs>`` archive action for a cross-language
+  ## upstream library. The action id prefix mirrors the compile action's
+  ## ``nim-xlang-ccpp-`` discriminator.
+  let archiveOutput = ccppCrossArchivePath(projectRoot, member.libraryName)
+  createDir(extendedPath(parentDir(archiveOutput)))
+  var argv = @[arExe, "rcs", archiveOutput]
+  for obj in objFiles:
+    argv.add(obj)
+  buildAction(
+    id = "nim-xlang-ccpp-archive-" & ccppSanitize(member.libraryName),
+    call = inlineExecCall(argv, projectRoot),
+    deps = compileIds,
+    inputs = objFiles,
+    outputs = @[archiveOutput],
+    pool = "compile",
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    commandStatsId = "nim.xlang.ccpp.archive")
+
+proc emitCCppCrossMember(projectRoot: string;
+                         member: CCppCrossMember):
+                           tuple[compiles: seq[BuildActionDef];
+                                 archive: BuildActionDef;
+                                 archivePath: string;
+                                 includeDir: string] =
+  ## Emit the full per-source ``gcc -c`` set plus the terminal
+  ## ``ar rcs`` archive action for one cross-language upstream library.
+  ## Returns the archive path + include dir so the caller can wire the
+  ## downstream Nim entrypoint's compile + link argv.
+  let ccExe = ccCompilerCross()
+  if ccExe.len == 0:
+    raise newException(ValueError,
+      "nim convention (mixed workspace): neither 'gcc' nor 'clang' on " &
+        "PATH; cannot compile upstream C/C++ library '" &
+        member.libraryName & "' for cross-language consumption")
+  let arExe = arDriver()
+  let objDir = ccppCrossObjDir(projectRoot, member.libraryName)
+  createDir(extendedPath(objDir))
+  var compileActions: seq[BuildActionDef] = @[]
+  var compileIds: seq[string] = @[]
+  var objFiles: seq[string] = @[]
+  for source in member.sourceFiles:
+    let objFile = ccppCrossObjFor(objDir, source, member.srcDir)
+    let depFile = objFile & ".d"
+    createDir(extendedPath(parentDir(objFile)))
+    objFiles.add(objFile)
+    let action = emitCCppCrossCompileAction(projectRoot, ccExe, member,
+      source, objFile, depFile)
+    compileActions.add(action)
+    compileIds.add(action.id)
+  let archive = emitCCppCrossArchiveAction(projectRoot, arExe, member,
+    objFiles, compileIds)
+  result.compiles = compileActions
+  result.archive = archive
+  result.archivePath = ccppCrossArchivePath(projectRoot, member.libraryName)
+  result.includeDir = member.includeDir
 
 proc readScannedDepsSource(projectRoot: string): string =
   ## Read ``<projectRoot>/repro.scanned-deps.nim`` when present and the
@@ -1379,6 +1866,7 @@ proc nimEmitFragment(projectRoot: string;
     let source = readReprobuildSource(projectRoot)
     let entrypoints = collectEntrypoints(projectRoot, source)
     let allLibraries = collectLibraries(projectRoot, source)
+    let usesEntries = extractPackageUses(source)
     # Header-only libraries emit no actions but still need to be
     # acknowledged by the convention. Filter them out at the convention
     # level so emitForLibrary never receives one.
@@ -1386,7 +1874,17 @@ proc nimEmitFragment(projectRoot: string;
     for lib in allLibraries:
       if lib.kind != nlkHeaderOnly:
         buildableLibraries.add(lib)
-    if entrypoints.len == 0 and buildableLibraries.len == 0:
+    # Cross-language: enumerate C/C++ library members the Nim
+    # convention should emit upstream archives for. These belong to
+    # packages whose ``uses:`` lists ``gcc`` or ``clang`` (NOT
+    # ``nim``). The mixed-workspace contract emits the archive in-line
+    # so the cross-package ``depends_on nimApp: cppLib`` edge produces
+    # a coherent action graph within a single buildPackageFragment
+    # call.
+    let cCppCrossMembers = collectCCppCrossMembers(
+      projectRoot, source, usesEntries)
+    if entrypoints.len == 0 and buildableLibraries.len == 0 and
+        cCppCrossMembers.len == 0:
       if allLibraries.len > 0:
         raise newException(ValueError,
           "nim convention: package declares only header-only libraries; " &
@@ -1417,6 +1915,13 @@ proc nimEmitFragment(projectRoot: string;
       if lib.package.len > 0 and
           declaredPackages.find(lib.package) < 0:
         declaredPackages.add(lib.package)
+    # Cross-language: include any C/C++ packages we're going to emit
+    # archives for so the validator accepts ``depends_on nimApp: cppLib``
+    # without spuriously rejecting cppLib as undeclared.
+    for member in cCppCrossMembers:
+      if member.package.len > 0 and
+          declaredPackages.find(member.package) < 0:
+        declaredPackages.add(member.package)
     validateWorkspaceDeps(depEdges, declaredPackages)
     # M22: discover ``tests/test_*.nim`` once at the top so registerAll
     # only walks the filesystem a single time per emit.
@@ -1425,8 +1930,28 @@ proc nimEmitFragment(projectRoot: string;
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]
       var testActions: seq[BuildActionDef] = @[]
-      # Mode 3 dep wiring: emit LIBRARIES first so their link-action ids
-      # + archive output paths are known by the time we reach each
+      # Cross-language: emit C/C++ archives FIRST so each Nim
+      # entrypoint's link can reference the archive output path + link
+      # action id by the time we hand it to emitForEntrypoint.
+      var packageCCppLibraries =
+        initTable[string, seq[CCppUpstreamLibrary]]()
+      for member in cCppCrossMembers:
+        let bundle = emitCCppCrossMember(projectRoot, member)
+        for a in bundle.compiles:
+          allActions.add(a)
+        allActions.add(bundle.archive)
+        let entry = CCppUpstreamLibrary(
+          package: member.package,
+          libraryName: member.libraryName,
+          linkActionId: bundle.archive.id,
+          outputPath: bundle.archivePath,
+          includeDir: bundle.includeDir)
+        if not packageCCppLibraries.hasKey(member.package):
+          packageCCppLibraries[member.package] = @[]
+        packageCCppLibraries[member.package].add(entry)
+        discard target(member.libraryName, allActions)
+      # Mode 3 dep wiring: emit Nim LIBRARIES next so their link-action
+      # ids + archive output paths are known by the time we reach each
       # executable's Phase 3. Index libraries by owning package so
       # ``depends_on hello: greet`` can resolve to "every library member
       # of the greet package". A package may declare multiple libraries
@@ -1462,30 +1987,36 @@ proc nimEmitFragment(projectRoot: string;
         discard target(lib.name, allActions)
       # Resolve dep edges for each entrypoint: the set of libraries
       # imported by the executable's package, in declaration order.
+      # Both Nim and C/C++ deps are looked up here — the schema-by-
+      # convention design means the entrypoint's link gets both flavours
+      # threaded onto its argv naturally.
       for entry in entrypoints:
         var entryDeps: seq[NimWorkspaceLibrary] = @[]
+        var entryCCppDeps: seq[CCppUpstreamLibrary] = @[]
         if entry.package.len > 0:
           for edge in depEdges:
             if edge.fromPackage != entry.package:
               continue
-            if not packageLibraries.hasKey(edge.toPackage):
-              # The validation pass above rejects undeclared packages,
-              # but a dep on a package that's declared yet ships no
-              # library member (executable-only package) is legal — we
-              # still sequence build ordering on it once executable-
-              # producing deps land. Today it's a silent no-op for the
-              # link-line because there's nothing to link against.
-              continue
-            for lib in packageLibraries[edge.toPackage]:
-              entryDeps.add(lib)
+            if packageLibraries.hasKey(edge.toPackage):
+              for lib in packageLibraries[edge.toPackage]:
+                entryDeps.add(lib)
+            if packageCCppLibraries.hasKey(edge.toPackage):
+              for lib in packageCCppLibraries[edge.toPackage]:
+                entryCCppDeps.add(lib)
+            # A dep on a declared package that ships no library
+            # member of either flavour (executable-only package) is
+            # legal — silent no-op for the link line, build-order
+            # sequencing comes once executable-on-executable wiring
+            # lands.
         let triple = emitForEntrypoint(projectRoot, nimExe, entry,
-          entryDeps)
+          entryDeps, entryCCppDeps)
         allActions.add(triple.phase1)
         for a in triple.phase2:
           allActions.add(a)
         allActions.add(triple.phase3)
         discard target(entry.name, allActions)
-      if entrypoints.len > 0 or buildableLibraries.len > 0:
+      if entrypoints.len > 0 or buildableLibraries.len > 0 or
+          cCppCrossMembers.len > 0:
         defaultTarget(target("default", allActions))
       # M22 test-target emission. Each ``tests/test_*.nim`` file becomes
       # a (nim c -r, fs.stamp) action pair. The test target is non-
