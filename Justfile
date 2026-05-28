@@ -278,6 +278,16 @@ store-daemon-m66-dev:
         tests/integration/t_store_daemon_m66_dev.nim \
         2>&1 | tee test-logs/store-daemon-m66-dev.log
 
+integration_daemon_nix_and_tarball_realize:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_daemon_nix_and_tarball_realize \
+        --out:build/test-bin/integration_daemon_nix_and_tarball_realize \
+        tests/integration/t_integration_daemon_nix_and_tarball_realize.nim \
+        2>&1 | tee test-logs/integration_daemon_nix_and_tarball_realize.log
+
 integration_hcr_reference_corpus_and_object_inputs:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

@@ -1,6 +1,8 @@
 import std/[net, os, strutils]
 
+import repro_interface_artifacts
 import repro_local_store
+import repro_tool_profiles
 
 import ./protocol
 
@@ -80,7 +82,9 @@ proc directSyntheticRealize*(req: SyntheticRealizeRequest):
     realizedPrefixPath: outcome.absolutePath,
     realizationHashHex: req.realizationIdHex,
     rootId: scoped,
-    writerMode: "direct")
+    writerMode: "direct",
+    installMethod: "synthetic",
+    selectedStorePath: outcome.absolutePath)
 
 proc realizeSyntheticViaDaemon*(req: SyntheticRealizeRequest;
                                 endpoint = defaultDevEndpoint()):
@@ -102,6 +106,75 @@ proc realizeSyntheticViaDaemon*(req: SyntheticRealizeRequest;
   raise newException(StoreDaemonClientError,
     "unexpected realize frame: " & $frame.kind)
 
+proc requestFromNixUse*(useDef: InterfaceToolUse; storeRoot, holderId,
+                        rootId: string): StoreDaemonExternalRealizeRequest =
+  let plan = nixAcquisitionPlan(useDef)
+  StoreDaemonExternalRealizeRequest(
+    storeRoot: storeRoot,
+    holderId: holderId,
+    rootId: rootId,
+    rawConstraint: useDef.rawConstraint,
+    packageSelector: useDef.packageSelector,
+    executableName: useDef.executableName,
+    packageId: plan.packageId,
+    declaredExecutablePath: plan.declaredExecutablePath,
+    lockIdentity: plan.lockIdentity,
+    nixSelector: plan.nixSelector,
+    nixExpressionFile: plan.nixExpressionFile,
+    nixpkgsRef: plan.nixpkgsRef,
+    nixpkgsRev: plan.nixpkgsRev,
+    nixpkgsNarHash: plan.nixpkgsNarHash)
+
+proc requestFromTarballUse*(useDef: InterfaceToolUse; storeRoot, holderId,
+                            rootId: string):
+    StoreDaemonExternalRealizeRequest =
+  let plan = tarballAcquisitionPlan(useDef)
+  StoreDaemonExternalRealizeRequest(
+    storeRoot: storeRoot,
+    holderId: holderId,
+    rootId: rootId,
+    rawConstraint: useDef.rawConstraint,
+    packageSelector: useDef.packageSelector,
+    executableName: useDef.executableName,
+    packageId: plan.packageId,
+    declaredExecutablePath: plan.declaredExecutablePath,
+    lockIdentity: plan.lockIdentity,
+    tarballUrl: plan.url,
+    tarballMirrors: plan.mirrors,
+    tarballSha256: plan.sha256,
+    archiveType: plan.archiveType,
+    stripComponents: plan.stripComponents)
+
+proc realizeExternalViaDaemon(req: StoreDaemonExternalRealizeRequest;
+                              kind: StoreDaemonMessageKind;
+                              endpoint: string): StoreDaemonRealizeResult =
+  var socket = connectDevDaemon(endpoint)
+  defer: socket.close()
+  socket.writeFrame(kind, externalRealizeBody(req))
+  let frame =
+    try:
+      socket.readFrame()
+    except CatchableError as err:
+      raise newException(StoreDaemonClientError,
+        "lost connection to dev store daemon during external realize; " &
+        "retry after restarting reprostored --dev: " & err.msg)
+  if frame.kind == sdkRealizeResponse:
+    return parseRealizeResponseBody(frame.body)
+  if frame.kind == sdkError:
+    raise newException(StoreDaemonClientError, parseErrorBody(frame.body))
+  raise newException(StoreDaemonClientError,
+    "unexpected external-realize frame: " & $frame.kind)
+
+proc realizeNixViaDaemon*(req: StoreDaemonExternalRealizeRequest;
+                          endpoint = defaultDevEndpoint()):
+    StoreDaemonRealizeResult =
+  realizeExternalViaDaemon(req, sdkNixRealize, endpoint)
+
+proc realizeTarballViaDaemon*(req: StoreDaemonExternalRealizeRequest;
+                              endpoint = defaultDevEndpoint()):
+    StoreDaemonRealizeResult =
+  realizeExternalViaDaemon(req, sdkTarballRealize, endpoint)
+
 proc realizeSyntheticWithFallback*(req: SyntheticRealizeRequest;
                                    endpoint = defaultDevEndpoint()):
     StoreDaemonRealizeResult =
@@ -109,6 +182,12 @@ proc realizeSyntheticWithFallback*(req: SyntheticRealizeRequest;
     result = realizeSyntheticViaDaemon(req, endpoint)
   except CatchableError:
     result = directSyntheticRealize(req)
+
+proc scoopRealizationIsPerUserFallthrough*(): bool =
+  ## Scoop installs into the calling user's Scoop root and keeps weak
+  ## per-user execution-profile semantics. An active store daemon does
+  ## not make Scoop a shared-store adapter.
+  true
 
 proc releaseDevRoot*(holderId, rootId: string;
                      endpoint = defaultDevEndpoint()) =

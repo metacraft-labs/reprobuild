@@ -820,7 +820,8 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
                             materializationMechanism: string;
                             extra: openArray[string];
                             absoluteRealizedPath: string;
-                            exportedExecutables: openArray[string] = []):
+                            exportedExecutables: openArray[string] = [];
+                            writerMode = "direct"):
     tuple[prefixId: PrefixIdBytes; inserted: bool] =
   ## Records the materialized prefix in the unified store and seals the
   ## binary `.repro-receipt` envelope at its root.
@@ -843,7 +844,7 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
     materializationMechanism: materializationMechanism,
     createdAtUnix: getTime().toUnix,
     writerProcessId: int64(getCurrentProcessId()),
-    writerMode: "direct")
+    writerMode: writerMode)
   let receiptBytes = encodeReceipt(receipt)
   var receiptText = newString(receiptBytes.len)
   for i, b in receiptBytes:
@@ -1020,7 +1021,8 @@ proc writeCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
     toByteString(encodeNixMaterializationProfile(profile)))
 
 proc resolveNixTool*(useDef: InterfaceToolUse;
-                     storeRoot = ""): PathOnlyToolProfile =
+                     storeRoot = "";
+                     writerMode = "direct"): PathOnlyToolProfile =
   let plan = nixAcquisitionPlan(useDef)
   let selector = plan.nixSelector
   let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
@@ -1114,7 +1116,8 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
       nixVersion, "nix", plan.lockIdentity,
       plan.declaredExecutablePath, "nix://" & plan.nixSelector,
       selectedStorePath, "nix-store-pointer", realized,
-      unified.absolutePath, [plan.declaredExecutablePath])
+      unified.absolutePath, [plan.declaredExecutablePath],
+      writerMode = writerMode)
     # Update the path-only profile to advertise the unified store
     # path alongside the /nix/store realization so callers can record
     # both for downstream tooling.
@@ -1372,7 +1375,8 @@ proc selectedUrlFromReceipt(prefix: string): string =
   except CatchableError:
     result = "existing"
 
-proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
+proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
+                              writerMode = "direct"):
     tuple[prefix: string; archivePath: string; selectedUrl: string] =
   ## Materializes a tarball realization into the unified M56 layout
   ## (`<store-root>/prefixes/<package>/<version>-<hash>/`).
@@ -1432,7 +1436,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
       resolvedVersion, "tarball", plan.lockIdentity,
       plan.declaredExecutablePath, plan.url, plan.sha256, "directory",
       [plan.archiveType, $plan.stripComponents], prefix,
-      [plan.declaredExecutablePath])
+      [plan.declaredExecutablePath], writerMode = writerMode)
     (prefix: prefix, archivePath: downloaded.path,
       selectedUrl: downloaded.selectedUrl)
   except CatchableError:
@@ -1440,7 +1444,8 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string):
       removeDir(extendedPath(tempPrefix))
     raise
 
-proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string):
+proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
+                         writerMode = "direct"):
     PathOnlyToolProfile =
   let plan = tarballAcquisitionPlan(useDef)
   let root =
@@ -1448,7 +1453,7 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string):
       storeRoot
     else:
       getCurrentDir() / ".repro" / "tool-store"
-  let materialized = materializeTarballPrefix(plan, root)
+  let materialized = materializeTarballPrefix(plan, root, writerMode)
   let resolved = executableInStorePath(materialized.prefix,
     plan.declaredExecutablePath, rejectSymlinks = true)
   if resolved.len == 0:

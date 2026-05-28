@@ -1,6 +1,8 @@
 import std/[net, os, osproc, strtabs, strutils, times]
 
+import repro_interface_artifacts
 import repro_local_store
+import repro_tool_profiles
 
 import ./client
 import ./protocol
@@ -201,7 +203,129 @@ proc realizeSyntheticDaemon(config: DevDaemonConfig;
     realizedPrefixPath: outcome.absolutePath,
     realizationHashHex: req.realizationIdHex,
     rootId: scoped,
-    writerMode: "daemon")
+    writerMode: "daemon",
+    installMethod: "synthetic",
+    selectedStorePath: outcome.absolutePath)
+
+proc ensureRequestStoreMatches(config: DevDaemonConfig; storeRoot: string) =
+  if storeRoot.len > 0 and
+      os.normalizedPath(storeRoot) != os.normalizedPath(config.storeRoot):
+    raise newException(StoreDaemonRuntimeError,
+      "request store root does not match daemon store root")
+
+proc useDefForNix(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse =
+  result = InterfaceToolUse(
+    rawConstraint:
+      if req.rawConstraint.len > 0: req.rawConstraint else: req.packageSelector,
+    packageSelector: req.packageSelector,
+    executableName: req.executableName,
+    location: SourceLocation(file: "reprostored-ipc", line: 1))
+  result.nixProvisioning = @[InterfaceNixProvisioning(
+    packageName: req.packageSelector,
+    selector: req.nixSelector,
+    executablePath: req.declaredExecutablePath,
+    expressionFile: req.nixExpressionFile,
+    nixpkgsRef: req.nixpkgsRef,
+    nixpkgsRev: req.nixpkgsRev,
+    nixpkgsNarHash: req.nixpkgsNarHash,
+    packageId: req.packageId,
+    lockIdentity: req.lockIdentity,
+    location: SourceLocation(file: "reprostored-ipc", line: 1))]
+
+proc useDefForTarball(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse =
+  result = InterfaceToolUse(
+    rawConstraint:
+      if req.rawConstraint.len > 0: req.rawConstraint else: req.packageSelector,
+    packageSelector: req.packageSelector,
+    executableName: req.executableName,
+    location: SourceLocation(file: "reprostored-ipc", line: 1))
+  result.tarballProvisioning = @[InterfaceTarballProvisioning(
+    packageName: req.packageSelector,
+    url: req.tarballUrl,
+    mirrors: req.tarballMirrors,
+    sha256: req.tarballSha256,
+    archiveType: req.archiveType,
+    executablePath: req.declaredExecutablePath,
+    stripComponents: req.stripComponents,
+    packageId: req.packageId,
+    lockIdentity: req.lockIdentity,
+    location: SourceLocation(file: "reprostored-ipc", line: 1))]
+
+proc daemonPrefixPathForProfile(config: DevDaemonConfig;
+                                profile: PathOnlyToolProfile): string =
+  let prefixRoot = config.storeRoot / "prefixes"
+  if profile.selectedStorePath.startsWith(prefixRoot):
+    return profile.selectedStorePath
+  for path in profile.realizedStorePaths:
+    if path.startsWith(prefixRoot):
+      return path
+  ""
+
+proc writeHolderProfileArtifact(config: DevDaemonConfig; holderId, rootId,
+                                adapter: string;
+                                profile: PathOnlyToolProfile): string =
+  let scoped = scopedRootId(holderId, rootId)
+  result = config.storeRoot / "profile-roots" / scoped /
+    (adapter & "-tool-identities.rbtp")
+  let identity = PathOnlyBuildIdentity(
+    projectName: "reprostored-dev-" & adapter,
+    profiles: @[profile],
+    actionIdentities: @[])
+  writePathOnlyBuildIdentity(result, identity)
+
+proc attachProfileRoot(config: DevDaemonConfig; holderId, rootId: string;
+                       profile: PathOnlyToolProfile): tuple[scoped: string;
+    prefixPath: string; realizationHashHex: string] =
+  result.prefixPath = daemonPrefixPathForProfile(config, profile)
+  if result.prefixPath.len == 0:
+    raise newException(StoreDaemonRuntimeError,
+      "daemon-side " & profile.installMethod &
+      " realization did not publish a unified store prefix")
+  let receipt = readReceiptFile(result.prefixPath / ReceiptFileName)
+  result.realizationHashHex = prefixIdHex(receipt.realizationHash)
+  result.scoped = scopedRootId(holderId, rootId)
+  var store = openStore(config.storeRoot)
+  defer: store.close()
+  store.registerRoot(result.scoped, rkProfile, currentUid())
+  store.attachPrefixToRoot(result.scoped, receipt.realizationHash)
+
+proc realizeNixDaemon(config: DevDaemonConfig;
+                      req: StoreDaemonExternalRealizeRequest):
+    StoreDaemonRealizeResult =
+  ensureRequestStoreMatches(config, req.storeRoot)
+  let profile = resolveNixTool(useDefForNix(req), config.storeRoot,
+    writerMode = "daemon")
+  let attached = attachProfileRoot(config, req.holderId, req.rootId, profile)
+  let artifact = writeHolderProfileArtifact(config, req.holderId, req.rootId,
+    "nix", profile)
+  StoreDaemonRealizeResult(
+    status: "realized",
+    realizedPrefixPath: attached.prefixPath,
+    realizationHashHex: attached.realizationHashHex,
+    rootId: attached.scoped,
+    writerMode: "daemon",
+    installMethod: "nix",
+    selectedStorePath: profile.selectedStorePath,
+    profileArtifactPath: artifact)
+
+proc realizeTarballDaemon(config: DevDaemonConfig;
+                          req: StoreDaemonExternalRealizeRequest):
+    StoreDaemonRealizeResult =
+  ensureRequestStoreMatches(config, req.storeRoot)
+  let profile = resolveTarballTool(useDefForTarball(req), config.storeRoot,
+    writerMode = "daemon")
+  let attached = attachProfileRoot(config, req.holderId, req.rootId, profile)
+  let artifact = writeHolderProfileArtifact(config, req.holderId, req.rootId,
+    "tarball", profile)
+  StoreDaemonRealizeResult(
+    status: "realized",
+    realizedPrefixPath: attached.prefixPath,
+    realizationHashHex: attached.realizationHashHex,
+    rootId: attached.scoped,
+    writerMode: "daemon",
+    installMethod: "tarball",
+    selectedStorePath: profile.selectedStorePath,
+    profileArtifactPath: artifact)
 
 proc releaseRootDaemon(config: DevDaemonConfig; holderId, rootId: string) =
   var store = openStore(config.storeRoot)
@@ -232,6 +356,21 @@ proc handleClient(socket: Socket; config: DevDaemonConfig; startedAt: Time;
     inc pending
     try:
       let res = realizeSyntheticDaemon(config, parseSyntheticBody(frame.body))
+      socket.writeFrame(sdkRealizeResponse, realizeResponseBody(res))
+    finally:
+      dec pending
+  of sdkNixRealize:
+    inc pending
+    try:
+      let res = realizeNixDaemon(config, parseExternalRealizeBody(frame.body))
+      socket.writeFrame(sdkRealizeResponse, realizeResponseBody(res))
+    finally:
+      dec pending
+  of sdkTarballRealize:
+    inc pending
+    try:
+      let res = realizeTarballDaemon(config,
+        parseExternalRealizeBody(frame.body))
       socket.writeFrame(sdkRealizeResponse, realizeResponseBody(res))
     finally:
       dec pending
@@ -331,7 +470,7 @@ proc siblingReprostoredPath*(publicCliPath: string): string =
   else:
     addFileExt("reprostored", ExeExt)
 
-proc waitForDevStatus(endpoint, expectedRoot: string; timeoutMs = 15000):
+proc waitForDevStatus(endpoint, expectedRoot: string; timeoutMs = 60000):
     StoreDaemonStatus =
   let deadline = epochTime() + float(timeoutMs) / 1000.0
   while epochTime() < deadline:

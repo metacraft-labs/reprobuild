@@ -23,6 +23,8 @@ type
     sdkReleaseRootAck = 8
     sdkShutdown = 9
     sdkShutdownAck = 10
+    sdkNixRealize = 11
+    sdkTarballRealize = 12
     sdkError = 255
 
   StoreDaemonStatus* = object
@@ -43,6 +45,9 @@ type
     realizationHashHex*: string
     rootId*: string
     writerMode*: string
+    installMethod*: string
+    selectedStorePath*: string
+    profileArtifactPath*: string
 
   SyntheticRealizeRequest* = object
     storeRoot*: string
@@ -53,6 +58,27 @@ type
     holderId*: string
     rootId*: string
     delayMs*: int
+
+  StoreDaemonExternalRealizeRequest* = object
+    storeRoot*: string
+    holderId*: string
+    rootId*: string
+    rawConstraint*: string
+    packageSelector*: string
+    executableName*: string
+    packageId*: string
+    declaredExecutablePath*: string
+    lockIdentity*: string
+    nixSelector*: string
+    nixExpressionFile*: string
+    nixpkgsRef*: string
+    nixpkgsRev*: string
+    nixpkgsNarHash*: string
+    tarballUrl*: string
+    tarballMirrors*: seq[string]
+    tarballSha256*: string
+    archiveType*: string
+    stripComponents*: int
 
 proc bytesOf(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -78,6 +104,17 @@ proc writeI64(buf: var seq[byte]; value: int64) =
 
 proc readI64(buf: openArray[byte]; pos: var int): int64 =
   int64(buf.readU64Le(pos))
+
+proc writeStringSeq(buf: var seq[byte]; values: openArray[string]) =
+  buf.writeU32Le(uint32(values.len))
+  for value in values:
+    buf.writeString(value)
+
+proc readStringSeq(buf: openArray[byte]; pos: var int): seq[string] =
+  let count = int(buf.readU32Le(pos))
+  result = newSeq[string](count)
+  for i in 0 ..< count:
+    result[i] = buf.readString(pos)
 
 proc writeFrame*(socket: Socket; kind: StoreDaemonMessageKind;
                  body: openArray[byte] = []) =
@@ -195,6 +232,9 @@ proc realizeResponseBody*(res: StoreDaemonRealizeResult): seq[byte] =
   result.writeString(res.realizationHashHex)
   result.writeString(res.rootId)
   result.writeString(res.writerMode)
+  result.writeString(res.installMethod)
+  result.writeString(res.selectedStorePath)
+  result.writeString(res.profileArtifactPath)
 
 proc parseRealizeResponseBody*(body: openArray[byte]):
     StoreDaemonRealizeResult =
@@ -204,6 +244,54 @@ proc parseRealizeResponseBody*(body: openArray[byte]):
   result.realizationHashHex = body.readString(pos)
   result.rootId = body.readString(pos)
   result.writerMode = body.readString(pos)
+  if pos < body.len:
+    result.installMethod = body.readString(pos)
+    result.selectedStorePath = body.readString(pos)
+    result.profileArtifactPath = body.readString(pos)
+
+proc externalRealizeBody*(req: StoreDaemonExternalRealizeRequest): seq[byte] =
+  result.writeString(req.storeRoot)
+  result.writeString(req.holderId)
+  result.writeString(req.rootId)
+  result.writeString(req.rawConstraint)
+  result.writeString(req.packageSelector)
+  result.writeString(req.executableName)
+  result.writeString(req.packageId)
+  result.writeString(req.declaredExecutablePath)
+  result.writeString(req.lockIdentity)
+  result.writeString(req.nixSelector)
+  result.writeString(req.nixExpressionFile)
+  result.writeString(req.nixpkgsRef)
+  result.writeString(req.nixpkgsRev)
+  result.writeString(req.nixpkgsNarHash)
+  result.writeString(req.tarballUrl)
+  result.writeStringSeq(req.tarballMirrors)
+  result.writeString(req.tarballSha256)
+  result.writeString(req.archiveType)
+  result.writeU32Le(uint32(max(req.stripComponents, 0)))
+
+proc parseExternalRealizeBody*(body: openArray[byte]):
+    StoreDaemonExternalRealizeRequest =
+  var pos = 0
+  result.storeRoot = body.readString(pos)
+  result.holderId = body.readString(pos)
+  result.rootId = body.readString(pos)
+  result.rawConstraint = body.readString(pos)
+  result.packageSelector = body.readString(pos)
+  result.executableName = body.readString(pos)
+  result.packageId = body.readString(pos)
+  result.declaredExecutablePath = body.readString(pos)
+  result.lockIdentity = body.readString(pos)
+  result.nixSelector = body.readString(pos)
+  result.nixExpressionFile = body.readString(pos)
+  result.nixpkgsRef = body.readString(pos)
+  result.nixpkgsRev = body.readString(pos)
+  result.nixpkgsNarHash = body.readString(pos)
+  result.tarballUrl = body.readString(pos)
+  result.tarballMirrors = body.readStringSeq(pos)
+  result.tarballSha256 = body.readString(pos)
+  result.archiveType = body.readString(pos)
+  result.stripComponents = int(body.readU32Le(pos))
 
 proc releaseRootBody*(holderId, rootId: string): seq[byte] =
   result.writeString(holderId)
