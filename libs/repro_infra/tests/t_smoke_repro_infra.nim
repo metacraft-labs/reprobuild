@@ -751,7 +751,7 @@ windows.service {
     check graph.edges.len == 1
     check graph.edges[0].fromIdx == 0     # capability is the producer
     check graph.edges[0].toIdx == 1       # service is the consumer
-    check graph.edges[0].sourceKind == edkExplicit
+    check graph.edges[0].kind == edkExplicit
 
   test "buildDependencyGraph infers the OpenSSH.Server -> sshd implicit edge":
     # No `depends_on` written; the shared `ProducerConsumerMap` is the
@@ -773,7 +773,7 @@ windows.capability { name = "OpenSSH.Server~~~~0.0.1.0" }
     # so the topological order reverses the declaration order.
     check graph.edges[0].fromIdx == 1
     check graph.edges[0].toIdx == 0
-    check graph.edges[0].sourceKind == edkImplicit
+    check graph.edges[0].kind == edkImplicit
 
   test "topologicallyOrder respects an explicit dependency chain":
     # A -> B -> C -> D via explicit depends_on, declared in REVERSE

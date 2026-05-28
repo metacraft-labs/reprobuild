@@ -17,9 +17,11 @@
 ## pure-Windows profile. The partition machinery is still exercised
 ## so the same code path serves a future mixed home+system apply.
 
-import std/[algorithm, os, sets, strutils, tables, times]
+import std/[os, strutils, tables, times]
 
 import blake3
+import repro_core
+import repro_core/dep_graph as repro_core_dep_graph
 import repro_elevation
 
 import ./audit_log
@@ -27,6 +29,14 @@ import ./errors
 import ./plan_envelope
 import ./profile
 import ./state_dir
+
+# Re-export the shared graph kernel's value types + enum members so
+# callers of `repro_infra` see the same names they did before the
+# M82 DRY refactor. `Graph` / `GraphEdge` / `EdgeKind` / `edkExplicit`
+# / `edkImplicit` / `addEdge` / `traceCycle` / `EGraphCycle` all
+# become reachable through `import repro_infra` without forcing
+# every consumer to also `import repro_core`.
+export repro_core_dep_graph
 
 type
   ResourceObservation* = object
@@ -261,25 +271,33 @@ proc summaryLine(r: SystemResource; action: string): string =
 # profile text.
 # ---------------------------------------------------------------------------
 
+# The generic graph algorithms — Kahn's topological sort, cycle-trace,
+# explicit-vs-implicit edge dedupe — live in `repro_core/dep_graph.nim`
+# as a single shared kernel that knows nothing about `SystemProfile`,
+# resource addresses, or the producer / consumer map. This module is
+# the SYSTEM-SCOPE ADAPTER over that kernel: it owns the
+# `SystemProfile`-to-graph translation, the `depends_on`-to-edge
+# resolution, the implicit producer / consumer edge inference, and the
+# cycle-index-to-address translation when a cycle is detected. The home
+# scope has a parallel adapter in
+# `libs/repro_home_apply/src/repro_home_apply/dep_graph.nim`.
+
 type
-  DependencyEdgeKind* = enum
-    ## Why an edge was added — surfaced in diagnostics so a cycle error
-    ## can tell the operator whether the offending edge came from a
-    ## user-declared `depends_on` or from the producer / consumer map.
-    edkExplicit = "explicit"             ## from a stanza's `depends_on`
-    edkImplicit = "implicit"             ## from `ProducerConsumerMap`
+  DependencyEdgeKind* = EdgeKind
+    ## Re-export of the shared module's edge-kind enum. Preserved
+    ## under the system-scope name so existing call sites that name
+    ## the type explicitly still compile. New code should reach for
+    ## `EdgeKind` directly.
 
-  DependencyEdge* = object
-    fromIdx*: int                        ## producer index (apply earlier)
-    toIdx*: int                          ## consumer index (apply later)
-    sourceKind*: DependencyEdgeKind
+  DependencyEdge* = GraphEdge
+    ## Re-export of the shared module's edge type. The fields are
+    ## `fromIdx`, `toIdx`, and `kind` (was `sourceKind` in the
+    ## pre-refactor system-scope copy).
 
-  DependencyGraph* = object
-    ## A resolved dependency graph over a profile's resources. Nodes
-    ## are identified by DECLARATION INDEX (the position in
-    ## `profile.resources`), so the secondary stable order falls out of
-    ## the indices without an extra address-comparison step.
-    edges*: seq[DependencyEdge]
+  DependencyGraph* = Graph
+    ## Re-export of the shared module's graph type. Adds `nodeCount`
+    ## alongside `edges`; the old system-scope copy implied
+    ## `nodeCount` from `profile.resources.len` at the call site.
 
 proc findResourceIndex(profile: SystemProfile;
                        depKind, depName: string): int =
@@ -303,29 +321,24 @@ proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
   ## resources. Pure — no observation, no I/O. Raises
   ## `ESystemProfileInvalid` if an explicit `depends_on` entry refers
   ## to a `(kind, name)` no resource in the profile satisfies (the
-  ## user surface for typos / stale references); the cycle check
-  ## itself runs in `topologicallyOrder`.
-  # De-duplicate edges so a user who both declares a `depends_on` AND
-  # benefits from the implicit producer-consumer entry sees one edge,
-  # not two. The dedupe key is `(fromIdx, toIdx)`; the explicit
-  # source-kind wins so a cycle diagnostic still names the user's
-  # edge.
-  var seen = initTable[(int, int), DependencyEdgeKind]()
-  proc record(fromIdx, toIdx: int; src: DependencyEdgeKind) =
+  ## user surface for typos / stale references); raises
+  ## `EPlanCyclicDependency` on a SELF-edge with the resource's
+  ## address named directly. Multi-node cycles are detected later in
+  ## `topologicallyOrder`.
+  result = DependencyGraph(nodeCount: profile.resources.len)
+
+  proc record(g: var DependencyGraph; fromIdx, toIdx: int;
+              src: EdgeKind) =
     if fromIdx == toIdx:
       # A self-edge would always cycle; refuse it at construction time
-      # with a clear-attribution message — the cycle-detection path
-      # below handles deeper loops.
+      # with a clear-attribution message that names the offending
+      # address directly. The shared kernel's generic
+      # `EGraphCycle` is the wrong tool here — we have a strictly
+      # better diagnostic available at the adapter layer.
       raisePlanCyclicDependency(@[
         profile.resources[fromIdx].address,
         profile.resources[fromIdx].address])
-    let key = (fromIdx, toIdx)
-    if key notin seen:
-      seen[key] = src
-    elif src == edkExplicit:
-      # Promote an implicit entry to explicit when the user has also
-      # declared it (so cycle diagnostics name the user's source).
-      seen[key] = edkExplicit
+    addEdge(g, fromIdx, toIdx, src)
 
   # 1. EXPLICIT edges from each stanza's `depends_on`.
   for consumerIdx in 0 ..< profile.resources.len:
@@ -337,7 +350,7 @@ proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
           "' depends_on '" & dep.kind & ":" & dep.name &
           "' but no resource in the profile satisfies that " &
           "(kind, name) pair")
-      record(producerIdx, consumerIdx, edkExplicit)
+      record(result, producerIdx, consumerIdx, edkExplicit)
 
   # 2. IMPLICIT edges from the shared producer / consumer map. For
   # every resource we treat it as a candidate producer; if any
@@ -351,127 +364,25 @@ proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
     for c in consumers:
       let consumerIdx = findResourceIndex(profile, c.kind, c.name)
       if consumerIdx >= 0:
-        record(producerIdx, consumerIdx, edkImplicit)
-
-  for key, src in seen.pairs:
-    result.edges.add(DependencyEdge(fromIdx: key[0], toIdx: key[1],
-                                    sourceKind: src))
-  # Stable iteration order: sort edges by (fromIdx, toIdx) so the
-  # graph is deterministic regardless of the table's hash iteration.
-  result.edges.sort(proc(a, b: DependencyEdge): int =
-    if a.fromIdx != b.fromIdx: cmp(a.fromIdx, b.fromIdx)
-    else: cmp(a.toIdx, b.toIdx))
-
-proc traceCycle(profile: SystemProfile;
-                graph: DependencyGraph;
-                inDegree: seq[int]): seq[string] =
-  ## When Kahn's algorithm leaves nodes unprocessed, run a DFS over
-  ## the surviving subgraph (nodes with `inDegree > 0` OR a node still
-  ## reachable from one) to find a concrete cycle and return its
-  ## resource-address sequence with the entry node repeated at the
-  ## end. Used purely for the diagnostic; the cycle DETECTION is
-  ## Kahn's "did we consume every node?" check.
-  var adj: Table[int, seq[int]]
-  for e in graph.edges:
-    if e.fromIdx notin adj: adj[e.fromIdx] = @[]
-    adj[e.fromIdx].add(e.toIdx)
-  for k in adj.mvalues: k.sort()
-  # Find a starting node still in-graph (in-degree > 0 OR has outgoing
-  # edges to in-graph nodes). The smallest declaration index wins so
-  # the diagnostic is stable across runs.
-  var start = -1
-  for i in 0 ..< profile.resources.len:
-    if inDegree[i] > 0:
-      start = i
-      break
-  if start < 0:
-    return @[]                           # defensive — Kahn miscounted
-  # Iterative DFS recording the path. The first node we revisit closes
-  # the cycle; trim the prefix that doesn't participate.
-  var stack: seq[int] = @[start]
-  var path: seq[int] = @[start]
-  var onStack: HashSet[int]
-  onStack.incl(start)
-  var iters: Table[int, int]
-  iters[start] = 0
-  while stack.len > 0:
-    let node = stack[^1]
-    let nexts = adj.getOrDefault(node, @[])
-    var i = iters.getOrDefault(node, 0)
-    var advanced = false
-    while i < nexts.len:
-      let nxt = nexts[i]
-      inc i
-      iters[node] = i
-      if nxt in onStack:
-        # Cycle closes at `nxt`. Trim path's prefix preceding the
-        # first occurrence of `nxt`.
-        var cycleStart = 0
-        for k in 0 ..< path.len:
-          if path[k] == nxt:
-            cycleStart = k
-            break
-        var cyclePath: seq[string]
-        for k in cycleStart ..< path.len:
-          cyclePath.add(profile.resources[path[k]].address)
-        cyclePath.add(profile.resources[nxt].address)
-        return cyclePath
-      if inDegree[nxt] > 0 and nxt notin onStack:
-        stack.add(nxt)
-        path.add(nxt)
-        onStack.incl(nxt)
-        iters[nxt] = 0
-        advanced = true
-        break
-    if not advanced:
-      discard stack.pop()
-      discard path.pop()
-      onStack.excl(node)
-  return @[]
+        record(result, producerIdx, consumerIdx, edkImplicit)
 
 proc topologicallyOrder*(profile: SystemProfile;
                          graph: DependencyGraph): seq[int] =
   ## Return the resource declaration-indices in apply order: every
   ## producer before every consumer; ties broken by declaration index
-  ## (stable secondary key). Kahn's algorithm with a min-priority
-  ## "ready set" keyed by declaration index — independent ops keep
-  ## their declaration order, which makes plan output byte-comparable
-  ## across runs of the same profile text. Raises
-  ## `EPlanCyclicDependency` (via `traceCycle`) when a cycle prevents
-  ## ordering every node.
-  let n = profile.resources.len
-  var inDegree = newSeq[int](n)
-  var outAdj = newSeq[seq[int]](n)
-  for e in graph.edges:
-    outAdj[e.fromIdx].add(e.toIdx)
-    inc inDegree[e.toIdx]
-  # Ready set: every node whose in-degree is currently 0. To honor
-  # stable declaration order we pop the smallest index first — using a
-  # sorted-on-insert array (n is small in practice, profiles rarely
-  # exceed a few hundred resources).
-  var ready: seq[int]
-  for i in 0 ..< n:
-    if inDegree[i] == 0:
-      ready.add(i)
-  while ready.len > 0:
-    # The minimum index is at position 0 because `ready` is kept
-    # sorted; we always insert into the right place below.
-    let node = ready[0]
-    ready.delete(0)
-    result.add(node)
-    for nxt in outAdj[node]:
-      dec inDegree[nxt]
-      if inDegree[nxt] == 0:
-        # Insertion-sort to keep `ready` ordered by declaration index.
-        var pos = ready.len
-        for j in 0 ..< ready.len:
-          if ready[j] > nxt:
-            pos = j
-            break
-        ready.insert(nxt, pos)
-  if result.len < n:
-    # Cycle: trace one and raise.
-    raisePlanCyclicDependency(traceCycle(profile, graph, inDegree))
+  ## (stable secondary key). Delegates to the shared kernel's
+  ## `topologicallyOrder`; on a multi-node cycle the kernel's
+  ## `EGraphCycle.cyclePath` (a seq of node indices) is translated
+  ## here into a `seq[string]` of system-scope resource addresses and
+  ## rewrapped as `EPlanCyclicDependency` — the operator-facing
+  ## exception type the M82 Phase B contract names.
+  try:
+    repro_core.topologicallyOrder(graph)
+  except EGraphCycle as e:
+    var addressPath: seq[string]
+    for idx in e.cyclePath:
+      addressPath.add(profile.resources[idx].address)
+    raisePlanCyclicDependency(addressPath)
 
 # ---------------------------------------------------------------------------
 # M82 Phase C — plan-time external drift detection.

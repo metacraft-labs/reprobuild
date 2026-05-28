@@ -4,6 +4,7 @@ import repro_core/process_specs
 import repro_core/dependency_gathering
 import repro_core/parallel
 import repro_core/codec
+import repro_core/dep_graph
 
 export types
 export paths
@@ -11,6 +12,7 @@ export process_specs
 export dependency_gathering
 export parallel
 export codec
+export dep_graph
 
 const ReprobuildVersion* = "0.1.0"
 
