@@ -54,6 +54,7 @@ const PopulatedExamples = [
   "c-cpp-autotools/hello-binary",
   "c-cpp-mode3/binary-with-library",
   "mixed/nim-uses-cpp-lib",
+  "mixed/cpp-uses-nim-lib",
 ]
 
 suite "examples layout M8":

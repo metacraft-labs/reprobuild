@@ -586,3 +586,144 @@ package nimapp:
     for action in actionByPrefix(fragment, "nim-xlang-ccpp-"):
       checkpoint "unexpected cross-language action: " & action.id
       fail()
+
+# ---------------------------------------------------------------------------
+# Reverse cross-language (C/C++ binary uses Nim library) emit-fragment suite.
+#
+# Pins the Nim convention's response when a single ``repro.nim`` declares
+# a Nim ``library`` package AND a C/C++ ``executable`` package with a
+# ``depends_on cppExe: nimLibPkg`` edge:
+#   * The Nim convention claims the WHOLE workspace because it's
+#     registered first AND at least one package declares ``uses: nim``.
+#   * The Nim ``library`` is built with ``--noMain`` (the cConsumable
+#     toggle) so the resulting archive's ``main`` symbol doesn't collide
+#     with the C++ binary's own ``main()`` at link time.
+#   * The C/C++ executable's per-source compile + terminal link actions
+#     are emitted in-line, with the Nim archive path threaded as a
+#     trailing positional on the link argv, added to ``inputs``, and
+#     the archive action's id added to ``deps``.
+# ---------------------------------------------------------------------------
+
+const
+  ReverseMixedFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "mixed" / "cpp-uses-nim-lib"
+
+suite "nim convention cross-language reverse (Mode 3 mixed workspace, C++ -> Nim)":
+
+  test "emitFragment: mixed fixture wires C++ exec -> Nim archive end-to-end":
+    let conv = nim_convention.nimConvention()
+    if not fileExists(ReverseMixedFixtureRoot / "repro.nim"):
+      checkpoint "fixture missing — looked at " & ReverseMixedFixtureRoot
+      fail()
+    elif not conv.recognize(ReverseMixedFixtureRoot,
+        dummyRequest(ReverseMixedFixtureRoot)):
+      # Missing nim/g++ on PATH — the convention's recognize check
+      # short-circuits to false. Skip the assertions instead of failing
+      # the test in a stripped-down sandbox.
+      skip()
+    else:
+      let request = dummyRequest(ReverseMixedFixtureRoot)
+      let fragment = conv.emitFragment(ReverseMixedFixtureRoot, request)
+
+      # (a) The Nim library's Phase 3 ``ar`` archive action must exist
+      #     under the standard ``ar-archive-addlib-static`` id.
+      var nimArchive: BuildActionDef
+      var sawArchive = false
+      for action in actionByPrefix(fragment, "ar-archive-addlib"):
+        nimArchive = action
+        sawArchive = true
+        break
+      check sawArchive
+      check nimArchive.outputs.len == 1
+      let archivePath = nimArchive.outputs[0]
+      check archivePath.replace('\\', '/').endsWith(
+        ".repro/build/addlib/libaddlib.a")
+
+      # (b) The Nim library's Phase 1 must carry ``--noMain``. Without
+      #     this, the archive contains a duplicate ``main()`` symbol
+      #     that would collide with the C++ binary's own ``main()`` at
+      #     link time. This is the load-bearing fingerprint flip for
+      #     reverse-direction cross-language consumption.
+      var nimPhase1: BuildActionDef
+      var sawPhase1 = false
+      for action in actionByPrefix(fragment, "nim-c-compileonly-addlib-"):
+        nimPhase1 = action
+        sawPhase1 = true
+        break
+      check sawPhase1
+      let phase1Argv = inlineArgvOf(nimPhase1)
+      check "--noMain" in phase1Argv
+
+      # (c) The C++ executable's per-source compile action exists under
+      #     the ``nim-xlang-ccpp-exec-compile-`` discriminator (NOT the
+      #     library-direction ``nim-xlang-ccpp-compile-`` prefix used
+      #     for C/C++ libraries the Nim convention emits archives for).
+      var sawCppCompile = false
+      var cppCompile: BuildActionDef
+      for action in actionByPrefix(fragment, "nim-xlang-ccpp-exec-compile-cppapp-"):
+        cppCompile = action
+        sawCppCompile = true
+        break
+      check sawCppCompile
+
+      # (d) The C++ executable's terminal link action exists, its argv
+      #     contains the Nim archive path as a trailing positional, its
+      #     inputs contain the Nim archive path, and its deps contain
+      #     the archive action's id. Same wiring shape as the same-
+      #     direction Nim->C path, just routed the other way.
+      var cppLink: BuildActionDef
+      var sawLink = false
+      for action in actionByPrefix(fragment, "nim-xlang-ccpp-exec-link-cppapp"):
+        cppLink = action
+        sawLink = true
+        break
+      check sawLink
+      let linkArgv = inlineArgvOf(cppLink)
+      check archivePath in linkArgv
+      check archivePath in cppLink.inputs
+      check nimArchive.id in cppLink.deps
+
+      # (e) Build sequencing: the C++ link depends on the compile of its
+      #     own source AND on the Nim archive. Both compile and archive
+      #     must precede the link in the action-graph ordering.
+      check cppCompile.id in cppLink.deps
+
+      # (f) The C++ binary output path matches the schema
+      #     ``.repro/build/<member>/<member>[.exe]`` — same schema the
+      #     c_cpp_direct convention emits for pure-C/C++ executables.
+      check cppLink.outputs.len == 1
+      let binaryPath = cppLink.outputs[0]
+      let normBinary = binaryPath.replace('\\', '/')
+      check (normBinary.endsWith(".repro/build/cppapp/cppapp.exe") or
+             normBinary.endsWith(".repro/build/cppapp/cppapp"))
+
+  test "emitFragment: pure-Nim fixture does NOT emit any cross-language exec":
+    # Regression: a single-language Nim project must not trigger the
+    # C/C++ EXECUTABLE emit path either. Pairs with the existing
+    # "no library archive" regression above.
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(FixtureRoot)
+    require conv.recognize(FixtureRoot, request)
+    let fragment = conv.emitFragment(FixtureRoot, request)
+    for action in actionByPrefix(fragment, "nim-xlang-ccpp-exec-"):
+      checkpoint "unexpected reverse cross-language action: " & action.id
+      fail()
+
+  test "emitFragment: forward fixture does NOT trigger reverse-direction emit":
+    # When the workspace declares a Nim binary + C/C++ library
+    # (mixed/nim-uses-cpp-lib), the C/C++ EXECUTABLE emit must stay
+    # silent — only the C/C++ LIBRARY archive path fires. This pins the
+    # partition between the two directions so a forward fixture
+    # doesn't accidentally emit reverse-direction actions.
+    let conv = nim_convention.nimConvention()
+    if not fileExists(MixedFixtureRoot / "repro.nim"):
+      skip()
+    elif not conv.recognize(MixedFixtureRoot, dummyRequest(MixedFixtureRoot)):
+      skip()
+    else:
+      let request = dummyRequest(MixedFixtureRoot)
+      let fragment = conv.emitFragment(MixedFixtureRoot, request)
+      for action in actionByPrefix(fragment, "nim-xlang-ccpp-exec-"):
+        checkpoint "forward fixture spuriously emitted reverse action: " &
+          action.id
+        fail()

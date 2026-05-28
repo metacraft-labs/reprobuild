@@ -139,7 +139,8 @@ $PopulatedExamples = @(
   'c-cpp-make/library-static',
   'c-cpp-autotools/hello-binary',
   'c-cpp-mode3/binary-with-library',
-  'mixed/nim-uses-cpp-lib'
+  'mixed/nim-uses-cpp-lib',
+  'mixed/cpp-uses-nim-lib'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -330,9 +331,11 @@ function Probe-Toolchain([string]$language) {
     }
     'mixed' {
       # Cross-language Mode 3 — needs BOTH the Nim toolchain (for the
-      # Nim entrypoint's three-phase build) AND a C compiler + ar (for
-      # the upstream C library archive the Nim convention emits inline).
-      # SKIP cleanly if any leg is missing.
+      # Nim entrypoint's three-phase build OR the Nim library's archive
+      # when the C/C++ binary depends on it) AND a C/C++ compiler + ar.
+      # The cpp-uses-nim-lib fixture additionally needs g++ (or
+      # clang++) for the C++ link driver. SKIP cleanly if any leg is
+      # missing.
       $nimCmd    = Get-Command nim    -ErrorAction SilentlyContinue
       $nimbleCmd = Get-Command nimble -ErrorAction SilentlyContinue
       if (-not $nimCmd) {
@@ -345,12 +348,19 @@ function Probe-Toolchain([string]$language) {
       if (-not $ccCmd) {
         return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (cross-language fixture needs both Nim and C toolchains)" }
       }
+      $cxxCmd = Get-Command g++ -ErrorAction SilentlyContinue
+      if (-not $cxxCmd) {
+        $cxxCmd = Get-Command clang++ -ErrorAction SilentlyContinue
+      }
+      if (-not $cxxCmd) {
+        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (the cpp-uses-nim-lib fixture needs a C++ link driver)" }
+      }
       $arCmd = Get-Command ar -ErrorAction SilentlyContinue
       if (-not $arCmd) {
-        return @{ Available = $false; Reason = "'ar' not on PATH (cross-language fixture needs an archiver for the upstream C library)" }
+        return @{ Available = $false; Reason = "'ar' not on PATH (cross-language fixture needs an archiver)" }
       }
       $nimbleSrc = if ($nimbleCmd) { $nimbleCmd.Source } else { '(not on PATH; fixture uses Layout A src/ only, so optional)' }
-      return @{ Available = $true; Reason = "nim=$($nimCmd.Source); nimble=$nimbleSrc; cc=$($ccCmd.Source); ar=$($arCmd.Source)" }
+      return @{ Available = $true; Reason = "nim=$($nimCmd.Source); nimble=$nimbleSrc; cc=$($ccCmd.Source); cxx=$($cxxCmd.Source); ar=$($arCmd.Source)" }
     }
     'c-cpp-autotools' {
       # M17: the C/C++ Autotools convention is registered. Probe for
@@ -1032,6 +1042,32 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'nimapp' 'nimapp.exe'))
           Greeting = '1 + 2 = 3'
+        }
+      )
+    }
+    'mixed/cpp-uses-nim-lib' {
+      # Cross-language Mode 3 (REVERSE direction): the workspace declares
+      # a Nim static library ``addlib`` (``uses: nim``) and a C++
+      # executable ``cppapp`` (``uses: gcc``) in a single ``repro.nim``
+      # with ``depends_on cppapp: addlib``. The Nim convention claims
+      # the whole workspace (registered first; addlib's uses block names
+      # nim), emits the upstream Nim archive with ``--noMain`` (so the
+      # archive's ``main`` symbol doesn't collide with the C++ binary's
+      # own ``main()`` at link time) via the existing emitForLibrary
+      # path, then emits per-source ``g++ -c`` + terminal ``g++ -o``
+      # actions for the cppapp executable in-line via the embedded
+      # cross-language emitCCppCrossExecutable helper. The libaddlib.a
+      # archive lands on the link argv as a trailing positional. The
+      # binary's first stdout line proves the cross-language round-trip
+      # succeeded: C++ -> Nim nimAdd() -> back to C++.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'addlib' 'libaddlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
+          Greeting = 'cpp says: nim added 2+3 = 5'
         }
       )
     }
