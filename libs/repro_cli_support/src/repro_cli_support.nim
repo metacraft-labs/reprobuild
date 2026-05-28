@@ -92,7 +92,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " home {add | remove | enable | disable | list | why | history | apply | plan | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n       " &
           programName &
-      " daemon {status | start | stop | restart | logs} [--endpoint=PATH] [--state-dir=PATH] [--log=PATH]\n       " &
+      " daemon {status | start | stop | restart | logs | sessions} [--endpoint=PATH] [--state-dir=PATH] [--log=PATH]\n       " &
           programName &
       " store {gc | recover | roots | list | daemon} ...\n       " &
           programName &
@@ -8498,7 +8498,7 @@ proc runStoreCommand*(args: seq[string]): int =
 
 proc runUserDaemonCliCommand(args: seq[string]): int =
   if args.len == 0:
-    echo "usage: repro daemon {status | start | stop | restart | logs} " &
+    echo "usage: repro daemon {status | start | stop | restart | logs | sessions} " &
       "[--foreground] [--dev] [--endpoint PATH] [--state-dir PATH] " &
       "[--log PATH]"
     return 2
@@ -8513,7 +8513,10 @@ proc runUserDaemonCliCommand(args: seq[string]): int =
     let config = parsed.config
     case action
     of "status":
-      echo renderUserDaemonStatus(queryUserDaemonStatus(config.endpoint))
+      let status = queryUserDaemonStatus(config.endpoint)
+      if not status.running:
+        discard cleanupStaleUserDaemonDiscovery(config)
+      echo renderUserDaemonStatus(status)
       return 0
     of "start":
       if config.foreground:
@@ -8524,20 +8527,25 @@ proc runUserDaemonCliCommand(args: seq[string]): int =
     of "stop":
       let status = queryUserDaemonStatus(config.endpoint)
       if not status.running:
+        discard cleanupStaleUserDaemonDiscovery(config)
         echo renderUserDaemonStatus(status)
         return 0
       stopUserDaemon(config.endpoint)
+      cleanupPlatformBackgroundRegistration(config)
+      discard cleanupStaleUserDaemonDiscovery(config)
       echo "repro daemon: stopped"
       return 0
     of "restart":
       let status = queryUserDaemonStatus(config.endpoint)
       if status.running:
         stopUserDaemon(config.endpoint)
+        cleanupPlatformBackgroundRegistration(config)
         let deadline = epochTime() + 10.0
         while epochTime() < deadline:
           if not queryUserDaemonStatus(config.endpoint).running:
             break
           sleep(25)
+        discard cleanupStaleUserDaemonDiscovery(config)
       let started = startUserDaemon(stablePublicCliPath(), config)
       echo renderUserDaemonStatus(started)
       return 0
@@ -8546,6 +8554,14 @@ proc runUserDaemonCliCommand(args: seq[string]): int =
       stdout.write(logs)
       if not logs.endsWith("\n"):
         stdout.writeLine("")
+      return 0
+    of "sessions":
+      let status = queryUserDaemonStatus(config.endpoint)
+      if not status.running:
+        discard cleanupStaleUserDaemonDiscovery(config)
+        stderr.writeLine("repro daemon sessions: daemon is not running")
+        return 1
+      echo renderUserDaemonSessions(requestUserDaemonSessions(config.endpoint))
       return 0
     else:
       stderr.writeLine("repro daemon: unknown action: " & action)

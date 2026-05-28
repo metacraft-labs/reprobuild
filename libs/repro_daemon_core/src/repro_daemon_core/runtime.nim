@@ -35,6 +35,32 @@ type
 
 const UserDaemonLockFileName = ".repro-daemon.lock"
 
+proc safePathSegment(value, fallback: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
+        ch in {'-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = fallback
+
+proc xmlEscape(value: string): string =
+  for ch in value:
+    case ch
+    of '&':
+      result.add("&amp;")
+    of '<':
+      result.add("&lt;")
+    of '>':
+      result.add("&gt;")
+    of '"':
+      result.add("&quot;")
+    of '\'':
+      result.add("&apos;")
+    else:
+      result.add(ch)
+
 proc defaultUserDaemonConfig*(daemonExe = ""; foreground = false;
                               devMode = false): UserDaemonConfig =
   UserDaemonConfig(endpoint: defaultUserDaemonEndpoint(),
@@ -112,13 +138,41 @@ proc releaseUserDaemonLock(lock: var UserDaemonLock) =
       lock.fd = -1
   lock.held = false
 
-proc removeEndpointFiles(config: UserDaemonConfig) =
-  try: removeFile(config.endpoint) except OSError: discard
+proc statusPath(config: UserDaemonConfig): string =
+  config.stateDir / "status" /
+    (safePathSegment(config.endpoint.extractFilename, "repro-daemon") &
+      ".status")
+
+proc removeStatusFile(config: UserDaemonConfig) =
   try:
-    removeFile(config.stateDir / "status" /
-      (config.endpoint.extractFilename & ".status"))
+    removeFile(statusPath(config))
   except OSError:
     discard
+
+proc removeEndpointFiles(config: UserDaemonConfig) =
+  try: removeFile(config.endpoint) except OSError: discard
+  removeStatusFile(config)
+
+proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
+  ## Remove stale discovery files only when the endpoint does not accept a raw
+  ## connection. A protocol-incompatible but live daemon must keep its state.
+  when defined(posix):
+    let endpointPresent = userDaemonEndpointExists(config.endpoint)
+    let accepts = userDaemonEndpointAcceptsConnections(config.endpoint)
+    if endpointPresent and not accepts:
+      try:
+        removeFile(config.endpoint)
+        result = true
+      except OSError:
+        discard
+    if not accepts:
+      if fileExists(statusPath(config)):
+        removeStatusFile(config)
+        result = true
+  else:
+    if fileExists(statusPath(config)):
+      removeStatusFile(config)
+      result = true
 
 proc generationFor(startedAt: Time): string =
   $getCurrentProcessId() & "-" & $startedAt.toUnix & "-" & $startedAt.nanosecond
@@ -142,8 +196,7 @@ proc statusFor(config: UserDaemonConfig; startedAt: Time;
     devMode: config.devMode)
 
 proc writeStatusFile(config: UserDaemonConfig; status: UserDaemonStatus) =
-  let path = config.stateDir / "status" /
-    (config.endpoint.extractFilename & ".status")
+  let path = statusPath(config)
   createDir(parentDir(path))
   writeFile(path,
     "role=" & status.role & "\n" &
@@ -192,9 +245,12 @@ proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
     shuttingDown = true
     socket.writeFrame(udkShutdownAck)
     logLine(config.logPath, "shutdown requested")
+  of udkSessions:
+    let sessions: seq[UserDaemonSession] = @[]
+    socket.writeFrame(udkSessionsResponse, sessionsBody(sessions))
   else:
     socket.writeFrame(udkError, errorBody(
-      "unsupported user-daemon message in M1 lifecycle server: " &
+      "unsupported user-daemon message in lifecycle server: " &
       $frame.kind))
 
 proc runUserDaemonForeground*(config: UserDaemonConfig): int =
@@ -215,6 +271,7 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
     except CatchableError:
       discard
 
+    discard cleanupStaleUserDaemonDiscovery(config)
     removeEndpointFiles(config)
     var listener = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
     defer:
@@ -256,29 +313,100 @@ proc siblingUserDaemonPath*(publicCliPath: string): string =
   else:
     addFileExt("repro-daemon", ExeExt)
 
-proc waitForUserDaemonStatus*(endpoint: string; timeoutMs = 60000):
-    UserDaemonStatus =
-  let deadline = epochTime() + float(timeoutMs) / 1000.0
-  while epochTime() < deadline:
-    let status = queryUserDaemonStatus(endpoint)
-    if status.running:
-      return status
-    sleep(25)
-  raise newException(UserDaemonRuntimeError,
-    "timed out waiting for repro-daemon at " & endpoint)
+proc launchdLabel(config: UserDaemonConfig): string =
+  "org.reprobuild.repro-daemon." &
+    safePathSegment(config.endpoint.extractFilename, "user")
 
-proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
-    UserDaemonStatus =
-  let existing = queryUserDaemonStatus(config.endpoint)
-  if existing.running:
-    return existing
-  let exe =
-    if config.daemonExe.len > 0: config.daemonExe
-    else: siblingUserDaemonPath(publicCliPath)
+proc launchdPlistPath(config: UserDaemonConfig): string =
+  config.stateDir / "launchd" / (launchdLabel(config) & ".plist")
+
+proc renderLaunchdUserAgentPlist*(exe: string; config: UserDaemonConfig):
+    string =
+  var args = @[exe, "--foreground", "--endpoint", config.endpoint,
+    "--state-dir", config.stateDir, "--log", config.logPath]
+  if config.devMode:
+    args.add("--dev")
+  result = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" &
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" " &
+    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" &
+    "<plist version=\"1.0\">\n<dict>\n" &
+    "  <key>Label</key>\n  <string>" & xmlEscape(launchdLabel(config)) &
+      "</string>\n" &
+    "  <key>ProgramArguments</key>\n  <array>\n"
+  for arg in args:
+    result.add("    <string>" & xmlEscape(arg) & "</string>\n")
+  result.add("  </array>\n" &
+    "  <key>RunAtLoad</key>\n  <true/>\n" &
+    "  <key>KeepAlive</key>\n  <false/>\n" &
+    "  <key>StandardOutPath</key>\n  <string>" &
+      xmlEscape(config.logPath) & "</string>\n" &
+    "  <key>StandardErrorPath</key>\n  <string>" &
+      xmlEscape(config.logPath) & "</string>\n" &
+    "</dict>\n</plist>\n")
+
+proc quoteCommand(args: openArray[string]): string =
+  var parts: seq[string] = @[]
+  for arg in args:
+    parts.add(quoteShell(arg))
+  parts.join(" ")
+
+proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
+  when defined(macosx):
+    try:
+      createDir(parentDir(launchdPlistPath(config)))
+      writeFile(launchdPlistPath(config), renderLaunchdUserAgentPlist(exe,
+        config))
+      let serviceTarget = "gui/" & $currentUid()
+      let bootstrap = execCmdEx(quoteCommand(["launchctl", "bootstrap",
+        serviceTarget, launchdPlistPath(config)]))
+      if bootstrap.exitCode == 0:
+        logLine(config.logPath, "launch requested backend=launchd label=" &
+          launchdLabel(config))
+        return true
+      let kickstart = execCmdEx(quoteCommand(["launchctl", "kickstart", "-k",
+        serviceTarget & "/" & launchdLabel(config)]))
+      if kickstart.exitCode == 0:
+        logLine(config.logPath, "launch requested backend=launchd-kickstart label=" &
+          launchdLabel(config))
+        return true
+      logLine(config.logPath, "launchd unavailable, falling back: " &
+        bootstrap.output.strip() & " " & kickstart.output.strip())
+    except CatchableError as err:
+      logLine(config.logPath, "launchd launch failed, falling back: " &
+        err.msg)
+    false
+  else:
+    false
+
+proc systemdUnitName(config: UserDaemonConfig): string =
+  "repro-daemon-" & safePathSegment(config.endpoint.extractFilename,
+    "user") & ".service"
+
+proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
+  when defined(linux):
+    try:
+      var args = @["systemd-run", "--user", "--unit=" & systemdUnitName(config),
+        "--collect", "--quiet", exe, "--foreground", "--endpoint",
+        config.endpoint, "--state-dir", config.stateDir, "--log",
+        config.logPath]
+      if config.devMode:
+        args.add("--dev")
+      let res = execCmdEx(quoteCommand(args))
+      if res.exitCode == 0:
+        logLine(config.logPath, "launch requested backend=systemd-user unit=" &
+          systemdUnitName(config))
+        return true
+      logLine(config.logPath, "systemd --user unavailable, falling back: " &
+        res.output.strip())
+    except CatchableError as err:
+      logLine(config.logPath, "systemd --user launch failed, falling back: " &
+        err.msg)
+    false
+  else:
+    false
+
+proc launchWithFork(exe: string; config: UserDaemonConfig) =
   when defined(posix):
-    createDir(parentDir(config.endpoint))
-    createDir(config.stateDir)
-    createDir(parentDir(config.logPath))
     let pid = fork()
     if pid < 0:
       raise newException(UserDaemonRuntimeError,
@@ -302,6 +430,50 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
       let cargv = allocCStringArray(argv)
       discard execv(cstring(exe), cargv)
       quit(127)
+    logLine(config.logPath, "launch requested backend=posix-fork pid=" &
+      $pid)
+
+proc cleanupPlatformBackgroundRegistration*(config: UserDaemonConfig) =
+  when defined(macosx):
+    if fileExists(launchdPlistPath(config)):
+      discard execCmdEx(quoteCommand(["launchctl", "bootout",
+        "gui/" & $currentUid() & "/" & launchdLabel(config)]))
+  elif defined(linux):
+    discard execCmdEx(quoteCommand(["systemctl", "--user", "stop",
+      systemdUnitName(config)]))
+
+proc waitForUserDaemonStatus*(endpoint: string; timeoutMs = 60000):
+    UserDaemonStatus =
+  let deadline = epochTime() + float(timeoutMs) / 1000.0
+  while epochTime() < deadline:
+    let status = queryUserDaemonStatus(endpoint)
+    if status.running:
+      return status
+    sleep(25)
+  raise newException(UserDaemonRuntimeError,
+    "timed out waiting for repro-daemon at " & endpoint)
+
+proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
+    UserDaemonStatus =
+  let existing = queryUserDaemonStatus(config.endpoint)
+  if existing.running:
+    return existing
+  discard cleanupStaleUserDaemonDiscovery(config)
+  let exe =
+    if config.daemonExe.len > 0: config.daemonExe
+    else: siblingUserDaemonPath(publicCliPath)
+  when defined(posix):
+    createDir(parentDir(config.endpoint))
+    createDir(config.stateDir)
+    createDir(parentDir(config.logPath))
+    when defined(macosx):
+      if not launchWithLaunchd(exe, config):
+        launchWithFork(exe, config)
+    elif defined(linux):
+      if not launchWithSystemdUser(exe, config):
+        launchWithFork(exe, config)
+    else:
+      launchWithFork(exe, config)
   else:
     var env = newStringTable()
     for key, value in envPairs():
@@ -342,6 +514,15 @@ proc renderUserDaemonLogs*(config: UserDaemonConfig): string =
   if not fileExists(config.logPath):
     return "repro daemon logs: no log file at " & config.logPath
   readFile(config.logPath)
+
+proc renderUserDaemonSessions*(sessions: openArray[UserDaemonSession]):
+    string =
+  if sessions.len == 0:
+    return "repro daemon sessions: none"
+  result = "repro daemon sessions: " & $sessions.len
+  for session in sessions:
+    result.add("\n" & session.sessionId & "\t" & session.mode & "\t" &
+      session.state & "\t" & session.projectRoot)
 
 proc parseUserDaemonConfigFlags*(args: seq[string];
                                  base = defaultUserDaemonConfig()):

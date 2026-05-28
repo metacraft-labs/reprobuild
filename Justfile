@@ -278,6 +278,16 @@ local-daemons-m1:
         tests/integration/t_local_daemons_control_plane_m1.nim \
         2>&1 | tee test-logs/local-daemons-m1.log
 
+local-daemons-m2:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m2 \
+        --out:build/test-bin/local_daemons_m2 \
+        tests/integration/t_local_daemons_control_plane_m2.nim \
+        2>&1 | tee test-logs/local-daemons-m2.log
+
 store-daemon-m66-dev:
     mkdir -p test-logs build/test-bin build/nimcache
     just build

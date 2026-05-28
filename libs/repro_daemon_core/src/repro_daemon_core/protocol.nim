@@ -9,7 +9,7 @@ const
   UserDaemonProtocolMajor* = 1'u16
   UserDaemonProtocolMinor* = 0'u16
   UserDaemonRole* = "repro-daemon/user"
-  UserDaemonFeatureFlags* = "lifecycle,status,logs,shutdown"
+  UserDaemonFeatureFlags* = "lifecycle,status,logs,shutdown,sessions"
   FrameMagic = "RBUD"
 
 type
@@ -20,6 +20,8 @@ type
     udkStatusResponse = 4
     udkShutdown = 5
     udkShutdownAck = 6
+    udkSessions = 7
+    udkSessionsResponse = 8
     udkError = 255
 
   BinaryIdentity* = object
@@ -44,6 +46,13 @@ type
     generation*: string
     activeSessionCount*: int
     devMode*: bool
+
+  UserDaemonSession* = object
+    sessionId*: string
+    projectRoot*: string
+    mode*: string
+    state*: string
+    startedAtUnix*: int64
 
 proc bytesOf(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -155,6 +164,20 @@ proc readBinaryIdentity(buf: openArray[byte]; pos: var int): BinaryIdentity =
   result.sizeBytes = buf.readI64(pos)
   result.mtimeUnix = buf.readI64(pos)
 
+proc writeSession(buf: var seq[byte]; session: UserDaemonSession) =
+  buf.writeString(session.sessionId)
+  buf.writeString(session.projectRoot)
+  buf.writeString(session.mode)
+  buf.writeString(session.state)
+  buf.writeI64(session.startedAtUnix)
+
+proc readSession(buf: openArray[byte]; pos: var int): UserDaemonSession =
+  result.sessionId = buf.readString(pos)
+  result.projectRoot = buf.readString(pos)
+  result.mode = buf.readString(pos)
+  result.state = buf.readString(pos)
+  result.startedAtUnix = buf.readI64(pos)
+
 proc writeFrame*(socket: Socket; kind: UserDaemonMessageKind;
                  body: openArray[byte] = []) =
   var frame: seq[byte] = @[]
@@ -259,6 +282,18 @@ proc parseStatusBody*(body: openArray[byte]): UserDaemonStatus =
   result.generation = body.readString(pos)
   result.activeSessionCount = int(body.readU32Le(pos))
   result.devMode = body.readBool(pos)
+
+proc sessionsBody*(sessions: openArray[UserDaemonSession]): seq[byte] =
+  result.writeU32Le(uint32(sessions.len))
+  for session in sessions:
+    result.writeSession(session)
+
+proc parseSessionsBody*(body: openArray[byte]): seq[UserDaemonSession] =
+  var pos = 0
+  let count = int(body.readU32Le(pos))
+  result = newSeq[UserDaemonSession](count)
+  for i in 0 ..< count:
+    result[i] = body.readSession(pos)
 
 proc errorBody*(message: string): seq[byte] =
   result.writeString(message)

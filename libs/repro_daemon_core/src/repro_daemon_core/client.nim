@@ -14,6 +14,23 @@ proc endpointExists(endpoint: string): bool =
   except OSError:
     false
 
+proc userDaemonEndpointExists*(endpoint: string): bool =
+  endpointExists(endpoint)
+
+proc userDaemonEndpointAcceptsConnections*(endpoint: string): bool =
+  when defined(posix):
+    if not endpointExists(endpoint):
+      return false
+    var socket = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
+    defer: socket.close()
+    try:
+      socket.connectUnix(endpoint)
+      true
+    except CatchableError:
+      false
+  else:
+    false
+
 proc connectUserDaemon*(endpoint = defaultUserDaemonEndpoint();
                         clientName = "repro";
                         commandMode = "daemon";
@@ -77,3 +94,16 @@ proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()) =
     raise newException(UserDaemonClientError, parseErrorBody(frame.body))
   raise newException(UserDaemonClientError,
     "unexpected user-daemon shutdown frame: " & $frame.kind)
+
+proc requestUserDaemonSessions*(endpoint = defaultUserDaemonEndpoint()):
+    seq[UserDaemonSession] =
+  var socket = connectUserDaemon(endpoint, commandMode = "sessions")
+  defer: socket.close()
+  socket.writeFrame(udkSessions)
+  let frame = socket.readFrame()
+  if frame.kind == udkSessionsResponse:
+    return parseSessionsBody(frame.body)
+  if frame.kind == udkError:
+    raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+  raise newException(UserDaemonClientError,
+    "unexpected user-daemon sessions frame: " & $frame.kind)
