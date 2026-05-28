@@ -114,3 +114,58 @@ suite "repro_core.dep_graph: topologicallyOrder":
     addEdge(g, 0, 2, edkImplicit)
     let emptyPath: seq[int] = @[]
     check traceCycle(g) == emptyPath
+
+suite "repro_core.paths: extendedPath separator collapse (Windows)":
+  # The Sandbox regression on 2026-05-28: home.nim's
+  # `shell.integration` resource declared `hostFile = "~/Documents/...".
+  # The home pipeline resolved `~` to `C:\Users\X\` (trailing `\`) and
+  # joined with the forward-slash relative path, producing
+  # `C:\Users\X\/Documents/...`. The original `extendedPath` did
+  # `.replace('/', '\\')` and prepended `\\?\` without collapsing the
+  # resulting `\\` mid-path. The `\\?\` namespace rejects non-canonical
+  # paths, so `createDir` silently failed and the subsequent atomic
+  # write to `<file>.repro.tmp` failed with "cannot open ...".
+
+  when defined(windows):
+    test "collapses '\\\\/' (backslash-slash) joining quirk":
+      # The exact failing shape from the Sandbox run. Verify the
+      # output has NO mid-path `\\` sequence (other than the leading
+      # `\\?\` prefix).
+      let result = extendedPath("C:\\Users\\X\\/Documents/PowerShell/foo.ps1")
+      check result.startsWith("\\\\?\\")
+      let body = result["\\\\?\\".len .. ^1]
+      check not body.contains("\\\\")
+      check body == "C:\\Users\\X\\Documents\\PowerShell\\foo.ps1"
+
+    test "collapses pre-existing '\\\\\\\\' (double backslash) mid-path":
+      # If the caller passed a path already containing `\\` mid-segment
+      # (e.g. from another buggy join), normalize it too.
+      let result = extendedPath("C:\\Users\\X\\\\Documents\\foo")
+      check result.startsWith("\\\\?\\")
+      let body = result["\\\\?\\".len .. ^1]
+      check not body.contains("\\\\")
+      check body == "C:\\Users\\X\\Documents\\foo"
+
+    test "clean Windows path is unchanged (modulo \\\\?\\ prefix)":
+      let result = extendedPath("C:\\Users\\X\\Documents\\foo.ps1")
+      check result == "\\\\?\\C:\\Users\\X\\Documents\\foo.ps1"
+
+    test "all-forward-slash input is converted + prefixed":
+      let result = extendedPath("C:/Users/X/Documents/foo.ps1")
+      check result == "\\\\?\\C:\\Users\\X\\Documents\\foo.ps1"
+
+    test "UNC input (\\\\\\\\server\\share) returned unchanged":
+      # The early-return for paths starting with `\\` preserves UNC
+      # paths verbatim — we don't want to prepend `\\?\` to them and we
+      # don't want to collapse their leading `\\`.
+      check extendedPath("\\\\server\\share\\file") ==
+        "\\\\server\\share\\file"
+
+    test "empty input returned unchanged":
+      check extendedPath("") == ""
+  else:
+    test "non-Windows: extendedPath is identity":
+      # POSIX has no MAX_PATH-prefix concern; the function is a pass-
+      # through and there is nothing to collapse.
+      check extendedPath("/home/x//docs///foo") == "/home/x//docs///foo"
+      check extendedPath("") == ""

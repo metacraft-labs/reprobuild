@@ -52,10 +52,20 @@ proc extendedPath*(path: string): string =
   ## store, compare, log, or pass it to a child process, because `\\?\`
   ## paths do not compare equal to (and are not understood the same way
   ## as) the ordinary form.
+  ##
+  ## The body collapses any internal `\\` that results from joining a
+  ## directory ending in `\\` with a path component beginning with `/`
+  ## (a common quirk on Windows when `~` resolves to `C:\Users\X\` and
+  ## the relative path uses forward slashes). The `\\?\` namespace is
+  ## strict-canonical — Windows rejects paths with `\\` mid-segment —
+  ## so this collapse is mandatory, not cosmetic.
   when defined(windows):
     if path.len == 0 or path.startsWith("\\\\"):
       path
     else:
-      "\\\\?\\" & absolutePath(path).replace('/', '\\')
+      var canonical = absolutePath(path).replace('/', '\\')
+      while "\\\\" in canonical:
+        canonical = canonical.replace("\\\\", "\\")
+      "\\\\?\\" & canonical
   else:
     path
