@@ -75,6 +75,19 @@ suite "attributeConvention: manifest detection":
     check attr.convention == "c-cpp-meson"
     removeDir(dir)
 
+  test "pom.xml ⇒ java-maven":
+    ## M40 — Maven manifest must attribute to ``java-maven``. Parallels
+    ## the M38/M39 tests above for CMakeLists.txt and meson.build.
+    let dir = makeScratch("maven")
+    writeFile(dir / "pom.xml",
+      "<?xml version=\"1.0\"?>\n" &
+      "<project><modelVersion>4.0.0</modelVersion>" &
+      "<groupId>g</groupId><artifactId>x</artifactId>" &
+      "<version>1.0</version></project>\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "java-maven"
+    removeDir(dir)
+
   test "*.nimble ⇒ nim":
     let dir = makeScratch("nimble")
     writeFile(dir / "mylib.nimble", "version = \"0.1.0\"\n")

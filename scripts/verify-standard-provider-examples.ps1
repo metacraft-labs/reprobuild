@@ -49,6 +49,7 @@
 #   c-cpp-autotools/hello-binary (when autotools toolchain available),
 #   c-cpp-cmake/hello-binary (M38; SKIP when cmake/ninja-or-make missing)
 #   c-cpp-meson/hello-binary  (M39; SKIP when meson/ninja missing)
+#   java-maven/hello-binary   (M40; SKIP when javac/mvn missing)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -142,6 +143,7 @@ $PopulatedExamples = @(
   'c-cpp-autotools/hello-binary',
   'c-cpp-cmake/hello-binary',
   'c-cpp-meson/hello-binary',
+  'java-maven/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -623,6 +625,63 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'ninja' not on PATH (M39 c-cpp-meson convention uses meson's default ninja backend)" }
       }
       return @{ Available = $true; Reason = "cc=$($ccCmd.Source); meson=$($mesonCmd.Source); ninja=$($ninjaCmd.Source)" }
+    }
+    'java-maven' {
+      # M40: the Java + Maven (Tier 2b) convention is registered. Probe
+      # for javac + mvn + java. The convention's ``recognize`` enforces
+      # javac + mvn; the validation script additionally needs ``java``
+      # to invoke the produced jar. The documented provisioning path is
+      # Adoptium JDK 21 LTS under ``D:/metacraft-dev-deps/jdk/21/`` and
+      # Apache Maven 3.9.x under ``D:/metacraft-dev-deps/maven/3.9.x/``.
+      $javacCmd = Get-Command javac -ErrorAction SilentlyContinue
+      if (-not $javacCmd) {
+        $jdkRoot = 'D:\metacraft-dev-deps\jdk'
+        if (Test-Path -LiteralPath $jdkRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $jdkRoot -Directory -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $verDir.FullName 'bin\javac.exe'
+            if (Test-Path -LiteralPath $candidate) {
+              $binDir = Split-Path -Parent $candidate
+              if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+                $env:PATH = "$binDir;$env:PATH"
+              }
+              $javacCmd = Get-Command javac -ErrorAction SilentlyContinue
+              break
+            }
+          }
+        }
+      }
+      if (-not $javacCmd) {
+        return @{ Available = $false; Reason = "'javac' not on PATH (install Adoptium JDK 21 LTS into D:/metacraft-dev-deps/jdk/21/)" }
+      }
+      $mvnCmd = Get-Command mvn -ErrorAction SilentlyContinue
+      if (-not $mvnCmd) {
+        $mavenRoot = 'D:\metacraft-dev-deps\maven'
+        if (Test-Path -LiteralPath $mavenRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $mavenRoot -Directory -ErrorAction SilentlyContinue) {
+            foreach ($candidate in @(
+              (Join-Path $verDir.FullName 'bin\mvn.cmd'),
+              (Join-Path $verDir.FullName 'bin\mvn'))) {
+              if (Test-Path -LiteralPath $candidate) {
+                $binDir = Split-Path -Parent $candidate
+                if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+                  $env:PATH = "$binDir;$env:PATH"
+                }
+                $mvnCmd = Get-Command mvn -ErrorAction SilentlyContinue
+                break
+              }
+            }
+            if ($mvnCmd) { break }
+          }
+        }
+      }
+      if (-not $mvnCmd) {
+        return @{ Available = $false; Reason = "'mvn' not on PATH (install Apache Maven 3.9.x into D:/metacraft-dev-deps/maven/3.9.x/)" }
+      }
+      $javaCmd = Get-Command java -ErrorAction SilentlyContinue
+      if (-not $javaCmd) {
+        return @{ Available = $false; Reason = "'java' not on PATH (need the JRE to run the produced jar)" }
+      }
+      return @{ Available = $true; Reason = "javac=$($javacCmd.Source); mvn=$($mvnCmd.Source); java=$($javaCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -1488,6 +1547,24 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir '.repro\build\meson\hello.exe'
         Greeting = 'hello from c-cpp-meson-hello-binary'
+      })
+    }
+    'java-maven/hello-binary' {
+      # M40: java-maven/hello-binary. The convention emits a single
+      # ``mvn package -o -q -f <pom>`` action that produces
+      # ``target/<artifactId>-<version>.jar`` under the project root.
+      # The fixture pins ``artifactId=hello`` + ``version=1.0`` so the
+      # jar lands at ``target/hello-1.0.jar``. No direct ``.exe`` to
+      # run; the harness asserts the jar exists. The greeting check
+      # runs via the dedicated validation script
+      # ``validate-standard-provider-java-maven-hello-binary.ps1``
+      # which invokes ``java -jar`` after the build — checking the
+      # greeting from the harness would need a separate jar-launch
+      # path, which the harness's ``Greeting`` field doesn't support
+      # (it execs the produced binary directly).
+      return @(@{
+        Path     = Join-Path $fixtureDir 'target\hello-1.0.jar'
+        Greeting = $null
       })
     }
     'c-cpp-mode3/binary-with-library' {

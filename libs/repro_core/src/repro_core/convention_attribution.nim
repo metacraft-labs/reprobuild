@@ -110,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[16, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[17, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -124,6 +124,7 @@ const
     ("Makefile.am",        "c-cpp-autotools"),
     ("CMakeLists.txt",     "c-cpp-cmake"),
     ("meson.build",        "c-cpp-meson"),
+    ("pom.xml",            "java-maven"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -133,7 +134,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[19, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[20, tuple[ext, convention: string]] = [
     (".nim",  "nim"),
     (".rs",   "rust"),
     (".go",   "go"),
@@ -149,6 +150,7 @@ const
     (".cpp",  "c-cpp-make"),
     (".cxx",  "c-cpp-make"),
     (".h",    "c-cpp-make"),
+    (".java", "java-maven"),
     (".f90",  "fortran-direct"),
     (".f95",  "fortran-direct"),
     (".f03",  "fortran-direct"),

@@ -5918,6 +5918,7 @@ const
     "c-cpp-cmake",
     "c-cpp-meson",
     "c-cpp-make",
+    "java-maven",
     "c-cpp-direct",
     "rust-direct",
     "go-direct",

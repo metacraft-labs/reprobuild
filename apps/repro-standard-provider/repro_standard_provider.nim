@@ -38,6 +38,7 @@ import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
 import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_convention
 import repro_standard_provider/conventions/c_cpp_cmake as c_cpp_cmake_convention
 import repro_standard_provider/conventions/c_cpp_meson as c_cpp_meson_convention
+import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/project_intro
@@ -185,6 +186,17 @@ when defined(reproProviderMode):
   # build.
   addDefaultConvention(c_cpp_meson_convention.cCppMesonConvention())
   addDefaultConvention(c_cpp_make_convention.cCppMakeConvention())
+  # java_maven (M40) — first JVM-ecosystem Tier 2b convention. Keys on
+  # ``pom.xml`` at the project root; no overlap with the C/C++
+  # conventions above (none of them recognise ``pom.xml``). Registration
+  # position is alphabetical-by-language ('j' after 'c') but the
+  # position has no recognition consequence — the convention's
+  # recognition gate is closed-set on ``pom.xml`` presence + a
+  # ``mvn``/``maven`` + ``java``/``jdk`` ``uses:`` declaration. Defers
+  # to a future Gradle convention (M41) when both ``pom.xml`` AND
+  # ``build.gradle[.kts]`` are present at the root (unusual but legal —
+  # the Maven convention's ``recognize`` rejects in that case).
+  addDefaultConvention(java_maven_convention.javaMavenConvention())
   # c_cpp_direct (Mode 3 / no-Makefile) is registered LAST among the
   # C/C++ conventions so a project shipping a Makefile routes through
   # the Make convention first; Mode 3 picks up the no-Makefile case

@@ -977,6 +977,7 @@ const
     "node", "typescript", "tsx", "swc", "esbuild",
     "gcc", "clang", "make", "ar", "autoconf", "automake",
     "cmake", "ninja", "meson",
+    "java", "jdk", "javac", "mvn", "maven",
     "gfortran", "fortran"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
@@ -997,6 +998,10 @@ const
     ## convention which keys on ``CMakeLists.txt`` at the project root.
     ## ``"meson"`` (M39) routes to the C/C++ Meson (Tier 2b) convention
     ## which keys on ``meson.build`` at the project root.
+    ## ``"java"`` / ``"jdk"`` / ``"javac"`` / ``"mvn"`` / ``"maven"`` (M40)
+    ## route to the Java + Maven (Tier 2b) convention which keys on
+    ## ``pom.xml`` at the project root; recognition additionally requires
+    ## both halves (a JDK token AND a Maven token) in ``uses:``.
     ## Mismatches break in the engine-side fall-back path:
     ## the engine will dispatch to the provider, the provider will reply
     ## "no convention matched", and the build fails loudly — preferable to
