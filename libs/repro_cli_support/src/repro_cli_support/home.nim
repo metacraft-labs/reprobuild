@@ -9,9 +9,9 @@
 ##   - A new `repro home apply` subcommand runs the pipeline directly.
 ##   - `add`, `remove`, `enable`, `disable` run the apply pipeline
 ##     inline after a successful edit unless `--no-apply` was passed.
-##   - `--now` on `enable`/`disable` is now the default behaviour (no
-##     extra effect); combining it with `--host <name>` is rejected
-##     because remote apply is deferred to M71.
+##   - `--now` on current-host `enable`/`disable` is the default local
+##     apply behaviour. `--host <name>` without `--now` is a pure
+##     intent edit; `--host <name> --now` drives M71 remote apply.
 ##
 ## ## Package-catalog lookup seam
 ##
@@ -193,6 +193,29 @@ proc parseFlagValue(args: openArray[string]; i: var int;
   if cur.startsWith(flag & "="):
     return cur[flag.len + 1 .. ^1]
   raise newException(ValueError, "internal: parseFlagValue called for " & flag)
+
+proc parseCliBool(raw, flag: string): bool =
+  case raw.toLowerAscii()
+  of "1", "true", "yes", "on":
+    true
+  of "0", "false", "no", "off":
+    false
+  else:
+    raise newException(ValueError,
+      "expected boolean value for " & flag & ", got '" & raw & "'")
+
+proc normalizeTargetPlatform(raw: string): string =
+  let p = raw.toLowerAscii()
+  if p notin ["linux", "macos", "windows", "bsd"]:
+    raise newException(ValueError,
+      "unsupported --target-platform '" & raw & "'")
+  p
+
+proc normalizeTargetArch(raw: string): string =
+  let a = raw.toLowerAscii()
+  if a notin ["x86_64", "arm64", "arm32"]:
+    raise newException(ValueError, "unsupported --target-arch '" & raw & "'")
+  a
 
 # ---------------------------------------------------------------------------
 # M83 Phase D + F3: compile-then-adapt path for `home.nim` profiles.
@@ -672,14 +695,39 @@ proc currentHostActivities(prof: Profile; host: string): seq[string] =
       return entry.hostActivities
   @[]
 
+type
+  RemoteApplyFlags = object
+    remoteRepro: string
+    targetStoreRoot: string
+    targetStateDir: string
+    targetHomeDir: string
+    sshPath: string
+    sshOptions: seq[string]
+    port: int
+    targetPlatform: string
+    targetArch: string
+    targetWslGiven: bool
+    targetWsl: bool
+
+  EnableDisableFlags = object
+    activity: string
+    host: string
+    now: bool
+    noApply: bool
+    hostGiven: bool
+    ok: bool
+    exitCode: int
+    remote: RemoteApplyFlags
+
 proc parseEnableDisableFlags(name: string; args: openArray[string]):
-    tuple[activity, host: string; now, noApply, hostGiven, ok: bool;
-          exitCode: int] =
+    EnableDisableFlags =
   result.now = false
   result.noApply = false
   result.hostGiven = false
   result.ok = false
   result.exitCode = 2
+  result.remote.remoteRepro = "repro"
+  result.remote.sshPath = "ssh"
   var positional = ""
   var hostOverride = ""
   var i = 0
@@ -692,6 +740,52 @@ proc parseEnableDisableFlags(name: string; args: openArray[string]):
       result.now = true
     elif a == "--no-apply":
       result.noApply = true
+    elif a == "--remote-repro" or a.startsWith("--remote-repro="):
+      result.remote.remoteRepro = parseFlagValue(args, i, "--remote-repro")
+    elif a == "--target-store-root" or a.startsWith("--target-store-root="):
+      result.remote.targetStoreRoot = parseFlagValue(args, i,
+        "--target-store-root")
+    elif a == "--target-state-dir" or a.startsWith("--target-state-dir="):
+      result.remote.targetStateDir = parseFlagValue(args, i,
+        "--target-state-dir")
+    elif a == "--target-home-dir" or a.startsWith("--target-home-dir="):
+      result.remote.targetHomeDir = parseFlagValue(args, i,
+        "--target-home-dir")
+    elif a == "--ssh" or a.startsWith("--ssh="):
+      result.remote.sshPath = parseFlagValue(args, i, "--ssh")
+    elif a == "--port" or a.startsWith("--port="):
+      try:
+        result.remote.port = parseInt(parseFlagValue(args, i, "--port"))
+      except ValueError as err:
+        stderr.writeLine("repro home " & name & ": " & err.msg)
+        return
+    elif a == "--ssh-option" or a.startsWith("--ssh-option="):
+      result.remote.sshOptions.add(parseFlagValue(args, i, "--ssh-option"))
+    elif a == "--target-platform" or a.startsWith("--target-platform="):
+      try:
+        result.remote.targetPlatform = normalizeTargetPlatform(
+          parseFlagValue(args, i, "--target-platform"))
+      except ValueError as err:
+        stderr.writeLine("repro home " & name & ": " & err.msg)
+        return
+    elif a == "--target-arch" or a.startsWith("--target-arch="):
+      try:
+        result.remote.targetArch = normalizeTargetArch(parseFlagValue(args, i,
+          "--target-arch"))
+      except ValueError as err:
+        stderr.writeLine("repro home " & name & ": " & err.msg)
+        return
+    elif a == "--target-wsl":
+      result.remote.targetWsl = true
+      result.remote.targetWslGiven = true
+    elif a.startsWith("--target-wsl="):
+      try:
+        result.remote.targetWsl = parseCliBool(a["--target-wsl=".len .. ^1],
+          "--target-wsl")
+        result.remote.targetWslGiven = true
+      except ValueError as err:
+        stderr.writeLine("repro home " & name & ": " & err.msg)
+        return
     elif a.startsWith("--"):
       stderr.writeLine("repro home " & name & ": unknown flag: " & a)
       return
@@ -703,7 +797,11 @@ proc parseEnableDisableFlags(name: string; args: openArray[string]):
     inc i
   if positional.len == 0:
     stderr.writeLine("usage: repro home " & name &
-      " <activity> [--host NAME] [--now] [--no-apply]")
+      " <activity> [--host NAME] [--now] [--no-apply] " &
+      "[--remote-repro PATH] [--target-store-root PATH] " &
+      "[--target-state-dir PATH] [--target-home-dir PATH] [--ssh PATH] " &
+      "[--port N] [--ssh-option OPT] [--target-platform PLATFORM] " &
+      "[--target-arch ARCH] [--target-wsl[=true|false]]")
     return
   result.activity = positional
   result.host = if hostOverride.len > 0: hostOverride else: currentHost()
@@ -721,19 +819,18 @@ proc refuseDefaultGuard(name, activity: string): bool =
     return true
   false
 
+proc runRemoteApplyAfterEdit(name: string; parsed: EnableDisableFlags): int
+
 proc runHomeEnable(args: openArray[string]): int =
-  let parsed = parseEnableDisableFlags("enable", args)
+  var parsed: EnableDisableFlags
+  try:
+    parsed = parseEnableDisableFlags("enable", args)
+  except ValueError as err:
+    stderr.writeLine("repro home enable: " & err.msg)
+    return 2
   if not parsed.ok:
     return parsed.exitCode
   if refuseDefaultGuard("enable", parsed.activity):
-    return 1
-  # M63: `--now` + `--host <name>` requests remote apply. Remote apply
-  # is deferred to M71; reject the combination with a clear pointer.
-  if parsed.hostGiven and parsed.now and parsed.host != currentHost():
-    stderr.writeLine("repro home enable: --now combined with --host '" &
-      parsed.host & "' requests remote apply, which is deferred to M71. " &
-      "Run the command on '" & parsed.host & "' directly, or omit --host " &
-      "to apply locally.")
     return 1
   try:
     let profilePath = loadProfilePath()
@@ -751,20 +848,23 @@ proc runHomeEnable(args: openArray[string]): int =
     return 1
   if parsed.noApply:
     return 0
+  if parsed.hostGiven and parsed.host != currentHost():
+    if parsed.now:
+      return runRemoteApplyAfterEdit("enable", parsed)
+    return 0
   # M63: apply runs by default after a successful intent edit.
   return runApplyInline("enable")
 
 proc runHomeDisable(args: openArray[string]): int =
-  let parsed = parseEnableDisableFlags("disable", args)
+  var parsed: EnableDisableFlags
+  try:
+    parsed = parseEnableDisableFlags("disable", args)
+  except ValueError as err:
+    stderr.writeLine("repro home disable: " & err.msg)
+    return 2
   if not parsed.ok:
     return parsed.exitCode
   if refuseDefaultGuard("disable", parsed.activity):
-    return 1
-  if parsed.hostGiven and parsed.now and parsed.host != currentHost():
-    stderr.writeLine("repro home disable: --now combined with --host '" &
-      parsed.host & "' requests remote apply, which is deferred to M71. " &
-      "Run the command on '" & parsed.host & "' directly, or omit --host " &
-      "to apply locally.")
     return 1
   try:
     let profilePath = loadProfilePath()
@@ -783,6 +883,10 @@ proc runHomeDisable(args: openArray[string]): int =
     stderr.writeLine("repro home disable: error: " & e.msg)
     return 1
   if parsed.noApply:
+    return 0
+  if parsed.hostGiven and parsed.host != currentHost():
+    if parsed.now:
+      return runRemoteApplyAfterEdit("disable", parsed)
     return 0
   return runApplyInline("disable")
 
@@ -1117,14 +1221,7 @@ proc bytesToString(bytes: openArray[byte]): string =
     result[i] = char(b)
 
 proc parseBundleTargetBool(raw: string): bool =
-  case raw.toLowerAscii()
-  of "1", "true", "yes", "on":
-    true
-  of "0", "false", "no", "off":
-    false
-  else:
-    raise newException(ValueError,
-      "expected boolean value for --target-wsl, got '" & raw & "'")
+  parseCliBool(raw, "--target-wsl")
 
 proc runHomeBuildBundle(args: openArray[string]): int =
   ## Internal M71 command. Phase A bundles an already-realized local
@@ -1213,17 +1310,9 @@ proc runHomeBuildBundle(args: openArray[string]): int =
       if targetHost.len > 0:
         ctx.host = targetHost
       if targetPlatform.len > 0:
-        let p = targetPlatform.toLowerAscii()
-        if p notin ["linux", "macos", "windows", "bsd"]:
-          raise newException(ValueError,
-            "unsupported --target-platform '" & targetPlatform & "'")
-        ctx.platform = p
+        ctx.platform = normalizeTargetPlatform(targetPlatform)
       if targetArch.len > 0:
-        let a = targetArch.toLowerAscii()
-        if a notin ["x86_64", "arm64", "arm32"]:
-          raise newException(ValueError,
-            "unsupported --target-arch '" & targetArch & "'")
-        ctx.arch = a
+        ctx.arch = normalizeTargetArch(targetArch)
       if targetWslGiven:
         ctx.isWsl = targetWsl
         if targetWsl and targetPlatform.len == 0:
@@ -1431,6 +1520,267 @@ proc fieldValueLoose(output, name: string): string =
       return line[prefix.len .. ^1].strip()
   ""
 
+type
+  ERemoteTransferFailed = object of CatchableError
+
+  TransferBundleOptions = object
+    bundleDigestHex: string
+    storeRoot: string
+    target: string
+    remoteRepro: string
+    targetStoreRoot: string
+    sshPath: string
+    sshOptions: seq[string]
+    port: int
+
+  TransferBundleResult = object
+    transferStatus: string
+    bundleDigestHex: string
+    targetBundlePath: string
+    prefixesImported: string
+    prefixesAlreadyPresent: string
+    bytesReceived: string
+
+proc raiseRemoteTransfer(msg: string) {.noreturn.} =
+  raise newException(ERemoteTransferFailed, msg)
+
+proc transferActivationBundle(opts: TransferBundleOptions):
+    TransferBundleResult =
+  let bundleDigest = parsePrefixIdHex(opts.bundleDigestHex)
+  let resolvedStoreRoot = resolveStoreRoot(opts.storeRoot)
+  var store = openStore(resolvedStoreRoot)
+  defer:
+    try: store.close() except CatchableError: discard
+  let bundleBytes = store.readCasBlob(bundleDigest)
+  let bundle = decodeActivationBundleBytes(bundleBytes,
+    store.casPath(bundleDigest))
+
+  var queryExtra = @["--query", opts.bundleDigestHex]
+  for prefix in bundle.prefixes:
+    queryExtra.add("--query-prefix")
+    queryExtra.add(prefixIdHex(prefix.prefixId))
+  let query = sshRun(opts.sshPath, opts.target, opts.port, opts.sshOptions,
+    remoteReceiveCommand(opts.remoteRepro, opts.targetStoreRoot, queryExtra))
+  if query.exitCode != 0:
+    raiseRemoteTransfer("target query failed:\n" & query.output)
+
+  let bundlePresent = fieldValueLoose(query.output, "bundlePresent") == "true"
+  let targetBundlePath = fieldValueLoose(query.output, "targetBundlePath")
+  var receiveExtra: seq[string]
+  receiveExtra.add("--expected-digest")
+  receiveExtra.add(opts.bundleDigestHex)
+  result.transferStatus =
+    if bundlePresent:
+      if targetBundlePath.len == 0:
+        raise newException(ValueError,
+          "target query did not return targetBundlePath")
+      receiveExtra.add("--bundle")
+      receiveExtra.add(targetBundlePath)
+      "already-present"
+    else:
+      "sent"
+  let input = if bundlePresent: "" else: bytesToString(bundleBytes)
+  let recv = sshRun(opts.sshPath, opts.target, opts.port, opts.sshOptions,
+    remoteReceiveCommand(opts.remoteRepro, opts.targetStoreRoot, receiveExtra),
+    input)
+  if recv.exitCode != 0:
+    raiseRemoteTransfer("target receive failed:\n" & recv.output)
+
+  let recvTargetPath = fieldValueLoose(recv.output, "targetBundlePath")
+  result.bundleDigestHex = opts.bundleDigestHex.toLowerAscii()
+  result.targetBundlePath =
+    if recvTargetPath.len > 0: recvTargetPath else: targetBundlePath
+  result.prefixesImported = fieldValueLoose(recv.output, "prefixesImported")
+  result.prefixesAlreadyPresent = fieldValueLoose(recv.output,
+    "prefixesAlreadyPresent")
+  result.bytesReceived = if bundlePresent: "0" else: $bundleBytes.len
+
+proc renderTransferResult(res: TransferBundleResult) =
+  echo "transferStatus: " & res.transferStatus
+  echo "bundleDigest: " & res.bundleDigestHex
+  echo "targetBundlePath: " & res.targetBundlePath
+  echo "prefixesImported: " & res.prefixesImported
+  echo "prefixesAlreadyPresent: " & res.prefixesAlreadyPresent
+  echo "bytesReceived: " & res.bytesReceived
+
+type
+  RemoteBuildResult = object
+    localGenerationId: string
+    bundleDigestHex: string
+    bundlePath: string
+    sourceStateDir: string
+    sourceStoreRoot: string
+
+proc remoteApplyTargetContext(parsed: EnableDisableFlags): HostContext =
+  result = currentHostContext()
+  result.host = parsed.host
+  if parsed.remote.targetPlatform.len > 0:
+    result.platform = parsed.remote.targetPlatform
+  if parsed.remote.targetArch.len > 0:
+    result.arch = parsed.remote.targetArch
+  if parsed.remote.targetWslGiven:
+    result.isWsl = parsed.remote.targetWsl
+    if parsed.remote.targetWsl and parsed.remote.targetPlatform.len == 0:
+      result.platform = "linux"
+
+proc validateRemoteApplyPreflight(name: string;
+                                  parsed: EnableDisableFlags;
+                                  targetCtx: HostContext): int =
+  if parsed.remote.targetStoreRoot.len == 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-store-root is required for --host --now")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
+  if parsed.remote.targetStateDir.len == 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-state-dir is required for --host --now")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
+  if parsed.remote.targetHomeDir.len == 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-home-dir is required for this remote apply " &
+      "implementation; refusing to evaluate against the source HOME")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
+
+  let sourceCtx = currentHostContext()
+  if targetCtx.platform != sourceCtx.platform:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: target platform '" & targetCtx.platform & "' differs from " &
+      "source platform '" & sourceCtx.platform & "', and no cross-builder " &
+      "capability is configured")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("sourcePlatform: " & sourceCtx.platform)
+    stderr.writeLine("targetPlatform: " & targetCtx.platform)
+    stderr.writeLine("missingCapability: cross-builder")
+    stderr.writeLine("localIntentStatus: preserved")
+    stderr.writeLine("hint: run the apply on the target host or configure " &
+      "a cross-builder before retrying")
+    return 1
+  0
+
+proc buildRemoteApplyBundle(parsed: EnableDisableFlags;
+                            targetCtx: HostContext): RemoteBuildResult =
+  result.sourceStateDir = resolveStateDir()
+  result.sourceStoreRoot = resolveStoreRoot()
+  var applyOpts: ApplyOptions
+  applyOpts.stateDir = result.sourceStateDir
+  applyOpts.storeRoot = result.sourceStoreRoot
+  applyOpts.homeDir = parsed.remote.targetHomeDir
+  applyOpts.host = parsed.host
+  applyOpts.targetContext = targetCtx
+  applyOpts.hasTargetContext = true
+  applyOpts.recordOnlyGeneratedFiles = true
+  let applied = runApply(applyOpts)
+  result.localGenerationId = applied.generationIdHex
+  var store = openStore(result.sourceStoreRoot)
+  defer:
+    try: store.close() except CatchableError: discard
+  let bundle = writeActivationBundle(result.sourceStateDir, store,
+    result.localGenerationId)
+  result.bundleDigestHex = bundle.bundleDigestHex
+  result.bundlePath = bundle.bundlePath
+
+proc remoteActivateCommand(remoteRepro, targetStoreRoot, targetStateDir,
+                           bundleDigestHex: string): string =
+  let parts = @[remoteRepro, "home", "__remote-activate",
+    "--store-root", targetStoreRoot,
+    "--state-dir", targetStateDir,
+    "--bundle-digest", bundleDigestHex]
+  for idx, part in parts:
+    if idx > 0:
+      result.add(" ")
+    result.add(quoteShell(part))
+
+proc printRemoteApplyFailure(name, phase, message: string;
+                             parsed: EnableDisableFlags;
+                             built: RemoteBuildResult;
+                             transferred: TransferBundleResult) =
+  stderr.writeLine("repro home " & name & ": remote apply phase '" & phase &
+    "' failed for target '" & parsed.host & "'")
+  stderr.writeLine("remoteApplyStatus: failed")
+  stderr.writeLine("remoteApplyPhase: " & phase)
+  stderr.writeLine("targetHost: " & parsed.host)
+  stderr.writeLine("localIntentStatus: preserved")
+  if built.localGenerationId.len > 0:
+    stderr.writeLine("localGenerationId: " & built.localGenerationId)
+  if built.bundleDigestHex.len > 0:
+    stderr.writeLine("bundleDigest: " & built.bundleDigestHex)
+  if built.bundlePath.len > 0:
+    stderr.writeLine("bundlePath: " & built.bundlePath)
+  if transferred.targetBundlePath.len > 0:
+    stderr.writeLine("targetBundlePath: " & transferred.targetBundlePath)
+  if transferred.transferStatus.len > 0:
+    stderr.writeLine("transferStatus: " & transferred.transferStatus)
+  stderr.writeLine("retryContext: rerun the same `repro home " & name & " " &
+    parsed.activity & " --host " & parsed.host & " --now` command after " &
+    "fixing the " & phase & " failure")
+  if message.len > 0:
+    stderr.writeLine(message)
+
+proc runRemoteApplyAfterEdit(name: string; parsed: EnableDisableFlags): int =
+  let targetCtx = remoteApplyTargetContext(parsed)
+  let preflight = validateRemoteApplyPreflight(name, parsed, targetCtx)
+  if preflight != 0:
+    return preflight
+
+  var built: RemoteBuildResult
+  try:
+    built = buildRemoteApplyBundle(parsed, targetCtx)
+  except CatchableError as err:
+    printRemoteApplyFailure(name, "build", err.msg, parsed, built,
+      TransferBundleResult())
+    return 1
+
+  var transferred: TransferBundleResult
+  try:
+    transferred = transferActivationBundle(TransferBundleOptions(
+      bundleDigestHex: built.bundleDigestHex,
+      storeRoot: built.sourceStoreRoot,
+      target: parsed.host,
+      remoteRepro: parsed.remote.remoteRepro,
+      targetStoreRoot: parsed.remote.targetStoreRoot,
+      sshPath: parsed.remote.sshPath,
+      sshOptions: parsed.remote.sshOptions,
+      port: parsed.remote.port))
+  except CatchableError as err:
+    printRemoteApplyFailure(name, "transfer", err.msg, parsed, built,
+      transferred)
+    return 1
+
+  let activate = sshRun(parsed.remote.sshPath, parsed.host,
+    parsed.remote.port, parsed.remote.sshOptions,
+    remoteActivateCommand(parsed.remote.remoteRepro,
+      parsed.remote.targetStoreRoot, parsed.remote.targetStateDir,
+      built.bundleDigestHex))
+  if activate.exitCode != 0:
+    printRemoteApplyFailure(name, "activate", activate.output, parsed, built,
+      transferred)
+    return 1
+
+  echo "remoteApplyStatus: activated"
+  echo "targetHost: " & parsed.host
+  echo "localGenerationId: " & built.localGenerationId
+  echo "bundleDigest: " & built.bundleDigestHex
+  echo "bundlePath: " & built.bundlePath
+  echo "transferStatus: " & transferred.transferStatus
+  echo "targetBundlePath: " & transferred.targetBundlePath
+  echo "remoteGenerationId: " & fieldValueLoose(activate.output,
+    "generationId")
+  echo "targetCurrent: " & fieldValueLoose(activate.output, "current")
+  return 0
+
 proc runHomeTransferBundle(args: openArray[string]): int =
   var bundleDigestHex = ""
   var storeRoot = ""
@@ -1485,60 +1835,20 @@ proc runHomeTransferBundle(args: openArray[string]): int =
     return 2
 
   try:
-    let bundleDigest = parsePrefixIdHex(bundleDigestHex)
-    let resolvedStoreRoot = resolveStoreRoot(storeRoot)
-    var store = openStore(resolvedStoreRoot)
-    defer:
-      try: store.close() except CatchableError: discard
-    let bundleBytes = store.readCasBlob(bundleDigest)
-    let bundle = decodeActivationBundleBytes(bundleBytes,
-      store.casPath(bundleDigest))
-
-    var queryExtra = @["--query", bundleDigestHex]
-    for prefix in bundle.prefixes:
-      queryExtra.add("--query-prefix")
-      queryExtra.add(prefixIdHex(prefix.prefixId))
-    let query = sshRun(sshPath, target, port, sshOptions,
-      remoteReceiveCommand(remoteRepro, targetStoreRoot, queryExtra))
-    if query.exitCode != 0:
-      stderr.writeLine("repro home __transfer-bundle: target query failed:")
-      stderr.write(query.output)
-      return 1
-
-    let bundlePresent = fieldValueLoose(query.output, "bundlePresent") == "true"
-    let targetBundlePath = fieldValueLoose(query.output, "targetBundlePath")
-    var receiveExtra: seq[string]
-    receiveExtra.add("--expected-digest")
-    receiveExtra.add(bundleDigestHex)
-    let transferStatus =
-      if bundlePresent:
-        if targetBundlePath.len == 0:
-          raise newException(ValueError,
-            "target query did not return targetBundlePath")
-        receiveExtra.add("--bundle")
-        receiveExtra.add(targetBundlePath)
-        "already-present"
-      else:
-        "sent"
-    let input = if bundlePresent: "" else: bytesToString(bundleBytes)
-    let recv = sshRun(sshPath, target, port, sshOptions,
-      remoteReceiveCommand(remoteRepro, targetStoreRoot, receiveExtra), input)
-    if recv.exitCode != 0:
-      stderr.writeLine("repro home __transfer-bundle: target receive failed:")
-      stderr.write(recv.output)
-      return 1
-
-    echo "transferStatus: " & transferStatus
-    echo "bundleDigest: " & bundleDigestHex.toLowerAscii()
-    let recvTargetPath = fieldValueLoose(recv.output, "targetBundlePath")
-    echo "targetBundlePath: " &
-      (if recvTargetPath.len > 0: recvTargetPath else: targetBundlePath)
-    echo "prefixesImported: " & fieldValueLoose(recv.output,
-      "prefixesImported")
-    echo "prefixesAlreadyPresent: " & fieldValueLoose(recv.output,
-      "prefixesAlreadyPresent")
-    echo "bytesReceived: " & (if bundlePresent: "0" else: $bundleBytes.len)
+    let res = transferActivationBundle(TransferBundleOptions(
+      bundleDigestHex: bundleDigestHex,
+      storeRoot: storeRoot,
+      target: target,
+      remoteRepro: remoteRepro,
+      targetStoreRoot: targetStoreRoot,
+      sshPath: sshPath,
+      sshOptions: sshOptions,
+      port: port))
+    renderTransferResult(res)
     return 0
+  except ERemoteTransferFailed as err:
+    stderr.writeLine("repro home __transfer-bundle: " & err.msg)
+    return 1
   except StoreError as err:
     stderr.writeLine("repro home __transfer-bundle: store error: " & err.msg)
     return 1
@@ -1663,9 +1973,9 @@ proc ensurePointerPrefixesPresent(store: Store; envelope: PointerEnvelope) =
       raiseRemoteActivation("realized prefix " & prefixIdHex(key) &
         " is indexed but missing on disk at " & abs)
 
-proc loadCurrentGeneratedFileDigests(stateDir: string; store: Store):
-    Table[string, Digest256] =
-  result = initTable[string, Digest256]()
+proc loadCurrentGeneratedFiles(stateDir: string; store: Store):
+    Table[string, GeneratedFile] =
+  result = initTable[string, GeneratedFile]()
   let active = readCurrentGenerationId(stateDir)
   if active.len == 0:
     return
@@ -1675,7 +1985,13 @@ proc loadCurrentGeneratedFileDigests(stateDir: string; store: Store):
   let manifest = decodeManifestBytes(manifestBytes,
     "current generation " & active & " activation manifest")
   for gf in manifest.generatedFiles:
-    result[gf.absoluteOutputPath] = gf.postWriteDigest
+    result[gf.absoluteOutputPath] = gf
+
+proc currentGeneratedFileDigests(stateDir: string; store: Store):
+    Table[string, Digest256] =
+  result = initTable[string, Digest256]()
+  for path, gf in loadCurrentGeneratedFiles(stateDir, store):
+    result[path] = gf.postWriteDigest
 
 proc fileDigestForActivation(path: string): Digest256 =
   digestBytesForActivation(readBinaryFile(path))
@@ -1702,7 +2018,7 @@ proc atomicWriteActivationBytes(path: string; content: openArray[byte]) =
 
 proc materializeOwnedGeneratedFiles(store: Store; stateDir: string;
                                     manifest: ActivationManifest): int =
-  let currentDigests = loadCurrentGeneratedFileDigests(stateDir, store)
+  let currentDigests = currentGeneratedFileDigests(stateDir, store)
   for gf in manifest.generatedFiles:
     let content = store.readCasBlob(keyFromDigest(gf.storeContentHash))
     if digestBytesForActivation(content) != gf.postWriteDigest:
@@ -1726,6 +2042,32 @@ proc materializeOwnedGeneratedFiles(store: Store; stateDir: string;
       raiseRemoteActivation("generated file post-write digest mismatch at " &
         gf.absoluteOutputPath)
     inc result
+
+proc removeRetiredOwnedGeneratedFiles(store: Store; stateDir: string;
+                                      manifest: ActivationManifest): int =
+  let currentFiles = loadCurrentGeneratedFiles(stateDir, store)
+  if currentFiles.len == 0:
+    return
+  var nextPaths = initHashSet[string]()
+  for gf in manifest.generatedFiles:
+    nextPaths.incl gf.absoluteOutputPath
+  for path, old in currentFiles:
+    if path in nextPaths:
+      continue
+    if old.ownershipPolicy != gfoOwned:
+      raiseRemoteActivation("remote activation cannot retire non-owned " &
+        "generated file from current generation: " & path)
+    if fileExists(extendedPath(path)):
+      let live = fileDigestForActivation(path)
+      if live != old.postWriteDigest:
+        raiseRemoteActivation("generated file drift at " & path &
+          "; live bytes no longer match the current generation")
+      try:
+        removeFile(extendedPath(path))
+      except OSError as err:
+        raiseRemoteActivation("could not remove retired generated file " &
+          path & ": " & err.msg)
+      inc result
 
 proc isSafeLauncherName(name: string): bool =
   if name.len == 0 or name == "." or name == "..":
@@ -1901,6 +2243,8 @@ proc runHomeRemoteActivate(args: openArray[string]): int =
         payload.generationIdHex, payload.manifest)
       let generatedFilesMaterialized = materializeOwnedGeneratedFiles(store,
         stateDir, payload.manifest)
+      let generatedFilesRemoved = removeRetiredOwnedGeneratedFiles(store,
+        stateDir, payload.manifest)
 
       var envelope = payload.envelope
       writeGeneration(stateDir, envelope, bundle.activationManifestBytes,
@@ -1916,6 +2260,7 @@ proc runHomeRemoteActivate(args: openArray[string]): int =
       echo "prefixesAlreadyPresent: " & $imported.prefixesAlreadyPresent
       echo "launchersMaterialized: " & $launchersMaterialized
       echo "generatedFilesMaterialized: " & $generatedFilesMaterialized
+      echo "generatedFilesRemoved: " & $generatedFilesRemoved
       return 0
     finally:
       releaseApplyLock(lock)

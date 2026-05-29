@@ -840,6 +840,21 @@ integration_remote_apply_remote_activation_phase_d:
         tests/e2e/m71/t_integration_remote_apply_remote_activation_phase_d.nim \
         2>&1 | tee test-logs/integration_remote_apply_remote_activation_phase_d.log
 
+e2e_remote_apply_home_profile_phase_e:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_remote_apply_home_profile_phase_e.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_remote_apply_home_profile_phase_e \
+        --out:build/test-bin/e2e_remote_apply_home_profile_phase_e \
+        tests/e2e/m71/t_e2e_remote_apply_home_profile_phase_e.nim \
+        2>&1 | tee test-logs/e2e_remote_apply_home_profile_phase_e.log
+
 e2e_repro_home_apply_fresh_install:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
     nim c \

@@ -216,6 +216,12 @@ type
                                         ## so downstream snapshot
                                         ## hashing reads the source
                                         ## file as intent input.
+    recordOnlyGeneratedFiles*: bool     ## M71 Phase E: source-side
+                                        ## remote-bundle evaluation.
+                                        ## Package-owned generated files
+                                        ## are recorded in the manifest
+                                        ## and CAS without writing the
+                                        ## target home path locally.
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2031,6 +2037,20 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     applyPlan.generatedFiles = suppressed.files
     for d in suppressed.diagnostics:
       applyPlan.diagnostics.add(d)
+    if opts.recordOnlyGeneratedFiles:
+      if stowEntries.len > 0:
+        raisePlanFailed("remote bundle evaluation cannot replay stow " &
+          "entries on the target yet")
+      let remoteDesiredResources = composeDesiredResources(profile,
+        opts.homeDir, opts.targetContext)
+      if remoteDesiredResources.len > 0:
+        raisePlanFailed("remote bundle evaluation cannot replay home " &
+          "resources on the target yet")
+      let syntheticBlocks = parseSyntheticPackageManagedBlocks(opts.homeDir,
+        packageIds)
+      if syntheticBlocks.len > 0:
+        raisePlanFailed("remote bundle evaluation cannot replay managed " &
+          "blocks on the target yet")
     result.diagnostics = applyPlan.diagnostics
     if shouldKillAfter(4):
       writeMarker(opts.stateDir, "", "killed-after-step-4")
@@ -2230,7 +2250,17 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             liveBuf[i] = byte(ord(ch))
           if digestOf(liveBuf) == candidateDigest:
             isCacheHit = true
-        if isCacheHit:
+        if opts.recordOnlyGeneratedFiles:
+          var staged: StagedFileRecord
+          staged.absoluteOutputPath = g.absoluteOutputPath
+          staged.sourceKind = pgfsPackageOutput
+          staged.contributingPackage = g.contributingPackage
+          staged.ownershipPolicy = gfoOwned
+          staged.hasPreWriteDigest = false
+          staged.postWriteDigest = candidateDigest
+          stagedFiles.add(staged)
+          inc rebuiltCount
+        elif isCacheHit:
           var staged: StagedFileRecord
           staged.absoluteOutputPath = g.absoluteOutputPath
           staged.sourceKind = pgfsPackageOutput
@@ -2280,7 +2310,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # spec line; M63 deferred the actual deletion work to a later
       # milestone, and we land it under M64 because rollback's
       # symmetry assumes apply already cleaned up.
-      if activeGenIdHex.len > 0:
+      if activeGenIdHex.len > 0 and not opts.recordOnlyGeneratedFiles:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
         if fileExists(extendedPath(prevPointerFile)):
           var newPaths: seq[string]
@@ -2351,8 +2381,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # `ResourceBinding` record for the manifest. `REPRO_TEST_RESOURCES`
       # remains as a TEST-ONLY override merged over the profile entries
       # by address (so existing M68/M70 gates keep working).
-      var desiredResources = composeDesiredResources(profile, opts.homeDir,
-        opts.targetContext)
+      var desiredResources =
+        if opts.recordOnlyGeneratedFiles:
+          initDesiredSet()
+        else:
+          composeDesiredResources(profile, opts.homeDir, opts.targetContext)
       # M69 step 5: synthesize PATH + per-tool env var resources from
       # the realized records and merge them into the desired set. The
       # synthesis is by-package, so a re-apply with unchanged catalog
@@ -2362,11 +2395,14 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # profile is the source of truth, the synthesized records are a
       # fallback that fills the PATH/env binding gap when the profile
       # did not declare an explicit `env.userPath` / `env.userVariable`
-      # for the package.
-      let envBindingPlan = planEnvBindings(realized)
-      for synthRes in envBindingPlan.resources:
-        if synthRes.address notin desiredResources.resources:
-          desiredResources.resources[synthRes.address] = synthRes
+      # for the package. Skip when `recordOnlyGeneratedFiles` is set
+      # (remote-apply bundle build) so the bundle stays focused on
+      # generated files per 17e43c7's intent.
+      if not opts.recordOnlyGeneratedFiles:
+        let envBindingPlan = planEnvBindings(realized)
+        for synthRes in envBindingPlan.resources:
+          if synthRes.address notin desiredResources.resources:
+            desiredResources.resources[synthRes.address] = synthRes
       # M69 Phase C follow-up: defence-in-depth layer 1. The four
       # POSIX/macOS home drivers (`gsettings`, `defaults`,
       # `systemd_user`, `launchd_user`) interpolate operator-controlled
@@ -2381,7 +2417,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           raiseResourceDriver(addr1, $res.kind,
             "pre-dispatch validation", validationErr)
       var recordedBindings = initOrderedTable[string, RecordedBinding]()
-      if activeGenIdHex.len > 0:
+      if activeGenIdHex.len > 0 and not opts.recordOnlyGeneratedFiles:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
         if fileExists(extendedPath(prevPointerFile)):
           try:
