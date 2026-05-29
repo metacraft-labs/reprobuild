@@ -49,7 +49,7 @@
 ##
 ## No `skip`, no `xfail`.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, strutils, tables, tempfiles, unittest]
 
 import repro_elevation
 import repro_infra
@@ -284,8 +284,15 @@ suite "integration_intra_batch_capability_to_service — drift half (M82 Phase C
           found = true
       check found
     else:
-      check classifyDrift("recorded-X", "observed-Y", "desired-Y") ==
-        dcInformational
+      # Pure-logic sanity check for the informational branch: the test
+      # cannot run the file-side scratch flow on this host, but the
+      # underlying classification is still exercised. Informational
+      # drift is defined as "OOB mutator landed observed AT desired";
+      # the recorded value is different from both because that is the
+      # whole point of *drift*. Keep observed and desired byte-equal so
+      # the assertion exercises the (observed == desired) branch.
+      check classifyDrift("recorded-X", "matches-desired-Y",
+        "matches-desired-Y") == dcInformational
 
   test "renderDriftFindings prints actionable + informational counts":
     let findings = @[

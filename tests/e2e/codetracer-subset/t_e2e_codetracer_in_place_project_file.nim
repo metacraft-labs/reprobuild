@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
 }
 """
 
-const CodeTracerCommonDevToolExecutables = [
+const CodeTracerCommonDevToolExecutables: seq[string] = @[
   "bash",
   "cachix",
   "capnp",
@@ -173,13 +173,13 @@ const CodeTracerCommonDevToolExecutables = [
 ]
 
 when not defined(macosx):
-  const CodeTracerTupToolExecutables = ["tup"]
+  const CodeTracerTupToolExecutables: seq[string] = @["tup"]
 else:
-  const CodeTracerTupToolExecutables: array[0, string] = []
+  const CodeTracerTupToolExecutables: seq[string] = @[]
 
 when defined(linux):
-  const CodeTracerDevToolExecutables = CodeTracerCommonDevToolExecutables &
-    CodeTracerTupToolExecutables & [
+  const CodeTracerDevToolExecutables: seq[string] =
+    CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables & @[
     "bpftrace",
     "bpftool",
     "dpkg",
@@ -187,8 +187,8 @@ when defined(linux):
     "xvfb-run"
   ]
 else:
-  const CodeTracerDevToolExecutables = CodeTracerCommonDevToolExecutables &
-    CodeTracerTupToolExecutables
+  const CodeTracerDevToolExecutables: seq[string] =
+    CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables
 
 const IsonimAsyncCompatFixtureSource = r"""
 when defined(js):
