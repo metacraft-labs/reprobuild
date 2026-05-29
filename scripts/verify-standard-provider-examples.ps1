@@ -146,7 +146,9 @@ $PopulatedExamples = @(
   'mixed/nim-uses-cpp-lib',
   'mixed/cpp-uses-nim-lib',
   'mixed/rust-uses-cpp-lib',
-  'mixed/cpp-uses-rust-lib'
+  'mixed/cpp-uses-rust-lib',
+  'mixed/nim-uses-rust-lib',
+  'mixed/rust-uses-nim-lib'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -726,6 +728,79 @@ function Probe-Fixture([string]$rel) {
         return @{ Available = $false; Reason = "'ar' not on PATH (M34 reverse fixture needs an archiver)" }
       }
       return @{ Available = $true; Reason = "rustc=$($rustc.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
+    }
+    'mixed/nim-uses-rust-lib' {
+      # M35 forward direction: a Nim executable that links a Rust
+      # staticlib. Needs rustc + nim + gcc/clang + ar.
+      $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+      if (-not $rustc) {
+        $rustupStableBin = 'D:\metacraft-dev-deps\rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
+        if (Test-Path -LiteralPath (Join-Path $rustupStableBin 'rustc.exe')) {
+          $env:PATH = "$rustupStableBin;$env:PATH"
+          $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+        }
+      }
+      if (-not $rustc) {
+        return @{ Available = $false; Reason = "rustc not on PATH and no rustup stable under D:/metacraft-dev-deps/rustup" }
+      }
+      $nimCmd = Get-Command nim -ErrorAction SilentlyContinue
+      if (-not $nimCmd) {
+        return @{ Available = $false; Reason = "'nim' not on PATH (M35 forward fixture needs nim)" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (M35 forward fixture needs a C compiler for the Nim Phase 2 + link)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M35 forward fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "rustc=$($rustc.Source); nim=$($nimCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/rust-uses-nim-lib' {
+      # M35 reverse direction: a Rust executable that links a Nim
+      # staticlib. Needs rustc + nim + gcc/clang + ar; on Windows also
+      # the x86_64-pc-windows-gnu rustup target so rustc routes through
+      # the gcc-mingw linker (Nim's archive uses MinGW gcc-compiled
+      # obj files; MSVC link.exe cannot resolve __mingw_printf et al.).
+      $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+      if (-not $rustc) {
+        $rustupStableBin = 'D:\metacraft-dev-deps\rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
+        if (Test-Path -LiteralPath (Join-Path $rustupStableBin 'rustc.exe')) {
+          $env:PATH = "$rustupStableBin;$env:PATH"
+          $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+        }
+      }
+      if (-not $rustc) {
+        return @{ Available = $false; Reason = "rustc not on PATH and no rustup stable under D:/metacraft-dev-deps/rustup" }
+      }
+      $nimCmd = Get-Command nim -ErrorAction SilentlyContinue
+      if (-not $nimCmd) {
+        return @{ Available = $false; Reason = "'nim' not on PATH (M35 reverse fixture needs nim)" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (M35 reverse fixture needs a C compiler for Nim Phase 2)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M35 reverse fixture needs an archiver)" }
+      }
+      # Windows-only: probe for the gnu target. On non-Windows the host
+      # toolchain is fine as-is (POSIX rustc + libc both gcc-compatible).
+      $IsWindowsHost = $true
+      try { $IsWindowsHost = $IsWindows } catch { $IsWindowsHost = $true }
+      if ($IsWindowsHost) {
+        $rustcDir = Split-Path -Parent $rustc.Source
+        $toolchainRoot = Split-Path -Parent $rustcDir
+        $gnuTargetDir = Join-Path $toolchainRoot 'lib\rustlib\x86_64-pc-windows-gnu'
+        if (-not (Test-Path -LiteralPath $gnuTargetDir)) {
+          return @{ Available = $false; Reason = "x86_64-pc-windows-gnu rustup target not installed (install via 'rustup target add x86_64-pc-windows-gnu')" }
+        }
+      }
+      return @{ Available = $true; Reason = "rustc=$($rustc.Source); nim=$($nimCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
     }
     default {
       return @{ Available = $true; Reason = '' }
@@ -1409,6 +1484,60 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
           Greeting = 'cpp says: rust added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/nim-uses-rust-lib' {
+      # M35 cross-language Mode 3 (FORWARD direction): the workspace
+      # declares a Rust static library ``addlib`` (``uses: rust``) and a
+      # Nim executable ``nimapp`` (``uses: nim``) in a single
+      # ``repro.nim`` with ``depends_on nimapp: addlib``. The Nim
+      # convention claims the whole workspace (registered first; nimapp's
+      # uses block names nim), emits the Rust library via a single
+      # ``rustc --crate-type=staticlib`` action landing at
+      # ``.repro/build/addlib/libaddlib.a`` (canonical archive schema).
+      # The Nim entrypoint's Phase 3 gcc link picks up the archive as a
+      # trailing positional plus the platform-specific Rust runtime libs
+      # (Windows MinGW: ws2_32, userenv, advapi32, bcrypt, ntdll; POSIX:
+      # pthread, dl, m). The binary's first stdout line proves the
+      # cross-language round-trip: Nim -> Rust rust_add() -> back to Nim.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'addlib' 'libaddlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'nimapp' 'nimapp.exe'))
+          Greeting = 'nim says: rust added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/rust-uses-nim-lib' {
+      # M35 cross-language Mode 3 (REVERSE direction): the workspace
+      # declares a Nim static library ``nimaddlib`` (``uses: nim``) and a
+      # Rust executable ``rustapp`` (``uses: rust``) in a single
+      # ``repro.nim`` with ``depends_on rustapp: nimaddlib``. The Nim
+      # convention claims the whole workspace (registered first), emits
+      # the Nim library archive with ``--noMain`` (driven by the
+      # cConsumable flag derived from the depends_on edge — the Rust
+      # binary has its own entry point so the archive's main symbol
+      # must NOT collide), then emits a single
+      # ``rustc --crate-type=bin`` action for rustapp. The link argv
+      # carries ``-L native=<dir>`` + ``-l static=nimaddlib``; on
+      # Windows the rustc invocation is forced to
+      # ``--target x86_64-pc-windows-gnu`` so rustc routes through the
+      # gcc-mingw linker (the Nim archive's MinGW gcc-compiled obj
+      # files reference symbols MSVC link.exe cannot resolve). The
+      # binary's first stdout line proves the cross-language round-trip:
+      # Rust -> Nim nimAdd() -> back to Rust.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'nimaddlib' 'libnimaddlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'rustapp' 'rustapp.exe'))
+          Greeting = 'rust says: nim added 2+3 = 5'
         }
       )
     }

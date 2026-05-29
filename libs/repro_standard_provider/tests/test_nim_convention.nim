@@ -727,3 +727,280 @@ suite "nim convention cross-language reverse (Mode 3 mixed workspace, C++ -> Nim
         checkpoint "forward fixture spuriously emitted reverse action: " &
           action.id
         fail()
+
+# ---------------------------------------------------------------------------
+# M35 Cross-language Nim <-> Rust (Mode 3 mixed-workspace) emit-fragment suite.
+#
+# Pins the Nim convention's response when a single ``repro.nim`` declares
+# a Nim package AND a Rust package with a depends_on edge:
+#
+#   Forward — ``mixed/nim-uses-rust-lib/``:
+#     The Nim convention emits ``rustc --crate-type=staticlib`` for the
+#     Rust library, lands the archive at the canonical schema, and
+#     threads it (plus Rust runtime libs) onto the Nim entrypoint's
+#     Phase 3 gcc link argv as a trailing positional.
+#
+#   Reverse — ``mixed/rust-uses-nim-lib/``:
+#     The Nim convention marks the Nim library cConsumable so Phase 1
+#     emits ``--noMain`` (the Rust binary has its own entry point), then
+#     emits ``rustc --crate-type=bin`` for the Rust executable with
+#     ``-L native=<dir>`` ``-l static=<libname>`` so the Rust binary's
+#     link picks up the Nim archive. On Windows, ``--target
+#     x86_64-pc-windows-gnu`` is forced so rustc routes through the
+#     gcc-mingw linker (Nim archive uses MinGW gcc-compiled obj files).
+# ---------------------------------------------------------------------------
+
+const
+  RustForwardMixedFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "mixed" / "nim-uses-rust-lib"
+  RustReverseMixedFixtureRoot =
+    MetacraftRoot / "reprobuild-examples" / "mixed" / "rust-uses-nim-lib"
+
+proc rustcOnPathForM35(): bool =
+  ## Probe rustc — the Nim convention's ``recognize`` only checks Nim,
+  ## but the M35 mixed-workspace ``emitFragment`` invokes ``findExe("rustc")``
+  ## eagerly to construct the rustc argv. Without this gate the missing
+  ## toolchain becomes a hard ``ValueError`` instead of a clean skip.
+  ## Mirrors the same helper in ``test_rust_direct_convention.nim``.
+  if findExe("rustc").len > 0:
+    return true
+  when defined(windows):
+    let rustupStableBin =
+      "D:/metacraft-dev-deps/rustup/toolchains/stable-x86_64-pc-windows-msvc/bin"
+    let candidate = rustupStableBin / "rustc.exe"
+    if fileExists(candidate):
+      putEnv("PATH", rustupStableBin & ";" & getEnv("PATH"))
+      return findExe("rustc").len > 0
+  false
+
+suite "nim convention M35 cross-language forward (Nim -> Rust)":
+
+  test "emitFragment: forward fixture emits Rust staticlib + Nim link picks it up":
+    let conv = nim_convention.nimConvention()
+    if not fileExists(RustForwardMixedFixtureRoot / "repro.nim"):
+      checkpoint "fixture missing — looked at " & RustForwardMixedFixtureRoot
+      fail()
+    elif not rustcOnPathForM35():
+      skip()
+    elif not conv.recognize(RustForwardMixedFixtureRoot,
+        dummyRequest(RustForwardMixedFixtureRoot)):
+      # Missing nim on PATH — skip cleanly.
+      skip()
+    else:
+      let request = dummyRequest(RustForwardMixedFixtureRoot)
+      let fragment = conv.emitFragment(RustForwardMixedFixtureRoot, request)
+
+      # (a) The Rust library's staticlib emit action exists under the
+      #     M35 ``nim-xlang-rust-lib-link-`` discriminator. Output lands
+      #     at the canonical archive path.
+      var rustArchive: BuildActionDef
+      var sawRustArchive = false
+      for action in actionByPrefix(fragment, "nim-xlang-rust-lib-link-addlib"):
+        rustArchive = action
+        sawRustArchive = true
+        break
+      check sawRustArchive
+      check rustArchive.outputs.len == 1
+      let archivePath = rustArchive.outputs[0]
+      check archivePath.replace('\\', '/').endsWith(
+        ".repro/build/addlib/libaddlib.a")
+
+      # (b) The rustc argv carries --crate-type=staticlib AND -C panic=abort
+      #     (load-bearing for no_std FFI staticlibs on this host).
+      let rustcArgv = inlineArgvOf(rustArchive)
+      var sawStaticlib = false
+      var sawPanicAbort = false
+      for i, token in rustcArgv:
+        if token == "--crate-type" and i + 1 < rustcArgv.len and
+            rustcArgv[i + 1] == "staticlib":
+          sawStaticlib = true
+        if token == "-C" and i + 1 < rustcArgv.len and
+            rustcArgv[i + 1] == "panic=abort":
+          sawPanicAbort = true
+      check sawStaticlib
+      check sawPanicAbort
+
+      # (c) The Nim entrypoint's Phase 3 link action picks up the Rust
+      #     archive as a trailing positional + the Rust runtime libs.
+      var nimLink: BuildActionDef
+      var sawNimLink = false
+      for action in actionByPrefix(fragment, "gcc-link-nimapp-"):
+        nimLink = action
+        sawNimLink = true
+        break
+      check sawNimLink
+      let linkArgv = inlineArgvOf(nimLink)
+      check archivePath in linkArgv
+      check archivePath in nimLink.inputs
+      check rustArchive.id in nimLink.deps
+
+      # (d) The Nim link argv carries the platform-specific Rust runtime
+      #     libs. On Windows MinGW that's -lws2_32 -lbcrypt etc.; on
+      #     POSIX it's -lpthread -ldl -lm.
+      when defined(windows):
+        var sawWs232 = false
+        var sawBcrypt = false
+        for token in linkArgv:
+          if token == "-lws2_32": sawWs232 = true
+          if token == "-lbcrypt": sawBcrypt = true
+        check sawWs232
+        check sawBcrypt
+      else:
+        var sawPthread = false
+        var sawDl = false
+        var sawM = false
+        for token in linkArgv:
+          if token == "-lpthread": sawPthread = true
+          if token == "-ldl": sawDl = true
+          if token == "-lm": sawM = true
+        check sawPthread
+        check sawDl
+        check sawM
+
+  test "emitFragment: forward fixture does NOT trigger reverse-direction Rust emit":
+    # Regression: a forward-direction fixture (Nim binary consumes a
+    # Rust library) must not emit ANY ``nim-xlang-rust-exec-link-`` action
+    # — only the library-direction emit fires.
+    let conv = nim_convention.nimConvention()
+    if not fileExists(RustForwardMixedFixtureRoot / "repro.nim"):
+      skip()
+    elif not rustcOnPathForM35():
+      skip()
+    elif not conv.recognize(RustForwardMixedFixtureRoot,
+        dummyRequest(RustForwardMixedFixtureRoot)):
+      skip()
+    else:
+      let request = dummyRequest(RustForwardMixedFixtureRoot)
+      let fragment = conv.emitFragment(RustForwardMixedFixtureRoot, request)
+      for action in actionByPrefix(fragment, "nim-xlang-rust-exec-"):
+        checkpoint "forward fixture spuriously emitted reverse Rust action: " &
+          action.id
+        fail()
+
+  test "emitFragment: pure-Nim fixture does NOT emit any cross-language Rust action":
+    # Regression: a single-language Nim project must not trigger any
+    # M35 Rust cross-language emit path.
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(FixtureRoot)
+    require conv.recognize(FixtureRoot, request)
+    let fragment = conv.emitFragment(FixtureRoot, request)
+    for action in actionByPrefix(fragment, "nim-xlang-rust-"):
+      checkpoint "unexpected M35 Rust cross-language action: " & action.id
+      fail()
+
+suite "nim convention M35 cross-language reverse (Rust -> Nim)":
+
+  test "emitFragment: reverse fixture wires Rust exec -> Nim archive end-to-end":
+    let conv = nim_convention.nimConvention()
+    if not fileExists(RustReverseMixedFixtureRoot / "repro.nim"):
+      checkpoint "fixture missing — looked at " & RustReverseMixedFixtureRoot
+      fail()
+    elif not rustcOnPathForM35():
+      skip()
+    elif not conv.recognize(RustReverseMixedFixtureRoot,
+        dummyRequest(RustReverseMixedFixtureRoot)):
+      skip()
+    else:
+      let request = dummyRequest(RustReverseMixedFixtureRoot)
+      let fragment = conv.emitFragment(RustReverseMixedFixtureRoot, request)
+
+      # (a) The Nim library's Phase 3 ``ar`` archive action exists.
+      var nimArchive: BuildActionDef
+      var sawArchive = false
+      for action in actionByPrefix(fragment, "ar-archive-nimaddlib"):
+        nimArchive = action
+        sawArchive = true
+        break
+      check sawArchive
+      check nimArchive.outputs.len == 1
+      let archivePath = nimArchive.outputs[0]
+      check archivePath.replace('\\', '/').endsWith(
+        ".repro/build/nimaddlib/libnimaddlib.a")
+
+      # (b) The Nim library's Phase 1 carries ``--noMain`` (driven by
+      #     the cConsumable flag derived from depends_on rustapp:
+      #     nimaddlib). Without it, the archive's ``main`` symbol
+      #     collides with the Rust binary's own entry point at link time.
+      var nimPhase1: BuildActionDef
+      var sawPhase1 = false
+      for action in actionByPrefix(fragment, "nim-c-compileonly-nimaddlib-"):
+        nimPhase1 = action
+        sawPhase1 = true
+        break
+      check sawPhase1
+      let phase1Argv = inlineArgvOf(nimPhase1)
+      check "--noMain" in phase1Argv
+
+      # (c) The Rust executable's link action exists under the
+      #     ``nim-xlang-rust-exec-link-`` discriminator.
+      var rustLink: BuildActionDef
+      var sawRustLink = false
+      for action in actionByPrefix(fragment, "nim-xlang-rust-exec-link-rustapp"):
+        rustLink = action
+        sawRustLink = true
+        break
+      check sawRustLink
+
+      # (d) The Rust link argv carries -L native=<dir> + -l
+      #     static=nimaddlib so rustc/ld resolves the Nim symbols.
+      let rustArgv = inlineArgvOf(rustLink)
+      var sawLNative = false
+      var sawLStatic = false
+      for i, token in rustArgv:
+        if token == "-L" and i + 1 < rustArgv.len and
+            rustArgv[i + 1].startsWith("native="):
+          sawLNative = true
+        if token == "-l" and i + 1 < rustArgv.len and
+            rustArgv[i + 1] == "static=nimaddlib":
+          sawLStatic = true
+      check sawLNative
+      check sawLStatic
+
+      # (e) Build sequencing: the Rust link depends on the Nim archive
+      #     action AND includes the archive in its inputs (cache
+      #     invalidation).
+      check nimArchive.id in rustLink.deps
+      check archivePath in rustLink.inputs
+
+      # (f) On Windows the rustc argv carries --target
+      #     x86_64-pc-windows-gnu so rustc routes through the gcc-mingw
+      #     linker. The MinGW gcc-compiled Nim archive references
+      #     MinGW-specific runtime symbols (__mingw_printf,
+      #     __emutls_get_address) that MSVC link.exe cannot resolve.
+      when defined(windows):
+        var sawGnuTarget = false
+        for i, token in rustArgv:
+          if token == "--target" and i + 1 < rustArgv.len and
+              rustArgv[i + 1] == "x86_64-pc-windows-gnu":
+            sawGnuTarget = true
+        check sawGnuTarget
+
+  test "emitFragment: pure-Nim fixture does NOT emit any cross-language Rust exec action":
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(FixtureRoot)
+    require conv.recognize(FixtureRoot, request)
+    let fragment = conv.emitFragment(FixtureRoot, request)
+    for action in actionByPrefix(fragment, "nim-xlang-rust-exec-"):
+      checkpoint "unexpected M35 reverse Rust cross-language action: " &
+        action.id
+      fail()
+
+  test "emitFragment: reverse fixture does NOT trigger forward-direction Rust lib emit":
+    # Regression: the reverse fixture has a Nim library + Rust executable;
+    # no Rust library is declared, so the forward-direction Rust staticlib
+    # emit must stay silent.
+    let conv = nim_convention.nimConvention()
+    if not fileExists(RustReverseMixedFixtureRoot / "repro.nim"):
+      skip()
+    elif not rustcOnPathForM35():
+      skip()
+    elif not conv.recognize(RustReverseMixedFixtureRoot,
+        dummyRequest(RustReverseMixedFixtureRoot)):
+      skip()
+    else:
+      let request = dummyRequest(RustReverseMixedFixtureRoot)
+      let fragment = conv.emitFragment(RustReverseMixedFixtureRoot, request)
+      for action in actionByPrefix(fragment, "nim-xlang-rust-lib-"):
+        checkpoint "reverse fixture spuriously emitted forward Rust action: " &
+          action.id
+        fail()

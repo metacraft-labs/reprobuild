@@ -962,10 +962,29 @@ proc collectNimSources(srcDir: string): seq[string] =
       result.add(entry)
   result.sort(system.cmp[string])
 
+type
+  RustWorkspaceUpstream = object
+    ## Forward cross-language: a Rust staticlib emitted in-line that a
+    ## Nim entrypoint's Phase 3 gcc link picks up. Same shape as
+    ## ``CCppUpstreamLibrary`` minus the include dir (Rust ABI is
+    ## consumed via Nim ``{.importc.}`` pragmas, not header files).
+    package*: string
+    libraryName*: string
+    linkActionId*: string
+    outputPath*: string
+
+proc rustCrossRuntimeLinkLibs(): seq[string]
+  ## Forward declaration — full definition lower in this module (near
+  ## the other M35 Rust cross-language helpers). Required because
+  ## ``emitForEntrypoint`` below references it for the forward direction
+  ## (Nim app uses Rust lib) and is itself defined before the Rust
+  ## helpers' textual position in the file.
+
 proc emitForEntrypoint(projectRoot, nimExe: string;
                       entry: NimEntrypoint;
                       depLibraries: openArray[NimWorkspaceLibrary] = [];
-                      cCppDepLibraries: openArray[CCppUpstreamLibrary] = []):
+                      cCppDepLibraries: openArray[CCppUpstreamLibrary] = [];
+                      rustDepLibraries: openArray[RustWorkspaceUpstream] = []):
                         tuple[phase1: BuildActionDef;
                               phase2: seq[BuildActionDef];
                               phase3: BuildActionDef] =
@@ -1110,6 +1129,18 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
   # gcc/ld's perspective.
   for lib in cCppDepLibraries:
     finalArgv.add(lib.outputPath)
+  # M35 forward cross-language: upstream Rust staticlibs slot at the
+  # same position. The Rust archive's exported symbols (declared via
+  # ``#[no_mangle] pub extern "C"`` in the Rust source) are picked up
+  # by gcc/ld and satisfy the Nim entrypoint's ``{.importc, cdecl.}``
+  # references. The Rust runtime libs (platform-specific) are appended
+  # below; they MUST trail the archive so gcc/ld resolves the runtime
+  # symbols against the archive's references.
+  for lib in rustDepLibraries:
+    finalArgv.add(lib.outputPath)
+  if rustDepLibraries.len > 0:
+    for libFlag in rustCrossRuntimeLinkLibs():
+      finalArgv.add(libFlag)
 
   let phase2Ids = block:
     var ids: seq[string] = @[]
@@ -1125,6 +1156,11 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
     if phase3Inputs.find(lib.outputPath) < 0:
       phase3Inputs.add(lib.outputPath)
   for lib in cCppDepLibraries:
+    if phase3Deps.find(lib.linkActionId) < 0:
+      phase3Deps.add(lib.linkActionId)
+    if phase3Inputs.find(lib.outputPath) < 0:
+      phase3Inputs.add(lib.outputPath)
+  for lib in rustDepLibraries:
     if phase3Deps.find(lib.linkActionId) < 0:
       phase3Deps.add(lib.linkActionId)
     if phase3Inputs.find(lib.outputPath) < 0:
@@ -2043,6 +2079,329 @@ proc emitCCppCrossExecutable(projectRoot: string;
   result.link = link
   result.binaryPath = ccppCrossBinaryPath(projectRoot, exec.executableName)
 
+# ---------------------------------------------------------------------------
+# M35 cross-language Rust helpers (mixed-workspace support, both directions).
+#
+# When a Mode 3 workspace declares both Nim packages and Rust packages in a
+# single ``repro.nim``, the Nim convention claims the workspace (registered
+# first) and takes responsibility for emitting the Rust packages' actions
+# in-line so the cross-package ``depends_on`` edges produce a coherent
+# action graph within a single ``buildPackageFragment`` call. Mirrors the
+# C/C++ cross-language helpers above; the trade-offs are identical.
+#
+# Two directions:
+#
+#   * Forward (Nim app uses Rust lib) — ``collectRustCrossLibraries``
+#     enumerates ``library`` members in ``uses: rust/rustc`` packages.
+#     Each library is emitted as ``rustc --crate-type=staticlib`` landing
+#     at ``<root>/.repro/build/<libName>/lib<libName>.a`` (canonical
+#     archive schema shared with c-cpp-direct + Nim). The Nim
+#     entrypoint's Phase 3 gcc link picks up the archive as a trailing
+#     positional plus the platform-specific Rust runtime libs
+#     (``-lws2_32 -luserenv -ladvapi32 -lbcrypt -lntdll`` on Windows
+#     MinGW; ``-lpthread -ldl -lm`` on POSIX). The Nim source uses
+#     ``proc rust_X(...): cint {.importc, cdecl.}`` to call into Rust.
+#
+#   * Reverse (Rust app uses Nim lib) — ``collectRustCrossExecutables``
+#     enumerates ``executable`` members in ``uses: rust/rustc`` packages.
+#     Each executable is emitted as ``rustc --crate-type=bin`` with
+#     ``-L native=<nimlib-build-dir>`` ``-l static=<nimlib>`` flags plus
+#     the platform-specific Nim runtime libs (``-lm`` on POSIX; empty on
+#     Windows). The upstream Nim library's ``cConsumable`` flag is
+#     derived from the dep graph (any Rust executable depending on the
+#     library's package → cConsumable=true), which threads ``--noMain``
+#     onto the Nim library's Phase 1 so the resulting archive's
+#     ``main()`` doesn't collide with the Rust binary's own entry point.
+#     The Rust source includes ``extern "C" { fn NimMain(); fn nimX();
+#     }`` and calls ``NimMain()`` once at startup.
+#
+# Action-id prefixes for Rust cross-language emit are
+# ``nim-xlang-rust-lib-link-<name>`` (forward staticlib emit) and
+# ``nim-xlang-rust-exec-link-<name>`` (reverse binary emit). The
+# discriminator mirrors the C/C++ helper's ``nim-xlang-ccpp-*`` shape so
+# tests can partition the two cross-language matrices.
+# ---------------------------------------------------------------------------
+
+type
+  RustCrossLibrary = object
+    ## Cross-language Rust ``library`` member belonging to a ``uses:
+    ## rust/rustc`` package in a workspace whose dispatch is owned by the
+    ## Nim convention. Discovered by ``collectRustCrossLibraries`` and
+    ## emitted in-line as a single ``rustc --crate-type=staticlib``
+    ## action. Output lands at ``<root>/.repro/build/<libName>/lib<libName>.a``.
+    package*: string
+    libraryName*: string
+    srcDir*: string
+    entrySource*: string
+
+  RustCrossExecutable = object
+    ## Cross-language Rust ``executable`` member belonging to a ``uses:
+    ## rust/rustc`` package. Discovered by ``collectRustCrossExecutables``
+    ## and emitted in-line as a single ``rustc --crate-type=bin`` action.
+    ## When the executable's package ``depends_on`` a Nim library
+    ## package, the upstream Nim archive is threaded onto the rustc link
+    ## argv via ``-L native=<dir>`` + ``-l static=<libname>``.
+    package*: string
+    executableName*: string
+    srcDir*: string
+    entrySource*: string
+
+proc rustCrossScratch(projectRoot, member: string): string =
+  projectRoot / ScratchDirName / member
+
+proc rustCrossStaticlibPath(projectRoot, member: string): string =
+  ## ``<root>/.repro/build/<member>/lib<member>.a`` — canonical
+  ## cross-language archive schema shared with c-cpp-direct + Nim's
+  ## own static library output + rust_direct's reverse staticlib
+  ## emit.
+  rustCrossScratch(projectRoot, member) / ("lib" & member & ".a")
+
+proc rustCrossBinaryPath(projectRoot, member: string): string =
+  when defined(windows):
+    rustCrossScratch(projectRoot, member) / (member & ".exe")
+  else:
+    rustCrossScratch(projectRoot, member) / member
+
+proc rustcCrossCompiler(): string =
+  findExe("rustc")
+
+proc collectRustSourcesUnderSrcDir(srcDir: string): seq[string] =
+  ## Every ``.rs`` under ``srcDir`` recursively. Used as the declared
+  ## ``inputs`` set of the rustc action so a source-only edit invalidates
+  ## the cache without depending on the FS-snoop monitor.
+  if not dirExists(extendedPath(srcDir)):
+    return @[]
+  for path in walkDirRec(srcDir):
+    if isRustSourceFile(path):
+      result.add(path)
+  result.sort(system.cmp[string])
+
+proc resolveRustCrossMember(projectRoot, memberName, memberKind: string):
+    tuple[srcDir, entrySource: string] =
+  ## Wrapper over the shared Mode 3 Rust scanner helper. Returns empty
+  ## strings when no layout matches; the caller skips the member.
+  let resolved = resolveRustMemberDirs(projectRoot, memberName, memberKind)
+  result.srcDir = resolved.srcDir
+  result.entrySource = resolved.entrySource
+
+proc collectRustCrossLibraries(projectRoot, source: string;
+                               usesEntries: openArray[PackageUsesEntry]):
+                                 seq[RustCrossLibrary] =
+  ## Walk the project file for ``library`` declarations inside packages
+  ## whose ``uses:`` block names ``rust`` or ``rustc``. Each resolvable
+  ## member becomes a ``RustCrossLibrary`` carrying its source set + crate
+  ## root (used downstream to emit a single ``rustc --crate-type=staticlib``
+  ## action). Executables in Rust packages are routed through
+  ## ``collectRustCrossExecutables`` separately.
+  let ownership = extractPackageMembers(source)
+  for entry in ownership:
+    if entry.kind != "library":
+      continue
+    if entry.package.len == 0:
+      continue
+    if not packageUsesAny(usesEntries, entry.package, ["rust", "rustc"]):
+      continue
+    let resolved = resolveRustCrossMember(projectRoot, entry.member, "library")
+    if resolved.entrySource.len == 0:
+      continue
+    result.add(RustCrossLibrary(
+      package: entry.package,
+      libraryName: entry.member,
+      srcDir: resolved.srcDir,
+      entrySource: resolved.entrySource))
+
+proc collectRustCrossExecutables(projectRoot, source: string;
+                                 usesEntries: openArray[PackageUsesEntry]):
+                                   seq[RustCrossExecutable] =
+  ## Walk the project file for ``executable`` declarations inside
+  ## packages whose ``uses:`` block names ``rust`` or ``rustc``. Each
+  ## resolvable member becomes a ``RustCrossExecutable``; emit downstream
+  ## produces a single ``rustc --crate-type=bin`` action that picks up
+  ## any upstream Nim staticlibs the depends_on edges resolve to.
+  let ownership = extractPackageMembers(source)
+  for entry in ownership:
+    if entry.kind != "executable":
+      continue
+    if entry.package.len == 0:
+      continue
+    if not packageUsesAny(usesEntries, entry.package, ["rust", "rustc"]):
+      continue
+    let resolved = resolveRustCrossMember(projectRoot, entry.member,
+      "executable")
+    if resolved.entrySource.len == 0:
+      continue
+    result.add(RustCrossExecutable(
+      package: entry.package,
+      executableName: entry.member,
+      srcDir: resolved.srcDir,
+      entrySource: resolved.entrySource))
+
+proc rustCrossRuntimeLinkLibs(): seq[string] =
+  ## Platform-specific link libs a Rust staticlib carries unresolved
+  ## references to. The Nim entrypoint's gcc link picks these up so the
+  ## resulting binary can satisfy the Rust archive's references to
+  ## platform APIs. Hard-coded set mirrors ``rust_direct.rustRuntimeLinkLibs``
+  ## (same trade-off; dynamic resolution via ``rustc --print=native-static-libs``
+  ## deferred per M34 outstanding tasks).
+  when defined(windows):
+    @["-lws2_32", "-luserenv", "-ladvapi32", "-lbcrypt", "-lntdll"]
+  else:
+    @["-lpthread", "-ldl", "-lm"]
+
+proc rustFnv1aHex(value: string): string =
+  ## FNV-1a 64-bit hash, hex-encoded. Same algorithm as rust_direct's
+  ## ``fnv1aHex`` — kept local so this convention doesn't import the
+  ## sibling module.
+  var hash = 0xcbf29ce484222325'u64
+  for ch in value:
+    hash = hash xor uint64(ord(ch))
+    hash = hash * 0x100000001b3'u64
+  hash.toHex(16).toLowerAscii()
+
+const RustCrossEdition = "2021"
+  ## Edition fed to ``rustc --edition``. Mirrors ``rust_direct.RustEdition``.
+
+proc emitRustCrossLibrary(projectRoot: string;
+                          lib: RustCrossLibrary): BuildActionDef =
+  ## ``rustc --crate-type=staticlib`` action for one cross-language Rust
+  ## library. Output lands at the canonical archive schema
+  ## ``<root>/.repro/build/<name>/lib<name>.a``. ``-C panic=abort`` is
+  ## threaded unconditionally so a no_std staticlib (the realistic FFI
+  ## pattern) links cleanly with rustc's precompiled core crate; the flag
+  ## is harmless for staticlibs that use std (rustc selects abort runtime
+  ## instead of unwind).
+  let rustcExe = rustcCrossCompiler()
+  if rustcExe.len == 0:
+    raise newException(ValueError,
+      "nim convention (mixed workspace): 'rustc' not on PATH; cannot " &
+        "compile upstream Rust library '" & lib.libraryName &
+        "' for cross-language consumption")
+  let outputPath = rustCrossStaticlibPath(projectRoot, lib.libraryName)
+  createDir(extendedPath(parentDir(outputPath)))
+  let crateName = normaliseRustCrateName(lib.libraryName)
+  let metaHash = rustFnv1aHex(lib.libraryName & "@" & RustCrossEdition)
+  var argv = @[
+    rustcExe,
+    "--crate-name", crateName,
+    "--edition", RustCrossEdition,
+    "--crate-type", "staticlib",
+    "--emit=link",
+    "-C", "opt-level=2",
+    "-C", "metadata=" & metaHash,
+    "-C", "panic=abort",
+    "-o", outputPath,
+    lib.entrySource,
+  ]
+  let inputs = collectRustSourcesUnderSrcDir(lib.srcDir)
+  buildAction(
+    id = "nim-xlang-rust-lib-link-" & ccppSanitize(lib.libraryName),
+    call = inlineExecCall(argv, projectRoot),
+    inputs = inputs,
+    outputs = @[outputPath],
+    pool = "compile",
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    commandStatsId = "nim.xlang.rust.lib.link")
+
+proc emitRustCrossExecutable(projectRoot: string;
+                             exec: RustCrossExecutable;
+                             nimUpstream:
+                               openArray[NimUpstreamLibrary]): BuildActionDef =
+  ## ``rustc --crate-type=bin`` action for one cross-language Rust
+  ## executable. The link argv carries ``-L native=<dir>`` + ``-l
+  ## static=<libname>`` per upstream Nim staticlib, plus the
+  ## platform-specific Nim runtime libs (``-lm`` on POSIX; nothing extra
+  ## on Windows MinGW — rustc's link line picks the C runtime up
+  ## implicitly). The Rust source initialises Nim via an explicit
+  ## ``NimMain()`` call at startup; the Nim library was emitted with
+  ## ``--noMain`` (via ``cConsumable`` derivation) so no ``main`` symbol
+  ## collides with Rust's entry point.
+  ##
+  ## **Windows toolchain note**: when the Rust binary links against a
+  ## Nim archive AND we're on Windows, the rustc invocation is forced to
+  ## ``--target x86_64-pc-windows-gnu`` so rustc uses the gcc-mingw
+  ## linker (which understands the MinGW gcc-compiled object files in
+  ## the Nim archive — Nim's runtime references symbols like
+  ## ``__mingw_printf`` / ``__emutls_get_address`` that MSVC link.exe
+  ## cannot resolve). The default ``x86_64-pc-windows-msvc`` target
+  ## remains in use for pure-Rust workspaces; only the cross-language
+  ## reverse direction switches. Requires the gnu target to be
+  ## installed (``rustup target add x86_64-pc-windows-gnu``) — the
+  ## per-fixture probe in the validation script skips with a clear
+  ## diagnostic when the target is missing.
+  let rustcExe = rustcCrossCompiler()
+  if rustcExe.len == 0:
+    raise newException(ValueError,
+      "nim convention (mixed workspace): 'rustc' not on PATH; cannot " &
+        "compile cross-language Rust executable '" & exec.executableName & "'")
+  let outputPath = rustCrossBinaryPath(projectRoot, exec.executableName)
+  createDir(extendedPath(parentDir(outputPath)))
+  let crateName = normaliseRustCrateName(exec.executableName)
+  let metaHash = rustFnv1aHex(exec.executableName & "@" & RustCrossEdition)
+  var argv = @[
+    rustcExe,
+    "--crate-name", crateName,
+    "--edition", RustCrossEdition,
+    "--crate-type", "bin",
+    "--emit=link",
+    "-C", "opt-level=2",
+    "-C", "metadata=" & metaHash,
+    "-o", outputPath,
+  ]
+  # M35 Windows cross-toolchain fix: rustc's default target on a
+  # Windows MSVC-built host is ``x86_64-pc-windows-msvc``, which makes
+  # rustc invoke ``link.exe`` (MSVC's linker). MSVC link.exe doesn't
+  # understand MinGW gcc-compiled object files (the Nim archive's
+  # contents) — symbols like ``__mingw_printf`` and ``__emutls_get_address``
+  # remain unresolved. Forcing the target to ``x86_64-pc-windows-gnu``
+  # routes rustc through its gcc-mingw linker which CAN resolve those
+  # references. Required only when there's a Nim upstream to link
+  # against; pure-Rust workspaces continue to use the host default.
+  when defined(windows):
+    if nimUpstream.len > 0:
+      argv.add("--target")
+      argv.add("x86_64-pc-windows-gnu")
+  # Thread upstream Nim staticlibs onto the rustc link via -L native +
+  # -l static. Each unique native dir lands once; the -l static=<libname>
+  # entries follow so rustc/ld picks them up in declared order.
+  var seenNativeDirs: seq[string] = @[]
+  for lib in nimUpstream:
+    let nativeDir = parentDir(lib.outputPath)
+    if seenNativeDirs.find(nativeDir) < 0:
+      argv.add("-L")
+      argv.add("native=" & nativeDir)
+      seenNativeDirs.add(nativeDir)
+  for lib in nimUpstream:
+    argv.add("-l")
+    argv.add("static=" & lib.libraryName)
+  # Nim's static archive references libm on POSIX (the runtime touches
+  # math symbols for float formatting). rustc handles -lm via its own
+  # link-line on POSIX; we add it explicitly so the Nim runtime symbols
+  # resolve even if a future rustc default drops it. Empty on Windows
+  # MinGW (rustc's default link line covers the C runtime via msvcrt
+  # implicitly when --target=x86_64-pc-windows-gnu is set).
+  when not defined(windows):
+    if nimUpstream.len > 0:
+      argv.add("-l")
+      argv.add("m")
+  argv.add(exec.entrySource)
+  var inputs = collectRustSourcesUnderSrcDir(exec.srcDir)
+  for lib in nimUpstream:
+    if inputs.find(lib.outputPath) < 0:
+      inputs.add(lib.outputPath)
+  var deps: seq[string] = @[]
+  for lib in nimUpstream:
+    if deps.find(lib.linkActionId) < 0:
+      deps.add(lib.linkActionId)
+  buildAction(
+    id = "nim-xlang-rust-exec-link-" & ccppSanitize(exec.executableName),
+    call = inlineExecCall(argv, projectRoot),
+    deps = deps,
+    inputs = inputs,
+    outputs = @[outputPath],
+    pool = "compile",
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    commandStatsId = "nim.xlang.rust.exec.link")
+
 proc readScannedDepsSource(projectRoot: string): string =
   ## Read ``<projectRoot>/repro.scanned-deps.nim`` when present and the
   ## project file ``include``s it. Returns the empty string in every
@@ -2242,8 +2601,29 @@ proc nimEmitFragment(projectRoot: string;
     # the two collectors partition by ``kind``.
     let cCppCrossExecutables = collectCCppCrossExecutables(
       projectRoot, source, usesEntries)
+    # M35 forward cross-language (Nim app uses Rust lib): enumerate
+    # Rust ``library`` members in ``uses: rust/rustc`` packages. The
+    # Nim convention emits a single ``rustc --crate-type=staticlib``
+    # action per library, landing at the canonical archive path so the
+    # Nim entrypoint's Phase 3 gcc link can pick it up via a trailing
+    # positional + the Rust runtime libs. Mirrors the C/C++ forward
+    # direction's shape.
+    let rustCrossLibraries = collectRustCrossLibraries(
+      projectRoot, source, usesEntries)
+    # M35 reverse cross-language (Rust app uses Nim lib): enumerate
+    # Rust ``executable`` members in ``uses: rust/rustc`` packages. The
+    # Nim convention emits a single ``rustc --crate-type=bin`` action
+    # per executable; each binary's link argv carries
+    # ``-L native=<dir>`` ``-l static=<libname>`` for any upstream Nim
+    # staticlib the depends_on edge resolves to. The Nim library's
+    # ``cConsumable`` toggle drives the ``--noMain`` flag (see below)
+    # so the archive's ``main`` symbol doesn't collide with Rust's own
+    # entry point.
+    let rustCrossExecutables = collectRustCrossExecutables(
+      projectRoot, source, usesEntries)
     if entrypoints.len == 0 and buildableLibraries.len == 0 and
-        cCppCrossMembers.len == 0 and cCppCrossExecutables.len == 0:
+        cCppCrossMembers.len == 0 and cCppCrossExecutables.len == 0 and
+        rustCrossLibraries.len == 0 and rustCrossExecutables.len == 0:
       if allLibraries.len > 0:
         raise newException(ValueError,
           "nim convention: package declares only header-only libraries; " &
@@ -2289,6 +2669,18 @@ proc nimEmitFragment(projectRoot: string;
       if exec.package.len > 0 and
           declaredPackages.find(exec.package) < 0:
         declaredPackages.add(exec.package)
+    # M35 forward cross-language: include Rust library packages so
+    # ``depends_on nimApp: rustLibPkg`` survives validation.
+    for lib in rustCrossLibraries:
+      if lib.package.len > 0 and
+          declaredPackages.find(lib.package) < 0:
+        declaredPackages.add(lib.package)
+    # M35 reverse cross-language: include Rust executable packages so
+    # ``depends_on rustApp: nimLibPkg`` survives validation.
+    for exec in rustCrossExecutables:
+      if exec.package.len > 0 and
+          declaredPackages.find(exec.package) < 0:
+        declaredPackages.add(exec.package)
     validateWorkspaceDeps(depEdges, declaredPackages)
 
     # Reverse cross-language: mark Nim libraries as ``cConsumable`` so
@@ -2309,6 +2701,19 @@ proc nimEmitFragment(projectRoot: string;
     # (the executable's link uses its own entrypoint's main).
     var cConsumedPackages: seq[string] = @[]
     for exec in cCppCrossExecutables:
+      for edge in depEdges:
+        if edge.fromPackage != exec.package:
+          continue
+        if cConsumedPackages.find(edge.toPackage) < 0:
+          cConsumedPackages.add(edge.toPackage)
+    # M35 reverse cross-language: a Rust executable consuming a Nim
+    # library has the same ``main``-collision concern. Without
+    # ``--noMain``, the Nim archive's ``int main(...)`` collides with
+    # Rust's own entry point (rustc emits ``fn main()`` from the
+    # executable crate's lib.rs/main.rs). Mark the library cConsumable
+    # so its Phase 1 picks up ``--noMain``; the Rust executable then
+    # calls ``NimMain()`` explicitly before any Nim function.
+    for exec in rustCrossExecutables:
       for edge in depEdges:
         if edge.fromPackage != exec.package:
           continue
@@ -2350,6 +2755,26 @@ proc nimEmitFragment(projectRoot: string;
           packageCCppLibraries[member.package] = @[]
         packageCCppLibraries[member.package].add(entry)
         discard target(member.libraryName, allActions)
+      # M35 forward cross-language: emit Rust staticlibs alongside C/C++
+      # archives so the Nim entrypoint's Phase 3 link can pick them up
+      # via trailing positionals (same shape as the C/C++ side; the
+      # only difference is the Rust runtime libs that follow). Index
+      # by owning package so a ``depends_on nimApp: rustLibPkg`` edge
+      # resolves to "every Rust library member of rustLibPkg".
+      var packageRustUpstream =
+        initTable[string, seq[RustWorkspaceUpstream]]()
+      for lib in rustCrossLibraries:
+        let action = emitRustCrossLibrary(projectRoot, lib)
+        allActions.add(action)
+        let entry = RustWorkspaceUpstream(
+          package: lib.package,
+          libraryName: lib.libraryName,
+          linkActionId: action.id,
+          outputPath: action.outputs[0])
+        if not packageRustUpstream.hasKey(lib.package):
+          packageRustUpstream[lib.package] = @[]
+        packageRustUpstream[lib.package].add(entry)
+        discard target(lib.libraryName, allActions)
       # Mode 3 dep wiring: emit Nim LIBRARIES next so their link-action
       # ids + archive output paths are known by the time we reach each
       # executable's Phase 3. Index libraries by owning package so
@@ -2412,6 +2837,7 @@ proc nimEmitFragment(projectRoot: string;
       for entry in entrypoints:
         var entryDeps: seq[NimWorkspaceLibrary] = @[]
         var entryCCppDeps: seq[CCppUpstreamLibrary] = @[]
+        var entryRustDeps: seq[RustWorkspaceUpstream] = @[]
         if entry.package.len > 0:
           for edge in depEdges:
             if edge.fromPackage != entry.package:
@@ -2422,13 +2848,16 @@ proc nimEmitFragment(projectRoot: string;
             if packageCCppLibraries.hasKey(edge.toPackage):
               for lib in packageCCppLibraries[edge.toPackage]:
                 entryCCppDeps.add(lib)
+            if packageRustUpstream.hasKey(edge.toPackage):
+              for lib in packageRustUpstream[edge.toPackage]:
+                entryRustDeps.add(lib)
             # A dep on a declared package that ships no library
             # member of either flavour (executable-only package) is
             # legal — silent no-op for the link line, build-order
             # sequencing comes once executable-on-executable wiring
             # lands.
         let triple = emitForEntrypoint(projectRoot, nimExe, entry,
-          entryDeps, entryCCppDeps)
+          entryDeps, entryCCppDeps, entryRustDeps)
         allActions.add(triple.phase1)
         for a in triple.phase2:
           allActions.add(a)
@@ -2462,8 +2891,32 @@ proc nimEmitFragment(projectRoot: string;
           allActions.add(a)
         allActions.add(bundle.link)
         discard target(exec.executableName, allActions)
+      # M35 reverse cross-language: emit Rust executables LAST so each
+      # binary's link can reference the upstream Nim archive's
+      # link-action id + output path. The depends_on edge map indexes
+      # the rustApp's upstream Nim libs by ``toPackage``; for each edge
+      # whose ``toPackage`` resolved a Nim library we thread the
+      # archive onto the rustc link via ``-L native=<dir>`` + ``-l
+      # static=<libname>``. Mirror of the C/C++ reverse direction
+      # above; the only difference is the rustc invocation (vs gcc)
+      # and the Nim runtime libs (``-lm`` on POSIX only — Windows
+      # MinGW's rustc-default link line picks up the C runtime).
+      for exec in rustCrossExecutables:
+        var execNimUpstream: seq[NimUpstreamLibrary] = @[]
+        if exec.package.len > 0:
+          for edge in depEdges:
+            if edge.fromPackage != exec.package:
+              continue
+            if packageNimUpstream.hasKey(edge.toPackage):
+              for nimLib in packageNimUpstream[edge.toPackage]:
+                execNimUpstream.add(nimLib)
+        let action = emitRustCrossExecutable(projectRoot, exec,
+          execNimUpstream)
+        allActions.add(action)
+        discard target(exec.executableName, allActions)
       if entrypoints.len > 0 or buildableLibraries.len > 0 or
-          cCppCrossMembers.len > 0 or cCppCrossExecutables.len > 0:
+          cCppCrossMembers.len > 0 or cCppCrossExecutables.len > 0 or
+          rustCrossLibraries.len > 0 or rustCrossExecutables.len > 0:
         defaultTarget(target("default", allActions))
       # M22 test-target emission. Each ``tests/test_*.nim`` file becomes
       # a (nim c -r, fs.stamp) action pair. The test target is non-
