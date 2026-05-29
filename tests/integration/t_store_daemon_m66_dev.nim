@@ -344,7 +344,7 @@ suite "M66 development store daemon":
     check res.writerMode == "daemon"
     check fileExists(res.realizedPrefixPath / "bin" / "tool")
 
-  test "integration_store_daemon_dev_corrupt_index_refuses_startup":
+  test "integration_store_daemon_dev_corrupt_index_recovers_and_rebuilds":
     let root = createTempDir("repro-m66-corrupt-", "")
     defer:
       try: removeDir(root) except OSError: discard
@@ -353,10 +353,29 @@ suite "M66 development store daemon":
     let endpoint = shortEndpoint("corrupt")
     let storeRoot = root / "store"
     let env = makeEnv(endpoint, runtimeRoot)
+    var restoredPrefixId: PrefixIdBytes
+    var restoredPrefixPath = ""
 
-    block createIndex:
+    block createPrefix:
       var store = openStore(storeRoot)
-      store.close()
+      defer: store.close()
+      let hint = StoreReceiptHint(
+        adapter: "synthetic",
+        packageName: "preexisting-synthetic",
+        version: "0.1.0",
+        declaredExecutablePath: "bin/tool",
+        lockIdentity: "synthetic:preexisting",
+        materializationMechanism: "directory")
+      restoredPrefixId = computeRealizationHash(hint.packageName,
+        hint.version, hint.adapter, hint.lockIdentity,
+        hint.declaredExecutablePath)
+      let realized = store.realizePrefix(restoredPrefixId, hint,
+        proc (stagingDir: string; mechanism: var string) =
+          createDir(stagingDir / "bin")
+          writeFile(stagingDir / "bin" / "tool", "preexisting payload\n")
+          mechanism = "directory")
+      restoredPrefixPath = realized.absolutePath
+      check fileExists(restoredPrefixPath / ReceiptFileName)
     try: removeFile(storeRoot / "index.db-wal") except OSError: discard
     try: removeFile(storeRoot / "index.db-shm") except OSError: discard
     writeFile(storeRoot / "index.db", "not a sqlite database\n")
@@ -365,10 +384,43 @@ suite "M66 development store daemon":
       args = @["--dev", "--store-root", storeRoot, "--endpoint", endpoint],
       env = env,
       options = {poStdErrToStdOut})
+    discard waitForStatus(endpoint, storeRoot)
+
+    block verifyRebuiltPrefix:
+      var rebuilt = openStore(storeRoot)
+      defer: rebuilt.close()
+      let row = rebuilt.lookupPrefix(restoredPrefixId)
+      check row.found
+      check row.row.realizedPath == prefixRelativePath(
+        "preexisting-synthetic", "0.1.0", restoredPrefixId)
+      check rebuilt.listRoots().len == 0
+      check dirExists(storeRoot / "recovery" / "index-db-corrupt")
+
+    let daemonRealized = realizeSyntheticViaDaemon(
+      syntheticReq(storeRoot, "holder-corrupt", "root-corrupt", 0), endpoint)
+    check daemonRealized.writerMode == "daemon"
+    check fileExists(daemonRealized.realizedPrefixPath / "bin" / "tool")
+
+    stopIfRunning(endpoint)
     let rc = daemon.waitForExit()
     let daemonOut = daemon.outputStream.readAll()
     daemon.close()
-    check rc != 0
-    check daemonOut.contains("index.db") or
-      daemonOut.contains("database") or daemonOut.contains("quick_check")
-    check not queryDevStatus(endpoint).running
+    check rc == 0
+    check daemonOut.contains("rebuilt corrupt index.db")
+    check daemonOut.contains("quarantine=")
+
+    try: removeFile(storeRoot / "index.db-wal") except OSError: discard
+    try: removeFile(storeRoot / "index.db-shm") except OSError: discard
+    writeFile(storeRoot / "index.db", "not a sqlite database, again\n")
+    let recoverOut = requireSuccess(shellCommand([
+      publicReproBin(), "store", "recover", "--store-root=" & storeRoot
+    ], env = [("REPROSTORED_ENDPOINT", endpoint),
+      ("XDG_RUNTIME_DIR", runtimeRoot)]))
+    check recoverOut.contains("index rebuilt: yes")
+    check recoverOut.contains("index quarantine:")
+    check recoverOut.contains("reinserted prefixes: 2")
+
+    var afterCliRecover = openStore(storeRoot)
+    defer: afterCliRecover.close()
+    check afterCliRecover.lookupPrefix(restoredPrefixId).found
+    check afterCliRecover.listPrefixes().len == 2

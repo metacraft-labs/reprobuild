@@ -406,9 +406,12 @@ proc runDevDaemonForeground*(config: DevDaemonConfig): int =
       discard
 
     block recoverAtStartup:
-      var store = openStore(config.storeRoot)
-      defer: store.close()
-      discard store.recover()
+      let report = recoverStoreRoot(config.storeRoot)
+      if report.indexRebuilt:
+        stderr.writeLine("reprostored --dev: rebuilt corrupt index.db; " &
+          "quarantine=" & report.indexQuarantineDir &
+          " reinserted-prefixes=" & $report.reinsertedPrefixes.len &
+          " quarantined-prefixes=" & $report.quarantinedPrefixes.len)
 
     removeEndpointFiles(config)
     var listener = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)

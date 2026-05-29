@@ -10431,10 +10431,10 @@ proc runStoreCommand*(args: seq[string]): int =
 
   let root = resolveStoreRoot(storeRootOverride)
   try:
-    var store = openStore(root)
-    defer: store.close()
     case sub
     of "gc":
+      var store = openStore(root)
+      defer: store.close()
       let report = store.gc(graceSeconds = graceSeconds)
       echo "repro store gc: store-root=" & root
       echo "quarantined: " & $report.quarantined.len
@@ -10446,8 +10446,14 @@ proc runStoreCommand*(args: seq[string]): int =
         echo "  - " & path
       return 0
     of "recover":
-      let report = store.recover()
+      let report = recoverStoreRoot(root)
       echo "repro store recover: store-root=" & root
+      echo "index rebuilt: " & (if report.indexRebuilt: "yes" else: "no")
+      if report.indexRebuilt:
+        echo "index recovery reason: " & report.indexRecoveryReason
+        echo "index quarantine: " & report.indexQuarantineDir
+        echo "quarantined index files: " & $report.quarantinedIndexFiles.len
+        for path in report.quarantinedIndexFiles: echo "  - " & path
       echo "quick_check: " & report.quickCheck
       echo "swept staging dirs: " & $report.sweptStagingDirs.len
       for path in report.sweptStagingDirs: echo "  - " & path
@@ -10457,11 +10463,15 @@ proc runStoreCommand*(args: seq[string]): int =
       for path in report.quarantinedPrefixes: echo "  - " & path
       return 0
     of "roots":
+      var store = openStore(root)
+      defer: store.close()
       echo "repro store roots: store-root=" & root
       for row in store.listRoots():
         echo "  - " & row.rootId & " (" & row.kind & ")"
       return 0
     of "list":
+      var store = openStore(root)
+      defer: store.close()
       echo "repro store list: store-root=" & root
       for row in store.listPrefixes():
         echo "  - " & row.adapter & " " & row.packageName & " " &

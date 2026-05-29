@@ -177,6 +177,10 @@ type
     reinsertedPrefixes*: seq[string]
     quarantinedPrefixes*: seq[string]
     quickCheck*: string
+    indexRebuilt*: bool
+    indexRecoveryReason*: string
+    indexQuarantineDir*: string
+    quarantinedIndexFiles*: seq[string]
 
 const
   StoreSchemaVersion* = 1
@@ -485,29 +489,45 @@ proc openStore*(root: string): Store =
   result.tmpRoot = root / "tmp"
   result.gcPendingRoot = root / "gc" / "pending-deletion"
   result.indexPath = root / "index.db"
+  let indexPreExists = fileExists(extendedPath(result.indexPath))
+  let existingIndexBytes =
+    if indexPreExists: getFileSize(extendedPath(result.indexPath))
+    else: 0
   createDir(extendedPath(result.casRoot))
   createDir(extendedPath(result.prefixesRoot))
   createDir(extendedPath(result.tmpRoot))
   createDir(extendedPath(result.gcPendingRoot))
   result.db = sqlite3_binding.open(result.indexPath)
-  let onDiskVersion = result.db.userVersion()
-  if onDiskVersion == 0:
-    result.db.initSchema()
-  elif onDiskVersion > StoreSchemaVersion:
-    var e = newException(EStoreSchemaTooNew,
-      "store index.db schema version " & $onDiskVersion &
-      " is newer than this Reprobuild build understands (" &
-      $StoreSchemaVersion & ")")
-    raise e
-  else:
-    result.db.exec("PRAGMA foreign_keys = ON")
-    result.db.exec("PRAGMA journal_mode = WAL")
-    result.db.exec("PRAGMA synchronous = NORMAL")
-  let check = result.db.quickCheck()
-  if check.len > 0 and check != "ok":
-    var e = newException(EStoreIndexCorrupt,
-      "PRAGMA quick_check returned: " & check)
-    raise e
+  var opened = false
+  try:
+    let onDiskVersion = result.db.userVersion()
+    if onDiskVersion == 0:
+      if indexPreExists and existingIndexBytes > 0:
+        let check = result.db.quickCheck()
+        if check.len > 0 and check != "ok":
+          var e = newException(EStoreIndexCorrupt,
+            "PRAGMA quick_check returned: " & check)
+          raise e
+      result.db.initSchema()
+    elif onDiskVersion > StoreSchemaVersion:
+      var e = newException(EStoreSchemaTooNew,
+        "store index.db schema version " & $onDiskVersion &
+        " is newer than this Reprobuild build understands (" &
+        $StoreSchemaVersion & ")")
+      raise e
+    else:
+      let check = result.db.quickCheck()
+      if check.len > 0 and check != "ok":
+        var e = newException(EStoreIndexCorrupt,
+          "PRAGMA quick_check returned: " & check)
+        raise e
+      result.db.exec("PRAGMA foreign_keys = ON")
+      result.db.exec("PRAGMA journal_mode = WAL")
+      result.db.exec("PRAGMA synchronous = NORMAL")
+    opened = true
+  finally:
+    if not opened:
+      result.db.close()
   result.nonce = uint64(getCurrentProcessId())
 
 proc close*(s: var Store) =
@@ -1101,6 +1121,85 @@ proc recover*(s: var Store): RecoverReport =
   result.quickCheck = s.db.quickCheck()
   result.sweptStagingDirs = s.sweepStaging()
   s.reconcileUnindexedPrefixes(result)
+
+proc indexSidecarPaths(root: string): seq[string] =
+  @[
+    root / "index.db",
+    root / "index.db-wal",
+    root / "index.db-shm"
+  ]
+
+proc quarantineDigestForIndex(root: string): PrefixIdBytes =
+  var buf: seq[byte] = @[]
+  for path in indexSidecarPaths(root):
+    if not fileExists(extendedPath(path)):
+      continue
+    buf.writeString(path.extractFilename)
+    let raw = readFile(extendedPath(path))
+    buf.writeU64Le(uint64(raw.len))
+    for ch in raw:
+      buf.add(byte(ord(ch)))
+  blake3.digest(buf)
+
+proc quarantineCorruptIndex(root, reason: string): tuple[dir: string;
+    moved: seq[string]] =
+  ## Move index.db and WAL sidecars away before rebuilding. The quarantine
+  ## path is store-local and derived from the corrupt bytes; a numeric suffix
+  ## is used only if the same corrupt payload has already been preserved.
+  createDir(extendedPath(root))
+  let recoveryRoot = root / "recovery" / "index-db-corrupt"
+  createDir(extendedPath(recoveryRoot))
+  let digestHex = hexOf(quarantineDigestForIndex(root))[0 ..< 16]
+  let base = recoveryRoot / digestHex
+  result.dir = base
+  var suffix = 0
+  while dirExists(extendedPath(result.dir)):
+    inc suffix
+    result.dir = base & "." & $suffix
+  createDir(extendedPath(result.dir))
+  writeFile(extendedPath(result.dir / "reason.txt"), reason & "\n")
+  for path in indexSidecarPaths(root):
+    if fileExists(extendedPath(path)):
+      let dest = result.dir / path.extractFilename
+      moveFile(extendedPath(path), extendedPath(dest))
+      result.moved.add(dest)
+
+proc recoverableIndexOpenError(err: ref SqliteError): bool =
+  let msg = err.msg.toLowerAscii()
+  err.code == 11.cint or err.code == 26.cint or
+    msg.contains("database disk image is malformed") or
+    msg.contains("file is not a database") or
+    msg.contains("not a database")
+
+proc rebuildIndexAndRecover(root, reason: string): RecoverReport =
+  let quarantine = quarantineCorruptIndex(root, reason)
+  result.indexRebuilt = true
+  result.indexRecoveryReason = reason
+  result.indexQuarantineDir = quarantine.dir
+  result.quarantinedIndexFiles = quarantine.moved
+  var store = openStore(root)
+  defer: store.close()
+  let report = store.recover()
+  result.quickCheck = report.quickCheck
+  result.sweptStagingDirs = report.sweptStagingDirs
+  result.reinsertedPrefixes = report.reinsertedPrefixes
+  result.quarantinedPrefixes = report.quarantinedPrefixes
+
+proc recoverStoreRoot*(root: string): RecoverReport =
+  ## Open the store and run recovery. If the existing index is corrupt or is
+  ## not a SQLite database, quarantine index.db plus WAL sidecars, create a
+  ## fresh index, and rebuild prefix rows from authoritative receipts.
+  try:
+    var store = openStore(root)
+    defer: store.close()
+    return store.recover()
+  except EStoreIndexCorrupt as err:
+    return rebuildIndexAndRecover(root, err.msg)
+  except SqliteError as err:
+    if fileExists(extendedPath(root / "index.db")) and
+        recoverableIndexOpenError(err):
+      return rebuildIndexAndRecover(root, err.msg)
+    raise
 
 # ---------------------------------------------------------------------------
 # Convenience: realize a prefix directly from on-disk source content
