@@ -185,6 +185,19 @@ proc dirFileCensus(dir: string;
           continue
         case kind
         of pcFile, pcLinkToFile:
+          # Skip the workspace project files (``repro.nim`` /
+          # ``reprobuild.nim`` / ``repro.scanned-deps.nim``) so they
+          # don't pollute the extension census toward ``nim``. The
+          # project file's presence is a manifest signal handled by
+          # ``attributeConvention``'s pass 1; counting it again at the
+          # extension level would tip the tie-break against the real
+          # source language in Mode 3 mixed workspaces. M30: this was
+          # observable on rust-mode3 fixtures where 2 ``.rs`` files
+          # tied 2 workspace ``.nim`` files and alphabetic ordering
+          # mis-attributed the target to ``nim``.
+          if basename == "repro.nim" or basename == "reprobuild.nim" or
+              basename == "repro.scanned-deps.nim":
+            continue
           inc result.total
           let ext = splitFile(basename).ext.toLowerAscii
           if ext.len > 0:
@@ -291,6 +304,17 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
       fileExists(targetDir / "Makefile.am")
     if not hasMakefile and not hasCmake and not hasAutotools:
       bestName = "c-cpp-direct"
+  # M30 refinement for Mode 3 Rust: same shape as the C/C++ refinement
+  # above. When the extension census picks ``rust`` (i.e. ``.rs``
+  # files dominate the target dir) but NO ``Cargo.toml`` is present
+  # at the target root OR at the workspace root containing it, the
+  # project routes through the Mode 3 ``rust-direct`` convention. Mode
+  # 3 is in-workspace only, so we don't need to walk further up the
+  # ancestry for a workspace ``Cargo.toml`` (Mode 2's Cargo workspace
+  # support handles that ancestor case via its own ``recognize``).
+  if bestName == "rust":
+    if not fileExists(targetDir / "Cargo.toml"):
+      bestName = "rust-direct"
   result.convention = bestName
   result.evidence = "extension census: " & $bestCount & "/" &
     $census.total & " files match " & bestName
@@ -511,11 +535,14 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[8, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[9, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "rust",
+                       exeName: "rustc",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "rust-direct",
                        exeName: "rustc",
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "go",

@@ -139,6 +139,7 @@ $PopulatedExamples = @(
   'c-cpp-make/library-static',
   'c-cpp-autotools/hello-binary',
   'c-cpp-mode3/binary-with-library',
+  'rust-mode3/binary-with-library',
   'mixed/nim-uses-cpp-lib',
   'mixed/cpp-uses-nim-lib'
 )
@@ -328,6 +329,26 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'ar' not on PATH" }
       }
       return @{ Available = $true; Reason = "cc=$($ccCmd.Source); ar=$($arCmd.Source)" }
+    }
+    'rust-mode3' {
+      # M30: Mode 3 Rust — same toolchain probe as ``rust`` (the
+      # Mode 2 path), minus the ``cargo`` requirement. ``rustc`` alone
+      # is enough; the Mode 3 convention emits pure rustc invocations
+      # and never spawns cargo. Reuse the rustup-stable fallback that
+      # the ``rust`` probe uses so a fresh host without a system rustc
+      # still picks up the bundled toolchain.
+      $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+      if (-not $rustc) {
+        $rustupStableBin = 'D:\metacraft-dev-deps\rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
+        if (Test-Path -LiteralPath (Join-Path $rustupStableBin 'rustc.exe')) {
+          $env:PATH = "$rustupStableBin;$env:PATH"
+          $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+        }
+      }
+      if ($rustc) {
+        return @{ Available = $true; Reason = "rustc=$($rustc.Source)" }
+      }
+      return @{ Available = $false; Reason = "rustc not on PATH and no rustup stable under D:/metacraft-dev-deps/rustup" }
     }
     'mixed' {
       # Cross-language Mode 3 — needs BOTH the Nim toolchain (for the
@@ -1020,6 +1041,28 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
         Greeting = 'hello from c-cpp-mode3-binary-with-library, 2 + 3 = 5'
       })
+    }
+    'rust-mode3/binary-with-library' {
+      # M30: Mode 3 Rust. The workspace declares a library ``mathlib``
+      # and an executable ``calc`` in a single ``repro.nim`` with NO
+      # ``Cargo.toml``. The Mode 3 ``rust-direct`` convention emits per-
+      # crate rustc link actions; the library produces
+      # ``libmathlib.rlib`` and the executable's argv carries
+      # ``--extern mathlib=<rlib>`` so ``use mathlib::add;`` resolves.
+      # The link action is sequenced strictly after the library action
+      # via Mode 3 ``depends_on`` wiring. Both outputs land under
+      # ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'calc'
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.rlib'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
+          Greeting = 'hello from rust-mode3-binary-with-library, mathlib added 2+3 = 5'
+        }
+      )
     }
     'mixed/nim-uses-cpp-lib' {
       # Cross-language Mode 3: the workspace declares a C static library

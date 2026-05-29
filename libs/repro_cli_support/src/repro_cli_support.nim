@@ -5913,6 +5913,7 @@ const
     "c-cpp-autotools",
     "c-cpp-make",
     "c-cpp-direct",
+    "rust-direct",
   ]
     ## The convention list ``repro show-conventions`` prints when asked
     ## for the registry order. Mirrors the registration order in

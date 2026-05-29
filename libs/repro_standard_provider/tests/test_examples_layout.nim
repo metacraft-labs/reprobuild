@@ -53,6 +53,7 @@ const PopulatedExamples = [
   "c-cpp-make/library-static",
   "c-cpp-autotools/hello-binary",
   "c-cpp-mode3/binary-with-library",
+  "rust-mode3/binary-with-library",
   "mixed/nim-uses-cpp-lib",
   "mixed/cpp-uses-nim-lib",
 ]

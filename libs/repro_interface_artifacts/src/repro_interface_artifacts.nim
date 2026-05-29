@@ -971,7 +971,8 @@ proc sameSourceFile(a, b: string): bool =
     a == b
 
 const
-  RegisteredStandardConventionToolchains* = ["nim", "rust", "cargo", "go",
+  RegisteredStandardConventionToolchains* = ["nim", "rust", "rustc", "cargo",
+    "go",
     "python3", "python", "uv",
     "node", "typescript", "tsx", "swc", "esbuild",
     "gcc", "clang", "make", "ar", "autoconf", "automake"]

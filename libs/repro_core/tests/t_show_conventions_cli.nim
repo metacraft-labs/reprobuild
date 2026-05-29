@@ -166,7 +166,7 @@ suite "repro show-conventions: CLI smoke":
       check sawAppPkg
       check sawLibPkg
       check doc["conventions"].kind == JArray
-      check doc["conventions"].len == 8
+      check doc["conventions"].len == 9
       # First convention is "nim" — pins the dispatch order.
       check doc["conventions"][0].getStr == "nim"
       # c-cpp-autotools must come BEFORE c-cpp-make BEFORE c-cpp-direct
@@ -182,17 +182,27 @@ suite "repro show-conventions: CLI smoke":
       var autotoolsIdx = -1
       var makeIdx = -1
       var directIdx = -1
+      var rustIdx = -1
+      var rustDirectIdx = -1
       for i in 0 ..< doc["conventions"].len:
         case doc["conventions"][i].getStr
         of "c-cpp-autotools": autotoolsIdx = i
         of "c-cpp-make":      makeIdx = i
         of "c-cpp-direct":    directIdx = i
+        of "rust":            rustIdx = i
+        of "rust-direct":     rustDirectIdx = i
         else: discard
       check autotoolsIdx >= 0
       check makeIdx >= 0
       check directIdx >= 0
       check autotoolsIdx < makeIdx
       check makeIdx < directIdx
+      # M30: rust (Mode 2) registered BEFORE rust-direct (Mode 3) so
+      # a project with a Cargo.toml routes through the Cargo-driven
+      # convention; rust-direct catches the no-Cargo.toml case.
+      check rustIdx >= 0
+      check rustDirectIdx >= 0
+      check rustIdx < rustDirectIdx
       removeDir(dir)
 
   test "--target=NAME filters to a single member":
@@ -331,6 +341,6 @@ suite "repro show-conventions: registry mirror sanity":
         let trimmed = stripped.strip(chars = {',', ' ', '"'})
         if trimmed.len > 0:
           mirror.add(trimmed)
-      check registered.len == 8
-      check mirror.len == 8
+      check registered.len == 9
+      check mirror.len == 9
       check registered == mirror

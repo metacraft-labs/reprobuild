@@ -27,6 +27,7 @@ import repro_provider_runtime
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/nim as nim_convention
 import repro_standard_provider/conventions/rust as rust_convention
+import repro_standard_provider/conventions/rust_direct as rust_direct_convention
 import repro_standard_provider/conventions/go as go_convention
 import repro_standard_provider/conventions/python as python_convention
 import repro_standard_provider/conventions/javascript_typescript as jsts_convention
@@ -161,6 +162,12 @@ when defined(reproProviderMode):
   # where the user declared their project shape in ``repro.nim`` with
   # no ecosystem manifest at all.
   addDefaultConvention(c_cpp_direct_convention.cCppDirectConvention())
+  # rust_direct (Mode 3 / no-Cargo.toml) registered AFTER the Mode 2
+  # rust convention so a project shipping a Cargo.toml routes through
+  # the Mode 2 path first; Mode 3 picks up the case where the user
+  # declared their crate shape in ``repro.nim`` with no Cargo
+  # manifest. M30 of Mode3-Language-Expansion.milestones.org.
+  addDefaultConvention(rust_direct_convention.rustDirectConvention())
 
   proc runStandardProvider(): int =
     try:

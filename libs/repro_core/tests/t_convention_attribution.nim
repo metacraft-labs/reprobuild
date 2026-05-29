@@ -106,14 +106,29 @@ suite "attributeConvention: extension census fallback":
     check attr.evidence.contains("extension census")
     removeDir(dir)
 
-  test "*.rs-dominant dir without Cargo.toml ⇒ rust":
+  test "*.rs-dominant dir without Cargo.toml ⇒ rust-direct (M30 refinement)":
+    # M30: when ``.rs`` files dominate the dir but NO ``Cargo.toml``
+    # is present, the project routes through the Mode 3 ``rust-direct``
+    # convention. Mirror of the c-cpp-direct refinement above.
     let dir = makeScratch("rust-extension")
     createDir(dir / "src")
     writeFile(dir / "src" / "lib.rs", "pub fn x() {}\n")
     writeFile(dir / "src" / "main.rs", "fn main() {}\n")
     let attr = attributeConvention(dir)
-    check attr.convention == "rust"
+    check attr.convention == "rust-direct"
     check attr.evidence.contains("extension census")
+    removeDir(dir)
+
+  test "*.rs-dominant dir WITH Cargo.toml ⇒ rust (Mode 2 wins)":
+    let dir = makeScratch("rust-with-cargo")
+    createDir(dir / "src")
+    writeFile(dir / "src" / "lib.rs", "pub fn x() {}\n")
+    writeFile(dir / "src" / "main.rs", "fn main() {}\n")
+    writeFile(dir / "Cargo.toml", "[package]\nname=\"x\"\nversion=\"0.1.0\"\n")
+    let attr = attributeConvention(dir)
+    # ``Cargo.toml`` is a manifest signal so we land on ``rust`` via
+    # the manifest table (no extension-census refinement needed).
+    check attr.convention == "rust"
     removeDir(dir)
 
   test "directory of only .png ⇒ no convention":
