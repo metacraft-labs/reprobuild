@@ -720,6 +720,76 @@ proc workspaceClaimedByZigDirect(projectRoot, source: string): bool =
     return false
   true
 
+proc usesIncludesDToolchain(source: string): bool =
+  ## M45: defer mixed D+C/C++ workspaces to the ``d-direct``
+  ## convention. Mirrors ``usesIncludesZigToolchain`` shape.
+  if source.len == 0:
+    return false
+  var sawD = false
+  var inBlock = false
+  proc consume(token: string) {.closure.} =
+    if token == "d" or token == "dmd" or token == "ldc2" or
+        token == "gdc":
+      sawD = true
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      if inBlock:
+        inBlock = false
+      continue
+    if inBlock:
+      let leading = line.len > 0 and line[0] in {' ', '\t'}
+      if not leading:
+        inBlock = false
+      else:
+        for raw in stripped.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+        continue
+    if stripped.startsWith("uses:"):
+      let payload = stripped[5 .. ^1].strip()
+      if payload.len == 0:
+        inBlock = true
+      else:
+        var clean = payload
+        if clean.startsWith("["):
+          clean = clean[1 .. ^1]
+        if clean.endsWith("]"):
+          clean = clean[0 ..< ^1]
+        for raw in clean.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+  sawD
+
+proc hasDubManifest(projectRoot: string): bool =
+  fileExists(extendedPath(projectRoot / "dub.json")) or
+    fileExists(extendedPath(projectRoot / "dub.sdl"))
+
+proc workspaceClaimedByDDirect(projectRoot, source: string): bool =
+  ## True when the ``d-direct`` Mode 3 convention will recognize the
+  ## same workspace. M45 hands cross-language D↔C/C++ mixed
+  ## workspaces to ``d-direct`` (it embeds the C/C++ cross helpers
+  ## the same way ``rust-direct`` / ``zig-direct`` do), so this
+  ## convention declines. The check mirrors ``d_direct.dDirectRecognize``
+  ## cheaply: ``uses:`` names ``d``/``dmd``/``ldc2``/``gdc`` anywhere
+  ## AND no ``dub.json`` / ``dub.sdl`` at the workspace root (the
+  ## future Mode 2 ``d`` convention's territory).
+  if not usesIncludesDToolchain(source):
+    return false
+  if hasDubManifest(projectRoot):
+    return false
+  true
+
 proc cCppDirectRecognize(projectRoot: string;
                          request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract:
@@ -753,6 +823,11 @@ proc cCppDirectRecognize(projectRoot: string;
   ##     (which embeds the C/C++ cross helpers and emits both
   ##     directions of the Zig ↔ C cross-language matrix from a single
   ##     fragment).
+  ##   * M45: NO ``d``/``dmd``/``ldc2``/``gdc`` in any ``uses:`` block
+  ##     AND no ``dub.json`` / ``dub.sdl``. A mixed D+C/C++ workspace
+  ##     routes through ``d-direct`` (which embeds the C/C++ cross
+  ##     helpers and emits both directions of the D ↔ C cross-language
+  ##     matrix from a single fragment).
   if rootMakefile(projectRoot).len > 0:
     return false
   if hasCMakeLists(projectRoot):
@@ -771,6 +846,8 @@ proc cCppDirectRecognize(projectRoot: string;
   if workspaceClaimedByFortranDirect(projectRoot, source):
     return false
   if workspaceClaimedByZigDirect(projectRoot, source):
+    return false
+  if workspaceClaimedByDDirect(projectRoot, source):
     return false
   let members = extractMembersWithOwnership(source)
   if members.len == 0:

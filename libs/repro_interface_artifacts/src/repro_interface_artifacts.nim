@@ -981,7 +981,9 @@ const
     "gradle", "kotlin",
     "dotnet", "dotnet-sdk", "csharp",
     "swift", "swiftc", "swiftpm",
-    "gfortran", "fortran"]
+    "gfortran", "fortran",
+    "zig",
+    "d", "dmd", "ldc2", "gdc"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
     ## Tier 2b standard provider. This list MUST stay in sync with the

@@ -45,6 +45,7 @@ import repro_standard_provider/conventions/swift_swiftpm as swift_swiftpm_conven
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/conventions/zig_direct as zig_direct_convention
+import repro_standard_provider/conventions/d_direct as d_direct_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -297,6 +298,18 @@ when defined(reproProviderMode):
   # ``zig`` AND no ``build.zig`` is present at the workspace root,
   # mirroring the rust-direct / go-direct / fortran-direct pattern.
   addDefaultConvention(zig_direct_convention.zigDirectConvention())
+  # d_direct (Mode 3 / no-dub.json/sdl) — registered AFTER all the
+  # other Mode 3 conventions per M45 of
+  # Mode3-Language-Expansion.milestones.org. There is no Mode 2 D
+  # convention sibling yet (dub.json/dub.sdl recognition is deferred
+  # per the M45 honest-scope cut); this is the only D convention
+  # today. Registration order matters only for mixed D + C/C++
+  # workspaces — c-cpp-direct defers to d-direct when ``uses:``
+  # anywhere names ``d``/``dmd``/``ldc2``/``gdc`` AND no
+  # ``dub.json`` / ``dub.sdl`` is present at the workspace root,
+  # mirroring the rust-direct / go-direct / fortran-direct /
+  # zig-direct pattern.
+  addDefaultConvention(d_direct_convention.dDirectConvention())
 
   proc runStandardProvider(): int =
     try:

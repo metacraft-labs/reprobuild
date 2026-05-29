@@ -169,7 +169,10 @@ $PopulatedExamples = @(
   'mixed/cpp-uses-fortran-lib',
   'zig-mode3/binary-with-library',
   'mixed/zig-uses-cpp-lib',
-  'mixed/cpp-uses-zig-lib'
+  'mixed/cpp-uses-zig-lib',
+  'd-mode3/binary-with-library',
+  'mixed/d-uses-cpp-lib',
+  'mixed/cpp-uses-d-lib'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -478,6 +481,42 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $true; Reason = "zig=$($zigCmd.Source)" }
       }
       return @{ Available = $false; Reason = "'zig' not on PATH and not under D:/metacraft-dev-deps/zig/ (download from ziglang.org)" }
+    }
+    'd-mode3' {
+      # M45: Mode 3 D — probe for a D compiler (ldmd2/dmd/ldc2). The
+      # convention prefers ``ldmd2`` (the dmd-compatible driver
+      # shipped with LDC) which avoids LDC's ``ldc2`` host-CPU
+      # auto-detection crash on some recent AMD CPUs. Falls back to
+      # the bundled LDC install under
+      # D:/metacraft-dev-deps/ldc/<version>/ldc2-<version>-windows-x64/.
+      # The M45 honest-scope cut: env.ps1 doesn't yet provision a D
+      # toolchain so most hosts SKIP this gate cleanly when LDC isn't
+      # bundled.
+      $dCmd = Get-Command ldmd2 -ErrorAction SilentlyContinue
+      if (-not $dCmd) { $dCmd = Get-Command dmd -ErrorAction SilentlyContinue }
+      if (-not $dCmd) { $dCmd = Get-Command ldc2 -ErrorAction SilentlyContinue }
+      if (-not $dCmd) {
+        $ldcRoot = 'D:\metacraft-dev-deps\ldc'
+        if (Test-Path -LiteralPath $ldcRoot) {
+          $candidates = @()
+          foreach ($verDir in Get-ChildItem -LiteralPath $ldcRoot -Directory -ErrorAction SilentlyContinue) {
+            foreach ($inner in Get-ChildItem -LiteralPath $verDir.FullName -Directory -ErrorAction SilentlyContinue) {
+              $candidate = Join-Path $inner.FullName 'bin\ldmd2.exe'
+              if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+            }
+          }
+          if ($candidates.Count -gt 0) {
+            $picked = $candidates | Sort-Object | Select-Object -Last 1
+            $binDir = Split-Path -Parent $picked
+            $env:PATH = "$binDir;$env:PATH"
+            $dCmd = Get-Command ldmd2 -ErrorAction SilentlyContinue
+          }
+        }
+      }
+      if ($dCmd) {
+        return @{ Available = $true; Reason = "d=$($dCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "no D compiler (ldmd2/dmd/ldc2) on PATH and not under D:/metacraft-dev-deps/ldc/ (download from github.com/ldc-developers/ldc/releases)" }
     }
     'jsts-mode3' {
       # M33: Mode 3 JS/TS — same toolchain probe as ``javascript-typescript``
@@ -1278,6 +1317,81 @@ function Probe-Fixture([string]$rel) {
         return @{ Available = $false; Reason = "'ar' not on PATH (M44 reverse fixture needs an archiver)" }
       }
       return @{ Available = $true; Reason = "zig=$($zigCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
+    }
+    'mixed/d-uses-cpp-lib' {
+      # M45 forward direction: a D executable that links a C archive.
+      # Needs a D compiler (ldmd2/dmd/ldc2) + gcc/clang + ar.
+      $dCmd = Get-Command ldmd2 -ErrorAction SilentlyContinue
+      if (-not $dCmd) { $dCmd = Get-Command dmd -ErrorAction SilentlyContinue }
+      if (-not $dCmd) { $dCmd = Get-Command ldc2 -ErrorAction SilentlyContinue }
+      if (-not $dCmd) {
+        $ldcRoot = 'D:\metacraft-dev-deps\ldc'
+        if (Test-Path -LiteralPath $ldcRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $ldcRoot -Directory -ErrorAction SilentlyContinue) {
+            foreach ($inner in Get-ChildItem -LiteralPath $verDir.FullName -Directory -ErrorAction SilentlyContinue) {
+              $candidate = Join-Path $inner.FullName 'bin\ldmd2.exe'
+              if (Test-Path -LiteralPath $candidate) {
+                $binDir = Split-Path -Parent $candidate
+                $env:PATH = "$binDir;$env:PATH"
+                $dCmd = Get-Command ldmd2 -ErrorAction SilentlyContinue
+                break
+              }
+            }
+            if ($dCmd) { break }
+          }
+        }
+      }
+      if (-not $dCmd) {
+        return @{ Available = $false; Reason = "no D compiler (ldmd2/dmd/ldc2) on PATH and not under D:/metacraft-dev-deps/ldc/ (M45 forward fixture needs D)" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (M45 forward fixture needs a C compiler)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M45 forward fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "d=$($dCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/cpp-uses-d-lib' {
+      # M45 reverse direction: a C++ executable that links a D
+      # staticlib. Needs a D compiler (ldmd2/dmd/ldc2) + g++/clang++
+      # + ar.
+      $dCmd = Get-Command ldmd2 -ErrorAction SilentlyContinue
+      if (-not $dCmd) { $dCmd = Get-Command dmd -ErrorAction SilentlyContinue }
+      if (-not $dCmd) { $dCmd = Get-Command ldc2 -ErrorAction SilentlyContinue }
+      if (-not $dCmd) {
+        $ldcRoot = 'D:\metacraft-dev-deps\ldc'
+        if (Test-Path -LiteralPath $ldcRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $ldcRoot -Directory -ErrorAction SilentlyContinue) {
+            foreach ($inner in Get-ChildItem -LiteralPath $verDir.FullName -Directory -ErrorAction SilentlyContinue) {
+              $candidate = Join-Path $inner.FullName 'bin\ldmd2.exe'
+              if (Test-Path -LiteralPath $candidate) {
+                $binDir = Split-Path -Parent $candidate
+                $env:PATH = "$binDir;$env:PATH"
+                $dCmd = Get-Command ldmd2 -ErrorAction SilentlyContinue
+                break
+              }
+            }
+            if ($dCmd) { break }
+          }
+        }
+      }
+      if (-not $dCmd) {
+        return @{ Available = $false; Reason = "no D compiler (ldmd2/dmd/ldc2) on PATH and not under D:/metacraft-dev-deps/ldc/ (M45 reverse fixture needs D)" }
+      }
+      $cxx = Get-Command g++ -ErrorAction SilentlyContinue
+      if (-not $cxx) { $cxx = Get-Command clang++ -ErrorAction SilentlyContinue }
+      if (-not $cxx) {
+        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (M45 reverse fixture needs a C++ link driver)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M45 reverse fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "d=$($dCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
     }
     'mixed/cpp-uses-go-lib' {
       # M36 reverse direction: a C++ executable that links a Go
@@ -2334,6 +2448,79 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
           Greeting = 'cpp says: zig added 2+3 = 5'
+        }
+      )
+    }
+    'd-mode3/binary-with-library' {
+      # M45: Mode 3 D pilot. The workspace declares a library
+      # ``dlib`` and an executable ``dcalc`` in a single
+      # ``repro.nim``. The d-direct convention emits one
+      # ``ldmd2 -lib`` action per library + one ``ldmd2`` action per
+      # executable; the executable's link argv carries the upstream
+      # archive via ``-L=<archive>`` (linker pass-through). The link
+      # is sequenced strictly after the library archive via the
+      # Mode 3 ``depends_on`` wiring. Both outputs land under
+      # ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'dcalc'
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'dlib' 'libdlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
+          Greeting = 'hello from d-mode3-binary-with-library, dlib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/d-uses-cpp-lib' {
+      # M45 cross-language Mode 3 (FORWARD direction): the workspace
+      # declares a C static library ``mathlib`` (``uses: gcc``) and a
+      # D executable ``dcalc`` (``uses: d``) in a single
+      # ``repro.nim`` with ``depends_on dcalc: mathlib``. The d-direct
+      # convention claims the whole workspace (c-cpp-direct defers
+      # when ``uses:`` names a D toolchain token AND no
+      # dub.json/dub.sdl is present), emits the upstream C archive
+      # in-line via the embedded ``emitCCppCrossMember`` helper, and
+      # threads the archive via ``-L=<archive>`` on the ldmd2 argv
+      # (linker pass-through). The binary's first stdout line proves
+      # the cross-language round-trip succeeded: D -> C c_add() ->
+      # back to D.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'dcalc' 'dcalc.exe'))
+          Greeting = 'd says: mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/cpp-uses-d-lib' {
+      # M45 cross-language Mode 3 (REVERSE direction): the workspace
+      # declares a D static library ``daddlib`` (``uses: d``) and a
+      # C++ executable ``cppapp`` (``uses: gcc``) in a single
+      # ``repro.nim`` with ``depends_on cppapp: daddlib``. The d-direct
+      # convention claims the whole workspace, emits the upstream D
+      # archive via ``ldmd2 -lib``, then emits per-source ``g++ -c``
+      # + terminal ``g++ -o`` actions for cppapp; the link argv
+      # carries the D archive as a trailing positional. The M45
+      # honest-scope cut limits the reverse fixture to ``extern (C)``
+      # entry points + ``core.stdc.*`` (no ``import std.*`` / no GC)
+      # so the gcc driver resolves all references against the D
+      # archive itself without external runtime libs — same property
+      # Zig's M44 reverse fixture relies on. The binary's first
+      # stdout line proves the cross-language round-trip: C++ -> D
+      # d_add() -> back to C++.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'daddlib' 'libdaddlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
+          Greeting = 'cpp says: d added 2+3 = 5'
         }
       )
     }

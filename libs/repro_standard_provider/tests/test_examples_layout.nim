@@ -77,6 +77,9 @@ const PopulatedExamples = [
   "zig-mode3/binary-with-library",
   "mixed/zig-uses-cpp-lib",
   "mixed/cpp-uses-zig-lib",
+  "d-mode3/binary-with-library",
+  "mixed/d-uses-cpp-lib",
+  "mixed/cpp-uses-d-lib",
 ]
 
 suite "examples layout M8":
