@@ -71,6 +71,11 @@ proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
   ##   - bare identifier (package reference) -> aekPackageRef
   ##   - quoted string (package reference with non-ident chars)
   ##   - `when <pred>: <body>` (predicate guard) -> aekWhenGuard
+  ##   - a call statement `helper(args...)` — the M83 Phase F1
+  ##     "splat" convention. The call must return `seq[ActivityElement]`;
+  ##     the macro emits a `for elem in helper(args...): targetSeq.add
+  ##     elem` loop so a user-authored sibling-module template that
+  ##     bundles package references composes cleanly into the activity.
   ## Anything else is a compile-error.
   case stmt.kind
   of nnkIdent:
@@ -113,13 +118,25 @@ proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
     result = newNimNode(nnkBlockStmt)
     result.add newEmptyNode()
     result.add inner
+  of nnkCall, nnkCommand:
+    # Splat: user-authored helper that returns seq[ActivityElement].
+    # The macro emits `for elem in <call>: targetSeq.add elem` so the
+    # helper's contributions inline into the activity body.
+    let elemSym = genSym(nskForVar, "actElem")
+    let forStmt = newNimNode(nnkForStmt)
+    forStmt.add elemSym
+    forStmt.add stmt
+    let addCall = newCall(newDotExpr(targetSeq, ident"add"), elemSym)
+    forStmt.add newStmtList(addCall)
+    result = forStmt
   of nnkCommentStmt:
     result = newEmptyNode()
   of nnkDiscardStmt:
     result = newEmptyNode()
   else:
     error("unsupported activity body element: " & $stmt.kind &
-          " (allowed: bare identifier, string literal, `when` block)",
+          " (allowed: bare identifier, string literal, `when` block, " &
+          "or a helper call returning seq[ActivityElement])",
           stmt)
 
 proc parseActivityBody(body: NimNode; targetSeq: NimNode): NimNode =
@@ -144,12 +161,33 @@ proc isCallTo(stmt: NimNode; name: string): bool =
 
 proc parseConfigSection(body: NimNode; profileVar: NimNode): NimNode =
   ## `config:` body is a list of `<pkg>: <subblock>` entries where the
-  ## subblock contains `key = value` assignments.
+  ## subblock contains `key = value` assignments, OR a helper-call
+  ## statement (M83 Phase F1 convention) that contributes config
+  ## overrides via a user-authored sibling-module template. The helper
+  ## is invoked as `helper(profileVar.configOverrides, args...)` —
+  ## matching the resource-constructor convention — so the helper's
+  ## body can append `ConfigOverride` records directly to the in-scope
+  ## list.
   result = newNimNode(nnkStmtList)
   if body.kind != nnkStmtList:
     error("config: expects an indented block of per-package overrides",
           body)
   for entry in body:
+    # Helper-call shape: `helper(arg = ..., arg = ...)` — no trailing
+    # block. The `nnkStmtList` second-child shape is what distinguishes
+    # the per-pkg form from the helper-call form.
+    if entry.kind in {nnkCall, nnkCommand} and
+       (entry.len < 2 or entry[^1].kind != nnkStmtList):
+      var newCall = newNimNode(nnkCall)
+      newCall.add entry[0]
+      var dotExpr = newNimNode(nnkDotExpr)
+      dotExpr.add profileVar
+      dotExpr.add newIdentNode("configOverrides")
+      newCall.add dotExpr
+      for i in 1 ..< entry.len:
+        newCall.add entry[i]
+      result.add newCall
+      continue
     if entry.kind != nnkCall or entry.len != 2 or
        entry[1].kind != nnkStmtList:
       error("config entry must be of the form `<pkg>: <key = value, ...>`",

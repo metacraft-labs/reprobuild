@@ -539,6 +539,29 @@ e2e_repro_profile_compile_via_action:
         tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim \
         2>&1 | tee test-logs/e2e_repro_profile_compile_via_action.log
 
+smoke_module_imports:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/smoke_module_imports \
+        --out:build/test-bin/smoke_module_imports \
+        libs/repro_profile_compile/tests/t_smoke_module_imports.nim \
+        2>&1 | tee test-logs/smoke_module_imports.log
+
+e2e_profile_modules:
+    mkdir -p test-logs build/test-bin build/nimcache build/bin
+    bash ./scripts/build_apps.sh
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/e2e_profile_modules \
+        --out:build/test-bin/e2e_profile_modules \
+        tests/e2e/m83/t_e2e_profile_modules.nim \
+        2>&1 | tee test-logs/e2e_profile_modules.log
+
 integration_intent_layer_round_trip:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
