@@ -65,6 +65,9 @@ const PopulatedExamples = [
   "mixed/rust-uses-nim-lib",
   "mixed/go-uses-cpp-lib",
   "mixed/cpp-uses-go-lib",
+  "fortran-mode3/binary-with-library",
+  "mixed/fortran-uses-cpp-lib",
+  "mixed/cpp-uses-fortran-lib",
 ]
 
 suite "examples layout M8":

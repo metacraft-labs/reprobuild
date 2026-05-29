@@ -131,7 +131,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[15, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[19, tuple[ext, convention: string]] = [
     (".nim",  "nim"),
     (".rs",   "rust"),
     (".go",   "go"),
@@ -147,6 +147,10 @@ const
     (".cpp",  "c-cpp-make"),
     (".cxx",  "c-cpp-make"),
     (".h",    "c-cpp-make"),
+    (".f90",  "fortran-direct"),
+    (".f95",  "fortran-direct"),
+    (".f03",  "fortran-direct"),
+    (".f08",  "fortran-direct"),
   ]
 
 proc isExtensionForConvention*(ext, convention: string): bool =
@@ -579,7 +583,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[12, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[13, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -615,6 +619,9 @@ const
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "c-cpp-direct",
                        exeName: "gcc",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "fortran-direct",
+                       exeName: "gfortran",
                        versionArgs: @["--version"]),
   ]
 

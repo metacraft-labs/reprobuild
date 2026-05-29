@@ -975,7 +975,8 @@ const
     "go",
     "python3", "python", "uv",
     "node", "typescript", "tsx", "swc", "esbuild",
-    "gcc", "clang", "make", "ar", "autoconf", "automake"]
+    "gcc", "clang", "make", "ar", "autoconf", "automake",
+    "gfortran", "fortran"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
     ## Tier 2b standard provider. This list MUST stay in sync with the

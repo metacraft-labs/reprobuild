@@ -37,6 +37,7 @@ import repro_standard_provider/conventions/jsts_direct as jsts_direct_convention
 import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
 import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_convention
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
+import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -192,6 +193,15 @@ when defined(reproProviderMode):
   # ``repro.nim`` with no ecosystem manifest. M33 of
   # Mode3-Language-Expansion.milestones.org.
   addDefaultConvention(jsts_direct_convention.jsTsDirectConvention())
+  # fortran_direct (Mode 3, minimal Fortran) — registered AFTER all
+  # the other Mode 3 conventions per M37 of
+  # Mode3-Language-Expansion.milestones.org. There is no Mode 2 Fortran
+  # convention sibling yet (fpm.toml recognition is deferred); this is
+  # the only Fortran convention today. Registration order matters only
+  # for mixed Fortran + C/C++ workspaces — c-cpp-direct defers to
+  # fortran-direct when ``uses:`` anywhere names ``gfortran``/``fortran``,
+  # mirroring the rust-direct / go-direct pattern.
+  addDefaultConvention(fortran_direct_convention.fortranDirectConvention())
 
   proc runStandardProvider(): int =
     try:

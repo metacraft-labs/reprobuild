@@ -150,7 +150,10 @@ $PopulatedExamples = @(
   'mixed/nim-uses-rust-lib',
   'mixed/rust-uses-nim-lib',
   'mixed/go-uses-cpp-lib',
-  'mixed/cpp-uses-go-lib'
+  'mixed/cpp-uses-go-lib',
+  'fortran-mode3/binary-with-library',
+  'mixed/fortran-uses-cpp-lib',
+  'mixed/cpp-uses-fortran-lib'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -414,6 +417,23 @@ function Probe-Toolchain([string]$language) {
       }
       return @{ Available = $false; Reason = "'go' not on PATH and not under D:/metacraft-dev-deps/go/" }
     }
+    'fortran-mode3' {
+      # M37: Mode 3 Fortran — probe for gfortran + ar. The convention
+      # emits per-source ``gfortran -c`` + ``ar rcs lib<n>.a`` +
+      # ``gfortran -o`` link argv. No managed-toolchain fallback today
+      # (env.ps1 doesn't ship a gfortran provisioner); the WinLibs
+      # GCC distribution carries gfortran alongside gcc so most hosts
+      # with a working dev shell have it.
+      $gfortranCmd = Get-Command gfortran -ErrorAction SilentlyContinue
+      if (-not $gfortranCmd) {
+        return @{ Available = $false; Reason = "'gfortran' not on PATH (env.ps1 / WinLibs / MSYS2 should provide it; install via 'pacman -S mingw-w64-x86_64-gcc-fortran' on MSYS2)" }
+      }
+      $arCmd = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $arCmd) {
+        return @{ Available = $false; Reason = "'ar' not on PATH" }
+      }
+      return @{ Available = $true; Reason = "gfortran=$($gfortranCmd.Source); ar=$($arCmd.Source)" }
+    }
     'jsts-mode3' {
       # M33: Mode 3 JS/TS — same toolchain probe as ``javascript-typescript``
       # (the Mode 2 path). ``node`` (and the npx that ships with it) is
@@ -452,10 +472,12 @@ function Probe-Toolchain([string]$language) {
     'mixed' {
       # Cross-language Mode 3 — the union of all mixed fixtures' needs.
       # Different fixtures need different toolchains:
-      #   * mixed/nim-uses-cpp-lib   : nim + gcc + ar
-      #   * mixed/cpp-uses-nim-lib   : nim + g++ + ar
-      #   * mixed/rust-uses-cpp-lib  : rustc + gcc + ar (M34 forward)
-      #   * mixed/cpp-uses-rust-lib  : rustc + g++ + ar (M34 reverse)
+      #   * mixed/nim-uses-cpp-lib       : nim + gcc + ar
+      #   * mixed/cpp-uses-nim-lib       : nim + g++ + ar
+      #   * mixed/rust-uses-cpp-lib      : rustc + gcc + ar (M34 forward)
+      #   * mixed/cpp-uses-rust-lib      : rustc + g++ + ar (M34 reverse)
+      #   * mixed/fortran-uses-cpp-lib   : gfortran + gcc + ar (M37 fwd)
+      #   * mixed/cpp-uses-fortran-lib   : gfortran + g++ + ar (M37 rev)
       # The language-level probe is permissive — it only checks for a
       # C/C++ compiler + ar (the minimum any mixed fixture needs). The
       # per-fixture probe under ``Probe-Fixture`` rejects fixtures whose
@@ -835,6 +857,42 @@ function Probe-Fixture([string]$rel) {
         return @{ Available = $false; Reason = "'ar' not on PATH (M36 forward fixture needs an archiver)" }
       }
       return @{ Available = $true; Reason = "go=$($goCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/fortran-uses-cpp-lib' {
+      # M37 forward direction: a Fortran executable that links a C
+      # archive. Needs gfortran + gcc/clang + ar.
+      $gfortranCmd = Get-Command gfortran -ErrorAction SilentlyContinue
+      if (-not $gfortranCmd) {
+        return @{ Available = $false; Reason = "'gfortran' not on PATH (M37 forward fixture needs gfortran)" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (M37 forward fixture needs a C compiler)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M37 forward fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "gfortran=$($gfortranCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/cpp-uses-fortran-lib' {
+      # M37 reverse direction: a C++ executable that links a Fortran
+      # staticlib. Needs gfortran + g++/clang++ + ar.
+      $gfortranCmd = Get-Command gfortran -ErrorAction SilentlyContinue
+      if (-not $gfortranCmd) {
+        return @{ Available = $false; Reason = "'gfortran' not on PATH (M37 reverse fixture needs gfortran)" }
+      }
+      $cxx = Get-Command g++ -ErrorAction SilentlyContinue
+      if (-not $cxx) { $cxx = Get-Command clang++ -ErrorAction SilentlyContinue }
+      if (-not $cxx) {
+        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (M37 reverse fixture needs a C++ link driver)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M37 reverse fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "gfortran=$($gfortranCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
     }
     'mixed/cpp-uses-go-lib' {
       # M36 reverse direction: a C++ executable that links a Go
@@ -1660,6 +1718,74 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
           Greeting = 'cpp says: GoAdd 2+3 = 5'
+        }
+      )
+    }
+    'fortran-mode3/binary-with-library' {
+      # M37: Mode 3 Fortran pilot. The workspace declares a library
+      # ``fortlib`` and an executable ``fortcalc`` in a single
+      # ``repro.nim``. The fortran-direct convention emits per-source
+      # ``gfortran -c`` actions + ``ar rcs libfortlib.a`` archive +
+      # ``gfortran -o fortcalc[.exe]`` link. The link is sequenced
+      # strictly after the archive via Mode 3 ``depends_on`` wiring.
+      # Both outputs land under ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'fortcalc'
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'fortlib' 'libfortlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
+          Greeting = 'hello from fortran-mode3-binary-with-library, fortlib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/fortran-uses-cpp-lib' {
+      # M37 cross-language Mode 3 (FORWARD direction): the workspace
+      # declares a C static library ``mathlib`` (``uses: gcc``) and a
+      # Fortran executable ``fortcalc`` (``uses: gfortran``) in a single
+      # ``repro.nim`` with ``depends_on fortcalc: mathlib``. The
+      # fortran-direct convention claims the whole workspace (c-cpp-
+      # direct defers when the workspace's uses names gfortran), emits
+      # the upstream C archive in-line via the embedded
+      # ``emitCCppCrossMember`` helper, and threads the archive onto
+      # the gfortran link argv as a trailing positional. The binary's
+      # first stdout line proves the cross-language round-trip
+      # succeeded: Fortran -> C c_add() -> back to Fortran.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'fortcalc' 'fortcalc.exe'))
+          Greeting = 'fortran says: mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/cpp-uses-fortran-lib' {
+      # M37 cross-language Mode 3 (REVERSE direction): the workspace
+      # declares a Fortran static library ``fortaddlib`` (``uses:
+      # gfortran``) and a C++ executable ``cppapp`` (``uses: gcc``) in
+      # a single ``repro.nim`` with ``depends_on cppapp: fortaddlib``.
+      # The fortran-direct convention claims the whole workspace,
+      # emits the upstream Fortran archive (per-source ``gfortran -c``
+      # + ``ar rcs libfortaddlib.a``), then emits per-source ``g++ -c``
+      # + terminal ``g++ -o`` actions for cppapp; the link argv
+      # carries the Fortran archive as a trailing positional plus the
+      # platform-specific Fortran runtime libs (``-lgfortran
+      # -lquadmath -lm``; ``-lpthread`` on POSIX). The binary's first
+      # stdout line proves the cross-language round-trip: C++ ->
+      # Fortran fortran_add() -> back to C++.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'fortaddlib' 'libfortaddlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
+          Greeting = 'cpp says: fortran added 2+3 = 5'
         }
       )
     }

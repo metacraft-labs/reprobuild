@@ -590,6 +590,68 @@ proc workspaceClaimedByGoDirect(projectRoot, source: string): bool =
     return false
   true
 
+proc usesIncludesFortranToolchain(source: string): bool =
+  ## M37: defer mixed Fortran+C/C++ workspaces to the ``fortran-direct``
+  ## convention. Mirrors ``usesIncludesRustToolchain`` /
+  ## ``usesIncludesGoToolchain`` shape.
+  if source.len == 0:
+    return false
+  var sawFortran = false
+  var inBlock = false
+  proc consume(token: string) {.closure.} =
+    if token == "gfortran" or token == "fortran":
+      sawFortran = true
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      if inBlock:
+        inBlock = false
+      continue
+    if inBlock:
+      let leading = line.len > 0 and line[0] in {' ', '\t'}
+      if not leading:
+        inBlock = false
+      else:
+        for raw in stripped.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+        continue
+    if stripped.startsWith("uses:"):
+      let payload = stripped[5 .. ^1].strip()
+      if payload.len == 0:
+        inBlock = true
+      else:
+        var clean = payload
+        if clean.startsWith("["):
+          clean = clean[1 .. ^1]
+        if clean.endsWith("]"):
+          clean = clean[0 ..< ^1]
+        for raw in clean.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+  sawFortran
+
+proc workspaceClaimedByFortranDirect(projectRoot, source: string): bool =
+  ## True when the ``fortran-direct`` Mode 3 convention will recognize
+  ## the same workspace. M37 hands cross-language Fortran↔C/C++ mixed
+  ## workspaces to ``fortran-direct`` (it embeds the C/C++ cross
+  ## helpers the same way ``rust-direct`` does), so this convention
+  ## declines. There is no Mode 2 Fortran convention sibling so we
+  ## don't probe for any manifest file.
+  if not usesIncludesFortranToolchain(source):
+    return false
+  true
+
 proc cCppDirectRecognize(projectRoot: string;
                          request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract:
@@ -613,6 +675,11 @@ proc cCppDirectRecognize(projectRoot: string;
   ##     ``go-direct`` (which embeds the C/C++ cross helpers and emits
   ##     both directions of the cgo / c-archive cross-language matrix
   ##     from a single fragment).
+  ##   * M37: NO ``gfortran`` / ``fortran`` in any ``uses:`` block. A
+  ##     mixed Fortran+C/C++ workspace routes through ``fortran-direct``
+  ##     (which embeds the C/C++ cross helpers and emits both
+  ##     directions of the Fortran ↔ C cross-language matrix from a
+  ##     single fragment).
   if rootMakefile(projectRoot).len > 0:
     return false
   if hasCMakeLists(projectRoot):
@@ -627,6 +694,8 @@ proc cCppDirectRecognize(projectRoot: string;
   if workspaceClaimedByRustDirect(projectRoot, source):
     return false
   if workspaceClaimedByGoDirect(projectRoot, source):
+    return false
+  if workspaceClaimedByFortranDirect(projectRoot, source):
     return false
   let members = extractMembersWithOwnership(source)
   if members.len == 0:
