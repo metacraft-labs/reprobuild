@@ -11,8 +11,8 @@
 ##     Mode 2 ``go`` convention's territory).
 ##   * ``recognize`` returns false when the ``uses:`` block lacks ``go``.
 ##   * ``recognize`` returns false when a go.work is present.
-##   * ``recognize`` returns false when any ``.go`` file ships
-##     ``import "C"`` (cgo trigger; cgo is deferred to M36).
+##   * ``recognize`` returns TRUE when any ``.go`` file ships
+##     ``import "C"`` (M36: cgo lifted; routes through ``go build``).
 ##   * ``emitFragment`` against the Mode 3 fixture:
 ##     - per-member compile actions for both ``mathlib`` (library) and
 ##       ``calc`` (executable);
@@ -27,6 +27,29 @@
 ##   * undeclared-dep detection: a scratch fixture with
 ##     ``depends_on a: c`` (where ``c`` is not a declared package)
 ##     rejects with ValueError.
+##
+## M36 cross-language coverage:
+##   * Forward direction (Go binary → C library, cgo path): the
+##     ``mixed/go-uses-cpp-lib`` fixture produces a per-source ``gcc -c``
+##     compile + ``ar rcs libmathlib.a`` archive action, plus a
+##     ``go-direct-build-calc`` cgo ``go build`` action. The action's
+##     argv carries ``-ldflags=-extldflags "-L<dir> -lmathlib"`` and its
+##     deps/inputs include the upstream archive.
+##   * Reverse direction (C++ binary → Go c-archive): the
+##     ``mixed/cpp-uses-go-lib`` fixture produces a
+##     ``go-direct-c-archive-goaddlib`` ``go build -buildmode=c-archive``
+##     action emitting ``libgoaddlib.a`` AND ``libgoaddlib.h``, plus a
+##     per-source ``g++ -c`` compile + ``g++ -o cppapp.exe`` link with
+##     the Go archive threaded as a trailing positional + Go runtime
+##     libs.
+##   * Pure-Go regression: the M31 ``go-mode3/binary-with-library``
+##     fixture continues to emit ``go-direct-compile-*`` +
+##     ``go-direct-link-*`` actions (the M31 fast path), NOT
+##     ``go-direct-build-*`` (which would mean we'd lost the
+##     ``go tool compile`` regression).
+##   * Cycle detection extends to cross-language: a workspace with
+##     ``depends_on goApp: cLib`` AND ``depends_on cLib: goApp`` is
+##     rejected.
 
 import std/[os, strutils, unittest]
 
@@ -44,6 +67,10 @@ const
   Mode3Fixture =
     MetacraftRoot / "reprobuild-examples" / "go-mode3" /
       "binary-with-library"
+  Mode3MixedForwardFixture =
+    MetacraftRoot / "reprobuild-examples" / "mixed" / "go-uses-cpp-lib"
+  Mode3MixedReverseFixture =
+    MetacraftRoot / "reprobuild-examples" / "mixed" / "cpp-uses-go-lib"
 
 proc dummyRequest(projectRoot: string): ProviderGraphRequest =
   ProviderGraphRequest(
@@ -157,9 +184,16 @@ package x:
     check not conv.recognize(dir, request)
     removeDir(dir)
 
-  test "recognize: negative — import \"C\" anywhere (cgo deferred to M36)":
-    let dir = makeScratch("with-cgo")
-    writeFile(dir / "repro.nim", """
+  test "recognize: positive — import \"C\" anywhere (M36: cgo lifted)":
+    # M36 lifts the M31 cgo-rejection. A workspace with ``import "C"``
+    # now routes through the go-direct convention; the per-member
+    # ``go build`` path (instead of ``go tool compile / go tool link``)
+    # handles cgo's preprocessor + linker integration.
+    if not goOnPath():
+      skip()
+    else:
+      let dir = makeScratch("with-cgo")
+      writeFile(dir / "repro.nim", """
 import repro_project_dsl
 
 package x:
@@ -168,8 +202,8 @@ package x:
   executable hello:
     discard
 """)
-    createDir(dir / "hello")
-    writeFile(dir / "hello" / "main.go", """
+      createDir(dir / "hello")
+      writeFile(dir / "hello" / "main.go", """
 package main
 
 // #include <stdio.h>
@@ -177,10 +211,10 @@ import "C"
 
 func main() { C.puts(C.CString("hi")) }
 """)
-    let conv = go_direct_convention.goDirectConvention()
-    let request = dummyRequest(dir)
-    check not conv.recognize(dir, request)
-    removeDir(dir)
+      let conv = go_direct_convention.goDirectConvention()
+      let request = dummyRequest(dir)
+      check conv.recognize(dir, request)
+      removeDir(dir)
 
 suite "go-direct convention emit (Mode 3 fixture)":
 
@@ -416,4 +450,273 @@ package soloPkg:
       let conv = go_direct_convention.goDirectConvention()
       let request = dummyRequest(dir)
       check conv.recognize(dir, request)
+      removeDir(dir)
+
+# ---------------------------------------------------------------------------
+# M36 cross-language Go ↔ C/C++ verification.
+#
+# Forward direction (Go binary → C library, cgo): the go-direct
+# convention emits per-source ``gcc -c`` + ``ar rcs lib<name>.a`` for
+# the C library plus a Go ``go build`` action that threads
+# ``-ldflags=-extldflags "-L<dir> -l<libname>"`` onto its argv.
+#
+# Reverse direction (C++ binary → Go c-archive): the convention emits
+# the Go library with ``go build -buildmode=c-archive`` (derived from
+# the ``cConsumable`` flag the dep graph sets) landing at
+# ``lib<name>.a``, plus per-source ``g++ -c`` + terminal ``g++ -o``
+# for the C++ binary with the Go archive threaded as a trailing
+# positional + the platform-specific Go runtime libs.
+# ---------------------------------------------------------------------------
+
+suite "go-direct convention M36 cross-language (forward direction)":
+
+  test "forward: Go binary uses cgo and picks up C archive via -ldflags":
+    if not goOnPath():
+      skip()
+    else:
+      let conv = go_direct_convention.goDirectConvention()
+      let request = dummyRequest(Mode3MixedForwardFixture)
+      require conv.recognize(Mode3MixedForwardFixture, request)
+      let fragment = conv.emitFragment(Mode3MixedForwardFixture, request)
+
+      var archiveAction: BuildActionDef
+      var calcBuildAction: BuildActionDef
+      var sawArchive = false
+      var sawCalcBuild = false
+      var sawCcompile = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id == "go-xlang-ccpp-archive-mathlib":
+          archiveAction = action
+          sawArchive = true
+        elif action.id == "go-direct-build-calc":
+          calcBuildAction = action
+          sawCalcBuild = true
+        elif action.id.startsWith("go-xlang-ccpp-compile-mathlib"):
+          sawCcompile = true
+
+      # The convention emits at least: 1 per-source compile + 1 archive +
+      # 1 Go cgo build. The C/C++ helpers carry the go-xlang-ccpp- prefix
+      # to discriminate from the rust-direct convention's
+      # rust-xlang-ccpp- and the Nim convention's nim-xlang-ccpp-.
+      check sawArchive
+      check sawCalcBuild
+      check sawCcompile
+
+      # The archive output lands at .repro/build/mathlib/libmathlib.a
+      # (the cross-language schema shared with c-cpp-direct).
+      var archiveOutput = ""
+      for outPath in archiveAction.outputs:
+        let lower = outPath.toLowerAscii.replace('\\', '/')
+        if lower.endsWith("/libmathlib.a"):
+          archiveOutput = outPath
+      check archiveOutput.len > 0
+
+      # The calc build action's deps include the archive action id.
+      var sawArchiveDep = false
+      for dep in calcBuildAction.deps:
+        if dep == archiveAction.id:
+          sawArchiveDep = true
+      check sawArchiveDep
+
+      # The calc build action's inputs include the upstream archive
+      # (cache invalidation).
+      var sawArchiveInput = false
+      for inp in calcBuildAction.inputs:
+        if inp == archiveOutput:
+          sawArchiveInput = true
+      check sawArchiveInput
+
+      # The calc build argv carries the canonical cgo → C archive
+      # ldflags: ``-ldflags=-extldflags "-L<dir> -lmathlib"`` (the
+      # exact form Go's linker expects when forwarding to gcc's ld).
+      let calcArgv = inlineArgvOf(calcBuildAction)
+      var sawLdflags = false
+      var sawLmathlib = false
+      for token in calcArgv:
+        if token.startsWith("-ldflags=-extldflags"):
+          sawLdflags = true
+          if "-lmathlib" in token:
+            sawLmathlib = true
+      check sawLdflags
+      check sawLmathlib
+
+suite "go-direct convention M36 cross-language (reverse direction)":
+
+  test "reverse: Go library emits -buildmode=c-archive when consumed by C++":
+    if not goOnPath():
+      skip()
+    else:
+      let conv = go_direct_convention.goDirectConvention()
+      let request = dummyRequest(Mode3MixedReverseFixture)
+      require conv.recognize(Mode3MixedReverseFixture, request)
+      let fragment = conv.emitFragment(Mode3MixedReverseFixture, request)
+
+      var goaddlibAction: BuildActionDef
+      var cppappLinkAction: BuildActionDef
+      var sawGoaddlib = false
+      var sawCppLink = false
+      var sawCppCompile = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id == "go-direct-c-archive-goaddlib":
+          goaddlibAction = action
+          sawGoaddlib = true
+        elif action.id == "go-xlang-ccpp-exec-link-cppapp":
+          cppappLinkAction = action
+          sawCppLink = true
+        elif action.id.startsWith("go-xlang-ccpp-exec-compile-cppapp"):
+          sawCppCompile = true
+      check sawGoaddlib
+      check sawCppLink
+      check sawCppCompile
+
+      # The goaddlib argv carries -buildmode=c-archive (NOT the M31
+      # ``go tool compile`` path).
+      let goaddlibArgv = inlineArgvOf(goaddlibAction)
+      var sawCArchiveFlag = false
+      for token in goaddlibArgv:
+        if token == "-buildmode=c-archive":
+          sawCArchiveFlag = true
+      check sawCArchiveFlag
+
+      # The goaddlib output lands at the canonical archive path
+      # .repro/build/goaddlib/libgoaddlib.a (shared schema with
+      # c-cpp-direct + Nim + Rust). Go's c-archive build mode also
+      # auto-emits a sibling libgoaddlib.h header in the same dir.
+      var goaddlibArchiveOut = ""
+      var sawHeaderOut = false
+      for outPath in goaddlibAction.outputs:
+        let lower = outPath.toLowerAscii.replace('\\', '/')
+        if lower.endsWith("/libgoaddlib.a"):
+          goaddlibArchiveOut = outPath
+        elif lower.endsWith("/libgoaddlib.h"):
+          sawHeaderOut = true
+      check goaddlibArchiveOut.len > 0
+      check sawHeaderOut
+
+      # The cppapp link action's deps include the goaddlib action id.
+      var sawGoaddlibDep = false
+      for dep in cppappLinkAction.deps:
+        if dep == goaddlibAction.id:
+          sawGoaddlibDep = true
+      check sawGoaddlibDep
+
+      # The cppapp link action's inputs include the upstream archive.
+      var sawGoaddlibInput = false
+      for inp in cppappLinkAction.inputs:
+        if inp == goaddlibArchiveOut:
+          sawGoaddlibInput = true
+      check sawGoaddlibInput
+
+      # The cppapp link argv carries the archive as a trailing
+      # positional AND the platform-specific Go runtime libs.
+      let cppappArgv = inlineArgvOf(cppappLinkAction)
+      var sawArchive = false
+      for token in cppappArgv:
+        if token == goaddlibArchiveOut:
+          sawArchive = true
+      check sawArchive
+      when defined(windows):
+        # Windows MinGW: -lws2_32 -lwinmm -lbcrypt -lntdll -luserenv
+        # -ladvapi32
+        var sawWs232 = false
+        var sawBcrypt = false
+        var sawNtdll = false
+        for token in cppappArgv:
+          if token == "-lws2_32": sawWs232 = true
+          if token == "-lbcrypt": sawBcrypt = true
+          if token == "-lntdll": sawNtdll = true
+        check sawWs232
+        check sawBcrypt
+        check sawNtdll
+      else:
+        # POSIX: -lpthread -ldl -lm
+        var sawPthread = false
+        var sawDl = false
+        var sawM = false
+        for token in cppappArgv:
+          if token == "-lpthread": sawPthread = true
+          if token == "-ldl": sawDl = true
+          if token == "-lm": sawM = true
+        check sawPthread
+        check sawDl
+        check sawM
+
+suite "go-direct convention M36 pure-Go regression":
+
+  test "M31 fixture (pure Go workspace) still uses go tool compile / link":
+    # The go-mode3/binary-with-library fixture has no cgo and no C
+    # deps — so no member is usesCgo / cConsumable. The convention
+    # must STILL emit the M31 fast-path ``go-direct-compile-*`` +
+    # ``go-direct-link-*`` actions (NOT ``go-direct-build-*``). This
+    # is the load-bearing regression check for M31 behaviour.
+    if not goOnPath():
+      skip()
+    else:
+      let conv = go_direct_convention.goDirectConvention()
+      let request = dummyRequest(Mode3Fixture)
+      require conv.recognize(Mode3Fixture, request)
+      let fragment = conv.emitFragment(Mode3Fixture, request)
+      var sawCompile = false
+      var sawLink = false
+      var sawCgoBuild = false
+      var sawCArchive = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("go-direct-compile-"):
+          sawCompile = true
+        elif action.id.startsWith("go-direct-link-"):
+          sawLink = true
+        elif action.id.startsWith("go-direct-build-"):
+          sawCgoBuild = true
+        elif action.id.startsWith("go-direct-c-archive-"):
+          sawCArchive = true
+      check sawCompile
+      check sawLink
+      check not sawCgoBuild
+      check not sawCArchive
+
+suite "go-direct convention M36 cross-language cycle + undeclared":
+
+  test "forward cycle: Go binary depends_on C lib AND C lib depends_on Go app — rejected":
+    if not goOnPath():
+      skip()
+    else:
+      let dir = makeScratch("xlang-cycle")
+      writeFile(dir / "repro.nim", """
+import repro_project_dsl
+
+package cLibPkg:
+  uses:
+    "gcc >=11"
+  library clib
+
+package goAppPkg:
+  uses:
+    "go"
+  executable goapp:
+    discard
+
+depends_on goAppPkg: cLibPkg
+depends_on cLibPkg: goAppPkg
+""")
+      createDir(dir / "clib" / "src")
+      writeFile(dir / "clib" / "src" / "add.c",
+        "int add(int a, int b) { return a + b; }\n")
+      createDir(dir / "goapp")
+      writeFile(dir / "goapp" / "main.go",
+        "package main\n\n// #include <stdio.h>\nimport \"C\"\n" &
+        "func main() { C.puts(C.CString(\"hi\")) }\n")
+      let conv = go_direct_convention.goDirectConvention()
+      let request = dummyRequest(dir)
+      check conv.recognize(dir, request)
+      expect ValueError:
+        discard conv.emitFragment(dir, request)
       removeDir(dir)

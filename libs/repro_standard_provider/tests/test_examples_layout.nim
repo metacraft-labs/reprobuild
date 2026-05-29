@@ -63,6 +63,8 @@ const PopulatedExamples = [
   "mixed/cpp-uses-rust-lib",
   "mixed/nim-uses-rust-lib",
   "mixed/rust-uses-nim-lib",
+  "mixed/go-uses-cpp-lib",
+  "mixed/cpp-uses-go-lib",
 ]
 
 suite "examples layout M8":

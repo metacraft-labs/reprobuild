@@ -502,6 +502,94 @@ proc workspaceClaimedByRustDirect(projectRoot, source: string): bool =
     return false
   true
 
+proc usesIncludesGoToolchain(source: string): bool =
+  ## M36: defer mixed Go+C/C++ workspaces to the ``go-direct``
+  ## convention (registered later in the standard provider) so a single
+  ## convention claims the workspace and emits both directions of the
+  ## cross-language matrix (cgo forward + c-archive reverse) from one
+  ## fragment. Mirrors ``usesIncludesRustToolchain`` shape.
+  ##
+  ## Detects ``go`` token in any ``uses:`` block, file-wide. The detail
+  ## of WHICH package owns the token doesn't matter — what matters is
+  ## whether the go-direct convention will resolve at least one member.
+  ## ``go_direct``'s own recognize does the full check; we replicate the
+  ## cheap shape here so we can decline without importing the sibling
+  ## convention.
+  if source.len == 0:
+    return false
+  var sawGo = false
+  var inBlock = false
+  proc consume(token: string) {.closure.} =
+    if token == "go":
+      sawGo = true
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      if inBlock:
+        inBlock = false
+      continue
+    if inBlock:
+      let leading = line.len > 0 and line[0] in {' ', '\t'}
+      if not leading:
+        inBlock = false
+      else:
+        for raw in stripped.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+        continue
+    if stripped.startsWith("uses:"):
+      let payload = stripped[5 .. ^1].strip()
+      if payload.len == 0:
+        inBlock = true
+      else:
+        var clean = payload
+        if clean.startsWith("["):
+          clean = clean[1 .. ^1]
+        if clean.endsWith("]"):
+          clean = clean[0 ..< ^1]
+        for raw in clean.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+  sawGo
+
+proc hasGoMod(projectRoot: string): bool =
+  fileExists(extendedPath(projectRoot / "go.mod"))
+
+proc hasGoWork(projectRoot: string): bool =
+  fileExists(extendedPath(projectRoot / "go.work"))
+
+proc workspaceClaimedByGoDirect(projectRoot, source: string): bool =
+  ## True when the ``go-direct`` Mode 3 convention will recognize the
+  ## same workspace. M36 hands cross-language Go↔C/C++ mixed workspaces
+  ## (cgo forward AND c-archive reverse) to ``go-direct`` (it embeds
+  ## the C/C++ cross helpers the same way ``rust-direct`` does), so
+  ## this convention declines.
+  ##
+  ## The check mirrors ``go_direct.goDirectRecognize`` cheaply: ``uses:``
+  ## names ``go`` anywhere AND no ``go.mod`` / ``go.work`` at the
+  ## workspace root (the Mode 2 ``go`` convention would claim manifest-
+  ## based Go projects first). We don't probe for ``go`` on PATH here —
+  ## if go-direct ultimately declines (e.g. no Go members resolve) the
+  ## standard provider's dispatch falls back to c-cpp-direct via the
+  ## next match attempt.
+  if not usesIncludesGoToolchain(source):
+    return false
+  if hasGoMod(projectRoot):
+    return false
+  if hasGoWork(projectRoot):
+    return false
+  true
+
 proc cCppDirectRecognize(projectRoot: string;
                          request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract:
@@ -520,6 +608,11 @@ proc cCppDirectRecognize(projectRoot: string;
   ##     ``rust-direct`` (which embeds the C/C++ cross helpers and emits
   ##     both directions of the cross-language matrix from a single
   ##     fragment).
+  ##   * M36: NO ``go`` in any ``uses:`` block AND no ``go.mod`` /
+  ##     ``go.work``. A mixed Go+C/C++ workspace routes through
+  ##     ``go-direct`` (which embeds the C/C++ cross helpers and emits
+  ##     both directions of the cgo / c-archive cross-language matrix
+  ##     from a single fragment).
   if rootMakefile(projectRoot).len > 0:
     return false
   if hasCMakeLists(projectRoot):
@@ -532,6 +625,8 @@ proc cCppDirectRecognize(projectRoot: string;
   if not usesIncludesCCppCompiler(source):
     return false
   if workspaceClaimedByRustDirect(projectRoot, source):
+    return false
+  if workspaceClaimedByGoDirect(projectRoot, source):
     return false
   let members = extractMembersWithOwnership(source)
   if members.len == 0:

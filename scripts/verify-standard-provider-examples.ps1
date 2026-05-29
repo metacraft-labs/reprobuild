@@ -148,7 +148,9 @@ $PopulatedExamples = @(
   'mixed/rust-uses-cpp-lib',
   'mixed/cpp-uses-rust-lib',
   'mixed/nim-uses-rust-lib',
-  'mixed/rust-uses-nim-lib'
+  'mixed/rust-uses-nim-lib',
+  'mixed/go-uses-cpp-lib',
+  'mixed/cpp-uses-go-lib'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -801,6 +803,71 @@ function Probe-Fixture([string]$rel) {
         }
       }
       return @{ Available = $true; Reason = "rustc=$($rustc.Source); nim=$($nimCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/go-uses-cpp-lib' {
+      # M36 forward direction: a Go executable that links a C archive
+      # via cgo. Needs go + gcc/clang + ar.
+      $goCmd = Get-Command go -ErrorAction SilentlyContinue
+      if (-not $goCmd) {
+        $goRoot = 'D:/metacraft-dev-deps/go'
+        if (Test-Path -LiteralPath $goRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $goRoot -Directory -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $verDir.FullName 'go\bin\go.exe'
+            if (Test-Path -LiteralPath $candidate) {
+              $binDir = Split-Path -Parent $candidate
+              $env:PATH = "$binDir;$env:PATH"
+              $goCmd = Get-Command go -ErrorAction SilentlyContinue
+              break
+            }
+          }
+        }
+      }
+      if (-not $goCmd) {
+        return @{ Available = $false; Reason = "'go' not on PATH and not under D:/metacraft-dev-deps/go/" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (M36 forward fixture needs a C compiler for cgo)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M36 forward fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "go=$($goCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/cpp-uses-go-lib' {
+      # M36 reverse direction: a C++ executable that links a Go
+      # c-archive. Needs go + g++/clang++ + gcc/clang + ar.
+      $goCmd = Get-Command go -ErrorAction SilentlyContinue
+      if (-not $goCmd) {
+        $goRoot = 'D:/metacraft-dev-deps/go'
+        if (Test-Path -LiteralPath $goRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $goRoot -Directory -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $verDir.FullName 'go\bin\go.exe'
+            if (Test-Path -LiteralPath $candidate) {
+              $binDir = Split-Path -Parent $candidate
+              $env:PATH = "$binDir;$env:PATH"
+              $goCmd = Get-Command go -ErrorAction SilentlyContinue
+              break
+            }
+          }
+        }
+      }
+      if (-not $goCmd) {
+        return @{ Available = $false; Reason = "'go' not on PATH and not under D:/metacraft-dev-deps/go/" }
+      }
+      $cxx = Get-Command g++ -ErrorAction SilentlyContinue
+      if (-not $cxx) { $cxx = Get-Command clang++ -ErrorAction SilentlyContinue }
+      if (-not $cxx) {
+        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (M36 reverse fixture needs a C++ link driver)" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (Go's c-archive build mode needs a C compiler at build time)" }
+      }
+      return @{ Available = $true; Reason = "go=$($goCmd.Source); cxx=$($cxx.Source); cc=$($cc.Source)" }
     }
     default {
       return @{ Available = $true; Reason = '' }
@@ -1538,6 +1605,61 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'rustapp' 'rustapp.exe'))
           Greeting = 'rust says: nim added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/go-uses-cpp-lib' {
+      # M36 cross-language Mode 3 (FORWARD direction, cgo): the
+      # workspace declares a C static library ``mathlib`` (``uses: gcc``)
+      # and a Go executable ``calc`` (``uses: go``) in a single
+      # ``repro.nim`` with ``depends_on calc: mathlib``. The go-direct
+      # convention claims the whole workspace (c-cpp-direct defers when
+      # the workspace's uses names go + no go.mod present), emits the
+      # upstream C archive in-line via the embedded
+      # ``emitCCppCrossMember`` helper, and threads
+      # ``-ldflags=-extldflags "-L<archive-dir> -lmathlib"`` onto the Go
+      # binary's ``go build`` argv (cgo path; the M31 ``go tool compile``
+      # /``go tool link`` per-package fast path is bypassed for cgo
+      # members). The binary's first stdout line proves the cross-
+      # language round-trip succeeded: Go -> C add() -> back to Go.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'calc' 'calc.exe'))
+          Greeting = 'go says: mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/cpp-uses-go-lib' {
+      # M36 cross-language Mode 3 (REVERSE direction, c-archive): the
+      # workspace declares a Go static library ``goaddlib`` (``uses: go``)
+      # and a C++ executable ``cppapp`` (``uses: gcc``) in a single
+      # ``repro.nim`` with ``depends_on cppapp: goaddlib``. The go-direct
+      # convention claims the whole workspace, emits the upstream Go
+      # library with ``go build -buildmode=c-archive`` (NOT the M31
+      # ``go tool compile -pack``) because goaddlib is marked
+      # ``cConsumable=true`` (derived from the depends_on edge: a C/C++
+      # executable consumes the library, so C ABI archive). The archive
+      # lands at ``.repro/build/goaddlib/libgoaddlib.a`` (canonical
+      # archive schema shared with c-cpp-direct + Nim + Rust); Go's
+      # c-archive toolchain ALSO auto-emits a sibling
+      # ``libgoaddlib.h``. Then emits per-source ``g++ -c`` + terminal
+      # ``g++ -o`` actions for cppapp; the link argv carries the Go
+      # archive as a trailing positional plus the platform-specific Go
+      # runtime libs (Windows MinGW: ws2_32, winmm, bcrypt, ntdll,
+      # userenv, advapi32). The binary's first stdout line proves the
+      # cross-language round-trip: C++ -> Go GoAdd() -> back to C++.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'goaddlib' 'libgoaddlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
+          Greeting = 'cpp says: GoAdd 2+3 = 5'
         }
       )
     }
