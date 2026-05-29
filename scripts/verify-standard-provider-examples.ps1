@@ -166,7 +166,10 @@ $PopulatedExamples = @(
   'mixed/cpp-uses-go-lib',
   'fortran-mode3/binary-with-library',
   'mixed/fortran-uses-cpp-lib',
-  'mixed/cpp-uses-fortran-lib'
+  'mixed/cpp-uses-fortran-lib',
+  'zig-mode3/binary-with-library',
+  'mixed/zig-uses-cpp-lib',
+  'mixed/cpp-uses-zig-lib'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -446,6 +449,35 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'ar' not on PATH" }
       }
       return @{ Available = $true; Reason = "gfortran=$($gfortranCmd.Source); ar=$($arCmd.Source)" }
+    }
+    'zig-mode3' {
+      # M44: Mode 3 Zig — probe for ``zig``. The convention emits
+      # per-member ``zig build-exe`` / ``zig build-lib`` invocations.
+      # When ``zig`` is not on PATH, fall back to the bundled install
+      # under D:/metacraft-dev-deps/zig/<version>/ (the M44 honest-
+      # scope cut: env.ps1 doesn't yet provision a zig toolchain so
+      # most hosts SKIP this gate cleanly).
+      $zigCmd = Get-Command zig -ErrorAction SilentlyContinue
+      if (-not $zigCmd) {
+        $zigRoot = 'D:\metacraft-dev-deps\zig'
+        if (Test-Path -LiteralPath $zigRoot) {
+          $candidates = @()
+          foreach ($verDir in Get-ChildItem -LiteralPath $zigRoot -Directory -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $verDir.FullName 'zig.exe'
+            if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+          }
+          if ($candidates.Count -gt 0) {
+            $picked = $candidates | Sort-Object | Select-Object -Last 1
+            $binDir = Split-Path -Parent $picked
+            $env:PATH = "$binDir;$env:PATH"
+            $zigCmd = Get-Command zig -ErrorAction SilentlyContinue
+          }
+        }
+      }
+      if ($zigCmd) {
+        return @{ Available = $true; Reason = "zig=$($zigCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "'zig' not on PATH and not under D:/metacraft-dev-deps/zig/ (download from ziglang.org)" }
     }
     'jsts-mode3' {
       # M33: Mode 3 JS/TS — same toolchain probe as ``javascript-typescript``
@@ -1182,6 +1214,70 @@ function Probe-Fixture([string]$rel) {
         return @{ Available = $false; Reason = "'ar' not on PATH (M37 reverse fixture needs an archiver)" }
       }
       return @{ Available = $true; Reason = "gfortran=$($gfortranCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
+    }
+    'mixed/zig-uses-cpp-lib' {
+      # M44 forward direction: a Zig executable that links a C archive.
+      # Needs zig + gcc/clang + ar.
+      $zigCmd = Get-Command zig -ErrorAction SilentlyContinue
+      if (-not $zigCmd) {
+        $zigRoot = 'D:\metacraft-dev-deps\zig'
+        if (Test-Path -LiteralPath $zigRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $zigRoot -Directory -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $verDir.FullName 'zig.exe'
+            if (Test-Path -LiteralPath $candidate) {
+              $binDir = Split-Path -Parent $candidate
+              $env:PATH = "$binDir;$env:PATH"
+              $zigCmd = Get-Command zig -ErrorAction SilentlyContinue
+              break
+            }
+          }
+        }
+      }
+      if (-not $zigCmd) {
+        return @{ Available = $false; Reason = "'zig' not on PATH and not under D:/metacraft-dev-deps/zig/ (M44 forward fixture needs zig)" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (M44 forward fixture needs a C compiler)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M44 forward fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "zig=$($zigCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/cpp-uses-zig-lib' {
+      # M44 reverse direction: a C++ executable that links a Zig
+      # staticlib. Needs zig + g++/clang++ + ar.
+      $zigCmd = Get-Command zig -ErrorAction SilentlyContinue
+      if (-not $zigCmd) {
+        $zigRoot = 'D:\metacraft-dev-deps\zig'
+        if (Test-Path -LiteralPath $zigRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $zigRoot -Directory -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $verDir.FullName 'zig.exe'
+            if (Test-Path -LiteralPath $candidate) {
+              $binDir = Split-Path -Parent $candidate
+              $env:PATH = "$binDir;$env:PATH"
+              $zigCmd = Get-Command zig -ErrorAction SilentlyContinue
+              break
+            }
+          }
+        }
+      }
+      if (-not $zigCmd) {
+        return @{ Available = $false; Reason = "'zig' not on PATH and not under D:/metacraft-dev-deps/zig/ (M44 reverse fixture needs zig)" }
+      }
+      $cxx = Get-Command g++ -ErrorAction SilentlyContinue
+      if (-not $cxx) { $cxx = Get-Command clang++ -ErrorAction SilentlyContinue }
+      if (-not $cxx) {
+        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (M44 reverse fixture needs a C++ link driver)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M44 reverse fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "zig=$($zigCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
     }
     'mixed/cpp-uses-go-lib' {
       # M36 reverse direction: a C++ executable that links a Go
@@ -2169,6 +2265,75 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
           Greeting = 'cpp says: fortran added 2+3 = 5'
+        }
+      )
+    }
+    'zig-mode3/binary-with-library' {
+      # M44: Mode 3 Zig pilot. The workspace declares a library
+      # ``ziglib`` and an executable ``zigcalc`` in a single
+      # ``repro.nim``. The zig-direct convention emits one
+      # ``zig build-lib`` action per library + one ``zig build-exe``
+      # action per executable; the link is sequenced strictly after
+      # the library archive via the Mode 3 ``depends_on`` wiring.
+      # Both outputs land under ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'zigcalc'
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'ziglib' 'libziglib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
+          Greeting = 'hello from zig-mode3-binary-with-library, ziglib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/zig-uses-cpp-lib' {
+      # M44 cross-language Mode 3 (FORWARD direction): the workspace
+      # declares a C static library ``mathlib`` (``uses: gcc``) and a
+      # Zig executable ``zigcalc`` (``uses: zig``) in a single
+      # ``repro.nim`` with ``depends_on zigcalc: mathlib``. The
+      # zig-direct convention claims the whole workspace (c-cpp-direct
+      # defers when ``uses:`` names zig AND no build.zig is present),
+      # emits the upstream C archive in-line via the embedded
+      # ``emitCCppCrossMember`` helper, and threads the archive onto
+      # the zig build-exe argv as a trailing positional plus the
+      # archive's parent dir as ``-L <dir>``. The binary's first
+      # stdout line proves the cross-language round-trip succeeded:
+      # Zig -> C c_add() -> back to Zig.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'zigcalc' 'zigcalc.exe'))
+          Greeting = 'zig says: mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/cpp-uses-zig-lib' {
+      # M44 cross-language Mode 3 (REVERSE direction): the workspace
+      # declares a Zig static library ``zigaddlib`` (``uses: zig``)
+      # and a C++ executable ``cppapp`` (``uses: gcc``) in a single
+      # ``repro.nim`` with ``depends_on cppapp: zigaddlib``. The
+      # zig-direct convention claims the whole workspace, emits the
+      # upstream Zig archive via ``zig build-lib``, then emits per-
+      # source ``g++ -c`` + terminal ``g++ -o`` actions for cppapp;
+      # the link argv carries the Zig archive as a trailing positional.
+      # Unlike Rust/Fortran reverse fixtures, Zig static archives
+      # bundle their (minimal) compiler-rt routines into the archive
+      # itself so the C++ link doesn't need explicit runtime ``-l``
+      # libs. The binary's first stdout line proves the cross-language
+      # round-trip: C++ -> Zig zig_add() -> back to C++.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'zigaddlib' 'libzigaddlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
+          Greeting = 'cpp says: zig added 2+3 = 5'
         }
       )
     }

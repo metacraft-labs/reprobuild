@@ -74,6 +74,9 @@ const PopulatedExamples = [
   "fortran-mode3/binary-with-library",
   "mixed/fortran-uses-cpp-lib",
   "mixed/cpp-uses-fortran-lib",
+  "zig-mode3/binary-with-library",
+  "mixed/zig-uses-cpp-lib",
+  "mixed/cpp-uses-zig-lib",
 ]
 
 suite "examples layout M8":

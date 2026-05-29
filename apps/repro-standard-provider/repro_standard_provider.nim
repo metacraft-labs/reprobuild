@@ -44,6 +44,7 @@ import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_conven
 import repro_standard_provider/conventions/swift_swiftpm as swift_swiftpm_convention
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
+import repro_standard_provider/conventions/zig_direct as zig_direct_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -286,6 +287,16 @@ when defined(reproProviderMode):
   # fortran-direct when ``uses:`` anywhere names ``gfortran``/``fortran``,
   # mirroring the rust-direct / go-direct pattern.
   addDefaultConvention(fortran_direct_convention.fortranDirectConvention())
+  # zig_direct (Mode 3 / no-build.zig) — registered AFTER all the other
+  # Mode 3 conventions per M44 of
+  # Mode3-Language-Expansion.milestones.org. There is no Mode 2 Zig
+  # convention sibling yet (build.zig recognition is deferred per the
+  # M44 honest-scope cut); this is the only Zig convention today.
+  # Registration order matters only for mixed Zig + C/C++ workspaces —
+  # c-cpp-direct defers to zig-direct when ``uses:`` anywhere names
+  # ``zig`` AND no ``build.zig`` is present at the workspace root,
+  # mirroring the rust-direct / go-direct / fortran-direct pattern.
+  addDefaultConvention(zig_direct_convention.zigDirectConvention())
 
   proc runStandardProvider(): int =
     try:

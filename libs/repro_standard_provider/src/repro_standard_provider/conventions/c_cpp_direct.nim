@@ -652,6 +652,74 @@ proc workspaceClaimedByFortranDirect(projectRoot, source: string): bool =
     return false
   true
 
+proc usesIncludesZigToolchain(source: string): bool =
+  ## M44: defer mixed Zig+C/C++ workspaces to the ``zig-direct``
+  ## convention. Mirrors ``usesIncludesRustToolchain`` /
+  ## ``usesIncludesFortranToolchain`` shape.
+  if source.len == 0:
+    return false
+  var sawZig = false
+  var inBlock = false
+  proc consume(token: string) {.closure.} =
+    if token == "zig":
+      sawZig = true
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      if inBlock:
+        inBlock = false
+      continue
+    if inBlock:
+      let leading = line.len > 0 and line[0] in {' ', '\t'}
+      if not leading:
+        inBlock = false
+      else:
+        for raw in stripped.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+        continue
+    if stripped.startsWith("uses:"):
+      let payload = stripped[5 .. ^1].strip()
+      if payload.len == 0:
+        inBlock = true
+      else:
+        var clean = payload
+        if clean.startsWith("["):
+          clean = clean[1 .. ^1]
+        if clean.endsWith("]"):
+          clean = clean[0 ..< ^1]
+        for raw in clean.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+  sawZig
+
+proc hasBuildZig(projectRoot: string): bool =
+  fileExists(extendedPath(projectRoot / "build.zig"))
+
+proc workspaceClaimedByZigDirect(projectRoot, source: string): bool =
+  ## True when the ``zig-direct`` Mode 3 convention will recognize the
+  ## same workspace. M44 hands cross-language Zig↔C/C++ mixed
+  ## workspaces to ``zig-direct`` (it embeds the C/C++ cross helpers
+  ## the same way ``rust-direct`` does), so this convention declines.
+  ## The check mirrors ``zig_direct.zigDirectRecognize`` cheaply:
+  ## ``uses:`` names ``zig`` anywhere AND no ``build.zig`` at the
+  ## workspace root (the future Mode 2 ``zig`` convention's territory).
+  if not usesIncludesZigToolchain(source):
+    return false
+  if hasBuildZig(projectRoot):
+    return false
+  true
+
 proc cCppDirectRecognize(projectRoot: string;
                          request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract:
@@ -680,6 +748,11 @@ proc cCppDirectRecognize(projectRoot: string;
   ##     (which embeds the C/C++ cross helpers and emits both
   ##     directions of the Fortran ↔ C cross-language matrix from a
   ##     single fragment).
+  ##   * M44: NO ``zig`` in any ``uses:`` block AND no ``build.zig``. A
+  ##     mixed Zig+C/C++ workspace routes through ``zig-direct``
+  ##     (which embeds the C/C++ cross helpers and emits both
+  ##     directions of the Zig ↔ C cross-language matrix from a single
+  ##     fragment).
   if rootMakefile(projectRoot).len > 0:
     return false
   if hasCMakeLists(projectRoot):
@@ -696,6 +769,8 @@ proc cCppDirectRecognize(projectRoot: string;
   if workspaceClaimedByGoDirect(projectRoot, source):
     return false
   if workspaceClaimedByFortranDirect(projectRoot, source):
+    return false
+  if workspaceClaimedByZigDirect(projectRoot, source):
     return false
   let members = extractMembersWithOwnership(source)
   if members.len == 0:

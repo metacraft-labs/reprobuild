@@ -138,7 +138,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[23, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[24, tuple[ext, convention: string]] = [
     (".nim",   "nim"),
     (".rs",    "rust"),
     (".go",    "go"),
@@ -162,6 +162,7 @@ const
     (".f95",   "fortran-direct"),
     (".f03",   "fortran-direct"),
     (".f08",   "fortran-direct"),
+    (".zig",   "zig-direct"),
   ]
 
 proc isExtensionForConvention*(ext, convention: string): bool =
@@ -630,7 +631,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[17, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[18, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -682,6 +683,9 @@ const
     ToolchainProbeSpec(convention: "swift-swiftpm",
                        exeName: "swift",
                        versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "zig-direct",
+                       exeName: "zig",
+                       versionArgs: @["version"]),
   ]
 
 var toolchainProbeCache: Table[string, ToolchainProbeResult]
