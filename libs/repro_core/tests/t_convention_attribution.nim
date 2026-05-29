@@ -136,6 +136,20 @@ suite "attributeConvention: manifest detection":
     check attr.evidence.contains("Package.swift")
     removeDir(dir)
 
+  test "dune-project ⇒ ocaml-dune":
+    ## M46 — Dune project manifest must attribute to ``ocaml-dune``.
+    ## Unique filename (no other convention recognises ``dune-project``)
+    ## so the manifest-pass picks it up directly.
+    let dir = makeScratch("dune-project")
+    writeFile(dir / "dune-project", "(lang dune 3.0)\n")
+    writeFile(dir / "dune", "(executable (name hello))\n")
+    writeFile(dir / "hello.ml",
+      "let () = print_endline \"hi\"\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "ocaml-dune"
+    check attr.evidence.contains("dune-project")
+    removeDir(dir)
+
   test "build.gradle (Groovy DSL) ⇒ kotlin-gradle":
     ## M41 — Groovy DSL Gradle manifest must also attribute to
     ## ``kotlin-gradle`` (the convention accepts either DSL).

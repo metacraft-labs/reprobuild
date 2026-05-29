@@ -983,7 +983,8 @@ const
     "swift", "swiftc", "swiftpm",
     "gfortran", "fortran",
     "zig",
-    "d", "dmd", "ldc2", "gdc"]
+    "d", "dmd", "ldc2", "gdc",
+    "ocaml", "ocamlc", "ocamlopt", "ocamlfind", "dune"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
     ## Tier 2b standard provider. This list MUST stay in sync with the
@@ -1019,6 +1020,13 @@ const
     ## ``"swift"`` / ``"swiftc"`` / ``"swiftpm"`` (M43) route to the
     ## Swift + SwiftPM (Tier 2b) convention which keys on ``Package.swift``
     ## at the project root.
+    ## ``"ocaml"`` / ``"ocamlc"`` / ``"ocamlopt"`` / ``"ocamlfind"`` /
+    ## ``"dune"`` (M46) route to the OCaml + Dune (Tier 2b) convention
+    ## which keys on ``dune-project`` at the project root; recognition
+    ## additionally requires BOTH halves (an OCaml token AND ``dune``)
+    ## in ``uses:`` — mirrors M40 java-maven's strict "both required"
+    ## pattern because Dune isn't a built-in part of the OCaml
+    ## distribution (it's a separate ``opam install dune``).
     ## Mismatches break in the engine-side fall-back path:
     ## the engine will dispatch to the provider, the provider will reply
     ## "no convention matched", and the build fails loudly — preferable to

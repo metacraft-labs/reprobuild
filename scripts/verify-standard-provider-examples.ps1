@@ -54,6 +54,8 @@
 #   csharp-dotnet/hello-binary (M42; SKIP when dotnet missing)
 #   swift-swiftpm/hello-binary (M43; SKIP when swift missing — Swift Windows
 #                               toolchain isn't in the standard dev shell)
+#   ocaml-dune/hello-binary   (M46; SKIP when ocaml/dune missing — OCaml
+#                               isn't in the standard dev shell on Windows)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -151,6 +153,7 @@ $PopulatedExamples = @(
   'kotlin-gradle/hello-binary',
   'csharp-dotnet/hello-binary',
   'swift-swiftpm/hello-binary',
+  'ocaml-dune/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -908,6 +911,49 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'swift' not on PATH (install Swift 5.10 from swift.org into D:/metacraft-dev-deps/swift/5.10/ or 'winget install Swift.Toolchain')" }
       }
       return @{ Available = $true; Reason = "swift=$($swiftCmd.Source)" }
+    }
+    'ocaml-dune' {
+      # M46: the OCaml + Dune (Tier 2b) convention is registered. Probe
+      # for BOTH ``ocaml`` AND ``dune`` on PATH. The convention's
+      # ``recognize`` enforces this jointly — Dune isn't a built-in
+      # part of the OCaml distribution (it's a separate ``opam install
+      # dune``). The documented provisioning path is OPAM Windows from
+      # ocaml.org unpacked into ``D:/metacraft-dev-deps/opam/`` and
+      # then ``opam install dune`` after ``opam init`` + ``opam switch
+      # create``. Most M46 review hosts do NOT ship OCaml — it isn't
+      # in the standard dev shell — so this probe is expected to SKIP
+      # cleanly on a default Windows host.
+      $ocamlCmd = Get-Command ocaml -ErrorAction SilentlyContinue
+      $duneCmd = Get-Command dune -ErrorAction SilentlyContinue
+      if (-not $ocamlCmd -or -not $duneCmd) {
+        $opamRoot = 'D:\metacraft-dev-deps\opam'
+        if (Test-Path -LiteralPath $opamRoot) {
+          $candidates = @()
+          foreach ($entry in Get-ChildItem -LiteralPath $opamRoot -Directory -ErrorAction SilentlyContinue) {
+            foreach ($candidate in @(
+              (Join-Path $entry.FullName 'bin\ocaml.exe'),
+              (Join-Path $entry.FullName 'usr\bin\ocaml.exe'))) {
+              if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+            }
+          }
+          if ($candidates.Count -gt 0) {
+            $picked = $candidates | Sort-Object | Select-Object -Last 1
+            $binDir = Split-Path -Parent $picked
+            if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+              $env:PATH = "$binDir;$env:PATH"
+            }
+            $ocamlCmd = Get-Command ocaml -ErrorAction SilentlyContinue
+            $duneCmd = Get-Command dune -ErrorAction SilentlyContinue
+          }
+        }
+      }
+      if (-not $ocamlCmd) {
+        return @{ Available = $false; Reason = "'ocaml' not on PATH (install OPAM Windows from ocaml.org into D:/metacraft-dev-deps/opam/ and then 'opam install dune')" }
+      }
+      if (-not $duneCmd) {
+        return @{ Available = $false; Reason = "'dune' not on PATH (install via 'opam install dune' after OPAM init)" }
+      }
+      return @{ Available = $true; Reason = "ocaml=$($ocamlCmd.Source); dune=$($duneCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -1963,6 +2009,21 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir (".build\release\" + $exeName)
         Greeting = 'hello from swift-swiftpm-hello-binary'
+      })
+    }
+    'ocaml-dune/hello-binary' {
+      # M46: ocaml-dune/hello-binary. The convention emits a single
+      # ``dune build --release -j 1`` action that produces
+      # ``_build/default/<entry-dir>/<name>.exe`` under the project root.
+      # The fixture's ``dune`` file lives at the root so the entry-dir
+      # is the root itself; the binary lands at
+      # ``_build/default/hello.exe``. Dune normalises the ``.exe``
+      # suffix even on POSIX as of Dune 3.x so the predicted path is
+      # stable across platforms (a bare-suffix file is also produced
+      # on POSIX but ``.exe`` is the form the convention pins).
+      return @(@{
+        Path     = Join-Path $fixtureDir '_build\default\hello.exe'
+        Greeting = 'hello from ocaml-dune-hello-binary'
       })
     }
     'csharp-dotnet/hello-binary' {

@@ -46,6 +46,7 @@ import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_conventi
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/conventions/zig_direct as zig_direct_convention
 import repro_standard_provider/conventions/d_direct as d_direct_convention
+import repro_standard_provider/conventions/ocaml_dune as ocaml_dune_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -310,6 +311,25 @@ when defined(reproProviderMode):
   # mirroring the rust-direct / go-direct / fortran-direct /
   # zig-direct pattern.
   addDefaultConvention(d_direct_convention.dDirectConvention())
+  # ocaml_dune (M46) — fifth managed-ecosystem Tier 2b convention. Keys
+  # on a single ``dune-project`` at the project root (the Dune project
+  # manifest filename — uniquely identifies a Dune project; no other
+  # convention recognises this filename). Registered AFTER d_direct per
+  # the M46 spec's "register after d-direct in the chain" sequencing —
+  # the spec treats ocaml-dune as a late-registration Mode 2 convention
+  # so the Mode 3 conventions block contiguously above it. The order has
+  # no recognition consequence — the convention's recognition gate is
+  # closed-set on ``dune-project`` presence + an OCaml token AND a
+  # ``dune`` token in ``uses:`` (the HARD precondition pattern, mirroring
+  # M40 java-maven's "both halves required"). The convention requires
+  # both ``ocaml`` AND ``dune`` drivers on PATH; when either is absent
+  # (which is the M46 default on Windows — the dev shell doesn't bundle
+  # OCaml) ``recognize`` returns false and the M9-style harness SKIPs
+  # cleanly. Mode 3 OCaml is explicitly DEFERRED per the M46 spec —
+  # Dune's per-module dep-ordering + module-aliasing heuristics are
+  # non-trivial to re-implement; track as a future milestone if demand
+  # surfaces.
+  addDefaultConvention(ocaml_dune_convention.ocamlDuneConvention())
 
   proc runStandardProvider(): int =
     try:

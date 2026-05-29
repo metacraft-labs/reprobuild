@@ -110,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[21, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[22, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -129,6 +129,7 @@ const
     ("build.gradle",       "kotlin-gradle"),
     ("*.csproj",           "csharp-dotnet"),
     ("Package.swift",      "swift-swiftpm"),
+    ("dune-project",       "ocaml-dune"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -138,7 +139,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[24, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[26, tuple[ext, convention: string]] = [
     (".nim",   "nim"),
     (".rs",    "rust"),
     (".go",    "go"),
@@ -163,6 +164,8 @@ const
     (".f03",   "fortran-direct"),
     (".f08",   "fortran-direct"),
     (".zig",   "zig-direct"),
+    (".ml",    "ocaml-dune"),
+    (".mli",   "ocaml-dune"),
   ]
 
 proc isExtensionForConvention*(ext, convention: string): bool =
@@ -631,7 +634,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[18, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[19, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -686,6 +689,9 @@ const
     ToolchainProbeSpec(convention: "zig-direct",
                        exeName: "zig",
                        versionArgs: @["version"]),
+    ToolchainProbeSpec(convention: "ocaml-dune",
+                       exeName: "ocaml",
+                       versionArgs: @["-version"]),
   ]
 
 var toolchainProbeCache: Table[string, ToolchainProbeResult]
