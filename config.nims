@@ -22,6 +22,7 @@ for libName in [
   "repro_dsl_stdlib",
   "repro_home_intent",
   "repro_profile",
+  "repro_profile_intent",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",

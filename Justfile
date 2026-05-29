@@ -494,6 +494,17 @@ smoke_repro_profile:
         libs/repro_profile/tests/t_smoke_repro_profile.nim \
         2>&1 | tee test-logs/smoke_repro_profile.log
 
+smoke_repro_profile_intent:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/smoke_repro_profile_intent \
+        --out:build/test-bin/smoke_repro_profile_intent \
+        libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim \
+        2>&1 | tee test-logs/smoke_repro_profile_intent.log
+
 e2e_repro_profile_compile:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
