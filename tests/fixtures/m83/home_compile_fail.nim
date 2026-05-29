@@ -1,8 +1,8 @@
-## M83 Phase C1 fixture: a deliberately-broken profile that fails to
+## M83 Phase C fixture: a deliberately-broken profile that fails to
 ## compile. The `nope_undefined_predicate` identifier is not declared
 ## anywhere in `repro_profile` or stdlib, so `nim c` emits a clean
 ## "undeclared identifier" error. Drives the compile-failure path of
-## `repro profile build`.
+## the profile-compile build-graph edge.
 
 import repro_profile
 

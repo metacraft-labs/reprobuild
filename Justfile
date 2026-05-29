@@ -516,28 +516,28 @@ e2e_repro_profile_compile:
         tests/e2e/m83/t_e2e_repro_profile_compile.nim \
         2>&1 | tee test-logs/e2e_repro_profile_compile.log
 
-smoke_profile_build:
+smoke_repro_profile_compile:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
         --threads:on \
         --hints:off \
         --warnings:off \
-        --nimcache:build/nimcache/smoke_profile_build \
-        --out:build/test-bin/smoke_profile_build \
-        libs/repro_cli_support/tests/t_smoke_profile_build.nim \
-        2>&1 | tee test-logs/smoke_profile_build.log
+        --nimcache:build/nimcache/smoke_repro_profile_compile \
+        --out:build/test-bin/smoke_repro_profile_compile \
+        libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim \
+        2>&1 | tee test-logs/smoke_repro_profile_compile.log
 
-e2e_repro_profile_build:
+e2e_repro_profile_compile_via_action:
     mkdir -p test-logs build/test-bin build/nimcache build/bin
     bash ./scripts/build_apps.sh
     nim c -r \
         --threads:on \
         --hints:off \
         --warnings:off \
-        --nimcache:build/nimcache/e2e_repro_profile_build \
-        --out:build/test-bin/e2e_repro_profile_build \
-        tests/e2e/m83/t_e2e_repro_profile_build.nim \
-        2>&1 | tee test-logs/e2e_repro_profile_build.log
+        --nimcache:build/nimcache/e2e_repro_profile_compile_via_action \
+        --out:build/test-bin/e2e_repro_profile_compile_via_action \
+        tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim \
+        2>&1 | tee test-logs/e2e_repro_profile_compile_via_action.log
 
 integration_intent_layer_round_trip:
     mkdir -p test-logs build/test-bin build/nimcache

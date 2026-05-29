@@ -23,6 +23,7 @@ for libName in [
   "repro_home_intent",
   "repro_profile",
   "repro_profile_intent",
+  "repro_profile_compile",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",
