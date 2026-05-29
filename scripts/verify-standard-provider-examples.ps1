@@ -51,6 +51,7 @@
 #   c-cpp-meson/hello-binary  (M39; SKIP when meson/ninja missing)
 #   java-maven/hello-binary   (M40; SKIP when javac/mvn missing)
 #   kotlin-gradle/hello-binary (M41; SKIP when javac/gradle missing)
+#   csharp-dotnet/hello-binary (M42; SKIP when dotnet missing)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -146,6 +147,7 @@ $PopulatedExamples = @(
   'c-cpp-meson/hello-binary',
   'java-maven/hello-binary',
   'kotlin-gradle/hello-binary',
+  'csharp-dotnet/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -742,6 +744,55 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'java' not on PATH (need the JRE to run the produced jar)" }
       }
       return @{ Available = $true; Reason = "javac=$($javacCmd.Source); gradle=$($gradleCmd.Source); java=$($javaCmd.Source)" }
+    }
+    'csharp-dotnet' {
+      # M42: the C# + .NET (Tier 2b) convention is registered. Probe
+      # for ``dotnet`` on PATH. The convention's ``recognize`` enforces
+      # this (the .NET SDK ships the dotnet driver as a single binary
+      # — no separate compiler executable needed). The documented
+      # provisioning paths are .NET SDK 8.0 LTS into
+      # ``D:/metacraft-dev-deps/dotnet/8.0/`` (manual download from
+      # microsoft.com) or ``winget install Microsoft.DotNet.SDK.8``
+      # which lands ``%ProgramFiles%\dotnet\dotnet.exe`` on PATH.
+      $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
+      if (-not $dotnetCmd) {
+        $dotnetRoot = 'D:\metacraft-dev-deps\dotnet'
+        if (Test-Path -LiteralPath $dotnetRoot) {
+          $candidates = @()
+          # The dev-deps tree carries one or more SDK versions as
+          # subdirs (e.g. ``D:\metacraft-dev-deps\dotnet\9.0.310\``);
+          # pick the lexicographically-latest one when multiple are
+          # present. Also accept ``D:\metacraft-dev-deps\dotnet\``
+          # itself as the install root when ``dotnet.exe`` is sat
+          # directly underneath.
+          $direct = Join-Path $dotnetRoot 'dotnet.exe'
+          if (Test-Path -LiteralPath $direct) { $candidates += $direct }
+          foreach ($verDir in Get-ChildItem -LiteralPath $dotnetRoot -Directory -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $verDir.FullName 'dotnet.exe'
+            if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+          }
+          if ($candidates.Count -gt 0) {
+            $picked = $candidates | Sort-Object | Select-Object -Last 1
+            $binDir = Split-Path -Parent $picked
+            if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+              $env:PATH = "$binDir;$env:PATH"
+            }
+            $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
+          }
+        }
+      }
+      if (-not $dotnetCmd) {
+        return @{ Available = $false; Reason = "'dotnet' not on PATH (install .NET SDK 8.0 LTS into D:/metacraft-dev-deps/dotnet/8.0/ or 'winget install Microsoft.DotNet.SDK.8')" }
+      }
+      # The .NET 5+ apphost (the produced .exe) searches for hostfxr.dll
+      # via DOTNET_ROOT first, then registry, then %ProgramFiles%\dotnet.
+      # When the SDK is provisioned outside any of those (e.g. under
+      # D:\metacraft-dev-deps\dotnet\<ver>\) the produced .exe fails to
+      # launch with "You must install .NET to run this application"
+      # unless we set DOTNET_ROOT explicitly. Set it here so the
+      # harness's post-build Greeting check can exec hello.exe directly.
+      $env:DOTNET_ROOT = Split-Path -Parent $dotnetCmd.Source
+      return @{ Available = $true; Reason = "dotnet=$($dotnetCmd.Source); DOTNET_ROOT=$($env:DOTNET_ROOT)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -1644,6 +1695,22 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir 'build\libs\hello-1.0.jar'
         Greeting = $null
+      })
+    }
+    'csharp-dotnet/hello-binary' {
+      # M42: csharp-dotnet/hello-binary. The convention emits a single
+      # ``dotnet build -c Release --no-restore --nologo --verbosity
+      # quiet <csproj>`` action that produces
+      # ``bin/Release/<TargetFramework>/<AssemblyName>.exe`` under the
+      # project root. The fixture pins ``TargetFramework=net8.0`` +
+      # ``OutputType=Exe`` and uses the default ``AssemblyName=hello``
+      # (csproj basename) so the binary lands at
+      # ``bin/Release/net8.0/hello.exe``. The .NET 5+ SDK-style
+      # build produces a self-launching .exe so the harness's
+      # ``Greeting`` check can exec it directly.
+      return @(@{
+        Path     = Join-Path $fixtureDir 'bin\Release\net8.0\hello.exe'
+        Greeting = 'hello from csharp-dotnet-hello-binary'
       })
     }
     'c-cpp-mode3/binary-with-library' {

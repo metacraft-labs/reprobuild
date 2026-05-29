@@ -40,6 +40,7 @@ import repro_standard_provider/conventions/c_cpp_cmake as c_cpp_cmake_convention
 import repro_standard_provider/conventions/c_cpp_meson as c_cpp_meson_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
+import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_convention
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/project_intro
@@ -211,6 +212,22 @@ when defined(reproProviderMode):
   # closed-set on ``build.gradle[.kts]`` presence + a
   # ``gradle``/``kotlin`` + ``java``/``jdk`` ``uses:`` declaration.
   addDefaultConvention(kotlin_gradle_convention.kotlinGradleConvention())
+  # csharp_dotnet (M42) — third managed-runtime-ecosystem Tier 2b
+  # convention. Keys on a single ``*.csproj`` at the project root plus
+  # a HARD precondition ``packages.lock.json`` (the M42 offline-build
+  # guarantee per the spec). Registered AFTER kotlin_gradle so the
+  # JVM-ecosystem conventions form a contiguous block, then the
+  # .NET-ecosystem convention follows; the order has no recognition
+  # consequence because each convention's recognition gate is
+  # closed-set on its own ecosystem's manifest (``*.csproj`` is unique
+  # to .NET — no other convention recognises it). The convention's
+  # ``recognize`` additionally rejects projects with ``*.fsproj`` at
+  # the root (deferred future F# convention's territory). Registration
+  # position is alphabetical-by-language ('c' is before 'j'/'k' but
+  # the C# convention follows the JVM block here because that block is
+  # the closest precedent — same lightweight Mode 2 ecosystem-
+  # delegation shape).
+  addDefaultConvention(csharp_dotnet_convention.csharpDotnetConvention())
   # c_cpp_direct (Mode 3 / no-Makefile) is registered LAST among the
   # C/C++ conventions so a project shipping a Makefile routes through
   # the Make convention first; Mode 3 picks up the no-Makefile case

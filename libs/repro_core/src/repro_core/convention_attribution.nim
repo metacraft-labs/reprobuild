@@ -110,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[19, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[20, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -127,6 +127,7 @@ const
     ("pom.xml",            "java-maven"),
     ("build.gradle.kts",   "kotlin-gradle"),
     ("build.gradle",       "kotlin-gradle"),
+    ("*.csproj",           "csharp-dotnet"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -136,7 +137,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[21, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[22, tuple[ext, convention: string]] = [
     (".nim",  "nim"),
     (".rs",   "rust"),
     (".go",   "go"),
@@ -154,6 +155,7 @@ const
     (".h",    "c-cpp-make"),
     (".java", "java-maven"),
     (".kt",   "kotlin-gradle"),
+    (".cs",   "csharp-dotnet"),
     (".f90",  "fortran-direct"),
     (".f95",  "fortran-direct"),
     (".f03",  "fortran-direct"),
@@ -262,10 +264,11 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
     result.evidence = "directory does not exist"
     return
   # Pass 1: manifest detection. Walk top-level entries once and record
-  # which manifests are present. We also note any ``*.nimble`` for the
-  # Nim glob-match sentinel.
+  # which manifests are present. We also note any ``*.nimble`` and
+  # ``*.csproj`` for the glob-match sentinels.
   var presentManifests: seq[string] = @[]
   var nimbleSeen = ""
+  var csprojSeen = ""
   try:
     for kind, path in walkDir(targetDir):
       if kind notin {pcFile, pcLinkToFile}:
@@ -273,6 +276,8 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
       let basename = extractFilename(path)
       if basename.toLowerAscii.endsWith(".nimble") and nimbleSeen.len == 0:
         nimbleSeen = basename
+      if basename.toLowerAscii.endsWith(".csproj") and csprojSeen.len == 0:
+        csprojSeen = basename
       for entry in ManifestSignals:
         if entry.fileName == basename:
           presentManifests.add(basename)
@@ -284,6 +289,22 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
       if nimbleSeen.len > 0:
         result.convention = entry.convention
         result.evidence = "manifest: " & nimbleSeen
+        return
+      continue
+    if entry.fileName == "*.csproj":
+      # M42: ``*.csproj`` is the .NET SDK-style project filename
+      # pattern (e.g. ``hello.csproj``). The csharp-dotnet convention
+      # additionally requires ``packages.lock.json`` at the project
+      # root for the offline-build guarantee, but the attribution
+      # heuristic here is intentionally manifest-presence-only —
+      # ``packages.lock.json`` absence is a "no manifest" condition
+      # that the heuristic's evidence string honestly reports as
+      # ``csharp-dotnet`` (so ``repro show-conventions`` still tells
+      # the user which convention WOULD claim the project once the
+      # lockfile is generated).
+      if csprojSeen.len > 0:
+        result.convention = entry.convention
+        result.evidence = "manifest: " & csprojSeen
         return
       continue
     if entry.fileName in presentManifests:
@@ -462,8 +483,12 @@ proc hasManifestFile(absDir: string): bool =
       let basename = extractFilename(path)
       if basename.toLowerAscii.endsWith(".nimble"):
         return true
+      if basename.toLowerAscii.endsWith(".csproj"):
+        return true
       for entry in ManifestSignals:
         if entry.fileName == "*.nimble":
+          continue
+        if entry.fileName == "*.csproj":
           continue
         if entry.fileName == basename:
           return true
@@ -603,7 +628,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[15, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[16, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -648,6 +673,9 @@ const
                        versionArgs: @["-version"]),
     ToolchainProbeSpec(convention: "kotlin-gradle",
                        exeName: "gradle",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "csharp-dotnet",
+                       exeName: "dotnet",
                        versionArgs: @["--version"]),
   ]
 

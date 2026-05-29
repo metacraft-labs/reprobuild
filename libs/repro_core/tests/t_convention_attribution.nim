@@ -102,6 +102,25 @@ suite "attributeConvention: manifest detection":
     check attr.evidence.contains("build.gradle.kts")
     removeDir(dir)
 
+  test "*.csproj ⇒ csharp-dotnet":
+    ## M42 — SDK-style C# project filename pattern must attribute to
+    ## ``csharp-dotnet``. Parallels the *.nimble glob-match sentinel
+    ## (since csprojs are named after the project rather than using a
+    ## fixed filename like ``pom.xml`` / ``build.gradle.kts``).
+    let dir = makeScratch("csproj")
+    writeFile(dir / "hello.csproj",
+      "<Project Sdk=\"Microsoft.NET.Sdk\">\n" &
+      "  <PropertyGroup>\n" &
+      "    <OutputType>Exe</OutputType>\n" &
+      "    <TargetFramework>net8.0</TargetFramework>\n" &
+      "  </PropertyGroup>\n" &
+      "</Project>\n")
+    writeFile(dir / "packages.lock.json", "{\n  \"version\": 1\n}\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "csharp-dotnet"
+    check attr.evidence.contains("hello.csproj")
+    removeDir(dir)
+
   test "build.gradle (Groovy DSL) ⇒ kotlin-gradle":
     ## M41 — Groovy DSL Gradle manifest must also attribute to
     ## ``kotlin-gradle`` (the convention accepts either DSL).

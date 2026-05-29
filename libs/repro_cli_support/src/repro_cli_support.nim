@@ -5917,6 +5917,7 @@ const
     "c-cpp-make",
     "java-maven",
     "kotlin-gradle",
+    "csharp-dotnet",
     "c-cpp-direct",
     "rust-direct",
     "go-direct",

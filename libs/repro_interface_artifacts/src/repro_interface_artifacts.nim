@@ -979,6 +979,7 @@ const
     "cmake", "ninja", "meson",
     "java", "jdk", "javac", "mvn", "maven",
     "gradle", "kotlin",
+    "dotnet", "dotnet-sdk", "csharp",
     "gfortran", "fortran"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
