@@ -37,6 +37,7 @@ import repro_standard_provider/conventions/jsts_direct as jsts_direct_convention
 import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
 import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_convention
 import repro_standard_provider/conventions/c_cpp_cmake as c_cpp_cmake_convention
+import repro_standard_provider/conventions/c_cpp_meson as c_cpp_meson_convention
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/project_intro
@@ -171,6 +172,18 @@ when defined(reproProviderMode):
   # need try_compile probes lifted into the reprobuild DAG; users opt
   # into Tier 2c via explicit provider declaration.
   addDefaultConvention(c_cpp_cmake_convention.cCppCMakeConvention())
+  # c_cpp_meson (M39) registered AFTER c_cpp_cmake and BEFORE
+  # c_cpp_make so Meson claims any project with a root-level
+  # ``meson.build`` before the Make convention gets a chance. CMake
+  # registers first because a project carrying BOTH ``CMakeLists.txt``
+  # and ``meson.build`` is almost always primarily a CMake project
+  # exporting a Meson side-build for some downstream consumer; the
+  # Meson convention's ``recognize`` rejects when ``CMakeLists.txt`` is
+  # present so the order is defensive in either direction. Like the
+  # CMake convention, this is the lightweight Tier 2b path that shells
+  # out to a stock ``meson`` + ``ninja`` for configure + per-member
+  # build.
+  addDefaultConvention(c_cpp_meson_convention.cCppMesonConvention())
   addDefaultConvention(c_cpp_make_convention.cCppMakeConvention())
   # c_cpp_direct (Mode 3 / no-Makefile) is registered LAST among the
   # C/C++ conventions so a project shipping a Makefile routes through

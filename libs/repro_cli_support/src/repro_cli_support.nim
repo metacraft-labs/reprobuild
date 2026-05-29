@@ -24,12 +24,14 @@ import repro_cli_support/watch
 import repro_cli_support/dev_session
 import repro_cli_support/home
 import repro_cli_support/infra
+import repro_cli_support/profile
 import repro_home_resources/drivers/managed_block
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
        home.ConfigurableSchemaEnvVar
 export infra.runInfraCommand, infra.runSystemCommand
+export profile.runProfileCommand
 
 proc wantsVersion*(args: openArray[string]): bool =
   args.len == 1 and args[0] in ["--version", "-V"]
@@ -91,6 +93,8 @@ proc renderUsage*(programName: string): string =
       " infra {plan | apply} ...\n       " &
           programName &
       " system {add | remove | list | why | sync | history | rollback | audit} ...\n       " &
+          programName &
+      " profile {build} [--profile=PATH] [--no-cache] [--out=PATH|-] [--verbose]\n       " &
           programName &
       " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n\n" &
       "build progress: default=bar-line; aliases: " &
@@ -5912,6 +5916,7 @@ const
     "javascript-typescript",
     "c-cpp-autotools",
     "c-cpp-cmake",
+    "c-cpp-meson",
     "c-cpp-make",
     "c-cpp-direct",
     "rust-direct",
@@ -8865,6 +8870,13 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runLaunchPlanCommand(lpArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "profile":
+    let profileArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runProfileCommand(profileArgs)
   if programName == "repro" and args.len > 0 and args[0] == "home":
     let homeArgs =
       if args.len > 1:

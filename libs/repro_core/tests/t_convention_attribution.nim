@@ -68,6 +68,13 @@ suite "attributeConvention: manifest detection":
     check attr.convention == "c-cpp-cmake"
     removeDir(dir)
 
+  test "meson.build ⇒ c-cpp-meson":
+    let dir = makeScratch("meson")
+    writeFile(dir / "meson.build", "project('x', 'c')\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "c-cpp-meson"
+    removeDir(dir)
+
   test "*.nimble ⇒ nim":
     let dir = makeScratch("nimble")
     writeFile(dir / "mylib.nimble", "version = \"0.1.0\"\n")

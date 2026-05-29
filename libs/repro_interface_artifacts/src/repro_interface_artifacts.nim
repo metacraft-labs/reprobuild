@@ -976,7 +976,7 @@ const
     "python3", "python", "uv",
     "node", "typescript", "tsx", "swc", "esbuild",
     "gcc", "clang", "make", "ar", "autoconf", "automake",
-    "cmake", "ninja",
+    "cmake", "ninja", "meson",
     "gfortran", "fortran"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
@@ -993,7 +993,11 @@ const
     ## / ``"make"`` / ``"ar"`` (M17) route to the C/C++ Make convention;
     ## ``"autoconf"`` / ``"automake"`` (M17) route to the C/C++ Autotools
     ## convention which keys on ``configure.ac`` + ``Makefile.am`` at the
-    ## project root. Mismatches break in the engine-side fall-back path:
+    ## project root. ``"cmake"`` (M38) routes to the C/C++ CMake (Tier 2b)
+    ## convention which keys on ``CMakeLists.txt`` at the project root.
+    ## ``"meson"`` (M39) routes to the C/C++ Meson (Tier 2b) convention
+    ## which keys on ``meson.build`` at the project root.
+    ## Mismatches break in the engine-side fall-back path:
     ## the engine will dispatch to the provider, the provider will reply
     ## "no convention matched", and the build fails loudly — preferable to
     ## silently routing through the slow path when the user expects the

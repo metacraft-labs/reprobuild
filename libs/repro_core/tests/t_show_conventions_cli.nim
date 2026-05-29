@@ -166,24 +166,27 @@ suite "repro show-conventions: CLI smoke":
       check sawAppPkg
       check sawLibPkg
       check doc["conventions"].kind == JArray
-      check doc["conventions"].len == 14
+      check doc["conventions"].len == 15
       # First convention is "nim" — pins the dispatch order.
       check doc["conventions"][0].getStr == "nim"
-      # c-cpp-autotools must come BEFORE c-cpp-cmake BEFORE c-cpp-make
-      # BEFORE c-cpp-direct in the registry mirror; the order is
-      # documented in
+      # c-cpp-autotools must come BEFORE c-cpp-cmake BEFORE c-cpp-meson
+      # BEFORE c-cpp-make BEFORE c-cpp-direct in the registry mirror;
+      # the order is documented in
       # ``apps/repro-standard-provider/repro_standard_provider.nim``.
       # A project carrying both a Makefile and configure.ac routes
       # through Autotools because it recognise-matches first; a
       # project with a CMakeLists.txt routes through c-cpp-cmake
       # (M38) ahead of the Make convention's defensive reject; a
-      # project with a Makefile but no autotools/cmake artefacts
-      # routes through Make; only a project with NO Makefile /
-      # CMakeLists / configure.ac falls through to the Mode 3
+      # project with a meson.build routes through c-cpp-meson (M39)
+      # ahead of the Make convention's defensive reject; a project
+      # with a Makefile but no autotools/cmake/meson artefacts routes
+      # through Make; only a project with NO Makefile / CMakeLists /
+      # configure.ac / meson.build falls through to the Mode 3
       # c-cpp-direct. If this assertion flips the static mirror has
       # drifted from the standard-provider's registration order.
       var autotoolsIdx = -1
       var cmakeIdx = -1
+      var mesonIdx = -1
       var makeIdx = -1
       var directIdx = -1
       var rustIdx = -1
@@ -194,6 +197,7 @@ suite "repro show-conventions: CLI smoke":
         case doc["conventions"][i].getStr
         of "c-cpp-autotools": autotoolsIdx = i
         of "c-cpp-cmake":     cmakeIdx = i
+        of "c-cpp-meson":     mesonIdx = i
         of "c-cpp-make":      makeIdx = i
         of "c-cpp-direct":    directIdx = i
         of "rust":            rustIdx = i
@@ -203,10 +207,12 @@ suite "repro show-conventions: CLI smoke":
         else: discard
       check autotoolsIdx >= 0
       check cmakeIdx >= 0
+      check mesonIdx >= 0
       check makeIdx >= 0
       check directIdx >= 0
       check autotoolsIdx < cmakeIdx
-      check cmakeIdx < makeIdx
+      check cmakeIdx < mesonIdx
+      check mesonIdx < makeIdx
       check makeIdx < directIdx
       # M30: rust (Mode 2) registered BEFORE rust-direct (Mode 3) so
       # a project with a Cargo.toml routes through the Cargo-driven
@@ -358,6 +364,6 @@ suite "repro show-conventions: registry mirror sanity":
         let trimmed = stripped.strip(chars = {',', ' ', '"'})
         if trimmed.len > 0:
           mirror.add(trimmed)
-      check registered.len == 14
-      check mirror.len == 14
+      check registered.len == 15
+      check mirror.len == 15
       check registered == mirror

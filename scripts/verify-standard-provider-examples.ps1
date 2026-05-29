@@ -48,6 +48,7 @@
 #   c-cpp-make/binary, c-cpp-make/library-static,
 #   c-cpp-autotools/hello-binary (when autotools toolchain available),
 #   c-cpp-cmake/hello-binary (M38; SKIP when cmake/ninja-or-make missing)
+#   c-cpp-meson/hello-binary  (M39; SKIP when meson/ninja missing)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -140,6 +141,7 @@ $PopulatedExamples = @(
   'c-cpp-make/library-static',
   'c-cpp-autotools/hello-binary',
   'c-cpp-cmake/hello-binary',
+  'c-cpp-meson/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -582,6 +584,45 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "no single-config build driver on PATH (needs ninja or mingw32-make or make)" }
       }
       return @{ Available = $true; Reason = "cc=$($ccCmd.Source); cmake=$($cmakeCmd.Source); $builderKind=$($builderCmd.Source)" }
+    }
+    'c-cpp-meson' {
+      # M39: the C/C++ Meson (Tier 2b) convention is registered. Probe
+      # for meson + ninja + a C compiler. Meson's default backend is
+      # ninja (single-config, cross-platform); the convention only
+      # supports the ninja backend so SKIPs when ninja is missing. On
+      # Windows hosts that pip-installed meson into the managed Python
+      # under ``D:/metacraft-dev-deps/python/.../Scripts``, prepend the
+      # Scripts dir to PATH so ``Get-Command meson`` resolves cleanly.
+      $ccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $ccCmd) {
+        $ccCmd = Get-Command clang -ErrorAction SilentlyContinue
+      }
+      if (-not $ccCmd) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH" }
+      }
+      $mesonCmd = Get-Command meson -ErrorAction SilentlyContinue
+      if (-not $mesonCmd) {
+        $pythonScriptsCandidates = @(
+          'D:\metacraft-dev-deps\python\3.12.10\Scripts'
+        )
+        foreach ($d in $pythonScriptsCandidates) {
+          if (Test-Path -LiteralPath (Join-Path $d 'meson.exe')) {
+            if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $d })) {
+              $env:PATH = "$d;$env:PATH"
+            }
+            $mesonCmd = Get-Command meson -ErrorAction SilentlyContinue
+            break
+          }
+        }
+      }
+      if (-not $mesonCmd) {
+        return @{ Available = $false; Reason = "'meson' not on PATH (run 'python -m pip install meson' to provision into the managed Python's Scripts dir)" }
+      }
+      $ninjaCmd = Get-Command ninja -ErrorAction SilentlyContinue
+      if (-not $ninjaCmd) {
+        return @{ Available = $false; Reason = "'ninja' not on PATH (M39 c-cpp-meson convention uses meson's default ninja backend)" }
+      }
+      return @{ Available = $true; Reason = "cc=$($ccCmd.Source); meson=$($mesonCmd.Source); ninja=$($ninjaCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -1434,6 +1475,19 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir '.repro\build\cmake\hello.exe'
         Greeting = 'hello from c-cpp-cmake-hello-binary'
+      })
+    }
+    'c-cpp-meson/hello-binary' {
+      # M39: c-cpp-meson/hello-binary. The convention emits one
+      # ``meson setup <root>/.repro/build/meson <root> --buildtype=release
+      # --backend=ninja`` configure action plus one ``meson compile -C
+      # ... hello`` build action. Meson's default layout places the
+      # produced executable at the build dir root, so on Windows the
+      # binary lands at ``.repro/build/meson/hello.exe`` matching the
+      # convention's predicted output path.
+      return @(@{
+        Path     = Join-Path $fixtureDir '.repro\build\meson\hello.exe'
+        Greeting = 'hello from c-cpp-meson-hello-binary'
       })
     }
     'c-cpp-mode3/binary-with-library' {

@@ -92,9 +92,10 @@ type
 # Convention attribution. The order in ``attributeConvention`` mirrors
 # the dispatch order in the standard-provider binary
 # (``addDefaultConvention(nim …); rust …; go …; python …;
-# javascript_typescript …; c_cpp_autotools …; c_cpp_cmake …; c_cpp_make
-# …``). When multiple manifests coexist in a target directory the order
-# here decides who wins — same as the live registry.
+# javascript_typescript …; c_cpp_autotools …; c_cpp_cmake …;
+# c_cpp_meson …; c_cpp_make …``). When multiple manifests coexist in a
+# target directory the order here decides who wins — same as the live
+# registry.
 # ----------------------------------------------------------------------
 
 const
@@ -109,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[15, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[16, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -122,6 +123,7 @@ const
     ("configure.in",       "c-cpp-autotools"),
     ("Makefile.am",        "c-cpp-autotools"),
     ("CMakeLists.txt",     "c-cpp-cmake"),
+    ("meson.build",        "c-cpp-meson"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -311,6 +313,7 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
       fileExists(targetDir / "GNUmakefile") or
       fileExists(targetDir / "makefile")
     let hasCmake = fileExists(targetDir / "CMakeLists.txt")
+    let hasMeson = fileExists(targetDir / "meson.build")
     let hasAutotools = fileExists(targetDir / "configure.ac") or
       fileExists(targetDir / "configure.in") or
       fileExists(targetDir / "Makefile.am")
@@ -320,7 +323,13 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
       # 2b convention rather than the Make convention (which would
       # reject the project for CMakeLists.txt presence anyway).
       bestName = "c-cpp-cmake"
-    elif not hasMakefile and not hasCmake and not hasAutotools:
+    elif hasMeson and not hasAutotools and not hasCmake:
+      # M39: when meson.build is present alongside .c sources but no
+      # autotools/cmake artefacts, route through the M39 ``c-cpp-meson``
+      # Tier 2b convention rather than the Make convention (which
+      # rejects the project for meson.build presence in any case).
+      bestName = "c-cpp-meson"
+    elif not hasMakefile and not hasCmake and not hasMeson and not hasAutotools:
       bestName = "c-cpp-direct"
   # M30 refinement for Mode 3 Rust: same shape as the C/C++ refinement
   # above. When the extension census picks ``rust`` (i.e. ``.rs``

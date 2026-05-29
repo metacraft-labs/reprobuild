@@ -336,6 +336,9 @@ proc arDriver(): string =
 proc hasCMakeLists(projectRoot: string): bool =
   fileExists(extendedPath(projectRoot / "CMakeLists.txt"))
 
+proc hasMesonBuild(projectRoot: string): bool =
+  fileExists(extendedPath(projectRoot / "meson.build"))
+
 proc hasAutotoolsArtifacts(projectRoot: string): bool =
   ## True when the project root carries Autotools artefacts. The C/C++
   ## Make convention defers to the Autotools convention in that case.
@@ -352,6 +355,7 @@ proc cCppMakeRecognize(projectRoot: string;
   ##     compiler (``gcc``/``clang``) AND ``make``.
   ##   * at least one ``executable`` or ``library`` member is declared.
   ##   * NO ``CMakeLists.txt`` at the project root.
+  ##   * NO ``meson.build`` at the project root (M39 Meson territory).
   ##   * NO Autotools artefacts (``configure.ac`` / ``Makefile.am``) at
   ##     the project root.
   ##   * a C compiler (``gcc`` or ``clang``) is on PATH at convention-
@@ -363,6 +367,8 @@ proc cCppMakeRecognize(projectRoot: string;
   if rootMakefile(projectRoot).len == 0:
     return false
   if hasCMakeLists(projectRoot):
+    return false
+  if hasMesonBuild(projectRoot):
     return false
   if hasAutotoolsArtifacts(projectRoot):
     return false
