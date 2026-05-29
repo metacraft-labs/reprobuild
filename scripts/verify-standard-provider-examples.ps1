@@ -142,6 +142,7 @@ $PopulatedExamples = @(
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
   'python-mode3/binary-with-library',
+  'jsts-mode3/binary-with-library',
   'mixed/nim-uses-cpp-lib',
   'mixed/cpp-uses-nim-lib'
 )
@@ -406,6 +407,41 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $true; Reason = "go=$($goCmd.Source)" }
       }
       return @{ Available = $false; Reason = "'go' not on PATH and not under D:/metacraft-dev-deps/go/" }
+    }
+    'jsts-mode3' {
+      # M33: Mode 3 JS/TS — same toolchain probe as ``javascript-typescript``
+      # (the Mode 2 path). ``node`` (and the npx that ships with it) is
+      # enough; the Mode 3 convention drives the per-executable bundle
+      # via ``npx --yes --package esbuild@<pin>`` and emits an
+      # ``fs.writeText`` wrapper that runs ``node <bundle.js>``. Reuse
+      # the bundled-toolchain probe so a fresh host without a system
+      # node still picks up the managed install under
+      # D:/metacraft-dev-deps/node/.
+      $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+      if (-not $nodeCmd) {
+        $nodeRoot = 'D:\metacraft-dev-deps\node'
+        if (Test-Path -LiteralPath $nodeRoot) {
+          $candidates = @()
+          foreach ($verDir in Get-ChildItem -LiteralPath $nodeRoot -Directory -ErrorAction SilentlyContinue) {
+            foreach ($inner in Get-ChildItem -LiteralPath $verDir.FullName -Directory -ErrorAction SilentlyContinue) {
+              $candidate = Join-Path $inner.FullName 'node.exe'
+              if (Test-Path -LiteralPath $candidate) {
+                $candidates += $candidate
+              }
+            }
+          }
+          if ($candidates.Count -gt 0) {
+            $picked = $candidates | Sort-Object | Select-Object -Last 1
+            $binDir = Split-Path -Parent $picked
+            $env:PATH = "$binDir;$env:PATH"
+            $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+          }
+        }
+      }
+      if ($nodeCmd) {
+        return @{ Available = $true; Reason = "node=$($nodeCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "'node' not on PATH and not under D:/metacraft-dev-deps/node/" }
     }
     'mixed' {
       # Cross-language Mode 3 — needs BOTH the Nim toolchain (for the
@@ -1142,6 +1178,35 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
           Greeting = 'hello from go-mode3-binary-with-library, mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'jsts-mode3/binary-with-library' {
+      # M33: Mode 3 JavaScript/TypeScript. The workspace declares a
+      # library ``mathlib`` and an executable ``calc`` in a single
+      # ``repro.nim`` with NO ``package.json`` / ``tsconfig.json`` /
+      # bundler config. The Mode 3 ``jsts-direct`` convention emits a
+      # single esbuild --bundle action per executable (consuming the
+      # library's TypeScript sources directly via
+      # --alias:mathlib=<libdir>/src/index.ts) plus an fs.writeText
+      # wrapper script. The wrapper runs ``node <bundle.js>`` so the
+      # bundled JS produces the program's output. The wrapper-emit
+      # action is sequenced strictly after the bundle via the action
+      # graph's deps. Outputs land under
+      # ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'calc'
+      $bundle = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.js')))
+      $wrapperCmd = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.cmd')))
+      $wrapperSh  = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member $member))
+      $wrapperPath = if (Test-Path -LiteralPath $wrapperCmd) { $wrapperCmd } elseif (Test-Path -LiteralPath $wrapperSh) { $wrapperSh } else { $wrapperCmd }
+      return @(
+        @{
+          Path     = $bundle
+          Greeting = $null
+        },
+        @{
+          Path     = $wrapperPath
+          Greeting = 'hello from jsts-mode3-binary-with-library, mathlib added 2+3 = 5'
         }
       )
     }

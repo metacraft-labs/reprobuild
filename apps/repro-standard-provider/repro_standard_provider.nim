@@ -33,6 +33,7 @@ import repro_standard_provider/conventions/go_direct as go_direct_convention
 import repro_standard_provider/conventions/python as python_convention
 import repro_standard_provider/conventions/python_direct as python_direct_convention
 import repro_standard_provider/conventions/javascript_typescript as jsts_convention
+import repro_standard_provider/conventions/jsts_direct as jsts_direct_convention
 import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
 import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_convention
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
@@ -183,6 +184,14 @@ when defined(reproProviderMode):
   # no Python build-system manifest. M32 of
   # Mode3-Language-Expansion.milestones.org.
   addDefaultConvention(python_direct_convention.pythonDirectConvention())
+  # jsts_direct (Mode 3 / no-package.json) registered AFTER the Mode 2
+  # javascript_typescript convention so a project shipping a
+  # package.json (or tsconfig.json / vite.config.* / webpack.config.*
+  # / etc.) routes through the Mode 2 path first; Mode 3 picks up the
+  # case where the user declared their JS/TS member shape in
+  # ``repro.nim`` with no ecosystem manifest. M33 of
+  # Mode3-Language-Expansion.milestones.org.
+  addDefaultConvention(jsts_direct_convention.jsTsDirectConvention())
 
   proc runStandardProvider(): int =
     try:

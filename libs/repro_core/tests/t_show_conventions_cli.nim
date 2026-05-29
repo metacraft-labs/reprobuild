@@ -166,7 +166,7 @@ suite "repro show-conventions: CLI smoke":
       check sawAppPkg
       check sawLibPkg
       check doc["conventions"].kind == JArray
-      check doc["conventions"].len == 11
+      check doc["conventions"].len == 12
       # First convention is "nim" — pins the dispatch order.
       check doc["conventions"][0].getStr == "nim"
       # c-cpp-autotools must come BEFORE c-cpp-make BEFORE c-cpp-direct
@@ -351,6 +351,6 @@ suite "repro show-conventions: registry mirror sanity":
         let trimmed = stripped.strip(chars = {',', ' ', '"'})
         if trimmed.len > 0:
           mirror.add(trimmed)
-      check registered.len == 11
-      check mirror.len == 11
+      check registered.len == 12
+      check mirror.len == 12
       check registered == mirror

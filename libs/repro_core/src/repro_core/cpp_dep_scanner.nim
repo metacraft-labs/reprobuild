@@ -49,6 +49,7 @@
 import std/[algorithm, os, sets, strutils, tables]
 
 import ./go_dep_scanner
+import ./jsts_dep_scanner
 import ./nim_dep_scanner
 import ./paths
 import ./project_file
@@ -591,26 +592,28 @@ proc mergeScanResults*(nimScan, cppScan: ScanResult): ScanResult =
     result.diagnostics.add(d)
 
 proc scanWorkspaceAll*(workspaceRoot: string): ScanResult =
-  ## Run the Nim, C/C++, Rust, Go, and Python scanners over
+  ## Run the Nim, C/C++, Rust, Go, Python, and JS/TS scanners over
   ## ``workspaceRoot`` and merge their outputs into a single
   ## deterministic ``ScanResult``. This is the entry point
   ## ``repro deps refresh`` calls.
   ##
   ## M30 added the Rust scanner. M31 added the Go scanner. M32 added
-  ## the Python scanner. The merge order keeps the C/C++, Rust, Go,
-  ## and Python scanners' ``WorkspaceMember`` entries winning on
-  ## collisions with the Nim scanner — all four of the newer scanners
-  ## filter by layout (only members whose source dir looks like that
-  ## language appear in their member list), so when both fire for the
-  ## same ``(package, member)`` pair their entry's ``sourceFile``
-  ## points at the real source file, not at a non-existent
-  ## ``src/<member>.nim``.
+  ## the Python scanner. M33 added the JS/TS scanner. The merge order
+  ## keeps the C/C++, Rust, Go, Python, and JS/TS scanners'
+  ## ``WorkspaceMember`` entries winning on collisions with the Nim
+  ## scanner — all five of the newer scanners filter by layout (only
+  ## members whose source dir looks like that language appear in their
+  ## member list), so when both fire for the same ``(package, member)``
+  ## pair their entry's ``sourceFile`` points at the real source file,
+  ## not at a non-existent ``src/<member>.nim``.
   let nimScan = scanWorkspace(workspaceRoot)
   let cppScan = scanWorkspaceCpp(workspaceRoot)
   let rustScan = scanWorkspaceRust(workspaceRoot)
   let goScan = scanWorkspaceGo(workspaceRoot)
   let pythonScan = scanWorkspacePython(workspaceRoot)
+  let jsTsScan = scanWorkspaceJsTs(workspaceRoot)
   let nimCpp = mergeScanResults(nimScan, cppScan)
   let withRust = mergeScanResults(nimCpp, rustScan)
   let withGo = mergeScanResults(withRust, goScan)
-  mergeScanResults(withGo, pythonScan)
+  let withPython = mergeScanResults(withGo, pythonScan)
+  mergeScanResults(withPython, jsTsScan)

@@ -342,6 +342,23 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
         not fileExists(targetDir / "setup.py") and
         not fileExists(targetDir / "setup.cfg"):
       bestName = "python-direct"
+  # M33 refinement for Mode 3 JS/TS: when the extension census picks
+  # ``javascript-typescript`` (i.e. ``.ts`` / ``.js`` / etc. files
+  # dominate the target dir) but NO ``package.json`` / ``tsconfig.json``
+  # / bundler config is present at the target root, the project routes
+  # through the Mode 3 ``jsts-direct`` convention. Mirror of the
+  # C/C++, Rust, Go, and Python refinements above.
+  if bestName == "javascript-typescript":
+    if not fileExists(targetDir / "package.json") and
+        not fileExists(targetDir / "tsconfig.json") and
+        not fileExists(targetDir / "vite.config.js") and
+        not fileExists(targetDir / "vite.config.ts") and
+        not fileExists(targetDir / "vite.config.mjs") and
+        not fileExists(targetDir / "webpack.config.js") and
+        not fileExists(targetDir / "webpack.config.ts") and
+        not fileExists(targetDir / "rollup.config.js") and
+        not fileExists(targetDir / "rollup.config.ts"):
+      bestName = "jsts-direct"
   result.convention = bestName
   result.evidence = "extension census: " & $bestCount & "/" &
     $census.total & " files match " & bestName
@@ -562,7 +579,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[11, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[12, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -585,6 +602,9 @@ const
                        exeName: "python3",
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "javascript-typescript",
+                       exeName: "node",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "jsts-direct",
                        exeName: "node",
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "c-cpp-autotools",

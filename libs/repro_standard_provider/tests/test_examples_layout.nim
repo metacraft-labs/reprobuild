@@ -56,6 +56,7 @@ const PopulatedExamples = [
   "rust-mode3/binary-with-library",
   "go-mode3/binary-with-library",
   "python-mode3/binary-with-library",
+  "jsts-mode3/binary-with-library",
   "mixed/nim-uses-cpp-lib",
   "mixed/cpp-uses-nim-lib",
 ]

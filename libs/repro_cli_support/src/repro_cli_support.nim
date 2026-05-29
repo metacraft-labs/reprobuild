@@ -5916,6 +5916,7 @@ const
     "rust-direct",
     "go-direct",
     "python-direct",
+    "jsts-direct",
   ]
     ## The convention list ``repro show-conventions`` prints when asked
     ## for the registry order. Mirrors the registration order in
