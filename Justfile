@@ -483,6 +483,28 @@ e2e_managed_block_cache_key_isolation:
         tests/e2e/generated-config/t_e2e_managed_block_cache_key_isolation.nim \
         2>&1 | tee test-logs/e2e_managed_block_cache_key_isolation.log
 
+smoke_repro_profile:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/smoke_repro_profile \
+        --out:build/test-bin/smoke_repro_profile \
+        libs/repro_profile/tests/t_smoke_repro_profile.nim \
+        2>&1 | tee test-logs/smoke_repro_profile.log
+
+e2e_repro_profile_compile:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/e2e_repro_profile_compile \
+        --out:build/test-bin/e2e_repro_profile_compile \
+        tests/e2e/m83/t_e2e_repro_profile_compile.nim \
+        2>&1 | tee test-logs/e2e_repro_profile_compile.log
+
 integration_intent_layer_round_trip:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

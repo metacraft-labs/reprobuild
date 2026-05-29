@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild Nim-compiled profile macro library (M83 Phase A)"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

@@ -21,6 +21,7 @@ for libName in [
   "repro_project_dsl_runtime_dll",
   "repro_dsl_stdlib",
   "repro_home_intent",
+  "repro_profile",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",
