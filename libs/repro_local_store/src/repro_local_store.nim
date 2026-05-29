@@ -90,6 +90,15 @@ type
 
   FileMetadataCache* = object
     entries: Table[string, FileMetadata]
+    stats: FileMetadataCacheStats
+
+  FileMetadataCacheStats* = object
+    currentRunHits*: int
+    coldStats*: int
+    warmEntries*: int
+    warmRevalidated*: int
+    warmUnchanged*: int
+    warmChanged*: int
 
   ActionCacheLookupStatus* = enum
     aclMissNoRecord
@@ -141,6 +150,8 @@ const
     fpOthersExec, fpOthersWrite, fpOthersRead}
     # Windows: marked {.used.} because readPermissions only iterates this set
     # on POSIX hosts; on Windows we discard the recorded mask entirely.
+
+var processWarmFileMetadataEntries = initTable[string, FileMetadata]()
 
 proc byteString(bytes: openArray[byte]): string =
   result = newString(bytes.len)
@@ -370,14 +381,33 @@ proc clear*(cache: var FileMetadataCache) =
 proc invalidate*(cache: var FileMetadataCache; path: string) =
   cache.entries.del(path)
 
+proc metadataStats*(cache: FileMetadataCache): FileMetadataCacheStats =
+  cache.stats
+
 proc fingerprintMetadata(path: string;
                          cache: ptr FileMetadataCache): FileMetadata =
   if cache.isNil:
     return fingerprintMetadata(path)
   if cache[].entries.hasKey(path):
+    inc cache[].stats.currentRunHits
     return cache[].entries[path]
+  let hadWarmEntry = processWarmFileMetadataEntries.hasKey(path)
+  let priorMetadata =
+    if hadWarmEntry: processWarmFileMetadataEntries[path]
+    else: FileMetadata()
+  if hadWarmEntry:
+    inc cache[].stats.warmEntries
+    inc cache[].stats.warmRevalidated
+  else:
+    inc cache[].stats.coldStats
   result = fingerprintMetadata(path)
+  if hadWarmEntry:
+    if result == priorMetadata:
+      inc cache[].stats.warmUnchanged
+    else:
+      inc cache[].stats.warmChanged
   cache[].entries[path] = result
+  processWarmFileMetadataEntries[path] = result
 
 proc fileBytesForHash(path: string; metadata: FileMetadata): seq[byte] =
   if metadata.kind != ffkRegular:
@@ -1176,7 +1206,7 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    let sourceMetadata = fingerprintMetadata(source)
+    let sourceMetadata = fingerprintMetadata(source, metadataCache)
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.

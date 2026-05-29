@@ -1,5 +1,5 @@
 import std/[algorithm, options, os, osproc, sequtils, sets, streams, strutils,
-            times]
+            tables, times]
 
 import cbor
 import repro_core
@@ -186,6 +186,24 @@ type
     providerFingerprint: ContentDigest
     outputBinaryFingerprint: ContentDigest
 
+  InterfaceArtifactWarmStats* = object
+    metadataColdReads*: int
+    metadataWarmHits*: int
+    metadataWarmMisses*: int
+    metadataRevalidatedSources*: int
+    metadataRevalidatedReproLibs*: int
+    artifactColdReads*: int
+    artifactWarmHits*: int
+    artifactWarmMisses*: int
+
+  WarmInterfaceExtractionCacheRecord = object
+    evidence: FileStamp
+    record: InterfaceExtractionCacheRecord
+
+  WarmProjectInterfaceArtifact = object
+    evidence: FileStamp
+    artifact: ProjectInterfaceArtifact
+
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
   EnvelopeVersion = 9'u16
@@ -207,6 +225,15 @@ const
     "reprobuild.providerFreshnessCache.v1"
 
 var cachedNimCompilerPath = ""
+var processWarmInterfaceMetadata =
+  initTable[string, WarmInterfaceExtractionCacheRecord]()
+var processWarmInterfaceArtifacts =
+  initTable[string, WarmProjectInterfaceArtifact]()
+var processWarmInterfaceStats: InterfaceArtifactWarmStats
+
+proc consumeInterfaceArtifactWarmStats*(): InterfaceArtifactWarmStats =
+  result = processWarmInterfaceStats
+  processWarmInterfaceStats = InterfaceArtifactWarmStats()
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -1699,6 +1726,25 @@ proc fileStamp(path: string): FileStamp =
   result.mtimeNs = uint64(mtime.toUnix) * 1_000_000_000'u64 +
     uint64(mtime.nanosecond)
 
+proc cacheableWarmEvidence(stamp: FileStamp): bool =
+  stamp.kind == fskRegular
+
+proc readInterfaceArtifactWithWarm(path: string): ProjectInterfaceArtifact =
+  let evidence = fileStamp(path)
+  if processWarmInterfaceArtifacts.hasKey(path):
+    let warm = processWarmInterfaceArtifacts[path]
+    if cacheableWarmEvidence(evidence) and warm.evidence == evidence:
+      inc processWarmInterfaceStats.artifactWarmHits
+      return warm.artifact
+    inc processWarmInterfaceStats.artifactWarmMisses
+  else:
+    inc processWarmInterfaceStats.artifactColdReads
+  result = readInterfaceArtifact(path)
+  if cacheableWarmEvidence(evidence):
+    processWarmInterfaceArtifacts[path] = WarmProjectInterfaceArtifact(
+      evidence: evidence,
+      artifact: result)
+
 proc fileStamps(paths: openArray[string]): seq[FileStamp] =
   for path in paths:
     result.add(fileStamp(path))
@@ -1787,17 +1833,40 @@ proc writeInterfaceExtractionCacheRecord(artifactPath: string;
     reproLibStamps: reproLibStampsForCache(context.workDir),
     inputFingerprint: fingerprint)
   try:
-    writeFile(extendedPath(interfaceExtractionMetadataPath(artifactPath)),
+    let metadataPath = interfaceExtractionMetadataPath(artifactPath)
+    writeFile(extendedPath(metadataPath),
       toByteString(encodeInterfaceExtractionCacheRecord(record)))
+    let evidence = fileStamp(metadataPath)
+    if cacheableWarmEvidence(evidence):
+      processWarmInterfaceMetadata[metadataPath] =
+        WarmInterfaceExtractionCacheRecord(
+          evidence: evidence,
+          record: record)
   except CatchableError:
     discard
 
 proc readInterfaceExtractionCacheRecord(path: string):
     Option[InterfaceExtractionCacheRecord] =
-  if not fileExists(extendedPath(path)):
+  let evidence = fileStamp(path)
+  if evidence.kind == fskMissing:
     return none(InterfaceExtractionCacheRecord)
+  if processWarmInterfaceMetadata.hasKey(path):
+    let warm = processWarmInterfaceMetadata[path]
+    if cacheableWarmEvidence(evidence) and warm.evidence == evidence:
+      inc processWarmInterfaceStats.metadataWarmHits
+      return some(warm.record)
+    inc processWarmInterfaceStats.metadataWarmMisses
+  else:
+    inc processWarmInterfaceStats.metadataColdReads
   try:
-    return some(decodeInterfaceExtractionCacheRecord(fromByteString(readFile(extendedPath(path)))))
+    let record =
+      decodeInterfaceExtractionCacheRecord(fromByteString(readFile(extendedPath(path))))
+    if cacheableWarmEvidence(evidence):
+      processWarmInterfaceMetadata[path] =
+        WarmInterfaceExtractionCacheRecord(
+          evidence: evidence,
+          record: record)
+    return some(record)
   except CatchableError:
     return none(InterfaceExtractionCacheRecord)
 
@@ -1816,12 +1885,16 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
   let cached = record.get()
   if not interfaceContextsMatchForCache(cached.context, context):
     return none(ProjectInterfaceArtifact)
+  processWarmInterfaceStats.metadataRevalidatedSources +=
+    cached.sourceStamps.len
   if cached.sourceStamps != restampRecordedInputs(cached.sourceStamps):
     return none(ProjectInterfaceArtifact)
+  processWarmInterfaceStats.metadataRevalidatedReproLibs +=
+    cached.reproLibStamps.len
   if cached.reproLibStamps != restampRecordedInputs(cached.reproLibStamps):
     return none(ProjectInterfaceArtifact)
   try:
-    let artifact = readInterfaceArtifact(artifactPath)
+    let artifact = readInterfaceArtifactWithWarm(artifactPath)
     if artifact.interfaceFingerprint != cached.inputFingerprint:
       return none(ProjectInterfaceArtifact)
     return some(artifact)
@@ -1840,7 +1913,7 @@ proc cachedInterfaceArtifactByFingerprint(artifactPath, stubPath: string;
   if readFile(extendedPath(cachePath)).strip() != toHex(fingerprint.bytes):
     return none(ProjectInterfaceArtifact)
   try:
-    return some(readInterfaceArtifact(artifactPath))
+    return some(readInterfaceArtifactWithWarm(artifactPath))
   except CatchableError:
     return none(ProjectInterfaceArtifact)
 
@@ -2113,7 +2186,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
         "\n" & execution.output)
-  result = readInterfaceArtifact(artifactPath)
+  result = readInterfaceArtifactWithWarm(artifactPath)
   writeFile(extendedPath(interfaceExtractionCachePath(artifactPath)), toHex(
       inputFingerprint.bytes))
   writeInterfaceExtractionCacheRecord(artifactPath, fingerprintContext,

@@ -2917,6 +2917,32 @@ proc finishStat(stats: var BuildStats; enabled: bool; name: string;
   if enabled:
     stats.addMetric(name, (epochTime() - started) * 1_000_000.0)
 
+proc addCounterMetric(stats: var BuildStats; enabled: bool; name: string;
+                      count: int) =
+  if not enabled:
+    return
+  for _ in 0 ..< count:
+    stats.addMetric(name, 0.0)
+
+proc recordInterfaceArtifactWarmStats(stats: var BuildStats; enabled: bool) =
+  let warmStats = consumeInterfaceArtifactWarmStats()
+  stats.addCounterMetric(enabled, "repro interface metadata cold read",
+    warmStats.metadataColdReads)
+  stats.addCounterMetric(enabled, "repro interface metadata warm hit",
+    warmStats.metadataWarmHits)
+  stats.addCounterMetric(enabled, "repro interface metadata warm miss",
+    warmStats.metadataWarmMisses)
+  stats.addCounterMetric(enabled, "repro interface metadata source revalidate",
+    warmStats.metadataRevalidatedSources)
+  stats.addCounterMetric(enabled, "repro interface metadata reprolib revalidate",
+    warmStats.metadataRevalidatedReproLibs)
+  stats.addCounterMetric(enabled, "repro interface artifact cold read",
+    warmStats.artifactColdReads)
+  stats.addCounterMetric(enabled, "repro interface artifact warm hit",
+    warmStats.artifactWarmHits)
+  stats.addCounterMetric(enabled, "repro interface artifact warm miss",
+    warmStats.artifactWarmMisses)
+
 proc renderBuildStats*(stats: BuildStats): string =
   let nameWidth = 36
   result = "metric" & repeat(' ', nameWidth - "metric".len) &
@@ -3087,6 +3113,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let statsEnabled = effectiveStatsMode == bsmText or benchmarkPath.len > 0 or
     statsGroupEnabled(scgTiming)
   var buildStats: BuildStats
+  discard consumeInterfaceArtifactWarmStats()
   let buildTotalStart = statStart(statsEnabled)
   let invocationWallStart = epochTime()
   var progressRenderer = newBuildProgressRenderer(progressMode,
@@ -3529,6 +3556,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     compileWorkDir, compileScratchDir, requireStub = false)
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
+  recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
 
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
@@ -10903,6 +10931,35 @@ proc runPrivilegedBrokerMode(args: openArray[string]): int =
     stderr.writeLine("repro --privileged-broker: error: " & err.msg)
     return 7
 
+proc prewarmBuildFileMetadata(info: BuildGraphInspection) =
+  if info.actions.len == 0:
+    return
+  var cache = openActionCache(currentActionCacheRoot() / "action-cache")
+  var metadataCache = initFileMetadataCache()
+  var probes: seq[HotMetadataProbe] = @[]
+  for action in info.actions:
+    if action.cacheable and action.dynamicDepsFile.len == 0:
+      probes.add(HotMetadataProbe(
+        weakFingerprint: action.weakFingerprint,
+        policy: action.actionCachePolicy))
+  if probes.len == 0:
+    return
+  let scan = cache.scanHotIndexMetadataInputsUnchanged(probes,
+    addr metadataCache)
+  if scan.status != hmssUnavailable:
+    return
+
+  var records: seq[ActionResultRecord] = @[]
+  for action in info.actions:
+    if not action.cacheable or action.dynamicDepsFile.len > 0:
+      continue
+    let record = cache.lookupHotMetadataRecord(action.weakFingerprint,
+      action.actionCachePolicy)
+    if record.isSome:
+      records.add(record.get())
+  if records.len > 0:
+    discard hotMetadataRecordInputsUnchanged(records, addr metadataCache)
+
 proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
   var target = ""
   var mode = tpmUnspecified
@@ -10943,9 +11000,10 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
     return
   if target.len == 0:
     target = "."
-  discard prepareBuildGraphInspection(target, mode, publicCliPath,
+  let info = prepareBuildGraphInspection(target, mode, publicCliPath,
     selectDefaultAction = targetWasOmitted, workRoot = workRoot,
     forceRefresh = false)
+  prewarmBuildFileMetadata(info)
 
 proc installUserDaemonBuildPrewarmer() =
   setUserDaemonBuildPrewarmer(proc(request: UserDaemonBuildRequest) =

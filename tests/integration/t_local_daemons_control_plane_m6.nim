@@ -144,6 +144,11 @@ proc metricPresent(path, name: string): bool =
     if item{"name"}.getStr() == name:
       return true
 
+proc metricCount(path, name: string): int =
+  for item in parseFile(path){"metrics"}.getElems():
+    if item{"name"}.getStr() == name:
+      return item{"count"}.getInt()
+
 proc waitForTimestampBoundary() =
   sleep(1100)
 
@@ -177,6 +182,14 @@ suite "Local daemons/control-plane M6 warm no-op path":
     check phaseUs(warmBenchmark, "cacheChecksUs") > 0.0
     check metricPresent(warmBenchmark, "repro lowered graph cache read")
     check metricPresent(warmBenchmark, "repro fast noop scan")
+    check metricCount(warmBenchmark,
+      "repro interface metadata warm hit") > 0
+    check metricCount(warmBenchmark,
+      "repro interface artifact warm hit") > 0
+    check metricCount(warmBenchmark,
+      "repro file metadata warm revalidate") > 0
+    check metricCount(warmBenchmark,
+      "repro file metadata warm unchanged") > 0
     check fileExists(actionHotIndexPath(tempRoot))
 
   test "integration_direct_and_daemon_share_incremental_records":
@@ -188,19 +201,22 @@ suite "Local daemons/control-plane M6 warm no-op path":
     daemon = startForegroundDaemon(tempRoot)
 
     let projectRoot = tempRoot / "project"
-    writeCopyProject(projectRoot, "daemonM6Shared", 1)
+    writeCopyProject(projectRoot, "daemonM6Shared", 2)
 
     let directBenchmark = tempRoot / "direct-benchmark.json"
     discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
       directBenchmark, daemonMode = "off"), repoRoot())
-    check executedActions(directBenchmark) == 1
+    check executedActions(directBenchmark) == 2
     check fileExists(actionHotIndexPath(tempRoot))
     check readFile(projectRoot / "dist" / "output-0.txt") == "input 0\n"
+    check readFile(projectRoot / "dist" / "output-1.txt") == "input 1\n"
 
     let daemonNoopBenchmark = tempRoot / "daemon-noop-benchmark.json"
     discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
       daemonNoopBenchmark), repoRoot())
     check executedActions(daemonNoopBenchmark) == 0
+    check metricCount(daemonNoopBenchmark,
+      "repro file metadata warm revalidate") > 0
 
     waitForTimestampBoundary()
     writeFile(projectRoot / "src" / "input-0.txt", "changed\n")
@@ -209,6 +225,7 @@ suite "Local daemons/control-plane M6 warm no-op path":
       daemonChangedBenchmark), repoRoot())
     check executedActions(daemonChangedBenchmark) == 1
     check readFile(projectRoot / "dist" / "output-0.txt") == "changed\n"
+    check readFile(projectRoot / "dist" / "output-1.txt") == "input 1\n"
 
     let directNoopBenchmark = tempRoot / "direct-noop-benchmark.json"
     discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",

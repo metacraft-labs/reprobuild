@@ -288,6 +288,10 @@ proc mergeStats*(stats: var BuildStats; other: BuildStats) =
     if not merged:
       stats.metrics.add(metric)
 
+proc addCounterMetric(stats: var BuildStats; name: string; count: int) =
+  for _ in 0 ..< count:
+    stats.addMetric(name, 0.0)
+
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
   for i, ch in text:
@@ -1507,6 +1511,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if config.statsEnabled:
       stats.addMetric(name, (epochTime() - started) * 1_000_000.0)
 
+  proc finishMetadataCacheStats(cache: FileMetadataCache) =
+    if not config.statsEnabled:
+      return
+    let metadataStats = cache.metadataStats()
+    stats.addCounterMetric("repro file metadata current-run hit",
+      metadataStats.currentRunHits)
+    stats.addCounterMetric("repro file metadata cold stat",
+      metadataStats.coldStats)
+    stats.addCounterMetric("repro file metadata warm revalidate",
+      metadataStats.warmRevalidated)
+    stats.addCounterMetric("repro file metadata warm unchanged",
+      metadataStats.warmUnchanged)
+    stats.addCounterMetric("repro file metadata warm changed",
+      metadataStats.warmChanged)
+
   let totalStart = statStart()
   let inferStart = statStart()
   # `var` because M25 ``create-action`` dyndep records grow ``buildGraph.actions``
@@ -1599,6 +1618,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             cacheDecision: cdHit,
             dependencyPolicyKind: action.dependencyPolicy.kind))
         finishStat("repro cache hit result materialize", resultMaterializeStart)
+        finishMetadataCacheStats(metadataCache)
         fastResult.stats = stats
         return some(fastResult)
       of hmssMissingRecord, hmssInputChanged:
@@ -1653,6 +1673,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         dependencyPolicyKind: action.dependencyPolicy.kind,
         evidence: cacheHitEvidence(action, record)))
     finishStat("repro cache hit result materialize", resultMaterializeStart)
+    finishMetadataCacheStats(metadataCache)
     fastResult.stats = stats
     some(fastResult)
 
@@ -2647,5 +2668,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if inlineRunQuotaSessionOpen:
       inlineRunQuotaSession.close()
   finishStat("repro scheduler total", totalStart)
+  finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats
   result = runResult
