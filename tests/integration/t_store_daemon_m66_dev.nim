@@ -1,8 +1,66 @@
-import std/[json, os, osproc, streams, strtabs, strutils, tempfiles,
+import std/[json, os, osproc, re, streams, strtabs, strutils, tempfiles,
     times, unittest]
 
 import repro_local_store
 import repro_store_daemon
+
+# Spec-layout invariants from
+# reprobuild-specs/Local-Content-Addressed-Store.md §"Why SQLite for the
+# store index" / §"`cas/`" and §"Schema".
+# Keep these regexes in lock-step with the path-shaping procs in
+# libs/repro_local_store/src/repro_local_store/store.nim
+# (`realizationDirName`, `casBlobRelative`).
+const
+  PrefixDirNameRe = r"^[^/]+-[0-9a-f]{16}$"
+  CasBlobNameRe = r"^[0-9a-f]{64}$"
+  CasShardDirRe = r"^[0-9a-f]{2}$"
+
+proc assertSpecLayoutAfterRealize(storeRoot, realizedPrefixPath: string) =
+  ## Cross-check the spec-required on-disk shape of a daemon-mediated
+  ## realization. The same contract is asserted on the M67 path in
+  ## t_integration_daemon_nix_and_tarball_realize.nim. We duplicate the
+  ## short version here (kept inline because the two test files do not
+  ## share a helpers module) so a regression in the synthetic-payload
+  ## daemon write path is caught next to the test that exercised it.
+  ##
+  ## NOTE: the intermediate `<package-segment>` directory under
+  ## `prefixes/` is adapter-specific (synthetic, tarball, and nix each
+  ## pick a different shape), so we assert the nesting depth and the
+  ## trailing `<version>-<16hex>` regex but do not require a uniform
+  ## package-segment shape. The `cas/` subtree may be empty for direct-
+  ## rename realizations; we assert only the sharding contract for any
+  ## blobs that happen to be present.
+
+  # SQLite index in WAL mode — index.db plus the sidecar WAL/SHM files.
+  check fileExists(storeRoot / "index.db")
+  check fileExists(storeRoot / "index.db-wal")
+  check fileExists(storeRoot / "index.db-shm")
+
+  # Realized prefix lives at depth 2 under `<root>/prefixes/...` and
+  # carries the receipt sidecar.
+  let prefixesRoot = storeRoot / "prefixes"
+  check dirExists(prefixesRoot)
+  check realizedPrefixPath.startsWith(prefixesRoot)
+  check fileExists(realizedPrefixPath / ReceiptFileName)
+  check realizedPrefixPath.parentDir.parentDir == prefixesRoot
+  check realizedPrefixPath.extractFilename.match(re(PrefixDirNameRe))
+
+  # cas/blake3/<aa>/<full-hash> sharding contract: every blob, if any,
+  # must live under a two-hex-char shard directory whose name matches
+  # the first two chars of the blob's full hash.
+  let casRoot = storeRoot / "cas" / "blake3"
+  check dirExists(casRoot)
+  for shardKind, shardPath in walkDir(casRoot):
+    if shardKind != pcDir:
+      continue
+    let shardName = shardPath.extractFilename
+    check shardName.match(re(CasShardDirRe))
+    for blobKind, blobPath in walkDir(shardPath):
+      if blobKind != pcFile:
+        continue
+      let blobName = blobPath.extractFilename
+      check blobName.match(re(CasBlobNameRe))
+      check blobName[0 ..< 2] == shardName
 
 const
   RealizationA =
@@ -225,6 +283,8 @@ suite "M66 development store daemon":
     check a["writerMode"].getStr() == "daemon"
     check b["writerMode"].getStr() == "daemon"
     check fileExists(a["path"].getStr() / "bin" / "tool")
+
+    assertSpecLayoutAfterRealize(storeRoot, a["path"].getStr())
 
     var store = openStore(storeRoot)
     defer: store.close()

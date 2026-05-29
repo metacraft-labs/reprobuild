@@ -1,10 +1,95 @@
-import std/[json, os, osproc, sequtils, streams, strtabs, strutils, tempfiles,
-    times, unittest]
+import std/[json, os, osproc, re, sequtils, streams, strtabs, strutils,
+    tempfiles, times, unittest]
 
 import repro_interface_artifacts
 import repro_local_store
 import repro_store_daemon
 import repro_tool_profiles
+
+# ---------------------------------------------------------------------------
+# Spec-layout invariants — see reprobuild-specs/Local-Content-Addressed-Store.md
+# §"Why SQLite for the store index" / §"Schema" / §"`cas/`" and
+# reprobuild-specs/Store-Daemon-And-Multi-User-Coordination.md §"Receipts".
+#
+# The exact on-disk shape of the store is the daemon's primary public
+# contract. We assert it inside the M67 happy-path test rather than in a
+# separate file so a change that drifts the layout fails next to the
+# realization that produced it.
+# ---------------------------------------------------------------------------
+
+const
+  ## `prefixes/<pkg>/<version>-<hash>` where the hash segment is the
+  ## first 16 hex chars (lowercase) of the BLAKE3 realization id. See
+  ## `realizationDirName` in libs/repro_local_store/src/repro_local_store/
+  ## store.nim — keep this regex in lock-step with that proc.
+  PrefixDirNameRe* = r"^[^/]+-[0-9a-f]{16}$"
+
+  ## `cas/blake3/<aa>/<full-hash>` where `<aa>` is the first two hex
+  ## chars of `<full-hash>`, and `<full-hash>` is exactly 64 lowercase
+  ## hex chars (BLAKE3-256 → 32 bytes). See `casBlobRelative` in the
+  ## same file.
+  CasBlobNameRe* = r"^[0-9a-f]{64}$"
+  CasShardDirRe* = r"^[0-9a-f]{2}$"
+
+proc assertSpecLayoutAfterRealize(storeRoot, realizedPrefixPath: string) =
+  ## Cross-check the spec-required directory shape of a populated store
+  ## root after a successful daemon-mediated realization.
+  ##
+  ## The daemon must:
+  ##
+  ## * Leave the store in WAL-mode SQLite (`index.db` plus the sidecar
+  ##   `index.db-wal` and `index.db-shm` files).
+  ## * Lay realized prefixes under
+  ##   `<root>/prefixes/<package-segment>/<version>-<16hex>/` where the
+  ##   trailing dir name is exactly what `realizationDirName` in
+  ##   `libs/repro_local_store/.../store.nim` emits. The intermediate
+  ##   `<package-segment>` is adapter-specific (e.g. the tarball adapter
+  ##   uses `<pkg>_<version>`, the Nix adapter uses
+  ##   `<adapter>.<pkg>.<executable>`) — we assert the nesting depth
+  ##   and the trailing-dir regex but do not impose a uniform package
+  ##   segment shape across adapters.
+  ## * Drop a `.repro-receipt` sidecar inside the realized prefix.
+  ## * Materialize content-addressed blobs (when any are written) under
+  ##   `<root>/cas/blake3/<aa>/<full-hash>` with the two-hex shard
+  ##   matching the first two chars of the blob's full hash. The daemon
+  ##   may take a direct-rename shortcut on fresh realizations that
+  ##   leaves the CAS subtree empty; we assert only the sharding shape
+  ##   for whatever blobs are present.
+
+  # SQLite index in WAL mode.
+  check fileExists(storeRoot / "index.db")
+  check fileExists(storeRoot / "index.db-wal")
+  check fileExists(storeRoot / "index.db-shm")
+
+  # Realized prefix lives at depth 2 under `<root>/prefixes/...` and
+  # carries the receipt sidecar.
+  let prefixesRoot = storeRoot / "prefixes"
+  check dirExists(prefixesRoot)
+  check realizedPrefixPath.startsWith(prefixesRoot)
+  check fileExists(realizedPrefixPath / ReceiptFileName)
+  check realizedPrefixPath.parentDir.parentDir == prefixesRoot
+
+  let realizationDir = realizedPrefixPath.extractFilename
+  check realizationDir.match(re(PrefixDirNameRe))
+
+  # Content-addressed cas/blake3/<aa>/<full-hash> sharding. Every blob
+  # present must live under a two-hex-char shard whose name matches the
+  # first two chars of its full hash; we do not require a minimum count
+  # because the daemon is allowed to direct-rename a fresh realization
+  # without round-tripping through `cas/`.
+  let casRoot = storeRoot / "cas" / "blake3"
+  check dirExists(casRoot)
+  for shardKind, shardPath in walkDir(casRoot):
+    if shardKind != pcDir:
+      continue
+    let shardName = shardPath.extractFilename
+    check shardName.match(re(CasShardDirRe))
+    for blobKind, blobPath in walkDir(shardPath):
+      if blobKind != pcFile:
+        continue
+      let blobName = blobPath.extractFilename
+      check blobName.match(re(CasBlobNameRe))
+      check blobName[0 ..< 2] == shardName
 
 proc shortEndpoint(name: string): string =
   "/tmp/repro-m67-" & $getCurrentProcessId() & "-" & name & ".sock"
@@ -230,6 +315,7 @@ suite "M67 daemon-mediated Nix and tarball realization":
       let tarPair = runPair("tarball", endpoint, storeRoot, root,
         @[fixture.url, fixture.sha256])
       verifyPairResult(tarPair, "tarball", storeRoot)
+      assertSpecLayoutAfterRealize(storeRoot, tarPair.a["path"].getStr())
 
       block verifyTarballStore:
         var store = openStore(storeRoot)
@@ -246,6 +332,7 @@ suite "M67 daemon-mediated Nix and tarball realization":
         if findExe("nix").len > 0:
           let nixPair = runPair("nix", endpoint, storeRoot, root)
           verifyPairResult(nixPair, "nix", storeRoot)
+          assertSpecLayoutAfterRealize(storeRoot, nixPair.a["path"].getStr())
           var store = openStore(storeRoot)
           defer: store.close()
           let rows = store.listPrefixes()
