@@ -144,7 +144,9 @@ $PopulatedExamples = @(
   'python-mode3/binary-with-library',
   'jsts-mode3/binary-with-library',
   'mixed/nim-uses-cpp-lib',
-  'mixed/cpp-uses-nim-lib'
+  'mixed/cpp-uses-nim-lib',
+  'mixed/rust-uses-cpp-lib',
+  'mixed/cpp-uses-rust-lib'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -444,37 +446,35 @@ function Probe-Toolchain([string]$language) {
       return @{ Available = $false; Reason = "'node' not on PATH and not under D:/metacraft-dev-deps/node/" }
     }
     'mixed' {
-      # Cross-language Mode 3 — needs BOTH the Nim toolchain (for the
-      # Nim entrypoint's three-phase build OR the Nim library's archive
-      # when the C/C++ binary depends on it) AND a C/C++ compiler + ar.
-      # The cpp-uses-nim-lib fixture additionally needs g++ (or
-      # clang++) for the C++ link driver. SKIP cleanly if any leg is
-      # missing.
-      $nimCmd    = Get-Command nim    -ErrorAction SilentlyContinue
-      $nimbleCmd = Get-Command nimble -ErrorAction SilentlyContinue
-      if (-not $nimCmd) {
-        return @{ Available = $false; Reason = "'nim' not on PATH (env.ps1 should provide it)" }
-      }
+      # Cross-language Mode 3 — the union of all mixed fixtures' needs.
+      # Different fixtures need different toolchains:
+      #   * mixed/nim-uses-cpp-lib   : nim + gcc + ar
+      #   * mixed/cpp-uses-nim-lib   : nim + g++ + ar
+      #   * mixed/rust-uses-cpp-lib  : rustc + gcc + ar (M34 forward)
+      #   * mixed/cpp-uses-rust-lib  : rustc + g++ + ar (M34 reverse)
+      # The language-level probe is permissive — it only checks for a
+      # C/C++ compiler + ar (the minimum any mixed fixture needs). The
+      # per-fixture probe under ``Probe-Fixture`` rejects fixtures whose
+      # specific language toolchain (nim / rustc / etc.) is missing.
       $ccCmd = Get-Command gcc -ErrorAction SilentlyContinue
       if (-not $ccCmd) {
         $ccCmd = Get-Command clang -ErrorAction SilentlyContinue
       }
       if (-not $ccCmd) {
-        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (cross-language fixture needs both Nim and C toolchains)" }
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (cross-language fixtures need a C compiler)" }
       }
       $cxxCmd = Get-Command g++ -ErrorAction SilentlyContinue
       if (-not $cxxCmd) {
         $cxxCmd = Get-Command clang++ -ErrorAction SilentlyContinue
       }
       if (-not $cxxCmd) {
-        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (the cpp-uses-nim-lib fixture needs a C++ link driver)" }
+        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (cross-language fixtures need a C++ link driver)" }
       }
       $arCmd = Get-Command ar -ErrorAction SilentlyContinue
       if (-not $arCmd) {
-        return @{ Available = $false; Reason = "'ar' not on PATH (cross-language fixture needs an archiver)" }
+        return @{ Available = $false; Reason = "'ar' not on PATH (cross-language fixtures need an archiver)" }
       }
-      $nimbleSrc = if ($nimbleCmd) { $nimbleCmd.Source } else { '(not on PATH; fixture uses Layout A src/ only, so optional)' }
-      return @{ Available = $true; Reason = "nim=$($nimCmd.Source); nimble=$nimbleSrc; cc=$($ccCmd.Source); cxx=$($cxxCmd.Source); ar=$($arCmd.Source)" }
+      return @{ Available = $true; Reason = "cc=$($ccCmd.Source); cxx=$($cxxCmd.Source); ar=$($arCmd.Source) (per-fixture probe selects nim/rustc)" }
     }
     'c-cpp-autotools' {
       # M17: the C/C++ Autotools convention is registered. Probe for
@@ -659,6 +659,73 @@ function Probe-Fixture([string]$rel) {
         return @{ Available = $false; Reason = "'npm' not on PATH; webpack Mode B needs npm to drive the install + bundler" }
       }
       return @{ Available = $true; Reason = "npm=$($npm.Source) (M24 Mode B will run 'npm install && npm run build')" }
+    }
+    'mixed/nim-uses-cpp-lib' {
+      # Forward Nim → C: needs nim + gcc/clang + ar (the language-level
+      # probe already covered the latter two).
+      $nimCmd = Get-Command nim -ErrorAction SilentlyContinue
+      if (-not $nimCmd) {
+        return @{ Available = $false; Reason = "'nim' not on PATH (env.ps1 should provide it)" }
+      }
+      return @{ Available = $true; Reason = "nim=$($nimCmd.Source)" }
+    }
+    'mixed/cpp-uses-nim-lib' {
+      # Reverse C++ → Nim: needs nim + g++/clang++ + ar.
+      $nimCmd = Get-Command nim -ErrorAction SilentlyContinue
+      if (-not $nimCmd) {
+        return @{ Available = $false; Reason = "'nim' not on PATH (env.ps1 should provide it)" }
+      }
+      return @{ Available = $true; Reason = "nim=$($nimCmd.Source)" }
+    }
+    'mixed/rust-uses-cpp-lib' {
+      # M34 forward direction: a Rust executable that links a C archive.
+      # Needs rustc + gcc/clang + ar. SKIP cleanly if any leg is missing.
+      $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+      if (-not $rustc) {
+        $rustupStableBin = 'D:\metacraft-dev-deps\rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
+        if (Test-Path -LiteralPath (Join-Path $rustupStableBin 'rustc.exe')) {
+          $env:PATH = "$rustupStableBin;$env:PATH"
+          $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+        }
+      }
+      if (-not $rustc) {
+        return @{ Available = $false; Reason = "rustc not on PATH and no rustup stable under D:/metacraft-dev-deps/rustup" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (M34 forward fixture needs a C compiler)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M34 forward fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "rustc=$($rustc.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/cpp-uses-rust-lib' {
+      # M34 reverse direction: a C++ executable that links a Rust
+      # staticlib. Needs rustc + g++/clang++ + ar.
+      $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+      if (-not $rustc) {
+        $rustupStableBin = 'D:\metacraft-dev-deps\rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
+        if (Test-Path -LiteralPath (Join-Path $rustupStableBin 'rustc.exe')) {
+          $env:PATH = "$rustupStableBin;$env:PATH"
+          $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+        }
+      }
+      if (-not $rustc) {
+        return @{ Available = $false; Reason = "rustc not on PATH and no rustup stable under D:/metacraft-dev-deps/rustup" }
+      }
+      $cxx = Get-Command g++ -ErrorAction SilentlyContinue
+      if (-not $cxx) { $cxx = Get-Command clang++ -ErrorAction SilentlyContinue }
+      if (-not $cxx) {
+        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (M34 reverse fixture needs a C++ link driver)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M34 reverse fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "rustc=$($rustc.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
     }
     default {
       return @{ Available = $true; Reason = '' }
@@ -1293,6 +1360,58 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         }
       )
     }
+    'mixed/rust-uses-cpp-lib' {
+      # M34 cross-language Mode 3 (FORWARD direction): the workspace
+      # declares a C static library ``mathlib`` (``uses: gcc``) and a
+      # Rust executable ``calc`` (``uses: rust``) in a single
+      # ``repro.nim`` with ``depends_on calc: mathlib``. The rust-direct
+      # convention claims the whole workspace (c-cpp-direct defers when
+      # the workspace's uses names rust + no Cargo.toml present), emits
+      # the upstream C archive in-line via the embedded
+      # ``emitCCppCrossMember`` helper, and threads
+      # ``-L native=<archive-dir>`` ``-l static=mathlib`` onto the Rust
+      # binary's rustc link argv. The binary's first stdout line proves
+      # the cross-language round-trip succeeded: Rust -> C add() -> back
+      # to Rust println!.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'calc' 'calc.exe'))
+          Greeting = 'rust says: mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/cpp-uses-rust-lib' {
+      # M34 cross-language Mode 3 (REVERSE direction): the workspace
+      # declares a Rust static library ``addlib`` (``uses: rust``) and a
+      # C++ executable ``cppapp`` (``uses: gcc``) in a single
+      # ``repro.nim`` with ``depends_on cppapp: addlib``. The rust-direct
+      # convention claims the whole workspace, emits the upstream Rust
+      # library with ``--crate-type=staticlib`` (NOT rlib) because addlib
+      # is marked ``cConsumable=true`` (derived from the depends_on edge:
+      # a C/C++ executable consumes the library, so C ABI archive). The
+      # archive lands at ``.repro/build/addlib/libaddlib.a`` (canonical
+      # archive schema shared with c-cpp-direct + Nim). Then emits per-
+      # source ``g++ -c`` + terminal ``g++ -o`` actions for cppapp; the
+      # link argv carries the Rust archive as a trailing positional plus
+      # the platform-specific Rust runtime libs (Windows MinGW: ws2_32,
+      # userenv, advapi32, bcrypt, ntdll). The binary's first stdout line
+      # proves the cross-language round-trip: C++ -> Rust rust_add() ->
+      # back to C++.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'addlib' 'libaddlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
+          Greeting = 'cpp says: rust added 2+3 = 5'
+        }
+      )
+    }
     'c-cpp-autotools/hello-binary' {
       # M28: c-cpp-autotools/hello-binary. The per-source lift emits
       # configure + per-source ``gcc -c`` + ``gcc -o`` link actions.
@@ -1504,6 +1623,11 @@ foreach ($rel in $PopulatedExamples) {
 
   $stdoutText = if (Test-Path $stdoutCapture) { Get-Content -LiteralPath $stdoutCapture -Raw } else { '' }
   $stderrText = if (Test-Path $stderrCapture) { Get-Content -LiteralPath $stderrCapture -Raw } else { '' }
+  # PowerShell 7's Get-Content -Raw returns $null for an empty file (not an
+  # empty string), which then breaks the $stdoutText.Length interpolation
+  # below. Defensive coercion.
+  if ($null -eq $stdoutText) { $stdoutText = '' }
+  if ($null -eq $stderrText) { $stderrText = '' }
   Write-Host "    exit=$exitCode  stdout=$($stdoutText.Length)B  stderr=$($stderrText.Length)B"
 
   if ($exitCode -eq 0) {

@@ -420,6 +420,88 @@ proc isCpp(source: string): bool =
   lower.endsWith(".cpp") or lower.endsWith(".cc") or
     lower.endsWith(".cxx") or lower.endsWith(".cpp")
 
+proc usesIncludesRustToolchain(source: string): bool =
+  ## M34: defer mixed Rust+C/C++ workspaces to the ``rust-direct``
+  ## convention (registered later in the standard provider) so a single
+  ## convention claims the workspace and emits both directions of the
+  ## cross-language matrix from one fragment. Mirrors the Nim
+  ## convention's claim of mixed Nim+C/C++ workspaces (registered first).
+  ##
+  ## Detects ``rust`` / ``rustc`` tokens in any ``uses:`` block,
+  ## file-wide. The detail of WHICH package owns which token doesn't
+  ## matter — what matters is whether the rust-direct convention will
+  ## resolve at least one member. ``rust_direct``'s own recognize does
+  ## the full check; we replicate the cheap shape here so we can decline
+  ## without importing the sibling convention.
+  if source.len == 0:
+    return false
+  var sawRust = false
+  var inBlock = false
+  proc consume(token: string) {.closure.} =
+    if token == "rust" or token == "rustc":
+      sawRust = true
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      if inBlock:
+        inBlock = false
+      continue
+    if inBlock:
+      let leading = line.len > 0 and line[0] in {' ', '\t'}
+      if not leading:
+        inBlock = false
+      else:
+        for raw in stripped.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+        continue
+    if stripped.startsWith("uses:"):
+      let payload = stripped[5 .. ^1].strip()
+      if payload.len == 0:
+        inBlock = true
+      else:
+        var clean = payload
+        if clean.startsWith("["):
+          clean = clean[1 .. ^1]
+        if clean.endsWith("]"):
+          clean = clean[0 ..< ^1]
+        for raw in clean.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+  sawRust
+
+proc hasCargoToml(projectRoot: string): bool =
+  fileExists(extendedPath(projectRoot / "Cargo.toml"))
+
+proc workspaceClaimedByRustDirect(projectRoot, source: string): bool =
+  ## True when the ``rust-direct`` Mode 3 convention will recognize the
+  ## same workspace. M34 hands cross-language Rust↔C/C++ mixed
+  ## workspaces to ``rust-direct`` (it embeds the C/C++ cross helpers
+  ## the same way ``nim`` does), so this convention declines.
+  ##
+  ## The check mirrors ``rust_direct.rustDirectRecognize`` cheaply:
+  ## ``uses:`` names rust/rustc anywhere AND no ``Cargo.toml`` at the
+  ## workspace root (Mode 2 rust would claim Cargo projects first).
+  ## We don't probe for ``rustc`` on PATH or scan source layouts here —
+  ## if rust-direct ultimately declines (e.g. no Rust members resolve)
+  ## the standard provider's dispatch falls back to c-cpp-direct via
+  ## the next match attempt.
+  if not usesIncludesRustToolchain(source):
+    return false
+  if hasCargoToml(projectRoot):
+    return false
+  true
+
 proc cCppDirectRecognize(projectRoot: string;
                          request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract:
@@ -430,9 +512,14 @@ proc cCppDirectRecognize(projectRoot: string;
   ##   * ``repro.nim`` (or legacy ``reprobuild.nim``) exists AND
   ##     ``uses:`` names gcc/clang.
   ##   * at least one ``executable`` / ``library`` member declared AND
-  ##     resolves to a non-empty source layout via
+  ##     resolves to a non-empty C/C++ source layout via
   ##     ``resolveMemberDirs``.
   ##   * a C compiler (gcc/clang) is on PATH at convention-emit time.
+  ##   * M34: NO ``rust`` / ``rustc`` in any ``uses:`` block AND no
+  ##     ``Cargo.toml``. A mixed Rust+C/C++ workspace routes through
+  ##     ``rust-direct`` (which embeds the C/C++ cross helpers and emits
+  ##     both directions of the cross-language matrix from a single
+  ##     fragment).
   if rootMakefile(projectRoot).len > 0:
     return false
   if hasCMakeLists(projectRoot):
@@ -443,6 +530,8 @@ proc cCppDirectRecognize(projectRoot: string;
   if source.len == 0:
     return false
   if not usesIncludesCCppCompiler(source):
+    return false
+  if workspaceClaimedByRustDirect(projectRoot, source):
     return false
   let members = extractMembersWithOwnership(source)
   if members.len == 0:

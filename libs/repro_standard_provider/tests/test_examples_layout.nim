@@ -59,6 +59,8 @@ const PopulatedExamples = [
   "jsts-mode3/binary-with-library",
   "mixed/nim-uses-cpp-lib",
   "mixed/cpp-uses-nim-lib",
+  "mixed/rust-uses-cpp-lib",
+  "mixed/cpp-uses-rust-lib",
 ]
 
 suite "examples layout M8":

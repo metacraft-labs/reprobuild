@@ -346,3 +346,87 @@ package nimapp:
         check not action.id.contains("nimapp")
       check sawArchive
       removeDir(dir)
+
+  test "recognize: M34 defers to rust-direct on mixed Rust+C/C++ workspaces":
+    # When the workspace ``uses:`` block names ``rust`` / ``rustc`` and
+    # no Cargo.toml is present, c-cpp-direct must decline so the later-
+    # registered ``rust-direct`` convention can claim the workspace and
+    # emit both directions of the cross-language matrix from one
+    # fragment. Mirror of how the Nim convention claims mixed Nim+C/C++
+    # workspaces (the Nim convention's recognize fires first).
+    if not gccOnPath():
+      skip()
+    else:
+      let dir = makeScratch("xlang-defer-rust")
+      writeFile(dir / "repro.nim", """
+import repro_project_dsl
+
+package mathlib:
+  uses:
+    "gcc >=11"
+  library mathlib
+
+package calc:
+  uses:
+    "rust"
+  executable calc:
+    discard
+
+depends_on calc: mathlib
+""")
+      createDir(dir / "mathlib" / "src")
+      writeFile(dir / "mathlib" / "src" / "add.c",
+        "int add(int a, int b) { return a + b; }\n")
+      createDir(dir / "calc" / "src")
+      writeFile(dir / "calc" / "src" / "main.rs",
+        "fn main() {}\n")
+      let conv = c_cpp_direct_convention.cCppDirectConvention()
+      let request = dummyRequest(dir)
+      check not conv.recognize(dir, request)
+      removeDir(dir)
+
+  test "recognize: M34 does NOT defer when Cargo.toml is present (Mode 2 territory)":
+    # When a Cargo.toml IS present, Mode 2 ``rust`` claims the
+    # workspace ahead of both Mode 3 conventions, so c-cpp-direct's
+    # defer-to-rust-direct check intentionally only fires when no
+    # Cargo.toml is present. (The pure-C/C++ probe still doesn't match
+    # this workspace at the convention level because of the Rust-only
+    # member layout, but the defer logic itself must not trigger.)
+    if not gccOnPath():
+      skip()
+    else:
+      let dir = makeScratch("xlang-defer-with-cargo")
+      writeFile(dir / "repro.nim", """
+import repro_project_dsl
+
+package mathlib:
+  uses:
+    "gcc >=11"
+  library mathlib
+
+package calc:
+  uses:
+    "rust"
+  executable calc:
+    discard
+""")
+      createDir(dir / "mathlib" / "src")
+      writeFile(dir / "mathlib" / "src" / "add.c",
+        "int add(int a, int b) { return a + b; }\n")
+      # The presence of Cargo.toml is what would normally route to
+      # Mode 2 rust; here we just check that c-cpp-direct's defer logic
+      # does NOT fire (it should recognize as positive because the
+      # rust-direct defer check requires NO Cargo.toml).
+      writeFile(dir / "Cargo.toml",
+        "[package]\nname = \"calc\"\nversion = \"0.1.0\"\n")
+      createDir(dir / "calc" / "src")
+      writeFile(dir / "calc" / "src" / "main.rs",
+        "fn main() {}\n")
+      let conv = c_cpp_direct_convention.cCppDirectConvention()
+      let request = dummyRequest(dir)
+      # c-cpp-direct DOES recognize (Cargo.toml suppresses the defer);
+      # in practice the Mode 2 rust convention recognizes first and
+      # wins dispatch, but c-cpp-direct's recognize must return true so
+      # the standard-provider's dispatch order resolution works.
+      check conv.recognize(dir, request)
+      removeDir(dir)

@@ -47,6 +47,10 @@ const
   Mode3Fixture =
     MetacraftRoot / "reprobuild-examples" / "rust-mode3" /
       "binary-with-library"
+  Mode3MixedForwardFixture =
+    MetacraftRoot / "reprobuild-examples" / "mixed" / "rust-uses-cpp-lib"
+  Mode3MixedReverseFixture =
+    MetacraftRoot / "reprobuild-examples" / "mixed" / "cpp-uses-rust-lib"
 
 proc dummyRequest(projectRoot: string): ProviderGraphRequest =
   ProviderGraphRequest(
@@ -351,4 +355,317 @@ package binPkg:
       let conv = rust_direct_convention.rustDirectConvention()
       let request = dummyRequest(dir)
       check conv.recognize(dir, request)
+      removeDir(dir)
+
+# ---------------------------------------------------------------------------
+# M34 cross-language Rust ↔ C/C++ verification.
+#
+# Forward direction (Rust binary → C library): the rust-direct
+# convention emits per-source ``gcc -c`` + ``ar rcs lib<name>.a`` for
+# the C library plus a Rust ``rustc`` link that threads
+# ``-L native=<dir>`` ``-l static=<libname>`` flags onto its argv.
+#
+# Reverse direction (C++ binary → Rust library): the convention emits
+# the Rust library with ``--crate-type=staticlib`` (derived from the
+# ``cConsumable`` flag the dep graph sets) landing at ``lib<name>.a``,
+# plus per-source ``g++ -c`` + terminal ``g++ -o`` for the C++ binary
+# with the Rust archive threaded as a trailing positional.
+# ---------------------------------------------------------------------------
+
+suite "rust-direct convention M34 cross-language (forward direction)":
+
+  test "forward: Rust binary picks up C archive via -L native + -l static":
+    if not rustcOnPath():
+      skip()
+    else:
+      let conv = rust_direct_convention.rustDirectConvention()
+      let request = dummyRequest(Mode3MixedForwardFixture)
+      require conv.recognize(Mode3MixedForwardFixture, request)
+      let fragment = conv.emitFragment(Mode3MixedForwardFixture, request)
+
+      var archiveAction: BuildActionDef
+      var calcAction: BuildActionDef
+      var sawArchive = false
+      var sawCalc = false
+      var sawCompile = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id == "rust-xlang-ccpp-archive-mathlib":
+          archiveAction = action
+          sawArchive = true
+        elif action.id == "rust-direct-link-calc":
+          calcAction = action
+          sawCalc = true
+        elif action.id.startsWith("rust-xlang-ccpp-compile-mathlib"):
+          sawCompile = true
+
+      # The convention emits at least: 1 per-source compile + 1 archive +
+      # 1 Rust link. The C/C++ helpers carry the rust-xlang-ccpp- prefix
+      # to discriminate from the Nim convention's nim-xlang-ccpp-.
+      check sawArchive
+      check sawCalc
+      check sawCompile
+
+      # The archive output lands at .repro/build/mathlib/libmathlib.a
+      # (the cross-language schema shared with c-cpp-direct).
+      var archiveOutput = ""
+      for outPath in archiveAction.outputs:
+        let lower = outPath.toLowerAscii.replace('\\', '/')
+        if lower.endsWith("/libmathlib.a"):
+          archiveOutput = outPath
+      check archiveOutput.len > 0
+
+      # The calc action's deps include the archive action id.
+      var sawArchiveDep = false
+      for dep in calcAction.deps:
+        if dep == archiveAction.id:
+          sawArchiveDep = true
+      check sawArchiveDep
+
+      # The calc action's inputs include the upstream archive (cache
+      # invalidation).
+      var sawArchiveInput = false
+      for inp in calcAction.inputs:
+        if inp == archiveOutput:
+          sawArchiveInput = true
+      check sawArchiveInput
+
+      # The calc argv carries the canonical Rust → C archive flags:
+      #   -L native=<dir>
+      #   -l static=mathlib
+      let calcArgv = inlineArgvOf(calcAction)
+      var sawLNative = false
+      var sawLStatic = false
+      for i, token in calcArgv:
+        if token == "-L" and i + 1 < calcArgv.len and
+            calcArgv[i + 1].startsWith("native="):
+          sawLNative = true
+        if token == "-l" and i + 1 < calcArgv.len and
+            calcArgv[i + 1] == "static=mathlib":
+          sawLStatic = true
+      check sawLNative
+      check sawLStatic
+
+suite "rust-direct convention M34 cross-language (reverse direction)":
+
+  test "reverse: Rust library emits --crate-type=staticlib when consumed by C++":
+    if not rustcOnPath():
+      skip()
+    else:
+      let conv = rust_direct_convention.rustDirectConvention()
+      let request = dummyRequest(Mode3MixedReverseFixture)
+      require conv.recognize(Mode3MixedReverseFixture, request)
+      let fragment = conv.emitFragment(Mode3MixedReverseFixture, request)
+
+      var addlibAction: BuildActionDef
+      var cppappLinkAction: BuildActionDef
+      var sawAddlib = false
+      var sawCppLink = false
+      var sawCppCompile = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id == "rust-direct-link-addlib":
+          addlibAction = action
+          sawAddlib = true
+        elif action.id == "rust-xlang-ccpp-exec-link-cppapp":
+          cppappLinkAction = action
+          sawCppLink = true
+        elif action.id.startsWith("rust-xlang-ccpp-exec-compile-cppapp"):
+          sawCppCompile = true
+      check sawAddlib
+      check sawCppLink
+      check sawCppCompile
+
+      # The addlib argv carries --crate-type staticlib (NOT rlib).
+      let addlibArgv = inlineArgvOf(addlibAction)
+      var sawStaticlib = false
+      var sawRlib = false
+      for i, token in addlibArgv:
+        if token == "--crate-type" and i + 1 < addlibArgv.len:
+          if addlibArgv[i + 1] == "staticlib":
+            sawStaticlib = true
+          elif addlibArgv[i + 1] == "rlib":
+            sawRlib = true
+      check sawStaticlib
+      check not sawRlib
+
+      # The addlib argv carries -C panic=abort (load-bearing for no_std
+      # staticlib FFI archives on this host's MSVC-rustc + MinGW-gcc
+      # combo — without the flag, rustc errors with "unwinding panics
+      # are not supported without std").
+      var sawPanicAbort = false
+      for i, token in addlibArgv:
+        if token == "-C" and i + 1 < addlibArgv.len and
+            addlibArgv[i + 1] == "panic=abort":
+          sawPanicAbort = true
+      check sawPanicAbort
+
+      # The addlib output lands at the canonical archive path
+      # .repro/build/addlib/libaddlib.a (shared schema with c-cpp-direct
+      # and Nim).
+      var addlibOutput = ""
+      for outPath in addlibAction.outputs:
+        let lower = outPath.toLowerAscii.replace('\\', '/')
+        if lower.endsWith("/libaddlib.a"):
+          addlibOutput = outPath
+      check addlibOutput.len > 0
+
+      # The cppapp link action's deps include the addlib action id.
+      var sawAddlibDep = false
+      for dep in cppappLinkAction.deps:
+        if dep == addlibAction.id:
+          sawAddlibDep = true
+      check sawAddlibDep
+
+      # The cppapp link action's inputs include the upstream archive.
+      var sawAddlibInput = false
+      for inp in cppappLinkAction.inputs:
+        if inp == addlibOutput:
+          sawAddlibInput = true
+      check sawAddlibInput
+
+      # The cppapp link argv carries the archive as a trailing positional
+      # AND the platform-specific Rust runtime libs.
+      let cppappArgv = inlineArgvOf(cppappLinkAction)
+      var sawArchive = false
+      for token in cppappArgv:
+        if token == addlibOutput:
+          sawArchive = true
+      check sawArchive
+      when defined(windows):
+        # Windows MinGW: -lws2_32 -luserenv -ladvapi32 -lbcrypt -lntdll
+        var sawWs232 = false
+        var sawBcrypt = false
+        for token in cppappArgv:
+          if token == "-lws2_32": sawWs232 = true
+          if token == "-lbcrypt": sawBcrypt = true
+        check sawWs232
+        check sawBcrypt
+      else:
+        # POSIX: -lpthread -ldl -lm
+        var sawPthread = false
+        var sawDl = false
+        var sawM = false
+        for token in cppappArgv:
+          if token == "-lpthread": sawPthread = true
+          if token == "-ldl": sawDl = true
+          if token == "-lm": sawM = true
+        check sawPthread
+        check sawDl
+        check sawM
+
+suite "rust-direct convention M34 cConsumable preserves M30 rlib emit":
+
+  test "M30 fixture (pure Rust workspace) still produces rlib, not staticlib":
+    # The mode3-pilot fixture has only Rust packages — no C/C++ consumers,
+    # so cConsumable=false for mathlib and the convention must still emit
+    # --crate-type=rlib. M30 behaviour preserved.
+    if not rustcOnPath():
+      skip()
+    else:
+      let conv = rust_direct_convention.rustDirectConvention()
+      let request = dummyRequest(Mode3Fixture)
+      require conv.recognize(Mode3Fixture, request)
+      let fragment = conv.emitFragment(Mode3Fixture, request)
+      var mathlibAction: BuildActionDef
+      var sawMathlib = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id == "rust-direct-link-mathlib":
+          mathlibAction = action
+          sawMathlib = true
+      check sawMathlib
+      let mathlibArgv = inlineArgvOf(mathlibAction)
+      var sawRlib = false
+      var sawStaticlib = false
+      for i, token in mathlibArgv:
+        if token == "--crate-type" and i + 1 < mathlibArgv.len:
+          if mathlibArgv[i + 1] == "rlib": sawRlib = true
+          elif mathlibArgv[i + 1] == "staticlib": sawStaticlib = true
+      check sawRlib
+      check not sawStaticlib
+      # The pure-Rust mathlib output lands at libmathlib.rlib (NOT .a).
+      var sawRlibOutput = false
+      for outPath in mathlibAction.outputs:
+        let lower = outPath.toLowerAscii.replace('\\', '/')
+        if lower.endsWith("/libmathlib.rlib"):
+          sawRlibOutput = true
+      check sawRlibOutput
+
+suite "rust-direct convention M34 cross-language cycle + undeclared":
+
+  test "forward cycle: Rust binary depends_on C lib AND C lib depends_on Rust app — rejected":
+    if not rustcOnPath():
+      skip()
+    else:
+      let dir = makeScratch("xlang-cycle")
+      writeFile(dir / "repro.nim", """
+import repro_project_dsl
+
+package cLibPkg:
+  uses:
+    "gcc >=11"
+  library clib
+
+package rustAppPkg:
+  uses:
+    "rust"
+  executable rustapp:
+    discard
+
+depends_on rustAppPkg: cLibPkg
+depends_on cLibPkg: rustAppPkg
+""")
+      createDir(dir / "clib" / "src")
+      writeFile(dir / "clib" / "src" / "add.c",
+        "int add(int a, int b) { return a + b; }\n")
+      createDir(dir / "rustapp" / "src")
+      writeFile(dir / "rustapp" / "src" / "main.rs",
+        "fn main() {}\n")
+      let conv = rust_direct_convention.rustDirectConvention()
+      let request = dummyRequest(dir)
+      check conv.recognize(dir, request)
+      expect ValueError:
+        discard conv.emitFragment(dir, request)
+      removeDir(dir)
+
+  test "reverse cycle: C++ binary depends_on Rust lib AND Rust lib depends_on C++ app — rejected":
+    if not rustcOnPath():
+      skip()
+    else:
+      let dir = makeScratch("xlang-reverse-cycle")
+      writeFile(dir / "repro.nim", """
+import repro_project_dsl
+
+package rustLibPkg:
+  uses:
+    "rust"
+  library rustlib
+
+package cppAppPkg:
+  uses:
+    "gcc >=11"
+  executable cppapp:
+    discard
+
+depends_on cppAppPkg: rustLibPkg
+depends_on rustLibPkg: cppAppPkg
+""")
+      createDir(dir / "rustlib" / "src")
+      writeFile(dir / "rustlib" / "src" / "lib.rs",
+        "pub fn x() -> i32 { 1 }\n")
+      createDir(dir / "cppapp" / "src")
+      writeFile(dir / "cppapp" / "src" / "main.cpp",
+        "int main() { return 0; }\n")
+      let conv = rust_direct_convention.rustDirectConvention()
+      let request = dummyRequest(dir)
+      check conv.recognize(dir, request)
+      expect ValueError:
+        discard conv.emitFragment(dir, request)
       removeDir(dir)
