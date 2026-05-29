@@ -315,6 +315,14 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
   if bestName == "rust":
     if not fileExists(targetDir / "Cargo.toml"):
       bestName = "rust-direct"
+  # M31 refinement for Mode 3 Go: when the extension census picks
+  # ``go`` (i.e. ``.go`` files dominate the target dir) but NO
+  # ``go.mod`` is present at the target root, the project routes
+  # through the Mode 3 ``go-direct`` convention. Mirror of the C/C++
+  # and Rust refinements above.
+  if bestName == "go":
+    if not fileExists(targetDir / "go.mod"):
+      bestName = "go-direct"
   result.convention = bestName
   result.evidence = "extension census: " & $bestCount & "/" &
     $census.total & " files match " & bestName
@@ -535,7 +543,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[9, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[10, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -546,6 +554,9 @@ const
                        exeName: "rustc",
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "go",
+                       exeName: "go",
+                       versionArgs: @["version"]),
+    ToolchainProbeSpec(convention: "go-direct",
                        exeName: "go",
                        versionArgs: @["version"]),
     ToolchainProbeSpec(convention: "python",

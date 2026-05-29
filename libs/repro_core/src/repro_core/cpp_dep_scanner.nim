@@ -48,6 +48,7 @@
 
 import std/[algorithm, os, sets, strutils, tables]
 
+import ./go_dep_scanner
 import ./nim_dep_scanner
 import ./paths
 import ./project_file
@@ -589,19 +590,22 @@ proc mergeScanResults*(nimScan, cppScan: ScanResult): ScanResult =
     result.diagnostics.add(d)
 
 proc scanWorkspaceAll*(workspaceRoot: string): ScanResult =
-  ## Run the Nim, C/C++, and Rust scanners over ``workspaceRoot`` and
-  ## merge their outputs into a single deterministic ``ScanResult``.
+  ## Run the Nim, C/C++, Rust, and Go scanners over ``workspaceRoot``
+  ## and merge their outputs into a single deterministic ``ScanResult``.
   ## This is the entry point ``repro deps refresh`` calls.
   ##
-  ## M30 added the Rust scanner. The merge order keeps the C/C++ and
-  ## Rust scanners' ``WorkspaceMember`` entries winning on collisions
-  ## with the Nim scanner — both newer scanners filter by layout (only
-  ## members whose ``src/`` looks like C/C++ / Rust appear in their
+  ## M30 added the Rust scanner. M31 added the Go scanner. The merge
+  ## order keeps the C/C++, Rust, and Go scanners'
+  ## ``WorkspaceMember`` entries winning on collisions with the Nim
+  ## scanner — all three of the newer scanners filter by layout (only
+  ## members whose source dir looks like that language appear in their
   ## member list), so when both fire for the same ``(package, member)``
   ## pair their entry's ``sourceFile`` points at the real source file,
   ## not at a non-existent ``src/<member>.nim``.
   let nimScan = scanWorkspace(workspaceRoot)
   let cppScan = scanWorkspaceCpp(workspaceRoot)
   let rustScan = scanWorkspaceRust(workspaceRoot)
+  let goScan = scanWorkspaceGo(workspaceRoot)
   let nimCpp = mergeScanResults(nimScan, cppScan)
-  mergeScanResults(nimCpp, rustScan)
+  let withRust = mergeScanResults(nimCpp, rustScan)
+  mergeScanResults(withRust, goScan)

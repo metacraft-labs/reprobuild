@@ -140,6 +140,7 @@ $PopulatedExamples = @(
   'c-cpp-autotools/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
+  'go-mode3/binary-with-library',
   'mixed/nim-uses-cpp-lib',
   'mixed/cpp-uses-nim-lib'
 )
@@ -349,6 +350,36 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $true; Reason = "rustc=$($rustc.Source)" }
       }
       return @{ Available = $false; Reason = "rustc not on PATH and no rustup stable under D:/metacraft-dev-deps/rustup" }
+    }
+    'go-mode3' {
+      # M31: Mode 3 Go — same toolchain probe as ``go`` (the Mode 2
+      # path). ``go`` alone is enough; the Mode 3 convention emits
+      # ``go tool compile`` + ``go tool link`` invocations directly
+      # and consumes the GOCACHE'd stdlib archives via ``go list
+      # -export``. Reuse the bundled-toolchain fallback that the
+      # ``go`` probe uses so a fresh host without a system go still
+      # picks up the managed install.
+      $goCmd = Get-Command go -ErrorAction SilentlyContinue
+      if (-not $goCmd) {
+        $goRoot = 'D:/metacraft-dev-deps/go'
+        $candidates = @()
+        if (Test-Path -LiteralPath $goRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $goRoot -Directory -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $verDir.FullName 'go\bin\go.exe'
+            if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+          }
+        }
+        if ($candidates.Count -gt 0) {
+          $picked = $candidates | Sort-Object | Select-Object -Last 1
+          $binDir = Split-Path -Parent $picked
+          $env:PATH = "$binDir;$env:PATH"
+          $goCmd = Get-Command go -ErrorAction SilentlyContinue
+        }
+      }
+      if ($goCmd) {
+        return @{ Available = $true; Reason = "go=$($goCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "'go' not on PATH and not under D:/metacraft-dev-deps/go/" }
     }
     'mixed' {
       # Cross-language Mode 3 — needs BOTH the Nim toolchain (for the
@@ -1061,6 +1092,30 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
           Greeting = 'hello from rust-mode3-binary-with-library, mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'go-mode3/binary-with-library' {
+      # M31: Mode 3 Go. The workspace declares a library ``mathlib``
+      # and an executable ``calc`` in a single ``repro.nim`` with NO
+      # ``go.mod``. The Mode 3 ``go-direct`` convention emits per-
+      # member ``go tool compile`` actions (producing ``<name>.a``
+      # archives) plus a ``go tool link`` action for the executable.
+      # The library produces ``mathlib.a`` which the executable's
+      # compile + link reference via importcfg / importcfg.link so
+      # ``import "mathlib"`` in calc/main.go resolves. The link action
+      # is sequenced strictly after the library compile via Mode 3
+      # ``depends_on`` wiring. Both outputs land under
+      # ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'calc'
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'mathlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
+          Greeting = 'hello from go-mode3-binary-with-library, mathlib added 2+3 = 5'
         }
       )
     }

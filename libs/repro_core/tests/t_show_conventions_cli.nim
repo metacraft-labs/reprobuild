@@ -166,7 +166,7 @@ suite "repro show-conventions: CLI smoke":
       check sawAppPkg
       check sawLibPkg
       check doc["conventions"].kind == JArray
-      check doc["conventions"].len == 9
+      check doc["conventions"].len == 10
       # First convention is "nim" — pins the dispatch order.
       check doc["conventions"][0].getStr == "nim"
       # c-cpp-autotools must come BEFORE c-cpp-make BEFORE c-cpp-direct
@@ -184,6 +184,8 @@ suite "repro show-conventions: CLI smoke":
       var directIdx = -1
       var rustIdx = -1
       var rustDirectIdx = -1
+      var goIdx = -1
+      var goDirectIdx = -1
       for i in 0 ..< doc["conventions"].len:
         case doc["conventions"][i].getStr
         of "c-cpp-autotools": autotoolsIdx = i
@@ -191,6 +193,8 @@ suite "repro show-conventions: CLI smoke":
         of "c-cpp-direct":    directIdx = i
         of "rust":            rustIdx = i
         of "rust-direct":     rustDirectIdx = i
+        of "go":              goIdx = i
+        of "go-direct":       goDirectIdx = i
         else: discard
       check autotoolsIdx >= 0
       check makeIdx >= 0
@@ -203,6 +207,12 @@ suite "repro show-conventions: CLI smoke":
       check rustIdx >= 0
       check rustDirectIdx >= 0
       check rustIdx < rustDirectIdx
+      # M31: go (Mode 2) registered BEFORE go-direct (Mode 3) so
+      # a project with a go.mod routes through the go-list-driven
+      # convention; go-direct catches the no-go.mod case.
+      check goIdx >= 0
+      check goDirectIdx >= 0
+      check goIdx < goDirectIdx
       removeDir(dir)
 
   test "--target=NAME filters to a single member":
@@ -341,6 +351,6 @@ suite "repro show-conventions: registry mirror sanity":
         let trimmed = stripped.strip(chars = {',', ' ', '"'})
         if trimmed.len > 0:
           mirror.add(trimmed)
-      check registered.len == 9
-      check mirror.len == 9
+      check registered.len == 10
+      check mirror.len == 10
       check registered == mirror

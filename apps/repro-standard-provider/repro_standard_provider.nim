@@ -29,6 +29,7 @@ import repro_standard_provider/conventions/nim as nim_convention
 import repro_standard_provider/conventions/rust as rust_convention
 import repro_standard_provider/conventions/rust_direct as rust_direct_convention
 import repro_standard_provider/conventions/go as go_convention
+import repro_standard_provider/conventions/go_direct as go_direct_convention
 import repro_standard_provider/conventions/python as python_convention
 import repro_standard_provider/conventions/javascript_typescript as jsts_convention
 import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
@@ -168,6 +169,12 @@ when defined(reproProviderMode):
   # declared their crate shape in ``repro.nim`` with no Cargo
   # manifest. M30 of Mode3-Language-Expansion.milestones.org.
   addDefaultConvention(rust_direct_convention.rustDirectConvention())
+  # go_direct (Mode 3 / no-go.mod) registered AFTER the Mode 2 go
+  # convention so a project shipping a go.mod routes through the
+  # Mode 2 path first; Mode 3 picks up the case where the user
+  # declared their package shape in ``repro.nim`` with no Go module
+  # manifest. M31 of Mode3-Language-Expansion.milestones.org.
+  addDefaultConvention(go_direct_convention.goDirectConvention())
 
   proc runStandardProvider(): int =
     try:
