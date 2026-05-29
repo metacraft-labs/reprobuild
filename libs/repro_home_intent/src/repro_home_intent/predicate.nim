@@ -19,8 +19,11 @@
 ##   `when` block.
 
 import std/[algorithm, sets, strutils]
+when defined(linux):
+  import std/os
 
 import ./errors
+import ./host_identity
 
 const
   StandardPlatformIdents* = ["windows", "macos", "linux", "bsd", "wsl"]
@@ -76,6 +79,35 @@ type
 
   UserPredicateEvaluator* = proc(name: string;
                                  ctx: HostContext): bool {.gcsafe.}
+
+proc currentHostContext*(): HostContext =
+  ## Construct predicate facts for the running host. Apply/planning
+  ## paths use this as the default, and cross-host callers override the
+  ## fields explicitly so predicate evaluation stays centralized.
+  result.host = currentHost()
+  when defined(windows):
+    result.platform = "windows"
+  elif defined(macosx):
+    result.platform = "macos"
+  elif defined(linux):
+    result.platform = "linux"
+  elif defined(freebsd) or defined(openbsd) or defined(netbsd):
+    result.platform = "bsd"
+  else:
+    result.platform = "unknown"
+  when defined(amd64) or defined(x86_64):
+    result.arch = "x86_64"
+  elif defined(arm64) or defined(aarch64):
+    result.arch = "arm64"
+  elif defined(arm) or defined(arm32):
+    result.arch = "arm32"
+  else:
+    result.arch = "unknown"
+  when defined(linux):
+    result.isWsl = getEnv("WSL_DISTRO_NAME").len > 0 or
+      getEnv("WSL_INTEROP").len > 0
+  else:
+    result.isWsl = false
 
 # ---------------------------------------------------------------------------
 # Tokeniser.

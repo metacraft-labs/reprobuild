@@ -18,7 +18,7 @@
 ## records into the same list and the suppression layer
 ## (`./suppression.nim`) deduplicates by absolute target path.
 
-import std/[algorithm, options, os, sets, strutils, tables]
+import std/[algorithm, options, sets]
 
 import repro_home_intent
 
@@ -116,49 +116,24 @@ proc enabledActivitiesFor(profile: Profile; host: string): HashSet[string] =
       for a in entry.hostActivities:
         result.incl a
 
-proc evaluateHostPredicate*(predicateAst: PredNode; host: string): bool =
-  ## Minimal predicate evaluator for M63 Phase A: only inspects the
-  ## predicate's referenced identifiers and compares them against the
-  ## supplied `host` name. The full predicate language (M60) supports
-  ## arbitrary boolean expressions over OS-tagged identifiers (`linux`,
-  ## `macos`, `windows`, `arm64`, `x86_64`, ...). For the Phase A gates
-  ## (`add fd`, fresh-install, etc.) the fixture profiles do not use
-  ## host-platform predicates — the gates fail closed if they do, with
-  ## a clear pointer to a future milestone that wires the full
-  ## evaluator.
-  ##
-  ## Bare-true predicates (an identifier matching the current host's
-  ## OS tag) are recognized: `windows`, `linux`, `macos`. Everything
-  ## else evaluates false. That covers the Phase B stow gate's needs
-  ## and is enough for the gates listed in the milestone.
+proc evaluateHostPredicate*(predicateAst: PredNode; ctx: HostContext): bool =
+  ## Evaluate a profile predicate against the host facts selected for
+  ## this apply. For normal local applies `ctx` is the current host; for
+  ## M71 Phase B local bundle evaluation it is an explicit target host.
   if predicateAst == nil:
     return true
-  let canon = renderPredicate(normalizeAst(predicateAst))
-  let token = canon.strip()
-  case token.toLowerAscii()
-  of "windows":
-    return defined(windows)
-  of "linux":
-    return defined(linux)
-  of "macos", "macosx", "osx":
-    return defined(macosx)
-  else:
-    discard
-  # An always-true degenerate predicate (`true`) is convenient for
-  # gates.
-  if token.toLowerAscii() == "true":
-    return true
-  if token.toLowerAscii() == "false":
-    return false
-  # Anything else is "unknown" → false (the predicate's branch is not
-  # taken). The planner does not raise here; an unknown predicate
-  # silently disables that branch, matching the spec's "host
-  # identity does not match → branch off" semantics for unresolved
-  # platform tags.
-  false
+  evaluateBool(predicateAst, ctx)
+
+proc evaluateHostPredicate*(predicateAst: PredNode; host: string): bool =
+  ## Compatibility wrapper for older call sites that only provide a
+  ## host identity. Platform/arch default to the current build host,
+  ## preserving the pre-M71 local behavior.
+  var ctx = currentHostContext()
+  ctx.host = host
+  evaluateHostPredicate(predicateAst, ctx)
 
 proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
-                            host: string;
+                            ctx: HostContext;
                             outSeq: var seq[PlannedPackage]) =
   ## Walk one activity's body, emitting one `PlannedPackage` per
   ## reachable `nkPackageRef` after evaluating any enclosing predicate.
@@ -169,7 +144,7 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
         fromActivity: activity, predicateText: "",
         requestedVersion: child.packageVersion))
     of nkCondBlock:
-      if not evaluateHostPredicate(child.predicateAst, host):
+      if not evaluateHostPredicate(child.predicateAst, ctx):
         continue
       for pkgRef in child.condChildren:
         if pkgRef.kind != nkPackageRef:
@@ -199,12 +174,13 @@ proc collectConfigContributions(profile: Profile): seq[ConfigContribution] =
           configKey: entry.configKey,
           configValue: entry.configValueSource))
 
-proc buildPlan*(profile: Profile; profileDir, hostIdentity: string): ApplyPlan =
+proc buildPlan*(profile: Profile; profileDir: string;
+                ctx: HostContext): ApplyPlan =
   ## Materialize a deterministic `ApplyPlan` from a parsed profile.
   ## The caller is responsible for invoking the stow synthesizer
   ## (Phase B) afterwards and feeding its outputs into
   ## `result.generatedFiles`.
-  result.hostIdentity = hostIdentity
+  result.hostIdentity = ctx.host
   result.profilePath = profile.path
   result.profileDir = profileDir
   # M2.5: copy the per-host adapter preference so the realize + preview
@@ -213,14 +189,14 @@ proc buildPlan*(profile: Profile; profileDir, hostIdentity: string): ApplyPlan =
   # `ApplyPlan.adapterPreference` — the realize/preview helpers then
   # fall back to the M65 platform default chain.
   result.adapterPreference = profile.adapterPreference
-  let active = enabledActivitiesFor(profile, hostIdentity)
+  let active = enabledActivitiesFor(profile, ctx.host)
   for child in profile.root.children:
     if child.kind != nkActivity:
       continue
     if child.activityName notin active:
       continue
     collectPackagesFromBody(child.activityChildren,
-      child.activityName, hostIdentity, result.packages)
+      child.activityName, ctx, result.packages)
   # Deduplicate by package id; preserve the first occurrence's metadata.
   var seen = initHashSet[string]()
   var deduped: seq[PlannedPackage]
@@ -243,6 +219,13 @@ proc buildPlan*(profile: Profile; profileDir, hostIdentity: string): ApplyPlan =
   # synthesizer fills it. The stow synthesizer (Phase B) populates it
   # too; both feed into the same list and the suppression pass
   # deduplicates by `absoluteOutputPath`.
+
+proc buildPlan*(profile: Profile; profileDir, hostIdentity: string): ApplyPlan =
+  ## Compatibility entry point: evaluate predicates with current-host
+  ## platform/arch facts while using the supplied host identity.
+  var ctx = currentHostContext()
+  ctx.host = hostIdentity
+  buildPlan(profile, profileDir, ctx)
 
 proc canonicalPlanBytes*(plan: ApplyPlan): seq[byte] =
   ## Deterministic byte rendering of the plan, used as one of the

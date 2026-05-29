@@ -166,6 +166,11 @@ type
     profileDir*: string                ## "" → resolveProfileDir()
     profilePath*: string               ## "" → resolveProfilePath()
     host*: string                      ## "" → currentHost()
+    targetContext*: HostContext        ## M71 Phase B: explicit
+                                        ## target facts for local
+                                        ## cross-host evaluation.
+    hasTargetContext*: bool             ## false → use current-host
+                                        ## platform/arch facts.
     stateDir*: string                  ## "" → resolveStateDir()
     storeRoot*: string                 ## "" → resolveStoreRoot()
     homeDir*: string                   ## "" → getHomeDir()
@@ -231,8 +236,23 @@ proc resolveOptions(opts: ApplyOptions): ApplyOptions =
     result.profileDir = resolveProfileDir()
   if result.profilePath.len == 0:
     result.profilePath = result.profileDir / HomeProfileAnchor
+  var ctx =
+    if result.hasTargetContext:
+      result.targetContext
+    else:
+      currentHostContext()
   if result.host.len == 0:
-    result.host = currentHost()
+    if ctx.host.len == 0:
+      ctx.host = currentHost()
+    result.host = ctx.host
+  else:
+    ctx.host = result.host
+  if ctx.platform.len == 0:
+    ctx.platform = currentHostContext().platform
+  if ctx.arch.len == 0:
+    ctx.arch = currentHostContext().arch
+  result.targetContext = ctx
+  result.hasTargetContext = true
   if result.stateDir.len == 0:
     result.stateDir = resolveStateDir()
   if result.storeRoot.len == 0:
@@ -1123,7 +1143,7 @@ proc resourceFromEntry(profilePath, homeDir: string;
       result.dependsOn = deps
       break
 
-proc collectProfileResources(profilePath, homeDir, host: string;
+proc collectProfileResources(profilePath, homeDir: string; ctx: HostContext;
                              nodes: seq[IntentNode];
                              into: var DesiredSet) =
   ## Walk a `resources:` block body, emitting one `Resource` per
@@ -1142,23 +1162,30 @@ proc collectProfileResources(profilePath, homeDir, host: string;
           "` in the profile's `resources:` block")
       into.add(r)
     of nkCondBlock:
-      if evaluateHostPredicate(node.predicateAst, host):
-        collectProfileResources(profilePath, homeDir, host,
+      if evaluateHostPredicate(node.predicateAst, ctx):
+        collectProfileResources(profilePath, homeDir, ctx,
           node.condChildren, into)
     else:
       discard
 
-proc parseProfileResources*(profile: Profile; homeDir, host: string):
+proc parseProfileResources*(profile: Profile; homeDir: string;
+                            ctx: HostContext):
     DesiredSet =
   ## M78: build a `DesiredSet` from the parsed profile's `resources:`
-  ## block. Predicates are resolved against `host`. Raises
+  ## block. Predicates are resolved against `ctx`. Raises
   ## `EUnstructured` on a malformed entry.
   result = initDesiredSet()
   let blkOpt = findResourcesBlock(profile)
   if blkOpt.isNone:
     return
-  collectProfileResources(profile.path, homeDir, host,
+  collectProfileResources(profile.path, homeDir, ctx,
     blkOpt.get.resourcesEntries, result)
+
+proc parseProfileResources*(profile: Profile; homeDir, host: string):
+    DesiredSet =
+  var ctx = currentHostContext()
+  ctx.host = host
+  parseProfileResources(profile, homeDir, ctx)
 
 proc resourceSeedString*(desired: DesiredSet): string =
   ## A deterministic textual rendering of a `DesiredSet`, fed into the
@@ -1253,7 +1280,8 @@ proc resourceSeedString*(desired: DesiredSet): string =
         "\x1e" & r.caskArgs.join(","))
     result.add('\x1d')
 
-proc composeDesiredResources*(profile: Profile; homeDir, host: string):
+proc composeDesiredResources*(profile: Profile; homeDir: string;
+                              ctx: HostContext):
     DesiredSet =
   ## M78: the resource step's source of truth. The profile's
   ## `resources:` block is the production source; `REPRO_TEST_RESOURCES`
@@ -1272,7 +1300,7 @@ proc composeDesiredResources*(profile: Profile; homeDir, host: string):
   ## any observation or write. Independent resources keep their
   ## declaration order, so the emitted action stream is byte-comparable
   ## across runs of the same profile text.
-  let profileSet = parseProfileResources(profile, homeDir, host)
+  let profileSet = parseProfileResources(profile, homeDir, ctx)
   let seam = parseSyntheticResources(homeDir)
   # Linearize the merged set (profile + seam override) into a seq so
   # `dep_graph` can index into it; profile entries first in
@@ -1295,6 +1323,12 @@ proc composeDesiredResources*(profile: Profile; homeDir, host: string):
   result = initDesiredSet()
   for r in sorted:
     result.resources[r.address] = r
+
+proc composeDesiredResources*(profile: Profile; homeDir, host: string):
+    DesiredSet =
+  var ctx = currentHostContext()
+  ctx.host = host
+  composeDesiredResources(profile, homeDir, ctx)
 
 proc parseSyntheticPackageManagedBlocks(homeDir: string;
                                         declaredPackages: seq[string]):
@@ -1699,7 +1733,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   let profile = resolveProfileFromOpts(opts)
 
   # ---- Step 4: build plan + synthetic seams + stow discovery ------------
-  var applyPlan = buildPlan(profile, opts.profileDir, opts.host)
+  var applyPlan = buildPlan(profile, opts.profileDir, opts.targetContext)
   var packageIds: seq[string]
   for p in applyPlan.packages:
     packageIds.add(p.packageId)
@@ -1726,7 +1760,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # (profile `resources:` block + `REPRO_TEST_RESOURCES` override),
   # so a change to a profile-declared resource produces a distinct id.
   let resourcesSeed = resourceSeedString(
-    composeDesiredResources(profile, opts.homeDir, opts.host))
+    composeDesiredResources(profile, opts.homeDir, opts.targetContext))
   let candidateId = deriveGenerationId(applyPlan, snapshotDig, resourcesSeed)
   result.generationIdHex = generationIdHex(candidateId)
   let activeGenIdHex = readCurrentGenerationId(opts.stateDir)
@@ -1821,7 +1855,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # M78: the desired set is the profile's `resources:` block, with
   # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
   let desiredResources = composeDesiredResources(profile, opts.homeDir,
-    opts.host)
+    opts.targetContext)
   # M69 Phase C follow-up: defence-in-depth layer 1 — the SAME
   # pre-dispatch gate as `runApply`. The `--plan` path composes the
   # plan via `composePlan` -> `observeResource` -> the observe procs
@@ -1958,7 +1992,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       raiseKilledByTestHook(3)
 
     # ---- Step 4: derive ApplyPlan (package walk + stow discovery) -------
-    var applyPlan = buildPlan(profile, opts.profileDir, opts.host)
+    var applyPlan = buildPlan(profile, opts.profileDir, opts.targetContext)
     # Phase B: pull in any synthetic package-output entries the test
     # hook declared. In production this seam will be fed by the M59
     # stdlib renderer.
@@ -2019,7 +2053,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # not taken). M68 Phase B: an adopt run also contributes its
       # adopt-address set so the adopted binding lands in a new id.
       var resourcesSeed = resourceSeedString(
-        composeDesiredResources(profile, opts.homeDir, opts.host))
+        composeDesiredResources(profile, opts.homeDir, opts.targetContext))
       if opts.adoptAddresses.len > 0:
         resourcesSeed.add("\x00adopt:")
         for a in opts.adoptAddresses:
@@ -2318,7 +2352,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # remains as a TEST-ONLY override merged over the profile entries
       # by address (so existing M68/M70 gates keep working).
       var desiredResources = composeDesiredResources(profile, opts.homeDir,
-        opts.host)
+        opts.targetContext)
       # M69 step 5: synthesize PATH + per-tool env var resources from
       # the realized records and merge them into the desired set. The
       # synthesis is by-package, so a re-apply with unchanged catalog

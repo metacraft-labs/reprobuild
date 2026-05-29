@@ -1114,33 +1114,82 @@ proc bytesToString(bytes: openArray[byte]): string =
   for i, b in bytes:
     result[i] = char(b)
 
+proc parseBundleTargetBool(raw: string): bool =
+  case raw.toLowerAscii()
+  of "1", "true", "yes", "on":
+    true
+  of "0", "false", "no", "off":
+    false
+  else:
+    raise newException(ValueError,
+      "expected boolean value for --target-wsl, got '" & raw & "'")
+
 proc runHomeBuildBundle(args: openArray[string]): int =
-  ## Internal Phase-A command: build a local-only activation bundle for
-  ## an already-realized generation and store it as one CAS blob in the
-  ## source store. This does not perform SSH transfer, remote
-  ## activation, or cross-host evaluation.
+  ## Internal M71 command. Phase A bundles an already-realized local
+  ## generation. Phase B's `--evaluate` mode first performs a local
+  ## apply under explicit target facts, then bundles that generation.
+  ## This still does not perform SSH transfer or remote activation.
   var generation = "current"
+  var generationGiven = false
+  var evaluate = false
   var stateDir = ""
   var storeRoot = ""
+  var profileDir = ""
+  var homeDir = ""
   var outPath = ""
+  var targetHost = ""
+  var targetPlatform = ""
+  var targetArch = ""
+  var targetWslGiven = false
+  var targetWsl = false
   var i = 0
   while i < args.len:
     let a = args[i]
     if a == "--help" or a == "-h":
       echo "usage: repro home __build-bundle [--generation=current|<hex>] " &
         "[--state-dir PATH] [--store-root PATH] [--out PATH]"
+      echo "       repro home __build-bundle --evaluate --target-host NAME " &
+        "[--target-platform linux|macos|windows|bsd] " &
+        "[--target-arch x86_64|arm64|arm32] [--target-wsl[=true|false]] " &
+        "[--profile-dir PATH] [--state-dir PATH] [--store-root PATH] " &
+        "[--home-dir PATH] [--out PATH]"
       echo ""
-      echo "Build a local-only activation bundle for an already-realized"
-      echo "home generation and store it as a CAS blob in the source store."
+      echo "Build a local-only activation bundle and store it as a CAS blob"
+      echo "in the source store. --evaluate performs local target-fact"
+      echo "evaluation only; it does not transfer or activate remotely."
       return 0
+    elif a == "--evaluate":
+      evaluate = true
     elif a == "--generation" or a.startsWith("--generation="):
       generation = parseFlagValue(args, i, "--generation")
+      generationGiven = true
     elif a == "--state-dir" or a.startsWith("--state-dir="):
       stateDir = parseFlagValue(args, i, "--state-dir")
     elif a == "--store-root" or a.startsWith("--store-root="):
       storeRoot = parseFlagValue(args, i, "--store-root")
+    elif a == "--profile-dir" or a.startsWith("--profile-dir="):
+      profileDir = parseFlagValue(args, i, "--profile-dir")
+    elif a == "--home-dir" or a.startsWith("--home-dir="):
+      homeDir = parseFlagValue(args, i, "--home-dir")
     elif a == "--out" or a.startsWith("--out="):
       outPath = parseFlagValue(args, i, "--out")
+    elif a == "--target-host" or a.startsWith("--target-host="):
+      targetHost = parseFlagValue(args, i, "--target-host")
+      evaluate = true
+    elif a == "--target-platform" or a.startsWith("--target-platform="):
+      targetPlatform = parseFlagValue(args, i, "--target-platform")
+      evaluate = true
+    elif a == "--target-arch" or a.startsWith("--target-arch="):
+      targetArch = parseFlagValue(args, i, "--target-arch")
+      evaluate = true
+    elif a == "--target-wsl":
+      targetWsl = true
+      targetWslGiven = true
+      evaluate = true
+    elif a.startsWith("--target-wsl="):
+      targetWsl = parseBundleTargetBool(a["--target-wsl=".len .. ^1])
+      targetWslGiven = true
+      evaluate = true
     elif a.startsWith("--"):
       stderr.writeLine("repro home __build-bundle: unknown flag: " & a)
       return 2
@@ -1153,7 +1202,43 @@ proc runHomeBuildBundle(args: openArray[string]): int =
   try:
     let resolvedStateDir =
       if stateDir.len > 0: stateDir else: resolveStateDir()
-    var store = openStore(resolveStoreRoot(storeRoot))
+    let resolvedStoreRoot = resolveStoreRoot(storeRoot)
+    if evaluate:
+      if generationGiven and generation != "current":
+        raise newException(ValueError,
+          "--generation cannot select an existing generation in --evaluate mode")
+      var ctx = currentHostContext()
+      if targetHost.len > 0:
+        ctx.host = targetHost
+      if targetPlatform.len > 0:
+        let p = targetPlatform.toLowerAscii()
+        if p notin ["linux", "macos", "windows", "bsd"]:
+          raise newException(ValueError,
+            "unsupported --target-platform '" & targetPlatform & "'")
+        ctx.platform = p
+      if targetArch.len > 0:
+        let a = targetArch.toLowerAscii()
+        if a notin ["x86_64", "arm64", "arm32"]:
+          raise newException(ValueError,
+            "unsupported --target-arch '" & targetArch & "'")
+        ctx.arch = a
+      if targetWslGiven:
+        ctx.isWsl = targetWsl
+        if targetWsl and targetPlatform.len == 0:
+          ctx.platform = "linux"
+      var applyOpts: ApplyOptions
+      applyOpts.profileDir = profileDir
+      if profileDir.len > 0:
+        applyOpts.profilePath = profileDir / HomeProfileAnchor
+      applyOpts.stateDir = resolvedStateDir
+      applyOpts.storeRoot = resolvedStoreRoot
+      applyOpts.homeDir = homeDir
+      applyOpts.host = ctx.host
+      applyOpts.targetContext = ctx
+      applyOpts.hasTargetContext = true
+      let applied = runApply(applyOpts)
+      generation = applied.generationIdHex
+    var store = openStore(resolvedStoreRoot)
     defer:
       try: store.close() except CatchableError: discard
     let outcome = writeActivationBundle(resolvedStateDir, store, generation)
@@ -1162,6 +1247,7 @@ proc runHomeBuildBundle(args: openArray[string]): int =
       if parent.len > 0:
         createDir(extendedPath(parent))
       writeFile(extendedPath(outPath), bytesToString(outcome.bundleBytes))
+    echo "generationId: " & outcome.generationIdHex
     echo "bundleDigest: " & outcome.bundleDigestHex
     echo "bundlePath: " & outcome.bundlePath
     return 0
@@ -1185,28 +1271,6 @@ proc runHomeBuildBundle(args: openArray[string]): int =
 # ---------------------------------------------------------------------------
 # `repro home set` / `repro home get` (M65).
 # ---------------------------------------------------------------------------
-
-proc currentHostContext(): HostContext =
-  ## Construct a `HostContext` for the running interpreter so the
-  ## intent layer's `resolveEffectiveConfig` can evaluate predicates
-  ## the same way the apply pipeline will. M65's pre-validation is
-  ## the only call site; predicate evaluation in `set`/`get` cannot
-  ## diverge from apply or the diagnostic would be misleading.
-  result.host = currentHost()
-  when defined(windows):
-    result.platform = "windows"
-  elif defined(macosx):
-    result.platform = "macos"
-  elif defined(linux):
-    result.platform = "linux"
-  else:
-    result.platform = "unknown"
-  when defined(amd64) or defined(x86_64):
-    result.arch = "x86_64"
-  elif defined(arm64) or defined(aarch64):
-    result.arch = "arm64"
-  else:
-    result.arch = "unknown"
 
 proc splitPkgDotKey(raw: string): tuple[ok: bool; pkg, key: string] =
   let dot = raw.find('.')
