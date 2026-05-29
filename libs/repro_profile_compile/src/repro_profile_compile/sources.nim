@@ -18,8 +18,17 @@ const
   ## Compile-time anchor: the reprobuild repo root computed from this file's
   ## location. `libs/repro_profile_compile/src/repro_profile_compile/sources.nim`
   ## is five parents deep from the repo root.
+  ##
+  ## M83 Phase F2: an off-by-one in this chain previously stepped one
+  ## directory ABOVE the repo root, so `profileNimPaths(CompiledRepoRoot)`
+  ## emitted bogus `--path:` flags whenever `$REPROBUILD_REPO_ROOT` was
+  ## unset — invisibly fine for the legacy text-format gates (they took
+  ## the legacy parser path), invisibly fine for tests that set the env
+  ## explicitly (the F1 example), but a hard fail for every migrated
+  ## Phase A fixture exercised through the production `repro home apply`
+  ## CLI. F2 surfaced and fixed the chain.
   CompiledRepoRoot* = currentSourcePath().parentDir.parentDir.parentDir.
-    parentDir.parentDir.parentDir
+    parentDir.parentDir
   RepoRootEnvVar* = "REPROBUILD_REPO_ROOT"
 
 ## Lib names whose `src` directories must appear on `--path:` for a profile

@@ -288,37 +288,90 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
     blk.add addCalls
     result.add blk
 
+proc rewriteResourceCall(stmt: NimNode; profileVar: NimNode): NimNode =
+  ## Rewrite a `<callee>(args)` resource-constructor call into
+  ## `<callee>(profileVar.resources, args)` — target seq splat as the
+  ## first positional argument. Used by `parseResourcesSection` and
+  ## by the `when` branch walker.
+  var newCall = newNimNode(nnkCall)
+  newCall.add stmt[0]
+  var dotExpr = newNimNode(nnkDotExpr)
+  dotExpr.add profileVar
+  dotExpr.add newIdentNode("resources")
+  newCall.add dotExpr
+  for i in 1 ..< stmt.len:
+    newCall.add stmt[i]
+  result = newCall
+
+proc rewriteResourcesBody(body: NimNode; profileVar: NimNode): NimNode
+
+proc rewriteResourcesStmt(stmt: NimNode; profileVar: NimNode): NimNode =
+  ## A single statement inside a `resources:` body.
+  case stmt.kind
+  of nnkCall, nnkCommand:
+    result = rewriteResourceCall(stmt, profileVar)
+  of nnkWhenStmt:
+    # Nim compile-time `when defined(...):` guard. The branches
+    # contain resource-constructor calls; we recurse and rewrite each
+    # branch's body in place so the standard Nim compile-time
+    # selection still elides the unreached branches.
+    result = newNimNode(nnkWhenStmt)
+    for branch in stmt:
+      case branch.kind
+      of nnkElifBranch, nnkElifExpr:
+        let cond = branch[0]
+        let inner = rewriteResourcesBody(branch[1], profileVar)
+        let newBranch = newNimNode(branch.kind)
+        newBranch.add cond
+        newBranch.add inner
+        result.add newBranch
+      of nnkElse, nnkElseExpr:
+        let inner = rewriteResourcesBody(branch[0], profileVar)
+        let newBranch = newNimNode(branch.kind)
+        newBranch.add inner
+        result.add newBranch
+      else:
+        error("resources: unsupported `when` branch shape " &
+              $branch.kind, branch)
+  of nnkCommentStmt, nnkDiscardStmt:
+    result = newEmptyNode()
+  else:
+    error("resources: block expects constructor calls (e.g. " &
+          "`fsUserFile(...)`) optionally wrapped in `when " &
+          "defined(...)`; got " & $stmt.kind, stmt)
+
+proc rewriteResourcesBody(body: NimNode; profileVar: NimNode): NimNode =
+  ## Walk a `resources:` body (or a single nested `when` branch body)
+  ## and rewrite every resource-constructor call. Recursive via
+  ## `rewriteResourcesStmt` so nested `when` blocks compose cleanly.
+  result = newNimNode(nnkStmtList)
+  if body.kind == nnkStmtList:
+    for stmt in body:
+      let rewritten = rewriteResourcesStmt(stmt, profileVar)
+      if rewritten.kind != nnkEmpty:
+        result.add rewritten
+  else:
+    let rewritten = rewriteResourcesStmt(body, profileVar)
+    if rewritten.kind != nnkEmpty:
+      result.add rewritten
+
 proc parseResourcesSection(body: NimNode; profileVar: NimNode): NimNode =
   ## `resources:` body is a list of resource-constructor calls. Each
   ## call must be one of the resource constructor templates declared
   ## in `./resources.nim` or a user-authored template that takes a
   ## `targetResources` final parameter. The macro rewrites each call
   ## to pass the in-scope profile's `resources` seq through.
-  result = newNimNode(nnkStmtList)
+  ##
+  ## M83 Phase F2 extension: a `when defined(<os>):` block is allowed
+  ## as a child of `resources:`. The macro rewrites each branch's
+  ## body in place so Nim's compile-time selection still elides the
+  ## unreached branches. This mirrors the legacy parser's
+  ## `when <predicate>:` shape for compile-time host gates and is the
+  ## migration target for fixtures that need OS-gated resources.
   if body.kind != nnkStmtList:
     error("resources: expects an indented block of resource " &
           "constructor calls", body)
-  for stmt in body:
-    case stmt.kind
-    of nnkCall, nnkCommand:
-      # Build `<callee>(profileVar.resources, <stmt's original args>)`
-      # -- target seq goes first positional. Templates in
-      # `./resources.nim` take it as their leading param. User-authored
-      # modules follow the same convention.
-      var newCall = newNimNode(nnkCall)
-      newCall.add stmt[0]
-      var dotExpr = newNimNode(nnkDotExpr)
-      dotExpr.add profileVar
-      dotExpr.add newIdentNode("resources")
-      newCall.add dotExpr
-      for i in 1 ..< stmt.len:
-        newCall.add stmt[i]
-      result.add newCall
-    of nnkCommentStmt:
-      discard
-    else:
-      error("resources: block expects constructor calls (e.g. " &
-            "`fsUserFile(...)`); got " & $stmt.kind, stmt)
+  result = rewriteResourcesBody(body, profileVar)
 
 proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   ## A top-level `activity name: body` form. Emit an

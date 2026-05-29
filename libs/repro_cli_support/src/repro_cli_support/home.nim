@@ -1432,11 +1432,25 @@ proc runHomePlan(args: openArray[string]): int =
     # M78: the desired set is the profile's `resources:` block, with
     # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
     let profilePath = loadProfilePath()
-    let prof = loadProfile(profilePath)
+    let stateDir = resolveStateDir()
+    # M83 Phase F2: drive the same compile-then-adapt path the apply
+    # CLI takes, so a Phase A macro-form profile loads through the
+    # build-graph edge. Fall back to the legacy parser when the
+    # compile failure looks like a legacy text-format profile or
+    # when Nim is missing — matching the `runApplyInline` policy.
+    let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
+    let prof =
+      if outcomeCompile.profile != nil:
+        outcomeCompile.profile
+      elif isLegacyTextProfile(profilePath, outcomeCompile.compileError):
+        loadProfile(profilePath)
+      else:
+        stderr.writeLine("repro home plan: profile compile failed: " &
+          outcomeCompile.compileError)
+        return 1
     let desired = composeDesiredResources(prof, homeDir, currentHost())
     # Load recorded bindings from the active generation's manifest.
     var recorded = initOrderedTable[string, RecordedBinding]()
-    let stateDir = resolveStateDir()
     let activeId = readCurrentGenerationId(stateDir)
     if activeId.len > 0:
       let pointerFile = pointerPath(stateDir, activeId)

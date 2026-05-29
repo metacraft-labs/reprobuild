@@ -11,13 +11,17 @@
 # the desired-state digest hashed the block content VERBATIM while
 # the writer appended a trailing newline, so the digests never
 # matched and the resource re-planned as `update` on every apply.
+#
+# M83 Phase F2 migration: built via the Phase A `repro_profile` macro
+# library so `repro home apply` takes the compile-then-apply path
+# (Phase D) end-to-end.
 
-import repro/profile
+import repro_profile
 
 profile "m79-shell-integration-idempotent":
 
   activity default:
-    m79-fixture
+    `m79-fixture`
 
   resources:
     # A `shell.integration` resource: written as a repro-managed
@@ -25,10 +29,10 @@ profile "m79-shell-integration-idempotent":
     # NOT end with a newline so the writer's trailing-`\n`
     # normalization is exercised — this is the exact mismatch M79
     # fixes.
-    shell.integration shellHook:
-      hostFile = "~/.m79-shell-integration-rc"
-      blockId = "m79-shell-block"
-      content = "eval \"$(repro hook init)\""
+    shellIntegration(hostFile = "~/.m79-shell-integration-rc",
+      blockId = "m79-shell-block",
+      content = "eval \"$(repro hook init)\"",
+      address = "shellHook")
 
   hosts:
     "m79-gate-host": [default]
