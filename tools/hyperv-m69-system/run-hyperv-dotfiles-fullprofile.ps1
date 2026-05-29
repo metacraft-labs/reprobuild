@@ -794,10 +794,15 @@ try {
         $listRaw = & scoop list 2>&1
         $listRaw | Out-File (Join-Path $diagDir 'scoop-list.txt') -Encoding utf8
         # Parse `scoop list` output - first column is package name.
+        # `scoop list` returns a PSObject array; -match against the array
+        # tests element-membership, which doesn't intersect well with the
+        # multiline (?m) regex semantics. Read the just-written text back
+        # as a single string so the (?m)^ anchor works per physical line.
+        $listText = Get-Content (Join-Path $diagDir 'scoop-list.txt') -Raw
         $expected = @('age','gnupg','git','gh','windows-terminal','vscode','neovim','pwsh','direnv','ripgrep','firefox','googlechrome','codex','claude-code')
         $installed = @()
         foreach ($pkg in $expected) {
-          if ($listRaw -match ('(?m)^\s*' + [regex]::Escape($pkg) + '\s')) { $installed += $pkg }
+          if ($listText -match ('(?m)^\s*' + [regex]::Escape($pkg) + '\s')) { $installed += $pkg }
         }
         S "scoop-list: $($installed.Count)/$($expected.Count) expected installed ($($installed -join ','))"
       } catch {
