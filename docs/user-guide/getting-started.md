@@ -216,6 +216,29 @@ You built a Mode 3 project. The principles:
   steps, runtime plugin loads, etc.) you write by hand in `repro.nim`
   using the same `depends_on` macro the scanner emits.
 
+## Want to skip the `repro.nim`? Try Mode 1.
+
+If your workspace already follows the `apps/<name>/` + `libs/<name>/`
+shape and you'd rather not write a `repro.nim`, Mode 1 (M48, 2026-05-29)
+lets you build with **zero** ceremony:
+
+```text
+my-monorepo/
+  apps/
+    calc/src/main.rs      # `use mathlib::add;`
+  libs/
+    mathlib/src/lib.rs    # `pub fn add(a: i32, b: i32) -> i32 { a + b }`
+```
+
+Run `repro build` from the root. Reprobuild walks `apps/<name>/` +
+`libs/<name>/`, censuses extensions to pick a per-target language,
+infers the dep edges from the source-level imports, and dispatches.
+Nothing is written to your workspace root — the synthesised
+`repro.nim` lives under `.repro/mode1-synth/` (plain build scratch).
+
+See [The Three Modes](three-modes.md#mode-1--layout-as-manifest)
+for the supported-languages list and the Mode 1 debugging contract.
+
 ## Next steps
 
 - [The Three Modes](three-modes.md) — full explanation of when to use

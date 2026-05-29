@@ -24,6 +24,7 @@ import repro_cli_support/watch
 import repro_cli_support/dev_session
 import repro_cli_support/home
 import repro_cli_support/infra
+import repro_cli_support/mode1_loader
 import repro_profile_compile
 import repro_home_resources/drivers/managed_block
 
@@ -6268,6 +6269,155 @@ proc renderShowConventionsJson(workspaceRoot: string;
     conventionsNode.add(%name)
   result["conventions"] = conventionsNode
 
+# ----------------------------------------------------------------------
+# M48 — Mode 1 show-conventions renderers. Output prefix ``[Mode 1 —
+# inferred from layout]`` so users can tell when they're seeing
+# Mode 1 inference vs Mode 3 scanned output. See the M48 section of
+# Mode3-Language-Expansion.milestones.org.
+# ----------------------------------------------------------------------
+
+proc renderMode1ShowConventionsText(ws: Mode1Workspace;
+                                    targetFilter: string): string =
+  ## Human-readable Mode 1 show-conventions output. Sibling of
+  ## ``renderShowConventionsText`` for the Mode 1 case.
+  result = "[Mode 1 — inferred from layout]\n"
+  result.add("Project: " & ws.workspaceRoot & "\n")
+  result.add("Project file: (none — Mode 1 synthesises in-memory)\n")
+  if ws.syntheticProjectFile.len > 0:
+    result.add("Synthesised under: " & ws.syntheticProjectFile & "\n")
+  result.add("\n")
+  if ws.ambiguousImports.len > 0:
+    result.add("AMBIGUOUS IMPORTS — Mode 1 cannot proceed:\n")
+    for incident in ws.ambiguousImports:
+      var rel =
+        try:
+          relativePath(incident.sourceFile, ws.workspaceRoot)
+        except OSError:
+          incident.sourceFile
+      rel = rel.replace('\\', '/')
+      result.add("  - " & rel & ":" & $incident.lineNumber &
+        ": import '" & incident.importHead &
+        "' resolves to: " & incident.candidates.join(", ") & "\n")
+    result.add("\n")
+    result.add("Resolve by graduating to Mode 3: write a repro.nim " &
+      "with explicit depends_on edges.\n\n")
+    return
+  if ws.targets.len == 0:
+    result.add("No Mode 1 targets discovered.\n")
+    result.add("  (the loader scanned apps/, libs/, tools/, cmd/, " &
+      "pkg/, bin/ and the workspace's src/ — none matched)\n\n")
+    return
+  result.add("Inferred targets:\n")
+  for target in ws.targets:
+    if targetFilter.len > 0 and target.name != targetFilter:
+      continue
+    let kindLabel =
+      if target.kind == m1tkExecutable: "executable" else: "library"
+    result.add("  - " & target.name & " (" & kindLabel & ")\n")
+    result.add("    Source dir: " & target.relDir & "\n")
+    result.add("    Language: " & languageName(target.language) & "\n")
+    if target.entrySource.len > 0:
+      var rel =
+        try:
+          relativePath(target.entrySource, ws.workspaceRoot)
+        except OSError:
+          target.entrySource
+      rel = rel.replace('\\', '/')
+      result.add("    Entry source: " & rel & "\n")
+    var censusKeys: seq[string] = @[]
+    for ext, _ in target.extensionCensus.pairs:
+      censusKeys.add(ext)
+    censusKeys.sort(system.cmp[string])
+    var censusParts: seq[string] = @[]
+    for ext in censusKeys:
+      censusParts.add(ext & "=" & $target.extensionCensus[ext])
+    result.add("    Extension census: " & censusParts.join(", ") & "\n")
+  result.add("\n")
+  if ws.edges.len > 0:
+    result.add("Inferred dep edges (scanner):\n")
+    for edge in ws.edges:
+      result.add("  - " & edge.fromPackage & " -> " & edge.toPackage &
+        " (evidence: " & edge.evidence & ")\n")
+  else:
+    result.add("Inferred dep edges (scanner): (no in-workspace edges)\n")
+  result.add("\n")
+  if ws.diagnostics.len > 0:
+    result.add("Diagnostics:\n")
+    for d in ws.diagnostics:
+      if d.target.len > 0:
+        result.add("  - [" & d.target & "] " & d.message & "\n")
+      else:
+        result.add("  - " & d.message & "\n")
+    result.add("\n")
+  result.add("Persistence policy: Mode 1 does NOT write " &
+    "repro.scanned-deps.nim to the workspace root.\n")
+
+proc renderMode1ShowConventionsJson(ws: Mode1Workspace;
+                                    targetFilter: string): JsonNode =
+  ## JSON projection of the Mode 1 show-conventions output.
+  result = newJObject()
+  result["mode"] = %"mode1"
+  result["project"] = %ws.workspaceRoot
+  if ws.syntheticProjectFile.len > 0:
+    result["synthesisedProjectFile"] = %ws.syntheticProjectFile
+  else:
+    result["synthesisedProjectFile"] = newJNull()
+  let targetsNode = newJArray()
+  for target in ws.targets:
+    if targetFilter.len > 0 and target.name != targetFilter:
+      continue
+    let entry = newJObject()
+    entry["name"] = %target.name
+    entry["relDir"] = %target.relDir
+    entry["kind"] =
+      %(if target.kind == m1tkExecutable: "executable" else: "library")
+    entry["language"] = %languageName(target.language)
+    if target.entrySource.len > 0:
+      var rel =
+        try:
+          relativePath(target.entrySource, ws.workspaceRoot)
+        except OSError:
+          target.entrySource
+      rel = rel.replace('\\', '/')
+      entry["entrySource"] = %rel
+    else:
+      entry["entrySource"] = newJNull()
+    let censusNode = newJObject()
+    for ext, count in target.extensionCensus.pairs:
+      censusNode[ext] = %count
+    entry["extensionCensus"] = censusNode
+    targetsNode.add(entry)
+  result["targets"] = targetsNode
+  let edgesNode = newJArray()
+  for edge in ws.edges:
+    let e = newJObject()
+    e["from"] = %edge.fromPackage
+    e["to"] = %edge.toPackage
+    e["evidence"] = %edge.evidence
+    edgesNode.add(e)
+  result["edges"] = edgesNode
+  let diagsNode = newJArray()
+  for d in ws.diagnostics:
+    let n = newJObject()
+    n["target"] = %d.target
+    n["message"] = %d.message
+    diagsNode.add(n)
+  result["diagnostics"] = diagsNode
+  let ambNode = newJArray()
+  for incident in ws.ambiguousImports:
+    let n = newJObject()
+    n["fromTarget"] = %incident.fromTarget
+    n["importHead"] = %incident.importHead
+    n["sourceFile"] = %incident.sourceFile
+    n["lineNumber"] = %incident.lineNumber
+    n["rawLine"] = %incident.rawLine
+    let candsNode = newJArray()
+    for c in incident.candidates:
+      candsNode.add(%c)
+    n["candidates"] = candsNode
+    ambNode.add(n)
+  result["ambiguousImports"] = ambNode
+
 proc runShowConventionsCommand(args: openArray[string]): int =
   ## Implements ``repro show-conventions`` — step 3 of the Three-Mode
   ## Convention System sequencing plan
@@ -6350,6 +6500,27 @@ proc runShowConventionsCommand(args: openArray[string]): int =
       "show-conventions: workspace root does not exist: " & workspaceRoot)
 
   let projectMatch = resolveProjectFile(workspaceRoot)
+
+  # M48 — Mode 1 detection. When the workspace has NO project file
+  # AND NO Mode 2 manifest, run the Mode 1 loader and render its
+  # output with the ``[Mode 1 — inferred from layout]`` prefix so the
+  # user sees the difference from Mode 3.
+  if projectMatch.path.len == 0 and
+      not hasMode2Manifest(workspaceRoot):
+    let ws = loadMode1Workspace(workspaceRoot)
+    if ws.targets.len > 0 or ws.ambiguousImports.len > 0:
+      if jsonOut:
+        let doc = renderMode1ShowConventionsJson(ws, targetFilter)
+        echo doc.pretty()
+      else:
+        stdout.write(renderMode1ShowConventionsText(ws, targetFilter))
+      if ws.ambiguousImports.len > 0:
+        # Surface the hard-error diagnostic even in show-conventions
+        # so users running ``repro show-conventions`` to debug see
+        # the exit-non-zero signal that ``repro build`` would emit.
+        return 1
+      return 0
+
   # ``scanWorkspaceAll`` unions the Nim + C/C++ scanners so a mixed-
   # language workspace surfaces every member, not just the Nim ones.
   let scan = scanWorkspaceAll(workspaceRoot)
@@ -6503,6 +6674,42 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string): int =
       logMode = blmQuiet
     if not statsModeExplicit:
       statsMode = bsmNone
+
+  # ----------------------------------------------------------------
+  # M48 — Mode 1 (layout-as-manifest) fallback.
+  # When the target points at a directory that has NO repro.nim /
+  # reprobuild.nim AND NO Mode 2 ecosystem manifest, attempt to load
+  # the workspace from layout. The loader synthesises a repro.nim +
+  # repro.scanned-deps.nim under <workspaceRoot>/.repro/mode1-synth/
+  # and we redirect the build target to that path. Per spec, NOTHING
+  # is written to the workspace root itself — the synth dir is plain
+  # build scratch.
+  # ----------------------------------------------------------------
+  let parts = splitTarget(target)
+  if dirExists(extendedPath(parts.base)):
+    let workspaceCandidate = absolutePath(parts.base)
+    if not hasAnyProjectFile(workspaceCandidate) and
+        not hasMode2Manifest(workspaceCandidate):
+      var ws = loadMode1Workspace(workspaceCandidate)
+      if ws.ambiguousImports.len > 0:
+        stderr.writeLine(renderAmbiguousImportError(ws))
+        return 2
+      if ws.targets.len > 0:
+        # Mixed-language Mode 1 surfaces a diagnostic with empty
+        # target field; surface as a hard error.
+        for d in ws.diagnostics:
+          if d.target.len == 0 and
+              d.message.contains("mixed-language workspace"):
+            stderr.writeLine("repro build: error: " & d.message)
+            return 2
+        let synth = materializeMode1ProjectFile(ws)
+        if synth.len > 0:
+          # Redirect the target: preserve any ``#fragment`` selector
+          # the user passed (``#default`` etc.).
+          if parts.fragment.len > 0:
+            target = synth & "#" & parts.fragment
+          else:
+            target = synth
 
   var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
   try:

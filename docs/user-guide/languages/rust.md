@@ -10,7 +10,10 @@ to `cargo` (Mode 2 — required for crates.io / git dependencies).
   No `Cargo.toml`. Cross-package `use` lines are scanned automatically.
 - **Mode 2**: existing `Cargo.toml`. Reprobuild reads `cargo metadata`
   output and lifts the workspace graph.
-- **Mode 1**: coming soon.
+- **Mode 1**: layout-as-manifest (M48). Drop sources under
+  `apps/<name>/src/main.rs` + `libs/<name>/src/lib.rs`, run
+  `repro build`, no project file needed. See the
+  [Mode 1 quickstart](#mode-1-quickstart-zero-ceremony) below.
 
 ## Quickstart (Mode 3)
 
@@ -94,6 +97,32 @@ my-workspace/
   mathlib/src/lib.rs
   calc/src/main.rs
 ```
+
+## Mode 1 quickstart (zero ceremony)
+
+For workspaces that follow the `apps/<name>/` + `libs/<name>/` shape,
+you can skip the `repro.nim` entirely:
+
+```text
+my-monorepo/
+  apps/
+    calc/
+      src/main.rs            # `use mathlib::add;`
+  libs/
+    mathlib/
+      src/lib.rs             # `pub fn add(a: i32, b: i32) -> i32`
+```
+
+Run `repro build` from the workspace root. The Mode 1 loader walks
+`apps/<name>/` + `libs/<name>/`, picks Rust from the extension census,
+infers the `apps/calc → libs/mathlib` edge from the `use mathlib::add;`
+line, synthesises a `repro.nim` + `repro.scanned-deps.nim` under
+`.repro/mode1-synth/`, and dispatches to the rust-direct convention.
+
+Fixture: `reprobuild-examples/mode1/rust-binary-with-library/`.
+
+Mode 1 errors out on ambiguous imports (two libs sharing a normalised
+name). Graduate to Mode 3 to disambiguate via explicit `depends_on`.
 
 ## Mode 2 escape hatch
 

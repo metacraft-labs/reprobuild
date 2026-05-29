@@ -17,7 +17,9 @@ builds C/C++ workspaces with no ecosystem manifest at all.
   `c-cpp-meson` convention.
 - **Mode 2 (Autotools)**: existing `configure.ac` + `Makefile.am`
   triggers the `c-cpp-autotools` convention.
-- **Mode 1**: coming soon.
+- **Mode 1**: layout-as-manifest (M48, 2026-05-29). Drop sources under
+  `apps/<name>/src/main.c` + `libs/<name>/src/lib.c`, run `repro build`.
+  See [The Three Modes §Mode 1](../three-modes.md#mode-1--layout-as-manifest).
 
 ## Quickstart (Mode 3)
 

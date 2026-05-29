@@ -10,7 +10,9 @@ case. For external Go modules (`go.mod` deps), Mode 2 delegates to
 - **Mode 3**: `repro.nim` + per-package Go sources. No `go.mod`.
 - **Mode 2**: existing `go.mod` / `go.work`. Reprobuild delegates to
   `go build`.
-- **Mode 1**: coming soon.
+- **Mode 1**: layout-as-manifest (M48, 2026-05-29). Drop sources under
+  `apps/<name>/main.go` + `libs/<name>/<name>.go`, run `repro build`.
+  See [The Three Modes §Mode 1](../three-modes.md#mode-1--layout-as-manifest).
 
 ## Quickstart (Mode 3)
 

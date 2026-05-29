@@ -36,8 +36,9 @@ There are three ways to describe a project to reprobuild, distinguished
 by how much you write by hand:
 
 - **Mode 1 — layout-as-manifest.** The directory tree itself is the
-  spec. No project file. *(Coming in a future release — see
-  [The Three Modes](three-modes.md).)*
+  spec. No project file. *(Shipped in M48, 2026-05-29, for the Mode 3
+  languages: Nim, Rust, Go, Python, JS/TS, C/C++, Fortran, Zig, D. See
+  [The Three Modes](three-modes.md#mode-1--layout-as-manifest).)*
 - **Mode 2 — delegate to ecosystem build systems.** You already wrote
   a `Cargo.toml` / `pyproject.toml` / `CMakeLists.txt` / etc. Reprobuild
   reads it and emits the corresponding actions.

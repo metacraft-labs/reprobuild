@@ -10,7 +10,11 @@ is the most exercised path through the standard provider.
   scanner-driven dep graph, no `.nimble` needed.
 - **Mode 2**: existing `<pkg>.nimble` is recognized and lifted into
   the action graph.
-- **Mode 1**: coming soon (see [The Three Modes](../three-modes.md)).
+- **Mode 1**: layout-as-manifest (M48, 2026-05-29). Drop sources under
+  `apps/<name>/src/<name>.nim` + `libs/<name>/src/<name>.nim`, run
+  `repro build` — no project file needed. Fixture:
+  `reprobuild-examples/mode1/nim-binary-with-library/`. See
+  [The Three Modes §Mode 1](../three-modes.md#mode-1--layout-as-manifest).
 
 ## Quickstart (Mode 3)
 

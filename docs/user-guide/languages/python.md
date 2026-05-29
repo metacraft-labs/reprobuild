@@ -12,7 +12,10 @@ packaging-tool involvement — no `pip`, no `setuptools`, no
   `pyproject.toml` / `setup.py`.
 - **Mode 2**: existing `pyproject.toml` / `setup.py` triggers
   Mode 2 (delegates to `pip install -e .` or `python -m build`).
-- **Mode 1**: coming soon.
+- **Mode 1**: layout-as-manifest (M48, 2026-05-29). Drop sources under
+  `apps/<name>/__main__.py` + `libs/<name>/__init__.py`, run
+  `repro build`. See
+  [The Three Modes §Mode 1](../three-modes.md#mode-1--layout-as-manifest).
 
 ## Quickstart (Mode 3)
 

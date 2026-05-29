@@ -13,7 +13,9 @@ link argv.
 - **Mode 2**: `build.zig` delegation is **deferred** — `build.zig` is
   itself Zig code and lifting it would require invoking `zig build`
   blindly without per-member visibility.
-- **Mode 1**: not yet (Zig scanner not implemented).
+- **Mode 1**: layout-as-manifest scaffold (M48, 2026-05-29). The
+  loader infers Zig targets from the `.zig` extension census. See
+  [The Three Modes §Mode 1](../three-modes.md#mode-1--layout-as-manifest).
 
 ## Quickstart (Mode 3)
 

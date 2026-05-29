@@ -11,7 +11,10 @@ flagship cross-language case.
   workflow. No ecosystem manifest.
 - **Mode 2**: `fpm.toml` recognition (Fortran Package Manager) is
   **deferred** — no Mode 2 Fortran convention today.
-- **Mode 1**: not yet (Fortran scanner not implemented).
+- **Mode 1**: layout-as-manifest scaffold (M48, 2026-05-29). The
+  loader infers Fortran targets from the `.f90` / `.f95` extension
+  census; the Mode 3 Fortran scanner runs in-line. See
+  [The Three Modes §Mode 1](../three-modes.md#mode-1--layout-as-manifest).
 
 ## Quickstart (Mode 3)
 

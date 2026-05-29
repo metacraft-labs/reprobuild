@@ -12,7 +12,9 @@ into single-file Node.js executables, with a wrapper script that runs
 - **Mode 2**: existing `package.json` triggers Mode 2 (delegates to
   `npm install` + `npm run build` / `tsc` / whatever the manifest
   declares).
-- **Mode 1**: coming soon.
+- **Mode 1**: layout-as-manifest (M48, 2026-05-29). Drop sources under
+  `apps/<name>/main.ts` + `libs/<name>/index.ts`, run `repro build`.
+  See [The Three Modes §Mode 1](../three-modes.md#mode-1--layout-as-manifest).
 
 ## Quickstart (Mode 3)
 

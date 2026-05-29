@@ -13,7 +13,9 @@ Zen 5 CPUs.
 - **Mode 2**: `dub.json` / `dub.sdl` delegation is **deferred** —
   `dub` is a sophisticated build system that would need its own
   introspection lift.
-- **Mode 1**: not yet.
+- **Mode 1**: layout-as-manifest scaffold (M48, 2026-05-29). The
+  loader infers D targets from the `.d` extension census. See
+  [The Three Modes §Mode 1](../three-modes.md#mode-1--layout-as-manifest).
 
 ## Quickstart (Mode 3)
 

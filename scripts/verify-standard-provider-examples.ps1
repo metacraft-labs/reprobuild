@@ -175,7 +175,9 @@ $PopulatedExamples = @(
   'mixed/cpp-uses-zig-lib',
   'd-mode3/binary-with-library',
   'mixed/d-uses-cpp-lib',
-  'mixed/cpp-uses-d-lib'
+  'mixed/cpp-uses-d-lib',
+  'mode1/rust-binary-with-library',
+  'mode1/nim-binary-with-library'
 )
 
 # --- M22 test-target probes ------------------------------------------------
@@ -520,6 +522,22 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $true; Reason = "d=$($dCmd.Source)" }
       }
       return @{ Available = $false; Reason = "no D compiler (ldmd2/dmd/ldc2) on PATH and not under D:/metacraft-dev-deps/ldc/ (download from github.com/ldc-developers/ldc/releases)" }
+    }
+    'mode1' {
+      # M48: Mode 1 (layout-as-manifest) fixtures. Each fixture is
+      # single-language by spec scope-down (mixed-language Mode 1 is
+      # DEFERRED) so the language-level probe here is permissive — we
+      # verify the C/C++ toolchain (every Mode 1 build leans on gcc/ar
+      # for the link stage) and defer the per-language toolchain probe
+      # to ``Probe-Fixture`` below.
+      $ccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $ccCmd) {
+        $ccCmd = Get-Command clang -ErrorAction SilentlyContinue
+      }
+      if (-not $ccCmd) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (Mode 1 link stage needs a C compiler)" }
+      }
+      return @{ Available = $true; Reason = "cc=$($ccCmd.Source) (Mode 1 per-fixture probe selects rustc/nim)" }
     }
     'jsts-mode3' {
       # M33: Mode 3 JS/TS — same toolchain probe as ``javascript-typescript``
@@ -1438,6 +1456,31 @@ function Probe-Fixture([string]$rel) {
         return @{ Available = $false; Reason = "'ar' not on PATH (M45 reverse fixture needs an archiver)" }
       }
       return @{ Available = $true; Reason = "d=$($dCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
+    }
+    'mode1/rust-binary-with-library' {
+      # M48: Mode 1 Rust — needs rustc. Reuse the rustup-stable
+      # fallback the rust probe uses so a fresh host without a system
+      # rustc still picks up the bundled toolchain.
+      $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+      if (-not $rustc) {
+        $rustupStableBin = 'D:\metacraft-dev-deps\rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
+        if (Test-Path -LiteralPath (Join-Path $rustupStableBin 'rustc.exe')) {
+          $env:PATH = "$rustupStableBin;$env:PATH"
+          $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+        }
+      }
+      if (-not $rustc) {
+        return @{ Available = $false; Reason = "rustc not on PATH and no rustup stable under D:/metacraft-dev-deps/rustup" }
+      }
+      return @{ Available = $true; Reason = "rustc=$($rustc.Source)" }
+    }
+    'mode1/nim-binary-with-library' {
+      # M48: Mode 1 Nim — needs nim + gcc (Nim's C backend driver).
+      $nimCmd = Get-Command nim -ErrorAction SilentlyContinue
+      if (-not $nimCmd) {
+        return @{ Available = $false; Reason = "'nim' not on PATH (env.ps1 should provide it)" }
+      }
+      return @{ Available = $true; Reason = "nim=$($nimCmd.Source)" }
     }
     'mixed/cpp-uses-go-lib' {
       # M36 reverse direction: a C++ executable that links a Go
@@ -2585,6 +2628,37 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         }
       )
     }
+    'mode1/rust-binary-with-library' {
+      # M48 Mode 1 Rust — synthesised repro.nim + scanned-deps.nim
+      # live under ``<fixture>/.repro/mode1-synth/`` so the produced
+      # rlib + binary land under the synth tree's own ``.repro/build/``.
+      $synthDir = Join-Path $fixtureDir '.repro\mode1-synth'
+      return @(
+        @{
+          Path     = Join-Path $synthDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.rlib'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $synthDir (Join-Path '.repro\build' (Join-Path 'calc' 'calc.exe'))
+          Greeting = 'hello from mode1-rust-binary-with-library, mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'mode1/nim-binary-with-library' {
+      # M48 Mode 1 Nim — synthesised repro.nim + scanned-deps.nim
+      # live under ``<fixture>/.repro/mode1-synth/``.
+      $synthDir = Join-Path $fixtureDir '.repro\mode1-synth'
+      return @(
+        @{
+          Path     = Join-Path $synthDir (Join-Path '.repro\build' (Join-Path 'greet' 'libgreet.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $synthDir (Join-Path '.repro\build' (Join-Path 'hello' 'hello.exe'))
+          Greeting = 'hello from mode1-nim-binary-with-library'
+        }
+      )
+    }
     'c-cpp-autotools/hello-binary' {
       # M28: c-cpp-autotools/hello-binary. The per-source lift emits
       # configure + per-source ``gcc -c`` + ``gcc -o`` link actions.
@@ -2658,8 +2732,14 @@ foreach ($rel in $PopulatedExamples) {
   $hasCanonical = Test-Path -LiteralPath (Join-Path $fixtureDir 'repro.nim')
   $hasLegacy    = Test-Path -LiteralPath (Join-Path $fixtureDir 'reprobuild.nim')
   if (-not $hasCanonical -and -not $hasLegacy) {
-    Add-Result 'FAIL' $rel "fixture has no repro.nim / reprobuild.nim at $fixtureDir"
-    continue
+    # M48: Mode 1 fixtures by definition have NO project file at the
+    # workspace root. The Mode 1 loader synthesises one in-memory at
+    # dispatch time. Skip the preflight rejection for the ``mode1/``
+    # subtree and let the harness proceed.
+    if ($language -ne 'mode1') {
+      Add-Result 'FAIL' $rel "fixture has no repro.nim / reprobuild.nim at $fixtureDir"
+      continue
+    }
   }
 
   $probe = Get-LanguageProbe $language

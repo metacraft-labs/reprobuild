@@ -8,33 +8,85 @@ This page is the user-facing summary. For the full design spec, see
 [Three-Mode-Convention-System.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Three-Mode-Convention-System.md)
 in `reprobuild-specs/`.
 
-## Mode 1 — layout-as-manifest *(coming soon)*
+## Mode 1 — layout-as-manifest *(supported for Nim, Rust, Go, Python, JS/TS, C/C++, Fortran, Zig, D)*
 
 In Mode 1 the directory tree IS the spec. There is no project file at
 all. You drop files into directories whose names match a recognized
 layout convention (`apps/<name>/`, `libs/<name>/`, `tools/<name>/`,
 plus per-ecosystem alternates like `cmd/<name>/`, `pkg/<name>/`,
-`src/main/`, `src/lib/`) and reprobuild figures out the rest from a
-file-extension census and an import scan.
+`bin/<name>/`) and reprobuild figures out the rest from a file-extension
+census and an import scan.
 
 ```text
 my-monorepo/
   apps/
-    hello/
-      main.go
+    calc/
+      src/
+        main.rs            # `use mathlib::add;`
   libs/
-    greet/
-      greet.go
+    mathlib/
+      src/
+        lib.rs             # `pub fn add(a: i32, b: i32) -> i32`
 ```
+
+Run `repro build` from the workspace root. The Mode 1 loader walks
+`apps/<name>/` + `libs/<name>/`, censuses extensions (both targets are
+Rust here), synthesises an in-memory `repro.nim` + `repro.scanned-deps.nim`
+under `.repro/mode1-synth/`, and dispatches to the rust-direct
+convention. NOTHING is written to your workspace root — the synth tree
+is plain build scratch.
 
 Mode 1 reuses the Mode 3 scanner; the only difference is "do we persist
 the scanner's output to disk?" In Mode 1 the answer is no — the
 inferred dep graph lives only in memory and is recomputed every build.
 
-**Status: not yet shipped.** Mode 1 is coming in a future release.
-It is deliberately the **last** piece to land because the failure mode
-of "silently picked the wrong import" is hardest to debug when there's
-no project file to look at. Use Mode 3 today.
+**Status: M48 (2026-05-29).** Mode 1 ships for the Mode 3 languages:
+Nim, Rust, Go, Python, JS/TS, C/C++, Fortran, Zig, D. Phase 3
+conventions (Java/Maven, Kotlin/Gradle, C#/.NET, Swift/SwiftPM,
+OCaml/Dune) are NOT meaningful in Mode 1 — they require an ecosystem
+manifest by construction. Mixed-language Mode 1 workspaces are
+DEFERRED; the loader errors out and points you to Mode 3.
+
+### Mode 1 debugging — `repro show-conventions`
+
+Mode 1's defining failure mode is silent wrong-builds on ambiguous
+imports. `repro show-conventions` is the load-bearing window into what
+the loader inferred:
+
+```text
+$ repro show-conventions my-monorepo
+[Mode 1 — inferred from layout]
+Project: D:/work/my-monorepo
+Project file: (none — Mode 1 synthesises in-memory)
+
+Inferred targets:
+  - calc (executable)
+    Source dir: apps/calc
+    Language: rust
+    Entry source: apps/calc/src/main.rs
+    Extension census: .rs=1
+  - mathlib (library)
+    Source dir: libs/mathlib
+    Language: rust
+    Entry source: libs/mathlib/src/lib.rs
+    Extension census: .rs=1
+
+Inferred dep edges (scanner):
+  - apps/calc -> libs/mathlib (evidence: apps/calc/src/main.rs:7: use mathlib::add;)
+```
+
+When the loader sees an ambiguous import (e.g. `use greet::hi;` that
+could resolve to both `libs/greet/` and `tools/greet/`), it HARD-ERRORS:
+
+```text
+$ repro build my-ambig-workspace
+Mode 1: ambiguous import detected in D:/work/my-ambig-workspace
+  - apps/hello/src/main.rs:1: import 'greet' resolves to candidates: libs/greet, tools/greet
+
+Resolve by graduating to Mode 3: write a repro.nim with explicit `depends_on` lines naming the intended target.
+```
+
+No silent pick. No wrong build.
 
 ## Mode 2 — delegate to ecosystem build systems
 
