@@ -15,6 +15,18 @@
 # authors inside this repository; the structural editor (`repro home set` /
 # `repro home add`) edits this file in place.
 #
+# M83 Phase F3 migration: built via the Phase A `repro_profile` macro
+# library so `repro home apply` takes the compile-then-apply path
+# end-to-end (Phase F3 made that the ONLY apply path -- the legacy text
+# parser no longer fires as an auto-fallback). Hyphenated package
+# identifiers (e.g. `windows-terminal`, `claude-code`) are spelled
+# with backticks so the Nim parser accepts them; the structural
+# editor's Phase F3 read-side update accepts both the bare and the
+# backtick-quoted form. `when defined(windows):` compile-time guards
+# replace the legacy parser's runtime `when windows:` shape inside the
+# `resources:` block; activity-body predicates use the Phase A
+# `windows()` predicate-function form.
+#
 # DELIBERATELY OUT OF SCOPE (left for a later milestone):
 #   * OpenSSH server install + sshd service config  -> system scope (M69)
 #   * GPG secret / age-identity decryption + import -> system scope / future
@@ -24,17 +36,17 @@
 #     it is intentionally NOT listed below (see the activity comment).
 # `home-switch.ps1` continues to own those concerns until they are ported.
 
-import repro/profile
+import repro_profile
 
 profile "zahary":
 
   # The `default` activity is always enabled on every host. It carries the
   # user-facing Scoop packages that `home-switch.ps1` installs. They are
-  # guarded by `when windows:` because this profile currently only
+  # guarded by `when windows():` because this profile currently only
   # describes the Windows host; the same package set on Linux/macOS is
   # still owned by the Nix flake.
   activity default:
-    when windows:
+    when windows():
       # --- secrets / crypto tooling ---
       age              # extras bucket -- age encryption CLI
       gnupg            # main bucket   -- GnuPG
@@ -44,7 +56,7 @@ profile "zahary":
       gh               # main bucket   -- GitHub CLI
 
       # --- terminal / editor ---
-      windows-terminal # extras bucket
+      `windows-terminal` # extras bucket
       vscode           # extras bucket
       neovim           # main bucket
 
@@ -61,7 +73,7 @@ profile "zahary":
 
       # --- AI dev tooling ---
       codex            # main bucket   -- OpenAI Codex CLI
-      claude-code      # main bucket   -- Anthropic Claude Code CLI
+      `claude-code`    # main bucket   -- Anthropic Claude Code CLI
 
   # Per-package configuration overrides. These feed the Configurable
   # system at priority `prSet`. The git identity values are mirrored from
@@ -75,16 +87,16 @@ profile "zahary":
   # resources: -- M78 profile-declared home-scope resources.
   # ---------------------------------------------------------------------------
   # This block ports the ELEVATION-FREE affordances of `home-switch.ps1`
-  # that previously had no representation in `home.nim`. Each entry is a
-  # `<kind> <address>:` header (one of the six M68 home-scope resource
-  # kinds) followed by `<key> = <value>` attribute lines. `repro home
-  # apply` materializes every reachable entry through the M68 drivers and
-  # records one `ResourceBinding` per resource in the activation manifest.
+  # that previously had no representation in `home.nim`. Phase A
+  # constructors (`envUserPath`, `shellIntegration`, `envUserVariable`)
+  # produce one `ResourceIntent` each; `repro home apply` materializes
+  # them through the M68 drivers and records one `ResourceBinding` per
+  # resource in the activation manifest.
   #
   # Everything here is Windows-specific (PowerShell profile, the user
   # PATH registry value, HKCU\Environment variables), so the whole block
-  # is nested under a single `when windows:` predicate -- on a non-Windows
-  # host none of these resources is planned or materialized.
+  # is wrapped in a `when defined(windows):` compile-time guard -- on a
+  # non-Windows host none of these resources is planned or materialized.
   #
   # CO-RESIDENCE WITH home-switch.ps1: these resources are ADDITIVE. The
   # legacy script's `Ensure-PowerShellProfileDirenvHook` still writes its
@@ -93,112 +105,56 @@ profile "zahary":
   # touch the user PATH and the XDG env vars. The Reprobuild-managed
   # block below uses its OWN `repro-managed:` sentinels and its own
   # `env.userPath` contribution accounting, so the two coexist without
-  # conflict (the two managed blocks are independent). The `env.userPath`
-  # driver de-duplicates only TEXTUALLY IDENTICAL PATH entries: on the
-  # real host `Ensure-GitBashInPath` had already added the Git-Bash
-  # `usr\bin` dir in fully-resolved form while this profile declares it
-  # in `%USERPROFILE%\...` token form, so that one directory ends up
-  # listed on PATH twice -- harmless and additive, and it resolves away
-  # once the legacy home-switch.ps1 PATH logic is retired. Once the user is
-  # satisfied that Reprobuild owns these affordances, they retire the
-  # legacy `# BEGIN DOTFILES DIRENV` block (and the corresponding
-  # PATH/XDG logic) from `home-switch.ps1` BY HAND -- Reprobuild never
-  # edits or deletes the legacy script.
+  # conflict. Once the user is satisfied that Reprobuild owns these
+  # affordances, they retire the legacy `# BEGIN DOTFILES DIRENV` block
+  # from `home-switch.ps1` BY HAND -- Reprobuild never edits or deletes
+  # the legacy script.
   resources:
-    when windows:
+    when defined(windows):
+      # 1. Put Reprobuild's realized-launcher directory on the user PATH.
+      #    The literal `%LOCALAPPDATA%\...` form is host/user-portable;
+      #    the M68 `env.userPath` driver preserves REG_EXPAND_SZ on the
+      #    existing registry value so Windows expands the placeholders
+      #    at session start.
+      envUserPath(
+        entries = "%LOCALAPPDATA%\\repro\\home\\bin," &
+                  "%USERPROFILE%\\scoop\\apps\\git\\current\\usr\\bin",
+        address = "launcherBin")
 
-      # 1. The essential affordance: put Reprobuild's realized-launcher
-      #    directory on the user PATH. M70 realizes 12 launchers into
-      #    `<state-dir>\bin`; on Windows the default state dir is
-      #    `%LOCALAPPDATA%\repro\home`, so the stable launcher dir is
-      #    `%LOCALAPPDATA%\repro\home\bin`. Without this entry the
-      #    realized launchers exist but are not on PATH.
-      #
-      #    The entry is written VERBATIM to `HKCU\Environment\Path` by
-      #    the M68 `env.userPath` driver. We use the literal
-      #    `%LOCALAPPDATA%\...` form (not a resolved absolute path)
-      #    deliberately: (a) it is host/user-portable -- it does not
-      #    bake in `C:\Users\zahary`, so the same profile is correct in
-      #    the sandbox (user WDAGUtilityAccount) and on the real host;
-      #    (b) a real Windows `HKCU\Environment\Path` is REG_EXPAND_SZ,
-      #    and the driver preserves REG_EXPAND_SZ when the existing
-      #    value already has it, so Windows expands `%LOCALAPPDATA%` at
-      #    session start. The driver is non-destructive: pre-existing
-      #    PATH entries (Scoop shims, anything home-switch added) are
-      #    preserved.
-      #
-      #    `home-switch.ps1`'s `Ensure-GitBashInPath` also adds the
-      #    Git-Bash `usr\bin` directory to the user PATH so `direnv`
-      #    (which shells out to `bash`) can find it. Scoop installs Git
-      #    under `%USERPROFILE%\scoop\apps\git\current`, so we add that
-      #    `usr\bin` here too. Comma-separated -> two PATH entries.
-      env.userPath launcherBin:
-        entries = "%LOCALAPPDATA%\\repro\\home\\bin,%USERPROFILE%\\scoop\\apps\\git\\current\\usr\\bin"
-
-      # 2. The PowerShell-profile shell integration: a Reprobuild-managed
+      # 2. PowerShell-profile shell integration: a Reprobuild-managed
       #    block in the PowerShell 7 profile carrying the XDG
-      #    base-directory setup and the direnv `cd`-hook, faithfully
-      #    ported from `home-switch.ps1`'s
-      #    `Ensure-PowerShellProfileDirenvHook`. `shell.integration` is
-      #    the right kind (not bare `fs.managedBlock`): the M68
-      #    `shell.integration` driver is purpose-built for a managed
-      #    block in a shell startup file and on Windows simply targets
-      #    the PowerShell profile via the managed-block writer.
-      #
-      #    `hostFile` is `~`-relative (resolved against $HOME by the
-      #    apply pipeline) and points at the conventional PowerShell 7
-      #    profile path -- the same path the `shell.integration`
-      #    driver's `defaultPowerShellProfilePath` uses.
-      #
-      #    The `home.nim` `resources:` surface is line-oriented: the
-      #    `content` attribute is a SINGLE logical line. PowerShell
-      #    statements separated by `;` run fine on one physical line,
-      #    so the hook is authored as a `;`-chained one-liner. It (a)
-      #    sets XDG_CONFIG_HOME / XDG_CACHE_HOME / XDG_DATA_HOME /
-      #    DIRENV_CONFIG in-session if unset -- mirroring the in-profile
-      #    defaults home-switch's hook applies; (b) creates those
-      #    directories; (c) registers direnv's pwsh `cd`-hook via
-      #    `direnv hook pwsh`, guarded on direnv being present. The
-      #    legacy block additionally does POSIX->Windows PATH-list
-      #    conversion inside a hand-rolled LocationChangedAction; that
-      #    refinement stays in the legacy `# BEGIN DOTFILES DIRENV`
-      #    block until the user retires it.
-      shell.integration powershellProfileDirenv:
-        hostFile = "~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1"
-        blockId = "repro-home-direnv"
-        content = "if (-not $env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME = $env:APPDATA }; if (-not $env:XDG_CACHE_HOME) { $env:XDG_CACHE_HOME = $env:LOCALAPPDATA }; if (-not $env:XDG_DATA_HOME) { $env:XDG_DATA_HOME = (Join-Path $env:LOCALAPPDATA 'direnv-data') }; if (-not $env:DIRENV_CONFIG) { $env:DIRENV_CONFIG = (Join-Path $env:XDG_CONFIG_HOME 'direnv') }; foreach ($d in @($env:XDG_CONFIG_HOME, $env:XDG_CACHE_HOME, $env:XDG_DATA_HOME, $env:DIRENV_CONFIG)) { if ($d -and -not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }; if (Get-Command direnv -ErrorAction SilentlyContinue) { Invoke-Expression (& direnv hook pwsh | Out-String) }"
+      #    base-directory setup and the direnv `cd`-hook. `hostFile` is
+      #    `~`-relative; the M68 `shell.integration` driver is purpose-
+      #    built for a managed block in a shell startup file.
+      shellIntegration(
+        hostFile = "~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1",
+        blockId = "repro-home-direnv",
+        content = "if (-not $env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME = $env:APPDATA }; if (-not $env:XDG_CACHE_HOME) { $env:XDG_CACHE_HOME = $env:LOCALAPPDATA }; if (-not $env:XDG_DATA_HOME) { $env:XDG_DATA_HOME = (Join-Path $env:LOCALAPPDATA 'direnv-data') }; if (-not $env:DIRENV_CONFIG) { $env:DIRENV_CONFIG = (Join-Path $env:XDG_CONFIG_HOME 'direnv') }; foreach ($d in @($env:XDG_CONFIG_HOME, $env:XDG_CACHE_HOME, $env:XDG_DATA_HOME, $env:DIRENV_CONFIG)) { if ($d -and -not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }; if (Get-Command direnv -ErrorAction SilentlyContinue) { Invoke-Expression (& direnv hook pwsh | Out-String) }",
+        address = "powershellProfileDirenv")
 
       # 3. The XDG base-directory variables as PERSISTENT user environment
       #    variables. `home-switch.ps1`'s `Ensure-DirenvConfig` sets these
       #    with `[Environment]::SetEnvironmentVariable(..., 'User')` -- i.e.
-      #    they ARE persistent registry-backed user env vars, not merely
-      #    in-profile assignments -- so they are declared here as
-      #    `env.userVariable` resources (the shell-integration block above
-      #    additionally sets them in-session for the current shell, exactly
-      #    as home-switch's hook does).
-      #
-      #    `valueKind = "expandString"` writes REG_EXPAND_SZ so the
-      #    `%APPDATA%` / `%LOCALAPPDATA%` references resolve per-user at
-      #    session start -- host/user-portable, no hardcoded profile path.
-      env.userVariable xdgConfigHome:
-        name = "XDG_CONFIG_HOME"
-        value = "%APPDATA%"
-        valueKind = "expandString"
+      #    they ARE persistent registry-backed user env vars.
+      envUserVariable(name = "XDG_CONFIG_HOME",
+        value = "%APPDATA%",
+        valueKind = "expandString",
+        address = "xdgConfigHome")
 
-      env.userVariable xdgCacheHome:
-        name = "XDG_CACHE_HOME"
-        value = "%LOCALAPPDATA%"
-        valueKind = "expandString"
+      envUserVariable(name = "XDG_CACHE_HOME",
+        value = "%LOCALAPPDATA%",
+        valueKind = "expandString",
+        address = "xdgCacheHome")
 
-      env.userVariable xdgDataHome:
-        name = "XDG_DATA_HOME"
-        value = "%LOCALAPPDATA%\\direnv-data"
-        valueKind = "expandString"
+      envUserVariable(name = "XDG_DATA_HOME",
+        value = "%LOCALAPPDATA%\\direnv-data",
+        valueKind = "expandString",
+        address = "xdgDataHome")
 
-      env.userVariable direnvConfig:
-        name = "DIRENV_CONFIG"
-        value = "%APPDATA%\\direnv"
-        valueKind = "expandString"
+      envUserVariable(name = "DIRENV_CONFIG",
+        value = "%APPDATA%\\direnv",
+        valueKind = "expandString",
+        address = "direnvConfig")
 
   # Host -> activity map. `default` is always enabled regardless of this
   # block; the entry below documents the mapping for the real development

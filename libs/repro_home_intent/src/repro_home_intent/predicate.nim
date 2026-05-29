@@ -226,6 +226,20 @@ proc parseAtom(p: var Parser): PredNode =
     result = PredNode(kind: pnStrLit, strVal: t.text)
   of tkIdent:
     discard p.advance()
+    # M83 Phase F3: also accept the Phase A call-form predicate
+    # (`windows()`, `linux()`, etc.) so a Phase-A-shaped profile
+    # parses through the structural editor's source-text reader.
+    # The empty argument list is collapsed to the bare identifier
+    # in the AST — both forms canonicalize to the same predicate.
+    if p.peek().kind == tkLParen:
+      discard p.advance()
+      if p.peek().kind == tkRParen:
+        discard p.advance()
+      else:
+        let inner = p.peek()
+        raiseUnstructured(p.profilePath, p.line, inner.col,
+          "'" & inner.text & "'",
+          "an empty argument list `()` after the predicate identifier")
     result = PredNode(kind: pnIdent, ident: t.text)
   of tkLParen:
     discard p.advance()

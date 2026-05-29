@@ -562,6 +562,21 @@ e2e_profile_modules:
         tests/e2e/m83/t_e2e_profile_modules.nim \
         2>&1 | tee test-logs/e2e_profile_modules.log
 
+e2e_compile_fail_is_hard_error:
+    # M83 Phase F3 gate: profile compile failure is a HARD error
+    # across `repro home apply`, `repro home apply --plan`, and
+    # `repro home plan` (no legacy-parser auto-fallback).
+    mkdir -p test-logs build/test-bin build/nimcache build/bin
+    bash ./scripts/build_apps.sh
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/e2e_compile_fail_is_hard_error \
+        --out:build/test-bin/e2e_compile_fail_is_hard_error \
+        tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim \
+        2>&1 | tee test-logs/e2e_compile_fail_is_hard_error.log
+
 integration_intent_layer_round_trip:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

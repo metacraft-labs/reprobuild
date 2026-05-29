@@ -191,82 +191,16 @@ proc parseFlagValue(args: openArray[string]; i: var int;
   raise newException(ValueError, "internal: parseFlagValue called for " & flag)
 
 # ---------------------------------------------------------------------------
-# M83 Phase D: compile-then-adapt path for `home.nim` profiles.
+# M83 Phase D + F3: compile-then-adapt path for `home.nim` profiles.
+#
+# Phase F3 removed the legacy-parser auto-fallback from the apply path.
+# Profile compilation failure is now a HARD ERROR. The hand-rolled
+# `loadProfile` parser still ships as a library proc for the structural
+# editor (`repro home add/set/remove`), which legitimately needs to read
+# the source text and edit it byte-for-byte preserving comments and
+# formatting — but the apply pipeline no longer falls through to it on a
+# Phase A compile failure.
 # ---------------------------------------------------------------------------
-
-const
-  ProfileCompileMarkerImport = "import repro/profile"
-    ## When the source carries this slash-form import, the file is a
-    ## legacy text-format profile (the `repro_profile` macro library
-    ## is imported as `import repro_profile`, NOT `repro/profile` —
-    ## the slash form is just a documentation marker the M60 parser
-    ## recognizes). On a compile failure for such a file we fall back
-    ## to the legacy parser instead of propagating the diagnostic.
-  ProfileCompileMacroImport = "import repro_profile"
-    ## A Phase-A-shaped profile begins with this real Nim import; it
-    ## is the SIGNATURE that the file is INTENDED to be compiled, not
-    ## hand-parsed.
-
-proc readProfileHeadLines(profilePath: string;
-                          limit = 50): seq[string] =
-  ## Read the first `limit` non-blank/non-comment lines of `profilePath`
-  ## for header analysis. Helper for the legacy / Phase-A decision.
-  try:
-    let src = readFile(extendedPath(profilePath))
-    var lineCount = 0
-    var pos = 0
-    while pos < src.len and lineCount < limit:
-      let lineEnd = src.find('\n', pos)
-      let stop = if lineEnd < 0: src.len else: lineEnd
-      result.add(src[pos ..< stop].strip())
-      pos = if lineEnd < 0: src.len else: lineEnd + 1
-      inc lineCount
-  except CatchableError:
-    discard
-
-proc isLegacyTextProfile*(profilePath: string;
-                          compileMsg: string): bool =
-  ## Heuristic: does this look like a legacy text-format profile that
-  ## the new `nim c` path is NOT expected to handle?
-  ##
-  ## A file is treated as a legacy fixture when ANY of:
-  ##   * the compile failure was a missing `repro/profile` module
-  ##     (the legacy marker import is not a real Nim module);
-  ##   * the compile failure was `nim not found on PATH` — no
-  ##     profile of any shape can compile on this host, so we let
-  ##     every profile fall back rather than fail-closing the apply
-  ##     pipeline (Phase D explicitly opts NOT to vendor Nim);
-  ##   * the file does NOT have a real `import repro_profile`
-  ##     statement among its head lines (the macro-library import IS
-  ##     the Phase-A-shape signature); a legacy `system.nim` with
-  ##     bare resource stanzas and no imports is the typical case;
-  ##   * the file carries the documentation-marker
-  ##     `import repro/profile` (slash form).
-  ##
-  ## Conservative for genuinely-broken Phase-A profiles: if a file
-  ## DOES `import repro_profile` AND the compile error is something
-  ## other than "nim missing", we propagate (don't silently degrade).
-  if compileMsg.contains("cannot open file: repro/profile"):
-    return true
-  if compileMsg.contains("`nim` not found on PATH") or
-     compileMsg.contains("'nim' not found on PATH"):
-    return true
-  let head = readProfileHeadLines(profilePath, limit = 80)
-  var hasMacroImport = false
-  for line in head:
-    if line.startsWith(ProfileCompileMarkerImport):
-      return true
-    # Match `import repro_profile` exactly OR followed by a non-ident
-    # character (so `import repro_profile_intent` etc. do NOT count).
-    if line == ProfileCompileMacroImport or
-       (line.startsWith(ProfileCompileMacroImport) and
-        line.len > ProfileCompileMacroImport.len and
-        line[ProfileCompileMacroImport.len] notin
-          {'a'..'z', 'A'..'Z', '0'..'9', '_'}):
-      hasMacroImport = true
-  if not hasMacroImport:
-    return true
-  false
 
 proc defaultProfileCompileOptionsFor(profileRoot: string;
                                      stateDir: string):
@@ -281,7 +215,7 @@ proc defaultProfileCompileOptionsFor(profileRoot: string;
 
 type
   CompileAdaptOutcome* = object
-    profile*: Profile           ## nil when fallback is required
+    profile*: Profile           ## nil when the compile failed
     compileError*: string
     cacheHit*: bool             ## informational
 
@@ -295,9 +229,8 @@ proc compileAndAdaptHomeProfile*(profilePath: string;
   ## through `ApplyOptions.preLoadedProfile`.
   ##
   ## On compile failure: `result.profile` is nil and
-  ## `result.compileError` carries the diagnostic. The caller decides
-  ## whether to fall back to the legacy parser (via
-  ## `isLegacyTextProfile`) or re-raise.
+  ## `result.compileError` carries the diagnostic. Apply-path callers
+  ## propagate as a hard error via `formatProfileCompileError`.
   result = CompileAdaptOutcome()
   let opts = defaultProfileCompileOptionsFor(profilePath, stateDir)
   try:
@@ -308,6 +241,31 @@ proc compileAndAdaptHomeProfile*(profilePath: string;
     result.compileError = err.msg
   except CatchableError as err:
     result.compileError = err.msg
+
+proc formatProfileCompileError*(commandName, profilePath,
+                                compileError: string;
+                                planCommand = ""): string =
+  ## M83 Phase F3: render the actionable error message produced when a
+  ## profile fails to compile on the apply path. The shape is uniform
+  ## across `repro home` and `repro infra` callers so operators see the
+  ## same surface no matter which subcommand surfaced the failure.
+  ##
+  ## The message points at the Phase F migration recipe, shows the Nim
+  ## compilation diagnostic verbatim, and suggests running the matching
+  ## `plan` subcommand to triage whether the issue is profile syntax or
+  ## an apply-side problem.
+  let plan =
+    if planCommand.len > 0: planCommand
+    else: commandName & " plan"
+  result =
+    commandName & ": profile compilation failed for " & profilePath &
+      "\n" &
+    "  diagnostic:\n" &
+    "    " & compileError.strip().replace("\n", "\n    ") & "\n" &
+    "  hint: see reprobuild-specs/Profile-Migration-Patterns.md for " &
+      "the Phase A migration recipe.\n" &
+    "  hint: run `" & plan & "` to see whether the issue is profile " &
+      "syntax vs. an apply-side problem."
 
 # ---------------------------------------------------------------------------
 # Apply-pipeline plumbing (M63).
@@ -344,25 +302,21 @@ proc runApplyInline*(commandName: string;
     opts.applyMode = mode
     opts.setOverrideKey = setOverrideKey
     opts.adoptAddresses = adoptAddresses
-    # M83 Phase D: try the compile-then-adapt path. On a compile
-    # failure that looks like a legacy text-format profile (no
-    # `import repro_profile` macro library — only the slash-form
-    # marker import), fall through to the legacy parser. Otherwise
-    # propagate the compile diagnostic.
+    # M83 Phase F3: the compile-then-adapt path is the ONLY apply path.
+    # A profile compilation failure is a HARD ERROR — the legacy text
+    # parser no longer auto-fills the gap.
     let profilePath =
       if opts.profilePath.len > 0: opts.profilePath
       else: resolveProfilePath()
     let stateDir = resolveStateDir()
     let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
-    if outcomeCompile.profile != nil:
-      opts.preLoadedProfile = outcomeCompile.profile
-    elif not isLegacyTextProfile(profilePath, outcomeCompile.compileError):
-      stderr.writeLine("repro home " & commandName &
-        ": profile compile failed: " & outcomeCompile.compileError)
+    if outcomeCompile.profile == nil:
+      stderr.writeLine(formatProfileCompileError(
+        "repro home " & commandName, profilePath,
+        outcomeCompile.compileError,
+        planCommand = "repro home plan"))
       return 1
-    # On a recognized legacy fixture: leave `preLoadedProfile` nil so
-    # the apply pipeline calls `loadProfile` on the source text via
-    # the legacy parser.
+    opts.preLoadedProfile = outcomeCompile.profile
     let outcome = runApply(opts)
     for r in outcome.abortedRecovered:
       stderr.writeLine(renderRecovered(r))
@@ -998,18 +952,19 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool): int =
   try:
     var opts: ApplyOptions
     opts.reconcileStowDrift = reconcileDrift
-    # M83 Phase D: same compile-then-adapt path as the real apply.
+    # M83 Phase F3: same hard-error compile path as the real apply.
     let profilePath =
       if opts.profilePath.len > 0: opts.profilePath
       else: resolveProfilePath()
     let stateDir = resolveStateDir()
     let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
-    if outcomeCompile.profile != nil:
-      opts.preLoadedProfile = outcomeCompile.profile
-    elif not isLegacyTextProfile(profilePath, outcomeCompile.compileError):
-      stderr.writeLine("repro home apply --plan: profile compile failed: " &
-        outcomeCompile.compileError)
+    if outcomeCompile.profile == nil:
+      stderr.writeLine(formatProfileCompileError(
+        "repro home apply --plan", profilePath,
+        outcomeCompile.compileError,
+        planCommand = "repro home plan"))
       return 1
+    opts.preLoadedProfile = outcomeCompile.profile
     let preview = runApplyPlan(opts)
     stdout.write(renderPlanPreview(preview))
     if preview.driftCount > 0 and not allowDrift and not reconcileDrift:
@@ -1433,21 +1388,17 @@ proc runHomePlan(args: openArray[string]): int =
     # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
     let profilePath = loadProfilePath()
     let stateDir = resolveStateDir()
-    # M83 Phase F2: drive the same compile-then-adapt path the apply
-    # CLI takes, so a Phase A macro-form profile loads through the
-    # build-graph edge. Fall back to the legacy parser when the
-    # compile failure looks like a legacy text-format profile or
-    # when Nim is missing — matching the `runApplyInline` policy.
+    # M83 Phase F3: the compile-then-adapt path is the ONLY path. A
+    # profile compilation failure is a HARD ERROR — the legacy text
+    # parser is no longer consulted as an apply-path fallback.
     let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
-    let prof =
-      if outcomeCompile.profile != nil:
-        outcomeCompile.profile
-      elif isLegacyTextProfile(profilePath, outcomeCompile.compileError):
-        loadProfile(profilePath)
-      else:
-        stderr.writeLine("repro home plan: profile compile failed: " &
-          outcomeCompile.compileError)
-        return 1
+    if outcomeCompile.profile == nil:
+      stderr.writeLine(formatProfileCompileError(
+        "repro home plan", profilePath,
+        outcomeCompile.compileError,
+        planCommand = "repro home plan"))
+      return 1
+    let prof = outcomeCompile.profile
     let desired = composeDesiredResources(prof, homeDir, currentHost())
     # Load recorded bindings from the active generation's manifest.
     var recorded = initOrderedTable[string, RecordedBinding]()

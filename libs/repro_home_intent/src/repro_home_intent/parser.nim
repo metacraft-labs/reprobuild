@@ -251,6 +251,14 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
   ## `--version-pin` style attributes; we treat the whole post-name
   ## tail as an opaque string we'll preserve byte-for-byte. Comments
   ## are ignored (they hang off the line).
+  ##
+  ## M83 Phase F3: also accept the Phase A backtick-quoted form
+  ## ``` `hyphenated-package` ``` so a Phase-A-shaped profile (which
+  ## must use backticks for hyphenated identifiers — `nnkAccQuoted`
+  ## in Nim) still parses through the structural editor's source-text
+  ## reader. The extracted `packageName` is the inner text;
+  ## surrounding backticks are dropped to match the bare-identifier
+  ## storage shape.
   let raw = ctx.lines[idx]
   let trimmed = stripInlineComment(raw).trimTrailing()
   let indent = countLeadingSpaces(trimmed)
@@ -259,17 +267,41 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
     raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
       "an empty line treated as a package reference",
       "a bare package identifier (e.g. `git`)")
-  # The package name is the first identifier token; the rest may be
-  # whitespace + flag-style attributes which we accept and preserve.
+  # The package name is the first identifier token (bare or
+  # backtick-quoted); the rest may be whitespace + flag-style
+  # attributes which we accept and preserve.
   var i = 0
-  while i < body.len and (body[i].isAlphaAscii() or body[i].isDigit() or
-                          body[i] in {'_', '-'}):
-    inc i
-  let pkgName = body[0 ..< i]
-  if pkgName.len == 0 or not (body[0].isAlphaAscii() or body[0] == '_'):
-    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
-      "'" & body & "'",
-      "a bare package reference starting with a letter or underscore")
+  var pkgName = ""
+  if body[0] == '`':
+    # Phase F3: backtick-quoted form `<name>`.
+    let closeIdx = body.find('`', 1)
+    if closeIdx <= 1:
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "'" & body & "'",
+        "a closing backtick after the package name " &
+        "(e.g. `windows-terminal`)")
+    pkgName = body[1 ..< closeIdx]
+    i = closeIdx + 1
+    if pkgName.len == 0 or
+       not (pkgName[0].isAlphaAscii() or pkgName[0] == '_'):
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 2,
+        "'`" & pkgName & "`'",
+        "a backtick-quoted name starting with a letter or underscore")
+    for ch in pkgName:
+      if not (ch.isAlphaAscii() or ch.isDigit() or ch in {'_', '-'}):
+        raiseUnstructured(ctx.profilePath, idx + 1, indent + 2,
+          "'`" & pkgName & "`'",
+          "a backtick-quoted name containing only " &
+          "letters, digits, `_`, and `-`")
+  else:
+    while i < body.len and (body[i].isAlphaAscii() or body[i].isDigit() or
+                            body[i] in {'_', '-'}):
+      inc i
+    pkgName = body[0 ..< i]
+    if pkgName.len == 0 or not (body[0].isAlphaAscii() or body[0] == '_'):
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "'" & body & "'",
+        "a bare package reference starting with a letter or underscore")
   # Refuse Nim control-flow keywords — the spec explicitly calls out
   # `for` loops building an activity body at runtime as the canonical
   # unstructured case.
@@ -307,6 +339,13 @@ proc parseActivityChildren(ctx: ParseCtx; startIdx, endIdxExclusive,
       raiseUnstructured(ctx.profilePath, i + 1, lineIndent + 1,
         "'" & raw.strip() & "' at indent " & $lineIndent,
         "content at indent " & $childIndent)
+    # M83 Phase F3: tolerate a bare `discard` line. The structural
+    # editor synthesizes one as a no-op body placeholder when a
+    # removal would otherwise leave the activity / conditional body
+    # syntactically empty (Phase A macro form requires a body).
+    if raw.strip() == "discard":
+      inc i
+      continue
     let m = matchAnyHeader(raw)
     if m.ok and m.keyword == WhenHeader:
       let blk = parseConditional(ctx, i, childIndent, ckWhen,

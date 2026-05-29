@@ -306,11 +306,62 @@ proc growBlockEndIfNeeded(node: IntentNode; line: int) =
   if node.endLine < line:
     node.endLine = line
 
+proc profileHasMacroImport(p: Profile): bool =
+  ## M83 Phase F3: detect whether the source carries the Phase A
+  ## `import repro_profile` macro-library import. Used by the package-
+  ## spelling renderer to decide whether a hyphenated name needs
+  ## backticks. A legacy text-form fixture (slash-form `import
+  ## repro/profile`) has no Phase A compile requirement, so hyphenated
+  ## names stay bare to keep the existing round-trip behaviour
+  ## byte-identical against the legacy home-intent test fixtures.
+  const Marker = "import repro_profile"
+  for raw in p.lines:
+    let line = raw.strip()
+    if line == Marker:
+      return true
+    if line.startsWith(Marker) and line.len > Marker.len and
+       line[Marker.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+      return true
+  false
+
+proc renderPackageRefSpelling(p: Profile; pkg: string): string =
+  ## M83 Phase F3: emit a hyphenated package name with backticks
+  ## (`` `pkg-x` ``) so the resulting line is also a valid Phase A
+  ## macro-form identifier — but ONLY when the profile is Phase-A
+  ## shaped (detected via the `import repro_profile` macro-library
+  ## import). Legacy text-form profiles keep the bare spelling so the
+  ## structural editor's round-trip stays byte-identical against the
+  ## existing home-intent test fixtures.
+  if not profileHasMacroImport(p):
+    return pkg
+  for ch in pkg:
+    if ch == '-':
+      return "`" & pkg & "`"
+  pkg
+
+proc stripBodyDiscardPlaceholder(p: Profile; blk: IntentNode) =
+  ## M83 Phase F3: drop the synthetic `discard` placeholder line that
+  ## `removePackageRefFromBlock` may have left when the body became
+  ## empty. Called from `addPackageRefInBlock` right before inserting
+  ## a real package line. Without this strip, the next add would
+  ## leave the discard line in place AND add the package — visible as
+  ## a stale `discard` in the file.
+  let header = headerLineOf(blk)
+  let endLine = blk.endLine
+  var idx = header
+  while idx < endLine and idx < p.lines.len:
+    let line = p.lines[idx]
+    if line.strip() == "discard":
+      deleteLine(p, idx)
+      return
+    inc idx
+
 proc addPackageRefInBlock(p: Profile; blk: IntentNode; pkg: string) =
   ## Append `pkg` as the last child of `blk` (`nkActivity` or
   ## `nkCondBlock`), preserving any trailing blank/comment lines.
+  stripBodyDiscardPlaceholder(p, blk)
   let bodyIndent = blk.indent + p.indentStep
-  let line = indentStr(bodyIndent) & pkg
+  let line = indentStr(bodyIndent) & renderPackageRefSpelling(p, pkg)
   let header = headerLineOf(blk)
   let insertAt = insertionIndex(p, blk, header)
   insertLine(p, insertAt, line)
@@ -382,6 +433,16 @@ proc removePackageRefFromBlock(p: Profile; blk: IntentNode;
                               pkg: string): bool =
   ## Remove the first matching package reference from `blk`. Returns
   ## true on success.
+  ##
+  ## M83 Phase F3: when the removal leaves the block body empty, leave
+  ## a `discard` placeholder line so the resulting file remains a valid
+  ## Phase A macro-form body (Nim requires every block to have at
+  ## least one statement). The legacy text parser already silently
+  ## tolerates an empty body via the activity-block re-emission code;
+  ## the `discard` placeholder is the canonical no-op statement for
+  ## Phase A and round-trips cleanly through the structural editor's
+  ## re-read (it is parsed as a no-op activity-body element and
+  ## ignored by the intent layer).
   var children = childrenSeq(blk)
   let idx = findPackageRef(children, pkg)
   if idx < 0:
@@ -390,6 +451,13 @@ proc removePackageRefFromBlock(p: Profile; blk: IntentNode;
   deleteLine(p, line - 1)
   children.delete(idx)
   setChildrenSeq(blk, children)
+  if children.len == 0 and profileHasMacroImport(p):
+    let bodyIndent = blk.indent + p.indentStep
+    let discardLine = indentStr(bodyIndent) & "discard"
+    let header = headerLineOf(blk)
+    let insertAt = insertionIndex(p, blk, header)
+    insertLine(p, insertAt, discardLine)
+    growBlockEndIfNeeded(blk, insertAt + 1)
   true
 
 proc removePackageReference*(profilePath: string; package: string;

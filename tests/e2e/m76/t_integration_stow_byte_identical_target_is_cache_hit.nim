@@ -55,6 +55,13 @@ else:
   import repro_home_generations
   import repro_local_store
   import repro_home_apply
+  # M83 Phase F3: the in-process apply call below routes the profile
+  # through `compileAndAdaptHomeProfile` so the `ApplyOptions.
+  # preLoadedProfile` seam carries the compiled Phase A intent. After
+  # F3 the apply pipeline no longer falls through to the legacy text
+  # parser, so this test cannot rely on `runApply`'s default source-
+  # text load path.
+  import repro_cli_support/home as cli_home
 
   const ProjectRoot = currentSourcePath().parentDir().parentDir()
     .parentDir().parentDir()
@@ -263,6 +270,10 @@ else:
       check readCurrentGenerationId(f.stateDir).len == 0
 
       # In-process: the surfaced exception is specifically EStowConflict.
+      # M83 Phase F3: load the (now Phase A) fixture through the
+      # compile-then-adapt path the CLI uses, then thread the compiled
+      # profile into `ApplyOptions.preLoadedProfile` so the in-process
+      # `runApply` call matches the CLI's apply semantics.
       block:
         var opts: ApplyOptions
         opts.profileDir = f.profileDir
@@ -270,6 +281,13 @@ else:
         opts.storeRoot = f.storeRoot
         opts.homeDir = f.homeDir
         opts.host = "m76-gate-host"
+        let profilePath = f.profileDir / "home.nim"
+        let compiled = cli_home.compileAndAdaptHomeProfile(profilePath,
+          f.stateDir)
+        doAssert compiled.profile != nil,
+          "in-process compile failed for the migrated m76 fixture: " &
+          compiled.compileError
+        opts.preLoadedProfile = compiled.profile
         var raisedKind = ""
         try:
           discard runApply(opts)
