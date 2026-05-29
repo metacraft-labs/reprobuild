@@ -30,6 +30,12 @@ type
     snapshotPath*: string
     field*: string
 
+  EActivationBundleCorrupt* = object of EHomeGenerations
+    ## An activation bundle failed structural validation, or the writer
+    ## could not assemble a complete closure for a generation.
+    bundlePath*: string
+    field*: string
+
   EApplyBusy* = object of EHomeGenerations
     ## `<state-dir>/locks/apply.lock` is already held by another
     ## process. The 30-second poll window elapsed without the holder
@@ -67,6 +73,14 @@ proc raiseIntentSnapshotCorrupt*(snapshotPath, field, msg: string) {.noreturn.} 
     "intent snapshot at '" & snapshotPath & "' is corrupt: " & msg &
     " (field: " & field & ")")
   e.snapshotPath = snapshotPath
+  e.field = field
+  raise e
+
+proc raiseActivationBundleCorrupt*(bundlePath, field, msg: string) {.noreturn.} =
+  var e = newException(EActivationBundleCorrupt,
+    "activation bundle at '" & bundlePath & "' is corrupt: " & msg &
+    " (field: " & field & ")")
+  e.bundlePath = bundlePath
   e.field = field
   raise e
 

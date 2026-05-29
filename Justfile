@@ -780,6 +780,21 @@ integration_apply_lock_serializes:
         tests/e2e/home-generations/t_integration_apply_lock_serializes.nim \
         2>&1 | tee test-logs/integration_apply_lock_serializes.log
 
+integration_remote_apply_activation_bundle_phase_a:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_activation_bundle_phase_a.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_remote_apply_activation_bundle_phase_a \
+        --out:build/test-bin/integration_remote_apply_activation_bundle_phase_a \
+        tests/e2e/m71/t_integration_remote_apply_activation_bundle_phase_a.nim \
+        2>&1 | tee test-logs/integration_remote_apply_activation_bundle_phase_a.log
+
 e2e_repro_home_apply_fresh_install:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
     nim c \

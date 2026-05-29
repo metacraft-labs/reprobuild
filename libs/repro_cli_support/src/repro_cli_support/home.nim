@@ -1106,6 +1106,83 @@ proc runHomeApply(args: openArray[string]): int =
   return runApplyInline("apply")
 
 # ---------------------------------------------------------------------------
+# `repro home __build-bundle` (M71 Phase A, internal).
+# ---------------------------------------------------------------------------
+
+proc bytesToString(bytes: openArray[byte]): string =
+  result = newString(bytes.len)
+  for i, b in bytes:
+    result[i] = char(b)
+
+proc runHomeBuildBundle(args: openArray[string]): int =
+  ## Internal Phase-A command: build a local-only activation bundle for
+  ## an already-realized generation and store it as one CAS blob in the
+  ## source store. This does not perform SSH transfer, remote
+  ## activation, or cross-host evaluation.
+  var generation = "current"
+  var stateDir = ""
+  var storeRoot = ""
+  var outPath = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      echo "usage: repro home __build-bundle [--generation=current|<hex>] " &
+        "[--state-dir PATH] [--store-root PATH] [--out PATH]"
+      echo ""
+      echo "Build a local-only activation bundle for an already-realized"
+      echo "home generation and store it as a CAS blob in the source store."
+      return 0
+    elif a == "--generation" or a.startsWith("--generation="):
+      generation = parseFlagValue(args, i, "--generation")
+    elif a == "--state-dir" or a.startsWith("--state-dir="):
+      stateDir = parseFlagValue(args, i, "--state-dir")
+    elif a == "--store-root" or a.startsWith("--store-root="):
+      storeRoot = parseFlagValue(args, i, "--store-root")
+    elif a == "--out" or a.startsWith("--out="):
+      outPath = parseFlagValue(args, i, "--out")
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home __build-bundle: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home __build-bundle: unexpected positional: " &
+        a)
+      return 2
+    inc i
+
+  try:
+    let resolvedStateDir =
+      if stateDir.len > 0: stateDir else: resolveStateDir()
+    var store = openStore(resolveStoreRoot(storeRoot))
+    defer:
+      try: store.close() except CatchableError: discard
+    let outcome = writeActivationBundle(resolvedStateDir, store, generation)
+    if outPath.len > 0:
+      let parent = parentDir(outPath)
+      if parent.len > 0:
+        createDir(extendedPath(parent))
+      writeFile(extendedPath(outPath), bytesToString(outcome.bundleBytes))
+    echo "bundleDigest: " & outcome.bundleDigestHex
+    echo "bundlePath: " & outcome.bundlePath
+    return 0
+  except EActivationBundleCorrupt as err:
+    stderr.writeLine("repro home __build-bundle: " & err.msg)
+    return 1
+  except EPointerCorrupt as err:
+    stderr.writeLine("repro home __build-bundle: corrupt pointer at " &
+      err.pointerPath & " (field: " & err.field & ")")
+    return 1
+  except StoreError as err:
+    stderr.writeLine("repro home __build-bundle: store error: " & err.msg)
+    return 1
+  except ValueError as err:
+    stderr.writeLine("repro home __build-bundle: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro home __build-bundle: error: " & err.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
 # `repro home set` / `repro home get` (M65).
 # ---------------------------------------------------------------------------
 
@@ -1970,6 +2047,7 @@ proc runHomeCommand*(args: seq[string]): int =
   of "why": return runHomeWhy(subArgs)
   of "history": return runHomeHistory(subArgs)
   of "apply": return runHomeApply(subArgs)
+  of "__build-bundle": return runHomeBuildBundle(subArgs)
   of "plan": return runHomePlan(subArgs)
   of "rollback": return runHomeRollback(subArgs)
   of "set": return runHomeSet(subArgs)
