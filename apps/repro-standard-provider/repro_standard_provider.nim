@@ -36,6 +36,7 @@ import repro_standard_provider/conventions/javascript_typescript as jsts_convent
 import repro_standard_provider/conventions/jsts_direct as jsts_direct_convention
 import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
 import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_convention
+import repro_standard_provider/conventions/c_cpp_cmake as c_cpp_cmake_convention
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/project_intro
@@ -159,6 +160,17 @@ when defined(reproProviderMode):
   addDefaultConvention(python_convention.pythonConvention())
   addDefaultConvention(jsts_convention.javaScriptTypeScriptConvention())
   addDefaultConvention(c_cpp_autotools_convention.cCppAutotoolsConvention())
+  # c_cpp_cmake (M38) registered BEFORE c_cpp_make so CMake claims any
+  # project with a root-level CMakeLists.txt before the Make convention
+  # gets a chance (the Make convention separately rejects projects with
+  # ``CMakeLists.txt`` at the root, so the order is defensive in either
+  # direction). c_cpp_cmake is the lightweight Tier 2b convention that
+  # shells out to a stock ``cmake`` binary for configure + per-member
+  # build. The heavier Tier 2c trycompile path
+  # (apps/repro-cmake-trycompile-provider.exe) remains for projects that
+  # need try_compile probes lifted into the reprobuild DAG; users opt
+  # into Tier 2c via explicit provider declaration.
+  addDefaultConvention(c_cpp_cmake_convention.cCppCMakeConvention())
   addDefaultConvention(c_cpp_make_convention.cCppMakeConvention())
   # c_cpp_direct (Mode 3 / no-Makefile) is registered LAST among the
   # C/C++ conventions so a project shipping a Makefile routes through

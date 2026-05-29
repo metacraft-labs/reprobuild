@@ -92,9 +92,9 @@ type
 # Convention attribution. The order in ``attributeConvention`` mirrors
 # the dispatch order in the standard-provider binary
 # (``addDefaultConvention(nim …); rust …; go …; python …;
-# javascript_typescript …; c_cpp_autotools …; c_cpp_make …``). When
-# multiple manifests coexist in a target directory the order here
-# decides who wins — same as the live registry.
+# javascript_typescript …; c_cpp_autotools …; c_cpp_cmake …; c_cpp_make
+# …``). When multiple manifests coexist in a target directory the order
+# here decides who wins — same as the live registry.
 # ----------------------------------------------------------------------
 
 const
@@ -121,10 +121,10 @@ const
     ("configure.ac",       "c-cpp-autotools"),
     ("configure.in",       "c-cpp-autotools"),
     ("Makefile.am",        "c-cpp-autotools"),
+    ("CMakeLists.txt",     "c-cpp-cmake"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
-    ("CMakeLists.txt",     "c-cpp-make"),
   ]
 
   ## Per-extension language attribution. We track a coarse "this dir is
@@ -314,7 +314,13 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
     let hasAutotools = fileExists(targetDir / "configure.ac") or
       fileExists(targetDir / "configure.in") or
       fileExists(targetDir / "Makefile.am")
-    if not hasMakefile and not hasCmake and not hasAutotools:
+    if hasCmake and not hasAutotools:
+      # M38: when CMakeLists.txt is present alongside .c sources but no
+      # autotools artefacts, route through the M38 ``c-cpp-cmake`` Tier
+      # 2b convention rather than the Make convention (which would
+      # reject the project for CMakeLists.txt presence anyway).
+      bestName = "c-cpp-cmake"
+    elif not hasMakefile and not hasCmake and not hasAutotools:
       bestName = "c-cpp-direct"
   # M30 refinement for Mode 3 Rust: same shape as the C/C++ refinement
   # above. When the extension census picks ``rust`` (i.e. ``.rs``

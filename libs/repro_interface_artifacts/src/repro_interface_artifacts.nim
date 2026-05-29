@@ -976,6 +976,7 @@ const
     "python3", "python", "uv",
     "node", "typescript", "tsx", "swc", "esbuild",
     "gcc", "clang", "make", "ar", "autoconf", "automake",
+    "cmake", "ninja",
     "gfortran", "fortran"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the

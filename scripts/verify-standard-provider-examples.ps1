@@ -46,7 +46,8 @@
 #                                             "npm install && npm run build"),
 #   javascript-typescript/webpack-app        (M24: webpack.config.* → Mode B),
 #   c-cpp-make/binary, c-cpp-make/library-static,
-#   c-cpp-autotools/hello-binary (when autotools toolchain available)
+#   c-cpp-autotools/hello-binary (when autotools toolchain available),
+#   c-cpp-cmake/hello-binary (M38; SKIP when cmake/ninja-or-make missing)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -138,6 +139,7 @@ $PopulatedExamples = @(
   'c-cpp-make/binary',
   'c-cpp-make/library-static',
   'c-cpp-autotools/hello-binary',
+  'c-cpp-cmake/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -548,6 +550,38 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'autoreconf' not on PATH (run windows/ensure-msys2-autotools.ps1 — sources autoconf + automake into D:/metacraft-dev-deps/msys2/msys64/usr/bin)" }
       }
       return @{ Available = $true; Reason = "cc=$($ccCmd.Source); make=$($makeCmd.Source); sh=$($shCmd.Source); autoreconf=$($autoreconfCmd.Source)" }
+    }
+    'c-cpp-cmake' {
+      # M38: the C/C++ CMake (Tier 2b) convention is registered. Probe
+      # for cmake + a C compiler + a single-config build driver (ninja
+      # or platform make). The convention prefers ninja; falls back to
+      # ``mingw32-make`` (MinGW Makefiles) on Windows or ``make`` (Unix
+      # Makefiles) on POSIX.
+      $ccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $ccCmd) {
+        $ccCmd = Get-Command clang -ErrorAction SilentlyContinue
+      }
+      if (-not $ccCmd) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH" }
+      }
+      $cmakeCmd = Get-Command cmake -ErrorAction SilentlyContinue
+      if (-not $cmakeCmd) {
+        return @{ Available = $false; Reason = "'cmake' not on PATH (M38 c-cpp-cmake convention needs stock cmake)" }
+      }
+      $builderCmd = Get-Command ninja -ErrorAction SilentlyContinue
+      $builderKind = "ninja"
+      if (-not $builderCmd) {
+        $builderCmd = Get-Command mingw32-make -ErrorAction SilentlyContinue
+        $builderKind = "mingw32-make"
+      }
+      if (-not $builderCmd) {
+        $builderCmd = Get-Command make -ErrorAction SilentlyContinue
+        $builderKind = "make"
+      }
+      if (-not $builderCmd) {
+        return @{ Available = $false; Reason = "no single-config build driver on PATH (needs ninja or mingw32-make or make)" }
+      }
+      return @{ Available = $true; Reason = "cc=$($ccCmd.Source); cmake=$($cmakeCmd.Source); $builderKind=$($builderCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -1386,6 +1420,20 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ('lib' + $member + '.a')))
         Greeting = $null
+      })
+    }
+    'c-cpp-cmake/hello-binary' {
+      # M38: c-cpp-cmake/hello-binary. The convention emits one
+      # ``cmake -S <root> -B <root>/.repro/build/cmake -G <generator>``
+      # configure action plus one ``cmake --build ... --target hello``
+      # build action. The fixture's CMakeLists.txt forces
+      # ``CMAKE_RUNTIME_OUTPUT_DIRECTORY=${CMAKE_BINARY_DIR}`` so the
+      # produced binary lands at
+      # ``.repro/build/cmake/hello[.exe]`` matching the convention's
+      # predicted output path.
+      return @(@{
+        Path     = Join-Path $fixtureDir '.repro\build\cmake\hello.exe'
+        Greeting = 'hello from c-cpp-cmake-hello-binary'
       })
     }
     'c-cpp-mode3/binary-with-library' {

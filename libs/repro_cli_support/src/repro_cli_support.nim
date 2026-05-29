@@ -5911,6 +5911,7 @@ const
     "python",
     "javascript-typescript",
     "c-cpp-autotools",
+    "c-cpp-cmake",
     "c-cpp-make",
     "c-cpp-direct",
     "rust-direct",
@@ -5928,14 +5929,17 @@ const
     ## hand-maintained list here for diagnostics rather than touching
     ## the registry on disk).
     ##
-    ## **Order matters.** The c-cpp pair must list ``c-cpp-autotools``
-    ## BEFORE ``c-cpp-make`` to mirror the registration order in the
-    ## standard-provider binary (a project carrying both a Makefile
-    ## and ``configure.ac`` is routed through Autotools because it
-    ## ``recognize``-matches first; the order documented here is the
-    ## order users see in ``repro show-conventions`` and must match
-    ## reality). If the standard-provider binary changes registration
-    ## order, update this constant to match — the pin test in
+    ## **Order matters.** The c-cpp triple must list ``c-cpp-autotools``
+    ## BEFORE ``c-cpp-cmake`` BEFORE ``c-cpp-make`` to mirror the
+    ## registration order in the standard-provider binary (a project
+    ## carrying both a Makefile and ``configure.ac`` is routed through
+    ## Autotools because it ``recognize``-matches first; a project
+    ## carrying CMakeLists.txt routes through ``c-cpp-cmake`` (M38) ahead
+    ## of the Make convention which separately rejects CMakeLists.txt
+    ## presence). The order documented here is the order users see in
+    ## ``repro show-conventions`` and must match reality. If the standard
+    ## provider binary changes registration order, update this constant
+    ## to match — the pin test in
     ## ``libs/repro_standard_provider/tests/test_known_convention_registry_pin.nim``
     ## fails loudly when the two drift.
 

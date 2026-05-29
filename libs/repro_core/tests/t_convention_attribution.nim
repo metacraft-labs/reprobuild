@@ -61,11 +61,11 @@ suite "attributeConvention: manifest detection":
     check attr.convention == "c-cpp-autotools"
     removeDir(dir)
 
-  test "CMakeLists.txt ⇒ c-cpp-make":
+  test "CMakeLists.txt ⇒ c-cpp-cmake":
     let dir = makeScratch("cmake")
     writeFile(dir / "CMakeLists.txt", "project(x)\n")
     let attr = attributeConvention(dir)
-    check attr.convention == "c-cpp-make"
+    check attr.convention == "c-cpp-cmake"
     removeDir(dir)
 
   test "*.nimble ⇒ nim":
