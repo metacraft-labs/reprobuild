@@ -110,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[17, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[19, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -125,6 +125,8 @@ const
     ("CMakeLists.txt",     "c-cpp-cmake"),
     ("meson.build",        "c-cpp-meson"),
     ("pom.xml",            "java-maven"),
+    ("build.gradle.kts",   "kotlin-gradle"),
+    ("build.gradle",       "kotlin-gradle"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -134,7 +136,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[20, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[21, tuple[ext, convention: string]] = [
     (".nim",  "nim"),
     (".rs",   "rust"),
     (".go",   "go"),
@@ -151,6 +153,7 @@ const
     (".cxx",  "c-cpp-make"),
     (".h",    "c-cpp-make"),
     (".java", "java-maven"),
+    (".kt",   "kotlin-gradle"),
     (".f90",  "fortran-direct"),
     (".f95",  "fortran-direct"),
     (".f03",  "fortran-direct"),
@@ -600,7 +603,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[13, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[15, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -639,6 +642,12 @@ const
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "fortran-direct",
                        exeName: "gfortran",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "java-maven",
+                       exeName: "javac",
+                       versionArgs: @["-version"]),
+    ToolchainProbeSpec(convention: "kotlin-gradle",
+                       exeName: "gradle",
                        versionArgs: @["--version"]),
   ]
 

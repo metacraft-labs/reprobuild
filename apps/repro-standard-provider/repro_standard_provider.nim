@@ -39,6 +39,7 @@ import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_co
 import repro_standard_provider/conventions/c_cpp_cmake as c_cpp_cmake_convention
 import repro_standard_provider/conventions/c_cpp_meson as c_cpp_meson_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
+import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/project_intro
@@ -197,6 +198,19 @@ when defined(reproProviderMode):
   # ``build.gradle[.kts]`` are present at the root (unusual but legal —
   # the Maven convention's ``recognize`` rejects in that case).
   addDefaultConvention(java_maven_convention.javaMavenConvention())
+  # kotlin_gradle (M41) — second JVM-ecosystem Tier 2b convention.
+  # Keys on ``build.gradle.kts`` or ``build.gradle`` at the project root
+  # (Kotlin DSL preferred). Registered AFTER java_maven so a project
+  # carrying BOTH ``pom.xml`` AND ``build.gradle[.kts]`` (unusual but
+  # legal — usually a transient migration state) routes through the
+  # Maven convention first. The kotlin_gradle convention's ``recognize``
+  # additionally rejects projects with ``pom.xml`` at the root, so the
+  # order is defensive in either direction. Registration position is
+  # alphabetical-by-language ('k' after 'j') and the position has no
+  # recognition consequence — the convention's recognition gate is
+  # closed-set on ``build.gradle[.kts]`` presence + a
+  # ``gradle``/``kotlin`` + ``java``/``jdk`` ``uses:`` declaration.
+  addDefaultConvention(kotlin_gradle_convention.kotlinGradleConvention())
   # c_cpp_direct (Mode 3 / no-Makefile) is registered LAST among the
   # C/C++ conventions so a project shipping a Makefile routes through
   # the Make convention first; Mode 3 picks up the no-Makefile case

@@ -88,6 +88,34 @@ suite "attributeConvention: manifest detection":
     check attr.convention == "java-maven"
     removeDir(dir)
 
+  test "build.gradle.kts ⇒ kotlin-gradle":
+    ## M41 — Kotlin DSL Gradle manifest must attribute to
+    ## ``kotlin-gradle``. Parallels the M40 test above for ``pom.xml``.
+    let dir = makeScratch("gradle-kts")
+    writeFile(dir / "build.gradle.kts",
+      "plugins { kotlin(\"jvm\") version \"1.9.25\" }\n" &
+      "version = \"1.0\"\n")
+    writeFile(dir / "settings.gradle.kts",
+      "rootProject.name = \"hello\"\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "kotlin-gradle"
+    check attr.evidence.contains("build.gradle.kts")
+    removeDir(dir)
+
+  test "build.gradle (Groovy DSL) ⇒ kotlin-gradle":
+    ## M41 — Groovy DSL Gradle manifest must also attribute to
+    ## ``kotlin-gradle`` (the convention accepts either DSL).
+    let dir = makeScratch("gradle-groovy")
+    writeFile(dir / "build.gradle",
+      "plugins { id 'org.jetbrains.kotlin.jvm' version '1.9.25' }\n" &
+      "version = '1.0'\n")
+    writeFile(dir / "settings.gradle",
+      "rootProject.name = 'hello'\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "kotlin-gradle"
+    check attr.evidence.contains("build.gradle")
+    removeDir(dir)
+
   test "*.nimble ⇒ nim":
     let dir = makeScratch("nimble")
     writeFile(dir / "mylib.nimble", "version = \"0.1.0\"\n")

@@ -50,6 +50,7 @@
 #   c-cpp-cmake/hello-binary (M38; SKIP when cmake/ninja-or-make missing)
 #   c-cpp-meson/hello-binary  (M39; SKIP when meson/ninja missing)
 #   java-maven/hello-binary   (M40; SKIP when javac/mvn missing)
+#   kotlin-gradle/hello-binary (M41; SKIP when javac/gradle missing)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -144,6 +145,7 @@ $PopulatedExamples = @(
   'c-cpp-cmake/hello-binary',
   'c-cpp-meson/hello-binary',
   'java-maven/hello-binary',
+  'kotlin-gradle/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -682,6 +684,64 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'java' not on PATH (need the JRE to run the produced jar)" }
       }
       return @{ Available = $true; Reason = "javac=$($javacCmd.Source); mvn=$($mvnCmd.Source); java=$($javaCmd.Source)" }
+    }
+    'kotlin-gradle' {
+      # M41: the Kotlin + Gradle (Tier 2b) convention is registered.
+      # Probe for javac + gradle + java. The convention's ``recognize``
+      # enforces javac + gradle (system or project wrapper); the
+      # validation script additionally needs ``java`` to invoke the
+      # produced jar. The documented provisioning path is Adoptium JDK
+      # 21 LTS under ``D:/metacraft-dev-deps/jdk/21/`` (shared with M40)
+      # and Gradle 8.x under ``D:/metacraft-dev-deps/gradle/8.x/``.
+      $javacCmd = Get-Command javac -ErrorAction SilentlyContinue
+      if (-not $javacCmd) {
+        $jdkRoot = 'D:\metacraft-dev-deps\jdk'
+        if (Test-Path -LiteralPath $jdkRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $jdkRoot -Directory -ErrorAction SilentlyContinue) {
+            $candidate = Join-Path $verDir.FullName 'bin\javac.exe'
+            if (Test-Path -LiteralPath $candidate) {
+              $binDir = Split-Path -Parent $candidate
+              if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+                $env:PATH = "$binDir;$env:PATH"
+              }
+              $javacCmd = Get-Command javac -ErrorAction SilentlyContinue
+              break
+            }
+          }
+        }
+      }
+      if (-not $javacCmd) {
+        return @{ Available = $false; Reason = "'javac' not on PATH (install Adoptium JDK 21 LTS into D:/metacraft-dev-deps/jdk/21/)" }
+      }
+      $gradleCmd = Get-Command gradle -ErrorAction SilentlyContinue
+      if (-not $gradleCmd) {
+        $gradleRoot = 'D:\metacraft-dev-deps\gradle'
+        if (Test-Path -LiteralPath $gradleRoot) {
+          foreach ($verDir in Get-ChildItem -LiteralPath $gradleRoot -Directory -ErrorAction SilentlyContinue) {
+            foreach ($candidate in @(
+              (Join-Path $verDir.FullName 'bin\gradle.bat'),
+              (Join-Path $verDir.FullName 'bin\gradle'))) {
+              if (Test-Path -LiteralPath $candidate) {
+                $binDir = Split-Path -Parent $candidate
+                if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+                  $env:PATH = "$binDir;$env:PATH"
+                }
+                $gradleCmd = Get-Command gradle -ErrorAction SilentlyContinue
+                break
+              }
+            }
+            if ($gradleCmd) { break }
+          }
+        }
+      }
+      if (-not $gradleCmd) {
+        return @{ Available = $false; Reason = "'gradle' not on PATH (install Gradle 8.x into D:/metacraft-dev-deps/gradle/8.x/)" }
+      }
+      $javaCmd = Get-Command java -ErrorAction SilentlyContinue
+      if (-not $javaCmd) {
+        return @{ Available = $false; Reason = "'java' not on PATH (need the JRE to run the produced jar)" }
+      }
+      return @{ Available = $true; Reason = "javac=$($javacCmd.Source); gradle=$($gradleCmd.Source); java=$($javaCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -1564,6 +1624,25 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       # (it execs the produced binary directly).
       return @(@{
         Path     = Join-Path $fixtureDir 'target\hello-1.0.jar'
+        Greeting = $null
+      })
+    }
+    'kotlin-gradle/hello-binary' {
+      # M41: kotlin-gradle/hello-binary. The convention emits a single
+      # ``gradle build --offline --no-daemon -q`` action that produces
+      # ``build/libs/<projectName>-<version>.jar`` under the project
+      # root. The fixture pins ``rootProject.name=hello`` (in
+      # settings.gradle.kts) + ``version=1.0`` (in build.gradle.kts) so
+      # the jar lands at ``build/libs/hello-1.0.jar``. No direct
+      # ``.exe`` to run; the harness asserts the jar exists. The
+      # greeting check runs via the dedicated validation script
+      # ``validate-standard-provider-kotlin-gradle-hello-binary.ps1``
+      # which invokes ``java -jar`` after the build — checking the
+      # greeting from the harness would need a separate jar-launch
+      # path, which the harness's ``Greeting`` field doesn't support
+      # (it execs the produced binary directly).
+      return @(@{
+        Path     = Join-Path $fixtureDir 'build\libs\hello-1.0.jar'
         Greeting = $null
       })
     }

@@ -978,6 +978,7 @@ const
     "gcc", "clang", "make", "ar", "autoconf", "automake",
     "cmake", "ninja", "meson",
     "java", "jdk", "javac", "mvn", "maven",
+    "gradle", "kotlin",
     "gfortran", "fortran"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
@@ -1002,6 +1003,12 @@ const
     ## route to the Java + Maven (Tier 2b) convention which keys on
     ## ``pom.xml`` at the project root; recognition additionally requires
     ## both halves (a JDK token AND a Maven token) in ``uses:``.
+    ## ``"gradle"`` / ``"kotlin"`` (M41) route to the Kotlin + Gradle
+    ## (Tier 2b) convention which keys on ``build.gradle.kts`` (or
+    ## ``build.gradle``) at the project root; recognition additionally
+    ## requires both halves (a JDK token AND a Gradle/Kotlin token) in
+    ## ``uses:`` AND the absence of ``pom.xml`` at the root (defers to
+    ## the M40 Maven convention when both manifests coexist).
     ## Mismatches break in the engine-side fall-back path:
     ## the engine will dispatch to the provider, the provider will reply
     ## "no convention matched", and the build fails loudly — preferable to
