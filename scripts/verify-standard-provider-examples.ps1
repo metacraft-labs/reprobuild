@@ -141,6 +141,7 @@ $PopulatedExamples = @(
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
+  'python-mode3/binary-with-library',
   'mixed/nim-uses-cpp-lib',
   'mixed/cpp-uses-nim-lib'
 )
@@ -350,6 +351,31 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $true; Reason = "rustc=$($rustc.Source)" }
       }
       return @{ Available = $false; Reason = "rustc not on PATH and no rustup stable under D:/metacraft-dev-deps/rustup" }
+    }
+    'python-mode3' {
+      # M32: Mode 3 Python — same toolchain probe as ``python`` (the
+      # Mode 2 path). ``python3``/``python`` on PATH is enough; the
+      # Mode 3 convention emits ``fs.preserveTree`` (stage) +
+      # ``python -m compileall`` (byte-compile) + ``fs.writeText``
+      # (wrapper script) actions directly and never invokes the PEP
+      # 517 backend toolchain. Reuse the bundled-toolchain probe so
+      # a fresh host without a system Python still picks up the
+      # managed install under D:/metacraft-dev-deps/python/.
+      $pythonCmd = $null
+      foreach ($n in @('python3', 'python')) {
+        $candidate = Get-Command $n -ErrorAction SilentlyContinue
+        if ($candidate) {
+          & $candidate.Source --version 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            $pythonCmd = $candidate
+            break
+          }
+        }
+      }
+      if ($pythonCmd) {
+        return @{ Available = $true; Reason = "python=$($pythonCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "'python3'/'python' not on PATH (env.ps1 should provide the managed install)" }
     }
     'go-mode3' {
       # M31: Mode 3 Go — same toolchain probe as ``go`` (the Mode 2
@@ -1116,6 +1142,39 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
           Greeting = 'hello from go-mode3-binary-with-library, mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'python-mode3/binary-with-library' {
+      # M32: Mode 3 Python. The workspace declares a library ``mathlib``
+      # and an executable ``calc`` in a single ``repro.nim`` with NO
+      # ``pyproject.toml``. The Mode 3 ``python-direct`` convention
+      # emits per-member ``fs.preserveTree`` stage actions, byte-
+      # compile actions via ``python -m compileall``, and an
+      # ``fs.writeText`` wrapper script for the executable. The
+      # wrapper sets PYTHONPATH to include the mathlib staging dir
+      # AND the calc staging dir so ``from mathlib import add`` in
+      # calc/calc/__main__.py resolves at runtime. The wrapper-emit
+      # action is sequenced strictly after the upstream byte-compile
+      # via Mode 3 ``depends_on`` wiring. Outputs land under
+      # ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'calc'
+      # On Windows the wrapper is a ``.cmd`` file; the harness checks
+      # ``.cmd`` first because that's the platform the M9 gate runs
+      # on. The library output is the staged ``__init__.py`` —
+      # checking it confirms the preserveTree stage ran for mathlib.
+      $stagedMathInit = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' (Join-Path 'mathlib' '__init__.py')))
+      $wrapperCmd = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.cmd')))
+      $wrapperSh  = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member $member))
+      $wrapperPath = if (Test-Path -LiteralPath $wrapperCmd) { $wrapperCmd } elseif (Test-Path -LiteralPath $wrapperSh) { $wrapperSh } else { $wrapperCmd }
+      return @(
+        @{
+          Path     = $stagedMathInit
+          Greeting = $null
+        },
+        @{
+          Path     = $wrapperPath
+          Greeting = 'hello from python-mode3-binary-with-library, mathlib added 2+3 = 5'
         }
       )
     }

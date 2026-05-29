@@ -31,6 +31,7 @@ import repro_standard_provider/conventions/rust_direct as rust_direct_convention
 import repro_standard_provider/conventions/go as go_convention
 import repro_standard_provider/conventions/go_direct as go_direct_convention
 import repro_standard_provider/conventions/python as python_convention
+import repro_standard_provider/conventions/python_direct as python_direct_convention
 import repro_standard_provider/conventions/javascript_typescript as jsts_convention
 import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
 import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_convention
@@ -175,6 +176,13 @@ when defined(reproProviderMode):
   # declared their package shape in ``repro.nim`` with no Go module
   # manifest. M31 of Mode3-Language-Expansion.milestones.org.
   addDefaultConvention(go_direct_convention.goDirectConvention())
+  # python_direct (Mode 3 / no-pyproject.toml) registered AFTER the
+  # Mode 2 python convention so a project shipping a pyproject.toml
+  # routes through the Mode 2 path first; Mode 3 picks up the case
+  # where the user declared their package shape in ``repro.nim`` with
+  # no Python build-system manifest. M32 of
+  # Mode3-Language-Expansion.milestones.org.
+  addDefaultConvention(python_direct_convention.pythonDirectConvention())
 
   proc runStandardProvider(): int =
     try:

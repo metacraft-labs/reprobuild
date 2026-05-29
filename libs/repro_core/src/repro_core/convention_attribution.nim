@@ -215,9 +215,17 @@ proc dirFileCensus(dir: string;
           if basename in ["target", "node_modules", ".repro", ".git",
               "build", ".nimcache", ".cargo", "dist", "__pycache__"]:
             continue
-          # Only peek into ``src/`` / direct children — extension census
-          # is dominated by manifest-dir + ``src/`` content.
+          # Peek into ``src/`` / direct children — extension census
+          # is dominated by manifest-dir + ``src/`` content. M32:
+          # also peek into a Python flat-layout package dir (``foo/``
+          # at depth 1 contains ``__init__.py``) so Mode 3 Python
+          # workspaces with the ``<member>/<member>/__init__.py``
+          # layout surface their ``.py`` files in the census.
           if curDepth == 0 or basename == "src":
+            queue.add(path)
+            depth[path] = curDepth + 1
+          elif curDepth == 1 and
+              fileExists(path / "__init__.py"):
             queue.add(path)
             depth[path] = curDepth + 1
     except OSError:
@@ -323,6 +331,17 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
   if bestName == "go":
     if not fileExists(targetDir / "go.mod"):
       bestName = "go-direct"
+  # M32 refinement for Mode 3 Python: when the extension census picks
+  # ``python`` (i.e. ``.py`` files dominate the target dir) but NO
+  # ``pyproject.toml`` / ``setup.py`` / ``setup.cfg`` is present at
+  # the target root, the project routes through the Mode 3
+  # ``python-direct`` convention. Mirror of the C/C++, Rust, and Go
+  # refinements above.
+  if bestName == "python":
+    if not fileExists(targetDir / "pyproject.toml") and
+        not fileExists(targetDir / "setup.py") and
+        not fileExists(targetDir / "setup.cfg"):
+      bestName = "python-direct"
   result.convention = bestName
   result.evidence = "extension census: " & $bestCount & "/" &
     $census.total & " files match " & bestName
@@ -543,7 +562,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[10, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[11, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -560,6 +579,9 @@ const
                        exeName: "go",
                        versionArgs: @["version"]),
     ToolchainProbeSpec(convention: "python",
+                       exeName: "python3",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "python-direct",
                        exeName: "python3",
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "javascript-typescript",
