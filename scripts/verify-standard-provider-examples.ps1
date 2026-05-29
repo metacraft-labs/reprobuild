@@ -52,6 +52,8 @@
 #   java-maven/hello-binary   (M40; SKIP when javac/mvn missing)
 #   kotlin-gradle/hello-binary (M41; SKIP when javac/gradle missing)
 #   csharp-dotnet/hello-binary (M42; SKIP when dotnet missing)
+#   swift-swiftpm/hello-binary (M43; SKIP when swift missing — Swift Windows
+#                               toolchain isn't in the standard dev shell)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -148,6 +150,7 @@ $PopulatedExamples = @(
   'java-maven/hello-binary',
   'kotlin-gradle/hello-binary',
   'csharp-dotnet/hello-binary',
+  'swift-swiftpm/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -793,6 +796,47 @@ function Probe-Toolchain([string]$language) {
       # harness's post-build Greeting check can exec hello.exe directly.
       $env:DOTNET_ROOT = Split-Path -Parent $dotnetCmd.Source
       return @{ Available = $true; Reason = "dotnet=$($dotnetCmd.Source); DOTNET_ROOT=$($env:DOTNET_ROOT)" }
+    }
+    'swift-swiftpm' {
+      # M43: the Swift + SwiftPM (Tier 2b) convention is registered.
+      # Probe for ``swift`` on PATH. The convention's ``recognize``
+      # enforces this (the Swift toolchain ships ``swift`` as a single
+      # driver binary that subcommands into ``swiftc`` for compilation
+      # and into ``swift build`` for SwiftPM operations). The
+      # documented provisioning paths are Swift 5.10 from swift.org
+      # into ``D:/metacraft-dev-deps/swift/5.10/`` (manual download) or
+      # ``winget install Swift.Toolchain`` (Microsoft Store install).
+      # Most M43 review hosts do NOT ship the Swift toolchain — Swift
+      # Windows isn't in the standard dev shell — so this probe is
+      # expected to SKIP cleanly on a default Windows host.
+      $swiftCmd = Get-Command swift -ErrorAction SilentlyContinue
+      if (-not $swiftCmd) {
+        $swiftRoot = 'D:\metacraft-dev-deps\swift'
+        if (Test-Path -LiteralPath $swiftRoot) {
+          $candidates = @()
+          $direct = Join-Path $swiftRoot 'swift.exe'
+          if (Test-Path -LiteralPath $direct) { $candidates += $direct }
+          foreach ($verDir in Get-ChildItem -LiteralPath $swiftRoot -Directory -ErrorAction SilentlyContinue) {
+            foreach ($candidate in @(
+              (Join-Path $verDir.FullName 'usr\bin\swift.exe'),
+              (Join-Path $verDir.FullName 'bin\swift.exe'))) {
+              if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+            }
+          }
+          if ($candidates.Count -gt 0) {
+            $picked = $candidates | Sort-Object | Select-Object -Last 1
+            $binDir = Split-Path -Parent $picked
+            if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+              $env:PATH = "$binDir;$env:PATH"
+            }
+            $swiftCmd = Get-Command swift -ErrorAction SilentlyContinue
+          }
+        }
+      }
+      if (-not $swiftCmd) {
+        return @{ Available = $false; Reason = "'swift' not on PATH (install Swift 5.10 from swift.org into D:/metacraft-dev-deps/swift/5.10/ or 'winget install Swift.Toolchain')" }
+      }
+      return @{ Available = $true; Reason = "swift=$($swiftCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -1695,6 +1739,20 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir 'build\libs\hello-1.0.jar'
         Greeting = $null
+      })
+    }
+    'swift-swiftpm/hello-binary' {
+      # M43: swift-swiftpm/hello-binary. The convention emits a single
+      # ``swift build -c release --quiet`` action that produces
+      # ``.build/release/<targetName>[.exe]`` under the project root.
+      # The fixture pins ``executableTarget(name: "hello")`` so the
+      # binary lands at ``.build/release/hello.exe`` (Windows) or
+      # ``.build/release/hello`` (POSIX). SwiftPM produces a
+      # self-launching binary so the harness can exec it directly.
+      $exeName = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'hello.exe' } else { 'hello' }
+      return @(@{
+        Path     = Join-Path $fixtureDir (".build\release\" + $exeName)
+        Greeting = 'hello from swift-swiftpm-hello-binary'
       })
     }
     'csharp-dotnet/hello-binary' {

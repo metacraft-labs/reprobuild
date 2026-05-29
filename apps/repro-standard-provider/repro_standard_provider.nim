@@ -41,6 +41,7 @@ import repro_standard_provider/conventions/c_cpp_meson as c_cpp_meson_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
 import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_convention
+import repro_standard_provider/conventions/swift_swiftpm as swift_swiftpm_convention
 import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_convention
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/project_intro
@@ -228,6 +229,21 @@ when defined(reproProviderMode):
   # the closest precedent — same lightweight Mode 2 ecosystem-
   # delegation shape).
   addDefaultConvention(csharp_dotnet_convention.csharpDotnetConvention())
+  # swift_swiftpm (M43) — fourth managed-ecosystem Tier 2b convention.
+  # Keys on a single ``Package.swift`` at the project root (the SwiftPM
+  # package manifest filename — uniquely identifies a SwiftPM package;
+  # no other convention recognises this filename). Registered AFTER
+  # csharp_dotnet so the managed-ecosystem block forms a contiguous
+  # cluster (Maven → Gradle → .NET → SwiftPM). The order has no
+  # recognition consequence — each convention's recognition gate is
+  # closed-set on its own ecosystem's manifest. The convention requires
+  # a ``swift`` driver on PATH; when the Swift toolchain is absent
+  # (which is the default on the M43 review host — Swift Windows isn't
+  # in the standard dev shell) ``recognize`` returns false and the
+  # M9-style harness SKIPs cleanly. Registration position is
+  # alphabetical-by-language ('s' is after 'c') and follows the M43
+  # spec's "register after csharp-dotnet in the chain" sequencing.
+  addDefaultConvention(swift_swiftpm_convention.swiftSwiftpmConvention())
   # c_cpp_direct (Mode 3 / no-Makefile) is registered LAST among the
   # C/C++ conventions so a project shipping a Makefile routes through
   # the Make convention first; Mode 3 picks up the no-Makefile case

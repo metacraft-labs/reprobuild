@@ -121,6 +121,21 @@ suite "attributeConvention: manifest detection":
     check attr.evidence.contains("hello.csproj")
     removeDir(dir)
 
+  test "Package.swift ⇒ swift-swiftpm":
+    ## M43 — SwiftPM manifest must attribute to ``swift-swiftpm``.
+    ## Unique filename (no other convention recognises ``Package.swift``)
+    ## so the manifest-pass picks it up directly.
+    let dir = makeScratch("package-swift")
+    writeFile(dir / "Package.swift",
+      "// swift-tools-version:5.5\n" &
+      "import PackageDescription\n" &
+      "let package = Package(name: \"hello\",\n" &
+      "  targets: [.executableTarget(name: \"hello\")])\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "swift-swiftpm"
+    check attr.evidence.contains("Package.swift")
+    removeDir(dir)
+
   test "build.gradle (Groovy DSL) ⇒ kotlin-gradle":
     ## M41 — Groovy DSL Gradle manifest must also attribute to
     ## ``kotlin-gradle`` (the convention accepts either DSL).

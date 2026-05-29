@@ -980,6 +980,7 @@ const
     "java", "jdk", "javac", "mvn", "maven",
     "gradle", "kotlin",
     "dotnet", "dotnet-sdk", "csharp",
+    "swift", "swiftc", "swiftpm",
     "gfortran", "fortran"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
@@ -1010,6 +1011,12 @@ const
     ## requires both halves (a JDK token AND a Gradle/Kotlin token) in
     ## ``uses:`` AND the absence of ``pom.xml`` at the root (defers to
     ## the M40 Maven convention when both manifests coexist).
+    ## ``"dotnet"`` / ``"dotnet-sdk"`` / ``"csharp"`` (M42) route to the
+    ## C# + .NET (Tier 2b) convention which keys on a single ``*.csproj``
+    ## at the project root + a ``packages.lock.json`` (HARD precondition).
+    ## ``"swift"`` / ``"swiftc"`` / ``"swiftpm"`` (M43) route to the
+    ## Swift + SwiftPM (Tier 2b) convention which keys on ``Package.swift``
+    ## at the project root.
     ## Mismatches break in the engine-side fall-back path:
     ## the engine will dispatch to the provider, the provider will reply
     ## "no convention matched", and the build fails loudly — preferable to

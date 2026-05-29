@@ -110,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[20, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[21, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -128,6 +128,7 @@ const
     ("build.gradle.kts",   "kotlin-gradle"),
     ("build.gradle",       "kotlin-gradle"),
     ("*.csproj",           "csharp-dotnet"),
+    ("Package.swift",      "swift-swiftpm"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -137,29 +138,30 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[22, tuple[ext, convention: string]] = [
-    (".nim",  "nim"),
-    (".rs",   "rust"),
-    (".go",   "go"),
-    (".py",   "python"),
-    (".ts",   "javascript-typescript"),
-    (".tsx",  "javascript-typescript"),
-    (".js",   "javascript-typescript"),
-    (".jsx",  "javascript-typescript"),
-    (".mjs",  "javascript-typescript"),
-    (".cjs",  "javascript-typescript"),
-    (".c",    "c-cpp-make"),
-    (".cc",   "c-cpp-make"),
-    (".cpp",  "c-cpp-make"),
-    (".cxx",  "c-cpp-make"),
-    (".h",    "c-cpp-make"),
-    (".java", "java-maven"),
-    (".kt",   "kotlin-gradle"),
-    (".cs",   "csharp-dotnet"),
-    (".f90",  "fortran-direct"),
-    (".f95",  "fortran-direct"),
-    (".f03",  "fortran-direct"),
-    (".f08",  "fortran-direct"),
+  ExtensionSignals: array[23, tuple[ext, convention: string]] = [
+    (".nim",   "nim"),
+    (".rs",    "rust"),
+    (".go",    "go"),
+    (".py",    "python"),
+    (".ts",    "javascript-typescript"),
+    (".tsx",   "javascript-typescript"),
+    (".js",    "javascript-typescript"),
+    (".jsx",   "javascript-typescript"),
+    (".mjs",   "javascript-typescript"),
+    (".cjs",   "javascript-typescript"),
+    (".c",     "c-cpp-make"),
+    (".cc",    "c-cpp-make"),
+    (".cpp",   "c-cpp-make"),
+    (".cxx",   "c-cpp-make"),
+    (".h",     "c-cpp-make"),
+    (".java",  "java-maven"),
+    (".kt",    "kotlin-gradle"),
+    (".cs",    "csharp-dotnet"),
+    (".swift", "swift-swiftpm"),
+    (".f90",   "fortran-direct"),
+    (".f95",   "fortran-direct"),
+    (".f03",   "fortran-direct"),
+    (".f08",   "fortran-direct"),
   ]
 
 proc isExtensionForConvention*(ext, convention: string): bool =
@@ -628,7 +630,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[16, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[17, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -676,6 +678,9 @@ const
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "csharp-dotnet",
                        exeName: "dotnet",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "swift-swiftpm",
+                       exeName: "swift",
                        versionArgs: @["--version"]),
   ]
 

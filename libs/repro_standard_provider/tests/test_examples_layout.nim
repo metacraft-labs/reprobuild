@@ -57,6 +57,7 @@ const PopulatedExamples = [
   "java-maven/hello-binary",
   "kotlin-gradle/hello-binary",
   "csharp-dotnet/hello-binary",
+  "swift-swiftpm/hello-binary",
   "c-cpp-mode3/binary-with-library",
   "rust-mode3/binary-with-library",
   "go-mode3/binary-with-library",

@@ -5918,6 +5918,7 @@ const
     "java-maven",
     "kotlin-gradle",
     "csharp-dotnet",
+    "swift-swiftpm",
     "c-cpp-direct",
     "rust-direct",
     "go-direct",
