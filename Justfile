@@ -848,6 +848,12 @@ e2e_remote_apply_home_profile_phase_e:
         --out:build/bin/repro \
         apps/repro/repro.nim \
         2>&1 | tee test-logs/e2e_remote_apply_home_profile_phase_e.build.log
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprostored \
+        --out:build/bin/reprostored \
+        apps/reprostored/reprostored.nim \
+        2>&1 | tee -a test-logs/e2e_remote_apply_home_profile_phase_e.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_remote_apply_home_profile_phase_e \

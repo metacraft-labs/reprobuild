@@ -699,6 +699,8 @@ type
   RemoteApplyFlags = object
     remoteRepro: string
     targetStoreRoot: string
+    targetStoreDaemon: string
+    targetStoreEndpoint: string
     targetStateDir: string
     targetHomeDir: string
     sshPath: string
@@ -745,6 +747,18 @@ proc parseEnableDisableFlags(name: string; args: openArray[string]):
     elif a == "--target-store-root" or a.startsWith("--target-store-root="):
       result.remote.targetStoreRoot = parseFlagValue(args, i,
         "--target-store-root")
+    elif a == "--target-store-daemon" or
+        a.startsWith("--target-store-daemon="):
+      result.remote.targetStoreDaemon = parseFlagValue(args, i,
+        "--target-store-daemon")
+      if result.remote.targetStoreDaemon != "dev":
+        stderr.writeLine("repro home " & name &
+          ": --target-store-daemon supports only 'dev' in this pass")
+        return
+    elif a == "--target-store-endpoint" or
+        a.startsWith("--target-store-endpoint="):
+      result.remote.targetStoreEndpoint = parseFlagValue(args, i,
+        "--target-store-endpoint")
     elif a == "--target-state-dir" or a.startsWith("--target-state-dir="):
       result.remote.targetStateDir = parseFlagValue(args, i,
         "--target-state-dir")
@@ -799,6 +813,7 @@ proc parseEnableDisableFlags(name: string; args: openArray[string]):
     stderr.writeLine("usage: repro home " & name &
       " <activity> [--host NAME] [--now] [--no-apply] " &
       "[--remote-repro PATH] [--target-store-root PATH] " &
+      "[--target-store-daemon dev --target-store-endpoint PATH] " &
       "[--target-state-dir PATH] [--target-home-dir PATH] [--ssh PATH] " &
       "[--port N] [--ssh-option OPT] [--target-platform PLATFORM] " &
       "[--target-arch ARCH] [--target-wsl[=true|false]]")
@@ -1634,6 +1649,25 @@ proc validateRemoteApplyPreflight(name: string;
     stderr.writeLine("targetHost: " & parsed.host)
     stderr.writeLine("localIntentStatus: preserved")
     return 2
+  if parsed.remote.targetStoreDaemon.len == 0 and
+      parsed.remote.targetStoreEndpoint.len > 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-store-endpoint requires --target-store-daemon=dev")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
+  if parsed.remote.targetStoreDaemon == "dev" and
+      parsed.remote.targetStoreEndpoint.len == 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-store-endpoint is required with " &
+      "--target-store-daemon=dev")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
   if parsed.remote.targetStateDir.len == 0:
     stderr.writeLine("repro home " & name & ": remote apply preflight " &
       "failed: --target-state-dir is required for --host --now")
@@ -1703,6 +1737,72 @@ proc remoteActivateCommand(remoteRepro, targetStoreRoot, targetStateDir,
       result.add(" ")
     result.add(quoteShell(part))
 
+type
+  ERemoteStoreDaemonFailed = object of CatchableError
+
+  RemoteStoreDaemonResult = object
+    enabled: bool
+    endpoint: string
+    storeRoot: string
+    profile: string
+    pid: string
+
+proc remoteStoreDaemonCommand(remoteRepro, action, targetStoreRoot,
+                              targetStoreEndpoint: string): string =
+  let parts = @[remoteRepro, "store", "daemon", action, "--dev",
+    "--store-root", targetStoreRoot, "--endpoint", targetStoreEndpoint]
+  for idx, part in parts:
+    if idx > 0:
+      result.add(" ")
+    result.add(quoteShell(part))
+
+proc requireRemoteStoreDaemon(parsed: EnableDisableFlags):
+    RemoteStoreDaemonResult =
+  if parsed.remote.targetStoreDaemon.len == 0:
+    return RemoteStoreDaemonResult(enabled: false)
+
+  let start = sshRun(parsed.remote.sshPath, parsed.host, parsed.remote.port,
+    parsed.remote.sshOptions,
+    remoteStoreDaemonCommand(parsed.remote.remoteRepro, "start",
+      parsed.remote.targetStoreRoot, parsed.remote.targetStoreEndpoint))
+  if start.exitCode != 0:
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon start failed:\n" & start.output)
+
+  let status = sshRun(parsed.remote.sshPath, parsed.host, parsed.remote.port,
+    parsed.remote.sshOptions,
+    remoteStoreDaemonCommand(parsed.remote.remoteRepro, "status",
+      parsed.remote.targetStoreRoot, parsed.remote.targetStoreEndpoint))
+  if status.exitCode != 0:
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon status failed:\n" & status.output)
+
+  let profile = fieldValueLoose(status.output, "profile")
+  let endpoint = fieldValueLoose(status.output, "endpoint")
+  let storeRoot = fieldValueLoose(status.output, "store-root")
+  if not status.output.contains("repro store daemon: running"):
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon is not running:\n" & status.output)
+  if profile != "development-store":
+    raise newException(ERemoteStoreDaemonFailed,
+      "target endpoint is not a development-store daemon:\n" & status.output)
+  if endpoint != parsed.remote.targetStoreEndpoint:
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon endpoint mismatch: expected " &
+      parsed.remote.targetStoreEndpoint & ", got " & endpoint)
+  if os.normalizedPath(storeRoot) !=
+      os.normalizedPath(parsed.remote.targetStoreRoot):
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon store-root mismatch: expected " &
+      parsed.remote.targetStoreRoot & ", got " & storeRoot)
+
+  RemoteStoreDaemonResult(
+    enabled: true,
+    endpoint: endpoint,
+    storeRoot: storeRoot,
+    profile: profile,
+    pid: fieldValueLoose(status.output, "pid"))
+
 proc printRemoteApplyFailure(name, phase, message: string;
                              parsed: EnableDisableFlags;
                              built: RemoteBuildResult;
@@ -1736,6 +1836,15 @@ proc runRemoteApplyAfterEdit(name: string; parsed: EnableDisableFlags): int =
     return preflight
 
   var built: RemoteBuildResult
+  var targetDaemon = RemoteStoreDaemonResult(enabled: false)
+  if parsed.remote.targetStoreDaemon.len > 0:
+    try:
+      targetDaemon = requireRemoteStoreDaemon(parsed)
+    except CatchableError as err:
+      printRemoteApplyFailure(name, "store-daemon", err.msg, parsed, built,
+        TransferBundleResult())
+      return 1
+
   try:
     built = buildRemoteApplyBundle(parsed, targetCtx)
   except CatchableError as err:
@@ -1776,6 +1885,10 @@ proc runRemoteApplyAfterEdit(name: string; parsed: EnableDisableFlags): int =
   echo "bundlePath: " & built.bundlePath
   echo "transferStatus: " & transferred.transferStatus
   echo "targetBundlePath: " & transferred.targetBundlePath
+  if targetDaemon.enabled:
+    echo "targetStoreDaemon: " & targetDaemon.profile
+    echo "targetStoreEndpoint: " & targetDaemon.endpoint
+    echo "targetStoreDaemonPid: " & targetDaemon.pid
   echo "remoteGenerationId: " & fieldValueLoose(activate.output,
     "generationId")
   echo "targetCurrent: " & fieldValueLoose(activate.output, "current")

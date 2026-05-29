@@ -5,7 +5,8 @@
 ## source-side target preflight, and the failure semantics that preserve
 ## the local intent edit after build/transfer/activation failures.
 
-import std/[net, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import std/[net, os, osproc, sequtils, streams, strtabs, strutils, tempfiles,
+    unittest]
 
 import repro_home_generations
 import repro_home_intent
@@ -230,6 +231,17 @@ proc remoteActivityArgs(command: string; h: SshHarness; targetStoreRoot,
     result.add("--ssh-option")
     result.add(opt)
 
+proc remoteDevStoreActivityArgs(command: string; h: SshHarness;
+                                targetStoreRoot, targetStoreEndpoint,
+                                targetStateDir, targetHomeDir: string):
+    seq[string] =
+  result = remoteActivityArgs(command, h, targetStoreRoot, targetStateDir,
+    targetHomeDir)
+  result.add("--target-store-daemon")
+  result.add("dev")
+  result.add("--target-store-endpoint")
+  result.add(targetStoreEndpoint)
+
 proc remoteEnableArgs(h: SshHarness; targetStoreRoot, targetStateDir,
                       targetHomeDir: string): seq[string] =
   remoteActivityArgs("enable", h, targetStoreRoot, targetStateDir,
@@ -239,6 +251,17 @@ proc remoteDisableArgs(h: SshHarness; targetStoreRoot, targetStateDir,
                        targetHomeDir: string): seq[string] =
   remoteActivityArgs("disable", h, targetStoreRoot, targetStateDir,
     targetHomeDir)
+
+proc q(value: string): string = quoteShell(value)
+
+proc remoteStoreDaemonCommand(action, targetStoreRoot,
+                              targetStoreEndpoint: string): string =
+  [reproBinary(), "store", "daemon", action, "--dev",
+    "--store-root", targetStoreRoot,
+    "--endpoint", targetStoreEndpoint].mapIt(q(it)).join(" ")
+
+proc runSsh(h: SshHarness; remoteCommand: string): CmdResult =
+  runProgram(h.ssh, sshArgs(h) & @["localhost", remoteCommand])
 
 proc otherPlatform(): string =
   let source = currentHostContext().platform
@@ -356,6 +379,103 @@ suite "M71 Phase E: public remote home-profile apply":
       check not fileExists(currentPath(targetStateDir) / "bin" / PackageName)
       let disabledProfile = readFile(profileDir / "home.nim")
       check disabledProfile.contains("\"" & TargetHostName & "\": []")
+
+  test "daemon-backed dev-store mode starts reprostored and remote applies":
+    when defined(windows):
+      doAssert false,
+        "M71 daemon-backed dev-store gate is POSIX-only in this slice"
+    else:
+      let tempRoot = createTempDir("repro-m71-public-remote-devdaemon-", "")
+      let targetStoreEndpoint =
+        "/tmp/repro-m71-" & $getCurrentProcessId() & "-dev-store.sock"
+      var sshd: SshHarness
+      defer:
+        if sshd.process != nil:
+          discard runSsh(sshd, remoteStoreDaemonCommand("stop",
+            tempRoot / "target-store", targetStoreEndpoint))
+        try: removeFile(targetStoreEndpoint) except OSError: discard
+        try: removeFile(targetStoreEndpoint & ".status") except OSError: discard
+        stopLoopbackSshd(sshd)
+        try: removeDir(tempRoot) except OSError: discard
+
+      let sourceStateDir = tempRoot / "source-state"
+      let targetStateDir = tempRoot / "target-state"
+      let sourceStoreRoot = tempRoot / "source-store"
+      let targetStoreRoot = tempRoot / "target-store"
+      let profileDir = tempRoot / "profile"
+      let sourceHomeDir = tempRoot / "source-home"
+      let targetHomeDir = tempRoot / "target-home"
+      let fixtureDir = tempRoot / "fixture"
+      createDir(sourceStateDir)
+      createDir(targetStateDir)
+      createDir(sourceStoreRoot)
+      createDir(targetStoreRoot)
+      createDir(sourceHomeDir)
+      createDir(targetHomeDir)
+      createDir(fixtureDir)
+      writeProfile(profileDir)
+
+      let exePath = fixtureDir / PackageName
+      discard writeFixtureExe(exePath)
+      let generatedRel = ".m71-phase-e-devdaemon-generated"
+      let generatedPath = targetHomeDir / generatedRel
+      let generatedContent = "phase-e dev daemon generated content"
+      let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
+        sourceHomeDir, exePath, generatedRel, generatedContent)
+
+      sshd = startLoopbackSshd(tempRoot)
+      let applied = runRepro(env, remoteDevStoreActivityArgs("enable", sshd,
+        targetStoreRoot, targetStoreEndpoint, targetStateDir, targetHomeDir))
+      check applied.exitCode == 0
+      check fieldValue(applied.output, "remoteApplyStatus") == "activated"
+      check fieldValue(applied.output, "targetStoreDaemon") ==
+        "development-store"
+      check fieldValue(applied.output, "targetStoreEndpoint") ==
+        targetStoreEndpoint
+      check applied.output.contains("targetStoreDaemonPid: ")
+      check not applied.output.contains("repro daemon")
+      check not applied.output.contains("repro-daemon")
+      check not applied.output.contains("watch daemon")
+
+      let generationId = fieldValue(applied.output, "remoteGenerationId")
+      check readCurrentGenerationId(targetStateDir) == generationId
+      check fileExists(generatedPath)
+      check readFile(generatedPath) == generatedContent
+
+      let status = runSsh(sshd, remoteStoreDaemonCommand("status",
+        targetStoreRoot, targetStoreEndpoint))
+      check status.exitCode == 0
+      check status.output.contains("repro store daemon: running")
+      check fieldValue(status.output, "profile") == "development-store"
+      check fieldValue(status.output, "endpoint") == targetStoreEndpoint
+      check fieldValue(status.output, "store-root") == targetStoreRoot
+      check not status.output.contains("repro daemon")
+      check not status.output.contains("watch daemon")
+
+      let watchDaemon = runSsh(sshd, [reproBinary(), "daemon"].mapIt(q(it)).
+        join(" "))
+      check watchDaemon.exitCode != 0
+      check not watchDaemon.output.contains("development-store")
+      check not watchDaemon.output.contains("repro store daemon: running")
+
+      var targetStore = openStore(targetStoreRoot)
+      check targetStore.listPrefixes().len == 1
+      check targetStore.listRoots().len == 1
+      targetStore.close()
+
+      let reused = runRepro(env, remoteDevStoreActivityArgs("enable", sshd,
+        targetStoreRoot, targetStoreEndpoint, targetStateDir, targetHomeDir))
+      check reused.exitCode == 0
+      check fieldValue(reused.output, "remoteApplyStatus") == "activated"
+      check fieldValue(reused.output, "targetStoreEndpoint") ==
+        targetStoreEndpoint
+      check fieldValue(reused.output, "targetStoreDaemonPid") ==
+        fieldValue(applied.output, "targetStoreDaemonPid")
+      check fieldValue(reused.output, "transferStatus") == "already-present"
+      var targetStoreAfterReuse = openStore(targetStoreRoot)
+      defer: targetStoreAfterReuse.close()
+      check targetStoreAfterReuse.listPrefixes().len == 1
+      check targetStoreAfterReuse.listRoots().len == 1
 
   test "--host without --now is a pure intent edit and does not contact SSH":
     let tempRoot = createTempDir("repro-m71-public-remote-intent-", "")
