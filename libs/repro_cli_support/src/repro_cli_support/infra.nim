@@ -20,9 +20,118 @@
 ## deferred to a later phase.
 
 import std/[os, strutils, times]
+from repro_core/paths import extendedPath
 
 import repro_elevation
 import repro_infra
+import repro_profile_intent
+import repro_profile_compile
+
+# ---------------------------------------------------------------------------
+# M83 Phase D: compile-then-adapt path for `system.nim` profiles.
+# ---------------------------------------------------------------------------
+
+const
+  ProfileCompileMarkerImport = "import repro/profile"
+  ProfileCompileMacroImport = "import repro_profile"
+
+proc readSystemProfileHeadLines(profilePath: string;
+                                limit = 80): seq[string] =
+  try:
+    let src = readFile(extendedPath(profilePath))
+    var lineCount = 0
+    var pos = 0
+    while pos < src.len and lineCount < limit:
+      let lineEnd = src.find('\n', pos)
+      let stop = if lineEnd < 0: src.len else: lineEnd
+      result.add(src[pos ..< stop].strip())
+      pos = if lineEnd < 0: src.len else: lineEnd + 1
+      inc lineCount
+  except CatchableError:
+    discard
+
+proc isLegacySystemTextProfile(profilePath, compileMsg: string): bool =
+  ## Heuristic identical to the home-side check (`home.isLegacyTextProfile`).
+  ## A file is treated as legacy text when:
+  ##   * the compile failure is a missing `repro/profile` module; OR
+  ##   * the compile failure is `nim not found on PATH` (no profile
+  ##     compiles on this host); OR
+  ##   * the file has no real `import repro_profile` macro-library
+  ##     import (a M69 `system.nim` with bare resource stanzas is the
+  ##     typical case); OR
+  ##   * the file carries the slash-form `import repro/profile`
+  ##     documentation marker.
+  if compileMsg.contains("cannot open file: repro/profile"):
+    return true
+  if compileMsg.contains("`nim` not found on PATH") or
+     compileMsg.contains("'nim' not found on PATH"):
+    return true
+  let head = readSystemProfileHeadLines(profilePath)
+  var hasMacroImport = false
+  for line in head:
+    if line.startsWith(ProfileCompileMarkerImport):
+      return true
+    if line == ProfileCompileMacroImport or
+       (line.startsWith(ProfileCompileMacroImport) and
+        line.len > ProfileCompileMacroImport.len and
+        line[ProfileCompileMacroImport.len] notin
+          {'a'..'z', 'A'..'Z', '0'..'9', '_'}):
+      hasMacroImport = true
+  if not hasMacroImport:
+    return true
+  false
+
+proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
+    tuple[text: string; cached: bool; compileError: string] =
+  ## Run the Phase C build-engine edge against `profilePath`, decode
+  ## the RBPI artifact, and render the adapted `SystemProfile` back
+  ## into the canonical declarative text the M69 lib's APIs consume.
+  ##
+  ## On success: `result.text` is the canonical text and the caller
+  ## passes it down to `runInfraApply(text, opts)`. On compile
+  ## failure: `result.text` is empty and `result.compileError`
+  ## carries the diagnostic; the caller decides whether to fall back
+  ## to the legacy text or re-raise.
+  let opts = ProfileCompileOptions(
+    stateDir: stateDir,
+    publicCliPath: getAppFilename(),
+    repoRoot: getEnv(RepoRootEnvVar),
+    workDir: profilePath.parentDir,
+    verbose: false,
+    forceRebuild: false)
+  try:
+    let artifact = compileProfileToRbpi(profilePath, opts)
+    let intent = decodeRbpi(artifact.rbpiBytes)
+    let sp = profileIntentToSystemProfile(intent)
+    result.text = renderSystemProfileToText(sp)
+  except ProfileCompileError as err:
+    result.compileError = err.msg
+  except CatchableError as err:
+    result.compileError = err.msg
+
+proc resolveSystemProfileText*(profilePath: string;
+                               originalText, stateDir,
+                               commandName: string;
+                               outText: var string): bool =
+  ## Drive the Phase D compile path for a `system.nim`. Sets `outText`
+  ## to either:
+  ##   * the canonical text rendered from the adapted profile (when
+  ##     the compile path succeeds), or
+  ##   * the `originalText` (legacy text-format fixture).
+  ##
+  ## Returns `false` (the caller should exit non-zero with an error
+  ## already on stderr) when the compile failed AND the file does NOT
+  ## look like a legacy fixture.
+  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir)
+  if outcome.text.len > 0:
+    outText = outcome.text
+    return true
+  if isLegacySystemTextProfile(profilePath, outcome.compileError):
+    outText = originalText
+    return true
+  stderr.writeLine(commandName & ": profile compile failed: " &
+    outcome.compileError)
+  false
 
 # ---------------------------------------------------------------------------
 # Shared option parsing.
@@ -129,7 +238,12 @@ proc runInfraPlan(args: openArray[string]): int =
   if not fileExists(profilePath):
     stderr.writeLine("repro infra plan: no system profile at " & profilePath)
     return 1
-  let profileText = readFile(profilePath)
+  let originalText = readFile(profilePath)
+  # M83 Phase D: compile-then-adapt; legacy text fallback for fixtures.
+  var profileText: string
+  if not resolveSystemProfileText(profilePath, originalText, stateDir,
+      "repro infra plan", profileText):
+    return 1
   let host = hostIdentity(flags.host)
   ensureSystemStateDir(stateDir)
   # M82 Phase C: pass the state dir so the planner can read the
@@ -192,7 +306,12 @@ proc runInfraApply(args: openArray[string]): int =
     stderr.writeLine("repro infra apply: no system profile at " &
       profilePath)
     return 1
-  let profileText = readFile(profilePath)
+  let originalText = readFile(profilePath)
+  # M83 Phase D: compile-then-adapt; legacy text fallback for fixtures.
+  var profileText: string
+  if not resolveSystemProfileText(profilePath, originalText, stateDir,
+      "repro infra apply", profileText):
+    return 1
   let host = hostIdentity(flags.host)
 
   var planId = flags.planId
@@ -462,7 +581,12 @@ proc runSystemSync(args: openArray[string]): int =
     stderr.writeLine("repro system sync: no system profile at " &
       profilePath)
     return 1
-  let profileText = readFile(profilePath)
+  let originalText = readFile(profilePath)
+  # M83 Phase D: compile-then-adapt; legacy text fallback for fixtures.
+  var profileText: string
+  if not resolveSystemProfileText(profilePath, originalText, stateDir,
+      "repro system sync", profileText):
+    return 1
   let host = hostIdentity(flags.host)
   if not acquireApplyLock(stateDir):
     stderr.writeLine("repro system sync: another system apply is in " &

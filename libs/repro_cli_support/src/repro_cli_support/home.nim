@@ -42,6 +42,8 @@ import repro_home_apply
 import repro_home_resources
 import repro_home_rollback
 import repro_local_store
+import repro_profile_intent
+import repro_profile_compile
 
 type
   PackageCatalogLookup* = proc(package: string): bool {.gcsafe.}
@@ -189,6 +191,125 @@ proc parseFlagValue(args: openArray[string]; i: var int;
   raise newException(ValueError, "internal: parseFlagValue called for " & flag)
 
 # ---------------------------------------------------------------------------
+# M83 Phase D: compile-then-adapt path for `home.nim` profiles.
+# ---------------------------------------------------------------------------
+
+const
+  ProfileCompileMarkerImport = "import repro/profile"
+    ## When the source carries this slash-form import, the file is a
+    ## legacy text-format profile (the `repro_profile` macro library
+    ## is imported as `import repro_profile`, NOT `repro/profile` —
+    ## the slash form is just a documentation marker the M60 parser
+    ## recognizes). On a compile failure for such a file we fall back
+    ## to the legacy parser instead of propagating the diagnostic.
+  ProfileCompileMacroImport = "import repro_profile"
+    ## A Phase-A-shaped profile begins with this real Nim import; it
+    ## is the SIGNATURE that the file is INTENDED to be compiled, not
+    ## hand-parsed.
+
+proc readProfileHeadLines(profilePath: string;
+                          limit = 50): seq[string] =
+  ## Read the first `limit` non-blank/non-comment lines of `profilePath`
+  ## for header analysis. Helper for the legacy / Phase-A decision.
+  try:
+    let src = readFile(extendedPath(profilePath))
+    var lineCount = 0
+    var pos = 0
+    while pos < src.len and lineCount < limit:
+      let lineEnd = src.find('\n', pos)
+      let stop = if lineEnd < 0: src.len else: lineEnd
+      result.add(src[pos ..< stop].strip())
+      pos = if lineEnd < 0: src.len else: lineEnd + 1
+      inc lineCount
+  except CatchableError:
+    discard
+
+proc isLegacyTextProfile*(profilePath: string;
+                          compileMsg: string): bool =
+  ## Heuristic: does this look like a legacy text-format profile that
+  ## the new `nim c` path is NOT expected to handle?
+  ##
+  ## A file is treated as a legacy fixture when ANY of:
+  ##   * the compile failure was a missing `repro/profile` module
+  ##     (the legacy marker import is not a real Nim module);
+  ##   * the compile failure was `nim not found on PATH` — no
+  ##     profile of any shape can compile on this host, so we let
+  ##     every profile fall back rather than fail-closing the apply
+  ##     pipeline (Phase D explicitly opts NOT to vendor Nim);
+  ##   * the file does NOT have a real `import repro_profile`
+  ##     statement among its head lines (the macro-library import IS
+  ##     the Phase-A-shape signature); a legacy `system.nim` with
+  ##     bare resource stanzas and no imports is the typical case;
+  ##   * the file carries the documentation-marker
+  ##     `import repro/profile` (slash form).
+  ##
+  ## Conservative for genuinely-broken Phase-A profiles: if a file
+  ## DOES `import repro_profile` AND the compile error is something
+  ## other than "nim missing", we propagate (don't silently degrade).
+  if compileMsg.contains("cannot open file: repro/profile"):
+    return true
+  if compileMsg.contains("`nim` not found on PATH") or
+     compileMsg.contains("'nim' not found on PATH"):
+    return true
+  let head = readProfileHeadLines(profilePath, limit = 80)
+  var hasMacroImport = false
+  for line in head:
+    if line.startsWith(ProfileCompileMarkerImport):
+      return true
+    # Match `import repro_profile` exactly OR followed by a non-ident
+    # character (so `import repro_profile_intent` etc. do NOT count).
+    if line == ProfileCompileMacroImport or
+       (line.startsWith(ProfileCompileMacroImport) and
+        line.len > ProfileCompileMacroImport.len and
+        line[ProfileCompileMacroImport.len] notin
+          {'a'..'z', 'A'..'Z', '0'..'9', '_'}):
+      hasMacroImport = true
+  if not hasMacroImport:
+    return true
+  false
+
+proc defaultProfileCompileOptionsFor(profileRoot: string;
+                                     stateDir: string):
+    ProfileCompileOptions =
+  result = ProfileCompileOptions(
+    stateDir: stateDir,
+    publicCliPath: getAppFilename(),
+    repoRoot: getEnv(RepoRootEnvVar),
+    workDir: profileRoot.parentDir,
+    verbose: false,
+    forceRebuild: false)
+
+type
+  CompileAdaptOutcome* = object
+    profile*: Profile           ## nil when fallback is required
+    compileError*: string
+    cacheHit*: bool             ## informational
+
+proc compileAndAdaptHomeProfile*(profilePath: string;
+                                 stateDir: string): CompileAdaptOutcome =
+  ## Run the Phase C build-engine edge against `profilePath`, decode
+  ## the RBPI artifact, and adapt it to the `Profile` shape the apply
+  ## pipeline consumes.
+  ##
+  ## On success: `result.profile` is non-nil; the caller threads it
+  ## through `ApplyOptions.preLoadedProfile`.
+  ##
+  ## On compile failure: `result.profile` is nil and
+  ## `result.compileError` carries the diagnostic. The caller decides
+  ## whether to fall back to the legacy parser (via
+  ## `isLegacyTextProfile`) or re-raise.
+  result = CompileAdaptOutcome()
+  let opts = defaultProfileCompileOptionsFor(profilePath, stateDir)
+  try:
+    let artifact = compileProfileToRbpi(profilePath, opts)
+    let intent = decodeRbpi(artifact.rbpiBytes)
+    result.profile = profileIntentToHomeProfile(intent, profilePath)
+  except ProfileCompileError as err:
+    result.compileError = err.msg
+  except CatchableError as err:
+    result.compileError = err.msg
+
+# ---------------------------------------------------------------------------
 # Apply-pipeline plumbing (M63).
 # ---------------------------------------------------------------------------
 
@@ -223,6 +344,25 @@ proc runApplyInline*(commandName: string;
     opts.applyMode = mode
     opts.setOverrideKey = setOverrideKey
     opts.adoptAddresses = adoptAddresses
+    # M83 Phase D: try the compile-then-adapt path. On a compile
+    # failure that looks like a legacy text-format profile (no
+    # `import repro_profile` macro library — only the slash-form
+    # marker import), fall through to the legacy parser. Otherwise
+    # propagate the compile diagnostic.
+    let profilePath =
+      if opts.profilePath.len > 0: opts.profilePath
+      else: resolveProfilePath()
+    let stateDir = resolveStateDir()
+    let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
+    if outcomeCompile.profile != nil:
+      opts.preLoadedProfile = outcomeCompile.profile
+    elif not isLegacyTextProfile(profilePath, outcomeCompile.compileError):
+      stderr.writeLine("repro home " & commandName &
+        ": profile compile failed: " & outcomeCompile.compileError)
+      return 1
+    # On a recognized legacy fixture: leave `preLoadedProfile` nil so
+    # the apply pipeline calls `loadProfile` on the source text via
+    # the legacy parser.
     let outcome = runApply(opts)
     for r in outcome.abortedRecovered:
       stderr.writeLine(renderRecovered(r))
@@ -858,6 +998,18 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool): int =
   try:
     var opts: ApplyOptions
     opts.reconcileStowDrift = reconcileDrift
+    # M83 Phase D: same compile-then-adapt path as the real apply.
+    let profilePath =
+      if opts.profilePath.len > 0: opts.profilePath
+      else: resolveProfilePath()
+    let stateDir = resolveStateDir()
+    let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
+    if outcomeCompile.profile != nil:
+      opts.preLoadedProfile = outcomeCompile.profile
+    elif not isLegacyTextProfile(profilePath, outcomeCompile.compileError):
+      stderr.writeLine("repro home apply --plan: profile compile failed: " &
+        outcomeCompile.compileError)
+      return 1
     let preview = runApplyPlan(opts)
     stdout.write(renderPlanPreview(preview))
     if preview.driftCount > 0 and not allowDrift and not reconcileDrift:

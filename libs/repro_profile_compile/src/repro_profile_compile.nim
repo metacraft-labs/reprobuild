@@ -24,6 +24,8 @@ import ./repro_profile_compile/sources
 import ./repro_profile_compile/compile
 import ./repro_profile_compile/edge
 import ./repro_profile_compile/helper
+import ./repro_profile_compile/adapter_home
+import ./repro_profile_compile/adapter_system
 
 # Source-discovery + digest + paths.
 export sources.CompiledRepoRoot
@@ -63,3 +65,8 @@ export edge.compileProfileToRbpi
 
 # Internal helper subcommand body.
 export helper.runProfileCompileHelper
+
+# Phase D adapters: ProfileIntent -> apply-pipeline IRs.
+export adapter_home.profileIntentToHomeProfile
+export adapter_system.profileIntentToSystemProfile
+export adapter_system.renderSystemProfileToText

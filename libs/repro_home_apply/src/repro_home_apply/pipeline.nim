@@ -195,6 +195,20 @@ type
                                         ## of raising `EStowConflict`
                                         ## (the `--reconcile-drift` /
                                         ## `--accept-overwrite` gate).
+    preLoadedProfile*: Profile          ## M83 Phase D: when non-nil,
+                                        ## the apply pipeline uses
+                                        ## this `Profile` (typically
+                                        ## produced by the
+                                        ## `compileProfileToRbpi ->
+                                        ## profileIntentToHomeProfile`
+                                        ## adapter chain) instead of
+                                        ## calling `loadProfile` on
+                                        ## the source text. The
+                                        ## profile's `path` field must
+                                        ## still match `profilePath`
+                                        ## so downstream snapshot
+                                        ## hashing reads the source
+                                        ## file as intent input.
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -951,6 +965,20 @@ proc loadProfileOrRaise(profilePath: string): Profile =
   except CatchableError as err:
     raiseIntentLoad(profilePath, err.msg)
 
+proc resolveProfileFromOpts(opts: ApplyOptions): Profile =
+  ## M83 Phase D: when the caller has already produced a `Profile`
+  ## (typically via the compile-then-adapt path), reuse it instead of
+  ## re-parsing the source. The pre-loaded profile's `path` is
+  ## reconciled with the resolved options' `profilePath` so downstream
+  ## snapshot-hashing reads the same file the pipeline thinks it
+  ## loaded.
+  if opts.preLoadedProfile != nil:
+    let p = opts.preLoadedProfile
+    if p.path.len == 0:
+      p.path = opts.profilePath
+    return p
+  loadProfileOrRaise(opts.profilePath)
+
 proc deriveGenerationId(plan: ApplyPlan;
                         intentSnapshotDigest: Digest256;
                         resourcesSeed: string = ""): GenerationId =
@@ -1219,7 +1247,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   if not fileExists(extendedPath(opts.profilePath)):
     raiseIntentLoad(opts.profilePath,
       "no home.nim at expected path (profile-dir: " & opts.profileDir & ")")
-  let profile = loadProfileOrRaise(opts.profilePath)
+  let profile = resolveProfileFromOpts(opts)
 
   # ---- Step 4: build plan + synthetic seams + stow discovery ------------
   var applyPlan = buildPlan(profile, opts.profileDir, opts.host)
@@ -1444,7 +1472,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       raiseIntentLoad(opts.profilePath,
         "no home.nim at expected path (profile-dir: " & opts.profileDir &
         ")")
-    let profile = loadProfileOrRaise(opts.profilePath)
+    let profile = resolveProfileFromOpts(opts)
     if shouldKillAfter(2):
       writeMarker(opts.stateDir, "", "killed-after-step-2")
       raiseKilledByTestHook(2)
