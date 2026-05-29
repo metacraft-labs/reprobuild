@@ -11407,6 +11407,13 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runLaunchPlanCommand(lpArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "__remote-activate":
+    let remoteArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runHomeCommand(@["__remote-activate"] & remoteArgs)
   if programName == "repro" and args.len > 0 and args[0] == "home":
     let homeArgs =
       if args.len > 1:

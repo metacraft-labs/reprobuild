@@ -3,7 +3,8 @@
 ## The bundle is a deterministic binary envelope stored as one CAS blob
 ## in the source local store. It represents an already-realized local
 ## generation and carries the pointer envelope, pointer-referenced CAS
-## artifacts, and complete realized-prefix file closures.
+## artifacts, additional activation-time CAS blobs, and complete
+## realized-prefix file closures.
 
 import std/[algorithm, os, strutils, tables]
 from repro_core/paths import extendedPath
@@ -13,12 +14,15 @@ import repro_core
 import repro_local_store
 
 import ./errors
+import ./manifest
 import ./pointer
 import ./state_dir
 
 const
   ActivationBundleMagic* = "RBAB"
-  ActivationBundleSchemaVersion*: uint16 = 1
+  ActivationBundleSchemaVersionV1*: uint16 = 1
+  ActivationBundleSchemaVersionV2*: uint16 = 2
+  ActivationBundleSchemaVersion*: uint16 = ActivationBundleSchemaVersionV2
   BundleHeaderSize = 4 + 2 + 4
   BundleTrailerSize = 32
   ActivationRuntimePlaceholderKind* = "phase-a-placeholder"
@@ -35,6 +39,10 @@ type
     receiptBytes*: seq[byte]
     files*: seq[ActivationBundleFileEntry]
 
+  ActivationBundleCasBlobEntry* = object
+    digest*: Digest256
+    contentBytes*: seq[byte]
+
   ActivationBundle* = object
     schemaVersion*: uint16
     sourceGenerationId*: GenerationId
@@ -46,6 +54,7 @@ type
     configurableGraphBytes*: seq[byte]
     activationRuntimeKind*: string
     activationRuntimeBytes*: seq[byte]
+    casBlobs*: seq[ActivationBundleCasBlobEntry]
     prefixes*: seq[ActivationBundlePrefixClosure]
 
   ActivationBundleWriteResult* = object
@@ -114,6 +123,9 @@ proc toPrefixId(digest: Digest256): PrefixIdBytes =
   for i in 0 ..< DigestSize:
     result[i] = digest[i]
 
+proc activationDigestHex(digest: Digest256): string =
+  prefixIdHex(toPrefixId(digest))
+
 proc parseBundleHexNibble(c: char): int =
   case c
   of '0' .. '9': int(ord(c) - ord('0'))
@@ -176,6 +188,10 @@ proc encodeBody(bundle: ActivationBundle): seq[byte] =
   result.writeBlob(bundle.configurableGraphBytes)
   result.writeString(bundle.activationRuntimeKind)
   result.writeBlob(bundle.activationRuntimeBytes)
+  result.writeU32Le(uint32(bundle.casBlobs.len))
+  for blob in bundle.casBlobs:
+    result.writeDigest(blob.digest)
+    result.writeBlob(blob.contentBytes)
   result.writeU32Le(uint32(bundle.prefixes.len))
   for prefix in bundle.prefixes:
     result.writeDigest(prefix.prefixId)
@@ -215,7 +231,8 @@ proc decodeActivationBundleBytes*(bytes: openArray[byte];
         "expected '" & ActivationBundleMagic & "' magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != ActivationBundleSchemaVersion:
+  if version != ActivationBundleSchemaVersionV1 and
+     version != ActivationBundleSchemaVersionV2:
     raiseActivationBundleCorrupt(filePath, "schemaVersion",
       "unsupported activation-bundle schema version " & $version)
   let bodyLen = int(readU32Le(bytes, pos))
@@ -257,6 +274,30 @@ proc decodeActivationBundleBytes*(bytes: openArray[byte];
     filePath, "activationRuntimeKind")
   result.activationRuntimeBytes = readBlob(bytes, pos, bodyEnd, filePath,
     "activationRuntimeBytes")
+  if version >= ActivationBundleSchemaVersionV2:
+    if pos + 4 > bodyEnd:
+      raiseActivationBundleCorrupt(filePath, "casBlobs", "truncated count")
+    let blobCount = int(readU32Le(bytes, pos))
+    result.casBlobs = newSeq[ActivationBundleCasBlobEntry](blobCount)
+    var previous = ""
+    for i in 0 ..< blobCount:
+      var blob: ActivationBundleCasBlobEntry
+      blob.digest = readDigest(bytes, pos, bodyEnd, filePath,
+        "casBlobs[" & $i & "].digest")
+      blob.contentBytes = readBlob(bytes, pos, bodyEnd, filePath,
+        "casBlobs[" & $i & "].contentBytes")
+      let actual = blake3.digest(blob.contentBytes)
+      if actual != blob.digest:
+        raiseActivationBundleCorrupt(filePath,
+          "casBlobs[" & $i & "].digest",
+          "CAS blob content digest mismatch")
+      let key = activationDigestHex(blob.digest)
+      if previous.len > 0 and key <= previous:
+        raiseActivationBundleCorrupt(filePath,
+          "casBlobs[" & $i & "].digest",
+          "CAS blob list is not strictly sorted by digest")
+      previous = key
+      result.casBlobs[i] = blob
   if pos + 4 > bodyEnd:
     raiseActivationBundleCorrupt(filePath, "prefixes", "truncated count")
   let prefixCount = int(readU32Le(bytes, pos))
@@ -327,6 +368,30 @@ proc collectPrefixClosure(store: Store; prefixDigest: Digest256):
       contentDigest: blake3.digest(content),
       contentBytes: content))
 
+proc collectActivationCasBlobs(store: Store;
+                               manifest: ActivationManifest):
+    seq[ActivationBundleCasBlobEntry] =
+  var seen = initTable[string, bool]()
+  var blobs: seq[ActivationBundleCasBlobEntry]
+
+  proc addDigest(digest: Digest256) =
+    let key = activationDigestHex(digest)
+    if key in seen:
+      return
+    seen[key] = true
+    blobs.add(ActivationBundleCasBlobEntry(
+      digest: digest,
+      contentBytes: store.readCasBlob(toPrefixId(digest))))
+
+  for command in manifest.exportedCommands:
+    addDigest(command.launchPlanDigest)
+  for generated in manifest.generatedFiles:
+    addDigest(generated.storeContentHash)
+
+  blobs.sort(proc(a, b: ActivationBundleCasBlobEntry): int =
+    cmp(activationDigestHex(a.digest), activationDigestHex(b.digest)))
+  blobs
+
 proc buildActivationBundle*(stateDir: string; store: Store;
                             generationId = "current"): ActivationBundle =
   ## Assemble the deterministic in-memory bundle for an already
@@ -366,6 +431,8 @@ proc buildActivationBundle*(stateDir: string; store: Store;
     toPrefixId(envelope.configurableGraphDigest))
   result.activationRuntimeKind = ActivationRuntimePlaceholderKind
   result.activationRuntimeBytes = @[]
+  let manifest = decodeManifestBytes(result.activationManifestBytes)
+  result.casBlobs = collectActivationCasBlobs(store, manifest)
   for prefixDigest in envelope.realizedPrefixIds:
     result.prefixes.add(collectPrefixClosure(store, prefixDigest))
 
@@ -510,6 +577,15 @@ proc importActivationBundleBytes*(store: var Store; bytes: openArray[byte];
   result.bundleAlreadyPresent = fileExists(extendedPath(result.targetBundlePath))
   discard store.storeCasBlob(bytes)
   store.verifyCasBlob(result.bundleDigest)
+
+  for i, blob in bundle.casBlobs:
+    let key = toPrefixId(blob.digest)
+    let stored = store.storeCasBlob(blob.contentBytes)
+    if stored != key:
+      raiseActivationBundleCorrupt(filePath,
+        "casBlobs[" & $i & "].digest",
+        "stored CAS blob digest did not match bundle digest")
+    store.verifyCasBlob(key)
 
   for i, closure in bundle.prefixes:
     requireSafeBundlePath(filePath, "prefixes[" & $i & "].storeRelativePath",

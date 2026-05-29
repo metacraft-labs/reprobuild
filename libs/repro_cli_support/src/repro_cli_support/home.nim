@@ -36,12 +36,14 @@
 import std/[options, os, osproc, sets, streams, strutils, tables, times]
 from repro_core/paths import extendedPath
 
+import blake3
 import repro_home_intent
 import repro_home_generations
 import repro_home_apply
 import repro_home_apply/catalog_lookup
 import repro_home_resources
 import repro_home_rollback
+import repro_launch_plan
 import repro_local_store
 import repro_profile_intent
 import repro_profile_compile
@@ -1548,6 +1550,413 @@ proc runHomeTransferBundle(args: openArray[string]): int =
     return 1
 
 # ---------------------------------------------------------------------------
+# `repro home __remote-activate` (M71 Phase D, internal target runtime).
+# ---------------------------------------------------------------------------
+
+type
+  ERemoteActivationFailed = object of CatchableError
+
+  RemoteActivationPayload = object
+    envelope: PointerEnvelope
+    manifest: ActivationManifest
+    generationIdHex: string
+
+proc raiseRemoteActivation(msg: string) {.noreturn.} =
+  raise newException(ERemoteActivationFailed, msg)
+
+proc keyFromDigest(digest: Digest256): PrefixIdBytes =
+  for i in 0 ..< 32:
+    result[i] = digest[i]
+
+proc digestBytesForActivation(bytes: openArray[byte]): Digest256 =
+  blake3.digest(bytes)
+
+proc currentPlatformName(): string =
+  when defined(windows):
+    "windows"
+  elif defined(macosx):
+    "macos"
+  elif defined(linux):
+    "linux"
+  else:
+    "unknown"
+
+proc validateRemoteActivationPayload(bundle: ActivationBundle;
+                                     filePath: string):
+    RemoteActivationPayload =
+  let envelope = decodePointerBytes(bundle.pointerEnvelopeBytes,
+    filePath & ":pointer")
+  let generationId = generationIdHex(envelope.generationId)
+  if envelope.generationId != bundle.sourceGenerationId:
+    raiseRemoteActivation("pointer generation id " & generationId &
+      " does not match bundle source generation id " &
+      generationIdHex(bundle.sourceGenerationId))
+  if envelope.hostIdentity != bundle.hostIdentity:
+    raiseRemoteActivation("pointer host identity '" & envelope.hostIdentity &
+      "' does not match bundle host identity '" & bundle.hostIdentity & "'")
+  if envelope.activationTimestamp != bundle.activationTimestamp:
+    raiseRemoteActivation("pointer activation timestamp does not match bundle")
+  if digestBytesForActivation(bundle.activationManifestBytes) !=
+      envelope.activationManifestDigest:
+    raiseRemoteActivation("bundled activation manifest bytes do not hash to " &
+      "the pointer activationManifestDigest")
+  if digestBytesForActivation(bundle.intentSnapshotBytes) !=
+      envelope.intentSnapshotDigest:
+    raiseRemoteActivation("bundled intent snapshot bytes do not hash to " &
+      "the pointer intentSnapshotDigest")
+  if digestBytesForActivation(bundle.configurableGraphBytes) !=
+      envelope.configurableGraphDigest:
+    raiseRemoteActivation("bundled configurable graph bytes do not hash to " &
+      "the pointer configurableGraphDigest")
+
+  let manifest = decodeManifestBytes(bundle.activationManifestBytes,
+    filePath & ":manifest")
+  discard decodeSnapshotBytes(bundle.intentSnapshotBytes,
+    filePath & ":snapshot")
+
+  proc prefixInPointer(digest: Digest256): bool =
+    for p in envelope.realizedPrefixIds:
+      if p == digest:
+        return true
+    false
+
+  for pkg in manifest.realizedPackages:
+    if not prefixInPointer(pkg.realizedPrefixId):
+      raiseRemoteActivation("manifest package '" & pkg.packageId &
+        "' references a realized prefix not present in the pointer")
+
+  if manifest.managedBlocks.len > 0:
+    raiseRemoteActivation("remote activation cannot replay managed-block " &
+      "records yet; refusing to ignore " & $manifest.managedBlocks.len &
+      " managed block(s)")
+  if manifest.resourceBindings.len > 0:
+    raiseRemoteActivation("remote activation cannot replay resource binding " &
+      "records yet; refusing to ignore " & $manifest.resourceBindings.len &
+      " resource binding(s)")
+  for i, gf in manifest.generatedFiles:
+    if gf.ownershipPolicy != gfoOwned:
+      raiseRemoteActivation("remote activation supports only owned " &
+        "generated files; generatedFiles[" & $i & "] uses " &
+        $gf.ownershipPolicy)
+    if gf.stowSource.len > 0:
+      raiseRemoteActivation("remote activation cannot replay stow-generated " &
+        "file records yet: " & gf.absoluteOutputPath)
+    if gf.storeContentHash != gf.postWriteDigest:
+      raiseRemoteActivation("remote activation requires owned generated " &
+        "file content hash to equal post-write digest: " &
+        gf.absoluteOutputPath)
+
+  RemoteActivationPayload(
+    envelope: envelope,
+    manifest: manifest,
+    generationIdHex: generationId)
+
+proc ensurePointerPrefixesPresent(store: Store; envelope: PointerEnvelope) =
+  for i, digest in envelope.realizedPrefixIds:
+    let key = keyFromDigest(digest)
+    let lookup = store.lookupPrefix(key)
+    if not lookup.found:
+      raiseRemoteActivation("realized prefix " & prefixIdHex(key) &
+        " from pointer index " & $i & " is not imported in target store")
+    let abs = store.absolutePrefixPath(lookup.row.realizedPath)
+    if not dirExists(extendedPath(abs)):
+      raiseRemoteActivation("realized prefix " & prefixIdHex(key) &
+        " is indexed but missing on disk at " & abs)
+
+proc loadCurrentGeneratedFileDigests(stateDir: string; store: Store):
+    Table[string, Digest256] =
+  result = initTable[string, Digest256]()
+  let active = readCurrentGenerationId(stateDir)
+  if active.len == 0:
+    return
+  let env = readPointerFile(pointerPath(stateDir, active))
+  let manifestBytes = store.readCasBlob(keyFromDigest(
+    env.activationManifestDigest))
+  let manifest = decodeManifestBytes(manifestBytes,
+    "current generation " & active & " activation manifest")
+  for gf in manifest.generatedFiles:
+    result[gf.absoluteOutputPath] = gf.postWriteDigest
+
+proc fileDigestForActivation(path: string): Digest256 =
+  digestBytesForActivation(readBinaryFile(path))
+
+proc atomicWriteActivationBytes(path: string; content: openArray[byte]) =
+  let parent = parentDir(path)
+  if parent.len > 0:
+    createDir(extendedPath(parent))
+  let tmp = path & ".repro-remote-activate.tmp"
+  writeFile(extendedPath(tmp), bytesToString(content))
+  if fileExists(extendedPath(path)) or symlinkExists(extendedPath(path)):
+    try:
+      removeFile(extendedPath(path))
+    except OSError as err:
+      try: removeFile(extendedPath(tmp)) except OSError: discard
+      raiseRemoteActivation("could not replace generated file " & path &
+        ": " & err.msg)
+  try:
+    moveFile(extendedPath(tmp), extendedPath(path))
+  except OSError as err:
+    try: removeFile(extendedPath(tmp)) except OSError: discard
+    raiseRemoteActivation("could not move generated file into place at " &
+      path & ": " & err.msg)
+
+proc materializeOwnedGeneratedFiles(store: Store; stateDir: string;
+                                    manifest: ActivationManifest): int =
+  let currentDigests = loadCurrentGeneratedFileDigests(stateDir, store)
+  for gf in manifest.generatedFiles:
+    let content = store.readCasBlob(keyFromDigest(gf.storeContentHash))
+    if digestBytesForActivation(content) != gf.postWriteDigest:
+      raiseRemoteActivation("CAS content for generated file does not match " &
+        "post-write digest: " & gf.absoluteOutputPath)
+    if fileExists(extendedPath(gf.absoluteOutputPath)):
+      let live = fileDigestForActivation(gf.absoluteOutputPath)
+      if live == gf.postWriteDigest:
+        inc result
+        continue
+      if gf.absoluteOutputPath in currentDigests:
+        if currentDigests[gf.absoluteOutputPath] != live:
+          raiseRemoteActivation("generated file drift at " &
+            gf.absoluteOutputPath & "; live bytes no longer match the " &
+            "current generation")
+      else:
+        raiseRemoteActivation("generated file target already exists outside " &
+          "remote activation state: " & gf.absoluteOutputPath)
+    atomicWriteActivationBytes(gf.absoluteOutputPath, content)
+    if fileDigestForActivation(gf.absoluteOutputPath) != gf.postWriteDigest:
+      raiseRemoteActivation("generated file post-write digest mismatch at " &
+        gf.absoluteOutputPath)
+    inc result
+
+proc isSafeLauncherName(name: string): bool =
+  if name.len == 0 or name == "." or name == "..":
+    return false
+  for ch in name:
+    if ch == '/' or ch == '\\' or ch == '\0':
+      return false
+  true
+
+proc remapPrefixPathValue(value, sourcePrefix, targetPrefix: string): string =
+  if sourcePrefix.len == 0:
+    return value
+  value.replace(sourcePrefix, targetPrefix)
+
+proc remapLaunchPlanToTarget(plan: var LaunchPlan; targetPrefix: string) =
+  let sourcePrefix = plan.realizedPrefix
+  if sourcePrefix.len == 0:
+    raiseRemoteActivation("launch plan for " & plan.exportedCommand &
+      " has no realizedPrefix to remap")
+  plan.realizedPrefix = targetPrefix
+  plan.executablePath = remapPrefixPathValue(plan.executablePath,
+    sourcePrefix, targetPrefix)
+  if plan.hasWorkingDirectory:
+    plan.workingDirectory = remapPrefixPathValue(plan.workingDirectory,
+      sourcePrefix, targetPrefix)
+  for i in 0 ..< plan.runtimeLibraryDirs.len:
+    plan.runtimeLibraryDirs[i] = remapPrefixPathValue(
+      plan.runtimeLibraryDirs[i], sourcePrefix, targetPrefix)
+  for i in 0 ..< plan.environmentBindings.len:
+    plan.environmentBindings[i].value = remapPrefixPathValue(
+      plan.environmentBindings[i].value, sourcePrefix, targetPrefix)
+  for i in 0 ..< plan.executableBindings.len:
+    plan.executableBindings[i].executablePath = remapPrefixPathValue(
+      plan.executableBindings[i].executablePath, sourcePrefix, targetPrefix)
+  if not plan.executablePath.startsWith(targetPrefix):
+    raiseRemoteActivation("launch plan executable did not remap into target " &
+      "prefix for " & plan.exportedCommand)
+
+proc materializeRemoteLaunchers(store: Store; stateDir, generationId: string;
+                                manifest: ActivationManifest): int =
+  if manifest.exportedCommands.len == 0:
+    return 0
+  when defined(windows):
+    raiseRemoteActivation("remote activation launcher materialization is not " &
+      "implemented on Windows yet")
+  else:
+    let binDir = generationBinDir(stateDir, generationId)
+    createDir(extendedPath(binDir))
+    for command in manifest.exportedCommands:
+      if command.binDirArtifactKind != "launcher-script":
+        raiseRemoteActivation("remote activation supports only POSIX " &
+          "launcher-script artifacts; command " & command.commandName &
+          " records " & command.binDirArtifactKind)
+      if not isSafeLauncherName(command.commandName):
+        raiseRemoteActivation("unsafe exported command name: " &
+          command.commandName)
+      let launchKey = keyFromDigest(command.launchPlanDigest)
+      var plan = decodeLaunchPlan(store.readCasBlob(launchKey))
+      if plan.supportProfile.platform.len > 0 and
+          plan.supportProfile.platform != currentPlatformName():
+        raiseRemoteActivation("launch plan for " & command.commandName &
+          " targets platform " & plan.supportProfile.platform &
+          " but remote activation is running on " & currentPlatformName())
+      if plan.provenance.realizationHashHex.len == 0:
+        raiseRemoteActivation("launch plan for " & command.commandName &
+          " lacks realization-hash provenance")
+      let prefixKey = parsePrefixIdHex(plan.provenance.realizationHashHex)
+      let lookup = store.lookupPrefix(prefixKey)
+      if not lookup.found:
+        raiseRemoteActivation("launch plan for " & command.commandName &
+          " references missing target prefix " &
+          plan.provenance.realizationHashHex)
+      let targetPrefix = store.absolutePrefixPath(lookup.row.realizedPath)
+      if not dirExists(extendedPath(targetPrefix)):
+        raiseRemoteActivation("launch plan target prefix is missing on disk: " &
+          targetPrefix)
+      remapLaunchPlanToTarget(plan, targetPrefix)
+      plan.binding = when defined(macosx): lbkMacosScript else: lbkLinuxScript
+      let scriptPath = binDir / command.commandName
+      let scriptBody = generatePosixLauncherScript(plan,
+        when defined(macosx): "DYLD_LIBRARY_PATH" else: "LD_LIBRARY_PATH")
+      writeFile(extendedPath(scriptPath), scriptBody)
+      try:
+        setFilePermissions(extendedPath(scriptPath), {fpUserExec, fpUserWrite,
+          fpUserRead, fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
+      except OSError as err:
+        raiseRemoteActivation("could not set launcher permissions for " &
+          scriptPath & ": " & err.msg)
+      inc result
+
+proc runHomeRemoteActivate(args: openArray[string]): int =
+  var storeRoot = ""
+  var stateDir = ""
+  var bundleDigestHex = ""
+  var expectedDigest = ""
+  var bundlePath = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      echo "usage: repro home __remote-activate --store-root PATH " &
+        "--state-dir PATH --bundle-digest HEX"
+      echo "       repro home __remote-activate --store-root PATH " &
+        "--state-dir PATH --bundle PATH [--expected-digest HEX]"
+      echo ""
+      echo "Internal M71 target-side activation runtime. It loads a " &
+        "transferred RBAB bundle from target CAS (or --bundle), verifies " &
+        "the pointer-referenced payloads, imports prefixes/CAS blobs, " &
+        "materializes supported typed activation artifacts, commits the " &
+        "generation with roots/holds, then rotates current."
+      return 0
+    elif a == "--store-root" or a.startsWith("--store-root="):
+      storeRoot = parseFlagValue(args, i, "--store-root")
+    elif a == "--state-dir" or a.startsWith("--state-dir="):
+      stateDir = parseFlagValue(args, i, "--state-dir")
+    elif a == "--bundle-digest" or a.startsWith("--bundle-digest="):
+      bundleDigestHex = parseFlagValue(args, i, "--bundle-digest")
+    elif a == "--expected-digest" or a.startsWith("--expected-digest="):
+      expectedDigest = parseFlagValue(args, i, "--expected-digest")
+    elif a == "--bundle" or a.startsWith("--bundle="):
+      bundlePath = parseFlagValue(args, i, "--bundle")
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home __remote-activate: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home __remote-activate: unexpected positional: " &
+        a)
+      return 2
+    inc i
+
+  if storeRoot.len == 0 or stateDir.len == 0:
+    stderr.writeLine("repro home __remote-activate: --store-root and " &
+      "--state-dir are required")
+    return 2
+  if bundleDigestHex.len == 0 and bundlePath.len == 0:
+    stderr.writeLine("repro home __remote-activate: --bundle-digest or " &
+      "--bundle is required")
+    return 2
+  if bundleDigestHex.len > 0 and expectedDigest.len > 0 and
+      bundleDigestHex.toLowerAscii() != expectedDigest.toLowerAscii():
+    stderr.writeLine("repro home __remote-activate: --bundle-digest and " &
+      "--expected-digest disagree")
+    return 2
+
+  try:
+    ensureStateDir(stateDir)
+    var lock = acquireApplyLock(stateDir, timeoutSeconds = 30)
+    try:
+      var store = openStore(resolveStoreRoot(storeRoot))
+      defer:
+        try: store.close() except CatchableError: discard
+
+      let bytes =
+        if bundlePath.len > 0:
+          readBinaryFile(bundlePath)
+        else:
+          store.readCasBlob(parsePrefixIdHex(bundleDigestHex))
+      let expected =
+        if expectedDigest.len > 0: expectedDigest
+        elif bundleDigestHex.len > 0: bundleDigestHex
+        else: ""
+      let imported = importActivationBundleBytes(store, bytes,
+        expectedDigestHex = expected,
+        filePath = if bundlePath.len > 0: bundlePath else:
+          store.casPath(parsePrefixIdHex(bundleDigestHex)))
+      let bundle = decodeActivationBundleBytes(bytes,
+        if bundlePath.len > 0: bundlePath else: imported.targetBundlePath)
+      let payload = validateRemoteActivationPayload(bundle,
+        if bundlePath.len > 0: bundlePath else: imported.targetBundlePath)
+      ensurePointerPrefixesPresent(store, payload.envelope)
+
+      let launchersMaterialized = materializeRemoteLaunchers(store, stateDir,
+        payload.generationIdHex, payload.manifest)
+      let generatedFilesMaterialized = materializeOwnedGeneratedFiles(store,
+        stateDir, payload.manifest)
+
+      var envelope = payload.envelope
+      writeGeneration(stateDir, envelope, bundle.activationManifestBytes,
+        bundle.intentSnapshotBytes, bundle.configurableGraphBytes, store)
+      rotateCurrent(stateDir, payload.generationIdHex)
+
+      echo "activationStatus: activated"
+      echo "bundleDigest: " & imported.bundleDigestHex
+      echo "targetBundlePath: " & imported.targetBundlePath
+      echo "generationId: " & payload.generationIdHex
+      echo "current: " & readCurrentGenerationId(stateDir)
+      echo "prefixesImported: " & $imported.prefixesImported
+      echo "prefixesAlreadyPresent: " & $imported.prefixesAlreadyPresent
+      echo "launchersMaterialized: " & $launchersMaterialized
+      echo "generatedFilesMaterialized: " & $generatedFilesMaterialized
+      return 0
+    finally:
+      releaseApplyLock(lock)
+  except ERemoteActivationFailed as err:
+    stderr.writeLine("repro home __remote-activate: " & err.msg)
+    return 1
+  except EActivationBundleCorrupt as err:
+    stderr.writeLine("repro home __remote-activate: " & err.msg)
+    return 1
+  except EPointerCorrupt as err:
+    stderr.writeLine("repro home __remote-activate: corrupt pointer at " &
+      err.pointerPath & " (field: " & err.field & ")")
+    return 1
+  except EManifestCorrupt as err:
+    stderr.writeLine("repro home __remote-activate: corrupt manifest at " &
+      err.manifestPath & " (field: " & err.field & ")")
+    return 1
+  except EIntentSnapshotCorrupt as err:
+    stderr.writeLine("repro home __remote-activate: corrupt intent snapshot " &
+      "at " & err.snapshotPath & " (field: " & err.field & ")")
+    return 1
+  except EApplyBusy as err:
+    stderr.writeLine("repro home __remote-activate: another apply/activation " &
+      "is in progress (lock " & err.lockPath & " held; waited " &
+      $err.waitedSeconds & "s).")
+    return 1
+  except StoreError as err:
+    stderr.writeLine("repro home __remote-activate: store error: " & err.msg)
+    return 1
+  except LaunchPlanCodecError as err:
+    stderr.writeLine("repro home __remote-activate: launch plan error: " &
+      err.msg)
+    return 1
+  except ValueError as err:
+    stderr.writeLine("repro home __remote-activate: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro home __remote-activate: error: " & err.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
 # `repro home set` / `repro home get` (M65).
 # ---------------------------------------------------------------------------
 
@@ -2393,6 +2802,7 @@ proc runHomeCommand*(args: seq[string]): int =
   of "__build-bundle": return runHomeBuildBundle(subArgs)
   of "__receive-bundle": return runHomeReceiveBundle(subArgs)
   of "__transfer-bundle": return runHomeTransferBundle(subArgs)
+  of "__remote-activate": return runHomeRemoteActivate(subArgs)
   of "plan": return runHomePlan(subArgs)
   of "rollback": return runHomeRollback(subArgs)
   of "set": return runHomeSet(subArgs)
