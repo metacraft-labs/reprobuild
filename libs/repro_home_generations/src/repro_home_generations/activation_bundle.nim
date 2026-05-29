@@ -5,7 +5,7 @@
 ## generation and carries the pointer envelope, pointer-referenced CAS
 ## artifacts, and complete realized-prefix file closures.
 
-import std/[algorithm, os]
+import std/[algorithm, os, strutils, tables]
 from repro_core/paths import extendedPath
 
 import blake3
@@ -54,6 +54,15 @@ type
     bundleDigestHex*: string
     bundlePath*: string
     bundleBytes*: seq[byte]
+
+  ActivationBundleImportResult* = object
+    bundleDigest*: PrefixIdBytes
+    bundleDigestHex*: string
+    targetBundlePath*: string
+    bundleAlreadyPresent*: bool
+    prefixesImported*: int
+    prefixesAlreadyPresent*: int
+    bytesReceived*: int
 
 proc writeBytes(outp: var seq[byte]; data: openArray[byte]) =
   for b in data:
@@ -105,17 +114,57 @@ proc toPrefixId(digest: Digest256): PrefixIdBytes =
   for i in 0 ..< DigestSize:
     result[i] = digest[i]
 
+proc parseBundleHexNibble(c: char): int =
+  case c
+  of '0' .. '9': int(ord(c) - ord('0'))
+  of 'a' .. 'f': int(ord(c) - ord('a') + 10)
+  of 'A' .. 'F': int(ord(c) - ord('A') + 10)
+  else:
+    raise newException(ValueError, "not a hex nibble: " & $c)
+
+proc parsePrefixIdHex*(hex: string): PrefixIdBytes =
+  ## Parse a 64-character BLAKE3-256 hex digest for activation-bundle
+  ## transfer/import CLI plumbing.
+  if hex.len != DigestSize * 2:
+    raise newException(ValueError,
+      "expected " & $(DigestSize * 2) & " hex chars, got " & $hex.len)
+  for i in 0 ..< DigestSize:
+    let high = parseBundleHexNibble(hex[2 * i])
+    let low = parseBundleHexNibble(hex[2 * i + 1])
+    result[i] = byte((high shl 4) or low)
+
 proc bytesFromFile(path: string): seq[byte] =
   let raw = readFile(extendedPath(path))
   result = newSeq[byte](raw.len)
   for i, ch in raw:
     result[i] = byte(ord(ch))
 
+proc bytesToString(bytes: openArray[byte]): string =
+  result = newString(bytes.len)
+  for i, b in bytes:
+    result[i] = char(b)
+
 proc normalizeRelPath(path: string): string =
   result = path
   for i in 0 ..< result.len:
     if result[i] == '\\':
       result[i] = '/'
+
+proc isSafeStoreRelativePath(path: string): bool =
+  if path.len == 0 or path.startsWith("/") or path.startsWith("\\"):
+    return false
+  let normalized = normalizeRelPath(path)
+  if normalized != path:
+    return false
+  for part in normalized.split('/'):
+    if part.len == 0 or part == "." or part == "..":
+      return false
+  true
+
+proc requireSafeBundlePath(filePath, field, path: string) =
+  if not isSafeStoreRelativePath(path):
+    raiseActivationBundleCorrupt(filePath, field,
+      "unsafe relative path in activation bundle: " & path)
 
 proc encodeBody(bundle: ActivationBundle): seq[byte] =
   result.writeBytes(bundle.sourceGenerationId)
@@ -334,3 +383,199 @@ proc writeActivationBundle*(stateDir: string; store: var Store;
   result.bundleDigestHex = prefixIdHex(digest)
   result.bundlePath = store.casPath(digest)
   result.bundleBytes = bytes
+
+proc validateExistingPrefixTree(filePath: string; store: Store;
+                                closure: ActivationBundlePrefixClosure;
+                                absolutePrefix: string;
+                                receiptDigest: PrefixIdBytes): bool =
+  if not dirExists(extendedPath(absolutePrefix)):
+    return false
+  let receiptPath = absolutePrefix / ReceiptFileName
+  if not fileExists(extendedPath(receiptPath)):
+    raiseActivationBundleCorrupt(filePath, "prefix.existingReceipt",
+      "existing prefix is missing " & ReceiptFileName & ": " & absolutePrefix)
+  let existingReceipt = bytesFromFile(receiptPath)
+  if blake3.digest(existingReceipt) != receiptDigest:
+    raiseActivationBundleCorrupt(filePath, "prefix.existingReceipt",
+      "existing prefix receipt digest mismatch: " & absolutePrefix)
+  if existingReceipt != closure.receiptBytes:
+    raiseActivationBundleCorrupt(filePath, "prefix.existingReceipt",
+      "existing prefix receipt bytes differ: " & absolutePrefix)
+
+  var expected = initTable[string, Digest256]()
+  for entry in closure.files:
+    expected[entry.relativePath] = entry.contentDigest
+
+  var seen = initTable[string, bool]()
+  for rel in walkDirRec(extendedPath(absolutePrefix),
+      yieldFilter = {pcFile, pcLinkToFile}, relative = true):
+    let normalized = normalizeRelPath(rel)
+    if normalized notin expected:
+      raiseActivationBundleCorrupt(filePath, "prefix.existingFiles",
+        "existing prefix contains unexpected file: " & normalized)
+    let content = bytesFromFile(absolutePrefix / rel)
+    if blake3.digest(content) != expected[normalized]:
+      raiseActivationBundleCorrupt(filePath, "prefix.existingFiles",
+        "existing prefix file digest mismatch: " & normalized)
+    seen[normalized] = true
+
+  for entry in closure.files:
+    if entry.relativePath notin seen:
+      raiseActivationBundleCorrupt(filePath, "prefix.existingFiles",
+        "existing prefix is missing file: " & entry.relativePath)
+  true
+
+proc materializeImportedPrefix(filePath: string; store: var Store;
+                               closure: ActivationBundlePrefixClosure;
+                               receipt: RealizationReceipt;
+                               receiptDigest: PrefixIdBytes) =
+  let finalPath = store.absolutePrefixPath(closure.storeRelativePath)
+  if dirExists(extendedPath(finalPath)):
+    if validateExistingPrefixTree(filePath, store, closure, finalPath,
+        receiptDigest):
+      discard store.insertPrefixOrIgnore(PrefixRow(
+        prefixId: closure.prefixId,
+        packageName: receipt.packageName,
+        version: receipt.version,
+        realizedPath: closure.storeRelativePath,
+        adapter: receipt.adapter,
+        receiptDigest: receiptDigest,
+        createdAtUnix: receipt.createdAtUnix))
+      return
+
+  let stage = store.allocateStagingDir()
+  try:
+    for entry in closure.files:
+      requireSafeBundlePath(filePath, "prefix.files.relativePath",
+        entry.relativePath)
+      let target = stage / entry.relativePath.replace('/', DirSep)
+      createDir(extendedPath(parentDir(target)))
+      writeFile(extendedPath(target), bytesToString(entry.contentBytes))
+    let stagedReceipt = stage / ReceiptFileName
+    if not fileExists(extendedPath(stagedReceipt)):
+      raiseActivationBundleCorrupt(filePath, "prefix.receipt",
+        "bundle did not materialize " & ReceiptFileName)
+    if bytesFromFile(stagedReceipt) != closure.receiptBytes:
+      raiseActivationBundleCorrupt(filePath, "prefix.receipt",
+        "materialized receipt bytes differ from bundle receipt bytes")
+
+    createDir(extendedPath(parentDir(finalPath)))
+    try:
+      moveDir(extendedPath(stage), extendedPath(finalPath))
+    except OSError:
+      if dirExists(extendedPath(stage)):
+        try: removeDir(extendedPath(stage)) except OSError: discard
+      if not dirExists(extendedPath(finalPath)):
+        raise
+      if not validateExistingPrefixTree(filePath, store, closure, finalPath,
+          receiptDigest):
+        raiseActivationBundleCorrupt(filePath, "prefix.publish",
+          "prefix publish lost race to a non-matching directory")
+
+    discard store.insertPrefixOrIgnore(PrefixRow(
+      prefixId: closure.prefixId,
+      packageName: receipt.packageName,
+      version: receipt.version,
+      realizedPath: closure.storeRelativePath,
+      adapter: receipt.adapter,
+      receiptDigest: receiptDigest,
+      createdAtUnix: receipt.createdAtUnix))
+  except CatchableError:
+    if dirExists(extendedPath(stage)):
+      try: removeDir(extendedPath(stage)) except OSError: discard
+    raise
+
+proc importActivationBundleBytes*(store: var Store; bytes: openArray[byte];
+                                  expectedDigestHex = "";
+                                  filePath = "<memory>"):
+    ActivationBundleImportResult =
+  ## Target-side Phase C receive/import primitive. It validates the
+  ## RBAB envelope and per-file digests, stores the complete bundle as
+  ## a target CAS object, then imports each realized prefix closure
+  ## under `prefixes/...` without registering roots or touching any
+  ## generation pointer.
+  result.bytesReceived = bytes.len
+  let actualDigest = toPrefixId(blake3.digest(bytes))
+  result.bundleDigest = actualDigest
+  result.bundleDigestHex = prefixIdHex(actualDigest)
+  if expectedDigestHex.len > 0:
+    let expected = parsePrefixIdHex(expectedDigestHex)
+    if expected != actualDigest:
+      raiseActivationBundleCorrupt(filePath, "bundleDigest",
+        "received bundle digest " & result.bundleDigestHex &
+        " does not match expected " & expectedDigestHex)
+
+  let bundle = decodeActivationBundleBytes(bytes, filePath)
+  result.targetBundlePath = store.casPath(result.bundleDigest)
+  result.bundleAlreadyPresent = fileExists(extendedPath(result.targetBundlePath))
+  discard store.storeCasBlob(bytes)
+  store.verifyCasBlob(result.bundleDigest)
+
+  for i, closure in bundle.prefixes:
+    requireSafeBundlePath(filePath, "prefixes[" & $i & "].storeRelativePath",
+      closure.storeRelativePath)
+    if not closure.storeRelativePath.startsWith("prefixes/"):
+      raiseActivationBundleCorrupt(filePath,
+        "prefixes[" & $i & "].storeRelativePath",
+        "prefix path must live under prefixes/")
+    let receipt = decodeReceipt(closure.receiptBytes)
+    if receipt.realizationHash != closure.prefixId:
+      raiseActivationBundleCorrupt(filePath,
+        "prefixes[" & $i & "].receipt.realizationHash",
+        "receipt realization hash does not match closure prefix id")
+    if normalizeRelPath(receipt.realizedPath) != closure.storeRelativePath:
+      raiseActivationBundleCorrupt(filePath,
+        "prefixes[" & $i & "].receipt.realizedPath",
+        "receipt path does not match bundle prefix path")
+    let canonicalPath = prefixRelativePath(receipt.packageName,
+      receipt.version, closure.prefixId)
+    if canonicalPath != closure.storeRelativePath:
+      raiseActivationBundleCorrupt(filePath,
+        "prefixes[" & $i & "].storeRelativePath",
+        "bundle prefix path is not canonical for receipt metadata")
+    let rd = blake3.digest(closure.receiptBytes)
+    var sawReceipt = false
+    for j, entry in closure.files:
+      requireSafeBundlePath(filePath,
+        "prefixes[" & $i & "].files[" & $j & "].relativePath",
+        entry.relativePath)
+      if entry.relativePath == ReceiptFileName:
+        sawReceipt = true
+        if entry.contentBytes != closure.receiptBytes:
+          raiseActivationBundleCorrupt(filePath,
+            "prefixes[" & $i & "].files[" & $j & "]",
+            "receipt file entry bytes do not match prefix receipt bytes")
+      if blake3.digest(entry.contentBytes) != entry.contentDigest:
+        raiseActivationBundleCorrupt(filePath,
+          "prefixes[" & $i & "].files[" & $j & "].contentDigest",
+          "file content digest mismatch")
+    if not sawReceipt:
+      raiseActivationBundleCorrupt(filePath,
+        "prefixes[" & $i & "].files",
+        "prefix closure is missing " & ReceiptFileName)
+
+    let lookup = store.lookupPrefix(closure.prefixId)
+    let finalPath = store.absolutePrefixPath(closure.storeRelativePath)
+    if lookup.found and lookup.row.realizedPath != closure.storeRelativePath:
+      raiseActivationBundleCorrupt(filePath,
+        "prefixes[" & $i & "].storeRelativePath",
+        "target index has same prefix id at a different path")
+    if lookup.found and dirExists(extendedPath(finalPath)):
+      discard validateExistingPrefixTree(filePath, store, closure, finalPath,
+        rd)
+      inc result.prefixesAlreadyPresent
+    elif dirExists(extendedPath(finalPath)):
+      discard validateExistingPrefixTree(filePath, store, closure, finalPath,
+        rd)
+      discard store.insertPrefixOrIgnore(PrefixRow(
+        prefixId: closure.prefixId,
+        packageName: receipt.packageName,
+        version: receipt.version,
+        realizedPath: closure.storeRelativePath,
+        adapter: receipt.adapter,
+        receiptDigest: rd,
+        createdAtUnix: receipt.createdAtUnix))
+      inc result.prefixesAlreadyPresent
+    else:
+      materializeImportedPrefix(filePath, store, closure, receipt, rd)
+      inc result.prefixesImported

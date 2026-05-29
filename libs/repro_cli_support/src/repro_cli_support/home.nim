@@ -33,7 +33,7 @@
 ## matches the spec's "do NOT load packages at runtime" rule for M61
 ## while still letting the gate exercise the error path.
 
-import std/[options, os, sets, strutils, tables, times]
+import std/[options, os, osproc, sets, streams, strutils, tables, times]
 from repro_core/paths import extendedPath
 
 import repro_home_intent
@@ -1269,6 +1269,285 @@ proc runHomeBuildBundle(args: openArray[string]): int =
     return 1
 
 # ---------------------------------------------------------------------------
+# `repro home __receive-bundle` / `__transfer-bundle` (M71 Phase C,
+# internal transfer/import only).
+# ---------------------------------------------------------------------------
+
+proc stringToBytes(text: string): seq[byte] =
+  result = newSeq[byte](text.len)
+  for i, ch in text:
+    result[i] = byte(ord(ch))
+
+proc boolField(value: bool): string =
+  if value: "true" else: "false"
+
+proc readBinaryFile(path: string): seq[byte] =
+  stringToBytes(readFile(extendedPath(path)))
+
+proc renderImportResult(res: ActivationBundleImportResult) =
+  echo "bundleDigest: " & res.bundleDigestHex
+  echo "targetBundlePath: " & res.targetBundlePath
+  echo "bundleStatus: " & (if res.bundleAlreadyPresent:
+    "already-present" else: "stored")
+  echo "prefixesImported: " & $res.prefixesImported
+  echo "prefixesAlreadyPresent: " & $res.prefixesAlreadyPresent
+  echo "bytesReceived: " & $res.bytesReceived
+
+proc runHomeReceiveBundle(args: openArray[string]): int =
+  var storeRoot = ""
+  var queryDigest = ""
+  var queryPrefixes: seq[string]
+  var expectedDigest = ""
+  var bundlePath = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      echo "usage: repro home __receive-bundle --store-root PATH " &
+        "[--query DIGEST [--query-prefix PREFIX...]]"
+      echo "       repro home __receive-bundle --store-root PATH " &
+        "[--expected-digest DIGEST] [--bundle PATH]"
+      echo ""
+      echo "Internal M71 target-side transfer/import command. Query mode"
+      echo "checks target CAS/prefix presence. Receive mode reads RBAB"
+      echo "bytes from stdin unless --bundle is supplied, stores the bundle"
+      echo "as target CAS, and imports prefix closures only. It does not"
+      echo "rotate generation pointers, register roots, or run activation."
+      return 0
+    elif a == "--store-root" or a.startsWith("--store-root="):
+      storeRoot = parseFlagValue(args, i, "--store-root")
+    elif a == "--query" or a.startsWith("--query="):
+      queryDigest = parseFlagValue(args, i, "--query")
+    elif a == "--query-prefix" or a.startsWith("--query-prefix="):
+      queryPrefixes.add(parseFlagValue(args, i, "--query-prefix"))
+    elif a == "--expected-digest" or a.startsWith("--expected-digest="):
+      expectedDigest = parseFlagValue(args, i, "--expected-digest")
+    elif a == "--bundle" or a.startsWith("--bundle="):
+      bundlePath = parseFlagValue(args, i, "--bundle")
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home __receive-bundle: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home __receive-bundle: unexpected positional: " &
+        a)
+      return 2
+    inc i
+  if storeRoot.len == 0:
+    stderr.writeLine("repro home __receive-bundle: --store-root is required")
+    return 2
+
+  try:
+    var store = openStore(resolveStoreRoot(storeRoot))
+    defer:
+      try: store.close() except CatchableError: discard
+    if queryDigest.len > 0:
+      let digest = parsePrefixIdHex(queryDigest)
+      let targetPath = store.casPath(digest)
+      var present = fileExists(extendedPath(targetPath))
+      if present:
+        try:
+          store.verifyCasBlob(digest)
+        except CatchableError:
+          present = false
+      echo "bundleDigest: " & queryDigest.toLowerAscii()
+      echo "bundlePresent: " & boolField(present)
+      echo "targetBundlePath: " & targetPath
+      var prefixPresent = 0
+      for raw in queryPrefixes:
+        let pid = parsePrefixIdHex(raw)
+        let lookup = store.lookupPrefix(pid)
+        let ok = lookup.found and
+          dirExists(extendedPath(store.absolutePrefixPath(lookup.row.realizedPath)))
+        if ok:
+          inc prefixPresent
+        echo "prefixStatus: " & raw.toLowerAscii() & " " &
+          (if ok: "present" else: "missing")
+      echo "prefixesPresent: " & $prefixPresent
+      echo "prefixesMissing: " & $(queryPrefixes.len - prefixPresent)
+      return 0
+
+    let bytes =
+      if bundlePath.len > 0: readBinaryFile(bundlePath)
+      else: stringToBytes(stdin.readAll())
+    let imported = importActivationBundleBytes(store, bytes,
+      expectedDigestHex = expectedDigest,
+      filePath = if bundlePath.len > 0: bundlePath else: "<stdin>")
+    renderImportResult(imported)
+    return 0
+  except EActivationBundleCorrupt as err:
+    stderr.writeLine("repro home __receive-bundle: " & err.msg)
+    return 1
+  except StoreError as err:
+    stderr.writeLine("repro home __receive-bundle: store error: " & err.msg)
+    return 1
+  except ValueError as err:
+    stderr.writeLine("repro home __receive-bundle: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro home __receive-bundle: error: " & err.msg)
+    return 1
+
+proc runCapture(program: string; args: seq[string]; input = ""):
+    tuple[exitCode: int; output: string] =
+  let p = startProcess(program, args = args,
+    options = {poUsePath, poStdErrToStdOut})
+  if input.len > 0:
+    p.inputStream().write(input)
+  p.inputStream().close()
+  result.output = p.outputStream().readAll()
+  result.exitCode = p.waitForExit()
+  p.close()
+
+proc remoteReceiveCommand(remoteRepro, targetStoreRoot: string;
+                          extra: openArray[string]): string =
+  var parts = @[remoteRepro, "home", "__receive-bundle",
+    "--store-root", targetStoreRoot]
+  for item in extra:
+    parts.add item
+  for idx, part in parts:
+    if idx > 0:
+      result.add(" ")
+    result.add(quoteShell(part))
+
+proc sshRun(sshPath, target: string; port: int; sshOptions: seq[string];
+            remoteCommand: string; input = ""):
+    tuple[exitCode: int; output: string] =
+  var args: seq[string]
+  for opt in sshOptions:
+    args.add opt
+  if port > 0:
+    args.add("-p")
+    args.add($port)
+  args.add(target)
+  args.add(remoteCommand)
+  runCapture(sshPath, args, input)
+
+proc fieldValueLoose(output, name: string): string =
+  let prefix = name & ": "
+  for line in output.splitLines():
+    if line.startsWith(prefix):
+      return line[prefix.len .. ^1].strip()
+  ""
+
+proc runHomeTransferBundle(args: openArray[string]): int =
+  var bundleDigestHex = ""
+  var storeRoot = ""
+  var target = ""
+  var remoteRepro = "repro"
+  var targetStoreRoot = ""
+  var sshPath = "ssh"
+  var sshOptions: seq[string]
+  var port = 0
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      echo "usage: repro home __transfer-bundle --bundle-digest HEX " &
+        "--target HOST --remote-repro PATH --target-store-root PATH " &
+        "[--store-root PATH] [--ssh PATH] [--port N] " &
+        "[--ssh-option OPT...]"
+      echo ""
+      echo "Internal M71 source-side SSH transfer command. It queries the"
+      echo "target first and skips streaming when the exact bundle CAS"
+      echo "object is already present. It imports the bundle into the"
+      echo "target store only; remote activation is Phase D."
+      return 0
+    elif a == "--bundle-digest" or a.startsWith("--bundle-digest="):
+      bundleDigestHex = parseFlagValue(args, i, "--bundle-digest")
+    elif a == "--store-root" or a.startsWith("--store-root="):
+      storeRoot = parseFlagValue(args, i, "--store-root")
+    elif a == "--target" or a.startsWith("--target="):
+      target = parseFlagValue(args, i, "--target")
+    elif a == "--remote-repro" or a.startsWith("--remote-repro="):
+      remoteRepro = parseFlagValue(args, i, "--remote-repro")
+    elif a == "--target-store-root" or a.startsWith("--target-store-root="):
+      targetStoreRoot = parseFlagValue(args, i, "--target-store-root")
+    elif a == "--ssh" or a.startsWith("--ssh="):
+      sshPath = parseFlagValue(args, i, "--ssh")
+    elif a == "--ssh-option" or a.startsWith("--ssh-option="):
+      sshOptions.add(parseFlagValue(args, i, "--ssh-option"))
+    elif a == "--port" or a.startsWith("--port="):
+      port = parseInt(parseFlagValue(args, i, "--port"))
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home __transfer-bundle: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home __transfer-bundle: unexpected positional: " &
+        a)
+      return 2
+    inc i
+
+  if bundleDigestHex.len == 0 or target.len == 0 or targetStoreRoot.len == 0:
+    stderr.writeLine("repro home __transfer-bundle: --bundle-digest, " &
+      "--target, and --target-store-root are required")
+    return 2
+
+  try:
+    let bundleDigest = parsePrefixIdHex(bundleDigestHex)
+    let resolvedStoreRoot = resolveStoreRoot(storeRoot)
+    var store = openStore(resolvedStoreRoot)
+    defer:
+      try: store.close() except CatchableError: discard
+    let bundleBytes = store.readCasBlob(bundleDigest)
+    let bundle = decodeActivationBundleBytes(bundleBytes,
+      store.casPath(bundleDigest))
+
+    var queryExtra = @["--query", bundleDigestHex]
+    for prefix in bundle.prefixes:
+      queryExtra.add("--query-prefix")
+      queryExtra.add(prefixIdHex(prefix.prefixId))
+    let query = sshRun(sshPath, target, port, sshOptions,
+      remoteReceiveCommand(remoteRepro, targetStoreRoot, queryExtra))
+    if query.exitCode != 0:
+      stderr.writeLine("repro home __transfer-bundle: target query failed:")
+      stderr.write(query.output)
+      return 1
+
+    let bundlePresent = fieldValueLoose(query.output, "bundlePresent") == "true"
+    let targetBundlePath = fieldValueLoose(query.output, "targetBundlePath")
+    var receiveExtra: seq[string]
+    receiveExtra.add("--expected-digest")
+    receiveExtra.add(bundleDigestHex)
+    let transferStatus =
+      if bundlePresent:
+        if targetBundlePath.len == 0:
+          raise newException(ValueError,
+            "target query did not return targetBundlePath")
+        receiveExtra.add("--bundle")
+        receiveExtra.add(targetBundlePath)
+        "already-present"
+      else:
+        "sent"
+    let input = if bundlePresent: "" else: bytesToString(bundleBytes)
+    let recv = sshRun(sshPath, target, port, sshOptions,
+      remoteReceiveCommand(remoteRepro, targetStoreRoot, receiveExtra), input)
+    if recv.exitCode != 0:
+      stderr.writeLine("repro home __transfer-bundle: target receive failed:")
+      stderr.write(recv.output)
+      return 1
+
+    echo "transferStatus: " & transferStatus
+    echo "bundleDigest: " & bundleDigestHex.toLowerAscii()
+    let recvTargetPath = fieldValueLoose(recv.output, "targetBundlePath")
+    echo "targetBundlePath: " &
+      (if recvTargetPath.len > 0: recvTargetPath else: targetBundlePath)
+    echo "prefixesImported: " & fieldValueLoose(recv.output,
+      "prefixesImported")
+    echo "prefixesAlreadyPresent: " & fieldValueLoose(recv.output,
+      "prefixesAlreadyPresent")
+    echo "bytesReceived: " & (if bundlePresent: "0" else: $bundleBytes.len)
+    return 0
+  except StoreError as err:
+    stderr.writeLine("repro home __transfer-bundle: store error: " & err.msg)
+    return 1
+  except ValueError as err:
+    stderr.writeLine("repro home __transfer-bundle: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro home __transfer-bundle: error: " & err.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
 # `repro home set` / `repro home get` (M65).
 # ---------------------------------------------------------------------------
 
@@ -2112,6 +2391,8 @@ proc runHomeCommand*(args: seq[string]): int =
   of "history": return runHomeHistory(subArgs)
   of "apply": return runHomeApply(subArgs)
   of "__build-bundle": return runHomeBuildBundle(subArgs)
+  of "__receive-bundle": return runHomeReceiveBundle(subArgs)
+  of "__transfer-bundle": return runHomeTransferBundle(subArgs)
   of "plan": return runHomePlan(subArgs)
   of "rollback": return runHomeRollback(subArgs)
   of "set": return runHomeSet(subArgs)

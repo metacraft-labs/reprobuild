@@ -810,6 +810,21 @@ integration_remote_apply_cross_host_evaluation_phase_b:
         tests/e2e/m71/t_integration_remote_apply_cross_host_evaluation_phase_b.nim \
         2>&1 | tee test-logs/integration_remote_apply_cross_host_evaluation_phase_b.log
 
+integration_remote_apply_ssh_transfer_phase_c:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_ssh_transfer_phase_c.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_remote_apply_ssh_transfer_phase_c \
+        --out:build/test-bin/integration_remote_apply_ssh_transfer_phase_c \
+        tests/e2e/m71/t_integration_remote_apply_ssh_transfer_phase_c.nim \
+        2>&1 | tee test-logs/integration_remote_apply_ssh_transfer_phase_c.log
+
 e2e_repro_home_apply_fresh_install:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
     nim c \
