@@ -6190,6 +6190,123 @@ proc autoRunQuotaEnabled(): bool =
   getEnv("REPROBUILD_AUTO_RUNQUOTA", "1").normalize notin
     ["0", "false", "no", "off"]
 
+const
+  ## Explicit env-var whitelist forwarded from the user-facing CLI invocation
+  ## across the daemon protocol into the daemon-hosted build executor. These are
+  ## process-control / lookup-control variables that must follow the user, not
+  ## the persistent daemon: the daemon may have been launched by launchd (macOS)
+  ## or systemd-user (Linux) at login, so it does not naturally see the user's
+  ## current shell environment.
+  DaemonExplicitForwardedEnvVars* = [
+    "PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
+    "RUNQUOTA_SOCKET", "REPROBUILD_STORE_ROOT",
+    "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
+    "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
+    "REPROBUILD_AUTO_RUNQUOTA",
+    "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS"
+  ]
+
+  ## Well-known toolchain env vars that must also be forwarded to the daemon
+  ## when present in the user's shell. On Nix systems (especially macOS where
+  ## ``-liconv`` must resolve to ``libiconv`` from the Nix store) the cc-wrapper
+  ## consumes these to inject the correct ``-L``/``-isystem`` paths into clang/
+  ## ld invocations driven by cargo/rustc. Without forwarding, a daemon spawned
+  ## by launchd has none of them and cargo actions like
+  ## ``db-replay-server-cargo`` fail at the rustc link step. Values are NEVER
+  ## hardcoded; they are read live from the launching shell's environment.
+  DaemonNixToolchainEnvVars* = [
+    # Nix cc-wrapper inputs — consumed by the wrapper to extend the underlying
+    # clang/ld invocation with the correct -L/-isystem paths.
+    "NIX_LDFLAGS",
+    "NIX_LDFLAGS_FOR_TARGET",
+    "NIX_CFLAGS_COMPILE",
+    "NIX_CFLAGS_COMPILE_FOR_TARGET",
+    "NIX_CFLAGS_LINK",
+    "NIX_CFLAGS_LINK_FOR_TARGET",
+    "NIX_CXXSTDLIB_COMPILE",
+    "NIX_CXXSTDLIB_LINK",
+    "NIX_HARDENING_ENABLE",
+    "NIX_NO_SELF_RPATH",
+    "NIX_DEBUG_INFO_DIRS",
+    "NIX_COREFOUNDATION_RPATH",
+    "NIX_DONT_SET_RPATH",
+    "NIX_DONT_SET_RPATH_FOR_TARGET",
+    "NIX_ENFORCE_NO_NATIVE",
+    "NIX_IGNORE_LD_THROUGH_GCC",
+    "NIX_SSL_CERT_FILE",
+    "SSL_CERT_FILE",
+    # Loader search paths used by clang/ld during link, and by dyld at runtime.
+    "LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    # macOS SDK selection (cc-wrapper uses SDKROOT to gate --sysroot).
+    "SDKROOT",
+    "MACOSX_DEPLOYMENT_TARGET",
+    # Pkgconfig + Cargo toolchain configuration that the user expects to flow
+    # into cargo invocations under nix-develop.
+    "PKG_CONFIG_PATH",
+    "PKG_CONFIG_PATH_FOR_TARGET",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTFLAGS",
+    "CARGO_BUILD_TARGET",
+    "CARGO_NET_OFFLINE"
+  ]
+
+  ## Env-var name prefixes forwarded wholesale. The cc-wrapper synthesizes
+  ## per-tuple variables of the form
+  ## ``NIX_LDFLAGS_<HOST>_<TARGET>``/``NIX_CFLAGS_COMPILE_<HOST>_<TARGET>`` /
+  ## ``NIX_BINTOOLS_WRAPPER_TARGET_HOST_<triple>`` whose suffixes vary by host
+  ## triple (e.g. ``aarch64_apple_darwin``). Forwarding them by prefix avoids
+  ## host-specific allowlist drift.
+  DaemonNixToolchainEnvPrefixes* = [
+    "NIX_LDFLAGS_",
+    "NIX_CFLAGS_",
+    "NIX_BINTOOLS_",
+    "NIX_CC_",
+    "NIX_BUILD_CORES",
+    "NIX_STORE",
+    "NIX_USER_PROFILE_DIR",
+    "NIX_PROFILES"
+  ]
+
+proc daemonCarriedEnvironment*(): seq[string] =
+  ## Snapshot of the user-facing CLI process environment forwarded to the
+  ## daemon-hosted build/watch executor. The daemon installs each entry via
+  ## ``putEnv`` before running the build session, so subsequent child actions
+  ## (rustc, cargo, clang, ld via cc-wrapper, ...) inherit the user's
+  ## toolchain configuration even when the daemon itself was launched without
+  ## that configuration (e.g. by launchd/systemd at login).
+  ##
+  ## The set is intentionally union-of-three:
+  ##  * explicit operational whitelist (PATH/HOME/RUNQUOTA_SOCKET/...);
+  ##  * well-known Nix cc-wrapper + loader variables;
+  ##  * host-triple-suffixed Nix variables matched by prefix (so we do not
+  ##    have to bake the host triple into source).
+  ##
+  ## All values are read live from the current process environment; nothing
+  ## is hardcoded. On non-Nix hosts the Nix entries simply contribute zero
+  ## additional values because none are set.
+  var seen = initHashSet[string]()
+  for key, value in envPairs():
+    if key.len == 0 or seen.contains(key):
+      continue
+    var matched = false
+    if key in DaemonExplicitForwardedEnvVars:
+      matched = true
+    elif key in DaemonNixToolchainEnvVars:
+      matched = true
+    else:
+      for prefix in DaemonNixToolchainEnvPrefixes:
+        if key.startsWith(prefix):
+          matched = true
+          break
+    if matched:
+      seen.incl(key)
+      result.add(key & "=" & value)
+
 proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
   if bypassRunQuota or getEnv("RUNQUOTA_SOCKET", "").len > 0 or
       not autoRunQuotaEnabled():
@@ -7236,14 +7353,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       getCurrentDir()
 
   proc daemonBuildEnvironment(): seq[string] =
-    for key, value in envPairs():
-      if key in ["PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
-          "RUNQUOTA_SOCKET", "REPROBUILD_STORE_ROOT",
-          "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
-          "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
-          "REPROBUILD_AUTO_RUNQUOTA",
-          "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS"]:
-        result.add(key & "=" & value)
+    # Delegates to the shared ``daemonCarriedEnvironment`` so that the build
+    # and watch sessions agree on the env-forwarding contract, and so that
+    # cargo/rustc actions launched by the daemon see Nix cc-wrapper variables
+    # (NIX_LDFLAGS et al) from the user's nix-develop shell.
+    daemonCarriedEnvironment()
 
   proc runDaemonBuild(): int =
     let config = defaultUserDaemonConfig()
@@ -10063,14 +10177,10 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       getCurrentDir()
 
   proc daemonWatchEnvironment(): seq[string] =
-    for key, value in envPairs():
-      if key in ["PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
-          "RUNQUOTA_SOCKET", "REPROBUILD_STORE_ROOT",
-          "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
-          "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
-          "REPROBUILD_AUTO_RUNQUOTA",
-          "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS"]:
-        result.add(key & "=" & value)
+    # See ``daemonBuildEnvironment``; we share one carried-env contract across
+    # build and watch so daemon-hosted compilers see the same toolchain
+    # configuration the user expects from their nix-develop shell.
+    daemonCarriedEnvironment()
 
   proc runDaemonWatch(): int =
     if hcrConfig.hcrWatchEnabled:
