@@ -132,6 +132,7 @@ suite "Local daemons/control-plane M0 current-state gates":
 
     let watchOutput = requireSuccess(shellCommand([
       publicReproBin(), "watch", projectRoot,
+      "--daemon=off",
       "--tool-provisioning=path",
       "--work-root=" & tempRoot / "watch-work",
       "--max-cycles=1",

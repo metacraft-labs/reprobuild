@@ -9893,7 +9893,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   var debounceMs = 250
   var workRoot = ""
   var hcrConfig: HcrWatchConfig
-  var daemonMode = bdmOff
+  var daemonMode = bdmAuto
   var daemonModeExplicit = false
   var detach = false
   var attachSessionId = ""
@@ -9968,7 +9968,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     else:
       raise newException(ValueError, "unexpected watch argument: " & arg)
 
-  if not daemonModeExplicit and getEnv("REPRO_DAEMON", "").len > 0:
+  if not daemonModeExplicit:
     daemonMode = configuredBuildDaemonMode()
 
   if statsCapture.enabled and (forceDirect or daemonMode == bdmOff) and

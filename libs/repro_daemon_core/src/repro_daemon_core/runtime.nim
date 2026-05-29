@@ -1201,16 +1201,20 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
     defer:
       releaseUserDaemonLock(daemonLock)
 
-    try:
-      let existing = queryUserDaemonStatus(config.endpoint)
-      if existing.running:
-        stderr.writeLine("repro-daemon: already running at " &
-          config.endpoint)
-        return 0
-    except CatchableError:
-      discard
+    let restartChild =
+      config.devMode and config.previousStagedGenerationDir.len > 0
+    if not restartChild:
+      try:
+        let existing = queryUserDaemonStatus(config.endpoint)
+        if existing.running:
+          stderr.writeLine("repro-daemon: already running at " &
+            config.endpoint)
+          return 0
+      except CatchableError:
+        discard
 
-    discard cleanupStaleUserDaemonDiscovery(config)
+    if not restartChild:
+      discard cleanupStaleUserDaemonDiscovery(config)
     removeEndpointFiles(config)
     var listener = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
     var selfRestarting = false
@@ -1375,6 +1379,10 @@ proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
 
 proc launchWithFork(exe: string; config: UserDaemonConfig) =
   when defined(posix):
+    let argv = @[exe] & daemonProcessArgs(config)
+    let cargv = allocCStringArray(argv)
+    let exeCString = cstring(exe)
+    let logPathCString = cstring(config.logPath)
     let pid = fork()
     if pid < 0:
       raise newException(UserDaemonRuntimeError,
@@ -1384,16 +1392,14 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
       let devNull = posix.open(cstring("/dev/null"), O_RDONLY)
       if devNull >= 0:
         discard dup2(devNull, 0)
-      let logFd = posix.open(cstring(config.logPath),
+      let logFd = posix.open(logPathCString,
         O_WRONLY or O_CREAT or O_APPEND, Mode(0o600))
       if logFd >= 0:
         discard dup2(logFd, 1)
         discard dup2(logFd, 2)
       for fd in 3.cint .. 255.cint:
         discard posix.close(fd)
-      var argv = @[exe] & daemonProcessArgs(config)
-      let cargv = allocCStringArray(argv)
-      discard execv(cstring(exe), cargv)
+      discard execv(exeCString, cargv)
       quit(127)
     logLine(config.logPath, "launch requested backend=posix-fork pid=" &
       $pid)
@@ -1423,6 +1429,13 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
   let existing = queryUserDaemonStatus(config.endpoint)
   if existing.running:
     return existing
+  when defined(posix):
+    if userDaemonEndpointExists(config.endpoint) and
+        userDaemonEndpointAcceptsConnections(config.endpoint):
+      raise newException(UserDaemonRuntimeError,
+        "repro-daemon endpoint accepts connections but did not complete a " &
+          "compatible status handshake at " & config.endpoint &
+          "; stop the incompatible daemon or set REPRO_DAEMON=off for direct mode")
   discard cleanupStaleUserDaemonDiscovery(config)
   let sourceExe =
     if config.daemonExe.len > 0: config.daemonExe
@@ -1443,14 +1456,27 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     createDir(parentDir(launchConfig.endpoint))
     createDir(launchConfig.stateDir)
     createDir(parentDir(launchConfig.logPath))
+    var launchedWithPlatformManager = false
     when defined(macosx):
-      if not launchWithLaunchd(exe, launchConfig):
+      launchedWithPlatformManager = launchWithLaunchd(exe, launchConfig)
+      if not launchedWithPlatformManager:
         launchWithFork(exe, launchConfig)
     elif defined(linux):
-      if not launchWithSystemdUser(exe, launchConfig):
+      launchedWithPlatformManager = launchWithSystemdUser(exe, launchConfig)
+      if not launchedWithPlatformManager:
         launchWithFork(exe, launchConfig)
     else:
       launchWithFork(exe, launchConfig)
+    if launchedWithPlatformManager:
+      try:
+        return waitForUserDaemonStatus(launchConfig.endpoint, 30000)
+      except UserDaemonRuntimeError as err:
+        logLine(launchConfig.logPath,
+          "platform launcher did not produce a ready repro-daemon: " &
+            err.msg & "; falling back to posix-fork")
+        cleanupPlatformBackgroundRegistration(launchConfig)
+        discard cleanupStaleUserDaemonDiscovery(launchConfig)
+        launchWithFork(exe, launchConfig)
   else:
     var env = newStringTable()
     for key, value in envPairs():
