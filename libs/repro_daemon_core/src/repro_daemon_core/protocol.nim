@@ -188,6 +188,50 @@ proc currentUid*(): int64 =
   else:
     0'i64
 
+when defined(macosx):
+  # macOS exposes a stable per-user temp directory through
+  # confstr(_CS_DARWIN_USER_TEMP_DIR). This is the same directory that
+  # launchd-spawned services see and is anchored to the user's confined
+  # area (e.g. /var/folders/<hash>/T/), regardless of any $TMPDIR override
+  # in the calling environment.
+  #
+  # We deliberately bypass nim's getTempDir() (which honours $TMPDIR) here
+  # because nix-shell rewrites $TMPDIR to a session-scoped path such as
+  # /tmp/nix-shell.<rand>/. That makes the per-user repro-daemon socket
+  # path change on every nix-shell entry, which prevents `repro build`
+  # from rediscovering an already-running daemon and causes daemon auto-
+  # spawn to time out waiting on a socket the previous daemon (still
+  # holding the shared user-daemon lock under
+  # ~/Library/Application Support/repro/daemon) does not bind to. See
+  # repro-daemon discovery in runtime.nim and M11 (Default Daemon Mode
+  # Rollout And Recovery) in
+  # reprobuild-specs/Local-Daemons-And-Control-Plane.milestones.org.
+  # Values from <unistd.h>:
+  #   #define _CS_DARWIN_USER_TEMP_DIR 65537
+  #   #define _CS_DARWIN_USER_CACHE_DIR 65538
+  # We intentionally use the TEMP_DIR variant (the per-user T directory)
+  # rather than CACHE_DIR (C) because the daemon endpoint is ephemeral and
+  # matches launchd's view of the user temp confinement.
+  const CsDarwinUserTempDir = 65537.cint
+  proc confstr(name: cint; buf: cstring; len: csize_t): csize_t {.
+    importc, header: "<unistd.h>".}
+
+  proc darwinUserTempDir(): string =
+    # confstr returns required buffer size (including NUL) when buf is nil
+    # or len is 0. A return of 0 means the value is unavailable.
+    let needed = confstr(CsDarwinUserTempDir, nil, csize_t(0))
+    if needed <= 0:
+      return ""
+    var buf = newString(int(needed))
+    let written = confstr(CsDarwinUserTempDir, cstring(buf), needed)
+    if written <= 0:
+      return ""
+    # confstr writes a trailing NUL inside the buffer. Strip it.
+    buf.setLen(int(written) - 1)
+    if buf.len > 0 and buf[buf.high] == '/':
+      buf.setLen(buf.high)
+    buf
+
 proc userDaemonRuntimeDir*(): string =
   let explicit = getEnv("REPRO_DAEMON_RUNTIME_DIR")
   if explicit.len > 0:
@@ -197,6 +241,14 @@ proc userDaemonRuntimeDir*(): string =
     if local.len > 0: local / "repro" / "daemon" / "runtime"
     else: getEnv("USERPROFILE") / "AppData" / "Local" / "repro" /
       "daemon" / "runtime"
+  elif defined(macosx):
+    # Prefer the per-user darwin temp dir so the endpoint is stable
+    # across nix-shell sessions and matches the path launchd-spawned
+    # repro-daemon instances bind to. Fall back to getTempDir() only
+    # if confstr is unavailable on this host.
+    let darwinTmp = darwinUserTempDir()
+    let base = if darwinTmp.len > 0: darwinTmp else: getTempDir()
+    base / ("repro-" & $currentUid())
   else:
     let xdg = getEnv("XDG_RUNTIME_DIR")
     if xdg.len > 0: xdg / "repro"
