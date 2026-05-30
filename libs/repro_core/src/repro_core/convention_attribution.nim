@@ -110,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[22, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[23, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -130,6 +130,7 @@ const
     ("*.csproj",           "csharp-dotnet"),
     ("Package.swift",      "swift-swiftpm"),
     ("dune-project",       "ocaml-dune"),
+    ("*.cabal",            "haskell-cabal"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -139,7 +140,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[26, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[28, tuple[ext, convention: string]] = [
     (".nim",   "nim"),
     (".rs",    "rust"),
     (".go",    "go"),
@@ -166,6 +167,8 @@ const
     (".zig",   "zig-direct"),
     (".ml",    "ocaml-dune"),
     (".mli",   "ocaml-dune"),
+    (".hs",    "haskell-cabal"),
+    (".lhs",   "haskell-cabal"),
   ]
 
 proc isExtensionForConvention*(ext, convention: string): bool =
@@ -275,6 +278,7 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
   var presentManifests: seq[string] = @[]
   var nimbleSeen = ""
   var csprojSeen = ""
+  var cabalSeen = ""
   try:
     for kind, path in walkDir(targetDir):
       if kind notin {pcFile, pcLinkToFile}:
@@ -284,6 +288,8 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
         nimbleSeen = basename
       if basename.toLowerAscii.endsWith(".csproj") and csprojSeen.len == 0:
         csprojSeen = basename
+      if basename.toLowerAscii.endsWith(".cabal") and cabalSeen.len == 0:
+        cabalSeen = basename
       for entry in ManifestSignals:
         if entry.fileName == basename:
           presentManifests.add(basename)
@@ -311,6 +317,23 @@ proc attributeConvention*(targetDir: string): ConventionAttribution =
       if csprojSeen.len > 0:
         result.convention = entry.convention
         result.evidence = "manifest: " & csprojSeen
+        return
+      continue
+    if entry.fileName == "*.cabal":
+      # M55: ``*.cabal`` is the Haskell Cabal package manifest filename
+      # pattern (e.g. ``hello.cabal`` — the filename varies per
+      # package). The haskell-cabal convention additionally requires
+      # both ``haskell``/``ghc`` AND ``cabal`` tokens in ``uses:`` for
+      # full dispatch, but the attribution heuristic here is
+      # intentionally manifest-presence-only — token absence is a
+      # "no manifest" condition that the heuristic's evidence string
+      # honestly reports as ``haskell-cabal`` (so
+      # ``repro show-conventions`` still tells the user which
+      # convention WOULD claim the project once the uses block is
+      # filled in).
+      if cabalSeen.len > 0:
+        result.convention = entry.convention
+        result.evidence = "manifest: " & cabalSeen
         return
       continue
     if entry.fileName in presentManifests:
@@ -491,10 +514,14 @@ proc hasManifestFile(absDir: string): bool =
         return true
       if basename.toLowerAscii.endsWith(".csproj"):
         return true
+      if basename.toLowerAscii.endsWith(".cabal"):
+        return true
       for entry in ManifestSignals:
         if entry.fileName == "*.nimble":
           continue
         if entry.fileName == "*.csproj":
+          continue
+        if entry.fileName == "*.cabal":
           continue
         if entry.fileName == basename:
           return true
@@ -634,7 +661,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[19, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[20, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -692,6 +719,9 @@ const
     ToolchainProbeSpec(convention: "ocaml-dune",
                        exeName: "ocaml",
                        versionArgs: @["-version"]),
+    ToolchainProbeSpec(convention: "haskell-cabal",
+                       exeName: "ghc",
+                       versionArgs: @["--numeric-version"]),
   ]
 
 var toolchainProbeCache: Table[string, ToolchainProbeResult]

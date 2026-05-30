@@ -136,6 +136,29 @@ suite "attributeConvention: manifest detection":
     check attr.evidence.contains("Package.swift")
     removeDir(dir)
 
+  test "<name>.cabal ⇒ haskell-cabal":
+    ## M55 — Cabal package manifest must attribute to ``haskell-cabal``.
+    ## The filename varies per package (named after the package, e.g.
+    ## ``hello.cabal``); the attribution heuristic uses the ``*.cabal``
+    ## sentinel mirroring the ``*.nimble`` and ``*.csproj`` cases.
+    let dir = makeScratch("haskell-cabal")
+    writeFile(dir / "hello.cabal",
+      "cabal-version: 2.0\n" &
+      "name: hello\n" &
+      "version: 1.0\n" &
+      "executable hello\n" &
+      "  main-is: Main.hs\n" &
+      "  hs-source-dirs: app\n" &
+      "  build-depends: base >=4.14 && <5\n" &
+      "  default-language: Haskell2010\n")
+    createDir(dir / "app")
+    writeFile(dir / "app" / "Main.hs",
+      "module Main where\nmain :: IO ()\nmain = putStrLn \"hi\"\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "haskell-cabal"
+    check attr.evidence.contains("hello.cabal")
+    removeDir(dir)
+
   test "dune-project ⇒ ocaml-dune":
     ## M46 — Dune project manifest must attribute to ``ocaml-dune``.
     ## Unique filename (no other convention recognises ``dune-project``)

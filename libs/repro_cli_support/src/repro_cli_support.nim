@@ -5929,6 +5929,7 @@ const
     "zig-direct",
     "d-direct",
     "ocaml-dune",
+    "haskell-cabal",
   ]
     ## The convention list ``repro show-conventions`` prints when asked
     ## for the registry order. Mirrors the registration order in

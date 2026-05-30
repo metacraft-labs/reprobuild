@@ -56,6 +56,8 @@
 #                               toolchain isn't in the standard dev shell)
 #   ocaml-dune/hello-binary   (M46; SKIP when ocaml/dune missing — OCaml
 #                               isn't in the standard dev shell on Windows)
+#   haskell-cabal/hello-binary (M55; SKIP when ghc/cabal missing — Haskell
+#                               isn't in the standard dev shell on Windows)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -154,6 +156,7 @@ $PopulatedExamples = @(
   'csharp-dotnet/hello-binary',
   'swift-swiftpm/hello-binary',
   'ocaml-dune/hello-binary',
+  'haskell-cabal/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -997,6 +1000,50 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'dune' not on PATH (install via 'opam install dune' after OPAM init)" }
       }
       return @{ Available = $true; Reason = "ocaml=$($ocamlCmd.Source); dune=$($duneCmd.Source)" }
+    }
+    'haskell-cabal' {
+      # M55: the Haskell + Cabal (Tier 2b) convention is registered.
+      # Probe for BOTH ``ghc`` AND ``cabal`` on PATH. The convention's
+      # ``recognize`` enforces this jointly — cabal-install isn't part
+      # of the GHC distribution per se (it's a separate binary that
+      # GHCup installs alongside GHC). The documented provisioning path
+      # is GHCup-windows from https://www.haskell.org/ghcup/ — M55 pins
+      # GHC 9.10.1 + cabal-install 3.12.1.0. Most M55 review hosts do
+      # NOT ship Haskell — it isn't in the standard dev shell — so this
+      # probe is expected to SKIP cleanly on a default Windows host.
+      $ghcCmd = Get-Command ghc -ErrorAction SilentlyContinue
+      $cabalCmd = Get-Command cabal -ErrorAction SilentlyContinue
+      if (-not $ghcCmd -or -not $cabalCmd) {
+        # Try lifting a managed GHCup install under
+        # ``D:\metacraft-dev-deps\ghcup\`` or ``%LOCALAPPDATA%\Programs\ghcup\``.
+        $candidates = @()
+        foreach ($ghcupRoot in @(
+          'D:\metacraft-dev-deps\ghcup',
+          (Join-Path $env:LOCALAPPDATA 'Programs\ghcup'))) {
+          if (-not $ghcupRoot) { continue }
+          if (-not (Test-Path -LiteralPath $ghcupRoot)) { continue }
+          foreach ($candidate in @(
+            (Join-Path $ghcupRoot 'bin\ghc.exe'),
+            (Join-Path $ghcupRoot 'bin\cabal.exe'))) {
+            if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+          }
+        }
+        if ($candidates.Count -gt 0) {
+          $binDir = Split-Path -Parent ($candidates | Select-Object -First 1)
+          if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+            $env:PATH = "$binDir;$env:PATH"
+          }
+          $ghcCmd = Get-Command ghc -ErrorAction SilentlyContinue
+          $cabalCmd = Get-Command cabal -ErrorAction SilentlyContinue
+        }
+      }
+      if (-not $ghcCmd) {
+        return @{ Available = $false; Reason = "'ghc' not on PATH (install GHC + cabal-install via GHCup from https://www.haskell.org/ghcup/ — M55 pins GHC 9.10.1)" }
+      }
+      if (-not $cabalCmd) {
+        return @{ Available = $false; Reason = "'cabal' not on PATH (install via GHCup from https://www.haskell.org/ghcup/ — M55 pins cabal-install 3.12.1.0)" }
+      }
+      return @{ Available = $true; Reason = "ghc=$($ghcCmd.Source); cabal=$($cabalCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -2092,6 +2139,38 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir '_build\default\hello.exe'
         Greeting = 'hello from ocaml-dune-hello-binary'
+      })
+    }
+    'haskell-cabal/hello-binary' {
+      # M55: haskell-cabal/hello-binary. The convention emits a single
+      # ``cabal v2-build --offline -j1 --enable-relocatable`` action.
+      # The produced binary lives under a complex
+      # ``dist-newstyle/build/<platform-tuple>/ghc-<ver>/<pkg>-<ver>/
+      # x/<exe>/build/<exe>/<exe>.exe`` path that varies by GHC version
+      # + platform-tuple. The harness can't predict the exact path
+      # without probing the toolchain, so it walks ``dist-newstyle/``
+      # for the ``hello.exe`` binary as a defensive lookup. On the M55
+      # review host (Windows, GHC absent) this fixture SKIPs cleanly
+      # before reaching the produced-exe check.
+      $exeName = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'hello.exe' } else { 'hello' }
+      $distDir = Join-Path $fixtureDir 'dist-newstyle'
+      $produced = $null
+      if (Test-Path -LiteralPath $distDir) {
+        $cands = Get-ChildItem -LiteralPath $distDir -Filter $exeName -Recurse -ErrorAction SilentlyContinue
+        if ($cands -and $cands.Count -gt 0) {
+          # Prefer the deepest path matching ``x/hello/build/hello/hello.exe``
+          $produced = ($cands | Sort-Object { $_.FullName.Length } -Descending | Select-Object -First 1).FullName
+        }
+      }
+      if (-not $produced) {
+        # Predicted path placeholder — harness uses this only for the
+        # missing-file error message when the convention failed to
+        # build (the actual produced path is discovered by walk above).
+        $produced = Join-Path $fixtureDir ("dist-newstyle\build\x86_64-windows\ghc-9.10.1\hello-1.0\x\hello\build\hello\" + $exeName)
+      }
+      return @(@{
+        Path     = $produced
+        Greeting = 'hello from haskell-cabal-hello-binary'
       })
     }
     'csharp-dotnet/hello-binary' {

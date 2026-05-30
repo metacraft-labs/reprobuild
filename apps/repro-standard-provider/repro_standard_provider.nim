@@ -47,6 +47,7 @@ import repro_standard_provider/conventions/fortran_direct as fortran_direct_conv
 import repro_standard_provider/conventions/zig_direct as zig_direct_convention
 import repro_standard_provider/conventions/d_direct as d_direct_convention
 import repro_standard_provider/conventions/ocaml_dune as ocaml_dune_convention
+import repro_standard_provider/conventions/haskell_cabal as haskell_cabal_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -330,6 +331,28 @@ when defined(reproProviderMode):
   # non-trivial to re-implement; track as a future milestone if demand
   # surfaces.
   addDefaultConvention(ocaml_dune_convention.ocamlDuneConvention())
+  # haskell_cabal (M55) — sixth managed-ecosystem Tier 2b convention.
+  # First Phase 2 language milestone. Keys on a ``<name>.cabal`` file
+  # at the project root (the Cabal package manifest filename — uniquely
+  # identifies a Cabal package; no other convention recognises this
+  # extension). Registered AFTER ocaml_dune per the M55 spec's
+  # "register after ocaml-dune in the chain" sequencing — the spec
+  # treats haskell-cabal as the first Phase 2 Mode 2 convention so the
+  # Phase 1 conventions form a contiguous block above it. The order has
+  # no recognition consequence — the convention's recognition gate is
+  # closed-set on ``<name>.cabal`` presence + a Haskell token AND a
+  # ``cabal`` token in ``uses:`` (the HARD precondition pattern,
+  # mirroring M40 java-maven's "both halves required" and M46
+  # ocaml-dune's "ocaml + dune" required pattern). The convention
+  # requires both ``ghc`` AND ``cabal`` drivers on PATH; when either is
+  # absent (which is the M55 default on Windows — the dev shell doesn't
+  # bundle Haskell) ``recognize`` returns false and the M9-style harness
+  # SKIPs cleanly. Defers when ``stack.yaml`` is present at the root —
+  # a future ``haskell-stack`` sibling will handle the Stack ecosystem.
+  # Library targets, multi-package cabal projects, ``cabal v2-test``
+  # discovery, and Mode 3 Haskell are all explicitly DEFERRED per the
+  # M55 spec.
+  addDefaultConvention(haskell_cabal_convention.haskellCabalConvention())
 
   proc runStandardProvider(): int =
     try:
