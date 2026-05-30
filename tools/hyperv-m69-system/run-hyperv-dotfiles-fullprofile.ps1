@@ -1108,10 +1108,17 @@ try {
         S "system-timezone: ERROR $_"
       }
 
-      # 15. vscode.extension cross-check. After stageG the desired
-      # extension(s) must be present in `code --list-extensions`. The
-      # driver leaves extras alone (`removeUnknown=false`) so we only
-      # check that the declared IDs are installed; extras are normal.
+      # 15. vscode.extension cross-check. After stageG the declared
+      # extension set must be present in `code --list-extensions`. The
+      # driver leaves extras alone (`removeUnknown=false`) so the
+      # verifier checks the declared IDs are installed and reports the
+      # observed total; extras are normal.
+      #
+      # The declared set mirrors the Nix flake's
+      # `modules/home-manager/programs/vscode.nix` list (7 entries).
+      # Theme extensions are version-pinned in the flake; on Windows
+      # the marketplace serves the pinned version unchanged so the
+      # presence check is by-ID (ignoring the @<version> suffix).
       try {
         $code = Get-Command code -ErrorAction SilentlyContinue
         if ($null -eq $code) {
@@ -1123,15 +1130,30 @@ try {
         } else {
           $extList = & $code.Source --list-extensions --show-versions 2>$null
           $extList | Out-File (Join-Path $diagDir 'home-vscode-extensions-summary.txt') -Encoding utf8
-          $vimPresent = $false
+          $declaredIds = @(
+            'bbenoist.nix',
+            'vscodevim.vim',
+            'sainnhe.everforest',
+            'enkia.tokyo-night',
+            'qufiwefefwoyn.kanagawa',
+            'arcticicestudio.nord-visual-studio-code',
+            'jdinhlife.gruvbox'
+          )
+          $installedIds = @()
           foreach ($line in $extList) {
             $id = ($line -split '@')[0].Trim()
-            if ($id -eq 'vscodevim.vim') {
-              $vimPresent = $true
-              break
-            }
+            if ($id) { $installedIds += $id }
           }
-          S "vscode-extensions: vscodevim.vim=$vimPresent total=$($extList.Count)"
+          $present = @()
+          $missing = @()
+          foreach ($id in $declaredIds) {
+            if ($installedIds -contains $id) { $present += $id } else { $missing += $id }
+          }
+          $vimPresent = $installedIds -contains 'vscodevim.vim'
+          S "vscode-extensions: vscodevim.vim=$vimPresent declared=$($declaredIds.Count) present=$($present.Count) missing=$($missing.Count) total=$($extList.Count)"
+          if ($missing.Count -gt 0) {
+            S "vscode-extensions: MISSING=$($missing -join ',')"
+          }
         }
       } catch {
         "ERROR: $_" | Out-File (Join-Path $diagDir 'home-vscode-extensions-summary.txt') -Encoding utf8
