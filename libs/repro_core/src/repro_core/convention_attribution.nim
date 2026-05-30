@@ -110,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[24, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[25, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -132,6 +132,7 @@ const
     ("dune-project",       "ocaml-dune"),
     ("*.cabal",            "haskell-cabal"),
     ("Gemfile",            "ruby-bundler"),
+    ("composer.json",      "php-composer"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -141,7 +142,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[29, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[30, tuple[ext, convention: string]] = [
     (".nim",   "nim"),
     (".rs",    "rust"),
     (".go",    "go"),
@@ -171,6 +172,7 @@ const
     (".hs",    "haskell-cabal"),
     (".lhs",   "haskell-cabal"),
     (".rb",    "ruby-bundler"),
+    (".php",   "php-composer"),
   ]
 
 proc isExtensionForConvention*(ext, convention: string): bool =
@@ -663,7 +665,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[21, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[22, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -726,6 +728,9 @@ const
                        versionArgs: @["--numeric-version"]),
     ToolchainProbeSpec(convention: "ruby-bundler",
                        exeName: "ruby",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "php-composer",
+                       exeName: "php",
                        versionArgs: @["--version"]),
   ]
 

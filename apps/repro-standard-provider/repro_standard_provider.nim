@@ -49,6 +49,7 @@ import repro_standard_provider/conventions/d_direct as d_direct_convention
 import repro_standard_provider/conventions/ocaml_dune as ocaml_dune_convention
 import repro_standard_provider/conventions/haskell_cabal as haskell_cabal_convention
 import repro_standard_provider/conventions/ruby_bundler as ruby_bundler_convention
+import repro_standard_provider/conventions/php_composer as php_composer_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -378,6 +379,32 @@ when defined(reproProviderMode):
   # supports app-style ``Gemfile`` + ``bundle exec ruby <entry>``
   # only.
   addDefaultConvention(ruby_bundler_convention.rubyBundlerConvention())
+  # php_composer (M57) — eighth managed-ecosystem Tier 2b convention.
+  # Third Phase 2 language milestone, immediately after M56
+  # ruby-bundler. Keys on a ``composer.json`` (Composer manifest) at
+  # the project root and additionally requires ``composer.lock`` (HARD
+  # precondition per the M57 spec — Composer's reproducibility +
+  # offline guarantee, mirroring the M56 ruby-bundler ``Gemfile.lock``
+  # pattern). Registered AFTER ruby-bundler per the M57 spec's
+  # "register after ruby-bundler in the chain" sequencing — the Phase
+  # 2 conventions form a contiguous block below the Phase 1 cluster.
+  # The order has no recognition consequence — the convention's
+  # recognition gate is closed-set on ``composer.json`` +
+  # ``composer.lock`` presence + a PHP token (``php`` or ``composer``)
+  # in ``uses:``. Composer is independent of PHP (separate ``.phar``)
+  # so the ``uses:`` check is single-token (mirroring M30 Rust's
+  # ``rust``-or-``cargo`` pattern and M56 ruby-bundler's
+  # ``ruby``-or-``bundler`` pattern rather than M55 haskell-cabal's
+  # strict "both halves required" pattern). The convention requires
+  # both ``php`` AND ``composer`` drivers on PATH; when either is
+  # absent (which is the M57 default on Windows — the dev shell
+  # doesn't bundle PHP) ``recognize`` returns false and the M9-style
+  # harness SKIPs cleanly. Library targets (PHP packages with no
+  # binary), PHAR packaging, PECL extensions, Composer scripts, and
+  # Symfony/Laravel/Drupal patterns are all explicitly DEFERRED per
+  # the M57 spec — M57 supports app-style ``composer.json`` +
+  # ``php bin/<name>.php`` only.
+  addDefaultConvention(php_composer_convention.phpComposerConvention())
 
   proc runStandardProvider(): int =
     try:

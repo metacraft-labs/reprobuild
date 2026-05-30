@@ -60,6 +60,8 @@
 #                               isn't in the standard dev shell on Windows)
 #   ruby-bundler/hello-binary  (M56; SKIP when ruby/bundle missing — Ruby
 #                               isn't in the standard dev shell on Windows)
+#   php-composer/hello-binary  (M57; SKIP when php/composer missing — PHP
+#                               isn't in the standard dev shell on Windows)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -160,6 +162,7 @@ $PopulatedExamples = @(
   'ocaml-dune/hello-binary',
   'haskell-cabal/hello-binary',
   'ruby-bundler/hello-binary',
+  'php-composer/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -1103,6 +1106,73 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'bundle' not on PATH (Bundler ships with Ruby >= 2.6; re-install Ruby via RubyInstaller from https://rubyinstaller.org/)" }
       }
       return @{ Available = $true; Reason = "ruby=$($rubyCmd.Source); bundle=$($bundleCmd.Source)" }
+    }
+    'php-composer' {
+      # M57: the PHP + Composer (Tier 2b) convention is registered.
+      # Probe for BOTH ``php`` AND ``composer`` on PATH. The
+      # convention's ``recognize`` enforces this jointly — Composer
+      # is an independent .phar so a vanilla PHP install does not
+      # come bundled with it. The documented provisioning paths on
+      # Windows are the PHP Windows binary from
+      # https://windows.php.net/downloads/ (M57 pins PHP 8.3.13) plus
+      # Composer-Setup.exe from
+      # https://getcomposer.org/Composer-Setup.exe (M57 pins
+      # Composer 2.8.1). Most M57 review hosts do NOT ship PHP — it
+      # isn't in the standard dev shell — so this probe is expected
+      # to SKIP cleanly on a default Windows host.
+      $phpCmd = Get-Command php -ErrorAction SilentlyContinue
+      $composerCmd = Get-Command composer -ErrorAction SilentlyContinue
+      if (-not $phpCmd -or -not $composerCmd) {
+        # Try lifting a managed PHP install under
+        # ``D:\metacraft-dev-deps\php\`` or a system PHP install
+        # under ``C:\php\`` / ``%LOCALAPPDATA%\Programs\php\``.
+        $candidates = @()
+        foreach ($phpRoot in @(
+          'D:\metacraft-dev-deps\php',
+          'C:\php',
+          (Join-Path $env:LOCALAPPDATA 'Programs\php'))) {
+          if (-not $phpRoot) { continue }
+          if (-not (Test-Path -LiteralPath $phpRoot)) { continue }
+          foreach ($candidate in @(
+            (Join-Path $phpRoot 'php.exe'))) {
+            if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+          }
+        }
+        if ($candidates.Count -gt 0) {
+          $binDir = Split-Path -Parent ($candidates | Select-Object -First 1)
+          if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+            $env:PATH = "$binDir;$env:PATH"
+          }
+        }
+        # Composer-Setup.exe drops launchers under
+        # ``%LOCALAPPDATA%\Composer\``.
+        foreach ($composerRoot in @(
+          'D:\metacraft-dev-deps\composer',
+          (Join-Path $env:LOCALAPPDATA 'Composer'),
+          (Join-Path $env:APPDATA 'Composer'))) {
+          if (-not $composerRoot) { continue }
+          if (-not (Test-Path -LiteralPath $composerRoot)) { continue }
+          foreach ($candidate in @(
+            (Join-Path $composerRoot 'composer.bat'),
+            (Join-Path $composerRoot 'composer.phar'))) {
+            if (Test-Path -LiteralPath $candidate) {
+              $binDir = Split-Path -Parent $candidate
+              if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+                $env:PATH = "$binDir;$env:PATH"
+              }
+            }
+          }
+        }
+        $phpCmd = Get-Command php -ErrorAction SilentlyContinue
+        $composerCmd = Get-Command composer -ErrorAction SilentlyContinue
+      }
+      if (-not $phpCmd) {
+        return @{ Available = $false; Reason = "'php' not on PATH (install PHP Windows binary from https://windows.php.net/downloads/ -- M57 pins PHP 8.3.13)" }
+      }
+      if (-not $composerCmd) {
+        return @{ Available = $false; Reason = "'composer' not on PATH (install Composer via Composer-Setup.exe from https://getcomposer.org/Composer-Setup.exe -- M57 pins Composer 2.8.1)" }
+      }
+      return @{ Available = $true; Reason = "php=$($phpCmd.Source); composer=$($composerCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -2249,6 +2319,23 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         Greeting = 'hello from ruby-bundler-hello-binary'
       })
     }
+    'php-composer/hello-binary' {
+      # M57: php-composer/hello-binary. The convention emits a single
+      # ``composer install --no-dev --optimize-autoloader --no-progress
+      # --quiet`` action (wrapped in cmd /c so the engine has a stable
+      # output sentinel under ``vendor/.repro-composer-stamp``) plus
+      # an ``fs.writeText`` action per executable that materialises
+      # ``<root>/.repro/build/<name>/<name>.cmd``. The wrapper invokes
+      # ``php bin/<name>.php`` so the harness can exec the .cmd
+      # directly and assert the greeting. On the M57 review host
+      # (Windows, PHP absent) this fixture SKIPs cleanly before
+      # reaching the produced-wrapper check.
+      $exeName = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'hello.cmd' } else { 'hello' }
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'hello' $exeName))
+        Greeting = 'hello from php-composer-hello-binary'
+      })
+    }
     'csharp-dotnet/hello-binary' {
       # M42: csharp-dotnet/hello-binary. The convention emits a single
       # ``dotnet build -c Release --no-restore --nologo --verbosity
@@ -3023,6 +3110,16 @@ foreach ($rel in $PopulatedExamples) {
   # config dir at the fixture root. Wipe both so every gate runs cold.
   if ($language -eq 'ruby-bundler') {
     foreach ($leftoverDir in @('vendor', '.bundle')) {
+      $leftoverDirPath = Join-Path $fixtureDir $leftoverDir
+      if (Test-Path -LiteralPath $leftoverDirPath) {
+        Remove-Item -LiteralPath $leftoverDirPath -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+  # M57: the php-composer convention vendors packages into ``vendor/``.
+  # Wipe so every gate runs cold.
+  if ($language -eq 'php-composer') {
+    foreach ($leftoverDir in @('vendor')) {
       $leftoverDirPath = Join-Path $fixtureDir $leftoverDir
       if (Test-Path -LiteralPath $leftoverDirPath) {
         Remove-Item -LiteralPath $leftoverDirPath -Recurse -Force -ErrorAction SilentlyContinue

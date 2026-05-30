@@ -159,6 +159,36 @@ suite "attributeConvention: manifest detection":
     check attr.evidence.contains("hello.cabal")
     removeDir(dir)
 
+  test "composer.json ⇒ php-composer":
+    ## M57 — Composer manifest must attribute to ``php-composer``.
+    ## Literal ``composer.json`` filename (no glob — Composer's manifest
+    ## filename is hard-coded). The ``php-composer`` convention
+    ## additionally requires ``composer.lock`` (HARD precondition) AND
+    ## a ``php`` / ``composer`` token in ``uses:`` for full dispatch,
+    ## but the attribution heuristic here is intentionally manifest-
+    ## presence-only — the heuristic honestly attributes
+    ## ``php-composer`` even when those preconditions aren't met (so
+    ## ``repro show-conventions`` still tells the user which convention
+    ## WOULD claim the project once the prerequisites are in place).
+    let dir = makeScratch("php-composer")
+    writeFile(dir / "composer.json",
+      "{\n  \"name\": \"hello/hello\",\n  \"type\": \"project\"\n}\n")
+    writeFile(dir / "composer.lock",
+      "{\n  \"_readme\": [\"M57 fixture stub\"],\n" &
+      "  \"content-hash\": \"" & "0".repeat(32) & "\",\n" &
+      "  \"packages\": [],\n  \"packages-dev\": [],\n" &
+      "  \"aliases\": [],\n  \"minimum-stability\": \"stable\",\n" &
+      "  \"stability-flags\": {},\n  \"prefer-stable\": false,\n" &
+      "  \"prefer-lowest\": false,\n  \"platform\": {},\n" &
+      "  \"platform-dev\": {},\n  \"plugin-api-version\": \"2.6.0\"\n}\n")
+    createDir(dir / "bin")
+    writeFile(dir / "bin" / "hello.php",
+      "<?php\necho \"hello\\n\";\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "php-composer"
+    check attr.evidence.contains("composer.json")
+    removeDir(dir)
+
   test "Gemfile ⇒ ruby-bundler":
     ## M56 — Bundler dependency manifest must attribute to
     ## ``ruby-bundler``. Literal ``Gemfile`` filename (no glob —

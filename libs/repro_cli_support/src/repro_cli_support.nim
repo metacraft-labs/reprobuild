@@ -5931,6 +5931,7 @@ const
     "ocaml-dune",
     "haskell-cabal",
     "ruby-bundler",
+    "php-composer",
   ]
     ## The convention list ``repro show-conventions`` prints when asked
     ## for the registry order. Mirrors the registration order in
