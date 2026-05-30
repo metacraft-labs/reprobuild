@@ -287,6 +287,45 @@ suite "M83 Phase D: home adapter — resources":
         stateSrc = a.resourceAttrValueSource
     check stateSrc == "\"Stopped\""
 
+  test "M83 step 4b: launchd.userAgent resource carries label + programArgs":
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("launchd.userAgent", "agent",
+      @[strFieldEntry("label", "com.metacraft.repro.demo"),
+        listFieldEntry("programArgs",
+          @["/usr/bin/true", "--flag"]),
+        boolFieldEntry("runAtLoad", true),
+        boolFieldEntry("keepAlive", false)]))
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    let e = findResourcesBlock(prof).get.resourcesEntries[0]
+    check e.resourceKind == "launchd.userAgent"
+    var hasProgramArgs = false
+    var hasKeepAlive = false
+    for a in e.resourceAttrs:
+      if a.resourceAttrKey == "programArgs":
+        # Comma-joined bare-text rendering (legacy list convention).
+        check a.resourceAttrValueSource == "/usr/bin/true,--flag"
+        hasProgramArgs = true
+      elif a.resourceAttrKey == "keepAlive":
+        check a.resourceAttrValueSource == "false"
+        hasKeepAlive = true
+    check hasProgramArgs
+    check hasKeepAlive
+
+  test "M83 step 4b: launchd.userAgent keepAlive=true round-trips":
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("launchd.userAgent", "agent",
+      @[strFieldEntry("label", "com.example.x"),
+        listFieldEntry("programArgs", @["/bin/sh", "-c", "true"]),
+        boolFieldEntry("runAtLoad", true),
+        boolFieldEntry("keepAlive", true)]))
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    let e = findResourcesBlock(prof).get.resourcesEntries[0]
+    var keepAliveSrc = ""
+    for a in e.resourceAttrs:
+      if a.resourceAttrKey == "keepAlive":
+        keepAliveSrc = a.resourceAttrValueSource
+    check keepAliveSrc == "true"
+
   test "vscode.extension resource carries extensions + removeUnknown":
     var intent = ProfileIntent(name: "demo")
     intent.resources.add(resourceIntent("vscode.extension", "vsExt",
@@ -612,17 +651,22 @@ suite "M83 Phase D: home adapter round-trip via attribute readback":
         strFieldEntry("content", "y"),
         strFieldEntry("mode", "0644"),
         boolFieldEntry("executable", false)]))
-    # M83 step 4b: the systemd.userUnit kind also belongs to the
-    # home-scope set and must NOT be filtered out by
+    # M83 step 4b: the two POSIX home-scope user-service kinds also
+    # belong to the home-scope set and must NOT be filtered out by
     # `isHomeScopeResource`.
     intent.resources.add(resourceIntent("systemd.userUnit", "su",
       @[strFieldEntry("name", "gpg-agent.service"),
         strFieldEntry("content", "[Unit]\n"),
         boolFieldEntry("enabled", true),
         strFieldEntry("state", "Running")]))
+    intent.resources.add(resourceIntent("launchd.userAgent", "la",
+      @[strFieldEntry("label", "com.example.x"),
+        listFieldEntry("programArgs", @["/usr/bin/true"]),
+        boolFieldEntry("runAtLoad", true),
+        boolFieldEntry("keepAlive", false)]))
     let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
     let entries = findResourcesBlock(prof).get.resourcesEntries
-    check entries.len == 8
+    check entries.len == 9
     var kinds: seq[string]
     for e in entries:
       kinds.add(e.resourceKind)
@@ -635,3 +679,4 @@ suite "M83 Phase D: home adapter round-trip via attribute readback":
     check "windows.startup" in kinds
     check "fs.userFile" in kinds
     check "systemd.userUnit" in kinds
+    check "launchd.userAgent" in kinds

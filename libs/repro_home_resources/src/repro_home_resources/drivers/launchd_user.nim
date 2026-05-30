@@ -64,15 +64,25 @@ proc escapeXml*(s: string): string =
     else: result.add(ch)
 
 proc buildLaunchAgentPlist*(label: string; programArgs: seq[string];
-                           runAtLoad: bool): string =
+                           runAtLoad: bool;
+                           keepAlive: bool = false): string =
   ## Build a minimal-but-valid LaunchAgent plist:
   ##   - `Label`            — the agent label.
   ##   - `ProgramArguments` — the argv array (program + args).
   ##   - `RunAtLoad`        — whether launchd starts it at load.
+  ##   - `KeepAlive`        — whether launchd restarts the agent
+  ##                          after exit (M83 step 4b, default
+  ##                          `false`).
   ##
   ## Newlines are LF; the caller writes the bytes verbatim (the
   ## driver's binary write avoids CRLF translation). This is a pure
   ## function: the Windows smoke suite asserts the generated text.
+  ##
+  ## Ordering note: the `KeepAlive` key is emitted AFTER `RunAtLoad`
+  ## so the plist key order is `Label`, `ProgramArguments`,
+  ## `RunAtLoad`, `KeepAlive`. Two semantically-equal plists with
+  ## the same field values therefore hash to the same digest — the
+  ## cache-hit no-op holds across applies.
   result = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
   result.add("<!DOCTYPE plist PUBLIC " &
     "\"-//Apple//DTD PLIST 1.0//EN\" " &
@@ -88,8 +98,34 @@ proc buildLaunchAgentPlist*(label: string; programArgs: seq[string];
   result.add("  </array>\n")
   result.add("  <key>RunAtLoad</key>\n")
   result.add("  " & (if runAtLoad: "<true/>" else: "<false/>") & "\n")
+  result.add("  <key>KeepAlive</key>\n")
+  result.add("  " & (if keepAlive: "<true/>" else: "<false/>") & "\n")
   result.add("</dict>\n")
   result.add("</plist>\n")
+
+# ---------------------------------------------------------------------------
+# Typed-resource helper: render-or-use cached plist bytes.
+# ---------------------------------------------------------------------------
+
+proc launchAgentPlistFor*(label: string; programArgs: seq[string];
+                          runAtLoad, keepAlive: bool;
+                          cachedPlistContent: string = ""): string =
+  ## The canonical plist for a `launchd.userAgent` resource. M83
+  ## step 4b: when `cachedPlistContent` is non-empty the typed
+  ## fields are bookkeeping and the bytes are used verbatim — this
+  ## supports backwards-compatible apply paths where the upstream
+  ## carried a literal `plistContent` field. When `cachedPlistContent`
+  ## is empty (the M83 step 4b common case) the bytes are
+  ## DETERMINISTICALLY rendered from `label` + `programArgs` +
+  ## `runAtLoad` + `keepAlive` via `buildLaunchAgentPlist`.
+  ##
+  ## Cache-hit semantics: `digestOfResource` for `rkLaunchdUserAgent`
+  ## calls this proc with the same arguments, so the desired-digest
+  ## and the on-disk bytes are byte-for-byte identical when nothing
+  ## changed.
+  if cachedPlistContent.len > 0:
+    return cachedPlistContent
+  return buildLaunchAgentPlist(label, programArgs, runAtLoad, keepAlive)
 
 # ---------------------------------------------------------------------------
 # Driver entry points (platform-bound).
@@ -130,7 +166,8 @@ proc observeLaunchAgent*(homeDir, label: string): ObservedState =
     raiseNotImplementedPlatform("launchd.userAgent", "macosx")
 
 proc applyLaunchAgent*(homeDir, label, plistContent: string;
-                      runAtLoad: bool): seq[byte] =
+                      runAtLoad: bool;
+                      keepAlive: bool = false): seq[byte] =
   ## Write the plist, then `launchctl bootstrap gui/<uid> <plist>`.
   ## A pre-existing agent is booted out first so `bootstrap` does
   ## not fail on a stale registration. All filesystem I/O is inside
@@ -155,6 +192,7 @@ proc applyLaunchAgent*(homeDir, label, plistContent: string;
         "launchctl bootstrap",
         "exit " & $bootCode & ": " & bootOut.strip())
     discard runAtLoad  # RunAtLoad is encoded in the plist itself.
+    discard keepAlive  # KeepAlive is encoded in the plist itself.
     result = newSeq[byte](plistContent.len)
     for i, ch in plistContent:
       result[i] = byte(ord(ch))

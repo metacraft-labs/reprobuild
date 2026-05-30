@@ -217,17 +217,19 @@ proc isHomeScopeResource(kind: string): bool =
   ## windows.registryValueHKLM) are filtered out of the home adapter's
   ## resources block and surface in the system adapter instead.
   ##
-  ## M83 step 4b: `systemd.userUnit` is a POSIX per-user service —
-  ## home-scope, NOT system-scope. It lives under
-  ## `~/.config/systemd/user/` and is reconciled by `systemctl
-  ## --user` unelevated. The system-scope peer `systemd.systemUnit`
-  ## (under `/etc/systemd/system/`) is elevated and lives in
-  ## `adapter_system.nim`.
+  ## M83 step 4b: `systemd.userUnit` + `launchd.userAgent` are POSIX
+  ## per-user services — home-scope, NOT system-scope. They live
+  ## under `~/.config/systemd/user/` / `~/Library/LaunchAgents/`
+  ## respectively and are reconciled by `systemctl --user` /
+  ## `launchctl bootstrap gui/<uid>` unelevated. The system-scope
+  ## peers `systemd.systemUnit` + `launchd.systemDaemon` (under
+  ## `/etc/systemd/system/` / `/Library/LaunchDaemons/`) are
+  ## elevated and live in `adapter_system.nim`.
   case kind
   of "env.userPath", "env.userVariable", "fs.managedBlock",
      "shell.integration", "windows.registryValueHKCU",
      "windows.startup", "fs.userFile", "vscode.extension",
-     "systemd.userUnit":
+     "systemd.userUnit", "launchd.userAgent":
     true
   else:
     false

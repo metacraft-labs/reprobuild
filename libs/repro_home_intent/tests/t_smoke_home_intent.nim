@@ -335,10 +335,10 @@ profile "x":
     check prof.root.kind == nkProfileRoot
 
   # ---------------------------------------------------------------------
-  # M83 step 4b: parser acceptance for the systemd.userUnit kind. The
-  # text-level parser only checks the kind tag belongs to
-  # `KnownResourceKinds` — per-kind attribute closed-sets are enforced
-  # in `repro_home_apply/pipeline.nim::resourceFromEntry`.
+  # M83 step 4b: parser acceptance for the two new POSIX home-scope
+  # user-services kinds. The text-level parser only checks the kind tag
+  # belongs to `KnownResourceKinds` — per-kind attribute closed-sets are
+  # enforced in `repro_home_apply/pipeline.nim::resourceFromEntry`.
   # ---------------------------------------------------------------------
 
   test "systemd.userUnit: parser accepts a minimal stanza":
@@ -357,6 +357,28 @@ profile "x":
       state = "Running"
 """
     let dir = createTempDir("repro-home-systemd-accept-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    let prof = loadProfile(path)
+    check prof.root.kind == nkProfileRoot
+
+  test "launchd.userAgent: parser accepts a minimal stanza":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    launchd.userAgent hammerspoon:
+      label = "org.hammerspoon.Hammerspoon"
+      programArgs = "/Applications/Hammerspoon.app/Contents/MacOS/Hammerspoon"
+      runAtLoad = true
+      keepAlive = true
+"""
+    let dir = createTempDir("repro-home-launchd-accept-", "")
     defer: removeDir(dir)
     let path = dir / "home.nim"
     writeFile(extendedPath(path), src)

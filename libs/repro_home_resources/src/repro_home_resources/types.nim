@@ -184,7 +184,28 @@ type
     of rkLaunchdUserAgent:
       launchdLabel*: string
       launchdPlistContent*: string
+        ## M83 step 4b: the rendered plist XML the apply pipeline
+        ## writes to disk. The driver always re-derives this field
+        ## from `launchdProgramArgs` + `launchdRunAtLoad` +
+        ## `launchdKeepAlive` via `buildLaunchAgentPlist` so the
+        ## bytes on disk are a deterministic function of the typed
+        ## fields. The field is retained on the variant to keep the
+        ## V1 manifest reader's `unitContent`-style direct-bytes
+        ## path working (an empty value means "render from typed
+        ## fields"; a non-empty value means "use these exact bytes").
       launchdRunAtLoad*: bool
+      launchdProgramArgs*: seq[string]
+        ## M83 step 4b: argv-style program arguments. The driver
+        ## emits a `<ProgramArguments><array><string>...</string>
+        ## </array>` block from this list. Empty is permitted but
+        ## yields an empty `<array/>` (an agent with no program is
+        ## valid as a SHELL-OUT-only definition; launchd would fail
+        ## to start it but the driver itself does not refuse).
+      launchdKeepAlive*: bool
+        ## M83 step 4b: `<KeepAlive>` value. Default `false` per
+        ## the spec. When `true` launchd restarts the agent after
+        ## exit; combine with `runAtLoad=true` for a long-lived
+        ## service.
     of rkFsUserFile:
       userFileHostPath*: string
         ## `$HOME`-resolved absolute path. The intent-layer parser

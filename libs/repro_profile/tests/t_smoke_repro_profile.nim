@@ -387,6 +387,40 @@ suite "Resource constructors":
       address = "gpg-agent-user-service")
     check target[0].address == "gpg-agent-user-service"
 
+  test "M83 step 4b: launchdUserAgent records every field":
+    var target: seq[ResourceIntent] = @[]
+    launchdUserAgent(target,
+      label = "org.hammerspoon.Hammerspoon",
+      programArgs = @["/Applications/Hammerspoon.app/Contents/MacOS/Hammerspoon"],
+      runAtLoad = true,
+      keepAlive = true)
+    check target.len == 1
+    check target[0].kind == "launchd.userAgent"
+    check target[0].address ==
+      "launchd.userAgent:org.hammerspoon.Hammerspoon"
+    check target[0].fields["label"].s == "org.hammerspoon.Hammerspoon"
+    check target[0].fields["programArgs"].items.len == 1
+    check target[0].fields["runAtLoad"].b == true
+    check target[0].fields["keepAlive"].b == true
+
+  test "M83 step 4b: launchdUserAgent defaults runAtLoad=true, keepAlive=false":
+    var target: seq[ResourceIntent] = @[]
+    launchdUserAgent(target,
+      label = "com.example.transient",
+      programArgs = @["/bin/true"])
+    check target[0].fields["runAtLoad"].b == true
+    check target[0].fields["keepAlive"].b == false
+
+  test "M83 step 4b: launchdUserAgent dependsOn parses into ResourceAddress":
+    var target: seq[ResourceIntent] = @[]
+    launchdUserAgent(target,
+      label = "com.example.x",
+      programArgs = @["/bin/true"],
+      dependsOn = @["fs.userFile:~/.config/foo"])
+    check target[0].dependsOn.len == 1
+    check target[0].dependsOn[0].kind == "fs.userFile"
+    check target[0].dependsOn[0].name == "~/.config/foo"
+
   test "fsSystemFile":
     var target: seq[ResourceIntent] = @[]
     fsSystemFile(target, path = "/etc/hosts.d/local",

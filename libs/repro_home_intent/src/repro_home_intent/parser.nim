@@ -39,18 +39,20 @@ const
   KnownResourceKinds* = ["env.userPath", "fs.managedBlock",
     "shell.integration", "env.userVariable", "windows.registryValue",
     "windows.startup", "fs.userFile",
-    "systemd.userUnit"]
+    "systemd.userUnit", "launchd.userAgent"]
     ## M78: the home-scope, elevation-free resource kinds whose M68
     ## drivers exist and that a `home.nim` `resources:` block may
     ## declare. An unrecognized kind is rejected with `EUnstructured`
     ## (the parser MUST NOT silently skip it). `fs.userFile` is the
     ## home-scope analogue of system-scope `fs.systemFile`; it writes
     ## a whole file at a `~`-relative `$HOME` path. `systemd.userUnit`
-    ## is the M83 step 4b Linux home-scope user-services driver; the
-    ## parser accepts it on every host even though its apply path is
-    ## Linux-bound — a Windows-host `home.nim` that guards it under a
-    ## `when linux:` predicate parses without error and the planner
-    ## emits it only when the predicate matches the running host.
+    ## and `launchd.userAgent` are the M83 step 4b POSIX home-scope
+    ## user-services drivers (Linux + macOS respectively); the
+    ## parser accepts them on every host even though their apply
+    ## paths are platform-bound — a Windows-host `home.nim` that
+    ## guards them under `when linux:` / `when macos:` predicates
+    ## parses without error and the planner emits them only when
+    ## the predicate matches the running host.
 
 type
   ParseCtx = object

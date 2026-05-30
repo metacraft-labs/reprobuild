@@ -249,6 +249,16 @@ suite "M68 smoke: home resource lifecycle":
     else:
       skip()
 
+  test "M83 step 4b: launchd.userAgent with keepAlive parameter still off-macOS":
+    # The applyLaunchAgent signature now takes `keepAlive` (default
+    # `false`); the platform guard MUST still raise off-macOS.
+    when not defined(macosx):
+      expect ENotImplementedPlatform:
+        discard applyLaunchAgent("/tmp/repro-m83-4b-launchd-ka",
+          "com.example.repro.ka", "<plist/>", true, keepAlive = true)
+    else:
+      skip()
+
   # ----------------------------------------------------------------
   # Phase B pure-function unit tests. The Linux/macOS drivers'
   # shell-out to gsettings / defaults / systemctl / launchctl can
@@ -877,8 +887,127 @@ suite "M83 step 4b: systemd.userUnit canonical state":
     expect ValueError:
       discard systemdUnitStateFromString("Reloading")
 
-  test "resourceKindFromString covers systemd.userUnit":
+# ===========================================================================
+# M83 step 4b: launchd.userAgent typed-field plist generation + lifecycle.
+# Pure on every platform (the plist generator is a pure function); the
+# launchctl shell-out is exercised only on macOS by `applyLaunchAgent`.
+# ===========================================================================
+
+suite "M83 step 4b: launchd.userAgent typed fields":
+
+  test "buildLaunchAgentPlist: KeepAlive defaults to <false/>":
+    let plist = buildLaunchAgentPlist("com.example.x",
+      @["/usr/bin/true"], runAtLoad = true)
+    check plist.contains("<key>KeepAlive</key>")
+    check plist.contains("<false/>")
+
+  test "buildLaunchAgentPlist: KeepAlive=true renders <true/>":
+    let plist = buildLaunchAgentPlist("com.example.x",
+      @["/usr/bin/true"], runAtLoad = true, keepAlive = true)
+    check plist.contains("<key>KeepAlive</key>")
+    # Both RunAtLoad AND KeepAlive should be <true/>; the substring
+    # count is therefore 2 (one per key).
+    var count = 0
+    var idx = 0
+    while idx >= 0:
+      idx = plist.find("<true/>", start = idx)
+      if idx < 0: break
+      inc count
+      inc idx
+    check count == 2
+
+  test "buildLaunchAgentPlist: KeepAlive key order is after RunAtLoad":
+    # Deterministic key order: Label, ProgramArguments, RunAtLoad,
+    # KeepAlive. Two semantically-equal plists with the same field
+    # values therefore hash to the same digest.
+    let plist = buildLaunchAgentPlist("com.example.x",
+      @["/usr/bin/true"], runAtLoad = true, keepAlive = false)
+    let runAtLoadIdx = plist.find("<key>RunAtLoad</key>")
+    let keepAliveIdx = plist.find("<key>KeepAlive</key>")
+    check runAtLoadIdx >= 0
+    check keepAliveIdx > runAtLoadIdx
+
+  test "launchAgentPlistFor: empty cache renders from typed fields":
+    let plist = launchAgentPlistFor("com.example.x",
+      @["/bin/true", "--flag"], true, false, "")
+    check plist.contains("<string>com.example.x</string>")
+    check plist.contains("<string>/bin/true</string>")
+    check plist.contains("<string>--flag</string>")
+
+  test "launchAgentPlistFor: non-empty cache passes bytes verbatim":
+    # Backwards-compat path: a previously-cached plistContent is
+    # used as-is, even if typed fields would render differently.
+    let cached = "<plist>cached body</plist>"
+    let plist = launchAgentPlistFor("com.example.x",
+      @["/never-used"], true, true, cached)
+    check plist == cached
+
+  test "digestOfResource: rkLaunchdUserAgent digests the rendered plist":
+    let r = Resource(kind: rkLaunchdUserAgent, address: "agent:digest",
+      lifecyclePolicy: lpDefault,
+      launchdLabel: "com.example.x",
+      launchdProgramArgs: @["/bin/true"],
+      launchdRunAtLoad: true,
+      launchdKeepAlive: false)
+    let rendered = launchAgentPlistFor(r.launchdLabel,
+      r.launchdProgramArgs, r.launchdRunAtLoad,
+      r.launchdKeepAlive, r.launchdPlistContent)
+    var buf = newSeq[byte](rendered.len)
+    for i, ch in rendered: buf[i] = byte(ord(ch))
+    check digestOfResource(r) == digestOfBytes(buf)
+
+  test "digestOfResource: keepAlive flip changes the launchd digest":
+    var r = Resource(kind: rkLaunchdUserAgent, address: "agent:k",
+      lifecyclePolicy: lpDefault,
+      launchdLabel: "com.example.x",
+      launchdProgramArgs: @["/bin/true"],
+      launchdRunAtLoad: true,
+      launchdKeepAlive: false)
+    let d0 = digestOfResource(r)
+    r.launchdKeepAlive = true
+    let d1 = digestOfResource(r)
+    check d0 != d1
+
+  test "digestOfResource: programArgs change flips the launchd digest":
+    var r = Resource(kind: rkLaunchdUserAgent, address: "agent:p",
+      lifecyclePolicy: lpDefault,
+      launchdLabel: "com.example.x",
+      launchdProgramArgs: @["/bin/true"],
+      launchdRunAtLoad: true,
+      launchdKeepAlive: false)
+    let d0 = digestOfResource(r)
+    r.launchdProgramArgs = @["/bin/true", "--new-flag"]
+    let d1 = digestOfResource(r)
+    check d0 != d1
+
+  test "lifecycle: launchd no-op when typed fields unchanged":
+    let r = Resource(kind: rkLaunchdUserAgent, address: "agent:noop",
+      lifecyclePolicy: lpDefault,
+      launchdLabel: "com.example.x",
+      launchdProgramArgs: @["/bin/true"],
+      launchdRunAtLoad: true,
+      launchdKeepAlive: false)
+    var state: ResourceState
+    state.address = r.address
+    state.desired = r
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfResource(r)
+    let action = decideAction(state)
+    check action.kind == rakNoOp
+
+  test "realWorldIdentity: launchd:user:<label>":
+    let r = Resource(kind: rkLaunchdUserAgent, address: "agent:id",
+      lifecyclePolicy: lpDefault,
+      launchdLabel: "com.metacraft.repro",
+      launchdProgramArgs: @[],
+      launchdRunAtLoad: false,
+      launchdKeepAlive: false)
+    check realWorldIdentity(r) == "launchd:user:com.metacraft.repro"
+
+  test "resourceKindFromString covers the M83 step 4b kinds":
     check resourceKindFromString("systemd.userUnit") == rkSystemdUserUnit
+    check resourceKindFromString("launchd.userAgent") == rkLaunchdUserAgent
 
 # ===========================================================================
 # vscode.extension — pure parse + drift logic. The shell-out side runs

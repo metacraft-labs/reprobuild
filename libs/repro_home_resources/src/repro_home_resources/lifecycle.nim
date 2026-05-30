@@ -29,6 +29,7 @@ import std/[strutils]
 import repro_home_generations
 
 import ./drivers/defaults
+import ./drivers/launchd_user
 import ./drivers/systemd_user
 import ./drivers/vscode_extension
 import ./errors
@@ -152,8 +153,19 @@ proc digestOfResource*(desired: Resource): Digest256 =
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
   of rkLaunchdUserAgent:
-    var buf = newSeq[byte](desired.launchdPlistContent.len)
-    for i, ch in desired.launchdPlistContent:
+    # M83 step 4b: the canonical bytes are the rendered plist —
+    # `launchAgentPlistFor` returns `launchdPlistContent` verbatim
+    # when present (backwards-compat path) or freshly builds the
+    # XML from the typed `label` / `programArgs` / `runAtLoad` /
+    # `keepAlive` fields (the M83 step 4b common case). The
+    # `observeLaunchAgent` driver reads the plist from disk and
+    # digests its raw bytes; the two converge to the same hash
+    # when nothing on disk has drifted.
+    let canonical = launchAgentPlistFor(desired.launchdLabel,
+      desired.launchdProgramArgs, desired.launchdRunAtLoad,
+      desired.launchdKeepAlive, desired.launchdPlistContent)
+    var buf = newSeq[byte](canonical.len)
+    for i, ch in canonical:
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
   of rkFsUserFile:

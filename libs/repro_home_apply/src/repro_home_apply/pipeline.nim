@@ -795,6 +795,44 @@ proc resourceFromEntry(profilePath, homeDir: string;
       unitContent: requireAttr(profilePath, entry, "content"),
       unitEnabled: enabled,
       unitState: state)
+  of "launchd.userAgent":
+    # M83 step 4b — macOS home-scope user-service driver. Closed-set
+    # attribute validation: `label`, `programArgs`, `runAtLoad`,
+    # `keepAlive`, plus the cross-kind `depends_on`. An unknown key
+    # surfaces as `EUnstructured`.
+    const launchdUserAgentAllowedKeys = ["label", "programArgs",
+      "runAtLoad", "keepAlive", "depends_on"]
+    for a in entry.resourceAttrs:
+      if a.kind == nkResourceAttr and
+         a.resourceAttrKey notin launchdUserAgentAllowedKeys:
+        resourceProfileError(profilePath, a.resourceAttrLine,
+          "resource `launchd.userAgent " & address &
+          "` has unknown attribute `" & a.resourceAttrKey &
+          "`; expected one of: " & launchdUserAgentAllowedKeys.join(", "))
+    let label = requireAttr(profilePath, entry, "label")
+    # `programArgs` is rendered by the adapter as comma-joined bare
+    # text (the legacy convention used by `env.userPath.entries` and
+    # `vscode.extension.extensions`). Split it back into a typed
+    # `seq[string]`; empty entries are dropped (so a trailing comma
+    # or whitespace-only segment is tolerated).
+    let progRaw = requireAttr(profilePath, entry, "programArgs")
+    var programArgs: seq[string] = @[]
+    for p in progRaw.split(','):
+      let t = p.strip()
+      if t.len > 0:
+        programArgs.add(t)
+    let runAtLoad =
+      if hasAttr(entry, "runAtLoad"): attrOf(entry, "runAtLoad") == "true"
+      else: true  # spec default
+    let keepAlive =
+      hasAttr(entry, "keepAlive") and attrOf(entry, "keepAlive") == "true"
+    result = Resource(kind: rkLaunchdUserAgent, address: address,
+      lifecyclePolicy: lpDefault,
+      launchdLabel: label,
+      launchdPlistContent: "",  # rendered on-demand by launchAgentPlistFor
+      launchdRunAtLoad: runAtLoad,
+      launchdProgramArgs: programArgs,
+      launchdKeepAlive: keepAlive)
   of "vscode.extension":
     # Closed-set attribute validation.
     const vscodeAllowedKeys = ["extensions", "removeUnknown", "depends_on"]
@@ -2131,9 +2169,18 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             payloadKindStr = "defaults-literal"
           of rkLaunchdUserAgent:
             # Phase B driver: re-raises ENotImplementedPlatform off-macOS.
+            # M83 step 4b: the plist bytes the driver writes come from
+            # `launchAgentPlistFor`, which renders from the typed
+            # `programArgs` / `runAtLoad` / `keepAlive` fields when
+            # `launchdPlistContent` is empty. The canonical-content
+            # path mirrors `digestOfResource(rkLaunchdUserAgent)` so a
+            # re-apply with unchanged typed fields cache-hits.
+            let plistBytes = launchAgentPlistFor(desired.launchdLabel,
+              desired.launchdProgramArgs, desired.launchdRunAtLoad,
+              desired.launchdKeepAlive, desired.launchdPlistContent)
             postWriteBytes = applyLaunchAgent(opts.homeDir,
-              desired.launchdLabel, desired.launchdPlistContent,
-              desired.launchdRunAtLoad)
+              desired.launchdLabel, plistBytes,
+              desired.launchdRunAtLoad, desired.launchdKeepAlive)
             payloadKindStr = "plist-content"
           of rkFsUserFile:
             # `applyUserFileResource` does the create / overwrite,

@@ -200,6 +200,34 @@ template systemdUserUnit*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "systemd.userUnit", addr0, fields,
       dependsOn)
 
+template launchdUserAgent*(targetResources: var seq[ResourceIntent];
+                           label: string;
+                           programArgs: seq[string];
+                           runAtLoad: bool = true;
+                           keepAlive: bool = false;
+                           address: string = "";
+                           dependsOn: seq[string] = @[]) =
+  ## M83 step 4b — macOS home-scope user-service.
+  ##
+  ## Wraps `launchctl bootstrap gui/<uid>` + the plist file under
+  ## `~/Library/LaunchAgents/<label>.plist`. The plist XML is
+  ## DERIVED from the typed fields by `launchAgentPlistFor` at
+  ## apply time; the macro never carries plist bytes directly so a
+  ## change to e.g. `keepAlive` re-converges the file on the next
+  ## apply.
+  ##
+  ## Address default: `launchd.userAgent:<label>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["label"] = strField(label)
+    fields["programArgs"] = listField(programArgs)
+    fields["runAtLoad"] = boolField(runAtLoad)
+    fields["keepAlive"] = boolField(keepAlive)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("launchd.userAgent", label)
+    pushResource(targetResources, "launchd.userAgent", addr0, fields,
+      dependsOn)
+
 template vscodeExtension*(targetResources: var seq[ResourceIntent];
                           extensions: seq[string];
                           removeUnknown: bool = false;
