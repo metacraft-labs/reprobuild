@@ -12,6 +12,7 @@
 ##      - desired present + observed absent             -> create
 ##      - desired present + observed matches desired    -> no_op (cache-hit)
 ##      - desired present + observed differs:
+##          no recorded binding (first apply)           -> update (converge)
 ##          recorded postWrite == observed              -> update (safe)
 ##          recorded postWrite != observed              -> drift_blocked
 ##      - desired absent + observed present:
@@ -226,6 +227,21 @@ proc decideAction*(state: ResourceState;
     if state.hasRecorded and not isZeroDigest(state.recorded.postWriteDigest) and
        state.recorded.postWriteDigest == state.observed.digest:
       # Safe update.
+      result.kind = rakUpdate
+      result.summary = summarize(rakUpdate, state.address, result.resourceKind)
+      return
+    # First-apply (no recorded binding) is NOT drift. "Drift" is
+    # defined as the operator mutating state we PREVIOUSLY wrote.
+    # If we have no record of ever writing this resource, the
+    # observed-vs-desired diff is just the initial-convergence
+    # delta — drive an `rakUpdate` (the apply executor converges
+    # observed -> desired through the same code path as a regular
+    # update). Hit by drivers whose `observe` returns `present=true`
+    # with the empty-set hash on a system that has nothing matching
+    # the desired set yet — e.g. `vscode.extension` on a fresh
+    # install where no extensions are installed and the canonical
+    # observed = the empty intersection of (installed ∩ desired).
+    if not state.hasRecorded:
       result.kind = rakUpdate
       result.summary = summarize(rakUpdate, state.address, result.resourceKind)
       return

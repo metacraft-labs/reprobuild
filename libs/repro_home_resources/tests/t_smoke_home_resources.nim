@@ -896,6 +896,61 @@ vscodevim.vim@1.27.0
     check action.kind == rakCreate
     check action.resourceKind == rkVscodeExtension
 
+  test "lifecycle: first-apply with no prior generation is NOT drift":
+    # Regression for the M83 step-3 Hyper-V harness failure: a
+    # `vscode.extension` resource on a fresh VM (no prior generation
+    # manifest, so no recorded binding) where the desired ID is not
+    # yet installed. `observeVscodeExtensions` returns
+    # `present=true` with the empty-intersection canonical (digest =
+    # `af1349b9f5f9…`, the empty-text BLAKE3); the desired digest is
+    # over the canonical `vscodevim.vim\n`. The two differ, but with
+    # `hasRecorded=false` the diff is NOT drift — drift requires a
+    # prior record of management. The lifecycle must collapse this
+    # to `rakUpdate` so the apply executor converges instead of
+    # raising `EDrift`.
+    let desired = Resource(kind: rkVscodeExtension, address: "ve:first-apply",
+      lifecyclePolicy: lpDefault,
+      vscodeExtensions: @["vscodevim.vim"],
+      vscodeRemoveUnknown: false)
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    # The empty-set canonical observation: `observeVscodeExtensions`
+    # with `removeUnknown=false` against the empty installed set
+    # filters down to the empty intersection.
+    state.observed.digest = digestOfBytes(@[])
+    state.hasRecorded = false  # No prior generation.
+    let action = decideAction(state)
+    check action.kind == rakUpdate
+    check action.kind != rakDriftBlocked
+    check action.resourceKind == rkVscodeExtension
+    # Drift fields stay empty (this is not a drift outcome).
+    check action.driftExpectedHex == ""
+    check action.driftObservedHex == ""
+
+  test "lifecycle: first-apply with observed != desired is update, not drift":
+    # Same pattern for `fs.managedBlock`: the host file already has
+    # content under our managed-block sentinels (e.g. a previous
+    # untracked installer wrote it) and no prior generation manifest
+    # records a binding for this address. Lifecycle must converge,
+    # not drift-block.
+    var desired = Resource(kind: rkFsManagedBlock,
+      address: "fs:first-apply",
+      hostFilePath: "/tmp/host", managedBlockId: "block",
+      managedBlockContent: "PATH=/desired")
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfBytes(@[byte('o'), byte('l'), byte('d')])
+    state.hasRecorded = false  # First apply.
+    let action = decideAction(state)
+    check action.kind == rakUpdate
+    check action.kind != rakDriftBlocked
+
   test "realWorldIdentity is the singleton vscode:extensions":
     let r = Resource(kind: rkVscodeExtension, address: "ve",
       vscodeExtensions: @["vscodevim.vim"])
