@@ -1059,6 +1059,38 @@ try {
         $lines | Out-File (Join-Path $diagDir 'system-registry-summary.txt') -Encoding utf8
       } catch { }
 
+      # 13. windows.firewallRule cross-check (OpenSSH server inbound).
+      # After stageH the rule must be present and match the system.nim
+      # declaration. Surfacing the live (Direction, Action, Protocol,
+      # LocalPort, Enabled) tuple makes a regression in the driver
+      # impossible to confuse with a generic apply failure.
+      try {
+        $fwLines = @()
+        $rule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+        if ($null -eq $rule) {
+          $fwLines += "OpenSSH-Server-In-TCP: MISSING"
+          $sshFwOk = $false
+        } else {
+          $pf = $rule | Get-NetFirewallPortFilter
+          $fwLines += "Name=$($rule.Name)"
+          $fwLines += "DisplayName=$($rule.DisplayName)"
+          $fwLines += "Direction=$($rule.Direction)"
+          $fwLines += "Action=$($rule.Action)"
+          $fwLines += "Enabled=$($rule.Enabled)"
+          $fwLines += "Protocol=$($pf.Protocol)"
+          $fwLines += "LocalPort=$($pf.LocalPort)"
+          $sshFwOk = ($rule.Direction -eq 'Inbound' -and
+                      $rule.Action -eq 'Allow' -and
+                      $pf.Protocol -eq 'TCP' -and
+                      "$($pf.LocalPort)" -eq '22')
+        }
+        $fwLines | Out-File (Join-Path $diagDir 'system-firewall-summary.txt') -Encoding utf8
+        S "openssh-firewall-rule: present=$($null -ne $rule) match=$sshFwOk"
+      } catch {
+        "ERROR: $_" | Out-File (Join-Path $diagDir 'system-firewall-summary.txt') -Encoding utf8
+        S "openssh-firewall-rule: ERROR $_"
+      }
+
       # Summary file
       $summary | Out-File (Join-Path $diagDir '_summary.txt') -Encoding utf8
 

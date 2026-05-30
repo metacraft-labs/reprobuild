@@ -860,12 +860,20 @@ proc applyWindowsFirewallRule*(op: PrivilegedOperation):
           op.fwName & "' failed: " & cOut.strip())
     elif not firewallRuleMatchesDesired(before, op.fwName, displayName,
         op.fwProtocol, op.fwDirection, op.fwAction, localPort, op.fwEnabled):
-      # Update fields in place. Set-NetFirewallRule does NOT update the
-      # port filter directly; the matching Set-NetFirewallPortFilter
-      # call is needed to flip Protocol or LocalPort.
+      # Update fields in place. CRITICAL: Set-NetFirewallRule uses
+      # `-Name` as the IDENTIFIER (selecting the by-Name parameter set);
+      # the new display name is set via `-NewDisplayName`, NOT
+      # `-DisplayName` (which is itself a SECOND IDENTIFIER in a
+      # different parameter set, so combining `-Name` and `-DisplayName`
+      # fails with "Parameter set cannot be resolved"). `-Direction`,
+      # `-Action`, and `-Enabled` flow in as ordinary property updates.
+      # Set-NetFirewallRule does NOT update the port filter directly;
+      # the matching Set-NetFirewallPortFilter call is needed to flip
+      # Protocol or LocalPort.
       let setInvocation =
         "Set-NetFirewallRule -Name " & psQuote(op.fwName) &
-        " -DisplayName " & psQuote(displayName) &
+        " -NewDisplayName " & psQuote(displayName) &
+        " -Direction " & psQuote(op.fwDirection) &
         " -Action " & psQuote(op.fwAction) &
         " -Enabled " & enabledArg
       let (sOut, sCode) = runPowerShell(wrapCmdletTerminating(setInvocation))
