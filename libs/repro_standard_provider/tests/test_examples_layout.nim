@@ -87,6 +87,9 @@ const PopulatedExamples = [
   "ada-mode3/binary-with-library",
   "mixed/ada-uses-cpp-lib",
   "mixed/cpp-uses-ada-lib",
+  "pascal-mode3/binary-with-library",
+  "mixed/pascal-uses-cpp-lib",
+  "mixed/cpp-uses-pascal-lib",
 ]
 
 suite "examples layout M8":

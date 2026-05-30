@@ -188,6 +188,9 @@ $PopulatedExamples = @(
   'ada-mode3/binary-with-library',
   'mixed/ada-uses-cpp-lib',
   'mixed/cpp-uses-ada-lib',
+  'pascal-mode3/binary-with-library',
+  'mixed/pascal-uses-cpp-lib',
+  'mixed/cpp-uses-pascal-lib',
   'mode1/rust-binary-with-library',
   'mode1/nim-binary-with-library'
 )
@@ -545,6 +548,19 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $true; Reason = "gnatmake=$($gnatCmd.Source)" }
       }
       return @{ Available = $false; Reason = "'gnatmake' not on PATH (install via 'pacman -S mingw-w64-x86_64-gcc-ada' under MSYS2)" }
+    }
+    'pascal-mode3' {
+      # M59: Mode 3 Pascal — probe for ``fpc`` (Free Pascal Compiler).
+      # The canonical Windows install is via MSYS2:
+      # ``pacman -S mingw-w64-x86_64-fpc``, or via the freepascal.org
+      # installer / scoop's ``freepascal`` bucket. The M59 honest-scope
+      # cut: env.ps1 doesn't yet provision the FPC toolchain so most
+      # hosts SKIP this gate cleanly.
+      $fpcCmd = Get-Command fpc -ErrorAction SilentlyContinue
+      if ($fpcCmd) {
+        return @{ Available = $true; Reason = "fpc=$($fpcCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "'fpc' not on PATH (install via 'pacman -S mingw-w64-x86_64-fpc' under MSYS2 or download from freepascal.org)" }
     }
     'mode1' {
       # M48: Mode 1 (layout-as-manifest) fixtures. Each fixture is
@@ -1707,6 +1723,42 @@ function Probe-Fixture([string]$rel) {
         return @{ Available = $false; Reason = "'ar' not on PATH (M58 reverse fixture needs an archiver)" }
       }
       return @{ Available = $true; Reason = "gnatmake=$($gnatCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
+    }
+    'mixed/pascal-uses-cpp-lib' {
+      # M59 forward direction: a Pascal executable that links a C
+      # archive. Needs fpc + gcc/clang + ar.
+      $fpcCmd = Get-Command fpc -ErrorAction SilentlyContinue
+      if (-not $fpcCmd) {
+        return @{ Available = $false; Reason = "'fpc' not on PATH (M59 forward fixture needs Pascal via 'pacman -S mingw-w64-x86_64-fpc' under MSYS2 or freepascal.org)" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (M59 forward fixture needs a C compiler)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M59 forward fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "fpc=$($fpcCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/cpp-uses-pascal-lib' {
+      # M59 reverse direction: a C++ executable that links a Pascal
+      # staticlib. Needs fpc + g++/clang++ + ar.
+      $fpcCmd = Get-Command fpc -ErrorAction SilentlyContinue
+      if (-not $fpcCmd) {
+        return @{ Available = $false; Reason = "'fpc' not on PATH (M59 reverse fixture needs Pascal via 'pacman -S mingw-w64-x86_64-fpc' under MSYS2 or freepascal.org)" }
+      }
+      $cxx = Get-Command g++ -ErrorAction SilentlyContinue
+      if (-not $cxx) { $cxx = Get-Command clang++ -ErrorAction SilentlyContinue }
+      if (-not $cxx) {
+        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (M59 reverse fixture needs a C++ link driver)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M59 reverse fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "fpc=$($fpcCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
     }
     'mode1/rust-binary-with-library' {
       # M48: Mode 1 Rust — needs rustc. Reuse the rustup-stable
@@ -3015,6 +3067,79 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
           Greeting = 'cpp says: ada added 2+3 = 5'
+        }
+      )
+    }
+    'pascal-mode3/binary-with-library' {
+      # M59: Mode 3 Pascal pilot. The workspace declares a library
+      # ``pascallib`` and an executable ``pascalcalc`` in a single
+      # ``repro.nim``. The pascal-direct convention emits per-source
+      # ``fpc -O2 -CX`` + ``ar rcs`` for the library + one ``fpc``
+      # action per executable; the executable's link argv carries the
+      # upstream archive via ``-Fl<dir>`` (lib search path) +
+      # ``-k<archive>`` (fpc linker pass-through). Both outputs land
+      # under ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'pascalcalc'
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'pascallib' 'libpascallib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
+          Greeting = 'hello from pascal-mode3-binary-with-library, pascallib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/pascal-uses-cpp-lib' {
+      # M59 cross-language Mode 3 (FORWARD direction): the workspace
+      # declares a C static library ``mathlib`` (``uses: gcc``) and a
+      # Pascal executable ``pascalcalc`` (``uses: fpc``) in a single
+      # ``repro.nim`` with ``depends_on pascalcalcPkg: mathlibPkg``.
+      # The pascal-direct convention claims the whole workspace
+      # (c-cpp-direct defers when ``uses:`` names a Pascal toolchain
+      # token AND no ``*.lpi`` is present), emits the upstream C
+      # archive in-line via the embedded ``emitCCppCrossMember``
+      # helper, and threads the archive on the fpc argv via
+      # ``-Fl<dir>`` + ``-k<archive>`` (linker pass-through). The
+      # binary's first stdout line proves the cross-language
+      # round-trip succeeded: Pascal -> C c_add() -> back to Pascal.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'pascalcalc' 'pascalcalc.exe'))
+          Greeting = 'pascal says: mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/cpp-uses-pascal-lib' {
+      # M59 cross-language Mode 3 (REVERSE direction): the workspace
+      # declares a Pascal static library ``pascaladdlib`` (``uses: fpc``)
+      # and a C++ executable ``cppapp`` (``uses: gcc``) in a single
+      # ``repro.nim`` with ``depends_on cppappPkg: pascaladdlibPkg``.
+      # The pascal-direct convention claims the whole workspace,
+      # emits the upstream Pascal archive via per-source ``fpc -O2 -CX``
+      # + ``ar rcs``, then emits per-source ``g++ -c`` + terminal
+      # ``g++ -o`` actions for cppapp; the link argv carries the
+      # Pascal archive as a trailing positional. The M59 honest-scope
+      # cut limits the reverse fixture to ``public name '...'; cdecl;``
+      # no-RTL-bootstrap entry points so the gcc driver resolves all
+      # references against the Pascal archive itself without external
+      # runtime libs — same property M58 Ada / M44 Zig / M45 D
+      # reverse fixtures rely on for their respective runtimes. The
+      # binary's first stdout line proves the cross-language
+      # round-trip: C++ -> Pascal pascal_add() -> back to C++.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'pascaladdlib' 'libpascaladdlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
+          Greeting = 'cpp says: pascal added 2+3 = 5'
         }
       )
     }

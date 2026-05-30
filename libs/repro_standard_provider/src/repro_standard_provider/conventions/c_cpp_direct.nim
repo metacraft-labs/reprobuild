@@ -868,6 +868,85 @@ proc workspaceClaimedByAdaDirect(projectRoot, source: string): bool =
     return false
   true
 
+proc usesIncludesPascalToolchain(source: string): bool =
+  ## M59: defer mixed Pascal+C/C++ workspaces to the ``pascal-direct``
+  ## convention. Mirrors ``usesIncludesAdaToolchain`` shape.
+  if source.len == 0:
+    return false
+  var sawPascal = false
+  var inBlock = false
+  proc consume(token: string) {.closure.} =
+    if token == "pascal" or token == "fpc" or token == "freepascal":
+      sawPascal = true
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      if inBlock:
+        inBlock = false
+      continue
+    if inBlock:
+      let leading = line.len > 0 and line[0] in {' ', '\t'}
+      if not leading:
+        inBlock = false
+      else:
+        for raw in stripped.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+        continue
+    if stripped.startsWith("uses:"):
+      let payload = stripped[5 .. ^1].strip()
+      if payload.len == 0:
+        inBlock = true
+      else:
+        var clean = payload
+        if clean.startsWith("["):
+          clean = clean[1 .. ^1]
+        if clean.endsWith("]"):
+          clean = clean[0 ..< ^1]
+        for raw in clean.split({',', ' ', '\t'}):
+          let entry = raw.strip(chars = {' ', '\t', '"', '\'', ',', ';'})
+          if entry.len == 0:
+            continue
+          let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
+          consume(firstToken)
+  sawPascal
+
+proc hasLazarusProjectFile(projectRoot: string): bool =
+  if not dirExists(extendedPath(projectRoot)):
+    return false
+  try:
+    for kind, path in walkDir(projectRoot):
+      if kind notin {pcFile, pcLinkToFile}:
+        continue
+      if path.toLowerAscii.endsWith(".lpi"):
+        return true
+  except OSError:
+    discard
+  false
+
+proc workspaceClaimedByPascalDirect(projectRoot, source: string): bool =
+  ## True when the ``pascal-direct`` Mode 3 convention will recognize
+  ## the same workspace. M59 hands cross-language Pascal↔C/C++ mixed
+  ## workspaces to ``pascal-direct`` (it embeds the C/C++ cross
+  ## helpers the same way ``rust-direct`` / ``zig-direct`` / ``d-direct``
+  ## / ``ada-direct`` do), so this convention declines. The check
+  ## mirrors ``pascal_direct.pascalDirectRecognize`` cheaply: ``uses:``
+  ## names ``pascal``/``fpc``/``freepascal`` anywhere AND no ``*.lpi``
+  ## at the workspace root (the future Mode 2 Pascal convention's
+  ## territory).
+  if not usesIncludesPascalToolchain(source):
+    return false
+  if hasLazarusProjectFile(projectRoot):
+    return false
+  true
+
 proc cCppDirectRecognize(projectRoot: string;
                          request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract:
@@ -911,6 +990,11 @@ proc cCppDirectRecognize(projectRoot: string;
   ##     ``ada-direct`` (which embeds the C/C++ cross helpers and emits
   ##     both directions of the Ada ↔ C cross-language matrix from a
   ##     single fragment).
+  ##   * M59: NO ``pascal``/``fpc``/``freepascal`` in any ``uses:``
+  ##     block AND no ``*.lpi``. A mixed Pascal+C/C++ workspace routes
+  ##     through ``pascal-direct`` (which embeds the C/C++ cross
+  ##     helpers and emits both directions of the Pascal ↔ C
+  ##     cross-language matrix from a single fragment).
   if rootMakefile(projectRoot).len > 0:
     return false
   if hasCMakeLists(projectRoot):
@@ -933,6 +1017,8 @@ proc cCppDirectRecognize(projectRoot: string;
   if workspaceClaimedByDDirect(projectRoot, source):
     return false
   if workspaceClaimedByAdaDirect(projectRoot, source):
+    return false
+  if workspaceClaimedByPascalDirect(projectRoot, source):
     return false
   let members = extractMembersWithOwnership(source)
   if members.len == 0:

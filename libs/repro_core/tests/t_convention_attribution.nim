@@ -324,6 +324,23 @@ suite "attributeConvention: extension census fallback":
     check attr.evidence.contains("extension census")
     removeDir(dir)
 
+  test "*.pas-dominant dir ⇒ pascal-direct (M59 extension census)":
+    # M59: when ``.pas`` (or ``.pp`` / ``.lpr``) files dominate the
+    # dir, the project routes through the Mode 3 ``pascal-direct``
+    # convention. There is no Mode 2 Pascal manifest (``*.lpi``
+    # recognition is deferred per the M59 honest-scope cut) so the
+    # extension census is the sole signal.
+    let dir = makeScratch("pascal-extension")
+    createDir(dir / "src")
+    writeFile(dir / "src" / "main.pas",
+      "program Main;\nbegin\nend.\n")
+    writeFile(dir / "src" / "lib.pas",
+      "unit Lib;\ninterface\nimplementation\nend.\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "pascal-direct"
+    check attr.evidence.contains("extension census")
+    removeDir(dir)
+
   test "directory of only .png ⇒ no convention":
     let dir = makeScratch("png-only")
     writeFile(dir / "icon.png", "")

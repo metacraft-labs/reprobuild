@@ -985,6 +985,7 @@ const
     "zig",
     "d", "dmd", "ldc2", "gdc",
     "ada", "gnat", "gnatmake",
+    "pascal", "fpc", "freepascal",
     "ocaml", "ocamlc", "ocamlopt", "ocamlfind", "dune",
     "haskell", "ghc", "cabal", "cabal-install",
     "ruby", "bundler",

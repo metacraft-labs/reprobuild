@@ -5929,6 +5929,7 @@ const
     "zig-direct",
     "d-direct",
     "ada-direct",
+    "pascal-direct",
     "ocaml-dune",
     "haskell-cabal",
     "ruby-bundler",
