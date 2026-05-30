@@ -36,12 +36,17 @@
 ## table is built lazily and memoized inside `ProductionCatalog`), not
 ## once per package.
 
-import std/[json, os, osproc, strutils, tables]
+import std/[json, options, os, osproc, strutils, tables]
 from repro_core/paths import extendedPath
 
 # M64: the cakBuiltin adapter resolves against the M63 VersionedProvisioning
 # catalog. We import the schema (cross-platform; no Windows-only deps).
 import repro_dsl_stdlib/packages_schema
+# M65: the adapter chain consults the built-in catalog registry to
+# look up `<tool>Catalog` literals for a given tool name. The registry
+# is the single point of truth for "which tools have a built-in catalog
+# entry"; the chain walks it via `getCatalog(toolName)`.
+import repro_dsl_stdlib/catalog_registry
 
 # M80: the plan classifier and the apply-time Scoop adapter
 # (`repro_tool_profiles.resolveScoopTool`) share ONE installed-version
@@ -72,6 +77,46 @@ type
       ## into a content-addressed prefix.  See M63's
       ## ``packages_schema.nim`` and the M64 ``builtin_adapter`` module
       ## for the realization flow.
+    cakNix = "nix"
+      ## M65: placeholder for the M21 Nix profile adapter. The M65
+      ## adapter chain accepts ``cakNix`` in the preference list and
+      ## skips it cleanly when the realize-side Nix adapter is not
+      ## present (the parallel work in ``libs/repro_home_*`` will land
+      ## the production Nix branch). Listing ``cakNix`` here keeps the
+      ## chain configuration future-proof so a host can declare
+      ## ``adapter_preference: [nix, builtin, path]`` today without a
+      ## schema migration when the Nix branch lands.
+
+  ChainStepOutcome* = enum
+    ## M65: the per-step verdict the selection chain records in its
+    ## trace. ``csoResolved`` is the terminating outcome; the other
+    ## variants are skip reasons that drive the structured
+    ## diagnostic when the entire chain is exhausted.
+    csoResolved = "resolved"
+    csoAdapterUnavailable = "adapter-unavailable"
+      ## The adapter is platform-incompatible (cakScoop on Linux),
+      ## missing a host binary (cakScoop without ``scoop`` on PATH), or
+      ## not yet implemented (cakNix today). The chain moves on.
+    csoCatalogMiss = "catalog-miss"
+      ## cakBuiltin specific: the tool has no entry in the M65 catalog
+      ## registry, or the registered catalog is empty.
+    csoToolNotFound = "tool-not-found"
+      ## cakPath / cakScoop specific: the executable is not discoverable
+      ## on PATH and no bucket manifest carries it.
+    csoSchemaError = "schema-error"
+      ## cakBuiltin specific: ``resolveBuiltinPackage`` returned a
+      ## structured error (platform-not-supported, schema-invalid,
+      ## version-not-in-catalog). The chain moves on with the detail
+      ## captured in the trace.
+
+  ChainStep* = object
+    ## M65: one step of the adapter selection chain. The full
+    ## ``chainTrace`` is attached to ``CatalogResolution.chainTrace``
+    ## (on a hit, the trace ends at the resolving step; on miss the
+    ## chain reports ``EAdapterChainExhausted`` carrying every step).
+    adapter*: CatalogAdapterKind
+    outcome*: ChainStepOutcome
+    reason*: string
 
   CatalogResolution* = object
     ## The production catalog's verdict for one package reference.
@@ -100,6 +145,16 @@ type
     pacmanPackages*: seq[string]
     bootstrapArgv*: seq[string]
     envSubstitutions*: seq[tuple[name, value: string]]
+    # M65: per-resolution chain trace. Populated by `chainResolvePackage`
+    # to record every adapter consulted, in order, with each adapter's
+    # outcome + skip reason. On a successful resolution the trace ends
+    # at the resolving step (the final entry has
+    # `outcome == csoResolved`); on an exhaustion the trace carries
+    # every step the chain walked before raising. Empty for the legacy
+    # `resolvePackage(cat, packageId)` signature (which does not run
+    # the chain — it preserves the pre-M65 single-adapter behaviour
+    # for callers that have not yet been migrated).
+    chainTrace*: seq[ChainStep]
 
   EUnknownPackage* = object of CatchableError
     ## Raised when a package reference resolves to no production
@@ -108,6 +163,17 @@ type
     ## structured diagnostic.
     packageId*: string
     searchedCatalogs*: seq[string]
+
+  EAdapterChainExhausted* = object of CatchableError
+    ## M65: every adapter in the configured chain was tried and none
+    ## resolved the package. The exception carries the package id, the
+    ## chain that was walked, and the full chain trace (one
+    ## ``ChainStep`` per adapter consulted) so the CLI layer can render
+    ## a per-adapter skip-reason diagnostic. The ``--plan`` extension
+    ## reads ``chainTrace`` directly to render its plan classifier.
+    packageId*: string
+    chain*: seq[CatalogAdapterKind]
+    chainTrace*: seq[ChainStep]
 
   ProductionCatalog* = object
     ## Per-apply catalog handle. Built once; the installed-app table
@@ -629,3 +695,298 @@ proc resolveBuiltinPackage*(packageId: string;
   result.resolution.installed = false
   result.resolution.cacheHit = false  # set true by `realizeBuiltinPackage`
                                       # when the CAS prefix exists
+
+# ---------------------------------------------------------------------------
+# M65 — adapter selection chain
+# ---------------------------------------------------------------------------
+#
+# The chain accepts a per-host-configurable adapter preference list
+# (default: platform-specific) and walks it in order, asking each
+# adapter "can you resolve this package?" until one says yes. The trace
+# of every step is attached to the resolution for ``--plan`` /
+# ``repro show-conventions`` introspection; on exhaustion a structured
+# ``EAdapterChainExhausted`` carrying the same trace is raised.
+#
+# The chain consults adapters in this conceptual order (cache-first is
+# the implicit M56 store lookup that happens inside each adapter's
+# realize loop, NOT a resolution-time concern — the resolver only
+# decides WHICH adapter realizes; the realize loop's own
+# `cacheHit` verdict is reported back through the M64 dispatcher):
+#
+#   1. cakBuiltin — `getCatalog(packageId)` against the M65 registry.
+#                   A registered tool with a non-empty catalog that
+#                   yields a `BuiltinResolveResult.found == true` is a
+#                   chain hit.
+#   2. cakNix     — placeholder. The M21 realize-side Nix adapter is
+#                   landing in a parallel branch; until it is wired
+#                   into the resolver, cakNix is skipped cleanly with
+#                   `csoAdapterUnavailable`.
+#   3. cakScoop   — Windows-only. Falls back to the existing
+#                   `resolvePackage` logic for the Scoop branch.
+#   4. cakPath    — the universal "executable already on PATH" adapter.
+#                   Last-resort.
+#
+# The chain is greedy first-match. Adapters not listed in the
+# preference are skipped silently (no trace entry). A preference of
+# `[builtin, path]` will never consult cakScoop even on Windows.
+
+const
+  WindowsDefaultChain* = @[cakBuiltin, cakScoop, cakPath]
+    ## M65: the default Windows adapter preference. cakBuiltin is the
+    ## new primary; cakScoop is the user-facing interop branch for
+    ## Scoop-native users; cakPath is the last-resort PATH fallback.
+
+  LinuxDefaultChain* = @[cakNix, cakBuiltin, cakPath]
+    ## M65: the default Linux adapter preference. cakNix is the
+    ## existing M21 production path (skipped cleanly when the realize-
+    ## side branch is not yet wired); cakBuiltin is the secondary; the
+    ## PATH adapter remains the last-resort fallback.
+
+  MacosDefaultChain* = @[cakNix, cakPath]
+    ## M65: the default macOS adapter preference. cakBuiltin is not yet
+    ## supported on macOS per the M64 outstanding-task list (slices
+    ## ship Windows + Linux today; macOS slices land in a future
+    ## campaign). Mac users continue using Nix; PATH is the fallback.
+
+proc defaultAdapterChain*(): seq[CatalogAdapterKind] =
+  ## Return the platform-default adapter preference chain. Callers
+  ## that want to override the default pass an explicit ``chain`` to
+  ## ``chainResolvePackage``; M69's ``adapter_preference:`` DSL hook
+  ## reads the per-host preference out of ``home.nim`` and threads it
+  ## through here.
+  when defined(windows):
+    WindowsDefaultChain
+  elif defined(linux):
+    LinuxDefaultChain
+  elif defined(macosx) or defined(osx):
+    MacosDefaultChain
+  else:
+    @[cakPath]
+
+proc tryResolveBuiltin(packageId: string;
+                       version: string;
+                       hostCpu: PlatformCpu;
+                       hostOs: PlatformOs;
+                       step: var ChainStep):
+    tuple[found: bool; resolution: CatalogResolution] =
+  ## M65: the cakBuiltin branch of the chain. Looks the tool up in the
+  ## M65 catalog registry; on a hit, runs
+  ## ``resolveBuiltinPackage`` and reports the resolution. On a miss or
+  ## a structured error the resolver fills ``step`` with the skip
+  ## reason and returns ``(false, ...)`` so the chain moves on.
+  step.adapter = cakBuiltin
+  let catOpt = getCatalog(packageId)
+  if catOpt.isNone:
+    step.outcome = csoCatalogMiss
+    step.reason = "no built-in catalog registered for '" & packageId &
+      "' (M65 registry knows " &
+      (if RegisteredTools.len > 0:
+         "@[\"" & RegisteredTools.join("\", \"") & "\"]"
+       else: "<none>") & ")"
+    return (false, CatalogResolution())
+  let cat = catOpt.get
+  if cat.len == 0:
+    step.outcome = csoCatalogMiss
+    step.reason = "built-in catalog for '" & packageId & "' is empty"
+    return (false, CatalogResolution())
+  let res = resolveBuiltinPackage(packageId, cat, version, hostCpu, hostOs)
+  if not res.found:
+    step.outcome = csoSchemaError
+    step.reason = "resolveBuiltinPackage: " & $res.error & " (" &
+      res.errorDetail & ")"
+    return (false, CatalogResolution())
+  step.outcome = csoResolved
+  step.reason = "matched version '" & res.resolution.builtinVersion &
+    "' for " & $hostCpu & "-" & $hostOs
+  (true, res.resolution)
+
+proc tryResolveNix(packageId: string; step: var ChainStep):
+    tuple[found: bool; resolution: CatalogResolution] =
+  ## M65: the cakNix branch of the chain. The M21 realize-side Nix
+  ## adapter lands in a parallel branch under ``libs/repro_home_*``;
+  ## until that integration is wired into the resolver, cakNix is
+  ## skipped cleanly with ``csoAdapterUnavailable``. The chain moves
+  ## on. Windows always skips cakNix regardless of registration —
+  ## Nix is not supported on Windows.
+  step.adapter = cakNix
+  step.outcome = csoAdapterUnavailable
+  when defined(windows):
+    step.reason = "cakNix is not supported on Windows (skipped)"
+  else:
+    step.reason = "cakNix resolver not yet wired into the M65 chain " &
+      "(parallel work in libs/repro_home_*); skipped cleanly so the " &
+      "chain falls through to the next adapter"
+  (false, CatalogResolution())
+
+proc tryResolveScoop(cat: var ProductionCatalog; packageId: string;
+                     step: var ChainStep):
+    tuple[found: bool; resolution: CatalogResolution] =
+  ## M65: the cakScoop branch of the chain. Windows-only; on non-
+  ## Windows hosts the step is recorded as ``csoAdapterUnavailable``
+  ## and the chain moves on. On Windows we look the package up in
+  ## ``scoop list`` + the configured bucket inventory using the same
+  ## helpers the legacy ``resolvePackage`` uses.
+  step.adapter = cakScoop
+  when not defined(windows):
+    step.outcome = csoAdapterUnavailable
+    step.reason = "cakScoop is Windows-only"
+    return (false, CatalogResolution())
+  else:
+    let inst = installedVersion(cat, packageId)
+    let manifest = findBucketManifest(cat, packageId)
+    if (not inst.installed) and (not manifest.found):
+      step.outcome = csoToolNotFound
+      step.reason = "no installed Scoop app named '" & packageId &
+        "' and no bucket manifest carries it"
+      return (false, CatalogResolution())
+    var resolution = CatalogResolution(
+      packageId: packageId,
+      adapter: cakScoop,
+      app: packageId,
+      executableName: packageId)
+    if manifest.found:
+      resolution.bucket = manifest.bucket
+      if manifest.binName.len > 0:
+        resolution.executableName = manifest.binName
+      if not inst.installed:
+        resolution.resolvedVersion = manifest.version
+    if inst.installed:
+      resolution.installed = true
+      resolution.resolvedVersion = inst.version
+      resolution.cacheHit = satisfiesProfile(inst.version,
+        pinnedVersion = "", preferredVersion = "")
+      let installedExe = installedExecutableName(cat.scoopRoot, packageId,
+        inst.version)
+      if installedExe.len > 0:
+        resolution.executableName = installedExe
+      if resolution.bucket.len == 0:
+        let installJson = cat.scoopRoot / "apps" / packageId / inst.version /
+          "install.json"
+        if fileExists(extendedPath(installJson)):
+          try:
+            let parsed = parseJson(readFile(extendedPath(installJson)))
+            if parsed.kind == JObject:
+              resolution.bucket = parsed{"bucket"}.getStr("")
+          except CatchableError:
+            discard
+      if resolution.bucket.len == 0:
+        resolution.bucket = "main"
+    step.outcome = csoResolved
+    step.reason =
+      if inst.installed:
+        "installed at version '" & inst.version & "' (bucket=" &
+          resolution.bucket & ")"
+      else:
+        "available in bucket '" & manifest.bucket & "' at version '" &
+          manifest.version & "' (not yet installed)"
+    return (true, resolution)
+
+proc tryResolvePath(packageId: string; step: var ChainStep):
+    tuple[found: bool; resolution: CatalogResolution] =
+  ## M65: the cakPath branch of the chain. The last-resort adapter:
+  ## the executable is on PATH, so we record it as a path-adapter
+  ## resolution. Already-on-PATH is an implicit cache-hit.
+  step.adapter = cakPath
+  let exe = findExe(packageId)
+  if exe.len == 0:
+    step.outcome = csoToolNotFound
+    step.reason = "'" & packageId & "' not found on PATH"
+    return (false, CatalogResolution())
+  step.outcome = csoResolved
+  step.reason = "found '" & exe & "' on PATH"
+  var resolution = CatalogResolution(
+    packageId: packageId,
+    adapter: cakPath,
+    app: packageId,
+    executableName: extractFilename(exe),
+    sourcePath: exe,
+    installed: true,
+    cacheHit: true,
+    searchedCatalogs: @["path:" & getEnv("PATH")])
+  (true, resolution)
+
+proc raiseAdapterChainExhausted*(packageId: string;
+                                 chain: seq[CatalogAdapterKind];
+                                 trace: seq[ChainStep]) {.noreturn.} =
+  ## M65: every adapter in ``chain`` was tried and none resolved
+  ## ``packageId``. The error carries the chain that was walked plus
+  ## the per-step skip reason so the CLI layer can render a structured
+  ## diagnostic ("nix: no nixPackage branch; builtin: no slice matches;
+  ## scoop: not installed; path: not on PATH"). Mirrors the
+  ## ``EAdapterChainExhausted`` shape the M65 spec specifies.
+  var chainStr = ""
+  for i, a in chain:
+    if i > 0: chainStr.add(", ")
+    chainStr.add($a)
+  var reasonStr = ""
+  for i, step in trace:
+    if i > 0: reasonStr.add("; ")
+    reasonStr.add($step.adapter & ": " & step.reason)
+  var e = newException(EAdapterChainExhausted,
+    "adapter chain exhausted for package '" & packageId &
+    "'. Chain walked: [" & chainStr & "]. Per-adapter outcomes: " &
+    reasonStr & ". Declare the package in a recognized adapter " &
+    "catalog (built-in registry, Scoop, Nix), make its executable " &
+    "available on PATH, or override `adapter_preference:` in home.nim.")
+  e.packageId = packageId
+  e.chain = chain
+  e.chainTrace = trace
+  raise e
+
+proc chainResolvePackage*(cat: var ProductionCatalog;
+                          packageId: string;
+                          chain: seq[CatalogAdapterKind] = @[];
+                          version = "";
+                          hostCpu = detectHostCpu();
+                          hostOs = detectHostOs()):
+    CatalogResolution =
+  ## M65: the production adapter selection chain. Walks ``chain`` in
+  ## order, returning the first adapter's resolution. When ``chain`` is
+  ## empty the platform default is used (Windows: builtin/scoop/path;
+  ## Linux: nix/builtin/path; macOS: nix/path).
+  ##
+  ## Raises ``EAdapterChainExhausted`` if every adapter in the chain
+  ## was tried and none resolved.
+  ##
+  ## The returned ``CatalogResolution.chainTrace`` carries one entry
+  ## per adapter consulted, in order, with the per-adapter outcome +
+  ## skip reason (the final entry on a hit has
+  ## ``outcome == csoResolved`` — the others are skip reasons).
+  let effective =
+    if chain.len == 0: defaultAdapterChain()
+    else: chain
+  var trace: seq[ChainStep] = @[]
+  for adapter in effective:
+    var step = ChainStep(adapter: adapter, outcome: csoAdapterUnavailable,
+      reason: "")
+    case adapter
+    of cakBuiltin:
+      let outcome = tryResolveBuiltin(packageId, version, hostCpu, hostOs,
+        step)
+      trace.add(step)
+      if outcome.found:
+        var resolution = outcome.resolution
+        resolution.chainTrace = trace
+        return resolution
+    of cakNix:
+      let outcome = tryResolveNix(packageId, step)
+      trace.add(step)
+      if outcome.found:
+        var resolution = outcome.resolution
+        resolution.chainTrace = trace
+        return resolution
+    of cakScoop:
+      let outcome = tryResolveScoop(cat, packageId, step)
+      trace.add(step)
+      if outcome.found:
+        var resolution = outcome.resolution
+        resolution.chainTrace = trace
+        return resolution
+    of cakPath:
+      let outcome = tryResolvePath(packageId, step)
+      trace.add(step)
+      if outcome.found:
+        var resolution = outcome.resolution
+        resolution.chainTrace = trace
+        return resolution
+  raiseAdapterChainExhausted(packageId, effective, trace)

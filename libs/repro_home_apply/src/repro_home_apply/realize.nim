@@ -348,9 +348,26 @@ proc realizeViaProductionCatalog(store: var Store;
         "non-Windows platform")
   of cakBuiltin:
     # M64 dispatch — the production catalog produced a cakBuiltin
-    # resolution (will become a real path in M65 when the adapter
-    # chain wires `resolveBuiltinPackage` into `resolvePackage`).
+    # resolution. M65 wires this branch into the apply pipeline via
+    # `chainResolvePackage` (downstream M69 home.nim integration);
+    # the legacy `resolvePackage` path continues to return cakPath /
+    # cakScoop only.
     result = realizeBuiltinAdapter(store, resolution)
+  of cakNix:
+    # M65 placeholder: the M21 realize-side Nix branch lands in a
+    # parallel libs/repro_home_* branch. The legacy `resolvePackage`
+    # never returns cakNix today (only the M65 `chainResolvePackage`
+    # accepts cakNix in the preference list, and its tryResolveNix
+    # branch skips cleanly with `csoAdapterUnavailable`). Until the
+    # parallel work lands, dispatch fails closed with a structured
+    # diagnostic so a future caller routing a cakNix resolution
+    # through here gets a clear "not yet implemented" message rather
+    # than a silent miss.
+    raiseRealizeFailed(packageId, "nix",
+      "cakNix realize branch is not yet wired into the production " &
+      "dispatch (parallel work in libs/repro_home_*); this code path " &
+      "is reachable only via the M65 chain when a future caller " &
+      "passes a cakNix resolution downstream")
   result.fromProductionCatalog = true
   if result.adapter != akBuiltin:
     # The builtin adapter computes its own cache-hit verdict from the
