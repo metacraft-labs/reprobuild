@@ -165,51 +165,71 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
 
 proc observeResource*(r: SystemResource): ResourceObservation =
   ## Re-observe a declared resource's live state. Read-only.
+  ##
+  ## Cross-platform planning: `repro infra plan` is documented as pure
+  ## logic that runs on every host (see
+  ## `tests/e2e/m69/t_e2e_repro_infra_depends_on_topological.nim`
+  ## header: "No VM, no broker, no real Windows API, no host mutation.
+  ## It therefore runs on every host (Windows, Linux, macOS)"). When a
+  ## resource's observe driver is not implemented on the host platform
+  ## (e.g. a `windows.capability` declared in a profile being planned
+  ## on macOS), the read-only probe simply cannot see the resource —
+  ## the correct interpretation is "absent on this host" (digest
+  ## `ZeroDigestHex`), MATCHING the canonical absent-resource
+  ## observation. The driver's `ENotImplementedPlatform` is a probe
+  ## failure, not a profile error; the broker's host-side re-observe
+  ## at apply time is what enforces the desired state on the correct
+  ## OS.
   result.address = r.address
   let op = toPrivilegedOperation(r)
-  let obs =
-    case r.kind
-    of srkWindowsRegistryValue: observeWindowsRegistryValue(op)
-    of srkWindowsOptionalFeature: observeWindowsOptionalFeature(op)
-    of srkWindowsCapability: observeWindowsCapability(op)
-    of srkWindowsService: observeWindowsService(op)
-    of srkWindowsVsInstaller: observeWindowsVsInstaller(op)
-    of srkWindowsFirewallRule: observeWindowsFirewallRule(op)
-    of srkWindowsAcl: observeWindowsAcl(op)
-    of srkMacosSystemDefault: observeMacosSystemDefault(op)
-    of srkSystemdSystemUnit: observeSystemdSystemUnit(op)
-    of srkLaunchdSystemDaemon: observeLaunchdSystemDaemon(op)
-    of srkFsSystemFile: observeFsSystemFile(op)
-    of srkEnvSystemVariable: observeEnvSystemVariable(op)
-    of srkPasswdUser: observePasswdUser(op)
-    of srkOsTimezone:
-      when defined(windows):
-        observeWindowsOsTimezone(op)
-      else:
-        observePosixOsTimezone(op)
-    of srkOsHostname:
-      when defined(windows):
-        observeWindowsOsHostname(op)
-      else:
-        observePosixOsHostname(op)
-    of srkLinuxSysctl:
-      observeLinuxSysctl(op)
-    of srkLinuxUdevRule:
-      observeLinuxUdevRule(op)
-    of srkLinuxPolkitRule:
-      observeLinuxPolkitRule(op)
-    of srkLinuxTmpfilesRule:
-      observeLinuxTmpfilesRule(op)
-    of srkLinuxSudoersRule:
-      observeLinuxSudoersRule(op)
-    of srkPasswdGroup:
-      observePasswdGroup(op)
-    of srkLinuxNixDaemonSetting:
-      observeLinuxNixDaemonSetting(op)
-    of srkSystemdSystemTimer:
-      observeSystemdSystemTimer(op)
-    of srkLinuxFirewallRule:
-      observeLinuxFirewallRule(op)
+  var obs: ObservedOperationState
+  try:
+    obs =
+      case r.kind
+      of srkWindowsRegistryValue: observeWindowsRegistryValue(op)
+      of srkWindowsOptionalFeature: observeWindowsOptionalFeature(op)
+      of srkWindowsCapability: observeWindowsCapability(op)
+      of srkWindowsService: observeWindowsService(op)
+      of srkWindowsVsInstaller: observeWindowsVsInstaller(op)
+      of srkWindowsFirewallRule: observeWindowsFirewallRule(op)
+      of srkWindowsAcl: observeWindowsAcl(op)
+      of srkMacosSystemDefault: observeMacosSystemDefault(op)
+      of srkSystemdSystemUnit: observeSystemdSystemUnit(op)
+      of srkLaunchdSystemDaemon: observeLaunchdSystemDaemon(op)
+      of srkFsSystemFile: observeFsSystemFile(op)
+      of srkEnvSystemVariable: observeEnvSystemVariable(op)
+      of srkPasswdUser: observePasswdUser(op)
+      of srkOsTimezone:
+        when defined(windows):
+          observeWindowsOsTimezone(op)
+        else:
+          observePosixOsTimezone(op)
+      of srkOsHostname:
+        when defined(windows):
+          observeWindowsOsHostname(op)
+        else:
+          observePosixOsHostname(op)
+      of srkLinuxSysctl:
+        observeLinuxSysctl(op)
+      of srkLinuxUdevRule:
+        observeLinuxUdevRule(op)
+      of srkLinuxPolkitRule:
+        observeLinuxPolkitRule(op)
+      of srkLinuxTmpfilesRule:
+        observeLinuxTmpfilesRule(op)
+      of srkLinuxSudoersRule:
+        observeLinuxSudoersRule(op)
+      of srkPasswdGroup:
+        observePasswdGroup(op)
+      of srkLinuxNixDaemonSetting:
+        observeLinuxNixDaemonSetting(op)
+      of srkSystemdSystemTimer:
+        observeSystemdSystemTimer(op)
+      of srkLinuxFirewallRule:
+        observeLinuxFirewallRule(op)
+  except ENotImplementedPlatform:
+    obs.present = false
+    obs.digestHex = ZeroDigestHex
   result.present = obs.present
   result.observedDigestHex =
     if obs.present: obs.digestHex else: ZeroDigestHex
