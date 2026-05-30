@@ -35,6 +35,7 @@ import ./drivers/systemd_user
 import ./drivers/user_file
 import ./drivers/vscode_extension
 import ./drivers/windows_startup
+import repro_homebrew_adapter/formula as homebrew_formula
 import ./lifecycle
 import ./manifest_record
 import ./types
@@ -115,6 +116,8 @@ proc observeResource*(r: Resource): ObservedState =
   of rkLinuxKdeConfigKey:
     return observeKdeConfigKey(r.kdeFile, r.kdeGroup, r.kdeKey,
       r.kdeVersion)
+  of rkHomebrewFormula:
+    return observeHomebrewFormula(r.formulaName, r.formulaVersion)
 
 proc observeRecorded*(address: string; binding: RecordedBinding):
     ObservedState =
@@ -200,6 +203,34 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
     const prefix = "dconf:"
     if binding.resourceId.startsWith(prefix):
       return observeDconfKey(binding.resourceId[prefix.len .. ^1])
+    result.present = false
+    result.digest = zeroDigest()
+  of rkHomebrewFormula:
+    # The resourceId is `homebrew:formula:<name>`. The recorded
+    # binding does not carry the original `formulaVersion` field
+    # verbatim, but the recorded `payloadBytes` is exactly the
+    # `name + 0x1e + (encoded-version)` produced at apply time —
+    # so we can recover the encoded-version (which is either ""
+    # for track-latest or the installed-version literal) and pass
+    # it back as the `desiredVersion` argument so the observed
+    # encoding matches what was recorded.
+    const prefix = "homebrew:formula:"
+    if binding.resourceId.startsWith(prefix):
+      let formulaName = binding.resourceId[prefix.len .. ^1]
+      # Decode the recorded payload: bytes after the 0x1e are the
+      # encoded-version (possibly empty for track-latest).
+      var encodedVersion = ""
+      for i, b in binding.payloadBytes:
+        if char(b) == '\x1e':
+          if i + 1 < binding.payloadBytes.len:
+            for j in i + 1 ..< binding.payloadBytes.len:
+              encodedVersion.add(char(binding.payloadBytes[j]))
+          break
+      # If the recorded encoded-version is non-empty, pass it as
+      # the desired pin so observe re-encodes the same shape; if
+      # empty, the desired was track-latest and observe should
+      # likewise emit name+0x1e+"".
+      return observeHomebrewFormula(formulaName, encodedVersion)
     result.present = false
     result.digest = zeroDigest()
   of rkLinuxKdeConfigKey:

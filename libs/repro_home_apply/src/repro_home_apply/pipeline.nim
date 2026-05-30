@@ -26,6 +26,7 @@ import blake3
 import repro_home_generations
 import repro_home_intent
 import repro_home_resources
+import repro_homebrew_adapter
 import repro_local_store
 
 import ./dep_graph
@@ -581,6 +582,26 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
         kdeValue: parts[3],
         kdeVersion: kdeVer)
       result.add(r)
+    of "homebrewformula":
+      # homebrewformula:<address>:<name>;<version>;<arg1>,<arg2>,...
+      # M83 step 9 Driver A test-seam form. `<version>` empty means
+      # "track the tap's latest" (cache-hits on any installed
+      # version). The args list uses comma separators so a single
+      # `;` can keep the three top-level components ordered.
+      let parts = payload.split(';')
+      if parts.len < 1 or parts[0].len == 0: continue
+      let formulaVer = if parts.len > 1: parts[1] else: ""
+      var formulaArgs: seq[string] = @[]
+      if parts.len > 2 and parts[2].len > 0:
+        for a in parts[2].split(','):
+          let t = a.strip()
+          if t.len > 0: formulaArgs.add(t)
+      let r = Resource(kind: rkHomebrewFormula, address: address,
+        lifecyclePolicy: resourcePolicy,
+        formulaName: parts[0],
+        formulaVersion: formulaVer,
+        formulaArgs: formulaArgs)
+      result.add(r)
     else: discard
 
 # ---------------------------------------------------------------------------
@@ -952,6 +973,38 @@ proc resourceFromEntry(profilePath, homeDir: string;
       kdeKey: key,
       kdeValue: value,
       kdeVersion: kdeVer)
+  of "pkg.homebrewFormula":
+    # M83 step 9 Driver A â€” macOS Homebrew CLI formula via
+    # `brew install`. Closed-set attribute validation: `name`,
+    # `version`, `args`, plus the cross-kind `depends_on`.
+    const homebrewFormulaAllowedKeys = ["name", "version", "args",
+      "depends_on"]
+    for a in entry.resourceAttrs:
+      if a.kind == nkResourceAttr and
+         a.resourceAttrKey notin homebrewFormulaAllowedKeys:
+        resourceProfileError(profilePath, a.resourceAttrLine,
+          "resource `pkg.homebrewFormula " & address &
+          "` has unknown attribute `" & a.resourceAttrKey &
+          "`; expected one of: " &
+          homebrewFormulaAllowedKeys.join(", "))
+    let name = requireAttr(profilePath, entry, "name")
+    let version =
+      if hasAttr(entry, "version"): attrOf(entry, "version")
+      else: ""
+    var args: seq[string] = @[]
+    if hasAttr(entry, "args"):
+      # The adapter renders a seq[string] FieldValue as a
+      # comma-joined bare text (`renderFieldValueAsAttrSource` of
+      # `fvkList`). Each entry passes through unchanged so we can
+      # split it back here.
+      for a in attrOf(entry, "args").split(','):
+        let t = a.strip()
+        if t.len > 0: args.add(t)
+    result = Resource(kind: rkHomebrewFormula, address: address,
+      lifecyclePolicy: lpDefault,
+      formulaName: name,
+      formulaVersion: version,
+      formulaArgs: args)
   else:
     # The parser already rejects unknown kinds; this is a defensive
     # guard for any kind added to the model but not wired here.
@@ -1080,6 +1133,14 @@ proc resourceSeedString*(desired: DesiredSet): string =
       # value) plus the major version go into the seed.
       result.add(r.kdeFile & "\x1e" & r.kdeGroup & "\x1e" &
         r.kdeKey & "\x1e" & r.kdeValue & "\x1e" & $r.kdeVersion)
+    of rkHomebrewFormula:
+      # M83 step 9 Driver A. The (name, version, args) triple
+      # determines the desired state; all three contribute to the
+      # seed so a version-pin tweak or args change bumps the
+      # generation id. Args are joined with `,` (no entry contains
+      # `,` â€” `isSafeHomebrewArg` rejects it as a metacharacter).
+      result.add(r.formulaName & "\x1e" & r.formulaVersion &
+        "\x1e" & r.formulaArgs.join(","))
     result.add('\x1d')
 
 proc composeDesiredResources*(profile: Profile; homeDir, host: string):
@@ -1397,6 +1458,24 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
             let kdeGroup = parts[1]
             let kdeKey = parts[2 .. ^1].join(":")
             live = observeKdeConfigKey(kdeFile, kdeGroup, kdeKey, 6)
+      of rkHomebrewFormula:
+        # `realWorldIdentity` for `pkg.homebrewFormula` is
+        # `homebrew:formula:<name>`. The recorded `payloadBytes` is
+        # `name + 0x1e + <encoded-version>`; the encoded-version
+        # (empty for track-latest, literal for pinned) doubles as
+        # the `desiredVersion` we pass to `observeHomebrewFormula`
+        # so the re-encoding matches what was recorded.
+        const formulaPrefix = "homebrew:formula:"
+        if rb.realWorldIdentity.startsWith(formulaPrefix):
+          let formulaName = rb.realWorldIdentity[formulaPrefix.len .. ^1]
+          var encodedVersion = ""
+          for i, b in rb.payloadBytes:
+            if char(b) == '\x1e':
+              if i + 1 < rb.payloadBytes.len:
+                for j in i + 1 ..< rb.payloadBytes.len:
+                  encodedVersion.add(char(rb.payloadBytes[j]))
+              break
+          live = observeHomebrewFormula(formulaName, encodedVersion)
     except CatchableError:
       return false
     if not live.present:
@@ -2193,6 +2272,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               of rkVscodeExtension: "vscode-extensions"
               of rkLinuxDconfKey: "gvariant-literal"
               of rkLinuxKdeConfigKey: "kde-config-value"
+              of rkHomebrewFormula: "homebrew-formula-version"
             rb = toResourceBinding(action.address, desired.kind,
               identity, observed, observed.rawBytes,
               adoptPayloadKind, desired.lifecyclePolicy)
@@ -2337,6 +2417,16 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               desired.kdeGroup, desired.kdeKey, desired.kdeValue,
               desired.kdeVersion)
             payloadKindStr = "kde-config-value"
+          of rkHomebrewFormula:
+            # M83 step 9 Driver A. macOS-only: re-raises
+            # ENotImplementedPlatform off-macOS. The driver runs
+            # `brew install` (or `brew upgrade` on a version
+            # mismatch) and returns the canonical bytes for the
+            # ACTUALLY-installed version, so the manifest payload
+            # reflects what's really on disk.
+            postWriteBytes = applyHomebrewFormula(desired.formulaName,
+              desired.formulaVersion, desired.formulaArgs)
+            payloadKindStr = "homebrew-formula-version"
           let rb = toResourceBinding(action.address, desired.kind,
             identity, preWrite, postWriteBytes, payloadKindStr,
             desired.lifecyclePolicy)
@@ -2431,6 +2521,17 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
                 let kdeGroup = parts[1]
                 let kdeKey = parts[2 .. ^1].join(":")
                 destroyKdeConfigKey(kdeFile, kdeGroup, kdeKey, 6)
+          of rkHomebrewFormula:
+            # M83 step 9 Driver A. macOS-only: re-raises
+            # ENotImplementedPlatform off-macOS. The destroy
+            # direction runs `brew uninstall <name>`. The
+            # `resourceId` is `homebrew:formula:<name>` â€” strip
+            # the prefix to recover the name.
+            preWrite = observeRecorded(action.address, prev)
+            const formulaPrefix = "homebrew:formula:"
+            if prev.resourceId.startsWith(formulaPrefix):
+              destroyHomebrewFormula(
+                prev.resourceId[formulaPrefix.len .. ^1])
           of rkFsUserFile:
             # `resourceId` is the resolved host path verbatim. The
             # destroy direction deletes the file; the pre-write

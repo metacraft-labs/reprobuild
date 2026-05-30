@@ -28,6 +28,7 @@ for libName in [
   "repro_home_apply",
   "repro_home_rollback",
   "repro_home_resources",
+  "repro_homebrew_adapter",
   "repro_elevation",
   "repro_infra",
   "repro_interface_artifacts",

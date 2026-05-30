@@ -1657,3 +1657,57 @@ suite "M83 step 7: linux.kdeConfigKey driver":
         kdeVersion: bad))
       check err.len > 0
       check err.contains("kdeVersion")
+
+# ===========================================================================
+# M83 step 9 Driver A: pkg.homebrewFormula — macOS Homebrew CLI formula.
+# Cross-cutting integration check that the resource kind survives every
+# dispatch point in `repro_home_resources` (resourceKindFromString,
+# digestOfResource, realWorldIdentity, decideAction, resourceValidationError).
+# The detailed driver tests live in
+# `libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim`.
+# ===========================================================================
+
+suite "M83 step 9 Driver A: pkg.homebrewFormula integration":
+
+  test "resourceKindFromString covers pkg.homebrewFormula":
+    check resourceKindFromString("pkg.homebrewFormula") ==
+      rkHomebrewFormula
+
+  test "realWorldIdentity: homebrew:formula:<name>":
+    let r = Resource(kind: rkHomebrewFormula,
+      address: "hb:smoke",
+      lifecyclePolicy: lpDefault,
+      formulaName: "ripgrep",
+      formulaVersion: "14.1.0",
+      formulaArgs: @[])
+    check realWorldIdentity(r) == "homebrew:formula:ripgrep"
+
+  test "lifecycle: pkg.homebrewFormula no-op when observed matches desired":
+    let desired = Resource(kind: rkHomebrewFormula,
+      address: "hb:smoke-noop",
+      lifecyclePolicy: lpDefault,
+      formulaName: "tmux",
+      formulaVersion: "3.5a",
+      formulaArgs: @[])
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfResource(desired)
+    let action = decideAction(state)
+    check action.kind == rakNoOp
+    check action.resourceKind == rkHomebrewFormula
+
+  test "resourceValidationError: clean pkg.homebrewFormula passes":
+    check resourceValidationError(Resource(kind: rkHomebrewFormula,
+      address: "hb:ok",
+      formulaName: "ripgrep",
+      formulaVersion: "14.1.0",
+      formulaArgs: @["--build-from-source"])) == ""
+
+  test "resourceValidationError: rejects empty formula name":
+    check resourceValidationError(Resource(kind: rkHomebrewFormula,
+      address: "hb:empty",
+      formulaName: "",
+      formulaVersion: "")).len > 0

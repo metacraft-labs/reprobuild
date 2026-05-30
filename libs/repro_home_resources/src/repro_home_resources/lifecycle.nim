@@ -34,6 +34,7 @@ import ./drivers/kde_config_key
 import ./drivers/launchd_user
 import ./drivers/systemd_user
 import ./drivers/vscode_extension
+import repro_homebrew_adapter/formula as homebrew_formula
 import ./errors
 import ./manifest_record
 import ./types
@@ -206,6 +207,17 @@ proc digestOfResource*(desired: Resource): Digest256 =
     # cache-hit re-apply compares equal byte-for-byte with what
     # `kreadconfig` returns from the same slot.
     return digestOfBytes(canonicalKdeConfigBytes(desired.kdeValue))
+  of rkHomebrewFormula:
+    # The desired identity is the (name, version) pair: same name
+    # + same version (or both empty version) cache-hits; a version
+    # bump or formula rename flips the digest. The `formulaArgs`
+    # list is NOT part of the digest — it controls HOW the install
+    # happens, not WHAT ends up installed. `observeHomebrewFormula`
+    # encodes the same (name, observed-version) pair, so a re-apply
+    # with the version still empty (track-latest mode) AND the tap
+    # still at the same version cache-hits.
+    return digestOfBytes(canonicalHomebrewFormulaBytes(
+      desired.formulaName, desired.formulaVersion))
 
 proc summarize*(action: ResourceActionKind; address: string;
                 kind: ResourceKind): string =

@@ -69,6 +69,17 @@ type
       ## 6); the apply path observes via the matching `kreadconfig`
       ## binary. Destroy passes `--delete` to remove the key.
       ## Linux-only; raises `ENotImplementedPlatform` elsewhere.
+    rkHomebrewFormula = "pkg.homebrewFormula"
+      ## M83 step 9 Driver A. Per-user macOS Homebrew CLI formula
+      ## (`brew install <name>`). The `formulaName` field carries the
+      ## formula identifier (e.g. `ripgrep`, `tmux`); the optional
+      ## `formulaVersion` field carries a desired version (empty
+      ## means "track the tap's latest"); the optional `formulaArgs`
+      ## carry extra `brew install` flags (e.g. `--build-from-source`,
+      ## `--HEAD`). The apply path is `brew install`; observe is
+      ## `brew list --formula --versions <name>`; destroy is
+      ## `brew uninstall <name>`. macOS-only; raises
+      ## `ENotImplementedPlatform` elsewhere.
 
   SystemdUnitState* = enum
     ## M83 step 4b: desired runtime state for a `systemd.userUnit`.
@@ -257,6 +268,27 @@ type
         ## `'prefer-dark'` (string), `true`/`false` (bool), bare
         ## decimal (int), `['a', 'b']` (array). The driver writes it
         ## verbatim via `dconf write`.
+    of rkHomebrewFormula:
+      formulaName*: string
+        ## Homebrew formula identifier (e.g. `ripgrep`, `tmux`,
+        ## `node@18`). Validated to match `[a-z0-9][a-z0-9._+-]*` so
+        ## the apply path never interpolates an unsafe name into a
+        ## `brew install` command. A versioned-formula tap entry
+        ## (`<name>@<major>`) is accepted; the `@` and digits are in
+        ## the safe charset.
+      formulaVersion*: string
+        ## Optional version pin. Homebrew's version model is "the
+        ## tap declares one version per formula" — pinning to an
+        ## arbitrary version against a non-versioned tap is not
+        ## supported. An empty value means "accept whatever the tap
+        ## installed". A non-empty value that mismatches the
+        ## installed version triggers `brew upgrade <name>`.
+      formulaArgs*: seq[string]
+        ## Optional extra args passed to `brew install` BEFORE the
+        ## formula name (e.g. `--build-from-source`, `--HEAD`,
+        ## `--ignore-dependencies`). Each entry must satisfy
+        ## `isSafeHomebrewArg` (no shell metacharacters or
+        ## whitespace).
     of rkLinuxKdeConfigKey:
       kdeFile*: string
         ## Config file basename under `~/.config/` (e.g. `kdeglobals`,
@@ -395,6 +427,7 @@ proc resourceKindFromString*(s: string): ResourceKind =
   of $rkVscodeExtension: rkVscodeExtension
   of $rkLinuxDconfKey: rkLinuxDconfKey
   of $rkLinuxKdeConfigKey: rkLinuxKdeConfigKey
+  of $rkHomebrewFormula: rkHomebrewFormula
   else:
     raise newException(ValueError,
       "unknown resource kind tag: '" & s & "'")
@@ -545,3 +578,12 @@ proc realWorldIdentity*(r: Resource): string =
     # share the config-file format on disk; only the binary name
     # changes).
     return "kde:" & r.kdeFile & ":" & r.kdeGroup & ":" & r.kdeKey
+  of rkHomebrewFormula:
+    # The formula NAME uniquely identifies the macOS Homebrew slot.
+    # Two `pkg.homebrewFormula` resources at the same `formulaName`
+    # are a conflict (the spec calls for explicit-only resolution).
+    # `formulaVersion` and `formulaArgs` are part of the DESIRED
+    # STATE (covered by the digest) but NOT the identity — a
+    # version-pin or extra-arg change is an `update`, not a new
+    # resource.
+    return "homebrew:formula:" & r.formulaName

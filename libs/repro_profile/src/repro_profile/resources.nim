@@ -254,6 +254,46 @@ template linuxKdeConfigKey*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "linux.kdeConfigKey", addr0,
       fields, dependsOn)
 
+template homebrewFormula*(targetResources: var seq[ResourceIntent];
+                          name: string;
+                          version: string = "";
+                          args: seq[string] = @[];
+                          address: string = "";
+                          dependsOn: seq[string] = @[]) =
+  ## M83 step 9 Driver A — macOS Homebrew CLI formula. Wraps
+  ## `brew install <name>` / `brew list --formula --versions <name>`
+  ## / `brew uninstall <name>`.
+  ##
+  ## `name` is a Homebrew formula identifier (e.g. `ripgrep`, `tmux`,
+  ## `node@18`). A versioned-formula tap (`<name>@<major>`) is
+  ## accepted; the `@` is in the safe charset.
+  ##
+  ## `version` is an OPTIONAL version pin. Empty means "track the
+  ## tap's latest" (cache-hits on ANY installed version of the
+  ## formula). A non-empty value triggers `brew upgrade <name>`
+  ## when the installed version mismatches. NOTE: Homebrew's
+  ## version model does NOT support pinning to an arbitrary
+  ## version against a non-versioned tap; for hard version pins
+  ## use a versioned-formula tap (`node@18`, `python@3.11`).
+  ##
+  ## `args` is an OPTIONAL list of extra args passed to
+  ## `brew install` BEFORE the formula name
+  ## (e.g. `--build-from-source`, `--HEAD`). Each entry must be
+  ## a safe brew flag (no shell metacharacters or whitespace).
+  ##
+  ## Address default: `pkg.homebrewFormula:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    if version.len > 0:
+      fields["version"] = strField(version)
+    if args.len > 0:
+      fields["args"] = listField(args)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("pkg.homebrewFormula", name)
+    pushResource(targetResources, "pkg.homebrewFormula", addr0,
+      fields, dependsOn)
+
 template launchdUserAgent*(targetResources: var seq[ResourceIntent];
                            label: string;
                            programArgs: seq[string];

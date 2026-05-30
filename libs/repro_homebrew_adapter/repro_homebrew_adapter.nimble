@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild Homebrew (formula + cask) package backend for macOS"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

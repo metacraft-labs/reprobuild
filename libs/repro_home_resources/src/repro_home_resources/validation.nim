@@ -31,6 +31,7 @@
 import std/[strutils]
 
 import ./types
+import repro_homebrew_adapter/common as homebrew_common
 
 # ---------------------------------------------------------------------------
 # launchd.userAgent — launchd label charset allowlist.
@@ -214,6 +215,34 @@ proc resourceValidationError*(r: Resource): string =
         "' has invalid kdeVersion " & $r.kdeVersion &
         " (must be 5 or 6)"
     # `kdeValue` is arbitrary user content (quoted at layer 2).
+  of rkHomebrewFormula:
+    # The Homebrew formula name flows into `brew install` / `brew
+    # list --versions` / `brew uninstall`. The name charset is the
+    # Homebrew-conventional `[a-z0-9][a-z0-9._+-]*` —
+    # `isSafeHomebrewName` is the layer-1 check; the driver also
+    # `quoteShell`s the name as layer 2. Each extra `args` entry
+    # must satisfy `isSafeHomebrewArg` (no shell metacharacters or
+    # whitespace); the version field is informational (`brew list
+    # --versions` output is parsed by `parseBrewVersionsLine`) but
+    # we still refuse a metacharacter-bearing version literal so a
+    # profile cannot smuggle one in via the manifest payload.
+    if r.formulaName.len == 0:
+      return "pkg.homebrewFormula resource '" & r.address &
+        "' has an empty formula name"
+    if not homebrew_common.isSafeHomebrewName(r.formulaName):
+      return "pkg.homebrewFormula formula name '" & r.formulaName &
+        "' is not a safe Homebrew identifier (charset: lowercase " &
+        "letters, digits, `.`, `_`, `+`, `-`; first char must be " &
+        "letter or digit)"
+    if r.formulaVersion.len > 0 and
+       hasShellMetacharacter(r.formulaVersion):
+      return "pkg.homebrewFormula version '" & r.formulaVersion &
+        "' contains a shell metacharacter or whitespace"
+    for a in r.formulaArgs:
+      if not homebrew_common.isSafeHomebrewArg(a):
+        return "pkg.homebrewFormula extra arg '" & a &
+          "' is not a safe brew flag (no shell metacharacters, " &
+          "whitespace, or control bytes; non-empty)"
   else:
     # Win32-API / pure-file-I/O drivers — no shell-out, nothing to
     # validate here.

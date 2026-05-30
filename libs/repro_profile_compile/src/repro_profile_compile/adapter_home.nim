@@ -230,7 +230,8 @@ proc isHomeScopeResource(kind: string): bool =
      "shell.integration", "windows.registryValueHKCU",
      "windows.startup", "fs.userFile", "vscode.extension",
      "systemd.userUnit", "launchd.userAgent",
-     "linux.dconfKey", "linux.kdeConfigKey":
+     "linux.dconfKey", "linux.kdeConfigKey",
+     "pkg.homebrewFormula":
     true
   else:
     false
