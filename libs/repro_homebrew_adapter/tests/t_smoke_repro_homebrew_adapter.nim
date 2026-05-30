@@ -401,3 +401,272 @@ suite "M83 step 9 Driver A: pkg.homebrewFormula":
       formulaName: "ripgrep",
       formulaVersion: "",
       formulaArgs: @[""])).len > 0
+
+# ===========================================================================
+# M83 step 9 Driver B: pkg.homebrewCask — macOS Homebrew Cask. Cross-
+# platform pure-logic + lifecycle + platform-guard tests. The shell-out
+# only runs on macOS; the cask-specific argv composers, the canonical-
+# bytes derivation, the digest derivation, the realWorldIdentity
+# derivation, and the off-macOS fail-closed gate are cross-platform.
+# ===========================================================================
+
+suite "M83 step 9 Driver B: pkg.homebrewCask":
+
+  # -------------------------------------------------------------------
+  # Pure helpers — argv composers (cask-flag flow).
+  # -------------------------------------------------------------------
+
+  test "composeListArgs: cask flag toggles to --cask":
+    check composeListArgs(isCask = true, name = "iterm2") ==
+      @["list", "--cask", "--versions", "iterm2"]
+
+  test "composeInstallArgs: cask flag + extra args":
+    check composeInstallArgs(isCask = true, name = "iterm2",
+        extraArgs = []) ==
+      @["install", "--cask", "iterm2"]
+    check composeInstallArgs(isCask = true, name = "iterm2",
+        extraArgs = ["--no-quarantine"]) ==
+      @["install", "--cask", "--no-quarantine", "iterm2"]
+
+  test "composeUninstallArgs: cask flag":
+    check composeUninstallArgs(isCask = true, name = "iterm2") ==
+      @["uninstall", "--cask", "iterm2"]
+
+  # -------------------------------------------------------------------
+  # Canonical-bytes derivation.
+  # -------------------------------------------------------------------
+
+  test "canonicalHomebrewCaskBytes: name+0x1e+version layout":
+    let bytes = canonicalHomebrewCaskBytes("iterm2", "3.5.0")
+    var s = ""
+    for b in bytes: s.add(char(b))
+    check s == "iterm2\x1e3.5.0"
+
+  test "canonicalHomebrewCaskBytes: empty version produces name+0x1e":
+    let bytes = canonicalHomebrewCaskBytes("iterm2", "")
+    var s = ""
+    for b in bytes: s.add(char(b))
+    check s == "iterm2\x1e"
+
+  test "canonicalHomebrewCaskBytes vs Formula: same encoding, different namespaces":
+    # The two canonical encoders MUST produce identical bytes for the
+    # same (name, version) — the wire format is shared so the
+    # `payloadBytes` field is interchangeable. The DISTINCTION lives
+    # in the realWorldIdentity prefix (`homebrew:formula:` vs
+    # `homebrew:cask:`), NOT in the canonical bytes.
+    check canonicalHomebrewCaskBytes("docker", "4.30.0") ==
+      canonicalHomebrewFormulaBytes("docker", "4.30.0")
+
+  # -------------------------------------------------------------------
+  # Resource model integration.
+  # -------------------------------------------------------------------
+
+  test "resourceKindFromString covers pkg.homebrewCask":
+    check resourceKindFromString("pkg.homebrewCask") ==
+      rkHomebrewCask
+
+  test "digestOfResource: pkg.homebrewCask digests (name, version)":
+    let r = Resource(kind: rkHomebrewCask,
+      address: "hbc:digest",
+      lifecyclePolicy: lpDefault,
+      caskName: "iterm2",
+      caskVersion: "3.5.0",
+      caskArgs: @[])
+    let expected = digestOfBytes(
+      canonicalHomebrewCaskBytes("iterm2", "3.5.0"))
+    check digestOfResource(r) == expected
+
+  test "digestOfResource: version change flips the digest":
+    var r = Resource(kind: rkHomebrewCask,
+      address: "hbc:flip",
+      lifecyclePolicy: lpDefault,
+      caskName: "iterm2",
+      caskVersion: "3.5.0",
+      caskArgs: @[])
+    let before = digestOfResource(r)
+    r.caskVersion = "3.4.0"
+    check before != digestOfResource(r)
+
+  test "digestOfResource: caskArgs change does NOT affect the digest":
+    var r1 = Resource(kind: rkHomebrewCask,
+      address: "hbc:args-1",
+      lifecyclePolicy: lpDefault,
+      caskName: "iterm2",
+      caskVersion: "3.5.0",
+      caskArgs: @[])
+    var r2 = r1
+    r2.caskArgs = @["--no-quarantine"]
+    check digestOfResource(r1) == digestOfResource(r2)
+
+  test "realWorldIdentity: homebrew:cask:<name>":
+    let r = Resource(kind: rkHomebrewCask,
+      address: "hbc:id",
+      lifecyclePolicy: lpDefault,
+      caskName: "iterm2",
+      caskVersion: "3.5.0",
+      caskArgs: @[])
+    check realWorldIdentity(r) == "homebrew:cask:iterm2"
+
+  test "realWorldIdentity: cask vs formula at the same name are DISJOINT":
+    # The shared `homebrew:` prefix could otherwise collide a formula
+    # and a cask with the same name — but the second path segment
+    # (`formula:` vs `cask:`) keeps them disjoint. This invariant
+    # matters because some toolchains exist as BOTH a formula and a
+    # cask (`docker` as the formula CLI vs `docker` as the Cask GUI).
+    let formula = Resource(kind: rkHomebrewFormula,
+      address: "h:formula",
+      lifecyclePolicy: lpDefault,
+      formulaName: "docker")
+    let cask = Resource(kind: rkHomebrewCask,
+      address: "h:cask",
+      lifecyclePolicy: lpDefault,
+      caskName: "docker")
+    check realWorldIdentity(formula) != realWorldIdentity(cask)
+
+  test "realWorldIdentity: version is NOT part of the cask identity":
+    let r1 = Resource(kind: rkHomebrewCask,
+      address: "hbc:id-1",
+      lifecyclePolicy: lpDefault,
+      caskName: "iterm2",
+      caskVersion: "3.5.0")
+    var r2 = r1
+    r2.caskVersion = "3.4.0"
+    check realWorldIdentity(r1) == realWorldIdentity(r2)
+
+  # -------------------------------------------------------------------
+  # Lifecycle decisions.
+  # -------------------------------------------------------------------
+
+  test "lifecycle: pkg.homebrewCask no-op when desired matches observed":
+    let desired = Resource(kind: rkHomebrewCask,
+      address: "hbc:noop",
+      lifecyclePolicy: lpDefault,
+      caskName: "iterm2",
+      caskVersion: "3.5.0",
+      caskArgs: @[])
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfResource(desired)
+    let action = decideAction(state)
+    check action.kind == rakNoOp
+    check action.resourceKind == rkHomebrewCask
+
+  test "lifecycle: pkg.homebrewCask create when absent":
+    let desired = Resource(kind: rkHomebrewCask,
+      address: "hbc:create",
+      lifecyclePolicy: lpDefault,
+      caskName: "firefox",
+      caskVersion: "")
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = false
+    let action = decideAction(state)
+    check action.kind == rakCreate
+    check action.resourceKind == rkHomebrewCask
+
+  test "lifecycle: pkg.homebrewCask version pin mismatch plans update":
+    var desired = Resource(kind: rkHomebrewCask,
+      address: "hbc:update",
+      lifecyclePolicy: lpDefault,
+      caskName: "iterm2",
+      caskVersion: "3.5.0")
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    let observedDigest = digestOfBytes(
+      canonicalHomebrewCaskBytes("iterm2", "3.4.0"))
+    state.observed.digest = observedDigest
+    state.hasRecorded = true
+    state.recorded.kind = rkHomebrewCask
+    state.recorded.postWriteDigest = observedDigest
+    let action = decideAction(state)
+    check action.kind == rakUpdate
+
+  # -------------------------------------------------------------------
+  # Platform guards — off-macOS fail-closed.
+  # -------------------------------------------------------------------
+
+  test "off-macOS: observeHomebrewCask raises ENotImplementedPlatform":
+    when not defined(macosx):
+      expect ENotImplementedPlatform:
+        discard observeHomebrewCask("iterm2", "")
+      try:
+        discard observeHomebrewCask("iterm2", "")
+        check false
+      except ENotImplementedPlatform as e:
+        check e.resourceKind == "pkg.homebrewCask"
+        check e.requiredPlatform == "macosx"
+        check e.currentPlatform != "macosx"
+    else:
+      skip()
+
+  test "off-macOS: applyHomebrewCask raises ENotImplementedPlatform":
+    when not defined(macosx):
+      expect ENotImplementedPlatform:
+        discard applyHomebrewCask("iterm2", "", @[])
+    else:
+      skip()
+
+  test "off-macOS: destroyHomebrewCask raises ENotImplementedPlatform":
+    when not defined(macosx):
+      expect ENotImplementedPlatform:
+        destroyHomebrewCask("iterm2")
+    else:
+      skip()
+
+  # -------------------------------------------------------------------
+  # Validation — defence-in-depth layer 1.
+  # -------------------------------------------------------------------
+
+  test "resourceValidationError: clean cask passes":
+    check resourceValidationError(Resource(kind: rkHomebrewCask,
+      address: "hbc:ok",
+      caskName: "iterm2",
+      caskVersion: "",
+      caskArgs: @["--no-quarantine"])) == ""
+
+  test "resourceValidationError: rejects empty cask name":
+    check resourceValidationError(Resource(kind: rkHomebrewCask,
+      address: "hbc:empty",
+      caskName: "",
+      caskVersion: "")).len > 0
+
+  test "resourceValidationError: rejects uppercase / metacharacter cask name":
+    check resourceValidationError(Resource(kind: rkHomebrewCask,
+      address: "hbc:uppercase",
+      caskName: "ITerm2",
+      caskVersion: "")).len > 0
+    for ch in [";", "&", "|", "$", "`", " ", "\n", "/"]:
+      check resourceValidationError(Resource(kind: rkHomebrewCask,
+        address: "hbc:evil",
+        caskName: "cask" & ch & "evil",
+        caskVersion: "")).len > 0
+
+  test "resourceValidationError: rejects metacharacter in cask version":
+    for ch in [";", "&", "|", "$", "`", " "]:
+      check resourceValidationError(Resource(kind: rkHomebrewCask,
+        address: "hbc:evil-v",
+        caskName: "iterm2",
+        caskVersion: "1.0" & ch & "0")).len > 0
+
+  test "resourceValidationError: rejects unsafe cask arg":
+    for ch in [";", "&", "|", "$", "`", " ", "\t"]:
+      check resourceValidationError(Resource(kind: rkHomebrewCask,
+        address: "hbc:evil-args",
+        caskName: "iterm2",
+        caskVersion: "",
+        caskArgs: @["--flag" & ch & "evil"])).len > 0
+
+  test "resourceValidationError: rejects empty cask arg":
+    check resourceValidationError(Resource(kind: rkHomebrewCask,
+      address: "hbc:empty-arg",
+      caskName: "iterm2",
+      caskVersion: "",
+      caskArgs: @[""])).len > 0

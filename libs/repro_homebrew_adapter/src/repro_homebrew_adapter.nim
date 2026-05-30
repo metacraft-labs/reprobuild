@@ -26,6 +26,8 @@
 
 import ./repro_homebrew_adapter/common
 import ./repro_homebrew_adapter/formula
+import ./repro_homebrew_adapter/cask
 
 export common
 export formula
+export cask

@@ -294,6 +294,45 @@ template homebrewFormula*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "pkg.homebrewFormula", addr0,
       fields, dependsOn)
 
+template homebrewCask*(targetResources: var seq[ResourceIntent];
+                       name: string;
+                       version: string = "";
+                       args: seq[string] = @[];
+                       address: string = "";
+                       dependsOn: seq[string] = @[]) =
+  ## M83 step 9 Driver B — macOS Homebrew Cask (GUI/binary apps).
+  ## Wraps `brew install --cask <name>` / `brew list --cask
+  ## --versions <name>` / `brew uninstall --cask <name>`.
+  ##
+  ## `name` is a Homebrew cask identifier (e.g. `iterm2`,
+  ## `firefox`, `visual-studio-code`, `docker`). Casks deliver
+  ## GUI applications under `/Applications/`.
+  ##
+  ## `version` is an OPTIONAL version pin. Casks typically track
+  ## LATEST only (Homebrew's cask DSL ships one version per cask
+  ## in the tap), so the version field is rarely useful — leave
+  ## it empty unless the tap genuinely has multi-version support.
+  ## A non-empty value that mismatches the installed version
+  ## triggers `brew upgrade --cask <name>`.
+  ##
+  ## `args` is an OPTIONAL list of extra args passed to
+  ## `brew install --cask` BEFORE the cask name (e.g.
+  ## `--no-quarantine`, `--appdir=...`). Each entry must be a safe
+  ## brew flag (no shell metacharacters or whitespace).
+  ##
+  ## Address default: `pkg.homebrewCask:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    if version.len > 0:
+      fields["version"] = strField(version)
+    if args.len > 0:
+      fields["args"] = listField(args)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("pkg.homebrewCask", name)
+    pushResource(targetResources, "pkg.homebrewCask", addr0,
+      fields, dependsOn)
+
 template launchdUserAgent*(targetResources: var seq[ResourceIntent];
                            label: string;
                            programArgs: seq[string];

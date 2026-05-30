@@ -36,6 +36,7 @@ import ./drivers/user_file
 import ./drivers/vscode_extension
 import ./drivers/windows_startup
 import repro_homebrew_adapter/formula as homebrew_formula
+import repro_homebrew_adapter/cask as homebrew_cask
 import ./lifecycle
 import ./manifest_record
 import ./types
@@ -118,6 +119,8 @@ proc observeResource*(r: Resource): ObservedState =
       r.kdeVersion)
   of rkHomebrewFormula:
     return observeHomebrewFormula(r.formulaName, r.formulaVersion)
+  of rkHomebrewCask:
+    return observeHomebrewCask(r.caskName, r.caskVersion)
 
 proc observeRecorded*(address: string; binding: RecordedBinding):
     ObservedState =
@@ -231,6 +234,25 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
       # empty, the desired was track-latest and observe should
       # likewise emit name+0x1e+"".
       return observeHomebrewFormula(formulaName, encodedVersion)
+    result.present = false
+    result.digest = zeroDigest()
+  of rkHomebrewCask:
+    # Parallel to the formula recorded-observation: the resourceId
+    # is `homebrew:cask:<name>` and the recorded payloadBytes is
+    # `name + 0x1e + (encoded-version)`. Decode the encoded-version
+    # and pass it as `desiredVersion` so observe re-encodes the
+    # identical shape.
+    const prefix = "homebrew:cask:"
+    if binding.resourceId.startsWith(prefix):
+      let caskName = binding.resourceId[prefix.len .. ^1]
+      var encodedVersion = ""
+      for i, b in binding.payloadBytes:
+        if char(b) == '\x1e':
+          if i + 1 < binding.payloadBytes.len:
+            for j in i + 1 ..< binding.payloadBytes.len:
+              encodedVersion.add(char(binding.payloadBytes[j]))
+          break
+      return observeHomebrewCask(caskName, encodedVersion)
     result.present = false
     result.digest = zeroDigest()
   of rkLinuxKdeConfigKey:

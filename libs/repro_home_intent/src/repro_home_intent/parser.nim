@@ -41,7 +41,7 @@ const
     "windows.startup", "fs.userFile",
     "systemd.userUnit", "launchd.userAgent",
     "linux.dconfKey", "linux.kdeConfigKey",
-    "pkg.homebrewFormula"]
+    "pkg.homebrewFormula", "pkg.homebrewCask"]
     ## M78: the home-scope, elevation-free resource kinds whose M68
     ## drivers exist and that a `home.nim` `resources:` block may
     ## declare. An unrecognized kind is rejected with `EUnstructured`
@@ -59,8 +59,9 @@ const
     ## environment-settings drivers (Linux-only; the parser accepts
     ## them on every host, the apply path raises
     ## `ENotImplementedPlatform` off-Linux). `pkg.homebrewFormula`
-    ## is the M83 step 9 macOS Homebrew CLI formula driver
-    ## (`brew install <name>`; macOS-only; the apply path raises
+    ## and `pkg.homebrewCask` are the M83 step 9 macOS Homebrew
+    ## drivers (`brew install <name>` and `brew install --cask
+    ## <name>` respectively; macOS-only; the apply path raises
     ## `ENotImplementedPlatform` off-macOS).
 
 type

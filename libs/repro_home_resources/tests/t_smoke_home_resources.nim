@@ -1711,3 +1711,55 @@ suite "M83 step 9 Driver A: pkg.homebrewFormula integration":
       address: "hb:empty",
       formulaName: "",
       formulaVersion: "")).len > 0
+
+# ===========================================================================
+# M83 step 9 Driver B: pkg.homebrewCask — macOS Homebrew Cask (GUI apps).
+# Cross-cutting integration check that the cask resource kind survives
+# every dispatch point in `repro_home_resources`. Detailed driver tests
+# live in `libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim`.
+# ===========================================================================
+
+suite "M83 step 9 Driver B: pkg.homebrewCask integration":
+
+  test "resourceKindFromString covers pkg.homebrewCask":
+    check resourceKindFromString("pkg.homebrewCask") ==
+      rkHomebrewCask
+
+  test "realWorldIdentity: homebrew:cask:<name>":
+    let r = Resource(kind: rkHomebrewCask,
+      address: "hbc:smoke",
+      lifecyclePolicy: lpDefault,
+      caskName: "iterm2",
+      caskVersion: "3.5.0",
+      caskArgs: @[])
+    check realWorldIdentity(r) == "homebrew:cask:iterm2"
+
+  test "lifecycle: pkg.homebrewCask no-op when observed matches desired":
+    let desired = Resource(kind: rkHomebrewCask,
+      address: "hbc:smoke-noop",
+      lifecyclePolicy: lpDefault,
+      caskName: "firefox",
+      caskVersion: "",
+      caskArgs: @[])
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfResource(desired)
+    let action = decideAction(state)
+    check action.kind == rakNoOp
+    check action.resourceKind == rkHomebrewCask
+
+  test "resourceValidationError: clean pkg.homebrewCask passes":
+    check resourceValidationError(Resource(kind: rkHomebrewCask,
+      address: "hbc:ok",
+      caskName: "iterm2",
+      caskVersion: "",
+      caskArgs: @["--no-quarantine"])) == ""
+
+  test "resourceValidationError: rejects empty cask name":
+    check resourceValidationError(Resource(kind: rkHomebrewCask,
+      address: "hbc:empty",
+      caskName: "",
+      caskVersion: "")).len > 0

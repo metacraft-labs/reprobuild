@@ -80,6 +80,19 @@ type
       ## `brew list --formula --versions <name>`; destroy is
       ## `brew uninstall <name>`. macOS-only; raises
       ## `ENotImplementedPlatform` elsewhere.
+    rkHomebrewCask = "pkg.homebrewCask"
+      ## M83 step 9 Driver B. Per-user macOS Homebrew Cask
+      ## (`brew install --cask <name>`). Casks deliver GUI/binary
+      ## applications under `/Applications/` (e.g. `iterm2`,
+      ## `firefox`, `visual-studio-code`, `docker`). The `caskName`
+      ## field carries the cask identifier; the optional
+      ## `caskVersion` field carries a desired version (typically
+      ## empty since most casks track LATEST only); the optional
+      ## `caskArgs` carry extra `brew install --cask` flags (e.g.
+      ## `--no-quarantine`). The apply path is `brew install
+      ## --cask`; observe is `brew list --cask --versions <name>`;
+      ## destroy is `brew uninstall --cask <name>`. macOS-only;
+      ## raises `ENotImplementedPlatform` elsewhere.
 
   SystemdUnitState* = enum
     ## M83 step 4b: desired runtime state for a `systemd.userUnit`.
@@ -268,6 +281,24 @@ type
         ## `'prefer-dark'` (string), `true`/`false` (bool), bare
         ## decimal (int), `['a', 'b']` (array). The driver writes it
         ## verbatim via `dconf write`.
+    of rkHomebrewCask:
+      caskName*: string
+        ## Homebrew cask identifier (e.g. `iterm2`, `firefox`,
+        ## `visual-studio-code`, `docker`). Validated to match
+        ## `[a-z0-9][a-z0-9._+@-]*` so the apply path never
+        ## interpolates an unsafe name into a `brew install --cask`
+        ## command.
+      caskVersion*: string
+        ## Optional version pin. Casks typically track LATEST only;
+        ## an empty value means "accept whatever the tap installed".
+        ## A non-empty value that mismatches the installed version
+        ## triggers `brew upgrade --cask <name>`.
+      caskArgs*: seq[string]
+        ## Optional extra args passed to `brew install --cask`
+        ## BEFORE the cask name (e.g. `--no-quarantine`,
+        ## `--appdir=...`). Each entry must satisfy
+        ## `isSafeHomebrewArg` (no shell metacharacters or
+        ## whitespace).
     of rkHomebrewFormula:
       formulaName*: string
         ## Homebrew formula identifier (e.g. `ripgrep`, `tmux`,
@@ -428,6 +459,7 @@ proc resourceKindFromString*(s: string): ResourceKind =
   of $rkLinuxDconfKey: rkLinuxDconfKey
   of $rkLinuxKdeConfigKey: rkLinuxKdeConfigKey
   of $rkHomebrewFormula: rkHomebrewFormula
+  of $rkHomebrewCask: rkHomebrewCask
   else:
     raise newException(ValueError,
       "unknown resource kind tag: '" & s & "'")
@@ -587,3 +619,12 @@ proc realWorldIdentity*(r: Resource): string =
     # version-pin or extra-arg change is an `update`, not a new
     # resource.
     return "homebrew:formula:" & r.formulaName
+  of rkHomebrewCask:
+    # Parallel to the formula identity: the cask NAME alone
+    # uniquely identifies the macOS slot. `caskVersion` and
+    # `caskArgs` are desired-state, not identity. The `homebrew:`
+    # prefix is shared with the formula kind but the second
+    # path segment (`formula:` vs `cask:`) keeps the two
+    # namespaces disjoint, so a formula and a cask with the same
+    # name do NOT collide.
+    return "homebrew:cask:" & r.caskName

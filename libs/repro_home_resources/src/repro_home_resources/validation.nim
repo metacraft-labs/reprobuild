@@ -243,6 +243,27 @@ proc resourceValidationError*(r: Resource): string =
         return "pkg.homebrewFormula extra arg '" & a &
           "' is not a safe brew flag (no shell metacharacters, " &
           "whitespace, or control bytes; non-empty)"
+  of rkHomebrewCask:
+    # Parallel to the formula validation: cask name flows into
+    # `brew install --cask` / `brew list --cask --versions` /
+    # `brew uninstall --cask`. Same charset rules apply
+    # (`isSafeHomebrewName`).
+    if r.caskName.len == 0:
+      return "pkg.homebrewCask resource '" & r.address &
+        "' has an empty cask name"
+    if not homebrew_common.isSafeHomebrewName(r.caskName):
+      return "pkg.homebrewCask cask name '" & r.caskName &
+        "' is not a safe Homebrew identifier (charset: lowercase " &
+        "letters, digits, `.`, `_`, `+`, `-`, `@`; first char " &
+        "must be letter or digit)"
+    if r.caskVersion.len > 0 and hasShellMetacharacter(r.caskVersion):
+      return "pkg.homebrewCask version '" & r.caskVersion &
+        "' contains a shell metacharacter or whitespace"
+    for a in r.caskArgs:
+      if not homebrew_common.isSafeHomebrewArg(a):
+        return "pkg.homebrewCask extra arg '" & a &
+          "' is not a safe brew flag (no shell metacharacters, " &
+          "whitespace, or control bytes; non-empty)"
   else:
     # Win32-API / pure-file-I/O drivers — no shell-out, nothing to
     # validate here.

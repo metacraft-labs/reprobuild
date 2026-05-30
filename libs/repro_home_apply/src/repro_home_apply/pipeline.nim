@@ -602,6 +602,24 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
         formulaVersion: formulaVer,
         formulaArgs: formulaArgs)
       result.add(r)
+    of "homebrewcask":
+      # homebrewcask:<address>:<name>;<version>;<arg1>,<arg2>,...
+      # M83 step 9 Driver B test-seam form. Identical shape to
+      # `homebrewformula` — only the resource kind differs.
+      let parts = payload.split(';')
+      if parts.len < 1 or parts[0].len == 0: continue
+      let caskVer = if parts.len > 1: parts[1] else: ""
+      var caskArgs: seq[string] = @[]
+      if parts.len > 2 and parts[2].len > 0:
+        for a in parts[2].split(','):
+          let t = a.strip()
+          if t.len > 0: caskArgs.add(t)
+      let r = Resource(kind: rkHomebrewCask, address: address,
+        lifecyclePolicy: resourcePolicy,
+        caskName: parts[0],
+        caskVersion: caskVer,
+        caskArgs: caskArgs)
+      result.add(r)
     else: discard
 
 # ---------------------------------------------------------------------------
@@ -974,7 +992,7 @@ proc resourceFromEntry(profilePath, homeDir: string;
       kdeValue: value,
       kdeVersion: kdeVer)
   of "pkg.homebrewFormula":
-    # M83 step 9 Driver A â€” macOS Homebrew CLI formula via
+    # M83 step 9 Driver A — macOS Homebrew CLI formula via
     # `brew install`. Closed-set attribute validation: `name`,
     # `version`, `args`, plus the cross-kind `depends_on`.
     const homebrewFormulaAllowedKeys = ["name", "version", "args",
@@ -1005,6 +1023,37 @@ proc resourceFromEntry(profilePath, homeDir: string;
       formulaName: name,
       formulaVersion: version,
       formulaArgs: args)
+  of "pkg.homebrewCask":
+    # M83 step 9 Driver B — macOS Homebrew Cask via `brew install
+    # --cask`. Closed-set attribute validation: `name`, `version`,
+    # `args`, plus the cross-kind `depends_on`. Same shape as the
+    # formula parser branch above.
+    const homebrewCaskAllowedKeys = ["name", "version", "args",
+      "depends_on"]
+    for a in entry.resourceAttrs:
+      if a.kind == nkResourceAttr and
+         a.resourceAttrKey notin homebrewCaskAllowedKeys:
+        resourceProfileError(profilePath, a.resourceAttrLine,
+          "resource `pkg.homebrewCask " & address &
+          "` has unknown attribute `" & a.resourceAttrKey &
+          "`; expected one of: " &
+          homebrewCaskAllowedKeys.join(", "))
+    let name = requireAttr(profilePath, entry, "name")
+    let version =
+      if hasAttr(entry, "version"): attrOf(entry, "version")
+      else: ""
+    var args: seq[string] = @[]
+    if hasAttr(entry, "args"):
+      # See the formula branch: `seq[string]` FieldValue renders as
+      # a comma-joined bare-text RHS that we split back here.
+      for a in attrOf(entry, "args").split(','):
+        let t = a.strip()
+        if t.len > 0: args.add(t)
+    result = Resource(kind: rkHomebrewCask, address: address,
+      lifecyclePolicy: lpDefault,
+      caskName: name,
+      caskVersion: version,
+      caskArgs: args)
   else:
     # The parser already rejects unknown kinds; this is a defensive
     # guard for any kind added to the model but not wired here.
@@ -1138,9 +1187,14 @@ proc resourceSeedString*(desired: DesiredSet): string =
       # determines the desired state; all three contribute to the
       # seed so a version-pin tweak or args change bumps the
       # generation id. Args are joined with `,` (no entry contains
-      # `,` â€” `isSafeHomebrewArg` rejects it as a metacharacter).
+      # `,` — `isSafeHomebrewArg` rejects it as a metacharacter).
       result.add(r.formulaName & "\x1e" & r.formulaVersion &
         "\x1e" & r.formulaArgs.join(","))
+    of rkHomebrewCask:
+      # M83 step 9 Driver B. Same shape as the formula seed —
+      # the (name, version, args) triple drives the generation id.
+      result.add(r.caskName & "\x1e" & r.caskVersion &
+        "\x1e" & r.caskArgs.join(","))
     result.add('\x1d')
 
 proc composeDesiredResources*(profile: Profile; homeDir, host: string):
@@ -1476,6 +1530,21 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
                   encodedVersion.add(char(rb.payloadBytes[j]))
               break
           live = observeHomebrewFormula(formulaName, encodedVersion)
+      of rkHomebrewCask:
+        # Parallel to the formula branch: identity is
+        # `homebrew:cask:<name>`; payloadBytes is
+        # `name + 0x1e + <encoded-version>`.
+        const caskPrefix = "homebrew:cask:"
+        if rb.realWorldIdentity.startsWith(caskPrefix):
+          let caskName = rb.realWorldIdentity[caskPrefix.len .. ^1]
+          var encodedVersion = ""
+          for i, b in rb.payloadBytes:
+            if char(b) == '\x1e':
+              if i + 1 < rb.payloadBytes.len:
+                for j in i + 1 ..< rb.payloadBytes.len:
+                  encodedVersion.add(char(rb.payloadBytes[j]))
+              break
+          live = observeHomebrewCask(caskName, encodedVersion)
     except CatchableError:
       return false
     if not live.present:
@@ -2273,6 +2342,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               of rkLinuxDconfKey: "gvariant-literal"
               of rkLinuxKdeConfigKey: "kde-config-value"
               of rkHomebrewFormula: "homebrew-formula-version"
+              of rkHomebrewCask: "homebrew-cask-version"
             rb = toResourceBinding(action.address, desired.kind,
               identity, observed, observed.rawBytes,
               adoptPayloadKind, desired.lifecyclePolicy)
@@ -2427,6 +2497,14 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             postWriteBytes = applyHomebrewFormula(desired.formulaName,
               desired.formulaVersion, desired.formulaArgs)
             payloadKindStr = "homebrew-formula-version"
+          of rkHomebrewCask:
+            # M83 step 9 Driver B. macOS-only: re-raises
+            # ENotImplementedPlatform off-macOS. Same shape as
+            # the formula apply branch but routed through
+            # `brew install --cask`.
+            postWriteBytes = applyHomebrewCask(desired.caskName,
+              desired.caskVersion, desired.caskArgs)
+            payloadKindStr = "homebrew-cask-version"
           let rb = toResourceBinding(action.address, desired.kind,
             identity, preWrite, postWriteBytes, payloadKindStr,
             desired.lifecyclePolicy)
@@ -2525,13 +2603,23 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             # M83 step 9 Driver A. macOS-only: re-raises
             # ENotImplementedPlatform off-macOS. The destroy
             # direction runs `brew uninstall <name>`. The
-            # `resourceId` is `homebrew:formula:<name>` â€” strip
+            # `resourceId` is `homebrew:formula:<name>` — strip
             # the prefix to recover the name.
             preWrite = observeRecorded(action.address, prev)
             const formulaPrefix = "homebrew:formula:"
             if prev.resourceId.startsWith(formulaPrefix):
               destroyHomebrewFormula(
                 prev.resourceId[formulaPrefix.len .. ^1])
+          of rkHomebrewCask:
+            # M83 step 9 Driver B. macOS-only: re-raises
+            # ENotImplementedPlatform off-macOS. The destroy
+            # direction runs `brew uninstall --cask <name>`.
+            # The `resourceId` is `homebrew:cask:<name>`.
+            preWrite = observeRecorded(action.address, prev)
+            const caskPrefix = "homebrew:cask:"
+            if prev.resourceId.startsWith(caskPrefix):
+              destroyHomebrewCask(
+                prev.resourceId[caskPrefix.len .. ^1])
           of rkFsUserFile:
             # `resourceId` is the resolved host path verbatim. The
             # destroy direction deletes the file; the pre-write

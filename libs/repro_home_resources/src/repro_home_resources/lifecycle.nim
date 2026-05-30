@@ -35,6 +35,7 @@ import ./drivers/launchd_user
 import ./drivers/systemd_user
 import ./drivers/vscode_extension
 import repro_homebrew_adapter/formula as homebrew_formula
+import repro_homebrew_adapter/cask as homebrew_cask
 import ./errors
 import ./manifest_record
 import ./types
@@ -218,6 +219,11 @@ proc digestOfResource*(desired: Resource): Digest256 =
     # still at the same version cache-hits.
     return digestOfBytes(canonicalHomebrewFormulaBytes(
       desired.formulaName, desired.formulaVersion))
+  of rkHomebrewCask:
+    # Parallel to the formula encoding: (name, version) digest.
+    # `caskArgs` are NOT part of the digest for the same reason.
+    return digestOfBytes(canonicalHomebrewCaskBytes(
+      desired.caskName, desired.caskVersion))
 
 proc summarize*(action: ResourceActionKind; address: string;
                 kind: ResourceKind): string =
