@@ -338,6 +338,12 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  value = " & renderScalar(r.nixValue))
     if r.nixFilename.len > 0:
       result.add("  filename = " & renderScalar(r.nixFilename))
+  of srkSystemdSystemTimer:
+    result.add("  name = " & renderScalar(r.stName))
+    result.add("  content = " & renderScalar(r.stContent))
+    if not r.stEnabled:
+      result.add("  enabled = false")
+    result.add("  state = " & (if r.stRunning: "Running" else: "Stopped"))
   # M82 Phase B: emit `depends_on` last so its presence is obvious in a
   # rendered stanza without disrupting the legacy kind-field order.
   # Absent / empty seq omits the line entirely (the common case), so

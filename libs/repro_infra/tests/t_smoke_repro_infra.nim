@@ -2015,3 +2015,94 @@ linux.nixDaemonSetting {
     check realWorldIdentity(r) == "nixDaemonSetting:experimental-features"
     check resourceName(r) == "experimental-features"
     check resourceKindTag(r) == "linux.nixDaemonSetting"
+
+# ===========================================================================
+# systemd.systemTimer — parser + toPrivilegedOperation. M83 step 6.
+# ===========================================================================
+
+suite "repro_infra: systemd.systemTimer profile parser":
+
+  test "parses a systemd.systemTimer stanza with defaults":
+    let text = """
+systemd.systemTimer {
+  name = "zfs-scrub.timer"
+  content = "[Unit]\n[Timer]\nOnCalendar=weekly\n[Install]\n"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkSystemdSystemTimer
+    check profile.resources[0].stName == "zfs-scrub.timer"
+    check profile.resources[0].stEnabled   # defaults to true
+    check profile.resources[0].stRunning   # defaults to true (Running)
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokSystemdSystemTimer
+    check op.stName == "zfs-scrub.timer"
+    check not op.stDestroy
+    check requiresElevation(op.kind)
+
+  test "parses a systemd.systemTimer stanza with enabled=false / state=Stopped":
+    let text = """
+systemd.systemTimer {
+  name = "zfs-scrub.timer"
+  content = "[Timer]\n"
+  enabled = false
+  state = "Stopped"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources[0].stEnabled == false
+    check profile.resources[0].stRunning == false
+
+  test "toPrivilegedOperation passes destroy through to stDestroy":
+    let text = """
+systemd.systemTimer {
+  name = "zfs-scrub.timer"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let op = toPrivilegedOperation(profile.resources[0], destroy = true)
+    check op.kind == pokSystemdSystemTimer
+    check op.stDestroy
+
+  test "systemd.systemTimer rejects a name without .timer suffix":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+systemd.systemTimer {
+  name = "zfs-scrub.service"
+  content = "x"
+}
+""")
+
+  test "systemd.systemTimer rejects a path-escape name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+systemd.systemTimer {
+  name = "../etc/passwd.timer"
+  content = "x"
+}
+""")
+
+  test "systemd.systemTimer rejects an unknown state":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+systemd.systemTimer {
+  name = "zfs-scrub.timer"
+  content = "x"
+  state = "Paused"
+}
+""")
+
+  test "realWorldIdentity and resourceName follow the timer name":
+    let text = """
+systemd.systemTimer {
+  name = "zfs-scrub.timer"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check realWorldIdentity(r) == "systemTimer:zfs-scrub.timer"
+    check resourceName(r) == "zfs-scrub.timer"
+    check resourceKindTag(r) == "systemd.systemTimer"

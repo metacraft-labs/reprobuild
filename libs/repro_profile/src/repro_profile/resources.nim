@@ -619,3 +619,28 @@ template linuxNixDaemonSetting*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("linux.nixDaemonSetting", key)
     pushResource(targetResources, "linux.nixDaemonSetting", addr0,
       fields, dependsOn)
+
+template systemdSystemTimer*(targetResources: var seq[ResourceIntent];
+                             name: string;
+                             content: string;
+                             enabled: bool = true;
+                             state: string = "Running";
+                             address: string = "";
+                             dependsOn: seq[string] = @[]) =
+  ## M83 step 6 — systemd system-scope timer companion of
+  ## `systemd.systemUnit`. Writes a `.timer` unit file under
+  ## `/etc/systemd/system/` (`name` must end `.timer`), runs
+  ## `daemon-reload`, and reconciles `enabled` (across-reboot) and
+  ## `state` (current `Running` / `Stopped`) independently.
+  ##
+  ## Address default: `systemd.systemTimer:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    fields["enabled"] = boolField(enabled)
+    fields["state"] = strField(state)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("systemd.systemTimer", name)
+    pushResource(targetResources, "systemd.systemTimer", addr0,
+      fields, dependsOn)

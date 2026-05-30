@@ -174,6 +174,11 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       # without breaking the top-down resolution order; the formula
       # is short enough to repeat (and matches the sysctl precedent).
       posixDigestHexOfText(op.nixKey & " = " & op.nixValue & "\n")
+  of pokSystemdSystemTimer:
+    if op.stDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.stContent)
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -1913,3 +1918,138 @@ proc applyLinuxNixDaemonSetting*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("linux.nixDaemonSetting apply")
+
+# ===========================================================================
+# systemd.systemTimer — `.timer` unit under /etc/systemd/system/.
+#
+# Sibling of `systemd.systemUnit`. The unit-file handling is identical
+# (write to `/etc/systemd/system/<name.timer>`, `daemon-reload`, content
+# digest); the timer-specific surface is the `enabled` + `running`
+# distinction. A timer is enabled (armed across reboot) AND running
+# (currently scheduling its `.service`) independently, so the driver
+# supports four desired combinations:
+#
+#   enabled=true,  running=true   — fully active (the common case)
+#   enabled=true,  running=false  — armed, but held inactive for now
+#   enabled=false, running=true   — running this boot only (rare)
+#   enabled=false, running=false  — present but inert
+#
+# The destroy direction `stop`s + `disable`s + removes the unit file.
+# ===========================================================================
+
+proc observeSystemdSystemTimer*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Read the timer unit file under `/etc/systemd/system/` and query
+  ## `systemctl show`. The digest covers the unit-file contents
+  ## verbatim (same model as `observeSystemdSystemUnit`); the
+  ## `is-enabled` / `is-active` cross-check runs for observability
+  ## tracing but does not feed the digest — drift on those flags is
+  ## a state-only difference the dispatch loop handles via the
+  ## desired-digest comparison after the apply, not via the file
+  ## bytes.
+  when defined(linux):
+    let path = systemUnitPath(op.stName)
+    if not fileExists(path):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let content = readFile(path)
+    result.present = true
+    result.digestHex = posixDigestHexOfText(content)
+    # `systemctl show` is queried for completeness; the exit code is
+    # not an error (a disabled / inactive timer is a valid state).
+    discard execCmdEx("systemctl show " & quoteShell(op.stName) &
+      " --property=LoadState,ActiveState,UnitFileState")
+  else:
+    raiseNotImplementedPlatform("systemd.systemTimer observe")
+
+proc applySystemdSystemTimer*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the timer unit file, `systemctl daemon-reload`, then
+  ## reconcile the `enabled` / `running` flags via `systemctl
+  ## enable|disable` and `systemctl start|stop`. The destroy
+  ## direction `stop`s + `disable`s and removes the file.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): re-read the unit
+  ## file via `observeSystemdSystemTimer` and compare the content
+  ## digest; raise `EProtocol` on mismatch.
+  when defined(linux):
+    let path = systemUnitPath(op.stName)
+    if op.stDestroy:
+      # Stop, disable, remove. Each is best-effort against an
+      # already-quiescent state; the post-apply check on the file
+      # is the integrity gate.
+      discard execCmd("systemctl stop " & quoteShell(op.stName))
+      discard execCmd("systemctl disable " & quoteShell(op.stName))
+      if fileExists(path):
+        try: removeFile(path)
+        except OSError: discard
+      discard execCmd("systemctl daemon-reload")
+      # Post-apply re-probe: a destroy is "done" when the timer file
+      # no longer exists.
+      if fileExists(path):
+        raiseProtocol("systemd.systemTimer destroy of '" & op.stName &
+          "' post-apply observation disagrees with desired state: " &
+          "unit file " & path & " still exists after `disable` + " &
+          "`removeFile`.")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    createDir(SystemdSystemUnitDir)
+    # Binary-mode write so the bytes on disk equal the operator's
+    # `stContent` verbatim — drift detection compares BLAKE3 digests,
+    # so any CRLF translation would be constant false-positive drift.
+    block:
+      var f: File
+      if not open(f, path, fmWrite):
+        raiseProtocol("systemd.systemTimer cannot open " & path)
+      try:
+        if op.stContent.len > 0:
+          discard f.writeBuffer(unsafeAddr op.stContent[0], op.stContent.len)
+      finally:
+        close(f)
+    let (reloadOut, reloadCode) = execCmdEx("systemctl daemon-reload")
+    if reloadCode != 0:
+      raiseProtocol("systemd.systemTimer daemon-reload failed: " &
+        reloadOut.strip())
+    # Reconcile `enabled` flag. `enable` + `disable` are idempotent;
+    # we run unconditionally so the apply converges from either
+    # initial state.
+    if op.stEnabled:
+      let (enOut, enCode) = execCmdEx(
+        "systemctl enable " & quoteShell(op.stName))
+      if enCode != 0:
+        raiseProtocol("systemd.systemTimer enable of '" &
+          op.stName & "' failed: " & enOut.strip())
+    else:
+      # Best-effort disable; an already-disabled unit emits a
+      # non-zero exit on some systemd versions, ignore it.
+      discard execCmd("systemctl disable " & quoteShell(op.stName))
+    # Reconcile `running` flag via `start` / `stop`.
+    if op.stRunning:
+      let (startOut, startCode) = execCmdEx(
+        "systemctl start " & quoteShell(op.stName))
+      if startCode != 0:
+        raiseProtocol("systemd.systemTimer start of '" &
+          op.stName & "' failed: " & startOut.strip())
+    else:
+      # Best-effort stop; an already-stopped unit returns non-zero
+      # on some versions, ignore it.
+      discard execCmd("systemctl stop " & quoteShell(op.stName))
+    # Post-apply re-probe — see the contract comment above.
+    let post = observeSystemdSystemTimer(op)
+    let desiredHex = posixDigestHexOfText(op.stContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("systemd.systemTimer '" & op.stName &
+        "' post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The unit-file write completed but a re-read shows a " &
+        "different value — the driver fails closed rather than " &
+        "reporting a spurious success.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("systemd.systemTimer apply")

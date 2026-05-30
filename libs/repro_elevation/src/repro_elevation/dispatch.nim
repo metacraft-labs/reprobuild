@@ -105,7 +105,7 @@ proc desiredDigest(op: PrivilegedOperation): string =
      pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser,
      pokLinuxSysctl, pokLinuxUdevRule, pokLinuxPolkitRule,
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
-     pokLinuxNixDaemonSetting:
+     pokLinuxNixDaemonSetting, pokSystemdSystemTimer:
     posixSystemDesiredDigestHex(op)
   of pokOsTimezone, pokOsHostname:
     # Cross-platform: every platform's desired digest is the canonical
@@ -185,6 +185,8 @@ proc reobserve*(ctx: FixtureContext;
     observePasswdGroup(op)
   of pokLinuxNixDaemonSetting:
     observeLinuxNixDaemonSetting(op)
+  of pokSystemdSystemTimer:
+    observeSystemdSystemTimer(op)
 
 proc applyOne(ctx: FixtureContext;
               op: PrivilegedOperation): ObservedOperationState =
@@ -250,6 +252,8 @@ proc applyOne(ctx: FixtureContext;
     result = applyPasswdGroup(op)
   of pokLinuxNixDaemonSetting:
     result = applyLinuxNixDaemonSetting(op)
+  of pokSystemdSystemTimer:
+    result = applySystemdSystemTimer(op)
 
 # ---------------------------------------------------------------------------
 # Dispatch one planned operation with the re-observe / drift gate.
@@ -306,7 +310,8 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokLinuxTmpfilesRule and op.tmpfilesDestroy) or
     (op.kind == pokLinuxSudoersRule and op.sudoersDestroy) or
     (op.kind == pokPasswdGroup and op.pgDestroy) or
-    (op.kind == pokLinuxNixDaemonSetting and op.nixDestroy)
+    (op.kind == pokLinuxNixDaemonSetting and op.nixDestroy) or
+    (op.kind == pokSystemdSystemTimer and op.stDestroy)
   let firstSampleLooksLikeCacheHit =
     if destroyOp: not observed.present
     else: observed.present and observed.digestHex == desiredHex

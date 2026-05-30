@@ -952,6 +952,59 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "systemd.systemTimer resource maps to srkSystemdSystemTimer":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("systemd.systemTimer",
+      "zfs-scrub.timer",
+      @[strFieldEntry("name", "zfs-scrub.timer"),
+        strFieldEntry("content",
+          "[Unit]\n[Timer]\nOnCalendar=weekly\n"),
+        boolFieldEntry("enabled", true),
+        strFieldEntry("state", "Running")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkSystemdSystemTimer
+    check sp.resources[0].stName == "zfs-scrub.timer"
+    check sp.resources[0].stEnabled
+    check sp.resources[0].stRunning
+    check sp.resources[0].address == "zfs-scrub.timer"
+
+  test "systemd.systemTimer rejects a name missing .timer at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("systemd.systemTimer", "x",
+      @[strFieldEntry("name", "zfs-scrub.service"),
+        strFieldEntry("content", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "systemd.systemTimer rejects an unknown state at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("systemd.systemTimer", "x",
+      @[strFieldEntry("name", "zfs-scrub.timer"),
+        strFieldEntry("content", "x"),
+        strFieldEntry("state", "Paused")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips systemd.systemTimer":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("systemd.systemTimer", "",
+      @[strFieldEntry("name", "zfs-scrub.timer"),
+        strFieldEntry("content",
+          "[Unit]\n[Timer]\nOnCalendar=weekly\n"),
+        boolFieldEntry("enabled", false),
+        strFieldEntry("state", "Stopped")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkSystemdSystemTimer
+    check sp2.resources[0].stName == "zfs-scrub.timer"
+    check sp2.resources[0].stEnabled == false
+    check sp2.resources[0].stRunning == false
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
 # ---------------------------------------------------------------------------
 # Cross-cutting sanity: the home adapter's output passes the apply
 # pipeline's resource pre-validation by going through `findResourcesBlock`

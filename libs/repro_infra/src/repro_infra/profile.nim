@@ -55,6 +55,7 @@ type
     srkLinuxSudoersRule = "linux.sudoersRule"
     srkPasswdGroup = "passwd.group"
     srkLinuxNixDaemonSetting = "linux.nixDaemonSetting"
+    srkSystemdSystemTimer = "systemd.systemTimer"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -164,6 +165,11 @@ type
       nixKey*: string
       nixValue*: string
       nixFilename*: string                ## "" => auto-derived
+    of srkSystemdSystemTimer:
+      stName*: string                     ## unit file name, must end `.timer`
+      stContent*: string
+      stEnabled*: bool                    ## desired: enabled (default true)
+      stRunning*: bool                    ## desired: active (default true)
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -216,6 +222,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "group:" & r.pgName
   of srkLinuxNixDaemonSetting:
     "nixDaemonSetting:" & r.nixKey
+  of srkSystemdSystemTimer:
+    "systemTimer:" & r.stName
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -256,6 +264,7 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxSudoersRule: r.sudoersName
   of srkPasswdGroup: r.pgName
   of srkLinuxNixDaemonSetting: r.nixKey
+  of srkSystemdSystemTimer: r.stName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -460,6 +469,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkLinuxSudoersRule: srk = srkLinuxSudoersRule
     of $srkPasswdGroup: srk = srkPasswdGroup
     of $srkLinuxNixDaemonSetting: srk = srkLinuxNixDaemonSetting
+    of $srkSystemdSystemTimer: srk = srkSystemdSystemTimer
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -800,6 +810,26 @@ proc parseSystemProfile*(text: string): SystemProfile =
             filename & "' must end with '.conf' (nix.conf.d convention)")
       res = SystemResource(kind: srkLinuxNixDaemonSetting,
         nixKey: k, nixValue: v, nixFilename: filename)
+    of srkSystemdSystemTimer:
+      let n = need("name")
+      let c = need("content")
+      if not isSafeUnitName(n):
+        raiseSystemProfileInvalid("systemd.systemTimer name '" & n &
+          "' is not a safe single-segment unit file name")
+      if not n.endsWith(".timer"):
+        raiseSystemProfileInvalid("systemd.systemTimer name '" & n &
+          "' must end with '.timer' (systemd timer convention)")
+      let stateStr =
+        if "state" in fields: fields["state"].toLowerAscii() else: "running"
+      if stateStr notin ["running", "stopped"]:
+        raiseSystemProfileInvalid("systemd.systemTimer state '" & stateStr &
+          "' is not one of Running / Stopped")
+      res = SystemResource(kind: srkSystemdSystemTimer,
+        stName: n, stContent: c,
+        stEnabled:
+          if "enabled" in fields: parseBoolField("enabled",
+            fields["enabled"]) else: true,
+        stRunning: stateStr == "running")
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -949,6 +979,13 @@ proc toPrivilegedOperation*(r: SystemResource;
       nixValue: r.nixValue,
       nixFilename: r.nixFilename,
       nixDestroy: destroy)
+  of srkSystemdSystemTimer:
+    PrivilegedOperation(kind: pokSystemdSystemTimer, address: r.address,
+      stName: r.stName,
+      stContent: r.stContent,
+      stEnabled: r.stEnabled,
+      stRunning: r.stRunning,
+      stDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

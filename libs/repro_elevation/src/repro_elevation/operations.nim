@@ -176,6 +176,15 @@ type
       ## instead; that fallback is deferred until a real host
       ## surfaces the need (every supported Nix release ships the
       ## drop-in dir).
+    pokSystemdSystemTimer = "systemd.systemTimer"
+      ## The post-M83 step-6 systemd timer operation: a `.timer` unit
+      ## under `/etc/systemd/system/`, managed via `systemctl` (no
+      ## `--user`). The companion of `pokSystemdSystemUnit` — same
+      ## content-digest model, same `daemon-reload` + optional
+      ## `enable` workflow, with an additional runtime `state` field
+      ## (`Running` / `Stopped`) that controls `systemctl start` /
+      ## `systemctl stop` so a timer can be authored but held
+      ## inactive when its `.service` companion is being staged.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -407,6 +416,21 @@ type
       nixValue*: string
       nixFilename*: string
       nixDestroy*: bool
+    of pokSystemdSystemTimer:
+      ## Write the timer unit file `stName` (a single path segment
+      ## ending `.timer`) under `/etc/systemd/system/` with
+      ## `stContent`, then `daemon-reload` and optionally `enable`
+      ## (no `--now` — the runtime state is governed by `stRunning`
+      ## via a separate `start` / `stop`). `stRunning` selects
+      ## whether the timer is active; an enabled but stopped timer
+      ## stays armed across reboots but does not fire until the next
+      ## apply flips `stRunning` to true. `stDestroy` selects the
+      ## disable + remove direction.
+      stName*: string
+      stContent*: string
+      stEnabled*: bool
+      stRunning*: bool
+      stDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -448,6 +472,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxSudoersRule: true
   of pokPasswdGroup: true
   of pokLinuxNixDaemonSetting: true
+  of pokSystemdSystemTimer: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -481,6 +506,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxSudoersRule: pokLinuxSudoersRule
   of $pokPasswdGroup: pokPasswdGroup
   of $pokLinuxNixDaemonSetting: pokLinuxNixDaemonSetting
+  of $pokSystemdSystemTimer: pokSystemdSystemTimer
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -1014,6 +1040,13 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       if not op.nixFilename.endsWith(".conf"):
         return "linux.nixDaemonSetting filename '" & op.nixFilename &
           "' must end with '.conf' (nix.conf.d convention)"
+  of pokSystemdSystemTimer:
+    if not isSafeUnitName(op.stName):
+      return "systemd.systemTimer name '" & op.stName &
+        "' is not a safe single-segment unit file name"
+    if not op.stName.endsWith(".timer"):
+      return "systemd.systemTimer name '" & op.stName &
+        "' must end with '.timer' (systemd timer convention)"
   return ""
 
 # ---------------------------------------------------------------------------

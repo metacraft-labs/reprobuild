@@ -2258,3 +2258,119 @@ suite "repro_elevation: linux.nixDaemonSetting pure surface":
         discard applyLinuxNixDaemonSetting(op)
       expect ENotImplementedPlatform:
         discard destroyLinuxNixDaemonSetting(op)
+
+# ===========================================================================
+# systemd.systemTimer — pure drift logic. The shell-out side mirrors
+# systemd.systemUnit; pure tests cover the closed-set validator
+# (`.timer` suffix + safe unit-name), the path derivation, the content
+# digest, the four enabled/running boolean combinations on the codec
+# round-trip, and the off-Linux gate.
+# ===========================================================================
+
+suite "repro_elevation: systemd.systemTimer pure surface":
+
+  test "systemUnitPath joins the directory with the timer file name":
+    check systemUnitPath("zfs-scrub.timer") ==
+      "/etc/systemd/system/zfs-scrub.timer"
+    check SystemdSystemUnitDir == "/etc/systemd/system"
+
+  test "operationValidationError accepts a valid systemd.systemTimer":
+    let ok = PrivilegedOperation(kind: pokSystemdSystemTimer,
+      address: "zfs-scrub.timer",
+      stName: "zfs-scrub.timer",
+      stContent: "[Unit]\n[Timer]\nOnCalendar=weekly\n[Install]\n",
+      stEnabled: true,
+      stRunning: true)
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad systemd.systemTimer fields":
+    # missing .timer suffix
+    let badSuffix = PrivilegedOperation(kind: pokSystemdSystemTimer,
+      address: "x", stName: "zfs-scrub.service",
+      stContent: "x", stEnabled: true, stRunning: true)
+    check operationValidationError(badSuffix).len > 0
+    # path-escape name
+    let escape = PrivilegedOperation(kind: pokSystemdSystemTimer,
+      address: "x", stName: "../etc/passwd.timer",
+      stContent: "x", stEnabled: true, stRunning: true)
+    check operationValidationError(escape).len > 0
+    # empty address
+    let emptyAddr = PrivilegedOperation(kind: pokSystemdSystemTimer,
+      address: "", stName: "zfs-scrub.timer",
+      stContent: "x", stEnabled: true, stRunning: true)
+    check operationValidationError(emptyAddr).len > 0
+
+  test "RBEB Operation frame round-trips a systemd.systemTimer (all four states)":
+    # The driver supports four enabled/running combinations; check
+    # all four survive the wire round-trip.
+    for enabled in [true, false]:
+      for running in [true, false]:
+        let op = PrivilegedOperation(kind: pokSystemdSystemTimer,
+          address: "zfs-scrub.timer",
+          stName: "zfs-scrub.timer",
+          stContent: "[Unit]\n[Timer]\nOnCalendar=weekly\n",
+          stEnabled: enabled,
+          stRunning: running,
+          stDestroy: false)
+        let wire = WireOperation(operation: op,
+          baselineDigestHex: "deadbeef")
+        let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+        check w2.baselineDigestHex == "deadbeef"
+        check w2.operation.kind == pokSystemdSystemTimer
+        check w2.operation.stName == "zfs-scrub.timer"
+        check w2.operation.stEnabled == enabled
+        check w2.operation.stRunning == running
+        check not w2.operation.stDestroy
+
+  test "RBEB Operation frame round-trips a destroy systemd.systemTimer":
+    let op = PrivilegedOperation(kind: pokSystemdSystemTimer,
+      address: "zfs-scrub.timer",
+      stName: "zfs-scrub.timer",
+      stContent: "",
+      stEnabled: false,
+      stRunning: false,
+      stDestroy: true)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "cafef00d")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.kind == pokSystemdSystemTimer
+    check w2.operation.stDestroy
+
+  test "posix desired digest for systemd.systemTimer matches content bytes":
+    let op = PrivilegedOperation(kind: pokSystemdSystemTimer,
+      address: "x",
+      stName: "zfs-scrub.timer",
+      stContent: "[Unit]\n[Timer]\nOnCalendar=weekly\n[Install]\n",
+      stEnabled: true,
+      stRunning: true)
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText(op.stContent)
+
+  test "posix desired digest for systemd.systemTimer destroy is the absent sentinel":
+    let op = PrivilegedOperation(kind: pokSystemdSystemTimer,
+      address: "x",
+      stName: "zfs-scrub.timer",
+      stContent: "x",
+      stEnabled: false,
+      stRunning: false,
+      stDestroy: true)
+    check posixSystemDesiredDigestHex(op) == ZeroDigestHex
+
+  test "systemd.systemTimer requires elevation":
+    check requiresElevation(pokSystemdSystemTimer)
+    check $pokSystemdSystemTimer == "systemd.systemTimer"
+    check privilegedOperationKindFromString("systemd.systemTimer") ==
+      pokSystemdSystemTimer
+
+  test "off-Linux systemd.systemTimer entry points raise ENotImplementedPlatform":
+    when not defined(linux):
+      let op = PrivilegedOperation(kind: pokSystemdSystemTimer,
+        address: "zfs-scrub.timer",
+        stName: "zfs-scrub.timer",
+        stContent: "x",
+        stEnabled: true,
+        stRunning: true)
+      expect ENotImplementedPlatform:
+        discard observeSystemdSystemTimer(op)
+      expect ENotImplementedPlatform:
+        discard applySystemdSystemTimer(op)

@@ -475,6 +475,29 @@ suite "Resource constructors":
     check target[0].address ==
       "linux.nixDaemonSetting:experimental-features"
 
+  test "systemdSystemTimer records name / content / enabled / state":
+    var target: seq[ResourceIntent] = @[]
+    systemdSystemTimer(target,
+      name = "zfs-scrub.timer",
+      content = "[Unit]\n[Timer]\nOnCalendar=weekly\n",
+      enabled = true,
+      state = "Running",
+      address = "zfs-scrub.timer")
+    check target.len == 1
+    check target[0].kind == "systemd.systemTimer"
+    check target[0].address == "zfs-scrub.timer"
+    check target[0].fields["name"].s == "zfs-scrub.timer"
+    check target[0].fields["enabled"].b == true
+    check target[0].fields["state"].s == "Running"
+
+  test "systemdSystemTimer auto-addresses from the name when address empty":
+    var target: seq[ResourceIntent] = @[]
+    systemdSystemTimer(target,
+      name = "zfs-scrub.timer",
+      content = "x")
+    check target.len == 1
+    check target[0].address == "systemd.systemTimer:zfs-scrub.timer"
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

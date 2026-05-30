@@ -307,6 +307,26 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
           "' must end with '.conf'")
     result = SystemResource(kind: srkLinuxNixDaemonSetting,
       nixKey: k, nixValue: v, nixFilename: filename)
+  of "systemd.systemTimer":
+    let n = fieldString(r, "name")
+    let c = fieldString(r, "content")
+    if not isSafeUnitName(n):
+      raise newException(ValueError,
+        "systemd.systemTimer name '" & n &
+        "' is not a safe single-segment unit file name")
+    if not n.endsWith(".timer"):
+      raise newException(ValueError,
+        "systemd.systemTimer name '" & n &
+        "' must end with '.timer'")
+    let stateStr = fieldString(r, "state", "Running").toLowerAscii()
+    if stateStr notin ["running", "stopped"]:
+      raise newException(ValueError,
+        "systemd.systemTimer state '" & stateStr &
+        "' is not one of Running / Stopped")
+    result = SystemResource(kind: srkSystemdSystemTimer,
+      stName: n, stContent: c,
+      stEnabled: fieldBool(r, "enabled", true),
+      stRunning: stateStr == "running")
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -334,7 +354,8 @@ proc isSystemScopeResource(kind: string): bool =
      "os.timezone", "os.hostname",
      "linux.sysctl", "linux.udevRule", "linux.polkitRule",
      "linux.tmpfilesRule", "linux.sudoersRule",
-     "passwd.group", "linux.nixDaemonSetting":
+     "passwd.group", "linux.nixDaemonSetting",
+     "systemd.systemTimer":
     true
   else:
     false
@@ -530,5 +551,11 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("value", quoteSystemValue(r.nixValue)))
       if r.nixFilename.len > 0:
         pairs.add(("filename", quoteSystemValue(r.nixFilename)))
+    of srkSystemdSystemTimer:
+      pairs.add(("name", quoteSystemValue(r.stName)))
+      pairs.add(("content", quoteSystemValue(r.stContent)))
+      pairs.add(("enabled", (if r.stEnabled: "true" else: "false")))
+      pairs.add(("state",
+        quoteSystemValue(if r.stRunning: "Running" else: "Stopped")))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

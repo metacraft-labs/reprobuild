@@ -369,6 +369,12 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.nixValue)
     body.writeString(op.nixFilename)
     body.writeBool(op.nixDestroy)
+  of pokSystemdSystemTimer:
+    body.writeString(op.stName)
+    body.writeString(op.stContent)
+    body.writeBool(op.stEnabled)
+    body.writeBool(op.stRunning)
+    body.writeBool(op.stDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -570,6 +576,14 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.nixValue = readString(body, pos)
     result.operation.nixFilename = readString(body, pos)
     result.operation.nixDestroy = readBool(body, pos, "nixDestroy")
+  of pokSystemdSystemTimer:
+    result.operation = PrivilegedOperation(kind: pokSystemdSystemTimer,
+      address: address)
+    result.operation.stName = readString(body, pos)
+    result.operation.stContent = readString(body, pos)
+    result.operation.stEnabled = readBool(body, pos, "stEnabled")
+    result.operation.stRunning = readBool(body, pos, "stRunning")
+    result.operation.stDestroy = readBool(body, pos, "stDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 
