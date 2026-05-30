@@ -524,6 +524,83 @@ try {
     Warn "scoop bootstrap failed - continuing so we can capture artifacts"
   }
 
+  # ---- Stage F2: ensure Nim compiler ------------------------------------
+  # Phase F3 of M83 (reprobuild commit 9f03144) made compile-then-apply
+  # the ONLY apply path: `repro home apply` / `repro infra apply` shell
+  # out to `nim c` to materialize each profile and HARD-ERROR when nim
+  # is not on PATH. The fresh-OOBE Win11 dev VM ships without Nim, so
+  # we run the dotfiles' own per-user installer here. The script is
+  # idempotent + uses LOCALAPPDATA, so re-runs on a warm VM fast-path
+  # to a no-op.
+  Info "ensuring Nim compiler inside the VM (bin/ensure-nim.ps1)"
+  $nimScript = {
+    param($profileDir)
+    $log = @()
+    function L($m) { $script:log += "[$(Get-Date -Format HH:mm:ss)] $m" }
+    $ok = $false
+    try {
+      Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+      L "ExecutionPolicy (Process) set to Bypass"
+      $ensureNim = Join-Path $profileDir 'bin\ensure-nim.ps1'
+      if (-not (Test-Path $ensureNim)) {
+        L "ERROR: ensure-nim.ps1 not found at $ensureNim"
+        return [pscustomobject]@{ Ok = $false; Log = ($log -join "`r`n") }
+      }
+      L "running $ensureNim -Quiet"
+      & $ensureNim -Quiet *>&1 | ForEach-Object { L ([string]$_) }
+      if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        L "ensure-nim.ps1 exit code $LASTEXITCODE"
+        return [pscustomobject]@{ Ok = $false; Log = ($log -join "`r`n") }
+      }
+      # ensure-nim.ps1 writes to HKCU\Environment Path; the apply
+      # invocation downstream uses a fresh Invoke-Command session that
+      # WILL inherit the HKCU change. Verify by resolving nim.exe via
+      # the user-scope PATH from the registry (the same path the next
+      # session sees).
+      $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+      $env:Path = ($userPath + ';' + $env:Path)
+      $nim = Get-Command nim -ErrorAction SilentlyContinue
+      if ($nim) {
+        $ver = (& $nim.Source --version 2>&1 | Select-Object -First 1)
+        L "nim on PATH: $($nim.Source)  ($ver)"
+        $ok = $true
+      } else {
+        L "ERROR: nim still not resolvable after ensure-nim.ps1 ran"
+      }
+    } catch {
+      L "EXCEPTION: $_"
+    }
+    return [pscustomobject]@{
+      Ok  = $ok
+      Log = ($log -join "`r`n")
+    }
+  }
+  # 10 minutes covers download (~30 MB) + extract; usually under 1 min.
+  $nimJob = Invoke-Command -VMName $VmName -Credential $cred `
+                           -ScriptBlock $nimScript `
+                           -ArgumentList @($VmDotfilesDir) -AsJob
+  $nimWaited = Wait-Job -Job $nimJob -Timeout 600
+  $nimRes = $null
+  if ($nimWaited) {
+    $nimRes = Receive-Job -Job $nimJob -ErrorAction Continue
+  } else {
+    Warn "ensure-nim timed out after 10 min"
+    Stop-Job $nimJob -ErrorAction SilentlyContinue
+  }
+  Remove-Job $nimJob -Force -ErrorAction SilentlyContinue
+  $nimOk = $false
+  if ($nimRes) {
+    Set-Content -Path (Join-Path $OutDir '00-nim-bootstrap.log') `
+                -Value $nimRes.Log -Encoding utf8
+    $nimOk = [bool]$nimRes.Ok
+  }
+  if ($nimOk) {
+    Record 'stageF2_ensure_nim' 'OK (nim on user PATH)'
+  } else {
+    Record 'stageF2_ensure_nim' 'FAILED'
+    Warn "ensure-nim failed - apply will likely hard-error; continuing to capture artifacts"
+  }
+
   # ---- Stage G: repro home apply -----------------------------------------
   Info "running repro home apply --profile-dir $VmDotfilesDir"
   $homeScript = {
@@ -535,6 +612,12 @@ try {
     # Ensure scoop's shims are on PATH for the apply (its scoop driver
     # shells out to `scoop install <pkg>`).
     $env:Path = "$env:USERPROFILE\scoop\shims;$env:Path"
+    # M83 Phase F3: the apply path shells out to `nim c` to compile the
+    # profile. bin/ensure-nim.ps1 wrote the nim bin dir to HKCU PATH in
+    # the previous stage; merge user-scope PATH in here so this fresh
+    # PSDirect session picks it up regardless of session-init timing.
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($userPath) { $env:Path = "$userPath;$env:Path" }
     $p = Start-Process -FilePath $exe -ArgumentList @('home','apply','--profile-dir', $profileDir) `
            -NoNewWindow -PassThru `
            -RedirectStandardOutput $stdoutF -RedirectStandardError $stderrF
@@ -592,6 +675,10 @@ try {
     # <id>` from a prior `repro infra plan`) OR `--no-preview` to
     # compute + apply a fresh plan in one shot. The harness is a
     # one-shot validation, so --no-preview is the right form.
+    # M83 Phase F3: as with home-apply above, merge the user-scope PATH
+    # so the nim install from bin/ensure-nim.ps1 is reachable.
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($userPath) { $env:Path = "$userPath;$env:Path" }
     $p = Start-Process -FilePath $exe -ArgumentList @('infra','apply','--no-preview','--profile', $profilePath) `
            -NoNewWindow -PassThru `
            -RedirectStandardOutput $stdoutF -RedirectStandardError $stderrF
