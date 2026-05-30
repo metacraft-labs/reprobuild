@@ -104,6 +104,20 @@ proc desiredDigest(op: PrivilegedOperation): string =
   of pokMacosSystemDefault, pokSystemdSystemUnit, pokLaunchdSystemDaemon,
      pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser:
     posixSystemDesiredDigestHex(op)
+  of pokOsTimezone, pokOsHostname:
+    # Cross-platform: every platform's desired digest is the canonical
+    # IANA / lowercase-hostname rendering. Both `systemDesiredDigest
+    # Hex` (Windows side, in `windows_system_driver`) and
+    # `posixSystemDesiredDigestHex` (POSIX side) produce the SAME
+    # canonical bytes for the same desired state, so the broker's
+    # drift gate compares uniformly regardless of where the apply
+    # runs. We pick the platform-resident impl deterministically:
+    # Windows uses the windows-side digest, POSIX uses the posix
+    # digest — both produce the same canonical string by construction.
+    when defined(windows):
+      systemDesiredDigestHex(op)
+    else:
+      posixSystemDesiredDigestHex(op)
 
 # ---------------------------------------------------------------------------
 # Re-observe one operation's current real-world state.
@@ -144,6 +158,16 @@ proc reobserve*(ctx: FixtureContext;
     observeEnvSystemVariable(op)
   of pokPasswdUser:
     observePasswdUser(op)
+  of pokOsTimezone:
+    when defined(windows):
+      observeWindowsOsTimezone(op)
+    else:
+      observePosixOsTimezone(op)
+  of pokOsHostname:
+    when defined(windows):
+      observeWindowsOsHostname(op)
+    else:
+      observePosixOsHostname(op)
 
 proc applyOne(ctx: FixtureContext;
               op: PrivilegedOperation): ObservedOperationState =
@@ -182,6 +206,19 @@ proc applyOne(ctx: FixtureContext;
     result = applyEnvSystemVariable(op)
   of pokPasswdUser:
     result = applyPasswdUser(op)
+  of pokOsTimezone:
+    when defined(windows):
+      result = applyWindowsOsTimezone(op)
+    else:
+      result = applyPosixOsTimezone(op)
+  of pokOsHostname:
+    when defined(windows):
+      result = applyWindowsOsHostname(op)
+      # `applyWindowsOsHostname` surfaces `restartNeeded` directly on
+      # the returned `ObservedOperationState`; the dispatch layer
+      # mirrors it onto the result for the apply-log record.
+    else:
+      result = applyPosixOsHostname(op)
 
 # ---------------------------------------------------------------------------
 # Dispatch one planned operation with the re-observe / drift gate.

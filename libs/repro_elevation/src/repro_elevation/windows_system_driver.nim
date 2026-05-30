@@ -29,6 +29,7 @@ import blake3
 import ./errors
 import ./fixture_driver
 import ./operations
+import ./os_system_parse
 import ./producer_consumer_map
 import ./system_value
 import ./windows_system_parse
@@ -84,6 +85,10 @@ proc systemDesiredDigestHex*(op: PrivilegedOperation): string =
         (if op.fwDisplayName.len > 0: op.fwDisplayName else: op.fwName),
         op.fwProtocol, op.fwDirection, op.fwAction,
         op.fwLocalPort, op.fwEnabled))
+  of pokOsTimezone:
+    digestHexOfText(canonicalTimezoneDesired(op.tzIana))
+  of pokOsHostname:
+    digestHexOfText(canonicalHostnameDesired(op.hostnameName))
   else:
     raise newException(ValueError,
       "systemDesiredDigestHex called on a non-system kind " & $op.kind)
@@ -930,3 +935,124 @@ proc destroyWindowsFirewallRule*(op: PrivilegedOperation):
     result = applyWindowsFirewallRule(destroyOp)
   else:
     raiseNotImplementedPlatform("windows.firewallRule destroy")
+
+# ===========================================================================
+# os.timezone — `tzutil /g` / `tzutil /s <windowsName>` on Windows.
+#
+# The IANA -> Windows mapping lives in `os_system_parse.IanaToWindows
+# TzTable`; an unmapped IANA value is refused at the closed-set validator
+# (`operationValidationError`) so the driver only ever sees a mapped
+# value when it gets called. Defence-in-depth: the driver `psQuote`s the
+# Windows name as well.
+# ===========================================================================
+
+proc observeWindowsOsTimezone*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe the active Windows timezone via `tzutil /g`. The probe
+  ## returns the Windows-flavoured name (e.g. `FLE Standard Time`); we
+  ## reverse-map it to the canonical IANA digest so observe and apply
+  ## compare on the same scale. An unmapped Windows name (e.g. an
+  ## operator-installed custom zone) digests to the absent sentinel so
+  ## any apply against a known IANA value triggers a write.
+  when defined(windows):
+    let (output, _) = execCmdEx("tzutil /g")
+    let observedWin = parseTzutilOutput(output)
+    var observedIana = ""
+    if observedWin.len > 0:
+      for entry in IanaToWindowsTzTable:
+        if entry.windows == observedWin:
+          observedIana = entry.iana
+          break
+    result.present = observedIana.len > 0
+    result.digestHex =
+      if not result.present: ZeroDigestHex
+      else: digestHexOfText(canonicalTimezoneState(observedIana))
+  else:
+    raiseNotImplementedPlatform("os.timezone observe (Windows path)")
+
+proc applyWindowsOsTimezone*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Set the Windows timezone via `tzutil /s <windowsName>`. The
+  ## Windows name is looked up from the embedded mapping table at apply
+  ## time (the closed-set validator already gated on it). Post-apply
+  ## re-probe via `tzutil /g`.
+  when defined(windows):
+    let windowsName = lookupWindowsTimezoneName(op.tzIana)
+    if windowsName.len == 0:
+      raiseProtocol("os.timezone IANA name '" & op.tzIana &
+        "' is not in the embedded IANA -> Windows mapping table " &
+        "(should have been caught by operationValidationError)")
+    let cmd = "tzutil /s " & psQuote(windowsName)
+    let (output, code) = execCmdEx(cmd)
+    if code != 0:
+      raiseProtocol("os.timezone tzutil /s of '" & op.tzIana &
+        "' (Windows name '" & windowsName & "') failed: " &
+        output.strip())
+    # Post-apply re-probe.
+    let post = observeWindowsOsTimezone(op)
+    let desiredHex = digestHexOfText(canonicalTimezoneDesired(op.tzIana))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("os.timezone '" & op.tzIana &
+        "' post-apply observation disagrees with desired state. " &
+        "`tzutil /s` returned exit 0 but a re-probe via `tzutil /g` " &
+        "shows a different timezone — the driver fails closed.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("os.timezone apply (Windows path)")
+
+# ===========================================================================
+# os.hostname — `hostname` / `Rename-Computer` on Windows.
+#
+# `Rename-Computer` always requires a reboot to take effect; the driver
+# surfaces `RestartNeeded = true` in the post-apply observation and
+# NEVER auto-reboots. The observe path uses the `hostname` CLI (which
+# returns the current effective hostname, not the pending rename
+# target) so a cache-hit re-apply against the live hostname is a no-op.
+# ===========================================================================
+
+proc observeWindowsOsHostname*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe the current effective hostname via the `hostname` CLI.
+  when defined(windows):
+    let (output, code) = execCmdEx("hostname")
+    if code != 0:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let observed = parseHostnameOutput(output)
+    result.present = observed.len > 0
+    result.digestHex =
+      if not result.present: ZeroDigestHex
+      else: digestHexOfText(canonicalHostnameState(observed))
+  else:
+    raiseNotImplementedPlatform("os.hostname observe (Windows path)")
+
+proc applyWindowsOsHostname*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Rename the computer via `Rename-Computer -NewName <name> -Force`.
+  ## On success the host needs a reboot to finalize the change; the
+  ## driver surfaces `RestartNeeded = true` and the live `hostname`
+  ## still returns the OLD name until the reboot. The desired digest
+  ## therefore won't match the post-apply observation until after the
+  ## reboot — we accept that and surface RestartNeeded so the dispatch
+  ## layer reports a pending-reboot apply rather than failing closed.
+  when defined(windows):
+    let invocation =
+      "Rename-Computer -NewName " & psQuote(op.hostnameName) & " -Force"
+    let (output, code) = runPowerShell(wrapCmdletTerminating(invocation))
+    if code != 0:
+      raiseProtocol("os.hostname Rename-Computer to '" &
+        op.hostnameName & "' failed: " & output.strip())
+    # Post-apply re-probe. The new name is staged for the next reboot;
+    # the live `hostname` still reports the old one. Surface
+    # RestartNeeded so the operator knows to schedule the reboot. The
+    # digest reflects the LIVE (old) hostname so the dispatch layer's
+    # post-apply integrity check does not raise a spurious mismatch.
+    let post = observeWindowsOsHostname(op)
+    let desiredHex = digestHexOfText(canonicalHostnameDesired(op.hostnameName))
+    result = post
+    if post.digestHex != desiredHex:
+      result.restartNeeded = true
+  else:
+    raiseNotImplementedPlatform("os.hostname apply (Windows path)")
+

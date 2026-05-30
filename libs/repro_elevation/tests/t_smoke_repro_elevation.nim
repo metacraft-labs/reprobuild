@@ -989,3 +989,107 @@ LocalPort=22
     check $pokWindowsFirewallRule == "windows.firewallRule"
     check privilegedOperationKindFromString("windows.firewallRule") ==
       pokWindowsFirewallRule
+
+# ===========================================================================
+# os.timezone — pure parse + drift logic. The shell-out side of the
+# driver runs only on the resident host's platform; what runs everywhere
+# is the closed-set validator, the IANA -> Windows mapping table, the
+# canonical-state digest, and the tzutil / timedatectl / systemsetup
+# probe-output parsers.
+# ===========================================================================
+
+suite "repro_elevation: os.timezone pure surface":
+
+  test "isSafeIanaTimezone accepts the IANA charset":
+    check isSafeIanaTimezone("Europe/Sofia")
+    check isSafeIanaTimezone("America/Los_Angeles")
+    check isSafeIanaTimezone("Etc/GMT+10")
+    check isSafeIanaTimezone("Etc/GMT-5")
+    check isSafeIanaTimezone("America/Argentina/Buenos_Aires")
+    check not isSafeIanaTimezone("")
+    check not isSafeIanaTimezone("Europe/Sofia;rm")
+    check not isSafeIanaTimezone("$(whoami)")
+    check not isSafeIanaTimezone("Europe Sofia")    # space refused
+    check not isSafeIanaTimezone("Europe\\Sofia")   # backslash refused
+
+  test "lookupWindowsTimezoneName covers Europe/Sofia and other common zones":
+    check lookupWindowsTimezoneName("Europe/Sofia") == "FLE Standard Time"
+    check lookupWindowsTimezoneName("America/Los_Angeles") ==
+      "Pacific Standard Time"
+    check lookupWindowsTimezoneName("Asia/Tokyo") == "Tokyo Standard Time"
+    check lookupWindowsTimezoneName("UTC") == "UTC"
+    check lookupWindowsTimezoneName("Etc/UTC") == "UTC"
+    check lookupWindowsTimezoneName("Atlantis/Citadel") == ""
+
+  test "isMappedIanaTimezone gates the apply path":
+    check isMappedIanaTimezone("Europe/Sofia")
+    check isMappedIanaTimezone("UTC")
+    check not isMappedIanaTimezone("Atlantis/Citadel")
+    check not isMappedIanaTimezone("Europe/Sofia;rm")    # both unsafe + unmapped
+
+  test "operationValidationError accepts a valid os.timezone operation":
+    let ok = PrivilegedOperation(kind: pokOsTimezone,
+      address: "userTimezone",
+      tzIana: "Europe/Sofia")
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad os.timezone fields":
+    let empty = PrivilegedOperation(kind: pokOsTimezone,
+      address: "x", tzIana: "")
+    check operationValidationError(empty).len > 0
+    let unsafe = PrivilegedOperation(kind: pokOsTimezone,
+      address: "x", tzIana: "Europe/Sofia;rm -rf /")
+    check operationValidationError(unsafe).len > 0
+    let unmapped = PrivilegedOperation(kind: pokOsTimezone,
+      address: "x", tzIana: "Atlantis/Citadel")
+    check operationValidationError(unmapped).len > 0
+    let noAddress = PrivilegedOperation(kind: pokOsTimezone,
+      address: "", tzIana: "Europe/Sofia")
+    check operationValidationError(noAddress).len > 0
+
+  test "parseTzutilOutput strips whitespace and CR/LF":
+    check parseTzutilOutput("FLE Standard Time\r\n") == "FLE Standard Time"
+    check parseTzutilOutput("  Pacific Standard Time  \n") ==
+      "Pacific Standard Time"
+    check parseTzutilOutput("") == ""
+
+  test "parseTimedatectlOutput reads both --value and --property forms":
+    check parseTimedatectlOutput("Timezone=Europe/Sofia\n") ==
+      "Europe/Sofia"
+    check parseTimedatectlOutput(
+      "       Local time: Sat 2026-05-30 12:00:00 EEST\n" &
+      "  Universal time: Sat 2026-05-30 09:00:00 UTC\n" &
+      "        RTC time: Sat 2026-05-30 09:00:00\n" &
+      "       Time zone: Europe/Sofia (EEST, +0300)\n") == "Europe/Sofia"
+    check parseTimedatectlOutput("") == ""
+
+  test "parseEtcTimezone reads the IANA line, skipping comments":
+    check parseEtcTimezone("Europe/Sofia\n") == "Europe/Sofia"
+    check parseEtcTimezone("# comment\nEurope/Sofia\n") == "Europe/Sofia"
+    check parseEtcTimezone("\n\n  \nAmerica/Los_Angeles\n") ==
+      "America/Los_Angeles"
+    check parseEtcTimezone("") == ""
+
+  test "canonical timezone state and desired digests match for the same IANA":
+    check canonicalTimezoneState("Europe/Sofia") ==
+      canonicalTimezoneDesired("Europe/Sofia")
+    check canonicalTimezoneState("") == "timezone:absent"
+
+  test "RBEB Operation frame round-trips an os.timezone":
+    let op = PrivilegedOperation(kind: pokOsTimezone,
+      address: "userTimezone",
+      tzIana: "Europe/Sofia")
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let dec = decodeFrame(encodeOperation(wire))
+    check dec.messageType == rmtOperation
+    let w2 = decodeOperation(dec.body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokOsTimezone
+    check w2.operation.address == "userTimezone"
+    check w2.operation.tzIana == "Europe/Sofia"
+
+  test "os.timezone requires elevation":
+    check requiresElevation(pokOsTimezone)
+    check $pokOsTimezone == "os.timezone"
+    check privilegedOperationKindFromString("os.timezone") == pokOsTimezone

@@ -177,6 +177,16 @@ proc observeResource*(r: SystemResource): ResourceObservation =
     of srkFsSystemFile: observeFsSystemFile(op)
     of srkEnvSystemVariable: observeEnvSystemVariable(op)
     of srkPasswdUser: observePasswdUser(op)
+    of srkOsTimezone:
+      when defined(windows):
+        observeWindowsOsTimezone(op)
+      else:
+        observePosixOsTimezone(op)
+    of srkOsHostname:
+      when defined(windows):
+        observeWindowsOsHostname(op)
+      else:
+        observePosixOsHostname(op)
   result.present = obs.present
   result.observedDigestHex =
     if obs.present: obs.digestHex else: ZeroDigestHex
@@ -246,6 +256,10 @@ proc summaryLine(r: SystemResource; action: string): string =
   of srkPasswdUser:
     action & " user " & r.puName &
       (if r.puGroups.len > 0: " groups=" & $r.puGroups.len else: "")
+  of srkOsTimezone:
+    action & " timezone " & r.tzIana
+  of srkOsHostname:
+    action & " hostname " & r.hostnameName
 
 # ---------------------------------------------------------------------------
 # Resource dependency graph + topological sort (M82 Phase B).

@@ -331,6 +331,10 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     for g in op.puGroups:
       body.writeString(g)
     body.writeBool(op.puDestroy)
+  of pokOsTimezone:
+    body.writeString(op.tzIana)
+  of pokOsHostname:
+    body.writeString(op.hostnameName)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -474,6 +478,14 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     for _ in 0 ..< gCount:
       result.operation.puGroups.add(readString(body, pos))
     result.operation.puDestroy = readBool(body, pos, "puDestroy")
+  of pokOsTimezone:
+    result.operation = PrivilegedOperation(kind: pokOsTimezone,
+      address: address)
+    result.operation.tzIana = readString(body, pos)
+  of pokOsHostname:
+    result.operation = PrivilegedOperation(kind: pokOsHostname,
+      address: address)
+    result.operation.hostnameName = readString(body, pos)
 
 # ---- OperationResult -------------------------------------------------------
 

@@ -112,6 +112,39 @@ windows.firewallRule {
 }
 """)
 
+  test "parses an os.timezone stanza":
+    let text = """
+os.timezone {
+  tz = "Europe/Sofia"
+  address = "userTimezone"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkOsTimezone
+    check profile.resources[0].tzIana == "Europe/Sofia"
+    check profile.resources[0].address == "userTimezone"
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokOsTimezone
+    check op.tzIana == "Europe/Sofia"
+    check requiresElevation(op.kind)
+
+  test "os.timezone rejects an IANA name with shell metacharacters":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+os.timezone {
+  tz = "Europe/Sofia;rm"
+}
+""")
+
+  test "os.timezone rejects an unmapped IANA name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+os.timezone {
+  tz = "Atlantis/Citadel"
+}
+""")
+
   test "an HKCU registry key is rejected (home-scope, not system)":
     expect ESystemProfileInvalid:
       discard parseSystemProfile("""

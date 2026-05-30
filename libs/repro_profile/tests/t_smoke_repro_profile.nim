@@ -265,6 +265,22 @@ suite "Resource constructors":
     check target[0].fields["localPort"].s == "Any"
     check target[0].fields["enabled"].b == true
 
+  test "osTimezone records the IANA tz under the tz field":
+    var target: seq[ResourceIntent] = @[]
+    osTimezone(target,
+      tz = "Europe/Sofia",
+      address = "userTimezone")
+    check target.len == 1
+    check target[0].kind == "os.timezone"
+    check target[0].address == "userTimezone"
+    check target[0].fields["tz"].s == "Europe/Sofia"
+
+  test "osTimezone auto-addresses from the tz value when address is empty":
+    var target: seq[ResourceIntent] = @[]
+    osTimezone(target, tz = "America/Los_Angeles")
+    check target.len == 1
+    check target[0].address == "os.timezone:America/Los_Angeles"
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

@@ -52,6 +52,7 @@ import blake3
 import ./errors
 import ./fixture_driver
 import ./operations
+import ./os_system_parse
 import ./posix_system_parse
 
 when defined(linux) or defined(macosx):
@@ -124,6 +125,10 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(canonicalPasswdUserDesired(desiredStateOf(op)))
+  of pokOsTimezone:
+    posixDigestHexOfText(canonicalTimezoneDesired(op.tzIana))
+  of pokOsHostname:
+    posixDigestHexOfText(canonicalHostnameDesired(op.hostnameName))
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -813,3 +818,155 @@ proc applyPasswdUser*(op: PrivilegedOperation): ObservedOperationState =
     result.digestHex = observedHex
   else:
     raiseNotImplementedPlatform("passwd.user apply")
+
+# ===========================================================================
+# os.timezone — `timedatectl` (Linux) / `systemsetup` (macOS).
+#
+# The POSIX side passes the IANA name verbatim to the platform tool;
+# the IANA -> Windows mapping is a Windows-only concern. Observation
+# uses the `timedatectl show --property=Timezone` form (Linux) which
+# prints `Timezone=<iana>` deterministically; macOS uses
+# `systemsetup -gettimezone` which prints `Time Zone: <iana>`.
+# ===========================================================================
+
+proc observePosixOsTimezone*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe the current system timezone via the platform tool.
+  when defined(linux):
+    let (output, code) = execCmdEx(
+      "timedatectl show --property=Timezone --value")
+    if code != 0:
+      # Older systemd versions don't support `--value`; fall back to
+      # the labeled form. Also fall back to `/etc/timezone` for systems
+      # without timedatectl in PATH.
+      let (output2, code2) = execCmdEx(
+        "timedatectl show --property=Timezone")
+      var iana = ""
+      if code2 == 0:
+        iana = parseTimedatectlOutput(output2)
+      if iana.len == 0 and fileExists("/etc/timezone"):
+        try:
+          iana = parseEtcTimezone(readFile("/etc/timezone"))
+        except IOError:
+          discard
+      result.present = iana.len > 0
+      result.digestHex =
+        if not result.present: ZeroDigestHex
+        else: posixDigestHexOfText(canonicalTimezoneState(iana))
+      return
+    let iana = output.strip()
+    result.present = iana.len > 0
+    result.digestHex =
+      if not result.present: ZeroDigestHex
+      else: posixDigestHexOfText(canonicalTimezoneState(iana))
+  elif defined(macosx):
+    let (output, code) = execCmdEx("systemsetup -gettimezone")
+    if code != 0:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let iana = parseSystemsetupTimezoneOutput(output)
+    result.present = iana.len > 0
+    result.digestHex =
+      if not result.present: ZeroDigestHex
+      else: posixDigestHexOfText(canonicalTimezoneState(iana))
+  else:
+    raiseNotImplementedPlatform("os.timezone observe (POSIX path)")
+
+proc applyPosixOsTimezone*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Set the system timezone via `timedatectl set-timezone <iana>` on
+  ## Linux or `systemsetup -settimezone <iana>` on macOS. Post-apply
+  ## re-probe via the matching observation tool.
+  when defined(linux):
+    let cmd = "timedatectl set-timezone " & quoteShell(op.tzIana)
+    let (output, code) = execCmdEx(cmd)
+    if code != 0:
+      raiseProtocol("os.timezone timedatectl set-timezone to '" &
+        op.tzIana & "' failed: " & output.strip())
+    let post = observePosixOsTimezone(op)
+    let desiredHex = posixDigestHexOfText(canonicalTimezoneDesired(op.tzIana))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("os.timezone '" & op.tzIana &
+        "' post-apply observation disagrees with desired state. " &
+        "`timedatectl set-timezone` returned exit 0 but a re-probe " &
+        "shows a different timezone — the driver fails closed.")
+    result = post
+  elif defined(macosx):
+    let cmd = "systemsetup -settimezone " & quoteShell(op.tzIana)
+    let (output, code) = execCmdEx(cmd)
+    if code != 0:
+      raiseProtocol("os.timezone systemsetup -settimezone to '" &
+        op.tzIana & "' failed: " & output.strip())
+    let post = observePosixOsTimezone(op)
+    let desiredHex = posixDigestHexOfText(canonicalTimezoneDesired(op.tzIana))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("os.timezone '" & op.tzIana &
+        "' post-apply observation disagrees with desired state.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("os.timezone apply (POSIX path)")
+
+# ===========================================================================
+# os.hostname — `hostnamectl` (Linux) / `scutil` triple-set (macOS).
+# ===========================================================================
+
+proc observePosixOsHostname*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe the current hostname via the `hostname` CLI.
+  when defined(linux) or defined(macosx):
+    let (output, code) = execCmdEx("hostname")
+    if code != 0:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let name = parseHostnameOutput(output)
+    result.present = name.len > 0
+    result.digestHex =
+      if not result.present: ZeroDigestHex
+      else: posixDigestHexOfText(canonicalHostnameState(name))
+  else:
+    raiseNotImplementedPlatform("os.hostname observe (POSIX path)")
+
+proc applyPosixOsHostname*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Set the hostname. Linux: `hostnamectl set-hostname <name>` (takes
+  ## effect immediately, no reboot). macOS: the conventional triple of
+  ## `scutil --set ComputerName/HostName/LocalHostName` — without the
+  ## three sets, the rename is incomplete.
+  when defined(linux):
+    let cmd = "hostnamectl set-hostname " & quoteShell(op.hostnameName)
+    let (output, code) = execCmdEx(cmd)
+    if code != 0:
+      raiseProtocol("os.hostname hostnamectl set-hostname to '" &
+        op.hostnameName & "' failed: " & output.strip())
+    let post = observePosixOsHostname(op)
+    let desiredHex = posixDigestHexOfText(
+      canonicalHostnameDesired(op.hostnameName))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("os.hostname '" & op.hostnameName &
+        "' post-apply observation disagrees with desired state.")
+    result = post
+  elif defined(macosx):
+    let quoted = quoteShell(op.hostnameName)
+    let (out1, c1) = execCmdEx("scutil --set ComputerName " & quoted)
+    if c1 != 0:
+      raiseProtocol("os.hostname scutil --set ComputerName to '" &
+        op.hostnameName & "' failed: " & out1.strip())
+    let (out2, c2) = execCmdEx("scutil --set HostName " & quoted)
+    if c2 != 0:
+      raiseProtocol("os.hostname scutil --set HostName to '" &
+        op.hostnameName & "' failed: " & out2.strip())
+    let (out3, c3) = execCmdEx("scutil --set LocalHostName " & quoted)
+    if c3 != 0:
+      raiseProtocol("os.hostname scutil --set LocalHostName to '" &
+        op.hostnameName & "' failed: " & out3.strip())
+    let post = observePosixOsHostname(op)
+    let desiredHex = posixDigestHexOfText(
+      canonicalHostnameDesired(op.hostnameName))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("os.hostname '" & op.hostnameName &
+        "' post-apply observation disagrees with desired state.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("os.hostname apply (POSIX path)")

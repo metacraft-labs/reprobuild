@@ -175,6 +175,23 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       puHome: fieldString(r, "home"),
       puShell: fieldString(r, "shell"),
       puGroups: fieldList(r, "extraGroups"))
+  of "os.timezone":
+    let iana = fieldString(r, "tz")
+    if not isSafeIanaTimezone(iana):
+      raise newException(ValueError,
+        "os.timezone tz '" & iana &
+        "' contains characters outside the IANA charset")
+    if not isMappedIanaTimezone(iana):
+      raise newException(ValueError,
+        "os.timezone tz '" & iana &
+        "' is not in the embedded IANA -> Windows mapping table")
+    result = SystemResource(kind: srkOsTimezone, tzIana: iana)
+  of "os.hostname":
+    let h = fieldString(r, "hostname")
+    if not isSafeHostname(h):
+      raise newException(ValueError,
+        "os.hostname '" & h & "' is not a valid RFC 1123 hostname")
+    result = SystemResource(kind: srkOsHostname, hostnameName: h)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -198,7 +215,8 @@ proc isSystemScopeResource(kind: string): bool =
      "windows.firewallRule",
      "macos.systemDefault", "systemd.systemUnit",
      "launchd.systemDaemon", "fs.systemFile",
-     "env.systemVariable", "passwd.user":
+     "env.systemVariable", "passwd.user",
+     "os.timezone", "os.hostname":
     true
   else:
     false
@@ -361,5 +379,9 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       if r.puShell.len > 0:
         pairs.add(("shell", quoteSystemValue(r.puShell)))
       pairs.add(("groups", renderListLiteral(r.puGroups)))
+    of srkOsTimezone:
+      pairs.add(("tz", quoteSystemValue(r.tzIana)))
+    of srkOsHostname:
+      pairs.add(("hostname", quoteSystemValue(r.hostnameName)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

@@ -75,6 +75,7 @@ import repro_elevation/windows_vs_installer_parse
 import repro_elevation/windows_vs_installer_driver
 import repro_elevation/posix_system_parse
 import repro_elevation/posix_system_driver
+import repro_elevation/os_system_parse
 import repro_elevation/dispatch
 import repro_elevation/broker
 
@@ -93,5 +94,6 @@ export windows_vs_installer_parse
 export windows_vs_installer_driver
 export posix_system_parse
 export posix_system_driver
+export os_system_parse
 export dispatch
 export broker

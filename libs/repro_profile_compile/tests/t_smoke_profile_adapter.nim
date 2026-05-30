@@ -440,6 +440,36 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "os.timezone resource maps to srkOsTimezone":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("os.timezone", "userTimezone",
+      @[strFieldEntry("tz", "Europe/Sofia")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkOsTimezone
+    check sp.resources[0].tzIana == "Europe/Sofia"
+    check sp.resources[0].address == "userTimezone"
+
+  test "os.timezone rejects an unmapped IANA name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("os.timezone", "x",
+      @[strFieldEntry("tz", "Atlantis/Citadel")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips os.timezone":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("os.timezone", "",
+      @[strFieldEntry("tz", "Europe/Sofia")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkOsTimezone
+    check sp2.resources[0].tzIana == "Europe/Sofia"
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
   test "renderSystemProfileToText preserves depends_on edges":
     var intent = ProfileIntent(name: "sys")
     intent.resources.add(resourceIntent("windows.service", "",

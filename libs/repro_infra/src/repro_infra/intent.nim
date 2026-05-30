@@ -304,6 +304,10 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  shell = " & renderScalar(r.puShell))
     if r.puGroups.len > 0:
       result.add("  groups = " & renderList(r.puGroups))
+  of srkOsTimezone:
+    result.add("  tz = " & renderScalar(r.tzIana))
+  of srkOsHostname:
+    result.add("  hostname = " & renderScalar(r.hostnameName))
   # M82 Phase B: emit `depends_on` last so its presence is obvious in a
   # rendered stanza without disrupting the legacy kind-field order.
   # Absent / empty seq omits the line entirely (the common case), so

@@ -46,6 +46,8 @@ type
     srkFsSystemFile = "fs.systemFile"
     srkEnvSystemVariable = "env.systemVariable"
     srkPasswdUser = "passwd.user"
+    srkOsTimezone = "os.timezone"
+    srkOsHostname = "os.hostname"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -126,6 +128,10 @@ type
       puHome*: string
       puShell*: string
       puGroups*: seq[string]
+    of srkOsTimezone:
+      tzIana*: string
+    of srkOsHostname:
+      hostnameName*: string
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -160,6 +166,10 @@ proc realWorldIdentity*(r: SystemResource): string =
     "systemVariable:" & r.evName
   of srkPasswdUser:
     "user:" & r.puName
+  of srkOsTimezone:
+    "timezone:" & r.tzIana
+  of srkOsHostname:
+    "hostname:" & r.hostnameName
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -191,6 +201,8 @@ proc resourceName*(r: SystemResource): string =
   of srkFsSystemFile: r.sfPath
   of srkEnvSystemVariable: r.evName
   of srkPasswdUser: r.puName
+  of srkOsTimezone: r.tzIana
+  of srkOsHostname: r.hostnameName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -386,6 +398,8 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkFsSystemFile: srk = srkFsSystemFile
     of $srkEnvSystemVariable: srk = srkEnvSystemVariable
     of $srkPasswdUser: srk = srkPasswdUser
+    of $srkOsTimezone: srk = srkOsTimezone
+    of $srkOsHostname: srk = srkOsHostname
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -572,6 +586,25 @@ proc parseSystemProfile*(text: string): SystemProfile =
         puHome: (if "home" in fields: fields["home"] else: ""),
         puShell: (if "shell" in fields: fields["shell"] else: ""),
         puGroups: groups)
+    of srkOsTimezone:
+      let iana = need("tz")
+      if not isSafeIanaTimezone(iana):
+        raiseSystemProfileInvalid("os.timezone tz '" & iana &
+          "' contains characters outside the IANA charset (letters, " &
+          "digits, '/', '_', '-', '+', '.')")
+      if not isMappedIanaTimezone(iana):
+        raiseSystemProfileInvalid("os.timezone tz '" & iana &
+          "' is not in the embedded IANA -> Windows mapping table; " &
+          "add it to IanaToWindowsTzTable in os_system_parse.nim or " &
+          "use a mapped IANA name")
+      res = SystemResource(kind: srkOsTimezone, tzIana: iana)
+    of srkOsHostname:
+      let h = need("hostname")
+      if not isSafeHostname(h):
+        raiseSystemProfileInvalid("os.hostname '" & h &
+          "' is not a valid RFC 1123 hostname (letters, digits, '-' " &
+          "only; 1-63 octets; no leading/trailing '-')")
+      res = SystemResource(kind: srkOsHostname, hostnameName: h)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -676,6 +709,12 @@ proc toPrivilegedOperation*(r: SystemResource;
       puShell: r.puShell,
       puGroups: r.puGroups,
       puDestroy: destroy)
+  of srkOsTimezone:
+    PrivilegedOperation(kind: pokOsTimezone, address: r.address,
+      tzIana: r.tzIana)
+  of srkOsHostname:
+    PrivilegedOperation(kind: pokOsHostname, address: r.address,
+      hostnameName: r.hostnameName)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

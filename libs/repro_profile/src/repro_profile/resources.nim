@@ -370,3 +370,27 @@ template passwdUser*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("passwd.user", name)
     pushResource(targetResources, "passwd.user", addr0, fields,
       dependsOn)
+
+template osTimezone*(targetResources: var seq[ResourceIntent];
+                     tz: string;
+                     address: string = "";
+                     dependsOn: seq[string] = @[]) =
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["tz"] = strField(tz)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("os.timezone", tz)
+    pushResource(targetResources, "os.timezone", addr0, fields,
+      dependsOn)
+
+template osHostname*(targetResources: var seq[ResourceIntent];
+                     hostname: string;
+                     address: string = "";
+                     dependsOn: seq[string] = @[]) =
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["hostname"] = strField(hostname)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("os.hostname", hostname)
+    pushResource(targetResources, "os.hostname", addr0, fields,
+      dependsOn)

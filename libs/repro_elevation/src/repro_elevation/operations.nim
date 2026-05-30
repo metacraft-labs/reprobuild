@@ -20,6 +20,7 @@
 
 import std/[strutils]
 
+import ./os_system_parse
 import ./posix_system_parse
 import ./system_value
 
@@ -103,6 +104,22 @@ type
       ## remove a user account via `useradd` / `usermod` / `userdel`
       ## (Linux) or the macOS equivalent. The destroy direction is
       ## gated by `--accept-passwd-destroy`.
+    pokOsTimezone = "os.timezone"
+      ## The post-M83 cross-platform `os.timezone` operation: set the
+      ## system timezone via `tzutil /s <windowsName>` on Windows
+      ## (with an embedded IANA -> Windows mapping table),
+      ## `timedatectl set-timezone <iana>` on Linux, and
+      ## `systemsetup -settimezone <iana>` on macOS. The driver is
+      ## idempotent: a re-apply with an unchanged timezone is a
+      ## no-op via the canonical-state digest.
+    pokOsHostname = "os.hostname"
+      ## The post-M83 cross-platform `os.hostname` operation: set the
+      ## system hostname via `Rename-Computer -NewName <name> -Force`
+      ## on Windows (which surfaces `RestartNeeded` — Reprobuild does
+      ## NOT auto-reboot), `hostnamectl set-hostname <name>` on Linux,
+      ## and the triple `scutil --set ComputerName/HostName/Local
+      ## HostName` invocations on macOS. The driver is idempotent: a
+      ## re-apply with an unchanged hostname is a no-op.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -251,6 +268,20 @@ type
       puShell*: string
       puGroups*: seq[string]
       puDestroy*: bool
+    of pokOsTimezone:
+      ## Set the system timezone. `tzIana` is the IANA timezone name
+      ## (`Europe/Sofia`, `America/Los_Angeles`, ...). The Windows
+      ## driver maps the IANA name to a Windows timezone name via the
+      ## embedded `IanaToWindowsTzTable`; the POSIX drivers use the
+      ## IANA name directly. An unmapped IANA name fails closed at
+      ## validation time.
+      tzIana*: string
+    of pokOsHostname:
+      ## Set the system hostname. `hostnameName` is the desired
+      ## hostname (RFC 1123 charset). The driver does NOT auto-reboot
+      ## even when the host requests one; instead it surfaces
+      ## `RestartNeeded` so the operator can schedule the reboot.
+      hostnameName*: string
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -283,6 +314,8 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokFsSystemFile: true
   of pokEnvSystemVariable: true
   of pokPasswdUser: true
+  of pokOsTimezone: true
+  of pokOsHostname: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -307,6 +340,8 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokFsSystemFile: pokFsSystemFile
   of $pokEnvSystemVariable: pokEnvSystemVariable
   of $pokPasswdUser: pokPasswdUser
+  of $pokOsTimezone: pokOsTimezone
+  of $pokOsHostname: pokOsHostname
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -589,6 +624,32 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       if ch in {'/', ':', ' ', '\t', '\n'}:
         return "passwd.user name '" & op.puName &
           "' contains an invalid character"
+  of pokOsTimezone:
+    if op.tzIana.strip().len == 0:
+      return "os.timezone operation has an empty IANA timezone name"
+    if not isSafeIanaTimezone(op.tzIana):
+      return "os.timezone IANA name '" & op.tzIana &
+        "' contains characters outside the IANA charset (letters, " &
+        "digits, '/', '_', '-', '+', '.')"
+    # The Windows side maps IANA -> Windows name via the embedded
+    # table; fail-closed at validation time so an unmapped name never
+    # reaches `tzutil`. The POSIX side passes the IANA name verbatim
+    # to `timedatectl` / `systemsetup`, but those tools fail-closed
+    # on an unrecognized name so we accept any IANA-shaped string
+    # off-Windows. Defence-in-depth: also accept on Windows when the
+    # mapping table covers it.
+    if not isMappedIanaTimezone(op.tzIana):
+      return "os.timezone IANA name '" & op.tzIana &
+        "' is not in the embedded IANA -> Windows timezone mapping " &
+        "table; add it to IanaToWindowsTzTable in os_system_parse.nim " &
+        "or use a mapped IANA name"
+  of pokOsHostname:
+    if op.hostnameName.strip().len == 0:
+      return "os.hostname operation has an empty hostname"
+    if not isSafeHostname(op.hostnameName):
+      return "os.hostname '" & op.hostnameName &
+        "' is not a valid RFC 1123 hostname (letters, digits, '-' " &
+        "only; 1-63 octets; no leading/trailing '-')"
   return ""
 
 # ---------------------------------------------------------------------------

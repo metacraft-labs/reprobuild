@@ -69,6 +69,23 @@ suite "M83 Phase D: system apply round-trip via canonical text":
     check plan.envelope.operations.len == 1
     check plan.envelope.operations[0].kindTag == "windows.firewallRule"
 
+  test "os.timezone adapter -> text -> producePlan emits one op":
+    var intent = ProfileIntent(name: "phaseD-sys-timezone")
+    var f = initTable[string, FieldValue]()
+    f["tz"] = strField("Europe/Sofia")
+    intent.resources.add(ResourceIntent(kind: "os.timezone",
+      address: "userTimezone", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkOsTimezone
+    check sp.resources[0].tzIana == "Europe/Sofia"
+    let txt = renderSystemProfileToText(sp)
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].tzIana == "Europe/Sofia"
+    let plan = producePlan(txt, "phaseD-sys-host")
+    check plan.envelope.operations.len == 1
+    check plan.envelope.operations[0].kindTag == "os.timezone"
+
   test "multi-resource adapter -> text -> producePlan emits N operations":
     var intent = ProfileIntent(name: "phaseD-sys-smoke")
     block:
