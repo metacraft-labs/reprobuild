@@ -52,6 +52,15 @@ type
       ## `removeUnknown == true` it converges to STRICT declarative-
       ## set semantics (uninstall extras). An optional `@<version>`
       ## pin on a declared ID forces a specific marketplace version.
+    rkLinuxDconfKey = "linux.dconfKey"
+      ## M83 step 7 Driver A. Per-user GNOME-stack settings via the
+      ## `dconf` CLI (`~/.config/dconf/user`). Writes a single key
+      ## (`/org/gnome/...`) to a GVariant literal value (`'prefer-
+      ## dark'`, `true`, `42`, `['a', 'b']`). Content-addressed:
+      ## re-apply with unchanged value is a no-op via the BLAKE3
+      ## digest comparison. Destroy resets the key to its schema
+      ## default via `dconf reset`. Linux-only; raises
+      ## `ENotImplementedPlatform` on every other platform.
 
   SystemdUnitState* = enum
     ## M83 step 4b: desired runtime state for a `systemd.userUnit`.
@@ -229,6 +238,17 @@ type
         ## reflects the operator's intent. When `mode` is also
         ## present, `mode` wins (the driver applies `mode` and
         ## ignores `executable` beyond bookkeeping).
+    of rkLinuxDconfKey:
+      dconfKey*: string
+        ## Slash-prefixed dconf key path (e.g.
+        ## `/org/gnome/desktop/interface/color-scheme`). Validated at
+        ## parse time to start with `/`.
+      dconfValue*: string
+        ## GVariant textual literal — opaque to the driver. The
+        ## operator picks the form that matches the schema:
+        ## `'prefer-dark'` (string), `true`/`false` (bool), bare
+        ## decimal (int), `['a', 'b']` (array). The driver writes it
+        ## verbatim via `dconf write`.
     of rkVscodeExtension:
       vscodeExtensions*: seq[string]
         ## Declared marketplace extension IDs, optionally with a
@@ -346,6 +366,7 @@ proc resourceKindFromString*(s: string): ResourceKind =
   of $rkLaunchdUserAgent: rkLaunchdUserAgent
   of $rkFsUserFile: rkFsUserFile
   of $rkVscodeExtension: rkVscodeExtension
+  of $rkLinuxDconfKey: rkLinuxDconfKey
   else:
     raise newException(ValueError,
       "unknown resource kind tag: '" & s & "'")
@@ -482,3 +503,9 @@ proc realWorldIdentity*(r: Resource): string =
     # more than once (which it should not — a closed-set parser-time
     # check guards against that).
     return "vscode:extensions"
+  of rkLinuxDconfKey:
+    # The dconf key path (slash-prefixed) is globally unique within
+    # the per-user dconf database. The `dconf:` prefix scopes the
+    # identity namespace so it cannot collide with the other home-
+    # scope kinds' identities.
+    return "dconf:" & r.dconfKey

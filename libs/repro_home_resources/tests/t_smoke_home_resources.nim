@@ -1194,3 +1194,192 @@ vscodevim.vim@1.27.0
 
   test "resourceKindFromString covers vscode.extension":
     check resourceKindFromString("vscode.extension") == rkVscodeExtension
+
+# ===========================================================================
+# M83 step 7 Driver A: linux.dconfKey — GNOME-stack dconf settings.
+# Pure-logic + lifecycle + platform-guard tests. The shell-out to
+# `dconf write/read/reset` only runs on Linux, but the canonical-bytes
+# helper, the digest derivation, the realWorldIdentity derivation, the
+# resource-kind round-trip and the off-Linux fail-closed gate are all
+# cross-platform.
+# ===========================================================================
+
+suite "M83 step 7: linux.dconfKey driver":
+
+  test "canonicalDconfBytes: encodes the literal verbatim":
+    let bytes = canonicalDconfBytes("'prefer-dark'")
+    check bytes.len == "'prefer-dark'".len
+    var s = ""
+    for b in bytes: s.add(char(b))
+    check s == "'prefer-dark'"
+
+  test "canonicalDconfBytes: empty literal yields empty bytes":
+    let bytes = canonicalDconfBytes("")
+    check bytes.len == 0
+
+  test "canonicalDconfBytes: GVariant array literal passes through":
+    let lit = "['a.desktop', 'b.desktop']"
+    let bytes = canonicalDconfBytes(lit)
+    var s = ""
+    for b in bytes: s.add(char(b))
+    check s == lit
+
+  test "digestOfResource: linux.dconfKey digests the value verbatim":
+    let r = Resource(kind: rkLinuxDconfKey, address: "dc:digest",
+      lifecyclePolicy: lpDefault,
+      dconfKey: "/org/gnome/desktop/interface/color-scheme",
+      dconfValue: "'prefer-dark'")
+    let expected = digestOfBytes(canonicalDconfBytes(r.dconfValue))
+    check digestOfResource(r) == expected
+
+  test "digestOfResource: dconf value change flips the digest":
+    var r = Resource(kind: rkLinuxDconfKey, address: "dc:flip",
+      lifecyclePolicy: lpDefault,
+      dconfKey: "/org/gnome/desktop/interface/color-scheme",
+      dconfValue: "'prefer-dark'")
+    let before = digestOfResource(r)
+    r.dconfValue = "'prefer-light'"
+    let after = digestOfResource(r)
+    check before != after
+
+  test "digestOfResource: dconf KEY change leaves the digest unchanged":
+    # The KEY is part of the resource IDENTITY (realWorldIdentity)
+    # not the digest input — two `linux.dconfKey` resources writing
+    # the same value to different keys have the same digest but
+    # different identities, and so are distinct resources.
+    var r1 = Resource(kind: rkLinuxDconfKey, address: "dc:k1",
+      lifecyclePolicy: lpDefault,
+      dconfKey: "/org/gnome/desktop/interface/color-scheme",
+      dconfValue: "'prefer-dark'")
+    var r2 = Resource(kind: rkLinuxDconfKey, address: "dc:k2",
+      lifecyclePolicy: lpDefault,
+      dconfKey: "/org/gnome/desktop/interface/font-name",
+      dconfValue: "'prefer-dark'")
+    check digestOfResource(r1) == digestOfResource(r2)
+    check realWorldIdentity(r1) != realWorldIdentity(r2)
+
+  test "realWorldIdentity: dconf:<key>":
+    let r = Resource(kind: rkLinuxDconfKey, address: "dc:id",
+      lifecyclePolicy: lpDefault,
+      dconfKey: "/org/gnome/desktop/interface/color-scheme",
+      dconfValue: "'prefer-dark'")
+    check realWorldIdentity(r) ==
+      "dconf:/org/gnome/desktop/interface/color-scheme"
+
+  test "resourceKindFromString covers linux.dconfKey":
+    check resourceKindFromString("linux.dconfKey") == rkLinuxDconfKey
+
+  test "lifecycle: no-op when desired matches observed":
+    let desired = Resource(kind: rkLinuxDconfKey, address: "dc:noop",
+      lifecyclePolicy: lpDefault,
+      dconfKey: "/org/gnome/desktop/interface/color-scheme",
+      dconfValue: "'prefer-dark'")
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfResource(desired)
+    let action = decideAction(state)
+    check action.kind == rakNoOp
+    check action.resourceKind == rkLinuxDconfKey
+
+  test "lifecycle: create when absent":
+    let desired = Resource(kind: rkLinuxDconfKey, address: "dc:create",
+      lifecyclePolicy: lpDefault,
+      dconfKey: "/org/gnome/desktop/interface/color-scheme",
+      dconfValue: "'prefer-dark'")
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = false
+    let action = decideAction(state)
+    check action.kind == rakCreate
+    check action.resourceKind == rkLinuxDconfKey
+
+  test "lifecycle: value flip plans update on prior generation":
+    var desired = Resource(kind: rkLinuxDconfKey, address: "dc:update",
+      lifecyclePolicy: lpDefault,
+      dconfKey: "/org/gnome/desktop/interface/color-scheme",
+      dconfValue: "'prefer-light'")
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    let observedDigest = digestOfBytes(canonicalDconfBytes("'prefer-dark'"))
+    state.observed.digest = observedDigest
+    state.hasRecorded = true
+    state.recorded.kind = rkLinuxDconfKey
+    state.recorded.postWriteDigest = observedDigest
+    let action = decideAction(state)
+    check action.kind == rakUpdate
+
+  test "phase-B: linux.dconfKey raises ENotImplementedPlatform off-Linux":
+    when not defined(linux):
+      expect ENotImplementedPlatform:
+        discard applyDconfKey(
+          "/org/gnome/desktop/interface/color-scheme",
+          "'prefer-dark'")
+      try:
+        discard applyDconfKey(
+          "/org/gnome/desktop/interface/color-scheme",
+          "'prefer-dark'")
+        check false  # unreachable
+      except ENotImplementedPlatform as e:
+        check e.resourceKind == "linux.dconfKey"
+        check e.requiredPlatform == "linux"
+        check e.currentPlatform != "linux"
+    else:
+      skip()
+
+  test "phase-B: observeDconfKey raises ENotImplementedPlatform off-Linux":
+    when not defined(linux):
+      expect ENotImplementedPlatform:
+        discard observeDconfKey(
+          "/org/gnome/desktop/interface/color-scheme")
+    else:
+      skip()
+
+  test "phase-B: destroyDconfKey raises ENotImplementedPlatform off-Linux":
+    when not defined(linux):
+      expect ENotImplementedPlatform:
+        destroyDconfKey(
+          "/org/gnome/desktop/interface/color-scheme")
+    else:
+      skip()
+
+  test "resourceValidationError: clean dconf resource passes":
+    check resourceValidationError(Resource(kind: rkLinuxDconfKey,
+      address: "dc:ok",
+      dconfKey: "/org/gnome/desktop/interface/color-scheme",
+      dconfValue: "'prefer-dark'")) == ""
+    # `/` in the key is legitimate.
+    check resourceValidationError(Resource(kind: rkLinuxDconfKey,
+      address: "dc:slashes",
+      dconfKey: "/org/gnome/shell/favorite-apps",
+      dconfValue: "['a.desktop', 'b.desktop']")) == ""
+
+  test "resourceValidationError: rejects missing slash prefix":
+    let err = resourceValidationError(Resource(kind: rkLinuxDconfKey,
+      address: "dc:noslash",
+      dconfKey: "org/gnome/desktop/interface/color-scheme",
+      dconfValue: "'prefer-dark'"))
+    check err.len > 0
+    check err.contains("slash-prefixed")
+
+  test "resourceValidationError: rejects empty key":
+    let err = resourceValidationError(Resource(kind: rkLinuxDconfKey,
+      address: "dc:empty", dconfKey: "",
+      dconfValue: "'prefer-dark'"))
+    check err.len > 0
+    check err.contains("empty")
+
+  test "resourceValidationError: rejects metacharacter in key":
+    for c in [";", "&", "|", "$", "`", " ", "\n", "\""]:
+      let err = resourceValidationError(Resource(kind: rkLinuxDconfKey,
+        address: "dc:evil",
+        dconfKey: "/org/gnome/x" & c & "evil",
+        dconfValue: "'x'"))
+      check err.len > 0

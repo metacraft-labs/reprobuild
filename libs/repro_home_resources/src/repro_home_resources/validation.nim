@@ -165,6 +165,23 @@ proc resourceValidationError*(r: Resource): string =
     if '/' in r.unitName:
       return "systemd.userUnit name '" & r.unitName &
         "' must be a single path segment (no '/')"
+  of rkLinuxDconfKey:
+    # The dconf key path LEGITIMATELY contains `/` (it is a path
+    # like `/org/gnome/desktop/interface/color-scheme`) but no
+    # shell metacharacter belongs in it — `hasShellMetacharacter`
+    # rejects every metacharacter and whitespace, and `/` is not
+    # one (consistent with `linux.gsettings.path`).
+    if r.dconfKey.len == 0:
+      return "linux.dconfKey resource '" & r.address &
+        "' has an empty key"
+    if not r.dconfKey.startsWith("/"):
+      return "linux.dconfKey key '" & r.dconfKey &
+        "' must be slash-prefixed (e.g. '/org/gnome/...')"
+    if hasShellMetacharacter(r.dconfKey):
+      return "linux.dconfKey key '" & r.dconfKey &
+        "' contains a shell metacharacter or whitespace"
+    # `dconfValue` is an opaque GVariant literal — quoted at
+    # `quoteShell` layer 2; not validated here.
   else:
     # Win32-API / pure-file-I/O drivers — no shell-out, nothing to
     # validate here.

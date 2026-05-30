@@ -28,6 +28,7 @@ import std/[strutils]
 
 import repro_home_generations
 
+import ./drivers/dconf_key
 import ./drivers/defaults
 import ./drivers/launchd_user
 import ./drivers/systemd_user
@@ -190,6 +191,12 @@ proc digestOfResource*(desired: Resource): Digest256 =
     for i, ch in canon:
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
+  of rkLinuxDconfKey:
+    # dconf is content-addressed; the digest covers the GVariant
+    # literal verbatim. `observeDconfKey` digests the same bytes
+    # (after stripping the trailing newline `dconf read` adds), so
+    # a cache-hit re-apply compares equal.
+    return digestOfBytes(canonicalDconfBytes(desired.dconfValue))
 
 proc summarize*(action: ResourceActionKind; address: string;
                 kind: ResourceKind): string =

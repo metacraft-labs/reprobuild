@@ -326,6 +326,37 @@ suite "M83 Phase D: home adapter — resources":
         keepAliveSrc = a.resourceAttrValueSource
     check keepAliveSrc == "true"
 
+  test "M83 step 7: linux.dconfKey resource carries key + value":
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("linux.dconfKey", "dc",
+      @[strFieldEntry("key",
+          "/org/gnome/desktop/interface/color-scheme"),
+        strFieldEntry("value", "'prefer-dark'")]))
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    let e = findResourcesBlock(prof).get.resourcesEntries[0]
+    check e.resourceKind == "linux.dconfKey"
+    var attrKeys: seq[string]
+    for a in e.resourceAttrs:
+      attrKeys.add(a.resourceAttrKey)
+    check "key" in attrKeys
+    check "value" in attrKeys
+
+  test "M83 step 7: linux.dconfKey value attribute renders quoted":
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("linux.dconfKey", "dc",
+      @[strFieldEntry("key",
+          "/org/gnome/desktop/interface/color-scheme"),
+        strFieldEntry("value", "'prefer-dark'")]))
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    let e = findResourcesBlock(prof).get.resourcesEntries[0]
+    var valueSrc = ""
+    for a in e.resourceAttrs:
+      if a.resourceAttrKey == "value":
+        valueSrc = a.resourceAttrValueSource
+    # The double-quoted source carries the GVariant single-quoted
+    # literal verbatim (with `'` escaped on Nim's side as needed).
+    check valueSrc == "\"'prefer-dark'\""
+
   test "vscode.extension resource carries extensions + removeUnknown":
     var intent = ProfileIntent(name: "demo")
     intent.resources.add(resourceIntent("vscode.extension", "vsExt",
@@ -1121,9 +1152,14 @@ suite "M83 Phase D: home adapter round-trip via attribute readback":
         listFieldEntry("programArgs", @["/usr/bin/true"]),
         boolFieldEntry("runAtLoad", true),
         boolFieldEntry("keepAlive", false)]))
+    # M83 step 7 Driver A: linux.dconfKey is home-scope.
+    intent.resources.add(resourceIntent("linux.dconfKey", "dc",
+      @[strFieldEntry("key",
+          "/org/gnome/desktop/interface/color-scheme"),
+        strFieldEntry("value", "'prefer-dark'")]))
     let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
     let entries = findResourcesBlock(prof).get.resourcesEntries
-    check entries.len == 9
+    check entries.len == 10
     var kinds: seq[string]
     for e in entries:
       kinds.add(e.resourceKind)
@@ -1137,3 +1173,4 @@ suite "M83 Phase D: home adapter round-trip via attribute readback":
     check "fs.userFile" in kinds
     check "systemd.userUnit" in kinds
     check "launchd.userAgent" in kinds
+    check "linux.dconfKey" in kinds

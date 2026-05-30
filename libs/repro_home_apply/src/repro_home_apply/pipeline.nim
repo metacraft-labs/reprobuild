@@ -552,6 +552,17 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
         launchdRunAtLoad: parts[1] == "1",
         launchdPlistContent: parts[2])
       result.add(r)
+    of "dconfkey":
+      # dconfkey:<address>:<key>;<value>
+      # M83 step 7 Driver A test-seam form. The Linux-only driver
+      # raises ENotImplementedPlatform off-Linux when reconciled.
+      let parts = payload.split(';')
+      if parts.len < 2: continue
+      let r = Resource(kind: rkLinuxDconfKey, address: address,
+        lifecyclePolicy: resourcePolicy,
+        dconfKey: parts[0],
+        dconfValue: parts[1])
+      result.add(r)
     else: discard
 
 # ---------------------------------------------------------------------------
@@ -860,6 +871,30 @@ proc resourceFromEntry(profilePath, homeDir: string;
       lifecyclePolicy: lpDefault,
       vscodeExtensions: exts,
       vscodeRemoveUnknown: removeUnknown)
+  of "linux.dconfKey":
+    # M83 step 7 Driver A — GNOME-stack settings via the `dconf` CLI.
+    # Closed-set attribute validation: `key`, `value`, plus the
+    # cross-kind `depends_on`. An unknown key surfaces as
+    # `EUnstructured`.
+    const dconfKeyAllowedKeys = ["key", "value", "depends_on"]
+    for a in entry.resourceAttrs:
+      if a.kind == nkResourceAttr and
+         a.resourceAttrKey notin dconfKeyAllowedKeys:
+        resourceProfileError(profilePath, a.resourceAttrLine,
+          "resource `linux.dconfKey " & address &
+          "` has unknown attribute `" & a.resourceAttrKey &
+          "`; expected one of: " & dconfKeyAllowedKeys.join(", "))
+    let key = requireAttr(profilePath, entry, "key")
+    if not key.startsWith("/"):
+      resourceProfileError(profilePath, entry.resourceHeaderLine,
+        "resource `linux.dconfKey " & address &
+        "` key `" & key &
+        "` must be slash-prefixed (e.g. `/org/gnome/...`)")
+    let value = requireAttr(profilePath, entry, "value")
+    result = Resource(kind: rkLinuxDconfKey, address: address,
+      lifecyclePolicy: lpDefault,
+      dconfKey: key,
+      dconfValue: value)
   else:
     # The parser already rejects unknown kinds; this is a defensive
     # guard for any kind added to the model but not wired here.
@@ -978,6 +1013,11 @@ proc resourceSeedString*(desired: DesiredSet): string =
       sortedExts.sort()
       result.add(sortedExts.join(",") & "\x1e" &
         (if r.vscodeRemoveUnknown: "1" else: "0"))
+    of rkLinuxDconfKey:
+      # M83 step 7 Driver A. The dconf key + value uniquely
+      # identifies the desired state; both go into the seed so a
+      # change in either bumps the generation id.
+      result.add(r.dconfKey & "\x1e" & r.dconfValue)
     result.add('\x1d')
 
 proc composeDesiredResources*(profile: Profile; homeDir, host: string):
@@ -1276,6 +1316,12 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
         if line.len > 0:
           declared.add(line)
         live = observeVscodeExtensions(declared, false)
+      of rkLinuxDconfKey:
+        # `realWorldIdentity` for `linux.dconfKey` is `dconf:<key>`.
+        const dcPrefix = "dconf:"
+        if rb.realWorldIdentity.startsWith(dcPrefix):
+          live = observeDconfKey(
+            rb.realWorldIdentity[dcPrefix.len .. ^1])
     except CatchableError:
       return false
     if not live.present:
@@ -2070,6 +2116,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               of rkLaunchdUserAgent: "plist-content"
               of rkFsUserFile: "user-file"
               of rkVscodeExtension: "vscode-extensions"
+              of rkLinuxDconfKey: "gvariant-literal"
             rb = toResourceBinding(action.address, desired.kind,
               identity, observed, observed.rawBytes,
               adoptPayloadKind, desired.lifecyclePolicy)
@@ -2201,6 +2248,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             postWriteBytes = applyVscodeExtensions(
               desired.vscodeExtensions, desired.vscodeRemoveUnknown)
             payloadKindStr = "vscode-extensions"
+          of rkLinuxDconfKey:
+            # M83 step 7 Driver A. Phase B driver: re-raises
+            # ENotImplementedPlatform off-Linux.
+            postWriteBytes = applyDconfKey(desired.dconfKey,
+              desired.dconfValue)
+            payloadKindStr = "gvariant-literal"
           let rb = toResourceBinding(action.address, desired.kind,
             identity, preWrite, postWriteBytes, payloadKindStr,
             desired.lifecyclePolicy)
@@ -2272,6 +2325,14 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             if prev.resourceId.startsWith(lcPrefix):
               destroyLaunchAgent(opts.homeDir,
                 prev.resourceId[lcPrefix.len .. ^1])
+          of rkLinuxDconfKey:
+            # M83 step 7 Driver A. Phase B driver: re-raises
+            # ENotImplementedPlatform off-Linux. The destroy direction
+            # resets the dconf key to its schema default.
+            preWrite = observeRecorded(action.address, prev)
+            const dcPrefix = "dconf:"
+            if prev.resourceId.startsWith(dcPrefix):
+              destroyDconfKey(prev.resourceId[dcPrefix.len .. ^1])
           of rkFsUserFile:
             # `resourceId` is the resolved host path verbatim. The
             # destroy direction deletes the file; the pre-write

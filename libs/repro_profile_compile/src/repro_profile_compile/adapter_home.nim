@@ -229,7 +229,8 @@ proc isHomeScopeResource(kind: string): bool =
   of "env.userPath", "env.userVariable", "fs.managedBlock",
      "shell.integration", "windows.registryValueHKCU",
      "windows.startup", "fs.userFile", "vscode.extension",
-     "systemd.userUnit", "launchd.userAgent":
+     "systemd.userUnit", "launchd.userAgent",
+     "linux.dconfKey":
     true
   else:
     false

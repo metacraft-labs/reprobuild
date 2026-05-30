@@ -633,6 +633,37 @@ suite "Resource constructors":
     check target[0].dependsOn[0].kind == "fs.userFile"
     check target[0].dependsOn[0].name == "~/.config/foo"
 
+  test "M83 step 7: linuxDconfKey records key + value":
+    var target: seq[ResourceIntent] = @[]
+    linuxDconfKey(target,
+      key = "/org/gnome/desktop/interface/color-scheme",
+      value = "'prefer-dark'")
+    check target.len == 1
+    check target[0].kind == "linux.dconfKey"
+    check target[0].address ==
+      "linux.dconfKey:/org/gnome/desktop/interface/color-scheme"
+    check target[0].fields["key"].s ==
+      "/org/gnome/desktop/interface/color-scheme"
+    check target[0].fields["value"].s == "'prefer-dark'"
+
+  test "M83 step 7: linuxDconfKey honours explicit address":
+    var target: seq[ResourceIntent] = @[]
+    linuxDconfKey(target,
+      key = "/org/gnome/desktop/interface/color-scheme",
+      value = "'prefer-dark'",
+      address = "gnome-color-scheme")
+    check target[0].address == "gnome-color-scheme"
+
+  test "M83 step 7: linuxDconfKey dependsOn parses into ResourceAddress":
+    var target: seq[ResourceIntent] = @[]
+    linuxDconfKey(target,
+      key = "/org/gnome/desktop/interface/color-scheme",
+      value = "'prefer-dark'",
+      dependsOn = @["env.userVariable:GTK_THEME"])
+    check target[0].dependsOn.len == 1
+    check target[0].dependsOn[0].kind == "env.userVariable"
+    check target[0].dependsOn[0].name == "GTK_THEME"
+
   test "fsSystemFile":
     var target: seq[ResourceIntent] = @[]
     fsSystemFile(target, path = "/etc/hosts.d/local",

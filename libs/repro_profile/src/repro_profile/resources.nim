@@ -200,6 +200,31 @@ template systemdUserUnit*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "systemd.userUnit", addr0, fields,
       dependsOn)
 
+template linuxDconfKey*(targetResources: var seq[ResourceIntent];
+                        key: string;
+                        value: string;
+                        address: string = "";
+                        dependsOn: seq[string] = @[]) =
+  ## M83 step 7 Driver A — Linux GNOME-stack settings via the `dconf`
+  ## CLI (`~/.config/dconf/user`).
+  ##
+  ## `key` is a slash-prefixed dconf key path
+  ## (`/org/gnome/desktop/interface/color-scheme`); `value` is a
+  ## GVariant textual literal — the operator is responsible for
+  ## the GVariant shape (`'prefer-dark'` for strings, `true`/`false`
+  ## for bools, bare decimals for ints, `['a', 'b']` for arrays).
+  ## The driver writes the literal verbatim via `dconf write`.
+  ##
+  ## Address default: `linux.dconfKey:<key>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["key"] = strField(key)
+    fields["value"] = strField(value)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.dconfKey", key)
+    pushResource(targetResources, "linux.dconfKey", addr0, fields,
+      dependsOn)
+
 template launchdUserAgent*(targetResources: var seq[ResourceIntent];
                            label: string;
                            programArgs: seq[string];

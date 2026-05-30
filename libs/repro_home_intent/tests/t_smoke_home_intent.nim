@@ -404,3 +404,50 @@ profile "x":
     writeFile(extendedPath(path), src)
     expect EUnstructured:
       discard loadProfile(path)
+
+  # ---------------------------------------------------------------------
+  # M83 step 7 Driver A: linux.dconfKey resource-kind acceptance —
+  # parser accepts the minimal stanza and rejects a typo'd variant.
+  # The Linux-only apply path is exercised separately (smoke tests in
+  # repro_home_resources); the parser is host-agnostic.
+  # ---------------------------------------------------------------------
+
+  test "linux.dconfKey: parser accepts a minimal stanza":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    linux.dconfKey colorScheme:
+      key = "/org/gnome/desktop/interface/color-scheme"
+      value = "'prefer-dark'"
+"""
+    let dir = createTempDir("repro-home-dconf-accept-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    let prof = loadProfile(path)
+    check prof.root.kind == nkProfileRoot
+
+  test "linux.dconfKey: parser rejects a typo'd kind":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    linux.dconfKeys bad:
+      key = "/org/gnome/x"
+      value = "'x'"
+"""
+    let dir = createTempDir("repro-home-dconf-typo-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    expect EUnstructured:
+      discard loadProfile(path)

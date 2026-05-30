@@ -22,6 +22,7 @@
 
 import std/[os, strutils, tables]
 
+import ./drivers/dconf_key
 import ./drivers/defaults
 import ./drivers/env_user
 import ./drivers/gsettings
@@ -108,6 +109,8 @@ proc observeResource*(r: Resource): ObservedState =
     return observeUserFile(r.userFileHostPath)
   of rkVscodeExtension:
     return observeVscodeExtensions(r.vscodeExtensions, r.vscodeRemoveUnknown)
+  of rkLinuxDconfKey:
+    return observeDconfKey(r.dconfKey)
 
 proc observeRecorded*(address: string; binding: RecordedBinding):
     ObservedState =
@@ -188,6 +191,13 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
     # against an empty desired digest). A subsequent destroy
     # uninstalls every declared extension via the binding's payload.
     return observeVscodeExtensions(@[], false)
+  of rkLinuxDconfKey:
+    # The resourceId is `dconf:<key>`. Strip the prefix and re-probe.
+    const prefix = "dconf:"
+    if binding.resourceId.startsWith(prefix):
+      return observeDconfKey(binding.resourceId[prefix.len .. ^1])
+    result.present = false
+    result.digest = zeroDigest()
   discard address
 
 # ---------------------------------------------------------------------------

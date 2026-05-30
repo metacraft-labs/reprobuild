@@ -36,6 +36,7 @@ import repro_home_resources/drivers/managed_block
 import repro_home_resources/drivers/registry
 import repro_home_resources/drivers/shell_integration
 import repro_home_resources/drivers/windows_startup
+import repro_home_resources/drivers/dconf_key
 import repro_home_resources/drivers/defaults
 import repro_home_resources/drivers/gsettings
 import repro_home_resources/drivers/launchd_user
@@ -54,6 +55,7 @@ export managed_block
 export registry
 export shell_integration
 export windows_startup
+export dconf_key
 export defaults
 export gsettings
 export launchd_user
