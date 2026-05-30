@@ -982,7 +982,15 @@ proc applyWindowsOsTimezone*(op: PrivilegedOperation):
       raiseProtocol("os.timezone IANA name '" & op.tzIana &
         "' is not in the embedded IANA -> Windows mapping table " &
         "(should have been caught by operationValidationError)")
-    let cmd = "tzutil /s " & psQuote(windowsName)
+    # `tzutil` is a plain Windows console tool, NOT a PowerShell
+    # cmdlet — it parses argv via the standard cmd-shell rules where
+    # single quotes are LITERAL characters and double quotes are the
+    # only argument-quoting mechanism. `psQuote` would emit a value
+    # like `'FLE Standard Time'`, which tzutil sees as three separate
+    # arguments and rejects with `TZUTIL: Invalid number of arguments
+    # for /s`. Use `quoteShell` (double-quote semantics) so the
+    # multi-word Windows tz name reaches tzutil as ONE argument.
+    let cmd = "tzutil /s " & quoteShell(windowsName)
     let (output, code) = execCmdEx(cmd)
     if code != 0:
       raiseProtocol("os.timezone tzutil /s of '" & op.tzIana &
