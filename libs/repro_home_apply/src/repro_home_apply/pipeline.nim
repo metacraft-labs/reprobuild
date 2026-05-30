@@ -779,12 +779,14 @@ proc resourceFromEntry(profilePath, homeDir: string;
       startupCommand: requireAttr(profilePath, entry, "command"))
   of "fs.userFile":
     # Closed-set attribute validation: `fs.userFile` accepts exactly
-    # `hostFile`, `content`, `mode`, `executable`, plus the
-    # cross-kind `depends_on`. An unknown key is refused so a typo
-    # ("modee", "execable") never silently degrades to its default —
-    # it surfaces as `EUnstructured` naming the offending key.
-    const userFileAllowedKeys = ["hostFile", "content", "mode",
-      "executable", "depends_on"]
+    # `hostFile`, `content`, `contentFromCommand`, `mode`,
+    # `executable`, `cacheKey`, plus the cross-kind `depends_on`. An
+    # unknown key is refused so a typo ("modee", "execable") never
+    # silently degrades to its default — it surfaces as
+    # `EUnstructured` naming the offending key.
+    const userFileAllowedKeys = ["hostFile", "content",
+      "contentFromCommand", "mode", "executable", "cacheKey",
+      "depends_on"]
     for a in entry.resourceAttrs:
       if a.kind == nkResourceAttr and a.resourceAttrKey notin userFileAllowedKeys:
         resourceProfileError(profilePath, a.resourceAttrLine,
@@ -802,7 +804,49 @@ proc resourceFromEntry(profilePath, homeDir: string;
       hostFile = homeDir & hostFile["${HOME}".len .. ^1]
     elif hostFile.startsWith("${USERPROFILE}"):
       hostFile = homeDir & hostFile["${USERPROFILE}".len .. ^1]
-    let content = requireAttr(profilePath, entry, "content")
+    # M83 step 10: `content` + `contentFromCommand` are mutually
+    # exclusive; exactly one MUST be set. Both empty is rejected
+    # (a literal-empty file is expressible by setting `content =
+    # ""` explicitly — that's the only attr-present case). Both
+    # set is rejected because the apply path could only honor one
+    # of them — silently picking either would mask an operator
+    # error.
+    let hasContent = hasAttr(entry, "content")
+    let hasCmd = hasAttr(entry, "contentFromCommand")
+    if hasContent and hasCmd:
+      resourceProfileError(profilePath, entry.resourceHeaderLine,
+        "resource `fs.userFile " & address &
+        "` has both `content` and `contentFromCommand` set; the two " &
+        "are mutually exclusive (set exactly one)")
+    if not hasContent and not hasCmd:
+      resourceProfileError(profilePath, entry.resourceHeaderLine,
+        "resource `fs.userFile " & address &
+        "` has neither `content` nor `contentFromCommand` set; one of " &
+        "the two is required")
+    var content = ""
+    var cmdArgv: seq[string] = @[]
+    if hasContent:
+      content = attrOf(entry, "content")
+    if hasCmd:
+      # The adapter renders `seq[string]` as a comma-joined bare
+      # text (mirroring `env.userPath`); the parser splits back on
+      # `,`. An argv entry containing a comma is therefore not
+      # representable — documented limitation; for the secrets use
+      # case (`age -d -i <id> <src>`) commas do not appear in
+      # paths/keys in practice.
+      let raw = attrOf(entry, "contentFromCommand")
+      for e in raw.split(','):
+        let s = e.strip()
+        if s.len > 0:
+          cmdArgv.add(s)
+      if cmdArgv.len == 0 or cmdArgv[0].len == 0:
+        resourceProfileError(profilePath, entry.resourceHeaderLine,
+          "resource `fs.userFile " & address &
+          "` has an empty `contentFromCommand` (the first element " &
+          "must be the program name and must be non-empty)")
+    let cacheKey =
+      if hasAttr(entry, "cacheKey"): attrOf(entry, "cacheKey")
+      else: ""
     let executable =
       hasAttr(entry, "executable") and
       attrOf(entry, "executable") == "true"
@@ -829,8 +873,10 @@ proc resourceFromEntry(profilePath, homeDir: string;
       lifecyclePolicy: lpDefault,
       userFileHostPath: hostFile,
       userFileContent: content,
+      userFileContentFromCommand: cmdArgv,
       userFileMode: mode,
-      userFileExecutable: executable)
+      userFileExecutable: executable,
+      userFileCacheKey: cacheKey)
   of "systemd.userUnit":
     # M83 step 4b — Linux home-scope user-service driver. Closed-set
     # attribute validation: a typo like `enableed` or `stat` is
@@ -1155,16 +1201,25 @@ proc resourceSeedString*(desired: DesiredSet): string =
     of rkLaunchdUserAgent:
       result.add(r.launchdPlistContent)
     of rkFsUserFile:
-      # Composite seed: host path + mode + content. The seed is fed
+      # Composite seed: host path + mode + content (or argv +
+      # cacheKey when `contentFromCommand` is set). The seed is fed
       # into the generation-id derivation, so a mode-only or path-only
       # change ALSO bumps the id (the lifecycle's per-resource digest
       # is content-only — mode-only changes are intentionally not
       # treated as drift — but the generation id is content-addressed
       # over the FULL declared shape, including bookkeeping fields,
       # so the no-op short-circuit fires only when the inputs are
-      # bytewise identical).
-      result.add(r.userFileHostPath & "\x1e" & r.userFileMode &
-        "\x1e" & r.userFileContent)
+      # bytewise identical). For the `contentFromCommand` branch the
+      # actual stdout bytes are not statically knowable; the seed
+      # covers the `(argv, cacheKey)` pair so a change to either
+      # bumps the generation id and forces re-planning.
+      if r.userFileContentFromCommand.len > 0:
+        result.add(r.userFileHostPath & "\x1e" & r.userFileMode &
+          "\x1e" & "cmd:" & r.userFileCacheKey & "\x1e" &
+          r.userFileContentFromCommand.join("\x1f"))
+      else:
+        result.add(r.userFileHostPath & "\x1e" & r.userFileMode &
+          "\x1e" & r.userFileContent)
     of rkVscodeExtension:
       # The seed covers the declared extension list (sorted +
       # joined) and the removeUnknown flag so any change in EITHER
@@ -2476,8 +2531,31 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             # Windows, and re-probes via `observeUserFile`. The
             # returned bytes are exactly what's on disk after the
             # write — used as the recorded payload.
-            postWriteBytes = applyUserFileResource(desired.userFileHostPath,
-              desired.userFileContent, desired.userFileMode)
+            #
+            # M83 step 10: when `userFileContentFromCommand` is non-
+            # empty, route through `applyUserFileResourceCmd`. The
+            # recorded post-write digest from the previous
+            # generation (if any) is passed so the driver can
+            # short-circuit the command invocation on a cache-hit
+            # when `userFileCacheKey` is non-empty.
+            if desired.userFileContentFromCommand.len > 0:
+              var recordedPostDigest = zeroDigest()
+              var hasRecordedPost = false
+              if action.address in recordedBindings:
+                let prev = recordedBindings[action.address]
+                if not isZeroDigest(prev.postWriteDigest):
+                  recordedPostDigest = prev.postWriteDigest
+                  hasRecordedPost = true
+              postWriteBytes = applyUserFileResourceCmd(
+                desired.userFileHostPath,
+                desired.userFileContentFromCommand,
+                desired.userFileMode,
+                desired.userFileCacheKey,
+                recordedPostDigest,
+                hasRecordedPost)
+            else:
+              postWriteBytes = applyUserFileResource(desired.userFileHostPath,
+                desired.userFileContent, desired.userFileMode)
             payloadKindStr = "user-file"
           of rkVscodeExtension:
             # The vscode.extension driver wraps `code --list/install/

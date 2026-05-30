@@ -795,6 +795,185 @@ suite "M68 fs.userFile driver":
     check action.resourceKind == rkFsUserFile
 
 # ===========================================================================
+# M83 step 10: fs.userFile contentFromCommand extension.
+# ===========================================================================
+
+suite "M83 step 10: fs.userFile contentFromCommand":
+
+  test "runContentCommand: captures stdout from a tiny program":
+    # Cross-platform stdout-producing invocation. POSIX uses
+    # `printf` (no trailing newline); Windows uses `cmd /c echo`
+    # which appends `\r\n`. We assert the prefix on both and skip
+    # the trailing-newline byte count check on Windows.
+    when defined(windows):
+      let argv = @["cmd", "/c", "echo hi"]
+    else:
+      let argv = @["/bin/sh", "-c", "printf hi"]
+    let bytes = runContentCommand(argv)
+    check bytes.len >= 2
+    check char(bytes[0]) == 'h'
+    check char(bytes[1]) == 'i'
+    when not defined(windows):
+      check bytes.len == 2
+
+  test "runContentCommand: empty argv raises":
+    var emptyArgv: seq[string] = @[]
+    expect EUserFileCommand:
+      discard runContentCommand(emptyArgv)
+
+  test "runContentCommand: empty program name raises":
+    let argv = @[""]
+    expect EUserFileCommand:
+      discard runContentCommand(argv)
+
+  test "runContentCommand: non-zero exit raises with stderr captured":
+    when defined(windows):
+      let argv = @["cmd", "/c", "echo boom 1>&2 & exit /b 7"]
+    else:
+      let argv = @["/bin/sh", "-c", "echo boom 1>&2; exit 7"]
+    expect EUserFileCommand:
+      discard runContentCommand(argv)
+    # And the message should name the exit code (7) — guard against
+    # a silent renumber.
+    try:
+      discard runContentCommand(argv)
+      check false  # unreachable
+    except EUserFileCommand as e:
+      check "exited with 7" in e.msg
+      # Stderr capture is best-effort; the message should at least
+      # surface our marker word `boom`.
+      check "boom" in e.msg
+
+  test "applyUserFileResourceCmd: command stdout becomes file content":
+    let dir = createTempDir("repro-userfile-cmd-", "")
+    defer: removeDir(dir)
+    let target = dir / "from-cmd.txt"
+    when defined(windows):
+      let argv = @["cmd", "/c", "echo hello-from-cmd"]
+    else:
+      let argv = @["/bin/sh", "-c", "printf hello-from-cmd"]
+    # cacheKey empty -> always re-run; recorded digest irrelevant.
+    let bytes = applyUserFileResourceCmd(target, argv, "0644",
+      "", zeroDigest(), false)
+    check fileExists(target)
+    # Windows `cmd /c echo` appends `\r\n`; POSIX `printf` does not.
+    when defined(windows):
+      check readFile(target).startsWith("hello-from-cmd")
+      check bytes.len >= "hello-from-cmd".len
+    else:
+      check readFile(target) == "hello-from-cmd"
+      check bytes.len == "hello-from-cmd".len
+
+  test "applyUserFileResourceCmd: cache-hit skips the command":
+    # Seed the target file with the same bytes the (now-broken)
+    # argv would have produced. Recorded post-write digest matches
+    # the on-disk bytes + cacheKey is non-empty + argv would FAIL
+    # if invoked — therefore the driver must SHORT-CIRCUIT and
+    # return the on-disk bytes without spawning the command.
+    let dir = createTempDir("repro-userfile-cachehit-", "")
+    defer: removeDir(dir)
+    let target = dir / "cached.txt"
+    writeFile(target, "cached-bytes")
+    var buf = newSeq[byte]("cached-bytes".len)
+    for i, ch in "cached-bytes":
+      buf[i] = byte(ord(ch))
+    let recordedDigest = digestOfBytes(buf)
+    when defined(windows):
+      let brokenArgv = @["this-binary-does-not-exist-12345"]
+    else:
+      let brokenArgv = @["/this/binary/does/not/exist/12345"]
+    # cacheKey non-empty + recorded digest matches observed -> skip.
+    let bytes = applyUserFileResourceCmd(target, brokenArgv, "0644",
+      "k1", recordedDigest, true)
+    check readFile(target) == "cached-bytes"
+    check bytes.len == "cached-bytes".len
+
+  test "applyUserFileResourceCmd: cache MISS when on-disk drifted":
+    # Recorded digest is stale (does NOT match the on-disk bytes).
+    # The driver must invoke the command to recompute. Since we
+    # point at a broken argv, this raises — proving the command
+    # was actually attempted (a non-attempt would have returned
+    # the stale on-disk bytes silently).
+    let dir = createTempDir("repro-userfile-cachemiss-", "")
+    defer: removeDir(dir)
+    let target = dir / "drifted.txt"
+    writeFile(target, "DRIFTED")
+    var staleBuf = newSeq[byte]("ORIGINAL".len)
+    for i, ch in "ORIGINAL":
+      staleBuf[i] = byte(ord(ch))
+    let staleDigest = digestOfBytes(staleBuf)
+    when defined(windows):
+      let brokenArgv = @["this-binary-does-not-exist-67890"]
+    else:
+      let brokenArgv = @["/this/binary/does/not/exist/67890"]
+    expect EUserFileCommand:
+      discard applyUserFileResourceCmd(target, brokenArgv, "0644",
+        "k1", staleDigest, true)
+
+  test "applyUserFileResourceCmd: empty cacheKey always re-runs":
+    # cacheKey empty AND recorded digest matches observed AND argv
+    # is broken -> must STILL raise (empty cacheKey means
+    # "no short-circuit").
+    let dir = createTempDir("repro-userfile-noskeep-", "")
+    defer: removeDir(dir)
+    let target = dir / "noskip.txt"
+    writeFile(target, "x")
+    var buf = newSeq[byte](1)
+    buf[0] = byte(ord('x'))
+    let recordedDigest = digestOfBytes(buf)
+    when defined(windows):
+      let brokenArgv = @["this-binary-does-not-exist-abcde"]
+    else:
+      let brokenArgv = @["/this/binary/does/not/exist/abcde"]
+    expect EUserFileCommand:
+      discard applyUserFileResourceCmd(target, brokenArgv, "0644",
+        "", recordedDigest, true)
+
+  test "digestOfResource: contentFromCommand digests (cacheKey, argv)":
+    # The digest must reflect the declared intent (cacheKey + argv)
+    # rather than the (unknown) stdout bytes. Two resources with
+    # the same argv but different cacheKeys digest DIFFERENTLY (so
+    # the operator's escape-hatch — bump the cacheKey to force
+    # recompute — actually forces a planner-side update).
+    var r1 = Resource(kind: rkFsUserFile, address: "uf:cmd:a",
+      lifecyclePolicy: lpDefault,
+      userFileHostPath: "/host/a",
+      userFileContent: "",
+      userFileContentFromCommand: @["age", "-d", "src.age"],
+      userFileMode: "0600",
+      userFileCacheKey: "k1")
+    var r2 = r1
+    r2.userFileCacheKey = "k2"
+    check digestOfResource(r1) != digestOfResource(r2)
+    # And differing argv with the same cacheKey also differ:
+    var r3 = r1
+    r3.userFileContentFromCommand = @["age", "-d", "OTHER.age"]
+    check digestOfResource(r1) != digestOfResource(r3)
+    # Same argv + same cacheKey + same mode -> same digest.
+    var r4 = r1
+    check digestOfResource(r1) == digestOfResource(r4)
+
+  test "digestOfResource: contentFromCommand digest differs from literal-content digest":
+    # A resource declaring `contentFromCommand` must NOT digest equal
+    # to a resource declaring a literal `content` of the same
+    # well-known bytes — the planner needs to see the two as
+    # distinct desired states (an operator switching from a literal
+    # to a command should re-converge).
+    var rCmd = Resource(kind: rkFsUserFile, address: "uf:diff",
+      lifecyclePolicy: lpDefault,
+      userFileHostPath: "/host/x",
+      userFileContent: "",
+      userFileContentFromCommand: @["age", "-d", "src"],
+      userFileMode: "0600",
+      userFileCacheKey: "")
+    var rLit = Resource(kind: rkFsUserFile, address: "uf:diff",
+      lifecyclePolicy: lpDefault,
+      userFileHostPath: "/host/x",
+      userFileContent: "hello",
+      userFileMode: "0600")
+    check digestOfResource(rCmd) != digestOfResource(rLit)
+
+# ===========================================================================
 # M83 step 4b: systemd.userUnit canonical-bytes + lifecycle assertions.
 # These are pure (no `systemctl` shell-out); they pin that the digest is
 # a function of `unitContent` + `unitEnabled` + `unitState` together so

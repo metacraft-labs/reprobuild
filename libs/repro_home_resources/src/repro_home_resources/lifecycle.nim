@@ -173,11 +173,38 @@ proc digestOfResource*(desired: Resource): Digest256 =
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
   of rkFsUserFile:
-    # Whole-file: the digest is over the raw declared content bytes
-    # (verbatim — no trailing-newline normalization, unlike
-    # `fs.managedBlock` whose sentinel writer appends `\n`). On
-    # re-observation `observeUserFile` digests the same raw bytes,
-    # so a cache-hit re-apply compares equal byte-for-byte.
+    # Whole-file: when `userFileContentFromCommand` is empty the
+    # digest is over the raw declared `content` bytes (verbatim — no
+    # trailing-newline normalization, unlike `fs.managedBlock` whose
+    # sentinel writer appends `\n`). On re-observation
+    # `observeUserFile` digests the same raw bytes, so a cache-hit
+    # re-apply compares equal byte-for-byte.
+    #
+    # M83 step 10: when `userFileContentFromCommand` is non-empty,
+    # the bytes-to-be-written are not knowable statically — the
+    # command's stdout determines them at apply time. We therefore
+    # cannot compute a content-equal desired digest; instead the
+    # digest covers `(cacheKey, argv)`. The lifecycle planner
+    # interprets this digest as "the declared INTENT" rather than
+    # "the literal file content" — so the desired-vs-observed
+    # comparison will (correctly) report inequality on every apply
+    # (the observed digest is the file body's BLAKE3, the desired
+    # is the argv hash) and force `rakUpdate`. The driver's apply
+    # path then uses its OWN cache-key short-circuit (non-empty
+    # `cacheKey` + matching recorded post-write digest = skip the
+    # command), so a steady-state re-apply is still cheap when
+    # `cacheKey` is non-empty. With `cacheKey == ""`, the command
+    # runs every apply — idempotent but slow, the documented
+    # trade-off.
+    if desired.userFileContentFromCommand.len > 0:
+      var seed = "cmd\x1e" & desired.userFileCacheKey & "\x1e"
+      for arg in desired.userFileContentFromCommand:
+        seed.add(arg)
+        seed.add('\x1f')
+      var buf = newSeq[byte](seed.len)
+      for i, ch in seed:
+        buf[i] = byte(ord(ch))
+      return digestOfBytes(buf)
     var buf = newSeq[byte](desired.userFileContent.len)
     for i, ch in desired.userFileContent:
       buf[i] = byte(ord(ch))

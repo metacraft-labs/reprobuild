@@ -256,7 +256,22 @@ type
       userFileContent*: string
         ## Whole-file content (verbatim bytes — the driver writes
         ## them in binary mode so Windows CRLF translation does not
-        ## introduce constant-false-positive drift).
+        ## introduce constant-false-positive drift). Mutually
+        ## exclusive with `userFileContentFromCommand`: exactly one
+        ## of the two MUST be set (the parser rejects the empty +
+        ## empty case as well as the both-set case).
+      userFileContentFromCommand*: seq[string]
+        ## M83 step 10: optional command + argv whose stdout becomes
+        ## the file content at apply time. When non-empty the driver
+        ## spawns the command via `osproc.startProcess` (no shell —
+        ## argv is passed verbatim), captures stdout as the bytes to
+        ## write, and reports stderr + the exit code on failure.
+        ## `userFileContent` MUST be empty when this field is non-
+        ## empty (the parser enforces the mutex). The command runs
+        ## unelevated as the apply-time user (the same user whose
+        ## `$HOME` the file lives under). The first element is the
+        ## program name (resolved via `PATH` lookup by
+        ## `startProcess`); it must be non-empty.
       userFileMode*: string
         ## POSIX permission octal as a string ("0600", "0644",
         ## "0755", ...). On Windows the field is RECORDED in the
@@ -270,6 +285,19 @@ type
         ## reflects the operator's intent. When `mode` is also
         ## present, `mode` wins (the driver applies `mode` and
         ## ignores `executable` beyond bookkeeping).
+      userFileCacheKey*: string
+        ## M83 step 10: optional content-cache key used ONLY when
+        ## `userFileContentFromCommand` is non-empty. The empty
+        ## string (the default) means "always re-run the command"
+        ## — idempotent but potentially slow. A non-empty value
+        ## opts in to the cache-hit short-circuit: when the post-
+        ## apply digest recorded in the previous generation matches
+        ## the current on-disk digest AND the cacheKey (combined
+        ## with the argv) is unchanged, the driver skips the
+        ## command invocation. Changing the cacheKey forces a
+        ## recompute even when the argv is unchanged — the
+        ## operator's escape hatch when the source bytes changed
+        ## but the argv didn't.
     of rkLinuxDconfKey:
       dconfKey*: string
         ## Slash-prefixed dconf key path (e.g.

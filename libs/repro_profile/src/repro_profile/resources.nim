@@ -155,17 +155,42 @@ template windowsStartup*(targetResources: var seq[ResourceIntent];
 
 template fsUserFile*(targetResources: var seq[ResourceIntent];
                      hostFile: string;
-                     content: string;
+                     content: string = "";
+                     contentFromCommand: seq[string] = @[];
                      mode: string = "0644";
                      executable: bool = false;
+                     cacheKey: string = "";
                      address: string = "";
                      dependsOn: seq[string] = @[]) =
+  ## M68 home-scope whole-file constructor.
+  ##
+  ## Either `content` (literal bytes) OR `contentFromCommand` (argv
+  ## list whose stdout becomes the file body at apply time) must be
+  ## set — the apply-pipeline parser enforces the mutex. Use the
+  ## former for static config + the latter for at-rest-encrypted
+  ## secrets (e.g. `@["age", "-d", "-i", id, src]`).
+  ##
+  ## `cacheKey` is consulted ONLY when `contentFromCommand` is set:
+  ## the empty default means "always re-run the command on every
+  ## apply" (idempotent but slow); a non-empty value opts in to the
+  ## driver's cache-hit short-circuit. See the driver docstring for
+  ## the full contract.
   block:
     var fields = initTable[string, FieldValue]()
     fields["hostFile"] = strField(hostFile)
-    fields["content"] = strField(content)
+    if contentFromCommand.len > 0:
+      fields["contentFromCommand"] = listField(contentFromCommand)
+      if content.len > 0:
+        # The pipeline parser rejects both-set; we still emit
+        # `content` so the error path reports the operator's actual
+        # input rather than a silent drop.
+        fields["content"] = strField(content)
+    else:
+      fields["content"] = strField(content)
     fields["mode"] = strField(mode)
     fields["executable"] = boolField(executable)
+    if cacheKey.len > 0:
+      fields["cacheKey"] = strField(cacheKey)
     let addr0 = if address.len > 0: address
                 else: autoAddress("fs.userFile", hostFile)
     pushResource(targetResources, "fs.userFile", addr0, fields,
