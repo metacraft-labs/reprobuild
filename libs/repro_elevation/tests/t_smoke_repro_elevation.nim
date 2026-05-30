@@ -1027,6 +1027,54 @@ suite "repro_elevation: os.timezone pure surface":
     check not isMappedIanaTimezone("Atlantis/Citadel")
     check not isMappedIanaTimezone("Europe/Sofia;rm")    # both unsafe + unmapped
 
+  test "reverseLookupIanaTimezoneName resolves many-to-one ambiguity":
+    # Regression for the M83 step-3 Hyper-V harness failure: the
+    # Windows-to-IANA mapping is many-to-one (Helsinki, Kiev, Sofia,
+    # and Kyiv all live under `FLE Standard Time`). A naive
+    # "first match wins" reverse lookup picks `Europe/Helsinki` so a
+    # post-apply re-probe of an `Europe/Sofia` apply digests the wrong
+    # IANA and raises a spurious "post-apply observation disagrees
+    # with desired state" error. The disambiguating reverse lookup
+    # honours the `preferred` IANA name (the operator's stated intent)
+    # whenever it maps to the same Windows zone — so the post-apply
+    # re-probe returns Sofia, not Helsinki.
+    check reverseLookupIanaTimezoneName("FLE Standard Time",
+      "Europe/Sofia") == "Europe/Sofia"
+    check reverseLookupIanaTimezoneName("FLE Standard Time",
+      "Europe/Kiev") == "Europe/Kiev"
+    check reverseLookupIanaTimezoneName("FLE Standard Time",
+      "Europe/Kyiv") == "Europe/Kyiv"
+    check reverseLookupIanaTimezoneName("FLE Standard Time",
+      "Europe/Helsinki") == "Europe/Helsinki"
+    # No preferred -> falls back to the first table match.
+    check reverseLookupIanaTimezoneName("FLE Standard Time", "") ==
+      "Europe/Helsinki"
+    # Preferred maps to a DIFFERENT Windows zone (live tz really
+    # does disagree with desired) -> fall back to first match for
+    # the OBSERVED Windows zone, NOT the preferred (which would
+    # mis-report agreement).
+    check reverseLookupIanaTimezoneName("Pacific Standard Time",
+      "Europe/Sofia") == "America/Los_Angeles"
+    # Unmapped Windows zone -> empty string.
+    check reverseLookupIanaTimezoneName("Mars Standard Time",
+      "Europe/Sofia") == ""
+    # Empty Windows zone -> empty string.
+    check reverseLookupIanaTimezoneName("", "Europe/Sofia") == ""
+
+  test "reverseLookupIanaTimezoneName: canonical digests match post-apply":
+    # End-to-end pin: when the operator declared `Europe/Sofia` and
+    # the system's live Windows tz is now `FLE Standard Time`, the
+    # canonical observed-state digest (computed via reverse-lookup
+    # with the desired IANA as `preferred`) MUST equal the canonical
+    # desired-state digest. This is what the M83 step-3 post-apply
+    # re-probe asserts — and what the harness failure caught when
+    # the digests fell on different sides of the many-to-one map.
+    let observedWin = "FLE Standard Time"
+    let observedIana = reverseLookupIanaTimezoneName(observedWin, "Europe/Sofia")
+    check observedIana == "Europe/Sofia"
+    check canonicalTimezoneState(observedIana) ==
+      canonicalTimezoneDesired("Europe/Sofia")
+
   test "operationValidationError accepts a valid os.timezone operation":
     let ok = PrivilegedOperation(kind: pokOsTimezone,
       address: "userTimezone",

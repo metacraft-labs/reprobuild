@@ -138,6 +138,39 @@ proc isMappedIanaTimezone*(iana: string): bool =
   ## name.
   lookupWindowsTimezoneName(iana).len > 0
 
+proc reverseLookupIanaTimezoneName*(windowsName: string;
+                                    preferred: string = ""): string =
+  ## Map a Windows timezone name back to an IANA name via the embedded
+  ## table. The Windows-to-IANA mapping is MANY-TO-ONE — several IANA
+  ## zones share a single Windows name (e.g. `Europe/Helsinki`,
+  ## `Europe/Kiev`, `Europe/Sofia` all map to `FLE Standard Time`).
+  ##
+  ## `preferred` is the IANA name the caller would prefer to see when
+  ## the Windows name is ambiguous: typically the desired IANA value
+  ## from the apply operation. If `preferred` is itself in the table
+  ## AND maps to the same Windows name, return `preferred` so a post-
+  ## apply re-probe of `Europe/Sofia` -> `FLE Standard Time` returns
+  ## `Europe/Sofia` (the operator's stated intent) rather than the
+  ## first-table-match `Europe/Helsinki`. When `preferred` is empty
+  ## or maps elsewhere (the live tz genuinely differs from desired),
+  ## return the first IANA in the table that maps to `windowsName`.
+  ## Returns the empty string when `windowsName` is not mapped.
+  let w = windowsName.strip()
+  if w.len == 0:
+    return ""
+  let p = preferred.strip()
+  if p.len > 0:
+    # Walk the table once: if `preferred` is in the table AND maps
+    # to `windowsName`, return it (preserves operator intent through
+    # the many-to-one ambiguity).
+    for entry in IanaToWindowsTzTable:
+      if entry.iana == p and entry.windows == w:
+        return p
+  for entry in IanaToWindowsTzTable:
+    if entry.windows == w:
+      return entry.iana
+  return ""
+
 # ---------------------------------------------------------------------------
 # `tzutil /g` output parser.
 #

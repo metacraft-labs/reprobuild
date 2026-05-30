@@ -954,15 +954,20 @@ proc observeWindowsOsTimezone*(op: PrivilegedOperation):
   ## compare on the same scale. An unmapped Windows name (e.g. an
   ## operator-installed custom zone) digests to the absent sentinel so
   ## any apply against a known IANA value triggers a write.
+  ##
+  ## Many-to-one disambiguation: the Windows-to-IANA mapping is many-
+  ## to-one (e.g. `FLE Standard Time` covers Helsinki, Kiev, Sofia,
+  ## Kyiv). `reverseLookupIanaTimezoneName` consults `op.tzIana` as the
+  ## preferred IANA name so the post-apply re-probe of an
+  ## `Europe/Sofia` apply on a system whose live Windows tz is now
+  ## `FLE Standard Time` returns `Europe/Sofia` (the operator's stated
+  ## intent) instead of the first-table-match `Europe/Helsinki` — which
+  ## would have produced a spurious "post-apply observation disagrees
+  ## with desired state" error.
   when defined(windows):
     let (output, _) = execCmdEx("tzutil /g")
     let observedWin = parseTzutilOutput(output)
-    var observedIana = ""
-    if observedWin.len > 0:
-      for entry in IanaToWindowsTzTable:
-        if entry.windows == observedWin:
-          observedIana = entry.iana
-          break
+    let observedIana = reverseLookupIanaTimezoneName(observedWin, op.tzIana)
     result.present = observedIana.len > 0
     result.digestHex =
       if not result.present: ZeroDigestHex
