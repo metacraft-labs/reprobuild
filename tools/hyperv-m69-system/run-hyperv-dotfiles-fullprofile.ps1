@@ -1091,6 +1091,53 @@ try {
         S "openssh-firewall-rule: ERROR $_"
       }
 
+      # 14. os.timezone cross-check. After stageH the active Windows
+      # timezone must be `FLE Standard Time` (the user's Europe/Sofia
+      # IANA -> Windows mapping). Surfacing the live value plus the
+      # match flag pins both the driver's mapping table and `tzutil /s`
+      # idempotence.
+      try {
+        $tzLive = (tzutil /g).Trim()
+        $tzExpected = 'FLE Standard Time'   # Europe/Sofia
+        $tzMatch = ($tzLive -eq $tzExpected)
+        "Expected=$tzExpected" | Out-File (Join-Path $diagDir 'system-timezone-summary.txt') -Encoding utf8
+        "Observed=$tzLive" | Out-File (Join-Path $diagDir 'system-timezone-summary.txt') -Append -Encoding utf8
+        S "system-timezone: expected='$tzExpected' observed='$tzLive' match=$tzMatch"
+      } catch {
+        "ERROR: $_" | Out-File (Join-Path $diagDir 'system-timezone-summary.txt') -Encoding utf8
+        S "system-timezone: ERROR $_"
+      }
+
+      # 15. vscode.extension cross-check. After stageG the desired
+      # extension(s) must be present in `code --list-extensions`. The
+      # driver leaves extras alone (`removeUnknown=false`) so we only
+      # check that the declared IDs are installed; extras are normal.
+      try {
+        $code = Get-Command code -ErrorAction SilentlyContinue
+        if ($null -eq $code) {
+          $code = Get-Command code.cmd -ErrorAction SilentlyContinue
+        }
+        if ($null -eq $code) {
+          S "vscode-extensions: code CLI not on PATH"
+          'code CLI not on PATH' | Out-File (Join-Path $diagDir 'home-vscode-extensions-summary.txt') -Encoding utf8
+        } else {
+          $extList = & $code.Source --list-extensions --show-versions 2>$null
+          $extList | Out-File (Join-Path $diagDir 'home-vscode-extensions-summary.txt') -Encoding utf8
+          $vimPresent = $false
+          foreach ($line in $extList) {
+            $id = ($line -split '@')[0].Trim()
+            if ($id -eq 'vscodevim.vim') {
+              $vimPresent = $true
+              break
+            }
+          }
+          S "vscode-extensions: vscodevim.vim=$vimPresent total=$($extList.Count)"
+        }
+      } catch {
+        "ERROR: $_" | Out-File (Join-Path $diagDir 'home-vscode-extensions-summary.txt') -Encoding utf8
+        S "vscode-extensions: ERROR $_"
+      }
+
       # Summary file
       $summary | Out-File (Join-Path $diagDir '_summary.txt') -Encoding utf8
 
