@@ -5928,6 +5928,7 @@ const
     "fortran-direct",
     "zig-direct",
     "d-direct",
+    "ada-direct",
     "ocaml-dune",
     "haskell-cabal",
     "ruby-bundler",

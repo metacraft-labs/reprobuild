@@ -185,6 +185,9 @@ $PopulatedExamples = @(
   'd-mode3/binary-with-library',
   'mixed/d-uses-cpp-lib',
   'mixed/cpp-uses-d-lib',
+  'ada-mode3/binary-with-library',
+  'mixed/ada-uses-cpp-lib',
+  'mixed/cpp-uses-ada-lib',
   'mode1/rust-binary-with-library',
   'mode1/nim-binary-with-library'
 )
@@ -531,6 +534,17 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $true; Reason = "d=$($dCmd.Source)" }
       }
       return @{ Available = $false; Reason = "no D compiler (ldmd2/dmd/ldc2) on PATH and not under D:/metacraft-dev-deps/ldc/ (download from github.com/ldc-developers/ldc/releases)" }
+    }
+    'ada-mode3' {
+      # M58: Mode 3 Ada — probe for ``gnatmake``. The canonical Windows
+      # install is via MSYS2: ``pacman -S mingw-w64-x86_64-gcc-ada``.
+      # The M58 honest-scope cut: env.ps1 doesn't yet provision the
+      # GNAT toolchain so most hosts SKIP this gate cleanly.
+      $gnatCmd = Get-Command gnatmake -ErrorAction SilentlyContinue
+      if ($gnatCmd) {
+        return @{ Available = $true; Reason = "gnatmake=$($gnatCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "'gnatmake' not on PATH (install via 'pacman -S mingw-w64-x86_64-gcc-ada' under MSYS2)" }
     }
     'mode1' {
       # M48: Mode 1 (layout-as-manifest) fixtures. Each fixture is
@@ -1657,6 +1671,42 @@ function Probe-Fixture([string]$rel) {
         return @{ Available = $false; Reason = "'ar' not on PATH (M45 reverse fixture needs an archiver)" }
       }
       return @{ Available = $true; Reason = "d=$($dCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
+    }
+    'mixed/ada-uses-cpp-lib' {
+      # M58 forward direction: an Ada executable that links a C archive.
+      # Needs gnatmake + gcc/clang + ar.
+      $gnatCmd = Get-Command gnatmake -ErrorAction SilentlyContinue
+      if (-not $gnatCmd) {
+        return @{ Available = $false; Reason = "'gnatmake' not on PATH (M58 forward fixture needs Ada via 'pacman -S mingw-w64-x86_64-gcc-ada' under MSYS2)" }
+      }
+      $cc = Get-Command gcc -ErrorAction SilentlyContinue
+      if (-not $cc) { $cc = Get-Command clang -ErrorAction SilentlyContinue }
+      if (-not $cc) {
+        return @{ Available = $false; Reason = "neither 'gcc' nor 'clang' on PATH (M58 forward fixture needs a C compiler)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M58 forward fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "gnatmake=$($gnatCmd.Source); cc=$($cc.Source); ar=$($ar.Source)" }
+    }
+    'mixed/cpp-uses-ada-lib' {
+      # M58 reverse direction: a C++ executable that links an Ada
+      # staticlib. Needs gnatmake + g++/clang++ + ar.
+      $gnatCmd = Get-Command gnatmake -ErrorAction SilentlyContinue
+      if (-not $gnatCmd) {
+        return @{ Available = $false; Reason = "'gnatmake' not on PATH (M58 reverse fixture needs Ada via 'pacman -S mingw-w64-x86_64-gcc-ada' under MSYS2)" }
+      }
+      $cxx = Get-Command g++ -ErrorAction SilentlyContinue
+      if (-not $cxx) { $cxx = Get-Command clang++ -ErrorAction SilentlyContinue }
+      if (-not $cxx) {
+        return @{ Available = $false; Reason = "neither 'g++' nor 'clang++' on PATH (M58 reverse fixture needs a C++ link driver)" }
+      }
+      $ar = Get-Command ar -ErrorAction SilentlyContinue
+      if (-not $ar) {
+        return @{ Available = $false; Reason = "'ar' not on PATH (M58 reverse fixture needs an archiver)" }
+      }
+      return @{ Available = $true; Reason = "gnatmake=$($gnatCmd.Source); cxx=$($cxx.Source); ar=$($ar.Source)" }
     }
     'mode1/rust-binary-with-library' {
       # M48: Mode 1 Rust — needs rustc. Reuse the rustup-stable
@@ -2892,6 +2942,79 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         @{
           Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
           Greeting = 'cpp says: d added 2+3 = 5'
+        }
+      )
+    }
+    'ada-mode3/binary-with-library' {
+      # M58: Mode 3 Ada pilot. The workspace declares a library
+      # ``adalib`` and an executable ``adacalc`` in a single
+      # ``repro.nim``. The ada-direct convention emits per-source
+      # ``gcc -c -gnatp`` + ``ar rcs`` for the library + one
+      # ``gnatmake`` action per executable; the executable's link
+      # argv carries the upstream archive after the ``-largs``
+      # separator (gnatmake linker pass-through). Both outputs land
+      # under ``<projectRoot>/.repro/build/<member>/``.
+      $member = 'adacalc'
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'adalib' 'libadalib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path $member ($member + '.exe')))
+          Greeting = 'hello from ada-mode3-binary-with-library, adalib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/ada-uses-cpp-lib' {
+      # M58 cross-language Mode 3 (FORWARD direction): the workspace
+      # declares a C static library ``mathlib`` (``uses: gcc``) and an
+      # Ada executable ``adacalc`` (``uses: gnatmake``) in a single
+      # ``repro.nim`` with ``depends_on adacalcPkg: mathlibPkg``. The
+      # ada-direct convention claims the whole workspace (c-cpp-direct
+      # defers when ``uses:`` names an Ada toolchain token AND no
+      # ``*.gpr`` is present), emits the upstream C archive in-line
+      # via the embedded ``emitCCppCrossMember`` helper, and threads
+      # the archive on the gnatmake argv after the ``-largs``
+      # separator (linker pass-through). The binary's first stdout
+      # line proves the cross-language round-trip succeeded: Ada -> C
+      # c_add() -> back to Ada.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'mathlib' 'libmathlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'adacalc' 'adacalc.exe'))
+          Greeting = 'ada says: mathlib added 2+3 = 5'
+        }
+      )
+    }
+    'mixed/cpp-uses-ada-lib' {
+      # M58 cross-language Mode 3 (REVERSE direction): the workspace
+      # declares an Ada static library ``adaaddlib`` (``uses: gnatmake``)
+      # and a C++ executable ``cppapp`` (``uses: gcc``) in a single
+      # ``repro.nim`` with ``depends_on cppappPkg: adaaddlibPkg``. The
+      # ada-direct convention claims the whole workspace, emits the
+      # upstream Ada archive via per-source ``gcc -c -gnatp`` + ``ar
+      # rcs``, then emits per-source ``g++ -c`` + terminal ``g++ -o``
+      # actions for cppapp; the link argv carries the Ada archive as a
+      # trailing positional. The M58 honest-scope cut limits the
+      # reverse fixture to ``pragma Export (C, ...)`` no-elaboration
+      # entry points (no Ada.Text_IO, no tagged types) so the gcc
+      # driver resolves all references against the Ada archive itself
+      # without external runtime libs — same property Zig's M44 / D's
+      # M45 reverse fixtures rely on for their respective runtimes.
+      # The binary's first stdout line proves the cross-language
+      # round-trip: C++ -> Ada ada_add() -> back to C++.
+      return @(
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'adaaddlib' 'libadaaddlib.a'))
+          Greeting = $null
+        },
+        @{
+          Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'cppapp' 'cppapp.exe'))
+          Greeting = 'cpp says: ada added 2+3 = 5'
         }
       )
     }

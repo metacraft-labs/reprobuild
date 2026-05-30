@@ -984,6 +984,7 @@ const
     "gfortran", "fortran",
     "zig",
     "d", "dmd", "ldc2", "gdc",
+    "ada", "gnat", "gnatmake",
     "ocaml", "ocamlc", "ocamlopt", "ocamlfind", "dune",
     "haskell", "ghc", "cabal", "cabal-install",
     "ruby", "bundler",

@@ -46,6 +46,7 @@ import repro_standard_provider/conventions/c_cpp_direct as c_cpp_direct_conventi
 import repro_standard_provider/conventions/fortran_direct as fortran_direct_convention
 import repro_standard_provider/conventions/zig_direct as zig_direct_convention
 import repro_standard_provider/conventions/d_direct as d_direct_convention
+import repro_standard_provider/conventions/ada_direct as ada_direct_convention
 import repro_standard_provider/conventions/ocaml_dune as ocaml_dune_convention
 import repro_standard_provider/conventions/haskell_cabal as haskell_cabal_convention
 import repro_standard_provider/conventions/ruby_bundler as ruby_bundler_convention
@@ -314,6 +315,21 @@ when defined(reproProviderMode):
   # mirroring the rust-direct / go-direct / fortran-direct /
   # zig-direct pattern.
   addDefaultConvention(d_direct_convention.dDirectConvention())
+  # ada_direct (Mode 3 / no-*.gpr) — registered AFTER d-direct per M58
+  # of Provisioning-And-Languages-Expansion.milestones.org. Ada is the
+  # seventh Mode 3 language and the first Phase 2 obj+linker language —
+  # the convention extends the cross-language matrix on the canonical
+  # ``<root>/.repro/build/<name>/lib<name>.a`` schema shared with
+  # c-cpp-direct, rust-direct, fortran-direct, zig-direct, d-direct.
+  # There is no Mode 2 Ada convention sibling yet (.gpr / gprbuild
+  # recognition is deferred per the M58 honest-scope cut); this is the
+  # only Ada convention today. Registration order matters only for
+  # mixed Ada + C/C++ workspaces — c-cpp-direct defers to ada-direct
+  # when ``uses:`` anywhere names ``ada``/``gnat``/``gnatmake`` AND no
+  # ``*.gpr`` is present at the workspace root, mirroring the
+  # rust-direct / go-direct / fortran-direct / zig-direct / d-direct
+  # pattern.
+  addDefaultConvention(ada_direct_convention.adaDirectConvention())
   # ocaml_dune (M46) — fifth managed-ecosystem Tier 2b convention. Keys
   # on a single ``dune-project`` at the project root (the Dune project
   # manifest filename — uniquely identifies a Dune project; no other

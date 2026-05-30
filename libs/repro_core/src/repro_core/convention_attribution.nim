@@ -142,7 +142,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[30, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[32, tuple[ext, convention: string]] = [
     (".nim",   "nim"),
     (".rs",    "rust"),
     (".go",    "go"),
@@ -173,6 +173,8 @@ const
     (".lhs",   "haskell-cabal"),
     (".rb",    "ruby-bundler"),
     (".php",   "php-composer"),
+    (".adb",   "ada-direct"),
+    (".ads",   "ada-direct"),
   ]
 
 proc isExtensionForConvention*(ext, convention: string): bool =
@@ -665,7 +667,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[22, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[23, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -731,6 +733,9 @@ const
                        versionArgs: @["--version"]),
     ToolchainProbeSpec(convention: "php-composer",
                        exeName: "php",
+                       versionArgs: @["--version"]),
+    ToolchainProbeSpec(convention: "ada-direct",
+                       exeName: "gnatmake",
                        versionArgs: @["--version"]),
   ]
 

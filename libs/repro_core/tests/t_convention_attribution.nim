@@ -306,6 +306,24 @@ suite "attributeConvention: extension census fallback":
     check attr.convention == "rust"
     removeDir(dir)
 
+  test "*.adb-dominant dir ⇒ ada-direct (M58 extension census)":
+    # M58: when ``.adb`` files dominate the dir, the project routes
+    # through the Mode 3 ``ada-direct`` convention. There is no Mode 2
+    # Ada manifest (``*.gpr`` recognition is deferred per the M58
+    # honest-scope cut) so the extension census is the sole signal.
+    let dir = makeScratch("ada-extension")
+    createDir(dir / "src")
+    writeFile(dir / "src" / "main.adb",
+      "procedure Main is\nbegin\n   null;\nend Main;\n")
+    writeFile(dir / "src" / "lib.adb",
+      "package body Lib is\nend Lib;\n")
+    writeFile(dir / "src" / "lib.ads",
+      "package Lib is\nend Lib;\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "ada-direct"
+    check attr.evidence.contains("extension census")
+    removeDir(dir)
+
   test "directory of only .png ⇒ no convention":
     let dir = makeScratch("png-only")
     writeFile(dir / "icon.png", "")
