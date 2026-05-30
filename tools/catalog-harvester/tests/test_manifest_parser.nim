@@ -192,3 +192,65 @@ suite "M66 — Scoop manifest parser":
     let p = parseScoopManifest("x", raw)
     check p.ok
     check p.entry.installer_args == @["/S", "/D=C:\\foo"]
+
+  # ===========================================================================
+  # M67 — bin_relpath synthesis from env_add_path + binDefaults
+  # ===========================================================================
+
+  test "M67: env_add_path + binDefaults cross-product synthesizes bin_relpath":
+    let raw = readFixture("bucket-env-path", "envapp")
+    let p = parseScoopManifest("envapp", raw, @["envapp.exe", "envappc.exe"])
+    check p.ok
+    # bin_relpath should be the cross-product of env_add_path ('bin',
+    # 'tools\\bin') with the binDefaults list — 2x2 = 4 entries. The
+    # parser normalizes backslashes to forward slashes.
+    check p.entry.bin_relpath == @[
+      "bin/envapp.exe", "bin/envappc.exe",
+      "tools/bin/envapp.exe", "tools/bin/envappc.exe",
+    ]
+    check validateVersionedProvisioning(p.entry).len == 0
+    check p.entry.env["ENVAPP_HOME"] == "${prefix}"
+
+  test "M67: binDefaults ignored when manifest already has bin":
+    let raw = """{
+      "version": "1.0.0",
+      "url": "https://example.test/x.zip",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "bin": "x.exe",
+      "env_add_path": "bin"
+    }"""
+    let p = parseScoopManifest("x", raw, @["should-be-ignored.exe"])
+    check p.ok
+    # The manifest's own bin field wins over the binDefaults fallback.
+    check p.entry.bin_relpath == @["x.exe"]
+
+  test "M67: no env_add_path -> binDefaults are used at the root":
+    let raw = """{
+      "version": "1.0.0",
+      "url": "https://example.test/x.zip",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }"""
+    let p = parseScoopManifest("x", raw, @["zig.exe"])
+    check p.ok
+    check p.entry.bin_relpath == @["zig.exe"]
+
+  test "M67: top-level extract_dir propagates to per-arch slices":
+    ## ScoopInstaller/Java's temurin*-jdk manifests carry the inner-dir
+    ## extract path at the TOP level (since both x64 and arm64 land in
+    ## the same JDK directory). The M67 parser fix lifts the top-level
+    ## ``extract_dir`` into every per-arch slice that lacks its own.
+    let raw = """{
+      "version": "21.0.5",
+      "architecture": {
+        "64bit": {
+          "url": "https://example.test/jdk-x64.zip",
+          "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      },
+      "extract_dir": "jdk-21.0.5+11",
+      "bin": "bin\\javac.exe"
+    }"""
+    let p = parseScoopManifest("temurin21-jdk", raw)
+    check p.ok
+    check p.entry.platforms.len == 1
+    check p.entry.platforms[0].extract_path == "jdk-21.0.5+11"

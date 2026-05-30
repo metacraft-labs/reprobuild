@@ -31,6 +31,20 @@ import std/[options, sets]
 
 import ./packages_schema
 import ./packages/jdk
+# M67 bulk-harvested catalogs. The Scoop bucket provenance and per-tool
+# version pin live in each module's auto-generated header comment.
+import ./packages/cabal
+import ./packages/composer
+import ./packages/crystal
+import ./packages/elixir
+import ./packages/erlang
+import ./packages/ghc
+import ./packages/gradle
+import ./packages/maven
+import ./packages/php
+import ./packages/ruby
+import ./packages/swift
+import ./packages/zig
 
 export packages_schema
 
@@ -40,6 +54,20 @@ const RegisteredTools* = [
   ## name "the built-in catalog knows: <list>" in its skip-reason
   ## telemetry).
   "jdk",
+  # M67 — JVM/Apple toolchains, niche obj+linker, functional + dynamic
+  # langs (alphabetized within the M67 block for grep-friendliness).
+  "cabal",
+  "composer",
+  "crystal",
+  "elixir",
+  "erlang",
+  "ghc",
+  "gradle",
+  "maven",
+  "php",
+  "ruby",
+  "swift",
+  "zig",
 ]
 
 proc getCatalog*(toolName: string):
@@ -53,12 +81,25 @@ proc getCatalog*(toolName: string):
   ## ``packages/<tool>.nim`` basenames, which are lowercased by
   ## convention. Callers normalize before lookup if their input source
   ## (e.g. ``home.nim`` ``package(...)`` references) is case-insensitive.
-  case toolName
-  of "jdk":
-    if jdkCatalog.len > 0:
-      some(jdkCatalog)
+  template selectIfNonEmpty(catVal: typed): untyped =
+    if catVal.len > 0:
+      some(catVal)
     else:
       none(seq[VersionedProvisioning])
+  case toolName
+  of "jdk":      selectIfNonEmpty(jdkCatalog)
+  of "cabal":    selectIfNonEmpty(cabalCatalog)
+  of "composer": selectIfNonEmpty(composerCatalog)
+  of "crystal":  selectIfNonEmpty(crystalCatalog)
+  of "elixir":   selectIfNonEmpty(elixirCatalog)
+  of "erlang":   selectIfNonEmpty(erlangCatalog)
+  of "ghc":      selectIfNonEmpty(ghcCatalog)
+  of "gradle":   selectIfNonEmpty(gradleCatalog)
+  of "maven":    selectIfNonEmpty(mavenCatalog)
+  of "php":      selectIfNonEmpty(phpCatalog)
+  of "ruby":     selectIfNonEmpty(rubyCatalog)
+  of "swift":    selectIfNonEmpty(swiftCatalog)
+  of "zig":      selectIfNonEmpty(zigCatalog)
   else:
     none(seq[VersionedProvisioning])
 

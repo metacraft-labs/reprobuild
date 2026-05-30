@@ -1,0 +1,16 @@
+{
+    "version": "2.5.0",
+    "description": "Synthetic env_add_path fixture for M67's bin_relpath synthesis test.",
+    "homepage": "https://example.test/envapp",
+    "license": "MIT",
+    "url": "https://example.test/envapp-2.5.0.zip",
+    "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "extract_dir": "envapp-2.5.0",
+    "env_add_path": [
+        "bin",
+        "tools\\bin"
+    ],
+    "env_set": {
+        "ENVAPP_HOME": "$dir"
+    }
+}

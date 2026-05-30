@@ -77,16 +77,26 @@ suite "M29 Part B — catalog audit":
       check fileExists(path)
 
   test "every catalog entry declares a provisioning shape":
-    # Every entry must declare ``nixPackage`` — either pinned to a
-    # ``"nixpkgs#..."`` selector (the common case, gated by the Nix CI
-    # script below) or to a local ``expressionFile`` (the stylus-style
-    # bespoke derivation). Both shapes are valid; the audit just
-    # requires SOMETHING is there.
+    # Every entry must declare ONE of:
+    #   * ``nixPackage`` (the M21/M29 nix-first shape — pinned to either
+    #     a ``"nixpkgs#..."`` selector OR a local ``expressionFile``);
+    #   * ``VersionedProvisioning`` (the M63/M67 catalog shape harvested
+    #     from Scoop bucket manifests; the M64+ ``cakBuiltin`` adapter
+    #     consumes it on Windows hosts).
+    # Either shape is valid provisioning; the audit just requires
+    # SOMETHING is there. (M67 introduced files like ``maven.nim`` /
+    # ``gradle.nim`` / ``zig.nim`` that ship ONLY the M63 catalog
+    # because Maven / Gradle / Zig have no existing Nix entry to
+    # co-host. ``ruby.nim`` carries both — see the hand-merge note in
+    # that file.)
     var seen = 0
     for entry in catalogFiles():
       let body = readCatalog(entry.path)
       checkpoint "entry: " & entry.name & " (" & entry.path & ")"
-      check "nixPackage " in body
+      let hasNixPackage = "nixPackage " in body
+      let hasVersionedProvisioning = "VersionedProvisioning(" in body or
+        "initVersionedProvisioning(" in body
+      check hasNixPackage or hasVersionedProvisioning
       inc seen
     # Sanity: the catalog can't have shrunk to nothing.
     check seen >= 60

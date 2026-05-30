@@ -43,8 +43,24 @@
 ## schema does not (yet) model. The harvester is a *catalog-author*
 ## tool — operators who need any of these can hand-edit the emitted
 ## ``<tool>.nim`` afterwards.
+##
+## **M67 extension — bin_relpath synthesis from env_add_path.** Several
+## Scoop manifests (maven, elixir, ruby, swift, …) declare no ``bin``
+## field and rely on ``env_add_path`` instead — Scoop's launcher
+## prepends the listed sub-directories to ``%PATH%`` so users invoke
+## the binaries by name. ``validateVersionedProvisioning`` requires
+## at least one ``bin_relpath`` entry for ``imExtract`` / installer
+## records, so the M67 bulk harvest extends ``parseScoopManifest``
+## with an optional ``binDefaults`` map keyed by app name. When
+## ``bin`` is empty and a default list is supplied, each entry is
+## prepended with each ``env_add_path`` segment to synthesize the
+## ``bin_relpath`` array (e.g. ``env_add_path = "bin"`` +
+## ``binDefaults["maven"] = @["mvn.cmd", "mvn"]`` yields
+## ``bin_relpath = @["bin/mvn.cmd", "bin/mvn"]``). This keeps the
+## emitter idempotent and avoids hand-edited drift after each
+## re-harvest.
 
-import std/[algorithm, json, strutils]
+import std/[algorithm, json, strutils, tables]
 import repro_dsl_stdlib/packages_schema
 
 type
@@ -198,6 +214,50 @@ proc installerArgsFor(installerNode: JsonNode; archiveFmt: ArchiveFormat):
     # diagnostic is emitted.
     (newSeq[string](), true)
 
+proc envAddPathsOf(node: JsonNode): seq[string] =
+  ## Translate the ``env_add_path`` field (string OR array of strings)
+  ## to a flat list of sub-directory relpaths. Returns an empty seq
+  ## if the field is missing / malformed.
+  ##
+  ## Scoop separator is backslash on disk; we normalize to forward
+  ## slashes so the harvester's synthesized ``bin_relpath`` mirrors
+  ## the JDK reference (``bin/javac.exe``).
+  if node.isNil: return @[]
+  case node.kind
+  of JString:
+    let s = node.getStr().strip()
+    if s.len > 0: @[s.replace("\\", "/")]
+    else: @[]
+  of JArray:
+    var outDirs: seq[string] = @[]
+    for child in node.items:
+      if child.kind == JString:
+        let s = child.getStr().strip()
+        if s.len > 0: outDirs.add(s.replace("\\", "/"))
+    outDirs
+  else: @[]
+
+proc synthesizeBinRelpaths(envAddPaths, binDefaults: openArray[string]):
+    seq[string] =
+  ## Synthesize a ``bin_relpath`` list by prepending every
+  ## ``env_add_path`` directory to every ``binDefaults`` filename. If
+  ## ``env_add_path`` is empty, fall back to the filenames as-is
+  ## (root-of-prefix install layout, e.g. Zig).
+  if binDefaults.len == 0: return @[]
+  if envAddPaths.len == 0:
+    var out0: seq[string] = @[]
+    for b in binDefaults: out0.add(b)
+    return out0
+  var combined: seq[string] = @[]
+  for dir in envAddPaths:
+    let trimmed = dir.strip(chars = {'/', '\\'})
+    for b in binDefaults:
+      if trimmed.len == 0:
+        combined.add(b)
+      else:
+        combined.add(trimmed & "/" & b)
+  combined
+
 proc binRelpathsOf(node: JsonNode; app: string; diags: var seq[Diagnostic]):
     seq[string] =
   ## Translate the ``bin`` field to a flat list of relpaths.
@@ -308,11 +368,18 @@ proc takePerArchSlice(arch: string; node: JsonNode; app: string;
 # Public entry point
 # ---------------------------------------------------------------------------
 
-proc parseScoopManifest*(app: string; raw: string): ParsedManifest =
+proc parseScoopManifest*(app: string; raw: string;
+                         binDefaults: openArray[string] = []):
+    ParsedManifest =
   ## Parse one Scoop manifest. ``app`` is the tool name (the manifest
   ## filename without ``.json``); ``raw`` is the manifest JSON
   ## source. Errors are non-throwing — invalid input yields
   ## ``ok = false`` and a populated ``diagnostics`` seq.
+  ##
+  ## ``binDefaults`` is the M67 escape hatch: when the manifest's
+  ## ``bin`` field is absent / empty, the parser synthesizes
+  ## ``bin_relpath`` from the manifest's ``env_add_path`` cross-product
+  ## with ``binDefaults`` (see module docstring).
   result = ParsedManifest(ok: false, app: app)
 
   var root: JsonNode
@@ -352,9 +419,27 @@ proc parseScoopManifest*(app: string; raw: string): ParsedManifest =
     # before aarch64) for deterministic platforms[] ordering — the
     # JObject insertion order would otherwise leak from the JSON
     # author's choice.
+    #
+    # Top-level ``extract_dir`` (Scoop convention: when the
+    # architecture-split download lands in the same inner dir
+    # regardless of CPU, e.g. ``jdk-21.0.11+10`` for temurin21-jdk)
+    # is propagated down into per-arch nodes that lack their own
+    # ``extract_dir`` so the synthesized PlatformBinary records carry
+    # the correct flatten path.
+    let topExtractDir =
+      if root.hasKey("extract_dir"): root["extract_dir"] else: nil
     for arch in ["64bit", "arm64"]:
       if archNode.hasKey(arch):
-        let added = takePerArchSlice(arch, archNode[arch], app,
+        var perArch = archNode[arch]
+        if not topExtractDir.isNil and
+           perArch.kind == JObject and not perArch.hasKey("extract_dir"):
+          # Shallow-copy + augment so we don't mutate the parsed
+          # JSON tree (the inspector / verify path may re-walk it).
+          var augmented = newJObject()
+          for k, v in perArch.pairs: augmented[k] = v
+          augmented["extract_dir"] = topExtractDir
+          perArch = augmented
+        let added = takePerArchSlice(arch, perArch, app,
           platforms, result.diagnostics)
         discard added
     # Diagnostic for any other architecture key present.
@@ -460,9 +545,18 @@ proc parseScoopManifest*(app: string; raw: string): ParsedManifest =
 
   # ----- bin -----
   var diags: seq[Diagnostic] = @[]
-  let binRelpath = binRelpathsOf(
+  var binRelpath = binRelpathsOf(
     if root.hasKey("bin"): root["bin"] else: nil, app, diags)
   for d in diags: result.diagnostics.add(d)
+
+  # If ``bin`` was empty (or absent) AND the operator supplied a
+  # binDefaults list for this app, synthesize bin_relpath from the
+  # manifest's env_add_path cross-product with the defaults. Mirrors
+  # the M67 spec's "M66 known limitation #1" workaround.
+  if binRelpath.len == 0 and binDefaults.len > 0:
+    let envPaths = envAddPathsOf(
+      if root.hasKey("env_add_path"): root["env_add_path"] else: nil)
+    binRelpath = synthesizeBinRelpaths(envPaths, binDefaults)
 
   # ----- env -----
   var envPairs: seq[(string, string)] = @[]

@@ -31,7 +31,7 @@
 ## Exit codes: 0 = OK; 2 = bad CLI invocation; 3 = harvest error
 ## (one or more manifests failed); 4 = verify drift detected.
 
-import std/[os, parseopt, strutils]
+import std/[os, parseopt, strutils, tables]
 
 import src/manifest_parser
 import src/bucket_clone
@@ -64,6 +64,20 @@ COMMON OPTIONS
   --dry-run                 For 'harvest': print what would be written
                             (file paths + first 10 lines) and exit 0.
   --no-refresh              Skip 'git pull' for cached buckets.
+  --bin-default <a>=<b,c>   Synthesize bin_relpath for manifests whose
+                            'bin' field is empty by combining their
+                            'env_add_path' segments with the supplied
+                            relative paths. Repeatable. Required for
+                            tools like maven/elixir/ruby whose Scoop
+                            manifest exposes binaries via PATH only.
+  --app-alias <src>=<dst>   Rename the catalog identifier on emit;
+                            the manifest stays addressed by <src> in
+                            the bucket, but the output file is
+                            <dst>.nim and the seq is <dst>Catalog.
+                            Repeatable. Required when Scoop's
+                            manifest name contains characters Nim
+                            forbids in identifiers (e.g.
+                            'haskell-cabal' -> 'cabal').
 
 VERIFY-ONLY OPTIONS
   --catalog <path>          The existing packages/<tool>.nim file.
@@ -91,6 +105,23 @@ type
     dryRun: bool
     noRefresh: bool
     catalog: string
+    binDefaults: Table[string, seq[string]]
+      ## M67: per-app bin_relpath synthesis defaults for manifests
+      ## whose ``bin`` field is absent / empty. CLI: ``--bin-default
+      ## <app>=<relpath1>,<relpath2>``, repeatable. Combined with the
+      ## manifest's ``env_add_path`` to produce
+      ## ``bin_relpath``. Required when ``validateVersionedProvisioning``
+      ## would otherwise reject the entry for missing ``bin_relpath``.
+    appAliases: Table[string, string]
+      ## M67: rename a manifest's logical tool name on emit. CLI:
+      ## ``--app-alias <manifestApp>=<toolName>``, repeatable. Used
+      ## when the Scoop bucket carries a manifest under one name
+      ## (e.g. ``haskell-cabal``) but the reprobuild catalog wants a
+      ## different identifier (``cabal``). Affects the emitted
+      ## filename (``cabal.nim``) AND the seq identifier
+      ## (``cabalCatalog``). Also enforces a valid Nim identifier —
+      ## hyphens, dots, and other non-identifier chars in the source
+      ## manifest name would otherwise produce uncompilable output.
 
 proc parseCli(argv: openArray[string]): CliOptions =
   result.sub = scNone
@@ -139,6 +170,45 @@ proc parseCli(argv: openArray[string]): CliOptions =
       of "dry-run": result.dryRun = true
       of "no-refresh": result.noRefresh = true
       of "catalog": result.catalog = p.val
+      of "app-alias":
+        # ``--app-alias <manifestApp>=<toolName>``
+        let eq = p.val.find('=')
+        if eq <= 0:
+          stderr.writeLine("error: --app-alias wants <manifestApp>=<toolName>")
+          quit(2)
+        let srcName = p.val[0 ..< eq].strip()
+        let dstName = p.val[eq + 1 .. ^1].strip()
+        if srcName.len == 0 or dstName.len == 0:
+          stderr.writeLine("error: --app-alias both sides must be non-empty")
+          quit(2)
+        # Validate dstName is a usable Nim identifier head — leading
+        # underscore is fine, leading digit is not, hyphens are not.
+        if dstName[0] notin {'a'..'z', 'A'..'Z', '_'}:
+          stderr.writeLine("error: --app-alias target '" & dstName &
+            "' must start with a letter or underscore")
+          quit(2)
+        for ch in dstName:
+          if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+            stderr.writeLine("error: --app-alias target '" & dstName &
+              "' contains invalid identifier character '" & $ch & "'")
+            quit(2)
+        result.appAliases[srcName] = dstName
+      of "bin-default":
+        # ``--bin-default <app>=<relpath1>,<relpath2>``
+        let eq = p.val.find('=')
+        if eq <= 0:
+          stderr.writeLine("error: --bin-default wants <app>=<relpaths>")
+          quit(2)
+        let appName = p.val[0 ..< eq]
+        var relpaths: seq[string] = @[]
+        for piece in p.val[eq + 1 .. ^1].split(','):
+          let trimmed = piece.strip()
+          if trimmed.len > 0: relpaths.add(trimmed)
+        if relpaths.len == 0:
+          stderr.writeLine("error: --bin-default for '" & appName &
+            "' produced an empty relpath list")
+          quit(2)
+        result.binDefaults[appName] = relpaths
       of "help", "h":
         result.sub = scNone
       else:
@@ -164,8 +234,8 @@ type
     diagnostics: seq[Diagnostic]
     fatal: bool  ## true if we couldn't synthesize ANY version
 
-proc harvestApp(bucket: BucketRef; app: string; versionHistory: int):
-    HarvestedApp =
+proc harvestApp(bucket: BucketRef; app: string; versionHistory: int;
+                binDefaults: openArray[string] = []): HarvestedApp =
   result.app = app
 
   let manifestsDir = manifestsDirOf(bucket)
@@ -179,7 +249,7 @@ proc harvestApp(bucket: BucketRef; app: string; versionHistory: int):
 
   # ----- Head manifest -----
   let raw = readFile(manifestPath)
-  let parsed = parseScoopManifest(app, raw)
+  let parsed = parseScoopManifest(app, raw, binDefaults)
   for d in parsed.diagnostics: result.diagnostics.add(d)
   if parsed.ok:
     result.catalog.add(parsed.entry)
@@ -212,7 +282,7 @@ proc harvestApp(bucket: BucketRef; app: string; versionHistory: int):
     if version == headVersion: continue  # already covered
     let histBody = manifestAtCommit(bucket, app, sha)
     if histBody.len == 0: continue
-    let histParsed = parseScoopManifest(app, histBody)
+    let histParsed = parseScoopManifest(app, histBody, binDefaults)
     for d in histParsed.diagnostics: result.diagnostics.add(d)
     if histParsed.ok:
       # Skip if we already have this version (shouldn't happen since
@@ -310,7 +380,10 @@ proc cmdHarvest(opts: CliOptions): int =
         stderr.writeLine("HBucketShadowed [" & app & "]: already harvested " &
           "from an earlier bucket; ignoring " & bucketSpec)
         continue
-      let harvested = harvestApp(bucket, app, opts.versionHistory)
+      let appBinDefaults =
+        if app in opts.binDefaults: opts.binDefaults[app] else: @[]
+      let harvested = harvestApp(bucket, app, opts.versionHistory,
+        appBinDefaults)
       writeDiagnostics(harvested.diagnostics)
       if harvested.fatal or harvested.catalog.len == 0:
         stderr.writeLine("error: harvest of '" & app & "' from '" &
@@ -319,8 +392,11 @@ proc cmdHarvest(opts: CliOptions): int =
         continue
       var ordered = harvested.catalog
       sortCatalog(ordered)
-      let body = emitCatalogFile(app, bucketSpec, ordered)
-      let outPath = opts.outputDir / (app & ".nim")
+      # Apply --app-alias rename to control filename + variable name.
+      let toolName =
+        if app in opts.appAliases: opts.appAliases[app] else: app
+      let body = emitCatalogFile(toolName, bucketSpec, ordered)
+      let outPath = opts.outputDir / (toolName & ".nim")
       if opts.dryRun:
         echo "DRY-RUN would write " & outPath & " (" & $ordered.len &
           " version(s))"
@@ -354,7 +430,10 @@ proc cmdInspect(opts: CliOptions): int =
     stderr.writeLine("error: no manifest at " & manifestPath)
     return 2
   let raw = readFile(manifestPath)
-  let parsed = parseScoopManifest(opts.apps[0], raw)
+  let appBinDefaults =
+    if opts.apps[0] in opts.binDefaults: opts.binDefaults[opts.apps[0]]
+    else: @[]
+  let parsed = parseScoopManifest(opts.apps[0], raw, appBinDefaults)
   writeDiagnostics(parsed.diagnostics)
   if not parsed.ok:
     return 3
@@ -381,13 +460,22 @@ proc cmdVerify(opts: CliOptions): int =
   except BucketError as err:
     stderr.writeLine("error: " & err.msg)
     return 2
-  let harvested = harvestApp(bucket, opts.apps[0], opts.versionHistory)
+  let appBinDefaults =
+    if opts.apps[0] in opts.binDefaults: opts.binDefaults[opts.apps[0]]
+    else: @[]
+  let harvested = harvestApp(bucket, opts.apps[0], opts.versionHistory,
+    appBinDefaults)
   writeDiagnostics(harvested.diagnostics)
   if harvested.fatal or harvested.catalog.len == 0:
     return 3
   var ordered = harvested.catalog
   sortCatalog(ordered)
-  let body = emitCatalogFile(opts.apps[0], opts.buckets[0], ordered)
+  # Honor --app-alias so verify against a renamed catalog file
+  # (e.g. haskell -> ghc.nim) matches the emitted seq identifier.
+  let toolName =
+    if opts.apps[0] in opts.appAliases: opts.appAliases[opts.apps[0]]
+    else: opts.apps[0]
+  let body = emitCatalogFile(toolName, opts.buckets[0], ordered)
   if body == existing:
     echo "verify OK: " & opts.catalog
     return 0
