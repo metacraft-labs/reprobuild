@@ -143,6 +143,11 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.udevContent)
+  of pokLinuxPolkitRule:
+    if op.polkitDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.polkitContent)
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -1275,3 +1280,80 @@ proc applyLinuxUdevRule*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("linux.udevRule apply")
+
+# ===========================================================================
+# linux.polkitRule — write /etc/polkit-1/rules.d/<name>.
+#
+# Polkit auto-reloads its rules.d via inotify; there is no explicit
+# reload command. The driver is therefore the simplest in the family —
+# write the file, post-apply re-probe, done.
+# ===========================================================================
+
+const LinuxPolkitRulesDir* = "/etc/polkit-1/rules.d"
+  ## The directory a `linux.polkitRule` drop-in file lands in.
+
+proc polkitRulePath*(name: string): string =
+  ## Full on-disk path of the polkit rule file for `name`.
+  LinuxPolkitRulesDir & "/" & name
+
+proc observeLinuxPolkitRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  when defined(linux):
+    let path = polkitRulePath(op.polkitName)
+    if not fileExists(path):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let content = readFile(path)
+    result.present = true
+    result.digestHex = posixDigestHexOfText(content)
+  else:
+    raiseNotImplementedPlatform("linux.polkitRule observe")
+
+proc destroyLinuxPolkitRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the rule file. Polkit will auto-detect the change via
+  ## inotify. Post-apply re-probe asserts the file is gone.
+  when defined(linux):
+    let path = polkitRulePath(op.polkitName)
+    if fileExists(path):
+      try: removeFile(path)
+      except OSError: discard
+    if fileExists(path):
+      raiseProtocol("linux.polkitRule destroy of " & path &
+        " post-apply observation disagrees with desired state: " &
+        "the rule file still exists after `removeFile`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.polkitRule destroy")
+
+proc applyLinuxPolkitRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the polkit JS rule body to /etc/polkit-1/rules.d/<name>;
+  ## polkit's inotify watcher picks up the change asynchronously.
+  ## Post-apply re-probe re-reads the file and compares the
+  ## canonical-bytes digest; raise `EProtocol` on mismatch.
+  when defined(linux):
+    if op.polkitDestroy:
+      return destroyLinuxPolkitRule(op)
+    let path = polkitRulePath(op.polkitName)
+    createDir(LinuxPolkitRulesDir)
+    writeLinuxDropInFile(path, op.polkitContent, 0o644)
+    # Post-apply re-probe; polkit's inotify watcher is asynchronous
+    # but the file-content drift gate only checks bytes on disk, not
+    # live polkit state — re-reading the file is sufficient.
+    let post = observeLinuxPolkitRule(op)
+    let desiredHex = posixDigestHexOfText(op.polkitContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.polkitRule " & path &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ".")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.polkitRule apply")

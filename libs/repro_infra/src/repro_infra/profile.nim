@@ -50,6 +50,7 @@ type
     srkOsHostname = "os.hostname"
     srkLinuxSysctl = "linux.sysctl"
     srkLinuxUdevRule = "linux.udevRule"
+    srkLinuxPolkitRule = "linux.polkitRule"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -141,6 +142,9 @@ type
     of srkLinuxUdevRule:
       udevName*: string                   ## basename, must end `.rules`
       udevContent*: string
+    of srkLinuxPolkitRule:
+      polkitName*: string                 ## basename, must end `.rules`
+      polkitContent*: string
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -183,6 +187,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "sysctl:" & r.sysctlKey
   of srkLinuxUdevRule:
     "udevRule:" & r.udevName
+  of srkLinuxPolkitRule:
+    "polkitRule:" & r.polkitName
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -218,6 +224,7 @@ proc resourceName*(r: SystemResource): string =
   of srkOsHostname: r.hostnameName
   of srkLinuxSysctl: r.sysctlKey
   of srkLinuxUdevRule: r.udevName
+  of srkLinuxPolkitRule: r.polkitName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -417,11 +424,26 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkOsHostname: srk = srkOsHostname
     of $srkLinuxSysctl: srk = srkLinuxSysctl
     of $srkLinuxUdevRule: srk = srkLinuxUdevRule
+    of $srkLinuxPolkitRule: srk = srkLinuxPolkitRule
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
-    # Find the matching `}` (no nesting in this format).
-    let closeIdx = clean.find('}', braceIdx + 1)
+    # Find the matching `}` (no nesting in this format). A `}` inside
+    # a double-quoted string is skipped — required for kinds whose
+    # content field carries JS / shell bodies (e.g.
+    # `linux.polkitRule content = "polkit.addRule(function() { ... });"`).
+    var closeIdx = -1
+    block:
+      var i = braceIdx + 1
+      var inQuote = false
+      while i < clean.len:
+        let c = clean[i]
+        if c == '"':
+          inQuote = not inQuote
+        elif not inQuote and c == '}':
+          closeIdx = i
+          break
+        inc i
     if closeIdx < 0:
       raiseSystemProfileInvalid("resource '" & kindTag &
         "' block is not closed with '}'")
@@ -657,6 +679,18 @@ proc parseSystemProfile*(text: string): SystemProfile =
           "' must end with '.rules' (udev convention)")
       res = SystemResource(kind: srkLinuxUdevRule,
         udevName: n, udevContent: c)
+    of srkLinuxPolkitRule:
+      let n = need("name")
+      let c = need("content")
+      if not isSafeDropInBasename(n):
+        raiseSystemProfileInvalid("linux.polkitRule name '" & n &
+          "' is not a safe single-segment basename (letters, digits, " &
+          "'.', '-', '_'; no '/', '..', or shell metacharacter)")
+      if not n.endsWith(".rules"):
+        raiseSystemProfileInvalid("linux.polkitRule name '" & n &
+          "' must end with '.rules' (polkit convention)")
+      res = SystemResource(kind: srkLinuxPolkitRule,
+        polkitName: n, polkitContent: c)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -778,6 +812,11 @@ proc toPrivilegedOperation*(r: SystemResource;
       udevName: r.udevName,
       udevContent: r.udevContent,
       udevDestroy: destroy)
+  of srkLinuxPolkitRule:
+    PrivilegedOperation(kind: pokLinuxPolkitRule, address: r.address,
+      polkitName: r.polkitName,
+      polkitContent: r.polkitContent,
+      polkitDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

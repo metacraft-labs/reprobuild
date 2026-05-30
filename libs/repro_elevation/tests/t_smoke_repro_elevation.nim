@@ -1555,3 +1555,109 @@ suite "repro_elevation: linux.udevRule pure surface":
         discard applyLinuxUdevRule(op)
       expect ENotImplementedPlatform:
         discard destroyLinuxUdevRule(op)
+
+# ===========================================================================
+# linux.polkitRule — pure parse + drift logic. Polkit auto-reloads via
+# inotify so the driver has no reload-command surface — it is the
+# simplest in the family.
+# ===========================================================================
+
+suite "repro_elevation: linux.polkitRule pure surface":
+
+  test "polkitRulePath joins the directory with the basename":
+    check polkitRulePath("50-myrule.rules") ==
+      "/etc/polkit-1/rules.d/50-myrule.rules"
+    check LinuxPolkitRulesDir == "/etc/polkit-1/rules.d"
+
+  test "operationValidationError accepts a valid linux.polkitRule":
+    let ok = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: "wheel-admin",
+      polkitName: "50-wheel-admin.rules",
+      polkitContent: "polkit.addRule(function(action, subject) { ... });\n")
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad linux.polkitRule fields":
+    let escape = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: "x",
+      polkitName: "../etc/passwd",
+      polkitContent: "x")
+    check operationValidationError(escape).len > 0
+    let meta = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: "x",
+      polkitName: "evil; rm.rules",
+      polkitContent: "x")
+    check operationValidationError(meta).len > 0
+    let badExt = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: "x",
+      polkitName: "50-bad.txt",
+      polkitContent: "x")
+    check operationValidationError(badExt).len > 0
+    let emptyAddr = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: "",
+      polkitName: "50-my.rules",
+      polkitContent: "x")
+    check operationValidationError(emptyAddr).len > 0
+
+  test "RBEB Operation frame round-trips a linux.polkitRule":
+    let op = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: "my-rule",
+      polkitName: "50-my.rules",
+      polkitContent: "polkit.addRule(function() { return null; });\n",
+      polkitDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokLinuxPolkitRule
+    check w2.operation.address == "my-rule"
+    check w2.operation.polkitName == "50-my.rules"
+    check w2.operation.polkitContent ==
+      "polkit.addRule(function() { return null; });\n"
+    check not w2.operation.polkitDestroy
+
+  test "RBEB Operation frame round-trips a destroy linux.polkitRule":
+    let op = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: "my-rule",
+      polkitName: "50-my.rules",
+      polkitContent: "",
+      polkitDestroy: true)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "cafef00d")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.kind == pokLinuxPolkitRule
+    check w2.operation.polkitDestroy
+
+  test "posix desired digest for polkit rule matches content bytes":
+    let op = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: "my-rule",
+      polkitName: "50-my.rules",
+      polkitContent: "polkit.addRule(function() { return null; });\n")
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText(op.polkitContent)
+
+  test "posix desired digest for polkit destroy is the absent sentinel":
+    let op = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: "x",
+      polkitName: "50-my.rules",
+      polkitContent: "x",
+      polkitDestroy: true)
+    check posixSystemDesiredDigestHex(op) == ZeroDigestHex
+
+  test "linux.polkitRule requires elevation":
+    check requiresElevation(pokLinuxPolkitRule)
+    check $pokLinuxPolkitRule == "linux.polkitRule"
+    check privilegedOperationKindFromString("linux.polkitRule") ==
+      pokLinuxPolkitRule
+
+  test "off-Linux linux.polkitRule entry points raise ENotImplementedPlatform":
+    when not defined(linux):
+      let op = PrivilegedOperation(kind: pokLinuxPolkitRule,
+        address: "x",
+        polkitName: "50-my.rules",
+        polkitContent: "x")
+      expect ENotImplementedPlatform:
+        discard observeLinuxPolkitRule(op)
+      expect ENotImplementedPlatform:
+        discard applyLinuxPolkitRule(op)
+      expect ENotImplementedPlatform:
+        discard destroyLinuxPolkitRule(op)

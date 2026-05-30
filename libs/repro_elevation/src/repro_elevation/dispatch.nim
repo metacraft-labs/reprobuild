@@ -103,7 +103,7 @@ proc desiredDigest(op: PrivilegedOperation): string =
     vsInstallerDesiredDigestHex(op)
   of pokMacosSystemDefault, pokSystemdSystemUnit, pokLaunchdSystemDaemon,
      pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser,
-     pokLinuxSysctl, pokLinuxUdevRule:
+     pokLinuxSysctl, pokLinuxUdevRule, pokLinuxPolkitRule:
     posixSystemDesiredDigestHex(op)
   of pokOsTimezone, pokOsHostname:
     # Cross-platform: every platform's desired digest is the canonical
@@ -173,6 +173,8 @@ proc reobserve*(ctx: FixtureContext;
     observeLinuxSysctl(op)
   of pokLinuxUdevRule:
     observeLinuxUdevRule(op)
+  of pokLinuxPolkitRule:
+    observeLinuxPolkitRule(op)
 
 proc applyOne(ctx: FixtureContext;
               op: PrivilegedOperation): ObservedOperationState =
@@ -228,6 +230,8 @@ proc applyOne(ctx: FixtureContext;
     result = applyLinuxSysctl(op)
   of pokLinuxUdevRule:
     result = applyLinuxUdevRule(op)
+  of pokLinuxPolkitRule:
+    result = applyLinuxPolkitRule(op)
 
 # ---------------------------------------------------------------------------
 # Dispatch one planned operation with the re-observe / drift gate.
@@ -279,7 +283,8 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokEnvSystemVariable and op.evDestroy) or
     (op.kind == pokPasswdUser and op.puDestroy) or
     (op.kind == pokLinuxSysctl and op.sysctlDestroy) or
-    (op.kind == pokLinuxUdevRule and op.udevDestroy)
+    (op.kind == pokLinuxUdevRule and op.udevDestroy) or
+    (op.kind == pokLinuxPolkitRule and op.polkitDestroy)
   let firstSampleLooksLikeCacheHit =
     if destroyOp: not observed.present
     else: observed.present and observed.digestHex == desiredHex

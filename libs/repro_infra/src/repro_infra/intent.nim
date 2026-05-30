@@ -316,6 +316,9 @@ proc renderStanza*(r: SystemResource): seq[string] =
   of srkLinuxUdevRule:
     result.add("  name = " & renderScalar(r.udevName))
     result.add("  content = " & renderScalar(r.udevContent))
+  of srkLinuxPolkitRule:
+    result.add("  name = " & renderScalar(r.polkitName))
+    result.add("  content = " & renderScalar(r.polkitContent))
   # M82 Phase B: emit `depends_on` last so its presence is obvious in a
   # rendered stanza without disrupting the legacy kind-field order.
   # Absent / empty seq omits the line entirely (the common case), so

@@ -344,6 +344,10 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.udevName)
     body.writeString(op.udevContent)
     body.writeBool(op.udevDestroy)
+  of pokLinuxPolkitRule:
+    body.writeString(op.polkitName)
+    body.writeString(op.polkitContent)
+    body.writeBool(op.polkitDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -508,6 +512,12 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.udevName = readString(body, pos)
     result.operation.udevContent = readString(body, pos)
     result.operation.udevDestroy = readBool(body, pos, "udevDestroy")
+  of pokLinuxPolkitRule:
+    result.operation = PrivilegedOperation(kind: pokLinuxPolkitRule,
+      address: address)
+    result.operation.polkitName = readString(body, pos)
+    result.operation.polkitContent = readString(body, pos)
+    result.operation.polkitDestroy = readBool(body, pos, "polkitDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

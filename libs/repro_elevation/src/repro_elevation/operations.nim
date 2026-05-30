@@ -131,6 +131,11 @@ type
       ## a rule body to `/etc/udev/rules.d/<name>.rules` (mode 0644),
       ## then `udevadm control --reload-rules`. NO automatic device-
       ## trigger — that is too invasive for a converge step.
+    pokLinuxPolkitRule = "linux.polkitRule"
+      ## The post-M83 step-5 Linux polkit rule drop-in operation:
+      ## write a JS rule body to `/etc/polkit-1/rules.d/<name>.rules`
+      ## (mode 0644). Polkit auto-reloads via inotify; no explicit
+      ## reload step is needed.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -310,6 +315,13 @@ type
       udevName*: string
       udevContent*: string
       udevDestroy*: bool
+    of pokLinuxPolkitRule:
+      ## Write a polkit JS rule drop-in. `polkitName` is the rule
+      ## basename (must end `.rules`); `polkitContent` is the full
+      ## file body; `polkitDestroy` selects the rollback direction.
+      polkitName*: string
+      polkitContent*: string
+      polkitDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -346,6 +358,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokOsHostname: true
   of pokLinuxSysctl: true
   of pokLinuxUdevRule: true
+  of pokLinuxPolkitRule: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -374,6 +387,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokOsHostname: pokOsHostname
   of $pokLinuxSysctl: pokLinuxSysctl
   of $pokLinuxUdevRule: pokLinuxUdevRule
+  of $pokLinuxPolkitRule: pokLinuxPolkitRule
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -770,6 +784,14 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.udevName.endsWith(".rules"):
       return "linux.udevRule name '" & op.udevName &
         "' must end with '.rules' (udev convention)"
+  of pokLinuxPolkitRule:
+    if not isSafeDropInBasename(op.polkitName):
+      return "linux.polkitRule name '" & op.polkitName &
+        "' is not a safe single-segment basename (letters, digits, " &
+        "'.', '-', '_'; no '/', '..', or shell metacharacter)"
+    if not op.polkitName.endsWith(".rules"):
+      return "linux.polkitRule name '" & op.polkitName &
+        "' must end with '.rules' (polkit convention)"
   return ""
 
 # ---------------------------------------------------------------------------

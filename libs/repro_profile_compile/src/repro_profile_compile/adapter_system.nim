@@ -227,6 +227,18 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
         "linux.udevRule name '" & n & "' must end with '.rules'")
     result = SystemResource(kind: srkLinuxUdevRule,
       udevName: n, udevContent: c)
+  of "linux.polkitRule":
+    let n = fieldString(r, "name")
+    let c = fieldString(r, "content")
+    if not isSafeDropInBasename(n):
+      raise newException(ValueError,
+        "linux.polkitRule name '" & n &
+        "' is not a safe single-segment basename")
+    if not n.endsWith(".rules"):
+      raise newException(ValueError,
+        "linux.polkitRule name '" & n & "' must end with '.rules'")
+    result = SystemResource(kind: srkLinuxPolkitRule,
+      polkitName: n, polkitContent: c)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -252,7 +264,7 @@ proc isSystemScopeResource(kind: string): bool =
      "launchd.systemDaemon", "fs.systemFile",
      "env.systemVariable", "passwd.user",
      "os.timezone", "os.hostname",
-     "linux.sysctl", "linux.udevRule":
+     "linux.sysctl", "linux.udevRule", "linux.polkitRule":
     true
   else:
     false
@@ -427,5 +439,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkLinuxUdevRule:
       pairs.add(("name", quoteSystemValue(r.udevName)))
       pairs.add(("content", quoteSystemValue(r.udevContent)))
+    of srkLinuxPolkitRule:
+      pairs.add(("name", quoteSystemValue(r.polkitName)))
+      pairs.add(("content", quoteSystemValue(r.polkitContent)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

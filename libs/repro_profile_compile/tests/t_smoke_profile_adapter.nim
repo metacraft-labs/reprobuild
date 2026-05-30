@@ -713,6 +713,51 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "linux.polkitRule resource maps to srkLinuxPolkitRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.polkitRule", "wheel",
+      @[strFieldEntry("name", "50-wheel-admin.rules"),
+        strFieldEntry("content", "polkit.addRule(function() { });")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkLinuxPolkitRule
+    check sp.resources[0].polkitName == "50-wheel-admin.rules"
+    check sp.resources[0].polkitContent ==
+      "polkit.addRule(function() { });"
+    check sp.resources[0].address == "wheel"
+
+  test "linux.polkitRule rejects a path-escape name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.polkitRule", "x",
+      @[strFieldEntry("name", "../etc/shadow"),
+        strFieldEntry("content", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "linux.polkitRule rejects a non-.rules name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.polkitRule", "x",
+      @[strFieldEntry("name", "50-bad.conf"),
+        strFieldEntry("content", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips linux.polkitRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.polkitRule", "",
+      @[strFieldEntry("name", "50-wheel-admin.rules"),
+        strFieldEntry("content", "polkit.addRule(function() { });")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkLinuxPolkitRule
+    check sp2.resources[0].polkitName == "50-wheel-admin.rules"
+    check sp2.resources[0].polkitContent ==
+      "polkit.addRule(function() { });"
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
 # ---------------------------------------------------------------------------
 # Cross-cutting sanity: the home adapter's output passes the apply
 # pipeline's resource pre-validation by going through `findResourcesBlock`

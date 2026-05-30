@@ -361,6 +361,27 @@ suite "Resource constructors":
     check target.len == 1
     check target[0].address == "linux.udevRule:99-my.rules"
 
+  test "linuxPolkitRule records name / content":
+    var target: seq[ResourceIntent] = @[]
+    linuxPolkitRule(target,
+      name = "50-wheel.rules",
+      content = "polkit.addRule(function() { return null; });\n",
+      address = "wheel-admin")
+    check target.len == 1
+    check target[0].kind == "linux.polkitRule"
+    check target[0].address == "wheel-admin"
+    check target[0].fields["name"].s == "50-wheel.rules"
+    check target[0].fields["content"].s ==
+      "polkit.addRule(function() { return null; });\n"
+
+  test "linuxPolkitRule auto-addresses from the name when address is empty":
+    var target: seq[ResourceIntent] = @[]
+    linuxPolkitRule(target,
+      name = "50-my.rules",
+      content = "x")
+    check target.len == 1
+    check target[0].address == "linux.polkitRule:50-my.rules"
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

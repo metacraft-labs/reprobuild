@@ -155,7 +155,7 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
     vsInstallerDesiredDigestHex(op)
   of pokMacosSystemDefault, pokSystemdSystemUnit, pokLaunchdSystemDaemon,
      pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser,
-     pokLinuxSysctl, pokLinuxUdevRule:
+     pokLinuxSysctl, pokLinuxUdevRule, pokLinuxPolkitRule:
     posixSystemDesiredDigestHex(op)
   else:
     systemDesiredDigestHex(op)
@@ -192,6 +192,8 @@ proc observeResource*(r: SystemResource): ResourceObservation =
       observeLinuxSysctl(op)
     of srkLinuxUdevRule:
       observeLinuxUdevRule(op)
+    of srkLinuxPolkitRule:
+      observeLinuxPolkitRule(op)
   result.present = obs.present
   result.observedDigestHex =
     if obs.present: obs.digestHex else: ZeroDigestHex
@@ -269,6 +271,8 @@ proc summaryLine(r: SystemResource; action: string): string =
     action & " sysctl " & r.sysctlKey & " = " & r.sysctlValue
   of srkLinuxUdevRule:
     action & " udev-rule " & r.udevName
+  of srkLinuxPolkitRule:
+    action & " polkit-rule " & r.polkitName
 
 # ---------------------------------------------------------------------------
 # Resource dependency graph + topological sort (M82 Phase B).

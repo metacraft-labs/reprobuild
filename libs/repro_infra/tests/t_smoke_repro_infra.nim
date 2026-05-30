@@ -1585,3 +1585,80 @@ linux.udevRule {
     check realWorldIdentity(r) == "udevRule:99-my.rules"
     check resourceName(r) == "99-my.rules"
     check resourceKindTag(r) == "linux.udevRule"
+
+# ===========================================================================
+# linux.polkitRule — parser + toPrivilegedOperation. M83 step 5.
+# ===========================================================================
+
+suite "repro_infra: linux.polkitRule profile parser":
+
+  test "parses a linux.polkitRule stanza":
+    let text = """
+linux.polkitRule {
+  name = "50-wheel-admin.rules"
+  content = "polkit.addRule(function() { return null; });"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkLinuxPolkitRule
+    check profile.resources[0].polkitName == "50-wheel-admin.rules"
+    check profile.resources[0].polkitContent ==
+      "polkit.addRule(function() { return null; });"
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokLinuxPolkitRule
+    check op.polkitName == "50-wheel-admin.rules"
+    check not op.polkitDestroy
+    check requiresElevation(op.kind)
+
+  test "toPrivilegedOperation passes destroy through to polkitDestroy":
+    let text = """
+linux.polkitRule {
+  name = "50-x.rules"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let op = toPrivilegedOperation(profile.resources[0], destroy = true)
+    check op.kind == pokLinuxPolkitRule
+    check op.polkitDestroy
+
+  test "linux.polkitRule rejects a path-escape name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.polkitRule {
+  name = "../etc/passwd"
+  content = "x"
+}
+""")
+
+  test "linux.polkitRule rejects a shell-meta name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.polkitRule {
+  name = "evil; rm.rules"
+  content = "x"
+}
+""")
+
+  test "linux.polkitRule rejects a name without .rules":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.polkitRule {
+  name = "50-bad.conf"
+  content = "x"
+}
+""")
+
+  test "realWorldIdentity and resourceName follow the polkit rule name":
+    let text = """
+linux.polkitRule {
+  name = "50-my.rules"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check realWorldIdentity(r) == "polkitRule:50-my.rules"
+    check resourceName(r) == "50-my.rules"
+    check resourceKindTag(r) == "linux.polkitRule"

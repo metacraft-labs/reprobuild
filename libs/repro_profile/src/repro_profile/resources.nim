@@ -506,3 +506,22 @@ template linuxUdevRule*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("linux.udevRule", name)
     pushResource(targetResources, "linux.udevRule", addr0, fields,
       dependsOn)
+
+template linuxPolkitRule*(targetResources: var seq[ResourceIntent];
+                          name: string;
+                          content: string;
+                          address: string = "";
+                          dependsOn: seq[string] = @[]) =
+  ## M83 step 5 — Linux system-scope polkit rule drop-in. Wraps a
+  ## write to `/etc/polkit-1/rules.d/<name>` (`name` must end
+  ## `.rules`). Polkit auto-reloads via inotify; no explicit reload.
+  ##
+  ## Address default: `linux.polkitRule:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.polkitRule", name)
+    pushResource(targetResources, "linux.polkitRule", addr0, fields,
+      dependsOn)
