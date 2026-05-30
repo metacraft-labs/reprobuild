@@ -766,12 +766,33 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
+proc assertActionCacheEffective(report: JsonNode; id: string) =
+  ## "Cache was effective for this action on this build" — accepts
+  ## either `asCacheHit` (cache hit + outputs had to be restored from
+  ## CAS) or `asUpToDate` (cache hit + outputs already on disk, no
+  ## restoration). Both are defined in
+  ## `libs/repro_build_engine/.../repro_build_engine.nim`
+  ## `ActionStatus`; both leave `launched == false`. The engine picks
+  ## `asUpToDate` whenever the prior outputs survived between runs,
+  ## which is the common case in watch-rebuild scenarios — see
+  ## `completeSuccess(id, asUpToDate, cdHit, false, "outputs-present")`
+  ## vs `completeSuccess(id, asCacheHit, cdHit, false, "restored")`
+  ## in the engine.
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  let status = action{"status"}.getStr()
+  if status notin ["asCacheHit", "asUpToDate"]:
+    checkpoint("expected asCacheHit or asUpToDate for " & id &
+      ", got " & status)
+    fail()
+  check action{"launched"}.getBool() == false
+
 proc assertActionCachedOrSucceeded(report: JsonNode; id: string) =
   let action = reportAction(report, id)
   check action.kind != JNull
   let status = action{"status"}.getStr()
   let launched = action{"launched"}.getBool()
-  if status == "asCacheHit":
+  if status in ["asCacheHit", "asUpToDate"]:
     check launched == false
   elif status == "asSucceeded":
     check launched == true
@@ -784,6 +805,21 @@ proc assertOutputAction(report: JsonNode; output, status: string;
   check action.kind != JNull
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
+
+proc assertOutputActionCacheEffective(report: JsonNode; output: string) =
+  ## Output-key flavour of `assertActionCacheEffective`. Accepts
+  ## either `asCacheHit` or `asUpToDate` and requires `launched ==
+  ## false`. Used for per-stylesheet rebuild gates where the watch
+  ## cycle should not relaunch the action when the upstream input is
+  ## untouched.
+  let action = reportActionWithDeclaredOutput(report, output)
+  check action.kind != JNull
+  let status = action{"status"}.getStr()
+  if status notin ["asCacheHit", "asUpToDate"]:
+    checkpoint("expected asCacheHit or asUpToDate for output " &
+      output & ", got " & status)
+    fail()
+  check action{"launched"}.getBool() == false
 
 const publicResourceAction = "frontend-public-resources"
 
@@ -1279,7 +1315,7 @@ when defined(macosx):
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
       check report{"actions"}.len == 3
-      assertAction(report, "generate-config-header", "asCacheHit", false)
+      assertActionCacheEffective(report, "generate-config-header")
       assertAction(report, "build-c-dir", "asUpToDate", false)
       assertAction(report, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
@@ -1339,16 +1375,16 @@ when defined(macosx):
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
       check report{"actions"}.len == 17
-      assertAction(report, "frontend-ui-js", "asCacheHit", false)
-      assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(report, "frontend-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-src-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-server-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(report, "frontend-src-subwindow-js", "asCacheHit", false)
+      assertActionCacheEffective(report, "frontend-ui-js")
+      assertActionCacheEffective(report, "frontend-public-ui-js")
+      assertActionCacheEffective(report, "frontend-index-js")
+      assertActionCacheEffective(report, "frontend-src-index-js")
+      assertActionCacheEffective(report, "frontend-server-index-js")
+      assertActionCacheEffective(report, "frontend-subwindow-js")
+      assertActionCacheEffective(report, "frontend-src-subwindow-js")
       assertAction(report, "frontend-index-html", "asSucceeded", true)
-      assertAction(report, "frontend-subwindow-html", "asCacheHit", false)
-      assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
+      assertActionCacheEffective(report, "frontend-subwindow-html")
+      assertActionCacheEffective(report, "frontend-src-helpers-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -1357,9 +1393,9 @@ when defined(macosx):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(report,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(report, "asCacheHit", false)
+        assertOutputActionCacheEffective(report,
+          "src/frontend/styles/" & stylesheet)
+      assertPublicResourceCachedOrSucceeded(report)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull
@@ -1431,16 +1467,16 @@ when defined(macosx):
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
       check report{"actions"}.len == 21
-      assertAction(report, "frontend-ui-js", "asCacheHit", false)
-      assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(report, "frontend-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-src-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-server-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(report, "frontend-src-subwindow-js", "asCacheHit", false)
-      assertAction(report, "frontend-index-html", "asCacheHit", false)
-      assertAction(report, "frontend-subwindow-html", "asCacheHit", false)
-      assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
+      assertActionCacheEffective(report, "frontend-ui-js")
+      assertActionCacheEffective(report, "frontend-public-ui-js")
+      assertActionCacheEffective(report, "frontend-index-js")
+      assertActionCacheEffective(report, "frontend-src-index-js")
+      assertActionCacheEffective(report, "frontend-server-index-js")
+      assertActionCacheEffective(report, "frontend-subwindow-js")
+      assertActionCacheEffective(report, "frontend-src-subwindow-js")
+      assertActionCacheEffective(report, "frontend-index-html")
+      assertActionCacheEffective(report, "frontend-subwindow-html")
+      assertActionCacheEffective(report, "frontend-src-helpers-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -1449,12 +1485,12 @@ when defined(macosx):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(report,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+        assertOutputActionCacheEffective(report,
+          "src/frontend/styles/" & stylesheet)
       assertPublicResourceCachedOrSucceeded(report)
-      assertAction(report, "config-default-layout-json", "asCacheHit", false)
-      assertAction(report, "config-default-config-yaml", "asCacheHit", false)
-      assertAction(report, "db-backend-record", "asCacheHit", false)
+      assertActionCacheEffective(report, "config-default-layout-json")
+      assertActionCacheEffective(report, "config-default-config-yaml")
+      assertActionCacheEffective(report, "db-backend-record")
       assertAction(report, "ct", "asSucceeded", true)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull

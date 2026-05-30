@@ -212,6 +212,20 @@ proc requireFailure(command: string; cwd = getCurrentDir()): string =
   check res.code != 0
   res.output
 
+proc actionLineCacheEffective(log, id: string): bool =
+  ## "Cache was effective for this action on this build" check against
+  ## the action-level log line emitted by `--log=actions`. Accepts
+  ## either `asCacheHit` (cache hit + outputs restored from CAS) or
+  ## `asUpToDate` (cache hit + outputs already present, no restore).
+  ## Both leave `launched=false`. The engine picks `asUpToDate`
+  ## whenever the prior outputs survived between runs — see
+  ## `completeSuccess(id, asUpToDate, cdHit, false, "outputs-present")`
+  ## vs `completeSuccess(id, asCacheHit, cdHit, false, "restored")`
+  ## in `libs/repro_build_engine/.../repro_build_engine.nim`.
+  let prefix = "action: " & id & " status="
+  log.contains(prefix & "asCacheHit launched=false") or
+  log.contains(prefix & "asUpToDate launched=false")
+
 proc hasInlineFlag(args: openArray[string]; prefix: string): bool =
   for arg in args:
     if arg == prefix or arg.startsWith(prefix & "="):
@@ -1028,7 +1042,7 @@ suite "e2e_local_reprobuild_project_build":
 
       let outputV1 = readFile(projectRoot / "build" / "generated.txt")
       let second = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
-      check second.contains("action: produce status=asCacheHit launched=false")
+      check actionLineCacheEffective(second, "produce")
       check readFile(projectRoot / "build" / "generated.txt") == outputV1
       check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
         @["producer"]
@@ -1438,10 +1452,8 @@ suite "e2e_local_reprobuild_project_build":
       let second = buildCurrentProject(reproBin, projectRoot, pathValue,
         monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      check reportAction(secondReport, "style-main"){"status"}.getStr() ==
-        "asCacheHit"
-      check reportAction(secondReport, "style-aggregate"){"status"}.getStr() ==
-        "asCacheHit"
+      check reportAction(secondReport, "style-main"){"status"}.getStr() in ["asCacheHit", "asUpToDate"]
+      check reportAction(secondReport, "style-aggregate"){"status"}.getStr() in ["asCacheHit", "asUpToDate"]
 
       writeFile(projectRoot / "styles" / "palette.styl",
         "primary = #654321\n")
@@ -1827,8 +1839,8 @@ suite "e2e_local_reprobuild_project_build":
       "--log=actions"
     ], traceEnv), repoRoot)
     check second.contains("providerInvocations: 0")
-    check second.contains("action: style-alpha status=asCacheHit launched=false")
-    check second.contains("action: style-beta status=asCacheHit launched=false")
+    check actionLineCacheEffective(second, "style-alpha")
+    check actionLineCacheEffective(second, "style-beta")
     check nonEmptyLines(tracePath).len == 0
 
     writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v2\n")
@@ -1840,8 +1852,7 @@ suite "e2e_local_reprobuild_project_build":
     check contentChanged.contains("providerInvocations: 0")
     check contentChanged.contains(
       "action: style-alpha status=asSucceeded launched=true")
-    check contentChanged.contains(
-      "action: style-beta status=asCacheHit launched=false")
+    check actionLineCacheEffective(contentChanged, "style-beta")
     check readFile(projectRoot / "public" / "alpha.css").contains("alpha-v2")
     check nonEmptyLines(tracePath).len == 0
 
@@ -1955,9 +1966,9 @@ suite "e2e_local_reprobuild_project_build":
     let second = build(reproBin, target, repoRoot, pathValue)
     check readFile(marker) == markerAfterFirst
     check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
-    check second.contains("action: produce status=asCacheHit launched=false")
-    check second.contains("action: consume status=asCacheHit launched=false")
-    check second.contains("action: unrelated status=asCacheHit launched=false")
+    check actionLineCacheEffective(second, "produce")
+    check actionLineCacheEffective(second, "consume")
+    check actionLineCacheEffective(second, "unrelated")
 
     writeFile(projectRoot / "src" / "hidden.txt", "hidden v2\n")
     let hiddenChanged = build(reproBin, target, repoRoot, pathValue)
@@ -1966,8 +1977,7 @@ suite "e2e_local_reprobuild_project_build":
     check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
     check hiddenChanged.contains("action: produce status=asSucceeded launched=true")
     check hiddenChanged.contains("action: consume status=asSucceeded launched=true")
-    check hiddenChanged.contains(
-      "action: unrelated status=asCacheHit launched=false")
+    check actionLineCacheEffective(hiddenChanged, "unrelated")
     check readFile(projectRoot / "dist" / "final.txt").contains("hidden=hidden v2")
 
     removeFile(projectRoot / "build" / "generated.txt")
@@ -1979,8 +1989,7 @@ suite "e2e_local_reprobuild_project_build":
       "action: produce status=asSucceeded launched=true")
     check upstreamOutputDeleted.contains(
       "action: consume status=asSucceeded launched=true")
-    check upstreamOutputDeleted.contains(
-      "action: unrelated status=asCacheHit launched=false")
+    check actionLineCacheEffective(upstreamOutputDeleted, "unrelated")
 
     let noFlag = requireFailure(shellCommand([reproBin, "build", target]), repoRoot)
     check noFlag.contains("refusing implicit PATH fallback")

@@ -26,6 +26,18 @@ proc requireFailure(command: string; cwd = getCurrentDir()): string =
   check res.code != 0
   res.output
 
+proc actionLineCacheEffective(log, id: string): bool =
+  ## "Cache was effective for this action" — accepts either
+  ## `asCacheHit` (cache hit + outputs restored from CAS) or
+  ## `asUpToDate` (cache hit + outputs already present, no restore).
+  ## Both leave `launched=false`. The engine picks `asUpToDate`
+  ## whenever the prior outputs survived between runs. See
+  ## `completeSuccess(...)` calls in
+  ## `libs/repro_build_engine/.../repro_build_engine.nim`.
+  let prefix = "action: " & id & " status="
+  log.contains(prefix & "asCacheHit launched=false") or
+  log.contains(prefix & "asUpToDate launched=false")
+
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
     if line.startsWith(prefix):
@@ -217,9 +229,9 @@ suite "m54_verified_tarball_profile":
     let prefixInfo = getFileInfo(profile.selectedStorePath)
     let second = requireSuccess(shellCommand([reproBin, "build", projectRoot,
       "--tool-provisioning=tarball"]), repoRoot)
-    if not second.contains("action: tarball-run status=asCacheHit launched=false"):
+    if not actionLineCacheEffective(second, "tarball-run"):
       checkpoint(second)
-    check second.contains("action: tarball-run status=asCacheHit launched=false")
+    check actionLineCacheEffective(second, "tarball-run")
     let secondIdentity = readPathOnlyBuildIdentity(valueAfter(second,
       "toolIdentity:"))
     check secondIdentity.profiles[0].selectedStorePath == profile.selectedStorePath
