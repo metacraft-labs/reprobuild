@@ -178,14 +178,50 @@ proc observedCanonical*(installed, desired: openArray[ExtensionSpec];
 # ---------------------------------------------------------------------------
 
 proc findCodeCli*(): string =
-  ## Locate the `code` CLI on PATH. Returns the absolute path or "" if
-  ## the CLI cannot be found. On Windows the binary is `code.cmd`; on
-  ## POSIX it is `code`. We probe both forms so the driver works under
-  ## any vendor-specific layout.
+  ## Locate the `code` CLI. Returns the absolute path or "" if the CLI
+  ## cannot be found. Probes (in order): the PATH, then known
+  ## install-time locations (Scoop shims on Windows, the VS Code shell
+  ## helper under `Program Files`, the macOS `.app` `bin/`, common
+  ## Linux package paths). This wider search makes the driver
+  ## resilient when a same-apply prior step installed VS Code but did
+  ## not refresh the apply process's PATH (e.g. a Scoop `vscode`
+  ## install completes but the running shell still holds the old PATH;
+  ## the driver finds the freshly-deployed shim regardless).
+  ##
+  ## On Windows the binary is `code.cmd`; on POSIX it is `code`. We
+  ## probe both forms so the driver works under any vendor-specific
+  ## layout.
   for cand in ["code", "code.cmd"]:
     let p = findExe(cand)
     if p.len > 0:
       return p
+  when defined(windows):
+    # Scoop's per-user shims directory.
+    let userHome = getEnv("USERPROFILE")
+    if userHome.len > 0:
+      for cand in [userHome / "scoop" / "shims" / "code.cmd",
+                   userHome / "scoop" / "shims" / "code.exe",
+                   userHome / "scoop" / "apps" / "vscode" / "current" /
+                     "bin" / "code.cmd",
+                   userHome / "AppData" / "Local" / "Programs" / "Microsoft VS Code" /
+                     "bin" / "code.cmd"]:
+        if fileExists(cand):
+          return cand
+    # Standard Program Files install location.
+    for pfRoot in [getEnv("ProgramFiles"), getEnv("ProgramFiles(x86)")]:
+      if pfRoot.len > 0:
+        let cand = pfRoot / "Microsoft VS Code" / "bin" / "code.cmd"
+        if fileExists(cand):
+          return cand
+  elif defined(macosx):
+    let cand = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+    if fileExists(cand):
+      return cand
+  else:
+    for cand in ["/usr/bin/code", "/usr/local/bin/code", "/snap/bin/code",
+                 "/var/lib/flatpak/exports/bin/com.visualstudio.code"]:
+      if fileExists(cand):
+        return cand
   return ""
 
 # ---------------------------------------------------------------------------
