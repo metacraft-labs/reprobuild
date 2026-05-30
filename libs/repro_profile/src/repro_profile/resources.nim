@@ -465,3 +465,25 @@ template osHostname*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("os.hostname", hostname)
     pushResource(targetResources, "os.hostname", addr0, fields,
       dependsOn)
+
+template linuxSysctl*(targetResources: var seq[ResourceIntent];
+                      key: string;
+                      value: string;
+                      filename: string = "";
+                      address: string = "";
+                      dependsOn: seq[string] = @[]) =
+  ## M83 step 5 — Linux system-scope sysctl drop-in. Wraps a write to
+  ## `/etc/sysctl.d/<filename>` (auto-derived to
+  ## `99-reprobuild-<address-or-key>.conf` when `filename` is empty)
+  ## plus a `sysctl -p <path>` reload.
+  ##
+  ## Address default: `linux.sysctl:<key>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["key"] = strField(key)
+    fields["value"] = strField(value)
+    fields["filename"] = strField(filename)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.sysctl", key)
+    pushResource(targetResources, "linux.sysctl", addr0, fields,
+      dependsOn)

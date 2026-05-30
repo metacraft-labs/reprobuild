@@ -611,6 +611,65 @@ suite "M83 Phase D: system adapter":
     check sp2.resources[0].dependsOn.len == 1
     check sp2.resources[0].dependsOn[0].kind == "windows.capability"
 
+  test "linux.sysctl resource maps to srkLinuxSysctl":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.sysctl", "perf",
+      @[strFieldEntry("key", "kernel.perf_event_paranoid"),
+        strFieldEntry("value", "1"),
+        strFieldEntry("filename", "10-perf.conf")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkLinuxSysctl
+    check sp.resources[0].sysctlKey == "kernel.perf_event_paranoid"
+    check sp.resources[0].sysctlValue == "1"
+    check sp.resources[0].sysctlFilename == "10-perf.conf"
+    check sp.resources[0].address == "perf"
+
+  test "linux.sysctl rejects an unsafe key at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.sysctl", "x",
+      @[strFieldEntry("key", "kernel.x; rm"),
+        strFieldEntry("value", "1")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "linux.sysctl rejects a newline-bearing value at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.sysctl", "x",
+      @[strFieldEntry("key", "kernel.x"),
+        strFieldEntry("value", "1\n2")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips linux.sysctl":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.sysctl", "",
+      @[strFieldEntry("key", "kernel.perf_event_paranoid"),
+        strFieldEntry("value", "1"),
+        strFieldEntry("filename", "10-perf.conf")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkLinuxSysctl
+    check sp2.resources[0].sysctlKey == "kernel.perf_event_paranoid"
+    check sp2.resources[0].sysctlValue == "1"
+    check sp2.resources[0].sysctlFilename == "10-perf.conf"
+    # Second round-trip is byte-equivalent.
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
+  test "renderSystemProfileToText round-trips linux.sysctl with default filename":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.sysctl", "",
+      @[strFieldEntry("key", "vm.swappiness"),
+        strFieldEntry("value", "10")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].sysctlFilename == ""
+
 # ---------------------------------------------------------------------------
 # Cross-cutting sanity: the home adapter's output passes the apply
 # pipeline's resource pre-validation by going through `findResourcesBlock`

@@ -192,6 +192,29 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       raise newException(ValueError,
         "os.hostname '" & h & "' is not a valid RFC 1123 hostname")
     result = SystemResource(kind: srkOsHostname, hostnameName: h)
+  of "linux.sysctl":
+    let k = fieldString(r, "key")
+    let v = fieldString(r, "value")
+    if not isSafeSysctlKey(k):
+      raise newException(ValueError,
+        "linux.sysctl key '" & k &
+        "' contains characters outside the sysctl-key charset")
+    if not isSafeSysctlValue(v):
+      raise newException(ValueError,
+        "linux.sysctl value for key '" & k &
+        "' contains a newline")
+    let filename = fieldString(r, "filename")
+    if filename.len > 0:
+      if not isSafeDropInBasename(filename):
+        raise newException(ValueError,
+          "linux.sysctl filename '" & filename &
+          "' is not a safe single-segment basename")
+      if not filename.endsWith(".conf"):
+        raise newException(ValueError,
+          "linux.sysctl filename '" & filename &
+          "' must end with '.conf'")
+    result = SystemResource(kind: srkLinuxSysctl,
+      sysctlKey: k, sysctlValue: v, sysctlFilename: filename)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -216,7 +239,8 @@ proc isSystemScopeResource(kind: string): bool =
      "macos.systemDefault", "systemd.systemUnit",
      "launchd.systemDaemon", "fs.systemFile",
      "env.systemVariable", "passwd.user",
-     "os.timezone", "os.hostname":
+     "os.timezone", "os.hostname",
+     "linux.sysctl":
     true
   else:
     false
@@ -383,5 +407,10 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("tz", quoteSystemValue(r.tzIana)))
     of srkOsHostname:
       pairs.add(("hostname", quoteSystemValue(r.hostnameName)))
+    of srkLinuxSysctl:
+      pairs.add(("key", quoteSystemValue(r.sysctlKey)))
+      pairs.add(("value", quoteSystemValue(r.sysctlValue)))
+      if r.sysctlFilename.len > 0:
+        pairs.add(("filename", quoteSystemValue(r.sysctlFilename)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

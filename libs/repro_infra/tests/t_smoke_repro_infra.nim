@@ -1383,3 +1383,116 @@ windows.optionalFeature { name = "Repro-Test-Nonexistent-Feature-M82C" }
     let f = plan.driftFindings[0]
     check f.classification == dcActionable
     check f.accepted
+
+# ===========================================================================
+# linux.sysctl — parser + toPrivilegedOperation. M83 step 5.
+# ===========================================================================
+
+suite "repro_infra: linux.sysctl profile parser":
+
+  test "parses a linux.sysctl stanza with auto-derived filename":
+    let text = """
+linux.sysctl {
+  key = "kernel.perf_event_paranoid"
+  value = "1"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkLinuxSysctl
+    check profile.resources[0].sysctlKey == "kernel.perf_event_paranoid"
+    check profile.resources[0].sysctlValue == "1"
+    check profile.resources[0].sysctlFilename == ""
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokLinuxSysctl
+    check op.sysctlKey == "kernel.perf_event_paranoid"
+    check op.sysctlValue == "1"
+    check op.sysctlFilename == ""
+    check not op.sysctlDestroy
+    check requiresElevation(op.kind)
+
+  test "parses a linux.sysctl stanza with an explicit filename":
+    let text = """
+linux.sysctl {
+  key = "vm.swappiness"
+  value = "10"
+  filename = "10-vm.conf"
+  address = "tune-swappiness"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].sysctlFilename == "10-vm.conf"
+    check profile.resources[0].address == "tune-swappiness"
+
+  test "toPrivilegedOperation passes destroy through to sysctlDestroy":
+    let text = """
+linux.sysctl {
+  key = "kernel.x"
+  value = "0"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let op = toPrivilegedOperation(profile.resources[0], destroy = true)
+    check op.kind == pokLinuxSysctl
+    check op.sysctlDestroy
+
+  test "linux.sysctl rejects an unsafe key":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.sysctl {
+  key = "kernel.x; rm -rf /"
+  value = "1"
+}
+""")
+
+  test "linux.sysctl rejects a value with a newline":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.sysctl {
+  key = "kernel.x"
+  value = "1
+2"
+}
+""")
+
+  test "linux.sysctl rejects a path-escape filename":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.sysctl {
+  key = "kernel.x"
+  value = "1"
+  filename = "../etc/shadow"
+}
+""")
+
+  test "linux.sysctl rejects a filename without .conf":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.sysctl {
+  key = "kernel.x"
+  value = "1"
+  filename = "10-perf.txt"
+}
+""")
+
+  test "linux.sysctl rejects a missing key":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.sysctl {
+  value = "1"
+}
+""")
+
+  test "realWorldIdentity and resourceName follow the sysctl key":
+    let text = """
+linux.sysctl {
+  key = "kernel.perf_event_paranoid"
+  value = "1"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check realWorldIdentity(r) == "sysctl:kernel.perf_event_paranoid"
+    check resourceName(r) == "kernel.perf_event_paranoid"
+    check resourceKindTag(r) == "linux.sysctl"

@@ -335,6 +335,11 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.tzIana)
   of pokOsHostname:
     body.writeString(op.hostnameName)
+  of pokLinuxSysctl:
+    body.writeString(op.sysctlKey)
+    body.writeString(op.sysctlValue)
+    body.writeString(op.sysctlFilename)
+    body.writeBool(op.sysctlDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -486,6 +491,13 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation = PrivilegedOperation(kind: pokOsHostname,
       address: address)
     result.operation.hostnameName = readString(body, pos)
+  of pokLinuxSysctl:
+    result.operation = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: address)
+    result.operation.sysctlKey = readString(body, pos)
+    result.operation.sysctlValue = readString(body, pos)
+    result.operation.sysctlFilename = readString(body, pos)
+    result.operation.sysctlDestroy = readBool(body, pos, "sysctlDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

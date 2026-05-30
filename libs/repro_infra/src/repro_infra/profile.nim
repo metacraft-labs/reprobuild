@@ -48,6 +48,7 @@ type
     srkPasswdUser = "passwd.user"
     srkOsTimezone = "os.timezone"
     srkOsHostname = "os.hostname"
+    srkLinuxSysctl = "linux.sysctl"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -132,6 +133,10 @@ type
       tzIana*: string
     of srkOsHostname:
       hostnameName*: string
+    of srkLinuxSysctl:
+      sysctlKey*: string
+      sysctlValue*: string
+      sysctlFilename*: string             ## "" => auto-derived
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -170,6 +175,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "timezone:" & r.tzIana
   of srkOsHostname:
     "hostname:" & r.hostnameName
+  of srkLinuxSysctl:
+    "sysctl:" & r.sysctlKey
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -203,6 +210,7 @@ proc resourceName*(r: SystemResource): string =
   of srkPasswdUser: r.puName
   of srkOsTimezone: r.tzIana
   of srkOsHostname: r.hostnameName
+  of srkLinuxSysctl: r.sysctlKey
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -400,6 +408,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkPasswdUser: srk = srkPasswdUser
     of $srkOsTimezone: srk = srkOsTimezone
     of $srkOsHostname: srk = srkOsHostname
+    of $srkLinuxSysctl: srk = srkLinuxSysctl
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -605,6 +614,29 @@ proc parseSystemProfile*(text: string): SystemProfile =
           "' is not a valid RFC 1123 hostname (letters, digits, '-' " &
           "only; 1-63 octets; no leading/trailing '-')")
       res = SystemResource(kind: srkOsHostname, hostnameName: h)
+    of srkLinuxSysctl:
+      let k = need("key")
+      let v = need("value")
+      if not isSafeSysctlKey(k):
+        raiseSystemProfileInvalid("linux.sysctl key '" & k &
+          "' contains characters outside the sysctl-key charset " &
+          "(letters, digits, '.', '-', '_', '/')")
+      if not isSafeSysctlValue(v):
+        raiseSystemProfileInvalid("linux.sysctl value for key '" & k &
+          "' contains a newline — a sysctl drop-in file is one " &
+          "key=value line, so a newline in the value would corrupt the file")
+      let filename =
+        if "filename" in fields: fields["filename"] else: ""
+      if filename.len > 0:
+        if not isSafeDropInBasename(filename):
+          raiseSystemProfileInvalid("linux.sysctl filename '" & filename &
+            "' is not a safe single-segment basename (letters, digits, " &
+            "'.', '-', '_'; no '/', '..', or shell metacharacter)")
+        if not filename.endsWith(".conf"):
+          raiseSystemProfileInvalid("linux.sysctl filename '" & filename &
+            "' must end with '.conf' (sysctl.d convention)")
+      res = SystemResource(kind: srkLinuxSysctl,
+        sysctlKey: k, sysctlValue: v, sysctlFilename: filename)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -715,6 +747,12 @@ proc toPrivilegedOperation*(r: SystemResource;
   of srkOsHostname:
     PrivilegedOperation(kind: pokOsHostname, address: r.address,
       hostnameName: r.hostnameName)
+  of srkLinuxSysctl:
+    PrivilegedOperation(kind: pokLinuxSysctl, address: r.address,
+      sysctlKey: r.sysctlKey,
+      sysctlValue: r.sysctlValue,
+      sysctlFilename: r.sysctlFilename,
+      sysctlDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

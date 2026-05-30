@@ -120,6 +120,12 @@ type
       ## and the triple `scutil --set ComputerName/HostName/Local
       ## HostName` invocations on macOS. The driver is idempotent: a
       ## re-apply with an unchanged hostname is a no-op.
+    pokLinuxSysctl = "linux.sysctl"
+      ## The post-M83 step-5 Linux `sysctl` drop-in operation: write a
+      ## `<key> = <value>` line to `/etc/sysctl.d/<filename>` (mode
+      ## 0644), then `sysctl -p <path>` to load the value into the
+      ## live kernel. Idempotent: a re-apply with unchanged content is
+      ## a no-op via the canonical-bytes digest.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -282,6 +288,16 @@ type
       ## even when the host requests one; instead it surfaces
       ## `RestartNeeded` so the operator can schedule the reboot.
       hostnameName*: string
+    of pokLinuxSysctl:
+      ## Set a sysctl key. `sysctlKey` is the dotted key
+      ## (e.g. `kernel.perf_event_paranoid`); `sysctlValue` is the
+      ## desired value; `sysctlFilename` is the drop-in filename
+      ## under `/etc/sysctl.d/` (must end `.conf`); `sysctlDestroy`
+      ## selects the rollback direction (delete the drop-in file).
+      sysctlKey*: string
+      sysctlValue*: string
+      sysctlFilename*: string
+      sysctlDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -316,6 +332,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokPasswdUser: true
   of pokOsTimezone: true
   of pokOsHostname: true
+  of pokLinuxSysctl: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -342,6 +359,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokPasswdUser: pokPasswdUser
   of $pokOsTimezone: pokOsTimezone
   of $pokOsHostname: pokOsHostname
+  of $pokLinuxSysctl: pokLinuxSysctl
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -492,6 +510,67 @@ proc isSafeFirewallPort*(port: string): bool =
     return true
   for ch in p:
     if ch notin {'0'..'9', ',', '-', ' '}:
+      return false
+  return true
+
+# ---------------------------------------------------------------------------
+# Linux drop-in driver shared validators (M83 step 5).
+#
+# The Linux drop-in driver family (sysctl / udevRule / polkitRule /
+# sudoersRule / tmpfilesRule — landed across step 5 commits) all write
+# ONE basename into ONE fixed `/etc/X.d/` directory. The basename flows
+# into a `quoteShell`'d argument and into a shell-out, so layer-1
+# defence is a conservative basename charset + a hard requirement that
+# it be a single path segment (no `/`, no `\`, no `..`). The sysctl key
+# is a dotted kernel-parameter identifier (e.g.
+# `kernel.perf_event_paranoid`) — its charset is well-known and a closed
+# allowlist closes the residual command-injection surface. The CONTENT
+# of each drop-in file is a verbatim file write; it never reaches the
+# shell, so a newline in the body is fine.
+# ---------------------------------------------------------------------------
+
+proc isSafeDropInBasename*(name: string): bool =
+  ## True only for a non-empty single-segment basename: no path
+  ## separator, no `..`, no shell metacharacter, charset restricted to
+  ## alphanumerics, `.`, `-`, `_`. The Linux drop-in driver family uses
+  ## this as a hard precondition before dispatching any I/O so a
+  ## profile carrying `name = "../etc/shadow"` cannot escape the fixed
+  ## `/etc/X.d/` directory and so a `name = "x; rm -rf /"` cannot
+  ## smuggle a shell metacharacter past the closed-set validator.
+  let n = name.strip()
+  if n.len == 0:
+    return false
+  if n == "." or n == "..":
+    return false
+  for ch in n:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      return false
+  return true
+
+proc isSafeSysctlKey*(key: string): bool =
+  ## True only for a non-empty sysctl key in the conservative kernel-
+  ## parameter charset: alphanumerics, `.`, `-`, `_`, `/`. (The `/`
+  ## form is the `/proc/sys/...` path equivalent that `sysctl` also
+  ## accepts; both forms appear in real-world `sysctl.d` files.) The
+  ## key flows into `sysctl -n <key>` AND into a `<key> = <value>` file
+  ## line; both surfaces need a closed charset so neither path can
+  ## smuggle a shell metacharacter or a stray `=` past validation.
+  let k = key.strip()
+  if k.len == 0:
+    return false
+  for ch in k:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_', '/'}:
+      return false
+  return true
+
+proc isSafeSysctlValue*(value: string): bool =
+  ## True only for a sysctl value that does not contain a newline. The
+  ## value is interpolated into a `<key> = <value>\n` file line; a
+  ## newline in the value would corrupt the file by injecting a
+  ## spurious key=value entry. Other shell metacharacters are fine —
+  ## the value never reaches the shell, only the file.
+  for ch in value:
+    if ch == '\n' or ch == '\r':
       return false
   return true
 
@@ -650,6 +729,25 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       return "os.hostname '" & op.hostnameName &
         "' is not a valid RFC 1123 hostname (letters, digits, '-' " &
         "only; 1-63 octets; no leading/trailing '-')"
+  of pokLinuxSysctl:
+    if op.sysctlKey.strip().len == 0:
+      return "linux.sysctl operation has an empty key"
+    if not isSafeSysctlKey(op.sysctlKey):
+      return "linux.sysctl key '" & op.sysctlKey &
+        "' contains characters outside the sysctl-key charset " &
+        "(letters, digits, '.', '-', '_', '/')"
+    if not isSafeSysctlValue(op.sysctlValue):
+      return "linux.sysctl value for key '" & op.sysctlKey &
+        "' contains a newline — a sysctl drop-in file is one " &
+        "key=value line, so a newline in the value would corrupt the file"
+    if op.sysctlFilename.len > 0:
+      if not isSafeDropInBasename(op.sysctlFilename):
+        return "linux.sysctl filename '" & op.sysctlFilename &
+          "' is not a safe single-segment basename (letters, digits, " &
+          "'.', '-', '_'; no '/', '..', or shell metacharacter)"
+      if not op.sysctlFilename.endsWith(".conf"):
+        return "linux.sysctl filename '" & op.sysctlFilename &
+          "' must end with '.conf' (sysctl.d convention)"
   return ""
 
 # ---------------------------------------------------------------------------

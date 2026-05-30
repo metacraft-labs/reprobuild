@@ -317,6 +317,29 @@ suite "Resource constructors":
     check target.len == 1
     check target[0].fields["removeUnknown"].b == false
 
+  test "linuxSysctl records key / value / filename":
+    var target: seq[ResourceIntent] = @[]
+    linuxSysctl(target,
+      key = "kernel.perf_event_paranoid",
+      value = "1",
+      filename = "10-perf.conf",
+      address = "tune-perf")
+    check target.len == 1
+    check target[0].kind == "linux.sysctl"
+    check target[0].address == "tune-perf"
+    check target[0].fields["key"].s == "kernel.perf_event_paranoid"
+    check target[0].fields["value"].s == "1"
+    check target[0].fields["filename"].s == "10-perf.conf"
+
+  test "linuxSysctl auto-addresses from the key when address is empty":
+    var target: seq[ResourceIntent] = @[]
+    linuxSysctl(target,
+      key = "kernel.perf_event_paranoid",
+      value = "1")
+    check target.len == 1
+    check target[0].address == "linux.sysctl:kernel.perf_event_paranoid"
+    check target[0].fields["filename"].s == ""
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

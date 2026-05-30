@@ -129,6 +129,15 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
     posixDigestHexOfText(canonicalTimezoneDesired(op.tzIana))
   of pokOsHostname:
     posixDigestHexOfText(canonicalHostnameDesired(op.hostnameName))
+  of pokLinuxSysctl:
+    if op.sysctlDestroy:
+      ZeroDigestHex
+    else:
+      # Inline form of `sysctlDropInContent(key, value)` — the helper
+      # is declared further down so we cannot call it here without
+      # breaking the top-down resolution order; the formula is short
+      # enough to repeat.
+      posixDigestHexOfText(op.sysctlKey & " = " & op.sysctlValue & "\n")
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -970,3 +979,209 @@ proc applyPosixOsHostname*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("os.hostname apply (POSIX path)")
+
+# ===========================================================================
+# linux.sysctl — write /etc/sysctl.d/<filename> + `sysctl -p` (M83 step 5).
+#
+# The driver mirrors the systemd.systemUnit shape: write the drop-in
+# file, run the activation tool, re-probe for integrity. The closed-set
+# validator (`isSafeDropInBasename`, `isSafeSysctlKey`,
+# `isSafeSysctlValue`) blocks the layer-1 injection surface BEFORE the
+# operation reaches dispatch; `quoteShell` on the path and the key is
+# defence-in-depth layer 2.
+# ===========================================================================
+
+const LinuxSysctlDir* = "/etc/sysctl.d"
+  ## The directory a `linux.sysctl` drop-in file lands in.
+
+proc sysctlDropInFilename*(op: PrivilegedOperation): string =
+  ## The on-disk filename for a `linux.sysctl` drop-in. When the
+  ## operator did not pin `sysctlFilename`, derive a deterministic
+  ## default of the form `99-reprobuild-<address-or-key>.conf` — the
+  ## `99-` prefix puts Reprobuild-managed values last in `sysctl.d`
+  ## load order so they win against earlier vendor defaults. The
+  ## `<address-or-key>` slug uses the resource address when set and
+  ## the sysctl key otherwise; every character outside the drop-in
+  ## basename charset is replaced with `_` so the result is always
+  ## `isSafeDropInBasename`-safe.
+  if op.sysctlFilename.len > 0:
+    return op.sysctlFilename
+  let raw =
+    if op.address.len > 0: op.address
+    else: op.sysctlKey
+  var slug = ""
+  for ch in raw:
+    if ch in {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      slug.add(ch)
+    else:
+      slug.add('_')
+  if slug.len == 0:
+    slug = "default"
+  "99-reprobuild-" & slug & ".conf"
+
+proc sysctlDropInContent*(key, value: string): string =
+  ## The canonical bytes of a `linux.sysctl` drop-in file: one
+  ## `<key> = <value>` line with a trailing newline. The digest covers
+  ## these bytes verbatim so two operators authoring the same logical
+  ## sysctl change produce the same digest regardless of whitespace
+  ## choices upstream.
+  key & " = " & value & "\n"
+
+proc sysctlDropInPath*(op: PrivilegedOperation): string =
+  ## Full on-disk path of the drop-in file for `op`.
+  LinuxSysctlDir & "/" & sysctlDropInFilename(op)
+
+proc parseSysctlDropInLine*(line, key: string): tuple[matched: bool;
+                                                       value: string] =
+  ## Parse a single drop-in line into the value for `key`. A line that
+  ## matches the LHS but has an empty RHS returns `(matched: true,
+  ## value: "")`; a non-match returns `(matched: false, value: "")`.
+  ## Comment / blank lines never match.
+  let stripped = line.strip()
+  if stripped.len == 0 or stripped.startsWith("#") or
+      stripped.startsWith(";"):
+    return (false, "")
+  let eq = stripped.find('=')
+  if eq < 0:
+    return (false, "")
+  let lhs = stripped[0 ..< eq].strip()
+  let rhs = stripped[eq + 1 .. ^1].strip()
+  if lhs == key:
+    return (true, rhs)
+  return (false, "")
+
+proc readSysctlDropInValue*(content, key: string): tuple[present: bool;
+                                                          value: string] =
+  ## Walk a sysctl drop-in file's content and return the value for
+  ## `key`, or `(false, "")` if the key is absent / commented out. The
+  ## LAST matching line wins, matching `sysctl`'s own load semantics
+  ## (later definitions override earlier ones).
+  result = (false, "")
+  for ln in content.splitLines():
+    let m = parseSysctlDropInLine(ln, key)
+    if m.matched:
+      result = (true, m.value)
+
+# ---------------------------------------------------------------------------
+# Shared drop-in file-write helper used by every Linux drop-in driver
+# in this family. Binary-mode write so the bytes on disk equal the
+# operator's content verbatim — drift detection compares BLAKE3
+# digests, so any CRLF translation would be constant false-positive
+# drift. `chmod` via the shell is the platform-portable form available
+# in std/osproc; the symbolic octal modes (0644, 0440) we use here are
+# universally supported by GNU coreutils. `quoteShell` on the path is
+# defence in depth — the validator restricted the basename charset
+# before dispatch.
+# ---------------------------------------------------------------------------
+
+when defined(linux):
+  proc writeLinuxDropInFile(path, content: string; modeOctal: int) =
+    var f: File
+    if not open(f, path, fmWrite):
+      raiseProtocol("linux drop-in driver cannot open " & path)
+    try:
+      if content.len > 0:
+        discard f.writeBuffer(unsafeAddr content[0], content.len)
+    finally:
+      close(f)
+    let modeStr = toOct(modeOctal, 4)
+    discard execCmd("chmod " & modeStr & " " & quoteShell(path))
+
+proc observeLinuxSysctl*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe a sysctl drop-in. The digest covers the canonical
+  ## drop-in bytes (`<key> = <value>\n`); a file whose key=value parses
+  ## to the desired pair digests identically regardless of trailing
+  ## whitespace or comment lines around it. A live-kernel cross-check
+  ## via `sysctl -n <key>` is run for completeness but is not folded
+  ## into the digest — the file IS the source of truth at apply time
+  ## (sysctl -p reloads it).
+  when defined(linux):
+    let path = sysctlDropInPath(op)
+    if not fileExists(path):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let content = readFile(path)
+    let observed = readSysctlDropInValue(content, op.sysctlKey)
+    result.present = true
+    if observed.present and observed.value == op.sysctlValue:
+      # File contains the desired key=value pair — digest the canonical
+      # form so a re-author with different whitespace is a cache hit.
+      result.digestHex = posixDigestHexOfText(
+        sysctlDropInContent(op.sysctlKey, op.sysctlValue))
+    else:
+      # File present but does not contain our pair — digest the live
+      # bytes so the broker's drift gate sees a different digest.
+      result.digestHex = posixDigestHexOfText(content)
+    # Live-kernel cross-check; exit code is not an error (an unloaded
+    # key or a sysctl with no read access is a valid intermediate
+    # state). The output is not consumed — this is purely for
+    # observability under verbose tracing.
+    discard execCmdEx("sysctl -n " & quoteShell(op.sysctlKey))
+  else:
+    raiseNotImplementedPlatform("linux.sysctl observe")
+
+proc destroyLinuxSysctl*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the drop-in file. `sysctl -p` is NOT re-run — the live
+  ## kernel value persists until the next boot or until something
+  ## else overwrites it; that is the documented sysctl.d semantics
+  ## (drop-in files are a boot-time mechanism, not a removal hook).
+  ## Post-apply re-probe asserts the file is gone.
+  when defined(linux):
+    let path = sysctlDropInPath(op)
+    if fileExists(path):
+      try: removeFile(path)
+      except OSError: discard
+    if fileExists(path):
+      raiseProtocol("linux.sysctl destroy of " & path &
+        " post-apply observation disagrees with desired state: " &
+        "the drop-in file still exists after `removeFile`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.sysctl destroy")
+
+proc applyLinuxSysctl*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the drop-in file, then `sysctl -p <path>` to load it into
+  ## the live kernel. Idempotent: a re-apply with unchanged content
+  ## still re-runs `sysctl -p`, which is itself idempotent.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): the per-driver post-
+  ## apply re-probe is the integrity check. After the write +
+  ## `sysctl -p`, re-read via the same file-read path
+  ## `observeLinuxSysctl` uses; raise `EProtocol` on a canonical-bytes
+  ## digest mismatch.
+  when defined(linux):
+    if op.sysctlDestroy:
+      return destroyLinuxSysctl(op)
+    let path = sysctlDropInPath(op)
+    createDir(LinuxSysctlDir)
+    let content = sysctlDropInContent(op.sysctlKey, op.sysctlValue)
+    writeLinuxDropInFile(path, content, 0o644)
+    # `sysctl -p <path>` loads only this file's keys; `quoteShell` on
+    # the path is defence in depth (the basename charset already blocks
+    # shell metacharacters).
+    let (loadOut, loadCode) = execCmdEx("sysctl -p " & quoteShell(path))
+    if loadCode != 0:
+      raiseProtocol("linux.sysctl `sysctl -p " & path & "` failed: " &
+        loadOut.strip())
+    # Post-apply re-probe — see the contract comment above.
+    let post = observeLinuxSysctl(op)
+    let desiredHex = posixDigestHexOfText(content)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.sysctl drop-in " & path &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The drop-in write completed but a re-read shows a different " &
+        "value — the driver fails closed rather than reporting a " &
+        "spurious success.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.sysctl apply")

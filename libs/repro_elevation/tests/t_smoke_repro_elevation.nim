@@ -1214,3 +1214,224 @@ suite "repro_elevation: os.hostname pure surface":
     check requiresElevation(pokOsHostname)
     check $pokOsHostname == "os.hostname"
     check privilegedOperationKindFromString("os.hostname") == pokOsHostname
+
+# ===========================================================================
+# linux.sysctl — pure parse + content + drift logic. The shell-out
+# side runs only on Linux hosts; what runs everywhere is the closed-
+# set validator, the basename / key / value safety predicates, the
+# canonical drop-in content generator, and the drop-in line parser.
+# ===========================================================================
+
+suite "repro_elevation: linux.sysctl pure surface":
+
+  test "isSafeDropInBasename accepts a typical basename":
+    check isSafeDropInBasename("99-reprobuild.conf")
+    check isSafeDropInBasename("kernel.perf_event_paranoid")
+    check isSafeDropInBasename("a")
+    check not isSafeDropInBasename("")
+    check not isSafeDropInBasename(".")
+    check not isSafeDropInBasename("..")
+    check not isSafeDropInBasename("foo/bar.conf")
+    check not isSafeDropInBasename("foo\\bar.conf")
+    check not isSafeDropInBasename("foo; rm")
+    check not isSafeDropInBasename("$(whoami).conf")
+
+  test "isSafeSysctlKey accepts dotted kernel-parameter keys":
+    check isSafeSysctlKey("kernel.perf_event_paranoid")
+    check isSafeSysctlKey("net.ipv4.tcp_rmem")
+    check isSafeSysctlKey("vm.swappiness")
+    # `/proc/sys/...` form
+    check isSafeSysctlKey("net/ipv4/tcp_rmem")
+    check not isSafeSysctlKey("")
+    check not isSafeSysctlKey("kernel.foo; rm")
+    check not isSafeSysctlKey("$(whoami)")
+    check not isSafeSysctlKey("kernel.foo bar")
+
+  test "isSafeSysctlValue refuses newlines, accepts everything else":
+    check isSafeSysctlValue("1")
+    check isSafeSysctlValue("0 1024 65536")
+    check isSafeSysctlValue("")
+    check isSafeSysctlValue("$(whoami)")            # OK — never reaches shell
+    check not isSafeSysctlValue("1\n2")
+    check not isSafeSysctlValue("foo\r\nbar")
+
+  test "sysctlDropInContent renders the canonical key=value line":
+    check sysctlDropInContent("kernel.perf_event_paranoid", "1") ==
+      "kernel.perf_event_paranoid = 1\n"
+    check sysctlDropInContent("vm.swappiness", "10") ==
+      "vm.swappiness = 10\n"
+
+  test "sysctlDropInFilename honours an explicit filename":
+    let op = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "perf",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1",
+      sysctlFilename: "10-perf.conf")
+    check sysctlDropInFilename(op) == "10-perf.conf"
+
+  test "sysctlDropInFilename auto-derives a slug from the address":
+    let op = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "tune-perf-paranoid",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1")
+    check sysctlDropInFilename(op) ==
+      "99-reprobuild-tune-perf-paranoid.conf"
+
+  test "sysctlDropInFilename auto-derives a slug from the key when no address":
+    let op = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1")
+    check sysctlDropInFilename(op) ==
+      "99-reprobuild-kernel.perf_event_paranoid.conf"
+
+  test "sysctlDropInFilename sanitizes shell-metas in the auto slug":
+    let op = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "perf$(rm); attack",
+      sysctlKey: "kernel.x",
+      sysctlValue: "0")
+    let derived = sysctlDropInFilename(op)
+    check isSafeDropInBasename(derived)
+
+  test "sysctlDropInPath joins the directory with the filename":
+    let op = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "perf",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1",
+      sysctlFilename: "10-perf.conf")
+    check sysctlDropInPath(op) == "/etc/sysctl.d/10-perf.conf"
+    check LinuxSysctlDir == "/etc/sysctl.d"
+
+  test "parseSysctlDropInLine matches the LHS exactly":
+    check parseSysctlDropInLine("kernel.x = 7", "kernel.x") ==
+      (matched: true, value: "7")
+    check parseSysctlDropInLine("  kernel.x   =   7  ", "kernel.x") ==
+      (matched: true, value: "7")
+    check parseSysctlDropInLine("kernel.x=7", "kernel.x") ==
+      (matched: true, value: "7")
+    check parseSysctlDropInLine("kernel.x = 7", "kernel.y") ==
+      (matched: false, value: "")
+    check parseSysctlDropInLine("# kernel.x = 7", "kernel.x") ==
+      (matched: false, value: "")
+    check parseSysctlDropInLine("", "kernel.x") ==
+      (matched: false, value: "")
+
+  test "readSysctlDropInValue returns the LAST matching line":
+    let content = """
+# leading comment
+kernel.x = 1
+kernel.y = 2
+kernel.x = 7
+"""
+    let result = readSysctlDropInValue(content, "kernel.x")
+    check result.present
+    check result.value == "7"
+    check readSysctlDropInValue(content, "kernel.z") ==
+      (present: false, value: "")
+
+  test "operationValidationError accepts a valid linux.sysctl operation":
+    let ok = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "perf",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1",
+      sysctlFilename: "10-perf.conf")
+    check operationValidationError(ok) == ""
+    let okAuto = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "perf",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1")
+    check operationValidationError(okAuto) == ""
+
+  test "operationValidationError flags bad linux.sysctl fields":
+    # Empty key
+    let emptyKey = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "x", sysctlKey: "", sysctlValue: "1")
+    check operationValidationError(emptyKey).len > 0
+    # Injection-shaped key
+    let badKey = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "x", sysctlKey: "kernel.x; rm -rf /", sysctlValue: "1")
+    check operationValidationError(badKey).len > 0
+    # Newline in value
+    let nlValue = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "x", sysctlKey: "kernel.x", sysctlValue: "1\n2")
+    check operationValidationError(nlValue).len > 0
+    # Path-escape in filename
+    let escape = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "x", sysctlKey: "kernel.x", sysctlValue: "1",
+      sysctlFilename: "../etc/shadow")
+    check operationValidationError(escape).len > 0
+    # Bad extension
+    let badExt = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "x", sysctlKey: "kernel.x", sysctlValue: "1",
+      sysctlFilename: "10-perf.txt")
+    check operationValidationError(badExt).len > 0
+    # Empty address
+    let emptyAddr = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "", sysctlKey: "kernel.x", sysctlValue: "1")
+    check operationValidationError(emptyAddr).len > 0
+
+  test "RBEB Operation frame round-trips a linux.sysctl":
+    let op = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "perf",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1",
+      sysctlFilename: "10-perf.conf",
+      sysctlDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let dec = decodeFrame(encodeOperation(wire))
+    check dec.messageType == rmtOperation
+    let w2 = decodeOperation(dec.body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokLinuxSysctl
+    check w2.operation.address == "perf"
+    check w2.operation.sysctlKey == "kernel.perf_event_paranoid"
+    check w2.operation.sysctlValue == "1"
+    check w2.operation.sysctlFilename == "10-perf.conf"
+    check not w2.operation.sysctlDestroy
+
+  test "RBEB Operation frame round-trips a destroy linux.sysctl":
+    let op = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "perf",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1",
+      sysctlDestroy: true)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "cafef00d")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.kind == pokLinuxSysctl
+    check w2.operation.sysctlDestroy
+
+  test "posix desired digest matches the canonical drop-in content":
+    let op = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "perf",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1")
+    let canon = sysctlDropInContent(op.sysctlKey, op.sysctlValue)
+    check posixSystemDesiredDigestHex(op) == posixDigestHexOfText(canon)
+
+  test "posix desired digest for a destroy is the absent sentinel":
+    let op = PrivilegedOperation(kind: pokLinuxSysctl,
+      address: "perf",
+      sysctlKey: "kernel.perf_event_paranoid",
+      sysctlValue: "1",
+      sysctlDestroy: true)
+    check posixSystemDesiredDigestHex(op) == ZeroDigestHex
+
+  test "linux.sysctl requires elevation":
+    check requiresElevation(pokLinuxSysctl)
+    check $pokLinuxSysctl == "linux.sysctl"
+    check privilegedOperationKindFromString("linux.sysctl") == pokLinuxSysctl
+
+  test "off-Linux observe / apply raise ENotImplementedPlatform":
+    when not defined(linux):
+      let op = PrivilegedOperation(kind: pokLinuxSysctl,
+        address: "perf",
+        sysctlKey: "kernel.perf_event_paranoid",
+        sysctlValue: "1")
+      expect ENotImplementedPlatform:
+        discard observeLinuxSysctl(op)
+      expect ENotImplementedPlatform:
+        discard applyLinuxSysctl(op)
+      expect ENotImplementedPlatform:
+        discard destroyLinuxSysctl(op)

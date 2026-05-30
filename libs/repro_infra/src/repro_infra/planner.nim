@@ -154,7 +154,8 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
   of pokWindowsVsInstaller:
     vsInstallerDesiredDigestHex(op)
   of pokMacosSystemDefault, pokSystemdSystemUnit, pokLaunchdSystemDaemon,
-     pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser:
+     pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser,
+     pokLinuxSysctl:
     posixSystemDesiredDigestHex(op)
   else:
     systemDesiredDigestHex(op)
@@ -187,6 +188,8 @@ proc observeResource*(r: SystemResource): ResourceObservation =
         observeWindowsOsHostname(op)
       else:
         observePosixOsHostname(op)
+    of srkLinuxSysctl:
+      observeLinuxSysctl(op)
   result.present = obs.present
   result.observedDigestHex =
     if obs.present: obs.digestHex else: ZeroDigestHex
@@ -260,6 +263,8 @@ proc summaryLine(r: SystemResource; action: string): string =
     action & " timezone " & r.tzIana
   of srkOsHostname:
     action & " hostname " & r.hostnameName
+  of srkLinuxSysctl:
+    action & " sysctl " & r.sysctlKey & " = " & r.sysctlValue
 
 # ---------------------------------------------------------------------------
 # Resource dependency graph + topological sort (M82 Phase B).
