@@ -5932,6 +5932,7 @@ const
     "pascal-direct",
     "crystal",
     "erlang-rebar3",
+    "elixir-mix",
     "ocaml-dune",
     "haskell-cabal",
     "ruby-bundler",

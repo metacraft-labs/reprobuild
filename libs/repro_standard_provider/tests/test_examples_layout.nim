@@ -93,6 +93,7 @@ const PopulatedExamples = [
   "crystal-shards/hello-binary",
   "crystal-mode3/hello-binary",
   "erlang-rebar3/hello-binary",
+  "elixir-mix/hello-binary",
 ]
 
 suite "examples layout M8":

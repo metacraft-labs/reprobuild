@@ -194,6 +194,7 @@ $PopulatedExamples = @(
   'crystal-shards/hello-binary',
   'crystal-mode3/hello-binary',
   'erlang-rebar3/hello-binary',
+  'elixir-mix/hello-binary',
   'mode1/rust-binary-with-library',
   'mode1/nim-binary-with-library'
 )
@@ -614,6 +615,34 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'rebar3' not on PATH (install via 'scoop install rebar3' on Windows; rebar3 is independent of Erlang/OTP)" }
       }
       return @{ Available = $true; Reason = "erl=$($erlCmd.Source); rebar3=$($rebar3Cmd.Source)" }
+    }
+    'elixir-mix' {
+      # M62 (campaign-closing): Elixir + mix — probe for both
+      # ``elixir`` AND ``mix``. mix ships bundled with the Elixir
+      # distribution so a positive ``elixir`` probe usually implies
+      # ``mix`` is available too (we still check both — defensive
+      # against a partial install). The canonical Windows install is
+      # via scoop: ``scoop install elixir`` (the ``main`` bucket
+      # carries Elixir 1.17.x+ as of mid-2025; pulls in Erlang/OTP
+      # transitively). M62 honest-scope cut: env.ps1 doesn't yet
+      # provision the Elixir toolchain dedicatedly so most hosts SKIP
+      # this gate cleanly unless scoop is used. Also requires
+      # ``escript`` on PATH to run the produced binary (escript ships
+      # with Erlang/OTP and the scoop ``elixir`` package pulls in
+      # Erlang too).
+      $elixirCmd = Get-Command elixir -ErrorAction SilentlyContinue
+      if (-not $elixirCmd) {
+        return @{ Available = $false; Reason = "'elixir' not on PATH (install via 'scoop install elixir' on Windows or download from https://github.com/elixir-lang/elixir/releases)" }
+      }
+      $mixCmd = Get-Command mix -ErrorAction SilentlyContinue
+      if (-not $mixCmd) {
+        return @{ Available = $false; Reason = "'mix' not on PATH (mix is bundled with the Elixir distribution; check that the Elixir install populated mix.bat alongside elixir.bat)" }
+      }
+      $escriptCmd = Get-Command escript -ErrorAction SilentlyContinue
+      if (-not $escriptCmd) {
+        return @{ Available = $false; Reason = "'escript' not on PATH (escript ships with Erlang/OTP — the Elixir install needs an Erlang dep; 'scoop install elixir' pulls in Erlang automatically)" }
+      }
+      return @{ Available = $true; Reason = "elixir=$($elixirCmd.Source); mix=$($mixCmd.Source); escript=$($escriptCmd.Source)" }
     }
     'mode1' {
       # M48: Mode 1 (layout-as-manifest) fixtures. Each fixture is
@@ -3233,6 +3262,22 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'hello' $wrapperName))
         Greeting = 'hello from erlang-rebar3-hello-binary'
+      })
+    }
+    'elixir-mix/hello-binary' {
+      # M62 (campaign-closing): elixir-mix/hello-binary. The convention
+      # emits a single ``mix escript.build`` action per declared
+      # executable plus an ``fs.writeText`` wrapper at
+      # ``<root>/.repro/build/hello/hello.cmd`` (Windows) that invokes
+      # ``escript`` against the mix-produced escript at
+      # ``<projectRoot>/hello`` (mix's escript task emits at the
+      # project root, NOT under ``_build/`` like rebar3 escriptize).
+      # The wrapper IS the load-bearing artefact for the harness's
+      # run-and-assert-greeting probe.
+      $wrapperName = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'hello.cmd' } else { 'hello' }
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'hello' $wrapperName))
+        Greeting = 'hello from elixir-mix-hello-binary'
       })
     }
     'mode1/rust-binary-with-library' {

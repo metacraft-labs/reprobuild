@@ -110,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[27, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[28, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -135,6 +135,7 @@ const
     ("composer.json",      "php-composer"),
     ("shard.yml",          "crystal"),
     ("rebar.config",       "erlang-rebar3"),
+    ("mix.exs",            "elixir-mix"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -144,7 +145,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[38, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[40, tuple[ext, convention: string]] = [
     (".nim",   "nim"),
     (".rs",    "rust"),
     (".go",    "go"),
@@ -183,6 +184,8 @@ const
     (".cr",    "crystal"),
     (".erl",   "erlang-rebar3"),
     (".hrl",   "erlang-rebar3"),
+    (".ex",    "elixir-mix"),
+    (".exs",   "elixir-mix"),
   ]
 
 proc isExtensionForConvention*(ext, convention: string): bool =
@@ -675,7 +678,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[26, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[27, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -754,6 +757,9 @@ const
     ToolchainProbeSpec(convention: "erlang-rebar3",
                        exeName: "erl",
                        versionArgs: @["-version"]),
+    ToolchainProbeSpec(convention: "elixir-mix",
+                       exeName: "elixir",
+                       versionArgs: @["--version"]),
   ]
 
 var toolchainProbeCache: Table[string, ToolchainProbeResult]

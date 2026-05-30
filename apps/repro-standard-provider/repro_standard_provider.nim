@@ -50,6 +50,7 @@ import repro_standard_provider/conventions/ada_direct as ada_direct_convention
 import repro_standard_provider/conventions/pascal_direct as pascal_direct_convention
 import repro_standard_provider/conventions/crystal as crystal_convention
 import repro_standard_provider/conventions/erlang_rebar3 as erlang_rebar3_convention
+import repro_standard_provider/conventions/elixir_mix as elixir_mix_convention
 import repro_standard_provider/conventions/ocaml_dune as ocaml_dune_convention
 import repro_standard_provider/conventions/haskell_cabal as haskell_cabal_convention
 import repro_standard_provider/conventions/ruby_bundler as ruby_bundler_convention
@@ -398,6 +399,40 @@ when defined(reproProviderMode):
   # cut — M61 supports app-style ``rebar.config`` + ``rebar3
   # escriptize`` only.
   addDefaultConvention(erlang_rebar3_convention.erlangRebar3Convention())
+  # elixir_mix (M62) — Elixir/BEAM Tier 2b convention. Eighth Phase 2
+  # language milestone and the **campaign-closing milestone** of the
+  # M49-M62 Provisioning & Languages Expansion campaign, immediately
+  # after M61 erlang-rebar3. Keys on a ``mix.exs`` (mix manifest) at
+  # the project root and additionally requires ``mix.lock`` (HARD
+  # precondition per the M62 spec — mix writes a lockfile on the first
+  # ``mix deps.get``, even for zero-deps projects, mirroring the
+  # M42 / M55 / M56 / M57 / M60 / M61 lockfile-required pattern).
+  # Registered AFTER erlang-rebar3 per the M62 spec's "register after
+  # erlang-rebar3 in the chain" sequencing — the Phase 2 conventions
+  # form a contiguous block below the Phase 1 cluster. The order has
+  # no recognition consequence — the convention's recognition gate is
+  # closed-set on ``mix.exs`` + ``mix.lock`` presence + an Elixir/mix
+  # token (``elixir``/``mix``) in ``uses:``. Defers to M61 when
+  # ``rebar.config`` is also at the root (a project carrying both
+  # manifests is primarily an Erlang/rebar3 project; mix can compile
+  # rebar deps but the M61 convention claims dispatch first). mix
+  # ships bundled with Elixir in every distribution channel so the
+  # ``uses:`` check is single-token (mirroring M30 Rust's
+  # ``rust``-or-``cargo``, M56 ruby-bundler's ``ruby``-or-``bundler``,
+  # M57 php-composer's ``php``-or-``composer``, M60 crystal's
+  # ``crystal``-or-``shards``, and M61 erlang-rebar3's
+  # ``erlang``/``erl``/``rebar3`` patterns rather than M55
+  # haskell-cabal's strict "both halves required" pattern). The
+  # convention requires both ``elixir`` AND ``mix`` drivers on PATH;
+  # when either is absent (which is the M62 default on Windows before
+  # ``scoop install elixir``) ``recognize`` returns false and the
+  # M9-style harness SKIPs cleanly. Library / Hex-only targets, ``mix
+  # release`` packaging, ``mix test`` discovery, Phoenix / LiveView
+  # deployment, Mode 3 Elixir, NIFs (Rustler/Zigler/C), and external
+  # Hex deps cache-warm are all explicitly DEFERRED per the M62
+  # honest-scope cut — M62 supports app-style ``mix.exs`` + ``mix
+  # escript.build`` only.
+  addDefaultConvention(elixir_mix_convention.elixirMixConvention())
   # ocaml_dune (M46) — fifth managed-ecosystem Tier 2b convention. Keys
   # on a single ``dune-project`` at the project root (the Dune project
   # manifest filename — uniquely identifies a Dune project; no other

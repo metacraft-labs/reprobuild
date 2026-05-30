@@ -212,6 +212,31 @@ suite "attributeConvention: manifest detection":
     check attr.evidence.contains("rebar.config")
     removeDir(dir)
 
+  test "mix.exs ⇒ elixir-mix":
+    ## M62 — mix's project manifest must attribute to ``elixir-mix``.
+    ## Literal ``mix.exs`` filename (no glob — mix's manifest filename
+    ## is hard-coded). The ``elixir-mix`` convention additionally
+    ## requires ``mix.lock`` (HARD precondition) AND an ``elixir`` /
+    ## ``mix`` token in ``uses:`` for full dispatch, but the
+    ## attribution heuristic here is intentionally manifest-presence-
+    ## only — the heuristic honestly attributes ``elixir-mix`` even
+    ## when those preconditions aren't met (so ``repro
+    ## show-conventions`` still tells the user which convention WOULD
+    ## claim the project once the prerequisites are in place).
+    let dir = makeScratch("elixir-mix")
+    writeFile(dir / "mix.exs",
+      "defmodule Hello.MixProject do\n  use Mix.Project\n" &
+      "  def project, do: [app: :hello, version: \"1.0.0\", " &
+      "escript: [main_module: Hello]]\nend\n")
+    writeFile(dir / "mix.lock", "%{}\n")
+    createDir(dir / "lib")
+    writeFile(dir / "lib" / "hello.ex",
+      "defmodule Hello do\n  def main(_), do: IO.puts \"hi\"\nend\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "elixir-mix"
+    check attr.evidence.contains("mix.exs")
+    removeDir(dir)
+
   test "composer.json ⇒ php-composer":
     ## M57 — Composer manifest must attribute to ``php-composer``.
     ## Literal ``composer.json`` filename (no glob — Composer's manifest
@@ -394,6 +419,26 @@ suite "attributeConvention: extension census fallback":
       "-module(helper).\n-export([f/0]).\nf() -> ok.\n")
     let attr = attributeConvention(dir)
     check attr.convention == "erlang-rebar3"
+    check attr.evidence.contains("extension census")
+    removeDir(dir)
+
+  test "*.ex-dominant dir ⇒ elixir-mix (M62 extension census)":
+    # M62: when ``.ex`` files dominate the dir but NO ``mix.exs`` is
+    # present, the project still attributes to ``elixir-mix`` (the
+    # only Elixir convention in the M62 registry). The actual
+    # ``elixir-mix`` convention's ``recognize`` requires ``mix.exs``
+    # so attribution-without-recognise is the diagnostic-only case —
+    # useful so ``repro show-conventions`` tells the user *which*
+    # convention WOULD claim the project once the manifest is in
+    # place. Mirror of the M61 erlang extension-census test.
+    let dir = makeScratch("elixir-extension")
+    createDir(dir / "lib")
+    writeFile(dir / "lib" / "hello.ex",
+      "defmodule Hello do\n  def main(_), do: :ok\nend\n")
+    writeFile(dir / "lib" / "helper.ex",
+      "defmodule Helper do\n  def f, do: :ok\nend\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "elixir-mix"
     check attr.evidence.contains("extension census")
     removeDir(dir)
 

@@ -988,6 +988,7 @@ const
     "pascal", "fpc", "freepascal",
     "crystal", "shards",
     "erlang", "erl", "rebar3",
+    "elixir", "mix",
     "ocaml", "ocamlc", "ocamlopt", "ocamlfind", "dune",
     "haskell", "ghc", "cabal", "cabal-install",
     "ruby", "bundler",
