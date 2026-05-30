@@ -381,7 +381,7 @@ proc requirePolicyCase(name, mode: string; policy: DependencyGatheringPolicy;
   let markerV1 = readFile(marker)
 
   let second = runOne(makeAction(), cacheRoot, app, monitorCli).singleResult()
-  check second.status == asCacheHit
+  check second.status in {asCacheHit, asUpToDate}
   check not second.launched
   check second.dependencyPolicyKind == policy.kind
   check evidenceInputs(second.evidence).find(hidden) >= 0

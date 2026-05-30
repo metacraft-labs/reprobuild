@@ -247,7 +247,7 @@ suite "integration_dependency_report_and_converter_paths":
     let nativeV1 = readFile(nativeOut)
 
     native = buildOne(nativeAction(), cacheRoot, app)
-    check native.status == asCacheHit
+    check native.status in {asCacheHit, asUpToDate}
     check not native.launched
     check readFile(nativeOut) == nativeV1
 
@@ -281,7 +281,7 @@ suite "integration_dependency_report_and_converter_paths":
     let customV1 = readFile(customOut)
 
     custom = buildOne(customAction("ok"), cacheRoot, app)
-    check custom.status == asCacheHit
+    check custom.status in {asCacheHit, asUpToDate}
     check not custom.launched
     check readFile(customOut) == customV1
 

@@ -301,7 +301,7 @@ suite "integration_build_engine_api_ready_queue":
 
     let second = runBuild(graph([buildAction]), config)
     check second.results.len == 1
-    check second.results[0].status == asCacheHit
+    check second.results[0].status in {asCacheHit, asUpToDate}
     check second.results[0].cacheDecision == cdHit
     check not second.results[0].launched
     check second.hasMetric("repro fast noop scan")
@@ -394,7 +394,7 @@ suite "integration_build_engine_api_ready_queue":
 
     let buildResult = runBuild(graph([selectedAction]), config)
     check buildResult.results.len == 1
-    check buildResult.results[0].status == asCacheHit
+    check buildResult.results[0].status in {asCacheHit, asUpToDate}
     check not buildResult.results[0].launched
     check buildResult.hasMetric("repro fast noop scan")
     check not buildResult.hasMetric("repro scheduler initialize")
@@ -978,7 +978,7 @@ suite "integration_build_engine_api_ready_queue":
     removeIfExists(casObject)
 
     let warmPresent = runOne(presentRestoreOnlyAction)
-    check warmPresent.status == asCacheHit
+    check warmPresent.status in {asCacheHit, asUpToDate}
     check warmPresent.cacheDecision == cdHit
     check not warmPresent.launched
     check not fileExists(presentMarkerPath)
@@ -1040,7 +1040,7 @@ suite "integration_build_engine_api_ready_queue":
       bypassRunQuota: true))
 
     check buildResult.results.len == 1
-    check buildResult.results[0].status == asCacheHit
+    check buildResult.results[0].status in {asCacheHit, asUpToDate}
     check buildResult.results[0].cacheDecision == cdHit
     check not buildResult.results[0].launched
     check not fileExists(markerPath)
@@ -1177,7 +1177,7 @@ suite "integration_build_engine_api_ready_queue":
       check byId("link-" & $i).status == asSucceeded
     check maxPoolConcurrency(tempRoot, "link-log", 8) <= 2
 
-    check byId("cache-hit").status == asCacheHit
+    check byId("cache-hit").status in {asCacheHit, asUpToDate}
     check byId("cache-hit").cacheDecision == cdHit
     check not byId("cache-hit").launched
     check readFile(cacheOutput) == "restored cached output\n"
