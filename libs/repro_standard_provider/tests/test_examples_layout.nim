@@ -60,6 +60,7 @@ const PopulatedExamples = [
   "swift-swiftpm/hello-binary",
   "ocaml-dune/hello-binary",
   "haskell-cabal/hello-binary",
+  "ruby-bundler/hello-binary",
   "c-cpp-mode3/binary-with-library",
   "rust-mode3/binary-with-library",
   "go-mode3/binary-with-library",

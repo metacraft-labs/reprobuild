@@ -985,7 +985,8 @@ const
     "zig",
     "d", "dmd", "ldc2", "gdc",
     "ocaml", "ocamlc", "ocamlopt", "ocamlfind", "dune",
-    "haskell", "ghc", "cabal", "cabal-install"]
+    "haskell", "ghc", "cabal", "cabal-install",
+    "ruby", "bundler"]
     ## Toolchain names whose presence in ``uses:`` makes a package
     ## ``executable``/``library`` declaration safe to route through the
     ## Tier 2b standard provider. This list MUST stay in sync with the

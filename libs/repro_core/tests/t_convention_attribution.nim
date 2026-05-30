@@ -159,6 +159,32 @@ suite "attributeConvention: manifest detection":
     check attr.evidence.contains("hello.cabal")
     removeDir(dir)
 
+  test "Gemfile ⇒ ruby-bundler":
+    ## M56 — Bundler dependency manifest must attribute to
+    ## ``ruby-bundler``. Literal ``Gemfile`` filename (no glob —
+    ## Bundler's manifest filename is hard-coded). The
+    ## ``ruby-bundler`` convention additionally requires
+    ## ``Gemfile.lock`` (HARD precondition) AND a ``ruby`` /
+    ## ``bundler`` token in ``uses:`` for full dispatch, but the
+    ## attribution heuristic here is intentionally manifest-presence-
+    ## only — the heuristic honestly attributes ``ruby-bundler`` even
+    ## when those preconditions aren't met (so ``repro
+    ## show-conventions`` still tells the user which convention WOULD
+    ## claim the project once the prerequisites are in place).
+    let dir = makeScratch("ruby-bundler")
+    writeFile(dir / "Gemfile",
+      "source 'https://rubygems.org'\nruby '>= 3.0'\n")
+    writeFile(dir / "Gemfile.lock",
+      "GEM\n  specs:\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n\n" &
+      "RUBY VERSION\n   ruby 3.3.5p100\n\nBUNDLED WITH\n   2.5.18\n")
+    createDir(dir / "bin")
+    writeFile(dir / "bin" / "hello.rb",
+      "#!/usr/bin/env ruby\nputs \"hello\"\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "ruby-bundler"
+    check attr.evidence.contains("Gemfile")
+    removeDir(dir)
+
   test "dune-project ⇒ ocaml-dune":
     ## M46 — Dune project manifest must attribute to ``ocaml-dune``.
     ## Unique filename (no other convention recognises ``dune-project``)

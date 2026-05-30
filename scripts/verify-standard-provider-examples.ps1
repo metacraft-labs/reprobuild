@@ -58,6 +58,8 @@
 #                               isn't in the standard dev shell on Windows)
 #   haskell-cabal/hello-binary (M55; SKIP when ghc/cabal missing — Haskell
 #                               isn't in the standard dev shell on Windows)
+#   ruby-bundler/hello-binary  (M56; SKIP when ruby/bundle missing — Ruby
+#                               isn't in the standard dev shell on Windows)
 #
 # M22 additionally runs ``repro build <fixture>#test`` for fixtures listed
 # in $TestTargetProbes (nim/library-with-tests, rust/library-with-tests,
@@ -157,6 +159,7 @@ $PopulatedExamples = @(
   'swift-swiftpm/hello-binary',
   'ocaml-dune/hello-binary',
   'haskell-cabal/hello-binary',
+  'ruby-bundler/hello-binary',
   'c-cpp-mode3/binary-with-library',
   'rust-mode3/binary-with-library',
   'go-mode3/binary-with-library',
@@ -1044,6 +1047,62 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $false; Reason = "'cabal' not on PATH (install via GHCup from https://www.haskell.org/ghcup/ — M55 pins cabal-install 3.12.1.0)" }
       }
       return @{ Available = $true; Reason = "ghc=$($ghcCmd.Source); cabal=$($cabalCmd.Source)" }
+    }
+    'ruby-bundler' {
+      # M56: the Ruby + Bundler (Tier 2b) convention is registered.
+      # Probe for BOTH ``ruby`` AND ``bundle`` on PATH. The convention's
+      # ``recognize`` enforces this jointly — Bundler ships with Ruby
+      # >= 2.6 so a vanilla Ruby install satisfies both, but the
+      # probe still checks each binary explicitly so a Ruby install
+      # with Bundler ripped out fails the gate honestly. The
+      # documented provisioning path on Windows is RubyInstaller
+      # (https://rubyinstaller.org/) — M56 pins Ruby 3.3.5. Most M56
+      # review hosts do NOT ship Ruby — it isn't in the standard dev
+      # shell — so this probe is expected to SKIP cleanly on a default
+      # Windows host.
+      $rubyCmd = Get-Command ruby -ErrorAction SilentlyContinue
+      $bundleCmd = Get-Command bundle -ErrorAction SilentlyContinue
+      if (-not $rubyCmd -or -not $bundleCmd) {
+        # Try lifting a managed Ruby install under
+        # ``D:\metacraft-dev-deps\ruby\`` or a system RubyInstaller
+        # install under ``C:\Ruby<version>\`` or
+        # ``%LOCALAPPDATA%\Programs\Ruby\``.
+        $candidates = @()
+        foreach ($rubyRoot in @(
+          'D:\metacraft-dev-deps\ruby',
+          (Join-Path $env:LOCALAPPDATA 'Programs\Ruby'))) {
+          if (-not $rubyRoot) { continue }
+          if (-not (Test-Path -LiteralPath $rubyRoot)) { continue }
+          foreach ($candidate in @(
+            (Join-Path $rubyRoot 'bin\ruby.exe'),
+            (Join-Path $rubyRoot 'bin\bundle.bat'))) {
+            if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+          }
+        }
+        foreach ($cRubyDir in @(Get-ChildItem -Path 'C:\' -Directory -Filter 'Ruby*' -ErrorAction SilentlyContinue)) {
+          $binDir = Join-Path $cRubyDir.FullName 'bin'
+          foreach ($candidate in @(
+            (Join-Path $binDir 'ruby.exe'),
+            (Join-Path $binDir 'bundle.bat'))) {
+            if (Test-Path -LiteralPath $candidate) { $candidates += $candidate }
+          }
+        }
+        if ($candidates.Count -gt 0) {
+          $binDir = Split-Path -Parent ($candidates | Select-Object -First 1)
+          if (-not ($env:PATH -split ';' | Where-Object { $_ -ieq $binDir })) {
+            $env:PATH = "$binDir;$env:PATH"
+          }
+          $rubyCmd = Get-Command ruby -ErrorAction SilentlyContinue
+          $bundleCmd = Get-Command bundle -ErrorAction SilentlyContinue
+        }
+      }
+      if (-not $rubyCmd) {
+        return @{ Available = $false; Reason = "'ruby' not on PATH (install Ruby via RubyInstaller from https://rubyinstaller.org/ — M56 pins Ruby 3.3.5)" }
+      }
+      if (-not $bundleCmd) {
+        return @{ Available = $false; Reason = "'bundle' not on PATH (Bundler ships with Ruby >= 2.6; re-install Ruby via RubyInstaller from https://rubyinstaller.org/)" }
+      }
+      return @{ Available = $true; Reason = "ruby=$($rubyCmd.Source); bundle=$($bundleCmd.Source)" }
     }
     default {
       return @{ Available = $false; Reason = "unknown language '$language'" }
@@ -2173,6 +2232,23 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
         Greeting = 'hello from haskell-cabal-hello-binary'
       })
     }
+    'ruby-bundler/hello-binary' {
+      # M56: ruby-bundler/hello-binary. The convention emits a single
+      # ``bundle install --deployment --local --quiet --path
+      # vendor/bundle`` action (wrapped in cmd /c so the engine has
+      # a stable output sentinel) plus an ``fs.writeText`` action per
+      # executable that materialises
+      # ``<root>/.repro/build/<name>/<name>.cmd``. The wrapper
+      # invokes ``bundle exec ruby bin/<name>.rb`` so the harness can
+      # exec the .cmd directly and assert the greeting. On the M56
+      # review host (Windows, Ruby absent) this fixture SKIPs cleanly
+      # before reaching the produced-wrapper check.
+      $exeName = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'hello.cmd' } else { 'hello' }
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'hello' $exeName))
+        Greeting = 'hello from ruby-bundler-hello-binary'
+      })
+    }
     'csharp-dotnet/hello-binary' {
       # M42: csharp-dotnet/hello-binary. The convention emits a single
       # ``dotnet build -c Release --no-restore --nologo --verbosity
@@ -2940,6 +3016,17 @@ foreach ($rel in $PopulatedExamples) {
     $srcObjs = Get-ChildItem -LiteralPath (Join-Path $fixtureDir 'src') -Filter '*.o' -ErrorAction SilentlyContinue
     foreach ($obj in $srcObjs) {
       Remove-Item -LiteralPath $obj.FullName -Force -ErrorAction SilentlyContinue
+    }
+  }
+  # M56: the ruby-bundler convention vendors gems into
+  # ``vendor/bundle/`` and Bundler may leave a per-project ``.bundle/``
+  # config dir at the fixture root. Wipe both so every gate runs cold.
+  if ($language -eq 'ruby-bundler') {
+    foreach ($leftoverDir in @('vendor', '.bundle')) {
+      $leftoverDirPath = Join-Path $fixtureDir $leftoverDir
+      if (Test-Path -LiteralPath $leftoverDirPath) {
+        Remove-Item -LiteralPath $leftoverDirPath -Recurse -Force -ErrorAction SilentlyContinue
+      }
     }
   }
 

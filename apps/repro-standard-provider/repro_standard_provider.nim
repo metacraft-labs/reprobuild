@@ -48,6 +48,7 @@ import repro_standard_provider/conventions/zig_direct as zig_direct_convention
 import repro_standard_provider/conventions/d_direct as d_direct_convention
 import repro_standard_provider/conventions/ocaml_dune as ocaml_dune_convention
 import repro_standard_provider/conventions/haskell_cabal as haskell_cabal_convention
+import repro_standard_provider/conventions/ruby_bundler as ruby_bundler_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
 
@@ -353,6 +354,30 @@ when defined(reproProviderMode):
   # discovery, and Mode 3 Haskell are all explicitly DEFERRED per the
   # M55 spec.
   addDefaultConvention(haskell_cabal_convention.haskellCabalConvention())
+  # ruby_bundler (M56) — seventh managed-ecosystem Tier 2b convention.
+  # Second Phase 2 language milestone, immediately after M55
+  # haskell-cabal. Keys on a ``Gemfile`` (Bundler manifest) at the
+  # project root and additionally requires ``Gemfile.lock`` (HARD
+  # precondition per the M56 spec — Bundler's reproducibility +
+  # offline guarantee). Registered AFTER haskell-cabal per the M56
+  # spec's "register after haskell-cabal in the chain" sequencing —
+  # the Phase 2 conventions form a contiguous block below the Phase 1
+  # cluster. The order has no recognition consequence — the
+  # convention's recognition gate is closed-set on ``Gemfile`` +
+  # ``Gemfile.lock`` presence + a Ruby token (``ruby`` or ``bundler``)
+  # in ``uses:``. Bundler ships with modern Ruby (≥ 2.6) so the
+  # ``uses:`` check is single-token (mirroring M30 Rust's
+  # ``rust``-or-``cargo`` pattern rather than M55 haskell-cabal's
+  # strict "both halves required" pattern). The convention requires
+  # both ``ruby`` AND ``bundle`` drivers on PATH; when either is
+  # absent (which is the M56 default on Windows — the dev shell
+  # doesn't bundle Ruby) ``recognize`` returns false and the M9-style
+  # harness SKIPs cleanly. Library targets (Ruby gems), gem packaging
+  # via ``rake build``, native gem extensions, and Rails/Sinatra
+  # patterns are all explicitly DEFERRED per the M56 spec — M56
+  # supports app-style ``Gemfile`` + ``bundle exec ruby <entry>``
+  # only.
+  addDefaultConvention(ruby_bundler_convention.rubyBundlerConvention())
 
   proc runStandardProvider(): int =
     try:
