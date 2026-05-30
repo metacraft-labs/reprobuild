@@ -1,0 +1,10 @@
+{
+    "version": "1.0.0",
+    "description": "Synthetic single-binary hello.exe for M66 smoke tests.",
+    "homepage": "https://example.test/hello",
+    "license": "MIT",
+    "url": "https://example.test/hello-1.0.0.zip",
+    "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "extract_dir": "hello-1.0.0",
+    "bin": "hello.exe"
+}

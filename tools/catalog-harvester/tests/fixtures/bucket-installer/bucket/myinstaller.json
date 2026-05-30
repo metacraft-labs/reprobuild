@@ -1,0 +1,22 @@
+{
+    "version": "28.5",
+    "description": "A synthetic NSIS installer manifest for M66 tests.",
+    "homepage": "https://example.test/myinstaller",
+    "license": "Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://example.test/myinstaller-28.5-win64.exe",
+            "hash": "46f56351e2e67865c6aaff83bcd0a7d97d73bea643a0531774dd9ba8fbee7dc0"
+        }
+    },
+    "installer": {
+        "file": "Install.exe",
+        "args": "-sasl"
+    },
+    "bin": [
+        "bin\\myinstaller.exe"
+    ],
+    "env_set": {
+        "MYINSTALLER_HOME": "$dir"
+    }
+}

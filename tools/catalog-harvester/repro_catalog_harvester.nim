@@ -1,0 +1,425 @@
+## M66 catalog harvester — CLI entry point.
+##
+## Subcommands:
+##
+##   ``harvest``  — clone / refresh one or more Scoop buckets, parse
+##                  each ``<app>.json``, translate to the M63
+##                  ``VersionedProvisioning`` schema, and write
+##                  ``packages/<tool>.nim`` files.
+##
+##   ``inspect``  — translate a SINGLE manifest and print the result
+##                  to stdout without writing a file. Useful for
+##                  debugging a sticky translation.
+##
+##   ``verify``   — re-harvest a checked-in ``packages/<tool>.nim``
+##                  and assert byte-identical output. Catches drift
+##                  between the catalog and the upstream bucket.
+##
+## Examples:
+##
+##   repro_catalog_harvester harvest \
+##     --bucket scoopinstaller/main \
+##     --app ripgrep --app maven \
+##     --out libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/
+##
+##   repro_catalog_harvester inspect --bucket ./tests/fixtures/bucket-simple \
+##     --app hello
+##
+##   repro_catalog_harvester verify --bucket scoopinstaller/main \
+##     --app ripgrep --catalog libs/.../packages/ripgrep.nim
+##
+## Exit codes: 0 = OK; 2 = bad CLI invocation; 3 = harvest error
+## (one or more manifests failed); 4 = verify drift detected.
+
+import std/[os, parseopt, strutils]
+
+import src/manifest_parser
+import src/bucket_clone
+import src/nim_emit
+import repro_dsl_stdlib/packages_schema
+
+const HelpText = """
+catalog-harvester — Scoop bucket harvester for the reprobuild M63 catalog.
+
+USAGE
+  catalog-harvester <subcommand> [options]
+
+SUBCOMMANDS
+  harvest   Clone Scoop bucket(s) and emit packages/<tool>.nim files.
+  inspect   Translate one manifest and print the result (no write).
+  verify    Re-harvest a checked-in packages/<tool>.nim and assert
+            byte-identical output (drift detector).
+
+COMMON OPTIONS
+  --bucket <spec>           Repeatable. <spec> is one of:
+                              * <org>/<repo>      (GitHub shortname)
+                              * https://… URL    (git clone URL)
+                              * /path/to/local/  (local bucket dir)
+  --app <name>              Repeatable. If omitted, every manifest in
+                            the bucket is harvested.
+  --output-dir <path>       For 'harvest': output directory; defaults
+                            to libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/
+  --version-history <N>     For 'harvest': walk N historical versions
+                            (default: 1). N > 1 unshallows the clone.
+  --dry-run                 For 'harvest': print what would be written
+                            (file paths + first 10 lines) and exit 0.
+  --no-refresh              Skip 'git pull' for cached buckets.
+
+VERIFY-ONLY OPTIONS
+  --catalog <path>          The existing packages/<tool>.nim file.
+
+EXIT CODES
+  0 = OK
+  2 = bad CLI invocation
+  3 = harvest error (one or more manifests skipped or invalid)
+  4 = verify drift detected
+
+ENVIRONMENT
+  XDG_CACHE_HOME / LOCALAPPDATA      Override bucket clone cache root.
+"""
+
+type
+  Subcommand = enum
+    scNone, scHarvest, scInspect, scVerify
+
+  CliOptions = object
+    sub: Subcommand
+    buckets: seq[string]
+    apps: seq[string]
+    outputDir: string
+    versionHistory: int
+    dryRun: bool
+    noRefresh: bool
+    catalog: string
+
+proc parseCli(argv: openArray[string]): CliOptions =
+  result.sub = scNone
+  result.outputDir = "libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/"
+  result.versionHistory = 1
+
+  # Honor BOTH GNU-style ``--key value`` and Nim-style ``--key:value``
+  # / ``--key=value``. Flags that take no value are declared in
+  # ``longNoVal`` so the parser knows to leave subsequent positionals
+  # alone for them.
+  const longNoVal = @["dry-run", "no-refresh", "help"]
+
+  var positionalSeen = false
+  var p = initOptParser(@argv,
+    longNoVal = longNoVal,
+    shortNoVal = {'h'})
+  while true:
+    p.next()
+    case p.kind
+    of cmdEnd: break
+    of cmdArgument:
+      if not positionalSeen:
+        case p.key
+        of "harvest": result.sub = scHarvest
+        of "inspect": result.sub = scInspect
+        of "verify": result.sub = scVerify
+        of "help":
+          result.sub = scNone
+        else:
+          stderr.writeLine("error: unknown subcommand '" & p.key & "'")
+          quit(2)
+        positionalSeen = true
+      else:
+        stderr.writeLine("error: unexpected positional '" & p.key & "'")
+        quit(2)
+    of cmdLongOption, cmdShortOption:
+      case p.key
+      of "bucket": result.buckets.add(p.val)
+      of "app", "tool": result.apps.add(p.val)
+      of "output-dir", "out": result.outputDir = p.val
+      of "version-history", "with-history":
+        try: result.versionHistory = parseInt(p.val)
+        except ValueError:
+          stderr.writeLine("error: --version-history wants an integer")
+          quit(2)
+      of "dry-run": result.dryRun = true
+      of "no-refresh": result.noRefresh = true
+      of "catalog": result.catalog = p.val
+      of "help", "h":
+        result.sub = scNone
+      else:
+        stderr.writeLine("error: unknown option '--" & p.key & "'")
+        quit(2)
+
+# ---------------------------------------------------------------------------
+# Diagnostics rendering
+# ---------------------------------------------------------------------------
+
+proc writeDiagnostics(diagnostics: openArray[Diagnostic]) =
+  for d in diagnostics:
+    stderr.writeLine($d.kind & " [" & d.app & "]: " & d.detail)
+
+# ---------------------------------------------------------------------------
+# Harvest one app (potentially multi-version)
+# ---------------------------------------------------------------------------
+
+type
+  HarvestedApp = object
+    app: string
+    catalog: seq[VersionedProvisioning]
+    diagnostics: seq[Diagnostic]
+    fatal: bool  ## true if we couldn't synthesize ANY version
+
+proc harvestApp(bucket: BucketRef; app: string; versionHistory: int):
+    HarvestedApp =
+  result.app = app
+
+  let manifestsDir = manifestsDirOf(bucket)
+  let manifestPath = manifestsDir / (app & ".json")
+  if not fileExists(manifestPath):
+    result.diagnostics.add(Diagnostic(
+      kind: dkManifestNoUrl, app: app,
+      detail: "no manifest file at " & manifestPath))
+    result.fatal = true
+    return
+
+  # ----- Head manifest -----
+  let raw = readFile(manifestPath)
+  let parsed = parseScoopManifest(app, raw)
+  for d in parsed.diagnostics: result.diagnostics.add(d)
+  if parsed.ok:
+    result.catalog.add(parsed.entry)
+  else:
+    # If even the head failed, surface as fatal — the operator wants
+    # to see this loudly.
+    result.fatal = true
+
+  # ----- Optional history walk -----
+  if versionHistory <= 1 or bucket.kind != bkGitRepository:
+    return
+
+  # We need the full git log for this file — unshallow if necessary.
+  # (Cheap if already full.)
+  try:
+    unshallow(bucket)
+  except BucketError as err:
+    result.diagnostics.add(Diagnostic(
+      kind: dkUnknownArchitecture, app: app,
+      detail: "could not unshallow bucket: " & err.msg))
+    return
+
+  let versionCommits = commitVersionsFor(bucket, app)
+  var added = result.catalog.len  # 0 or 1 — the head version
+  let headVersion = if result.catalog.len > 0: result.catalog[0].version
+                    else: ""
+
+  for (sha, version) in versionCommits:
+    if added >= versionHistory: break
+    if version == headVersion: continue  # already covered
+    let histBody = manifestAtCommit(bucket, app, sha)
+    if histBody.len == 0: continue
+    let histParsed = parseScoopManifest(app, histBody)
+    for d in histParsed.diagnostics: result.diagnostics.add(d)
+    if histParsed.ok:
+      # Skip if we already have this version (shouldn't happen since
+      # commitVersionsFor de-dupes, but defense in depth).
+      var dup = false
+      for existing in result.catalog:
+        if existing.version == histParsed.entry.version:
+          dup = true; break
+      if not dup:
+        result.catalog.add(histParsed.entry)
+        inc added
+
+# ---------------------------------------------------------------------------
+# Catalog ordering
+# ---------------------------------------------------------------------------
+
+proc semverTuple(version: string): tuple[parts: seq[int]; rest: string] =
+  ## Coarse semver decomposition. Splits the leading numeric dot-
+  ## separated run; everything after the first non-numeric segment
+  ## stays as a string for lexicographic ordering. Handles
+  ## ``21.0.5+11`` and ``0.26-1`` without crashing.
+  var parts: seq[int] = @[]
+  var i = 0
+  while i < version.len:
+    var j = i
+    while j < version.len and version[j] in {'0'..'9'}: inc j
+    if j == i: break
+    try: parts.add(parseInt(version[i ..< j]))
+    except ValueError: break
+    i = j
+    if i < version.len and version[i] == '.': inc i else: break
+  (parts, version[i .. ^1])
+
+proc compareSemverDesc(a, b: VersionedProvisioning): int =
+  ## Newest-first ordering. Pure-numeric semver comparison falls back
+  ## to lexicographic on non-numeric remainders.
+  let av = semverTuple(a.version)
+  let bv = semverTuple(b.version)
+  let n = min(av.parts.len, bv.parts.len)
+  for k in 0 ..< n:
+    if av.parts[k] != bv.parts[k]:
+      return cmp(bv.parts[k], av.parts[k])
+  if av.parts.len != bv.parts.len:
+    return cmp(bv.parts.len, av.parts.len)
+  return cmp(bv.rest, av.rest)
+
+proc sortCatalog(items: var seq[VersionedProvisioning]) =
+  ## In-place newest-first sort. Stable enough for our purposes —
+  ## duplicates are caught upstream by ``validateCatalog``.
+  for i in 1 ..< items.len:
+    var j = i
+    while j > 0 and compareSemverDesc(items[j - 1], items[j]) > 0:
+      let tmp = items[j - 1]
+      items[j - 1] = items[j]
+      items[j] = tmp
+      dec j
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+proc cmdHarvest(opts: CliOptions): int =
+  if opts.buckets.len == 0:
+    stderr.writeLine("error: --bucket is required for 'harvest'")
+    return 2
+
+  if opts.outputDir.len == 0:
+    stderr.writeLine("error: --output-dir is required")
+    return 2
+
+  if not opts.dryRun:
+    createDir(opts.outputDir)
+
+  # Track which apps we've already emitted — first bucket wins for
+  # cross-bucket name collisions (the spec's HBucketShadowed).
+  var emittedApps: seq[string] = @[]
+  var anyError = false
+
+  for bucketSpec in opts.buckets:
+    let bucket = try:
+      resolveBucket(bucketSpec, refresh = not opts.noRefresh)
+    except BucketError as err:
+      stderr.writeLine("error: " & err.msg)
+      anyError = true
+      continue
+
+    var appList = opts.apps
+    if appList.len == 0:
+      # No --app filter: harvest every manifest in the bucket.
+      for tup in manifestFiles(bucket):
+        appList.add(tup.app)
+
+    for app in appList:
+      if app in emittedApps:
+        stderr.writeLine("HBucketShadowed [" & app & "]: already harvested " &
+          "from an earlier bucket; ignoring " & bucketSpec)
+        continue
+      let harvested = harvestApp(bucket, app, opts.versionHistory)
+      writeDiagnostics(harvested.diagnostics)
+      if harvested.fatal or harvested.catalog.len == 0:
+        stderr.writeLine("error: harvest of '" & app & "' from '" &
+          bucketSpec & "' produced no usable versions; skipped")
+        anyError = true
+        continue
+      var ordered = harvested.catalog
+      sortCatalog(ordered)
+      let body = emitCatalogFile(app, bucketSpec, ordered)
+      let outPath = opts.outputDir / (app & ".nim")
+      if opts.dryRun:
+        echo "DRY-RUN would write " & outPath & " (" & $ordered.len &
+          " version(s))"
+        # Print the first few lines to make the dry-run useful.
+        var n = 0
+        for ln in body.splitLines:
+          if n >= 10: break
+          echo "    " & ln
+          inc n
+      else:
+        writeFile(outPath, body)
+      emittedApps.add(app)
+
+  if anyError: return 3
+  return 0
+
+proc cmdInspect(opts: CliOptions): int =
+  if opts.buckets.len != 1:
+    stderr.writeLine("error: 'inspect' wants exactly one --bucket")
+    return 2
+  if opts.apps.len != 1:
+    stderr.writeLine("error: 'inspect' wants exactly one --app")
+    return 2
+  let bucket = try:
+    resolveBucket(opts.buckets[0], refresh = not opts.noRefresh)
+  except BucketError as err:
+    stderr.writeLine("error: " & err.msg)
+    return 2
+  let manifestPath = manifestsDirOf(bucket) / (opts.apps[0] & ".json")
+  if not fileExists(manifestPath):
+    stderr.writeLine("error: no manifest at " & manifestPath)
+    return 2
+  let raw = readFile(manifestPath)
+  let parsed = parseScoopManifest(opts.apps[0], raw)
+  writeDiagnostics(parsed.diagnostics)
+  if not parsed.ok:
+    return 3
+  echo serializeAsCode(parsed.entry)
+  return 0
+
+proc cmdVerify(opts: CliOptions): int =
+  if opts.buckets.len < 1:
+    stderr.writeLine("error: 'verify' wants --bucket")
+    return 2
+  if opts.apps.len != 1:
+    stderr.writeLine("error: 'verify' wants exactly one --app")
+    return 2
+  if opts.catalog.len == 0:
+    stderr.writeLine("error: 'verify' wants --catalog <path>")
+    return 2
+  if not fileExists(opts.catalog):
+    stderr.writeLine("error: catalog file not found: " & opts.catalog)
+    return 2
+  let existing = readFile(opts.catalog)
+  # Reuse the harvest pipeline.
+  let bucket = try:
+    resolveBucket(opts.buckets[0], refresh = not opts.noRefresh)
+  except BucketError as err:
+    stderr.writeLine("error: " & err.msg)
+    return 2
+  let harvested = harvestApp(bucket, opts.apps[0], opts.versionHistory)
+  writeDiagnostics(harvested.diagnostics)
+  if harvested.fatal or harvested.catalog.len == 0:
+    return 3
+  var ordered = harvested.catalog
+  sortCatalog(ordered)
+  let body = emitCatalogFile(opts.apps[0], opts.buckets[0], ordered)
+  if body == existing:
+    echo "verify OK: " & opts.catalog
+    return 0
+  stderr.writeLine("verify DRIFT: " & opts.catalog & " differs from re-harvest")
+  # Best-effort diff: print the byte-length delta and the first
+  # differing line.
+  stderr.writeLine("  existing size: " & $existing.len)
+  stderr.writeLine("  harvested size: " & $body.len)
+  let exLines = existing.splitLines
+  let hvLines = body.splitLines
+  let n = min(exLines.len, hvLines.len)
+  for i in 0 ..< n:
+    if exLines[i] != hvLines[i]:
+      stderr.writeLine("  first diff at line " & $(i + 1) & ":")
+      stderr.writeLine("    -existing: " & exLines[i])
+      stderr.writeLine("    +harvested: " & hvLines[i])
+      break
+  return 4
+
+# ---------------------------------------------------------------------------
+# main()
+# ---------------------------------------------------------------------------
+
+proc main(): int =
+  let opts = parseCli(commandLineParams())
+  case opts.sub
+  of scNone:
+    echo HelpText
+    return 0
+  of scHarvest: return cmdHarvest(opts)
+  of scInspect: return cmdInspect(opts)
+  of scVerify: return cmdVerify(opts)
+
+when isMainModule:
+  quit(main())

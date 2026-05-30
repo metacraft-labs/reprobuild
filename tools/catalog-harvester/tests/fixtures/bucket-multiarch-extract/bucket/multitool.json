@@ -1,0 +1,23 @@
+{
+    "version": "3.2.1",
+    "description": "Synthetic per-arch extract_dir fixture.",
+    "homepage": "https://example.test/multitool",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://example.test/multitool-3.2.1-x64.zip",
+            "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "extract_dir": "multitool-3.2.1-x64"
+        },
+        "arm64": {
+            "url": "https://example.test/multitool-3.2.1-arm64.zip",
+            "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "extract_dir": "multitool-3.2.1-arm64"
+        }
+    },
+    "bin": "bin\\multitool.exe",
+    "env_set": {
+        "MULTITOOL_HOME": "$dir",
+        "MULTITOOL_CONF": "$dir\\etc"
+    }
+}

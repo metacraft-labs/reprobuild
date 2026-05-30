@@ -58,6 +58,11 @@ while IFS= read -r -d '' test_file; do
 done < <(
   find tests -type f -name 't*.nim' -print0
   find libs -path '*/tests/t*.nim' -type f -print0
+  # M66 harvester: tools/catalog-harvester/tests/test_*.nim — discovery is
+  # name-prefixed `test_` (not `t*`) to distinguish maintainer-tool tests
+  # from library / repository tests. The runner's existing add-extra-flags
+  # logic doesn't apply to them (no provider-mode, no HCR).
+  find tools -path '*/tests/test_*.nim' -type f -print0 2>/dev/null
 )
 
 if [ "${found}" -eq 0 ]; then

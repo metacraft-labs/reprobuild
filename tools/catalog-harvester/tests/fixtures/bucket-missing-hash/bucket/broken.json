@@ -1,0 +1,6 @@
+{
+    "version": "0.0.1",
+    "description": "Missing-hash fixture for the M66 diagnostic test.",
+    "url": "https://example.test/broken-0.0.1.zip",
+    "bin": "broken.exe"
+}
