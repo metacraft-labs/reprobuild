@@ -1383,3 +1383,277 @@ suite "M83 step 7: linux.dconfKey driver":
         dconfKey: "/org/gnome/x" & c & "evil",
         dconfValue: "'x'"))
       check err.len > 0
+
+# ===========================================================================
+# M83 step 7 Driver B: linux.kdeConfigKey — KDE Plasma settings via
+# kwriteconfig5 / kwriteconfig6. Pure-logic + lifecycle + platform-guard
+# tests. The shell-out only runs on Linux; the binary-selection helpers,
+# the canonical-bytes derivation, the absence-sentinel constant, the
+# digest derivation, the realWorldIdentity derivation, and the off-Linux
+# fail-closed gate are cross-platform.
+# ===========================================================================
+
+suite "M83 step 7: linux.kdeConfigKey driver":
+
+  test "kwriteconfigBinary: maps 5/6 to the expected binary":
+    check kwriteconfigBinary(5) == "kwriteconfig5"
+    check kwriteconfigBinary(6) == "kwriteconfig6"
+
+  test "kwriteconfigBinary: rejects every other version":
+    for bad in [0, 1, 4, 7, 99, -1]:
+      expect ValueError:
+        discard kwriteconfigBinary(bad)
+
+  test "kreadconfigBinary: maps 5/6 to the expected binary":
+    check kreadconfigBinary(5) == "kreadconfig5"
+    check kreadconfigBinary(6) == "kreadconfig6"
+
+  test "kreadconfigBinary: rejects every other version":
+    for bad in [0, 1, 4, 7, 99, -1]:
+      expect ValueError:
+        discard kreadconfigBinary(bad)
+
+  test "KdeConfigAbsenceSentinel: starts with a control character":
+    # The sentinel must be unambiguously not-a-user-value. The
+    # leading `\x1f` (unit separator) is non-printable and so cannot
+    # collide with any KDE-valid value.
+    check KdeConfigAbsenceSentinel.len > 0
+    check KdeConfigAbsenceSentinel[0] == '\x1f'
+
+  test "canonicalKdeConfigBytes: encodes the value verbatim":
+    let bytes = canonicalKdeConfigBytes("prefer-dark")
+    check bytes.len == "prefer-dark".len
+    var s = ""
+    for b in bytes: s.add(char(b))
+    check s == "prefer-dark"
+
+  test "canonicalKdeConfigBytes: empty value yields empty bytes":
+    let bytes = canonicalKdeConfigBytes("")
+    check bytes.len == 0
+
+  test "digestOfResource: linux.kdeConfigKey digests the value verbatim":
+    let r = Resource(kind: rkLinuxKdeConfigKey, address: "kde:digest",
+      lifecyclePolicy: lpDefault,
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "ColorScheme", kdeValue: "BreezeDark",
+      kdeVersion: 6)
+    let expected = digestOfBytes(canonicalKdeConfigBytes(r.kdeValue))
+    check digestOfResource(r) == expected
+
+  test "digestOfResource: value change flips the digest":
+    var r = Resource(kind: rkLinuxKdeConfigKey, address: "kde:flip",
+      lifecyclePolicy: lpDefault,
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "ColorScheme", kdeValue: "BreezeDark",
+      kdeVersion: 6)
+    let before = digestOfResource(r)
+    r.kdeValue = "BreezeLight"
+    let after = digestOfResource(r)
+    check before != after
+
+  test "digestOfResource: file/group/key change is identity, not digest":
+    # Same value at three different (file, group, key) slots — all
+    # three have the same digest (the canonical-bytes derivation
+    # covers only the value) but different identities.
+    var r1 = Resource(kind: rkLinuxKdeConfigKey, address: "k:1",
+      lifecyclePolicy: lpDefault,
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "Theme", kdeValue: "Breeze",
+      kdeVersion: 6)
+    var r2 = r1
+    r2.kdeKey = "ColorScheme"
+    check digestOfResource(r1) == digestOfResource(r2)
+    check realWorldIdentity(r1) != realWorldIdentity(r2)
+
+  test "realWorldIdentity: kde:<file>:<group>:<key>":
+    let r = Resource(kind: rkLinuxKdeConfigKey, address: "kde:id",
+      lifecyclePolicy: lpDefault,
+      kdeFile: "kwinrc", kdeGroup: "Compositing",
+      kdeKey: "Enabled", kdeValue: "true",
+      kdeVersion: 6)
+    check realWorldIdentity(r) == "kde:kwinrc:Compositing:Enabled"
+
+  test "realWorldIdentity: kdeVersion is NOT part of the identity":
+    # Two resources differing only in kdeVersion address the same
+    # on-disk slot (KDE 5 and 6 share the config-file format on disk;
+    # only the binary name changes). The identities must therefore
+    # match so a profile that flips kdeVersion does not surface as
+    # "two distinct resources".
+    var r5 = Resource(kind: rkLinuxKdeConfigKey, address: "k:v5",
+      lifecyclePolicy: lpDefault,
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "ColorScheme", kdeValue: "BreezeDark",
+      kdeVersion: 5)
+    var r6 = r5
+    r6.kdeVersion = 6
+    check realWorldIdentity(r5) == realWorldIdentity(r6)
+
+  test "resourceKindFromString covers linux.kdeConfigKey":
+    check resourceKindFromString("linux.kdeConfigKey") ==
+      rkLinuxKdeConfigKey
+
+  test "lifecycle: no-op when desired matches observed":
+    let desired = Resource(kind: rkLinuxKdeConfigKey,
+      address: "kde:noop",
+      lifecyclePolicy: lpDefault,
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "ColorScheme", kdeValue: "BreezeDark",
+      kdeVersion: 6)
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfResource(desired)
+    let action = decideAction(state)
+    check action.kind == rakNoOp
+    check action.resourceKind == rkLinuxKdeConfigKey
+
+  test "lifecycle: create when absent":
+    let desired = Resource(kind: rkLinuxKdeConfigKey,
+      address: "kde:create",
+      lifecyclePolicy: lpDefault,
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "ColorScheme", kdeValue: "BreezeDark",
+      kdeVersion: 6)
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = false
+    let action = decideAction(state)
+    check action.kind == rakCreate
+    check action.resourceKind == rkLinuxKdeConfigKey
+
+  test "lifecycle: value flip plans update on prior generation":
+    var desired = Resource(kind: rkLinuxKdeConfigKey,
+      address: "kde:update",
+      lifecyclePolicy: lpDefault,
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "ColorScheme", kdeValue: "BreezeLight",
+      kdeVersion: 6)
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    let observedDigest = digestOfBytes(
+      canonicalKdeConfigBytes("BreezeDark"))
+    state.observed.digest = observedDigest
+    state.hasRecorded = true
+    state.recorded.kind = rkLinuxKdeConfigKey
+    state.recorded.postWriteDigest = observedDigest
+    let action = decideAction(state)
+    check action.kind == rakUpdate
+
+  test "phase-B: linux.kdeConfigKey raises ENotImplementedPlatform off-Linux":
+    when not defined(linux):
+      expect ENotImplementedPlatform:
+        discard applyKdeConfigKey("kdeglobals", "General",
+          "ColorScheme", "BreezeDark", 6)
+      try:
+        discard applyKdeConfigKey("kdeglobals", "General",
+          "ColorScheme", "BreezeDark", 6)
+        check false  # unreachable
+      except ENotImplementedPlatform as e:
+        check e.resourceKind == "linux.kdeConfigKey"
+        check e.requiredPlatform == "linux"
+        check e.currentPlatform != "linux"
+    else:
+      skip()
+
+  test "phase-B: observeKdeConfigKey raises ENotImplementedPlatform off-Linux":
+    when not defined(linux):
+      expect ENotImplementedPlatform:
+        discard observeKdeConfigKey("kdeglobals", "General",
+          "ColorScheme", 6)
+    else:
+      skip()
+
+  test "phase-B: destroyKdeConfigKey raises ENotImplementedPlatform off-Linux":
+    when not defined(linux):
+      expect ENotImplementedPlatform:
+        destroyKdeConfigKey("kdeglobals", "General",
+          "ColorScheme", 6)
+    else:
+      skip()
+
+  test "M83 step 7: applyKdeConfigKey with kdeVersion=5 still off-Linux":
+    # The applyKdeConfigKey signature accepts kdeVersion = 5; the
+    # platform guard MUST still raise off-Linux regardless of the
+    # version parameter.
+    when not defined(linux):
+      expect ENotImplementedPlatform:
+        discard applyKdeConfigKey("kdeglobals", "General",
+          "ColorScheme", "BreezeDark", 5)
+    else:
+      skip()
+
+  test "resourceValidationError: clean KDE resource passes":
+    check resourceValidationError(Resource(kind: rkLinuxKdeConfigKey,
+      address: "kde:ok",
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "ColorScheme", kdeValue: "BreezeDark",
+      kdeVersion: 6)) == ""
+    # kdeVersion = 5 also valid.
+    check resourceValidationError(Resource(kind: rkLinuxKdeConfigKey,
+      address: "kde:v5",
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "ColorScheme", kdeValue: "BreezeDark",
+      kdeVersion: 5)) == ""
+
+  test "resourceValidationError: rejects empty file/group/key":
+    check resourceValidationError(Resource(kind: rkLinuxKdeConfigKey,
+      address: "kde:empty-file",
+      kdeFile: "", kdeGroup: "General",
+      kdeKey: "K", kdeValue: "v",
+      kdeVersion: 6)).len > 0
+    check resourceValidationError(Resource(kind: rkLinuxKdeConfigKey,
+      address: "kde:empty-group",
+      kdeFile: "kdeglobals", kdeGroup: "",
+      kdeKey: "K", kdeValue: "v",
+      kdeVersion: 6)).len > 0
+    check resourceValidationError(Resource(kind: rkLinuxKdeConfigKey,
+      address: "kde:empty-key",
+      kdeFile: "kdeglobals", kdeGroup: "General",
+      kdeKey: "", kdeValue: "v",
+      kdeVersion: 6)).len > 0
+
+  test "resourceValidationError: rejects metacharacter in file/group/key":
+    for c in [";", "&", "|", "$", "`", " ", "\n", "\""]:
+      check resourceValidationError(Resource(kind: rkLinuxKdeConfigKey,
+        address: "kde:evil-file",
+        kdeFile: "kde" & c & "evil", kdeGroup: "General",
+        kdeKey: "K", kdeValue: "v",
+        kdeVersion: 6)).len > 0
+      check resourceValidationError(Resource(kind: rkLinuxKdeConfigKey,
+        address: "kde:evil-group",
+        kdeFile: "kdeglobals", kdeGroup: "Gen" & c & "evil",
+        kdeKey: "K", kdeValue: "v",
+        kdeVersion: 6)).len > 0
+      check resourceValidationError(Resource(kind: rkLinuxKdeConfigKey,
+        address: "kde:evil-key",
+        kdeFile: "kdeglobals", kdeGroup: "General",
+        kdeKey: "K" & c & "evil", kdeValue: "v",
+        kdeVersion: 6)).len > 0
+
+  test "resourceValidationError: rejects / in the file basename":
+    let err = resourceValidationError(Resource(
+      kind: rkLinuxKdeConfigKey,
+      address: "kde:slashed-file",
+      kdeFile: "subdir/kdeglobals", kdeGroup: "General",
+      kdeKey: "K", kdeValue: "v",
+      kdeVersion: 6))
+    check err.len > 0
+    check err.contains("single path segment")
+
+  test "resourceValidationError: rejects invalid kdeVersion":
+    for bad in [0, 1, 4, 7, 99]:
+      let err = resourceValidationError(Resource(
+        kind: rkLinuxKdeConfigKey,
+        address: "kde:bad-version",
+        kdeFile: "kdeglobals", kdeGroup: "General",
+        kdeKey: "K", kdeValue: "v",
+        kdeVersion: bad))
+      check err.len > 0
+      check err.contains("kdeVersion")

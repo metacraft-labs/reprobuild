@@ -30,6 +30,7 @@ import repro_home_generations
 
 import ./drivers/dconf_key
 import ./drivers/defaults
+import ./drivers/kde_config_key
 import ./drivers/launchd_user
 import ./drivers/systemd_user
 import ./drivers/vscode_extension
@@ -197,6 +198,14 @@ proc digestOfResource*(desired: Resource): Digest256 =
     # (after stripping the trailing newline `dconf read` adds), so
     # a cache-hit re-apply compares equal.
     return digestOfBytes(canonicalDconfBytes(desired.dconfValue))
+  of rkLinuxKdeConfigKey:
+    # The on-disk file `~/.config/<file>` is shared with other
+    # KDE-managed keys, so the digest cannot cover the file body.
+    # Instead it covers just the declared VALUE — kwriteconfig is
+    # idempotent (re-writing the same value is a no-op), so a
+    # cache-hit re-apply compares equal byte-for-byte with what
+    # `kreadconfig` returns from the same slot.
+    return digestOfBytes(canonicalKdeConfigBytes(desired.kdeValue))
 
 proc summarize*(action: ResourceActionKind; address: string;
                 kind: ResourceKind): string =

@@ -225,6 +225,35 @@ template linuxDconfKey*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "linux.dconfKey", addr0, fields,
       dependsOn)
 
+template linuxKdeConfigKey*(targetResources: var seq[ResourceIntent];
+                            file: string;
+                            group: string;
+                            key: string;
+                            value: string;
+                            kdeVersion: int = 6;
+                            address: string = "";
+                            dependsOn: seq[string] = @[]) =
+  ## M83 step 7 Driver B — Linux KDE Plasma settings via the
+  ## `kwriteconfig5` / `kwriteconfig6` CLI.
+  ##
+  ## Writes `value` to `<key>` under `[<group>]` in `~/.config/<file>`
+  ## (e.g. `kdeglobals`, `kwinrc`). `kdeVersion` selects the major
+  ## binary; the default `6` matches modern Plasma 6. A profile
+  ## targeting Plasma 5 passes `kdeVersion = 5`.
+  ##
+  ## Address default: `linux.kdeConfigKey:<file>:<group>:<key>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["file"] = strField(file)
+    fields["group"] = strField(group)
+    fields["key"] = strField(key)
+    fields["value"] = strField(value)
+    fields["kdeVersion"] = intField(kdeVersion)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.kdeConfigKey", file, group, key)
+    pushResource(targetResources, "linux.kdeConfigKey", addr0,
+      fields, dependsOn)
+
 template launchdUserAgent*(targetResources: var seq[ResourceIntent];
                            label: string;
                            programArgs: seq[string];

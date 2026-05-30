@@ -23,6 +23,9 @@ proc strFieldEntry(k, v: string): (string, FieldValue) =
 proc boolFieldEntry(k: string; v: bool): (string, FieldValue) =
   (k, boolField(v))
 
+proc intFieldEntry(k: string; v: int): (string, FieldValue) =
+  (k, intField(v))
+
 proc listFieldEntry(k: string; items: seq[string]): (string, FieldValue) =
   (k, listField(items))
 
@@ -356,6 +359,44 @@ suite "M83 Phase D: home adapter — resources":
     # The double-quoted source carries the GVariant single-quoted
     # literal verbatim (with `'` escaped on Nim's side as needed).
     check valueSrc == "\"'prefer-dark'\""
+
+  test "M83 step 7: linux.kdeConfigKey carries every field":
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("linux.kdeConfigKey", "kde",
+      @[strFieldEntry("file", "kdeglobals"),
+        strFieldEntry("group", "General"),
+        strFieldEntry("key", "ColorScheme"),
+        strFieldEntry("value", "BreezeDark"),
+        intFieldEntry("kdeVersion", 6)]))
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    let e = findResourcesBlock(prof).get.resourcesEntries[0]
+    check e.resourceKind == "linux.kdeConfigKey"
+    var attrKeys: seq[string]
+    for a in e.resourceAttrs:
+      attrKeys.add(a.resourceAttrKey)
+    check "file" in attrKeys
+    check "group" in attrKeys
+    check "key" in attrKeys
+    check "value" in attrKeys
+    check "kdeVersion" in attrKeys
+
+  test "M83 step 7: linux.kdeConfigKey kdeVersion renders as a bare int":
+    # `intField` renders to a bare textual integer (no quotes) so the
+    # apply parser's `parseInt` succeeds against the source token.
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("linux.kdeConfigKey", "kde",
+      @[strFieldEntry("file", "kdeglobals"),
+        strFieldEntry("group", "General"),
+        strFieldEntry("key", "K"),
+        strFieldEntry("value", "v"),
+        intFieldEntry("kdeVersion", 5)]))
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    let e = findResourcesBlock(prof).get.resourcesEntries[0]
+    var versionSrc = ""
+    for a in e.resourceAttrs:
+      if a.resourceAttrKey == "kdeVersion":
+        versionSrc = a.resourceAttrValueSource
+    check versionSrc == "5"
 
   test "vscode.extension resource carries extensions + removeUnknown":
     var intent = ProfileIntent(name: "demo")
@@ -1157,9 +1198,16 @@ suite "M83 Phase D: home adapter round-trip via attribute readback":
       @[strFieldEntry("key",
           "/org/gnome/desktop/interface/color-scheme"),
         strFieldEntry("value", "'prefer-dark'")]))
+    # M83 step 7 Driver B: linux.kdeConfigKey is home-scope.
+    intent.resources.add(resourceIntent("linux.kdeConfigKey", "kde",
+      @[strFieldEntry("file", "kdeglobals"),
+        strFieldEntry("group", "General"),
+        strFieldEntry("key", "ColorScheme"),
+        strFieldEntry("value", "BreezeDark"),
+        intFieldEntry("kdeVersion", 6)]))
     let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
     let entries = findResourcesBlock(prof).get.resourcesEntries
-    check entries.len == 10
+    check entries.len == 11
     var kinds: seq[string]
     for e in entries:
       kinds.add(e.resourceKind)
@@ -1174,3 +1222,4 @@ suite "M83 Phase D: home adapter round-trip via attribute readback":
     check "systemd.userUnit" in kinds
     check "launchd.userAgent" in kinds
     check "linux.dconfKey" in kinds
+    check "linux.kdeConfigKey" in kinds

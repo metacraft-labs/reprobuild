@@ -664,6 +664,56 @@ suite "Resource constructors":
     check target[0].dependsOn[0].kind == "env.userVariable"
     check target[0].dependsOn[0].name == "GTK_THEME"
 
+  test "M83 step 7: linuxKdeConfigKey records every field":
+    var target: seq[ResourceIntent] = @[]
+    linuxKdeConfigKey(target,
+      file = "kdeglobals",
+      group = "General",
+      key = "ColorScheme",
+      value = "BreezeDark")
+    check target.len == 1
+    check target[0].kind == "linux.kdeConfigKey"
+    check target[0].address ==
+      "linux.kdeConfigKey:kdeglobals:General:ColorScheme"
+    check target[0].fields["file"].s == "kdeglobals"
+    check target[0].fields["group"].s == "General"
+    check target[0].fields["key"].s == "ColorScheme"
+    check target[0].fields["value"].s == "BreezeDark"
+    check target[0].fields["kdeVersion"].i == 6
+
+  test "M83 step 7: linuxKdeConfigKey defaults kdeVersion=6":
+    var target: seq[ResourceIntent] = @[]
+    linuxKdeConfigKey(target,
+      file = "kdeglobals", group = "General",
+      key = "K", value = "v")
+    check target[0].fields["kdeVersion"].i == 6
+
+  test "M83 step 7: linuxKdeConfigKey honours kdeVersion=5":
+    var target: seq[ResourceIntent] = @[]
+    linuxKdeConfigKey(target,
+      file = "kdeglobals", group = "General",
+      key = "K", value = "v",
+      kdeVersion = 5)
+    check target[0].fields["kdeVersion"].i == 5
+
+  test "M83 step 7: linuxKdeConfigKey honours explicit address":
+    var target: seq[ResourceIntent] = @[]
+    linuxKdeConfigKey(target,
+      file = "kdeglobals", group = "General",
+      key = "K", value = "v",
+      address = "kde-color-scheme")
+    check target[0].address == "kde-color-scheme"
+
+  test "M83 step 7: linuxKdeConfigKey dependsOn parses into ResourceAddress":
+    var target: seq[ResourceIntent] = @[]
+    linuxKdeConfigKey(target,
+      file = "kdeglobals", group = "General",
+      key = "K", value = "v",
+      dependsOn = @["linux.dconfKey:/org/gnome/x"])
+    check target[0].dependsOn.len == 1
+    check target[0].dependsOn[0].kind == "linux.dconfKey"
+    check target[0].dependsOn[0].name == "/org/gnome/x"
+
   test "fsSystemFile":
     var target: seq[ResourceIntent] = @[]
     fsSystemFile(target, path = "/etc/hosts.d/local",

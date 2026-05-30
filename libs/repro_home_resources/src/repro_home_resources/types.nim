@@ -61,6 +61,14 @@ type
       ## digest comparison. Destroy resets the key to its schema
       ## default via `dconf reset`. Linux-only; raises
       ## `ENotImplementedPlatform` on every other platform.
+    rkLinuxKdeConfigKey = "linux.kdeConfigKey"
+      ## M83 step 7 Driver B. Per-user KDE Plasma settings via the
+      ## `kwriteconfig5` / `kwriteconfig6` CLI. Writes a single key
+      ## under a `[group]` in `~/.config/<file>` (e.g. `kdeglobals`,
+      ## `kwinrc`). The `kdeVersion` field selects the major (5 or
+      ## 6); the apply path observes via the matching `kreadconfig`
+      ## binary. Destroy passes `--delete` to remove the key.
+      ## Linux-only; raises `ENotImplementedPlatform` elsewhere.
 
   SystemdUnitState* = enum
     ## M83 step 4b: desired runtime state for a `systemd.userUnit`.
@@ -249,6 +257,25 @@ type
         ## `'prefer-dark'` (string), `true`/`false` (bool), bare
         ## decimal (int), `['a', 'b']` (array). The driver writes it
         ## verbatim via `dconf write`.
+    of rkLinuxKdeConfigKey:
+      kdeFile*: string
+        ## Config file basename under `~/.config/` (e.g. `kdeglobals`,
+        ## `kwinrc`).
+      kdeGroup*: string
+        ## KDE config `[group]` name (without the brackets). Nested
+        ## groups are not modelled today; the apply path passes the
+        ## value as a single `--group <name>` arg.
+      kdeKey*: string
+        ## The key name inside the group.
+      kdeValue*: string
+        ## The string value to write. kwriteconfig accepts arbitrary
+        ## strings — the driver does not interpret the value (e.g.
+        ## numeric keys still take a string `"42"` and KDE applies
+        ## the cast when reading).
+      kdeVersion*: int
+        ## KDE major (5 or 6). Selects between `kwriteconfig5` /
+        ## `kreadconfig5` and `kwriteconfig6` / `kreadconfig6`.
+        ## Default `6` per the spec.
     of rkVscodeExtension:
       vscodeExtensions*: seq[string]
         ## Declared marketplace extension IDs, optionally with a
@@ -367,6 +394,7 @@ proc resourceKindFromString*(s: string): ResourceKind =
   of $rkFsUserFile: rkFsUserFile
   of $rkVscodeExtension: rkVscodeExtension
   of $rkLinuxDconfKey: rkLinuxDconfKey
+  of $rkLinuxKdeConfigKey: rkLinuxKdeConfigKey
   else:
     raise newException(ValueError,
       "unknown resource kind tag: '" & s & "'")
@@ -509,3 +537,11 @@ proc realWorldIdentity*(r: Resource): string =
     # identity namespace so it cannot collide with the other home-
     # scope kinds' identities.
     return "dconf:" & r.dconfKey
+  of rkLinuxKdeConfigKey:
+    # Triple: `<file>:<group>:<key>` uniquely identifies a single
+    # writable slot in `~/.config/<file>`. The `kdeVersion` is NOT
+    # part of the identity — switching from kwriteconfig5 to
+    # kwriteconfig6 still targets the same file (KDE 5 and 6
+    # share the config-file format on disk; only the binary name
+    # changes).
+    return "kde:" & r.kdeFile & ":" & r.kdeGroup & ":" & r.kdeKey

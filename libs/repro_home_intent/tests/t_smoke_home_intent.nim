@@ -451,3 +451,74 @@ profile "x":
     writeFile(extendedPath(path), src)
     expect EUnstructured:
       discard loadProfile(path)
+
+  # ---------------------------------------------------------------------
+  # M83 step 7 Driver B: linux.kdeConfigKey resource-kind acceptance.
+  # ---------------------------------------------------------------------
+
+  test "linux.kdeConfigKey: parser accepts a minimal stanza":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    linux.kdeConfigKey colorScheme:
+      file = "kdeglobals"
+      group = "General"
+      key = "ColorScheme"
+      value = "BreezeDark"
+"""
+    let dir = createTempDir("repro-home-kde-accept-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    let prof = loadProfile(path)
+    check prof.root.kind == nkProfileRoot
+
+  test "linux.kdeConfigKey: parser accepts an explicit kdeVersion":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    linux.kdeConfigKey colorSchemeV5:
+      file = "kdeglobals"
+      group = "General"
+      key = "ColorScheme"
+      value = "BreezeDark"
+      kdeVersion = 5
+"""
+    let dir = createTempDir("repro-home-kde-v5-accept-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    let prof = loadProfile(path)
+    check prof.root.kind == nkProfileRoot
+
+  test "linux.kdeConfigKey: parser rejects a typo'd kind":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    linux.kdeConfigKeys bad:
+      file = "kdeglobals"
+      group = "General"
+      key = "K"
+      value = "v"
+"""
+    let dir = createTempDir("repro-home-kde-typo-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    expect EUnstructured:
+      discard loadProfile(path)

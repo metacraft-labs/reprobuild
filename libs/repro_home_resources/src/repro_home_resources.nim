@@ -39,6 +39,7 @@ import repro_home_resources/drivers/windows_startup
 import repro_home_resources/drivers/dconf_key
 import repro_home_resources/drivers/defaults
 import repro_home_resources/drivers/gsettings
+import repro_home_resources/drivers/kde_config_key
 import repro_home_resources/drivers/launchd_user
 import repro_home_resources/drivers/systemd_user
 import repro_home_resources/drivers/user_file
@@ -58,6 +59,7 @@ export windows_startup
 export dconf_key
 export defaults
 export gsettings
+export kde_config_key
 export launchd_user
 export systemd_user
 export user_file

@@ -40,7 +40,7 @@ const
     "shell.integration", "env.userVariable", "windows.registryValue",
     "windows.startup", "fs.userFile",
     "systemd.userUnit", "launchd.userAgent",
-    "linux.dconfKey"]
+    "linux.dconfKey", "linux.kdeConfigKey"]
     ## M78: the home-scope, elevation-free resource kinds whose M68
     ## drivers exist and that a `home.nim` `resources:` block may
     ## declare. An unrecognized kind is rejected with `EUnstructured`
@@ -53,10 +53,11 @@ const
     ## paths are platform-bound — a Windows-host `home.nim` that
     ## guards them under `when linux:` / `when macos:` predicates
     ## parses without error and the planner emits them only when
-    ## the predicate matches the running host. `linux.dconfKey` is the
-    ## M83 step 7 Driver A GNOME desktop-environment-settings driver
-    ## (Linux-only; the parser accepts it on every host, the apply
-    ## path raises `ENotImplementedPlatform` off-Linux).
+    ## the predicate matches the running host. `linux.dconfKey` and
+    ## `linux.kdeConfigKey` are the M83 step 7 GNOME / KDE desktop-
+    ## environment-settings drivers (Linux-only; the parser accepts
+    ## them on every host, the apply path raises
+    ## `ENotImplementedPlatform` off-Linux).
 
 type
   ParseCtx = object

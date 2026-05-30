@@ -563,6 +563,24 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
         dconfKey: parts[0],
         dconfValue: parts[1])
       result.add(r)
+    of "kdeconfigkey":
+      # kdeconfigkey:<address>:<file>;<group>;<key>;<value>;<version>
+      # M83 step 7 Driver B test-seam form. `<version>` is `5` or
+      # `6`; an empty / missing component defaults to `6` per spec.
+      let parts = payload.split(';')
+      if parts.len < 4: continue
+      var kdeVer = 6
+      if parts.len > 4 and parts[4].len > 0:
+        try: kdeVer = parseInt(parts[4])
+        except ValueError: kdeVer = 6
+      let r = Resource(kind: rkLinuxKdeConfigKey, address: address,
+        lifecyclePolicy: resourcePolicy,
+        kdeFile: parts[0],
+        kdeGroup: parts[1],
+        kdeKey: parts[2],
+        kdeValue: parts[3],
+        kdeVersion: kdeVer)
+      result.add(r)
     else: discard
 
 # ---------------------------------------------------------------------------
@@ -895,6 +913,45 @@ proc resourceFromEntry(profilePath, homeDir: string;
       lifecyclePolicy: lpDefault,
       dconfKey: key,
       dconfValue: value)
+  of "linux.kdeConfigKey":
+    # M83 step 7 Driver B — KDE Plasma settings via the
+    # `kwriteconfig5` / `kwriteconfig6` CLI. Closed-set attribute
+    # validation: `file`, `group`, `key`, `value`, `kdeVersion`,
+    # plus the cross-kind `depends_on`.
+    const kdeKeyAllowedKeys = ["file", "group", "key", "value",
+      "kdeVersion", "depends_on"]
+    for a in entry.resourceAttrs:
+      if a.kind == nkResourceAttr and
+         a.resourceAttrKey notin kdeKeyAllowedKeys:
+        resourceProfileError(profilePath, a.resourceAttrLine,
+          "resource `linux.kdeConfigKey " & address &
+          "` has unknown attribute `" & a.resourceAttrKey &
+          "`; expected one of: " & kdeKeyAllowedKeys.join(", "))
+    let file = requireAttr(profilePath, entry, "file")
+    let group = requireAttr(profilePath, entry, "group")
+    let key = requireAttr(profilePath, entry, "key")
+    let value = requireAttr(profilePath, entry, "value")
+    var kdeVer = 6  # spec default
+    if hasAttr(entry, "kdeVersion"):
+      let vs = attrOf(entry, "kdeVersion")
+      try:
+        kdeVer = parseInt(vs)
+      except ValueError:
+        resourceProfileError(profilePath, entry.resourceHeaderLine,
+          "resource `linux.kdeConfigKey " & address &
+          "` has non-integer kdeVersion `" & vs & "`")
+      if kdeVer != 5 and kdeVer != 6:
+        resourceProfileError(profilePath, entry.resourceHeaderLine,
+          "resource `linux.kdeConfigKey " & address &
+          "` has invalid kdeVersion `" & vs &
+          "` (must be 5 or 6)")
+    result = Resource(kind: rkLinuxKdeConfigKey, address: address,
+      lifecyclePolicy: lpDefault,
+      kdeFile: file,
+      kdeGroup: group,
+      kdeKey: key,
+      kdeValue: value,
+      kdeVersion: kdeVer)
   else:
     # The parser already rejects unknown kinds; this is a defensive
     # guard for any kind added to the model but not wired here.
@@ -1018,6 +1075,11 @@ proc resourceSeedString*(desired: DesiredSet): string =
       # identifies the desired state; both go into the seed so a
       # change in either bumps the generation id.
       result.add(r.dconfKey & "\x1e" & r.dconfValue)
+    of rkLinuxKdeConfigKey:
+      # M83 step 7 Driver B. The KDE 4-tuple (file, group, key,
+      # value) plus the major version go into the seed.
+      result.add(r.kdeFile & "\x1e" & r.kdeGroup & "\x1e" &
+        r.kdeKey & "\x1e" & r.kdeValue & "\x1e" & $r.kdeVersion)
     result.add('\x1d')
 
 proc composeDesiredResources*(profile: Profile; homeDir, host: string):
@@ -1322,6 +1384,19 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
         if rb.realWorldIdentity.startsWith(dcPrefix):
           live = observeDconfKey(
             rb.realWorldIdentity[dcPrefix.len .. ^1])
+      of rkLinuxKdeConfigKey:
+        # `realWorldIdentity` for `linux.kdeConfigKey` is
+        # `kde:<file>:<group>:<key>`. The recorded binding does not
+        # carry `kdeVersion`; default to 6.
+        const kdePrefix = "kde:"
+        if rb.realWorldIdentity.startsWith(kdePrefix):
+          let body = rb.realWorldIdentity[kdePrefix.len .. ^1]
+          let parts = body.split(':')
+          if parts.len >= 3:
+            let kdeFile = parts[0]
+            let kdeGroup = parts[1]
+            let kdeKey = parts[2 .. ^1].join(":")
+            live = observeKdeConfigKey(kdeFile, kdeGroup, kdeKey, 6)
     except CatchableError:
       return false
     if not live.present:
@@ -2117,6 +2192,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               of rkFsUserFile: "user-file"
               of rkVscodeExtension: "vscode-extensions"
               of rkLinuxDconfKey: "gvariant-literal"
+              of rkLinuxKdeConfigKey: "kde-config-value"
             rb = toResourceBinding(action.address, desired.kind,
               identity, observed, observed.rawBytes,
               adoptPayloadKind, desired.lifecyclePolicy)
@@ -2254,6 +2330,13 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             postWriteBytes = applyDconfKey(desired.dconfKey,
               desired.dconfValue)
             payloadKindStr = "gvariant-literal"
+          of rkLinuxKdeConfigKey:
+            # M83 step 7 Driver B. Phase B driver: re-raises
+            # ENotImplementedPlatform off-Linux.
+            postWriteBytes = applyKdeConfigKey(desired.kdeFile,
+              desired.kdeGroup, desired.kdeKey, desired.kdeValue,
+              desired.kdeVersion)
+            payloadKindStr = "kde-config-value"
           let rb = toResourceBinding(action.address, desired.kind,
             identity, preWrite, postWriteBytes, payloadKindStr,
             desired.lifecyclePolicy)
@@ -2333,6 +2416,21 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             const dcPrefix = "dconf:"
             if prev.resourceId.startsWith(dcPrefix):
               destroyDconfKey(prev.resourceId[dcPrefix.len .. ^1])
+          of rkLinuxKdeConfigKey:
+            # M83 step 7 Driver B. Phase B driver: re-raises
+            # ENotImplementedPlatform off-Linux. The destroy direction
+            # passes `--delete` to remove the key. The recorded
+            # binding does not carry `kdeVersion`; default to 6.
+            preWrite = observeRecorded(action.address, prev)
+            const kdePrefix = "kde:"
+            if prev.resourceId.startsWith(kdePrefix):
+              let body = prev.resourceId[kdePrefix.len .. ^1]
+              let parts = body.split(':')
+              if parts.len >= 3:
+                let kdeFile = parts[0]
+                let kdeGroup = parts[1]
+                let kdeKey = parts[2 .. ^1].join(":")
+                destroyKdeConfigKey(kdeFile, kdeGroup, kdeKey, 6)
           of rkFsUserFile:
             # `resourceId` is the resolved host path verbatim. The
             # destroy direction deletes the file; the pre-write

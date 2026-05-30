@@ -26,6 +26,7 @@ import ./drivers/dconf_key
 import ./drivers/defaults
 import ./drivers/env_user
 import ./drivers/gsettings
+import ./drivers/kde_config_key
 import ./drivers/launchd_user
 import ./drivers/managed_block
 import ./drivers/registry
@@ -111,6 +112,9 @@ proc observeResource*(r: Resource): ObservedState =
     return observeVscodeExtensions(r.vscodeExtensions, r.vscodeRemoveUnknown)
   of rkLinuxDconfKey:
     return observeDconfKey(r.dconfKey)
+  of rkLinuxKdeConfigKey:
+    return observeKdeConfigKey(r.kdeFile, r.kdeGroup, r.kdeKey,
+      r.kdeVersion)
 
 proc observeRecorded*(address: string; binding: RecordedBinding):
     ObservedState =
@@ -196,6 +200,29 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
     const prefix = "dconf:"
     if binding.resourceId.startsWith(prefix):
       return observeDconfKey(binding.resourceId[prefix.len .. ^1])
+    result.present = false
+    result.digest = zeroDigest()
+  of rkLinuxKdeConfigKey:
+    # The resourceId is `kde:<file>:<group>:<key>`. Split on `:`.
+    # The recorded binding does not carry `kdeVersion`; default to
+    # 6 (the modern Plasma 6 binary). If the host only has the v5
+    # toolchain, `kreadconfig6` will fail to launch and the
+    # observation surfaces as absent — the lifecycle algorithm
+    # then plans no destroy and the operator can re-declare with
+    # the matching kdeVersion to converge.
+    const prefix = "kde:"
+    if binding.resourceId.startsWith(prefix):
+      let body = binding.resourceId[prefix.len .. ^1]
+      let parts = body.split(':')
+      if parts.len >= 3:
+        # Reassemble the trailing key parts in case the key name
+        # itself contains a `:` — `kde:<file>:<group>:<key>` uses
+        # FIRST-SEPARATOR semantics for the file and group, and
+        # JOIN semantics for whatever follows.
+        let kdeFile = parts[0]
+        let kdeGroup = parts[1]
+        let kdeKey = parts[2 .. ^1].join(":")
+        return observeKdeConfigKey(kdeFile, kdeGroup, kdeKey, 6)
     result.present = false
     result.digest = zeroDigest()
   discard address

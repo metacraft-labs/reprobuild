@@ -182,6 +182,38 @@ proc resourceValidationError*(r: Resource): string =
         "' contains a shell metacharacter or whitespace"
     # `dconfValue` is an opaque GVariant literal — quoted at
     # `quoteShell` layer 2; not validated here.
+  of rkLinuxKdeConfigKey:
+    # File / group / key are KDE identifiers — letters, digits,
+    # `_`, `-`, `.` typically. We reject metacharacters / whitespace
+    # but accept `.` (file basenames like `kdeglobals` are bare; but
+    # a file like `kded5rc` is also fine). The file name is a single
+    # path segment; reject `/` to keep it under `~/.config/`.
+    if r.kdeFile.len == 0:
+      return "linux.kdeConfigKey resource '" & r.address &
+        "' has an empty file"
+    if r.kdeGroup.len == 0:
+      return "linux.kdeConfigKey resource '" & r.address &
+        "' has an empty group"
+    if r.kdeKey.len == 0:
+      return "linux.kdeConfigKey resource '" & r.address &
+        "' has an empty key"
+    if hasShellMetacharacter(r.kdeFile):
+      return "linux.kdeConfigKey file '" & r.kdeFile &
+        "' contains a shell metacharacter or whitespace"
+    if '/' in r.kdeFile:
+      return "linux.kdeConfigKey file '" & r.kdeFile &
+        "' must be a single path segment (no '/')"
+    if hasShellMetacharacter(r.kdeGroup):
+      return "linux.kdeConfigKey group '" & r.kdeGroup &
+        "' contains a shell metacharacter or whitespace"
+    if hasShellMetacharacter(r.kdeKey):
+      return "linux.kdeConfigKey key '" & r.kdeKey &
+        "' contains a shell metacharacter or whitespace"
+    if r.kdeVersion != 5 and r.kdeVersion != 6:
+      return "linux.kdeConfigKey resource '" & r.address &
+        "' has invalid kdeVersion " & $r.kdeVersion &
+        " (must be 5 or 6)"
+    # `kdeValue` is arbitrary user content (quoted at layer 2).
   else:
     # Win32-API / pure-file-I/O drivers — no shell-out, nothing to
     # validate here.
