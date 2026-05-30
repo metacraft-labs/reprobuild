@@ -454,15 +454,24 @@ suite "zig-direct convention M44 cross-language (reverse direction)":
       check sawZigaddlibInput
 
       # The cppapp link argv carries the archive as a trailing
-      # positional. Unlike Rust/Fortran, Zig does NOT thread runtime
-      # ``-l`` libs onto the link — Zig static archives bundle
-      # compiler-rt into the archive.
+      # positional. On POSIX hosts, Zig static archives bundle
+      # compiler-rt into the archive, so unlike Rust/Fortran no
+      # explicit ``-l`` runtime libs are threaded. On Windows the
+      # archive references NT API symbols (NtClose, RtlEqualUnicodeString,
+      # …) that live in ntdll.dll, so M53 added ``-lntdll`` to the
+      # link argv on Windows ONLY — kept the POSIX argv minimal.
       let cppappArgv = inlineArgvOf(cppappLinkAction)
       var sawArchive = false
       for token in cppappArgv:
         if token == zigaddlibOutput:
           sawArchive = true
       check sawArchive
+      when defined(windows):
+        var sawNtdll = false
+        for token in cppappArgv:
+          if token == "-lntdll":
+            sawNtdll = true
+        check sawNtdll
 
 suite "zig-direct convention M44 cConsumable toggle":
 

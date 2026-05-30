@@ -1028,11 +1028,26 @@ proc emitCCppCrossExecLinkAction(projectRoot, linkDriver: string;
                                    openArray[ZigDirectWorkspaceLibrary]):
                                    BuildActionDef =
   ## Terminal ``g++ -o <bin>`` link action. Each upstream Zig
-  ## staticlib lands as a trailing positional. Unlike Rust/Fortran
-  ## which need explicit ``-lpthread``/``-lgfortran`` runtime libs,
-  ## Zig static archives bundle their (minimal) compiler-rt routines
-  ## INTO the archive itself, so the gcc driver resolves the
-  ## references against the archive without external runtime libs.
+  ## staticlib lands as a trailing positional.
+  ##
+  ## Runtime-lib threading:
+  ##
+  ##   * On POSIX hosts, Zig static archives bundle their (minimal)
+  ##     compiler-rt routines INTO the archive itself, so the gcc
+  ##     driver resolves the references against the archive without
+  ##     external runtime libs.
+  ##   * On Windows, even a trivial ``zig build-lib -O ReleaseSafe``
+  ##     pulls in Zig's std runtime, which references the NT API
+  ##     (``NtClose``, ``RtlEqualUnicodeString``, ``NtQueryObject``,
+  ##     ``NtDeviceIoControlFile``, …). These live in ``ntdll.dll``
+  ##     and are NOT in the default mingw g++ link argv; without
+  ##     ``-lntdll`` the link fails with ~hundreds of undefined
+  ##     references. Append it at the END of the argv (after the
+  ##     archive itself) so the archive's unresolved NT-API symbols
+  ##     get resolved against ntdll's import lib. M53 added this
+  ##     after the M44 ``mixed/cpp-uses-zig-lib`` fixture surfaced
+  ##     the bug on the first dev shell that actually had Zig
+  ##     provisioned.
   let binaryOutput = ccppCrossBinaryPath(projectRoot, exec.executableName)
   createDir(extendedPath(parentDir(binaryOutput)))
   var argv = @[linkDriver, "-o", binaryOutput]
@@ -1040,6 +1055,13 @@ proc emitCCppCrossExecLinkAction(projectRoot, linkDriver: string;
     argv.add(obj)
   for lib in zigUpstream:
     argv.add(lib.outputPath)
+  when defined(windows):
+    # ntdll covers the Zig std-runtime's NT-API references. Place
+    # AFTER the archive positional so the linker scans the archive
+    # first (left-to-right), records its unresolved NT-API symbols,
+    # and resolves them when it then scans ntdll's import lib.
+    if zigUpstream.len > 0:
+      argv.add("-lntdll")
   var deps = compileIds
   var inputs = objFiles
   for lib in zigUpstream:
