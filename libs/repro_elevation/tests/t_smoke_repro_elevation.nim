@@ -1888,3 +1888,204 @@ suite "repro_elevation: linux.sudoersRule pure surface":
         discard applyLinuxSudoersRule(op)
       expect ENotImplementedPlatform:
         discard destroyLinuxSudoersRule(op)
+
+# ===========================================================================
+# passwd.group — pure parse + drift logic. The shell-out side wraps
+# `groupadd` / `groupmod` / `usermod -aG`; pure tests cover the closed-
+# set validator (name + gid + member charsets), the additive-only
+# membership semantics in the diff, the canonical-state digest, the
+# argv builders, and the codec round-trip.
+# ===========================================================================
+
+suite "repro_elevation: passwd.group pure surface":
+
+  test "parseGetentGroup parses a populated group entry":
+    let line = "docker:x:998:alice,bob"
+    let obs = parseGetentGroup(line)
+    check obs.present
+    check obs.gid == "998"
+    check obs.members == @["alice", "bob"]
+
+  test "parseGetentGroup parses an empty member list":
+    let line = "wheel:x:10:"
+    let obs = parseGetentGroup(line)
+    check obs.present
+    check obs.gid == "10"
+    check obs.members.len == 0
+
+  test "parseGetentGroup treats an empty / malformed line as absent":
+    check not parseGetentGroup("").present
+    check not parseGetentGroup("malformed-no-colons").present
+    check not parseGetentGroup("only:two:fields").present
+
+  test "diffPasswdGroup flags an absent group":
+    let want = PasswdGroupDesired(name: "docker", gid: "998",
+      members: @["alice"])
+    let obs = PasswdGroupObservation(present: false)
+    let d = diffPasswdGroup(want, obs)
+    check d.groupAbsent
+    check d.missingMembers == @["alice"]
+
+  test "diffPasswdGroup flags gid drift on a pinned gid":
+    let want = PasswdGroupDesired(name: "docker", gid: "998",
+      members: @[])
+    let obs = PasswdGroupObservation(present: true, gid: "1000",
+      members: @[])
+    let d = diffPasswdGroup(want, obs)
+    check d.gidDiffers
+    check not d.groupAbsent
+
+  test "diffPasswdGroup ignores gid when unpinned":
+    let want = PasswdGroupDesired(name: "docker", gid: "", members: @[])
+    let obs = PasswdGroupObservation(present: true, gid: "1000",
+      members: @[])
+    let d = diffPasswdGroup(want, obs)
+    check not d.gidDiffers
+
+  test "diffPasswdGroup reports missing + extra members but does NOT mix them":
+    # Declared = [alice, bob]; observed = [bob, carol]
+    # missing = [alice], extra = [carol]  (additive-only: extras are
+    # reported but the driver does not act on them by default).
+    let want = PasswdGroupDesired(name: "docker", gid: "",
+      members: @["alice", "bob"])
+    let obs = PasswdGroupObservation(present: true, gid: "998",
+      members: @["bob", "carol"])
+    let d = diffPasswdGroup(want, obs)
+    check d.missingMembers == @["alice"]
+    check d.extraMembers == @["carol"]
+
+  test "canonicalPasswdGroupState renders a stable digest input":
+    let obs = PasswdGroupObservation(present: true, gid: "998",
+      members: @["alice", "bob"])
+    check canonicalPasswdGroupState(obs) ==
+      "group:present;gid=998;members=alice,bob"
+    check canonicalPasswdGroupState(
+      PasswdGroupObservation(present: false)) == "group:absent"
+
+  test "canonicalPasswdGroupDesired renders `*` for an unpinned gid":
+    let want = PasswdGroupDesired(name: "docker", gid: "",
+      members: @["bob", "alice"])
+    # Members must be sorted in the canonical form.
+    check canonicalPasswdGroupDesired(want) ==
+      "group:present;gid=*;members=alice,bob"
+
+  test "buildGroupaddArgs builds a typed argv with --gid when pinned":
+    let want = PasswdGroupDesired(name: "docker", gid: "998",
+      members: @[])
+    check buildGroupaddArgs(want) == @["--gid", "998", "docker"]
+
+  test "buildGroupaddArgs omits --gid when unpinned":
+    let want = PasswdGroupDesired(name: "docker", gid: "", members: @[])
+    check buildGroupaddArgs(want) == @["docker"]
+
+  test "buildGroupmodGidArgs and buildGroupdelArgs":
+    let want = PasswdGroupDesired(name: "docker", gid: "999",
+      members: @[])
+    check buildGroupmodGidArgs(want) == @["--gid", "999", "docker"]
+    check buildGroupdelArgs("docker") == @["docker"]
+
+  test "operationValidationError accepts a valid passwd.group":
+    let ok = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "docker",
+      pgName: "docker",
+      pgGid: "998",
+      pgMembers: @["alice", "bob"])
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad passwd.group fields":
+    # bad name (shell meta)
+    let badName = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "x", pgName: "bad; rm", pgGid: "",
+      pgMembers: @[])
+    check operationValidationError(badName).len > 0
+    # leading '-' (argument-injection guard)
+    let dashName = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "x", pgName: "-rf", pgGid: "",
+      pgMembers: @[])
+    check operationValidationError(dashName).len > 0
+    # non-numeric gid
+    let badGid = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "x", pgName: "docker", pgGid: "abc",
+      pgMembers: @[])
+    check operationValidationError(badGid).len > 0
+    # member with a slash
+    let badMember = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "x", pgName: "docker", pgGid: "",
+      pgMembers: @["a/b"])
+    check operationValidationError(badMember).len > 0
+    # empty address
+    let emptyAddr = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "", pgName: "docker", pgGid: "",
+      pgMembers: @[])
+    check operationValidationError(emptyAddr).len > 0
+
+  test "RBEB Operation frame round-trips a passwd.group":
+    let op = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "docker",
+      pgName: "docker",
+      pgGid: "998",
+      pgMembers: @["alice", "bob"],
+      pgDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokPasswdGroup
+    check w2.operation.address == "docker"
+    check w2.operation.pgName == "docker"
+    check w2.operation.pgGid == "998"
+    check w2.operation.pgMembers == @["alice", "bob"]
+    check not w2.operation.pgDestroy
+
+  test "RBEB Operation frame round-trips a destroy passwd.group":
+    let op = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "docker",
+      pgName: "docker",
+      pgGid: "",
+      pgMembers: @[],
+      pgDestroy: true)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "cafef00d")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.kind == pokPasswdGroup
+    check w2.operation.pgDestroy
+
+  test "posix desired digest for passwd.group matches canonical desired":
+    let op = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "docker",
+      pgName: "docker",
+      pgGid: "998",
+      pgMembers: @["bob", "alice"])
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText(canonicalPasswdGroupDesired(
+        PasswdGroupDesired(name: "docker", gid: "998",
+          members: @["bob", "alice"])))
+
+  test "posix desired digest for passwd.group destroy is the absent sentinel":
+    let op = PrivilegedOperation(kind: pokPasswdGroup,
+      address: "docker",
+      pgName: "docker",
+      pgGid: "",
+      pgMembers: @[],
+      pgDestroy: true)
+    check posixSystemDesiredDigestHex(op) == ZeroDigestHex
+
+  test "passwd.group requires elevation":
+    check requiresElevation(pokPasswdGroup)
+    check $pokPasswdGroup == "passwd.group"
+    check privilegedOperationKindFromString("passwd.group") ==
+      pokPasswdGroup
+
+  test "off-Linux passwd.group entry points raise ENotImplementedPlatform":
+    when not defined(linux):
+      let op = PrivilegedOperation(kind: pokPasswdGroup,
+        address: "docker",
+        pgName: "docker",
+        pgGid: "",
+        pgMembers: @[])
+      expect ENotImplementedPlatform:
+        discard observePasswdGroup(op)
+      expect ENotImplementedPlatform:
+        discard applyPasswdGroup(op)
+      expect ENotImplementedPlatform:
+        discard destroyPasswdGroup(op)

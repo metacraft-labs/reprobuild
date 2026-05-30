@@ -427,6 +427,31 @@ suite "Resource constructors":
     check target.len == 1
     check target[0].address == "linux.sudoersRule:wheel-extra"
 
+  test "passwdGroup records name / gid / members":
+    var target: seq[ResourceIntent] = @[]
+    passwdGroup(target,
+      name = "docker",
+      gid = "998",
+      members = @["alice", "bob"],
+      address = "docker")
+    check target.len == 1
+    check target[0].kind == "passwd.group"
+    check target[0].address == "docker"
+    check target[0].fields["name"].s == "docker"
+    check target[0].fields["gid"].s == "998"
+    check target[0].fields["members"].items == @["alice", "bob"]
+
+  test "passwdGroup auto-addresses from the name when address is empty":
+    var target: seq[ResourceIntent] = @[]
+    passwdGroup(target,
+      name = "developers")
+    check target.len == 1
+    check target[0].address == "passwd.group:developers"
+    # The optional `gid` / `members` fields are omitted entirely when
+    # the caller left them at the defaults, keeping the intent minimal.
+    check "gid" notin target[0].fields
+    check "members" notin target[0].fields
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

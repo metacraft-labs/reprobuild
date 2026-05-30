@@ -590,3 +590,157 @@ proc buildUserdelArgs*(name: string): seq[string] =
   ## drops the home directory and mail spool too.
   result.add("--remove")
   result.add(name.strip())
+
+# ===========================================================================
+# passwd.group — `getent group` parse + desired-vs-observed diff.
+#
+# The Linux `/etc/group` form is `name:passwd:gid:member1,member2,...`.
+# `getent group <name>` renders that same colon line; the pure parser
+# below digests its fields. The system-scope driver wraps `groupadd`
+# / `groupmod` / `gpasswd` / `groupdel`; the PURE pieces — the
+# observation parse and the desired-vs-observed diff — are here.
+# ===========================================================================
+
+type
+  PasswdGroupObservation* = object
+    ## What an observation of a group account reports. `present`
+    ## false means the group does not exist.
+    present*: bool
+    gid*: string
+    members*: seq[string]              ## member names, sorted
+
+  PasswdGroupDesired* = object
+    ## The desired state a `passwd.group` resource declares. An empty
+    ## `gid` means "leave unpinned" (the system picks one on create,
+    ## an existing gid is left alone on update). `members` is the
+    ## supplementary-membership set the resource declares —
+    ## ADDITIVE-ONLY semantics at the driver layer (a user already in
+    ## the group but not listed is NOT removed; the M83 step-6 driver
+    ## does not converge a membership-subtract by default).
+    name*: string
+    gid*: string
+    members*: seq[string]
+
+proc parseGetentGroup*(rawLine: string): PasswdGroupObservation =
+  ## Parse a single `getent group <name>` line — the canonical
+  ## `name:passwd:gid:member1,member2,...` colon form. An empty /
+  ## malformed line means the group is absent. The member list is
+  ## sorted so the diff is order-insensitive.
+  let t = rawLine.strip()
+  if t.len == 0:
+    result.present = false
+    return
+  let fields = t.split(':')
+  if fields.len < 4:
+    result.present = false
+    return
+  result.present = true
+  result.gid = fields[2].strip()
+  var members: seq[string]
+  for tok in fields[3].split(','):
+    let m = tok.strip()
+    if m.len > 0:
+      members.add(m)
+  members.sort()
+  result.members = members
+
+type
+  PasswdGroupDiff* = object
+    ## The result of comparing a desired `passwd.group` against the
+    ## live observation. `groupAbsent` => `groupadd` is needed.
+    ## `gidDiffers` drives a `groupmod --gid`. `missingMembers` drives
+    ## a `usermod -aG <name> <user>` per entry; `extraMembers` is
+    ## REPORTED for completeness but NOT acted on (additive-only
+    ## membership) unless a future `--strict-members` flag flips the
+    ## driver to subtract them via `gpasswd -d`.
+    groupAbsent*: bool
+    gidDiffers*: bool
+    missingMembers*: seq[string]
+    extraMembers*: seq[string]
+
+proc diffPasswdGroup*(desired: PasswdGroupDesired;
+                      observed: PasswdGroupObservation): PasswdGroupDiff =
+  ## Compare a desired group against the live observation. An empty
+  ## desired `gid` is "unpinned" — never reported as a difference.
+  ## The member set is compared as a SET; the resource pins the
+  ## SUPPLEMENTARY membership additively, so a member present on the
+  ## group but not declared is `extraMembers` (reported, not removed
+  ## — the driver is additive-only by default).
+  if not observed.present:
+    result.groupAbsent = true
+    for m in desired.members:
+      let n = m.strip()
+      if n.len > 0 and n notin result.missingMembers:
+        result.missingMembers.add(n)
+    result.missingMembers.sort()
+    return
+  if desired.gid.len > 0 and desired.gid.strip() != observed.gid.strip():
+    result.gidDiffers = true
+  var want: seq[string]
+  for m in desired.members:
+    let n = m.strip()
+    if n.len > 0 and n notin want:
+      want.add(n)
+  want.sort()
+  let have = observed.members
+  for m in want:
+    if m notin have:
+      result.missingMembers.add(m)
+  for m in have:
+    if m notin want:
+      result.extraMembers.add(m)
+
+proc canonicalPasswdGroupState*(observed: PasswdGroupObservation): string =
+  ## Render an observed group to a stable canonical string the broker's
+  ## re-observe / drift digest covers. The gid is included (a group
+  ## re-created with a different gid is a real change); members are
+  ## sorted.
+  if not observed.present:
+    return "group:absent"
+  "group:present;gid=" & observed.gid &
+    ";members=" & observed.members.join(",")
+
+proc canonicalPasswdGroupDesired*(desired: PasswdGroupDesired): string =
+  ## The desired canonical string. An unpinned `gid` (empty) is
+  ## rendered `*` so a desired state that does not pin the gid does
+  ## not falsely equal an observed state that has one. ADDITIVE-only
+  ## semantics: the canonical digest reflects the DECLARED members
+  ## only — an observation with extra members will not match the
+  ## desired digest, so the driver runs the apply (which is a no-op
+  ## for already-present declared members and an `-aG` for missing
+  ## ones). This is intentional: a profile that adds a member then is
+  ## re-applied should converge the new member; ditto for the gid.
+  var members: seq[string]
+  for m in desired.members:
+    let n = m.strip()
+    if n.len > 0 and n notin members:
+      members.add(n)
+  members.sort()
+  "group:present;gid=" & (if desired.gid.len > 0: desired.gid else: "*") &
+    ";members=" & members.join(",")
+
+# ---------------------------------------------------------------------------
+# passwd.group command-argument construction. The driver passes argv
+# directly and never interpolates an operator string into a shell line.
+# ---------------------------------------------------------------------------
+
+proc buildGroupaddArgs*(desired: PasswdGroupDesired): seq[string] =
+  ## Build the `groupadd` argv for creating a new group. `--system`
+  ## is deliberately NOT forced — a `passwd.group` resource may
+  ## declare an ordinary user group.
+  if desired.gid.len > 0:
+    result.add("--gid")
+    result.add(desired.gid)
+  result.add(desired.name)
+
+proc buildGroupmodGidArgs*(desired: PasswdGroupDesired): seq[string] =
+  ## Build the `groupmod --gid <gid> <name>` argv. Only called when
+  ## the diff reports `gidDiffers`; an empty desired gid never
+  ## reaches here.
+  result.add("--gid")
+  result.add(desired.gid)
+  result.add(desired.name)
+
+proc buildGroupdelArgs*(name: string): seq[string] =
+  ## Build the `groupdel <name>` argv for the destroy direction.
+  result.add(name.strip())

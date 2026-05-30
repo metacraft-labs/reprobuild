@@ -265,6 +265,25 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
         "' must not contain '.' (sudo silently ignores dotted files)")
     result = SystemResource(kind: srkLinuxSudoersRule,
       sudoersName: n, sudoersContent: c)
+  of "passwd.group":
+    let n = fieldString(r, "name")
+    if not isSafePosixUserOrGroupName(n):
+      raise newException(ValueError,
+        "passwd.group name '" & n &
+        "' is not a valid POSIX group name")
+    let gidStr = fieldString(r, "gid")
+    if not isSafeGid(gidStr):
+      raise newException(ValueError,
+        "passwd.group gid '" & gidStr &
+        "' is not a non-negative decimal integer")
+    let members = fieldList(r, "members")
+    for m in members:
+      if not isSafePosixUserOrGroupName(m):
+        raise newException(ValueError,
+          "passwd.group member '" & m &
+          "' is not a valid POSIX user name")
+    result = SystemResource(kind: srkPasswdGroup,
+      pgName: n, pgGid: gidStr, pgMembers: members)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -291,7 +310,8 @@ proc isSystemScopeResource(kind: string): bool =
      "env.systemVariable", "passwd.user",
      "os.timezone", "os.hostname",
      "linux.sysctl", "linux.udevRule", "linux.polkitRule",
-     "linux.tmpfilesRule", "linux.sudoersRule":
+     "linux.tmpfilesRule", "linux.sudoersRule",
+     "passwd.group":
     true
   else:
     false
@@ -477,5 +497,10 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkLinuxSudoersRule:
       pairs.add(("name", quoteSystemValue(r.sudoersName)))
       pairs.add(("content", quoteSystemValue(r.sudoersContent)))
+    of srkPasswdGroup:
+      pairs.add(("name", quoteSystemValue(r.pgName)))
+      if r.pgGid.len > 0:
+        pairs.add(("gid", quoteSystemValue(r.pgGid)))
+      pairs.add(("members", renderListLiteral(r.pgMembers)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

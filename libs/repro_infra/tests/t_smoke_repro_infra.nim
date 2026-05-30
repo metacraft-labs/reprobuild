@@ -1819,3 +1819,102 @@ linux.sudoersRule {
     check realWorldIdentity(r) == "sudoersRule:wheel-extra"
     check resourceName(r) == "wheel-extra"
     check resourceKindTag(r) == "linux.sudoersRule"
+
+# ===========================================================================
+# passwd.group — parser + toPrivilegedOperation. M83 step 6.
+# ===========================================================================
+
+suite "repro_infra: passwd.group profile parser":
+
+  test "parses a passwd.group stanza with gid and members":
+    let text = """
+passwd.group {
+  name = "docker"
+  gid = "998"
+  members = ["alice", "bob"]
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkPasswdGroup
+    check profile.resources[0].pgName == "docker"
+    check profile.resources[0].pgGid == "998"
+    check profile.resources[0].pgMembers == @["alice", "bob"]
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokPasswdGroup
+    check op.pgName == "docker"
+    check op.pgGid == "998"
+    check op.pgMembers == @["alice", "bob"]
+    check not op.pgDestroy
+    check requiresElevation(op.kind)
+
+  test "parses a passwd.group stanza with only a name":
+    let text = """
+passwd.group {
+  name = "developers"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].pgName == "developers"
+    check profile.resources[0].pgGid == ""
+    check profile.resources[0].pgMembers.len == 0
+
+  test "toPrivilegedOperation passes destroy through to pgDestroy":
+    let text = """
+passwd.group {
+  name = "docker"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let op = toPrivilegedOperation(profile.resources[0], destroy = true)
+    check op.kind == pokPasswdGroup
+    check op.pgDestroy
+
+  test "passwd.group destroy requires the --accept-passwd-destroy gate":
+    let text = """
+passwd.group {
+  name = "docker"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check requiresPasswdDestroy(r)
+
+  test "passwd.group rejects a shell-meta name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+passwd.group {
+  name = "evil; rm"
+}
+""")
+
+  test "passwd.group rejects a non-numeric gid":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+passwd.group {
+  name = "docker"
+  gid = "abc"
+}
+""")
+
+  test "passwd.group rejects a member with a path separator":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+passwd.group {
+  name = "docker"
+  members = ["alice", "../etc/shadow"]
+}
+""")
+
+  test "realWorldIdentity and resourceName follow the group name":
+    let text = """
+passwd.group {
+  name = "docker"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check realWorldIdentity(r) == "group:docker"
+    check resourceName(r) == "docker"
+    check resourceKindTag(r) == "passwd.group"

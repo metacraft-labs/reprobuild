@@ -860,6 +860,52 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "passwd.group resource maps to srkPasswdGroup":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("passwd.group", "docker",
+      @[strFieldEntry("name", "docker"),
+        strFieldEntry("gid", "998"),
+        listFieldEntry("members", @["alice", "bob"])]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkPasswdGroup
+    check sp.resources[0].pgName == "docker"
+    check sp.resources[0].pgGid == "998"
+    check sp.resources[0].pgMembers == @["alice", "bob"]
+    check sp.resources[0].address == "docker"
+
+  test "passwd.group rejects a bad name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("passwd.group", "bad",
+      @[strFieldEntry("name", "-rf")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "passwd.group rejects a non-numeric gid at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("passwd.group", "x",
+      @[strFieldEntry("name", "docker"),
+        strFieldEntry("gid", "abc")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips passwd.group":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("passwd.group", "",
+      @[strFieldEntry("name", "docker"),
+        strFieldEntry("gid", "998"),
+        listFieldEntry("members", @["alice", "bob"])]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkPasswdGroup
+    check sp2.resources[0].pgName == "docker"
+    check sp2.resources[0].pgGid == "998"
+    check sp2.resources[0].pgMembers == @["alice", "bob"]
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
 # ---------------------------------------------------------------------------
 # Cross-cutting sanity: the home adapter's output passes the apply
 # pipeline's resource pre-validation by going through `findResourcesBlock`

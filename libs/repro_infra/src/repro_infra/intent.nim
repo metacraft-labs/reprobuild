@@ -327,6 +327,12 @@ proc renderStanza*(r: SystemResource): seq[string] =
   of srkLinuxSudoersRule:
     result.add("  name = " & renderScalar(r.sudoersName))
     result.add("  content = " & renderScalar(r.sudoersContent))
+  of srkPasswdGroup:
+    result.add("  name = " & renderScalar(r.pgName))
+    if r.pgGid.len > 0:
+      result.add("  gid = " & renderScalar(r.pgGid))
+    if r.pgMembers.len > 0:
+      result.add("  members = " & renderList(r.pgMembers))
   # M82 Phase B: emit `depends_on` last so its presence is obvious in a
   # rendered stanza without disrupting the legacy kind-field order.
   # Absent / empty seq omits the line entirely (the common case), so

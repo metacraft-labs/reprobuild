@@ -152,6 +152,18 @@ type
       ## failure deletes the tmp and raises a clear error — a broken
       ## sudoers file can lock the operator out of root, so the driver
       ## fails closed before the atomic rename.
+    pokPasswdGroup = "passwd.group"
+      ## The post-M83 step-6 Linux group operation: manage an
+      ## `/etc/group` entry via `groupadd` / `groupmod` / `gpasswd`
+      ## (and `groupdel` on destroy). The companion of `pokPasswdUser`.
+      ## A desired `gid` is optional; when omitted the system picks
+      ## one. Membership is additive-only by default — a user already
+      ## in the group but not in `pgMembers` is left alone — so a
+      ## profile that converges only the membership it knows about does
+      ## not silently drop a manually-added admin. The destroy
+      ## direction is gated by `--accept-passwd-destroy` (a removed
+      ## group can break file ownership), mirroring the
+      ## `pokPasswdUser` gate.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -357,6 +369,20 @@ type
       sudoersName*: string
       sudoersContent*: string
       sudoersDestroy*: bool
+    of pokPasswdGroup:
+      ## Manage a `/etc/group` entry. `pgName` is the group name;
+      ## `pgGid` is the desired numeric gid (empty => unpinned — the
+      ## system picks one on create, an existing gid is left alone on
+      ## update); `pgMembers` is the supplementary-membership set the
+      ## resource declares. Membership is ADDITIVE-ONLY: a user
+      ## already in the group but not in `pgMembers` is left alone, so
+      ## a profile that converges only what it knows about does not
+      ## silently drop a manually-added admin. `pgDestroy` selects the
+      ## rollback direction (`groupdel`).
+      pgName*: string
+      pgGid*: string
+      pgMembers*: seq[string]
+      pgDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -396,6 +422,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxPolkitRule: true
   of pokLinuxTmpfilesRule: true
   of pokLinuxSudoersRule: true
+  of pokPasswdGroup: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -427,6 +454,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxPolkitRule: pokLinuxPolkitRule
   of $pokLinuxTmpfilesRule: pokLinuxTmpfilesRule
   of $pokLinuxSudoersRule: pokLinuxSudoersRule
+  of $pokPasswdGroup: pokPasswdGroup
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -642,6 +670,56 @@ proc isSafeSysctlValue*(value: string): bool =
   return true
 
 # ---------------------------------------------------------------------------
+# passwd.group — group name + gid + member charset guards.
+#
+# `pgName` flows into `groupadd` / `groupmod` / `groupdel` / `gpasswd`
+# argv via `quoteShell`; `pgGid` is interpolated into `--gid <gid>`.
+# Defence-in-depth layer 1 is a closed charset for the name (the POSIX
+# group-name convention is the conservative `useradd(8)` set —
+# alphanumerics, `.`, `-`, `_`, with no leading `-`) and digits-only
+# for the gid. The member list is validated identically to the
+# `pgName` so a username smuggled into `usermod -aG <name> <user>`
+# cannot break out of its argument.
+# ---------------------------------------------------------------------------
+
+proc isSafePosixUserOrGroupName*(name: string): bool =
+  ## True only for a non-empty POSIX-style user or group name in the
+  ## conservative `useradd(8)` charset: alphanumerics, `.`, `-`, `_`,
+  ## with no leading `-` (an argument that starts with `-` is parsed
+  ## by `groupadd` / `usermod` / `gpasswd` as an option, not a name).
+  ## Refuses `.` and `..` explicitly as defence-in-depth. The trailing
+  ## `$` that Samba accounts use is permitted only at the end of the
+  ## name (a `$` mid-string is refused).
+  let n = name.strip()
+  if n.len == 0:
+    return false
+  if n == "." or n == "..":
+    return false
+  if n[0] == '-':
+    return false
+  for i in 0 ..< n.len:
+    let ch = n[i]
+    if ch in {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      continue
+    if ch == '$' and i == n.len - 1:
+      continue
+    return false
+  return true
+
+proc isSafeGid*(gid: string): bool =
+  ## True only for the empty string (unpinned) or a non-empty digits-
+  ## only decimal gid in the 0..4294967295 range. The decimal-only
+  ## charset closes the residual command-injection surface (gid flows
+  ## into `--gid <gid>` as a separate argv element, but the closed
+  ## charset is defence-in-depth on top of `quoteShell`).
+  if gid.len == 0:
+    return true
+  for ch in gid:
+    if ch notin {'0'..'9'}:
+      return false
+  return true
+
+# ---------------------------------------------------------------------------
 # Closed-set validation. The broker calls `validateOperation` on
 # every decoded `PrivilegedOperation` before dispatch — a frame that
 # is structurally a `PrivilegedOperation` but carries an out-of-policy
@@ -852,6 +930,19 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       return "linux.sudoersRule name '" & op.sudoersName &
         "' must not contain '.' — sudo silently ignores sudoers.d " &
         "files with a '.' in the basename"
+  of pokPasswdGroup:
+    if not isSafePosixUserOrGroupName(op.pgName):
+      return "passwd.group name '" & op.pgName &
+        "' is not a valid POSIX group name (letters, digits, '.', " &
+        "'-', '_'; no leading '-')"
+    if not isSafeGid(op.pgGid):
+      return "passwd.group gid '" & op.pgGid &
+        "' is not a non-negative decimal integer"
+    for m in op.pgMembers:
+      if not isSafePosixUserOrGroupName(m):
+        return "passwd.group member '" & m &
+          "' is not a valid POSIX user name (letters, digits, '.', " &
+          "'-', '_'; no leading '-')"
   return ""
 
 # ---------------------------------------------------------------------------

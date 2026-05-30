@@ -158,6 +158,13 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.sudoersContent)
+  of pokPasswdGroup:
+    if op.pgDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(canonicalPasswdGroupDesired(
+        PasswdGroupDesired(name: op.pgName, gid: op.pgGid,
+          members: op.pgMembers)))
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -1596,3 +1603,143 @@ proc applyLinuxSudoersRule*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("linux.sudoersRule apply")
+
+# ===========================================================================
+# passwd.group — `groupadd` / `groupmod` / `gpasswd` (Linux).
+#
+# The Linux-side companion to `passwd.user`. Membership is ADDITIVE-only
+# by default: a user already in the group but not declared by the
+# resource is REPORTED in the observation but NOT removed, so a profile
+# that converges only the membership it knows about does not silently
+# drop a manually-added admin. The destroy direction runs `groupdel`
+# and is gated by `--accept-passwd-destroy` (a removed group can break
+# file ownership), mirroring `passwd.user`.
+# ===========================================================================
+
+when defined(linux):
+  proc desiredOf(op: PrivilegedOperation): PasswdGroupDesired =
+    PasswdGroupDesired(name: op.pgName, gid: op.pgGid,
+      members: op.pgMembers)
+
+  proc observePasswdGroupRaw(name: string): PasswdGroupObservation =
+    ## Collect a group observation via `getent group <name>`. An exit
+    ## code other than zero, or an empty output, means the group does
+    ## not exist.
+    let (getentOut, getentCode) = runArgv("getent", @["group", name])
+    if getentCode != 0 or getentOut.strip().len == 0:
+      return PasswdGroupObservation(present: false)
+    parseGetentGroup(getentOut)
+
+proc observePasswdGroup*(op: PrivilegedOperation): ObservedOperationState =
+  ## Re-observe a group account. `present` is true when the group
+  ## exists; the digest covers the canonical observed state (gid +
+  ## sorted member list).
+  when defined(linux):
+    let obs = observePasswdGroupRaw(op.pgName)
+    result.present = obs.present
+    result.digestHex =
+      if not obs.present: ZeroDigestHex
+      else: posixDigestHexOfText(canonicalPasswdGroupState(obs))
+  else:
+    raiseNotImplementedPlatform("passwd.group observe")
+
+proc destroyPasswdGroup*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove a group via `groupdel`. An already-absent group is not an
+  ## error for a destroy. The post-apply re-probe asserts the group
+  ## is no longer present.
+  when defined(linux):
+    if observePasswdGroupRaw(op.pgName).present:
+      let (delOut, delCode) = runArgv("groupdel",
+        buildGroupdelArgs(op.pgName))
+      if delCode != 0:
+        # If the group is gone after the failure (race), accept it.
+        if observePasswdGroupRaw(op.pgName).present:
+          raiseProtocol("passwd.group groupdel of '" & op.pgName &
+            "' failed: " & delOut.strip())
+    if observePasswdGroupRaw(op.pgName).present:
+      raiseProtocol("passwd.group destroy of '" & op.pgName &
+        "' post-apply observation disagrees with desired state: " &
+        "group still present after `groupdel`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("passwd.group destroy")
+
+proc applyPasswdGroup*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Create / converge / remove a group. A fresh group is created via
+  ## `groupadd [--gid N] <name>`; an existing group's gid is converged
+  ## via `groupmod --gid N <name>`; membership additions are realised
+  ## via `usermod -aG <name> <user>` for each missing user.
+  ## ADDITIVE-only: extras observed in the group but not declared are
+  ## REPORTED in the observation but not removed (the driver does not
+  ## ship a `--strict-members` mode yet).
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): after the apply the
+  ## driver re-observes via `observePasswdGroupRaw` and compares the
+  ## canonical-state digest against the desired canonical-string
+  ## digest. They disagree when the apply did not converge — including
+  ## the additive case where extra members remain on the live group;
+  ## the desired canonical reflects the DECLARED set, and an
+  ## additive-only apply does not remove extras. Because step 6 ships
+  ## the driver WITHOUT `--strict-members`, the re-probe instead
+  ## checks the WEAKER post-condition: "every declared member is
+  ## present, the gid matches when pinned" — extras are tolerated.
+  when defined(linux):
+    if op.pgDestroy:
+      return destroyPasswdGroup(op)
+    let desired = desiredOf(op)
+    let before = observePasswdGroupRaw(op.pgName)
+    if not before.present:
+      let (addOut, addCode) = runArgv("groupadd",
+        buildGroupaddArgs(desired))
+      if addCode != 0:
+        raiseProtocol("passwd.group groupadd of '" & op.pgName &
+          "' failed: " & addOut.strip())
+    else:
+      let diff = diffPasswdGroup(desired, before)
+      if diff.gidDiffers:
+        let (modOut, modCode) = runArgv("groupmod",
+          buildGroupmodGidArgs(desired))
+        if modCode != 0:
+          raiseProtocol("passwd.group groupmod --gid of '" & op.pgName &
+            "' failed: " & modOut.strip())
+    # Membership additions: re-observe (a fresh `groupadd` may have
+    # populated initial members from elsewhere) then `usermod -aG`
+    # any declared member not yet in the group. Errors here surface
+    # immediately because the membership change is the operator's
+    # explicit intent.
+    let mid = observePasswdGroupRaw(op.pgName)
+    let midDiff = diffPasswdGroup(desired, mid)
+    for member in midDiff.missingMembers:
+      let (umOut, umCode) = runArgv("usermod",
+        @["-aG", op.pgName, member])
+      if umCode != 0:
+        raiseProtocol("passwd.group `usermod -aG " & op.pgName & " " &
+          member & "` failed: " & umOut.strip())
+    # Post-apply re-probe (weaker form — additive-only): the group
+    # must exist, the gid must match when pinned, every declared
+    # member must be present. Extras are tolerated.
+    let after = observePasswdGroupRaw(op.pgName)
+    if not after.present:
+      raiseProtocol("passwd.group '" & op.pgName &
+        "' post-apply observation disagrees with desired state: " &
+        "groupadd / groupmod returned exit 0 but the group does not " &
+        "exist — the driver fails closed rather than reporting a " &
+        "spurious success.")
+    let afterDiff = diffPasswdGroup(desired, after)
+    if afterDiff.gidDiffers:
+      raiseProtocol("passwd.group '" & op.pgName &
+        "' post-apply gid mismatch: observed gid '" & after.gid &
+        "', desired gid '" & op.pgGid & "'.")
+    if afterDiff.missingMembers.len > 0:
+      raiseProtocol("passwd.group '" & op.pgName &
+        "' post-apply membership disagreement: declared members not " &
+        "present after `usermod -aG`: " &
+        afterDiff.missingMembers.join(", ") & ".")
+    result.present = true
+    result.digestHex = posixDigestHexOfText(
+      canonicalPasswdGroupState(after))
+  else:
+    raiseNotImplementedPlatform("passwd.group apply")

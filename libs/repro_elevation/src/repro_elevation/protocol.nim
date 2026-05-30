@@ -357,6 +357,13 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.sudoersName)
     body.writeString(op.sudoersContent)
     body.writeBool(op.sudoersDestroy)
+  of pokPasswdGroup:
+    body.writeString(op.pgName)
+    body.writeString(op.pgGid)
+    body.writeU32Le(uint32(op.pgMembers.len))
+    for m in op.pgMembers:
+      body.writeString(m)
+    body.writeBool(op.pgDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -540,6 +547,17 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.sudoersName = readString(body, pos)
     result.operation.sudoersContent = readString(body, pos)
     result.operation.sudoersDestroy = readBool(body, pos, "sudoersDestroy")
+  of pokPasswdGroup:
+    result.operation = PrivilegedOperation(kind: pokPasswdGroup,
+      address: address)
+    result.operation.pgName = readString(body, pos)
+    result.operation.pgGid = readString(body, pos)
+    let mCount = int(readU32Le(body, pos))
+    if mCount < 0 or pos + mCount > body.len:
+      raiseProtocol("passwd.group frame: implausible member count")
+    for _ in 0 ..< mCount:
+      result.operation.pgMembers.add(readString(body, pos))
+    result.operation.pgDestroy = readBool(body, pos, "pgDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

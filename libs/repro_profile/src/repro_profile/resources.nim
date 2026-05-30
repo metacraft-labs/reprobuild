@@ -569,3 +569,30 @@ template linuxSudoersRule*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("linux.sudoersRule", name)
     pushResource(targetResources, "linux.sudoersRule", addr0, fields,
       dependsOn)
+
+template passwdGroup*(targetResources: var seq[ResourceIntent];
+                      name: string;
+                      gid: string = "";
+                      members: seq[string] = @[];
+                      address: string = "";
+                      dependsOn: seq[string] = @[]) =
+  ## M83 step 6 — Linux passwd.group companion to `passwd.user`.
+  ## Manages an `/etc/group` entry via `groupadd` / `groupmod` /
+  ## `usermod -aG`. An empty `gid` leaves the gid unpinned (the
+  ## system picks one on create); `members` is the additive
+  ## supplementary-membership set the resource declares (a user
+  ## already in the group but not declared is NOT removed —
+  ## additive-only by default).
+  ##
+  ## Address default: `passwd.group:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    if gid.len > 0:
+      fields["gid"] = strField(gid)
+    if members.len > 0:
+      fields["members"] = listField(members)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("passwd.group", name)
+    pushResource(targetResources, "passwd.group", addr0, fields,
+      dependsOn)

@@ -156,7 +156,7 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
   of pokMacosSystemDefault, pokSystemdSystemUnit, pokLaunchdSystemDaemon,
      pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser,
      pokLinuxSysctl, pokLinuxUdevRule, pokLinuxPolkitRule,
-     pokLinuxTmpfilesRule, pokLinuxSudoersRule:
+     pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup:
     posixSystemDesiredDigestHex(op)
   else:
     systemDesiredDigestHex(op)
@@ -199,6 +199,8 @@ proc observeResource*(r: SystemResource): ResourceObservation =
       observeLinuxTmpfilesRule(op)
     of srkLinuxSudoersRule:
       observeLinuxSudoersRule(op)
+    of srkPasswdGroup:
+      observePasswdGroup(op)
   result.present = obs.present
   result.observedDigestHex =
     if obs.present: obs.digestHex else: ZeroDigestHex
@@ -283,6 +285,10 @@ proc summaryLine(r: SystemResource; action: string): string =
       (if r.tmpfilesApplyNow: " (apply-now)" else: " (boot-only)")
   of srkLinuxSudoersRule:
     action & " sudoers-rule " & r.sudoersName
+  of srkPasswdGroup:
+    action & " group " & r.pgName &
+      (if r.pgGid.len > 0: " (gid=" & r.pgGid & ")" else: "") &
+      (if r.pgMembers.len > 0: " members=" & $r.pgMembers.len else: "")
 
 # ---------------------------------------------------------------------------
 # Resource dependency graph + topological sort (M82 Phase B).

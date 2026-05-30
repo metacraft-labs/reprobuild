@@ -53,6 +53,7 @@ type
     srkLinuxPolkitRule = "linux.polkitRule"
     srkLinuxTmpfilesRule = "linux.tmpfilesRule"
     srkLinuxSudoersRule = "linux.sudoersRule"
+    srkPasswdGroup = "passwd.group"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -154,6 +155,10 @@ type
     of srkLinuxSudoersRule:
       sudoersName*: string                ## basename, no extension
       sudoersContent*: string
+    of srkPasswdGroup:
+      pgName*: string                     ## group name
+      pgGid*: string                      ## "" => unpinned
+      pgMembers*: seq[string]             ## additive-only members
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -202,6 +207,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "tmpfilesRule:" & r.tmpfilesName
   of srkLinuxSudoersRule:
     "sudoersRule:" & r.sudoersName
+  of srkPasswdGroup:
+    "group:" & r.pgName
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -240,6 +247,7 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxPolkitRule: r.polkitName
   of srkLinuxTmpfilesRule: r.tmpfilesName
   of srkLinuxSudoersRule: r.sudoersName
+  of srkPasswdGroup: r.pgName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -442,6 +450,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkLinuxPolkitRule: srk = srkLinuxPolkitRule
     of $srkLinuxTmpfilesRule: srk = srkLinuxTmpfilesRule
     of $srkLinuxSudoersRule: srk = srkLinuxSudoersRule
+    of $srkPasswdGroup: srk = srkPasswdGroup
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -737,6 +746,27 @@ proc parseSystemProfile*(text: string): SystemProfile =
           "files with a '.' in the basename")
       res = SystemResource(kind: srkLinuxSudoersRule,
         sudoersName: n, sudoersContent: c)
+    of srkPasswdGroup:
+      let n = need("name")
+      if not isSafePosixUserOrGroupName(n):
+        raiseSystemProfileInvalid("passwd.group name '" & n &
+          "' is not a valid POSIX group name (letters, digits, '.', " &
+          "'-', '_'; no leading '-')")
+      let gidStr =
+        if "gid" in fields: fields["gid"].strip() else: ""
+      if not isSafeGid(gidStr):
+        raiseSystemProfileInvalid("passwd.group gid '" & gidStr &
+          "' is not a non-negative decimal integer")
+      let members =
+        if "members" in rawFields: parseListLiteral(rawFields["members"])
+        else: @[]
+      for m in members:
+        if not isSafePosixUserOrGroupName(m):
+          raiseSystemProfileInvalid("passwd.group member '" & m &
+            "' is not a valid POSIX user name (letters, digits, '.', " &
+            "'-', '_'; no leading '-')")
+      res = SystemResource(kind: srkPasswdGroup,
+        pgName: n, pgGid: gidStr, pgMembers: members)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -874,6 +904,12 @@ proc toPrivilegedOperation*(r: SystemResource;
       sudoersName: r.sudoersName,
       sudoersContent: r.sudoersContent,
       sudoersDestroy: destroy)
+  of srkPasswdGroup:
+    PrivilegedOperation(kind: pokPasswdGroup, address: r.address,
+      pgName: r.pgName,
+      pgGid: r.pgGid,
+      pgMembers: r.pgMembers,
+      pgDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional
@@ -886,8 +922,10 @@ proc isDestructiveRollback*(r: SystemResource): bool =
 
 proc requiresPasswdDestroy*(r: SystemResource): bool =
   ## True when rolling this resource back would REMOVE a user account
-  ## — the operation `--accept-passwd-destroy` gates (the symmetric
-  ## counterpart of `--accept-feature-destroy`). A `passwd.user`
-  ## destroy deletes a real account, so it is gated even when the
-  ## account was created by a prior apply.
-  r.kind == srkPasswdUser
+  ## or a group — the operation `--accept-passwd-destroy` gates (the
+  ## symmetric counterpart of `--accept-feature-destroy`). A
+  ## `passwd.user` destroy deletes a real account; a `passwd.group`
+  ## destroy can break file ownership for files chown'd to that gid.
+  ## Both are gated even when the account / group was created by a
+  ## prior apply.
+  r.kind in {srkPasswdUser, srkPasswdGroup}
