@@ -57,6 +57,8 @@ when defined(windows):
 import ./errors
 import ./plan
 import ./package_catalog
+import ./builtin_adapter
+import repro_dsl_stdlib/packages_schema
 
 const
   PackageSourceEnvVar* = "REPRO_TEST_PACKAGE_SOURCE"
@@ -68,6 +70,11 @@ type
     akPath = "path"
     akScoop = "scoop"
     akTarball = "tarball"
+    akBuiltin = "builtin"
+      ## M64: a realized cakBuiltin package — bytes fetched from the
+      ## catalog's recorded URL, verified against the catalog's
+      ## recorded SHA, and materialized into the M56 store via
+      ## `realizeBuiltinPackage`.
 
   RealizedRecord* = object
     ## Per-package realization output: the prefix id + the resolved
@@ -91,6 +98,15 @@ type
       ## reinstalled. False for a genuine fresh realization.
     resolvedVersion*: string
       ## M72: the version the catalog resolved (Scoop app version).
+    # M64 fields: populated when `adapter == akBuiltin`.
+    urlUsed*: string
+    digestAlgorithm*: string
+    digestValue*: string
+    archiveFormat*: ArchiveFormat
+    envBindings*: seq[tuple[name, value: string]]
+      ## Per-tool environment variables (e.g. JAVA_HOME) with
+      ## `${prefix}` already substituted. The apply pipeline merges
+      ## these into the home generation's env export.
 
 # ---------------------------------------------------------------------------
 # Env-driven catalog
@@ -272,6 +288,36 @@ when defined(windows):
       result.provenance[i] = byte(ord(ch))
 
 # ---------------------------------------------------------------------------
+# M64 cakBuiltin-adapter realization
+# ---------------------------------------------------------------------------
+
+proc realizeBuiltinAdapter(store: var Store;
+                           resolution: CatalogResolution): RealizedRecord =
+  ## Bridge the `CatalogResolution` shape onto the `realizeBuiltinPackage`
+  ## entry point in `./builtin_adapter.nim` and pack the result into a
+  ## `RealizedRecord` the apply pipeline downstream consumes.
+  let outcome = realizeBuiltinPackage(store, resolution)
+  result.packageId = resolution.packageId
+  result.adapter = akBuiltin
+  result.prefixId = outcome.prefixId
+  result.prefixRelativePath = outcome.prefixRelativePath
+  result.prefixAbsolutePath = outcome.prefixAbsolutePath
+  result.resolvedExecutablePath = outcome.resolvedExecutablePath
+  result.cacheHit = outcome.cacheHit
+  result.resolvedVersion = resolution.builtinVersion
+  result.urlUsed = outcome.urlUsed
+  result.digestAlgorithm = outcome.digestAlgorithm
+  result.digestValue = outcome.digestValue
+  result.archiveFormat = outcome.archiveFormat
+  result.envBindings = outcome.envBindings
+  # Provenance: a typed `builtin:<algorithm>:<digest>` blob so cross-
+  # adapter callers can identify which adapter realized the prefix.
+  let prov = "builtin:" & outcome.digestAlgorithm & ":" & outcome.digestValue
+  result.provenance = newSeq[byte](prov.len)
+  for i, ch in prov:
+    result.provenance[i] = byte(ord(ch))
+
+# ---------------------------------------------------------------------------
 # M72 production catalog dispatch
 # ---------------------------------------------------------------------------
 
@@ -300,9 +346,18 @@ proc realizeViaProductionCatalog(store: var Store;
       raiseRealizeFailed(packageId, "scoop",
         "the scoop adapter is Windows-only; this build runs on a " &
         "non-Windows platform")
+  of cakBuiltin:
+    # M64 dispatch — the production catalog produced a cakBuiltin
+    # resolution (will become a real path in M65 when the adapter
+    # chain wires `resolveBuiltinPackage` into `resolvePackage`).
+    result = realizeBuiltinAdapter(store, resolution)
   result.fromProductionCatalog = true
-  result.cacheHit = resolution.cacheHit
-  result.resolvedVersion = resolution.resolvedVersion
+  if result.adapter != akBuiltin:
+    # The builtin adapter computes its own cache-hit verdict from the
+    # store lookup; preserve it. For the other adapters the
+    # CatalogResolution carries the verdict already.
+    result.cacheHit = resolution.cacheHit
+    result.resolvedVersion = resolution.resolvedVersion
 
 # ---------------------------------------------------------------------------
 # M72 Deliverable 2: read-only package preview for `--plan`
@@ -353,6 +408,15 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
             preview.kind = ppkCacheHit
             preview.detail = "path " & resolution.sourcePath &
               " already available"
+          elif resolution.adapter == cakBuiltin:
+            # M64 / M65: a cakBuiltin resolution becomes either a
+            # cache-hit (the M56 store already carries a matching
+            # prefix) or a realize. Without consulting the store the
+            # plan classifier reports realize; M65's `--plan` extension
+            # threads the store query through.
+            preview.kind = ppkRealize
+            preview.detail = "builtin " & resolution.urlUsed &
+              " (" & resolution.digestAlgorithm & ")"
           elif resolution.cacheHit:
             preview.kind = ppkCacheHit
             preview.detail = "scoop " & resolution.bucket & "/" &

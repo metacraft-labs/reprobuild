@@ -39,6 +39,10 @@
 import std/[json, os, osproc, strutils, tables]
 from repro_core/paths import extendedPath
 
+# M64: the cakBuiltin adapter resolves against the M63 VersionedProvisioning
+# catalog. We import the schema (cross-platform; no Windows-only deps).
+import repro_dsl_stdlib/packages_schema
+
 # M80: the plan classifier and the apply-time Scoop adapter
 # (`repro_tool_profiles.resolveScoopTool`) share ONE installed-version
 # cache-hit predicate — `installedVersionSatisfies` — so a
@@ -59,6 +63,15 @@ type
   CatalogAdapterKind* = enum
     cakPath = "path"
     cakScoop = "scoop"
+    cakBuiltin = "builtin"
+      ## M64: a tool resolved against a checked-in
+      ## ``<tool>Catalog: seq[VersionedProvisioning]`` literal under
+      ## ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/``.  The
+      ## adapter downloads the slice URL, verifies the SHA, extracts
+      ## per ``archive_format``, and materializes the bytes directly
+      ## into a content-addressed prefix.  See M63's
+      ## ``packages_schema.nim`` and the M64 ``builtin_adapter`` module
+      ## for the realization flow.
 
   CatalogResolution* = object
     ## The production catalog's verdict for one package reference.
@@ -72,6 +85,21 @@ type
     installed*: bool                 ## already present in the Scoop tree
     cacheHit*: bool                  ## installed AND version-satisfying
     searchedCatalogs*: seq[string]   ## buckets / sources searched
+    # M64 cakBuiltin fields — populated by `resolveBuiltinPackage`. They
+    # carry the realization inputs forward so `realizeBuiltinPackage`
+    # does not need to re-resolve the slice.
+    builtinVersion*: string          ## VersionedProvisioning.version
+    urlUsed*: string                 ## PlatformBinary.url chosen for host
+    digestAlgorithm*: string         ## "sha256" | "sha512"
+    digestValue*: string             ## hex digest (lowercase)
+    archiveFormat*: ArchiveFormat
+    installMethod*: InstallMethod
+    binRelpath*: seq[string]
+    extractPath*: string             ## inner-dir flatten
+    installerArgs*: seq[string]
+    pacmanPackages*: seq[string]
+    bootstrapArgv*: seq[string]
+    envSubstitutions*: seq[tuple[name, value: string]]
 
   EUnknownPackage* = object of CatchableError
     ## Raised when a package reference resolves to no production
@@ -445,3 +473,159 @@ proc resolvePackage*(cat: var ProductionCatalog; packageId: string):
       return pathResolution.resolution
     result.searchedCatalogs = searched
     raiseUnknownPackage(packageId, searched)
+
+# ---------------------------------------------------------------------------
+# M64 — cakBuiltin resolver (probe the M63 VersionedProvisioning catalog)
+# ---------------------------------------------------------------------------
+#
+# `resolveBuiltinPackage` takes a packageId + an in-memory catalog
+# (`seq[VersionedProvisioning]`, the shape `<tool>Catalog: seq[...]`
+# literals export from `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/
+# packages/<tool>.nim`) + an optional version constraint and returns a
+# fully-populated `CatalogResolution` whose `adapter == cakBuiltin` and
+# whose `urlUsed / digestAlgorithm / digestValue / archiveFormat /
+# installMethod / binRelpath / extractPath / installerArgs /
+# pacmanPackages / bootstrapArgv / envSubstitutions` carry the
+# realization inputs the cakBuiltin realize loop consumes.
+#
+# Version resolution: an empty `version` selects the catalog default
+# (last entry); a non-empty `version` is matched exactly against
+# `vp.version`. Per-platform resolution uses
+# `packages_schema.selectPlatformBinary` with the host's (cpu, os)
+# tuple.
+#
+# Returns `(found = false, resolution = default)` on miss. Callers
+# (M65's adapter chain) treat a miss as "this adapter cannot resolve
+# the package; try the next adapter" rather than fail-closed.
+
+type
+  BuiltinResolveError* = enum
+    breOk = "ok"
+    breVersionNotInCatalog = "version-not-in-catalog"
+      ## Requested `version` does not match any slice in the catalog.
+    breEmptyCatalog = "empty-catalog"
+      ## The catalog is empty — the packages/<tool>.nim is missing the
+      ## `let <tool>Catalog* = @[...]` literal or shipped a stub.
+    brePlatformNotSupported = "platform-not-supported"
+      ## A matching version was found but it has no `PlatformBinary`
+      ## entry for the current (cpu, os) tuple.
+    breSchemaInvalid = "schema-invalid"
+      ## The selected slice failed `validateVersionedProvisioning`.
+
+  BuiltinResolveResult* = object
+    found*: bool
+    resolution*: CatalogResolution
+    error*: BuiltinResolveError
+    errorDetail*: string
+
+proc detectHostCpu*(): PlatformCpu =
+  ## Map the Nim `hostCPU` token to the schema's `PlatformCpu` enum.
+  ## Unknown CPUs fall through to `pcAny` (the realize loop will then
+  ## look for an arch-independent slice; if none exists,
+  ## `selectPlatformBinary` reports `found=false`).
+  when defined(amd64) or defined(x86_64):
+    pcX86_64
+  elif defined(arm64) or defined(aarch64):
+    pcAArch64
+  elif defined(i386) or defined(i686) or defined(x86):
+    pcX86
+  else:
+    pcAny
+
+proc detectHostOs*(): PlatformOs =
+  when defined(windows):
+    poWindows
+  elif defined(linux):
+    poLinux
+  elif defined(macosx) or defined(osx):
+    poMacos
+  else:
+    poAny
+
+proc resolveBuiltinPackage*(packageId: string;
+                            catalog: openArray[VersionedProvisioning];
+                            version = "";
+                            hostCpu = detectHostCpu();
+                            hostOs = detectHostOs()):
+    BuiltinResolveResult =
+  ## Probe a checked-in VersionedProvisioning catalog for a satisfying
+  ## (version, platform) tuple and produce a `CatalogResolution`
+  ## carrying every input the M64 realize loop needs.
+  result.found = false
+  result.error = breOk
+  result.resolution.packageId = packageId
+  result.resolution.adapter = cakBuiltin
+  result.resolution.app = packageId
+  result.resolution.searchedCatalogs = @["builtin:" & packageId]
+  if catalog.len == 0:
+    result.error = breEmptyCatalog
+    result.errorDetail = "builtin catalog for '" & packageId & "' is empty"
+    return
+  var picked: VersionedProvisioning
+  if version.len == 0:
+    let def = selectDefault(catalog)
+    if not def.found:
+      result.error = breEmptyCatalog
+      result.errorDetail = "selectDefault returned no entry"
+      return
+    picked = def.entry
+  else:
+    let exact = selectVersion(catalog, version)
+    if not exact.found:
+      result.error = breVersionNotInCatalog
+      result.errorDetail = "no slice with version '" & version &
+        "' in builtin catalog for '" & packageId & "'"
+      return
+    picked = exact.entry
+  let schemaErrors = validateVersionedProvisioning(picked)
+  if schemaErrors.len > 0:
+    result.error = breSchemaInvalid
+    result.errorDetail = "selected slice failed validation: " &
+      schemaErrors.join("; ")
+    return
+  let pb = selectPlatformBinary(picked, hostCpu, hostOs)
+  if not pb.found:
+    result.error = brePlatformNotSupported
+    result.errorDetail = "no platform slice for cpu=" & $hostCpu &
+      " os=" & $hostOs & " in builtin catalog for '" & packageId &
+      "' version '" & picked.version & "'"
+    return
+  # Populate the resolution.
+  result.found = true
+  result.resolution.resolvedVersion = picked.version
+  result.resolution.builtinVersion = picked.version
+  result.resolution.urlUsed = pb.binary.url
+  if pb.binary.sha256.len > 0:
+    result.resolution.digestAlgorithm = "sha256"
+    result.resolution.digestValue = pb.binary.sha256.toLowerAscii()
+  else:
+    result.resolution.digestAlgorithm = "sha512"
+    result.resolution.digestValue = pb.binary.sha512.toLowerAscii()
+  result.resolution.archiveFormat = picked.archive_format
+  result.resolution.installMethod = picked.install_method
+  result.resolution.binRelpath = picked.bin_relpath
+  result.resolution.extractPath = pb.binary.extract_path
+  result.resolution.installerArgs = picked.installer_args
+  result.resolution.pacmanPackages = picked.pacman_packages
+  result.resolution.bootstrapArgv = picked.bootstrap_argv
+  # Use the first bin_relpath as the executable name (leaf only).
+  if picked.bin_relpath.len > 0:
+    result.resolution.executableName = picked.bin_relpath[0].extractFilename
+  else:
+    result.resolution.executableName = packageId
+  # Stable env-substitution order — sort by key so the realize loop
+  # produces deterministic output and `serializeAsCode` round-trips.
+  var keys: seq[string] = @[]
+  for k in picked.env.keys:
+    keys.add(k)
+  for i in 0 ..< keys.len:
+    for j in i + 1 ..< keys.len:
+      if keys[j] < keys[i]:
+        let tmp = keys[i]
+        keys[i] = keys[j]
+        keys[j] = tmp
+  for k in keys:
+    result.resolution.envSubstitutions.add((name: k, value: picked.env[k]))
+  result.resolution.installed = false
+  result.resolution.cacheHit = false  # set true by `realizeBuiltinPackage`
+                                      # when the CAS prefix exists
