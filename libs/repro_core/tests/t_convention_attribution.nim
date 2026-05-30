@@ -159,6 +159,32 @@ suite "attributeConvention: manifest detection":
     check attr.evidence.contains("hello.cabal")
     removeDir(dir)
 
+  test "shard.yml ⇒ crystal":
+    ## M60 — Crystal's Shards manifest must attribute to ``crystal``.
+    ## Literal ``shard.yml`` filename (no glob — Shards' manifest
+    ## filename is hard-coded). The ``crystal`` convention additionally
+    ## requires ``shard.lock`` (HARD precondition for Mode 2) AND a
+    ## ``crystal`` / ``shards`` token in ``uses:`` for full dispatch,
+    ## but the attribution heuristic here is intentionally manifest-
+    ## presence-only — the heuristic honestly attributes ``crystal``
+    ## even when those preconditions aren't met (so ``repro
+    ## show-conventions`` still tells the user which convention WOULD
+    ## claim the project once the prerequisites are in place).
+    let dir = makeScratch("crystal-shards")
+    writeFile(dir / "shard.yml",
+      "name: hello\nversion: 1.0.0\n" &
+      "targets:\n  hello:\n    main: src/hello.cr\n" &
+      "crystal: \">= 1.0\"\n")
+    writeFile(dir / "shard.lock",
+      "version: 2.0\nshards: {}\n")
+    createDir(dir / "src")
+    writeFile(dir / "src" / "hello.cr",
+      "puts \"hello\"\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "crystal"
+    check attr.evidence.contains("shard.yml")
+    removeDir(dir)
+
   test "composer.json ⇒ php-composer":
     ## M57 — Composer manifest must attribute to ``php-composer``.
     ## Literal ``composer.json`` filename (no glob — Composer's manifest
@@ -321,6 +347,25 @@ suite "attributeConvention: extension census fallback":
       "package Lib is\nend Lib;\n")
     let attr = attributeConvention(dir)
     check attr.convention == "ada-direct"
+    check attr.evidence.contains("extension census")
+    removeDir(dir)
+
+  test "*.cr-dominant dir ⇒ crystal (M60 extension census)":
+    # M60: when ``.cr`` files dominate the dir but NO ``shard.yml`` is
+    # present, the project still routes through the ``crystal``
+    # convention (Mode 3 — pure source). Mirror of the pascal-direct
+    # extension census case. Crystal is unusual among the M60-era
+    # conventions in that a single ``crystal`` convention covers both
+    # Mode 2 (shard.yml present) and Mode 3 (no shard.yml) — so the
+    # attribution heuristic threads ``crystal`` for both shapes.
+    let dir = makeScratch("crystal-extension")
+    createDir(dir / "src")
+    writeFile(dir / "src" / "main.cr",
+      "puts \"hello\"\n")
+    writeFile(dir / "src" / "helper.cr",
+      "def helper; end\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "crystal"
     check attr.evidence.contains("extension census")
     removeDir(dir)
 

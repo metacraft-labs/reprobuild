@@ -191,6 +191,8 @@ $PopulatedExamples = @(
   'pascal-mode3/binary-with-library',
   'mixed/pascal-uses-cpp-lib',
   'mixed/cpp-uses-pascal-lib',
+  'crystal-shards/hello-binary',
+  'crystal-mode3/hello-binary',
   'mode1/rust-binary-with-library',
   'mode1/nim-binary-with-library'
 )
@@ -561,6 +563,36 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $true; Reason = "fpc=$($fpcCmd.Source)" }
       }
       return @{ Available = $false; Reason = "'fpc' not on PATH (install via 'pacman -S mingw-w64-x86_64-fpc' under MSYS2 or download from freepascal.org)" }
+    }
+    'crystal-shards' {
+      # M60: Mode 2 Crystal — probe for both ``crystal`` AND
+      # ``shards``. ``shards`` is bundled with the Crystal distribution
+      # so a positive ``crystal`` probe usually implies ``shards`` is
+      # available too. The canonical Windows install is via scoop:
+      # ``scoop install crystal`` (the ``main`` bucket carries
+      # ``crystal 1.20.2`` as of the M60 milestone), or via manual
+      # download from https://github.com/crystal-lang/crystal/releases.
+      # M60 honest-scope cut: env.ps1 doesn't yet provision the
+      # Crystal toolchain so most hosts SKIP this gate cleanly.
+      $crystalCmd = Get-Command crystal -ErrorAction SilentlyContinue
+      if (-not $crystalCmd) {
+        return @{ Available = $false; Reason = "'crystal' not on PATH (install via 'scoop install crystal' on Windows or download from https://github.com/crystal-lang/crystal/releases)" }
+      }
+      $shardsCmd = Get-Command shards -ErrorAction SilentlyContinue
+      if (-not $shardsCmd) {
+        return @{ Available = $false; Reason = "'shards' not on PATH (shards is bundled with the Crystal distribution; check that Crystal install populated shards.exe alongside crystal.exe)" }
+      }
+      return @{ Available = $true; Reason = "crystal=$($crystalCmd.Source); shards=$($shardsCmd.Source)" }
+    }
+    'crystal-mode3' {
+      # M60: Mode 3 Crystal — probe for ``crystal`` only. Mode 3
+      # bypasses the shards package manager (no ``shard.yml`` at the
+      # workspace root) so only the Crystal compiler is needed.
+      $crystalCmd = Get-Command crystal -ErrorAction SilentlyContinue
+      if ($crystalCmd) {
+        return @{ Available = $true; Reason = "crystal=$($crystalCmd.Source)" }
+      }
+      return @{ Available = $false; Reason = "'crystal' not on PATH (install via 'scoop install crystal' on Windows or download from https://github.com/crystal-lang/crystal/releases)" }
     }
     'mode1' {
       # M48: Mode 1 (layout-as-manifest) fixtures. Each fixture is
@@ -3142,6 +3174,31 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
           Greeting = 'cpp says: pascal added 2+3 = 5'
         }
       )
+    }
+    'crystal-shards/hello-binary' {
+      # M60: crystal-shards/hello-binary. The convention emits a chained
+      # ``shards install`` (with sentinel ``shards.stamp``) followed by a
+      # single ``crystal build src/hello.cr -o <out> --release --no-debug``
+      # action. The produced binary lands at
+      # ``<root>/.repro/build/hello/hello[.exe]``.
+      $exeName = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'hello.exe' } else { 'hello' }
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'hello' $exeName))
+        Greeting = 'hello from crystal-shards-hello-binary'
+      })
+    }
+    'crystal-mode3/hello-binary' {
+      # M60: crystal-mode3/hello-binary. The convention emits a single
+      # ``crystal build src/hello.cr -o <out> --release --no-debug``
+      # action (no ``shards install`` step — Mode 3 bypasses the
+      # package manager entirely because there's no ``shard.yml`` at
+      # the workspace root). The produced binary lands at
+      # ``<root>/.repro/build/hello/hello[.exe]``.
+      $exeName = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'hello.exe' } else { 'hello' }
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'hello' $exeName))
+        Greeting = 'hello from crystal-mode3-hello-binary'
+      })
     }
     'mode1/rust-binary-with-library' {
       # M48 Mode 1 Rust — synthesised repro.nim + scanned-deps.nim

@@ -110,7 +110,7 @@ const
   ## inline in ``attributeConvention``; the table itself uses the
   ## special sentinel ``"*.nimble"`` so iteration order still decides
   ## tie-breaking against other manifests.
-  ManifestSignals: array[25, tuple[fileName, convention: string]] = [
+  ManifestSignals: array[26, tuple[fileName, convention: string]] = [
     ("*.nimble",           "nim"),
     ("Cargo.toml",         "rust"),
     ("go.mod",             "go"),
@@ -133,6 +133,7 @@ const
     ("*.cabal",            "haskell-cabal"),
     ("Gemfile",            "ruby-bundler"),
     ("composer.json",      "php-composer"),
+    ("shard.yml",          "crystal"),
     ("Makefile",           "c-cpp-make"),
     ("makefile",           "c-cpp-make"),
     ("GNUmakefile",        "c-cpp-make"),
@@ -142,7 +143,7 @@ const
   ## mostly <lang>" heuristic from the extension census; the table here
   ## maps lowercase extensions (with the leading dot) to a convention
   ## name.
-  ExtensionSignals: array[35, tuple[ext, convention: string]] = [
+  ExtensionSignals: array[36, tuple[ext, convention: string]] = [
     (".nim",   "nim"),
     (".rs",    "rust"),
     (".go",    "go"),
@@ -178,6 +179,7 @@ const
     (".pas",   "pascal-direct"),
     (".pp",    "pascal-direct"),
     (".lpr",   "pascal-direct"),
+    (".cr",    "crystal"),
   ]
 
 proc isExtensionForConvention*(ext, convention: string): bool =
@@ -670,7 +672,7 @@ type
     versionArgs: seq[string]
 
 const
-  ToolchainProbeSpecs: array[24, ToolchainProbeSpec] = [
+  ToolchainProbeSpecs: array[25, ToolchainProbeSpec] = [
     ToolchainProbeSpec(convention: "nim",
                        exeName: "nim",
                        versionArgs: @["--version"]),
@@ -743,6 +745,9 @@ const
     ToolchainProbeSpec(convention: "pascal-direct",
                        exeName: "fpc",
                        versionArgs: @["-iV"]),
+    ToolchainProbeSpec(convention: "crystal",
+                       exeName: "crystal",
+                       versionArgs: @["--version"]),
   ]
 
 var toolchainProbeCache: Table[string, ToolchainProbeResult]

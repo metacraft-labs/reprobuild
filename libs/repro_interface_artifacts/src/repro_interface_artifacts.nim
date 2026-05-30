@@ -986,6 +986,7 @@ const
     "d", "dmd", "ldc2", "gdc",
     "ada", "gnat", "gnatmake",
     "pascal", "fpc", "freepascal",
+    "crystal", "shards",
     "ocaml", "ocamlc", "ocamlopt", "ocamlfind", "dune",
     "haskell", "ghc", "cabal", "cabal-install",
     "ruby", "bundler",

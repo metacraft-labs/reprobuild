@@ -48,6 +48,7 @@ import repro_standard_provider/conventions/zig_direct as zig_direct_convention
 import repro_standard_provider/conventions/d_direct as d_direct_convention
 import repro_standard_provider/conventions/ada_direct as ada_direct_convention
 import repro_standard_provider/conventions/pascal_direct as pascal_direct_convention
+import repro_standard_provider/conventions/crystal as crystal_convention
 import repro_standard_provider/conventions/ocaml_dune as ocaml_dune_convention
 import repro_standard_provider/conventions/haskell_cabal as haskell_cabal_convention
 import repro_standard_provider/conventions/ruby_bundler as ruby_bundler_convention
@@ -346,6 +347,28 @@ when defined(reproProviderMode):
   # the workspace root, mirroring the rust-direct / go-direct /
   # fortran-direct / zig-direct / d-direct / ada-direct pattern.
   addDefaultConvention(pascal_direct_convention.pascalDirectConvention())
+  # crystal (M60) — Tier 2b convention covering BOTH Mode 2 (shards-
+  # managed via ``shard.yml`` + ``shard.lock``) AND Mode 3 (pure source,
+  # no ``shard.yml``) Crystal workspaces via in-procedure mode
+  # detection. Single convention rather than two siblings per the M60
+  # hand-off (Option A) — the recognise + emit halves dispatch on
+  # ``shard.yml`` presence at the project root.
+  #
+  # Registered AFTER pascal-direct in the dispatch chain — registration
+  # order matters only for mixed-language workspaces (Crystal alongside
+  # another language). The convention's recognise gate keys on a
+  # ``crystal`` / ``shards`` token in ``uses:`` so Crystal-flavoured
+  # workspaces unambiguously claim dispatch.
+  #
+  # **Honest-scope cut** (M60): Mode 3 emits ONE ``crystal build``
+  # action per executable (whole-program analysis — no per-source
+  # ``-c`` DAG possible until Crystal grows a ``-c``-equivalent flag).
+  # Library targets, ``lib LibFoo`` cross-language with C/C++, and the
+  # ``require`` scanner are explicitly DEFERRED. The convention SKIPs
+  # cleanly when ``crystal`` isn't on PATH (which is the M60 default
+  # on Windows — env.ps1 doesn't yet provision Crystal; a follow-up
+  # provisioning milestone covers that).
+  addDefaultConvention(crystal_convention.crystalConvention())
   # ocaml_dune (M46) — fifth managed-ecosystem Tier 2b convention. Keys
   # on a single ``dune-project`` at the project root (the Dune project
   # manifest filename — uniquely identifies a Dune project; no other

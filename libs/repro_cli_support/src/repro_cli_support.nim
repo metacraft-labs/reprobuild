@@ -5930,6 +5930,7 @@ const
     "d-direct",
     "ada-direct",
     "pascal-direct",
+    "crystal",
     "ocaml-dune",
     "haskell-cabal",
     "ruby-bundler",
