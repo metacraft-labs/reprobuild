@@ -58,11 +58,25 @@ $CredCachePath = Join-Path $env:LOCALAPPDATA 'Repro\hyperv-m69\vm-cred.xml'
 $ReproBinHost  = 'D:\metacraft\reprobuild\build\bin'
 $ReproFiles    = @('repro.exe','sqlite3_64.dll','repro-launcher.exe')
 
+# Reprobuild lib source tree needed for `nim c` to find `repro_profile`
+# during apply (Phase F3 compile-then-apply path). The list MUST match
+# `ProfileNimPathLibs` in libs/repro_profile_compile/src/repro_profile_compile/sources.nim
+# -- both sides reference the same closure of libraries a profile can
+# legitimately import.
+$ReproRepoRoot = 'D:\metacraft\reprobuild'
+$ReproProfileLibs = @(
+  'repro_core', 'repro_platform', 'repro_diagnostics', 'blake3', 'xxh3',
+  'gxhash', 'repro_hash', 'cbor', 'repro_domain_types',
+  'repro_profile', 'repro_profile_intent'
+)
+
 # Guest paths
 $VmHarness     = 'C:\harness'
 $VmDotfilesDir = "$VmHarness\dotfiles"
 $VmReproDir    = "$VmHarness\repro"
+$VmReproRoot   = "$VmHarness\reprobuild-libs"   # set as $REPROBUILD_REPO_ROOT
 $VmDotfilesZip = "$VmHarness\dotfiles.zip"
+$VmReproLibsZip = "$VmHarness\reprobuild-libs.zip"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -299,6 +313,52 @@ $zipBytes = (Get-Item $HostDotfilesZip).Length
 Info ("  zip built: $entryCount entries, source $totalBytes b, zip $zipBytes b, ${zipBuildSec}s")
 Record 'stageA0_zip_build' "OK ($entryCount entries, $zipBytes bytes in ${zipBuildSec}s)"
 
+# Build the reprobuild-libs zip alongside the dotfiles zip. Only the
+# `libs/<name>/src` subtrees from `$ReproProfileLibs` are included; tests/
+# and other non-imported tree are excluded to keep the staged archive
+# small (~2 MB end-to-end vs ~30+ MB for the full libs tree).
+$HostReproLibsZip = Join-Path $StageDir 'reprobuild-libs.zip'
+Info "building reprobuild-libs zip at $HostReproLibsZip"
+$libsZipStart = Get-Date
+if (Test-Path $HostReproLibsZip) { Remove-Item $HostReproLibsZip -Force }
+$libsZip = [System.IO.Compression.ZipFile]::Open(
+  $HostReproLibsZip, [System.IO.Compression.ZipArchiveMode]::Create)
+$libsEntries = 0
+$libsBytes = 0
+try {
+  foreach ($libName in $ReproProfileLibs) {
+    $libSrcRoot = Join-Path $ReproRepoRoot ("libs\$libName\src")
+    if (-not (Test-Path -LiteralPath $libSrcRoot -PathType Container)) {
+      throw "reprobuild lib src missing on host: $libSrcRoot"
+    }
+    $rootLen = $libSrcRoot.TrimEnd('\').Length + 1
+    Get-ChildItem -LiteralPath $libSrcRoot -Recurse -File -Force -ErrorAction SilentlyContinue |
+      ForEach-Object {
+        $full = $_.FullName
+        $rel = "libs/$libName/src/" + $full.Substring($rootLen).Replace('\','/')
+        $entry = $libsZip.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::Fastest)
+        $stream = $null
+        $reader = $null
+        try {
+          $stream = $entry.Open()
+          $reader = [System.IO.File]::OpenRead($full)
+          $reader.CopyTo($stream)
+        } finally {
+          if ($reader) { $reader.Dispose() }
+          if ($stream) { $stream.Dispose() }
+        }
+        $libsEntries++
+        $libsBytes += $_.Length
+      }
+  }
+} finally {
+  $libsZip.Dispose()
+}
+$libsZipSec = [int]((Get-Date) - $libsZipStart).TotalSeconds
+$libsZipBytes = (Get-Item $HostReproLibsZip).Length
+Info ("  reprobuild-libs zip built: $libsEntries entries, source $libsBytes b, zip $libsZipBytes b, ${libsZipSec}s")
+Record 'stageA1_libs_zip_build' "OK ($libsEntries entries, $libsZipBytes bytes in ${libsZipSec}s)"
+
 # ---------------------------------------------------------------------------
 # Main lifecycle - try/finally so Stop-VM always runs
 # ---------------------------------------------------------------------------
@@ -412,6 +472,48 @@ try {
     throw "dotfiles expand incomplete inside VM"
   }
   Record 'stageD_copy_dotfiles' "OK ($($expandResult.FileCount) files staged)"
+
+  # ---- Stage D2: Copy-VMFile the reprobuild-libs zip + expand -----------
+  # Phase F3 compile-then-apply path needs `nim c` to resolve
+  # `import repro_profile` inside the dotfiles' home.nim / system.nim.
+  # reproot resolves either $REPROBUILD_REPO_ROOT (operator override) OR
+  # a compile-time-baked anchor, which on the host points at the
+  # reprobuild build dir -- nonsense inside the VM. We stage the closure
+  # of `ProfileNimPathLibs` and point the env var at the staged root.
+  Info "Copy-VMFile: staging reprobuild-libs zip into $VmReproLibsZip"
+  $libsCopyStart = Get-Date
+  Copy-VMFile -Name $VmName -SourcePath $HostReproLibsZip -DestinationPath $VmReproLibsZip `
+              -CreateFullPath -FileSource Host -Force
+  $libsCopySec = [int]((Get-Date) - $libsCopyStart).TotalSeconds
+  Info ("  Copy-VMFile of $libsZipBytes b reprobuild-libs.zip completed in ${libsCopySec}s")
+
+  Info "Expand-Archive inside VM -> $VmReproRoot"
+  $libsExpandResult = Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock {
+    param($zip, $dest, $sentinelLib)
+    $err = $null
+    try {
+      if (Test-Path $dest) {
+        Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+      }
+      Expand-Archive -Path $zip -DestinationPath $dest -Force -ErrorAction Stop
+    } catch { $err = "Expand-Archive failed: $_" }
+    $sentinel = Test-Path (Join-Path $dest "libs\$sentinelLib\src\$sentinelLib.nim")
+    $fileCount = (Get-ChildItem -LiteralPath $dest -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object).Count
+    return [pscustomobject]@{
+      Error      = $err
+      Sentinel   = $sentinel
+      FileCount  = $fileCount
+    }
+  } -ArgumentList @($VmReproLibsZip, $VmReproRoot, 'repro_profile')
+  if ($libsExpandResult.Error) {
+    Record 'stageD2_copy_libs' "FAILED: $($libsExpandResult.Error)"
+    throw "reprobuild-libs expand failed: $($libsExpandResult.Error)"
+  }
+  if (-not $libsExpandResult.Sentinel) {
+    Record 'stageD2_copy_libs' "INCOMPLETE: sentinel libs\repro_profile\src\repro_profile.nim missing (files=$($libsExpandResult.FileCount))"
+    throw "reprobuild-libs expand incomplete inside VM"
+  }
+  Record 'stageD2_copy_libs' "OK ($($libsExpandResult.FileCount) files staged)"
 
   # ---- Stage E: Copy-VMFile the repro binaries ----------------------------
   Info "Copy-VMFile: staging repro binaries into $VmReproDir"
@@ -604,7 +706,7 @@ try {
   # ---- Stage G: repro home apply -----------------------------------------
   Info "running repro home apply --profile-dir $VmDotfilesDir"
   $homeScript = {
-    param($reproDir, $profileDir, $outRoot)
+    param($reproDir, $profileDir, $outRoot, $reproRepoRoot)
     $exe = Join-Path $reproDir 'repro.exe'
     $stdoutF = Join-Path $env:TEMP 'home-apply-out.txt'
     $stderrF = Join-Path $env:TEMP 'home-apply-err.txt'
@@ -618,6 +720,13 @@ try {
     # PSDirect session picks it up regardless of session-init timing.
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($userPath) { $env:Path = "$userPath;$env:Path" }
+    # M83 Phase F3: the compile step needs to find the `repro_profile`
+    # Nim module (and its dep closure). reprobuildRepoRoot() consults
+    # $REPROBUILD_REPO_ROOT first, then falls back to a compile-time
+    # anchor baked into repro.exe -- the latter points at the build
+    # host's filesystem, which doesn't exist inside the VM. Pin the
+    # env var to the staged libs root from stageD2.
+    $env:REPROBUILD_REPO_ROOT = $reproRepoRoot
     $p = Start-Process -FilePath $exe -ArgumentList @('home','apply','--profile-dir', $profileDir) `
            -NoNewWindow -PassThru `
            -RedirectStandardOutput $stdoutF -RedirectStandardError $stderrF
@@ -635,7 +744,7 @@ try {
   # Timeout: 35 min for full home apply (incl. scoop install of ~14 packages).
   $homeJob = Invoke-Command -VMName $VmName -Credential $cred `
                             -ScriptBlock $homeScript `
-                            -ArgumentList @($VmReproDir, $VmDotfilesDir, $OutDir) -AsJob
+                            -ArgumentList @($VmReproDir, $VmDotfilesDir, $OutDir, $VmReproRoot) -AsJob
   $homeWaited = Wait-Job -Job $homeJob -Timeout (35 * 60)
   $homeRes = $null
   if ($homeWaited) {
@@ -665,7 +774,7 @@ try {
   # ---- Stage H: repro infra apply ----------------------------------------
   Info "running repro infra apply --no-preview --profile $VmDotfilesDir\system.nim"
   $infraScript = {
-    param($reproDir, $profileDir)
+    param($reproDir, $profileDir, $reproRepoRoot)
     $exe = Join-Path $reproDir 'repro.exe'
     $profilePath = Join-Path $profileDir 'system.nim'
     $stdoutF = Join-Path $env:TEMP 'infra-apply-out.txt'
@@ -676,9 +785,11 @@ try {
     # compute + apply a fresh plan in one shot. The harness is a
     # one-shot validation, so --no-preview is the right form.
     # M83 Phase F3: as with home-apply above, merge the user-scope PATH
-    # so the nim install from bin/ensure-nim.ps1 is reachable.
+    # so the nim install from bin/ensure-nim.ps1 is reachable, AND set
+    # REPROBUILD_REPO_ROOT so the profile compile finds `repro_profile`.
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($userPath) { $env:Path = "$userPath;$env:Path" }
+    $env:REPROBUILD_REPO_ROOT = $reproRepoRoot
     $p = Start-Process -FilePath $exe -ArgumentList @('infra','apply','--no-preview','--profile', $profilePath) `
            -NoNewWindow -PassThru `
            -RedirectStandardOutput $stdoutF -RedirectStandardError $stderrF
@@ -696,7 +807,7 @@ try {
   # Timeout: 20 min for infra apply (capability install can take 5-10 min).
   $infraJob = Invoke-Command -VMName $VmName -Credential $cred `
                              -ScriptBlock $infraScript `
-                             -ArgumentList @($VmReproDir, $VmDotfilesDir) -AsJob
+                             -ArgumentList @($VmReproDir, $VmDotfilesDir, $VmReproRoot) -AsJob
   $infraWaited = Wait-Job -Job $infraJob -Timeout (20 * 60)
   $infraRes = $null
   if ($infraWaited) {
