@@ -49,6 +49,69 @@ windows.service {
     check profile.resources[3].serviceStartType == "Automatic"
     check profile.resources[3].serviceRunning
 
+  test "parses a windows.firewallRule stanza":
+    let text = """
+windows.firewallRule {
+  name = "OpenSSH-Server-In-TCP"
+  displayName = "OpenSSH Server (sshd)"
+  protocol = "TCP"
+  direction = "Inbound"
+  action = "Allow"
+  localPort = "22"
+  enabled = true
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkWindowsFirewallRule
+    check profile.resources[0].fwName == "OpenSSH-Server-In-TCP"
+    check profile.resources[0].fwDisplayName == "OpenSSH Server (sshd)"
+    check profile.resources[0].fwProtocol == "TCP"
+    check profile.resources[0].fwDirection == "Inbound"
+    check profile.resources[0].fwAction == "Allow"
+    check profile.resources[0].fwLocalPort == "22"
+    check profile.resources[0].fwEnabled
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokWindowsFirewallRule
+    check op.fwName == "OpenSSH-Server-In-TCP"
+    check op.fwProtocol == "TCP"
+    check op.fwLocalPort == "22"
+    check requiresElevation(op.kind)
+
+  test "windows.firewallRule rejects an unknown protocol":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.firewallRule {
+  name = "BadProto"
+  protocol = "SCTP"
+  direction = "Inbound"
+  action = "Allow"
+}
+""")
+
+  test "windows.firewallRule rejects a name with shell metacharacters":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.firewallRule {
+  name = "X'; rm -rf /"
+  protocol = "TCP"
+  direction = "Inbound"
+  action = "Allow"
+}
+""")
+
+  test "windows.firewallRule rejects a localPort with shell metacharacters":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.firewallRule {
+  name = "BadPort"
+  protocol = "TCP"
+  direction = "Inbound"
+  action = "Allow"
+  localPort = "22; rm -rf /"
+}
+""")
+
   test "an HKCU registry key is rejected (home-scope, not system)":
     expect ESystemProfileInvalid:
       discard parseSystemProfile("""

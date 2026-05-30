@@ -75,6 +75,15 @@ proc systemDesiredDigestHex*(op: PrivilegedOperation): string =
   of pokWindowsService:
     digestHexOfText(canonicalServiceDesired(
       op.serviceStartType, op.serviceRunning))
+  of pokWindowsFirewallRule:
+    if op.fwDestroy:
+      ZeroDigestHex
+    else:
+      digestHexOfText(canonicalFirewallRuleDesired(
+        op.fwName,
+        (if op.fwDisplayName.len > 0: op.fwDisplayName else: op.fwName),
+        op.fwProtocol, op.fwDirection, op.fwAction,
+        op.fwLocalPort, op.fwEnabled))
   else:
     raise newException(ValueError,
       "systemDesiredDigestHex called on a non-system kind " & $op.kind)
@@ -726,3 +735,190 @@ proc applyWindowsService*(op: PrivilegedOperation): ObservedOperationState =
       else: digestHexOfText(canonicalServiceState(after))
   else:
     raiseNotImplementedPlatform("windows.service apply")
+
+# ===========================================================================
+# windows.firewallRule — Get/New/Set/Remove-NetFirewallRule via PowerShell.
+#
+# A Windows Firewall rule is fully described by the (Name, DisplayName,
+# Protocol, Direction, Action, LocalPort, Enabled) tuple. `Get-NetFirewall
+# Rule` exposes most fields directly; `LocalPort` lives on the rule's
+# associated `NetFirewallPortFilter`. The probe script stitches the two
+# objects into a single deterministic `key=value` block so the parser in
+# `windows_system_parse.nim` stays pure.
+#
+# The driver is the typed counterpart to `applyWindowsService`: on apply
+# it reads current state, no-ops on a match, creates a new rule when
+# absent, and updates fields in place when the rule exists but differs.
+# A `Remove-NetFirewallRule` path implements the destroy direction.
+# Defence-in-depth: every interpolated field is closed-set validated
+# upstream (`operations.operationValidationError`) and `psQuote`d at the
+# call site.
+# ===========================================================================
+
+when defined(windows):
+  proc firewallProbeScript(name: string): string =
+    ## Render the deterministic `key=value` probe for a firewall rule.
+    ## Uses `-ErrorAction SilentlyContinue` so an absent rule yields a
+    ## `Missing=1` sentinel; the rule's `LocalPort` is read via the
+    ## associated `NetFirewallPortFilter`.
+    "$r = Get-NetFirewallRule -Name " & psQuote(name) &
+      " -ErrorAction SilentlyContinue; " &
+      "if ($null -eq $r) { 'Missing=1' } else { " &
+      "'Name=' + $r.Name; 'DisplayName=' + $r.DisplayName; " &
+      "'Direction=' + $r.Direction; 'Action=' + $r.Action; " &
+      "'Enabled=' + $r.Enabled; " &
+      "$pf = $r | Get-NetFirewallPortFilter; " &
+      "'Protocol=' + $pf.Protocol; 'LocalPort=' + $pf.LocalPort }"
+
+  proc firewallEnabledArg(enabled: bool): string =
+    ## `New-NetFirewallRule` / `Set-NetFirewallRule` accept `-Enabled
+    ## True/False` (NOT `$true` / `$false`). Centralised so the driver
+    ## stays consistent across the two cmdlets.
+    if enabled: "True" else: "False"
+
+  proc firewallLocalPortArg(port: string): string =
+    ## Normalize the localPort field for the `-LocalPort` argument:
+    ## an empty string substitutes `Any` (the cmdlet default).
+    if port.strip().len == 0: "Any" else: port
+
+  proc firewallDisplayNameArg(displayName, name: string): string =
+    ## Default the display name to the internal name when the operator
+    ## omitted it. Mirrors `canonicalFirewallRuleDesired`'s default.
+    if displayName.len > 0: displayName else: name
+
+proc observeWindowsFirewallRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-read the rule via `Get-NetFirewallRule -Name <name>`.
+  ## `present` is true whenever the rule exists by that name;
+  ## `digestHex` covers the canonical (Name, DisplayName, Protocol,
+  ## Direction, Action, LocalPort, Enabled) tuple so an in-place
+  ## drift (e.g. an operator flipped Enabled) shows up in the broker's
+  ## drift gate.
+  when defined(windows):
+    let (output, _) = runPowerShell(firewallProbeScript(op.fwName))
+    let obs = parseFirewallRuleQuery(output)
+    result.present = obs.present
+    result.digestHex =
+      if not obs.present: ZeroDigestHex
+      else: digestHexOfText(canonicalFirewallRuleState(obs))
+  else:
+    raiseNotImplementedPlatform("windows.firewallRule observe")
+
+proc applyWindowsFirewallRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Reconcile the rule to the desired state. Creates it via
+  ## `New-NetFirewallRule` when absent, updates it via
+  ## `Set-NetFirewallRule` when present-but-differing, and is a no-op
+  ## when present-and-matching. The destroy direction (`op.fwDestroy
+  ## == true`) calls `Remove-NetFirewallRule`.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): the per-driver
+  ## post-apply re-probe is the integrity check. When this proc
+  ## returns without raising, the observed rule matches the desired
+  ## state (or, on the destroy path, no rule by that name exists). A
+  ## genuine disagreement raises `EProtocol`.
+  when defined(windows):
+    let probe = runPowerShell(firewallProbeScript(op.fwName))
+    let before = parseFirewallRuleQuery(probe.output)
+
+    if op.fwDestroy:
+      if before.present:
+        let (rmOut, rmCode) = runPowerShell(wrapCmdletTerminating(
+          "Remove-NetFirewallRule -Name " & psQuote(op.fwName)))
+        if rmCode != 0:
+          raiseProtocol("windows.firewallRule Remove-NetFirewallRule of '" &
+            op.fwName & "' failed: " & rmOut.strip())
+      # Post-apply re-probe.
+      let (postOutput, _) = runPowerShell(firewallProbeScript(op.fwName))
+      let after = parseFirewallRuleQuery(postOutput)
+      if after.present:
+        raiseProtocol("windows.firewallRule '" & op.fwName &
+          "' post-apply observation reports the rule is still present " &
+          "after Remove-NetFirewallRule returned exit 0 — the driver " &
+          "fails closed rather than reporting a spurious success.")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+
+    let displayName = firewallDisplayNameArg(op.fwDisplayName, op.fwName)
+    let localPort = firewallLocalPortArg(op.fwLocalPort)
+    let enabledArg = firewallEnabledArg(op.fwEnabled)
+
+    if not before.present:
+      # Create.
+      let createInvocation =
+        "New-NetFirewallRule -Name " & psQuote(op.fwName) &
+        " -DisplayName " & psQuote(displayName) &
+        " -Protocol " & psQuote(op.fwProtocol) &
+        " -Direction " & psQuote(op.fwDirection) &
+        " -Action " & psQuote(op.fwAction) &
+        " -LocalPort " & psQuote(localPort) &
+        " -Enabled " & enabledArg
+      let (cOut, cCode) = runPowerShell(wrapCmdletTerminating(createInvocation))
+      if cCode != 0:
+        raiseProtocol("windows.firewallRule New-NetFirewallRule of '" &
+          op.fwName & "' failed: " & cOut.strip())
+    elif not firewallRuleMatchesDesired(before, op.fwName, displayName,
+        op.fwProtocol, op.fwDirection, op.fwAction, localPort, op.fwEnabled):
+      # Update fields in place. Set-NetFirewallRule does NOT update the
+      # port filter directly; the matching Set-NetFirewallPortFilter
+      # call is needed to flip Protocol or LocalPort.
+      let setInvocation =
+        "Set-NetFirewallRule -Name " & psQuote(op.fwName) &
+        " -DisplayName " & psQuote(displayName) &
+        " -Action " & psQuote(op.fwAction) &
+        " -Enabled " & enabledArg
+      let (sOut, sCode) = runPowerShell(wrapCmdletTerminating(setInvocation))
+      if sCode != 0:
+        raiseProtocol("windows.firewallRule Set-NetFirewallRule of '" &
+          op.fwName & "' failed: " & sOut.strip())
+      let portInvocation =
+        "Get-NetFirewallRule -Name " & psQuote(op.fwName) &
+        " | Set-NetFirewallPortFilter" &
+        " -Protocol " & psQuote(op.fwProtocol) &
+        " -LocalPort " & psQuote(localPort)
+      let (pOut, pCode) = runPowerShell(wrapCmdletTerminating(portInvocation))
+      if pCode != 0:
+        raiseProtocol("windows.firewallRule Set-NetFirewallPortFilter of '" &
+          op.fwName & "' failed: " & pOut.strip())
+
+    # Post-apply re-probe.
+    let (postOutput, _) = runPowerShell(firewallProbeScript(op.fwName))
+    let after = parseFirewallRuleQuery(postOutput)
+    if not firewallRuleMatchesDesired(after, op.fwName, displayName,
+        op.fwProtocol, op.fwDirection, op.fwAction, localPort, op.fwEnabled):
+      raiseProtocol("windows.firewallRule '" & op.fwName &
+        "' post-apply observation disagrees with desired state: " &
+        "observed " & canonicalFirewallRuleState(after) &
+        "; desired " & canonicalFirewallRuleDesired(op.fwName, displayName,
+          op.fwProtocol, op.fwDirection, op.fwAction, localPort,
+          op.fwEnabled) &
+        ". The New-/Set-NetFirewallRule cmdlets returned exit 0 but the " &
+        "firewall ruleset does not reflect the change — the driver fails " &
+        "closed rather than reporting a spurious success.")
+    result.present = after.present
+    result.digestHex =
+      if not after.present: ZeroDigestHex
+      else: digestHexOfText(canonicalFirewallRuleState(after))
+  else:
+    raiseNotImplementedPlatform("windows.firewallRule apply")
+
+proc destroyWindowsFirewallRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the named firewall rule. Convenience wrapper used by the
+  ## rollback engine; the dispatcher itself goes through
+  ## `applyWindowsFirewallRule` with `fwDestroy = true`.
+  when defined(windows):
+    let destroyOp = PrivilegedOperation(kind: pokWindowsFirewallRule,
+      address: op.address,
+      fwName: op.fwName,
+      fwDisplayName: op.fwDisplayName,
+      fwProtocol: op.fwProtocol,
+      fwDirection: op.fwDirection,
+      fwAction: op.fwAction,
+      fwLocalPort: op.fwLocalPort,
+      fwEnabled: op.fwEnabled,
+      fwDestroy: true)
+    result = applyWindowsFirewallRule(destroyOp)
+  else:
+    raiseNotImplementedPlatform("windows.firewallRule destroy")

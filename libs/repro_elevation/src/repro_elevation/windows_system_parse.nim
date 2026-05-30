@@ -238,3 +238,140 @@ proc canonicalServiceDesired*(wantStartType: string;
                               wantRunning: bool): string =
   "service:" & wantStartType & ":" &
     (if wantRunning: "running" else: "stopped")
+
+# ===========================================================================
+# windows.firewallRule — `Get-NetFirewallRule` parsing.
+#
+# Like the service driver, the firewall driver emits a deterministic
+# block of `key=value` lines (or a sentinel `Missing=1`) from a
+# PowerShell probe so the pure parser sees an unambiguous shape:
+#
+#   StartType-style probe shape (rendered by `firewallProbeScript`):
+#     Name=OpenSSH-Server-In-TCP
+#     DisplayName=OpenSSH Server (sshd)
+#     Protocol=TCP
+#     Direction=Inbound
+#     Action=Allow
+#     LocalPort=22
+#     Enabled=True
+#
+# Get-NetFirewallRule + Get-NetFirewallPortFilter return separate
+# objects (the port lives on the PortFilter object). The probe script
+# stitches them into the single block above so the parser stays pure.
+# ===========================================================================
+
+type
+  FirewallRuleObservation* = object
+    ## What a `Get-NetFirewallRule` observation reports. `present`
+    ## false means the rule does not exist by that `Name`. Empty
+    ## strings on present rules mean the field was not surfaced
+    ## (e.g. a rule with no port filter prints `LocalPort=Any`).
+    present*: bool
+    name*: string
+    displayName*: string
+    protocol*: string             ## TCP / UDP / ICMPv4 / ICMPv6 / Any
+    direction*: string            ## Inbound / Outbound
+    action*: string               ## Allow / Block
+    localPort*: string            ## "22", "Any", "22,2222", "8000-9000"
+    enabled*: bool
+
+proc normalizeFirewallEnabled*(raw: string): bool =
+  ## `Get-NetFirewallRule.Enabled` prints `True` / `False` in the
+  ## PowerShell `Format-List` view but the underlying CIM type renders
+  ## as `1` / `0` in some builds. Accept both spellings.
+  case raw.strip().toLowerAscii()
+  of "true", "1", "yes", "on", "enabled": true
+  of "false", "0", "no", "off", "disabled": false
+  else: false
+
+proc parseFirewallRuleQuery*(rawOutput: string): FirewallRuleObservation =
+  ## Parse a firewall-rule observation from a deterministic block of
+  ## `key=value` lines as emitted by `firewallProbeScript` (see the
+  ## section banner). A `Missing=1` line short-circuits to an absent
+  ## observation; an output with no recognized field becomes absent
+  ## too (defensive default — a malformed PowerShell run cannot pose
+  ## as a present rule).
+  result.present = true
+  result.enabled = false
+  var sawAnyField = false
+  for line in rawOutput.splitLines():
+    let t = line.strip()
+    if t.len == 0: continue
+    let idx = t.find('=')
+    if idx < 0: continue
+    let key = t[0 ..< idx].strip().toLowerAscii()
+    let val = t[idx + 1 .. ^1].strip()
+    case key
+    of "missing":
+      if val in ["1", "true", "yes"]:
+        result.present = false
+        return
+    of "name":
+      result.name = val
+      sawAnyField = true
+    of "displayname":
+      result.displayName = val
+      sawAnyField = true
+    of "protocol":
+      result.protocol = val
+      sawAnyField = true
+    of "direction":
+      result.direction = val
+      sawAnyField = true
+    of "action":
+      result.action = val
+      sawAnyField = true
+    of "localport":
+      result.localPort = val
+      sawAnyField = true
+    of "enabled":
+      result.enabled = normalizeFirewallEnabled(val)
+      sawAnyField = true
+    else: discard
+  if not sawAnyField:
+    result.present = false
+
+proc canonicalFirewallRuleState*(obs: FirewallRuleObservation): string =
+  ## Stable canonical rendering used for the broker's drift-digest.
+  ## A `displayName` field is INCLUDED so a profile that updates only
+  ## the display label still triggers an apply. `localPort` is
+  ## case-normalised so `any` and `Any` collapse to the same digest.
+  if not obs.present:
+    return "firewallRule:absent"
+  let port =
+    if obs.localPort.len == 0: "Any"
+    elif obs.localPort.toLowerAscii() == "any": "Any"
+    else: obs.localPort
+  "firewallRule:" & obs.name & ":" & obs.displayName & ":" &
+    obs.protocol & ":" & obs.direction & ":" & obs.action & ":" &
+    port & ":" & (if obs.enabled: "enabled" else: "disabled")
+
+proc canonicalFirewallRuleDesired*(name, displayName, protocol,
+                                   direction, action, localPort: string;
+                                   enabled: bool): string =
+  let port =
+    if localPort.len == 0: "Any"
+    elif localPort.toLowerAscii() == "any": "Any"
+    else: localPort
+  let label = if displayName.len > 0: displayName else: name
+  "firewallRule:" & name & ":" & label & ":" & protocol & ":" &
+    direction & ":" & action & ":" & port & ":" &
+    (if enabled: "enabled" else: "disabled")
+
+proc firewallRuleMatchesDesired*(obs: FirewallRuleObservation;
+                                 desiredName, desiredDisplayName,
+                                 desiredProtocol, desiredDirection,
+                                 desiredAction, desiredLocalPort: string;
+                                 desiredEnabled: bool): bool =
+  ## True when the observed rule matches the desired declaration on
+  ## every field that the driver writes — name, display name (after
+  ## the default-to-name substitution), protocol, direction, action,
+  ## local port (after the empty-or-`any` normalization), and enabled
+  ## state.
+  if not obs.present:
+    return false
+  let observedDigest = canonicalFirewallRuleState(obs)
+  let desiredDigest = canonicalFirewallRuleDesired(
+    desiredName, desiredDisplayName, desiredProtocol, desiredDirection,
+    desiredAction, desiredLocalPort, desiredEnabled)
+  observedDigest == desiredDigest

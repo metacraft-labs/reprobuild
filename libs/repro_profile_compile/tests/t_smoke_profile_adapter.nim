@@ -387,6 +387,59 @@ suite "M83 Phase D: system adapter":
     let sp2 = parseSystemProfile(txt)
     check sp2.resources.len == 2
 
+  test "windows.firewallRule resource maps to srkWindowsFirewallRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("windows.firewallRule", "fw",
+      @[strFieldEntry("name", "OpenSSH-Server-In-TCP"),
+        strFieldEntry("displayName", "OpenSSH Server (sshd)"),
+        strFieldEntry("protocol", "TCP"),
+        strFieldEntry("direction", "Inbound"),
+        strFieldEntry("action", "Allow"),
+        strFieldEntry("localPort", "22"),
+        boolFieldEntry("enabled", true)]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkWindowsFirewallRule
+    check sp.resources[0].fwName == "OpenSSH-Server-In-TCP"
+    check sp.resources[0].fwDisplayName == "OpenSSH Server (sshd)"
+    check sp.resources[0].fwProtocol == "TCP"
+    check sp.resources[0].fwDirection == "Inbound"
+    check sp.resources[0].fwAction == "Allow"
+    check sp.resources[0].fwLocalPort == "22"
+    check sp.resources[0].fwEnabled
+
+  test "windows.firewallRule rejects an unknown protocol at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("windows.firewallRule", "fw",
+      @[strFieldEntry("name", "BadProto"),
+        strFieldEntry("protocol", "SCTP"),
+        strFieldEntry("direction", "Inbound"),
+        strFieldEntry("action", "Allow")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips windows.firewallRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("windows.firewallRule", "",
+      @[strFieldEntry("name", "OpenSSH-Server-In-TCP"),
+        strFieldEntry("displayName", "OpenSSH Server (sshd)"),
+        strFieldEntry("protocol", "TCP"),
+        strFieldEntry("direction", "Inbound"),
+        strFieldEntry("action", "Allow"),
+        strFieldEntry("localPort", "22"),
+        boolFieldEntry("enabled", true)]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkWindowsFirewallRule
+    check sp2.resources[0].fwName == "OpenSSH-Server-In-TCP"
+    check sp2.resources[0].fwProtocol == "TCP"
+    check sp2.resources[0].fwLocalPort == "22"
+    # Second round-trip is byte-equivalent.
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
   test "renderSystemProfileToText preserves depends_on edges":
     var intent = ProfileIntent(name: "sys")
     intent.resources.add(resourceIntent("windows.service", "",

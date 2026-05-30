@@ -284,6 +284,15 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
       body.writeString(c)
     body.writeBool(op.vsStrict)
     body.writeBool(op.vsDestroy)
+  of pokWindowsFirewallRule:
+    body.writeString(op.fwName)
+    body.writeString(op.fwDisplayName)
+    body.writeString(op.fwProtocol)
+    body.writeString(op.fwDirection)
+    body.writeString(op.fwAction)
+    body.writeString(op.fwLocalPort)
+    body.writeBool(op.fwEnabled)
+    body.writeBool(op.fwDestroy)
   of pokMacosSystemDefault:
     body.writeString(op.sdDomain)
     body.writeString(op.sdKey)
@@ -398,6 +407,17 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
       result.operation.vsComponents.add(readString(body, pos))
     result.operation.vsStrict = readBool(body, pos, "vsStrict")
     result.operation.vsDestroy = readBool(body, pos, "vsDestroy")
+  of pokWindowsFirewallRule:
+    result.operation = PrivilegedOperation(kind: pokWindowsFirewallRule,
+      address: address)
+    result.operation.fwName = readString(body, pos)
+    result.operation.fwDisplayName = readString(body, pos)
+    result.operation.fwProtocol = readString(body, pos)
+    result.operation.fwDirection = readString(body, pos)
+    result.operation.fwAction = readString(body, pos)
+    result.operation.fwLocalPort = readString(body, pos)
+    result.operation.fwEnabled = readBool(body, pos, "fwEnabled")
+    result.operation.fwDestroy = readBool(body, pos, "fwDestroy")
   of pokMacosSystemDefault:
     result.operation = PrivilegedOperation(kind: pokMacosSystemDefault,
       address: address)

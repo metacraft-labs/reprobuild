@@ -39,6 +39,7 @@ type
     srkWindowsCapability = "windows.capability"
     srkWindowsService = "windows.service"
     srkWindowsVsInstaller = "windows.vsInstaller"
+    srkWindowsFirewallRule = "windows.firewallRule"
     srkMacosSystemDefault = "macos.systemDefault"
     srkSystemdSystemUnit = "systemd.systemUnit"
     srkLaunchdSystemDaemon = "launchd.systemDaemon"
@@ -91,6 +92,14 @@ type
       vsWorkloads*: seq[string]
       vsComponents*: seq[string]
       vsStrict*: bool
+    of srkWindowsFirewallRule:
+      fwName*: string
+      fwDisplayName*: string
+      fwProtocol*: string
+      fwDirection*: string
+      fwAction*: string
+      fwLocalPort*: string
+      fwEnabled*: bool
     of srkMacosSystemDefault:
       sdDomain*: string
       sdKey*: string
@@ -137,6 +146,8 @@ proc realWorldIdentity*(r: SystemResource): string =
   of srkWindowsVsInstaller:
     "vsInstaller:" & r.vsEdition &
       (if r.vsInstallPath.len > 0: "@" & r.vsInstallPath else: "")
+  of srkWindowsFirewallRule:
+    "firewallRule:" & r.fwName
   of srkMacosSystemDefault:
     "systemDefault:" & r.sdDomain & ":" & r.sdKey
   of srkSystemdSystemUnit:
@@ -173,6 +184,7 @@ proc resourceName*(r: SystemResource): string =
   of srkWindowsCapability: r.capabilityName
   of srkWindowsService: r.serviceName
   of srkWindowsVsInstaller: r.vsEdition
+  of srkWindowsFirewallRule: r.fwName
   of srkMacosSystemDefault: r.sdDomain & ":" & r.sdKey
   of srkSystemdSystemUnit: r.suName
   of srkLaunchdSystemDaemon: r.sdaLabel
@@ -367,6 +379,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkWindowsCapability: srk = srkWindowsCapability
     of $srkWindowsService: srk = srkWindowsService
     of $srkWindowsVsInstaller: srk = srkWindowsVsInstaller
+    of $srkWindowsFirewallRule: srk = srkWindowsFirewallRule
     of $srkMacosSystemDefault: srk = srkMacosSystemDefault
     of $srkSystemdSystemUnit: srk = srkSystemdSystemUnit
     of $srkLaunchdSystemDaemon: srk = srkLaunchdSystemDaemon
@@ -465,6 +478,46 @@ proc parseSystemProfile*(text: string): SystemProfile =
         vsComponents: components,
         vsStrict: (if "strict" in fields: parseBoolField("strict",
           fields["strict"]) else: false))
+    of srkWindowsFirewallRule:
+      let fname = need("name")
+      let displayName =
+        if "displayName" in fields: fields["displayName"] else: ""
+      let protocol = need("protocol")
+      if protocol notin FirewallProtocols:
+        raiseSystemProfileInvalid("windows.firewallRule protocol '" &
+          protocol & "' is not one of " & FirewallProtocols.join(" / "))
+      let direction = need("direction")
+      if direction notin FirewallDirections:
+        raiseSystemProfileInvalid("windows.firewallRule direction '" &
+          direction & "' is not one of " &
+          FirewallDirections.join(" / "))
+      let action = need("action")
+      if action notin FirewallActions:
+        raiseSystemProfileInvalid("windows.firewallRule action '" &
+          action & "' is not one of " & FirewallActions.join(" / "))
+      let localPort =
+        if "localPort" in fields: fields["localPort"] else: ""
+      if not isSafeFirewallIdentifier(fname):
+        raiseSystemProfileInvalid("windows.firewallRule name '" & fname &
+          "' contains characters outside the firewall-identifier " &
+          "charset (letters, digits, '.', '-', '_', space)")
+      if displayName.len > 0 and not isSafeFirewallDisplayName(displayName):
+        raiseSystemProfileInvalid("windows.firewallRule displayName '" &
+          displayName & "' contains a single-quote or control character")
+      if localPort.len > 0 and not isSafeFirewallPort(localPort):
+        raiseSystemProfileInvalid("windows.firewallRule localPort '" &
+          localPort & "' is not a port number, port range, comma list, " &
+          "or 'Any'")
+      res = SystemResource(kind: srkWindowsFirewallRule,
+        fwName: fname,
+        fwDisplayName: displayName,
+        fwProtocol: protocol,
+        fwDirection: direction,
+        fwAction: action,
+        fwLocalPort: localPort,
+        fwEnabled:
+          if "enabled" in fields: parseBoolField("enabled",
+            fields["enabled"]) else: true)
     of srkMacosSystemDefault:
       res = SystemResource(kind: srkMacosSystemDefault,
         sdDomain: need("domain"),
@@ -575,6 +628,16 @@ proc toPrivilegedOperation*(r: SystemResource;
       vsComponents: r.vsComponents,
       vsStrict: r.vsStrict,
       vsDestroy: destroy)
+  of srkWindowsFirewallRule:
+    PrivilegedOperation(kind: pokWindowsFirewallRule, address: r.address,
+      fwName: r.fwName,
+      fwDisplayName: r.fwDisplayName,
+      fwProtocol: r.fwProtocol,
+      fwDirection: r.fwDirection,
+      fwAction: r.fwAction,
+      fwLocalPort: r.fwLocalPort,
+      fwEnabled: r.fwEnabled,
+      fwDestroy: destroy)
   of srkMacosSystemDefault:
     PrivilegedOperation(kind: pokMacosSystemDefault, address: r.address,
       sdDomain: r.sdDomain,

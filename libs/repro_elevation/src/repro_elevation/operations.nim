@@ -64,6 +64,13 @@ type
       ## modify / uninstall a Visual Studio product through the
       ## bootstrapped installer, with workload/component membership
       ## convergence. State is read through the embedded `vswhere.exe`.
+    pokWindowsFirewallRule = "windows.firewallRule"
+      ## The post-M69 `windows.firewallRule` operation: manage a
+      ## Windows Firewall (advfirewall) rule via the
+      ## `Get-/New-/Set-/Remove-NetFirewallRule` cmdlets. Used to open
+      ## a TCP/UDP port (e.g. the OpenSSH server's inbound port 22)
+      ## without resorting to a parent-supplied raw command. The driver
+      ## is idempotent: a re-apply with unchanged fields is a no-op.
     pokMacosSystemDefault = "macos.systemDefault"
       ## The M69 Phase-C `macos.systemDefault` operation: a typed
       ## value write under `/Library/Preferences/<plist>` via
@@ -167,6 +174,24 @@ type
       vsComponents*: seq[string]
       vsStrict*: bool
       vsDestroy*: bool
+    of pokWindowsFirewallRule:
+      ## Declare a Windows Firewall rule. `fwName` is the internal
+      ## name (`-Name`); `fwDisplayName` the human-readable label
+      ## (`-DisplayName`, defaults to `fwName`); `fwProtocol` is one of
+      ## `TCP` / `UDP` / `ICMPv4` / `ICMPv6` / `Any`; `fwDirection`
+      ## is `Inbound` / `Outbound`; `fwAction` is `Allow` / `Block`;
+      ## `fwLocalPort` is the port number string (or `Any`), meaningful
+      ## only for TCP/UDP; `fwEnabled` selects whether the rule is
+      ## active. `fwDestroy` selects the rollback direction
+      ## (Remove-NetFirewallRule).
+      fwName*: string
+      fwDisplayName*: string
+      fwProtocol*: string
+      fwDirection*: string
+      fwAction*: string
+      fwLocalPort*: string
+      fwEnabled*: bool
+      fwDestroy*: bool
     of pokMacosSystemDefault:
       ## Write `sdValueLiteral` (a `defaults`-literal) for `sdKey`
       ## under `sdDomain` (a `/Library/Preferences/...` plist path,
@@ -251,6 +276,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokWindowsCapability: true
   of pokWindowsService: true
   of pokWindowsVsInstaller: true
+  of pokWindowsFirewallRule: true
   of pokMacosSystemDefault: true
   of pokSystemdSystemUnit: true
   of pokLaunchdSystemDaemon: true
@@ -274,6 +300,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokWindowsCapability: pokWindowsCapability
   of $pokWindowsService: pokWindowsService
   of $pokWindowsVsInstaller: pokWindowsVsInstaller
+  of $pokWindowsFirewallRule: pokWindowsFirewallRule
   of $pokMacosSystemDefault: pokMacosSystemDefault
   of $pokSystemdSystemUnit: pokSystemdSystemUnit
   of $pokLaunchdSystemDaemon: pokLaunchdSystemDaemon
@@ -374,6 +401,66 @@ proc isSafeLaunchdLabel*(label: string): bool =
   return true
 
 # ---------------------------------------------------------------------------
+# windows.firewallRule — protocol/direction/action allowlists and
+# identifier/port charset guards.
+#
+# The `New-/Set-/Get-/Remove-NetFirewallRule` cmdlets are wrapped from
+# strings composed of typed fields; defence-in-depth layer 1 is to
+# allow only closed enumeration values for the protocol/direction/
+# action fields and a conservative charset for `fwName`/`fwLocalPort`
+# so a `protocol = "TCP'; <cmd>"` profile cannot reach arbitrary root
+# execution. Layer 2 is `psQuote` in the driver.
+# ---------------------------------------------------------------------------
+
+const
+  FirewallProtocols* = ["TCP", "UDP", "ICMPv4", "ICMPv6", "Any"]
+  FirewallDirections* = ["Inbound", "Outbound"]
+  FirewallActions* = ["Allow", "Block"]
+
+proc isSafeFirewallIdentifier*(name: string): bool =
+  ## Rule names flow into `-Name <value>` PowerShell arguments. The
+  ## `New-NetFirewallRule` documentation allows arbitrary unicode in
+  ## `-Name`, but Reprobuild restricts the charset to alphanumerics,
+  ## `.`, `-`, `_` and a single space so the value cannot break out of
+  ## a `psQuote`d argument and so two profiles can compare names
+  ## byte-for-byte. Anything else is refused at validation time.
+  let n = name.strip()
+  if n.len == 0:
+    return false
+  for ch in n:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_', ' '}:
+      return false
+  return true
+
+proc isSafeFirewallDisplayName*(displayName: string): bool =
+  ## Display names may contain spaces and parentheses (the OpenSSH
+  ## rule's canonical label is `OpenSSH Server (sshd)`) but never a
+  ## single-quote or a control character — both would break the
+  ## `psQuote`'d argument that wraps the value.
+  if displayName.len == 0:
+    return true
+  for ch in displayName:
+    if ch == '\'' or ord(ch) < 0x20 or ord(ch) == 0x7f:
+      return false
+  return true
+
+proc isSafeFirewallPort*(port: string): bool =
+  ## A localPort field accepts a single port (`22`), a comma-separated
+  ## list (`22,2222`), a port range (`8000-9000`), the literal `Any`,
+  ## or the empty string (the driver substitutes `Any`). Everything
+  ## else is refused so the field cannot smuggle a shell metacharacter
+  ## past the closed-set validator.
+  let p = port.strip()
+  if p.len == 0:
+    return true
+  if p == "Any" or p == "any":
+    return true
+  for ch in p:
+    if ch notin {'0'..'9', ',', '-', ' '}:
+      return false
+  return true
+
+# ---------------------------------------------------------------------------
 # Closed-set validation. The broker calls `validateOperation` on
 # every decoded `PrivilegedOperation` before dispatch — a frame that
 # is structurally a `PrivilegedOperation` but carries an out-of-policy
@@ -423,6 +510,29 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     # without one defaults to the VS standard location, so an empty
     # install path is allowed only for a fresh install — the driver's
     # re-observe handles the distinction.
+  of pokWindowsFirewallRule:
+    if op.fwName.strip().len == 0:
+      return "windows.firewallRule operation has an empty name"
+    if not isSafeFirewallIdentifier(op.fwName):
+      return "windows.firewallRule name '" & op.fwName &
+        "' contains characters outside the firewall-identifier charset " &
+        "(letters, digits, '.', '-', '_', space)"
+    if op.fwDisplayName.len > 0 and not isSafeFirewallDisplayName(
+        op.fwDisplayName):
+      return "windows.firewallRule displayName '" & op.fwDisplayName &
+        "' contains a single-quote or control character"
+    if op.fwProtocol notin FirewallProtocols:
+      return "windows.firewallRule protocol '" & op.fwProtocol &
+        "' is not one of " & FirewallProtocols.join(" / ")
+    if op.fwDirection notin FirewallDirections:
+      return "windows.firewallRule direction '" & op.fwDirection &
+        "' is not one of " & FirewallDirections.join(" / ")
+    if op.fwAction notin FirewallActions:
+      return "windows.firewallRule action '" & op.fwAction &
+        "' is not one of " & FirewallActions.join(" / ")
+    if op.fwLocalPort.len > 0 and not isSafeFirewallPort(op.fwLocalPort):
+      return "windows.firewallRule localPort '" & op.fwLocalPort &
+        "' is not a port number, port range, comma list, or 'Any'"
   of pokMacosSystemDefault:
     if op.sdDomain.len == 0:
       return "macos.systemDefault operation has an empty domain"

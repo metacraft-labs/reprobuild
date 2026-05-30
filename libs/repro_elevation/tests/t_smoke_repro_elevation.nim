@@ -829,3 +829,163 @@ suite "repro_elevation: ProducerConsumerMap lookup (M82 Phase B)":
       "OpenSSH.Server~~~~0.0.1.0") == "sshd"
     check lookupCapabilityRegisteredService(
       "RSAT.NotInMap") == ""
+
+# ===========================================================================
+# windows.firewallRule — pure parse + drift logic. The shell-out side
+# of the driver runs only on Windows hosts; what runs everywhere is
+# the closed-set validator, the canonical-state digest, and the
+# Get-NetFirewallRule probe-output parser.
+# ===========================================================================
+
+suite "repro_elevation: windows.firewallRule pure surface":
+
+  test "isSafeFirewallIdentifier accepts a typical rule name":
+    check isSafeFirewallIdentifier("OpenSSH-Server-In-TCP")
+    check isSafeFirewallIdentifier("Custom_Rule.42 v2")
+    check not isSafeFirewallIdentifier("")
+    check not isSafeFirewallIdentifier("Bad'Name")
+    check not isSafeFirewallIdentifier("Bad;Name")
+    check not isSafeFirewallIdentifier("Bad`Name")
+
+  test "isSafeFirewallDisplayName accepts spaces and parentheses":
+    check isSafeFirewallDisplayName("OpenSSH Server (sshd)")
+    check isSafeFirewallDisplayName("")
+    check not isSafeFirewallDisplayName("Bad'Quote")
+    check not isSafeFirewallDisplayName("Has\nNewline")
+
+  test "isSafeFirewallPort accepts single ports, ranges, lists, and Any":
+    check isSafeFirewallPort("22")
+    check isSafeFirewallPort("22,2222")
+    check isSafeFirewallPort("8000-9000")
+    check isSafeFirewallPort("Any")
+    check isSafeFirewallPort("any")
+    check isSafeFirewallPort("")
+    check not isSafeFirewallPort("22; rm")
+    check not isSafeFirewallPort("$(whoami)")
+    check not isSafeFirewallPort("twentytwo")
+
+  test "operationValidationError accepts a valid firewall-rule operation":
+    let ok = PrivilegedOperation(kind: pokWindowsFirewallRule,
+      address: "ssh-firewall",
+      fwName: "OpenSSH-Server-In-TCP",
+      fwDisplayName: "OpenSSH Server (sshd)",
+      fwProtocol: "TCP", fwDirection: "Inbound", fwAction: "Allow",
+      fwLocalPort: "22", fwEnabled: true)
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad firewall fields":
+    let badProto = PrivilegedOperation(kind: pokWindowsFirewallRule,
+      address: "x", fwName: "Rule",
+      fwProtocol: "SCTP", fwDirection: "Inbound", fwAction: "Allow")
+    check operationValidationError(badProto).len > 0
+
+    let badDir = PrivilegedOperation(kind: pokWindowsFirewallRule,
+      address: "x", fwName: "Rule",
+      fwProtocol: "TCP", fwDirection: "Sideways", fwAction: "Allow")
+    check operationValidationError(badDir).len > 0
+
+    let badAction = PrivilegedOperation(kind: pokWindowsFirewallRule,
+      address: "x", fwName: "Rule",
+      fwProtocol: "TCP", fwDirection: "Inbound", fwAction: "Permit")
+    check operationValidationError(badAction).len > 0
+
+    let badName = PrivilegedOperation(kind: pokWindowsFirewallRule,
+      address: "x", fwName: "X'; rm -rf /",
+      fwProtocol: "TCP", fwDirection: "Inbound", fwAction: "Allow")
+    check operationValidationError(badName).len > 0
+
+    let emptyAddr = PrivilegedOperation(kind: pokWindowsFirewallRule,
+      address: "", fwName: "Rule",
+      fwProtocol: "TCP", fwDirection: "Inbound", fwAction: "Allow")
+    check operationValidationError(emptyAddr).len > 0
+
+  test "parseFirewallRuleQuery reads a present rule probe":
+    let raw = """
+Name=OpenSSH-Server-In-TCP
+DisplayName=OpenSSH Server (sshd)
+Direction=Inbound
+Action=Allow
+Enabled=True
+Protocol=TCP
+LocalPort=22
+"""
+    let obs = parseFirewallRuleQuery(raw)
+    check obs.present
+    check obs.name == "OpenSSH-Server-In-TCP"
+    check obs.displayName == "OpenSSH Server (sshd)"
+    check obs.protocol == "TCP"
+    check obs.direction == "Inbound"
+    check obs.action == "Allow"
+    check obs.localPort == "22"
+    check obs.enabled
+
+  test "parseFirewallRuleQuery reads the Missing=1 sentinel as absent":
+    check not parseFirewallRuleQuery("Missing=1").present
+
+  test "parseFirewallRuleQuery treats an empty output as absent":
+    check not parseFirewallRuleQuery("").present
+
+  test "canonical firewall-rule state collapses Any port spellings":
+    let obs1 = FirewallRuleObservation(present: true,
+      name: "R", displayName: "R", protocol: "TCP",
+      direction: "Inbound", action: "Allow", localPort: "Any",
+      enabled: true)
+    let obs2 = FirewallRuleObservation(present: true,
+      name: "R", displayName: "R", protocol: "TCP",
+      direction: "Inbound", action: "Allow", localPort: "any",
+      enabled: true)
+    check canonicalFirewallRuleState(obs1) ==
+      canonicalFirewallRuleState(obs2)
+    check canonicalFirewallRuleState(obs1) ==
+      canonicalFirewallRuleDesired("R", "R", "TCP", "Inbound", "Allow",
+        "Any", true)
+
+  test "firewallRuleMatchesDesired detects a port mismatch":
+    let obs = FirewallRuleObservation(present: true,
+      name: "OpenSSH-Server-In-TCP",
+      displayName: "OpenSSH Server (sshd)",
+      protocol: "TCP", direction: "Inbound", action: "Allow",
+      localPort: "22", enabled: true)
+    check firewallRuleMatchesDesired(obs,
+      "OpenSSH-Server-In-TCP", "OpenSSH Server (sshd)",
+      "TCP", "Inbound", "Allow", "22", true)
+    check not firewallRuleMatchesDesired(obs,
+      "OpenSSH-Server-In-TCP", "OpenSSH Server (sshd)",
+      "TCP", "Inbound", "Allow", "23", true)
+    check not firewallRuleMatchesDesired(obs,
+      "OpenSSH-Server-In-TCP", "OpenSSH Server (sshd)",
+      "TCP", "Inbound", "Allow", "22", false)
+    check not firewallRuleMatchesDesired(
+      FirewallRuleObservation(present: false),
+      "OpenSSH-Server-In-TCP", "OpenSSH Server (sshd)",
+      "TCP", "Inbound", "Allow", "22", true)
+
+  test "RBEB Operation frame round-trips a windows.firewallRule":
+    let op = PrivilegedOperation(kind: pokWindowsFirewallRule,
+      address: "ssh-firewall",
+      fwName: "OpenSSH-Server-In-TCP",
+      fwDisplayName: "OpenSSH Server (sshd)",
+      fwProtocol: "TCP", fwDirection: "Inbound", fwAction: "Allow",
+      fwLocalPort: "22", fwEnabled: true, fwDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let dec = decodeFrame(encodeOperation(wire))
+    check dec.messageType == rmtOperation
+    let w2 = decodeOperation(dec.body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokWindowsFirewallRule
+    check w2.operation.address == "ssh-firewall"
+    check w2.operation.fwName == "OpenSSH-Server-In-TCP"
+    check w2.operation.fwDisplayName == "OpenSSH Server (sshd)"
+    check w2.operation.fwProtocol == "TCP"
+    check w2.operation.fwDirection == "Inbound"
+    check w2.operation.fwAction == "Allow"
+    check w2.operation.fwLocalPort == "22"
+    check w2.operation.fwEnabled
+    check not w2.operation.fwDestroy
+
+  test "windows.firewallRule requires elevation":
+    check requiresElevation(pokWindowsFirewallRule)
+    check $pokWindowsFirewallRule == "windows.firewallRule"
+    check privilegedOperationKindFromString("windows.firewallRule") ==
+      pokWindowsFirewallRule

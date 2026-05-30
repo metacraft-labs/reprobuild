@@ -231,6 +231,40 @@ suite "Resource constructors":
     check target[0].fields["startType"].s == "Automatic"
     check target[0].fields["state"].s == "Running"
 
+  test "windowsFirewallRule records firewall rule fields":
+    var target: seq[ResourceIntent] = @[]
+    windowsFirewallRule(target,
+      name = "OpenSSH-Server-In-TCP",
+      protocol = "TCP",
+      direction = "Inbound",
+      action = "Allow",
+      displayName = "OpenSSH Server (sshd)",
+      localPort = "22",
+      enabled = true,
+      address = "opensshFirewallRule")
+    check target.len == 1
+    check target[0].kind == "windows.firewallRule"
+    check target[0].address == "opensshFirewallRule"
+    check target[0].fields["name"].s == "OpenSSH-Server-In-TCP"
+    check target[0].fields["displayName"].s == "OpenSSH Server (sshd)"
+    check target[0].fields["protocol"].s == "TCP"
+    check target[0].fields["direction"].s == "Inbound"
+    check target[0].fields["action"].s == "Allow"
+    check target[0].fields["localPort"].s == "22"
+    check target[0].fields["enabled"].b == true
+
+  test "windowsFirewallRule defaults displayName / localPort / enabled":
+    var target: seq[ResourceIntent] = @[]
+    windowsFirewallRule(target,
+      name = "Bare-Rule",
+      protocol = "UDP",
+      direction = "Outbound",
+      action = "Block")
+    check target.len == 1
+    check target[0].fields["displayName"].s == ""
+    check target[0].fields["localPort"].s == "Any"
+    check target[0].fields["enabled"].b == true
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

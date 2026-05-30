@@ -119,6 +119,30 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       vsWorkloads: fieldList(r, "workloads"),
       vsComponents: fieldList(r, "components"),
       vsStrict: fieldBool(r, "strict", false))
+  of "windows.firewallRule":
+    let protocol = fieldString(r, "protocol")
+    if protocol notin FirewallProtocols:
+      raise newException(ValueError,
+        "windows.firewallRule protocol '" & protocol &
+        "' is not one of " & FirewallProtocols.join(" / "))
+    let direction = fieldString(r, "direction")
+    if direction notin FirewallDirections:
+      raise newException(ValueError,
+        "windows.firewallRule direction '" & direction &
+        "' is not one of " & FirewallDirections.join(" / "))
+    let action = fieldString(r, "action")
+    if action notin FirewallActions:
+      raise newException(ValueError,
+        "windows.firewallRule action '" & action &
+        "' is not one of " & FirewallActions.join(" / "))
+    result = SystemResource(kind: srkWindowsFirewallRule,
+      fwName: fieldString(r, "name"),
+      fwDisplayName: fieldString(r, "displayName"),
+      fwProtocol: protocol,
+      fwDirection: direction,
+      fwAction: action,
+      fwLocalPort: fieldString(r, "localPort"),
+      fwEnabled: fieldBool(r, "enabled", true))
   of "macos.systemDefault":
     result = SystemResource(kind: srkMacosSystemDefault,
       sdDomain: fieldString(r, "domain"),
@@ -171,6 +195,7 @@ proc isSystemScopeResource(kind: string): bool =
   of "windows.registryValueHKLM",
      "windows.optionalFeature", "windows.capability",
      "windows.service", "windows.vsInstaller",
+     "windows.firewallRule",
      "macos.systemDefault", "systemd.systemUnit",
      "launchd.systemDaemon", "fs.systemFile",
      "env.systemVariable", "passwd.user":
@@ -295,6 +320,16 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("workloads", renderListLiteral(r.vsWorkloads)))
       pairs.add(("components", renderListLiteral(r.vsComponents)))
       pairs.add(("strict", (if r.vsStrict: "true" else: "false")))
+    of srkWindowsFirewallRule:
+      pairs.add(("name", quoteSystemValue(r.fwName)))
+      if r.fwDisplayName.len > 0:
+        pairs.add(("displayName", quoteSystemValue(r.fwDisplayName)))
+      pairs.add(("protocol", quoteSystemValue(r.fwProtocol)))
+      pairs.add(("direction", quoteSystemValue(r.fwDirection)))
+      pairs.add(("action", quoteSystemValue(r.fwAction)))
+      if r.fwLocalPort.len > 0:
+        pairs.add(("localPort", quoteSystemValue(r.fwLocalPort)))
+      pairs.add(("enabled", (if r.fwEnabled: "true" else: "false")))
     of srkMacosSystemDefault:
       pairs.add(("domain", quoteSystemValue(r.sdDomain)))
       pairs.add(("key", quoteSystemValue(r.sdKey)))

@@ -46,6 +46,29 @@ suite "M83 Phase D: system apply round-trip via canonical text":
     check plan.envelope.operations[0].kindTag ==
       "windows.capability"
 
+  test "windows.firewallRule adapter -> text -> producePlan emits one op":
+    var intent = ProfileIntent(name: "phaseD-sys-firewall")
+    var f = initTable[string, FieldValue]()
+    f["name"] = strField("OpenSSH-Server-In-TCP")
+    f["displayName"] = strField("OpenSSH Server (sshd)")
+    f["protocol"] = strField("TCP")
+    f["direction"] = strField("Inbound")
+    f["action"] = strField("Allow")
+    f["localPort"] = strField("22")
+    f["enabled"] = boolField(true)
+    intent.resources.add(ResourceIntent(kind: "windows.firewallRule",
+      address: "opensshFirewallRule", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkWindowsFirewallRule
+    let txt = renderSystemProfileToText(sp)
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].fwName == "OpenSSH-Server-In-TCP"
+    check reparsed.resources[0].fwLocalPort == "22"
+    let plan = producePlan(txt, "phaseD-sys-host")
+    check plan.envelope.operations.len == 1
+    check plan.envelope.operations[0].kindTag == "windows.firewallRule"
+
   test "multi-resource adapter -> text -> producePlan emits N operations":
     var intent = ProfileIntent(name: "phaseD-sys-smoke")
     block:

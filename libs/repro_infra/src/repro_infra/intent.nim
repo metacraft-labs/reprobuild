@@ -256,6 +256,17 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  components = " & renderList(r.vsComponents))
     if r.vsStrict:
       result.add("  strict = true")
+  of srkWindowsFirewallRule:
+    result.add("  name = " & renderScalar(r.fwName))
+    if r.fwDisplayName.len > 0:
+      result.add("  displayName = " & renderScalar(r.fwDisplayName))
+    result.add("  protocol = " & r.fwProtocol)
+    result.add("  direction = " & r.fwDirection)
+    result.add("  action = " & r.fwAction)
+    if r.fwLocalPort.len > 0:
+      result.add("  localPort = " & renderScalar(r.fwLocalPort))
+    if not r.fwEnabled:
+      result.add("  enabled = false")
   of srkMacosSystemDefault:
     result.add("  domain = " & renderScalar(r.sdDomain))
     result.add("  key = " & renderScalar(r.sdKey))

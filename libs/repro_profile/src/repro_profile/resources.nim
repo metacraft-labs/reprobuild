@@ -251,6 +251,30 @@ template windowsVsInstaller*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "windows.vsInstaller", addr0, fields,
       dependsOn)
 
+template windowsFirewallRule*(targetResources: var seq[ResourceIntent];
+                              name: string;
+                              protocol: string;
+                              direction: string;
+                              action: string;
+                              displayName: string = "";
+                              localPort: string = "Any";
+                              enabled: bool = true;
+                              address: string = "";
+                              dependsOn: seq[string] = @[]) =
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["displayName"] = strField(displayName)
+    fields["protocol"] = strField(protocol)
+    fields["direction"] = strField(direction)
+    fields["action"] = strField(action)
+    fields["localPort"] = strField(localPort)
+    fields["enabled"] = boolField(enabled)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("windows.firewallRule", name)
+    pushResource(targetResources, "windows.firewallRule", addr0, fields,
+      dependsOn)
+
 template macosSystemDefault*(targetResources: var seq[ResourceIntent];
                              domain: string;
                              key: string;

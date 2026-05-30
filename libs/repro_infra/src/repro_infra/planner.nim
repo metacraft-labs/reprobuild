@@ -170,6 +170,7 @@ proc observeResource*(r: SystemResource): ResourceObservation =
     of srkWindowsCapability: observeWindowsCapability(op)
     of srkWindowsService: observeWindowsService(op)
     of srkWindowsVsInstaller: observeWindowsVsInstaller(op)
+    of srkWindowsFirewallRule: observeWindowsFirewallRule(op)
     of srkMacosSystemDefault: observeMacosSystemDefault(op)
     of srkSystemdSystemUnit: observeSystemdSystemUnit(op)
     of srkLaunchdSystemDaemon: observeLaunchdSystemDaemon(op)
@@ -224,6 +225,11 @@ proc summaryLine(r: SystemResource; action: string): string =
     action & " vs-installer " & r.vsEdition & " (" &
       $r.vsWorkloads.len & " workload(s), " & $r.vsComponents.len &
       " component(s)" & (if r.vsStrict: ", strict" else: "") & ")"
+  of srkWindowsFirewallRule:
+    action & " firewall-rule " & r.fwName & " (" &
+      r.fwProtocol & "/" & r.fwDirection & "/" & r.fwAction &
+      (if r.fwLocalPort.len > 0: ", port " & r.fwLocalPort else: "") &
+      (if r.fwEnabled: ", enabled" else: ", disabled") & ")"
   of srkMacosSystemDefault:
     action & " system-default " & r.sdDomain & " " & r.sdKey
   of srkSystemdSystemUnit:
