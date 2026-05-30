@@ -86,7 +86,8 @@ proc encodeActivityElementSeq(es: seq[ActivityElement]): string =
 proc encodeActivityElement(e: ActivityElement): string =
   case e.kind
   of aekPackageRef:
-    result = "{\"kind\":\"packageRef\",\"name\":" & encodeStr(e.pkgName) & "}"
+    result = "{\"kind\":\"packageRef\",\"name\":" & encodeStr(e.pkgName) &
+      ",\"version\":" & encodeStr(e.pkgVersion) & "}"
   of aekWhenGuard:
     result = "{\"kind\":\"whenGuard\",\"predicate\":" &
       encodeStr(e.predicate.expr) &
@@ -208,7 +209,9 @@ proc parseActivityElement(n: JsonNode): ActivityElement =
   case kind
   of "packageRef":
     result = ActivityElement(kind: aekPackageRef,
-      pkgName: n["name"].getStr())
+      pkgName: n["name"].getStr(),
+      pkgVersion:
+        (if n.hasKey("version"): n["version"].getStr() else: ""))
   of "whenGuard":
     var body: seq[ActivityElement] = @[]
     for it in n["body"]:

@@ -58,7 +58,9 @@ import ./errors
 import ./plan
 import ./package_catalog
 import ./builtin_adapter
+import ./catalog_lookup
 import repro_dsl_stdlib/packages_schema
+import repro_dsl_stdlib/catalog_registry
 
 const
   PackageSourceEnvVar* = "REPRO_TEST_PACKAGE_SOURCE"
@@ -323,9 +325,64 @@ proc realizeBuiltinAdapter(store: var Store;
 
 proc realizeViaProductionCatalog(store: var Store;
                                  cat: var ProductionCatalog;
-                                 packageId: string): RealizedRecord =
+                                 packageId: string;
+                                 requestedVersion = ""): RealizedRecord =
   ## M72+ production dispatch. Windows prefers Scoop; macOS/Linux can
   ## realize PATH-discovered tools through the universal path adapter.
+  ##
+  ## M69: when ``requestedVersion`` is non-empty OR the package is in
+  ## the built-in catalog registry, the dispatcher MUST use
+  ## ``chainResolvePackage`` so the version threads into
+  ## ``resolveBuiltinPackage``. The catalog-lookup helper validates
+  ## that the slice exists before the chain runs, so a miss surfaces
+  ## as a structured ``EVersionNotInCatalog`` rather than a generic
+  ## ``EAdapterChainExhausted``.
+  let useChain = requestedVersion.len > 0 or isRegistered(packageId)
+  if useChain:
+    if isRegistered(packageId):
+      try:
+        # The lookup raises a structured error for a missing version
+        # OR an unknown id — fail-closed per M69's contract.
+        discard lookupCatalogSlice(packageId, requestedVersion)
+      except EVersionNotInCatalog as err:
+        raiseRealizeFailed(packageId, "builtin", err.msg)
+      except EUnknownPackageId as err:
+        raiseRealizeFailed(packageId, "builtin", err.msg)
+    let resolutionChain =
+      try:
+        chainResolvePackage(cat, packageId, version = requestedVersion)
+      except EAdapterChainExhausted as err:
+        raiseRealizeFailed(packageId, "<chain>", err.msg)
+      except EUnknownPackage as err:
+        raiseRealizeFailed(packageId, "<none>", err.msg)
+    case resolutionChain.adapter
+    of cakBuiltin:
+      result = realizeBuiltinAdapter(store, resolutionChain)
+    of cakPath:
+      result = realizePathAdapter(store, packageId, resolutionChain.sourcePath)
+    of cakScoop:
+      when defined(windows):
+        let spec = ScoopPackageSpec(
+          bucket: resolutionChain.bucket,
+          app: resolutionChain.app,
+          version: resolutionChain.resolvedVersion,
+          executableName: resolutionChain.executableName)
+        result = realizeScoopAdapter(store, packageId, spec)
+      else:
+        raiseRealizeFailed(packageId, "scoop",
+          "the scoop adapter is Windows-only; this build runs on a " &
+          "non-Windows platform")
+    of cakNix:
+      raiseRealizeFailed(packageId, "nix",
+        "cakNix realize branch is not yet wired into the production " &
+        "dispatch (parallel work in libs/repro_home_*); chain returned " &
+        "cakNix for package '" & packageId & "'")
+    result.fromProductionCatalog = true
+    if result.adapter != akBuiltin:
+      result.cacheHit = resolutionChain.cacheHit
+      result.resolvedVersion = resolutionChain.resolvedVersion
+    return
+
   let resolution =
     try:
       resolvePackage(cat, packageId)

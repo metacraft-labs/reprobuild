@@ -30,6 +30,7 @@ import repro_homebrew_adapter
 import repro_local_store
 
 import ./dep_graph
+import ./env_binding
 import ./errors
 import ./plan
 import ./realize
@@ -2247,8 +2248,22 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # `ResourceBinding` record for the manifest. `REPRO_TEST_RESOURCES`
       # remains as a TEST-ONLY override merged over the profile entries
       # by address (so existing M68/M70 gates keep working).
-      let desiredResources = composeDesiredResources(profile, opts.homeDir,
+      var desiredResources = composeDesiredResources(profile, opts.homeDir,
         opts.host)
+      # M69 step 5: synthesize PATH + per-tool env var resources from
+      # the realized records and merge them into the desired set. The
+      # synthesis is by-package, so a re-apply with unchanged catalog
+      # slices produces byte-identical resources and the lifecycle
+      # planner cache-hits on the second apply. Author-written
+      # `resources:` entries WIN over the synthesized records: the
+      # profile is the source of truth, the synthesized records are a
+      # fallback that fills the PATH/env binding gap when the profile
+      # did not declare an explicit `env.userPath` / `env.userVariable`
+      # for the package.
+      let envBindingPlan = planEnvBindings(realized)
+      for synthRes in envBindingPlan.resources:
+        if synthRes.address notin desiredResources.resources:
+          desiredResources.resources[synthRes.address] = synthRes
       # M69 Phase C follow-up: defence-in-depth layer 1. The four
       # POSIX/macOS home drivers (`gsettings`, `defaults`,
       # `systemd_user`, `launchd_user`) interpolate operator-controlled

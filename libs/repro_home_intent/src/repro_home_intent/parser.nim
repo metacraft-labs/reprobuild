@@ -264,6 +264,73 @@ const
     "yield", "break", "continue", "try", "except", "finally",
     "static", "block", "asm", "defer", "echo"]
 
+proc parsePackageCallForm(ctx: ParseCtx; idx, indent: int;
+                          body: string): IntentNode =
+  ## M69: parse the new `package(<id>[, "<version>"])` call form used
+  ## inside `activity <name>:` blocks. Returns an `nkPackageRef`
+  ## carrying `packageVersion = ""` for the bare-arg call
+  ## `package(<id>)` and the literal version string for the
+  ## `package(<id>, "<version>")` form. A malformed call (missing
+  ## closing paren, non-identifier id, version not a double-quoted
+  ## string literal, extra arguments, etc.) is rejected with
+  ## `EUnstructured` naming the offending text.
+  doAssert body.startsWith("package(")
+  let openIdx = "package".len  # position of '('
+  let closeIdx = body.rfind(')')
+  if closeIdx <= openIdx:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "'" & body & "'",
+      "a `package(<id>)` or `package(<id>, \"<version>\")` call " &
+      "with a closing parenthesis")
+  let trailing = body[closeIdx + 1 .. ^1].strip()
+  if trailing.len > 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "trailing text after `package(...)` call: '" & trailing & "'",
+      "no content after the closing parenthesis")
+  let inner = body[openIdx + 1 ..< closeIdx]
+  # Split at the FIRST top-level comma (outside any string literal).
+  var idArg = ""
+  var versionArg = ""
+  var hasVersion = false
+  var i = 0
+  while i < inner.len and inner[i] != ',':
+    idArg.add inner[i]
+    inc i
+  if i < inner.len and inner[i] == ',':
+    hasVersion = true
+    inc i  # past comma
+    versionArg = inner[i .. ^1]
+  let pkgId = idArg.strip()
+  if pkgId.len == 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "an empty package id in `package(...)`",
+      "a package identifier (e.g. `package(jdk)`)")
+  if not (pkgId[0].isAlphaAscii() or pkgId[0] == '_'):
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "'" & pkgId & "' as a `package(...)` id",
+      "an identifier starting with a letter or underscore")
+  for ch in pkgId:
+    if not (ch.isAlphaAscii() or ch.isDigit() or ch in {'_', '-'}):
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "'" & pkgId & "' as a `package(...)` id",
+        "an identifier of letters, digits, `_`, and `-`")
+  var version = ""
+  if hasVersion:
+    let vTrim = versionArg.strip()
+    if vTrim.len < 2 or vTrim[0] != '"' or vTrim[^1] != '"':
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "'" & versionArg & "' as a `package(...)` version literal",
+        "a double-quoted version string (e.g. \"21.0.5\")")
+    version = vTrim[1 ..< vTrim.len - 1]
+    if version.len == 0:
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "an empty version literal in `package(" & pkgId & ", \"\")`",
+        "a non-empty double-quoted version string")
+  result = IntentNode(kind: nkPackageRef,
+    startLine: idx + 1, endLine: idx + 1, indent: indent,
+    packageName: pkgId, packageLine: idx + 1,
+    packageVersion: version)
+
 proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
   ## Parse a bare package-reference line. The spec allows
   ## `--version-pin` style attributes; we treat the whole post-name
@@ -277,6 +344,12 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
   ## reader. The extracted `packageName` is the inner text;
   ## surrounding backticks are dropped to match the bare-identifier
   ## storage shape.
+  ##
+  ## M69: also accept the `package(<id>[, "<version>"])` call form.
+  ## This is the spec-mandated DSL extension that lets `home.nim`
+  ## activities reference catalog packages with an optional pinned
+  ## version. Bare-identifier references continue to parse exactly as
+  ## before.
   let raw = ctx.lines[idx]
   let trimmed = stripInlineComment(raw).trimTrailing()
   let indent = countLeadingSpaces(trimmed)
@@ -285,6 +358,15 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
     raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
       "an empty line treated as a package reference",
       "a bare package identifier (e.g. `git`)")
+  # M69: detect the `package(<id>[, "<version>"])` call form FIRST so
+  # the bare-identifier rejection logic (which forbids `(` after the
+  # name) doesn't fire against a legitimate call.
+  if body.startsWith("package(") or body.startsWith("package ("):
+    # Normalize the optional whitespace between `package` and `(`.
+    var normalized = body
+    if body.startsWith("package ("):
+      normalized = "package(" & body["package (".len .. ^1]
+    return parsePackageCallForm(ctx, idx, indent, normalized)
   # The package name is the first identifier token (bare or
   # backtick-quoted); the rest may be whitespace + flag-style
   # attributes which we accept and preserve.
@@ -336,7 +418,8 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
       "a bare package reference (no `=`, `(`, or `,`)")
   result = IntentNode(kind: nkPackageRef,
     startLine: idx + 1, endLine: idx + 1, indent: indent,
-    packageName: pkgName, packageLine: idx + 1)
+    packageName: pkgName, packageLine: idx + 1,
+    packageVersion: "")
 
 proc parseConditional(ctx: ParseCtx; startIdx: int; indent: int;
                      keyword: CondKeyword;

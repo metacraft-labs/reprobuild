@@ -39,6 +39,7 @@ from repro_core/paths import extendedPath
 import repro_home_intent
 import repro_home_generations
 import repro_home_apply
+import repro_home_apply/catalog_lookup
 import repro_home_resources
 import repro_home_rollback
 import repro_local_store
@@ -429,12 +430,32 @@ proc runApplyInline*(commandName: string;
 # `repro home add`.
 # ---------------------------------------------------------------------------
 
+proc splitToolAtVersion(spec: string):
+    tuple[tool, version: string; hasVersion: bool] =
+  ## M69: parse a `<tool>` or `<tool>@<version>` positional argument.
+  ## The version is everything after the FIRST `@`; the tool name is
+  ## everything before. A spec with no `@` returns `(tool, "", false)`.
+  ## The literal `@latest` is preserved here — the caller resolves it
+  ## against the catalog so the structural editor writes the concrete
+  ## pinned version (the intent-layer's "no `latest` on disk" rule).
+  let at = spec.find('@')
+  if at < 0:
+    return (spec, "", false)
+  (spec[0 ..< at], spec[at + 1 .. ^1], true)
+
 proc runHomeAdd(args: openArray[string]): int =
   if args.len == 0:
-    stderr.writeLine("usage: repro home add <package> [--activity NAME] " &
-      "[--when PRED | --if PRED] [--no-apply] [--catalog=<list>]")
+    stderr.writeLine("usage: repro home add <package>[@<version>|@latest] " &
+      "[--activity NAME] [--when PRED | --if PRED] [--no-apply] " &
+      "[--catalog=<list>]")
+    stderr.writeLine("  examples:")
+    stderr.writeLine("    repro home add git              # bare reference")
+    stderr.writeLine("    repro home add jdk@21.0.5       # pin to a concrete version")
+    stderr.writeLine("    repro home add jdk@latest       # resolve to the highest-SemVer")
+    stderr.writeLine("                                    #   slice at edit time and write")
+    stderr.writeLine("                                    #   the concrete pinned literal")
     return 2
-  var pkg = ""
+  var pkgSpec = ""
   var activity = "default"
   var pred = emptyPredicate()
   var noApply = false
@@ -458,15 +479,36 @@ proc runHomeAdd(args: openArray[string]): int =
     elif a.startsWith("--"):
       stderr.writeLine("repro home add: unknown flag: " & a)
       return 2
-    elif pkg.len == 0:
-      pkg = a
+    elif pkgSpec.len == 0:
+      pkgSpec = a
     else:
       stderr.writeLine("repro home add: unexpected positional: " & a)
       return 2
     inc i
-  if pkg.len == 0:
+  if pkgSpec.len == 0:
     stderr.writeLine("repro home add: missing <package>")
     return 2
+  let split = splitToolAtVersion(pkgSpec)
+  let pkg = split.tool
+  var version = split.version
+  if pkg.len == 0:
+    stderr.writeLine("repro home add: missing <package> name (got '@" &
+      version & "'); expected `<tool>` or `<tool>@<version>`")
+    return 2
+  if split.hasVersion and version.len == 0:
+    stderr.writeLine("repro home add: empty version literal after `@` in '" &
+      pkgSpec & "'; pass `<tool>` for a bare reference or " &
+      "`<tool>@<concrete-version>`")
+    return 2
+  if version == "latest":
+    let latest = latestCatalogVersion(pkg)
+    if not latest.found:
+      stderr.writeLine("repro home add: cannot resolve `" & pkg &
+        "@latest`: no built-in catalog registered for '" & pkg & "'")
+      stderr.writeLine("  hint: registered tools: " &
+        registeredToolNames().join(", "))
+      return 1
+    version = latest.version
   try:
     let profilePath = loadProfilePath()
     if not packageInCatalog(pkg):
@@ -474,7 +516,8 @@ proc runHomeAdd(args: openArray[string]): int =
       return 1
     addPackageReference(profilePath, pkg, activity = activity,
                         predicate = pred.text,
-                        predicateKeyword = pred.keyword)
+                        predicateKeyword = pred.keyword,
+                        version = version)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnknownPredicate as e:
@@ -499,10 +542,14 @@ proc activityNames(p: Profile): seq[string] =
 
 proc runHomeRemove(args: openArray[string]): int =
   if args.len == 0:
-    stderr.writeLine("usage: repro home remove <package> [--activity NAME] " &
-      "[--when PRED | --if PRED] [--no-apply]")
+    stderr.writeLine("usage: repro home remove <package>[@<version>] " &
+      "[--activity NAME] [--when PRED | --if PRED] [--no-apply]")
+    stderr.writeLine("  examples:")
+    stderr.writeLine("    repro home remove git              # strip every git reference")
+    stderr.writeLine("    repro home remove jdk@21.0.5       # strip ONLY the pinned line")
+    stderr.writeLine("                                       #   (a bare `package(jdk)` is kept)")
     return 2
-  var pkg = ""
+  var pkgSpec = ""
   var activitySpec = ""
   var activityGiven = false
   var pred = emptyPredicate()
@@ -526,14 +573,21 @@ proc runHomeRemove(args: openArray[string]): int =
     elif a.startsWith("--"):
       stderr.writeLine("repro home remove: unknown flag: " & a)
       return 2
-    elif pkg.len == 0:
-      pkg = a
+    elif pkgSpec.len == 0:
+      pkgSpec = a
     else:
       stderr.writeLine("repro home remove: unexpected positional: " & a)
       return 2
     inc i
-  if pkg.len == 0:
+  if pkgSpec.len == 0:
     stderr.writeLine("repro home remove: missing <package>")
+    return 2
+  let split = splitToolAtVersion(pkgSpec)
+  let pkg = split.tool
+  let version = split.version
+  if pkg.len == 0:
+    stderr.writeLine("repro home remove: missing <package> name in '" &
+      pkgSpec & "'")
     return 2
   try:
     let profilePath = loadProfilePath()
@@ -541,7 +595,12 @@ proc runHomeRemove(args: openArray[string]): int =
     # activities and both predicate keywords.
     if not activityGiven and not pred.given:
       # Walk every activity and remove from both the bare body and every
-      # conditional inside it.
+      # conditional inside it. M69: when `<tool>@<version>` is given,
+      # match BOTH name AND version so a bare `package(jdk)` is NOT
+      # stripped when the user asked to remove only `jdk@21.0.5`.
+      proc matchesRef(ref1: IntentNode): bool =
+        ref1.kind == nkPackageRef and ref1.packageName == pkg and
+          (version.len == 0 or ref1.packageVersion == version)
       while true:
         let prof = loadProfile(profilePath)
         var removedAny = false
@@ -551,8 +610,9 @@ proc runHomeRemove(args: openArray[string]): int =
           let act = actOpt.get
           # Remove from the activity's bare body.
           for ch in act.activityChildren:
-            if ch.kind == nkPackageRef and ch.packageName == pkg:
-              removePackageReference(profilePath, pkg, activity = actName)
+            if matchesRef(ch):
+              removePackageReference(profilePath, pkg, activity = actName,
+                version = version)
               removedAny = true
               break
           if removedAny: break
@@ -560,10 +620,10 @@ proc runHomeRemove(args: openArray[string]): int =
           for ch in act.activityChildren:
             if ch.kind == nkCondBlock:
               for pkgRef in ch.condChildren:
-                if pkgRef.kind == nkPackageRef and
-                    pkgRef.packageName == pkg:
+                if matchesRef(pkgRef):
                   removePackageReference(profilePath, pkg,
-                    activity = actName, predicate = ch.predicateSource)
+                    activity = actName, predicate = ch.predicateSource,
+                    version = version)
                   removedAny = true
                   break
               if removedAny: break
@@ -576,9 +636,10 @@ proc runHomeRemove(args: openArray[string]): int =
         if activityGiven: activitySpec else: "default"
       if pred.given:
         removePackageReference(profilePath, pkg, activity = targetActivity,
-          predicate = pred.text)
+          predicate = pred.text, version = version)
       else:
-        removePackageReference(profilePath, pkg, activity = targetActivity)
+        removePackageReference(profilePath, pkg, activity = targetActivity,
+          version = version)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnknownPredicate as e:

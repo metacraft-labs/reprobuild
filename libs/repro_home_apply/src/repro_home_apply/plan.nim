@@ -33,6 +33,11 @@ type
     fromActivity*: string
     predicateText*: string             ## "" when the package appeared
                                        ## directly in the activity body
+    requestedVersion*: string          ## M69: the pinned version literal
+                                       ## from `package(<id>, "<version>")`,
+                                       ## or "" when the reference was bare
+                                       ## (defaultVersion will resolve at
+                                       ## realize time).
 
   PlannedGeneratedFileSource* = enum
     pgfsPackageOutput = "package-output"
@@ -153,7 +158,8 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
     case child.kind
     of nkPackageRef:
       outSeq.add(PlannedPackage(packageId: child.packageName,
-        fromActivity: activity, predicateText: ""))
+        fromActivity: activity, predicateText: "",
+        requestedVersion: child.packageVersion))
     of nkCondBlock:
       if not evaluateHostPredicate(child.predicateAst, host):
         continue
@@ -161,7 +167,8 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
         if pkgRef.kind != nkPackageRef:
           continue
         outSeq.add(PlannedPackage(packageId: pkgRef.packageName,
-          fromActivity: activity, predicateText: child.predicateSource))
+          fromActivity: activity, predicateText: child.predicateSource,
+          requestedVersion: pkgRef.packageVersion))
     else:
       discard
 
@@ -247,6 +254,7 @@ proc canonicalPlanBytes*(plan: ApplyPlan): seq[byte] =
     result.addStr(p.packageId)
     result.addStr(p.fromActivity)
     result.addStr(p.predicateText)
+    result.addStr(p.requestedVersion)
   result.addU32(plan.generatedFiles.len)
   for g in plan.generatedFiles:
     result.addStr(g.relativeHomePath)

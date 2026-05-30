@@ -54,6 +54,12 @@ type
     of nkPackageRef:
       packageName*: string
       packageLine*: int
+      packageVersion*: string        ## M69: the literal version pin from
+                                     ## `package(<id>, "<version>")`, or
+                                     ## "" for a bare-identifier reference
+                                     ## (and for the bare `package(<id>)`
+                                     ## call form). The structural editor
+                                     ## round-trips this verbatim.
     of nkConfigBlock:
       configHeaderLine*: int
       configPackages*: seq[IntentNode]

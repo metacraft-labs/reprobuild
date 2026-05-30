@@ -212,9 +212,21 @@ proc findCondWithCanonical(blocks: seq[IntentNode]; canon: string):
 
 proc findPackageRef(blocks: seq[IntentNode]; pkg: string): int =
   ## Index in `blocks` where a package-reference matching `pkg` lives,
-  ## or -1.
+  ## or -1. Matches on package name only (any version variant).
   for i, ch in blocks:
     if ch.kind == nkPackageRef and ch.packageName == pkg:
+      return i
+  -1
+
+proc findPackageRefVersioned(blocks: seq[IntentNode]; pkg, version: string): int =
+  ## M69: locate a package reference matching both `pkg` AND `version`.
+  ## An empty `version` matches a bare reference (no version pin); a
+  ## non-empty `version` matches only the exact pinned literal so
+  ## `repro home remove jdk@21.0.5` strips ONLY that pinned line and
+  ## leaves a bare `package(jdk)` elsewhere untouched.
+  for i, ch in blocks:
+    if ch.kind == nkPackageRef and ch.packageName == pkg and
+       ch.packageVersion == version:
       return i
   -1
 
@@ -356,18 +368,37 @@ proc stripBodyDiscardPlaceholder(p: Profile; blk: IntentNode) =
       return
     inc idx
 
-proc addPackageRefInBlock(p: Profile; blk: IntentNode; pkg: string) =
-  ## Append `pkg` as the last child of `blk` (`nkActivity` or
-  ## `nkCondBlock`), preserving any trailing blank/comment lines.
+proc renderPackageLineText(p: Profile; pkg, version: string): string =
+  ## M69: pick the source-text form for a package reference. A bare
+  ## reference (empty `version`) renders as the legacy form (a bare
+  ## identifier, optionally backtick-quoted by `renderPackageRefSpelling`
+  ## for the M83 Phase A macro form). A versioned reference renders
+  ## as `package(<pkg>, "<version>")` — the spec-mandated literal that
+  ## the M69 parser round-trips byte-for-byte. The bare-`package(<id>)`
+  ## form (versioned-shape with empty version) is reachable only via
+  ## the CLI's `--versioned-call-form` path that the structural editor
+  ## does not currently expose; the renderer falls back to the legacy
+  ## bare form so a no-version `add` continues to produce the
+  ## byte-identical line the existing round-trip tests assert.
+  if version.len > 0:
+    return "package(" & pkg & ", \"" & version & "\")"
+  renderPackageRefSpelling(p, pkg)
+
+proc addPackageRefInBlock(p: Profile; blk: IntentNode; pkg: string;
+                          version = "") =
+  ## Append `pkg` (optionally pinned to `version`) as the last child
+  ## of `blk` (`nkActivity` or `nkCondBlock`), preserving any trailing
+  ## blank/comment lines.
   stripBodyDiscardPlaceholder(p, blk)
   let bodyIndent = blk.indent + p.indentStep
-  let line = indentStr(bodyIndent) & renderPackageRefSpelling(p, pkg)
+  let line = indentStr(bodyIndent) & renderPackageLineText(p, pkg, version)
   let header = headerLineOf(blk)
   let insertAt = insertionIndex(p, blk, header)
   insertLine(p, insertAt, line)
   let newNode = IntentNode(kind: nkPackageRef,
     startLine: insertAt + 1, endLine: insertAt + 1, indent: bodyIndent,
-    packageName: pkg, packageLine: insertAt + 1)
+    packageName: pkg, packageLine: insertAt + 1,
+    packageVersion: version)
   case blk.kind
   of nkActivity:
     blk.activityChildren.add newNode
@@ -384,7 +415,8 @@ proc addPackageRefInBlock(p: Profile; blk: IntentNode; pkg: string) =
 proc addPackageReference*(profilePath: string; package: string;
                           activity = "default";
                           predicate = "";
-                          predicateKeyword = ckWhen) =
+                          predicateKeyword = ckWhen;
+                          version = "") =
   ## Add `package` as a bare reference inside `activity`, optionally
   ## nested under a `when <predicate>:` or `if <predicate>:` block.
   ## Behavior:
@@ -426,13 +458,18 @@ proc addPackageReference*(profilePath: string; package: string;
     else:
       targetBlock = createCondBlock(prof, activityNode,
         predicate, predicateKeyword)
-  addPackageRefInBlock(prof, targetBlock, package)
+  addPackageRefInBlock(prof, targetBlock, package, version)
   writeProfile(prof)
 
 proc removePackageRefFromBlock(p: Profile; blk: IntentNode;
-                              pkg: string): bool =
+                              pkg: string;
+                              version = ""): bool =
   ## Remove the first matching package reference from `blk`. Returns
-  ## true on success.
+  ## true on success. M69: when `version` is non-empty, only the
+  ## exact `package(<pkg>, "<version>")` line is removed (so removing
+  ## `jdk@21.0.5` does not strip a bare `package(jdk)` elsewhere in
+  ## the same block). When `version` is empty the legacy by-name
+  ## match runs and the first matching reference is removed.
   ##
   ## M83 Phase F3: when the removal leaves the block body empty, leave
   ## a `discard` placeholder line so the resulting file remains a valid
@@ -444,7 +481,9 @@ proc removePackageRefFromBlock(p: Profile; blk: IntentNode;
   ## re-read (it is parsed as a no-op activity-body element and
   ## ignored by the intent layer).
   var children = childrenSeq(blk)
-  let idx = findPackageRef(children, pkg)
+  let idx =
+    if version.len > 0: findPackageRefVersioned(children, pkg, version)
+    else: findPackageRef(children, pkg)
   if idx < 0:
     return false
   let line = children[idx].packageLine
@@ -462,7 +501,8 @@ proc removePackageRefFromBlock(p: Profile; blk: IntentNode;
 
 proc removePackageReference*(profilePath: string; package: string;
                              activity = "default";
-                             predicate = "") =
+                             predicate = "";
+                             version = "") =
   ## Remove the first occurrence of `package` from the targeted scope.
   ## If the removal would leave an activity body empty, the activity
   ## block stays (avoids noisy churn — per the spec's reasoning that
@@ -473,7 +513,7 @@ proc removePackageReference*(profilePath: string; package: string;
     return # nothing to remove
   let activityNode = activityOpt.get
   if predicate.len == 0:
-    discard removePackageRefFromBlock(prof, activityNode, package)
+    discard removePackageRefFromBlock(prof, activityNode, package, version)
     writeProfile(prof)
     return
   let predAst = parsePredicate(profilePath, predicate, 0)
@@ -482,7 +522,7 @@ proc removePackageReference*(profilePath: string; package: string;
     activityNode.activityChildren, canon)
   if existingCond.isNone:
     return
-  discard removePackageRefFromBlock(prof, existingCond.get, package)
+  discard removePackageRefFromBlock(prof, existingCond.get, package, version)
   writeProfile(prof)
 
 # ---------------------------------------------------------------------------

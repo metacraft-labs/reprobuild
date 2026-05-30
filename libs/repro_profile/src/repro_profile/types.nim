@@ -26,6 +26,10 @@ type
     case kind*: ActivityElementKind
     of aekPackageRef:
       pkgName*: string
+      pkgVersion*: string             ## M69: the literal version pin from
+                                      ## `package(<id>, "<version>")`; "" for
+                                      ## a bare identifier reference or
+                                      ## the bare `package(<id>)` call form.
     of aekWhenGuard:
       predicate*: PredicateExpr
       guardedBody*: seq[ActivityElement]

@@ -119,16 +119,53 @@ proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
     result.add newEmptyNode()
     result.add inner
   of nnkCall, nnkCommand:
-    # Splat: user-authored helper that returns seq[ActivityElement].
-    # The macro emits `for elem in <call>: targetSeq.add elem` so the
-    # helper's contributions inline into the activity body.
-    let elemSym = genSym(nskForVar, "actElem")
-    let forStmt = newNimNode(nnkForStmt)
-    forStmt.add elemSym
-    forStmt.add stmt
-    let addCall = newCall(newDotExpr(targetSeq, ident"add"), elemSym)
-    forStmt.add newStmtList(addCall)
-    result = forStmt
+    # M69: recognize the `package(<id>[, "<version>"])` call form and
+    # emit a typed `aekPackageRef` with the version literal pinned.
+    # The bare-arg call `package(<id>)` records `pkgVersion = ""`. The
+    # call is detected by callee identifier + 1-or-2-arg arity; the
+    # version argument MUST be a string literal at compile time (the
+    # intent layer records concrete versions, never expressions).
+    if stmt.len >= 2 and stmt[0].kind == nnkIdent and $stmt[0] == "package" and
+       (stmt[1].kind notin {nnkStmtList}):
+      if stmt.len > 3:
+        error("`package(...)` takes 1 or 2 arguments " &
+              "(`package(<id>)` or `package(<id>, \"<version>\")`)", stmt)
+      var pkgName = ""
+      case stmt[1].kind
+      of nnkIdent: pkgName = $stmt[1]
+      of nnkAccQuoted:
+        for child in stmt[1]: pkgName.add $child
+      of nnkStrLit, nnkRStrLit, nnkTripleStrLit: pkgName = stmt[1].strVal
+      else:
+        error("`package(<id>, ...)` id argument must be an identifier " &
+              "or string literal, got " & $stmt[1].kind, stmt[1])
+      var version = ""
+      if stmt.len == 3:
+        let vNode = stmt[2]
+        case vNode.kind
+        of nnkStrLit, nnkRStrLit, nnkTripleStrLit: version = vNode.strVal
+        else:
+          error("`package(<id>, \"<version>\")` version argument must be " &
+                "a string literal (the intent layer records concrete " &
+                "versions; expressions are not allowed); got " &
+                $vNode.kind, vNode)
+        if version.len == 0:
+          error("`package(<id>, \"\")` empty version literal; pass " &
+                "`package(<id>)` for a bare reference", vNode)
+      result = quote do:
+        `targetSeq`.add ActivityElement(kind: aekPackageRef,
+          pkgName: `pkgName`, pkgVersion: `version`)
+    else:
+      # Splat: user-authored helper that returns seq[ActivityElement].
+      # The macro emits `for elem in <call>: targetSeq.add elem` so the
+      # helper's contributions inline into the activity body.
+      let elemSym = genSym(nskForVar, "actElem")
+      let forStmt = newNimNode(nnkForStmt)
+      forStmt.add elemSym
+      forStmt.add stmt
+      let addCall = newCall(newDotExpr(targetSeq, ident"add"), elemSym)
+      forStmt.add newStmtList(addCall)
+      result = forStmt
   of nnkCommentStmt:
     result = newEmptyNode()
   of nnkDiscardStmt:
