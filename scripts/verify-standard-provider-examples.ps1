@@ -928,7 +928,32 @@ function Probe-Toolchain([string]$language) {
       if (-not $swiftCmd) {
         return @{ Available = $false; Reason = "'swift' not on PATH (install Swift 5.10 from swift.org into D:/metacraft-dev-deps/swift/5.10/ or 'winget install Swift.Toolchain')" }
       }
-      return @{ Available = $true; Reason = "swift=$($swiftCmd.Source)" }
+      # M51 honest-scope: Swift on Windows uses the MSVC ABI, so the
+      # actual ``swift build`` link step shells out to ``link.exe``
+      # (the MSVC linker from VS 2022 Build Tools + Windows SDK). The
+      # swift.org installer does NOT bundle that — it's a separate
+      # ~5 GB Microsoft installer (``winget install Microsoft.VisualStudio.2022.BuildTools
+      # --override "--add Microsoft.VisualStudio.Workload.VCTools
+      # --includeRecommended"``). Without it, ``swift build`` fails
+      # with ``error: toolchain is invalid: could not find CLI tool
+      # `link` at any of these directories``. Probe for VS via
+      # vswhere (the canonical Microsoft-supported VS-install
+      # discovery tool); a bare ``Get-Command link.exe`` would not
+      # work because MSYS2 / Git-bash ship a POSIX ``link.exe``
+      # (hard-link coreutil) that shadows the MSVC linker without
+      # satisfying Swift's MSVC-toolchain probe.
+      $vsLink = $null
+      $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+      if (Test-Path -LiteralPath $vsWhere) {
+        $vsInstall = (& $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1)
+        if ($vsInstall) {
+          $vsLink = "vswhere:$vsInstall"
+        }
+      }
+      if (-not $vsLink) {
+        return @{ Available = $false; Reason = "swift=$($swiftCmd.Source) but VS 2022 Build Tools (MSVC link.exe + Windows SDK) missing — install via 'winget install Microsoft.VisualStudio.2022.BuildTools --override `"--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended`"' so Swift's MSVC link step can resolve. (MSYS2 / Git-bash POSIX link.exe does NOT satisfy Swift's MSVC-toolchain probe.)" }
+      }
+      return @{ Available = $true; Reason = "swift=$($swiftCmd.Source); vs-build-tools=$vsLink" }
     }
     'ocaml-dune' {
       # M46: the OCaml + Dune (Tier 2b) convention is registered. Probe

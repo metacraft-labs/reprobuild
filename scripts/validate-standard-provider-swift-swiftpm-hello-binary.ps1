@@ -93,6 +93,28 @@ if (-not $swiftCmd) {
 
 Write-Host "==> using swift=$($swiftCmd.Source)"
 
+# M51 honest-scope: Swift on Windows uses the MSVC ABI, so ``swift
+# build`` shells out to ``link.exe`` from VS 2022 Build Tools at link
+# time. The swift.org installer does NOT bundle that — it's a separate
+# Microsoft installer. Probe for VS via vswhere (the canonical
+# Microsoft-supported VS-install discovery tool); a bare ``Get-Command
+# link.exe`` won't work because MSYS2 / Git-bash ship a POSIX
+# ``link.exe`` (hard-link coreutil) that shadows the MSVC linker
+# without satisfying Swift's MSVC-toolchain probe.
+$vsLink = $null
+$vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path -LiteralPath $vsWhere) {
+  $vsInstall = (& $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1)
+  if ($vsInstall) {
+    $vsLink = "vswhere:$vsInstall"
+  }
+}
+if (-not $vsLink) {
+  Write-Host "SKIP: Swift toolchain is present but VS 2022 Build Tools (MSVC link.exe + Windows SDK) is missing — Swift on Windows uses the MSVC ABI and shells out to MSVC link.exe at link time. Install via 'winget install Microsoft.VisualStudio.2022.BuildTools --override `"--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended`"' and re-run. (MSYS2 / Git-bash ship a POSIX link.exe that does NOT satisfy Swift's MSVC-toolchain probe.)"
+  exit 0
+}
+Write-Host "==> using vs-build-tools=$vsLink"
+
 # --- step 1: clean prior scratch + .build dir ---
 if (Test-Path -LiteralPath $scratchInsideFixture) {
   Write-Host "wiping prior scratch dir $scratchInsideFixture"
