@@ -92,6 +92,7 @@ const PopulatedExamples = [
   "mixed/cpp-uses-pascal-lib",
   "crystal-shards/hello-binary",
   "crystal-mode3/hello-binary",
+  "erlang-rebar3/hello-binary",
 ]
 
 suite "examples layout M8":

@@ -193,6 +193,7 @@ $PopulatedExamples = @(
   'mixed/cpp-uses-pascal-lib',
   'crystal-shards/hello-binary',
   'crystal-mode3/hello-binary',
+  'erlang-rebar3/hello-binary',
   'mode1/rust-binary-with-library',
   'mode1/nim-binary-with-library'
 )
@@ -593,6 +594,26 @@ function Probe-Toolchain([string]$language) {
         return @{ Available = $true; Reason = "crystal=$($crystalCmd.Source)" }
       }
       return @{ Available = $false; Reason = "'crystal' not on PATH (install via 'scoop install crystal' on Windows or download from https://github.com/crystal-lang/crystal/releases)" }
+    }
+    'erlang-rebar3' {
+      # M61: Erlang + rebar3 — probe for both ``erl`` AND ``rebar3``.
+      # rebar3 ships separately from Erlang/OTP in most distribution
+      # channels so a positive ``erl`` probe does NOT imply ``rebar3``
+      # is available. The canonical Windows install is via scoop:
+      # ``scoop install erlang`` + ``scoop install rebar3`` (the
+      # ``main`` bucket carries Erlang/OTP 27.x+ and rebar3 3.27.x+
+      # as of the M61 milestone). M61 honest-scope cut: env.ps1
+      # doesn't yet provision the Erlang+rebar3 toolchain dedicatedly
+      # so most hosts SKIP this gate cleanly unless scoop is used.
+      $erlCmd = Get-Command erl -ErrorAction SilentlyContinue
+      if (-not $erlCmd) {
+        return @{ Available = $false; Reason = "'erl' not on PATH (install via 'scoop install erlang' on Windows or download from https://www.erlang.org/downloads)" }
+      }
+      $rebar3Cmd = Get-Command rebar3 -ErrorAction SilentlyContinue
+      if (-not $rebar3Cmd) {
+        return @{ Available = $false; Reason = "'rebar3' not on PATH (install via 'scoop install rebar3' on Windows; rebar3 is independent of Erlang/OTP)" }
+      }
+      return @{ Available = $true; Reason = "erl=$($erlCmd.Source); rebar3=$($rebar3Cmd.Source)" }
     }
     'mode1' {
       # M48: Mode 1 (layout-as-manifest) fixtures. Each fixture is
@@ -3198,6 +3219,20 @@ function Get-ExpectedOutputs([string]$rel, [string]$fixtureDir) {
       return @(@{
         Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'hello' $exeName))
         Greeting = 'hello from crystal-mode3-hello-binary'
+      })
+    }
+    'erlang-rebar3/hello-binary' {
+      # M61: erlang-rebar3/hello-binary. The convention emits a single
+      # ``rebar3 escriptize`` action per declared executable plus an
+      # ``fs.writeText`` wrapper at
+      # ``<root>/.repro/build/hello/hello.cmd`` (Windows) that delegates
+      # to the rebar3-produced ``_build/default/bin/hello.cmd``
+      # launcher. The wrapper IS the load-bearing artefact for the
+      # harness's run-and-assert-greeting probe.
+      $wrapperName = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'hello.cmd' } else { 'hello' }
+      return @(@{
+        Path     = Join-Path $fixtureDir (Join-Path '.repro\build' (Join-Path 'hello' $wrapperName))
+        Greeting = 'hello from erlang-rebar3-hello-binary'
       })
     }
     'mode1/rust-binary-with-library' {

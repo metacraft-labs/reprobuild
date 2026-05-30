@@ -49,6 +49,7 @@ import repro_standard_provider/conventions/d_direct as d_direct_convention
 import repro_standard_provider/conventions/ada_direct as ada_direct_convention
 import repro_standard_provider/conventions/pascal_direct as pascal_direct_convention
 import repro_standard_provider/conventions/crystal as crystal_convention
+import repro_standard_provider/conventions/erlang_rebar3 as erlang_rebar3_convention
 import repro_standard_provider/conventions/ocaml_dune as ocaml_dune_convention
 import repro_standard_provider/conventions/haskell_cabal as haskell_cabal_convention
 import repro_standard_provider/conventions/ruby_bundler as ruby_bundler_convention
@@ -369,6 +370,34 @@ when defined(reproProviderMode):
   # on Windows — env.ps1 doesn't yet provision Crystal; a follow-up
   # provisioning milestone covers that).
   addDefaultConvention(crystal_convention.crystalConvention())
+  # erlang_rebar3 (M61) — Erlang/OTP Tier 2b convention. Seventh Phase 2
+  # language milestone, immediately after M60 crystal. Keys on a
+  # ``rebar.config`` (rebar3 manifest) at the project root and
+  # additionally requires ``rebar.lock`` (HARD precondition per the M61
+  # spec — rebar3 writes a lockfile on every compile, even for zero-
+  # deps projects, mirroring the M42 / M55 / M56 / M57 / M60 lockfile-
+  # required pattern). Registered AFTER crystal per the M61 spec's
+  # "register after crystal in the chain" sequencing — the Phase 2
+  # conventions form a contiguous block below the Phase 1 cluster. The
+  # order has no recognition consequence — the convention's recognition
+  # gate is closed-set on ``rebar.config`` + ``rebar.lock`` presence +
+  # an Erlang/rebar3 token (``erlang``/``erl``/``rebar3``) in
+  # ``uses:``. rebar3 ships alongside Erlang/OTP in most distribution
+  # channels so the ``uses:`` check is single-token (mirroring M30
+  # Rust's ``rust``-or-``cargo`` pattern, M56 ruby-bundler's
+  # ``ruby``-or-``bundler``, M57 php-composer's ``php``-or-``composer``,
+  # and M60 crystal's ``crystal``-or-``shards`` patterns rather than
+  # M55 haskell-cabal's strict "both halves required" pattern). The
+  # convention requires both ``erl`` AND ``rebar3`` drivers on PATH;
+  # when either is absent (which is the M61 default on Windows
+  # before ``scoop install erlang rebar3``) ``recognize`` returns
+  # false and the M9-style harness SKIPs cleanly. Library / OTP-only
+  # targets, ``rebar3 release`` packaging, ``rebar3 ct`` test
+  # discovery, NIFs, erlang.mk sibling, and external Hex deps
+  # cache-warm are all explicitly DEFERRED per the M61 honest-scope
+  # cut — M61 supports app-style ``rebar.config`` + ``rebar3
+  # escriptize`` only.
+  addDefaultConvention(erlang_rebar3_convention.erlangRebar3Convention())
   # ocaml_dune (M46) — fifth managed-ecosystem Tier 2b convention. Keys
   # on a single ``dune-project`` at the project root (the Dune project
   # manifest filename — uniquely identifies a Dune project; no other

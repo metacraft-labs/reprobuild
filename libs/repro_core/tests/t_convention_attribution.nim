@@ -185,6 +185,33 @@ suite "attributeConvention: manifest detection":
     check attr.evidence.contains("shard.yml")
     removeDir(dir)
 
+  test "rebar.config ⇒ erlang-rebar3":
+    ## M61 — rebar3's project manifest must attribute to
+    ## ``erlang-rebar3``. Literal ``rebar.config`` filename (no glob —
+    ## rebar3's manifest filename is hard-coded). The ``erlang-rebar3``
+    ## convention additionally requires ``rebar.lock`` (HARD
+    ## precondition) AND an ``erlang`` / ``erl`` / ``rebar3`` token in
+    ## ``uses:`` for full dispatch, but the attribution heuristic here
+    ## is intentionally manifest-presence-only — the heuristic honestly
+    ## attributes ``erlang-rebar3`` even when those preconditions aren't
+    ## met (so ``repro show-conventions`` still tells the user which
+    ## convention WOULD claim the project once the prerequisites are in
+    ## place).
+    let dir = makeScratch("erlang-rebar3")
+    writeFile(dir / "rebar.config",
+      "{erl_opts, [debug_info]}.\n{deps, []}.\n" &
+      "{escript_main_app, hello}.\n")
+    writeFile(dir / "rebar.lock", "[].\n")
+    createDir(dir / "src")
+    writeFile(dir / "src" / "hello.app.src",
+      "{application, hello, [{vsn, \"1.0.0\"}]}.\n")
+    writeFile(dir / "src" / "hello.erl",
+      "-module(hello).\n-export([main/1]).\nmain(_) -> ok.\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "erlang-rebar3"
+    check attr.evidence.contains("rebar.config")
+    removeDir(dir)
+
   test "composer.json ⇒ php-composer":
     ## M57 — Composer manifest must attribute to ``php-composer``.
     ## Literal ``composer.json`` filename (no glob — Composer's manifest
@@ -347,6 +374,26 @@ suite "attributeConvention: extension census fallback":
       "package Lib is\nend Lib;\n")
     let attr = attributeConvention(dir)
     check attr.convention == "ada-direct"
+    check attr.evidence.contains("extension census")
+    removeDir(dir)
+
+  test "*.erl-dominant dir ⇒ erlang-rebar3 (M61 extension census)":
+    # M61: when ``.erl`` files dominate the dir but NO ``rebar.config``
+    # is present, the project still attributes to ``erlang-rebar3``
+    # (the only Erlang convention in the M61 registry). The actual
+    # ``erlang-rebar3`` convention's ``recognize`` requires
+    # ``rebar.config`` so attribution-without-recognise is the
+    # diagnostic-only case — useful so ``repro show-conventions``
+    # tells the user *which* convention WOULD claim the project once
+    # the manifest is in place.
+    let dir = makeScratch("erlang-extension")
+    createDir(dir / "src")
+    writeFile(dir / "src" / "main.erl",
+      "-module(main).\n-export([go/0]).\ngo() -> ok.\n")
+    writeFile(dir / "src" / "helper.erl",
+      "-module(helper).\n-export([f/0]).\nf() -> ok.\n")
+    let attr = attributeConvention(dir)
+    check attr.convention == "erlang-rebar3"
     check attr.evidence.contains("extension census")
     removeDir(dir)
 

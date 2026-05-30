@@ -5931,6 +5931,7 @@ const
     "ada-direct",
     "pascal-direct",
     "crystal",
+    "erlang-rebar3",
     "ocaml-dune",
     "haskell-cabal",
     "ruby-bundler",

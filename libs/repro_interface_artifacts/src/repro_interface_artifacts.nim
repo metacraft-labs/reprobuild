@@ -987,6 +987,7 @@ const
     "ada", "gnat", "gnatmake",
     "pascal", "fpc", "freepascal",
     "crystal", "shards",
+    "erlang", "erl", "rebar3",
     "ocaml", "ocamlc", "ocamlopt", "ocamlfind", "dune",
     "haskell", "ghc", "cabal", "cabal-install",
     "ruby", "bundler",
