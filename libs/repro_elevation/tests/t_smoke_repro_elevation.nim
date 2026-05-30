@@ -1774,3 +1774,117 @@ suite "repro_elevation: linux.tmpfilesRule pure surface":
         discard applyLinuxTmpfilesRule(op)
       expect ENotImplementedPlatform:
         discard destroyLinuxTmpfilesRule(op)
+
+# ===========================================================================
+# linux.sudoersRule — pure parse + drift logic. The shell-out side
+# adds `visudo -c -f` validation gating; pure tests cover the closed-
+# set validator, the path derivation including the `.tmp` staging
+# path, and the codec round-trip.
+# ===========================================================================
+
+suite "repro_elevation: linux.sudoersRule pure surface":
+
+  test "sudoersRulePath joins the directory with the basename":
+    check sudoersRulePath("wheel-extra") == "/etc/sudoers.d/wheel-extra"
+    check LinuxSudoersDir == "/etc/sudoers.d"
+
+  test "sudoersRuleTmpPath stages with a .tmp suffix":
+    check sudoersRuleTmpPath("wheel-extra") ==
+      "/etc/sudoers.d/wheel-extra.tmp"
+
+  test "operationValidationError accepts a valid linux.sudoersRule":
+    let ok = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: "wheel-extra",
+      sudoersName: "wheel-extra",
+      sudoersContent: "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n")
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad linux.sudoersRule fields":
+    # path escape
+    let escape = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: "x",
+      sudoersName: "../etc/shadow",
+      sudoersContent: "x")
+    check operationValidationError(escape).len > 0
+    # shell-meta name
+    let meta = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: "x",
+      sudoersName: "evil; rm",
+      sudoersContent: "x")
+    check operationValidationError(meta).len > 0
+    # a `.` in the name (sudo silently skips dotted files)
+    let dotted = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: "x",
+      sudoersName: "wheel-extra.conf",
+      sudoersContent: "x")
+    check operationValidationError(dotted).len > 0
+    # empty address
+    let emptyAddr = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: "",
+      sudoersName: "wheel-extra",
+      sudoersContent: "x")
+    check operationValidationError(emptyAddr).len > 0
+
+  test "RBEB Operation frame round-trips a linux.sudoersRule":
+    let op = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: "wheel-extra",
+      sudoersName: "wheel-extra",
+      sudoersContent: "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n",
+      sudoersDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokLinuxSudoersRule
+    check w2.operation.address == "wheel-extra"
+    check w2.operation.sudoersName == "wheel-extra"
+    check w2.operation.sudoersContent ==
+      "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n"
+    check not w2.operation.sudoersDestroy
+
+  test "RBEB Operation frame round-trips a destroy linux.sudoersRule":
+    let op = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: "wheel-extra",
+      sudoersName: "wheel-extra",
+      sudoersContent: "",
+      sudoersDestroy: true)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "cafef00d")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.kind == pokLinuxSudoersRule
+    check w2.operation.sudoersDestroy
+
+  test "posix desired digest for sudoers rule matches content bytes":
+    let op = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: "x",
+      sudoersName: "wheel-extra",
+      sudoersContent: "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n")
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText(op.sudoersContent)
+
+  test "posix desired digest for sudoers destroy is the absent sentinel":
+    let op = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: "x",
+      sudoersName: "wheel-extra",
+      sudoersContent: "x",
+      sudoersDestroy: true)
+    check posixSystemDesiredDigestHex(op) == ZeroDigestHex
+
+  test "linux.sudoersRule requires elevation":
+    check requiresElevation(pokLinuxSudoersRule)
+    check $pokLinuxSudoersRule == "linux.sudoersRule"
+    check privilegedOperationKindFromString("linux.sudoersRule") ==
+      pokLinuxSudoersRule
+
+  test "off-Linux linux.sudoersRule entry points raise ENotImplementedPlatform":
+    when not defined(linux):
+      let op = PrivilegedOperation(kind: pokLinuxSudoersRule,
+        address: "x",
+        sudoersName: "wheel-extra",
+        sudoersContent: "x")
+      expect ENotImplementedPlatform:
+        discard observeLinuxSudoersRule(op)
+      expect ENotImplementedPlatform:
+        discard applyLinuxSudoersRule(op)
+      expect ENotImplementedPlatform:
+        discard destroyLinuxSudoersRule(op)

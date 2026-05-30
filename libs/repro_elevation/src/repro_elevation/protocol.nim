@@ -353,6 +353,10 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.tmpfilesContent)
     body.writeBool(op.tmpfilesApplyNow)
     body.writeBool(op.tmpfilesDestroy)
+  of pokLinuxSudoersRule:
+    body.writeString(op.sudoersName)
+    body.writeString(op.sudoersContent)
+    body.writeBool(op.sudoersDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -530,6 +534,12 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.tmpfilesContent = readString(body, pos)
     result.operation.tmpfilesApplyNow = readBool(body, pos, "tmpfilesApplyNow")
     result.operation.tmpfilesDestroy = readBool(body, pos, "tmpfilesDestroy")
+  of pokLinuxSudoersRule:
+    result.operation = PrivilegedOperation(kind: pokLinuxSudoersRule,
+      address: address)
+    result.operation.sudoersName = readString(body, pos)
+    result.operation.sudoersContent = readString(body, pos)
+    result.operation.sudoersDestroy = readBool(body, pos, "sudoersDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

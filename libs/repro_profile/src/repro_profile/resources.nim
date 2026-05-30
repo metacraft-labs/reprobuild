@@ -548,3 +548,24 @@ template linuxTmpfilesRule*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("linux.tmpfilesRule", name)
     pushResource(targetResources, "linux.tmpfilesRule", addr0, fields,
       dependsOn)
+
+template linuxSudoersRule*(targetResources: var seq[ResourceIntent];
+                           name: string;
+                           content: string;
+                           address: string = "";
+                           dependsOn: seq[string] = @[]) =
+  ## M83 step 5 — Linux system-scope sudoers rule drop-in. Wraps a
+  ## write to `/etc/sudoers.d/<name>` (`name` must NOT contain `.` —
+  ## sudo silently skips dotted files; 0440 mode). The driver
+  ## validates the staged content with `visudo -c -f <tmp>` and only
+  ## atomically renames into place on success.
+  ##
+  ## Address default: `linux.sudoersRule:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.sudoersRule", name)
+    pushResource(targetResources, "linux.sudoersRule", addr0, fields,
+      dependsOn)

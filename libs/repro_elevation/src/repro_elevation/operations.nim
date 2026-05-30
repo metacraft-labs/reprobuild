@@ -143,6 +143,15 @@ type
       ## to apply the rule NOW (versus next boot). The `applyNow`
       ## field selects the immediate-apply behavior; it defaults to
       ## true.
+    pokLinuxSudoersRule = "linux.sudoersRule"
+      ## The post-M83 step-5 Linux sudoers drop-in operation: write a
+      ## sudoers fragment to `/etc/sudoers.d/<name>` (NO extension —
+      ## sudoers convention; mode 0440). The fragment is written to a
+      ## sibling `.tmp` file first, validated with `visudo -c -f
+      ## <tmp>`, and only `mv`'d into place on success. A validation
+      ## failure deletes the tmp and raises a clear error — a broken
+      ## sudoers file can lock the operator out of root, so the driver
+      ## fails closed before the atomic rename.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -339,6 +348,15 @@ type
       tmpfilesContent*: string
       tmpfilesApplyNow*: bool
       tmpfilesDestroy*: bool
+    of pokLinuxSudoersRule:
+      ## Write a sudoers drop-in. `sudoersName` is the file basename
+      ## (NO extension — sudoers convention); `sudoersContent` is the
+      ## full fragment body. Always written 0440 to a `.tmp` file,
+      ## validated with `visudo -c -f`, and `mv`'d into place on
+      ## success. `sudoersDestroy` selects the rollback direction.
+      sudoersName*: string
+      sudoersContent*: string
+      sudoersDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -377,6 +395,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxUdevRule: true
   of pokLinuxPolkitRule: true
   of pokLinuxTmpfilesRule: true
+  of pokLinuxSudoersRule: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -407,6 +426,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxUdevRule: pokLinuxUdevRule
   of $pokLinuxPolkitRule: pokLinuxPolkitRule
   of $pokLinuxTmpfilesRule: pokLinuxTmpfilesRule
+  of $pokLinuxSudoersRule: pokLinuxSudoersRule
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -819,6 +839,19 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.tmpfilesName.endsWith(".conf"):
       return "linux.tmpfilesRule name '" & op.tmpfilesName &
         "' must end with '.conf' (tmpfiles.d convention)"
+  of pokLinuxSudoersRule:
+    if not isSafeDropInBasename(op.sudoersName):
+      return "linux.sudoersRule name '" & op.sudoersName &
+        "' is not a safe single-segment basename (letters, digits, " &
+        "'.', '-', '_'; no '/', '..', or shell metacharacter)"
+    # sudoers convention: NO extension. A `.` in the name would cause
+    # sudo's `sudoers.d` parser to silently SKIP the file — defence-in-
+    # depth refusal here surfaces the typo at validation time rather
+    # than at the next privileged operation.
+    if op.sudoersName.contains('.'):
+      return "linux.sudoersRule name '" & op.sudoersName &
+        "' must not contain '.' — sudo silently ignores sudoers.d " &
+        "files with a '.' in the basename"
   return ""
 
 # ---------------------------------------------------------------------------

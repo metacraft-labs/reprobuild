@@ -406,6 +406,27 @@ suite "Resource constructors":
     check target[0].fields["applyNow"].b == true
     check target[0].address == "linux.tmpfilesRule:x.conf"
 
+  test "linuxSudoersRule records name / content":
+    var target: seq[ResourceIntent] = @[]
+    linuxSudoersRule(target,
+      name = "wheel-extra",
+      content = "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n",
+      address = "wheel-extra")
+    check target.len == 1
+    check target[0].kind == "linux.sudoersRule"
+    check target[0].address == "wheel-extra"
+    check target[0].fields["name"].s == "wheel-extra"
+    check target[0].fields["content"].s ==
+      "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n"
+
+  test "linuxSudoersRule auto-addresses from the name when address is empty":
+    var target: seq[ResourceIntent] = @[]
+    linuxSudoersRule(target,
+      name = "wheel-extra",
+      content = "x")
+    check target.len == 1
+    check target[0].address == "linux.sudoersRule:wheel-extra"
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

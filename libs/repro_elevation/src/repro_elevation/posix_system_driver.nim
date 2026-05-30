@@ -153,6 +153,11 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.tmpfilesContent)
+  of pokLinuxSudoersRule:
+    if op.sudoersDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.sudoersContent)
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -1453,3 +1458,141 @@ proc applyLinuxTmpfilesRule*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("linux.tmpfilesRule apply")
+
+# ===========================================================================
+# linux.sudoersRule — `visudo -c -f <tmp>` then atomic `mv` into place.
+#
+# A broken sudoers fragment can lock the operator out of root, so this
+# driver is built around `visudo -c` validation:
+#
+#   1. write to `/etc/sudoers.d/<name>.tmp`  (0440)
+#   2. run `visudo -c -f <tmp>`               — fail closed on non-zero exit
+#   3. `mv <tmp>` to `/etc/sudoers.d/<name>`  — atomic rename
+#
+# Step 2 is the safety gate; step 3 makes the change visible only
+# after step 2 has approved it. A `visudo -c` failure deletes the tmp
+# file so no half-written `.tmp` lingers in `/etc/sudoers.d/`.
+# ===========================================================================
+
+const LinuxSudoersDir* = "/etc/sudoers.d"
+  ## The directory a `linux.sudoersRule` drop-in file lands in.
+
+proc sudoersRulePath*(name: string): string =
+  ## Full on-disk path of the sudoers fragment for `name`.
+  LinuxSudoersDir & "/" & name
+
+proc sudoersRuleTmpPath*(name: string): string =
+  ## The validation-staging path for a sudoers fragment. `visudo -c
+  ## -f` checks this file before the atomic rename so a broken
+  ## fragment never replaces a working one.
+  LinuxSudoersDir & "/" & name & ".tmp"
+
+proc observeLinuxSudoersRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe a sudoers drop-in. The digest covers the file content
+  ## verbatim. As a drift-tripwire on hand-edits we ALSO run
+  ## `visudo -c -f <path>`; a present-but-invalid file is reported as
+  ## a protocol failure because a hand-edit has rendered the operator
+  ## profile inconsistent with the live sudoers parse.
+  when defined(linux):
+    let path = sudoersRulePath(op.sudoersName)
+    if not fileExists(path):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let content = readFile(path)
+    result.present = true
+    result.digestHex = posixDigestHexOfText(content)
+    let (vOut, vCode) = execCmdEx("visudo -c -f " & quoteShell(path))
+    if vCode != 0:
+      raiseProtocol("linux.sudoersRule " & path &
+        " is present but `visudo -c -f` reports it as INVALID — a " &
+        "hand-edit has broken the fragment. Re-apply or remove the " &
+        "fragment to restore a valid state. visudo says: " &
+        vOut.strip())
+  else:
+    raiseNotImplementedPlatform("linux.sudoersRule observe")
+
+proc destroyLinuxSudoersRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the sudoers drop-in file. Post-apply re-probe asserts the
+  ## file is gone — even on destroy we fail closed if the file is
+  ## still there, because a stale sudoers can give an unintended user
+  ## continued root access.
+  when defined(linux):
+    let path = sudoersRulePath(op.sudoersName)
+    if fileExists(path):
+      try: removeFile(path)
+      except OSError: discard
+    if fileExists(path):
+      raiseProtocol("linux.sudoersRule destroy of " & path &
+        " post-apply observation disagrees with desired state: " &
+        "the fragment file still exists after `removeFile`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.sudoersRule destroy")
+
+proc applyLinuxSudoersRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write to a sibling `.tmp` file, `visudo -c -f` to validate, then
+  ## atomic-rename into place. `visudo -c` failure deletes the tmp
+  ## and raises a clear `EProtocol` naming the rejected file.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): re-read the final
+  ## file via `observeLinuxSudoersRule` and compare the digest;
+  ## additionally `visudo -c -f` runs against the final path as part
+  ## of the observation, so a syntactically-broken final file fails
+  ## closed.
+  when defined(linux):
+    if op.sudoersDestroy:
+      return destroyLinuxSudoersRule(op)
+    let finalPath = sudoersRulePath(op.sudoersName)
+    let tmpPath = sudoersRuleTmpPath(op.sudoersName)
+    createDir(LinuxSudoersDir)
+    # Defensive: drop any stale `.tmp` from a previous failed apply.
+    if fileExists(tmpPath):
+      try: removeFile(tmpPath)
+      except OSError: discard
+    writeLinuxDropInFile(tmpPath, op.sudoersContent, 0o440)
+    # `visudo -c -f <tmp>` validates the staged file. A non-zero exit
+    # means the fragment is syntactically broken — delete the tmp so
+    # no half-written state lingers, then raise with `visudo`'s
+    # diagnostic so the operator can fix the source.
+    let (vOut, vCode) = execCmdEx("visudo -c -f " & quoteShell(tmpPath))
+    if vCode != 0:
+      try: removeFile(tmpPath)
+      except OSError: discard
+      raiseProtocol("linux.sudoersRule fragment '" & op.sudoersName &
+        "' rejected by `visudo -c -f`: " & vOut.strip() &
+        " — the staged file " & tmpPath & " was removed. Fix the " &
+        "fragment body before re-applying; a broken sudoers can lock " &
+        "you out of root.")
+    # Atomic rename: from this point on, the final file is the
+    # validated bytes. On Linux `moveFile` maps to a `rename(2)` that
+    # is the documented atomic-replace syscall.
+    if fileExists(finalPath):
+      try: removeFile(finalPath)
+      except OSError: discard
+    try:
+      moveFile(tmpPath, finalPath)
+    except OSError as e:
+      raiseProtocol("linux.sudoersRule atomic rename of " & tmpPath &
+        " -> " & finalPath & " failed: " & e.msg)
+    # Post-apply re-probe — `observeLinuxSudoersRule` re-runs
+    # `visudo -c -f <finalPath>` so a syntactically-broken final file
+    # surfaces here even if the tmp validation somehow disagreed.
+    let post = observeLinuxSudoersRule(op)
+    let desiredHex = posixDigestHexOfText(op.sudoersContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.sudoersRule " & finalPath &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ".")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.sudoersRule apply")

@@ -252,6 +252,19 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
     result = SystemResource(kind: srkLinuxTmpfilesRule,
       tmpfilesName: n, tmpfilesContent: c,
       tmpfilesApplyNow: fieldBool(r, "applyNow", true))
+  of "linux.sudoersRule":
+    let n = fieldString(r, "name")
+    let c = fieldString(r, "content")
+    if not isSafeDropInBasename(n):
+      raise newException(ValueError,
+        "linux.sudoersRule name '" & n &
+        "' is not a safe single-segment basename")
+    if n.contains('.'):
+      raise newException(ValueError,
+        "linux.sudoersRule name '" & n &
+        "' must not contain '.' (sudo silently ignores dotted files)")
+    result = SystemResource(kind: srkLinuxSudoersRule,
+      sudoersName: n, sudoersContent: c)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -278,7 +291,7 @@ proc isSystemScopeResource(kind: string): bool =
      "env.systemVariable", "passwd.user",
      "os.timezone", "os.hostname",
      "linux.sysctl", "linux.udevRule", "linux.polkitRule",
-     "linux.tmpfilesRule":
+     "linux.tmpfilesRule", "linux.sudoersRule":
     true
   else:
     false
@@ -461,5 +474,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("content", quoteSystemValue(r.tmpfilesContent)))
       pairs.add(("applyNow",
         (if r.tmpfilesApplyNow: "true" else: "false")))
+    of srkLinuxSudoersRule:
+      pairs.add(("name", quoteSystemValue(r.sudoersName)))
+      pairs.add(("content", quoteSystemValue(r.sudoersContent)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

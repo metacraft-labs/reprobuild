@@ -1742,3 +1742,80 @@ linux.tmpfilesRule {
     check realWorldIdentity(r) == "tmpfilesRule:repro-cache.conf"
     check resourceName(r) == "repro-cache.conf"
     check resourceKindTag(r) == "linux.tmpfilesRule"
+
+# ===========================================================================
+# linux.sudoersRule — parser + toPrivilegedOperation. M83 step 5.
+# ===========================================================================
+
+suite "repro_infra: linux.sudoersRule profile parser":
+
+  test "parses a linux.sudoersRule stanza":
+    let text = """
+linux.sudoersRule {
+  name = "wheel-extra"
+  content = "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkLinuxSudoersRule
+    check profile.resources[0].sudoersName == "wheel-extra"
+    check profile.resources[0].sudoersContent ==
+      "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl"
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokLinuxSudoersRule
+    check op.sudoersName == "wheel-extra"
+    check not op.sudoersDestroy
+    check requiresElevation(op.kind)
+
+  test "toPrivilegedOperation passes destroy through to sudoersDestroy":
+    let text = """
+linux.sudoersRule {
+  name = "wheel-x"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let op = toPrivilegedOperation(profile.resources[0], destroy = true)
+    check op.kind == pokLinuxSudoersRule
+    check op.sudoersDestroy
+
+  test "linux.sudoersRule rejects a path-escape name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.sudoersRule {
+  name = "../etc/shadow"
+  content = "x"
+}
+""")
+
+  test "linux.sudoersRule rejects a dotted name (sudo silently skips)":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.sudoersRule {
+  name = "wheel-extra.conf"
+  content = "x"
+}
+""")
+
+  test "linux.sudoersRule rejects a shell-meta name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.sudoersRule {
+  name = "evil; rm"
+  content = "x"
+}
+""")
+
+  test "realWorldIdentity and resourceName follow the sudoers rule name":
+    let text = """
+linux.sudoersRule {
+  name = "wheel-extra"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check realWorldIdentity(r) == "sudoersRule:wheel-extra"
+    check resourceName(r) == "wheel-extra"
+    check resourceKindTag(r) == "linux.sudoersRule"

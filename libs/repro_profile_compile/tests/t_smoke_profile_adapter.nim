@@ -813,6 +813,53 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "linux.sudoersRule resource maps to srkLinuxSudoersRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.sudoersRule", "wheel-extra",
+      @[strFieldEntry("name", "wheel-extra"),
+        strFieldEntry("content",
+          "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkLinuxSudoersRule
+    check sp.resources[0].sudoersName == "wheel-extra"
+    check sp.resources[0].sudoersContent ==
+      "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n"
+    check sp.resources[0].address == "wheel-extra"
+
+  test "linux.sudoersRule rejects a path-escape name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.sudoersRule", "x",
+      @[strFieldEntry("name", "../etc/shadow"),
+        strFieldEntry("content", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "linux.sudoersRule rejects a dotted name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.sudoersRule", "x",
+      @[strFieldEntry("name", "wheel-extra.conf"),
+        strFieldEntry("content", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips linux.sudoersRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.sudoersRule", "",
+      @[strFieldEntry("name", "wheel-extra"),
+        strFieldEntry("content",
+          "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkLinuxSudoersRule
+    check sp2.resources[0].sudoersName == "wheel-extra"
+    check sp2.resources[0].sudoersContent ==
+      "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl"
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
 # ---------------------------------------------------------------------------
 # Cross-cutting sanity: the home adapter's output passes the apply
 # pipeline's resource pre-validation by going through `findResourcesBlock`

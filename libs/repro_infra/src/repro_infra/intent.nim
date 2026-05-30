@@ -324,6 +324,9 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  content = " & renderScalar(r.tmpfilesContent))
     if not r.tmpfilesApplyNow:
       result.add("  applyNow = false")
+  of srkLinuxSudoersRule:
+    result.add("  name = " & renderScalar(r.sudoersName))
+    result.add("  content = " & renderScalar(r.sudoersContent))
   # M82 Phase B: emit `depends_on` last so its presence is obvious in a
   # rendered stanza without disrupting the legacy kind-field order.
   # Absent / empty seq omits the line entirely (the common case), so

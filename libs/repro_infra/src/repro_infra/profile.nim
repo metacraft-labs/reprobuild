@@ -52,6 +52,7 @@ type
     srkLinuxUdevRule = "linux.udevRule"
     srkLinuxPolkitRule = "linux.polkitRule"
     srkLinuxTmpfilesRule = "linux.tmpfilesRule"
+    srkLinuxSudoersRule = "linux.sudoersRule"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -150,6 +151,9 @@ type
       tmpfilesName*: string               ## basename, must end `.conf`
       tmpfilesContent*: string
       tmpfilesApplyNow*: bool             ## `systemd-tmpfiles --create` now
+    of srkLinuxSudoersRule:
+      sudoersName*: string                ## basename, no extension
+      sudoersContent*: string
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -196,6 +200,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "polkitRule:" & r.polkitName
   of srkLinuxTmpfilesRule:
     "tmpfilesRule:" & r.tmpfilesName
+  of srkLinuxSudoersRule:
+    "sudoersRule:" & r.sudoersName
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -233,6 +239,7 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxUdevRule: r.udevName
   of srkLinuxPolkitRule: r.polkitName
   of srkLinuxTmpfilesRule: r.tmpfilesName
+  of srkLinuxSudoersRule: r.sudoersName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -434,6 +441,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkLinuxUdevRule: srk = srkLinuxUdevRule
     of $srkLinuxPolkitRule: srk = srkLinuxPolkitRule
     of $srkLinuxTmpfilesRule: srk = srkLinuxTmpfilesRule
+    of $srkLinuxSudoersRule: srk = srkLinuxSudoersRule
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -716,6 +724,19 @@ proc parseSystemProfile*(text: string): SystemProfile =
       res = SystemResource(kind: srkLinuxTmpfilesRule,
         tmpfilesName: n, tmpfilesContent: c,
         tmpfilesApplyNow: applyNow)
+    of srkLinuxSudoersRule:
+      let n = need("name")
+      let c = need("content")
+      if not isSafeDropInBasename(n):
+        raiseSystemProfileInvalid("linux.sudoersRule name '" & n &
+          "' is not a safe single-segment basename (letters, digits, " &
+          "'.', '-', '_'; no '/', '..', or shell metacharacter)")
+      if n.contains('.'):
+        raiseSystemProfileInvalid("linux.sudoersRule name '" & n &
+          "' must not contain '.' — sudo silently ignores sudoers.d " &
+          "files with a '.' in the basename")
+      res = SystemResource(kind: srkLinuxSudoersRule,
+        sudoersName: n, sudoersContent: c)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -848,6 +869,11 @@ proc toPrivilegedOperation*(r: SystemResource;
       tmpfilesContent: r.tmpfilesContent,
       tmpfilesApplyNow: r.tmpfilesApplyNow,
       tmpfilesDestroy: destroy)
+  of srkLinuxSudoersRule:
+    PrivilegedOperation(kind: pokLinuxSudoersRule, address: r.address,
+      sudoersName: r.sudoersName,
+      sudoersContent: r.sudoersContent,
+      sudoersDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional
