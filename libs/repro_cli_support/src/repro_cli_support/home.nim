@@ -1335,7 +1335,16 @@ proc runHomeBuildBundle(args: openArray[string]): int =
       var applyOpts: ApplyOptions
       applyOpts.profileDir = profileDir
       if profileDir.len > 0:
-        applyOpts.profilePath = profileDir / HomeProfileAnchor
+        # Both `repro_home_intent/host_identity` and
+        # `repro_profile_compile/sources` export a `HomeProfileAnchor`
+        # constant with the same value ("home.nim"). They are both
+        # transitively imported into this module via
+        # `repro_home_intent` and `repro_profile_compile`, so the bare
+        # identifier is ambiguous. Qualify against `host_identity`
+        # because that is the M60 home-profile authoritative anchor;
+        # the `sources.HomeProfileAnchor` in profile-compile is a
+        # later mirror used inside the profile-compile graph edge.
+        applyOpts.profilePath = profileDir / host_identity.HomeProfileAnchor
       applyOpts.stateDir = resolvedStateDir
       applyOpts.storeRoot = resolvedStoreRoot
       applyOpts.homeDir = homeDir
