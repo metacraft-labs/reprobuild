@@ -279,11 +279,26 @@ suite "integration_project_interface_artifact_import_modes":
       providerModule, provider1.outputBinaryPath, artifact1.interfaceFingerprint)
     check freshProvider.isSome
     check fileExists(providerArtifactPath & ".inputs")
-    writeFile(providerDir / "extra_provider_source.nim",
-      "const extraProviderSalt* = \"one\"\n")
+    # Provider-compile freshness tracks the *imported* source closure (see
+    # `discoverNimSources` in repro_interface_artifacts); a sibling .nim file
+    # that no module imports has no effect on the compiled provider binary
+    # and therefore must NOT invalidate the cache. Mutating an imported
+    # private source (private_dependency.nim, reached via private_helper.nim)
+    # is the canonical implementation-edit that does invalidate, per
+    # `Project-Interface-Artifacts-And-Import-Modes.md`: "changing a private
+    # helper used only by implementation does not recompile downstream
+    # projects" — but it must still re-compile the provider itself.
+    let priorPrivateDependency =
+      readFile(providerDir / "private_dependency.nim")
+    writeFile(providerDir / "private_dependency.nim",
+      "const privateDependencyMarker* = \"private-dependency-edited\"\n")
     check readFreshProviderCompileArtifact(providerArtifactPath, providerModule,
       provider1.outputBinaryPath, artifact1.interfaceFingerprint).isNone
-    removeFile(providerDir / "extra_provider_source.nim")
+    writeFile(providerDir / "private_dependency.nim", priorPrivateDependency)
+    # Sanity check: restoring the imported source bytes brings the cache
+    # back to a fresh state (no other inputs changed).
+    check readFreshProviderCompileArtifact(providerArtifactPath, providerModule,
+      provider1.outputBinaryPath, artifact1.interfaceFingerprint).isSome
     writeFile(provider1.outputBinaryPath, "corrupt provider binary\n")
     check readFreshProviderCompileArtifact(providerArtifactPath, providerModule,
       provider1.outputBinaryPath, artifact1.interfaceFingerprint).isNone
