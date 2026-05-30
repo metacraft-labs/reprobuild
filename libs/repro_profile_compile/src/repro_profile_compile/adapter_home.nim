@@ -219,7 +219,7 @@ proc isHomeScopeResource(kind: string): bool =
   case kind
   of "env.userPath", "env.userVariable", "fs.managedBlock",
      "shell.integration", "windows.registryValueHKCU",
-     "windows.startup", "fs.userFile":
+     "windows.startup", "fs.userFile", "vscode.extension":
     true
   else:
     false

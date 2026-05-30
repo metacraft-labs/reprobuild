@@ -251,6 +251,29 @@ suite "M83 Phase D: home adapter — resources":
         hasExecutable = true
     check hasExecutable
 
+  test "vscode.extension resource carries extensions + removeUnknown":
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("vscode.extension", "vsExt",
+      @[listFieldEntry("extensions",
+          @["vscodevim.vim", "ms-python.python"]),
+        boolFieldEntry("removeUnknown", false)]))
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    let e = findResourcesBlock(prof).get.resourcesEntries[0]
+    check e.resourceKind == "vscode.extension"
+    var hasExtensions = false
+    var hasRemoveUnknown = false
+    for a in e.resourceAttrs:
+      if a.resourceAttrKey == "extensions":
+        # The home adapter renders a list as comma-separated bare text
+        # (the legacy parser convention for `env.userPath.entries`).
+        check a.resourceAttrValueSource == "vscodevim.vim,ms-python.python"
+        hasExtensions = true
+      elif a.resourceAttrKey == "removeUnknown":
+        check a.resourceAttrValueSource == "false"
+        hasRemoveUnknown = true
+    check hasExtensions
+    check hasRemoveUnknown
+
   test "depends_on synthesises the depends_on attribute as a [\"k:n\"] literal":
     var intent = ProfileIntent(name: "demo")
     intent.resources.add(resourceIntent("env.userPath", "p",

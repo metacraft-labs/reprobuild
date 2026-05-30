@@ -31,6 +31,7 @@ import ./drivers/registry
 import ./drivers/shell_integration
 import ./drivers/systemd_user
 import ./drivers/user_file
+import ./drivers/vscode_extension
 import ./drivers/windows_startup
 import ./lifecycle
 import ./manifest_record
@@ -105,6 +106,8 @@ proc observeResource*(r: Resource): ObservedState =
     return observeLaunchAgent(getHomeDir(), r.launchdLabel)
   of rkFsUserFile:
     return observeUserFile(r.userFileHostPath)
+  of rkVscodeExtension:
+    return observeVscodeExtensions(r.vscodeExtensions, r.vscodeRemoveUnknown)
 
 proc observeRecorded*(address: string; binding: RecordedBinding):
     ObservedState =
@@ -178,6 +181,13 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
     # The resourceId IS the resolved host path verbatim (no suffix),
     # per `realWorldIdentity`. Probe the file directly.
     return observeUserFile(binding.resourceId)
+  of rkVscodeExtension:
+    # The destroy path has no live "desired set" to compare against;
+    # observe with an empty desired + removeUnknown=false so the
+    # canonical-observed form is the empty intersection (zero digest
+    # against an empty desired digest). A subsequent destroy
+    # uninstalls every declared extension via the binding's payload.
+    return observeVscodeExtensions(@[], false)
   discard address
 
 # ---------------------------------------------------------------------------

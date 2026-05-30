@@ -41,6 +41,7 @@ import repro_home_resources/drivers/gsettings
 import repro_home_resources/drivers/launchd_user
 import repro_home_resources/drivers/systemd_user
 import repro_home_resources/drivers/user_file
+import repro_home_resources/drivers/vscode_extension
 
 export errors
 export types
@@ -58,3 +59,4 @@ export gsettings
 export launchd_user
 export systemd_user
 export user_file
+export vscode_extension

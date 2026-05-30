@@ -19,7 +19,7 @@
 ## intentionally left in place so the next apply's recovery sweep
 ## can quarantine the partial generation.
 
-import std/[options, os, sequtils, sets, strutils, tables, times]
+import std/[algorithm, options, os, sequtils, sets, strutils, tables, times]
 from repro_core/paths import extendedPath
 
 import blake3
@@ -762,6 +762,33 @@ proc resourceFromEntry(profilePath, homeDir: string;
       userFileContent: content,
       userFileMode: mode,
       userFileExecutable: executable)
+  of "vscode.extension":
+    # Closed-set attribute validation.
+    const vscodeAllowedKeys = ["extensions", "removeUnknown", "depends_on"]
+    for a in entry.resourceAttrs:
+      if a.kind == nkResourceAttr and a.resourceAttrKey notin vscodeAllowedKeys:
+        resourceProfileError(profilePath, a.resourceAttrLine,
+          "resource `vscode.extension " & address &
+          "` has unknown attribute `" & a.resourceAttrKey &
+          "`; expected one of: " & vscodeAllowedKeys.join(", "))
+    let raw = requireAttr(profilePath, entry, "extensions")
+    var exts: seq[string] = @[]
+    for e in raw.split(','):
+      let t = e.strip()
+      if t.len > 0:
+        if not isSafeExtensionId(t):
+          resourceProfileError(profilePath, entry.resourceHeaderLine,
+            "resource `vscode.extension " & address &
+            "` has an unsafe extension ID `" & t &
+            "` (charset: letters, digits, `.`, `-`, `_`, single `@`)")
+        exts.add(t)
+    let removeUnknown =
+      hasAttr(entry, "removeUnknown") and
+      attrOf(entry, "removeUnknown") == "true"
+    result = Resource(kind: rkVscodeExtension, address: address,
+      lifecyclePolicy: lpDefault,
+      vscodeExtensions: exts,
+      vscodeRemoveUnknown: removeUnknown)
   else:
     # The parser already rejects unknown kinds; this is a defensive
     # guard for any kind added to the model but not wired here.
@@ -872,6 +899,14 @@ proc resourceSeedString*(desired: DesiredSet): string =
       # bytewise identical).
       result.add(r.userFileHostPath & "\x1e" & r.userFileMode &
         "\x1e" & r.userFileContent)
+    of rkVscodeExtension:
+      # The seed covers the declared extension list (sorted +
+      # joined) and the removeUnknown flag so any change in EITHER
+      # bumps the generation id.
+      var sortedExts = r.vscodeExtensions
+      sortedExts.sort()
+      result.add(sortedExts.join(",") & "\x1e" &
+        (if r.vscodeRemoveUnknown: "1" else: "0"))
     result.add('\x1d')
 
 proc composeDesiredResources*(profile: Profile; homeDir, host: string):
@@ -1152,6 +1187,24 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
         # `realWorldIdentity` for `fs.userFile` IS the resolved host
         # path — no suffix to strip. Probe the file directly.
         live = observeUserFile(rb.realWorldIdentity)
+      of rkVscodeExtension:
+        # The vscode.extension resource is a singleton with the
+        # fixed identity `vscode:extensions`. The verify pass reads
+        # the recorded declared extension list from the binding's
+        # payload bytes (one ID per line — the canonical apply-time
+        # rendering) and re-observes against it.
+        var declared: seq[string]
+        var line = ""
+        for b in rb.payloadBytes:
+          if char(b) == '\n':
+            if line.len > 0:
+              declared.add(line)
+            line = ""
+          else:
+            line.add(char(b))
+        if line.len > 0:
+          declared.add(line)
+        live = observeVscodeExtensions(declared, false)
     except CatchableError:
       return false
     if not live.present:
@@ -1945,6 +1998,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               of rkMacosUserDefault: "defaults-literal"
               of rkLaunchdUserAgent: "plist-content"
               of rkFsUserFile: "user-file"
+              of rkVscodeExtension: "vscode-extensions"
             rb = toResourceBinding(action.address, desired.kind,
               identity, observed, observed.rawBytes,
               adoptPayloadKind, desired.lifecyclePolicy)
@@ -2054,6 +2108,16 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             postWriteBytes = applyUserFileResource(desired.userFileHostPath,
               desired.userFileContent, desired.userFileMode)
             payloadKindStr = "user-file"
+          of rkVscodeExtension:
+            # The vscode.extension driver wraps `code --list/install/
+            # uninstall-extension`. Reconciles the live installed
+            # extension set to the desired declared set (subset
+            # semantics when `removeUnknown=false`, strict-set
+            # semantics when `removeUnknown=true`). The recorded
+            # payload is the canonical-observed bytes.
+            postWriteBytes = applyVscodeExtensions(
+              desired.vscodeExtensions, desired.vscodeRemoveUnknown)
+            payloadKindStr = "vscode-extensions"
           let rb = toResourceBinding(action.address, desired.kind,
             identity, preWrite, postWriteBytes, payloadKindStr,
             desired.lifecyclePolicy)
@@ -2132,6 +2196,27 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             # can restore them.
             preWrite = observeRecorded(action.address, prev)
             destroyUserFileResource(prev.resourceId)
+          of rkVscodeExtension:
+            # The pre-write observation feeds the rollback record;
+            # the destroy direction uninstalls every extension we
+            # declared in the recorded payload. Extensions the user
+            # installed out-of-band stay.
+            preWrite = observeRecorded(action.address, prev)
+            # Parse the recorded payload bytes back into the declared
+            # extension list (one ID per line — the canonical
+            # rendering produced by the apply path).
+            var declared: seq[string]
+            var line = ""
+            for b in prev.payloadBytes:
+              if char(b) == '\n':
+                if line.len > 0:
+                  declared.add(line)
+                line = ""
+              else:
+                line.add(char(b))
+            if line.len > 0:
+              declared.add(line)
+            destroyVscodeExtensions(declared)
           let rb = toDestroyBinding(action.address, prev.kind,
             prev.resourceId, preWrite, prev.payloadKind,
             prev.lifecyclePolicy)

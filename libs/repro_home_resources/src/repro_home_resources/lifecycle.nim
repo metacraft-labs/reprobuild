@@ -28,6 +28,7 @@ import std/[strutils]
 import repro_home_generations
 
 import ./drivers/defaults
+import ./drivers/vscode_extension
 import ./errors
 import ./manifest_record
 import ./types
@@ -155,6 +156,18 @@ proc digestOfResource*(desired: Resource): Digest256 =
     # so a cache-hit re-apply compares equal byte-for-byte.
     var buf = newSeq[byte](desired.userFileContent.len)
     for i, ch in desired.userFileContent:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+  of rkVscodeExtension:
+    # The canonical-desired form is the sorted line-oriented rendering
+    # of the declared extension set (with `@version` pins preserved
+    # verbatim). `observeVscodeExtensions` computes the same canonical
+    # form against the installed set + `removeUnknown` policy, so a
+    # cache-hit re-apply digests equal.
+    let specs = parseDesiredExtensions(desired.vscodeExtensions)
+    let canon = canonicalExtensionSet(specs)
+    var buf = newSeq[byte](canon.len)
+    for i, ch in canon:
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
 

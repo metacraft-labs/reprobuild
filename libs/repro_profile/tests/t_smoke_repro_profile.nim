@@ -297,6 +297,26 @@ suite "Resource constructors":
     check target.len == 1
     check target[0].address == "os.hostname:MyDevBox"
 
+  test "vscodeExtension records the extensions list and removeUnknown flag":
+    var target: seq[ResourceIntent] = @[]
+    vscodeExtension(target,
+      extensions = @["vscodevim.vim", "ms-python.python"],
+      removeUnknown = false,
+      address = "vscodeExtensions")
+    check target.len == 1
+    check target[0].kind == "vscode.extension"
+    check target[0].address == "vscodeExtensions"
+    check target[0].fields["extensions"].items == @[
+      "vscodevim.vim", "ms-python.python"]
+    check target[0].fields["removeUnknown"].b == false
+
+  test "vscodeExtension defaults removeUnknown to false":
+    var target: seq[ResourceIntent] = @[]
+    vscodeExtension(target,
+      extensions = @["vscodevim.vim"])
+    check target.len == 1
+    check target[0].fields["removeUnknown"].b == false
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

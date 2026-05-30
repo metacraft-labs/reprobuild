@@ -42,6 +42,16 @@ type
       ## status, not POSIX permission bits. See the
       ## `Home-Profile-Resource-Lifecycle.md` "`fs.userFile`"
       ## section for the full contract.
+    rkVscodeExtension = "vscode.extension"
+      ## Post-M83 declarative VS Code extension set. Manages a SET of
+      ## marketplace extension IDs (`ms-python.python`, `vscodevim.
+      ## vim`, ...) installed via the `code --install-extension`
+      ## CLI. When `removeUnknown == false` (the default) the
+      ## resource OWNS only its declared subset and leaves other
+      ## extensions the user installed out-of-band alone; when
+      ## `removeUnknown == true` it converges to STRICT declarative-
+      ## set semantics (uninstall extras). An optional `@<version>`
+      ## pin on a declared ID forces a specific marketplace version.
 
   RegistryValueKind* = enum
     ## The 6 typed value kinds the `windows.registryValue` driver
@@ -180,6 +190,19 @@ type
         ## reflects the operator's intent. When `mode` is also
         ## present, `mode` wins (the driver applies `mode` and
         ## ignores `executable` beyond bookkeeping).
+    of rkVscodeExtension:
+      vscodeExtensions*: seq[string]
+        ## Declared marketplace extension IDs, optionally with a
+        ## `@<version>` pin (e.g. `vscodevim.vim@1.27.0`). The
+        ## driver parses each entry into an `ExtensionSpec` (id,
+        ## pinnedVersion). Order is insignificant — the canonical
+        ## digest sorts by ID.
+      vscodeRemoveUnknown*: bool
+        ## When true, the apply path uninstalls any extension NOT
+        ## in `vscodeExtensions` (strict declarative-set semantics).
+        ## When false (the default), the resource only OWNS its
+        ## declared subset and leaves other extensions the user
+        ## installed out-of-band alone.
 
   ResourceActionKind* = enum
     ## Output of the lifecycle decision algorithm.
@@ -283,6 +306,7 @@ proc resourceKindFromString*(s: string): ResourceKind =
   of $rkMacosUserDefault: rkMacosUserDefault
   of $rkLaunchdUserAgent: rkLaunchdUserAgent
   of $rkFsUserFile: rkFsUserFile
+  of $rkVscodeExtension: rkVscodeExtension
   else:
     raise newException(ValueError,
       "unknown resource kind tag: '" & s & "'")
@@ -397,3 +421,11 @@ proc realWorldIdentity*(r: Resource): string =
     # owns a SLICE of the file and therefore qualifies the host path
     # with `#<blockId>`).
     return r.userFileHostPath
+  of rkVscodeExtension:
+    # Singleton per VS Code installation — the resource manages "the
+    # set of installed extensions" for the per-user `code` CLI. The
+    # identity is fixed; the lifecycle algorithm uses the resource
+    # ADDRESS to disambiguate when a profile declares the resource
+    # more than once (which it should not — a closed-set parser-time
+    # check guards against that).
+    return "vscode:extensions"

@@ -171,6 +171,20 @@ template fsUserFile*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "fs.userFile", addr0, fields,
       dependsOn)
 
+template vscodeExtension*(targetResources: var seq[ResourceIntent];
+                          extensions: seq[string];
+                          removeUnknown: bool = false;
+                          address: string = "";
+                          dependsOn: seq[string] = @[]) =
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["extensions"] = listField(extensions)
+    fields["removeUnknown"] = boolField(removeUnknown)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("vscode.extension", "vscode-extensions")
+    pushResource(targetResources, "vscode.extension", addr0, fields,
+      dependsOn)
+
 # ---------------------------------------------------------------------
 # System-scope (M69) constructors.
 # ---------------------------------------------------------------------

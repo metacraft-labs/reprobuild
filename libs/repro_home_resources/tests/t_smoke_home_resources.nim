@@ -772,3 +772,134 @@ suite "M68 fs.userFile driver":
     let action = decideAction(state)
     check action.kind == rakCreate
     check action.resourceKind == rkFsUserFile
+
+# ===========================================================================
+# vscode.extension — pure parse + drift logic. The shell-out side runs
+# only when `code` is on PATH; what runs everywhere is the closed-set
+# validator, the marketplace-ID charset guard, the `code --list-
+# extensions --show-versions` parser, and the canonical-state digest.
+# ===========================================================================
+
+suite "vscode.extension pure surface":
+
+  test "isSafeExtensionId accepts marketplace IDs and pins":
+    check isSafeExtensionId("vscodevim.vim")
+    check isSafeExtensionId("ms-python.python")
+    check isSafeExtensionId("vscodevim.vim@1.27.0")
+    check isSafeExtensionId("ms_publisher.ext-name")
+    check not isSafeExtensionId("")
+    check not isSafeExtensionId("evil; rm -rf /")
+    check not isSafeExtensionId("ext'name")
+    check not isSafeExtensionId("a@b@c")            # double @
+    check not isSafeExtensionId("$(whoami)")
+
+  test "parseExtensionSpec splits id and version pin":
+    let s = parseExtensionSpec("vscodevim.vim@1.27.0")
+    check s.id == "vscodevim.vim"
+    check s.pinnedVersion == "1.27.0"
+    let u = parseExtensionSpec("ms-python.python")
+    check u.id == "ms-python.python"
+    check u.pinnedVersion == ""
+
+  test "parseCodeListExtensions reads the deterministic line-oriented form":
+    let raw = """
+ms-python.python@2024.0.1
+vscodevim.vim@1.27.0
+
+# a comment line is skipped
+"""
+    let parsed = parseCodeListExtensions(raw)
+    check parsed.len == 2
+    # Sorted by ID.
+    check parsed[0].id == "ms-python.python"
+    check parsed[0].pinnedVersion == "2024.0.1"
+    check parsed[1].id == "vscodevim.vim"
+    check parsed[1].pinnedVersion == "1.27.0"
+
+  test "parseCodeListExtensions skips unsafe-looking lines":
+    let raw = "good.ext\nevil; rm -rf /\nanother.ok\n"
+    let parsed = parseCodeListExtensions(raw)
+    check parsed.len == 2
+    check parsed[0].id == "another.ok"
+    check parsed[1].id == "good.ext"
+
+  test "canonicalExtensionSet sorts by ID":
+    let specs = @[
+      ExtensionSpec(id: "zzz.last", pinnedVersion: ""),
+      ExtensionSpec(id: "aaa.first", pinnedVersion: "1.0")]
+    let canon = canonicalExtensionSet(specs)
+    check canon == "aaa.first@1.0\nzzz.last\n"
+
+  test "observedCanonical subset semantics ignore extras when removeUnknown=false":
+    let installed = @[
+      ExtensionSpec(id: "vscodevim.vim", pinnedVersion: "1.27.0"),
+      ExtensionSpec(id: "ms-python.python", pinnedVersion: "2024.0.1"),
+      ExtensionSpec(id: "extra.installed-by-user", pinnedVersion: "0.1")]
+    let desired = @[
+      ExtensionSpec(id: "vscodevim.vim", pinnedVersion: "")]
+    let obs = observedCanonical(installed, desired, removeUnknown = false)
+    # Only the desired ID is kept, without its pin (desired is unpinned).
+    check obs == "vscodevim.vim\n"
+
+  test "observedCanonical strict semantics surface extras as drift":
+    let installed = @[
+      ExtensionSpec(id: "vscodevim.vim", pinnedVersion: "1.27.0"),
+      ExtensionSpec(id: "extra.installed-by-user", pinnedVersion: "0.1")]
+    let desired = @[
+      ExtensionSpec(id: "vscodevim.vim", pinnedVersion: "")]
+    let obs = observedCanonical(installed, desired, removeUnknown = true)
+    # Full installed set rendered; mismatch vs the desired canonical
+    # ("vscodevim.vim\n") triggers an update.
+    check obs == "extra.installed-by-user@0.1\nvscodevim.vim@1.27.0\n"
+
+  test "observedCanonical pinned desired keeps live version visible":
+    let installed = @[
+      ExtensionSpec(id: "vscodevim.vim", pinnedVersion: "1.27.0")]
+    let desired = @[
+      ExtensionSpec(id: "vscodevim.vim", pinnedVersion: "1.27.0")]
+    let obs = observedCanonical(installed, desired, removeUnknown = false)
+    check obs == "vscodevim.vim@1.27.0\n"
+    # When the live version drifts from the pin, the observed canonical
+    # still shows the LIVE version — driving an update.
+    let installed2 = @[
+      ExtensionSpec(id: "vscodevim.vim", pinnedVersion: "1.27.1")]
+    let obs2 = observedCanonical(installed2, desired, removeUnknown = false)
+    check obs2 == "vscodevim.vim@1.27.1\n"
+    check obs2 != canonicalExtensionSet(desired)
+
+  test "lifecycle: cache-hit when desired matches observed":
+    let desired = Resource(kind: rkVscodeExtension, address: "ve:hit",
+      lifecyclePolicy: lpDefault,
+      vscodeExtensions: @["vscodevim.vim"],
+      vscodeRemoveUnknown: false)
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfResource(desired)
+    let action = decideAction(state)
+    check action.kind == rakNoOp
+    check action.resourceKind == rkVscodeExtension
+
+  test "lifecycle: create for absent vscode.extension":
+    let desired = Resource(kind: rkVscodeExtension, address: "ve:create",
+      lifecyclePolicy: lpDefault,
+      vscodeExtensions: @["vscodevim.vim", "ms-python.python"],
+      vscodeRemoveUnknown: false)
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = false
+    let action = decideAction(state)
+    check action.kind == rakCreate
+    check action.resourceKind == rkVscodeExtension
+
+  test "realWorldIdentity is the singleton vscode:extensions":
+    let r = Resource(kind: rkVscodeExtension, address: "ve",
+      vscodeExtensions: @["vscodevim.vim"])
+    check realWorldIdentity(r) == "vscode:extensions"
+
+  test "resourceKindFromString covers vscode.extension":
+    check resourceKindFromString("vscode.extension") == rkVscodeExtension
