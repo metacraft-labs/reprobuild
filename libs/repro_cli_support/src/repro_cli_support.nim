@@ -9,6 +9,8 @@ import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_interface_artifacts
 import repro_monitor_depfile/fs_snoop
+import repro_monitor_depfile/types as monitor_depfile_types
+import repro_monitor_depfile/writer as monitor_depfile_writer
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider_protocol
@@ -4141,11 +4143,82 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
       responsePath)
   readProviderResponseFile(responsePath)
 
+proc writeDevEnvObservedInputs(path: string;
+                               inputs: openArray[GraphEvaluationInput]) =
+  ## Persist a `repro-pathset` side-car listing the observed evaluation
+  ## inputs that the provider consumed while answering manifest+dev-env
+  ## requests. The build engine reads this file as a recognized dependency
+  ## report so the introspection action's recorded inputs include — and the
+  ## strong fingerprint covers — files the provider read (e.g. via
+  ## ``readDevEnvFile``). Without this side-car the engine cannot observe
+  ## these reads on macOS, where SIP strips ``DYLD_INSERT_LIBRARIES`` from
+  ## ``/bin/sh`` and the monitor shim never reaches the provider subprocess.
+  ## See Filesystem-Policy-And-Observed-Inputs.md and
+  ## Caching-Architecture.md (strong-fingerprint section).
+  createDir(extendedPath(parentDir(path)))
+  var seenInputs = initHashSet[string]()
+  var seenProbes = initHashSet[string]()
+  var lines = @["repro-pathset-v1"]
+  for input in inputs:
+    case input.kind
+    of gevFileRead:
+      if input.identity.len == 0 or seenInputs.containsOrIncl(input.identity):
+        continue
+      lines.add("input\t" & input.identity)
+    of gevDirectoryEnumeration:
+      if input.identity.len == 0 or seenProbes.containsOrIncl(input.identity):
+        continue
+      lines.add("probe\t" & input.identity)
+    else:
+      discard
+  writeFile(extendedPath(path), lines.join("\n") & "\n")
+
+proc emitDevEnvObservedInputsToMonitor(
+    inputs: openArray[GraphEvaluationInput]) =
+  ## When the introspection action is wrapped by ``repro-fs-snoop``, also
+  ## emit synthetic ``mrFileOpen``/``mrPathProbe`` records into the monitor
+  ## fragment dir so the action's collected monitor evidence reflects the
+  ## reads the provider performed in a SIP-stripped subprocess (e.g.
+  ## ``readDevEnvFile``). The merged depfile then includes these paths in
+  ## ``monitorReads``, which makes the action's recorded evidence match
+  ## what the action actually consumed. We only emit records when a
+  ## fragment dir is present (i.e. the action runs under the snoop wrapper).
+  let fragmentDir = getEnv("REPRO_MONITOR_FRAGMENT_DIR")
+  if fragmentDir.len == 0:
+    return
+  var seen = initHashSet[string]()
+  var seq = 0'u64
+  let pid = uint64(getCurrentProcessId())
+  for input in inputs:
+    if input.identity.len == 0 or seen.containsOrIncl(input.identity):
+      continue
+    let (kind, obs) = case input.kind
+      of gevFileRead: (mrFileOpen, moFileRead)
+      of gevDirectoryEnumeration: (mrDirectoryEnumerate, moDirectoryEnumerate)
+      else: continue
+    inc seq
+    let record = MonitorRecord(
+      kind: kind,
+      observationKind: obs,
+      seq: seq,
+      osPid: pid,
+      threadId: 0,
+      result: 0,
+      path: input.identity,
+      detail: "repro-dev-env-introspect:evaluation-input")
+    try:
+      appendFragmentRecord(fragmentDir, record)
+    except CatchableError:
+      # Best-effort: if the fragment write fails we still have the
+      # repro-pathset side-car, which is authoritative for caching.
+      discard
+
 proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
   let providerBinary = valueAfterFlag(args, "--provider-binary")
   let providerArtifactId = valueAfterFlag(args, "--provider-artifact-id")
   let projectRoot = valueAfterFlag(args, "--project-root")
   let artifactPath = valueAfterFlag(args, "--out")
+  let observedInputsPath = valueAfterFlag(args, "--observed-inputs")
   let protocolRoot = valueAfterFlag(args, "--protocol-root")
   let entryPointId = valueAfterFlag(args, "--entry-point")
   let activity = valueAfterFlag(args, "--activity")
@@ -4225,6 +4298,9 @@ proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
       raise newException(ValueError, "activity selection mismatch in dev-env result")
 
     writeDevEnvArtifact(artifactPath, artifactFromDevEnvResult(response.devEnv))
+    if observedInputsPath.len > 0:
+      writeDevEnvObservedInputs(observedInputsPath, response.devEnv.evaluationInputs)
+    emitDevEnvObservedInputsToMonitor(response.devEnv.evaluationInputs)
     return 0
   except CatchableError as err:
     stderr.writeLine("repro dev-env introspection: error: " & err.msg)

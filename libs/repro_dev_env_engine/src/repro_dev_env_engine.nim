@@ -2,6 +2,7 @@ import std/[options, os, strutils]
 
 import repro_build_engine
 import repro_core
+import repro_depfile
 import repro_hash
 import repro_interface_artifacts
 
@@ -160,8 +161,20 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
                                providerArtifactPath, providerArtifactId,
                                artifactPath: string): BuildAction =
   let protocolRoot = config.outDir / "dev-env-protocol"
+  # Side-car listing the provider's evaluation inputs (gevFileRead /
+  # gevDirectoryEnumeration paths). The helper writes it on every
+  # successful run; the engine reads it as a recognized
+  # ``repro-pathset`` report so the recorded action inputs — and hence
+  # the strong fingerprint — cover every file the provider read while
+  # producing the dev-env artifact. This is required for correct
+  # invalidation on macOS, where SIP strips DYLD_INSERT_LIBRARIES from
+  # ``/bin/sh`` and the monitor shim cannot see into the provider
+  # subprocess. See Filesystem-Policy-And-Observed-Inputs.md (observed
+  # input classification) and Caching-Architecture.md (strong-
+  # fingerprint section).
+  let observedInputsPath = config.outDir / "dev-env.observed-inputs.rbpath"
   let weak = fingerprintText([
-    "reprobuild.dev-env.introspection.v1",
+    "reprobuild.dev-env.introspection.v2",
     providerArtifactId,
     provider.outputBinaryPath,
     hexDigest(provider.outputBinaryFingerprint),
@@ -178,6 +191,7 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
     "--provider-artifact-id", providerArtifactId,
     "--project-root", config.projectRoot,
     "--out", artifactPath,
+    "--observed-inputs", observedInputsPath,
     "--protocol-root", protocolRoot
   ]
   if config.entryPointId.len > 0:
@@ -196,17 +210,25 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
   if config.developOverridesPath.len > 0 and
       fileExists(extendedPath(config.developOverridesPath)):
     inputs.add(config.developOverridesPath)
+  let observedReport = RecognizedDependencyReportSpec(
+    formatName: DependencyFormatName(ReproPathSetFormatName),
+    outputs: @[ExpectedDependencyFile(
+      logicalName: "observed-inputs",
+      path: observedInputsPath,
+      required: true)],
+    completeness: decComplete)
   action("__repro_dev_env_introspection", argv,
     cwd = config.workDir,
     inputs = inputs,
-    outputs = @[artifactPath],
+    outputs = @[artifactPath, observedInputsPath],
     env = config.commonMonitorEnv(),
     commandStatsId = "repro dev-env introspection edge",
     cacheable = true,
     weakFingerprint = weak,
     dependencyPolicy = DependencyGatheringPolicy(
-      kind: dgAutomaticMonitor,
-      completeness: decComplete))
+      kind: dgRecognizedFormatValidatedByMonitor,
+      completeness: decComplete,
+      recognizedReports: @[observedReport]))
 
 proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
                        shellFragmentPath, navigatorStatsPath: string): BuildAction =

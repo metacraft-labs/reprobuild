@@ -140,12 +140,16 @@ proc parseMakeLikeText(path, text: string): DependencyPathSet =
     raiseReport(dreMalformed, path & ": depfile contains no rules")
   parsed
 
+proc readReproPathSet*(path: string): DependencyPathSet
+
 proc readRecognizedDependencyReport*(formatName, path: string): DependencyPathSet =
   if path.len == 0 or not fileExists(extendedPath(path)):
     raiseReport(dreMissingFile, "dependency report is missing: " & path)
   case formatName
   of MakeDepfileFormatName, NinjaDepfileFormatName:
     parseMakeLikeText(path, readFile(extendedPath(path)))
+  of ReproPathSetFormatName:
+    readReproPathSet(path)
   of MsvcShowIncludesFormatName, ClangScanDepsJsonFormatName:
     raiseReport(dreUnsupportedFormat,
       "recognized dependency format is not implemented yet: " & formatName)
