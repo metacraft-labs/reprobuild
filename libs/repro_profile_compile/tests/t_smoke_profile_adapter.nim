@@ -470,6 +470,36 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "os.hostname resource maps to srkOsHostname":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("os.hostname", "userHostname",
+      @[strFieldEntry("hostname", "MyDevBox")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkOsHostname
+    check sp.resources[0].hostnameName == "MyDevBox"
+    check sp.resources[0].address == "userHostname"
+
+  test "os.hostname rejects a metacharacter hostname at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("os.hostname", "x",
+      @[strFieldEntry("hostname", "host;rm")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips os.hostname":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("os.hostname", "",
+      @[strFieldEntry("hostname", "MyDevBox")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkOsHostname
+    check sp2.resources[0].hostnameName == "MyDevBox"
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
   test "renderSystemProfileToText preserves depends_on edges":
     var intent = ProfileIntent(name: "sys")
     intent.resources.add(resourceIntent("windows.service", "",

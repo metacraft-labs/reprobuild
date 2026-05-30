@@ -1093,3 +1093,76 @@ suite "repro_elevation: os.timezone pure surface":
     check requiresElevation(pokOsTimezone)
     check $pokOsTimezone == "os.timezone"
     check privilegedOperationKindFromString("os.timezone") == pokOsTimezone
+
+# ===========================================================================
+# os.hostname — pure parse + drift logic. The shell-out side of the
+# driver runs only on the resident host's platform; what runs everywhere
+# is the closed-set validator, the RFC 1123 hostname guard, the canonical-
+# state digest (case-insensitive), and the `hostname` probe parser.
+# ===========================================================================
+
+suite "repro_elevation: os.hostname pure surface":
+
+  test "isSafeHostname accepts RFC 1123 names":
+    check isSafeHostname("myhost")
+    check isSafeHostname("MyHost")
+    check isSafeHostname("host-01")
+    check isSafeHostname("a")
+    check not isSafeHostname("")
+    check not isSafeHostname("-myhost")           # leading dash
+    check not isSafeHostname("myhost-")           # trailing dash
+    check not isSafeHostname("my.host")           # period not allowed (single label)
+    check not isSafeHostname("my_host")           # underscore refused
+    check not isSafeHostname("my host")           # space refused
+    check not isSafeHostname("my'host")
+    check not isSafeHostname("host;rm")
+    check not isSafeHostname("x" & "a".repeat(63)) # 64 chars, too long
+
+  test "operationValidationError accepts a valid os.hostname operation":
+    let ok = PrivilegedOperation(kind: pokOsHostname,
+      address: "userHostname",
+      hostnameName: "myhost-01")
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad os.hostname fields":
+    let empty = PrivilegedOperation(kind: pokOsHostname,
+      address: "x", hostnameName: "")
+    check operationValidationError(empty).len > 0
+    let unsafe = PrivilegedOperation(kind: pokOsHostname,
+      address: "x", hostnameName: "host;rm -rf /")
+    check operationValidationError(unsafe).len > 0
+    let noAddress = PrivilegedOperation(kind: pokOsHostname,
+      address: "", hostnameName: "myhost")
+    check operationValidationError(noAddress).len > 0
+
+  test "parseHostnameOutput strips whitespace and CR/LF":
+    check parseHostnameOutput("myhost\r\n") == "myhost"
+    check parseHostnameOutput("  myhost  \n") == "myhost"
+    check parseHostnameOutput("") == ""
+
+  test "canonical hostname state is case-insensitive":
+    check canonicalHostnameState("MyHost") == canonicalHostnameState("myhost")
+    check canonicalHostnameState("MyHost") == canonicalHostnameDesired("myhost")
+    check hostnameMatchesDesired("MYHOST", "myhost")
+    check hostnameMatchesDesired("myhost", "MYHOST")
+    check not hostnameMatchesDesired("otherhost", "myhost")
+    check canonicalHostnameState("") == "hostname:absent"
+
+  test "RBEB Operation frame round-trips an os.hostname":
+    let op = PrivilegedOperation(kind: pokOsHostname,
+      address: "userHostname",
+      hostnameName: "MyDevBox")
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let dec = decodeFrame(encodeOperation(wire))
+    check dec.messageType == rmtOperation
+    let w2 = decodeOperation(dec.body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokOsHostname
+    check w2.operation.address == "userHostname"
+    check w2.operation.hostnameName == "MyDevBox"
+
+  test "os.hostname requires elevation":
+    check requiresElevation(pokOsHostname)
+    check $pokOsHostname == "os.hostname"
+    check privilegedOperationKindFromString("os.hostname") == pokOsHostname

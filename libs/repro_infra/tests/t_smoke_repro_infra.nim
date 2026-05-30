@@ -145,6 +145,39 @@ os.timezone {
 }
 """)
 
+  test "parses an os.hostname stanza":
+    let text = """
+os.hostname {
+  hostname = "MyDevBox"
+  address = "userHostname"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkOsHostname
+    check profile.resources[0].hostnameName == "MyDevBox"
+    check profile.resources[0].address == "userHostname"
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokOsHostname
+    check op.hostnameName == "MyDevBox"
+    check requiresElevation(op.kind)
+
+  test "os.hostname rejects a name with shell metacharacters":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+os.hostname {
+  hostname = "host;rm -rf /"
+}
+""")
+
+  test "os.hostname rejects an underscore":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+os.hostname {
+  hostname = "my_host"
+}
+""")
+
   test "an HKCU registry key is rejected (home-scope, not system)":
     expect ESystemProfileInvalid:
       discard parseSystemProfile("""

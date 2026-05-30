@@ -281,6 +281,22 @@ suite "Resource constructors":
     check target.len == 1
     check target[0].address == "os.timezone:America/Los_Angeles"
 
+  test "osHostname records the hostname under the hostname field":
+    var target: seq[ResourceIntent] = @[]
+    osHostname(target,
+      hostname = "MyDevBox",
+      address = "userHostname")
+    check target.len == 1
+    check target[0].kind == "os.hostname"
+    check target[0].address == "userHostname"
+    check target[0].fields["hostname"].s == "MyDevBox"
+
+  test "osHostname auto-addresses from the hostname value when address is empty":
+    var target: seq[ResourceIntent] = @[]
+    osHostname(target, hostname = "MyDevBox")
+    check target.len == 1
+    check target[0].address == "os.hostname:MyDevBox"
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,
