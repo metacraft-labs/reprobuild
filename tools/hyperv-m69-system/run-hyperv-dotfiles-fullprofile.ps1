@@ -593,6 +593,16 @@ try {
       & scoop bucket add extras *>&1 | ForEach-Object { L ([string]$_) }
       L "scoop bucket list:"
       & scoop bucket list *>&1 | ForEach-Object { L ([string]$_) }
+      # M83 Phase E: Nim's `nim c` shells out to a C backend (gcc.exe by
+      # default). The fresh Win11 dev VM has neither gcc nor cl.exe;
+      # rather than dragging in winget+WinLibs, install gcc via scoop's
+      # `main` bucket -- same machinery that just bootstrapped git.
+      # This puts `gcc.exe` under `~\scoop\apps\gcc\current\bin\`, and
+      # the apply ScriptBlock further down already prepends the user
+      # PATH (which includes scoop shims) so the compile step finds it.
+      L "installing gcc from main bucket (Nim backend C compiler)"
+      & scoop install gcc *>&1 | ForEach-Object { L ([string]$_) }
+      $env:Path = "$env:USERPROFILE\scoop\apps\gcc\current\bin;$env:Path"
       $ok = $true
     } catch {
       L "EXCEPTION: $_"
