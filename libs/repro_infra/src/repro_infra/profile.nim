@@ -54,6 +54,7 @@ type
     srkLinuxTmpfilesRule = "linux.tmpfilesRule"
     srkLinuxSudoersRule = "linux.sudoersRule"
     srkPasswdGroup = "passwd.group"
+    srkLinuxNixDaemonSetting = "linux.nixDaemonSetting"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -159,6 +160,10 @@ type
       pgName*: string                     ## group name
       pgGid*: string                      ## "" => unpinned
       pgMembers*: seq[string]             ## additive-only members
+    of srkLinuxNixDaemonSetting:
+      nixKey*: string
+      nixValue*: string
+      nixFilename*: string                ## "" => auto-derived
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -209,6 +214,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "sudoersRule:" & r.sudoersName
   of srkPasswdGroup:
     "group:" & r.pgName
+  of srkLinuxNixDaemonSetting:
+    "nixDaemonSetting:" & r.nixKey
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -248,6 +255,7 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxTmpfilesRule: r.tmpfilesName
   of srkLinuxSudoersRule: r.sudoersName
   of srkPasswdGroup: r.pgName
+  of srkLinuxNixDaemonSetting: r.nixKey
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -451,6 +459,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkLinuxTmpfilesRule: srk = srkLinuxTmpfilesRule
     of $srkLinuxSudoersRule: srk = srkLinuxSudoersRule
     of $srkPasswdGroup: srk = srkPasswdGroup
+    of $srkLinuxNixDaemonSetting: srk = srkLinuxNixDaemonSetting
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -767,6 +776,30 @@ proc parseSystemProfile*(text: string): SystemProfile =
             "'-', '_'; no leading '-')")
       res = SystemResource(kind: srkPasswdGroup,
         pgName: n, pgGid: gidStr, pgMembers: members)
+    of srkLinuxNixDaemonSetting:
+      let k = need("key")
+      let v = need("value")
+      if not isSafeNixDaemonKey(k):
+        raiseSystemProfileInvalid("linux.nixDaemonSetting key '" & k &
+          "' contains characters outside the Nix-key charset " &
+          "(letters, digits, '-', '_')")
+      if not isSafeNixDaemonValue(v):
+        raiseSystemProfileInvalid("linux.nixDaemonSetting value for key '" &
+          k & "' contains a newline — a nix.conf drop-in entry is one " &
+          "key=value line, so a newline in the value would corrupt the file")
+      let filename =
+        if "filename" in fields: fields["filename"] else: ""
+      if filename.len > 0:
+        if not isSafeDropInBasename(filename):
+          raiseSystemProfileInvalid("linux.nixDaemonSetting filename '" &
+            filename & "' is not a safe single-segment basename " &
+            "(letters, digits, '.', '-', '_'; no '/', '..', or shell " &
+            "metacharacter)")
+        if not filename.endsWith(".conf"):
+          raiseSystemProfileInvalid("linux.nixDaemonSetting filename '" &
+            filename & "' must end with '.conf' (nix.conf.d convention)")
+      res = SystemResource(kind: srkLinuxNixDaemonSetting,
+        nixKey: k, nixValue: v, nixFilename: filename)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -910,6 +943,12 @@ proc toPrivilegedOperation*(r: SystemResource;
       pgGid: r.pgGid,
       pgMembers: r.pgMembers,
       pgDestroy: destroy)
+  of srkLinuxNixDaemonSetting:
+    PrivilegedOperation(kind: pokLinuxNixDaemonSetting, address: r.address,
+      nixKey: r.nixKey,
+      nixValue: r.nixValue,
+      nixFilename: r.nixFilename,
+      nixDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

@@ -906,6 +906,52 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "linux.nixDaemonSetting resource maps to srkLinuxNixDaemonSetting":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.nixDaemonSetting", "ef",
+      @[strFieldEntry("key", "experimental-features"),
+        strFieldEntry("value", "nix-command flakes"),
+        strFieldEntry("filename", "10-flakes.conf")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkLinuxNixDaemonSetting
+    check sp.resources[0].nixKey == "experimental-features"
+    check sp.resources[0].nixValue == "nix-command flakes"
+    check sp.resources[0].nixFilename == "10-flakes.conf"
+    check sp.resources[0].address == "ef"
+
+  test "linux.nixDaemonSetting rejects a bad key at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.nixDaemonSetting", "x",
+      @[strFieldEntry("key", "bad; rm"),
+        strFieldEntry("value", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "linux.nixDaemonSetting rejects a non-.conf filename at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.nixDaemonSetting", "x",
+      @[strFieldEntry("key", "experimental-features"),
+        strFieldEntry("value", "x"),
+        strFieldEntry("filename", "no-extension")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips linux.nixDaemonSetting":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.nixDaemonSetting", "",
+      @[strFieldEntry("key", "experimental-features"),
+        strFieldEntry("value", "nix-command flakes")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkLinuxNixDaemonSetting
+    check sp2.resources[0].nixKey == "experimental-features"
+    check sp2.resources[0].nixValue == "nix-command flakes"
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
 # ---------------------------------------------------------------------------
 # Cross-cutting sanity: the home adapter's output passes the apply
 # pipeline's resource pre-validation by going through `findResourcesBlock`

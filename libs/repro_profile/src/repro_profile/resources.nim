@@ -596,3 +596,26 @@ template passwdGroup*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("passwd.group", name)
     pushResource(targetResources, "passwd.group", addr0, fields,
       dependsOn)
+
+template linuxNixDaemonSetting*(targetResources: var seq[ResourceIntent];
+                                key: string;
+                                value: string;
+                                filename: string = "";
+                                address: string = "";
+                                dependsOn: seq[string] = @[]) =
+  ## M83 step 6 — Linux Nix-daemon configuration drop-in. Writes
+  ## `<key> = <value>` to `/etc/nix/nix.conf.d/<filename>`
+  ## (auto-derived to `99-reprobuild-<addressOrKey>.conf` when
+  ## `filename` is empty). No daemon reload is performed; Nix
+  ## re-reads on each invocation.
+  ##
+  ## Address default: `linux.nixDaemonSetting:<key>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["key"] = strField(key)
+    fields["value"] = strField(value)
+    fields["filename"] = strField(filename)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.nixDaemonSetting", key)
+    pushResource(targetResources, "linux.nixDaemonSetting", addr0,
+      fields, dependsOn)

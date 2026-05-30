@@ -452,6 +452,29 @@ suite "Resource constructors":
     check "gid" notin target[0].fields
     check "members" notin target[0].fields
 
+  test "linuxNixDaemonSetting records key / value / filename":
+    var target: seq[ResourceIntent] = @[]
+    linuxNixDaemonSetting(target,
+      key = "experimental-features",
+      value = "nix-command flakes",
+      filename = "10-flakes.conf",
+      address = "ef")
+    check target.len == 1
+    check target[0].kind == "linux.nixDaemonSetting"
+    check target[0].address == "ef"
+    check target[0].fields["key"].s == "experimental-features"
+    check target[0].fields["value"].s == "nix-command flakes"
+    check target[0].fields["filename"].s == "10-flakes.conf"
+
+  test "linuxNixDaemonSetting auto-addresses from the key when address empty":
+    var target: seq[ResourceIntent] = @[]
+    linuxNixDaemonSetting(target,
+      key = "experimental-features",
+      value = "nix-command")
+    check target.len == 1
+    check target[0].address ==
+      "linux.nixDaemonSetting:experimental-features"
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

@@ -333,6 +333,11 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  gid = " & renderScalar(r.pgGid))
     if r.pgMembers.len > 0:
       result.add("  members = " & renderList(r.pgMembers))
+  of srkLinuxNixDaemonSetting:
+    result.add("  key = " & renderScalar(r.nixKey))
+    result.add("  value = " & renderScalar(r.nixValue))
+    if r.nixFilename.len > 0:
+      result.add("  filename = " & renderScalar(r.nixFilename))
   # M82 Phase B: emit `depends_on` last so its presence is obvious in a
   # rendered stanza without disrupting the legacy kind-field order.
   # Absent / empty seq omits the line entirely (the common case), so

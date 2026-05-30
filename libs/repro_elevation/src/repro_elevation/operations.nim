@@ -164,6 +164,18 @@ type
       ## direction is gated by `--accept-passwd-destroy` (a removed
       ## group can break file ownership), mirroring the
       ## `pokPasswdUser` gate.
+    pokLinuxNixDaemonSetting = "linux.nixDaemonSetting"
+      ## The post-M83 step-6 Linux Nix-daemon configuration drop-in:
+      ## write a `<key> = <value>` line to
+      ## `/etc/nix/nix.conf.d/<filename>` (mode 0644). Nix re-reads
+      ## its configuration on each invocation, so no daemon reload
+      ## is performed — the next `nix` / `nix-daemon` call observes
+      ## the new setting. The drop-in directory is created if absent.
+      ## NOTE: a host whose Nix install predates drop-in support
+      ## would need a managed-block region inside `/etc/nix/nix.conf`
+      ## instead; that fallback is deferred until a real host
+      ## surfaces the need (every supported Nix release ships the
+      ## drop-in dir).
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -383,6 +395,18 @@ type
       pgGid*: string
       pgMembers*: seq[string]
       pgDestroy*: bool
+    of pokLinuxNixDaemonSetting:
+      ## Write a Nix-daemon configuration drop-in. `nixKey` is the
+      ## Nix config key (e.g. `experimental-features`); `nixValue` is
+      ## the value (newlines are refused — a config line is one
+      ## `key = value` entry); `nixFilename` is the drop-in basename
+      ## under `/etc/nix/nix.conf.d/` (must end `.conf`).
+      ## `nixDestroy` selects the rollback direction (delete the
+      ## drop-in file).
+      nixKey*: string
+      nixValue*: string
+      nixFilename*: string
+      nixDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -423,6 +447,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxTmpfilesRule: true
   of pokLinuxSudoersRule: true
   of pokPasswdGroup: true
+  of pokLinuxNixDaemonSetting: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -455,6 +480,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxTmpfilesRule: pokLinuxTmpfilesRule
   of $pokLinuxSudoersRule: pokLinuxSudoersRule
   of $pokPasswdGroup: pokPasswdGroup
+  of $pokLinuxNixDaemonSetting: pokLinuxNixDaemonSetting
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -719,6 +745,34 @@ proc isSafeGid*(gid: string): bool =
       return false
   return true
 
+proc isSafeNixDaemonKey*(key: string): bool =
+  ## True only for a non-empty Nix-daemon config key in the
+  ## conservative charset: alphanumerics, `-`, `_`. Real Nix keys
+  ## (`experimental-features`, `substituters`, `trusted-users`,
+  ## `auto-optimise-store`) all fall in this set; `.` / `/` / shell
+  ## metacharacters never appear in a legitimate Nix key. The key is
+  ## interpolated into a `<key> = <value>` file line and into the
+  ## `key:` prefix grep that observes the live file, so a closed
+  ## charset is necessary for both surfaces.
+  let k = key.strip()
+  if k.len == 0:
+    return false
+  for ch in k:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '-', '_'}:
+      return false
+  return true
+
+proc isSafeNixDaemonValue*(value: string): bool =
+  ## True only for a Nix-daemon value that does not contain a newline.
+  ## The value is interpolated into a `<key> = <value>\n` file line; a
+  ## newline in the value would corrupt the file. Other characters
+  ## (including `=` and shell metacharacters) are fine — the value
+  ## never reaches a shell, only the file.
+  for ch in value:
+    if ch == '\n' or ch == '\r':
+      return false
+  return true
+
 # ---------------------------------------------------------------------------
 # Closed-set validation. The broker calls `validateOperation` on
 # every decoded `PrivilegedOperation` before dispatch — a frame that
@@ -943,6 +997,23 @@ proc operationValidationError*(op: PrivilegedOperation): string =
         return "passwd.group member '" & m &
           "' is not a valid POSIX user name (letters, digits, '.', " &
           "'-', '_'; no leading '-')"
+  of pokLinuxNixDaemonSetting:
+    if not isSafeNixDaemonKey(op.nixKey):
+      return "linux.nixDaemonSetting key '" & op.nixKey &
+        "' contains characters outside the Nix-key charset " &
+        "(letters, digits, '-', '_')"
+    if not isSafeNixDaemonValue(op.nixValue):
+      return "linux.nixDaemonSetting value for key '" & op.nixKey &
+        "' contains a newline — a nix.conf drop-in entry is one " &
+        "key=value line, so a newline in the value would corrupt the file"
+    if op.nixFilename.len > 0:
+      if not isSafeDropInBasename(op.nixFilename):
+        return "linux.nixDaemonSetting filename '" & op.nixFilename &
+          "' is not a safe single-segment basename (letters, digits, " &
+          "'.', '-', '_'; no '/', '..', or shell metacharacter)"
+      if not op.nixFilename.endsWith(".conf"):
+        return "linux.nixDaemonSetting filename '" & op.nixFilename &
+          "' must end with '.conf' (nix.conf.d convention)"
   return ""
 
 # ---------------------------------------------------------------------------

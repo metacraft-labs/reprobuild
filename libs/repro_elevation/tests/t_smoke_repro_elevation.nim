@@ -2089,3 +2089,172 @@ suite "repro_elevation: passwd.group pure surface":
         discard applyPasswdGroup(op)
       expect ENotImplementedPlatform:
         discard destroyPasswdGroup(op)
+
+# ===========================================================================
+# linux.nixDaemonSetting — pure drop-in parse + drift logic. The shell-
+# out side wraps a write to /etc/nix/nix.conf.d/; pure tests cover the
+# closed-set validator (Nix-key + value charset), the canonical
+# drop-in content shape, the line parser, the auto-filename
+# derivation, and the codec round-trip.
+# ===========================================================================
+
+suite "repro_elevation: linux.nixDaemonSetting pure surface":
+
+  test "nixDaemonDropInContent renders the canonical bytes":
+    check nixDaemonDropInContent("experimental-features",
+      "nix-command flakes") ==
+      "experimental-features = nix-command flakes\n"
+
+  test "parseNixDaemonDropInLine matches a simple key=value pair":
+    let m = parseNixDaemonDropInLine(
+      "experimental-features = nix-command flakes",
+      "experimental-features")
+    check m.matched
+    check m.value == "nix-command flakes"
+
+  test "parseNixDaemonDropInLine ignores comments and blank lines":
+    check not parseNixDaemonDropInLine(
+      "# experimental-features = flakes",
+      "experimental-features").matched
+    check not parseNixDaemonDropInLine("",
+      "experimental-features").matched
+    check not parseNixDaemonDropInLine("   ",
+      "experimental-features").matched
+
+  test "parseNixDaemonDropInLine returns the LAST matching value":
+    let content = "experimental-features = old\n" &
+                  "experimental-features = nix-command flakes\n"
+    let r = readNixDaemonDropInValue(content, "experimental-features")
+    check r.present
+    check r.value == "nix-command flakes"
+
+  test "readNixDaemonDropInValue reports absent for an unmatched key":
+    let r = readNixDaemonDropInValue("# nothing here\n",
+      "experimental-features")
+    check not r.present
+
+  test "nixDaemonDropInFilename uses explicit filename when set":
+    let op = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "ef",
+      nixKey: "experimental-features",
+      nixValue: "x",
+      nixFilename: "10-flakes.conf")
+    check nixDaemonDropInFilename(op) == "10-flakes.conf"
+
+  test "nixDaemonDropInFilename auto-derives a slug when filename empty":
+    let op = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "linux.nixDaemonSetting:experimental-features",
+      nixKey: "experimental-features",
+      nixValue: "x",
+      nixFilename: "")
+    let f = nixDaemonDropInFilename(op)
+    check f.startsWith("99-reprobuild-")
+    check f.endsWith(".conf")
+
+  test "nixDaemonDropInPath roots the file under /etc/nix/nix.conf.d":
+    let op = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "ef",
+      nixKey: "experimental-features",
+      nixValue: "x",
+      nixFilename: "10-flakes.conf")
+    check nixDaemonDropInPath(op) ==
+      "/etc/nix/nix.conf.d/10-flakes.conf"
+    check LinuxNixDaemonDropInDir == "/etc/nix/nix.conf.d"
+
+  test "operationValidationError accepts a valid linux.nixDaemonSetting":
+    let ok = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "experimental-features",
+      nixKey: "experimental-features",
+      nixValue: "nix-command flakes",
+      nixFilename: "10-flakes.conf")
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad linux.nixDaemonSetting fields":
+    # shell-meta in key
+    let badKey = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "x", nixKey: "bad; rm", nixValue: "x")
+    check operationValidationError(badKey).len > 0
+    # newline in value
+    let badValue = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "x", nixKey: "ok", nixValue: "first\nsecond")
+    check operationValidationError(badValue).len > 0
+    # filename missing .conf
+    let badFilename = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "x", nixKey: "ok", nixValue: "x",
+      nixFilename: "no-extension")
+    check operationValidationError(badFilename).len > 0
+    # filename with path-escape segment
+    let escapeFilename = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "x", nixKey: "ok", nixValue: "x",
+      nixFilename: "../etc/passwd")
+    check operationValidationError(escapeFilename).len > 0
+    # empty address
+    let emptyAddr = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "", nixKey: "ok", nixValue: "x")
+    check operationValidationError(emptyAddr).len > 0
+
+  test "RBEB Operation frame round-trips a linux.nixDaemonSetting":
+    let op = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "experimental-features",
+      nixKey: "experimental-features",
+      nixValue: "nix-command flakes",
+      nixFilename: "10-flakes.conf",
+      nixDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokLinuxNixDaemonSetting
+    check w2.operation.address == "experimental-features"
+    check w2.operation.nixKey == "experimental-features"
+    check w2.operation.nixValue == "nix-command flakes"
+    check w2.operation.nixFilename == "10-flakes.conf"
+    check not w2.operation.nixDestroy
+
+  test "RBEB Operation frame round-trips a destroy linux.nixDaemonSetting":
+    let op = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "ef",
+      nixKey: "experimental-features",
+      nixValue: "",
+      nixFilename: "",
+      nixDestroy: true)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "cafef00d")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.kind == pokLinuxNixDaemonSetting
+    check w2.operation.nixDestroy
+
+  test "posix desired digest for nixDaemonSetting matches content bytes":
+    let op = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "ef",
+      nixKey: "experimental-features",
+      nixValue: "nix-command flakes")
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText(nixDaemonDropInContent(op.nixKey, op.nixValue))
+
+  test "posix desired digest for nixDaemonSetting destroy is the absent sentinel":
+    let op = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: "ef",
+      nixKey: "experimental-features",
+      nixValue: "x",
+      nixDestroy: true)
+    check posixSystemDesiredDigestHex(op) == ZeroDigestHex
+
+  test "linux.nixDaemonSetting requires elevation":
+    check requiresElevation(pokLinuxNixDaemonSetting)
+    check $pokLinuxNixDaemonSetting == "linux.nixDaemonSetting"
+    check privilegedOperationKindFromString("linux.nixDaemonSetting") ==
+      pokLinuxNixDaemonSetting
+
+  test "off-Linux linux.nixDaemonSetting entry points raise ENotImplementedPlatform":
+    when not defined(linux):
+      let op = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+        address: "ef",
+        nixKey: "experimental-features",
+        nixValue: "x")
+      expect ENotImplementedPlatform:
+        discard observeLinuxNixDaemonSetting(op)
+      expect ENotImplementedPlatform:
+        discard applyLinuxNixDaemonSetting(op)
+      expect ENotImplementedPlatform:
+        discard destroyLinuxNixDaemonSetting(op)

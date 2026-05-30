@@ -284,6 +284,29 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
           "' is not a valid POSIX user name")
     result = SystemResource(kind: srkPasswdGroup,
       pgName: n, pgGid: gidStr, pgMembers: members)
+  of "linux.nixDaemonSetting":
+    let k = fieldString(r, "key")
+    let v = fieldString(r, "value")
+    if not isSafeNixDaemonKey(k):
+      raise newException(ValueError,
+        "linux.nixDaemonSetting key '" & k &
+        "' contains characters outside the Nix-key charset")
+    if not isSafeNixDaemonValue(v):
+      raise newException(ValueError,
+        "linux.nixDaemonSetting value for key '" & k &
+        "' contains a newline")
+    let filename = fieldString(r, "filename")
+    if filename.len > 0:
+      if not isSafeDropInBasename(filename):
+        raise newException(ValueError,
+          "linux.nixDaemonSetting filename '" & filename &
+          "' is not a safe single-segment basename")
+      if not filename.endsWith(".conf"):
+        raise newException(ValueError,
+          "linux.nixDaemonSetting filename '" & filename &
+          "' must end with '.conf'")
+    result = SystemResource(kind: srkLinuxNixDaemonSetting,
+      nixKey: k, nixValue: v, nixFilename: filename)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -311,7 +334,7 @@ proc isSystemScopeResource(kind: string): bool =
      "os.timezone", "os.hostname",
      "linux.sysctl", "linux.udevRule", "linux.polkitRule",
      "linux.tmpfilesRule", "linux.sudoersRule",
-     "passwd.group":
+     "passwd.group", "linux.nixDaemonSetting":
     true
   else:
     false
@@ -502,5 +525,10 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       if r.pgGid.len > 0:
         pairs.add(("gid", quoteSystemValue(r.pgGid)))
       pairs.add(("members", renderListLiteral(r.pgMembers)))
+    of srkLinuxNixDaemonSetting:
+      pairs.add(("key", quoteSystemValue(r.nixKey)))
+      pairs.add(("value", quoteSystemValue(r.nixValue)))
+      if r.nixFilename.len > 0:
+        pairs.add(("filename", quoteSystemValue(r.nixFilename)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

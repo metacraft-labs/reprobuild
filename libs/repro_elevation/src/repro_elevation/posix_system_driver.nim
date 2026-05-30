@@ -165,6 +165,15 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       posixDigestHexOfText(canonicalPasswdGroupDesired(
         PasswdGroupDesired(name: op.pgName, gid: op.pgGid,
           members: op.pgMembers)))
+  of pokLinuxNixDaemonSetting:
+    if op.nixDestroy:
+      ZeroDigestHex
+    else:
+      # Inline form of `nixDaemonDropInContent(key, value)` — the
+      # helper is declared further down so we cannot call it here
+      # without breaking the top-down resolution order; the formula
+      # is short enough to repeat (and matches the sysctl precedent).
+      posixDigestHexOfText(op.nixKey & " = " & op.nixValue & "\n")
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -1743,3 +1752,164 @@ proc applyPasswdGroup*(op: PrivilegedOperation):
       canonicalPasswdGroupState(after))
   else:
     raiseNotImplementedPlatform("passwd.group apply")
+
+# ===========================================================================
+# linux.nixDaemonSetting — drop-in under /etc/nix/nix.conf.d/.
+#
+# Nix re-reads its configuration on each invocation, so no daemon
+# reload is performed — the next `nix` / `nix-daemon` call picks up
+# the new setting. The drop-in directory is created if absent.
+#
+# A host running an older Nix release that predates drop-in support
+# would need a managed-block region inside `/etc/nix/nix.conf` instead;
+# every supported Nix release ships the drop-in dir so that fallback
+# is deferred until a real host surfaces the need.
+# ===========================================================================
+
+const LinuxNixDaemonDropInDir* = "/etc/nix/nix.conf.d"
+  ## The directory a `linux.nixDaemonSetting` drop-in file lands in.
+
+proc nixDaemonDropInFilename*(op: PrivilegedOperation): string =
+  ## Resolve the drop-in basename. An explicit `nixFilename` wins;
+  ## otherwise an auto-name is synthesised from the resource address
+  ## or key (matching the sysctl precedent — `99-reprobuild-<slug>.conf`).
+  if op.nixFilename.len > 0:
+    return op.nixFilename
+  let raw =
+    if op.address.len > 0: op.address
+    else: op.nixKey
+  var slug = ""
+  for ch in raw:
+    if ch in {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      slug.add(ch)
+    else:
+      slug.add('_')
+  if slug.len == 0:
+    slug = "default"
+  "99-reprobuild-" & slug & ".conf"
+
+proc nixDaemonDropInContent*(key, value: string): string =
+  ## The canonical bytes of a `linux.nixDaemonSetting` drop-in file:
+  ## one `<key> = <value>` line with a trailing newline. Matches the
+  ## actual nix.conf line syntax (Nix accepts `key = value` with
+  ## surrounding whitespace, but the canonical form is the
+  ## single-space rendering).
+  key & " = " & value & "\n"
+
+proc nixDaemonDropInPath*(op: PrivilegedOperation): string =
+  ## Full on-disk path of the drop-in file for `op`.
+  LinuxNixDaemonDropInDir & "/" & nixDaemonDropInFilename(op)
+
+proc parseNixDaemonDropInLine*(line, key: string): tuple[matched: bool;
+                                                          value: string] =
+  ## Parse a single nix.conf drop-in line into the value for `key`.
+  ## A line that matches the LHS but has an empty RHS returns
+  ## `(matched: true, value: "")`; a non-match returns
+  ## `(matched: false, value: "")`. Comment / blank lines never match.
+  let stripped = line.strip()
+  if stripped.len == 0 or stripped.startsWith("#"):
+    return (false, "")
+  let eq = stripped.find('=')
+  if eq < 0:
+    return (false, "")
+  let lhs = stripped[0 ..< eq].strip()
+  let rhs = stripped[eq + 1 .. ^1].strip()
+  if lhs == key:
+    return (true, rhs)
+  return (false, "")
+
+proc readNixDaemonDropInValue*(content, key: string): tuple[present: bool;
+                                                             value: string] =
+  ## Walk a nix.conf drop-in file's content and return the value for
+  ## `key`, or `(false, "")` if the key is absent / commented out. The
+  ## LAST matching line wins, matching nix.conf's own parser
+  ## (later definitions override earlier ones).
+  result = (false, "")
+  for ln in content.splitLines():
+    let m = parseNixDaemonDropInLine(ln, key)
+    if m.matched:
+      result = (true, m.value)
+
+proc observeLinuxNixDaemonSetting*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe a nix.conf drop-in. The digest covers the canonical
+  ## drop-in bytes (`<key> = <value>\n`); a file whose key=value
+  ## parses to the desired pair digests identically regardless of
+  ## trailing whitespace or comment lines around it (matching the
+  ## sysctl precedent).
+  when defined(linux):
+    let path = nixDaemonDropInPath(op)
+    if not fileExists(path):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let content = readFile(path)
+    let observed = readNixDaemonDropInValue(content, op.nixKey)
+    result.present = true
+    if observed.present and observed.value == op.nixValue:
+      # File contains the desired key=value pair — digest the
+      # canonical form so a re-author with different whitespace is
+      # a cache hit.
+      result.digestHex = posixDigestHexOfText(
+        nixDaemonDropInContent(op.nixKey, op.nixValue))
+    else:
+      # File present but does not contain our pair — digest the live
+      # bytes so the broker's drift gate sees a different digest.
+      result.digestHex = posixDigestHexOfText(content)
+  else:
+    raiseNotImplementedPlatform("linux.nixDaemonSetting observe")
+
+proc destroyLinuxNixDaemonSetting*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the drop-in file. The next `nix` invocation will no longer
+  ## read this setting; pre-existing values inside `/etc/nix/nix.conf`
+  ## (which the driver never writes to) remain unchanged. Post-apply
+  ## re-probe asserts the drop-in file is gone.
+  when defined(linux):
+    let path = nixDaemonDropInPath(op)
+    if fileExists(path):
+      try: removeFile(path)
+      except OSError: discard
+    if fileExists(path):
+      raiseProtocol("linux.nixDaemonSetting destroy of " & path &
+        " post-apply observation disagrees with desired state: " &
+        "the drop-in file still exists after `removeFile`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.nixDaemonSetting destroy")
+
+proc applyLinuxNixDaemonSetting*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the drop-in file. No daemon reload is performed; Nix
+  ## re-reads its configuration on each invocation, so the change is
+  ## observed by the next `nix` call.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): the per-driver post-
+  ## apply re-probe is the integrity check. After the write, re-read
+  ## via the same file-read path `observeLinuxNixDaemonSetting` uses;
+  ## raise `EProtocol` on a canonical-bytes digest mismatch.
+  when defined(linux):
+    if op.nixDestroy:
+      return destroyLinuxNixDaemonSetting(op)
+    let path = nixDaemonDropInPath(op)
+    createDir(LinuxNixDaemonDropInDir)
+    let content = nixDaemonDropInContent(op.nixKey, op.nixValue)
+    writeLinuxDropInFile(path, content, 0o644)
+    # Post-apply re-probe — see the contract comment above.
+    let post = observeLinuxNixDaemonSetting(op)
+    let desiredHex = posixDigestHexOfText(content)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.nixDaemonSetting drop-in " & path &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The drop-in write completed but a re-read shows a different " &
+        "value — the driver fails closed rather than reporting a " &
+        "spurious success.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.nixDaemonSetting apply")

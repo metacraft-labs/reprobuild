@@ -364,6 +364,11 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     for m in op.pgMembers:
       body.writeString(m)
     body.writeBool(op.pgDestroy)
+  of pokLinuxNixDaemonSetting:
+    body.writeString(op.nixKey)
+    body.writeString(op.nixValue)
+    body.writeString(op.nixFilename)
+    body.writeBool(op.nixDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -558,6 +563,13 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     for _ in 0 ..< mCount:
       result.operation.pgMembers.add(readString(body, pos))
     result.operation.pgDestroy = readBool(body, pos, "pgDestroy")
+  of pokLinuxNixDaemonSetting:
+    result.operation = PrivilegedOperation(kind: pokLinuxNixDaemonSetting,
+      address: address)
+    result.operation.nixKey = readString(body, pos)
+    result.operation.nixValue = readString(body, pos)
+    result.operation.nixFilename = readString(body, pos)
+    result.operation.nixDestroy = readBool(body, pos, "nixDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

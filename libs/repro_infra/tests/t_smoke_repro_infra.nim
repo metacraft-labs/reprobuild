@@ -1918,3 +1918,100 @@ passwd.group {
     check realWorldIdentity(r) == "group:docker"
     check resourceName(r) == "docker"
     check resourceKindTag(r) == "passwd.group"
+
+# ===========================================================================
+# linux.nixDaemonSetting — parser + toPrivilegedOperation. M83 step 6.
+# ===========================================================================
+
+suite "repro_infra: linux.nixDaemonSetting profile parser":
+
+  test "parses a linux.nixDaemonSetting stanza":
+    let text = """
+linux.nixDaemonSetting {
+  key = "experimental-features"
+  value = "nix-command flakes"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkLinuxNixDaemonSetting
+    check profile.resources[0].nixKey == "experimental-features"
+    check profile.resources[0].nixValue == "nix-command flakes"
+    check profile.resources[0].nixFilename == ""
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokLinuxNixDaemonSetting
+    check op.nixKey == "experimental-features"
+    check not op.nixDestroy
+    check requiresElevation(op.kind)
+
+  test "parses a linux.nixDaemonSetting stanza with an explicit filename":
+    let text = """
+linux.nixDaemonSetting {
+  key = "experimental-features"
+  value = "nix-command flakes"
+  filename = "10-flakes.conf"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources[0].nixFilename == "10-flakes.conf"
+
+  test "toPrivilegedOperation passes destroy through to nixDestroy":
+    let text = """
+linux.nixDaemonSetting {
+  key = "experimental-features"
+  value = ""
+}
+"""
+    let profile = parseSystemProfile(text)
+    let op = toPrivilegedOperation(profile.resources[0], destroy = true)
+    check op.kind == pokLinuxNixDaemonSetting
+    check op.nixDestroy
+
+  test "linux.nixDaemonSetting rejects a shell-meta key":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.nixDaemonSetting {
+  key = "bad; rm"
+  value = "x"
+}
+""")
+
+  test "linux.nixDaemonSetting rejects a newline in the value":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("linux.nixDaemonSetting {\n" &
+        "  key = \"experimental-features\"\n" &
+        "  value = \"line1\nline2\"\n" &
+        "}\n")
+
+  test "linux.nixDaemonSetting rejects a filename without .conf":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.nixDaemonSetting {
+  key = "experimental-features"
+  value = "x"
+  filename = "no-extension"
+}
+""")
+
+  test "linux.nixDaemonSetting rejects a path-escape filename":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.nixDaemonSetting {
+  key = "experimental-features"
+  value = "x"
+  filename = "../etc/passwd"
+}
+""")
+
+  test "realWorldIdentity and resourceName follow the nix key":
+    let text = """
+linux.nixDaemonSetting {
+  key = "experimental-features"
+  value = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check realWorldIdentity(r) == "nixDaemonSetting:experimental-features"
+    check resourceName(r) == "experimental-features"
+    check resourceKindTag(r) == "linux.nixDaemonSetting"
