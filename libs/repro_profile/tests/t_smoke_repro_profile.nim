@@ -382,6 +382,30 @@ suite "Resource constructors":
     check target.len == 1
     check target[0].address == "linux.polkitRule:50-my.rules"
 
+  test "linuxTmpfilesRule records name / content / applyNow":
+    var target: seq[ResourceIntent] = @[]
+    linuxTmpfilesRule(target,
+      name = "repro-cache.conf",
+      content = "d /var/cache/repro 0755 root root - -\n",
+      applyNow = false,
+      address = "repro-cache")
+    check target.len == 1
+    check target[0].kind == "linux.tmpfilesRule"
+    check target[0].address == "repro-cache"
+    check target[0].fields["name"].s == "repro-cache.conf"
+    check target[0].fields["content"].s ==
+      "d /var/cache/repro 0755 root root - -\n"
+    check target[0].fields["applyNow"].b == false
+
+  test "linuxTmpfilesRule defaults applyNow to true and auto-addresses":
+    var target: seq[ResourceIntent] = @[]
+    linuxTmpfilesRule(target,
+      name = "x.conf",
+      content = "d /run/x 0755 root root - -")
+    check target.len == 1
+    check target[0].fields["applyNow"].b == true
+    check target[0].address == "linux.tmpfilesRule:x.conf"
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

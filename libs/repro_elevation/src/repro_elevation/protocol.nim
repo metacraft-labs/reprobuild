@@ -348,6 +348,11 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.polkitName)
     body.writeString(op.polkitContent)
     body.writeBool(op.polkitDestroy)
+  of pokLinuxTmpfilesRule:
+    body.writeString(op.tmpfilesName)
+    body.writeString(op.tmpfilesContent)
+    body.writeBool(op.tmpfilesApplyNow)
+    body.writeBool(op.tmpfilesDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -518,6 +523,13 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.polkitName = readString(body, pos)
     result.operation.polkitContent = readString(body, pos)
     result.operation.polkitDestroy = readBool(body, pos, "polkitDestroy")
+  of pokLinuxTmpfilesRule:
+    result.operation = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: address)
+    result.operation.tmpfilesName = readString(body, pos)
+    result.operation.tmpfilesContent = readString(body, pos)
+    result.operation.tmpfilesApplyNow = readBool(body, pos, "tmpfilesApplyNow")
+    result.operation.tmpfilesDestroy = readBool(body, pos, "tmpfilesDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

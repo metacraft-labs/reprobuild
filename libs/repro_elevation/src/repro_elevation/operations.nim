@@ -136,6 +136,13 @@ type
       ## write a JS rule body to `/etc/polkit-1/rules.d/<name>.rules`
       ## (mode 0644). Polkit auto-reloads via inotify; no explicit
       ## reload step is needed.
+    pokLinuxTmpfilesRule = "linux.tmpfilesRule"
+      ## The post-M83 step-5 Linux systemd-tmpfiles drop-in operation:
+      ## write a rule body to `/etc/tmpfiles.d/<name>.conf` (mode
+      ## 0644), then optionally run `systemd-tmpfiles --create <path>`
+      ## to apply the rule NOW (versus next boot). The `applyNow`
+      ## field selects the immediate-apply behavior; it defaults to
+      ## true.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -322,6 +329,16 @@ type
       polkitName*: string
       polkitContent*: string
       polkitDestroy*: bool
+    of pokLinuxTmpfilesRule:
+      ## Write a systemd-tmpfiles drop-in. `tmpfilesName` is the rule
+      ## basename (must end `.conf`); `tmpfilesContent` is the full
+      ## file body; `tmpfilesApplyNow` selects whether to invoke
+      ## `systemd-tmpfiles --create <path>` after writing (default
+      ## true); `tmpfilesDestroy` selects the rollback direction.
+      tmpfilesName*: string
+      tmpfilesContent*: string
+      tmpfilesApplyNow*: bool
+      tmpfilesDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -359,6 +376,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxSysctl: true
   of pokLinuxUdevRule: true
   of pokLinuxPolkitRule: true
+  of pokLinuxTmpfilesRule: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -388,6 +406,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxSysctl: pokLinuxSysctl
   of $pokLinuxUdevRule: pokLinuxUdevRule
   of $pokLinuxPolkitRule: pokLinuxPolkitRule
+  of $pokLinuxTmpfilesRule: pokLinuxTmpfilesRule
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -792,6 +811,14 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.polkitName.endsWith(".rules"):
       return "linux.polkitRule name '" & op.polkitName &
         "' must end with '.rules' (polkit convention)"
+  of pokLinuxTmpfilesRule:
+    if not isSafeDropInBasename(op.tmpfilesName):
+      return "linux.tmpfilesRule name '" & op.tmpfilesName &
+        "' is not a safe single-segment basename (letters, digits, " &
+        "'.', '-', '_'; no '/', '..', or shell metacharacter)"
+    if not op.tmpfilesName.endsWith(".conf"):
+      return "linux.tmpfilesRule name '" & op.tmpfilesName &
+        "' must end with '.conf' (tmpfiles.d convention)"
   return ""
 
 # ---------------------------------------------------------------------------

@@ -758,6 +758,61 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "linux.tmpfilesRule resource maps to srkLinuxTmpfilesRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.tmpfilesRule", "repro-cache",
+      @[strFieldEntry("name", "repro-cache.conf"),
+        strFieldEntry("content", "d /var/cache/repro 0755 root root - -\n"),
+        boolFieldEntry("applyNow", false)]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkLinuxTmpfilesRule
+    check sp.resources[0].tmpfilesName == "repro-cache.conf"
+    check sp.resources[0].tmpfilesContent ==
+      "d /var/cache/repro 0755 root root - -\n"
+    check not sp.resources[0].tmpfilesApplyNow
+    check sp.resources[0].address == "repro-cache"
+
+  test "linux.tmpfilesRule defaults applyNow to true at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.tmpfilesRule", "x",
+      @[strFieldEntry("name", "x.conf"),
+        strFieldEntry("content", "x")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources[0].tmpfilesApplyNow
+
+  test "linux.tmpfilesRule rejects a path-escape name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.tmpfilesRule", "x",
+      @[strFieldEntry("name", "../etc/passwd"),
+        strFieldEntry("content", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "linux.tmpfilesRule rejects a non-.conf name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.tmpfilesRule", "x",
+      @[strFieldEntry("name", "x.rules"),
+        strFieldEntry("content", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips linux.tmpfilesRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.tmpfilesRule", "",
+      @[strFieldEntry("name", "repro-cache.conf"),
+        strFieldEntry("content", "d /var/cache/repro 0755 root root - -"),
+        boolFieldEntry("applyNow", false)]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkLinuxTmpfilesRule
+    check sp2.resources[0].tmpfilesName == "repro-cache.conf"
+    check not sp2.resources[0].tmpfilesApplyNow
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
 # ---------------------------------------------------------------------------
 # Cross-cutting sanity: the home adapter's output passes the apply
 # pipeline's resource pre-validation by going through `findResourcesBlock`

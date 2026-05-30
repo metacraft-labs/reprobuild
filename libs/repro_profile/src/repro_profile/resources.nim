@@ -525,3 +525,26 @@ template linuxPolkitRule*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("linux.polkitRule", name)
     pushResource(targetResources, "linux.polkitRule", addr0, fields,
       dependsOn)
+
+template linuxTmpfilesRule*(targetResources: var seq[ResourceIntent];
+                            name: string;
+                            content: string;
+                            applyNow: bool = true;
+                            address: string = "";
+                            dependsOn: seq[string] = @[]) =
+  ## M83 step 5 — Linux system-scope tmpfiles.d drop-in. Wraps a
+  ## write to `/etc/tmpfiles.d/<name>` (`name` must end `.conf`) plus,
+  ## when `applyNow == true`, a `systemd-tmpfiles --create <path>`
+  ## call so the rule takes effect immediately rather than at next
+  ## boot.
+  ##
+  ## Address default: `linux.tmpfilesRule:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    fields["applyNow"] = boolField(applyNow)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.tmpfilesRule", name)
+    pushResource(targetResources, "linux.tmpfilesRule", addr0, fields,
+      dependsOn)

@@ -1661,3 +1661,116 @@ suite "repro_elevation: linux.polkitRule pure surface":
         discard applyLinuxPolkitRule(op)
       expect ENotImplementedPlatform:
         discard destroyLinuxPolkitRule(op)
+
+# ===========================================================================
+# linux.tmpfilesRule — pure parse + drift logic. The shell-out side
+# (write + `systemd-tmpfiles --create`) runs only on Linux.
+# ===========================================================================
+
+suite "repro_elevation: linux.tmpfilesRule pure surface":
+
+  test "tmpfilesRulePath joins the directory with the basename":
+    check tmpfilesRulePath("repro-cache.conf") ==
+      "/etc/tmpfiles.d/repro-cache.conf"
+    check LinuxTmpfilesDir == "/etc/tmpfiles.d"
+
+  test "operationValidationError accepts a valid linux.tmpfilesRule":
+    let ok = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: "repro-cache",
+      tmpfilesName: "repro-cache.conf",
+      tmpfilesContent: "d /var/cache/repro 0755 root root - -\n",
+      tmpfilesApplyNow: true)
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad linux.tmpfilesRule fields":
+    let escape = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: "x",
+      tmpfilesName: "../etc/passwd",
+      tmpfilesContent: "x")
+    check operationValidationError(escape).len > 0
+    let meta = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: "x",
+      tmpfilesName: "evil; rm.conf",
+      tmpfilesContent: "x")
+    check operationValidationError(meta).len > 0
+    let badExt = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: "x",
+      tmpfilesName: "repro-cache.rules",
+      tmpfilesContent: "x")
+    check operationValidationError(badExt).len > 0
+    let emptyAddr = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: "",
+      tmpfilesName: "repro-cache.conf",
+      tmpfilesContent: "x")
+    check operationValidationError(emptyAddr).len > 0
+
+  test "RBEB Operation frame round-trips a linux.tmpfilesRule":
+    let op = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: "repro-cache",
+      tmpfilesName: "repro-cache.conf",
+      tmpfilesContent: "d /var/cache/repro 0755 root root - -\n",
+      tmpfilesApplyNow: true,
+      tmpfilesDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokLinuxTmpfilesRule
+    check w2.operation.address == "repro-cache"
+    check w2.operation.tmpfilesName == "repro-cache.conf"
+    check w2.operation.tmpfilesContent ==
+      "d /var/cache/repro 0755 root root - -\n"
+    check w2.operation.tmpfilesApplyNow
+    check not w2.operation.tmpfilesDestroy
+
+  test "RBEB Operation frame round-trips a destroy linux.tmpfilesRule":
+    let op = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: "repro-cache",
+      tmpfilesName: "repro-cache.conf",
+      tmpfilesContent: "",
+      tmpfilesApplyNow: false,
+      tmpfilesDestroy: true)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "cafef00d")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.kind == pokLinuxTmpfilesRule
+    check w2.operation.tmpfilesDestroy
+    check not w2.operation.tmpfilesApplyNow
+
+  test "posix desired digest for tmpfiles rule matches content bytes":
+    let op = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: "x",
+      tmpfilesName: "repro-cache.conf",
+      tmpfilesContent: "d /var/cache/repro 0755 root root - -\n",
+      tmpfilesApplyNow: true)
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText(op.tmpfilesContent)
+
+  test "posix desired digest for tmpfiles destroy is the absent sentinel":
+    let op = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+      address: "x",
+      tmpfilesName: "repro-cache.conf",
+      tmpfilesContent: "x",
+      tmpfilesApplyNow: true,
+      tmpfilesDestroy: true)
+    check posixSystemDesiredDigestHex(op) == ZeroDigestHex
+
+  test "linux.tmpfilesRule requires elevation":
+    check requiresElevation(pokLinuxTmpfilesRule)
+    check $pokLinuxTmpfilesRule == "linux.tmpfilesRule"
+    check privilegedOperationKindFromString("linux.tmpfilesRule") ==
+      pokLinuxTmpfilesRule
+
+  test "off-Linux linux.tmpfilesRule entry points raise ENotImplementedPlatform":
+    when not defined(linux):
+      let op = PrivilegedOperation(kind: pokLinuxTmpfilesRule,
+        address: "x",
+        tmpfilesName: "repro-cache.conf",
+        tmpfilesContent: "x",
+        tmpfilesApplyNow: true)
+      expect ENotImplementedPlatform:
+        discard observeLinuxTmpfilesRule(op)
+      expect ENotImplementedPlatform:
+        discard applyLinuxTmpfilesRule(op)
+      expect ENotImplementedPlatform:
+        discard destroyLinuxTmpfilesRule(op)

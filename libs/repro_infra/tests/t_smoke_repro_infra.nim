@@ -1662,3 +1662,83 @@ linux.polkitRule {
     check realWorldIdentity(r) == "polkitRule:50-my.rules"
     check resourceName(r) == "50-my.rules"
     check resourceKindTag(r) == "linux.polkitRule"
+
+# ===========================================================================
+# linux.tmpfilesRule — parser + toPrivilegedOperation. M83 step 5.
+# ===========================================================================
+
+suite "repro_infra: linux.tmpfilesRule profile parser":
+
+  test "parses a linux.tmpfilesRule stanza with default applyNow":
+    let text = """
+linux.tmpfilesRule {
+  name = "repro-cache.conf"
+  content = "d /var/cache/repro 0755 root root - -"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkLinuxTmpfilesRule
+    check profile.resources[0].tmpfilesName == "repro-cache.conf"
+    check profile.resources[0].tmpfilesContent ==
+      "d /var/cache/repro 0755 root root - -"
+    check profile.resources[0].tmpfilesApplyNow                # default true
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokLinuxTmpfilesRule
+    check op.tmpfilesApplyNow
+    check not op.tmpfilesDestroy
+    check requiresElevation(op.kind)
+
+  test "parses a linux.tmpfilesRule stanza with applyNow = false":
+    let text = """
+linux.tmpfilesRule {
+  name = "repro-cache.conf"
+  content = "d /var/cache/repro 0755 root root - -"
+  applyNow = false
+}
+"""
+    let profile = parseSystemProfile(text)
+    check not profile.resources[0].tmpfilesApplyNow
+
+  test "toPrivilegedOperation passes destroy through to tmpfilesDestroy":
+    let text = """
+linux.tmpfilesRule {
+  name = "x.conf"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let op = toPrivilegedOperation(profile.resources[0], destroy = true)
+    check op.kind == pokLinuxTmpfilesRule
+    check op.tmpfilesDestroy
+
+  test "linux.tmpfilesRule rejects a path-escape name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.tmpfilesRule {
+  name = "../etc/shadow"
+  content = "x"
+}
+""")
+
+  test "linux.tmpfilesRule rejects a non-.conf name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.tmpfilesRule {
+  name = "bad.txt"
+  content = "x"
+}
+""")
+
+  test "realWorldIdentity and resourceName follow the tmpfiles rule name":
+    let text = """
+linux.tmpfilesRule {
+  name = "repro-cache.conf"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check realWorldIdentity(r) == "tmpfilesRule:repro-cache.conf"
+    check resourceName(r) == "repro-cache.conf"
+    check resourceKindTag(r) == "linux.tmpfilesRule"

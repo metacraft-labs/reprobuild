@@ -239,6 +239,19 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
         "linux.polkitRule name '" & n & "' must end with '.rules'")
     result = SystemResource(kind: srkLinuxPolkitRule,
       polkitName: n, polkitContent: c)
+  of "linux.tmpfilesRule":
+    let n = fieldString(r, "name")
+    let c = fieldString(r, "content")
+    if not isSafeDropInBasename(n):
+      raise newException(ValueError,
+        "linux.tmpfilesRule name '" & n &
+        "' is not a safe single-segment basename")
+    if not n.endsWith(".conf"):
+      raise newException(ValueError,
+        "linux.tmpfilesRule name '" & n & "' must end with '.conf'")
+    result = SystemResource(kind: srkLinuxTmpfilesRule,
+      tmpfilesName: n, tmpfilesContent: c,
+      tmpfilesApplyNow: fieldBool(r, "applyNow", true))
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -264,7 +277,8 @@ proc isSystemScopeResource(kind: string): bool =
      "launchd.systemDaemon", "fs.systemFile",
      "env.systemVariable", "passwd.user",
      "os.timezone", "os.hostname",
-     "linux.sysctl", "linux.udevRule", "linux.polkitRule":
+     "linux.sysctl", "linux.udevRule", "linux.polkitRule",
+     "linux.tmpfilesRule":
     true
   else:
     false
@@ -442,5 +456,10 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkLinuxPolkitRule:
       pairs.add(("name", quoteSystemValue(r.polkitName)))
       pairs.add(("content", quoteSystemValue(r.polkitContent)))
+    of srkLinuxTmpfilesRule:
+      pairs.add(("name", quoteSystemValue(r.tmpfilesName)))
+      pairs.add(("content", quoteSystemValue(r.tmpfilesContent)))
+      pairs.add(("applyNow",
+        (if r.tmpfilesApplyNow: "true" else: "false")))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

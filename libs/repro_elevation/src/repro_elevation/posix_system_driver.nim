@@ -148,6 +148,11 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.polkitContent)
+  of pokLinuxTmpfilesRule:
+    if op.tmpfilesDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.tmpfilesContent)
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -1357,3 +1362,94 @@ proc applyLinuxPolkitRule*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("linux.polkitRule apply")
+
+# ===========================================================================
+# linux.tmpfilesRule — write /etc/tmpfiles.d/<name> + optional
+# `systemd-tmpfiles --create <path>`.
+#
+# The `tmpfilesApplyNow` field selects whether to run the immediate-
+# create step. The default is true — most tmpfiles.d use-cases (a
+# /run/<dir>, a /var/cache/<file>) want the entry created NOW rather
+# than only at next boot. An operator who needs only the boot-time
+# behavior can pin `applyNow = false`.
+# ===========================================================================
+
+const LinuxTmpfilesDir* = "/etc/tmpfiles.d"
+  ## The directory a `linux.tmpfilesRule` drop-in file lands in.
+
+proc tmpfilesRulePath*(name: string): string =
+  ## Full on-disk path of the tmpfiles.d rule file for `name`.
+  LinuxTmpfilesDir & "/" & name
+
+proc observeLinuxTmpfilesRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  when defined(linux):
+    let path = tmpfilesRulePath(op.tmpfilesName)
+    if not fileExists(path):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let content = readFile(path)
+    result.present = true
+    result.digestHex = posixDigestHexOfText(content)
+  else:
+    raiseNotImplementedPlatform("linux.tmpfilesRule observe")
+
+proc destroyLinuxTmpfilesRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the rule file. `systemd-tmpfiles --remove` is INTENTIONALLY
+  ## NOT invoked — the rule body could create files we have no business
+  ## removing on a destroy step; the documented tmpfiles.d semantics are
+  ## that removing the drop-in only stops the boot-time create from
+  ## re-running. Post-apply re-probe asserts the file is gone.
+  when defined(linux):
+    let path = tmpfilesRulePath(op.tmpfilesName)
+    if fileExists(path):
+      try: removeFile(path)
+      except OSError: discard
+    if fileExists(path):
+      raiseProtocol("linux.tmpfilesRule destroy of " & path &
+        " post-apply observation disagrees with desired state: " &
+        "the rule file still exists after `removeFile`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.tmpfilesRule destroy")
+
+proc applyLinuxTmpfilesRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the rule file. When `tmpfilesApplyNow` is true (the default)
+  ## also invoke `systemd-tmpfiles --create <path>` so the rule takes
+  ## effect immediately rather than only at next boot.
+  when defined(linux):
+    if op.tmpfilesDestroy:
+      return destroyLinuxTmpfilesRule(op)
+    let path = tmpfilesRulePath(op.tmpfilesName)
+    createDir(LinuxTmpfilesDir)
+    writeLinuxDropInFile(path, op.tmpfilesContent, 0o644)
+    if op.tmpfilesApplyNow:
+      # `systemd-tmpfiles --create <path>` processes ONLY this file's
+      # rules; exit code is meaningful (a syntax error or a permissions
+      # mismatch is a real failure that should surface). `quoteShell`
+      # on the path is defence in depth (the basename charset already
+      # blocks shell metacharacters).
+      let (createOut, createCode) = execCmdEx(
+        "systemd-tmpfiles --create " & quoteShell(path))
+      if createCode != 0:
+        raiseProtocol("linux.tmpfilesRule `systemd-tmpfiles --create " &
+          path & "` failed: " & createOut.strip())
+    # Post-apply re-probe.
+    let post = observeLinuxTmpfilesRule(op)
+    let desiredHex = posixDigestHexOfText(op.tmpfilesContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.tmpfilesRule " & path &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ".")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.tmpfilesRule apply")
