@@ -744,3 +744,95 @@ proc buildGroupmodGidArgs*(desired: PasswdGroupDesired): seq[string] =
 proc buildGroupdelArgs*(name: string): seq[string] =
   ## Build the `groupdel <name>` argv for the destroy direction.
   result.add(name.strip())
+
+# ===========================================================================
+# linux.firewallRule — nftables rule body + comment marker + handle parser.
+#
+# Reprobuild manages exactly the rules it created. The marker that ties a
+# wire `name` field to a live rule is the comment `repro-fw:<name>` —
+# present on every rule we add, scanned for on every observe / destroy.
+# The pure pieces — building the rule body, building the comment, and
+# parsing `nft -a list chain` output for the rule's handle — live here.
+# ===========================================================================
+
+const NftCommentPrefix* = "repro-fw:"
+  ## The comment prefix every Reprobuild-authored nftables rule carries.
+  ## A rule the operator added by hand without this prefix is left
+  ## alone; a rule with this prefix is the responsibility of the
+  ## `linux.firewallRule` resource whose `name` matches.
+
+proc nftRuleComment*(name: string): string =
+  ## Build the comment string for a `linux.firewallRule` resource
+  ## named `name`. The format is `repro-fw:<name>`; the closed
+  ## charset on `name` is enforced by `isSafeNftRuleName` in
+  ## `operations.nim`.
+  NftCommentPrefix & name
+
+proc nftRuleBody*(protocol, localPort, action, name: string): string =
+  ## Build the rule body the driver passes to `nft add rule <chain>
+  ## <body>`. The format mirrors the `nft` syntax exactly:
+  ##
+  ##   <protocol> dport <port> <action> comment "repro-fw:<name>"
+  ##
+  ## For icmp / icmpv6 the `dport` clause is omitted (the protocols
+  ## have no port concept). The caller is responsible for the
+  ## upstream closed-set validation; this proc just assembles the
+  ## tokens.
+  if protocol in ["icmp", "icmpv6"]:
+    return protocol & " " & action & " comment \"" &
+      nftRuleComment(name) & "\""
+  protocol & " dport " & localPort & " " & action &
+    " comment \"" & nftRuleComment(name) & "\""
+
+proc parseNftHandleForComment*(rawOutput, comment: string): int =
+  ## Parse `nft -a list chain <chain>` output for the handle of the
+  ## rule carrying `comment`. Returns the integer handle, or -1 if
+  ## no rule with that comment is present.
+  ##
+  ## A typical `nft -a list chain` line for a managed rule looks
+  ## like:
+  ##
+  ##     tcp dport 22 accept comment "repro-fw:openssh" # handle 17
+  ##
+  ## The `# handle <N>` suffix is what `nft -a` emits; the parser
+  ## walks lines, finds the one containing the comment marker, and
+  ## reads the integer that follows `handle `. Robust to stray
+  ## whitespace and trailing characters.
+  for line in rawOutput.splitLines():
+    if comment notin line:
+      continue
+    # Search for `handle` token; the integer immediately follows.
+    let handleIdx = line.find("handle ")
+    if handleIdx < 0:
+      continue
+    var i = handleIdx + len("handle ")
+    var digits = ""
+    while i < line.len and line[i] in {'0'..'9'}:
+      digits.add(line[i])
+      inc i
+    if digits.len == 0:
+      continue
+    try:
+      return parseInt(digits)
+    except ValueError:
+      continue
+  return -1
+
+proc parseNftRuleSpecForComment*(rawOutput, comment: string): string =
+  ## Return the rule-body line (without leading whitespace, without
+  ## the trailing `# handle N` suffix) for the rule carrying
+  ## `comment` in `nft list chain` output. Returns "" if absent.
+  ##
+  ## The line text is what the canonical-bytes digest covers: two
+  ## rules with the same comment but different actions (e.g. an
+  ## operator hand-edited `accept` to `drop`) digest differently,
+  ## so the broker's drift gate triggers a re-apply.
+  for line in rawOutput.splitLines():
+    if comment notin line:
+      continue
+    var clean = line.strip()
+    let handleIdx = clean.find(" # handle")
+    if handleIdx >= 0:
+      clean = clean[0 ..< handleIdx].strip()
+    return clean
+  return ""

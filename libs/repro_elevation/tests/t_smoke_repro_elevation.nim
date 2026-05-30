@@ -2374,3 +2374,246 @@ suite "repro_elevation: systemd.systemTimer pure surface":
         discard observeSystemdSystemTimer(op)
       expect ENotImplementedPlatform:
         discard applySystemdSystemTimer(op)
+
+# ===========================================================================
+# linux.firewallRule — pure parse + drift logic. The shell-out side
+# wraps `nft add rule` / `nft -a list chain` / `nft delete rule`;
+# pure tests cover the closed-set validator (chain triple shape +
+# protocol / action / direction enums + port charset), the rule
+# body / comment builders, the handle parser, and the codec
+# round-trip.
+# ===========================================================================
+
+suite "repro_elevation: linux.firewallRule pure surface":
+
+  test "nftRuleComment and NftCommentPrefix":
+    check NftCommentPrefix == "repro-fw:"
+    check nftRuleComment("openssh") == "repro-fw:openssh"
+
+  test "nftRuleBody for tcp includes dport and comment":
+    check nftRuleBody("tcp", "22", "accept", "openssh") ==
+      "tcp dport 22 accept comment \"repro-fw:openssh\""
+
+  test "nftRuleBody for udp includes dport and comment":
+    check nftRuleBody("udp", "53", "drop", "dns-block") ==
+      "udp dport 53 drop comment \"repro-fw:dns-block\""
+
+  test "nftRuleBody for icmp omits the dport clause":
+    check nftRuleBody("icmp", "", "accept", "ping") ==
+      "icmp accept comment \"repro-fw:ping\""
+
+  test "nftRuleBody for icmpv6 omits the dport clause":
+    check nftRuleBody("icmpv6", "", "accept", "ping6") ==
+      "icmpv6 accept comment \"repro-fw:ping6\""
+
+  test "parseNftHandleForComment finds the integer handle":
+    let listing = "table inet filter {\n" &
+                  "\tchain input {\n" &
+                  "\t\ttype filter hook input priority 0;\n" &
+                  "\t\ttcp dport 22 accept comment \"repro-fw:openssh\" # handle 17\n" &
+                  "\t\ttcp dport 80 accept # handle 18\n" &
+                  "\t}\n" &
+                  "}\n"
+    check parseNftHandleForComment(listing, "repro-fw:openssh") == 17
+
+  test "parseNftHandleForComment returns -1 for an absent marker":
+    let listing = "table inet filter {\n" &
+                  "\tchain input {\n" &
+                  "\t\ttcp dport 80 accept # handle 18\n" &
+                  "\t}\n" &
+                  "}\n"
+    check parseNftHandleForComment(listing, "repro-fw:openssh") == -1
+
+  test "parseNftHandleForComment ignores lines without a handle suffix":
+    # A `nft list ruleset` (no `-a` flag) emits no `# handle N`
+    # suffix; the parser must safely return -1 instead of crashing.
+    let listing = "table inet filter {\n" &
+                  "\ttcp dport 22 accept comment \"repro-fw:openssh\"\n" &
+                  "}\n"
+    check parseNftHandleForComment(listing, "repro-fw:openssh") == -1
+
+  test "parseNftRuleSpecForComment strips leading whitespace + handle suffix":
+    let listing = "\t\ttcp dport 22 accept comment \"repro-fw:openssh\" # handle 17\n"
+    check parseNftRuleSpecForComment(listing, "repro-fw:openssh") ==
+      "tcp dport 22 accept comment \"repro-fw:openssh\""
+
+  test "parseNftRuleSpecForComment returns empty for an absent marker":
+    check parseNftRuleSpecForComment(
+      "tcp dport 80 accept # handle 18", "repro-fw:openssh") == ""
+
+  test "operationValidationError accepts a valid linux.firewallRule (tcp)":
+    let ok = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "openssh",
+      lfwChain: "inet filter input",
+      lfwName: "openssh",
+      lfwProtocol: "tcp",
+      lfwDirection: "inbound",
+      lfwLocalPort: "22",
+      lfwAction: "accept")
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError accepts a valid linux.firewallRule (icmp, no port)":
+    let ok = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "ping",
+      lfwChain: "inet filter input",
+      lfwName: "ping",
+      lfwProtocol: "icmp",
+      lfwDirection: "inbound",
+      lfwLocalPort: "",
+      lfwAction: "accept")
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad linux.firewallRule fields":
+    # bad chain (not a triple)
+    let badChain = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "x", lfwChain: "input",
+      lfwName: "x", lfwProtocol: "tcp",
+      lfwLocalPort: "22", lfwAction: "accept")
+    check operationValidationError(badChain).len > 0
+    # chain with shell metacharacter
+    let metaChain = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "x", lfwChain: "inet filter input; rm",
+      lfwName: "x", lfwProtocol: "tcp",
+      lfwLocalPort: "22", lfwAction: "accept")
+    check operationValidationError(metaChain).len > 0
+    # bad protocol
+    let badProto = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "x", lfwChain: "inet filter input",
+      lfwName: "x", lfwProtocol: "sctp",
+      lfwLocalPort: "22", lfwAction: "accept")
+    check operationValidationError(badProto).len > 0
+    # bad action
+    let badAction = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "x", lfwChain: "inet filter input",
+      lfwName: "x", lfwProtocol: "tcp",
+      lfwLocalPort: "22", lfwAction: "log")
+    check operationValidationError(badAction).len > 0
+    # bad direction
+    let badDir = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "x", lfwChain: "inet filter input",
+      lfwName: "x", lfwProtocol: "tcp", lfwDirection: "sideways",
+      lfwLocalPort: "22", lfwAction: "accept")
+    check operationValidationError(badDir).len > 0
+    # missing port for tcp
+    let noPort = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "x", lfwChain: "inet filter input",
+      lfwName: "x", lfwProtocol: "tcp",
+      lfwLocalPort: "", lfwAction: "accept")
+    check operationValidationError(noPort).len > 0
+    # bad rule name (shell meta)
+    let badName = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "x", lfwChain: "inet filter input",
+      lfwName: "evil; rm", lfwProtocol: "tcp",
+      lfwLocalPort: "22", lfwAction: "accept")
+    check operationValidationError(badName).len > 0
+    # bad port shape
+    let badPort = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "x", lfwChain: "inet filter input",
+      lfwName: "x", lfwProtocol: "tcp",
+      lfwLocalPort: "twenty-two", lfwAction: "accept")
+    check operationValidationError(badPort).len > 0
+    # empty address
+    let emptyAddr = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "", lfwChain: "inet filter input",
+      lfwName: "x", lfwProtocol: "tcp",
+      lfwLocalPort: "22", lfwAction: "accept")
+    check operationValidationError(emptyAddr).len > 0
+
+  test "destroy linux.firewallRule does not need a localPort":
+    # The destroy direction looks up by comment marker only; the
+    # protocol-port pairing rule does not gate destroy.
+    let destroyOp = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "openssh",
+      lfwChain: "inet filter input",
+      lfwName: "openssh",
+      lfwProtocol: "tcp",
+      lfwDirection: "inbound",
+      lfwLocalPort: "",
+      lfwAction: "accept",
+      lfwDestroy: true)
+    check operationValidationError(destroyOp) == ""
+
+  test "RBEB Operation frame round-trips a linux.firewallRule":
+    let op = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "openssh",
+      lfwChain: "inet filter input",
+      lfwName: "openssh",
+      lfwProtocol: "tcp",
+      lfwDirection: "inbound",
+      lfwLocalPort: "22",
+      lfwAction: "accept",
+      lfwDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokLinuxFirewallRule
+    check w2.operation.lfwChain == "inet filter input"
+    check w2.operation.lfwName == "openssh"
+    check w2.operation.lfwProtocol == "tcp"
+    check w2.operation.lfwDirection == "inbound"
+    check w2.operation.lfwLocalPort == "22"
+    check w2.operation.lfwAction == "accept"
+    check not w2.operation.lfwDestroy
+
+  test "RBEB Operation frame round-trips a destroy linux.firewallRule":
+    let op = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "openssh",
+      lfwChain: "inet filter input",
+      lfwName: "openssh",
+      lfwProtocol: "tcp",
+      lfwDirection: "inbound",
+      lfwLocalPort: "22",
+      lfwAction: "accept",
+      lfwDestroy: true)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "cafef00d")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.kind == pokLinuxFirewallRule
+    check w2.operation.lfwDestroy
+
+  test "posix desired digest for linux.firewallRule matches rule body":
+    let op = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "openssh",
+      lfwChain: "inet filter input",
+      lfwName: "openssh",
+      lfwProtocol: "tcp",
+      lfwDirection: "inbound",
+      lfwLocalPort: "22",
+      lfwAction: "accept")
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText(nftRuleBody("tcp", "22", "accept", "openssh"))
+
+  test "posix desired digest for linux.firewallRule destroy is absent sentinel":
+    let op = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: "openssh",
+      lfwChain: "inet filter input",
+      lfwName: "openssh",
+      lfwProtocol: "tcp",
+      lfwLocalPort: "22",
+      lfwAction: "accept",
+      lfwDestroy: true)
+    check posixSystemDesiredDigestHex(op) == ZeroDigestHex
+
+  test "linux.firewallRule requires elevation":
+    check requiresElevation(pokLinuxFirewallRule)
+    check $pokLinuxFirewallRule == "linux.firewallRule"
+    check privilegedOperationKindFromString("linux.firewallRule") ==
+      pokLinuxFirewallRule
+
+  test "off-Linux linux.firewallRule entry points raise ENotImplementedPlatform":
+    when not defined(linux):
+      let op = PrivilegedOperation(kind: pokLinuxFirewallRule,
+        address: "openssh",
+        lfwChain: "inet filter input",
+        lfwName: "openssh",
+        lfwProtocol: "tcp",
+        lfwDirection: "inbound",
+        lfwLocalPort: "22",
+        lfwAction: "accept")
+      expect ENotImplementedPlatform:
+        discard observeLinuxFirewallRule(op)
+      expect ENotImplementedPlatform:
+        discard applyLinuxFirewallRule(op)
+      expect ENotImplementedPlatform:
+        discard destroyLinuxFirewallRule(op)

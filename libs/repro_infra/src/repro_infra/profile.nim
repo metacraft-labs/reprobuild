@@ -56,6 +56,7 @@ type
     srkPasswdGroup = "passwd.group"
     srkLinuxNixDaemonSetting = "linux.nixDaemonSetting"
     srkSystemdSystemTimer = "systemd.systemTimer"
+    srkLinuxFirewallRule = "linux.firewallRule"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -170,6 +171,13 @@ type
       stContent*: string
       stEnabled*: bool                    ## desired: enabled (default true)
       stRunning*: bool                    ## desired: active (default true)
+    of srkLinuxFirewallRule:
+      lfwChain*: string                   ## "<family> <table> <chain>"
+      lfwName*: string                    ## stable marker
+      lfwProtocol*: string                ## tcp/udp/icmp/icmpv6
+      lfwDirection*: string               ## inbound/outbound (informational)
+      lfwLocalPort*: string               ## port number / range
+      lfwAction*: string                  ## accept/drop/reject
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -224,6 +232,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "nixDaemonSetting:" & r.nixKey
   of srkSystemdSystemTimer:
     "systemTimer:" & r.stName
+  of srkLinuxFirewallRule:
+    "firewallRule:" & r.lfwName
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -265,6 +275,7 @@ proc resourceName*(r: SystemResource): string =
   of srkPasswdGroup: r.pgName
   of srkLinuxNixDaemonSetting: r.nixKey
   of srkSystemdSystemTimer: r.stName
+  of srkLinuxFirewallRule: r.lfwName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -470,6 +481,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkPasswdGroup: srk = srkPasswdGroup
     of $srkLinuxNixDaemonSetting: srk = srkLinuxNixDaemonSetting
     of $srkSystemdSystemTimer: srk = srkSystemdSystemTimer
+    of $srkLinuxFirewallRule: srk = srkLinuxFirewallRule
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -830,6 +842,49 @@ proc parseSystemProfile*(text: string): SystemProfile =
           if "enabled" in fields: parseBoolField("enabled",
             fields["enabled"]) else: true,
         stRunning: stateStr == "running")
+    of srkLinuxFirewallRule:
+      let chain = need("chain")
+      let lname = need("name")
+      let protocol = need("protocol")
+      let action = need("action")
+      if not isSafeNftChain(chain):
+        raiseSystemProfileInvalid("linux.firewallRule chain '" & chain &
+          "' is not a `<family> <table> <chain>` triple in the " &
+          "conservative nftables identifier charset")
+      if not isSafeNftRuleName(lname):
+        raiseSystemProfileInvalid("linux.firewallRule name '" & lname &
+          "' contains characters outside the rule-identifier charset " &
+          "(letters, digits, '.', '-', '_')")
+      if protocol notin LinuxFirewallProtocols:
+        raiseSystemProfileInvalid("linux.firewallRule protocol '" &
+          protocol & "' is not one of " &
+          LinuxFirewallProtocols.join(" / "))
+      if action notin LinuxFirewallActions:
+        raiseSystemProfileInvalid("linux.firewallRule action '" &
+          action & "' is not one of " &
+          LinuxFirewallActions.join(" / "))
+      let direction =
+        if "direction" in fields: fields["direction"] else: "inbound"
+      if direction notin LinuxFirewallDirections:
+        raiseSystemProfileInvalid("linux.firewallRule direction '" &
+          direction & "' is not one of " &
+          LinuxFirewallDirections.join(" / "))
+      let localPort =
+        if "localPort" in fields: fields["localPort"] else: ""
+      if localPort.len > 0 and not isSafeNftPort(localPort):
+        raiseSystemProfileInvalid("linux.firewallRule localPort '" &
+          localPort & "' is not a port number, port range, comma " &
+          "list, or 'any'")
+      # tcp / udp need a port; icmp / icmpv6 ignore it.
+      if protocol in ["tcp", "udp"] and
+         (localPort.strip().len == 0 or localPort.strip() == "any"):
+        raiseSystemProfileInvalid("linux.firewallRule for protocol '" &
+          protocol & "' requires a non-empty localPort (port number, " &
+          "range, or comma list)")
+      res = SystemResource(kind: srkLinuxFirewallRule,
+        lfwChain: chain, lfwName: lname,
+        lfwProtocol: protocol, lfwDirection: direction,
+        lfwLocalPort: localPort, lfwAction: action)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -986,6 +1041,15 @@ proc toPrivilegedOperation*(r: SystemResource;
       stEnabled: r.stEnabled,
       stRunning: r.stRunning,
       stDestroy: destroy)
+  of srkLinuxFirewallRule:
+    PrivilegedOperation(kind: pokLinuxFirewallRule, address: r.address,
+      lfwChain: r.lfwChain,
+      lfwName: r.lfwName,
+      lfwProtocol: r.lfwProtocol,
+      lfwDirection: r.lfwDirection,
+      lfwLocalPort: r.lfwLocalPort,
+      lfwAction: r.lfwAction,
+      lfwDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

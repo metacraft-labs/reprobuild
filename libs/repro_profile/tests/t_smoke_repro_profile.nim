@@ -498,6 +498,37 @@ suite "Resource constructors":
     check target.len == 1
     check target[0].address == "systemd.systemTimer:zfs-scrub.timer"
 
+  test "linuxFirewallRule records chain / name / protocol / port / action":
+    var target: seq[ResourceIntent] = @[]
+    linuxFirewallRule(target,
+      chain = "inet filter input",
+      name = "openssh",
+      protocol = "tcp",
+      action = "accept",
+      direction = "inbound",
+      localPort = "22",
+      address = "openssh")
+    check target.len == 1
+    check target[0].kind == "linux.firewallRule"
+    check target[0].address == "openssh"
+    check target[0].fields["chain"].s == "inet filter input"
+    check target[0].fields["name"].s == "openssh"
+    check target[0].fields["protocol"].s == "tcp"
+    check target[0].fields["direction"].s == "inbound"
+    check target[0].fields["localPort"].s == "22"
+    check target[0].fields["action"].s == "accept"
+
+  test "linuxFirewallRule auto-addresses from the name when address empty":
+    var target: seq[ResourceIntent] = @[]
+    linuxFirewallRule(target,
+      chain = "inet filter input",
+      name = "openssh",
+      protocol = "tcp",
+      action = "accept",
+      localPort = "22")
+    check target.len == 1
+    check target[0].address == "linux.firewallRule:openssh"
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

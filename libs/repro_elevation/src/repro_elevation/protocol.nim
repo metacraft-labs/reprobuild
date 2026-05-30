@@ -375,6 +375,14 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeBool(op.stEnabled)
     body.writeBool(op.stRunning)
     body.writeBool(op.stDestroy)
+  of pokLinuxFirewallRule:
+    body.writeString(op.lfwChain)
+    body.writeString(op.lfwName)
+    body.writeString(op.lfwProtocol)
+    body.writeString(op.lfwDirection)
+    body.writeString(op.lfwLocalPort)
+    body.writeString(op.lfwAction)
+    body.writeBool(op.lfwDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -584,6 +592,16 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.stEnabled = readBool(body, pos, "stEnabled")
     result.operation.stRunning = readBool(body, pos, "stRunning")
     result.operation.stDestroy = readBool(body, pos, "stDestroy")
+  of pokLinuxFirewallRule:
+    result.operation = PrivilegedOperation(kind: pokLinuxFirewallRule,
+      address: address)
+    result.operation.lfwChain = readString(body, pos)
+    result.operation.lfwName = readString(body, pos)
+    result.operation.lfwProtocol = readString(body, pos)
+    result.operation.lfwDirection = readString(body, pos)
+    result.operation.lfwLocalPort = readString(body, pos)
+    result.operation.lfwAction = readString(body, pos)
+    result.operation.lfwDestroy = readBool(body, pos, "lfwDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

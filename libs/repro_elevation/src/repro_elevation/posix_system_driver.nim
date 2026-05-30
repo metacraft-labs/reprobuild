@@ -179,6 +179,18 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.stContent)
+  of pokLinuxFirewallRule:
+    if op.lfwDestroy:
+      ZeroDigestHex
+    else:
+      # The canonical-bytes form of a managed rule is the rule body
+      # the driver would issue as `nft add rule <chain> <body>`. Two
+      # operators authoring the same logical rule produce the same
+      # digest; a hand-edited live rule that disagrees with the
+      # profile yields a different observed digest (the broker's
+      # drift gate re-applies).
+      posixDigestHexOfText(nftRuleBody(op.lfwProtocol, op.lfwLocalPort,
+        op.lfwAction, op.lfwName))
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -2053,3 +2065,167 @@ proc applySystemdSystemTimer*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("systemd.systemTimer apply")
+
+# ===========================================================================
+# linux.firewallRule — `nft add rule` + `nft -a list chain` + `nft delete`.
+#
+# Reprobuild manages only rules it created — every Reprobuild rule
+# carries a `comment "repro-fw:<name>"` marker. The observe path
+# greps `nft list ruleset` for that marker; the destroy path looks
+# up the rule's handle via `nft -a list chain <chain>` and runs
+# `nft delete rule <chain> handle <handle>`. A handle-less destroy
+# would force the operator to author the entire rule body verbatim
+# for `nft delete`, which is fragile across version skew.
+# ===========================================================================
+
+when defined(linux):
+  proc nftChainArgs(chain: string): seq[string] =
+    ## Split the chain triple `<family> <table> <chain>` into three
+    ## separate argv tokens. The closed-set validator already
+    ## restricted the chain to exactly three space-separated
+    ## identifier-charset tokens, so the split is unambiguous.
+    for part in chain.split(' '):
+      let p = part.strip()
+      if p.len > 0:
+        result.add(p)
+
+proc observeLinuxFirewallRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe an nftables rule. Looks for the marker comment in
+  ## `nft list ruleset` output. The digest covers the canonical
+  ## rule-body bytes, so a hand-edited rule with the same comment
+  ## but a different action / port digests differently and triggers
+  ## the broker's drift gate.
+  when defined(linux):
+    let comment = nftRuleComment(op.lfwName)
+    let (output, code) = execCmdEx("nft list ruleset")
+    if code != 0:
+      # nft not installed or no ruleset accessible — treat as absent.
+      # The apply path will run `nft add rule` and fail with a clean
+      # diagnostic if nft really is missing.
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let spec = parseNftRuleSpecForComment(output, comment)
+    if spec.len == 0:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    result.present = true
+    # The desired-state digest covers the rule-body bytes the driver
+    # would emit; compare the observed spec against that canonical
+    # form so a re-read of our own rule digests as a cache-hit.
+    let desiredBody = nftRuleBody(op.lfwProtocol, op.lfwLocalPort,
+      op.lfwAction, op.lfwName)
+    if spec == desiredBody:
+      result.digestHex = posixDigestHexOfText(desiredBody)
+    else:
+      # The live rule disagrees with desired — digest the live form
+      # so the broker's drift gate triggers a re-apply.
+      result.digestHex = posixDigestHexOfText(spec)
+  else:
+    raiseNotImplementedPlatform("linux.firewallRule observe")
+
+proc destroyLinuxFirewallRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the rule. Find its handle via `nft -a list chain
+  ## <chain>`, then `nft delete rule <chain> handle <handle>`.
+  ## Already-absent is a no-op (the post-apply re-probe asserts
+  ## the rule is gone).
+  when defined(linux):
+    let chainArgs = nftChainArgs(op.lfwChain)
+    let comment = nftRuleComment(op.lfwName)
+    # `nft -a list chain <chain>` shows the handle annotation.
+    var listCmd = "nft -a list chain"
+    for c in chainArgs:
+      listCmd.add(" " & quoteShell(c))
+    let (listOut, listCode) = execCmdEx(listCmd)
+    if listCode == 0:
+      let handle = parseNftHandleForComment(listOut, comment)
+      if handle >= 0:
+        var delCmd = "nft delete rule"
+        for c in chainArgs:
+          delCmd.add(" " & quoteShell(c))
+        delCmd.add(" handle " & $handle)
+        let (delOut, delCode) = execCmdEx(delCmd)
+        if delCode != 0:
+          raiseProtocol("linux.firewallRule destroy of '" & op.lfwName &
+            "' failed: `nft delete rule <chain> handle " & $handle &
+            "` exited " & $delCode & ": " & delOut.strip())
+    # Post-apply re-probe: a destroy is "done" when the comment is
+    # no longer in the ruleset listing.
+    let (output, code) = execCmdEx("nft list ruleset")
+    if code == 0 and comment in output:
+      raiseProtocol("linux.firewallRule destroy of '" & op.lfwName &
+        "' post-apply observation disagrees with desired state: " &
+        "the marker '" & comment & "' is still present in the live " &
+        "ruleset after `nft delete rule`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.firewallRule destroy")
+
+proc applyLinuxFirewallRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Add (or update) the nftables rule. The driver always runs
+  ## `nft delete rule <chain> handle <handle>` FIRST if a rule with
+  ## our marker already exists, then `nft add rule <chain> <body>`
+  ## — `nft add rule` appends; an in-place update is "delete then
+  ## add" with the same marker.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): re-read via
+  ## `observeLinuxFirewallRule` and compare the canonical-bytes
+  ## digest; raise `EProtocol` on mismatch.
+  when defined(linux):
+    if op.lfwDestroy:
+      return destroyLinuxFirewallRule(op)
+    let chainArgs = nftChainArgs(op.lfwChain)
+    let comment = nftRuleComment(op.lfwName)
+    # If a rule with our marker already exists, delete it first so
+    # the new add does not duplicate. `nft replace` would be more
+    # elegant but requires the handle in the same atomic command;
+    # the two-step pattern is simpler and stays atomic per `nft`
+    # invocation.
+    var listCmd = "nft -a list chain"
+    for c in chainArgs:
+      listCmd.add(" " & quoteShell(c))
+    let (listOut, listCode) = execCmdEx(listCmd)
+    if listCode == 0:
+      let priorHandle = parseNftHandleForComment(listOut, comment)
+      if priorHandle >= 0:
+        var delCmd = "nft delete rule"
+        for c in chainArgs:
+          delCmd.add(" " & quoteShell(c))
+        delCmd.add(" handle " & $priorHandle)
+        # Ignore the exit code: a concurrent operator may have
+        # deleted the rule between the list and the delete; the
+        # post-apply re-probe is the integrity gate.
+        discard execCmd(delCmd)
+    let body = nftRuleBody(op.lfwProtocol, op.lfwLocalPort,
+      op.lfwAction, op.lfwName)
+    var addCmd = "nft add rule"
+    for c in chainArgs:
+      addCmd.add(" " & quoteShell(c))
+    addCmd.add(" " & body)
+    let (addOut, addCode) = execCmdEx(addCmd)
+    if addCode != 0:
+      raiseProtocol("linux.firewallRule add of '" & op.lfwName &
+        "' failed: `nft add rule` exited " & $addCode & ": " &
+        addOut.strip())
+    # Post-apply re-probe.
+    let post = observeLinuxFirewallRule(op)
+    let desiredHex = posixDigestHexOfText(body)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.firewallRule '" & op.lfwName &
+        "' post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The `nft add rule` returned exit 0 but a re-read shows a " &
+        "different value — the driver fails closed rather than " &
+        "reporting a spurious success.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.firewallRule apply")

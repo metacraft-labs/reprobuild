@@ -2106,3 +2106,138 @@ systemd.systemTimer {
     check realWorldIdentity(r) == "systemTimer:zfs-scrub.timer"
     check resourceName(r) == "zfs-scrub.timer"
     check resourceKindTag(r) == "systemd.systemTimer"
+
+# ===========================================================================
+# linux.firewallRule — parser + toPrivilegedOperation. M83 step 6.
+# ===========================================================================
+
+suite "repro_infra: linux.firewallRule profile parser":
+
+  test "parses a linux.firewallRule stanza (tcp)":
+    let text = """
+linux.firewallRule {
+  chain = "inet filter input"
+  name = "openssh"
+  protocol = "tcp"
+  localPort = "22"
+  action = "accept"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkLinuxFirewallRule
+    check profile.resources[0].lfwChain == "inet filter input"
+    check profile.resources[0].lfwName == "openssh"
+    check profile.resources[0].lfwProtocol == "tcp"
+    check profile.resources[0].lfwDirection == "inbound"   # default
+    check profile.resources[0].lfwLocalPort == "22"
+    check profile.resources[0].lfwAction == "accept"
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokLinuxFirewallRule
+    check op.lfwChain == "inet filter input"
+    check op.lfwName == "openssh"
+    check not op.lfwDestroy
+    check requiresElevation(op.kind)
+
+  test "parses a linux.firewallRule stanza (icmp, no port)":
+    let text = """
+linux.firewallRule {
+  chain = "inet filter input"
+  name = "ping"
+  protocol = "icmp"
+  action = "accept"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources[0].lfwProtocol == "icmp"
+    check profile.resources[0].lfwLocalPort == ""
+
+  test "toPrivilegedOperation passes destroy through to lfwDestroy":
+    let text = """
+linux.firewallRule {
+  chain = "inet filter input"
+  name = "openssh"
+  protocol = "tcp"
+  localPort = "22"
+  action = "accept"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let op = toPrivilegedOperation(profile.resources[0], destroy = true)
+    check op.kind == pokLinuxFirewallRule
+    check op.lfwDestroy
+
+  test "linux.firewallRule rejects a chain that is not a triple":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.firewallRule {
+  chain = "input"
+  name = "openssh"
+  protocol = "tcp"
+  localPort = "22"
+  action = "accept"
+}
+""")
+
+  test "linux.firewallRule rejects an unknown protocol":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.firewallRule {
+  chain = "inet filter input"
+  name = "x"
+  protocol = "sctp"
+  localPort = "22"
+  action = "accept"
+}
+""")
+
+  test "linux.firewallRule rejects an unknown action":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.firewallRule {
+  chain = "inet filter input"
+  name = "x"
+  protocol = "tcp"
+  localPort = "22"
+  action = "log"
+}
+""")
+
+  test "linux.firewallRule requires a port for tcp":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.firewallRule {
+  chain = "inet filter input"
+  name = "x"
+  protocol = "tcp"
+  action = "accept"
+}
+""")
+
+  test "linux.firewallRule rejects a shell-meta name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.firewallRule {
+  chain = "inet filter input"
+  name = "evil; rm"
+  protocol = "tcp"
+  localPort = "22"
+  action = "accept"
+}
+""")
+
+  test "realWorldIdentity and resourceName follow the rule name":
+    let text = """
+linux.firewallRule {
+  chain = "inet filter input"
+  name = "openssh"
+  protocol = "tcp"
+  localPort = "22"
+  action = "accept"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check realWorldIdentity(r) == "firewallRule:openssh"
+    check resourceName(r) == "openssh"
+    check resourceKindTag(r) == "linux.firewallRule"

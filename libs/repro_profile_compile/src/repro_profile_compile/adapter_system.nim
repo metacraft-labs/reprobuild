@@ -327,6 +327,46 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       stName: n, stContent: c,
       stEnabled: fieldBool(r, "enabled", true),
       stRunning: stateStr == "running")
+  of "linux.firewallRule":
+    let chain = fieldString(r, "chain")
+    let lname = fieldString(r, "name")
+    let protocol = fieldString(r, "protocol")
+    let action = fieldString(r, "action")
+    if not isSafeNftChain(chain):
+      raise newException(ValueError,
+        "linux.firewallRule chain '" & chain &
+        "' is not a `<family> <table> <chain>` triple")
+    if not isSafeNftRuleName(lname):
+      raise newException(ValueError,
+        "linux.firewallRule name '" & lname &
+        "' contains characters outside the rule-identifier charset")
+    if protocol notin LinuxFirewallProtocols:
+      raise newException(ValueError,
+        "linux.firewallRule protocol '" & protocol &
+        "' is not one of " & LinuxFirewallProtocols.join(" / "))
+    if action notin LinuxFirewallActions:
+      raise newException(ValueError,
+        "linux.firewallRule action '" & action &
+        "' is not one of " & LinuxFirewallActions.join(" / "))
+    let direction = fieldString(r, "direction", "inbound")
+    if direction notin LinuxFirewallDirections:
+      raise newException(ValueError,
+        "linux.firewallRule direction '" & direction &
+        "' is not one of " & LinuxFirewallDirections.join(" / "))
+    let localPort = fieldString(r, "localPort")
+    if localPort.len > 0 and not isSafeNftPort(localPort):
+      raise newException(ValueError,
+        "linux.firewallRule localPort '" & localPort &
+        "' is not a port number, range, comma list, or 'any'")
+    if protocol in ["tcp", "udp"] and
+       (localPort.strip().len == 0 or localPort.strip() == "any"):
+      raise newException(ValueError,
+        "linux.firewallRule for protocol '" & protocol &
+        "' requires a non-empty localPort")
+    result = SystemResource(kind: srkLinuxFirewallRule,
+      lfwChain: chain, lfwName: lname,
+      lfwProtocol: protocol, lfwDirection: direction,
+      lfwLocalPort: localPort, lfwAction: action)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -355,7 +395,7 @@ proc isSystemScopeResource(kind: string): bool =
      "linux.sysctl", "linux.udevRule", "linux.polkitRule",
      "linux.tmpfilesRule", "linux.sudoersRule",
      "passwd.group", "linux.nixDaemonSetting",
-     "systemd.systemTimer":
+     "systemd.systemTimer", "linux.firewallRule":
     true
   else:
     false
@@ -557,5 +597,13 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("enabled", (if r.stEnabled: "true" else: "false")))
       pairs.add(("state",
         quoteSystemValue(if r.stRunning: "Running" else: "Stopped")))
+    of srkLinuxFirewallRule:
+      pairs.add(("chain", quoteSystemValue(r.lfwChain)))
+      pairs.add(("name", quoteSystemValue(r.lfwName)))
+      pairs.add(("protocol", quoteSystemValue(r.lfwProtocol)))
+      pairs.add(("direction", quoteSystemValue(r.lfwDirection)))
+      if r.lfwLocalPort.len > 0:
+        pairs.add(("localPort", quoteSystemValue(r.lfwLocalPort)))
+      pairs.add(("action", quoteSystemValue(r.lfwAction)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

@@ -105,7 +105,8 @@ proc desiredDigest(op: PrivilegedOperation): string =
      pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser,
      pokLinuxSysctl, pokLinuxUdevRule, pokLinuxPolkitRule,
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
-     pokLinuxNixDaemonSetting, pokSystemdSystemTimer:
+     pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
+     pokLinuxFirewallRule:
     posixSystemDesiredDigestHex(op)
   of pokOsTimezone, pokOsHostname:
     # Cross-platform: every platform's desired digest is the canonical
@@ -187,6 +188,8 @@ proc reobserve*(ctx: FixtureContext;
     observeLinuxNixDaemonSetting(op)
   of pokSystemdSystemTimer:
     observeSystemdSystemTimer(op)
+  of pokLinuxFirewallRule:
+    observeLinuxFirewallRule(op)
 
 proc applyOne(ctx: FixtureContext;
               op: PrivilegedOperation): ObservedOperationState =
@@ -254,6 +257,8 @@ proc applyOne(ctx: FixtureContext;
     result = applyLinuxNixDaemonSetting(op)
   of pokSystemdSystemTimer:
     result = applySystemdSystemTimer(op)
+  of pokLinuxFirewallRule:
+    result = applyLinuxFirewallRule(op)
 
 # ---------------------------------------------------------------------------
 # Dispatch one planned operation with the re-observe / drift gate.
@@ -311,7 +316,8 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokLinuxSudoersRule and op.sudoersDestroy) or
     (op.kind == pokPasswdGroup and op.pgDestroy) or
     (op.kind == pokLinuxNixDaemonSetting and op.nixDestroy) or
-    (op.kind == pokSystemdSystemTimer and op.stDestroy)
+    (op.kind == pokSystemdSystemTimer and op.stDestroy) or
+    (op.kind == pokLinuxFirewallRule and op.lfwDestroy)
   let firstSampleLooksLikeCacheHit =
     if destroyOp: not observed.present
     else: observed.present and observed.digestHex == desiredHex

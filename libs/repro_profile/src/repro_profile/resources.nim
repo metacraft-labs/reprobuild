@@ -644,3 +644,35 @@ template systemdSystemTimer*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("systemd.systemTimer", name)
     pushResource(targetResources, "systemd.systemTimer", addr0,
       fields, dependsOn)
+
+template linuxFirewallRule*(targetResources: var seq[ResourceIntent];
+                            chain: string;
+                            name: string;
+                            protocol: string;
+                            action: string;
+                            direction: string = "inbound";
+                            localPort: string = "";
+                            address: string = "";
+                            dependsOn: seq[string] = @[]) =
+  ## M83 step 6 — Linux nftables companion of
+  ## `windows.firewallRule`. Adds an `nft add rule <chain> <body>`
+  ## with a `comment "repro-fw:<name>"` marker for idempotent
+  ## observe / destroy. The chain triple is the `<family> <table>
+  ## <chain>` form (e.g. `inet filter input`). For `tcp` / `udp`
+  ## protocols a non-empty `localPort` is required; for
+  ## `icmp` / `icmpv6` it is ignored.
+  ##
+  ## Address default: `linux.firewallRule:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["chain"] = strField(chain)
+    fields["name"] = strField(name)
+    fields["protocol"] = strField(protocol)
+    fields["direction"] = strField(direction)
+    if localPort.len > 0:
+      fields["localPort"] = strField(localPort)
+    fields["action"] = strField(action)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.firewallRule", name)
+    pushResource(targetResources, "linux.firewallRule", addr0,
+      fields, dependsOn)

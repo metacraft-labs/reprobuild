@@ -1005,6 +1005,69 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "linux.firewallRule resource maps to srkLinuxFirewallRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.firewallRule", "openssh",
+      @[strFieldEntry("chain", "inet filter input"),
+        strFieldEntry("name", "openssh"),
+        strFieldEntry("protocol", "tcp"),
+        strFieldEntry("direction", "inbound"),
+        strFieldEntry("localPort", "22"),
+        strFieldEntry("action", "accept")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkLinuxFirewallRule
+    check sp.resources[0].lfwChain == "inet filter input"
+    check sp.resources[0].lfwName == "openssh"
+    check sp.resources[0].lfwProtocol == "tcp"
+    check sp.resources[0].lfwDirection == "inbound"
+    check sp.resources[0].lfwLocalPort == "22"
+    check sp.resources[0].lfwAction == "accept"
+    check sp.resources[0].address == "openssh"
+
+  test "linux.firewallRule rejects an unknown protocol at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.firewallRule", "x",
+      @[strFieldEntry("chain", "inet filter input"),
+        strFieldEntry("name", "x"),
+        strFieldEntry("protocol", "sctp"),
+        strFieldEntry("localPort", "22"),
+        strFieldEntry("action", "accept")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "linux.firewallRule rejects a missing port for tcp at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.firewallRule", "x",
+      @[strFieldEntry("chain", "inet filter input"),
+        strFieldEntry("name", "x"),
+        strFieldEntry("protocol", "tcp"),
+        strFieldEntry("action", "accept")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips linux.firewallRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.firewallRule", "",
+      @[strFieldEntry("chain", "inet filter input"),
+        strFieldEntry("name", "openssh"),
+        strFieldEntry("protocol", "tcp"),
+        strFieldEntry("direction", "inbound"),
+        strFieldEntry("localPort", "22"),
+        strFieldEntry("action", "accept")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkLinuxFirewallRule
+    check sp2.resources[0].lfwChain == "inet filter input"
+    check sp2.resources[0].lfwName == "openssh"
+    check sp2.resources[0].lfwProtocol == "tcp"
+    check sp2.resources[0].lfwLocalPort == "22"
+    check sp2.resources[0].lfwAction == "accept"
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
 # ---------------------------------------------------------------------------
 # Cross-cutting sanity: the home adapter's output passes the apply
 # pipeline's resource pre-validation by going through `findResourcesBlock`

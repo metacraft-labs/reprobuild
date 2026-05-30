@@ -185,6 +185,14 @@ type
       ## (`Running` / `Stopped`) that controls `systemctl start` /
       ## `systemctl stop` so a timer can be authored but held
       ## inactive when its `.service` companion is being staged.
+    pokLinuxFirewallRule = "linux.firewallRule"
+      ## The post-M83 step-6 Linux nftables operation: declare an
+      ## `nft add rule <chain> <protocol> dport <port> <action>
+      ## comment "repro-fw:<name>"` rule. The comment is the marker
+      ## the observer / destroy path uses to find the rule's handle
+      ## via `nft -a list chain <chain>`. Linux counterpart of
+      ## `pokWindowsFirewallRule` — both manage a port-rule, the
+      ## platform backend differs.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -431,6 +439,26 @@ type
       stEnabled*: bool
       stRunning*: bool
       stDestroy*: bool
+    of pokLinuxFirewallRule:
+      ## Declare an nftables rule. `lfwChain` is the chain triple
+      ## (e.g. `inet filter input`); `lfwName` is the stable
+      ## identifier embedded in the rule's comment (the marker the
+      ## observe + destroy paths look for); `lfwProtocol` is one of
+      ## `tcp` / `udp` / `icmp` / `icmpv6`; `lfwDirection` is
+      ## informational (`inbound` / `outbound` — the chain already
+      ## names this; included for parity with the Windows surface);
+      ## `lfwLocalPort` is the port number / range (required for
+      ## tcp / udp; ignored for icmp / icmpv6); `lfwAction` is one
+      ## of `accept` / `drop` / `reject`. `lfwDestroy` selects the
+      ## delete direction (find the rule's handle, `nft delete
+      ## rule <chain> handle <handle>`).
+      lfwChain*: string
+      lfwName*: string
+      lfwProtocol*: string
+      lfwDirection*: string
+      lfwLocalPort*: string
+      lfwAction*: string
+      lfwDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -473,6 +501,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokPasswdGroup: true
   of pokLinuxNixDaemonSetting: true
   of pokSystemdSystemTimer: true
+  of pokLinuxFirewallRule: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -507,6 +536,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokPasswdGroup: pokPasswdGroup
   of $pokLinuxNixDaemonSetting: pokLinuxNixDaemonSetting
   of $pokSystemdSystemTimer: pokSystemdSystemTimer
+  of $pokLinuxFirewallRule: pokLinuxFirewallRule
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -800,6 +830,79 @@ proc isSafeNixDaemonValue*(value: string): bool =
   return true
 
 # ---------------------------------------------------------------------------
+# linux.firewallRule — nftables protocol / action / direction allowlists
+# and chain / identifier / port charset guards.
+#
+# The four chain/protocol/action/direction fields flow into `nft add
+# rule <chain> <protocol> dport <port> <action> comment "repro-fw:<name>"`
+# command lines; defence-in-depth layer 1 is to allow only closed
+# enumeration values for the protocol / direction / action fields and
+# a conservative charset for `lfwChain` / `lfwName` / `lfwLocalPort`
+# so a `action = "accept; <cmd>"` profile cannot reach arbitrary root
+# execution. Layer 2 is `quoteShell` on the assembled argv.
+# ---------------------------------------------------------------------------
+
+const
+  LinuxFirewallProtocols* = ["tcp", "udp", "icmp", "icmpv6"]
+  LinuxFirewallDirections* = ["inbound", "outbound"]
+  LinuxFirewallActions* = ["accept", "drop", "reject"]
+
+proc isSafeNftChain*(chain: string): bool =
+  ## True only for a non-empty nftables chain triple in the form
+  ## `<family> <table> <chain>` (e.g. `inet filter input`). Each
+  ## component is restricted to the conservative nftables identifier
+  ## charset (letters, digits, `-`, `_`); exactly two single-space
+  ## separators between the three components. This refuses anything
+  ## that could smuggle a shell metacharacter or break the `nft add
+  ## rule` argv shape.
+  let c = chain.strip()
+  if c.len == 0:
+    return false
+  let parts = c.split(' ')
+  if parts.len != 3:
+    return false
+  for p in parts:
+    if p.len == 0:
+      return false
+    for ch in p:
+      if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '-', '_'}:
+        return false
+  return true
+
+proc isSafeNftRuleName*(name: string): bool =
+  ## True only for a non-empty rule identifier in the conservative
+  ## charset (letters, digits, `.`, `-`, `_`). The name is embedded
+  ## verbatim into the rule's comment (`comment "repro-fw:<name>"`)
+  ## and used as a `grep "repro-fw:<name>"` match; closing the
+  ## charset means neither surface can be confused by a smuggled
+  ## quote, comment separator, or shell metacharacter.
+  let n = name.strip()
+  if n.len == 0:
+    return false
+  if n == "." or n == "..":
+    return false
+  for ch in n:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      return false
+  return true
+
+proc isSafeNftPort*(port: string): bool =
+  ## True for a single port (`22`), a comma-separated list
+  ## (`22,2222`), a port range (`8000-9000`), the literal `any`, or
+  ## the empty string. Everything else is refused so the field
+  ## cannot smuggle a shell metacharacter past the closed-set
+  ## validator. (Mirrors `isSafeFirewallPort` for the Windows side.)
+  let p = port.strip()
+  if p.len == 0:
+    return true
+  if p == "any":
+    return true
+  for ch in p:
+    if ch notin {'0'..'9', ',', '-', ' '}:
+      return false
+  return true
+
+# ---------------------------------------------------------------------------
 # Closed-set validation. The broker calls `validateOperation` on
 # every decoded `PrivilegedOperation` before dispatch — a frame that
 # is structurally a `PrivilegedOperation` but carries an out-of-policy
@@ -1047,6 +1150,40 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.stName.endsWith(".timer"):
       return "systemd.systemTimer name '" & op.stName &
         "' must end with '.timer' (systemd timer convention)"
+  of pokLinuxFirewallRule:
+    if not isSafeNftChain(op.lfwChain):
+      return "linux.firewallRule chain '" & op.lfwChain &
+        "' is not a `<family> <table> <chain>` triple in the " &
+        "conservative nftables identifier charset (letters, digits, " &
+        "'-', '_')"
+    if not isSafeNftRuleName(op.lfwName):
+      return "linux.firewallRule name '" & op.lfwName &
+        "' contains characters outside the rule-identifier charset " &
+        "(letters, digits, '.', '-', '_')"
+    if op.lfwProtocol notin LinuxFirewallProtocols:
+      return "linux.firewallRule protocol '" & op.lfwProtocol &
+        "' is not one of " & LinuxFirewallProtocols.join(" / ")
+    if op.lfwDirection.len > 0 and
+       op.lfwDirection notin LinuxFirewallDirections:
+      return "linux.firewallRule direction '" & op.lfwDirection &
+        "' is not one of " & LinuxFirewallDirections.join(" / ")
+    if op.lfwAction notin LinuxFirewallActions:
+      return "linux.firewallRule action '" & op.lfwAction &
+        "' is not one of " & LinuxFirewallActions.join(" / ")
+    if op.lfwLocalPort.len > 0 and not isSafeNftPort(op.lfwLocalPort):
+      return "linux.firewallRule localPort '" & op.lfwLocalPort &
+        "' is not a port number, port range, comma list, or 'any'"
+    # tcp / udp need a port; icmp / icmpv6 do not. Enforce the
+    # protocol-port pairing so a `protocol = tcp` rule with no port
+    # never reaches `nft` (which would reject it with a less-useful
+    # diagnostic).
+    if op.lfwProtocol in ["tcp", "udp"] and not op.lfwDestroy:
+      if op.lfwLocalPort.strip().len == 0 or
+         op.lfwLocalPort.strip() == "any":
+        return "linux.firewallRule for protocol '" & op.lfwProtocol &
+          "' requires a non-empty localPort (port number, port " &
+          "range, or comma list); 'any' is not accepted by `nft " &
+          "add rule <chain> " & op.lfwProtocol & " dport ...`"
   return ""
 
 # ---------------------------------------------------------------------------

@@ -344,6 +344,15 @@ proc renderStanza*(r: SystemResource): seq[string] =
     if not r.stEnabled:
       result.add("  enabled = false")
     result.add("  state = " & (if r.stRunning: "Running" else: "Stopped"))
+  of srkLinuxFirewallRule:
+    result.add("  chain = " & renderScalar(r.lfwChain))
+    result.add("  name = " & renderScalar(r.lfwName))
+    result.add("  protocol = " & renderScalar(r.lfwProtocol))
+    if r.lfwDirection.len > 0 and r.lfwDirection != "inbound":
+      result.add("  direction = " & renderScalar(r.lfwDirection))
+    if r.lfwLocalPort.len > 0:
+      result.add("  localPort = " & renderScalar(r.lfwLocalPort))
+    result.add("  action = " & renderScalar(r.lfwAction))
   # M82 Phase B: emit `depends_on` last so its presence is obvious in a
   # rendered stanza without disrupting the legacy kind-field order.
   # Absent / empty seq omits the line entirely (the common case), so
