@@ -104,7 +104,13 @@ proc requireDirenv(): string =
 
 proc prepareCase(prefix: string): M5Case =
   result.repoRoot = getCurrentDir()
-  result.tempRoot = createTempDir(prefix, "")
+  # Resolve symlinks (e.g. /tmp -> /private/tmp on macOS) so the test's
+  # idea of projectRoot matches the path direnv stores in its allow database.
+  # direnv resolves the .envrc path via realpath before computing the allow
+  # hash; without this canonicalisation, `direnv allow` records the resolved
+  # /private/tmp/... path but `direnv exec /tmp/...` looks up the literal
+  # /tmp/... form, treats the file as un-allowed, and refuses to run.
+  result.tempRoot = expandFilename(createTempDir(prefix, ""))
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)

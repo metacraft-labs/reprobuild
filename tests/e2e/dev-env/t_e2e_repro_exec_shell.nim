@@ -96,7 +96,12 @@ type
 
 proc prepareCase(prefix: string): M4Case =
   result.repoRoot = getCurrentDir()
-  result.tempRoot = createTempDir(prefix, "")
+  # Resolve symlinks (e.g. /tmp -> /private/tmp on macOS) so that paths the
+  # test passes into child processes match the paths the kernel reports back
+  # via getcwd / realpath. Without this, equality checks against c.projectRoot
+  # fail under `nix develop` where TMPDIR=/tmp/nix-shell.X but the OS resolves
+  # /tmp to /private/tmp at every syscall boundary.
+  result.tempRoot = expandFilename(createTempDir(prefix, ""))
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
