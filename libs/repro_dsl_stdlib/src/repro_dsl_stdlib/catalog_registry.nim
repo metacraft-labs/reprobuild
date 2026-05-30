@@ -45,6 +45,22 @@ import ./packages/php
 import ./packages/ruby
 import ./packages/swift
 import ./packages/zig
+# M68 baseline dev tools (env.ps1 / repo-workspaces bootstrap targets).
+# Some merge their catalog with a pre-existing M21 ``package <tool>:`` DSL
+# block (nim, git, gh, just, gcc, node, python3); cmake / ninja / meson /
+# dotnet_sdk are new files. ``python`` and ``dotnet-sdk`` were harvested
+# via --app-alias to satisfy Nim-identifier constraints.
+import ./packages/cmake
+import ./packages/dotnet_sdk
+import ./packages/gcc
+import ./packages/gh
+import ./packages/git
+import ./packages/just
+import ./packages/meson
+import ./packages/nim
+import ./packages/ninja
+import ./packages/node
+import ./packages/python3
 
 export packages_schema
 
@@ -68,6 +84,22 @@ const RegisteredTools* = [
   "ruby",
   "swift",
   "zig",
+  # M68 — baseline dev tools every env.ps1 currently provisions
+  # (alphabetized within the M68 block for grep-friendliness).
+  # ``python3`` and ``dotnet-sdk`` are the registered keys; the
+  # underlying packages/<tool>.nim files use the (renamed) Nim-identifier
+  # names ``python3`` and ``dotnet_sdk``.
+  "cmake",
+  "dotnet-sdk",
+  "gcc",
+  "gh",
+  "git",
+  "just",
+  "meson",
+  "nim",
+  "ninja",
+  "node",
+  "python3",
 ]
 
 proc getCatalog*(toolName: string):
@@ -87,19 +119,31 @@ proc getCatalog*(toolName: string):
     else:
       none(seq[VersionedProvisioning])
   case toolName
-  of "jdk":      selectIfNonEmpty(jdkCatalog)
-  of "cabal":    selectIfNonEmpty(cabalCatalog)
-  of "composer": selectIfNonEmpty(composerCatalog)
-  of "crystal":  selectIfNonEmpty(crystalCatalog)
-  of "elixir":   selectIfNonEmpty(elixirCatalog)
-  of "erlang":   selectIfNonEmpty(erlangCatalog)
-  of "ghc":      selectIfNonEmpty(ghcCatalog)
-  of "gradle":   selectIfNonEmpty(gradleCatalog)
-  of "maven":    selectIfNonEmpty(mavenCatalog)
-  of "php":      selectIfNonEmpty(phpCatalog)
-  of "ruby":     selectIfNonEmpty(rubyCatalog)
-  of "swift":    selectIfNonEmpty(swiftCatalog)
-  of "zig":      selectIfNonEmpty(zigCatalog)
+  of "jdk":        selectIfNonEmpty(jdkCatalog)
+  of "cabal":      selectIfNonEmpty(cabalCatalog)
+  of "composer":   selectIfNonEmpty(composerCatalog)
+  of "crystal":    selectIfNonEmpty(crystalCatalog)
+  of "elixir":     selectIfNonEmpty(elixirCatalog)
+  of "erlang":     selectIfNonEmpty(erlangCatalog)
+  of "ghc":        selectIfNonEmpty(ghcCatalog)
+  of "gradle":     selectIfNonEmpty(gradleCatalog)
+  of "maven":      selectIfNonEmpty(mavenCatalog)
+  of "php":        selectIfNonEmpty(phpCatalog)
+  of "ruby":       selectIfNonEmpty(rubyCatalog)
+  of "swift":      selectIfNonEmpty(swiftCatalog)
+  of "zig":        selectIfNonEmpty(zigCatalog)
+  # M68 baseline dev tools.
+  of "cmake":      selectIfNonEmpty(cmakeCatalog)
+  of "dotnet-sdk": selectIfNonEmpty(dotnet_sdkCatalog)
+  of "gcc":        selectIfNonEmpty(gccCatalog)
+  of "gh":         selectIfNonEmpty(ghCatalog)
+  of "git":        selectIfNonEmpty(gitCatalog)
+  of "just":       selectIfNonEmpty(justCatalog)
+  of "meson":      selectIfNonEmpty(mesonCatalog)
+  of "nim":        selectIfNonEmpty(nimCatalog)
+  of "ninja":      selectIfNonEmpty(ninjaCatalog)
+  of "node":       selectIfNonEmpty(nodeCatalog)
+  of "python3":    selectIfNonEmpty(python3Catalog)
   else:
     none(seq[VersionedProvisioning])
 

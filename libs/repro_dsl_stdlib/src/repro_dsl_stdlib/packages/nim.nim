@@ -1,4 +1,31 @@
+## M68 merge note (hand-edited): the auto-generated ``nimCatalog`` body
+## sits below the pre-existing ``package nim:`` DSL block. The DSL
+## block remains the source of truth for the Nim CLI surface
+## (``nim c`` / ``nim js`` flag declarations) and the Nix
+## provisioning shape on Nix-capable hosts; the ``nimCatalog`` slice
+## is consumed by the M64 ``cakBuiltin`` adapter on Windows.
+## Re-harvest emits ONLY the catalog half; re-attach the DSL block
+## by hand if you regenerate.
+##
+## **Known M69 realize-time gap.** The Scoop manifest carries a
+## ``post_install`` PowerShell hook that copies ``dist/nimble/src/nimblepkg``
+## into ``bin/`` so ``nimble`` can locate its package definitions at
+## runtime. The harvester silently drops the hook (per the module's
+## "post_install is deliberately discarded" rule), so cakBuiltin's
+## realized prefix will ship ``bin/nimble.exe`` but ``nimble``
+## invocations may fail to find ``nimblepkg``. The manifest also
+## carries an ``installer.script`` (``Add-Path -Path "$env:USERPROFILE\.nimble\bin"``)
+## — a USERPROFILE PATH tweak, not a true installer, so M68's
+## refined harvester correctly keeps ``install_method = imExtract``.
+
+import std/tables
 import repro_project_dsl
+import repro_dsl_stdlib/packages_schema
+export packages_schema
+
+# ---------------------------------------------------------------------------
+# Pre-existing M21 DSL declaration (CLI surface + Nix provisioning).
+# ---------------------------------------------------------------------------
 
 package nim:
   provisioning:
@@ -103,3 +130,24 @@ package nim:
         pos source is string,
           role = input,
           position = 0
+
+# ---------------------------------------------------------------------------
+# M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
+# Harvested from bucket: ScoopInstaller/Main
+# Versions (newest-first): 2.2.10
+# ---------------------------------------------------------------------------
+
+let nimCatalog* = @[
+  VersionedProvisioning(
+    version: "2.2.10",
+    archive_format: afZip,
+    install_method: imExtract,
+    bin_relpath: @["bin\\atlas.exe", "bin\\nim.exe", "bin\\nimble.exe", "bin\\nimgrab.exe", "bin\\nimgrep.exe", "bin\\nimpretty.exe", "bin\\nimsuggest.exe", "bin\\vccexe.exe", "bin\\testament.exe"],
+    platforms: @[
+      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://nim-lang.org/download/nim-2.2.10_x64.zip", sha256: "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f", sha512: "", extract_path: "nim-2.2.10")
+    ],
+    installer_args: @[],
+    pacman_packages: @[],
+    bootstrap_argv: @[],
+    env: initTable[string, string]())
+]

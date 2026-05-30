@@ -254,3 +254,84 @@ suite "M66 — Scoop manifest parser":
     check p.ok
     check p.entry.platforms.len == 1
     check p.entry.platforms[0].extract_path == "jdk-21.0.5+11"
+
+  # ===========================================================================
+  # M68 — installer.script-only is a post-extract hook, not a silent installer
+  # ===========================================================================
+
+  test "M68: bare installer.script (no url/file) keeps imExtract":
+    ## Scoop's ``nim`` manifest carries an ``installer.script``
+    ## (``Add-Path -Path "$env:USERPROFILE\.nimble\bin"``) which is a
+    ## PATH tweak, NOT a true installer. Pre-M68 the parser flipped
+    ## ``install_method`` to ``imInstallerSilent`` for ANY ``installer``
+    ## object, which mis-classified zip-extractable tools. The M68 fix
+    ## requires ``installer.url`` OR ``installer.file`` to flip the
+    ## method; a bare ``installer.script`` is treated as a dropped
+    ## post-extract hook (consistent with how ``post_install`` is
+    ## silently discarded per the module docstring).
+    let raw = """{
+      "version": "2.2.10",
+      "url": "https://example.test/nim-2.2.10_x64.zip",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "bin": "bin\\nim.exe",
+      "installer": {
+        "script": "Add-Path -Path \"$env:USERPROFILE\\.nimble\\bin\""
+      }
+    }"""
+    let p = parseScoopManifest("nim", raw)
+    check p.ok
+    check p.entry.install_method == imExtract
+    check p.entry.archive_format == afZip
+
+  test "M68: installer with url still flips to imInstallerSilent":
+    ## Sanity check that the M68 narrowing did not break the normal
+    ## installer path: an ``installer`` object that DOES carry
+    ## ``url`` (or ``file``) still drives the installer codepath.
+    let raw = """{
+      "version": "1.0.0",
+      "url": "https://example.test/install.exe",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "installer": {
+        "url": "https://example.test/install.exe",
+        "args": ["/S"]
+      },
+      "bin": "x.exe"
+    }"""
+    let p = parseScoopManifest("x", raw)
+    check p.ok
+    check p.entry.install_method == imInstallerSilent
+
+  # ===========================================================================
+  # M68 — env_add_path "." current-dir marker stripped from bin synthesis
+  # ===========================================================================
+
+  test "M68: env_add_path '.' synthesizes root-relative bins (no leading ./)":
+    ## Scoop's ``nodejs-lts`` (and ``dotnet-sdk``) manifests use
+    ## ``env_add_path: ["bin", "."]`` to surface BOTH the bin subdir
+    ## and the prefix root. Pre-M68 the cross-product produced
+    ## ``./node.exe`` for the "." segment; M68 also strips '.' from
+    ## ``dir.strip(chars = {'/', '\\', '.'})`` so the root entry comes
+    ## out as a bare relpath, matching how Zig/Just emit root binaries.
+    let raw = """{
+      "version": "1.0.0",
+      "url": "https://example.test/x.zip",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "env_add_path": ["bin", "."]
+    }"""
+    let p = parseScoopManifest("x", raw, @["x.exe"])
+    check p.ok
+    # Cross-product: "bin" -> "bin/x.exe", "." -> "x.exe" (NOT "./x.exe")
+    check p.entry.bin_relpath == @["bin/x.exe", "x.exe"]
+
+  test "M68: env_add_path '.' alone yields root-relative bins":
+    ## Single-segment "." should behave like an empty env_add_path:
+    ## the binDefaults end up at the prefix root.
+    let raw = """{
+      "version": "1.0.0",
+      "url": "https://example.test/x.zip",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "env_add_path": "."
+    }"""
+    let p = parseScoopManifest("x", raw, @["x.exe"])
+    check p.ok
+    check p.entry.bin_relpath == @["x.exe"]

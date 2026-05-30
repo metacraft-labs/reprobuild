@@ -250,7 +250,12 @@ proc synthesizeBinRelpaths(envAddPaths, binDefaults: openArray[string]):
     return out0
   var combined: seq[string] = @[]
   for dir in envAddPaths:
-    let trimmed = dir.strip(chars = {'/', '\\'})
+    # M68 refinement: also strip the ``.`` (current-dir marker) — Scoop
+    # manifests like nodejs use ``env_add_path: ["bin", "."]`` to surface
+    # both the persist subdir AND the prefix root. ``"."`` should
+    # synthesize ``<binary>`` (root-relative) rather than ``./<binary>``,
+    # matching the convention the rest of the catalog uses (Zig, Just).
+    let trimmed = dir.strip(chars = {'/', '\\', '.'})
     for b in binDefaults:
       if trimmed.len == 0:
         combined.add(b)
@@ -407,8 +412,17 @@ proc parseScoopManifest*(app: string; raw: string;
 
   let installerNode =
     if root.hasKey("installer"): root["installer"] else: nil
+  # M68 refinement: only treat the manifest as an installer-style payload
+  # when ``installer`` carries a ``url`` or ``file`` key (i.e. an actual
+  # binary to invoke). A bare ``installer.script`` (e.g. nim's PATH-tweak
+  # ``Add-Path``) is a post-extract PowerShell hook semantically equivalent
+  # to ``post_install`` and must NOT flip ``install_method`` to
+  # ``imInstallerSilent`` — the archive still extracts normally and the
+  # script-only hook is silently dropped (consistent with how
+  # ``post_install`` is dropped per the module docstring).
   let hasInstaller = (not installerNode.isNil) and
-    installerNode.kind == JObject
+    installerNode.kind == JObject and
+    (installerNode.hasKey("url") or installerNode.hasKey("file"))
 
   # ----- Per-platform slices -----
   var platforms: seq[PlatformBinary] = @[]
