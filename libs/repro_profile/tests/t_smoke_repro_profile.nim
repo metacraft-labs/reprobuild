@@ -359,6 +359,34 @@ suite "Resource constructors":
     check target[0].kind == "launchd.systemDaemon"
     check target[0].fields["programArgs"].items.len == 2
 
+  test "M83 step 4b: systemdUserUnit records every field":
+    var target: seq[ResourceIntent] = @[]
+    systemdUserUnit(target,
+      name = "gpg-agent.service",
+      content = "[Unit]\nDescription=gpg-agent\n[Service]\nExecStart=/usr/bin/gpg-agent --daemon\n",
+      enabled = true,
+      state = "Running")
+    check target.len == 1
+    check target[0].kind == "systemd.userUnit"
+    check target[0].address == "systemd.userUnit:gpg-agent.service"
+    check target[0].fields["name"].s == "gpg-agent.service"
+    check target[0].fields["enabled"].b == true
+    check target[0].fields["state"].s == "Running"
+
+  test "M83 step 4b: systemdUserUnit defaults state=Running, enabled=true":
+    var target: seq[ResourceIntent] = @[]
+    systemdUserUnit(target, name = "x.service", content = "[Unit]\n")
+    check target[0].fields["enabled"].b == true
+    check target[0].fields["state"].s == "Running"
+
+  test "M83 step 4b: systemdUserUnit honours explicit address":
+    var target: seq[ResourceIntent] = @[]
+    systemdUserUnit(target,
+      name = "x.service",
+      content = "",
+      address = "gpg-agent-user-service")
+    check target[0].address == "gpg-agent-user-service"
+
   test "fsSystemFile":
     var target: seq[ResourceIntent] = @[]
     fsSystemFile(target, path = "/etc/hosts.d/local",

@@ -53,6 +53,18 @@ type
       ## set semantics (uninstall extras). An optional `@<version>`
       ## pin on a declared ID forces a specific marketplace version.
 
+  SystemdUnitState* = enum
+    ## M83 step 4b: desired runtime state for a `systemd.userUnit`.
+    ## `susRunning` is the default; the driver issues `systemctl
+    ## --user start` when `is-active != active`. `susStopped`
+    ## flips the direction: the driver issues `systemctl --user
+    ## stop` when `is-active == active`. The string form is what
+    ## a `home.nim` `state = "Running" | "Stopped"` attribute
+    ## carries and how the resource parser maps the attribute back
+    ## to the enum.
+    susRunning = "Running"
+    susStopped = "Stopped"
+
   RegistryValueKind* = enum
     ## The 6 typed value kinds the `windows.registryValue` driver
     ## understands. The string form is what gets serialized into
@@ -158,6 +170,12 @@ type
       unitName*: string
       unitContent*: string
       unitEnabled*: bool
+      unitState*: SystemdUnitState
+        ## M83 step 4b: desired runtime state — `susRunning`
+        ## (`systemctl --user start`) or `susStopped` (`systemctl
+        ## --user stop`). Default `susRunning`. The driver compares
+        ## the desired state to the observed `is-active` result and
+        ## issues start/stop only on mismatch.
     of rkMacosUserDefault:
       defaultsDomain*: string
       defaultsKey*: string
@@ -344,6 +362,20 @@ proc registryValueKindFromRegType*(regType: uint32): RegistryValueKind =
   else:
     raise newException(ValueError,
       "unknown REG_TYPE numeric constant: " & $regType)
+
+proc systemdUnitStateFromString*(s: string): SystemdUnitState =
+  ## Map a `home.nim` `state = "..."` attribute to the typed enum.
+  ## Empty is treated as the default `susRunning` so an omitted
+  ## attribute keeps the spec's default. Unknown values raise
+  ## `ValueError`; the apply pipeline turns that into a typed
+  ## `EUnstructured` with the offending key/value.
+  case s
+  of $susRunning, "": susRunning
+  of $susStopped: susStopped
+  else:
+    raise newException(ValueError,
+      "unknown systemd.userUnit state: '" & s &
+      "'; expected 'Running' or 'Stopped'")
 
 proc lifecyclePolicyFromString*(s: string): LifecyclePolicy =
   case s

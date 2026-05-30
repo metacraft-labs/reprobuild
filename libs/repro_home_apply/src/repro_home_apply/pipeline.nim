@@ -762,6 +762,39 @@ proc resourceFromEntry(profilePath, homeDir: string;
       userFileContent: content,
       userFileMode: mode,
       userFileExecutable: executable)
+  of "systemd.userUnit":
+    # M83 step 4b — Linux home-scope user-service driver. Closed-set
+    # attribute validation: a typo like `enableed` or `stat` is
+    # rejected at parse time rather than silently degrading to the
+    # default. The `address` attribute is not in this list — the
+    # parser stores `address` on the entry header, not as an attr.
+    const systemdUserUnitAllowedKeys = ["name", "content", "enabled",
+      "state", "depends_on"]
+    for a in entry.resourceAttrs:
+      if a.kind == nkResourceAttr and
+         a.resourceAttrKey notin systemdUserUnitAllowedKeys:
+        resourceProfileError(profilePath, a.resourceAttrLine,
+          "resource `systemd.userUnit " & address &
+          "` has unknown attribute `" & a.resourceAttrKey &
+          "`; expected one of: " & systemdUserUnitAllowedKeys.join(", "))
+    let enabled =
+      if hasAttr(entry, "enabled"): attrOf(entry, "enabled") == "true"
+      else: true  # spec default
+    let stateStr =
+      if hasAttr(entry, "state"): attrOf(entry, "state")
+      else: ""  # empty -> susRunning via systemdUnitStateFromString
+    var state: SystemdUnitState
+    try:
+      state = systemdUnitStateFromString(stateStr)
+    except ValueError as e:
+      resourceProfileError(profilePath, entry.resourceHeaderLine,
+        "resource `systemd.userUnit " & address & "` " & e.msg)
+    result = Resource(kind: rkSystemdUserUnit, address: address,
+      lifecyclePolicy: lpDefault,
+      unitName: requireAttr(profilePath, entry, "name"),
+      unitContent: requireAttr(profilePath, entry, "content"),
+      unitEnabled: enabled,
+      unitState: state)
   of "vscode.extension":
     # Closed-set attribute validation.
     const vscodeAllowedKeys = ["extensions", "removeUnknown", "depends_on"]
@@ -2084,8 +2117,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             payloadKindStr = "gvariant-literal"
           of rkSystemdUserUnit:
             # Phase B driver: re-raises ENotImplementedPlatform off-Linux.
+            # M83 step 4b: pass the typed `unitState` through so the
+            # driver can converge start/stop separately from
+            # enable/disable.
             postWriteBytes = applyUserUnit(opts.homeDir, desired.unitName,
-              desired.unitContent, desired.unitEnabled)
+              desired.unitContent, desired.unitEnabled, desired.unitState)
             payloadKindStr = "unit-content"
           of rkMacosUserDefault:
             # Phase B driver: re-raises ENotImplementedPlatform off-macOS.

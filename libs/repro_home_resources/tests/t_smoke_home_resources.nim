@@ -238,6 +238,17 @@ suite "M68 smoke: home resource lifecycle":
     else:
       skip()
 
+  test "M83 step 4b: systemd.userUnit with state parameter still off-Linux":
+    # The applyUserUnit signature now takes `state` (default
+    # `susRunning`); the platform guard MUST still raise off-Linux
+    # regardless of the extra parameter.
+    when not defined(linux):
+      expect ENotImplementedPlatform:
+        discard applyUserUnit("/tmp/repro-m83-4b-systemd-state",
+          "repro-state.service", "[Unit]\n", false, susStopped)
+    else:
+      skip()
+
   # ----------------------------------------------------------------
   # Phase B pure-function unit tests. The Linux/macOS drivers'
   # shell-out to gsettings / defaults / systemctl / launchctl can
@@ -772,6 +783,102 @@ suite "M68 fs.userFile driver":
     let action = decideAction(state)
     check action.kind == rakCreate
     check action.resourceKind == rkFsUserFile
+
+# ===========================================================================
+# M83 step 4b: systemd.userUnit canonical-bytes + lifecycle assertions.
+# These are pure (no `systemctl` shell-out); they pin that the digest is
+# a function of `unitContent` + `unitEnabled` + `unitState` together so
+# a state flip ALONE re-triggers an update.
+# ===========================================================================
+
+suite "M83 step 4b: systemd.userUnit canonical state":
+
+  test "canonicalUnitBytes: same content + enabled + state digests equal":
+    let body = "[Unit]\nDescription=demo\n[Service]\nExecStart=/bin/true\n"
+    let a = canonicalUnitBytes(body, true, susRunning)
+    let b = canonicalUnitBytes(body, true, susRunning)
+    check digestOfBytes(a) == digestOfBytes(b)
+
+  test "canonicalUnitBytes: changing enabled flips the digest":
+    let body = "[Unit]\nDescription=demo\n"
+    let a = canonicalUnitBytes(body, true, susRunning)
+    let b = canonicalUnitBytes(body, false, susRunning)
+    check digestOfBytes(a) != digestOfBytes(b)
+
+  test "canonicalUnitBytes: changing state flips the digest":
+    let body = "[Unit]\nDescription=demo\n"
+    let a = canonicalUnitBytes(body, true, susRunning)
+    let b = canonicalUnitBytes(body, true, susStopped)
+    check digestOfBytes(a) != digestOfBytes(b)
+
+  test "canonicalUnitBytes: changing the body bytes flips the digest":
+    let a = canonicalUnitBytes("body=1", true, susRunning)
+    let b = canonicalUnitBytes("body=2", true, susRunning)
+    check digestOfBytes(a) != digestOfBytes(b)
+
+  test "digestOfResource: rkSystemdUserUnit reuses canonicalUnitBytes":
+    let body = "[Unit]\nDescription=demo\n"
+    let r = Resource(kind: rkSystemdUserUnit, address: "u:digest",
+      lifecyclePolicy: lpDefault, unitName: "demo.service",
+      unitContent: body, unitEnabled: true, unitState: susRunning)
+    let expected = digestOfBytes(canonicalUnitBytes(body, true, susRunning))
+    check digestOfResource(r) == expected
+
+  test "lifecycle: state flip re-plans as update":
+    # Desired says "Stopped", observed (recorded) says "Running": the
+    # canonical digest differs, so the lifecycle plans an update
+    # rather than a spurious no-op.
+    let body = "[Unit]\nDescription=demo\n"
+    var desired = Resource(kind: rkSystemdUserUnit, address: "u:flip",
+      lifecyclePolicy: lpDefault, unitName: "demo.service",
+      unitContent: body, unitEnabled: true, unitState: susStopped)
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfBytes(
+      canonicalUnitBytes(body, true, susRunning))
+    state.hasRecorded = true
+    state.recorded.kind = rkSystemdUserUnit
+    state.recorded.postWriteDigest = state.observed.digest
+    let action = decideAction(state)
+    check action.kind == rakUpdate
+    check action.resourceKind == rkSystemdUserUnit
+
+  test "lifecycle: same content + enabled + state collapses to no-op":
+    let body = "[Unit]\nDescription=demo\n"
+    var desired = Resource(kind: rkSystemdUserUnit, address: "u:noop",
+      lifecyclePolicy: lpDefault, unitName: "demo.service",
+      unitContent: body, unitEnabled: true, unitState: susRunning)
+    var state: ResourceState
+    state.address = desired.address
+    state.desired = desired
+    state.hasDesired = true
+    state.observed.present = true
+    state.observed.digest = digestOfResource(desired)
+    let action = decideAction(state)
+    check action.kind == rakNoOp
+
+  test "realWorldIdentity: systemd:user:<name>":
+    let r = Resource(kind: rkSystemdUserUnit, address: "u:id",
+      lifecyclePolicy: lpDefault, unitName: "repro-dev.service",
+      unitContent: "", unitEnabled: true, unitState: susRunning)
+    check realWorldIdentity(r) == "systemd:user:repro-dev.service"
+
+  test "systemdUnitStateFromString: maps the spec strings":
+    check systemdUnitStateFromString("Running") == susRunning
+    check systemdUnitStateFromString("Stopped") == susStopped
+    # Empty preserves the default.
+    check systemdUnitStateFromString("") == susRunning
+    # Unknown raises (the apply pipeline turns it into EUnstructured).
+    expect ValueError:
+      discard systemdUnitStateFromString("running")  # case-sensitive
+    expect ValueError:
+      discard systemdUnitStateFromString("Reloading")
+
+  test "resourceKindFromString covers systemd.userUnit":
+    check resourceKindFromString("systemd.userUnit") == rkSystemdUserUnit
 
 # ===========================================================================
 # vscode.extension — pure parse + drift logic. The shell-out side runs

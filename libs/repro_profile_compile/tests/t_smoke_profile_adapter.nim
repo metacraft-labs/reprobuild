@@ -251,6 +251,42 @@ suite "M83 Phase D: home adapter — resources":
         hasExecutable = true
     check hasExecutable
 
+  test "M83 step 4b: systemd.userUnit resource carries name + content + state":
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("systemd.userUnit", "u",
+      @[strFieldEntry("name", "gpg-agent.service"),
+        strFieldEntry("content", "[Unit]\nDescription=gpg-agent\n"),
+        boolFieldEntry("enabled", true),
+        strFieldEntry("state", "Running")]))
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    let e = findResourcesBlock(prof).get.resourcesEntries[0]
+    check e.resourceKind == "systemd.userUnit"
+    var attrKeys: seq[string]
+    for a in e.resourceAttrs:
+      attrKeys.add(a.resourceAttrKey)
+    check "name" in attrKeys
+    check "content" in attrKeys
+    check "enabled" in attrKeys
+    check "state" in attrKeys
+
+  test "M83 step 4b: systemd.userUnit state attribute renders quoted":
+    # The string-typed `state` field is rendered as a double-quoted
+    # source token so the apply parser's `attrOf` decoder unquotes
+    # it to bare `Running` / `Stopped` text.
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("systemd.userUnit", "u",
+      @[strFieldEntry("name", "x.service"),
+        strFieldEntry("content", ""),
+        boolFieldEntry("enabled", false),
+        strFieldEntry("state", "Stopped")]))
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    let e = findResourcesBlock(prof).get.resourcesEntries[0]
+    var stateSrc = ""
+    for a in e.resourceAttrs:
+      if a.resourceAttrKey == "state":
+        stateSrc = a.resourceAttrValueSource
+    check stateSrc == "\"Stopped\""
+
   test "vscode.extension resource carries extensions + removeUnknown":
     var intent = ProfileIntent(name: "demo")
     intent.resources.add(resourceIntent("vscode.extension", "vsExt",
@@ -576,9 +612,17 @@ suite "M83 Phase D: home adapter round-trip via attribute readback":
         strFieldEntry("content", "y"),
         strFieldEntry("mode", "0644"),
         boolFieldEntry("executable", false)]))
+    # M83 step 4b: the systemd.userUnit kind also belongs to the
+    # home-scope set and must NOT be filtered out by
+    # `isHomeScopeResource`.
+    intent.resources.add(resourceIntent("systemd.userUnit", "su",
+      @[strFieldEntry("name", "gpg-agent.service"),
+        strFieldEntry("content", "[Unit]\n"),
+        boolFieldEntry("enabled", true),
+        strFieldEntry("state", "Running")]))
     let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
     let entries = findResourcesBlock(prof).get.resourcesEntries
-    check entries.len == 7
+    check entries.len == 8
     var kinds: seq[string]
     for e in entries:
       kinds.add(e.resourceKind)
@@ -590,3 +634,4 @@ suite "M83 Phase D: home adapter round-trip via attribute readback":
     check "windows.registryValue" in kinds
     check "windows.startup" in kinds
     check "fs.userFile" in kinds
+    check "systemd.userUnit" in kinds

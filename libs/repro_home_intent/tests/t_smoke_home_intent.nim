@@ -333,3 +333,52 @@ profile "x":
     writeFile(extendedPath(path), src)
     let prof = loadProfile(path)
     check prof.root.kind == nkProfileRoot
+
+  # ---------------------------------------------------------------------
+  # M83 step 4b: parser acceptance for the systemd.userUnit kind. The
+  # text-level parser only checks the kind tag belongs to
+  # `KnownResourceKinds` — per-kind attribute closed-sets are enforced
+  # in `repro_home_apply/pipeline.nim::resourceFromEntry`.
+  # ---------------------------------------------------------------------
+
+  test "systemd.userUnit: parser accepts a minimal stanza":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    systemd.userUnit gpgAgent:
+      name = "gpg-agent.service"
+      content = "[Unit]\nDescription=gpg-agent\n[Service]\nExecStart=/usr/bin/gpg-agent --daemon\n"
+      enabled = true
+      state = "Running"
+"""
+    let dir = createTempDir("repro-home-systemd-accept-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    let prof = loadProfile(path)
+    check prof.root.kind == nkProfileRoot
+
+  test "systemd.userUnit: parser rejects a typo'd kind":
+    let src = """
+import repro/profile
+
+profile "x":
+  activity default:
+    neovim
+
+  resources:
+    systemd.userUnits bad:
+      name = "x.service"
+      content = ""
+"""
+    let dir = createTempDir("repro-home-systemd-typo-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), src)
+    expect EUnstructured:
+      discard loadProfile(path)

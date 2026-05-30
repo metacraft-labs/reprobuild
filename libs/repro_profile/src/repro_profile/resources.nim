@@ -171,6 +171,35 @@ template fsUserFile*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "fs.userFile", addr0, fields,
       dependsOn)
 
+template systemdUserUnit*(targetResources: var seq[ResourceIntent];
+                          name: string;
+                          content: string;
+                          enabled: bool = true;
+                          state: string = "Running";
+                          address: string = "";
+                          dependsOn: seq[string] = @[]) =
+  ## M83 step 4b — Linux home-scope user-service.
+  ##
+  ## Wraps `systemctl --user enable/disable/start/stop`. The `state`
+  ## attribute is the runtime state — `"Running"` or `"Stopped"`. A
+  ## bare `state` string is used (not an untyped enum literal) so
+  ## the macro compiles without leaking a Phase-A-side enum into the
+  ## resource model; the apply pipeline maps the string to the typed
+  ## `SystemdUnitState` enum via `systemdUnitStateFromString` and
+  ## rejects anything other than `"Running"` / `"Stopped"`.
+  ##
+  ## Address default: `systemd.userUnit:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    fields["enabled"] = boolField(enabled)
+    fields["state"] = strField(state)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("systemd.userUnit", name)
+    pushResource(targetResources, "systemd.userUnit", addr0, fields,
+      dependsOn)
+
 template vscodeExtension*(targetResources: var seq[ResourceIntent];
                           extensions: seq[string];
                           removeUnknown: bool = false;

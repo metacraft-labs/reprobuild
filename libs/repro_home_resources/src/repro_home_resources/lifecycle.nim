@@ -29,6 +29,7 @@ import std/[strutils]
 import repro_home_generations
 
 import ./drivers/defaults
+import ./drivers/systemd_user
 import ./drivers/vscode_extension
 import ./errors
 import ./manifest_record
@@ -128,10 +129,16 @@ proc digestOfResource*(desired: Resource): Digest256 =
       buf[i] = byte(ord(ch))
     return digestOfBytes(buf)
   of rkSystemdUserUnit:
-    var buf = newSeq[byte](desired.unitContent.len)
-    for i, ch in desired.unitContent:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
+    # The on-disk file the driver writes is just `unitContent`, but
+    # `unitEnabled` and `unitState` are RECONCILED by `systemctl`
+    # without touching the file. A change to either field must
+    # therefore re-trigger the apply path even when the file body
+    # itself is unchanged. `canonicalUnitBytes` encodes the triple
+    # consistently for both desired (here) and observed
+    # (`observeUserUnit`); same content + enabled + state -> same
+    # digest -> cache-hit no-op.
+    return digestOfBytes(canonicalUnitBytes(desired.unitContent,
+      desired.unitEnabled, desired.unitState))
   of rkMacosUserDefault:
     # Structural canonicalization (NOT a text compare): the
     # `macos.userDefault` driver records and observes the
