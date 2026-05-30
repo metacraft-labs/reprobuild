@@ -11,6 +11,88 @@ import repro_monitor_depfile/writer
 when defined(windows):
   import repro_monitor_depfile/windows_injector
 
+# macOS: prepare a sandbox-tools directory holding non-SIP copies of the
+# common shell binaries that show up in monitored subprocess trees. The
+# shim's spawn hook (see repro_monitor_hooks/macos_interpose_runtime.nim)
+# rewrites SIP-protected exec paths to these copies so that
+# DYLD_INSERT_LIBRARIES is not stripped on the way into /bin/sh and
+# friends — the path-rewriting bypass documented in
+# codetracer-native-recorder/ct_interpose/src/ct_interpose/library_init.nim.
+# This is the "route B" minimum-viable populate referenced in the
+# Reprobuild M11+ integration plan; the binary list mirrors the SIP-
+# protected commands that ``osproc.execCmdEx``/``quoteShellCommand`` and
+# the dev-env activation pipeline reach for. When ct_interpose grows a
+# canonical populate routine, this list collapses to a single call.
+when defined(macosx):
+  import ct_interpose/propagation as ct_propagation
+
+  const reproSandboxBinaries = [
+    "/bin/sh",
+    "/bin/bash",
+    "/bin/dash",
+    "/bin/zsh",
+    "/usr/bin/env",
+    "/usr/bin/which"
+  ]
+
+  proc findNonSipAlternative(binaryName: string): string =
+    ## Walk PATH looking for an instance of ``binaryName`` that lives
+    ## outside the SIP-protected prefixes (``/bin``, ``/sbin``,
+    ## ``/usr/bin``, ``/usr/sbin``). On macOS 26 / arm64e, byte-copies
+    ## of system binaries refuse to execute (the kernel rejects them),
+    ## so the sandbox-tools tree has to symlink to a non-SIP alternative
+    ## — typically the Nix-provided shell on developer machines or the
+    ## Homebrew copy on others. Returns an empty string if no candidate
+    ## exists, in which case the caller falls back to a byte-copy.
+    let pathEnv = getEnv("PATH")
+    if pathEnv.len == 0:
+      return ""
+    for entry in pathEnv.split(PathSep):
+      if entry.len == 0:
+        continue
+      let candidate = entry / binaryName
+      if not fileExists(candidate):
+        continue
+      if ct_propagation.isSipProtected(candidate):
+        continue
+      return candidate
+    ""
+
+  proc populateReproSandboxTools(sandboxDir: string) =
+    if sandboxDir.len == 0:
+      return
+    try:
+      createDir(extendedPath(sandboxDir / "bin"))
+    except OSError, IOError:
+      return
+    for src in reproSandboxBinaries:
+      if not fileExists(src):
+        continue
+      let destPath = sandboxDir / src.strip(leading = true, trailing = false,
+                                            chars = {'/'})
+      if fileExists(destPath) or symlinkExists(destPath):
+        continue
+      try:
+        createDir(extendedPath(destPath.parentDir))
+      except OSError, IOError:
+        continue
+      let basename = src.extractFilename
+      let alternative = findNonSipAlternative(basename)
+      if alternative.len > 0:
+        try:
+          createSymlink(alternative, destPath)
+          continue
+        except OSError, IOError:
+          discard
+      # No non-SIP alternative on PATH — fall back to byte-copy. This
+      # is the documented path for Linux and pre-arm64e macOS; on
+      # macOS 26 / arm64e the copy will fail to execute and the spawn
+      # hook will fall back to the SIP-stripped original.
+      try:
+        discard ct_propagation.prepareSandboxCopy(src, sandboxDir)
+      except OSError, IOError:
+        discard
+
 type
   ParsedFsSnoopCommand = object
     inspectMode: bool
@@ -224,7 +306,18 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
     defer: removeDir(extendedPath(fragmentDir))
     ensureParentDir(request.depFilePath)
 
+    # SIP bypass: ensure CT_SANDBOX_TOOLS_DIR exists and contains non-SIP
+    # copies of the shell binaries that monitored subprocesses commonly
+    # exec. Without this, /bin/sh (used by osproc.execCmdEx) loses
+    # DYLD_INSERT_LIBRARIES and the shim falls silent for the rest of
+    # the process tree.
+    var sandboxDir = getEnv("CT_SANDBOX_TOOLS_DIR")
+    if sandboxDir.len == 0:
+      sandboxDir = createLocalTempDir("repro-fs-snoop-sandbox-tools")
+    populateReproSandboxTools(sandboxDir)
+
     var oldEnv: seq[(string, string, bool)] = @[]
+    setEnvVar("CT_SANDBOX_TOOLS_DIR", sandboxDir, oldEnv)
     setEnvVar("DYLD_INSERT_LIBRARIES", injectionValue(shimLib), oldEnv)
     setEnvVar("REPRO_MONITOR_FRAGMENT_DIR", fragmentDir, oldEnv)
     setEnvVar("REPRO_MONITOR_OUTPUT", request.depFilePath, oldEnv)

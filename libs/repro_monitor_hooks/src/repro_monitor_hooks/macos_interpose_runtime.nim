@@ -1,6 +1,46 @@
 when not defined(macosx):
   {.error: "repro_monitor_hooks/macos_interpose_runtime is macOS-only".}
 
+import std/os
+import ct_interpose/propagation as ct_propagation
+
+# Bridge from C-level spawn hooks back into ct_interpose's SIP-rewrite
+# helper. On macOS, /bin/, /sbin/, /usr/bin/, /usr/sbin/ are SIP-protected,
+# so DYLD_INSERT_LIBRARIES is stripped when those binaries are exec'd. The
+# helper consults CT_SANDBOX_TOOLS_DIR (populated by repro-fs-snoop) and, if
+# a sandbox copy of the requested binary exists, returns its path instead.
+#
+# We can't reuse ct_interpose's private static C symbol _ct_rewrite_sip_path
+# directly (it depends on private state), so we expose the Nim helper to C
+# via an exportc shim. The returned cstring points into a per-thread Nim
+# string that lives until the next call from the same thread — the spawn
+# hook consumes it immediately, so the lifetime is sufficient.
+var sipRewriteBuf {.threadvar.}: string
+
+proc repro_macos_rewrite_sip_path*(path: cstring): cstring
+    {.exportc: "repro_macos_rewrite_sip_path", cdecl.} =
+  if path == nil:
+    return path
+  let original = $path
+  let rewritten = ct_propagation.rewriteExecPathForSip(original)
+  if rewritten == original:
+    return path
+  sipRewriteBuf = rewritten
+  result = cstring(sipRewriteBuf)
+
+var sandboxDirBuf {.threadvar.}: string
+
+proc repro_macos_get_sandbox_tools_dir*(): cstring
+    {.exportc: "repro_macos_get_sandbox_tools_dir", cdecl.} =
+  ## Returns the active CT_SANDBOX_TOOLS_DIR (or the propagation default)
+  ## so the C-level env builder can propagate it to the child env. Returns
+  ## nil if the env var is unset and we should not synthesise one.
+  let envDir = getEnv("CT_SANDBOX_TOOLS_DIR")
+  if envDir.len == 0:
+    return nil
+  sandboxDirBuf = envDir
+  result = cstring(sandboxDirBuf)
+
 {.emit: """
 #include <dlfcn.h>
 #include <dirent.h>
@@ -18,6 +58,8 @@ when not defined(macosx):
 #include <unistd.h>
 
 extern char **environ;
+extern char *repro_macos_rewrite_sip_path(char *path);
+extern char *repro_macos_get_sandbox_tools_dir(void);
 
 int repro_macos_real_open_syscall(char *path, int flags, int mode) {
   return (int)syscall(SYS_open, path, flags, mode);
@@ -62,30 +104,47 @@ static int repro_macos_env_has(char **envp, const char *name) {
 
 static char **repro_macos_env_with_preload(char **envp) {
   const char *shim = getenv("REPRO_MONITOR_SHIM_LIB");
-  if (!shim || shim[0] == '\0') return envp;
-  if (repro_macos_env_has(envp, "DYLD_INSERT_LIBRARIES")) return envp;
+  char *sandbox_dir = repro_macos_get_sandbox_tools_dir();
+  int need_dyld = shim && shim[0] != '\0' &&
+    !repro_macos_env_has(envp, "DYLD_INSERT_LIBRARIES");
+  int need_sandbox = sandbox_dir && sandbox_dir[0] != '\0' &&
+    !repro_macos_env_has(envp, "CT_SANDBOX_TOOLS_DIR");
+  if (!need_dyld && !need_sandbox) return envp;
 
   char **source = envp ? envp : environ;
   size_t count = 0;
   while (source && source[count]) count++;
 
-  char **result = (char **)calloc(count + 2, sizeof(char *));
+  size_t extras = (need_dyld ? 1u : 0u) + (need_sandbox ? 1u : 0u);
+  char **result = (char **)calloc(count + extras + 1, sizeof(char *));
   if (!result) return envp;
   for (size_t i = 0; i < count; i++) result[i] = source[i];
 
-  const char *prefix = "DYLD_INSERT_LIBRARIES=";
-  size_t value_len = strlen(prefix) + strlen(shim) + 1;
-  char *value = (char *)malloc(value_len);
-  if (!value) return envp;
-  snprintf(value, value_len, "%s%s", prefix, shim);
-  result[count] = value;
-  result[count + 1] = NULL;
+  size_t slot = count;
+  if (need_dyld) {
+    const char *prefix = "DYLD_INSERT_LIBRARIES=";
+    size_t value_len = strlen(prefix) + strlen(shim) + 1;
+    char *value = (char *)malloc(value_len);
+    if (!value) { free(result); return envp; }
+    snprintf(value, value_len, "%s%s", prefix, shim);
+    result[slot++] = value;
+  }
+  if (need_sandbox) {
+    const char *prefix = "CT_SANDBOX_TOOLS_DIR=";
+    size_t value_len = strlen(prefix) + strlen(sandbox_dir) + 1;
+    char *value = (char *)malloc(value_len);
+    if (!value) { free(result); return envp; }
+    snprintf(value, value_len, "%s%s", prefix, sandbox_dir);
+    result[slot++] = value;
+  }
+  result[slot] = NULL;
   return result;
 }
 
 int repro_macos_real_execve_syscall(char *path, char **argv, char **envp) {
   char **effective_envp = repro_macos_env_with_preload(envp);
-  return (int)syscall(SYS_execve, path, argv, effective_envp);
+  char *effective_path = repro_macos_rewrite_sip_path(path);
+  return (int)syscall(SYS_execve, effective_path, argv, effective_envp);
 }
 
 typedef int (*repro_macos_posix_spawn_fn)(pid_t *, const char *,
@@ -230,7 +289,8 @@ int repro_macos_real_posix_spawn(pid_t *pid, char *path, void *file_actions,
   repro_macos_resolve_spawn();
   if (!repro_macos_real_posix_spawn_ptr) return -1;
   char **effective_envp = repro_macos_env_with_preload(envp);
-  return repro_macos_real_posix_spawn_ptr(pid, path,
+  char *effective_path = repro_macos_rewrite_sip_path(path);
+  return repro_macos_real_posix_spawn_ptr(pid, effective_path,
     (const posix_spawn_file_actions_t *)file_actions,
     (const posix_spawnattr_t *)attrp, argv, effective_envp);
 }
@@ -240,7 +300,8 @@ int repro_macos_real_posix_spawnp(pid_t *pid, char *path, void *file_actions,
   repro_macos_resolve_spawn();
   if (!repro_macos_real_posix_spawnp_ptr) return -1;
   char **effective_envp = repro_macos_env_with_preload(envp);
-  return repro_macos_real_posix_spawnp_ptr(pid, path,
+  char *effective_path = repro_macos_rewrite_sip_path(path);
+  return repro_macos_real_posix_spawnp_ptr(pid, effective_path,
     (const posix_spawn_file_actions_t *)file_actions,
     (const posix_spawnattr_t *)attrp, argv, effective_envp);
 }
