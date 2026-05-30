@@ -126,6 +126,11 @@ type
       ## 0644), then `sysctl -p <path>` to load the value into the
       ## live kernel. Idempotent: a re-apply with unchanged content is
       ## a no-op via the canonical-bytes digest.
+    pokLinuxUdevRule = "linux.udevRule"
+      ## The post-M83 step-5 Linux udev rule drop-in operation: write
+      ## a rule body to `/etc/udev/rules.d/<name>.rules` (mode 0644),
+      ## then `udevadm control --reload-rules`. NO automatic device-
+      ## trigger — that is too invasive for a converge step.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -298,6 +303,13 @@ type
       sysctlValue*: string
       sysctlFilename*: string
       sysctlDestroy*: bool
+    of pokLinuxUdevRule:
+      ## Write a udev rule drop-in. `udevName` is the rule basename
+      ## (must end `.rules`); `udevContent` is the full file body;
+      ## `udevDestroy` selects the rollback direction.
+      udevName*: string
+      udevContent*: string
+      udevDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -333,6 +345,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokOsTimezone: true
   of pokOsHostname: true
   of pokLinuxSysctl: true
+  of pokLinuxUdevRule: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -360,6 +373,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokOsTimezone: pokOsTimezone
   of $pokOsHostname: pokOsHostname
   of $pokLinuxSysctl: pokLinuxSysctl
+  of $pokLinuxUdevRule: pokLinuxUdevRule
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -748,6 +762,14 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       if not op.sysctlFilename.endsWith(".conf"):
         return "linux.sysctl filename '" & op.sysctlFilename &
           "' must end with '.conf' (sysctl.d convention)"
+  of pokLinuxUdevRule:
+    if not isSafeDropInBasename(op.udevName):
+      return "linux.udevRule name '" & op.udevName &
+        "' is not a safe single-segment basename (letters, digits, " &
+        "'.', '-', '_'; no '/', '..', or shell metacharacter)"
+    if not op.udevName.endsWith(".rules"):
+      return "linux.udevRule name '" & op.udevName &
+        "' must end with '.rules' (udev convention)"
   return ""
 
 # ---------------------------------------------------------------------------

@@ -340,6 +340,27 @@ suite "Resource constructors":
     check target[0].address == "linux.sysctl:kernel.perf_event_paranoid"
     check target[0].fields["filename"].s == ""
 
+  test "linuxUdevRule records name / content":
+    var target: seq[ResourceIntent] = @[]
+    linuxUdevRule(target,
+      name = "99-my.rules",
+      content = "KERNEL==\"event*\", MODE=\"0666\"\n",
+      address = "my-udev-rule")
+    check target.len == 1
+    check target[0].kind == "linux.udevRule"
+    check target[0].address == "my-udev-rule"
+    check target[0].fields["name"].s == "99-my.rules"
+    check target[0].fields["content"].s ==
+      "KERNEL==\"event*\", MODE=\"0666\"\n"
+
+  test "linuxUdevRule auto-addresses from the name when address is empty":
+    var target: seq[ResourceIntent] = @[]
+    linuxUdevRule(target,
+      name = "99-my.rules",
+      content = "x")
+    check target.len == 1
+    check target[0].address == "linux.udevRule:99-my.rules"
+
   test "windowsRegistryValueHKLM":
     var target: seq[ResourceIntent] = @[]
     windowsRegistryValueHKLM(target,

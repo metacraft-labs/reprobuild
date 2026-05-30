@@ -1496,3 +1496,92 @@ linux.sysctl {
     check realWorldIdentity(r) == "sysctl:kernel.perf_event_paranoid"
     check resourceName(r) == "kernel.perf_event_paranoid"
     check resourceKindTag(r) == "linux.sysctl"
+
+# ===========================================================================
+# linux.udevRule — parser + toPrivilegedOperation. M83 step 5.
+# ===========================================================================
+
+suite "repro_infra: linux.udevRule profile parser":
+
+  test "parses a linux.udevRule stanza":
+    let text = """
+linux.udevRule {
+  name = "99-my-keyboard.rules"
+  content = "KERNEL==\"event*\", MODE=\"0666\""
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkLinuxUdevRule
+    check profile.resources[0].udevName == "99-my-keyboard.rules"
+    check profile.resources[0].udevContent ==
+      "KERNEL==\\\"event*\\\", MODE=\\\"0666\\\""
+    # Note: the M69 parser's `unquote` does not decode `\"` escapes —
+    # it strips one surrounding pair. The author writes the rule body
+    # via a here-doc / raw string in real `system.nim` profiles; this
+    # smoke test exercises the parser's literal-passthrough behavior.
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokLinuxUdevRule
+    check op.udevName == "99-my-keyboard.rules"
+    check not op.udevDestroy
+    check requiresElevation(op.kind)
+
+  test "toPrivilegedOperation passes destroy through to udevDestroy":
+    let text = """
+linux.udevRule {
+  name = "99-my.rules"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let op = toPrivilegedOperation(profile.resources[0], destroy = true)
+    check op.kind == pokLinuxUdevRule
+    check op.udevDestroy
+
+  test "linux.udevRule rejects a path-escape name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.udevRule {
+  name = "../etc/passwd"
+  content = "x"
+}
+""")
+
+  test "linux.udevRule rejects a shell-meta name":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.udevRule {
+  name = "evil; rm.rules"
+  content = "x"
+}
+""")
+
+  test "linux.udevRule rejects a name without .rules":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.udevRule {
+  name = "99-my-keyboard.conf"
+  content = "x"
+}
+""")
+
+  test "linux.udevRule rejects a missing content field":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+linux.udevRule {
+  name = "99-my.rules"
+}
+""")
+
+  test "realWorldIdentity and resourceName follow the udev rule name":
+    let text = """
+linux.udevRule {
+  name = "99-my.rules"
+  content = "x"
+}
+"""
+    let profile = parseSystemProfile(text)
+    let r = profile.resources[0]
+    check realWorldIdentity(r) == "udevRule:99-my.rules"
+    check resourceName(r) == "99-my.rules"
+    check resourceKindTag(r) == "linux.udevRule"

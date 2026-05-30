@@ -138,6 +138,11 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       # breaking the top-down resolution order; the formula is short
       # enough to repeat.
       posixDigestHexOfText(op.sysctlKey & " = " & op.sysctlValue & "\n")
+  of pokLinuxUdevRule:
+    if op.udevDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.udevContent)
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -1185,3 +1190,88 @@ proc applyLinuxSysctl*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("linux.sysctl apply")
+
+# ===========================================================================
+# linux.udevRule — write /etc/udev/rules.d/<name> + reload rules.
+#
+# The device-trigger (`udevadm trigger`) is INTENTIONALLY NOT invoked —
+# triggering would re-run rules against every connected device and is
+# much more invasive than a converge step should be. The operator who
+# needs an immediate effect on already-connected hardware runs `udevadm
+# trigger` explicitly.
+# ===========================================================================
+
+const LinuxUdevRulesDir* = "/etc/udev/rules.d"
+  ## The directory a `linux.udevRule` drop-in file lands in.
+
+proc udevRulePath*(name: string): string =
+  ## Full on-disk path of the rule file for `name`.
+  LinuxUdevRulesDir & "/" & name
+
+proc observeLinuxUdevRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe a udev rule drop-in. The digest covers the file
+  ## contents verbatim (the M68 systemd.userUnit content-digest model).
+  when defined(linux):
+    let path = udevRulePath(op.udevName)
+    if not fileExists(path):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let content = readFile(path)
+    result.present = true
+    result.digestHex = posixDigestHexOfText(content)
+  else:
+    raiseNotImplementedPlatform("linux.udevRule observe")
+
+proc destroyLinuxUdevRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the rule file and reload udev so the absence takes effect.
+  ## Post-apply re-probe asserts the file is gone.
+  when defined(linux):
+    let path = udevRulePath(op.udevName)
+    if fileExists(path):
+      try: removeFile(path)
+      except OSError: discard
+    discard execCmdEx("udevadm control --reload-rules")
+    if fileExists(path):
+      raiseProtocol("linux.udevRule destroy of " & path &
+        " post-apply observation disagrees with desired state: " &
+        "the rule file still exists after `removeFile`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.udevRule destroy")
+
+proc applyLinuxUdevRule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the rule file and `udevadm control --reload-rules`. The
+  ## post-apply re-probe re-reads the file and compares the
+  ## canonical-bytes digest; raise `EProtocol` on mismatch.
+  when defined(linux):
+    if op.udevDestroy:
+      return destroyLinuxUdevRule(op)
+    let path = udevRulePath(op.udevName)
+    createDir(LinuxUdevRulesDir)
+    writeLinuxDropInFile(path, op.udevContent, 0o644)
+    let (reloadOut, reloadCode) = execCmdEx(
+      "udevadm control --reload-rules")
+    if reloadCode != 0:
+      raiseProtocol("linux.udevRule `udevadm control --reload-rules` " &
+        "failed after writing " & path & ": " & reloadOut.strip())
+    # Post-apply re-probe — see the M82 Phase A contract on the other
+    # drivers.
+    let post = observeLinuxUdevRule(op)
+    let desiredHex = posixDigestHexOfText(op.udevContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.udevRule " & path &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ".")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.udevRule apply")

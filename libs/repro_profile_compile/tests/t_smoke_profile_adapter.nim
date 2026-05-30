@@ -670,6 +670,49 @@ suite "M83 Phase D: system adapter":
     check sp2.resources.len == 1
     check sp2.resources[0].sysctlFilename == ""
 
+  test "linux.udevRule resource maps to srkLinuxUdevRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.udevRule", "kbd",
+      @[strFieldEntry("name", "99-keyboard.rules"),
+        strFieldEntry("content", "KERNEL==event MODE=0666\n")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkLinuxUdevRule
+    check sp.resources[0].udevName == "99-keyboard.rules"
+    check sp.resources[0].udevContent == "KERNEL==event MODE=0666\n"
+    check sp.resources[0].address == "kbd"
+
+  test "linux.udevRule rejects a path-escape name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.udevRule", "x",
+      @[strFieldEntry("name", "../etc/passwd"),
+        strFieldEntry("content", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "linux.udevRule rejects a non-.rules name at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.udevRule", "x",
+      @[strFieldEntry("name", "99-bad.conf"),
+        strFieldEntry("content", "x")]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips linux.udevRule":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("linux.udevRule", "",
+      @[strFieldEntry("name", "99-keyboard.rules"),
+        strFieldEntry("content", "KERNEL==event MODE=0666")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkLinuxUdevRule
+    check sp2.resources[0].udevName == "99-keyboard.rules"
+    check sp2.resources[0].udevContent == "KERNEL==event MODE=0666"
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
 # ---------------------------------------------------------------------------
 # Cross-cutting sanity: the home adapter's output passes the apply
 # pipeline's resource pre-validation by going through `findResourcesBlock`

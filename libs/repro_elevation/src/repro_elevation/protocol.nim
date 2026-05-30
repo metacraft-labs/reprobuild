@@ -340,6 +340,10 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.sysctlValue)
     body.writeString(op.sysctlFilename)
     body.writeBool(op.sysctlDestroy)
+  of pokLinuxUdevRule:
+    body.writeString(op.udevName)
+    body.writeString(op.udevContent)
+    body.writeBool(op.udevDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -498,6 +502,12 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.sysctlValue = readString(body, pos)
     result.operation.sysctlFilename = readString(body, pos)
     result.operation.sysctlDestroy = readBool(body, pos, "sysctlDestroy")
+  of pokLinuxUdevRule:
+    result.operation = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: address)
+    result.operation.udevName = readString(body, pos)
+    result.operation.udevContent = readString(body, pos)
+    result.operation.udevDestroy = readBool(body, pos, "udevDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

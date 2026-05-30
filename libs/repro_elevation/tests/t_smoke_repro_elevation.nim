@@ -1435,3 +1435,123 @@ kernel.x = 7
         discard applyLinuxSysctl(op)
       expect ENotImplementedPlatform:
         discard destroyLinuxSysctl(op)
+
+# ===========================================================================
+# linux.udevRule — pure parse + drift logic. The shell-out side runs
+# only on Linux; what runs everywhere is the closed-set validator, the
+# canonical-bytes digest, and the udev rule path derivation.
+# ===========================================================================
+
+suite "repro_elevation: linux.udevRule pure surface":
+
+  test "udevRulePath joins the directory with the basename":
+    check udevRulePath("99-myrule.rules") == "/etc/udev/rules.d/99-myrule.rules"
+    check LinuxUdevRulesDir == "/etc/udev/rules.d"
+
+  test "operationValidationError accepts a valid linux.udevRule":
+    let ok = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "my-keyboard-rule",
+      udevName: "99-my-keyboard.rules",
+      udevContent: "KERNEL==\"event*\", MODE=\"0666\"\n")
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad linux.udevRule fields":
+    # path-escape name
+    let escape = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "x",
+      udevName: "../etc/passwd",
+      udevContent: "x")
+    check operationValidationError(escape).len > 0
+    # shell-meta name
+    let meta = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "x",
+      udevName: "evil; rm.rules",
+      udevContent: "x")
+    check operationValidationError(meta).len > 0
+    # missing .rules extension
+    let badExt = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "x",
+      udevName: "99-myrule.txt",
+      udevContent: "x")
+    check operationValidationError(badExt).len > 0
+    # empty address
+    let emptyAddr = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "",
+      udevName: "99-myrule.rules",
+      udevContent: "x")
+    check operationValidationError(emptyAddr).len > 0
+
+  test "udevRule content may contain newlines (multi-line rules)":
+    # The udev rule body is a file write; newlines in content are
+    # required by the udev grammar (one rule per line) and must not
+    # be refused by the validator.
+    let multiLine = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "x",
+      udevName: "99-my.rules",
+      udevContent: "KERNEL==\"event*\", MODE=\"0666\"\n" &
+        "KERNEL==\"mouse*\", MODE=\"0666\"\n")
+    check operationValidationError(multiLine) == ""
+
+  test "RBEB Operation frame round-trips a linux.udevRule":
+    let op = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "my-rule",
+      udevName: "99-my.rules",
+      udevContent: "KERNEL==\"event*\", MODE=\"0666\"\n",
+      udevDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokLinuxUdevRule
+    check w2.operation.address == "my-rule"
+    check w2.operation.udevName == "99-my.rules"
+    check w2.operation.udevContent ==
+      "KERNEL==\"event*\", MODE=\"0666\"\n"
+    check not w2.operation.udevDestroy
+
+  test "RBEB Operation frame round-trips a destroy linux.udevRule":
+    let op = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "my-rule",
+      udevName: "99-my.rules",
+      udevContent: "",
+      udevDestroy: true)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "cafef00d")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.kind == pokLinuxUdevRule
+    check w2.operation.udevDestroy
+
+  test "posix desired digest for udev rule matches content bytes":
+    let op = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "my-rule",
+      udevName: "99-my.rules",
+      udevContent: "KERNEL==\"event*\", MODE=\"0666\"\n")
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText(op.udevContent)
+
+  test "posix desired digest for udev destroy is the absent sentinel":
+    let op = PrivilegedOperation(kind: pokLinuxUdevRule,
+      address: "x",
+      udevName: "99-my.rules",
+      udevContent: "x",
+      udevDestroy: true)
+    check posixSystemDesiredDigestHex(op) == ZeroDigestHex
+
+  test "linux.udevRule requires elevation":
+    check requiresElevation(pokLinuxUdevRule)
+    check $pokLinuxUdevRule == "linux.udevRule"
+    check privilegedOperationKindFromString("linux.udevRule") ==
+      pokLinuxUdevRule
+
+  test "off-Linux linux.udevRule entry points raise ENotImplementedPlatform":
+    when not defined(linux):
+      let op = PrivilegedOperation(kind: pokLinuxUdevRule,
+        address: "x",
+        udevName: "99-my.rules",
+        udevContent: "x")
+      expect ENotImplementedPlatform:
+        discard observeLinuxUdevRule(op)
+      expect ENotImplementedPlatform:
+        discard applyLinuxUdevRule(op)
+      expect ENotImplementedPlatform:
+        discard destroyLinuxUdevRule(op)

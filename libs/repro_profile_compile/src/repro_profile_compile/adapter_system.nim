@@ -215,6 +215,18 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
           "' must end with '.conf'")
     result = SystemResource(kind: srkLinuxSysctl,
       sysctlKey: k, sysctlValue: v, sysctlFilename: filename)
+  of "linux.udevRule":
+    let n = fieldString(r, "name")
+    let c = fieldString(r, "content")
+    if not isSafeDropInBasename(n):
+      raise newException(ValueError,
+        "linux.udevRule name '" & n &
+        "' is not a safe single-segment basename")
+    if not n.endsWith(".rules"):
+      raise newException(ValueError,
+        "linux.udevRule name '" & n & "' must end with '.rules'")
+    result = SystemResource(kind: srkLinuxUdevRule,
+      udevName: n, udevContent: c)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -240,7 +252,7 @@ proc isSystemScopeResource(kind: string): bool =
      "launchd.systemDaemon", "fs.systemFile",
      "env.systemVariable", "passwd.user",
      "os.timezone", "os.hostname",
-     "linux.sysctl":
+     "linux.sysctl", "linux.udevRule":
     true
   else:
     false
@@ -412,5 +424,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("value", quoteSystemValue(r.sysctlValue)))
       if r.sysctlFilename.len > 0:
         pairs.add(("filename", quoteSystemValue(r.sysctlFilename)))
+    of srkLinuxUdevRule:
+      pairs.add(("name", quoteSystemValue(r.udevName)))
+      pairs.add(("content", quoteSystemValue(r.udevContent)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

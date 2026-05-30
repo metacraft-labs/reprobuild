@@ -487,3 +487,22 @@ template linuxSysctl*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("linux.sysctl", key)
     pushResource(targetResources, "linux.sysctl", addr0, fields,
       dependsOn)
+
+template linuxUdevRule*(targetResources: var seq[ResourceIntent];
+                        name: string;
+                        content: string;
+                        address: string = "";
+                        dependsOn: seq[string] = @[]) =
+  ## M83 step 5 — Linux system-scope udev rule drop-in. Wraps a write
+  ## to `/etc/udev/rules.d/<name>` (`name` must end `.rules`) plus a
+  ## `udevadm control --reload-rules` reload. No device-trigger.
+  ##
+  ## Address default: `linux.udevRule:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.udevRule", name)
+    pushResource(targetResources, "linux.udevRule", addr0, fields,
+      dependsOn)
