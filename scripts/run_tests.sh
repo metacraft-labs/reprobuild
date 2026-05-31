@@ -15,6 +15,7 @@ if [[ -f tests/e2e/home-generations/harness_apply_lock_holder.nim ]]; then
 fi
 
 found=0
+failed_tests=()
 while IFS= read -r -d '' test_file; do
   found=1
   python3 "${test_file}"
@@ -53,12 +54,28 @@ while IFS= read -r -d '' test_file; do
   # when `extra_flags` is empty. macOS's bundled Bash 3.2.57 aborts under
   # `set -u` on a bare `"${extra_flags[@]}"` against an empty array;
   # Bash 4+ tolerates it. Same fix as scripts/build_apps.sh.
+  #
+  # Continue past per-test failures so we surface every failing test in
+  # one run instead of aborting at the first failure. The aggregate exit
+  # code is computed after the loop. Set REPRO_TEST_FAIL_FAST=1 to
+  # restore the legacy stop-at-first-failure behaviour.
+  set +e
   nim c -r \
     --threads:on \
     ${extra_flags[@]+"${extra_flags[@]}"} \
     --nimcache:"build/nimcache/${test_name}" \
     --out:"build/test-bin/${test_name}" \
     "${test_file}"
+  test_rc=$?
+  set -e
+  if (( test_rc != 0 )); then
+    failed_tests+=("${test_file}")
+    if [[ "${REPRO_TEST_FAIL_FAST:-0}" == "1" ]]; then
+      printf '\n[REPRO_TEST_FAIL_FAST] aborting after first failure: %s\n' \
+        "${test_file}" >&2
+      break
+    fi
+  fi
 done < <(
   find tests -type f -name 't*.nim' -print0
   find libs -path '*/tests/t*.nim' -type f -print0
@@ -71,5 +88,13 @@ done < <(
 
 if [ "${found}" -eq 0 ]; then
   echo "no Nim tests found" >&2
+  exit 1
+fi
+
+if (( ${#failed_tests[@]} > 0 )); then
+  printf '\n========== FAILED TESTS (%d) ==========\n' "${#failed_tests[@]}" >&2
+  for t in "${failed_tests[@]}"; do
+    printf '  %s\n' "$t" >&2
+  done
   exit 1
 fi
