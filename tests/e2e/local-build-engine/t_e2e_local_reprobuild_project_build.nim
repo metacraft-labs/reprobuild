@@ -1506,8 +1506,13 @@ suite "e2e_local_reprobuild_project_build":
       getEnv("PATH"), extraArgs = ["--progress=bar-line"])
     check not progressOutput.contains(
       "providerCompileAction: __repro_provider_compile")
-    check progressOutput.contains("repro [")
-    check progressOutput.contains("checked=4/4 100%")
+    # Progress format per docs/progress.md (May 2026 refresh, commit d3fc445):
+    # overlay bar `[####...####]` followed by `checked=N/M`. The legacy
+    # `repro [` prefix and `100%` suffix were dropped; `checked=4/4` is the
+    # full-progress marker (4/4 is implicitly 100% of the 4-action graph).
+    check progressOutput.contains("[")
+    check progressOutput.contains("]")
+    check progressOutput.contains("checked=4/4")
 
     let quietOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
       extraArgs = ["--progress=quiet", "--report=none"])

@@ -3818,15 +3818,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "repro cmake regeneration cache seed", seedStart)
       finishStat(buildStats, statsEnabled, "repro build total",
         buildTotalStart)
-    if statsMode == bsmText:
-      let statsRenderStart = statStart(statsEnabled)
-      if eventSink != nil:
-        eventSink("diagnostic", renderBuildStats(buildStats), "{}")
-      else:
-        stderr.write(renderBuildStats(buildStats))
-        stderr.flushFile()
-        finishStat(buildStats, statsEnabled, "repro stats render",
-          statsRenderStart)
+      if statsMode == bsmText:
+        let statsRenderStart = statStart(statsEnabled)
+        if eventSink != nil:
+          eventSink("diagnostic", renderBuildStats(buildStats), "{}")
+        else:
+          stderr.write(renderBuildStats(buildStats))
+          stderr.flushFile()
+          finishStat(buildStats, statsEnabled, "repro stats render",
+            statsRenderStart)
       result.exitCode = 0
       return
     if parsedTarget.fragmentKind == tfkActionSelection:
