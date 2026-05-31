@@ -453,13 +453,32 @@ proc parsePasswdObservation*(getentLine, idGroupsOutput, primaryGroupOutput:
   ## Assemble a full `PasswdUserObservation` from the three probe
   ## outputs the driver collects: `getent passwd <name>` (or the
   ## macOS `dscl` equivalent rendered into the same colon form), `id
-  ## -nG <name>` (supplementary groups), and `id -gn <name>` (the
-  ## primary group name).
+  ## -nG <name>` (FULL group set — primary + supplementary), and `id
+  ## -gn <name>` (the primary group name).
+  ##
+  ## `id -nG` returns the COMPLETE group list — both the primary
+  ## group and every supplementary group — so the primary is filtered
+  ## out here to leave `groups` as the supplementary-only set the
+  ## `passwd.user` resource pins. The distinction matters on every
+  ## distro that runs `useradd` with `USERGROUPS_ENAB=yes` (the
+  ## Debian / Ubuntu default): `useradd reprotest --groups users`
+  ## creates a per-user primary group `reprotest` AND adds the user
+  ## to supplementary `users`, so `id -nG reprotest` returns
+  ## `reprotest users`. Without this filter the per-user primary
+  ## group spuriously shows up as an "extraGroup" in `diffPasswd
+  ## User` and breaks the post-apply re-probe digest comparison
+  ## even on a freshly-converged `useradd`.
   result = parseGetentPasswd(getentLine)
   if not result.present:
     return
-  result.groups = parseIdGroups(idGroupsOutput)
   result.primaryGroup = primaryGroupOutput.strip()
+  let allGroups = parseIdGroups(idGroupsOutput)
+  if result.primaryGroup.len > 0:
+    for g in allGroups:
+      if g != result.primaryGroup:
+        result.groups.add(g)
+  else:
+    result.groups = allGroups
 
 proc normalizeGroupSet(groups: openArray[string]): seq[string] =
   ## A sorted, de-duplicated copy of a group list — so the diff is

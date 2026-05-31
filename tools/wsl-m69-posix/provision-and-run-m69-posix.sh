@@ -650,11 +650,19 @@ systemctl daemon-reload >> "${LOG_FILE}" 2>&1 || true
 section "Stage E (M83 step 13) - post-M69 Linux driver gates"
 mkdir -p /tmp/repro-vm-test 2>/dev/null || true
 
-# Best-effort: ensure XDG_RUNTIME_DIR exists, then start a session
-# DBus daemon so the dconf gate has a bus to talk to. The system
-# dbus daemon needs systemd; we use the session bus form which only
-# needs the binary. If this fails the dconf gate's pre-check emits
-# SKIP cleanly.
+# The harness deliberately does NOT pre-start a session DBus daemon
+# any more — the `linux.dconfKey` driver auto-wraps every `dconf`
+# invocation with `dbus-run-session --` when `$DBUS_SESSION_BUS_
+# ADDRESS` is empty, so a per-invocation transient bus is the
+# canonical bare-rootfs path. The previous `dbus-daemon --session
+# --print-address --fork` produced an address pointing at a socket
+# the forked daemon never actually bound (the `dbus-daemon` parent
+# exit semantics under WSL leave the printed address stale before
+# the gate reads it), which broke the driver's "bus is set →ride
+# the operator's bus" branch and surfaced as "Could not connect:
+# No such file or directory" inside `dconf write`. Unsetting the
+# address keeps the driver on its own bootstrap path.
+unset DBUS_SESSION_BUS_ADDRESS
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
   export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 fi
@@ -662,21 +670,7 @@ if [ ! -d "${XDG_RUNTIME_DIR}" ]; then
   mkdir -p "${XDG_RUNTIME_DIR}" 2>/dev/null || true
   chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 fi
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
-  log "  starting session DBus daemon (best-effort for dconf gate)"
-  DBUS_LAUNCH_OUT=$(dbus-daemon --session --print-address --fork 2>>"${LOG_FILE}") || DBUS_LAUNCH_OUT=""
-  if [ -n "${DBUS_LAUNCH_OUT}" ]; then
-    export DBUS_SESSION_BUS_ADDRESS="${DBUS_LAUNCH_OUT}"
-    log "    DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}"
-    log "    XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
-    record "stageE_dbus_session" "OK (${DBUS_SESSION_BUS_ADDRESS})"
-  else
-    log "    dbus-daemon --session failed; dconf gate will SKIP"
-    record "stageE_dbus_session" "FAIL"
-  fi
-else
-  record "stageE_dbus_session" "${DBUS_SESSION_BUS_ADDRESS:-not-attempted}"
-fi
+record "stageE_dbus_session" "not-attempted (driver bootstraps via dbus-run-session)"
 
 run_m83_gate() {
   # A thinner wrapper than run_gate above: M83 step-13 gates are NOT

@@ -832,6 +832,46 @@ suite "repro_elevation: passwd.user pure logic (Phase C)":
     check canonicalPasswdUserStateMaskedBy(
       PasswdUserObservation(present: false), desired) == "user:absent"
 
+  test "parsePasswdObservation: primary group filtered out of supplementary set":
+    # Debian / Ubuntu's `useradd reprotest --groups users` (with the
+    # default `USERGROUPS_ENAB=yes`) creates a per-user primary
+    # group `reprotest` AND adds the user to supplementary `users`,
+    # so `id -nG reprotest` returns `reprotest users`. The
+    # supplementary-only set the `passwd.user` resource pins is
+    # `["users"]`, not `["reprotest", "users"]` — the parser must
+    # drop the primary group to keep the diff / re-probe digest
+    # correct on every distro where useradd creates per-user primary
+    # groups.
+    let obs = parsePasswdObservation(
+      "reprotest:x:1001:1001::/home/reprotest:/bin/sh",
+      "reprotest users", "reprotest")
+    check obs.present
+    check obs.primaryGroup == "reprotest"
+    check obs.groups == @["users"]
+
+  test "parsePasswdObservation: primary already excluded by id -nG -> no-op":
+    # Distros that share a system-wide primary group (NixOS, some
+    # corporate LDAP setups) produce `id -nG reprotest` => `users`
+    # alone, with `id -gn reprotest` => `users`. The filter MUST
+    # NOT drop the only group when it's both primary and pinned.
+    let obs = parsePasswdObservation(
+      "reprotest:x:1001:100::/home/reprotest:/bin/sh",
+      "users", "users")
+    check obs.present
+    check obs.primaryGroup == "users"
+    check obs.groups == newSeq[string]()
+
+  test "parsePasswdObservation: empty primary leaves all groups intact":
+    # Defence in depth: a probe that returns no primary group (the
+    # `id -gn` failure mode) MUST NOT discard the entire group set
+    # — leave `groups` populated so drift detection still has
+    # something to compare against.
+    let obs = parsePasswdObservation(
+      "reprotest:x:1001:100::/home/reprotest:/bin/sh",
+      "docker wheel", "")
+    check obs.present
+    check obs.groups == @["docker", "wheel"]
+
 # ===========================================================================
 # M82 Phase B — the shared producer / consumer map, promoted from the
 # driver-private `CapabilityServiceMap`. Verified here at the elevation
