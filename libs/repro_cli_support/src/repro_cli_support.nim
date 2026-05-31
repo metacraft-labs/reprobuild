@@ -1984,6 +1984,17 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
 proc toolIdentityRealizationsUsable(identity: PathOnlyBuildIdentity): bool =
+  # The cache is usable when the artifacts the identity points at are
+  # still on disk: realized store paths (for nix/tarball/scoop) and the
+  # resolved executable itself. The ``pathSearchList`` is the snapshot of
+  # ``$PATH`` at resolution time and is fingerprinted into the cache key
+  # via ``toolIdentityCacheKey`` — PATH commonly carries entries for
+  # directories that don't exist on the current host (e.g. Linux-style
+  # ``~/.pixi/bin`` entries persisted in a shell rc and inherited on
+  # macOS). Requiring every PATH entry to exist would invalidate the
+  # cache on every build and force a fresh probe each time. Cache
+  # invalidation when PATH itself changes is already handled by the
+  # cache-key check.
   for profile in identity.profiles:
     for storePath in profile.realizedStorePaths:
       if storePath.len > 0 and not dirExists(extendedPath(storePath)):
@@ -1991,9 +2002,6 @@ proc toolIdentityRealizationsUsable(identity: PathOnlyBuildIdentity): bool =
     if profile.resolvedExecutablePath.len > 0 and
         not fileExists(extendedPath(profile.resolvedExecutablePath)):
       return false
-    for binDir in profile.pathSearchList:
-      if binDir.len > 0 and not dirExists(extendedPath(binDir)):
-        return false
   true
 
 proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
