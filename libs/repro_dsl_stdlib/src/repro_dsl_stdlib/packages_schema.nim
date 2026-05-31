@@ -47,7 +47,7 @@
 ## entries to every existing ``packages/*.nim``; in M63 only
 ## ``packages/jdk.nim`` carries a real entry (as the M49 reference).
 
-import std/tables
+import std/[strutils, tables]
 
 # ---------------------------------------------------------------------------
 # Schema warning hook
@@ -202,6 +202,50 @@ type
     piaExpandMsi = "expand-msi"           ## M4: Expand-MsiArchive <msi> <dir>
     piaExpandInno = "expand-inno"         ## M4: Expand-InnoArchive <exe> <dir>
 
+  LauncherEmitKind* = enum
+    ## M5 (Realize-Closure-And-Catalog-Expansion spec): closed-set
+    ## launcher-synthesis shapes the cakBuiltin realize loop emits AFTER
+    ## the extract / install_method dispatch completes. Each kind names a
+    ## wrap pattern Scoop's ``pre_install`` PowerShell idiomatically
+    ## synthesizes (composer's ``& php $dir\composer.phar @args`` shim,
+    ## the rare ``& java -jar $dir\<tool>.jar @args`` shim, the generic
+    ## wrapped-script shape). The interpreter binary is discovered at
+    ## realize time via the same catalog-prefix-first pattern as M3/M4
+    ## extractors (``discoverPhpExe`` / ``discoverJavaExe``); the
+    ## launcher file itself is generated inline via deterministic Nim
+    ## string concatenation — the M56 content-addressed store's digest
+    ## covers the launcher bytes.
+    lekPhar = "phar"     ## ``.phar`` wrap (composer); interpreter = php
+    lekJar = "jar"       ## ``.jar`` wrap (future gradle/maven); interpreter = jdk
+    lekScript = "script" ## generic wrapped-script shape (bash/python etc.)
+
+  LauncherEmitSpec* = object
+    ## M5: one launcher to emit at realize time. The realize loop
+    ## generates two files per spec under the prefix's ``bin/``
+    ## directory: ``<launcher_name>.ps1`` (PowerShell entry) and
+    ## ``<launcher_name>.cmd`` (cmd.exe entry on Windows). Both invoke
+    ## the discovered interpreter with the ``target`` (a relpath under
+    ## the prefix that points at the .phar / .jar / script file the
+    ## extract step deposited) and forward the user's argv.
+    ##
+    ## The ``interpreter_package_id`` is the catalog id whose realized
+    ## prefix supplies the interpreter binary (e.g. ``"php"`` for
+    ## composer, ``"jdk"`` for jar wrappers). The realize loop's
+    ## discovery falls through (catalog prefix -> PATH -> fail closed
+    ## with ``EBuiltinInterpreterUnavailable``) — same shape as M3's
+    ## 7z / M4's lessmsi discovery.
+    kind*: LauncherEmitKind
+    target*: string                   ## prefix-relative path to the
+                                      ## payload (e.g. "composer.phar").
+                                      ## The post-extract layout places
+                                      ## this file at <prefix>/<target>.
+    interpreter_package_id*: string   ## catalog package id of the
+                                      ## interpreter (e.g. "php", "jdk").
+    launcher_name*: string            ## bare name of the emitted
+                                      ## launchers (e.g. "composer" ->
+                                      ## "bin/composer.ps1" +
+                                      ## "bin/composer.cmd").
+
   PreInstallAction* = object
     ## M3: one structured ``pre_install`` action the realize loop
     ## replays. Path arguments are stored ``$dir``-relative (or
@@ -254,6 +298,50 @@ type
                                       ## operator sees the gap. Realize does
                                       ## NOT fail closed on this — the rest
                                       ## of the install proceeds.
+    launcher_emit*: seq[LauncherEmitSpec]
+                                      ## M5 (Realize-Closure-And-Catalog-
+                                      ## Expansion spec): ordered list of
+                                      ## launcher shims the realize loop
+                                      ## emits AFTER extract / install_method
+                                      ## dispatch. Each spec yields
+                                      ## ``bin/<launcher_name>.ps1`` +
+                                      ## ``bin/<launcher_name>.cmd`` invoking
+                                      ## the discovered interpreter against
+                                      ## the spec's ``target`` (a prefix-
+                                      ## relative path the extract step
+                                      ## deposited). Used for ``.phar``
+                                      ## (composer; interpreter=php), ``.jar``
+                                      ## (future jdk-based tools), and
+                                      ## generic wrapped-script shapes.
+                                      ## Validation: every spec's
+                                      ## ``launcher_name`` must appear in
+                                      ## ``bin_relpath`` as a ``.ps1`` or
+                                      ## ``.cmd`` entry (sanity check that
+                                      ## the catalog declares the launchers
+                                      ## as its bin surface). Empty for the
+                                      ## vast majority of catalog entries —
+                                      ## the M67/M68 baseline round-trips
+                                      ## byte-identical when this field is
+                                      ## empty.
+                                      ##
+                                      ## **Placement trade-off (M5)**:
+                                      ## ``launcher_emit`` lives at the
+                                      ## ``VersionedProvisioning`` level
+                                      ## (cross-platform), NOT on
+                                      ## ``PlatformBinary``. The composer
+                                      ## .phar wrap is identical on every
+                                      ## platform (same php interpreter id,
+                                      ## same .phar payload name, same
+                                      ## launcher body), so version-level
+                                      ## placement avoids duplicating the
+                                      ## spec across per-platform slices.
+                                      ## A future tool needing DIFFERENT
+                                      ## launchers per arch / OS (e.g. a
+                                      ## bash-script on Linux + a .ps1 on
+                                      ## Windows) would need a schema
+                                      ## extension promoting this field to
+                                      ## the platform level. M5 ships the
+                                      ## simpler cross-platform shape.
 
 # ---------------------------------------------------------------------------
 # Construction helpers
@@ -281,7 +369,8 @@ proc initVersionedProvisioning*(version: string;
                                 bootstrap_argv: seq[string] = @[];
                                 env: openArray[(string, string)] = [];
                                 pre_install_actions: seq[PreInstallAction] = @[];
-                                pre_install_unrecognized: seq[string] = @[]):
+                                pre_install_unrecognized: seq[string] = @[];
+                                launcher_emit: seq[LauncherEmitSpec] = @[]):
     VersionedProvisioning =
   result = VersionedProvisioning(
     version: version,
@@ -294,7 +383,8 @@ proc initVersionedProvisioning*(version: string;
     bootstrap_argv: bootstrap_argv,
     env: initTable[string, string](),
     pre_install_actions: pre_install_actions,
-    pre_install_unrecognized: pre_install_unrecognized)
+    pre_install_unrecognized: pre_install_unrecognized,
+    launcher_emit: launcher_emit)
   for pair in env:
     result.env[pair[0]] = pair[1]
 
@@ -419,6 +509,35 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
     if vp.bin_relpath.len == 0:
       result.add("install_method=" & $vp.install_method &
         " requires at least one bin_relpath entry")
+  # M5: when launcher_emit is non-empty, every spec's launcher_name must
+  # appear in bin_relpath as a .ps1 / .cmd entry. The sanity check
+  # confirms the catalog declares the emitted launchers as the tool's
+  # public bin surface (so the post-extract bin-existence verification
+  # at apply time matches reality). Also catches typos in launcher_name.
+  for i, spec in vp.launcher_emit:
+    let prefix = "launcher_emit[" & $i & "] (kind=" & $spec.kind & "): "
+    if spec.launcher_name.len == 0:
+      result.add(prefix & "launcher_name is required")
+    if spec.target.len == 0:
+      result.add(prefix & "target is required (prefix-relative path " &
+        "to the payload file)")
+    if spec.interpreter_package_id.len == 0:
+      result.add(prefix & "interpreter_package_id is required (the " &
+        "catalog package whose realized prefix supplies the interpreter)")
+    if spec.launcher_name.len > 0 and vp.bin_relpath.len > 0:
+      let ps1Leaf = spec.launcher_name & ".ps1"
+      let cmdLeaf = spec.launcher_name & ".cmd"
+      var sawPs1 = false
+      var sawCmd = false
+      for b in vp.bin_relpath:
+        let leaf = b.split({'/', '\\'})[^1]
+        if leaf == ps1Leaf: sawPs1 = true
+        if leaf == cmdLeaf: sawCmd = true
+      if not (sawPs1 or sawCmd):
+        result.add(prefix & "launcher_name '" & spec.launcher_name &
+          "' has no matching .ps1 or .cmd entry in bin_relpath (declare " &
+          "the launcher files in bin_relpath so the post-extract sanity " &
+          "check matches reality)")
 
 proc validateVersionedProvisioning*(vp: VersionedProvisioning):
     seq[string] =
@@ -568,6 +687,18 @@ proc archiveFormatIdent(af: ArchiveFormat): string =
   of afInstallerMsi: "afInstallerMsi"
   of afRaw: "afRaw"
 
+proc launcherEmitKindIdent*(lek: LauncherEmitKind): string =
+  case lek
+  of lekPhar: "lekPhar"
+  of lekJar: "lekJar"
+  of lekScript: "lekScript"
+
+proc serializeLauncherEmitSpec*(spec: LauncherEmitSpec): string =
+  result = "LauncherEmitSpec(kind: " & launcherEmitKindIdent(spec.kind) &
+    ", target: " & escapeString(spec.target) &
+    ", interpreter_package_id: " & escapeString(spec.interpreter_package_id) &
+    ", launcher_name: " & escapeString(spec.launcher_name) & ")"
+
 proc preInstallActionKindIdent*(pia: PreInstallActionKind): string =
   case pia
   of piaNewItemDir: "piaNewItemDir"
@@ -690,4 +821,16 @@ proc serializeAsCode*(vp: VersionedProvisioning): string =
       if i > 0: result.add(", ")
       result.add(escapeString(line))
     result.add("]")
+  # M5: launcher_emit emitted ONLY when non-empty so the M67/M68 baseline
+  # (every existing entry has none) round-trips byte-identical through
+  # the harvester. Composer (the M5 target) renders an explicit
+  # multi-line tail.
+  if vp.launcher_emit.len > 0:
+    result.add(",\n  launcher_emit: @[\n")
+    for i, spec in vp.launcher_emit:
+      result.add("    " & serializeLauncherEmitSpec(spec))
+      if i + 1 < vp.launcher_emit.len:
+        result.add(",")
+      result.add("\n")
+    result.add("  ]")
   result.add(")")

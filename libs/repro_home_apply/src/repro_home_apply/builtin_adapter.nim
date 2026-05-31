@@ -159,6 +159,34 @@ type
     packageId*: string
     discoveryTrace*: seq[string]
 
+  EBuiltinInterpreterUnavailable* = object of EHomeApply
+    ## M5: the Scoop-style launcher emit hook needed an interpreter
+    ## binary (php for .phar, java for .jar, etc.) but the discovery
+    ## order (catalog-registered prefix → PATH → fail-closed) exhausted
+    ## without finding one. Carries the discovery trace AND the missing
+    ## interpreter's catalog package id so the operator sees exactly
+    ## which steps were attempted and which ``repro home add <pkg>`` to
+    ## run. Subclassed by ``EBuiltinPhpUnavailable`` /
+    ## ``EBuiltinJavaUnavailable`` for back-pressure on the specific
+    ## interpreter the launcher needed (the catch-all parent type makes
+    ## downstream code that does not care about the specific shape
+    ## easier to write).
+    packageId*: string
+    interpreterPackageId*: string
+    discoveryTrace*: seq[string]
+
+  EBuiltinPhpUnavailable* = object of EBuiltinInterpreterUnavailable
+    ## M5: the lekPhar launcher emit hook needed a ``php`` /
+    ## ``php.exe`` but discovery exhausted. Remediation: ``repro home
+    ## add php`` (or list ``package(php)`` ahead of ``package(composer)``
+    ## in home.nim).
+
+  EBuiltinJavaUnavailable* = object of EBuiltinInterpreterUnavailable
+    ## M5: the lekJar launcher emit hook needed a ``java`` /
+    ## ``java.exe`` but discovery exhausted. Remediation: ``repro home
+    ## add jdk`` (or list ``package(jdk)`` ahead of the .jar-shipping
+    ## tool in home.nim).
+
   EBuiltinPrefixMergeConflict* = object of EHomeApply
     ## M4: the NSIS+MSI bundle realize merged the per-MSI extract trees
     ## into a single prefix and observed two MSIs writing the same
@@ -677,6 +705,347 @@ proc discoverLessmsiExe*(store: var Store; packageId: string): string =
   e.packageId = packageId
   e.discoveryTrace = trace
   raise e
+
+# ---------------------------------------------------------------------------
+# M5 — interpreter discovery for Scoop-style launcher emit
+# ---------------------------------------------------------------------------
+#
+# The lekPhar / lekJar / lekScript launcher emit cases each need an
+# interpreter binary (php / java / a script's #! interp) at realize
+# time so the emitted .ps1 / .cmd launchers can hard-bake the
+# interpreter path. Discovery follows the same M3 catalog-prefix-first
+# pattern as ``discoverSevenZipExe`` / ``discoverDarkExe`` /
+# ``discoverInnounpExe`` / ``discoverLessmsiExe``:
+#
+#   (i)  catalog-registered prefix — the operator listed
+#        ``package(php)`` / ``package(jdk)`` ahead of the launcher-
+#        emitting tool in their home.nim, so a realized prefix exists.
+#   (ii) ``PATH`` lookup — operators with Scoop-installed php / java
+#        get picked up.
+#   (iii) fail closed — raise the specific
+#        ``EBuiltinPhpUnavailable`` / ``EBuiltinJavaUnavailable``
+#        subclass of ``EBuiltinInterpreterUnavailable`` naming the
+#        missing catalog package and the ``repro home add <pkg>``
+#        remediation.
+
+proc discoverPhpExe*(store: var Store; packageId: string): string =
+  ## M5: discover a ``php.exe`` for the lekPhar launcher emit hook.
+  ## ``packageId`` is the tool whose launcher needs php (e.g. composer).
+  ## Looks in the catalog-registered ``php`` prefix first (php.nim
+  ## ships ``php.exe`` at the prefix root via env_add_path = "" — no
+  ## ``bin/`` subdir), then PATH, then fails closed with
+  ## ``EBuiltinPhpUnavailable``. The returned path is always absolute
+  ## (normalized via ``absolutePath``) so the launcher emit step bakes
+  ## a position-independent interpreter reference even when the store
+  ## was opened with a relative root.
+  var trace: seq[string] = @[]
+  let prefixes = listPrefixes(store)
+  trace.add("catalog-prefix:scanned " & $prefixes.len & " rows for package=php")
+  for row in prefixes:
+    if row.packageName != "php": continue
+    let prefixAbs = store.absolutePrefixPath(row.realizedPath)
+    # php.nim's bin_relpath is @["php.exe", "php-cgi.exe", "phpdbg.exe"]
+    # — root-relative, so we probe the prefix root first.
+    let candidate = prefixAbs / "php.exe"
+    if fileExists(extendedPath(candidate)):
+      return absolutePath(candidate)
+    let candidateBare = prefixAbs / "php"
+    if fileExists(extendedPath(candidateBare)):
+      return absolutePath(candidateBare)
+    let candidateBin = prefixAbs / "bin" / "php.exe"
+    if fileExists(extendedPath(candidateBin)):
+      return absolutePath(candidateBin)
+    let candidateBinBare = prefixAbs / "bin" / "php"
+    if fileExists(extendedPath(candidateBinBare)):
+      return absolutePath(candidateBinBare)
+    trace.add("catalog-prefix:row " & row.realizedPath &
+      " lacked php.exe / php / bin/php.exe / bin/php")
+  let pathExe = findExe("php.exe")
+  if pathExe.len > 0:
+    return absolutePath(pathExe)
+  let pathBare = findExe("php")
+  if pathBare.len > 0:
+    return absolutePath(pathBare)
+  trace.add("path:no 'php' / 'php.exe' on PATH")
+  var e = newException(EBuiltinPhpUnavailable,
+    "builtin adapter: lekPhar launcher emit for '" & packageId &
+    "' could not discover a php.exe binary. Discovery trace: " &
+    trace.join("; ") &
+    ". Remediation: add php to your home profile (`repro home add php`) " &
+    "or list `package(php)` ahead of `package(" & packageId & ")` in " &
+    "home.nim (M5 uses discovery-by-prefix; the formal " &
+    "`requires_for_realize: [php]` schema field is deferred to a " &
+    "future campaign).")
+  e.step = 7
+  e.stepName = "realize"
+  e.packageId = packageId
+  e.interpreterPackageId = "php"
+  e.discoveryTrace = trace
+  raise e
+
+proc discoverJavaExe*(store: var Store; packageId: string): string =
+  ## M5: discover a ``java.exe`` for the lekJar launcher emit hook.
+  ## ``packageId`` is the tool whose launcher needs java (.jar wrapped).
+  ## Looks in the catalog-registered ``jdk`` prefix first (jdk.nim
+  ## ships ``bin/java.exe``), then PATH, then fails closed with
+  ## ``EBuiltinJavaUnavailable``. The returned path is always absolute
+  ## (see ``discoverPhpExe`` for the rationale).
+  var trace: seq[string] = @[]
+  let prefixes = listPrefixes(store)
+  trace.add("catalog-prefix:scanned " & $prefixes.len & " rows for package=jdk")
+  for row in prefixes:
+    if row.packageName != "jdk": continue
+    let prefixAbs = store.absolutePrefixPath(row.realizedPath)
+    let candidate = prefixAbs / "bin" / "java.exe"
+    if fileExists(extendedPath(candidate)):
+      return absolutePath(candidate)
+    let candidateBare = prefixAbs / "bin" / "java"
+    if fileExists(extendedPath(candidateBare)):
+      return absolutePath(candidateBare)
+    trace.add("catalog-prefix:row " & row.realizedPath &
+      " lacked bin/java.exe / bin/java")
+  let pathExe = findExe("java.exe")
+  if pathExe.len > 0:
+    return absolutePath(pathExe)
+  let pathBare = findExe("java")
+  if pathBare.len > 0:
+    return absolutePath(pathBare)
+  trace.add("path:no 'java' / 'java.exe' on PATH")
+  var e = newException(EBuiltinJavaUnavailable,
+    "builtin adapter: lekJar launcher emit for '" & packageId &
+    "' could not discover a java.exe binary. Discovery trace: " &
+    trace.join("; ") &
+    ". Remediation: add jdk to your home profile (`repro home add jdk`) " &
+    "or list `package(jdk)` ahead of `package(" & packageId & ")` in " &
+    "home.nim (M5 uses discovery-by-prefix; the formal " &
+    "`requires_for_realize: [jdk]` schema field is deferred to a " &
+    "future campaign).")
+  e.step = 7
+  e.stepName = "realize"
+  e.packageId = packageId
+  e.interpreterPackageId = "jdk"
+  e.discoveryTrace = trace
+  raise e
+
+proc discoverInterpreterExe*(store: var Store; packageId: string;
+                              spec: LauncherEmitSpec): string =
+  ## M5: dispatch to the right discovery proc by launcher kind. Called
+  ## by the realize loop BEFORE entering the staging closure so the
+  ## fail-closed path runs before any destructive staging work (same
+  ## closure-capture rationale as M3's 7z discovery).
+  ##
+  ## ``lekScript`` is intentionally not implemented in M5 — no current
+  ## catalog tool needs it (composer is the only M5 deferred-8 target),
+  ## and the generic "wrapped script" surface needs a per-spec
+  ## interpreter declaration the schema does not yet model. Raises a
+  ## structured error if a catalog entry tries to use it.
+  case spec.kind
+  of lekPhar:
+    if spec.interpreter_package_id != "php":
+      # Defensive: the schema validator enforces interpreter_package_id
+      # is non-empty, but a catalog could declare lekPhar + a non-php
+      # interpreter. The M5 launcher emit only ships the php path.
+      var e = newException(EBuiltinInterpreterUnavailable,
+        "builtin adapter: lekPhar launcher emit for '" & packageId &
+        "' declared interpreter_package_id='" & spec.interpreter_package_id &
+        "' but M5 only supports interpreter_package_id='php' for lekPhar. " &
+        "Either fix the catalog entry or extend the M5 discovery table.")
+      e.step = 7
+      e.stepName = "realize"
+      e.packageId = packageId
+      e.interpreterPackageId = spec.interpreter_package_id
+      raise e
+    return discoverPhpExe(store, packageId)
+  of lekJar:
+    if spec.interpreter_package_id != "jdk":
+      var e = newException(EBuiltinInterpreterUnavailable,
+        "builtin adapter: lekJar launcher emit for '" & packageId &
+        "' declared interpreter_package_id='" & spec.interpreter_package_id &
+        "' but M5 only supports interpreter_package_id='jdk' for lekJar. " &
+        "Either fix the catalog entry or extend the M5 discovery table.")
+      e.step = 7
+      e.stepName = "realize"
+      e.packageId = packageId
+      e.interpreterPackageId = spec.interpreter_package_id
+      raise e
+    return discoverJavaExe(store, packageId)
+  of lekScript:
+    var e = newException(EBuiltinInterpreterUnavailable,
+      "builtin adapter: lekScript launcher emit for '" & packageId &
+      "' is reserved for a future campaign; no current catalog tool " &
+      "needs the generic wrapped-script shape. The schema supports " &
+      "it for forward compatibility but the M5 realize hook only " &
+      "implements lekPhar + lekJar.")
+    e.step = 7
+    e.stepName = "realize"
+    e.packageId = packageId
+    e.interpreterPackageId = spec.interpreter_package_id
+    raise e
+
+# ---------------------------------------------------------------------------
+# M5 — launcher emit (post-extract step)
+# ---------------------------------------------------------------------------
+#
+# The launcher emit step generates two static text files per spec:
+#
+#   * ``<prefix>/bin/<launcher_name>.ps1`` — PowerShell entry that
+#     invokes the discovered interpreter with the target file +
+#     forwards ``$args``. Used by Scoop-style PATH activation when the
+#     consumer is a PowerShell host.
+#   * ``<prefix>/bin/<launcher_name>.cmd`` — cmd.exe entry that does
+#     the same with ``%*``. Used when the consumer is cmd.exe / a build
+#     tool that shells out without a PowerShell context.
+#
+# Both files are deterministic (idempotence: identical inputs produce
+# identical bytes); the M56 store's content-addressed prefix digest
+# covers them so the realize loop's cache-hit check transparently
+# includes the launcher payload.
+#
+# The interpreter path is BAKED in absolute form into the launcher
+# text. This is the same shape Scoop's shim layer uses (the .ps1 /
+# .cmd files in ``~/scoop/shims/`` reference absolute interpreter
+# paths). The trade-off: re-extracting the interpreter prefix (e.g.
+# php upgrades) invalidates the composer launcher because its baked
+# path no longer exists; the M56 store's realization-hash includes
+# the interpreter's prefix path, so re-realizing composer regenerates
+# the launcher pointing at the new interpreter.
+
+proc renderPharLauncherPs1(interpreterPath, targetRelFromBin, packageName,
+                           packageVersion: string): string =
+  ## Emit the .ps1 PowerShell launcher for a lekPhar spec. The text is
+  ## intentionally minimal — PowerShell's call operator (``&``) handles
+  ## quoting + exit-code forwarding cleanly; ``$args`` is the auto-
+  ## populated unbound-positional-arg array that forwards verbatim.
+  ##
+  ## The interpreter path is BAKED in absolute form (Scoop-style: the
+  ## interpreter's catalog prefix is content-addressed and stable for a
+  ## given (interpreter, version) pair). The target file is resolved
+  ## RELATIVE TO ``$PSScriptRoot`` so the launcher works regardless of
+  ## the realized prefix's absolute path — this is critical because
+  ## realizePrefix's atomic-rename moves the staging dir to its final
+  ## content-addressed location AFTER the launcher emit step. The
+  ## ``Join-Path`` resolves at invocation time against the actual
+  ## bin/ dir the .ps1 lives in.
+  ##
+  ## Header comment names the source catalog package + version so
+  ## ``cat <launcher>.ps1`` is self-documenting and so a re-emit with a
+  ## different version produces visibly-different bytes (the diff is
+  ## the header comment + the interpreter path).
+  result.add("#!/usr/bin/env pwsh\n")
+  result.add("# Auto-generated by cakBuiltin M5 launcher emit; DO NOT EDIT.\n")
+  result.add("# Source: package=" & packageName & ", version=" &
+    packageVersion & ", launcher_emit kind=lekPhar\n")
+  result.add("# NOTE: the interpreter path below is content-addressed —\n")
+  result.add("# if the interpreter package (e.g. php) is re-realized at a\n")
+  result.add("# different hash, this launcher will reference the stale\n")
+  result.add("# prefix. Re-apply this package's realize step to regenerate.\n")
+  result.add("$target = Join-Path $PSScriptRoot '" & targetRelFromBin & "'\n")
+  result.add("& '" & interpreterPath & "' $target @args\n")
+  result.add("exit $LASTEXITCODE\n")
+
+proc renderPharLauncherCmd(interpreterPath, targetRelFromBin, packageName,
+                           packageVersion: string): string =
+  ## Emit the .cmd cmd.exe launcher for a lekPhar spec. Uses ``%*`` to
+  ## forward all argv tokens. ``%~dp0`` resolves to the directory the
+  ## .cmd file lives in (including trailing backslash) so the target
+  ## path is position-independent. CRLF line endings match cmd.exe's
+  ## native expectation.
+  result.add("@echo off\r\n")
+  result.add("rem Auto-generated by cakBuiltin M5 launcher emit; DO NOT EDIT.\r\n")
+  result.add("rem Source: package=" & packageName & ", version=" &
+    packageVersion & ", launcher_emit kind=lekPhar\r\n")
+  result.add("rem NOTE: the interpreter path below is content-addressed —\r\n")
+  result.add("rem if the interpreter package (e.g. php) is re-realized at a\r\n")
+  result.add("rem different hash, this launcher will reference the stale\r\n")
+  result.add("rem prefix. Re-apply this package's realize step to regenerate.\r\n")
+  result.add("\"" & interpreterPath & "\" \"%~dp0" & targetRelFromBin &
+    "\" %*\r\n")
+
+proc renderJarLauncherPs1(interpreterPath, targetRelFromBin, packageName,
+                          packageVersion: string): string =
+  ## Emit the .ps1 launcher for a lekJar spec. Same shape as lekPhar
+  ## but the interpreter call adds ``-jar`` so ``java`` treats the
+  ## target as a runnable jar rather than a classpath entry.
+  result.add("#!/usr/bin/env pwsh\n")
+  result.add("# Auto-generated by cakBuiltin M5 launcher emit; DO NOT EDIT.\n")
+  result.add("# Source: package=" & packageName & ", version=" &
+    packageVersion & ", launcher_emit kind=lekJar\n")
+  result.add("# NOTE: the interpreter path below is content-addressed —\n")
+  result.add("# if the interpreter package (e.g. jdk) is re-realized at a\n")
+  result.add("# different hash, this launcher will reference the stale\n")
+  result.add("# prefix. Re-apply this package's realize step to regenerate.\n")
+  result.add("$target = Join-Path $PSScriptRoot '" & targetRelFromBin & "'\n")
+  result.add("& '" & interpreterPath & "' -jar $target @args\n")
+  result.add("exit $LASTEXITCODE\n")
+
+proc renderJarLauncherCmd(interpreterPath, targetRelFromBin, packageName,
+                          packageVersion: string): string =
+  ## Emit the .cmd launcher for a lekJar spec.
+  result.add("@echo off\r\n")
+  result.add("rem Auto-generated by cakBuiltin M5 launcher emit; DO NOT EDIT.\r\n")
+  result.add("rem Source: package=" & packageName & ", version=" &
+    packageVersion & ", launcher_emit kind=lekJar\r\n")
+  result.add("rem NOTE: the interpreter path below is content-addressed —\r\n")
+  result.add("rem if the interpreter package (e.g. jdk) is re-realized at a\r\n")
+  result.add("rem different hash, this launcher will reference the stale\r\n")
+  result.add("rem prefix. Re-apply this package's realize step to regenerate.\r\n")
+  result.add("\"" & interpreterPath & "\" -jar \"%~dp0" & targetRelFromBin &
+    "\" %*\r\n")
+
+proc runLauncherEmit*(packageId, packageVersion, destDir: string;
+                      specs: openArray[LauncherEmitSpec];
+                      interpreterPaths: openArray[string]) =
+  ## M5: emit the launcher .ps1 + .cmd pair for each spec under
+  ## ``<destDir>/bin/``. ``interpreterPaths`` is parallel to ``specs``
+  ## (one discovered absolute interpreter path per spec). The caller
+  ## (the realize loop) discovers interpreter paths via
+  ## ``discoverInterpreterExe`` BEFORE entering the staging closure so
+  ## the fail-closed path runs before destructive staging work.
+  ##
+  ## Per the M5 spec's "bin/launcher_name.{ps1,cmd}" placement: the
+  ## launcher leafs are emitted under ``<destDir>/bin/`` to match the
+  ## catalog's ``bin_relpath`` declarations (e.g. composer's
+  ## ``bin/composer.ps1``). The target's prefix-relative path (e.g.
+  ## ``composer.phar``) resolves to ``<destDir>/<target>`` — the
+  ## payload sits at the prefix root.
+  doAssert specs.len == interpreterPaths.len,
+    "runLauncherEmit: specs / interpreterPaths length mismatch"
+  let binDir = destDir / "bin"
+  createDir(extendedPath(binDir))
+  for i, spec in specs:
+    let interp = interpreterPaths[i]
+    let ps1Path = binDir / (spec.launcher_name & ".ps1")
+    let cmdPath = binDir / (spec.launcher_name & ".cmd")
+    # The target's path RELATIVE TO the bin/ dir (where the launchers
+    # live). Since the launchers are in <prefix>/bin/ and the spec's
+    # target is prefix-relative (e.g. "composer.phar"), the relative
+    # path from bin/ is "..\<target>" (one dir up). Using a relative
+    # path lets the launcher work after realizePrefix's atomic-rename
+    # of the staging dir to its final content-addressed location.
+    # Normalize forward slashes to backslashes for cmd.exe friendliness;
+    # PowerShell handles either.
+    let targetRelFromBin = (".." / spec.target).replace('/', '\\')
+    case spec.kind
+    of lekPhar:
+      writeFile(extendedPath(ps1Path),
+        renderPharLauncherPs1(interp, targetRelFromBin, packageId,
+          packageVersion))
+      writeFile(extendedPath(cmdPath),
+        renderPharLauncherCmd(interp, targetRelFromBin, packageId,
+          packageVersion))
+    of lekJar:
+      writeFile(extendedPath(ps1Path),
+        renderJarLauncherPs1(interp, targetRelFromBin, packageId,
+          packageVersion))
+      writeFile(extendedPath(cmdPath),
+        renderJarLauncherCmd(interp, targetRelFromBin, packageId,
+          packageVersion))
+    of lekScript:
+      # Defensive: discoverInterpreterExe already raised for lekScript;
+      # this is unreachable from the realize loop. Kept exhaustive for
+      # the case-statement.
+      doAssert false,
+        "runLauncherEmit: lekScript not implemented (M5 ships lekPhar + lekJar)"
 
 proc extract7z(packageId, archivePath, destDir, sevenZipExe: string) =
   ## Extract a `.7z` archive (raw or SFX-wrapped) using a pre-discovered
@@ -1790,6 +2159,17 @@ proc realizeBuiltinPackage*(store: var Store;
   if needsInnounp():
     innounpExe = discoverInnounpExe(store, packageId)
 
+  # M5: discover the interpreter binary for each launcher_emit spec
+  # BEFORE entering the staging closure. Same closure-capture rationale
+  # as M3/M4: discovery FIRST, destructive staging SECOND. The fail-
+  # closed path (EBuiltinPhpUnavailable / EBuiltinJavaUnavailable)
+  # raises here rather than mid-extract so a missing interpreter does
+  # not leave a half-realized prefix.
+  var launcherInterpreterPaths: seq[string] = @[]
+  for spec in resolution.launcherEmit:
+    launcherInterpreterPaths.add(
+      discoverInterpreterExe(store, packageId, spec))
+
   # M3: pre_install Add-Path actions append to the env bindings the
   # apply pipeline downstream consumes. We accumulate them here so the
   # bindings carry the substituted prefix path.
@@ -1877,8 +2257,17 @@ proc realizeBuiltinPackage*(store: var Store;
           # recognises the envelope transparently; same code path.
           extract7z(packageId, downloadPath, stagingDir, sevenZipExe)
         of afRaw:
+          # M5: when launcher_emit is non-empty, the bin_relpath entries
+          # are the LAUNCHERS we are about to synthesize — NOT the raw
+          # payload. Place the downloaded bytes at launcher_emit[0].target
+          # (e.g. "composer.phar") so the launcher's baked target path
+          # resolves on disk; the launcher emit step below then writes
+          # the .ps1 / .cmd files that satisfy the bin_relpath sanity
+          # check.
           let rel =
-            if resolution.binRelpath.len > 0: resolution.binRelpath[0]
+            if resolution.launcherEmit.len > 0:
+              resolution.launcherEmit[0].target
+            elif resolution.binRelpath.len > 0: resolution.binRelpath[0]
             else: packageId
           copyRaw(packageId, downloadPath, stagingDir, rel)
         of afInstallerNsis, afInstallerMsi:
@@ -1992,6 +2381,17 @@ proc realizeBuiltinPackage*(store: var Store;
         e.packageId = packageId
         e.installMethod = "imMsys2Pacman"
         raise e
+
+      # M5: Scoop-style launcher emit. Runs AFTER install_method dispatch
+      # so the target file (e.g. composer.phar) is already on disk, but
+      # BEFORE the bin_relpath sanity check (the launchers populate
+      # bin/<launcher_name>.{ps1,cmd} which the catalog declares in
+      # bin_relpath). Interpreter paths were discovered above (outside
+      # the closure) so the fail-closed path runs before any destructive
+      # staging.
+      if resolution.launcherEmit.len > 0:
+        runLauncherEmit(packageId, version, stagingDir,
+          resolution.launcherEmit, launcherInterpreterPaths)
 
       # 4) Sanity: every bin_relpath exists under the staged tree.
       for rel in resolution.binRelpath:

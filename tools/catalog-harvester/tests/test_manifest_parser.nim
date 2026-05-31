@@ -469,3 +469,57 @@ suite "M66 — Scoop manifest parser":
     check (not hasDiagnostic(p.diagnostics, dkInstallMethodInnoSetup))
     check (not hasDiagnostic(p.diagnostics, dkInstallMethodMsi))
     check (not hasDiagnostic(p.diagnostics, dkInstallMethodNsisBundle))
+
+  test "M5: composer-shaped pre_install emits launcher_emit slice":
+    ## A Scoop manifest carrying the composer-style pre_install (& php
+    ## + composer.phar + Add-Content to $dir\composer.ps1) translates
+    ## to a launcher_emit slice instead of dropping every line into
+    ## pre_install_unrecognized. The emitted bin_relpath is the
+    ## .ps1+.cmd launcher pair (not the .phar payload), so the schema
+    ## validator's launcher_name-in-bin_relpath sanity check passes.
+    ## Tests both the recognizer + the bin_relpath override + the
+    ## diagnostic emission.
+    let raw = """{
+      "version": "2.10.0",
+      "url": "https://getcomposer.org/download/2.10.0/composer.phar",
+      "hash": "a346538851988ead111d11e3cbd7d372eeba44abd0af412e09890d3c21ea6c31",
+      "pre_install": [
+        "@(",
+        "    'if ($args.length -eq 1 -and ($args -eq \"selfupdate\" -or $args -eq \"self-update\")) { & scoop update composer }'",
+        "    'else { & php (Join-Path $PSScriptRoot \"composer.phar\") @args }'",
+        ") | Add-Content -Path \"$dir\\composer.ps1\""
+      ],
+      "bin": "composer.ps1"
+    }"""
+    let p = parseScoopManifest("composer", raw)
+    check p.ok
+    check p.entry.launcher_emit.len == 1
+    check p.entry.launcher_emit[0].kind == lekPhar
+    check p.entry.launcher_emit[0].target == "composer.phar"
+    check p.entry.launcher_emit[0].interpreter_package_id == "php"
+    check p.entry.launcher_emit[0].launcher_name == "composer"
+    # bin_relpath was overridden to the .ps1+.cmd pair.
+    check p.entry.bin_relpath == @["bin/composer.ps1", "bin/composer.cmd"]
+    # Diagnostic emitted.
+    check hasDiagnostic(p.diagnostics, dkLauncherEmitRecognized)
+    # Validator accepts the new shape.
+    check validateVersionedProvisioning(p.entry).len == 0
+
+  test "M5: non-composer pre_install does NOT emit launcher_emit":
+    ## Regression guard: a pre_install block that does NOT carry the
+    ## .phar + .ps1 + & php trio (e.g. a Set-Content for a config file)
+    ## stays in the existing pre_install_actions / unrecognized path
+    ## and emits NO launcher_emit slice.
+    let raw = """{
+      "version": "1.0.0",
+      "url": "https://example.test/x.zip",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "pre_install": [
+        "Set-Content -Path \"$dir\\etc\\config.ini\" -Value 'key=value'"
+      ],
+      "bin": "x.exe"
+    }"""
+    let p = parseScoopManifest("x", raw)
+    check p.ok
+    check p.entry.launcher_emit.len == 0
+    check (not hasDiagnostic(p.diagnostics, dkLauncherEmitRecognized))

@@ -158,6 +158,13 @@ type
     # global ``CAKBUILTIN_PREFER_MSIEXEC=1`` env var has the same
     # effect; this flag is the per-(cpu, os) override.
     msiAdminInstall*: bool
+    # M5 (Realize-Closure-And-Catalog-Expansion) — Scoop-style launcher
+    # emit. After extract / install_method dispatch, the realize loop
+    # walks this sequence and synthesizes one .ps1 + one .cmd launcher
+    # per spec at ``<prefix>/bin/<launcher_name>.{ps1,cmd}`` invoking
+    # the discovered interpreter against the spec's prefix-relative
+    # ``target``. Composer's .phar wrap is the M5 anchor case.
+    launcherEmit*: seq[LauncherEmitSpec]
     # M65: per-resolution chain trace. Populated by `chainResolvePackage`
     # to record every adapter consulted, in order, with each adapter's
     # outcome + skip reason. On a successful resolution the trace ends
@@ -702,6 +709,8 @@ proc resolveBuiltinPackage*(packageId: string;
   result.resolution.preInstallUnrecognized = picked.pre_install_unrecognized
   # M4: thread the per-platform MSI admin-install override through.
   result.resolution.msiAdminInstall = pb.binary.msi_admin_install
+  # M5: thread the launcher_emit spec list through.
+  result.resolution.launcherEmit = picked.launcher_emit
   # Use the first bin_relpath as the executable name (leaf only).
   if picked.bin_relpath.len > 0:
     result.resolution.executableName = picked.bin_relpath[0].extractFilename

@@ -142,6 +142,18 @@ type
       ## A line inside an ``installer.script`` block did NOT match the
       ## M4 allowlist; captured verbatim in
       ## ``pre_install_unrecognized``.
+    # M5 (Realize-Closure-And-Catalog-Expansion spec) — Scoop-style
+    # launcher emit recognition.
+    dkLauncherEmitRecognized = "HLauncherEmitRecognized"
+      ## The harvester recognized a Scoop ``pre_install`` PowerShell
+      ## block that synthesizes a .phar / .jar / wrapped-script launcher
+      ## (composer's ``& php (Join-Path $PSScriptRoot "composer.phar")
+      ## @args`` shape, gradle's ``& java -jar ...`` shape, etc.) and
+      ## translated it to a ``launcher_emit`` slice instead of dropping
+      ## the lines into ``pre_install_unrecognized``. Informational —
+      ## does not fail the parse. The matched pattern is closed-set;
+      ## arbitrary pre_install PowerShell continues to land in
+      ## ``pre_install_unrecognized``.
 
   Diagnostic* = object
     kind*: DiagnosticKind
@@ -668,11 +680,123 @@ proc translatePreInstallLine(line: string;
     dropped.add("cmdlet not in allowlist: " & cmdlet)
     return (false, PreInstallAction())
 
+proc recognizeLauncherEmitFromPreInstall*(lines: openArray[string];
+                                           app: string;
+                                           diags: var seq[Diagnostic]):
+    tuple[recognized: bool; spec: LauncherEmitSpec; consumedLines: seq[int]] =
+  ## M5: scan the pre_install lines for a Scoop-style launcher synthesis
+  ## shape. Currently recognizes the .phar wrap pattern (composer's
+  ## shape: lines containing ``& php`` + ``<name>.phar`` + the
+  ## eventual ``$dir\<name>.ps1`` write target). Returns the matched
+  ## ``LauncherEmitSpec`` AND the line indices the matcher consumed so
+  ## the caller can skip them in the unrecognized fallback.
+  ##
+  ## Recognition heuristic — closed-set, conservative:
+  ##   * the lines collectively reference ``& php`` (case-insensitive)
+  ##   * the lines collectively reference a ``<name>.phar`` literal
+  ##   * the lines collectively reference a ``$dir\<name>.ps1`` write
+  ##     target (Add-Content / Set-Content / `>` redirect) whose
+  ##     ``<name>`` matches the .phar's stem
+  ##
+  ## When all three match, emit ``LauncherEmitSpec(kind: lekPhar,
+  ## target: "<name>.phar", interpreter_package_id: "php",
+  ## launcher_name: "<name>")`` and mark every line that contributed
+  ## a match as consumed. Arbitrary additional pre_install logic (e.g.
+  ## composer's COMPOSER_HOME migration block) is left unconsumed and
+  ## flows through the existing unrecognized path so the operator sees
+  ## the gap.
+  ##
+  ## Java/jar shape (``& java -jar <name>.jar``) is detected with the
+  ## same pattern + ``jdk`` interpreter; M5 does not exercise it (no
+  ## current catalog tool uses it) but the schema supports it.
+  result.recognized = false
+  result.consumedLines = @[]
+  var pharStem = ""
+  var jarStem = ""
+  var sawPhpInvoke = false
+  var sawJavaJarInvoke = false
+  var ps1WriteStem = ""
+  var consumedCandidate: seq[int] = @[]
+  for i, raw in lines:
+    let line = raw.strip()
+    if line.len == 0: continue
+    let low = line.toLowerAscii()
+    # & php ... <name>.phar
+    if (low.contains("& php") or low.contains("&php")) and low.contains(".phar"):
+      sawPhpInvoke = true
+      consumedCandidate.add(i)
+      # Extract the .phar stem.
+      var idx = low.find(".phar")
+      if idx > 0:
+        var start = idx
+        while start > 0 and low[start - 1] notin {' ', '\t', '"', '\'',
+                                                   '\\', '/', '(', ')'}:
+          dec start
+        pharStem = line[start ..< idx]
+    # & java -jar ... <name>.jar
+    if (low.contains("& java") or low.contains("&java")) and
+       low.contains("-jar") and low.contains(".jar"):
+      sawJavaJarInvoke = true
+      consumedCandidate.add(i)
+      var idx = low.find(".jar")
+      if idx > 0:
+        var start = idx
+        while start > 0 and low[start - 1] notin {' ', '\t', '"', '\'',
+                                                   '\\', '/', '(', ')'}:
+          dec start
+        jarStem = line[start ..< idx]
+    # Add-Content / Set-Content / > redirect targeting $dir\<name>.ps1
+    if low.contains("$dir") and low.contains(".ps1") and
+       (low.contains("add-content") or low.contains("set-content") or
+        low.contains(">") or low.contains("out-file")):
+      consumedCandidate.add(i)
+      var idx = low.find(".ps1")
+      if idx > 0:
+        var start = idx
+        while start > 0 and low[start - 1] notin {' ', '\t', '"', '\'',
+                                                   '\\', '/'}:
+          dec start
+        ps1WriteStem = line[start ..< idx]
+  # Deduplicate consumed indices preserving order.
+  var seen: seq[int] = @[]
+  for i in consumedCandidate:
+    if i notin seen: seen.add(i)
+  consumedCandidate = seen
+  if sawPhpInvoke and pharStem.len > 0 and ps1WriteStem.len > 0 and
+     pharStem.toLowerAscii() == ps1WriteStem.toLowerAscii():
+    result.recognized = true
+    result.spec = LauncherEmitSpec(
+      kind: lekPhar,
+      target: pharStem & ".phar",
+      interpreter_package_id: "php",
+      launcher_name: pharStem)
+    result.consumedLines = consumedCandidate
+    diags.add(Diagnostic(
+      kind: dkLauncherEmitRecognized, app: app,
+      detail: "lekPhar launcher synthesis: target=" & pharStem &
+        ".phar interpreter=php launcher_name=" & pharStem &
+        " (consumed " & $consumedCandidate.len & " pre_install lines)"))
+    return
+  if sawJavaJarInvoke and jarStem.len > 0 and ps1WriteStem.len > 0 and
+     jarStem.toLowerAscii() == ps1WriteStem.toLowerAscii():
+    result.recognized = true
+    result.spec = LauncherEmitSpec(
+      kind: lekJar,
+      target: jarStem & ".jar",
+      interpreter_package_id: "jdk",
+      launcher_name: jarStem)
+    result.consumedLines = consumedCandidate
+    diags.add(Diagnostic(
+      kind: dkLauncherEmitRecognized, app: app,
+      detail: "lekJar launcher synthesis: target=" & jarStem &
+        ".jar interpreter=jdk launcher_name=" & jarStem &
+        " (consumed " & $consumedCandidate.len & " pre_install lines)"))
+
 proc translatePreInstall(node: JsonNode;
                           app: string;
                           diags: var seq[Diagnostic]):
     tuple[actions: seq[PreInstallAction]; unrecognized: seq[string];
-          impliesNested7z: bool] =
+          impliesNested7z: bool; launcherEmit: seq[LauncherEmitSpec]] =
   ## Translate a Scoop ``pre_install`` JSON node (string | seq[string])
   ## into the M3 schema. Detects the nested-7z idiom: presence of an
   ## ``Expand-7zArchive`` ``*.7z`` glob (or a sibling cleanup
@@ -687,9 +811,17 @@ proc translatePreInstall(node: JsonNode;
       if child.kind == JString: lines.add(child.getStr())
   else: return
   if lines.len == 0: return
+  # M5: try the launcher-emit recognizer FIRST. If matched, the
+  # contributing lines are skipped in the per-line allowlist walk below
+  # (so we don't double-emit them as pre_install_unrecognized warnings).
+  let launcherMatch = recognizeLauncherEmitFromPreInstall(lines, app, diags)
+  if launcherMatch.recognized:
+    result.launcherEmit.add(launcherMatch.spec)
   var sawExpandWildcard = false
   var sawRemoveSevenZ = false
-  for line in lines:
+  for idx, line in lines:
+    if launcherMatch.recognized and idx in launcherMatch.consumedLines:
+      continue
     var dropped: seq[string] = @[]
     let translation = translatePreInstallLine(line, dropped)
     if translation.ok:
@@ -713,7 +845,8 @@ proc translatePreInstall(node: JsonNode;
         kind: dkPreInstallUnrecognized, app: app,
         detail: line.strip() & " (" & reason & ")"))
   result.impliesNested7z = sawExpandWildcard or sawRemoveSevenZ
-  if result.actions.len == 0 and result.unrecognized.len == 0:
+  if result.actions.len == 0 and result.unrecognized.len == 0 and
+     result.launcherEmit.len == 0:
     diags.add(Diagnostic(
       kind: dkPreInstallSkippedAllRecognized, app: app,
       detail: "pre_install block was entirely comments / blank lines"))
@@ -1085,12 +1218,16 @@ proc parseScoopManifest*(app: string; raw: string;
   var preActions: seq[PreInstallAction] = @[]
   var preUnrecognized: seq[string] = @[]
   var impliesNested = false
+  # M5: launcher_emit specs harvested from a recognized pre_install
+  # synthesis pattern (composer's .phar shape, future .jar wraps).
+  var launcherEmit: seq[LauncherEmitSpec] = @[]
   if root.hasKey("pre_install"):
     let translated = translatePreInstall(root["pre_install"], app,
       result.diagnostics)
     preActions = translated.actions
     preUnrecognized = translated.unrecognized
     impliesNested = translated.impliesNested7z
+    for spec in translated.launcherEmit: launcherEmit.add(spec)
 
   # M4: when install_method == imInstallerNsisBundle, also harvest the
   # installer.script lines through the same translator and append to
@@ -1108,6 +1245,7 @@ proc parseScoopManifest*(app: string; raw: string;
       result.diagnostics)
     for action in translated.actions: preActions.add(action)
     for line in translated.unrecognized: preUnrecognized.add(line)
+    for spec in translated.launcherEmit: launcherEmit.add(spec)
 
   # M3: nested_7z is per-platform. When pre_install actions imply a
   # nested extraction, mark every platform's nested_7z = true (the
@@ -1122,6 +1260,21 @@ proc parseScoopManifest*(app: string; raw: string;
       detail: "pre_install contains Expand-7zArchive + Remove-Item *.7z; " &
         "platform nested_7z flag set"))
 
+  # M5: when a launcher_emit was harvested, the catalog's bin_relpath
+  # surface should be the LAUNCHERS we will emit at realize time, not
+  # the raw .phar / .jar payload. Override bin_relpath here when the
+  # auto-harvested value is empty / is just the payload file (composer's
+  # auto-harvest landed bin_relpath=["composer.ps1"] from the Scoop
+  # ``bin`` field; we replace it with the synthesized .ps1+.cmd pair so
+  # the M5 schema validator's launcher_name-in-bin_relpath sanity check
+  # holds).
+  if launcherEmit.len > 0:
+    var synthBins: seq[string] = @[]
+    for spec in launcherEmit:
+      synthBins.add("bin/" & spec.launcher_name & ".ps1")
+      synthBins.add("bin/" & spec.launcher_name & ".cmd")
+    binRelpath = synthBins
+
   # ----- Compose the VersionedProvisioning -----
   result.entry = initVersionedProvisioning(
     version = version,
@@ -1132,5 +1285,6 @@ proc parseScoopManifest*(app: string; raw: string;
     installer_args = installerArgs,
     env = envPairs,
     pre_install_actions = preActions,
-    pre_install_unrecognized = preUnrecognized)
+    pre_install_unrecognized = preUnrecognized,
+    launcher_emit = launcherEmit)
   result.ok = true
