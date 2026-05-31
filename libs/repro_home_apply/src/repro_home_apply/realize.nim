@@ -449,14 +449,44 @@ type
     packageId*: string
     kind*: PackagePreviewKind
     detail*: string
+    adapter*: CatalogAdapterKind
+      ## M0: the adapter that resolved the package via M65's
+      ## ``chainResolvePackage`` (cakBuiltin / cakScoop / cakPath / cakNix).
+      ## Defaulted; only populated for chain-routed previews. Test-seam
+      ## bindings + the legacy fallback leave this at its zero value
+      ## (``cakBuiltin``) and rely on ``detail`` for adapter identification.
+    chainTrace*: seq[ChainStep]
+      ## M0: the per-adapter trace M65's chain populated for this
+      ## resolution. Empty for test-seam bindings + the legacy fallback;
+      ## non-empty for every chain-routed preview (one entry per adapter
+      ## consulted, in order). Surface for the deferred ``repro home
+      ## why-adapter`` debug subcommand.
+    resolvedVersion*: string
+      ## M0: the version the catalog picked. For cakBuiltin this is
+      ## ``builtinVersion``; for cakScoop ``resolvedVersion``. Empty for
+      ## cakPath / cakNix.
 
 proc previewPackageResolutions*(packages: seq[PlannedPackage]):
     seq[PackagePreview] =
-  ## M72 Deliverable 2: classify each planned package WITHOUT
-  ## realizing it. The production catalog query (`scoop list`, bucket
-  ## manifests) is a READ; no `scoop install` runs. Resolution
-  ## precedence matches `realizePlannedPackages` — test seams first,
-  ## then the production catalog.
+  ## M72 Deliverable 2 + M0 planner-path correctness fix: classify each
+  ## planned package WITHOUT realizing it. The production catalog query
+  ## (`scoop list`, bucket manifests, built-in catalog registry) is a
+  ## READ; no `scoop install` runs. Resolution precedence matches
+  ## `realizePlannedPackages` — test seams first, then the production
+  ## catalog.
+  ##
+  ## M0 (Realize-Closure-And-Catalog-Expansion): for a package that has
+  ## no test-seam binding, this proc now mirrors
+  ## ``realizeViaProductionCatalog``'s dispatch — it routes through M65's
+  ## ``chainResolvePackage`` (default platform chain: Windows builtin/
+  ## scoop/path; Linux nix/builtin/path; macOS nix/path) whenever the
+  ## package id is in the M65 catalog registry OR carries a pinned
+  ## ``requestedVersion``. Pre-validation via ``lookupCatalogSlice``
+  ## fails closed with a structured ``EUnknownPackageId`` /
+  ## ``EVersionNotInCatalog`` message instead of misclassifying as
+  ## "missing". Unregistered packages with no pin keep the pre-M65
+  ## ``resolvePackage`` fallback so the legacy non-catalog flows (e.g.
+  ## pure-Scoop-only references) still preview cleanly.
   let pathCatalog = parsePathCatalog()
   let scoopCatalog = parseScoopCatalog()
   var prodCatalog = openProductionCatalog()
@@ -475,23 +505,69 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
       let s = scoopCatalog[p.packageId]
       preview.detail = "scoop adapter (test seam) -> " & s.bucket & "/" & s.app
     else:
-      when defined(windows):
+      # M0: same gate as `realizeViaProductionCatalog` — a registered
+      # built-in catalog id OR a pinned version forces the M65 chain.
+      let useChain = p.requestedVersion.len > 0 or isRegistered(p.packageId)
+      if useChain:
+        # Pre-validate the catalog slice so unknown ids / missing versions
+        # surface as structured errors rather than a silent "missing" row.
+        # The realize-side path raises `EApplyRealizeFailed`; the planner
+        # is non-mutating so we surface the diagnostic as a `ppkMissing`
+        # row carrying the structured message in `detail` — the CLI
+        # already increments `driftCount` on a missing row, so PLAN mode
+        # fails closed unless `--allow-drift` was passed.
+        if isRegistered(p.packageId):
+          try:
+            discard lookupCatalogSlice(p.packageId, p.requestedVersion)
+          except EVersionNotInCatalog as err:
+            preview.kind = ppkMissing
+            preview.detail = "version-not-in-catalog: " & err.msg
+            result.add(preview)
+            continue
+          except EUnknownPackageId as err:
+            preview.kind = ppkMissing
+            preview.detail = "unknown-package-id: " & err.msg
+            result.add(preview)
+            continue
+        var resolution: CatalogResolution
+        var chainOk = true
         try:
-          let resolution = resolvePackage(prodCatalog, p.packageId)
-          if resolution.adapter == cakPath:
-            preview.kind = ppkCacheHit
-            preview.detail = "path " & resolution.sourcePath &
-              " already available"
-          elif resolution.adapter == cakBuiltin:
-            # M64 / M65: a cakBuiltin resolution becomes either a
-            # cache-hit (the M56 store already carries a matching
-            # prefix) or a realize. Without consulting the store the
-            # plan classifier reports realize; M65's `--plan` extension
-            # threads the store query through.
-            preview.kind = ppkRealize
-            preview.detail = "builtin " & resolution.urlUsed &
-              " (" & resolution.digestAlgorithm & ")"
-          elif resolution.cacheHit:
+          resolution = chainResolvePackage(prodCatalog, p.packageId,
+            version = p.requestedVersion)
+        except EAdapterChainExhausted as err:
+          preview.kind = ppkMissing
+          preview.detail = "adapter-chain-exhausted: " & err.msg
+          chainOk = false
+        except EUnknownPackage as err:
+          preview.kind = ppkMissing
+          preview.detail = "unknown package; searched catalogs: " &
+            err.searchedCatalogs.join(", ")
+          chainOk = false
+        if not chainOk:
+          result.add(preview)
+          continue
+        preview.adapter = resolution.adapter
+        preview.chainTrace = resolution.chainTrace
+        preview.resolvedVersion =
+          if resolution.builtinVersion.len > 0: resolution.builtinVersion
+          else: resolution.resolvedVersion
+        case resolution.adapter
+        of cakBuiltin:
+          # Honest reporting: the M65 chain resolved the package via the
+          # built-in catalog. The realize half will fetch the slice URL
+          # and materialize it into the M56 store; report the URL +
+          # digest algorithm so the operator can audit the source.
+          preview.kind = ppkRealize
+          preview.detail = "builtin " & resolution.urlUsed &
+            (if resolution.builtinVersion.len > 0:
+               " @" & resolution.builtinVersion else: "") &
+            " (" & resolution.digestAlgorithm & ")"
+        of cakPath:
+          preview.kind = ppkCacheHit
+          preview.detail = "path " & resolution.sourcePath &
+            " already available"
+        of cakScoop:
+          if resolution.cacheHit:
             preview.kind = ppkCacheHit
             preview.detail = "scoop " & resolution.bucket & "/" &
               resolution.app & "@" & resolution.resolvedVersion &
@@ -503,24 +579,55 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
               (if resolution.resolvedVersion.len > 0:
                  "@" & resolution.resolvedVersion else: "") &
               " would be installed"
-        except EUnknownPackage as err:
-          preview.kind = ppkMissing
-          preview.detail = "unknown package; searched catalogs: " &
-            err.searchedCatalogs.join(", ")
+        of cakNix:
+          # M65: the cakNix branch is a placeholder until the parallel
+          # realize-side Nix wiring lands. The chain itself skips
+          # cleanly, but if a chain ever DOES return cakNix (a future
+          # configuration), surface it honestly.
+          preview.kind = ppkRealize
+          preview.detail = "nix " & resolution.packageId &
+            " (realize-side wiring pending)"
       else:
-        try:
-          let resolution = resolvePackage(prodCatalog, p.packageId)
-          if resolution.adapter == cakPath:
-            preview.kind = ppkCacheHit
-            preview.detail = "path " & resolution.sourcePath &
-              " already available"
-          else:
-            preview.kind = ppkRealize
-            preview.detail = $resolution.adapter
-        except EUnknownPackage as err:
-          preview.kind = ppkMissing
-          preview.detail = "unknown package; searched catalogs: " &
-            err.searchedCatalogs.join(", ")
+        # Pre-M65 legacy path for unregistered packages with no pin —
+        # preserves back-compat for pure-Scoop / pure-PATH references
+        # that have no built-in catalog entry.
+        when defined(windows):
+          try:
+            let resolution = resolvePackage(prodCatalog, p.packageId)
+            if resolution.adapter == cakPath:
+              preview.kind = ppkCacheHit
+              preview.detail = "path " & resolution.sourcePath &
+                " already available"
+            elif resolution.cacheHit:
+              preview.kind = ppkCacheHit
+              preview.detail = "scoop " & resolution.bucket & "/" &
+                resolution.app & "@" & resolution.resolvedVersion &
+                " already installed (no reinstall)"
+            else:
+              preview.kind = ppkRealize
+              preview.detail = "scoop " & resolution.bucket & "/" &
+                resolution.app &
+                (if resolution.resolvedVersion.len > 0:
+                   "@" & resolution.resolvedVersion else: "") &
+                " would be installed"
+          except EUnknownPackage as err:
+            preview.kind = ppkMissing
+            preview.detail = "unknown package; searched catalogs: " &
+              err.searchedCatalogs.join(", ")
+        else:
+          try:
+            let resolution = resolvePackage(prodCatalog, p.packageId)
+            if resolution.adapter == cakPath:
+              preview.kind = ppkCacheHit
+              preview.detail = "path " & resolution.sourcePath &
+                " already available"
+            else:
+              preview.kind = ppkRealize
+              preview.detail = $resolution.adapter
+          except EUnknownPackage as err:
+            preview.kind = ppkMissing
+            preview.detail = "unknown package; searched catalogs: " &
+              err.searchedCatalogs.join(", ")
     result.add(preview)
 
 # ---------------------------------------------------------------------------
