@@ -1267,12 +1267,22 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
     2
 
 proc siblingUserDaemonPath*(publicCliPath: string): string =
+  ## Locate the ``repro-daemon`` companion binary for the given ``repro``
+  ## executable. Prefers a sibling next to ``publicCliPath`` (the layout used
+  ## by installed and ``just build`` outputs), then falls back to ``findExe``
+  ## so a daemon staged into ``PATH`` (for example, in a dev shell with
+  ## ``build/bin`` on ``PATH``) still wins. Returns the bare unqualified
+  ## binary name when neither lookup succeeds; callers must treat that as
+  ## "daemon binary not found" and fail fast rather than handing the bare
+  ## name to ``launchctl`` / ``execv``.
   let candidate = parentDir(publicCliPath) /
     addFileExt("repro-daemon", ExeExt)
   if fileExists(candidate):
-    os.normalizedPath(candidate)
-  else:
-    addFileExt("repro-daemon", ExeExt)
+    return os.normalizedPath(candidate)
+  let viaPath = findExe("repro-daemon")
+  if viaPath.len > 0:
+    return os.normalizedPath(absolutePath(viaPath))
+  addFileExt("repro-daemon", ExeExt)
 
 proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
   result = @["--foreground", "--endpoint", config.endpoint,
@@ -1440,6 +1450,19 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
   let sourceExe =
     if config.daemonExe.len > 0: config.daemonExe
     else: siblingUserDaemonPath(publicCliPath)
+  # Fail fast when the daemon binary cannot be located. Without this guard the
+  # bare unqualified name returned by ``siblingUserDaemonPath`` propagates into
+  # ``launchctl bootstrap`` (which silently registers a non-executable plist
+  # entry and forces a 30 s status-wait timeout) and then into ``execv`` in the
+  # posix-fork fallback (another 60 s wait). Both paths eventually surface as a
+  # generic timeout that hides the real cause from CLI fallbacks. Raising here
+  # lets ``runBuildCommand`` / ``runWatchCommand`` switch to direct mode in
+  # milliseconds with a clear diagnostic naming the path we tried.
+  if not isAbsolute(sourceExe) or not fileExists(sourceExe):
+    raise newException(UserDaemonRuntimeError,
+      "repro-daemon binary not found (looked for sibling next to " &
+        publicCliPath & " and on PATH as 'repro-daemon'); set " &
+        "REPRO_DAEMON=off or install/build repro-daemon next to repro")
   var launchConfig = config
   var exe = sourceExe
   if config.devMode:
