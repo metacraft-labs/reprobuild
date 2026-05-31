@@ -41,12 +41,17 @@
 ## Chocolatey wix.portable, manual install) and finally raises
 ## ``EBuiltinDarkUnavailable``.
 ##
-## **Bootstrap-order**: this catalog is hand-authored pre-M7 (M7 adds
-## ``--source gh-releases:`` to the harvester). After M7, re-harvest
-## via ``repro_catalog_harvester harvest --source
-## gh-releases:wixtoolset/wix3``. The hand-authored entry is correct
-## in the catalog-as-source-of-truth sense; the harvester replay just
-## makes the provenance walkable.
+## **Bootstrap-order**: this catalog was hand-authored pre-M7. M7's
+## ``--source gh-releases:wixtoolset/wix3`` mode CAN re-harvest the
+## release shape, BUT the wix3 release uses non-semver tag
+## ``wix3141rtm`` and asset name ``wix314-binaries.zip`` (no version
+## token) — neither maps cleanly to the catalog's ``version: "3.14.1"``
+## via a single ``--version-extract`` regex. A re-harvest would either
+## record the version as ``wix3141rtm`` (drift from existing
+## consumers' ``selectVersion("3.14.1")`` lookups) or require an
+## operator override. The hand-authored entry is kept; the catalog's
+## URL + sha256 match upstream and re-verification is one ``curl``
+## away.
 ##
 ## **Operator-visible consequences of the hand-authored shape**: the
 ## harvester's ``verify`` subcommand will report DRIFT against this

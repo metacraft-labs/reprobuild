@@ -51,6 +51,32 @@
 ## A later milestone may re-harvest from Scoop and reattach this
 ## docstring; the entry's bytes (URL + sha256) match Scoop's exactly.
 ##
+## **M7 re-harvest option (post-M7)**: ``jrathlev/InnoUnpacker-Windows-GUI``
+## DOES publish GitHub releases (tagged ``ui_2_2_9``, ``iu_2_2_8``, …)
+## that ship ``innounp-2.zip`` as a release asset with the SAME bytes
+## (sha256 ``1439f8d9...``) as the master-branch raw file this catalog
+## currently links to, and the asset's ``digest`` field already carries
+## that sha256. A re-harvest via
+##   ``repro_catalog_harvester harvest \
+##      --source gh-releases:jrathlev/InnoUnpacker-Windows-GUI \
+##      --asset-pattern 'innounp-2\.zip' \
+##      --bin-relpath innounp.exe --output-app innounp``
+## would emit a working catalog (same bytes, different URL —
+## ``releases/download/ui_2_2_9/innounp-2.zip`` instead of the master-
+## branch raw path). The catalog is kept hand-authored because:
+##   (i)  the release tag scheme (``ui_2_2_9`` for "Inno Unpack GUI
+##        2.2.9", versioning the GUI front-end) doesn't map to this
+##        catalog's ``2.67.9`` version (which tracks the bundled
+##        ``innounp.exe`` itself, named in the release body) via a
+##        single ``--version-extract`` regex;
+##   (ii) the docstring above ("innounp is the cakBuiltin EXTRACTOR for
+##        the Inno-Setup-family realize hook" + the innounp-vs-innoextract
+##        rationale) needs to survive a re-harvest. A future milestone
+##        may add a ``--version-override`` flag or a per-source mapping
+##        table that lets the harvester re-emit while preserving the
+##        version field; in the meantime, the bytes match upstream and
+##        re-verification is one ``certutil -hashfile`` away.
+##
 ## **Discovery contract** (per the M4 ``discoverInnounpExe`` order):
 ## the cakBuiltin Inno Setup realize loop probes the M4 store FIRST
 ## for an ``innounp``-registered prefix containing ``innounp.exe`` at

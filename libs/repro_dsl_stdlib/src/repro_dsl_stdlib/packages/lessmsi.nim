@@ -31,6 +31,20 @@
 ## ``lessmsi``-registered prefix containing ``lessmsi.exe`` at the
 ## prefix root. Falls back to PATH ``lessmsi.exe`` (host Scoop
 ## install) and finally raises ``EBuiltinLessmsiUnavailable``.
+##
+## **M7 re-harvest option (post-M7)**: this catalog can now be
+## re-harvested via
+##   ``repro_catalog_harvester harvest \
+##      --source gh-releases:activescott/lessmsi \
+##      --asset-pattern 'lessmsi-v.*\.zip' \
+##      --version-extract '^v(.+)$' \
+##      --bin-relpath lessmsi.exe --output-app lessmsi``
+## The harvested output's URL + sha256 match this hand-authored entry
+## byte-identically. The catalog is kept hand-authored to preserve the
+## "WiX dark.exe is the wrong tool, lessmsi is the right one"
+## rationale in the docstring above; a re-harvest would clobber that
+## context. Discovery happens at realize time independent of
+## authorship; both shapes work end-to-end.
 
 import std/tables
 import repro_dsl_stdlib/packages_schema

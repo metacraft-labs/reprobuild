@@ -96,6 +96,12 @@ import ./packages/lessmsi
 # resolution stays the operator's responsibility — list every required
 # MSYS2 package in home.nim (e.g. flexdll, gmp).
 import ./packages/ocaml
+# M7 (Realize-Closure-And-Catalog-Expansion spec) — GitHub Releases
+# harvester source. ``alire`` (Ada toolchain manager) is the first
+# end-to-end consumer; the ``alr-...-bin-x86_64-windows.zip`` asset
+# ships ``bin/alr.exe`` at the archive root, fitting cakBuiltin's
+# ``afZip + imExtract`` baseline without any new dispatch surface.
+import ./packages/alire
 
 export packages_schema
 
@@ -154,6 +160,9 @@ const RegisteredTools* = [
   # M6 (Realize-Closure-And-Catalog-Expansion spec) — first MSYS2-
   # harvested catalog tool.
   "ocaml",
+  # M7 (Realize-Closure-And-Catalog-Expansion spec) — first
+  # GitHub-Releases-harvested catalog tool. Ada toolchain manager.
+  "alire",
 ]
 
 proc getCatalog*(toolName: string):
@@ -208,6 +217,8 @@ proc getCatalog*(toolName: string):
   of "lessmsi":    selectIfNonEmpty(lessmsiCatalog)
   # M6 (Realize-Closure-And-Catalog-Expansion spec) — MSYS2-harvested.
   of "ocaml":      selectIfNonEmpty(ocamlCatalog)
+  # M7 (Realize-Closure-And-Catalog-Expansion spec) — GitHub-Releases-harvested.
+  of "alire":      selectIfNonEmpty(alireCatalog)
   else:
     none(seq[VersionedProvisioning])
 

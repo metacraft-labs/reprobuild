@@ -63,7 +63,7 @@ const
     ## method (.phar wrapping for composer; gem install for ruby; etc.)
     ## isn't a cakBuiltin install_method yet.
 
-  Phase2NoCatalog = ["gnat", "alire", "dune"]
+  Phase2NoCatalog = ["gnat", "dune"]
     ## No packages/<tool>.nim entry yet. The harness reports these as
     ## BLOCKED-NO-CATALOG; the M9 validate script SKIPs cleanly because
     ## the tool isn't on PATH (no realize path AT ALL — not even a
@@ -82,11 +82,23 @@ const
     ## RESOLVES and REALIZES via cakBuiltin end-to-end (the M6 LIVE
     ## smoke materialized ``ocaml --version`` from a real MSYS2
     ## .pkg.tar.zst). ocaml is in ``Phase2GraduatedToBuiltin`` below.
+    ##
+    ## M7 (Realize-Closure spec) graduated ``alire`` out of this list:
+    ## the GitHub Releases harvester source landed in M7, the
+    ## alire-project/alire windows-x86_64 asset (a plain ``afZip``
+    ## carrying ``bin/alr.exe`` at the archive root) was harvested into
+    ## ``packages/alire.nim``, and the existing cakBuiltin
+    ## ``afZip + imExtract`` baseline materializes it without any
+    ## new dispatch surface. alire is in ``Phase2GraduatedToBuiltin``
+    ## below.
+    ##
     ## ``dune`` is NOT in MSYS2 (dune ships only as a source .tbz via
     ## GitHub releases; the canonical Windows build path is opam,
     ## which is itself bootstrapped from OCaml source) — deferred to
     ## a future opam-harvester milestone, NOT M7's GitHub-Releases
-    ## binary harvester.
+    ## binary harvester. ``gnat`` is in the same boat (the Ada
+    ## compiler proper ships as an alire crate; alire itself is the
+    ## tool that fetches gnat).
 
   Phase1Clean = ["jdk", "gradle", "dotnet-sdk", "zig"]
     ## M40 / M41 / M42 / M44 fixtures whose tools are CLEAN in the
@@ -105,14 +117,17 @@ const
     ## with no ``installer:`` block. The realize-time installer
     ## dispatch is M3 territory; the resolver-level contract holds.
 
-  Phase2GraduatedToBuiltin = ["ocaml"]
+  Phase2GraduatedToBuiltin = ["ocaml", "alire"]
     ## Phase-2 packages that this campaign (Realize-Closure-And-
     ## Catalog-Expansion) added to cakBuiltin end-to-end (both
     ## resolver and realize hook). Unlike ``M69DeferredButResolves``
-    ## these tools have a working realize path — the cakBuiltin
-    ## ``imMsys2Pacman`` hook (M6) materializes a runnable prefix
-    ## from the upstream .pkg.tar.zst. ocaml was M6's LIVE-validated
-    ## end-to-end target.
+    ## these tools have a working realize path:
+    ##   * ``ocaml`` (M6) — cakBuiltin ``imMsys2Pacman`` hook
+    ##     materializes a runnable prefix from the upstream
+    ##     .pkg.tar.zst. M6 LIVE-validated end-to-end.
+    ##   * ``alire`` (M7) — cakBuiltin ``afZip + imExtract`` baseline
+    ##     materializes ``bin/alr.exe`` from the harvested GitHub
+    ##     Releases asset. M7 LIVE-validated end-to-end.
 
 suite "M71 e2e: Phase-2 partials resolve via the production catalog":
 
@@ -247,3 +262,13 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
     check "ocaml" in Phase2GraduatedToBuiltin
     check "ocaml" notin Phase2NoCatalog
     check "dune" in Phase2NoCatalog
+    # M7 graduation: alire moves from NO-CATALOG to GRADUATED-TO-BUILTIN
+    # (the GitHub Releases harvester landed; alire-project/alire ships
+    # a clean afZip with bin/alr.exe at the archive root). gnat stays
+    # NO-CATALOG because the GNAT compiler proper ships AS an alire
+    # crate (operators install alire and then `alr toolchain --select gnat`)
+    # — that's an alire-driven flow that doesn't fit cakBuiltin's
+    # single-tool catalog shape.
+    check "alire" in Phase2GraduatedToBuiltin
+    check "alire" notin Phase2NoCatalog
+    check "gnat" in Phase2NoCatalog

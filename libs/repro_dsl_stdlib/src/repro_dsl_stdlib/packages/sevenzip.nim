@@ -40,6 +40,16 @@
 ## emits ``bin/7z.exe`` (renamed-by-relpath from the upstream
 ## ``7zr.exe`` filename) so the lookup is hit even on hosts whose
 ## ``PATH`` lacks 7z entirely.
+##
+## **M7 re-harvest option (post-M7)**: ``--source gh-releases:ip7z/7zip``
+## CAN reach the same release asset, BUT M7's harvester emits
+## ``bin_relpath: @["7zr.exe"]`` (the literal asset filename) while
+## this hand-authored catalog declares ``bin_relpath: @["bin/7z.exe"]``
+## — the cakBuiltin realize hook treats the bin_relpath as both the
+## probe path AND the on-disk target, so a re-harvest would break
+## downstream consumers that ``discover``-via the catalog's
+## ``bin/7z.exe`` shape. M7's harvester does NOT support
+## rename-on-extract; the hand-authored catalog stays in place.
 
 import std/tables
 import repro_dsl_stdlib/packages_schema
