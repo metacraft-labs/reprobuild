@@ -1403,6 +1403,46 @@ suite "M83 step 7: linux.dconfKey driver":
     for b in bytes: s.add(char(b))
     check s == lit
 
+  test "dconfArgvFor: empty bus address wraps with dbus-run-session":
+    # The bare-rootfs / WSL case: no `$DBUS_SESSION_BUS_ADDRESS` →
+    # `dbus-run-session --` spawns a transient bus for the child.
+    # Without the wrapper `dconf write` fails with "Could not
+    # connect: No such file or directory" on every distro that
+    # ships systemd (every gate `linux.dconfKey` runs against).
+    let argv = dconfArgvFor("write",
+      ["/org/reprobuild/x", "'hello'"], "")
+    check argv == @["dbus-run-session", "--", "dconf", "write",
+      "/org/reprobuild/x", "'hello'"]
+
+  test "dconfArgvFor: present bus address calls dconf directly":
+    # When a session bus IS set (desktop login, harness pre-flight
+    # `dbus-daemon --session --fork`) the wrapper is omitted: a
+    # nested `dbus-run-session` would spawn a SECOND bus and the
+    # observe-after-apply step would read a different dconf
+    # database for the current process.
+    let argv = dconfArgvFor("read", ["/org/reprobuild/x"],
+      "unix:abstract=/tmp/dbus-XXX,guid=abc")
+    check argv == @["dconf", "read", "/org/reprobuild/x"]
+
+  test "dconfArgvFor: whitespace-only bus address is treated as empty":
+    # Defence in depth — a stray-whitespace value masquerading as a
+    # real bus address should still trigger the wrapper.
+    let argv = dconfArgvFor("reset", ["/org/reprobuild/x"], "   \t  ")
+    check argv == @["dbus-run-session", "--", "dconf", "reset",
+      "/org/reprobuild/x"]
+
+  test "dconfArgvFor: every verb composes consistently":
+    for verb in ["read", "write", "reset"]:
+      let withBus = dconfArgvFor(verb, ["/org/x"],
+        "unix:abstract=/tmp/dbus,guid=1")
+      let noBus = dconfArgvFor(verb, ["/org/x"], "")
+      check withBus[0] == "dconf"
+      check withBus[1] == verb
+      check noBus[0] == "dbus-run-session"
+      check noBus[1] == "--"
+      check noBus[2] == "dconf"
+      check noBus[3] == verb
+
   test "digestOfResource: linux.dconfKey digests the value verbatim":
     let r = Resource(kind: rkLinuxDconfKey, address: "dc:digest",
       lifecyclePolicy: lpDefault,

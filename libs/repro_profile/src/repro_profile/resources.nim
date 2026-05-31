@@ -850,7 +850,7 @@ template linuxFirewallRule*(targetResources: var seq[ResourceIntent];
                             dependsOn: seq[string] = @[]) =
   ## M83 step 6 — Linux nftables companion of
   ## `windows.firewallRule`. Adds an `nft add rule <chain> <body>`
-  ## with a `comment "repro-fw:<name>"` marker for idempotent
+  ## with a `comment "repro-fw-<name>"` marker for idempotent
   ## observe / destroy. The chain triple is the `<family> <table>
   ## <chain>` form (e.g. `inet filter input`). For `tcp` / `udp`
   ## protocols a non-empty `localPort` is required; for

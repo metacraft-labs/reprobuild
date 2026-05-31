@@ -1,15 +1,18 @@
 ## M83 step 13 — disposable-WSL gate for `linux.firewallRule`.
 ##
 ## The driver wraps `nft add rule` / `nft -a list chain` /
-## `nft delete rule`. nftables requires:
-##   1. the `nft` userspace binary (Ubuntu's `nftables` package);
-##   2. kernel netfilter / nf_tables support (typically absent in
-##      WSL2's Microsoft kernel until very recent builds).
+## `nft delete rule`. As of the M83 step-13 bug-fix bundle:
+##   1. the `nft` userspace binary ships in Ubuntu's `nftables`
+##      package (the harness installs it in stage A);
+##   2. WSL2's Microsoft kernel exposes the netfilter / nf_tables
+##      hooks the driver needs (verified against Ubuntu 22.04 +
+##      modern WSL2 kernels).
 ##
-## When either of these is missing the gate emits a SKIP sentinel.
-## On a conventional Linux VM with nftables both in userspace and the
-## kernel, this gate exercises the full rule add/observe/destroy
-## lifecycle.
+## Missing-binary is a HARD FAIL — the apt-get installed it. A
+## missing kernel hook is also a HARD FAIL — every supported WSL
+## kernel ships nftables. A driver exception is a HARD FAIL — the
+## previous `SKIP on CatchableError` swept real bugs (the
+## `:`-in-comment quoting bug fixed in this bundle) under the rug.
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_LINUX_FIREWALL_VM=1`.
 
@@ -54,16 +57,17 @@ proc main() =
 
   when defined(linux):
     if not nftAvailable():
-      echo "  [SKIP] " & GateName & ": nft binary not installed"
-      writeLineSentinel("SKIP: " & GateName & " (nft binary missing)")
-      quit(0)
+      echo "  [FAIL] " & GateName & ": nft binary not installed"
+      writeLineSentinel("FAIL: " & GateName &
+        " (nft binary missing — install nftables)")
+      quit(1)
 
     if not nftablesWorkable():
-      echo "  [SKIP] " & GateName &
+      echo "  [FAIL] " & GateName &
         ": nftables not reachable (kernel netfilter unavailable)"
-      writeLineSentinel("SKIP: " & GateName &
-        " (kernel nf_tables not enabled in WSL kernel)")
-      quit(0)
+      writeLineSentinel("FAIL: " & GateName &
+        " (kernel nf_tables hooks unavailable in this WSL kernel)")
+      quit(1)
 
     # Set up a private table + chain that does NOT exist in the live
     # ruleset, so we cannot break any pre-existing firewall.
@@ -102,9 +106,15 @@ proc main() =
       writeLineSentinel("OK: " & GateName)
       echo "  [OK] linux.firewallRule lifecycle"
     except CatchableError as e:
+      # A driver exception is a real bug — fail HARD instead of
+      # SKIPping. Sweeping driver bugs under the rug as SKIPs is
+      # exactly what the M83 step-13 bug-fix bundle existed to
+      # undo (the `:`-in-comment bug pretended to be an
+      # environment limitation for months).
       let head = e.msg.splitLines()[0]
-      echo "  [SKIP] " & GateName & ": " & head
-      writeLineSentinel("SKIP: " & GateName & " (" & head & ")")
+      echo "  [FAIL] " & GateName & ": " & head
+      writeLineSentinel("FAIL: " & GateName & " (" & head & ")")
+      quit(1)
   else:
     discard
 

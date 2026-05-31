@@ -539,6 +539,32 @@ proc canonicalPasswdUserDesired*(desired: PasswdUserDesired): string =
     ";shell=" & (if desired.shell.len > 0: desired.shell else: "*") &
     ";groups=" & normalizeGroupSet(desired.groups).join(",")
 
+proc canonicalPasswdUserStateMaskedBy*(observed: PasswdUserObservation;
+    desired: PasswdUserDesired): string =
+  ## Render an observed user account in the SAME canonical form as
+  ## `canonicalPasswdUserDesired`: any attribute the desired left
+  ## unpinned (empty `homeDir` / `shell`, or the always-unpinned
+  ## uid) is rendered as the literal `*` so the masked-observed
+  ## bytes compare equal to the desired bytes whenever the pinned
+  ## attributes match.
+  ##
+  ## This is the comparator the post-apply re-probe uses to decide
+  ## "did `useradd` / `usermod` converge on what was asked for?". A
+  ## resource that does not pin `homeDir` is satisfied by ANY
+  ## observed home directory (the one `useradd` chose); the
+  ## unmasked `canonicalPasswdUserState` stays unchanged for the
+  ## drift-detection paths that need the literal observed value.
+  if not observed.present:
+    return "user:absent"
+  let homeRendered =
+    if desired.homeDir.len > 0: observed.homeDir else: "*"
+  let shellRendered =
+    if desired.shell.len > 0: observed.shell else: "*"
+  "user:present;uid=*" &
+    ";home=" & homeRendered &
+    ";shell=" & shellRendered &
+    ";groups=" & normalizeGroupSet(observed.groups).join(",")
+
 # ---------------------------------------------------------------------------
 # passwd.user command-argument construction. The `useradd` / `usermod`
 # argv is built from typed fields — the driver passes argv directly
@@ -749,13 +775,24 @@ proc buildGroupdelArgs*(name: string): seq[string] =
 # linux.firewallRule — nftables rule body + comment marker + handle parser.
 #
 # Reprobuild manages exactly the rules it created. The marker that ties a
-# wire `name` field to a live rule is the comment `repro-fw:<name>` —
+# wire `name` field to a live rule is the comment `repro-fw-<name>` —
 # present on every rule we add, scanned for on every observe / destroy.
 # The pure pieces — building the rule body, building the comment, and
 # parsing `nft -a list chain` output for the rule's handle — live here.
+#
+# Separator choice (`-`, not `:`): nft's parser sub-parses bare comment
+# tokens that contain `:` as `key:value` pairs and rejects them with
+# "syntax error, unexpected colon". Even with shell-level `"…"` around
+# the marker, the surrounding `nft add rule` invocation runs through
+# `sh -c` and the shell strips the quotes before nft sees its argv. The
+# only quoting layer nft itself honours is its OWN grammar; embedding
+# `\"…\"` inside a single argv element works, but using a separator nft
+# never sub-parses sidesteps the whole problem. The closed `name`
+# charset (`A-Za-z0-9._-`) keeps `-` collision-free with the literal
+# rule-name characters, so the marker boundary stays unambiguous.
 # ===========================================================================
 
-const NftCommentPrefix* = "repro-fw:"
+const NftCommentPrefix* = "repro-fw-"
   ## The comment prefix every Reprobuild-authored nftables rule carries.
   ## A rule the operator added by hand without this prefix is left
   ## alone; a rule with this prefix is the responsibility of the
@@ -763,7 +800,7 @@ const NftCommentPrefix* = "repro-fw:"
 
 proc nftRuleComment*(name: string): string =
   ## Build the comment string for a `linux.firewallRule` resource
-  ## named `name`. The format is `repro-fw:<name>`; the closed
+  ## named `name`. The format is `repro-fw-<name>`; the closed
   ## charset on `name` is enforced by `isSafeNftRuleName` in
   ## `operations.nim`.
   NftCommentPrefix & name

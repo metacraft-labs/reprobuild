@@ -200,7 +200,7 @@ type
     pokLinuxFirewallRule = "linux.firewallRule"
       ## The post-M83 step-6 Linux nftables operation: declare an
       ## `nft add rule <chain> <protocol> dport <port> <action>
-      ## comment "repro-fw:<name>"` rule. The comment is the marker
+      ## comment "repro-fw-<name>"` rule. The comment is the marker
       ## the observer / destroy path uses to find the rule's handle
       ## via `nft -a list chain <chain>`. Linux counterpart of
       ## `pokWindowsFirewallRule` — both manage a port-rule, the
@@ -964,7 +964,7 @@ proc isSafeNixDaemonValue*(value: string): bool =
 # and chain / identifier / port charset guards.
 #
 # The four chain/protocol/action/direction fields flow into `nft add
-# rule <chain> <protocol> dport <port> <action> comment "repro-fw:<name>"`
+# rule <chain> <protocol> dport <port> <action> comment "repro-fw-<name>"`
 # command lines; defence-in-depth layer 1 is to allow only closed
 # enumeration values for the protocol / direction / action fields and
 # a conservative charset for `lfwChain` / `lfwName` / `lfwLocalPort`
@@ -1002,8 +1002,8 @@ proc isSafeNftChain*(chain: string): bool =
 proc isSafeNftRuleName*(name: string): bool =
   ## True only for a non-empty rule identifier in the conservative
   ## charset (letters, digits, `.`, `-`, `_`). The name is embedded
-  ## verbatim into the rule's comment (`comment "repro-fw:<name>"`)
-  ## and used as a `grep "repro-fw:<name>"` match; closing the
+  ## verbatim into the rule's comment (`comment "repro-fw-<name>"`)
+  ## and used as a `grep "repro-fw-<name>"` match; closing the
   ## charset means neither surface can be confused by a smuggled
   ## quote, comment separator, or shell metacharacter.
   let n = name.strip()

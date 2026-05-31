@@ -861,10 +861,18 @@ proc applyPasswdUser*(op: PrivilegedOperation): ObservedOperationState =
             @["-o", "edit", "-d", op.puName, "-t", "user", g])
     let after = observePasswdUserRaw(op.puName)
     # Post-apply re-probe — see the contract comment on this proc.
+    # Compare the desired canonical bytes against the OBSERVED bytes
+    # MASKED by the desired's unpinned fields: a resource that left
+    # `homeDir` / `shell` blank is satisfied by whatever `useradd` /
+    # `usermod` actually chose, so masking those fields in the
+    # observed canonical keeps the comparison about what the
+    # resource pinned. The unmasked `canonicalPasswdUserState` stays
+    # in service for drift detection elsewhere.
     let desiredHex = posixDigestHexOfText(canonicalPasswdUserDesired(desired))
     let observedHex =
       if not after.present: ZeroDigestHex
-      else: posixDigestHexOfText(canonicalPasswdUserState(after))
+      else: posixDigestHexOfText(
+        canonicalPasswdUserStateMaskedBy(after, desired))
     if not after.present or observedHex != desiredHex:
       raiseProtocol("passwd.user '" & op.puName &
         "' post-apply observation disagrees with desired state: " &
@@ -2070,7 +2078,7 @@ proc applySystemdSystemTimer*(op: PrivilegedOperation):
 # linux.firewallRule — `nft add rule` + `nft -a list chain` + `nft delete`.
 #
 # Reprobuild manages only rules it created — every Reprobuild rule
-# carries a `comment "repro-fw:<name>"` marker. The observe path
+# carries a `comment "repro-fw-<name>"` marker. The observe path
 # greps `nft list ruleset` for that marker; the destroy path looks
 # up the rule's handle via `nft -a list chain <chain>` and runs
 # `nft delete rule <chain> handle <handle>`. A handle-less destroy

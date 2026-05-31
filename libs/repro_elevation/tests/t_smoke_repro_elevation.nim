@@ -789,6 +789,49 @@ suite "repro_elevation: passwd.user pure logic (Phase C)":
     check posixSystemDesiredDigestHex(destroyOp) ==
       "0000000000000000000000000000000000000000000000000000000000000000"
 
+  test "canonicalPasswdUserStateMaskedBy: unpinned fields mask to wildcard":
+    # The post-apply re-probe contract: an `useradd` driven by a
+    # desired that pins ONLY name + groups must compare equal to
+    # whatever `useradd` chose for home / shell / uid. Without the
+    # mask the digests would never match (the desired canonical
+    # has `home=*;shell=*` while the observed has the live paths)
+    # and every `passwd.user` apply would `errorCount=1` even on a
+    # clean `useradd` exit 0.
+    let desired = PasswdUserDesired(name: "reprotest",
+      homeDir: "", shell: "", groups: @["users"])
+    let observed = PasswdUserObservation(present: true,
+      uid: "1001", primaryGroup: "users",
+      homeDir: "/home/reprotest", shell: "/bin/sh",
+      groups: @["users"])
+    # The unmasked observed carries the live paths (drift detection).
+    check canonicalPasswdUserState(observed) ==
+      "user:present;uid=1001;home=/home/reprotest;shell=/bin/sh;" &
+      "groups=users"
+    # The masked observed matches the desired byte-for-byte.
+    check canonicalPasswdUserStateMaskedBy(observed, desired) ==
+      canonicalPasswdUserDesired(desired)
+
+  test "canonicalPasswdUserStateMaskedBy: pinned fields are NOT masked":
+    # A resource that pins `shell` must not be satisfied by an
+    # observation with a DIFFERENT shell — masking only rewrites
+    # fields the desired left blank.
+    let desired = PasswdUserDesired(name: "reprotest",
+      homeDir: "", shell: "/bin/bash", groups: @["users"])
+    let observed = PasswdUserObservation(present: true,
+      uid: "1001", primaryGroup: "users",
+      homeDir: "/home/reprotest", shell: "/bin/sh",
+      groups: @["users"])
+    check canonicalPasswdUserStateMaskedBy(observed, desired) !=
+      canonicalPasswdUserDesired(desired)
+    # The pinned shell shows through verbatim; only home was masked.
+    check canonicalPasswdUserStateMaskedBy(observed, desired) ==
+      "user:present;uid=*;home=*;shell=/bin/sh;groups=users"
+
+  test "canonicalPasswdUserStateMaskedBy: absent observation is `user:absent`":
+    let desired = PasswdUserDesired(name: "reprotest", groups: @["users"])
+    check canonicalPasswdUserStateMaskedBy(
+      PasswdUserObservation(present: false), desired) == "user:absent"
+
 # ===========================================================================
 # M82 Phase B — the shared producer / consumer map, promoted from the
 # driver-private `CapabilityServiceMap`. Verified here at the elevation
@@ -2387,34 +2430,48 @@ suite "repro_elevation: systemd.systemTimer pure surface":
 suite "repro_elevation: linux.firewallRule pure surface":
 
   test "nftRuleComment and NftCommentPrefix":
-    check NftCommentPrefix == "repro-fw:"
-    check nftRuleComment("openssh") == "repro-fw:openssh"
+    # The marker uses `-` (not `:`) as the prefix/name separator so
+    # the comment body parses unambiguously through nft's grammar
+    # even when the surrounding `nft add rule` line passes through
+    # the shell and loses one layer of quoting. nft sub-parses
+    # `<word>:<word>` as a key/value pair and rejects it; `-` is
+    # never sub-parsed.
+    check NftCommentPrefix == "repro-fw-"
+    check nftRuleComment("openssh") == "repro-fw-openssh"
 
   test "nftRuleBody for tcp includes dport and comment":
     check nftRuleBody("tcp", "22", "accept", "openssh") ==
-      "tcp dport 22 accept comment \"repro-fw:openssh\""
+      "tcp dport 22 accept comment \"repro-fw-openssh\""
 
   test "nftRuleBody for udp includes dport and comment":
     check nftRuleBody("udp", "53", "drop", "dns-block") ==
-      "udp dport 53 drop comment \"repro-fw:dns-block\""
+      "udp dport 53 drop comment \"repro-fw-dns-block\""
 
   test "nftRuleBody for icmp omits the dport clause":
     check nftRuleBody("icmp", "", "accept", "ping") ==
-      "icmp accept comment \"repro-fw:ping\""
+      "icmp accept comment \"repro-fw-ping\""
 
   test "nftRuleBody for icmpv6 omits the dport clause":
     check nftRuleBody("icmpv6", "", "accept", "ping6") ==
-      "icmpv6 accept comment \"repro-fw:ping6\""
+      "icmpv6 accept comment \"repro-fw-ping6\""
+
+  test "nft rule body contains no `:` (the byte that breaks unquoted comments)":
+    # Belt-and-braces against a regression that re-introduces `:`
+    # in the marker — it'd compile, but `nft add rule` would
+    # reject it on every distro whose nft sub-parses unquoted
+    # `<word>:<word>` tokens (Ubuntu 22.04 nftables 1.0.x).
+    let body = nftRuleBody("tcp", "65500", "accept", "reprom83vmtest")
+    check ':' notin body
 
   test "parseNftHandleForComment finds the integer handle":
     let listing = "table inet filter {\n" &
                   "\tchain input {\n" &
                   "\t\ttype filter hook input priority 0;\n" &
-                  "\t\ttcp dport 22 accept comment \"repro-fw:openssh\" # handle 17\n" &
+                  "\t\ttcp dport 22 accept comment \"repro-fw-openssh\" # handle 17\n" &
                   "\t\ttcp dport 80 accept # handle 18\n" &
                   "\t}\n" &
                   "}\n"
-    check parseNftHandleForComment(listing, "repro-fw:openssh") == 17
+    check parseNftHandleForComment(listing, "repro-fw-openssh") == 17
 
   test "parseNftHandleForComment returns -1 for an absent marker":
     let listing = "table inet filter {\n" &
@@ -2422,24 +2479,24 @@ suite "repro_elevation: linux.firewallRule pure surface":
                   "\t\ttcp dport 80 accept # handle 18\n" &
                   "\t}\n" &
                   "}\n"
-    check parseNftHandleForComment(listing, "repro-fw:openssh") == -1
+    check parseNftHandleForComment(listing, "repro-fw-openssh") == -1
 
   test "parseNftHandleForComment ignores lines without a handle suffix":
     # A `nft list ruleset` (no `-a` flag) emits no `# handle N`
     # suffix; the parser must safely return -1 instead of crashing.
     let listing = "table inet filter {\n" &
-                  "\ttcp dport 22 accept comment \"repro-fw:openssh\"\n" &
+                  "\ttcp dport 22 accept comment \"repro-fw-openssh\"\n" &
                   "}\n"
-    check parseNftHandleForComment(listing, "repro-fw:openssh") == -1
+    check parseNftHandleForComment(listing, "repro-fw-openssh") == -1
 
   test "parseNftRuleSpecForComment strips leading whitespace + handle suffix":
-    let listing = "\t\ttcp dport 22 accept comment \"repro-fw:openssh\" # handle 17\n"
-    check parseNftRuleSpecForComment(listing, "repro-fw:openssh") ==
-      "tcp dport 22 accept comment \"repro-fw:openssh\""
+    let listing = "\t\ttcp dport 22 accept comment \"repro-fw-openssh\" # handle 17\n"
+    check parseNftRuleSpecForComment(listing, "repro-fw-openssh") ==
+      "tcp dport 22 accept comment \"repro-fw-openssh\""
 
   test "parseNftRuleSpecForComment returns empty for an absent marker":
     check parseNftRuleSpecForComment(
-      "tcp dport 80 accept # handle 18", "repro-fw:openssh") == ""
+      "tcp dport 80 accept # handle 18", "repro-fw-openssh") == ""
 
   test "operationValidationError accepts a valid linux.firewallRule (tcp)":
     let ok = PrivilegedOperation(kind: pokLinuxFirewallRule,

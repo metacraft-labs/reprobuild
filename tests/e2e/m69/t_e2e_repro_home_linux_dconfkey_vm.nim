@@ -1,12 +1,15 @@
 ## M83 step 13 — disposable-WSL gate for `linux.dconfKey`.
 ##
-## The driver shells out to `dconf write` / `dconf read` / `dconf reset`.
-## `dconf` requires a running dbus session at
-## `$DBUS_SESSION_BUS_ADDRESS`; the orchestrator starts a session bus
-## under the throwaway distro before running this gate. If `dconf` is
-## not installed (Ubuntu's `dconf-cli` package) or the dbus session
-## connection fails, the gate emits a SKIP sentinel rather than failing
-## the harness.
+## The driver shells out to `dconf write` / `dconf read` / `dconf reset`,
+## auto-wrapping every invocation with `dbus-run-session --` when
+## `$DBUS_SESSION_BUS_ADDRESS` is empty. As long as the distro ships
+## `dconf-cli` AND `dbus-run-session` (the `dbus-x11` package on Ubuntu)
+## the gate exercises the full lifecycle end-to-end on a bare WSL
+## rootfs without a desktop session.
+##
+## The only legitimate SKIP path is "the distro is missing a binary"
+## (apt-get install failed) — the driver itself never SKIPs on a
+## live bus or its absence.
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_DCONF_KEY_VM=1`.
 
@@ -29,17 +32,9 @@ proc writeLineSentinel(text: string) =
     finally:
       close(f)
 
-proc dconfPresent(): bool =
-  let (output, code) = execCmdEx("command -v dconf")
+proc binaryPresent(name: string): bool =
+  let (output, code) = execCmdEx("command -v " & name)
   result = code == 0 and output.strip().len > 0
-
-proc dbusSessionLive(): bool =
-  # `dconf list /` is a quick smoke that exercises the dbus path the
-  # driver depends on without writing anything. If dbus is missing,
-  # it exits non-zero with a "Cannot autolaunch D-Bus" or similar
-  # message.
-  let (_, code) = execCmdEx("dconf list / 2>&1")
-  result = code == 0
 
 proc main() =
   let sandboxMode =
@@ -49,15 +44,18 @@ proc main() =
     quit(0)
 
   when defined(linux):
-    if not dconfPresent():
-      echo "  [SKIP] " & GateName & ": dconf-cli not installed in distro"
-      writeLineSentinel("SKIP: " & GateName & " (dconf-cli missing)")
-      quit(0)
-
-    if not dbusSessionLive():
-      echo "  [SKIP] " & GateName & ": no live dbus session in WSL"
-      writeLineSentinel("SKIP: " & GateName & " (dbus session missing)")
-      quit(0)
+    # Provisioning prereqs: missing-binary is a HARD failure, not a
+    # SKIP — the harness installs both via apt-get in stage A. A
+    # missing binary here means the harness is broken.
+    if not binaryPresent("dconf"):
+      echo "  [FAIL] " & GateName & ": dconf binary missing"
+      writeLineSentinel("FAIL: " & GateName & " (dconf binary missing)")
+      quit(1)
+    if not binaryPresent("dbus-run-session"):
+      echo "  [FAIL] " & GateName & ": dbus-run-session missing"
+      writeLineSentinel("FAIL: " & GateName &
+        " (dbus-run-session missing — install dbus-x11)")
+      quit(1)
 
     # Use a namespaced key under /org/reprobuild/m83-vm-test/ so we
     # don't disturb any real GNOME settings (and there is no schema
@@ -75,9 +73,13 @@ proc main() =
       writeLineSentinel("OK: " & GateName)
       echo "  [OK] linux.dconfKey lifecycle"
     except CatchableError as e:
+      # A failure now is a real driver bug, NOT an environment
+      # limitation — every prereq was just verified. Fail hard so
+      # the harness verdict reflects it.
       let head = e.msg.splitLines()[0]
-      echo "  [SKIP] " & GateName & ": " & head
-      writeLineSentinel("SKIP: " & GateName & " (" & head & ")")
+      echo "  [FAIL] " & GateName & ": " & head
+      writeLineSentinel("FAIL: " & GateName & " (" & head & ")")
+      quit(1)
   else:
     discard
 

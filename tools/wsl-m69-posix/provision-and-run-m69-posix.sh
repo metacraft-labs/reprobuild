@@ -214,6 +214,14 @@ export DEBIAN_FRONTEND=noninteractive
 #     activate the system dbus daemon — WSL without PID-1 systemd
 #     cannot do so consistently — so the gates that need a live bus
 #     fall back to SKIP.
+#   - dbus-x11: provides `/usr/bin/dbus-run-session`, the per-
+#     invocation transient session-bus launcher the
+#     `linux.dconfKey` driver wraps `dconf write` / `dconf read` /
+#     `dconf reset` with when `$DBUS_SESSION_BUS_ADDRESS` is
+#     empty. Without this binary the dconfKey gate fails on a bare
+#     rootfs with "Could not connect: No such file or directory"
+#     (the bus the wrapper would spawn does not exist) and the
+#     gate cannot run end-to-end.
 #   - kmod: provides `udevadm`'s prereqs. udev daemon itself is NOT
 #     running in this harness; linux.udevRule's gate catches the
 #     reload failure and emits SKIP.
@@ -226,6 +234,11 @@ export DEBIAN_FRONTEND=noninteractive
   # PAM hook adds extra setup that diverges from the canonical
   # observed state). We do NOT install `dbus-user-session`.
   #
+  # `dbus-x11` ships `dbus-run-session` standalone — the
+  # `linux.dconfKey` driver wraps every `dconf` invocation with
+  # `dbus-run-session --` when there is no session bus, so this
+  # binary MUST be present for the dconfKey gate to pass.
+  #
   # `kmod` is similarly NOT installed — udev is not running in this
   # harness, and `kmod` pulls in shared libraries that perturb the
   # other gates' PAM/setup flows.
@@ -237,6 +250,7 @@ export DEBIAN_FRONTEND=noninteractive
     libkf5config-bin \
     nftables \
     dbus \
+    dbus-x11 \
     2>&1
 } >> "${LOG_FILE}" 2>&1
 APT_STATUS=$?
@@ -257,6 +271,7 @@ record "stageA_kwriteconfig5" "$(which kwriteconfig5 2>/dev/null || echo 'kwrite
 record "stageA_nft"          "$(which nft 2>/dev/null || echo 'nft not found')"
 record "stageA_udevadm"      "$(which udevadm 2>/dev/null || echo 'udevadm not installed (kmod skipped)')"
 record "stageA_dbus_daemon"  "$(which dbus-daemon 2>/dev/null || echo 'dbus-daemon not found')"
+record "stageA_dbus_run_session" "$(which dbus-run-session 2>/dev/null || echo 'dbus-run-session not found (linux.dconfKey gate will FAIL)')"
 
 # ===========================================================================
 # Stage B - install Nim 2.2.8 from the cached prebuilt linux x64 tarball
