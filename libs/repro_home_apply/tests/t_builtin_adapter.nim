@@ -335,6 +335,78 @@ suite "M64 — cakBuiltin adapter":
       check fileExists(extendedPath(lib))
       check readFile(extendedPath(lib)).contains("runtime-marker")
 
+  test "realizeBuiltinPackage: 7z extraction + extract_path flatten":
+    # M64 step 12: build a real .7z archive on disk via the `7z`
+    # CLI, drive the adapter through afSevenZip imExtract with an
+    # inner-dir flatten, and assert the realized prefix carries the
+    # inner-dir contents directly.
+    #
+    # Skipped when no `7z` binary is on PATH. On the M69 Hyper-V
+    # harness the Scoop bootstrap installs `7zip`, satisfying this.
+    let fixtureDir = FixtureRoot / "seven-zip-flatten"
+    let storeDir = fixtureDir / "store"
+    let stagingDir = fixtureDir / "staging"
+    resetDir(fixtureDir)
+    resetDir(storeDir)
+    resetDir(stagingDir)
+
+    let sevenZip = findExe("7z")
+    if sevenZip.len == 0:
+      echo "  [skip] no 7z binary on PATH; skipping afSevenZip test"
+      skip()
+    else:
+      # Lay out the inner dir the archive will ship:
+      #   stagingDir / tool-1.0.0 / bin / tool.cmd
+      #   stagingDir / tool-1.0.0 / lib / runtime.txt
+      let innerDir = stagingDir / "tool-1.0.0"
+      createDir(extendedPath(innerDir / "bin"))
+      createDir(extendedPath(innerDir / "lib"))
+      writeFile(extendedPath(innerDir / "bin" / "tool.cmd"),
+        "@echo hello from 7z tool\n")
+      writeFile(extendedPath(innerDir / "lib" / "runtime.txt"),
+        "seven-zip-runtime-marker\n")
+
+      # Produce the .7z archive. Use `7z a` to add the inner dir
+      # tree; -bsp0/-bso0 suppress chatty progress + status lines.
+      let archivePath = fixtureDir / "tool-1.0.0.7z"
+      let addCmd = quoteShell(sevenZip) & " a -t7z " &
+        quoteShell(absolutePath(archivePath)) & " " &
+        quoteShell("tool-1.0.0") & " -y -bsp0 -bso0"
+      let addRes = execCmdEx(addCmd, workingDir = stagingDir)
+      check addRes.exitCode == 0
+      check fileExists(extendedPath(archivePath))
+
+      let sha = fileShaHex(archivePath, "sha256")
+      let url = fileToUrl(absolutePath(archivePath))
+      let vp = initVersionedProvisioning(
+        version = "1.0.0",
+        archive_format = afSevenZip,
+        install_method = imExtract,
+        bin_relpath = @["bin/tool.cmd", "lib/runtime.txt"],
+        platforms = @[
+          initPlatformBinary(
+            cpu = detectHostCpu(),
+            os = detectHostOs(),
+            url = url,
+            sha256 = sha,
+            extract_path = "tool-1.0.0"),
+        ])
+      let res = resolveBuiltinPackage("tool-7z", @[vp])
+      check res.found
+
+      var store = openStore(storeDir)
+      defer: store.close()
+
+      let outR = realizeBuiltinPackage(store, res.resolution)
+      check (not outR.cacheHit)
+      # The flatten removed the `tool-1.0.0/` prefix.
+      let bin = outR.prefixAbsolutePath / "bin" / "tool.cmd"
+      let lib = outR.prefixAbsolutePath / "lib" / "runtime.txt"
+      check fileExists(extendedPath(bin))
+      check fileExists(extendedPath(lib))
+      check readFile(extendedPath(lib)).contains("seven-zip-runtime-marker")
+      check outR.archiveFormat == afSevenZip
+
   test "realizeBuiltinPackage: installer mode captures argv via mock":
     # Mock the installer invocation so the test is hermetic. The
     # adapter writes the recorded argv into `$REPRO_TEST_BUILTIN_INSTALLER_MOCK`

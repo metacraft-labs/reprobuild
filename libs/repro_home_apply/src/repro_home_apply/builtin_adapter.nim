@@ -353,6 +353,40 @@ proc extractZip(packageId, archivePath, destDir: string) =
     "no zip extractor available (tried unzip" &
     (when defined(windows): ", powershell" else: "") & ")")
 
+proc extract7z(packageId, archivePath, destDir: string) =
+  ## Extract a `.7z` archive using the `7z` (or `7z.exe`) tool on PATH.
+  ## The expected provisioner is Scoop's `7zip` package or any other
+  ## bootstrap that puts `7z` on PATH; the user's home.nim activity
+  ## matrix declares `7zip` as a transitive Scoop dependency, so the
+  ## binary is available after scoop-install on the M69 Hyper-V harness.
+  ##
+  ## On POSIX hosts, `p7zip`'s `7z` binary speaks the same CLI.
+  ##
+  ## We deliberately do NOT fall back to PowerShell's
+  ## `Microsoft.PowerShell.Archive` (Expand-Archive only handles .zip)
+  ## or to any other built-in extractor: 7z's compression family
+  ## (LZMA/LZMA2/PPMd) has no in-box Windows alternative.
+  createDir(extendedPath(destDir))
+  let sevenZipExe = findExe("7z")
+  if sevenZipExe.len == 0:
+    raiseExtractFailed(packageId, archivePath, "7z",
+      "7z extraction requires '7z' on PATH (install via " &
+      "`scoop install 7zip`, or include `7zip` in your home.nim " &
+      "activity matrix)")
+  # `x` = extract with full paths preserved.
+  # `-o<dir>` = output directory (NO space between -o and the path).
+  # `-y` = assume yes for all prompts (overwrites).
+  # `-bsp0` = no progress output on stdout.
+  # `-bso0` = no standard output (only errors go to stderr).
+  # `--` is unsupported by 7z; the archive path goes last positional.
+  let command = quoteShell(sevenZipExe) & " x " &
+    quoteShell("-o" & destDir) & " " & quoteShell(archivePath) &
+    " -y -bsp0 -bso0"
+  let res = execCmdEx(command)
+  if res.exitCode != 0:
+    raiseExtractFailed(packageId, archivePath, "7z",
+      "7z exited " & $res.exitCode & "\n" & res.output)
+
 proc extractTar(packageId, archivePath, destDir, format: string) =
   createDir(extendedPath(destDir))
   let tar = findExe("tar")
@@ -705,8 +739,7 @@ proc realizeBuiltinPackage*(store: var Store;
         of afTarBz2:
           extractTar(packageId, downloadPath, stagingDir, "tar.bz2")
         of afSevenZip:
-          raiseExtractFailed(packageId, downloadPath, "7z",
-            "afSevenZip extraction is deferred (no built-in 7z dispatch in M64)")
+          extract7z(packageId, downloadPath, stagingDir)
         of afRaw:
           let rel =
             if resolution.binRelpath.len > 0: resolution.binRelpath[0]
@@ -734,10 +767,12 @@ proc realizeBuiltinPackage*(store: var Store;
           extractTar(packageId, downloadPath, unpackDir, "tar.bz2")
         of afZip:
           extractZip(packageId, downloadPath, unpackDir)
+        of afSevenZip:
+          extract7z(packageId, downloadPath, unpackDir)
         else:
           raiseExtractFailed(packageId, downloadPath,
             $resolution.archiveFormat,
-            "imSourceBootstrap requires an archive format (zip/tar.*)")
+            "imSourceBootstrap requires an archive format (zip/tar.*/7z)")
         var rootDir = unpackDir
         if resolution.extractPath.len > 0:
           rootDir = unpackDir / resolution.extractPath
