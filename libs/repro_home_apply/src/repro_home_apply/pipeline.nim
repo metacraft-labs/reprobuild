@@ -1434,6 +1434,18 @@ proc userPathHostFromIdentity(resourceId: string): string =
     else:
       ""
 
+proc userPathBlockIdFromIdentity(resourceId: string): string =
+  ## Recover the per-resource block id from a POSIX `env.userPath`
+  ## identity (`<hostFile>#<blockId>`). Empty on Windows.
+  when defined(windows):
+    ""
+  else:
+    let hash = resourceId.rfind('#')
+    if hash > 0 and hash + 1 < resourceId.len:
+      resourceId[hash + 1 .. ^1]
+    else:
+      ""
+
 proc parseGsettingsIdentity(resourceId: string): tuple[schema, path, key: string] =
   const prefix = "gsettings:"
   if not resourceId.startsWith(prefix):
@@ -1537,8 +1549,9 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
           live = observeUserVariable(rb.realWorldIdentity[bs + 1 .. ^1])
       of rkEnvUserPath:
         let entries = parseRecordedPathEntries(rb.payloadBytes)
-        live = observeUserPath(entries, userPathHostFromIdentity(
-          rb.realWorldIdentity))
+        live = observeUserPath(entries,
+          userPathHostFromIdentity(rb.realWorldIdentity),
+          userPathBlockIdFromIdentity(rb.realWorldIdentity))
       of rkWindowsStartup:
         let bs = rb.realWorldIdentity.rfind('\\')
         if bs > 0:
@@ -2560,7 +2573,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               priorEntries = parseRecordedPathEntries(
                 recordedBindings[action.address].payloadBytes)
             postWriteBytes = applyUserPath(desired.pathEntries,
-              priorEntries, desired.pathHostFilePath)
+              priorEntries, desired.pathHostFilePath,
+              desired.pathBlockId)
             payloadKindStr = "joined-entries"
           of rkWindowsStartup:
             postWriteBytes = applyStartup(desired.startupName,
@@ -2707,8 +2721,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           of rkEnvUserPath:
             let priorEntries = parseRecordedPathEntries(prev.payloadBytes)
             let hostFile = userPathHostFromIdentity(prev.resourceId)
-            preWrite = observeUserPath(priorEntries, hostFile)
-            removeUserPathContribution(priorEntries, hostFile)
+            let blockId = userPathBlockIdFromIdentity(prev.resourceId)
+            preWrite = observeUserPath(priorEntries, hostFile, blockId)
+            removeUserPathContribution(priorEntries, hostFile, blockId)
           of rkWindowsStartup:
             preWrite = observeRecorded(action.address, prev)
             let bs = prev.resourceId.rfind('\\')

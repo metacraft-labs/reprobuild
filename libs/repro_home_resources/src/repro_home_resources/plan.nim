@@ -58,6 +58,19 @@ proc userPathHostFromIdentity(resourceId: string): string =
     else:
       ""
 
+proc userPathBlockIdFromIdentity(resourceId: string): string =
+  ## Recover the per-resource block id from a POSIX `env.userPath`
+  ## identity. The identity format is `<hostFile>#<blockId>` —
+  ## see `types.realWorldIdentity`. Returns "" on Windows.
+  when defined(windows):
+    ""
+  else:
+    let hash = resourceId.rfind('#')
+    if hash > 0 and hash + 1 < resourceId.len:
+      resourceId[hash + 1 .. ^1]
+    else:
+      ""
+
 proc parseGsettingsIdentity(resourceId: string): tuple[schema, path, key: string] =
   const prefix = "gsettings:"
   if not resourceId.startsWith(prefix):
@@ -95,7 +108,8 @@ proc observeResource*(r: Resource): ObservedState =
   of rkEnvUserVariable:
     return observeUserVariable(r.envVarName)
   of rkEnvUserPath:
-    return observeUserPath(r.pathEntries, r.pathHostFilePath)
+    return observeUserPath(r.pathEntries, r.pathHostFilePath,
+      r.pathBlockId)
   of rkWindowsStartup:
     return observeStartup(r.startupName)
   of rkShellIntegration:
@@ -152,7 +166,9 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
     return observeUserVariable(binding.resourceId[bs + 1 .. ^1])
   of rkEnvUserPath:
     let entries = parseRecordedPathEntries(binding.payloadBytes)
-    return observeUserPath(entries, userPathHostFromIdentity(binding.resourceId))
+    return observeUserPath(entries,
+      userPathHostFromIdentity(binding.resourceId),
+      userPathBlockIdFromIdentity(binding.resourceId))
   of rkWindowsStartup:
     let bs = binding.resourceId.rfind('\\')
     if bs <= 0:

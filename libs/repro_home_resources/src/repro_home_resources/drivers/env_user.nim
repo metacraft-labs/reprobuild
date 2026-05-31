@@ -24,6 +24,11 @@ import ./registry
 const
   EnvironmentSubkey* = "Environment"
   UserPathBlockId* = "repro-home-userpath"
+    ## Legacy default sentinel id. Hand-written profiles that emit a
+    ## single `env.userPath` resource continue to write into this
+    ## block. The M69 emitter (`envUserPathResource`) sets a per-
+    ## resource block id so per-package PATH contributions don't
+    ## clobber each other in the shared rc file.
   UserPathRcEnvVar* = "REPRO_HOME_POSIX_PATH_RC"
 
 when defined(windows):
@@ -194,11 +199,17 @@ proc computeMergedPath*(existing, contributed: openArray[string]):
 
 proc applyUserPath*(contributed: openArray[string];
                    priorContribution: openArray[string];
-                   hostFilePath = ""): seq[byte] =
+                   hostFilePath = "";
+                   blockId = ""): seq[byte] =
   ## Write the merged PATH back. Returns the bytes the executor
   ## should record as `payloadBytes` — the JOINED CONTRIBUTION
   ## (not the full PATH), so rollback knows exactly which entries
   ## to remove without touching unrelated user-added entries.
+  ##
+  ## `blockId` (POSIX only) selects the sentinel-delimited slice of
+  ## the rc file. Empty means "use the legacy default block id"
+  ## (`UserPathBlockId`); the M69 emitter passes a per-resource id
+  ## so per-package PATH contributions don't clobber each other.
   when defined(windows):
     let current = readUserPathRaw()
     var existingEntries =
@@ -223,18 +234,27 @@ proc applyUserPath*(contributed: openArray[string];
     let hostFile =
       if hostFilePath.len > 0: hostFilePath
       else: defaultUserPathHostFile()
+    let effBlockId =
+      if blockId.len > 0: blockId
+      else: UserPathBlockId
     if hostFile.len > 0:
-      discard applyManagedBlockResource(hostFile, UserPathBlockId,
+      discard applyManagedBlockResource(hostFile, effBlockId,
         posixPathBlockContent(contributed))
   # Recorded payload: the JOINED CONTRIBUTION bytes (UTF-8).
   let joined = joinPathEntries(contributed)
   result = bytesOf(joined)
 
 proc removeUserPathContribution*(contribution: openArray[string];
-                                 hostFilePath = "") =
+                                 hostFilePath = "";
+                                 blockId = "") =
   ## Destroy: remove only the recorded contribution entries from
   ## the live PATH. User-added entries (anything not in
   ## `contribution`) remain byte-identical.
+  ##
+  ## `blockId` (POSIX only) selects the sentinel-delimited slice
+  ## of the rc file. Empty means "use the legacy default block id"
+  ## so a destroy initiated against a recorded resource whose
+  ## identity carries the default still finds the block.
   when defined(windows):
     let current = readUserPathRaw()
     if not current.present:
@@ -260,11 +280,15 @@ proc removeUserPathContribution*(contribution: openArray[string];
     let hostFile =
       if hostFilePath.len > 0: hostFilePath
       else: defaultUserPathHostFile()
+    let effBlockId =
+      if blockId.len > 0: blockId
+      else: UserPathBlockId
     if hostFile.len > 0:
-      destroyManagedBlockResource(hostFile, UserPathBlockId)
+      destroyManagedBlockResource(hostFile, effBlockId)
 
 proc observeUserPath*(contribution: openArray[string];
-                      hostFilePath = ""): ObservedState =
+                      hostFilePath = "";
+                      blockId = ""): ObservedState =
   ## Observe the live PATH and reduce to the recorded form for
   ## drift comparison. The "observed digest" is computed over the
   ## subset of the desired contribution that's currently in PATH;
@@ -305,11 +329,14 @@ proc observeUserPath*(contribution: openArray[string];
     let hostFile =
       if hostFilePath.len > 0: hostFilePath
       else: defaultUserPathHostFile()
+    let effBlockId =
+      if blockId.len > 0: blockId
+      else: UserPathBlockId
     if hostFile.len == 0:
       result.present = false
       result.digest = zeroDigest()
       return
-    let observed = observeManagedBlock(hostFile, UserPathBlockId)
+    let observed = observeManagedBlock(hostFile, effBlockId)
     if not observed.present:
       result.present = false
       result.digest = zeroDigest()
