@@ -2617,3 +2617,243 @@ suite "repro_elevation: linux.firewallRule pure surface":
         discard applyLinuxFirewallRule(op)
       expect ENotImplementedPlatform:
         discard destroyLinuxFirewallRule(op)
+
+# ===========================================================================
+# windows.acl — pure parse + drift logic. The shell-out side of the
+# driver runs only on Windows hosts; what runs everywhere is the
+# closed-set validator, the canonical-state digest, and the icacls
+# probe-output parser.
+# ===========================================================================
+
+suite "repro_elevation: windows.acl pure surface":
+
+  test "isSafeAclPath accepts a typical absolute path":
+    check isSafeAclPath("C:\\Users\\foo\\.ssh")
+    check isSafeAclPath("C:\\ProgramData\\Reprobuild-Tests\\acl-test")
+    check isSafeAclPath("D:\\path with spaces\\sub")
+    check not isSafeAclPath("")
+    check not isSafeAclPath("C:\\bad\\..\\escape")
+    check not isSafeAclPath("C:\\bad;rm")
+    check not isSafeAclPath("C:\\bad`rm")
+    check not isSafeAclPath("C:\\bad\"injected")
+    check not isSafeAclPath("C:\\$injected")
+
+  test "isSafeAclPrincipal accepts NTAccount + SID forms":
+    check isSafeAclPrincipal("BUILTIN\\Administrators")
+    check isSafeAclPrincipal("NT AUTHORITY\\SYSTEM")
+    check isSafeAclPrincipal("Administrators")
+    check isSafeAclPrincipal("S-1-5-32-544")
+    check isSafeAclPrincipal("Zahary")
+    check isSafeAclPrincipal("DOMAIN\\user.name")
+    check isSafeAclPrincipal("user@DOMAIN")
+    check not isSafeAclPrincipal("")
+    check not isSafeAclPrincipal("Bad'Name")
+    check not isSafeAclPrincipal("Bad;Name")
+    check not isSafeAclPrincipal("Bad:Name")
+    check not isSafeAclPrincipal("Bad\"Name")
+
+  test "isSafeAclEntry accepts canonical icacls grant forms":
+    check isSafeAclEntry("BUILTIN\\Administrators:(OI)(CI)(F)")
+    check isSafeAclEntry("NT AUTHORITY\\SYSTEM:(OI)(CI)(F)")
+    check isSafeAclEntry("Users:(OI)(CI)(RX)")
+    check isSafeAclEntry("Zahary:(R,W)")
+    check isSafeAclEntry("S-1-5-32-544:(F)")
+    check not isSafeAclEntry("")
+    check not isSafeAclEntry("noColonForm")
+    check not isSafeAclEntry("BadPrinc;:(F)")
+    check not isSafeAclEntry("OK:(F);rm -rf /")
+    check not isSafeAclEntry("OK:$(whoami)")
+
+  test "operationValidationError accepts a valid windows.acl op":
+    let ok = PrivilegedOperation(kind: pokWindowsAcl,
+      address: "ssh-acl",
+      aclPath: "C:\\Users\\Zahary\\.ssh",
+      aclOwner: "BUILTIN\\Administrators",
+      aclEntries: @["BUILTIN\\Administrators:(OI)(CI)(F)",
+                    "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
+                    "Zahary:(OI)(CI)(F)"],
+      aclInheritanceMode: "disabled-replace")
+    check operationValidationError(ok) == ""
+
+  test "operationValidationError flags bad windows.acl fields":
+    let emptyEntries = PrivilegedOperation(kind: pokWindowsAcl,
+      address: "x", aclPath: "C:\\Users\\Zahary\\.ssh",
+      aclEntries: @[])
+    check operationValidationError(emptyEntries).len > 0
+
+    let badPath = PrivilegedOperation(kind: pokWindowsAcl,
+      address: "x", aclPath: "C:\\bad\\..\\escape",
+      aclEntries: @["Users:(F)"])
+    check operationValidationError(badPath).len > 0
+
+    let badOwner = PrivilegedOperation(kind: pokWindowsAcl,
+      address: "x", aclPath: "C:\\valid",
+      aclOwner: "BAD;OWNER",
+      aclEntries: @["Users:(F)"])
+    check operationValidationError(badOwner).len > 0
+
+    let badMode = PrivilegedOperation(kind: pokWindowsAcl,
+      address: "x", aclPath: "C:\\valid",
+      aclEntries: @["Users:(F)"],
+      aclInheritanceMode: "off")
+    check operationValidationError(badMode).len > 0
+
+    let badEntry = PrivilegedOperation(kind: pokWindowsAcl,
+      address: "x", aclPath: "C:\\valid",
+      aclEntries: @["Users:(F);rm -rf /"])
+    check operationValidationError(badEntry).len > 0
+
+    let emptyAddr = PrivilegedOperation(kind: pokWindowsAcl,
+      address: "", aclPath: "C:\\valid",
+      aclEntries: @["Users:(F)"])
+    check operationValidationError(emptyAddr).len > 0
+
+    # destroy op with empty entries is allowed (icacls /reset takes
+    # no entries).
+    let okDestroy = PrivilegedOperation(kind: pokWindowsAcl,
+      address: "x", aclPath: "C:\\valid",
+      aclEntries: @[], aclDestroy: true)
+    check operationValidationError(okDestroy) == ""
+
+  test "parseIcaclsOutput reads a present directory ACL":
+    let raw = "C:\\ProgramData\\Reprobuild-Tests\\acl-test " &
+      "BUILTIN\\Administrators:(F)\n" &
+      "                                            " &
+      "NT AUTHORITY\\SYSTEM:(F)\n" &
+      "                                            " &
+      "BUILTIN\\Users:(OI)(CI)(RX)\n" &
+      "\n" &
+      "Successfully processed 1 files; Failed processing 0 files\n"
+    let obs = parseIcaclsOutput(raw,
+      "C:\\ProgramData\\Reprobuild-Tests\\acl-test")
+    check obs.present
+    check obs.entries.len == 3
+    check obs.entries[0].contains("Administrators:(F)")
+    check obs.entries[1].contains("SYSTEM:(F)")
+    check obs.entries[2].contains("Users:(OI)(CI)(RX)")
+    # No `(I)` flag in any entry => observation reports inheritance
+    # disabled (heuristic — see parser docstring).
+    check obs.inheritanceDisabled
+
+  test "parseIcaclsOutput detects the (I) inherited-marker flag":
+    let raw = "C:\\foo BUILTIN\\Users:(I)(OI)(CI)(RX)\n" &
+      "       BUILTIN\\Administrators:(F)\n" &
+      "Successfully processed 1 files; Failed processing 0 files\n"
+    let obs = parseIcaclsOutput(raw, "C:\\foo")
+    check obs.present
+    check not obs.inheritanceDisabled
+
+  test "parseIcaclsOutput treats `cannot find` output as absent":
+    let raw = "C:\\does\\not\\exist: The system cannot find the " &
+      "path specified.\n"
+    let obs = parseIcaclsOutput(raw, "C:\\does\\not\\exist")
+    check not obs.present
+    check obs.entries.len == 0
+
+  test "parseIcaclsOutput treats empty output as absent":
+    check not parseIcaclsOutput("", "C:\\anywhere").present
+
+  test "normalizeAclEntry collapses whitespace":
+    check normalizeAclEntry("Users:(F)") == "Users:(F)"
+    check normalizeAclEntry("  Users:(F)  ") == "Users:(F)"
+    check normalizeAclEntry("Users: (F)") == "Users: (F)"
+    check normalizeAclEntry("Users:(F)\t(OI)") == "Users:(F) (OI)"
+
+  test "canonicalAclDesired sorts entries":
+    let a = canonicalAclDesired("C:\\foo", "",
+      @["Users:(R)", "Administrators:(F)"], "enabled")
+    let b = canonicalAclDesired("C:\\foo", "",
+      @["Administrators:(F)", "Users:(R)"], "enabled")
+    check a == b
+
+  test "canonicalAclDesired defaults inheritanceMode to enabled":
+    let a = canonicalAclDesired("C:\\foo", "",
+      @["Users:(R)"], "")
+    let b = canonicalAclDesired("C:\\foo", "",
+      @["Users:(R)"], "enabled")
+    check a == b
+
+  test "aclMatchesDesired detects missing ACE":
+    let obs = AclObservation(present: true, inheritanceDisabled: true,
+      entries: @["BUILTIN\\Administrators:(F)",
+                 "NT AUTHORITY\\SYSTEM:(F)"])
+    check aclMatchesDesired(obs, "C:\\foo", "",
+      @["BUILTIN\\Administrators:(F)",
+        "NT AUTHORITY\\SYSTEM:(F)"], "enabled")
+    # Adding a desired entry that's not present => mismatch.
+    check not aclMatchesDesired(obs, "C:\\foo", "",
+      @["BUILTIN\\Administrators:(F)",
+        "NT AUTHORITY\\SYSTEM:(F)",
+        "Zahary:(F)"], "enabled")
+
+  test "aclMatchesDesired is additive-only on extra ACEs":
+    let obs = AclObservation(present: true, inheritanceDisabled: true,
+      entries: @["BUILTIN\\Administrators:(F)",
+                 "NT AUTHORITY\\SYSTEM:(F)",
+                 "Extra-Local-Account:(R)"])
+    # The operator declared only Administrators+SYSTEM; the extra
+    # local ACE is NOT considered drift.
+    check aclMatchesDesired(obs, "C:\\foo", "",
+      @["BUILTIN\\Administrators:(F)",
+        "NT AUTHORITY\\SYSTEM:(F)"], "enabled")
+
+  test "aclMatchesDesired enforces disabled-replace inheritance":
+    let obsInherited = AclObservation(present: true,
+      inheritanceDisabled: false,
+      entries: @["BUILTIN\\Administrators:(F)"])
+    check not aclMatchesDesired(obsInherited, "C:\\foo", "",
+      @["BUILTIN\\Administrators:(F)"], "disabled-replace")
+    let obsDisabled = AclObservation(present: true,
+      inheritanceDisabled: true,
+      entries: @["BUILTIN\\Administrators:(F)"])
+    check aclMatchesDesired(obsDisabled, "C:\\foo", "",
+      @["BUILTIN\\Administrators:(F)"], "disabled-replace")
+
+  test "aclMatchesDesired returns false for absent":
+    check not aclMatchesDesired(AclObservation(present: false),
+      "C:\\foo", "", @["Users:(F)"], "enabled")
+
+  test "RBEB Operation frame round-trips a windows.acl":
+    let op = PrivilegedOperation(kind: pokWindowsAcl,
+      address: "ssh-acl",
+      aclPath: "C:\\Users\\Zahary\\.ssh",
+      aclOwner: "BUILTIN\\Administrators",
+      aclEntries: @["BUILTIN\\Administrators:(OI)(CI)(F)",
+                    "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
+                    "Zahary:(OI)(CI)(F)"],
+      aclInheritanceMode: "disabled-replace",
+      aclDestroy: false)
+    let wire = WireOperation(operation: op,
+      baselineDigestHex: "deadbeef")
+    let dec = decodeFrame(encodeOperation(wire))
+    check dec.messageType == rmtOperation
+    let w2 = decodeOperation(dec.body)
+    check w2.baselineDigestHex == "deadbeef"
+    check w2.operation.kind == pokWindowsAcl
+    check w2.operation.address == "ssh-acl"
+    check w2.operation.aclPath == "C:\\Users\\Zahary\\.ssh"
+    check w2.operation.aclOwner == "BUILTIN\\Administrators"
+    check w2.operation.aclEntries.len == 3
+    check w2.operation.aclEntries[0] ==
+      "BUILTIN\\Administrators:(OI)(CI)(F)"
+    check w2.operation.aclEntries[2] == "Zahary:(OI)(CI)(F)"
+    check w2.operation.aclInheritanceMode == "disabled-replace"
+    check not w2.operation.aclDestroy
+
+  test "windows.acl requires elevation":
+    check requiresElevation(pokWindowsAcl)
+    check $pokWindowsAcl == "windows.acl"
+    check privilegedOperationKindFromString("windows.acl") ==
+      pokWindowsAcl
+
+  test "off-Windows windows.acl entry points raise ENotImplementedPlatform":
+    when not defined(windows):
+      let op = PrivilegedOperation(kind: pokWindowsAcl,
+        address: "x", aclPath: "C:\\foo",
+        aclEntries: @["Users:(F)"])
+      expect ENotImplementedPlatform:
+        discard observeWindowsAcl(op)
+      expect ENotImplementedPlatform:
+        discard applyWindowsAcl(op)
+      expect ENotImplementedPlatform:
+        discard destroyWindowsAcl(op)

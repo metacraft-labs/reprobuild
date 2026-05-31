@@ -97,7 +97,7 @@ proc desiredDigest(op: PrivilegedOperation): string =
     desiredDigestHex(op)
   of pokWindowsRegistryValue, pokWindowsOptionalFeature,
      pokWindowsCapability, pokWindowsService,
-     pokWindowsFirewallRule:
+     pokWindowsFirewallRule, pokWindowsAcl:
     systemDesiredDigestHex(op)
   of pokWindowsVsInstaller:
     vsInstallerDesiredDigestHex(op)
@@ -150,6 +150,8 @@ proc reobserve*(ctx: FixtureContext;
     observeWindowsVsInstaller(op)
   of pokWindowsFirewallRule:
     observeWindowsFirewallRule(op)
+  of pokWindowsAcl:
+    observeWindowsAcl(op)
   of pokMacosSystemDefault:
     observeMacosSystemDefault(op)
   of pokSystemdSystemUnit:
@@ -216,6 +218,8 @@ proc applyOne(ctx: FixtureContext;
     result.restartNeeded = r.restartNeeded
   of pokWindowsFirewallRule:
     result = applyWindowsFirewallRule(op)
+  of pokWindowsAcl:
+    result = applyWindowsAcl(op)
   of pokMacosSystemDefault:
     result = applyMacosSystemDefault(op)
   of pokSystemdSystemUnit:
@@ -303,6 +307,7 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokWindowsRegistryValue and op.hklmDestroy) or
     (op.kind == pokWindowsVsInstaller and op.vsDestroy) or
     (op.kind == pokWindowsFirewallRule and op.fwDestroy) or
+    (op.kind == pokWindowsAcl and op.aclDestroy) or
     (op.kind == pokMacosSystemDefault and op.sdDestroy) or
     (op.kind == pokSystemdSystemUnit and op.suDestroy) or
     (op.kind == pokLaunchdSystemDaemon and op.sdaDestroy) or

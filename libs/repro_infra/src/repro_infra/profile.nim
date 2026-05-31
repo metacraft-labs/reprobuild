@@ -40,6 +40,7 @@ type
     srkWindowsService = "windows.service"
     srkWindowsVsInstaller = "windows.vsInstaller"
     srkWindowsFirewallRule = "windows.firewallRule"
+    srkWindowsAcl = "windows.acl"
     srkMacosSystemDefault = "macos.systemDefault"
     srkSystemdSystemUnit = "systemd.systemUnit"
     srkLaunchdSystemDaemon = "launchd.systemDaemon"
@@ -111,6 +112,11 @@ type
       fwAction*: string
       fwLocalPort*: string
       fwEnabled*: bool
+    of srkWindowsAcl:
+      aclPath*: string
+      aclOwner*: string
+      aclEntries*: seq[string]
+      aclInheritanceMode*: string         ## "" => "enabled"
     of srkMacosSystemDefault:
       sdDomain*: string
       sdKey*: string
@@ -200,6 +206,8 @@ proc realWorldIdentity*(r: SystemResource): string =
       (if r.vsInstallPath.len > 0: "@" & r.vsInstallPath else: "")
   of srkWindowsFirewallRule:
     "firewallRule:" & r.fwName
+  of srkWindowsAcl:
+    "acl:" & r.aclPath
   of srkMacosSystemDefault:
     "systemDefault:" & r.sdDomain & ":" & r.sdKey
   of srkSystemdSystemUnit:
@@ -259,6 +267,7 @@ proc resourceName*(r: SystemResource): string =
   of srkWindowsService: r.serviceName
   of srkWindowsVsInstaller: r.vsEdition
   of srkWindowsFirewallRule: r.fwName
+  of srkWindowsAcl: r.aclPath
   of srkMacosSystemDefault: r.sdDomain & ":" & r.sdKey
   of srkSystemdSystemUnit: r.suName
   of srkLaunchdSystemDaemon: r.sdaLabel
@@ -465,6 +474,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkWindowsService: srk = srkWindowsService
     of $srkWindowsVsInstaller: srk = srkWindowsVsInstaller
     of $srkWindowsFirewallRule: srk = srkWindowsFirewallRule
+    of $srkWindowsAcl: srk = srkWindowsAcl
     of $srkMacosSystemDefault: srk = srkMacosSystemDefault
     of $srkSystemdSystemUnit: srk = srkSystemdSystemUnit
     of $srkLaunchdSystemDaemon: srk = srkLaunchdSystemDaemon
@@ -628,6 +638,46 @@ proc parseSystemProfile*(text: string): SystemProfile =
         fwEnabled:
           if "enabled" in fields: parseBoolField("enabled",
             fields["enabled"]) else: true)
+    of srkWindowsAcl:
+      let aclPath = need("path")
+      if not isSafeAclPath(aclPath):
+        raiseSystemProfileInvalid("windows.acl path '" & aclPath &
+          "' contains characters outside the safe-path charset " &
+          "(no '..' segment, no quote / shell metacharacter / " &
+          "control character)")
+      let aclOwner =
+        if "owner" in fields: fields["owner"] else: ""
+      if aclOwner.len > 0 and not isSafeAclPrincipal(aclOwner):
+        raiseSystemProfileInvalid("windows.acl owner '" & aclOwner &
+          "' contains characters outside the principal charset " &
+          "(letters, digits, '\\', ' ', '.', '-', '_', '@')")
+      let inheritanceMode =
+        if "inheritanceMode" in fields: fields["inheritanceMode"]
+        else: ""
+      if inheritanceMode.len > 0 and
+         inheritanceMode notin AclInheritanceModes:
+        raiseSystemProfileInvalid("windows.acl inheritanceMode '" &
+          inheritanceMode & "' is not one of " &
+          AclInheritanceModes.join(" / "))
+      let entries =
+        if "accessControlEntries" in rawFields:
+          parseListLiteral(rawFields["accessControlEntries"])
+        else: @[]
+      if entries.len == 0:
+        raiseSystemProfileInvalid("windows.acl '" & aclPath &
+          "' requires a non-empty accessControlEntries list")
+      for e in entries:
+        if not isSafeAclEntry(e):
+          raiseSystemProfileInvalid("windows.acl entry '" & e &
+            "' is not a safe `<principal>:<perms>` ACE spec " &
+            "(principal must be in the NTAccount / SID charset; " &
+            "perms must use only icacls permission codes, '(', " &
+            "')', ',', ' ')")
+      res = SystemResource(kind: srkWindowsAcl,
+        aclPath: aclPath,
+        aclOwner: aclOwner,
+        aclEntries: entries,
+        aclInheritanceMode: inheritanceMode)
     of srkMacosSystemDefault:
       res = SystemResource(kind: srkMacosSystemDefault,
         sdDomain: need("domain"),
@@ -951,6 +1001,13 @@ proc toPrivilegedOperation*(r: SystemResource;
       fwLocalPort: r.fwLocalPort,
       fwEnabled: r.fwEnabled,
       fwDestroy: destroy)
+  of srkWindowsAcl:
+    PrivilegedOperation(kind: pokWindowsAcl, address: r.address,
+      aclPath: r.aclPath,
+      aclOwner: r.aclOwner,
+      aclEntries: r.aclEntries,
+      aclInheritanceMode: r.aclInheritanceMode,
+      aclDestroy: destroy)
   of srkMacosSystemDefault:
     PrivilegedOperation(kind: pokMacosSystemDefault, address: r.address,
       sdDomain: r.sdDomain,

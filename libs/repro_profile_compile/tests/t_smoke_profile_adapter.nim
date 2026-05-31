@@ -610,6 +610,57 @@ suite "M83 Phase D: system adapter":
     let txt2 = renderSystemProfileToText(sp2)
     check txt2 == txt
 
+  test "windows.acl resource maps to srkWindowsAcl":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("windows.acl", "sshAcl",
+      @[strFieldEntry("path", "C:\\Users\\Zahary\\.ssh"),
+        strFieldEntry("owner", "BUILTIN\\Administrators"),
+        listFieldEntry("accessControlEntries", @[
+          "BUILTIN\\Administrators:(OI)(CI)(F)",
+          "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
+          "Zahary:(OI)(CI)(F)"]),
+        strFieldEntry("inheritanceMode", "disabled-replace")]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkWindowsAcl
+    check sp.resources[0].aclPath == "C:\\Users\\Zahary\\.ssh"
+    check sp.resources[0].aclOwner == "BUILTIN\\Administrators"
+    check sp.resources[0].aclEntries.len == 3
+    check sp.resources[0].aclEntries[2] == "Zahary:(OI)(CI)(F)"
+    check sp.resources[0].aclInheritanceMode == "disabled-replace"
+
+  test "windows.acl rejects an unsafe ACE entry at adapter time":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("windows.acl", "x",
+      @[strFieldEntry("path", "C:\\foo"),
+        listFieldEntry("accessControlEntries",
+          @["Users:(F);rm -rf /"])]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "renderSystemProfileToText round-trips windows.acl":
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("windows.acl", "",
+      @[strFieldEntry("path", "C:\\Users\\Zahary\\.ssh"),
+        strFieldEntry("owner", "BUILTIN\\Administrators"),
+        listFieldEntry("accessControlEntries", @[
+          "BUILTIN\\Administrators:(OI)(CI)(F)",
+          "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
+          "Zahary:(OI)(CI)(F)"]),
+        strFieldEntry("inheritanceMode", "disabled-replace")]))
+    let sp1 = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp1)
+    let sp2 = parseSystemProfile(txt)
+    check sp2.resources.len == 1
+    check sp2.resources[0].kind == srkWindowsAcl
+    check sp2.resources[0].aclPath == "C:\\Users\\Zahary\\.ssh"
+    check sp2.resources[0].aclOwner == "BUILTIN\\Administrators"
+    check sp2.resources[0].aclEntries.len == 3
+    check sp2.resources[0].aclInheritanceMode == "disabled-replace"
+    # Second round-trip is byte-equivalent.
+    let txt2 = renderSystemProfileToText(sp2)
+    check txt2 == txt
+
   test "os.timezone resource maps to srkOsTimezone":
     var intent = ProfileIntent(name: "sys")
     intent.resources.add(resourceIntent("os.timezone", "userTimezone",

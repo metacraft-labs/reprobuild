@@ -504,6 +504,42 @@ template windowsFirewallRule*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "windows.firewallRule", addr0, fields,
       dependsOn)
 
+template windowsAcl*(targetResources: var seq[ResourceIntent];
+                     path: string;
+                     accessControlEntries: seq[string];
+                     owner: string = "";
+                     inheritanceMode: string = "enabled";
+                     address: string = "";
+                     dependsOn: seq[string] = @[]) =
+  ## Manage the NTFS DACL on a file or directory via `icacls`.
+  ##
+  ## `path` is an absolute Windows path (the closed-set validator
+  ## rejects `..` segments and shell metacharacters).
+  ##
+  ## `accessControlEntries` is the list of canonical
+  ## `<principal>:<perms>` ACE specs in `icacls /grant` form
+  ## (e.g. `"BUILTIN\\Administrators:(OI)(CI)(F)"`,
+  ## `"NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"`, `"Zahary:(R,W)"`).
+  ##
+  ## `owner` is an OPTIONAL NTAccount-form principal or SID; empty
+  ## leaves ownership unchanged.
+  ##
+  ## `inheritanceMode` is one of `enabled` (default) /
+  ## `disabled-replace` (disable + remove inherited entries) /
+  ## `disabled-convert` (disable + convert inherited to explicit).
+  ##
+  ## Address default: `windows.acl:<path>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["path"] = strField(path)
+    fields["accessControlEntries"] = listField(accessControlEntries)
+    fields["owner"] = strField(owner)
+    fields["inheritanceMode"] = strField(inheritanceMode)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("windows.acl", path)
+    pushResource(targetResources, "windows.acl", addr0, fields,
+      dependsOn)
+
 template macosSystemDefault*(targetResources: var seq[ResourceIntent];
                              domain: string;
                              key: string;

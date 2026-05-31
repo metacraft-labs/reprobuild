@@ -143,6 +143,38 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       fwAction: action,
       fwLocalPort: fieldString(r, "localPort"),
       fwEnabled: fieldBool(r, "enabled", true))
+  of "windows.acl":
+    let aclPath = fieldString(r, "path")
+    if not isSafeAclPath(aclPath):
+      raise newException(ValueError,
+        "windows.acl path '" & aclPath &
+        "' contains characters outside the safe-path charset")
+    let aclOwner = fieldString(r, "owner")
+    if aclOwner.len > 0 and not isSafeAclPrincipal(aclOwner):
+      raise newException(ValueError,
+        "windows.acl owner '" & aclOwner &
+        "' contains characters outside the principal charset")
+    let inheritanceMode = fieldString(r, "inheritanceMode")
+    if inheritanceMode.len > 0 and
+       inheritanceMode notin AclInheritanceModes:
+      raise newException(ValueError,
+        "windows.acl inheritanceMode '" & inheritanceMode &
+        "' is not one of " & AclInheritanceModes.join(" / "))
+    let entries = fieldList(r, "accessControlEntries")
+    if entries.len == 0:
+      raise newException(ValueError,
+        "windows.acl '" & aclPath &
+        "' requires a non-empty accessControlEntries list")
+    for e in entries:
+      if not isSafeAclEntry(e):
+        raise newException(ValueError,
+          "windows.acl entry '" & e &
+          "' is not a safe `<principal>:<perms>` ACE spec")
+    result = SystemResource(kind: srkWindowsAcl,
+      aclPath: aclPath,
+      aclOwner: aclOwner,
+      aclEntries: entries,
+      aclInheritanceMode: inheritanceMode)
   of "macos.systemDefault":
     result = SystemResource(kind: srkMacosSystemDefault,
       sdDomain: fieldString(r, "domain"),
@@ -387,7 +419,7 @@ proc isSystemScopeResource(kind: string): bool =
   of "windows.registryValueHKLM",
      "windows.optionalFeature", "windows.capability",
      "windows.service", "windows.vsInstaller",
-     "windows.firewallRule",
+     "windows.firewallRule", "windows.acl",
      "macos.systemDefault", "systemd.systemUnit",
      "launchd.systemDaemon", "fs.systemFile",
      "env.systemVariable", "passwd.user",
@@ -527,6 +559,15 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       if r.fwLocalPort.len > 0:
         pairs.add(("localPort", quoteSystemValue(r.fwLocalPort)))
       pairs.add(("enabled", (if r.fwEnabled: "true" else: "false")))
+    of srkWindowsAcl:
+      pairs.add(("path", quoteSystemValue(r.aclPath)))
+      if r.aclOwner.len > 0:
+        pairs.add(("owner", quoteSystemValue(r.aclOwner)))
+      pairs.add(("accessControlEntries", renderListLiteral(r.aclEntries)))
+      if r.aclInheritanceMode.len > 0 and
+         r.aclInheritanceMode != "enabled":
+        pairs.add(("inheritanceMode",
+          quoteSystemValue(r.aclInheritanceMode)))
     of srkMacosSystemDefault:
       pairs.add(("domain", quoteSystemValue(r.sdDomain)))
       pairs.add(("key", quoteSystemValue(r.sdKey)))

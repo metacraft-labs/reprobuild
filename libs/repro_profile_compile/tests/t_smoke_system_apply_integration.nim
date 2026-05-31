@@ -69,6 +69,30 @@ suite "M83 Phase D: system apply round-trip via canonical text":
     check plan.envelope.operations.len == 1
     check plan.envelope.operations[0].kindTag == "windows.firewallRule"
 
+  test "windows.acl adapter -> text -> producePlan emits one op":
+    var intent = ProfileIntent(name: "phaseD-sys-acl")
+    var f = initTable[string, FieldValue]()
+    f["path"] = strField("C:\\ProgramData\\Reprobuild-Tests\\acl-test")
+    f["owner"] = strField("BUILTIN\\Administrators")
+    f["accessControlEntries"] = listField(@[
+      "BUILTIN\\Administrators:(OI)(CI)(F)",
+      "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"])
+    f["inheritanceMode"] = strField("disabled-replace")
+    intent.resources.add(ResourceIntent(kind: "windows.acl",
+      address: "smokeAcl", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkWindowsAcl
+    let txt = renderSystemProfileToText(sp)
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].aclPath ==
+      "C:\\ProgramData\\Reprobuild-Tests\\acl-test"
+    check reparsed.resources[0].aclEntries.len == 2
+    check reparsed.resources[0].aclInheritanceMode == "disabled-replace"
+    let plan = producePlan(txt, "phaseD-sys-host")
+    check plan.envelope.operations.len == 1
+    check plan.envelope.operations[0].kindTag == "windows.acl"
+
   test "os.timezone adapter -> text -> producePlan emits one op":
     var intent = ProfileIntent(name: "phaseD-sys-timezone")
     var f = initTable[string, FieldValue]()

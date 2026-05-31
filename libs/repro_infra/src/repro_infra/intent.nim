@@ -267,6 +267,14 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  localPort = " & renderScalar(r.fwLocalPort))
     if not r.fwEnabled:
       result.add("  enabled = false")
+  of srkWindowsAcl:
+    result.add("  path = " & renderScalar(r.aclPath))
+    if r.aclOwner.len > 0:
+      result.add("  owner = " & renderScalar(r.aclOwner))
+    result.add("  accessControlEntries = " & renderList(r.aclEntries))
+    if r.aclInheritanceMode.len > 0 and
+       r.aclInheritanceMode != "enabled":
+      result.add("  inheritanceMode = " & renderScalar(r.aclInheritanceMode))
   of srkMacosSystemDefault:
     result.add("  domain = " & renderScalar(r.sdDomain))
     result.add("  key = " & renderScalar(r.sdKey))

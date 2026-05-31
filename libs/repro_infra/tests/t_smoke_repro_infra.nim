@@ -112,6 +112,72 @@ windows.firewallRule {
 }
 """)
 
+  test "parses a windows.acl stanza":
+    let text = """
+windows.acl {
+  path = "C:\Users\Zahary\.ssh"
+  owner = "BUILTIN\Administrators"
+  accessControlEntries = [
+    "BUILTIN\Administrators:(OI)(CI)(F)",
+    "NT AUTHORITY\SYSTEM:(OI)(CI)(F)",
+    "Zahary:(OI)(CI)(F)"
+  ]
+  inheritanceMode = "disabled-replace"
+}
+"""
+    let profile = parseSystemProfile(text)
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkWindowsAcl
+    check profile.resources[0].aclPath == "C:\\Users\\Zahary\\.ssh"
+    check profile.resources[0].aclOwner == "BUILTIN\\Administrators"
+    check profile.resources[0].aclEntries.len == 3
+    check profile.resources[0].aclEntries[0] ==
+      "BUILTIN\\Administrators:(OI)(CI)(F)"
+    check profile.resources[0].aclInheritanceMode == "disabled-replace"
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokWindowsAcl
+    check op.aclPath == "C:\\Users\\Zahary\\.ssh"
+    check op.aclEntries.len == 3
+    check op.aclInheritanceMode == "disabled-replace"
+    check requiresElevation(op.kind)
+
+  test "windows.acl rejects an unknown inheritanceMode":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.acl {
+  path = "C:\Users\Zahary\.ssh"
+  accessControlEntries = ["Administrators:(F)"]
+  inheritanceMode = "off"
+}
+""")
+
+  test "windows.acl rejects a path with `..` segment":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.acl {
+  path = "C:\Users\..\Windows"
+  accessControlEntries = ["Administrators:(F)"]
+}
+""")
+
+  test "windows.acl rejects an ACE with shell metacharacters":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.acl {
+  path = "C:\foo"
+  accessControlEntries = ["Administrators:(F);rm -rf /"]
+}
+""")
+
+  test "windows.acl rejects an empty accessControlEntries list":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.acl {
+  path = "C:\foo"
+  accessControlEntries = []
+}
+""")
+
   test "parses an os.timezone stanza":
     let text = """
 os.timezone {

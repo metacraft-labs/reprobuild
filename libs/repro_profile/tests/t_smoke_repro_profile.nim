@@ -265,6 +265,36 @@ suite "Resource constructors":
     check target[0].fields["localPort"].s == "Any"
     check target[0].fields["enabled"].b == true
 
+  test "windowsAcl records ACL fields":
+    var target: seq[ResourceIntent] = @[]
+    windowsAcl(target,
+      path = "C:\\Users\\Zahary\\.ssh",
+      accessControlEntries = @[
+        "BUILTIN\\Administrators:(OI)(CI)(F)",
+        "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
+        "Zahary:(OI)(CI)(F)"],
+      owner = "BUILTIN\\Administrators",
+      inheritanceMode = "disabled-replace",
+      address = "userSshDirectoryAcl")
+    check target.len == 1
+    check target[0].kind == "windows.acl"
+    check target[0].address == "userSshDirectoryAcl"
+    check target[0].fields["path"].s == "C:\\Users\\Zahary\\.ssh"
+    check target[0].fields["owner"].s == "BUILTIN\\Administrators"
+    check target[0].fields["inheritanceMode"].s == "disabled-replace"
+    check target[0].fields["accessControlEntries"].items.len == 3
+    check target[0].fields["accessControlEntries"].items[2] ==
+      "Zahary:(OI)(CI)(F)"
+
+  test "windowsAcl defaults owner / inheritanceMode":
+    var target: seq[ResourceIntent] = @[]
+    windowsAcl(target,
+      path = "C:\\foo",
+      accessControlEntries = @["Users:(F)"])
+    check target.len == 1
+    check target[0].fields["owner"].s == ""
+    check target[0].fields["inheritanceMode"].s == "enabled"
+
   test "osTimezone records the IANA tz under the tz field":
     var target: seq[ResourceIntent] = @[]
     osTimezone(target,

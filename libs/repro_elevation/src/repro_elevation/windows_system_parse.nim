@@ -9,7 +9,7 @@
 ## cross-platform without touching the host. No `import std/os`, no
 ## `osproc`, no Win32 — this module is platform-pure by construction.
 
-import std/[strutils]
+import std/[algorithm, strutils]
 
 # ===========================================================================
 # windows.optionalFeature — DISM `Get-WindowsOptionalFeature` parsing.
@@ -374,4 +374,233 @@ proc firewallRuleMatchesDesired*(obs: FirewallRuleObservation;
   let desiredDigest = canonicalFirewallRuleDesired(
     desiredName, desiredDisplayName, desiredProtocol, desiredDirection,
     desiredAction, desiredLocalPort, desiredEnabled)
+  observedDigest == desiredDigest
+
+# ===========================================================================
+# windows.acl — `icacls` output parsing.
+#
+# `icacls <path>` prints the ACL in a stable shape:
+#
+#     C:\ProgramData\Reprobuild-Tests\acl-test BUILTIN\Administrators:(F)
+#                                              NT AUTHORITY\SYSTEM:(F)
+#                                              CREATOR OWNER:(OI)(CI)(IO)(F)
+#                                              BUILTIN\Users:(OI)(CI)(RX)
+#
+#     Successfully processed 1 files; Failed processing 0 files
+#
+# An absent file yields `<path>: The system cannot find the file
+# specified.`; a present file's first non-empty line begins with the
+# canonical path, optionally followed by the FIRST ACE on the same
+# line. Subsequent ACE lines are indented and contain only
+# `<principal>:<perms>`. The trailer (`Successfully processed ...`)
+# is ignored.
+#
+# The PURE parser cares about three things:
+#
+#   1. Is the file present?
+#   2. The set of explicit ACE specs the OS reports (the bare
+#      `<principal>:<perms>` text per line, with inheritance flags
+#      preserved as-is — they ARE part of the spec).
+#   3. Whether inheritance is enabled. icacls does NOT print a direct
+#      "inherited: yes/no" flag; instead, inherited entries have a
+#      bare permission rendering (no synthesizing of `(I)` flags),
+#      while explicitly-set entries do. Reprobuild's canonical
+#      comparison is on the SET of desired entries (additive-only,
+#      per the design), so we don't need an exact inheritance flag
+#      to detect drift on the entries themselves. We expose a
+#      lightweight `inheritanceDisabled` heuristic based on whether
+#      any entry carries the `(I)` flag — `disabled-replace` /
+#      `disabled-convert` modes strip the `(I)` flag from inherited
+#      entries that ARE re-emitted as explicit, so the heuristic is
+#      sufficient for the post-apply re-probe contract.
+# ===========================================================================
+
+type
+  AclObservation* = object
+    ## What an `icacls <path>` observation reports. `present` is true
+    ## when the file/directory exists; an absent target has an empty
+    ## entries list and the absent-sentinel digest.
+    present*: bool
+    entries*: seq[string]
+      ## Each entry is a single `<principal>:<perms>` token as printed
+      ## by `icacls`. The principal half is read up to (but not
+      ## including) the FIRST `:` that is followed by `(` — that
+      ## matches both `NT AUTHORITY\SYSTEM:(F)` (no colon in the
+      ## principal) and the SID form `S-1-5-...:(F)` (no colon in
+      ## the SID).
+    inheritanceDisabled*: bool
+      ## True when the OBSERVED ACL appears to have inheritance
+      ## disabled — no entry carries the `(I)` flag. icacls does not
+      ## print this flag directly; the heuristic is sufficient for the
+      ## driver's `disabled-replace` / `disabled-convert` post-apply
+      ## probe.
+
+proc parseSingleAclEntry(text: string): string =
+  ## Extract a single `<principal>:<perms>` ACE token from a string
+  ## that may contain leading path, leading whitespace, and trailing
+  ## whitespace. Returns "" if the line does not appear to be an ACE.
+  ## The principal is matched up to the first `:` that is followed by
+  ## a `(` (the icacls perm-group opener).
+  let t = text.strip()
+  if t.len == 0:
+    return ""
+  # Find a `:(` separator (the icacls perm-group opener follows the
+  # principal-perm separator).
+  let sep = t.find(":(")
+  if sep <= 0:
+    return ""
+  result = t
+
+proc aceContainsInheritanceFlag(ace: string): bool =
+  ## True when the ACE spec contains the `(I)` inherited-marker flag.
+  ## icacls prints `(I)` (capital I, parens) to mark an entry as
+  ## inherited from the parent; `disabled-replace` / `disabled-convert`
+  ## clear that flag on any entry the apply re-emits as explicit.
+  ace.contains("(I)")
+
+proc parseIcaclsOutput*(rawOutput: string; targetPath: string):
+    AclObservation =
+  ## Parse an `icacls <path>` invocation's output. `targetPath` is the
+  ## path icacls was invoked on — the parser uses it to peel the path
+  ## prefix off the first line (icacls prints the path inline with the
+  ## first ACE). An "absent target" output (`The system cannot find
+  ## the file specified` / `cannot find the path`) yields an absent
+  ## observation; anything else with at least one parseable ACE yields
+  ## a present observation.
+  result.present = false
+  result.inheritanceDisabled = true
+  if rawOutput.strip().len == 0:
+    return
+  let lowered = rawOutput.toLowerAscii()
+  if lowered.contains("cannot find the file") or
+     lowered.contains("cannot find the path") or
+     lowered.contains("could not find") or
+     lowered.contains("the system cannot find"):
+    return
+  var foundAnyAce = false
+  let pathLen = targetPath.len
+  for rawLine in rawOutput.splitLines():
+    let line = rawLine
+    var workingLine = line
+    # The first line begins with the path (no leading whitespace).
+    # Strip it so the ACE parser sees the same `<principal>:(...)`
+    # shape on every line.
+    if pathLen > 0 and workingLine.len >= pathLen and
+       workingLine.startsWith(targetPath):
+      workingLine = workingLine[pathLen .. ^1]
+    let entry = parseSingleAclEntry(workingLine)
+    if entry.len == 0:
+      continue
+    # `Successfully processed N files; Failed processing M files`
+    # contains a `:` but no `(` — `parseSingleAclEntry` already
+    # rejects it. Defensive double-check below skips any line whose
+    # principal half is suspicious (contains digits + `processed`).
+    let lowerEntry = entry.toLowerAscii()
+    if lowerEntry.contains("processed") or
+       lowerEntry.contains("successfully"):
+      continue
+    result.entries.add(entry)
+    foundAnyAce = true
+    if aceContainsInheritanceFlag(entry):
+      result.inheritanceDisabled = false
+  result.present = foundAnyAce
+  if not foundAnyAce:
+    result.inheritanceDisabled = true
+
+proc normalizeAclEntry*(ace: string): string =
+  ## Stable rendering of an ACE: trim outer whitespace + collapse all
+  ## internal whitespace runs to single spaces. icacls is permitted
+  ## extra whitespace inside the perm groups; the canonical form
+  ## collapses these so two visually-equivalent ACE strings hash to
+  ## the same digest.
+  var collapsed = ""
+  var prevWasSpace = false
+  for ch in ace.strip():
+    if ch in {' ', '\t'}:
+      if not prevWasSpace:
+        collapsed.add(' ')
+        prevWasSpace = true
+    else:
+      collapsed.add(ch)
+      prevWasSpace = false
+  collapsed
+
+proc canonicalAclDesired*(path, owner: string;
+                          entries: seq[string];
+                          inheritanceMode: string): string =
+  ## Stable canonical rendering used for the broker's desired-digest.
+  ## The entries are normalized + SORTED so a re-ordering of the
+  ## operator's declaration does NOT trigger a drift apply. The owner
+  ## is omitted from the digest when unset (the apply does not change
+  ## ownership, so the observation should not gate the cache-hit on
+  ## it).
+  var normalized: seq[string] = @[]
+  for e in entries:
+    normalized.add(normalizeAclEntry(e))
+  normalized.sort()
+  let mode = if inheritanceMode.len > 0: inheritanceMode else: "enabled"
+  result = "acl:" & path & ":owner=" & owner & ":mode=" & mode &
+    ":entries="
+  for i, e in normalized:
+    if i > 0:
+      result.add(',')
+    result.add(e)
+
+proc canonicalAclState*(obs: AclObservation; path, owner: string;
+                        desiredEntries: seq[string];
+                        desiredInheritanceMode: string): string =
+  ## Canonical rendering of the OBSERVED state, projected onto the
+  ## desired-entries set. Additive-only semantics: only entries the
+  ## operator declared are compared; extra ACEs already on disk are
+  ## NOT considered drift. The projection digests the observed ACE
+  ## that MATCHES the desired ACE's principal+perms (after
+  ## normalization), or the empty string when the desired ACE is not
+  ## present on disk — that asymmetric digest collapses to the
+  ## desired digest iff every desired ACE was actually observed.
+  if not obs.present:
+    return "acl:absent"
+  var normalizedDesired: seq[string] = @[]
+  for e in desiredEntries:
+    normalizedDesired.add(normalizeAclEntry(e))
+  normalizedDesired.sort()
+  var normalizedObserved: seq[string] = @[]
+  for e in obs.entries:
+    normalizedObserved.add(normalizeAclEntry(e))
+  var matched: seq[string] = @[]
+  for d in normalizedDesired:
+    var found = ""
+    for o in normalizedObserved:
+      if o == d:
+        found = d
+        break
+    matched.add(found)
+  let mode =
+    if desiredInheritanceMode.len > 0: desiredInheritanceMode
+    else: "enabled"
+  result = "acl:" & path & ":owner=" & owner & ":mode=" & mode &
+    ":entries="
+  for i, e in matched:
+    if i > 0:
+      result.add(',')
+    result.add(e)
+
+proc aclMatchesDesired*(obs: AclObservation;
+                        path, owner: string;
+                        desiredEntries: seq[string];
+                        desiredInheritanceMode: string): bool =
+  ## True when every desired ACE is present in the observed ACL, the
+  ## inheritance-mode constraint is satisfied (a `disabled-*` mode
+  ## requires `obs.inheritanceDisabled`), and the file is present.
+  ## Additive-only on the entries — extra observed ACEs are ignored.
+  if not obs.present:
+    return false
+  let mode =
+    if desiredInheritanceMode.len > 0: desiredInheritanceMode
+    else: "enabled"
+  if mode != "enabled" and not obs.inheritanceDisabled:
+    return false
+  let observedDigest = canonicalAclState(obs, path, owner,
+    desiredEntries, mode)
+  let desiredDigest = canonicalAclDesired(path, owner,
+    desiredEntries, mode)
   observedDigest == desiredDigest

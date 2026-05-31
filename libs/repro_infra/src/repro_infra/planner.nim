@@ -175,6 +175,7 @@ proc observeResource*(r: SystemResource): ResourceObservation =
     of srkWindowsService: observeWindowsService(op)
     of srkWindowsVsInstaller: observeWindowsVsInstaller(op)
     of srkWindowsFirewallRule: observeWindowsFirewallRule(op)
+    of srkWindowsAcl: observeWindowsAcl(op)
     of srkMacosSystemDefault: observeMacosSystemDefault(op)
     of srkSystemdSystemUnit: observeSystemdSystemUnit(op)
     of srkLaunchdSystemDaemon: observeLaunchdSystemDaemon(op)
@@ -262,6 +263,15 @@ proc summaryLine(r: SystemResource; action: string): string =
       r.fwProtocol & "/" & r.fwDirection & "/" & r.fwAction &
       (if r.fwLocalPort.len > 0: ", port " & r.fwLocalPort else: "") &
       (if r.fwEnabled: ", enabled" else: ", disabled") & ")"
+  of srkWindowsAcl:
+    action & " acl " & r.aclPath & " (" &
+      $r.aclEntries.len & " entr" &
+      (if r.aclEntries.len == 1: "y" else: "ies") &
+      (if r.aclOwner.len > 0: ", owner=" & r.aclOwner else: "") &
+      (if r.aclInheritanceMode.len > 0 and
+          r.aclInheritanceMode != "enabled":
+         ", inheritance=" & r.aclInheritanceMode
+       else: "") & ")"
   of srkMacosSystemDefault:
     action & " system-default " & r.sdDomain & " " & r.sdKey
   of srkSystemdSystemUnit:

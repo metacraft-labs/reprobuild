@@ -85,6 +85,13 @@ proc systemDesiredDigestHex*(op: PrivilegedOperation): string =
         (if op.fwDisplayName.len > 0: op.fwDisplayName else: op.fwName),
         op.fwProtocol, op.fwDirection, op.fwAction,
         op.fwLocalPort, op.fwEnabled))
+  of pokWindowsAcl:
+    if op.aclDestroy:
+      ZeroDigestHex
+    else:
+      digestHexOfText(canonicalAclDesired(
+        op.aclPath, op.aclOwner, op.aclEntries,
+        op.aclInheritanceMode))
   of pokOsTimezone:
     digestHexOfText(canonicalTimezoneDesired(op.tzIana))
   of pokOsHostname:
@@ -935,6 +942,222 @@ proc destroyWindowsFirewallRule*(op: PrivilegedOperation):
     result = applyWindowsFirewallRule(destroyOp)
   else:
     raiseNotImplementedPlatform("windows.firewallRule destroy")
+
+# ===========================================================================
+# windows.acl — `icacls` + `takeown` for NTFS Discretionary Access
+# Control List management.
+#
+# `icacls` is a plain Win32 console tool, NOT a PowerShell cmdlet — it
+# parses argv via the standard cmd-shell rules. The driver therefore
+# uses `quoteShell` (double-quote semantics) for every interpolated
+# value, NOT `psQuote`. The closed-set validator
+# (`operationValidationError` for `pokWindowsAcl`) is layer 1;
+# `quoteShell` here is layer 2.
+#
+# The driver is additive-only on the ACE set: a re-apply that finds
+# every desired ACE present + the inheritance-mode constraint
+# satisfied is a no-op. Extra ACEs ALREADY on disk are NOT considered
+# drift (the operator may have local additions; the driver does not
+# strip them unless a `disabled-replace` inheritance mode is set). On
+# destroy, `icacls /reset` re-inherits from the parent.
+# ===========================================================================
+
+when defined(windows):
+  proc icaclsQuery(path: string): tuple[output: string; code: int] =
+    ## Run `icacls <path>` and return combined stdout+stderr + exit
+    ## code. `quoteShell` handles spaces in the path (e.g.
+    ## `C:\Program Files\...`).
+    let cmd = "icacls " & quoteShell(path)
+    let (output, code) = execCmdEx(cmd)
+    (output, code)
+
+  proc takeownOf(path, owner: string): tuple[output: string; code: int] =
+    ## Take ownership of `path` to `owner`. The driver issues two
+    ## calls: `takeown /F <path> /A` to seize ownership (always to
+    ## the Administrators group when `/A` is set; without `/A` the
+    ## current Administrator user takes ownership) and then `icacls
+    ## <path> /setowner <owner>` to pin it to the declared principal.
+    ## The driver returns the second call's output; the first call's
+    ## failure is non-fatal (the file may already be owned by an
+    ## Administrator-group account, in which case `takeown` is a
+    ## no-op).
+    let takeownCmd = "takeown /F " & quoteShell(path) & " /A"
+    discard execCmdEx(takeownCmd)
+    let setownerCmd = "icacls " & quoteShell(path) &
+      " /setowner " & quoteShell(owner)
+    let (output, code) = execCmdEx(setownerCmd)
+    (output, code)
+
+  proc icaclsInheritanceCmd(path, mode: string):
+      tuple[output: string; code: int] =
+    ## Apply the inheritance-mode change. `disabled-replace` calls
+    ## `icacls /inheritance:r` (disable + remove inherited entries);
+    ## `disabled-convert` calls `icacls /inheritance:d` (disable +
+    ## convert inherited entries to explicit). `enabled` is a no-op
+    ## from the driver's perspective — icacls has no "re-enable
+    ## inheritance" verb that does not destroy the current ACL, and
+    ## the cache-hit path keeps the live state.
+    let flag =
+      case mode
+      of "disabled-replace": "r"
+      of "disabled-convert": "d"
+      else: ""
+    if flag.len == 0:
+      return ("", 0)
+    let cmd = "icacls " & quoteShell(path) & " /inheritance:" & flag
+    let (output, code) = execCmdEx(cmd)
+    (output, code)
+
+  proc icaclsGrant(path, entry: string):
+      tuple[output: string; code: int] =
+    ## `icacls /grant` is the idempotent add — it REPLACES any
+    ## existing ACE for the principal at the SAME inheritance level
+    ## with the new spec. The entry is passed as ONE argument so the
+    ## spec's parentheses don't get parsed as cmd-shell groups.
+    let cmd = "icacls " & quoteShell(path) & " /grant " &
+      quoteShell(entry)
+    let (output, code) = execCmdEx(cmd)
+    (output, code)
+
+  proc icaclsReset(path: string): tuple[output: string; code: int] =
+    ## `icacls /reset` clears any explicit ACEs and re-inherits the
+    ## parent's ACL. Used by the destroy path.
+    let cmd = "icacls " & quoteShell(path) & " /reset"
+    let (output, code) = execCmdEx(cmd)
+    (output, code)
+
+proc observeWindowsAcl*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe the file/directory's ACL via `icacls <path>`. The
+  ## observation digest projects onto the DESIRED entry set — only
+  ## ACEs the operator declared appear in the digest, so a third
+  ## party's extra ACE does NOT register as drift. An absent target
+  ## yields the absent sentinel.
+  when defined(windows):
+    let (output, _) = icaclsQuery(op.aclPath)
+    let obs = parseIcaclsOutput(output, op.aclPath)
+    result.present = obs.present
+    result.digestHex =
+      if not obs.present: ZeroDigestHex
+      else: digestHexOfText(canonicalAclState(obs, op.aclPath,
+        op.aclOwner, op.aclEntries, op.aclInheritanceMode))
+  else:
+    raiseNotImplementedPlatform("windows.acl observe")
+
+proc applyWindowsAcl*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Reconcile the file/directory's ACL to the desired state:
+  ##
+  ##   1. If `aclOwner` is set, take ownership (`takeown /F /A` +
+  ##      `icacls /setowner`).
+  ##   2. If `aclInheritanceMode != enabled`, apply
+  ##      `icacls /inheritance:r` / `/inheritance:d` once. The
+  ##      cache-hit predicate already short-circuits the no-op case.
+  ##   3. For every desired ACE that is missing on disk (or differs),
+  ##      invoke `icacls /grant <ACE>`. icacls's grant verb is
+  ##      idempotent — re-running with the same `<principal>:<perms>`
+  ##      replaces the existing entry.
+  ##   4. Post-apply re-probe via `icacls <path>` to assert the
+  ##      observed ACL contains every desired ACE; a disagreement
+  ##      raises `EProtocol`.
+  ##
+  ## The destroy direction (`op.aclDestroy == true`) calls
+  ## `icacls /reset` to re-inherit from the parent.
+  when defined(windows):
+    if op.aclDestroy:
+      let (rmOut, rmCode) = icaclsReset(op.aclPath)
+      if rmCode != 0:
+        raiseProtocol("windows.acl `icacls /reset` of '" &
+          op.aclPath & "' failed: " & rmOut.strip())
+      # Post-apply re-probe — confirm the path is still observable
+      # (a reset does not remove the file, just re-inherits the ACL).
+      let (postOutput, _) = icaclsQuery(op.aclPath)
+      let after = parseIcaclsOutput(postOutput, op.aclPath)
+      result.present = after.present
+      result.digestHex = ZeroDigestHex
+      return
+
+    # 1. Owner change (optional).
+    if op.aclOwner.len > 0:
+      let (ownOut, ownCode) = takeownOf(op.aclPath, op.aclOwner)
+      if ownCode != 0:
+        raiseProtocol("windows.acl `icacls /setowner " &
+          op.aclOwner & "` of '" & op.aclPath & "' failed: " &
+          ownOut.strip())
+
+    # 2. Inheritance-mode change (optional).
+    let mode =
+      if op.aclInheritanceMode.len > 0: op.aclInheritanceMode
+      else: "enabled"
+    if mode != "enabled":
+      let (inhOut, inhCode) = icaclsInheritanceCmd(op.aclPath, mode)
+      if inhCode != 0:
+        raiseProtocol("windows.acl `icacls /inheritance` (mode=" &
+          mode & ") of '" & op.aclPath & "' failed: " &
+          inhOut.strip())
+
+    # 3. Grant every declared ACE. icacls's grant is idempotent so
+    #    we don't need to check absence first — but re-emitting
+    #    unchanged entries triggers a no-op print, not a state
+    #    change, so the live-state cache-hit branch handles the true
+    #    no-op case higher up the dispatch.
+    let (preOutput, _) = icaclsQuery(op.aclPath)
+    let before = parseIcaclsOutput(preOutput, op.aclPath)
+    for ace in op.aclEntries:
+      # Skip if the desired ACE is already present (additive
+      # semantics — re-emitting an unchanged ACE is safe but wastes
+      # a process spawn).
+      let normalized = normalizeAclEntry(ace)
+      var alreadyPresent = false
+      for o in before.entries:
+        if normalizeAclEntry(o) == normalized:
+          alreadyPresent = true
+          break
+      if alreadyPresent:
+        continue
+      let (gOut, gCode) = icaclsGrant(op.aclPath, ace)
+      if gCode != 0:
+        raiseProtocol("windows.acl `icacls /grant " & ace &
+          "` of '" & op.aclPath & "' failed: " & gOut.strip())
+
+    # 4. Post-apply re-probe.
+    let (postOutput, _) = icaclsQuery(op.aclPath)
+    let after = parseIcaclsOutput(postOutput, op.aclPath)
+    if not aclMatchesDesired(after, op.aclPath, op.aclOwner,
+        op.aclEntries, mode):
+      raiseProtocol("windows.acl '" & op.aclPath &
+        "' post-apply observation disagrees with desired state: " &
+        "observed " & canonicalAclState(after, op.aclPath,
+          op.aclOwner, op.aclEntries, mode) &
+        "; desired " & canonicalAclDesired(op.aclPath, op.aclOwner,
+          op.aclEntries, mode) &
+        ". The `icacls /grant` invocations returned exit 0 but the " &
+        "ACL does not contain every declared ACE — the driver " &
+        "fails closed rather than reporting a spurious success.")
+    result.present = after.present
+    result.digestHex =
+      if not after.present: ZeroDigestHex
+      else: digestHexOfText(canonicalAclState(after, op.aclPath,
+        op.aclOwner, op.aclEntries, mode))
+  else:
+    raiseNotImplementedPlatform("windows.acl apply")
+
+proc destroyWindowsAcl*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Reset the ACL to its inherited defaults. Convenience wrapper
+  ## used by the rollback engine; the dispatcher itself goes through
+  ## `applyWindowsAcl` with `aclDestroy = true`.
+  when defined(windows):
+    let destroyOp = PrivilegedOperation(kind: pokWindowsAcl,
+      address: op.address,
+      aclPath: op.aclPath,
+      aclOwner: op.aclOwner,
+      aclEntries: op.aclEntries,
+      aclInheritanceMode: op.aclInheritanceMode,
+      aclDestroy: true)
+    result = applyWindowsAcl(destroyOp)
+  else:
+    raiseNotImplementedPlatform("windows.acl destroy")
 
 # ===========================================================================
 # os.timezone — `tzutil /g` / `tzutil /s <windowsName>` on Windows.

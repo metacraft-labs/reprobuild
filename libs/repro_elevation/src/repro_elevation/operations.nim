@@ -72,6 +72,18 @@ type
       ## a TCP/UDP port (e.g. the OpenSSH server's inbound port 22)
       ## without resorting to a parent-supplied raw command. The driver
       ## is idempotent: a re-apply with unchanged fields is a no-op.
+    pokWindowsAcl = "windows.acl"
+      ## The post-M83 `windows.acl` operation: manage the NTFS
+      ## Discretionary Access Control List (DACL) on a file or
+      ## directory via `icacls` (and optionally `takeown` for the owner
+      ## change). Used to harden a sensitive directory (e.g. the
+      ## per-user `.ssh` directory the M83 SSH authorized-keys helper
+      ## creates) by stamping an explicit ACL and optionally disabling
+      ## inheritance. The driver is idempotent: a re-apply with the
+      ## same desired ACL is a no-op via the canonical-state digest.
+      ## Companion of the POSIX `fs.systemFile` mode field; an NTFS
+      ## directory ACL cannot be expressed as a POSIX `0700` mode and
+      ## needs the typed `windows.acl` driver.
     pokMacosSystemDefault = "macos.systemDefault"
       ## The M69 Phase-C `macos.systemDefault` operation: a typed
       ## value write under `/Library/Preferences/<plist>` via
@@ -282,6 +294,27 @@ type
       fwLocalPort*: string
       fwEnabled*: bool
       fwDestroy*: bool
+    of pokWindowsAcl:
+      ## Declare the NTFS ACL on a file or directory. `aclPath` is the
+      ## absolute Windows path the ACL applies to (the driver pins this
+      ## as a single closed value — no `..` segment, no shell
+      ## metacharacters). `aclOwner` is an optional principal (an
+      ## NTAccount form like `BUILTIN\Administrators` or a SID) that
+      ## takes ownership before the grant pass; an empty string leaves
+      ## ownership unchanged. `aclEntries` is the list of canonical ACE
+      ## specifications in `icacls /grant` form
+      ## (`<principal>:<perms>`); each one is matched against the live
+      ## ACL and `icacls /grant` is invoked only on absence/diff so a
+      ## re-apply is a no-op. `aclInheritanceMode` is one of `enabled`
+      ## (default) / `disabled-replace` (disable + clear inherited
+      ## entries) / `disabled-convert` (disable + convert inherited to
+      ## explicit). `aclDestroy` selects the rollback direction —
+      ## `icacls /reset` re-inherits from the parent.
+      aclPath*: string
+      aclOwner*: string
+      aclEntries*: seq[string]
+      aclInheritanceMode*: string
+      aclDestroy*: bool
     of pokMacosSystemDefault:
       ## Write `sdValueLiteral` (a `defaults`-literal) for `sdKey`
       ## under `sdDomain` (a `/Library/Preferences/...` plist path,
@@ -485,6 +518,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokWindowsService: true
   of pokWindowsVsInstaller: true
   of pokWindowsFirewallRule: true
+  of pokWindowsAcl: true
   of pokMacosSystemDefault: true
   of pokSystemdSystemUnit: true
   of pokLaunchdSystemDaemon: true
@@ -520,6 +554,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokWindowsService: pokWindowsService
   of $pokWindowsVsInstaller: pokWindowsVsInstaller
   of $pokWindowsFirewallRule: pokWindowsFirewallRule
+  of $pokWindowsAcl: pokWindowsAcl
   of $pokMacosSystemDefault: pokMacosSystemDefault
   of $pokSystemdSystemUnit: pokSystemdSystemUnit
   of $pokLaunchdSystemDaemon: pokLaunchdSystemDaemon
@@ -687,6 +722,101 @@ proc isSafeFirewallPort*(port: string): bool =
     return true
   for ch in p:
     if ch notin {'0'..'9', ',', '-', ' '}:
+      return false
+  return true
+
+# ---------------------------------------------------------------------------
+# windows.acl — path / principal / ACE / inheritance-mode allowlists.
+#
+# The `icacls` and `takeown` CLIs are wrapped from strings composed of
+# typed fields; defence-in-depth layer 1 is a closed allowlist on the
+# inheritance mode + a conservative charset on the path / principal /
+# ACE-spec values so a `principal = "BUILTIN\Administrators; <cmd>"`
+# profile cannot reach arbitrary root execution. Layer 2 is
+# `quoteShell` in the driver (icacls is a plain Win32 console tool —
+# it uses cmd-shell argv rules, NOT PowerShell — so quoting is
+# `quoteShell`, not `psQuote`).
+# ---------------------------------------------------------------------------
+
+const
+  AclInheritanceModes* = ["enabled", "disabled-replace", "disabled-convert"]
+
+proc isSafeAclPath*(path: string): bool =
+  ## True only for a non-empty absolute Windows path with no `..`
+  ## segment and no shell metacharacter / control character / quote.
+  ## The path flows into `icacls <path>` and `takeown /F <path>`
+  ## argument positions; both are plain console tools that parse argv
+  ## via cmd-shell rules. `quoteShell` (layer 2) handles spaces, but
+  ## a `"` / `\n` / `;` / `&` / `|` / `<` / `>` / `^` / `` ` `` can
+  ## still subvert the argv parse, and a `..` segment can escape the
+  ## intended scope — both are refused here.
+  let p = path.strip()
+  if p.len == 0:
+    return false
+  # Reject characters cmd.exe interprets specially or that don't have
+  # a legitimate place in an NTFS path. NTFS forbids `<>:"/\\|?*`
+  # inside a path component (the path itself uses `\` as separator and
+  # may contain a single `:` after the drive letter); we apply the
+  # restrictive subset here.
+  for ch in p:
+    if ord(ch) < 0x20 or ord(ch) == 0x7f:
+      return false
+    if ch in {'"', '*', '?', '<', '>', '|', '\'', '`', '$', ';', '&',
+              '^', '!', '%', '\n', '\r'}:
+      return false
+  # Disallow `..` as a path segment (escape).
+  for seg in p.multiReplace(("\\", "/")).split('/'):
+    if seg == "..":
+      return false
+  return true
+
+proc isSafeAclPrincipal*(principal: string): bool =
+  ## True only for a non-empty NTAccount-form name or SID. NTAccount
+  ## forms have shape `<authority>\<name>` (e.g. `BUILTIN\Administrators`
+  ## or `NT AUTHORITY\SYSTEM`) or a bare local name (`Administrators`).
+  ## SIDs have shape `S-1-...`. Allowed charset: alphanumerics, `\`,
+  ## ` `, `.`, `-`, `_`, `@`. Single-quote / double-quote / control /
+  ## shell metacharacter / `:` are refused so the principal cannot
+  ## smuggle ACE-spec syntax or shell metacharacters past the
+  ## closed-set validator.
+  let p = principal.strip()
+  if p.len == 0:
+    return false
+  for ch in p:
+    if ord(ch) < 0x20 or ord(ch) == 0x7f:
+      return false
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9',
+                 '\\', ' ', '.', '-', '_', '@'}:
+      return false
+  return true
+
+proc isSafeAclEntry*(entry: string): bool =
+  ## True only for a non-empty ACE spec `<principal>:<spec>` whose
+  ## principal half is `isSafeAclPrincipal` and whose spec half is in
+  ## the closed icacls charset:
+  ##   * uppercase ASCII letters (icacls permission codes: F, M, RX,
+  ##     R, W, D, GA, GW, GR, WO, WDAC, ...)
+  ##   * `,` (permission-list separator inside parentheses)
+  ##   * `(` / `)` (inheritance + permission groups)
+  ##   * digits (rare — e.g. `(IO)` indices)
+  ## A `:` is allowed exactly once and is the separator between the
+  ## two halves; a stray semicolon, backtick, dollar sign, etc. is
+  ## refused. The colon position is determined by the FIRST `:` so a
+  ## SID-form principal (no colon in `S-1-...`) parses correctly.
+  let e = entry.strip()
+  if e.len == 0:
+    return false
+  let colon = e.find(':')
+  if colon <= 0 or colon == e.len - 1:
+    return false
+  let principal = e[0 ..< colon]
+  let spec = e[colon + 1 .. ^1]
+  if not isSafeAclPrincipal(principal):
+    return false
+  for ch in spec:
+    if ord(ch) < 0x20 or ord(ch) == 0x7f:
+      return false
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '(', ')', ',', ' '}:
       return false
   return true
 
@@ -975,6 +1105,32 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if op.fwLocalPort.len > 0 and not isSafeFirewallPort(op.fwLocalPort):
       return "windows.firewallRule localPort '" & op.fwLocalPort &
         "' is not a port number, port range, comma list, or 'Any'"
+  of pokWindowsAcl:
+    if op.aclPath.strip().len == 0:
+      return "windows.acl operation has an empty path"
+    if not isSafeAclPath(op.aclPath):
+      return "windows.acl path '" & op.aclPath &
+        "' contains characters outside the safe-path charset " &
+        "(no '..' segment, no quote / shell metacharacter / " &
+        "control character)"
+    if op.aclOwner.len > 0 and not isSafeAclPrincipal(op.aclOwner):
+      return "windows.acl owner '" & op.aclOwner &
+        "' contains characters outside the principal charset " &
+        "(letters, digits, '\\', ' ', '.', '-', '_', '@')"
+    if op.aclInheritanceMode.len > 0 and
+       op.aclInheritanceMode notin AclInheritanceModes:
+      return "windows.acl inheritanceMode '" & op.aclInheritanceMode &
+        "' is not one of " & AclInheritanceModes.join(" / ")
+    if not op.aclDestroy and op.aclEntries.len == 0:
+      return "windows.acl '" & op.aclPath &
+        "' has an empty accessControlEntries list (a non-destroy " &
+        "apply must declare at least one ACE)"
+    for ace in op.aclEntries:
+      if not isSafeAclEntry(ace):
+        return "windows.acl entry '" & ace &
+          "' is not a safe `<principal>:<perms>` ACE spec " &
+          "(principal must be in the NTAccount / SID charset; perms " &
+          "must use only icacls permission codes, '(', ')', ',', ' ')"
   of pokMacosSystemDefault:
     if op.sdDomain.len == 0:
       return "macos.systemDefault operation has an empty domain"

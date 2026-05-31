@@ -293,6 +293,14 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.fwLocalPort)
     body.writeBool(op.fwEnabled)
     body.writeBool(op.fwDestroy)
+  of pokWindowsAcl:
+    body.writeString(op.aclPath)
+    body.writeString(op.aclOwner)
+    body.writeU32Le(uint32(op.aclEntries.len))
+    for e in op.aclEntries:
+      body.writeString(e)
+    body.writeString(op.aclInheritanceMode)
+    body.writeBool(op.aclDestroy)
   of pokMacosSystemDefault:
     body.writeString(op.sdDomain)
     body.writeString(op.sdKey)
@@ -470,6 +478,18 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.fwLocalPort = readString(body, pos)
     result.operation.fwEnabled = readBool(body, pos, "fwEnabled")
     result.operation.fwDestroy = readBool(body, pos, "fwDestroy")
+  of pokWindowsAcl:
+    result.operation = PrivilegedOperation(kind: pokWindowsAcl,
+      address: address)
+    result.operation.aclPath = readString(body, pos)
+    result.operation.aclOwner = readString(body, pos)
+    let eCount = int(readU32Le(body, pos))
+    if eCount < 0 or pos + eCount > body.len:
+      raiseProtocol("windows.acl frame: implausible entries count")
+    for _ in 0 ..< eCount:
+      result.operation.aclEntries.add(readString(body, pos))
+    result.operation.aclInheritanceMode = readString(body, pos)
+    result.operation.aclDestroy = readBool(body, pos, "aclDestroy")
   of pokMacosSystemDefault:
     result.operation = PrivilegedOperation(kind: pokMacosSystemDefault,
       address: address)
