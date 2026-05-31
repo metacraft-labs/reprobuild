@@ -35,6 +35,7 @@
 import std/[options, os, strutils, unittest]
 
 import repro_dsl_stdlib/catalog_registry
+import repro_dsl_stdlib/packages_schema
 import repro_home_apply/catalog_lookup
 import repro_home_apply/package_catalog
 
@@ -123,9 +124,13 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
       check cat.get.len > 0
 
   test "every Phase-2 CLEAN package resolves via cakBuiltin (default version)":
+    # Pin the host facts so the test asserts the catalog contract
+    # (the slices the project ships are Windows + Linux today; the
+    # runner's actual OS — e.g. macOS — is incidental to the contract).
     var prodCat = openProductionCatalog()
     for pkg in Phase2Clean:
-      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin])
+      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin],
+        hostCpu = pcX86_64, hostOs = poWindows)
       check res.adapter == cakBuiltin
       check res.builtinVersion.len > 0
       check res.urlUsed.len > 0
@@ -152,7 +157,8 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
   test "Phase-1 CLEAN regression set still resolves via cakBuiltin":
     var prodCat = openProductionCatalog()
     for pkg in Phase1Clean:
-      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin])
+      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin],
+        hostCpu = pcX86_64, hostOs = poWindows)
       check res.adapter == cakBuiltin
       check res.builtinVersion.len > 0
 
@@ -160,7 +166,8 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
     var prodCat = openProductionCatalog()
     for pkg in M69DeferredButResolves:
       check isRegistered(pkg)
-      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin])
+      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin],
+        hostCpu = pcX86_64, hostOs = poWindows)
       check res.adapter == cakBuiltin
       # The realize-time gap manifests at builtin_adapter.realizeBuiltinPackage,
       # not at the resolver level — this gate proves the resolver
@@ -206,7 +213,8 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
     var prodCat = openProductionCatalog()
     for pkg in Phase2GraduatedToBuiltin:
       check isRegistered(pkg)
-      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin])
+      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin],
+        hostCpu = pcX86_64, hostOs = poWindows)
       check res.adapter == cakBuiltin
       check res.builtinVersion.len > 0
       check res.urlUsed.len > 0
