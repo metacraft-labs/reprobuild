@@ -540,8 +540,18 @@ proc discoverSevenZipExe*(store: var Store; packageId: string):
     let candidateNoExe = prefixAbs / "bin" / "7z"
     if fileExists(extendedPath(candidateNoExe)):
       return candidateNoExe
+    # M8: also probe the prefix root — both layouts exist. The M3 hand-
+    # authored sevenzip catalog renames the upstream 7zr.exe to
+    # ``bin/7z.exe``; the M8 Scoop-MSI re-harvest places ``7z.exe``
+    # at the prefix root (lessmsi-flattened ``Files\7-Zip`` payload).
+    let candidateRoot = prefixAbs / "7z.exe"
+    if fileExists(extendedPath(candidateRoot)):
+      return candidateRoot
+    let candidateRootNoExe = prefixAbs / "7z"
+    if fileExists(extendedPath(candidateRootNoExe)):
+      return candidateRootNoExe
     trace.add("catalog-prefix:row " & row.realizedPath &
-      " lacked bin/7z.exe")
+      " lacked bin/7z.exe or 7z.exe at prefix root")
   # Step (ii): PATH lookup.
   let pathExe = findExe("7z.exe")
   if pathExe.len > 0:

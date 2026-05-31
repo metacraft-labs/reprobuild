@@ -28,12 +28,41 @@
 ## The full 7-Zip ships as an MSI on Windows main — which now (post-M4)
 ## CAN be extracted via lessmsi but requires re-harvesting the
 ## sevenzip catalog with ``afInstallerMsi + imInstallerMsi``.
-## **Honest scope**: erlang's full unblock requires a follow-up M
-## that bumps the sevenzip catalog to the full 7-Zip distribution
-## (the MSI shape that ships the NSIS-aware 7z.exe). M4 lands the
-## Burn-bundle outer + per-MSI inner sandwich correctly (covers
-## python3 + swift); erlang's specific NSIS-installer format is a
-## downstream extraction-tool capability gap, not an M4 hook gap.
+##
+## **M8 (Realize-Closure-And-Catalog-Expansion spec) status update:**
+## the M8 sevenzip re-harvest is DONE — ``packages/sevenzip.nim`` now
+## ships the full 7-Zip 26.01 distribution. LIVE-validated (manual
+## probe): ``7z.exe x otp_win64_28.5.exe`` extracts the OTP payload
+## cleanly (detects the file as PE/NSIS, dumps the inner tree with
+## ``erts-<ver>/bin/erl.exe`` runnable end-to-end — ``erl -version``
+## returns the BEAM emulator version). **The 7z-capability blocker
+## the M3/M4 docstring above predicted is GONE.**
+##
+## **New blocker** (folded into M11): the current catalog
+## ``install_method = imInstallerNsisBundle`` dispatches through the M4
+## Burn/MSI sandwich (``extractNsisMsiBundle`` requires dark.exe to
+## crack the .wixburn section). The OTP installer is a bona-fide NSIS
+## installer with NO Burn outer, so dark.exe rejects it (``DARK0339:
+## Stub executable does not contain a .wixburn data section``). The
+## right path is direct ``extract7z`` against the NSIS .exe — exactly
+## what the M3 ``imExtract + afSevenZip`` code path does, but the
+## current schema blocks ``imExtract + afInstallerNsis`` at compile
+## time (see ``builtin_adapter.nim:2575``: ``imExtract is incompatible
+## with installer archive_format``). Unblocking erlang in M11 needs
+## EITHER:
+##   * a new ``imInstallerNsis`` (plain) install method that dispatches
+##     to ``extract7z`` directly (1-day add — three lines in the realize
+##     loop + the enum + a tiny test);
+##   * OR a schema relaxation that allows ``imExtract + afInstallerNsis``
+##     when the catalog explicitly opts in (more controversial — the
+##     current restriction is a useful guard).
+## AND the catalog's ``bin_relpath`` must change from
+## ``bin\\erl.exe`` to ``erts-<ver>\\bin\\erl.exe`` because OTP places
+## its runtime under the ``erts-<ver>`` subdir, not a flat ``bin/``.
+## A future re-harvest with ``--version-extract`` capturing the ``erts``
+## version is also possible, but the simpler fix is per-version
+## hand-edited bin_relpath in this file (OTP's erts version tracks
+## OTP-major; for OTP-28.x it is erts-16.x).
 ##
 ## **Honest scope continued**: the OTP installer historically writes
 ## a per-user ``vcredist*`` redistributable side-effect and a

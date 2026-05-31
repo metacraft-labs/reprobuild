@@ -116,6 +116,21 @@ const
     ## upstream Scoop manifest is an innosetup ``.exe`` installer
     ## with no ``installer:`` block. The realize-time installer
     ## dispatch is M3 territory; the resolver-level contract holds.
+    ##
+    ## M8 (Realize-Closure-And-Catalog-Expansion spec) erlang status
+    ## shift: the M8 sevenzip MSI re-harvest unblocked the prerequisite
+    ## (full 7-Zip 26.01 is now realized via cakBuiltin and DOES
+    ## extract the OTP installer cleanly — LIVE-validated manually).
+    ## However, erlang STAYS in this list because the catalog's
+    ## ``install_method = imInstallerNsisBundle`` dispatches through
+    ## the M4 dark.exe Burn-bundle code path; OTP is a bona-fide NSIS
+    ## installer with NO Burn outer, so dark.exe rejects it with
+    ## ``DARK0339``. Unblocking erlang fully needs a new
+    ## ``imInstallerNsis`` (plain) install method that calls
+    ## ``extract7z`` directly + a per-version-aware ``bin_relpath``
+    ## (OTP lives under ``erts-<ver>/bin/``, not flat ``bin/``).
+    ## See ``packages/erlang.nim`` header for the M8 status update
+    ## and the M11 unblock plan.
 
   Phase2GraduatedToBuiltin = ["ocaml", "alire"]
     ## Phase-2 packages that this campaign (Realize-Closure-And-

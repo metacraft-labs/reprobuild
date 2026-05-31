@@ -1,55 +1,44 @@
-## M3 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip catalog
-## entry. **Hand-authored** rather than harvested from the Scoop
-## ``main/7zip`` bucket because the upstream manifest currently ships
-## the 64-bit and 32-bit variants as ``.msi`` installers (which would
-## require the M4 MSI-realize hook — out of M3 scope per the campaign's
-## "no MSI in M3" honest scope rule). The arm64 variant ships as a
-## pre_install-bootstrapped ``.exe`` whose bootstrap helper itself
-## requires an already-installed 7zr.exe — a chicken-and-egg.
+## M8 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip catalog
+## entry. REPLACED the M3 hand-authored standalone-7zr bootstrap with
+## the harvested Scoop ``7zip`` MSI manifest. The MSI ships the full
+## 7-Zip distribution (CLI + GUI + plugins including the zstd codec —
+## closes a follow-up from M6's MSYS2 .zst extraction).
 ##
-## Instead this entry harvests the upstream **official standalone
-## console binary** ``7zr.exe`` directly from
-## ``github.com/ip7z/7zip/releases``. That binary:
-##   * is a single .exe (afRaw + imExtract) — fits cakBuiltin's M64
-##     baseline extraction without any new dispatch surface;
-##   * speaks the same ``7z x`` / ``7z a`` / ``7z l`` CLI cakBuiltin's
-##     M3 7z-family realize hooks invoke;
-##   * supports both raw .7z and SFX-wrapped .7z (transparently);
-##   * has zero installer footprint (no MSI, no registry writes, no
-##     filesystem side effects beyond the single .exe);
-##   * is the same binary the upstream project ships AS the bootstrap
-##     for installing the full 7zip suite (the Scoop arm64 pre_install
-##     downloads exactly this file).
+## **Re-harvest command (for byte-equal verify):**
+##   repro_catalog_harvester harvest --bucket ScoopInstaller/Main \
+##     --app 7zip --app-alias 7zip=sevenzip \
+##     --output-dir libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/
 ##
-## **Operator-visible consequences of the hand-authored shape**:
-##   * Re-harvesting via ``repro_catalog_harvester harvest --app 7zip
-##     --bucket ScoopInstaller/Main`` would clobber this file with the
-##     MSI shape that does not realize under M3. The harvester's
-##     ``verify`` subcommand will report DRIFT against this hand-author;
-##     that drift is EXPECTED and the M3 reviewer documents it as a
-##     known-OK divergence until the M4 MSI-realize hook lands.
-##   * Once M4 ships MSI realize, the operator can choose: re-harvest
-##     to the upstream MSI shape (full 7zip suite — File Manager + GUI
-##     + plugins) OR keep the hand-authored 7zr.exe shape (smaller,
-##     CLI-only, exact bootstrap surface). Both options will work
-##     post-M4.
+## **Post-harvest hand-edit** (per the M4 lessmsi convention also used
+## by ``packages/meson.nim`` and ``packages/python3.nim``): the
+## ``extract_path`` for the x86_64 MSI is bumped from
+## ``Files\7-Zip`` (Scoop's manifest, correct under msiexec /a) to
+## ``SourceDir\Files\7-Zip`` so the M4 lessmsi extractor flow
+## (``<destDir>\SourceDir\<MSI install path>\``) resolves cleanly.
+## See ``packages/lessmsi.nim`` for the rationale.
 ##
-## **Discovery contract** (per the M3 ``discoverSevenZipExe`` order):
-## the cakBuiltin realize loop probes the M3 store FIRST for a
-## ``7zip``-registered prefix containing ``bin/7z.exe``. This file
-## emits ``bin/7z.exe`` (renamed-by-relpath from the upstream
-## ``7zr.exe`` filename) so the lookup is hit even on hosts whose
-## ``PATH`` lacks 7z entirely.
+## **Discovery contract**: the M8 ``discoverSevenZipExe`` probes
+## ``<prefix>\bin\7z.exe`` first (M3 hand-author + synthetic test
+## seeds) THEN ``<prefix>\7z.exe`` at the root (M8 MSI shape — after
+## lessmsi flattens ``SourceDir\Files\7-Zip`` the binary lands at
+## ``<prefix>\7z.exe``). Both paths must continue to resolve.
 ##
-## **M7 re-harvest option (post-M7)**: ``--source gh-releases:ip7z/7zip``
-## CAN reach the same release asset, BUT M7's harvester emits
-## ``bin_relpath: @["7zr.exe"]`` (the literal asset filename) while
-## this hand-authored catalog declares ``bin_relpath: @["bin/7z.exe"]``
-## — the cakBuiltin realize hook treats the bin_relpath as both the
-## probe path AND the on-disk target, so a re-harvest would break
-## downstream consumers that ``discover``-via the catalog's
-## ``bin/7z.exe`` shape. M7's harvester does NOT support
-## rename-on-extract; the hand-authored catalog stays in place.
+## **Operator-visible consequence**: the standalone 7zr.exe is gone.
+## Operators relying on M3's ``bin/7z.exe`` shape (e.g. operators who
+## seeded a synthetic ``7zip`` prefix in tests) must either rename to
+## the MSI shape or accept that synthetic tests stay on the bin/
+## probe path (the M8 discovery extension keeps that working).
+##
+## **arm64 record**: the harvested catalog also carries an arm64
+## platform whose URL is the upstream ``7z2601-arm64.exe`` self-
+## extractor. This is the Scoop ``pre_install`` path; the M4 NSIS
+## family-hook can extract it but the operator's machine is x86_64
+## so this slice is not LIVE-validated in M8. The slice stays for
+## future cross-arch work.
+
+## Auto-generated by tools/catalog-harvester. DO NOT EDIT.
+## Harvested from bucket: ScoopInstaller/Main
+## Versions (newest-first): 26.01
 
 import std/tables
 import repro_dsl_stdlib/packages_schema
@@ -58,14 +47,12 @@ export packages_schema
 let sevenzipCatalog* = @[
   VersionedProvisioning(
     version: "26.01",
-    archive_format: afRaw,
-    install_method: imExtract,
-    bin_relpath: @["bin/7z.exe"],
+    archive_format: afInstallerMsi,
+    install_method: imInstallerMsi,
+    bin_relpath: @["7z.exe", "7zG.exe", "7zFM.exe"],
     platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows,
-        url: "https://github.com/ip7z/7zip/releases/download/26.01/7zr.exe",
-        sha256: "abcf64ae1cbafddb5395e4cdd3bdc7e3e0561d54a0c6380e3dd43bdbffe519a2",
-        sha512: "", sha1: "", extract_path: "")
+      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-x64.msi", sha256: "a47ea8dcf8bc08e6de474cae77c828e031fa22cb528f6095defffebf11cd02f2", sha512: "", sha1: "", extract_path: "SourceDir\\Files\\7-Zip"),
+      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-arm64.exe", sha256: "1fecf4e3407950939c8ffcc3e42e3039821997dea155301c75369474e5f15175", sha512: "", sha1: "", extract_path: "")
     ],
     installer_args: @[],
     pacman_packages: @[],

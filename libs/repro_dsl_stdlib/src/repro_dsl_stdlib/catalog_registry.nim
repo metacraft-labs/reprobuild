@@ -67,9 +67,18 @@ import ./packages/fpc
 # M3 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip catalog
 # prerequisite. Registered under the operator-facing tool name ``7zip``
 # (string); the underlying packages/<file>.nim is sevenzip.nim because
-# Nim identifiers cannot start with a digit. Hand-authored against the
-# upstream standalone 7zr.exe — see packages/sevenzip.nim's header for
-# the rationale + the operator-visible re-harvest caveat.
+# Nim identifiers cannot start with a digit.
+#
+# **M8 transition**: replaced the hand-authored 7zr.exe bootstrap entry
+# with the harvested Scoop MSI catalog (re-harvest:
+# ``repro_catalog_harvester harvest --bucket ScoopInstaller/Main
+# --app 7zip --app-alias 7zip=sevenzip``). The MSI ships the full 7-Zip
+# distribution (CLI + GUI + plugins including the zstd codec — closes a
+# follow-up from M6's MSYS2 .zst extraction). M3's hand-authored
+# ``bin/7z.exe`` shape is gone; the MSI places ``7z.exe`` at the prefix
+# root after lessmsi flattens ``Files\7-Zip``. ``discoverSevenZipExe`` in
+# repro_home_apply was extended in M8 to probe both ``<prefix>/bin/7z.exe``
+# (legacy + synthetic test seeds) and ``<prefix>/7z.exe`` (M8 MSI shape).
 import ./packages/sevenzip
 # M4 (Realize-Closure-And-Catalog-Expansion spec) — Windows installer
 # family prerequisites:
@@ -102,6 +111,21 @@ import ./packages/ocaml
 # ships ``bin/alr.exe`` at the archive root, fitting cakBuiltin's
 # ``afZip + imExtract`` baseline without any new dispatch surface.
 import ./packages/alire
+# M8 (Realize-Closure-And-Catalog-Expansion spec) — bulk-harvest pass
+# over the M6 + M7 harvester sources. Two new GitHub-Releases-harvested
+# Windows toolchains land here:
+#   * ``gcc-winlibs`` — brechtsanders/winlibs_mingw distribution. Ships
+#     the full mingw-w64 GCC stack (gcc + g++ + gfortran + binutils ld)
+#     under ``mingw64/`` inside a ``.7z`` archive. Coexists with the M68
+#     ``gcc`` entry (nuwen.net components-20.0 via Scoop); the M68 entry
+#     lacks gfortran while winlibs bundles it.
+#   * ``llvm-mingw`` — mstorsjo/llvm-mingw distribution. Ships clang +
+#     clang++ + lld (ld.lld.exe) under a top-level
+#     ``llvm-mingw-<tag>-<crt>-<arch>/`` directory inside a ``.zip``.
+#     First clang-on-Windows catalog (M68 left clang DEFERRED per its
+#     header note — Scoop main has no ``clang.json``).
+import ./packages/gcc_winlibs
+import ./packages/llvm_mingw
 
 export packages_schema
 
@@ -163,6 +187,14 @@ const RegisteredTools* = [
   # M7 (Realize-Closure-And-Catalog-Expansion spec) — first
   # GitHub-Releases-harvested catalog tool. Ada toolchain manager.
   "alire",
+  # M8 (Realize-Closure-And-Catalog-Expansion spec) — bulk-harvest
+  # additions. ``gcc-winlibs`` is the operator-facing key for the
+  # winlibs-distributed GCC (coexists with the M68 ``gcc`` Scoop entry;
+  # winlibs ships gfortran which the nuwen.net components-20.0 does not).
+  # ``llvm-mingw`` is the operator-facing key for the mstorsjo/llvm-mingw
+  # clang+lld distribution (the first clang-on-Windows catalog entry).
+  "gcc-winlibs",
+  "llvm-mingw",
 ]
 
 proc getCatalog*(toolName: string):
@@ -219,6 +251,12 @@ proc getCatalog*(toolName: string):
   of "ocaml":      selectIfNonEmpty(ocamlCatalog)
   # M7 (Realize-Closure-And-Catalog-Expansion spec) — GitHub-Releases-harvested.
   of "alire":      selectIfNonEmpty(alireCatalog)
+  # M8 (Realize-Closure-And-Catalog-Expansion spec) — bulk-harvest.
+  # The Nim-identifier filenames (``gcc_winlibs`` / ``llvm_mingw``) are
+  # mapped to the operator-facing hyphenated keys (``gcc-winlibs`` /
+  # ``llvm-mingw``).
+  of "gcc-winlibs": selectIfNonEmpty(gcc_winlibsCatalog)
+  of "llvm-mingw":  selectIfNonEmpty(llvm_mingwCatalog)
   else:
     none(seq[VersionedProvisioning])
 

@@ -116,7 +116,16 @@ SOURCE SELECTION
                                        subdir (e.g. 'foo-1.2.3/'). The
                                        realize hook strips it.
   --platform-os <windows|linux|        (M7) OPTIONAL override of the
-        macos|any>                     inferred OS tag.
+        macos|any>                     inferred OS tag. Asset-name
+                                       inference looks for the literal
+                                       'windows' / 'linux' / 'macos' /
+                                       'darwin' tokens; M8 found that
+                                       winlibs (brechtsanders/winlibs_mingw)
+                                       and llvm-mingw (mstorsjo/llvm-mingw)
+                                       asset names omit the OS token
+                                       entirely, so passing
+                                       '--platform-os windows' explicitly
+                                       is REQUIRED for those harvests.
   --platform-cpu <x86_64|aarch64|      (M7) OPTIONAL override of the
         x86|any>                       inferred CPU tag.
 
