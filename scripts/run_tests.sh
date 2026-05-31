@@ -49,9 +49,13 @@ while IFS= read -r -d '' test_file; do
       extra_flags+=("--define:reproProviderMode")
       ;;
   esac
+  # Use the `${arr[@]+"${arr[@]}"}` idiom so the expansion is a no-op
+  # when `extra_flags` is empty. macOS's bundled Bash 3.2.57 aborts under
+  # `set -u` on a bare `"${extra_flags[@]}"` against an empty array;
+  # Bash 4+ tolerates it. Same fix as scripts/build_apps.sh.
   nim c -r \
     --threads:on \
-    "${extra_flags[@]}" \
+    ${extra_flags[@]+"${extra_flags[@]}"} \
     --nimcache:"build/nimcache/${test_name}" \
     --out:"build/test-bin/${test_name}" \
     "${test_file}"
