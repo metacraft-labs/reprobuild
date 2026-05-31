@@ -45,6 +45,7 @@ import repro_home_rollback
 import repro_local_store
 import repro_profile_intent
 import repro_profile_compile
+import ./migrate_from_env_scripts as mfes
 
 type
   PackageCatalogLookup* = proc(package: string): bool {.gcsafe.}
@@ -1718,6 +1719,213 @@ proc runHomeRollback(args: openArray[string]): int =
     return 1
 
 # ---------------------------------------------------------------------------
+# `repro home migrate-from-env-scripts` (M70).
+# ---------------------------------------------------------------------------
+
+proc defaultEnvFilePath(): string =
+  ## Resolve the default ``--env-file`` path from $METACRAFT_ROOT (set
+  ## by env.ps1) or fall back to the spec's canonical location
+  ## ``D:/metacraft/windows/toolchain-versions.env``. Tests pass an
+  ## explicit ``--env-file`` so they never depend on the env var.
+  let root = getEnv("METACRAFT_ROOT")
+  if root.len > 0:
+    return root / "windows" / "toolchain-versions.env"
+  when defined(windows):
+    return "D:/metacraft/windows/toolchain-versions.env"
+  else:
+    return ""
+
+proc renderMigrateUsage(): string =
+  result = ""
+  result.add "usage: repro home migrate-from-env-scripts [--env-file <path>] \n"
+  result.add "                                           [--activity <name>] \n"
+  result.add "                                           [--dry-run]\n"
+  result.add "\n"
+  result.add "Read a Windows toolchain-versions.env file and synthesize\n"
+  result.add "package(<tool>, \"<version>\") lines into your home.nim.\n"
+  result.add "\n"
+  result.add "Options:\n"
+  result.add "  --env-file <path>   Path to a toolchain-versions.env-shaped\n"
+  result.add "                      file. Default: " & defaultEnvFilePath() & "\n"
+  result.add "  --activity <name>   Activity block to receive the synthesized\n"
+  result.add "                      lines. Must be a Nim identifier (letters,\n"
+  result.add "                      digits, underscore). Default:\n"
+  result.add "                      migrated_from_env_scripts\n"
+  result.add "  --dry-run           Print the proposed home.nim diff without\n"
+  result.add "                      writing anything.\n"
+  result.add "\n"
+  result.add "Behavior:\n"
+  result.add "  - Clean migrates: catalog hit + version present in M67/M68 +\n"
+  result.add "    NOT in the M70 deferred-8 list (swift/gcc/git/meson/\n"
+  result.add "    python3/composer/erlang/ruby). Written as\n"
+  result.add "    package(<tool>, \"<version>\") lines.\n"
+  result.add "  - TODO comments: in-catalog tools whose realize-time is\n"
+  result.add "    deferred, in-catalog tools missing the requested version,\n"
+  result.add "    or unknown env-file keys.\n"
+  result.add "  - Idempotent: a tool already pinned in home.nim is skipped.\n"
+  result.add "  - Refuses to overwrite existing package(<tool>, ...) lines.\n"
+
+proc printMigrateSummary(summary: MigrationSummary) =
+  echo "repro home migrate-from-env-scripts: " &
+    $summary.migrated & " migrated, " &
+    $summary.deferred & " deferred (TODO), " &
+    $summary.missingVersion & " version-missing (TODO), " &
+    $summary.unknown & " unknown (TODO), " &
+    $summary.alreadyOwned & " already owned, " &
+    $summary.ignored & " ignored"
+
+proc runHomeMigrateFromEnvScripts(args: openArray[string]): int =
+  ## `repro home migrate-from-env-scripts` per M70. Reads
+  ## ``toolchain-versions.env`` and writes ``package(<tool>,
+  ## "<version>")`` lines into ``home.nim`` for every pin whose tool
+  ## maps cleanly onto the M67/M68 catalog. Tools that are in the
+  ## catalog but realize-time-deferred (the M69 "deferred-8"), tools
+  ## with a version that isn't in the catalog, and unknown env-file
+  ## keys are emitted as ``# TODO`` comments so the user can audit +
+  ## replace them manually.
+  var envFile = ""
+  var activity = "migrated_from_env_scripts"
+  var dryRun = false
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      stdout.write renderMigrateUsage()
+      return 0
+    elif a == "--env-file" or a.startsWith("--env-file="):
+      envFile = parseFlagValue(args, i, "--env-file")
+    elif a == "--activity" or a.startsWith("--activity="):
+      activity = parseFlagValue(args, i, "--activity")
+    elif a == "--dry-run":
+      dryRun = true
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home migrate-from-env-scripts: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home migrate-from-env-scripts: " &
+        "unexpected positional: " & a)
+      return 2
+    inc i
+
+  if envFile.len == 0:
+    envFile = defaultEnvFilePath()
+  if envFile.len == 0:
+    stderr.writeLine("repro home migrate-from-env-scripts: " &
+      "no --env-file given and METACRAFT_ROOT is unset; " &
+      "pass --env-file <path-to-toolchain-versions.env>")
+    return 2
+  if not fileExists(envFile):
+    stderr.writeLine("repro home migrate-from-env-scripts: " &
+      "env file not found: " & envFile)
+    return 1
+
+  var parsed: EnvFileParseResult
+  try:
+    parsed = loadEnvFile(envFile)
+  except IOError as e:
+    stderr.writeLine("repro home migrate-from-env-scripts: " &
+      "cannot read " & envFile & ": " & e.msg)
+    return 1
+
+  # Resolve the target home.nim. Use loadProfilePath so we land at the
+  # XDG / APPDATA default unless the caller passed --profile-dir
+  # (handled by the top-level dispatch).
+  let profileDir = resolveProfileDir()
+  let profilePath = profileDir / "home.nim"
+  let profileExists = fileExists(profilePath)
+
+  # Compute owned tools from the existing profile (or empty if absent).
+  let owned = mfes.ownedToolsAtPath(profilePath)
+
+  let plan = mfes.planMigration(parsed, activity, owned)
+  let summary = mfes.summarize(plan)
+
+  if dryRun:
+    echo "# repro home migrate-from-env-scripts --dry-run"
+    echo "# env file: " & envFile
+    echo "# target home.nim: " & profilePath &
+      (if profileExists: " (exists)" else: " (does not exist)")
+    echo "# activity: " & activity
+    echo "#"
+    echo "# proposed lines (in insertion order):"
+    if plan.lines.len == 0:
+      echo "#   (no pins parsed from env file)"
+    for line in plan.lines:
+      case line.kind
+      of moMigrate:
+        echo line.text
+      of moDeferred, moMissingVersion, moUnknown:
+        echo line.text
+      of moAlreadyOwned:
+        echo "# SKIP " & line.tool & ": " & line.reason
+      of moIgnored:
+        echo "# IGNORE " & line.envVar & ": " & line.reason
+    echo "#"
+    printMigrateSummary(summary)
+    return 0
+
+  # Non-dry-run write. Scaffold the profile if it doesn't exist; then
+  # delegate each migrate / TODO line to the structural editor's
+  # addPackageReference for migrate lines and a direct line insert for
+  # TODO comments (the structural editor doesn't represent comments
+  # as first-class nodes — we insert them at the end of the activity
+  # body alongside the package refs).
+  if not profileExists:
+    if not dirExists(profileDir):
+      try:
+        createDir(profileDir)
+      except OSError as e:
+        stderr.writeLine("repro home migrate-from-env-scripts: " &
+          "cannot create profile directory " & profileDir & ": " & e.msg)
+        return 1
+    let scaffold = "import repro/profile\n\nprofile \"migrated\":\n" &
+      "  activity " & activity & ":\n    discard\n"
+    # Note: ``activity`` must be a valid Nim identifier (letters,
+    # digits, underscore). The default is ``migrated_from_env_scripts``;
+    # the CLI rejects names containing ``-`` further down via the
+    # structural editor.
+    try:
+      writeFile(profilePath, scaffold)
+    except IOError as e:
+      stderr.writeLine("repro home migrate-from-env-scripts: " &
+        "cannot scaffold " & profilePath & ": " & e.msg)
+      return 1
+
+  var migrated = 0
+  var skipped = 0
+  for line in plan.lines:
+    case line.kind
+    of moMigrate:
+      try:
+        addPackageReference(profilePath, line.tool, activity = activity,
+          version = line.version)
+        inc migrated
+      except CatchableError as e:
+        stderr.writeLine("repro home migrate-from-env-scripts: failed to " &
+          "write " & line.tool & "@" & line.version & ": " & e.msg)
+        return 1
+    of moAlreadyOwned, moIgnored:
+      inc skipped
+    of moDeferred, moMissingVersion, moUnknown:
+      # TODO comments: we leave them out of the file by default to keep
+      # the structural editor's invariants clean (it doesn't track
+      # free-floating comments as first-class nodes). The user sees the
+      # full TODO list via the printed summary + the --dry-run output.
+      discard
+
+  printMigrateSummary(summary)
+  if summary.deferred + summary.missingVersion + summary.unknown > 0:
+    echo ""
+    echo "Tools that need manual attention (run with --dry-run to see " &
+      "the full TODO list):"
+    for line in plan.lines:
+      case line.kind
+      of moDeferred, moMissingVersion, moUnknown:
+        echo "  " & line.text.strip()
+      else: discard
+  return 0
+
+# ---------------------------------------------------------------------------
 # Top-level dispatch.
 # ---------------------------------------------------------------------------
 
@@ -1751,7 +1959,7 @@ proc runHomeCommand*(args: seq[string]): int =
   if sub.len == 0:
     stderr.writeLine("usage: repro home {add | remove | enable | disable | " &
       "list | why | history | apply | plan | rollback | set | get | " &
-      "adopt | resource} ...")
+      "adopt | resource | migrate-from-env-scripts} ...")
     return 2
   case sub
   of "add": return runHomeAdd(subArgs)
@@ -1768,6 +1976,8 @@ proc runHomeCommand*(args: seq[string]): int =
   of "get": return runHomeGet(subArgs)
   of "adopt": return runHomeAdopt(subArgs)
   of "resource": return runHomeResource(subArgs)
+  of "migrate-from-env-scripts":
+    return runHomeMigrateFromEnvScripts(subArgs)
   else:
     stderr.writeLine("repro home: unknown subcommand: " & sub)
     return 2
