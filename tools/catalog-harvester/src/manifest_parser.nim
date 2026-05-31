@@ -83,6 +83,33 @@ type
       ## upstream provides it. ``md5`` continues to be rejected via
       ## ``dkHashAlgorithmUnsupported``.
     dkArchiveFormatUnknown = "HArchiveFormatUnknown"
+    # M3 (Realize-Closure-And-Catalog-Expansion spec) — residual 7z
+    # family classification.
+    dkSevenZipSfx = "HSevenZipSfx"
+      ## Recognized a 7z-SFX shape: the manifest's URL ends in
+      ## ``.7z.exe`` OR the URL has a Scoop ``#/dl.7z`` rename suffix
+      ## paired with a ``.exe`` upstream path AND no ``installer``
+      ## block — i.e. a self-extracting executable whose payload is a
+      ## 7z stream. Set ``archive_format = afSevenZipSfx``.
+    dkNested7z = "HNested7z"
+      ## The manifest's ``pre_install`` block contains an
+      ## ``Expand-7zArchive`` (or ``Expand-7ZipArchive``) invocation
+      ## paired with a corresponding ``Remove-Item *.7z`` cleanup —
+      ## i.e. the upstream archive contains additional 7z files that
+      ## need recursive extraction. Set the platform's ``nested_7z``
+      ## flag.
+    dkPreInstallAllowlistEntry = "HPreInstallAllowlistEntry"
+      ## Recognized a Scoop ``pre_install`` line that matches the
+      ## cakBuiltin allowlist; translated into a structured
+      ## ``PreInstallAction``.
+    dkPreInstallUnrecognized = "HPreInstallUnrecognized"
+      ## A ``pre_install`` line that escaped the cakBuiltin allowlist;
+      ## captured verbatim in the slice's
+      ## ``pre_install_unrecognized`` for the realize loop to surface
+      ## as a ``WPreInstallUnrecognized`` warning at apply time.
+    dkPreInstallSkippedAllRecognized = "HPreInstallSkippedAllRecognized"
+      ## The whole ``pre_install`` block was a noop (e.g. just
+      ## comments / whitespace); no actions emitted.
 
   Diagnostic* = object
     kind*: DiagnosticKind
@@ -170,6 +197,31 @@ proc inferArchiveFormat(url: string; hasInstaller: bool):
   ## Match in longest-suffix-first order so ``.tar.gz`` wins over
   ## ``.gz``. ``hasInstaller`` short-circuits to NSIS/MSI for
   ## installer manifests with a ``.exe`` / ``.msi`` URL.
+  ##
+  ## M3 (Realize-Closure-And-Catalog-Expansion spec) — 7z-SFX
+  ## detection: an upstream URL ending in ``.7z.exe`` (the canonical
+  ## ip7z / Git-for-Windows SFX naming) classifies as
+  ## ``afSevenZipSfx``. The Scoop ``#/dl.7z`` rename trick is already
+  ## handled by ``extensionForFormatSniff`` collapsing the rename
+  ## suffix into the format-sniffed extension — so an upstream
+  ## ``...some-installer.exe#/dl.7z`` lands here as ``.7z`` and
+  ## dispatches to plain ``afSevenZip`` even though the upstream URL's
+  ## extension is ``.exe``. We probe the *original* URL for the
+  ## ``.7z.exe`` shape BEFORE the rename collapse so that
+  ## genuine-SFX-without-rename is correctly classified.
+  let originalLower = url.toLowerAscii()
+  # Probe the raw URL (before #-suffix stripping) for the .7z.exe shape.
+  # ``erlang/git/ruby`` typically use ``...XXX.exe#/dl.7z`` (already
+  # sniffed as .7z) → afSevenZip. A bare ``...XXX.7z.exe`` (no rename
+  # suffix) → afSevenZipSfx.
+  let hashIdx = originalLower.find('#')
+  let urlNoHash =
+    if hashIdx >= 0: originalLower[0 ..< hashIdx] else: originalLower
+  let qIdx = urlNoHash.find('?')
+  let urlNoQuery =
+    if qIdx >= 0: urlNoHash[0 ..< qIdx] else: urlNoHash
+  if urlNoQuery.endsWith(".7z.exe") and not hasInstaller:
+    return (afSevenZipSfx, true)
   let clean = extensionForFormatSniff(url).toLowerAscii()
   # Plain HTML pages or weird extensions fall through to afRaw.
   if clean.endsWith(".tar.gz") or clean.endsWith(".tgz"):
@@ -312,6 +364,283 @@ proc binRelpathsOf(node: JsonNode; app: string; diags: var seq[Diagnostic]):
       else: discard
     outPaths
   else: @[]
+
+## ---------------------------------------------------------------------------
+## M3 — pre_install allowlist translator
+## ---------------------------------------------------------------------------
+##
+## Scoop manifests carry ``pre_install: [...]`` blocks of PowerShell.
+## The harvester translates each LINE into either a structured
+## ``PreInstallAction`` (cakBuiltin allowlist hit) or records it
+## verbatim in ``pre_install_unrecognized``. The cakBuiltin realize
+## loop replays actions; unrecognized lines surface as
+## ``WPreInstallUnrecognized`` stderr warnings at apply time.
+##
+## The harvester does NOT execute PowerShell — it only does shape
+## recognition. The matcher is intentionally lenient (whitespace +
+## case-insensitive cmdlet names) but conservative on argument shapes
+## (only accepts $dir-rooted paths; anything reaching ``$persist_dir``,
+## ``$bucketsdir``, etc. lands in unrecognized).
+
+proc isDirRootedPath(arg: string): bool =
+  ## Path references must stay rooted under ``$dir`` (the realized
+  ## prefix). Scoop's ``$persist_dir`` / ``$bucketsdir`` /
+  ## ``$cachedir`` / ``$env:TMP`` references → unrecognized.
+  let s = arg.strip(chars = {' ', '\t', '"', '\''})
+  s.startsWith("$dir") or s.startsWith("$Dir") or s.startsWith("${dir}")
+
+proc unquoteArg(arg: string): string =
+  let s = arg.strip()
+  if s.len >= 2 and ((s.startsWith("\"") and s.endsWith("\"")) or
+                     (s.startsWith("'") and s.endsWith("'"))):
+    return s[1 ..< s.len - 1]
+  s
+
+proc canonicalizeArg(arg: string): string =
+  ## Normalize ``\\`` -> ``\`` (manifest authors double-escape
+  ## backslashes in JSON strings) and unquote. The realize loop's
+  ## ``substituteDirPlaceholder`` does the final $dir → staging dir
+  ## substitution.
+  unquoteArg(arg).replace("\\\\", "\\")
+
+proc splitPsArgs(rest: string): seq[string] =
+  ## Tokenize a PowerShell argv tail (after the cmdlet name). Honors
+  ## quoted strings (' and "), splits on whitespace otherwise. Returns
+  ## the tokens in order; the caller pairs them with named flags
+  ## (``-Path X -Destination Y``) or treats them as positional.
+  result = @[]
+  var i = 0
+  while i < rest.len:
+    let ch = rest[i]
+    if ch in {' ', '\t'}:
+      inc i; continue
+    if ch == '"' or ch == '\'':
+      let q = ch
+      var j = i + 1
+      while j < rest.len and rest[j] != q:
+        inc j
+      result.add(rest[i+1 ..< j])
+      i = j + 1
+    else:
+      var j = i
+      while j < rest.len and rest[j] notin {' ', '\t'}:
+        inc j
+      result.add(rest[i ..< j])
+      i = j
+
+proc parsePathFlags(args: openArray[string]):
+    tuple[path, destination, value: string; recurse, force: bool] =
+  ## Walk the ``args`` list looking for ``-Path``, ``-Destination``,
+  ## ``-Value``, ``-Recurse``, ``-Force`` flags (case-insensitive).
+  ## Positional args fall back: first positional → path, second →
+  ## destination/value.
+  var positional: seq[string] = @[]
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    let aL = a.toLowerAscii()
+    if aL in ["-path", "-literalpath"] and i + 1 < args.len:
+      result.path = args[i + 1]
+      i += 2
+    elif aL == "-destination" and i + 1 < args.len:
+      result.destination = args[i + 1]
+      i += 2
+    elif aL == "-value" and i + 1 < args.len:
+      result.value = args[i + 1]
+      i += 2
+    elif aL == "-recurse":
+      result.recurse = true
+      inc i
+    elif aL == "-force":
+      result.force = true
+      inc i
+    elif aL.startsWith("-"):
+      # Skip unknown named-flag values (one-arg consumption is the
+      # conservative default; this drops e.g. -Encoding utf8).
+      if i + 1 < args.len and not args[i + 1].startsWith("-"):
+        i += 2
+      else:
+        inc i
+    else:
+      positional.add(a)
+      inc i
+  if result.path.len == 0 and positional.len >= 1:
+    result.path = positional[0]
+  if result.destination.len == 0 and result.value.len == 0 and
+     positional.len >= 2:
+    result.destination = positional[1]
+
+proc translatePreInstallLine(line: string;
+                              dropped: var seq[string]):
+    tuple[ok: bool; action: PreInstallAction] =
+  ## Translate ONE pre_install PS line into a structured action. On
+  ## allowlist miss, return ``(false, default)`` so the caller records
+  ## the verbatim line in ``pre_install_unrecognized``. ``dropped`` is
+  ## populated with rejected-arg reasons (debug info).
+  let stripped = line.strip()
+  # Empty + comment-only lines are noops — return (false) and let the
+  # caller treat them as no-emit (NOT as unrecognized).
+  if stripped.len == 0 or stripped.startsWith("#"):
+    return (false, PreInstallAction())
+  # Multi-statement lines (e.g. `if (Test-Path ...) { ... }`) are
+  # out of allowlist; fail soft.
+  if stripped.contains("{") or stripped.contains("}") or
+     stripped.contains("if (") or stripped.contains("foreach") or
+     stripped.startsWith("&") or stripped.startsWith("$") or
+     stripped.startsWith("("):
+    dropped.add("control-flow / variable-assignment")
+    return (false, PreInstallAction())
+
+  # Split into cmdlet + arg list.
+  var idx = 0
+  while idx < stripped.len and stripped[idx] notin {' ', '\t'}: inc idx
+  let cmdlet = stripped[0 ..< idx].toLowerAscii()
+  let tail = if idx < stripped.len: stripped[idx + 1 .. ^1] else: ""
+  let args = splitPsArgs(tail)
+
+  case cmdlet
+  of "new-item":
+    let flags = parsePathFlags(args)
+    var itemType = ""
+    var j = 0
+    while j < args.len:
+      if args[j].toLowerAscii() == "-itemtype" and j + 1 < args.len:
+        itemType = args[j + 1].toLowerAscii()
+        break
+      inc j
+    if flags.path.len == 0 or not isDirRootedPath(flags.path):
+      dropped.add("New-Item path not $dir-rooted")
+      return (false, PreInstallAction())
+    case itemType
+    of "directory":
+      return (true, PreInstallAction(kind: piaNewItemDir,
+        source: "", target: canonicalizeArg(flags.path),
+        recurse: false, literal: ""))
+    of "file":
+      return (true, PreInstallAction(kind: piaNewItemFile,
+        source: "", target: canonicalizeArg(flags.path),
+        recurse: false, literal: ""))
+    else:
+      dropped.add("New-Item -ItemType not Directory/File")
+      return (false, PreInstallAction())
+  of "copy-item":
+    let flags = parsePathFlags(args)
+    if flags.path.len == 0 or flags.destination.len == 0 or
+       not isDirRootedPath(flags.path) or
+       not isDirRootedPath(flags.destination):
+      dropped.add("Copy-Item path/destination not $dir-rooted")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaCopyItem,
+      source: canonicalizeArg(flags.path),
+      target: canonicalizeArg(flags.destination),
+      recurse: flags.recurse, literal: ""))
+  of "move-item":
+    let flags = parsePathFlags(args)
+    if flags.path.len == 0 or flags.destination.len == 0 or
+       not isDirRootedPath(flags.path) or
+       not isDirRootedPath(flags.destination):
+      dropped.add("Move-Item path/destination not $dir-rooted")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaMoveItem,
+      source: canonicalizeArg(flags.path),
+      target: canonicalizeArg(flags.destination),
+      recurse: false, literal: ""))
+  of "remove-item":
+    let flags = parsePathFlags(args)
+    if flags.path.len == 0 or not isDirRootedPath(flags.path):
+      dropped.add("Remove-Item path not $dir-rooted")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaRemoveItem,
+      source: "", target: canonicalizeArg(flags.path),
+      recurse: flags.recurse, literal: ""))
+  of "set-content":
+    let flags = parsePathFlags(args)
+    if flags.path.len == 0 or not isDirRootedPath(flags.path):
+      dropped.add("Set-Content path not $dir-rooted")
+      return (false, PreInstallAction())
+    if flags.value.len == 0:
+      dropped.add("Set-Content -Value missing or non-literal")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaSetContent,
+      source: "", target: canonicalizeArg(flags.path),
+      recurse: false, literal: unquoteArg(flags.value)))
+  of "add-path":
+    # Scoop's Add-Path helper: ``Add-Path <dir>``.
+    if args.len < 1 or not isDirRootedPath(args[0]):
+      dropped.add("Add-Path target not $dir-rooted")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaAddPath,
+      source: "", target: canonicalizeArg(args[0]),
+      recurse: false, literal: ""))
+  of "expand-7zarchive", "expand-7ziparchive":
+    # ``Expand-7zArchive <source> <destination>``.
+    var positionals: seq[string] = @[]
+    for a in args:
+      if not a.startsWith("-"):
+        positionals.add(a)
+    if positionals.len < 1 or not isDirRootedPath(positionals[0]):
+      dropped.add("Expand-7zArchive source not $dir-rooted")
+      return (false, PreInstallAction())
+    let src = canonicalizeArg(positionals[0])
+    let dst =
+      if positionals.len >= 2 and isDirRootedPath(positionals[1]):
+        canonicalizeArg(positionals[1])
+      else: "$dir"
+    return (true, PreInstallAction(kind: piaExpand7z,
+      source: src, target: dst, recurse: false, literal: ""))
+  else:
+    dropped.add("cmdlet not in allowlist: " & cmdlet)
+    return (false, PreInstallAction())
+
+proc translatePreInstall(node: JsonNode;
+                          app: string;
+                          diags: var seq[Diagnostic]):
+    tuple[actions: seq[PreInstallAction]; unrecognized: seq[string];
+          impliesNested7z: bool] =
+  ## Translate a Scoop ``pre_install`` JSON node (string | seq[string])
+  ## into the M3 schema. Detects the nested-7z idiom: presence of an
+  ## ``Expand-7zArchive`` ``*.7z`` glob (or a sibling cleanup
+  ## ``Remove-Item *.7z``) → ``impliesNested7z = true``.
+  result.impliesNested7z = false
+  if node.isNil: return
+  var lines: seq[string] = @[]
+  case node.kind
+  of JString: lines.add(node.getStr())
+  of JArray:
+    for child in node.items:
+      if child.kind == JString: lines.add(child.getStr())
+  else: return
+  if lines.len == 0: return
+  var sawExpandWildcard = false
+  var sawRemoveSevenZ = false
+  for line in lines:
+    var dropped: seq[string] = @[]
+    let translation = translatePreInstallLine(line, dropped)
+    if translation.ok:
+      result.actions.add(translation.action)
+      diags.add(Diagnostic(
+        kind: dkPreInstallAllowlistEntry, app: app,
+        detail: "translated: " & line.strip()))
+      if translation.action.kind == piaExpand7z and
+         '*' in translation.action.source:
+        sawExpandWildcard = true
+      if translation.action.kind == piaRemoveItem and
+         translation.action.target.toLowerAscii().endsWith(".7z"):
+        sawRemoveSevenZ = true
+    elif line.strip().len == 0 or line.strip().startsWith("#"):
+      # Noop line — drop silently.
+      discard
+    else:
+      result.unrecognized.add(line)
+      let reason = if dropped.len > 0: dropped.join("; ") else: "no allowlist match"
+      diags.add(Diagnostic(
+        kind: dkPreInstallUnrecognized, app: app,
+        detail: line.strip() & " (" & reason & ")"))
+  result.impliesNested7z = sawExpandWildcard or sawRemoveSevenZ
+  if result.actions.len == 0 and result.unrecognized.len == 0:
+    diags.add(Diagnostic(
+      kind: dkPreInstallSkippedAllRecognized, app: app,
+      detail: "pre_install block was entirely comments / blank lines"))
 
 proc cpuOf(arch: string): PlatformCpu =
   case arch
@@ -571,6 +900,13 @@ proc parseScoopManifest*(app: string; raw: string;
       kind: dkArchiveFormatUnknown, app: app,
       detail: "could not infer archive_format from URL '" &
         platforms[0].url & "'; defaulting to afRaw"))
+  # M3: emit the SFX-recognition diagnostic so operators can grep
+  # for the dkSevenZipSfx kind across a bulk-harvest log.
+  if archiveFmt == afSevenZipSfx:
+    result.diagnostics.add(Diagnostic(
+      kind: dkSevenZipSfx, app: app,
+      detail: "URL '" & platforms[0].url &
+        "' classified as 7z self-extracting (afSevenZipSfx)"))
 
   # ----- install_method -----
   var installMethod = imExtract
@@ -612,6 +948,30 @@ proc parseScoopManifest*(app: string; raw: string;
       if v.kind == JString:
         envPairs.add((k, dollarDirToPrefix(v.getStr())))
 
+  # ----- M3: pre_install allowlist translation -----
+  var preActions: seq[PreInstallAction] = @[]
+  var preUnrecognized: seq[string] = @[]
+  var impliesNested = false
+  if root.hasKey("pre_install"):
+    let translated = translatePreInstall(root["pre_install"], app,
+      result.diagnostics)
+    preActions = translated.actions
+    preUnrecognized = translated.unrecognized
+    impliesNested = translated.impliesNested7z
+
+  # M3: nested_7z is per-platform. When pre_install actions imply a
+  # nested extraction, mark every platform's nested_7z = true (the
+  # nested-archive shape is upstream-uniform across CPUs for the M3
+  # target tools — gcc's components-*.7z ships the same payload on
+  # x86_64 + arm64 if/when the arm64 build lands).
+  if impliesNested:
+    for i in 0 ..< platforms.len:
+      platforms[i].nested_7z = true
+    result.diagnostics.add(Diagnostic(
+      kind: dkNested7z, app: app,
+      detail: "pre_install contains Expand-7zArchive + Remove-Item *.7z; " &
+        "platform nested_7z flag set"))
+
   # ----- Compose the VersionedProvisioning -----
   result.entry = initVersionedProvisioning(
     version = version,
@@ -620,5 +980,7 @@ proc parseScoopManifest*(app: string; raw: string;
     bin_relpath = binRelpath,
     platforms = platforms,
     installer_args = installerArgs,
-    env = envPairs)
+    env = envPairs,
+    pre_install_actions = preActions,
+    pre_install_unrecognized = preUnrecognized)
   result.ok = true

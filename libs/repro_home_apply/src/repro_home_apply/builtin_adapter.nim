@@ -53,6 +53,8 @@
 ## is exercised by the optional integration gate.
 
 import std/[os, osproc, strutils, tables, times]
+when defined(windows):
+  import std/widestrs
 from repro_core/paths import extendedPath
 
 import repro_local_store
@@ -97,6 +99,27 @@ type
     ## fires when an unsupported method is requested.
     packageId*: string
     installMethod*: string
+
+  EBuiltinSevenZipUnavailable* = object of EHomeApply
+    ## M3: the 7z-family realize hook needed a ``7z.exe`` but the
+    ## discovery order (catalog-registered prefix → PATH → fail-closed)
+    ## exhausted without finding one. Carries the discovery trace so
+    ## the operator sees exactly which steps were attempted.
+    ## Remediation: ``repro home add 7zip`` (or list ``package(7zip)``
+    ## ahead of the 7z-needing tools in ``home.nim``).
+    packageId*: string
+    discoveryTrace*: seq[string]
+
+  EBuiltinPreInstallRejected* = object of EHomeApply
+    ## M3: the realize loop reached a ``pre_install`` line/action it
+    ## could not safely replay (allowlist miss surfaced as a planning-
+    ## time error, e.g. a junction-recursion guardrail tripped). Carries
+    ## the offending line for operator debug. See
+    ## ``WPreInstallUnrecognized`` for the soft-warning variant the
+    ## harvester emits at apply time when a manifest line escaped the
+    ## allowlist at harvest time.
+    packageId*: string
+    rejectedLine*: string
 
   RealizeBuiltinResult* = object
     ## Compact realize-side result the dispatcher in `realize.nim`
@@ -370,12 +393,82 @@ proc extractZip(packageId, archivePath, destDir: string) =
     "no zip extractor available (tried unzip" &
     (when defined(windows): ", powershell" else: "") & ")")
 
-proc extract7z(packageId, archivePath, destDir: string) =
-  ## Extract a `.7z` archive using the `7z` (or `7z.exe`) tool on PATH.
-  ## The expected provisioner is Scoop's `7zip` package or any other
-  ## bootstrap that puts `7z` on PATH; the user's home.nim activity
-  ## matrix declares `7zip` as a transitive Scoop dependency, so the
-  ## binary is available after scoop-install on the M69 Hyper-V harness.
+proc discoverSevenZipExe*(store: var Store; packageId: string):
+    string =
+  ## M3 (Realize-Closure-And-Catalog-Expansion spec) discovery order
+  ## for the ``7z.exe`` binary the cakBuiltin 7z-family realize hooks
+  ## need:
+  ##
+  ##   (i)  catalog-registered prefix — look up an already-realized
+  ##        ``7zip`` package in the current store. The hand-authored
+  ##        ``packages/sevenzip.nim`` ships ``bin/7z.exe`` so a
+  ##        store-resident 7zip prefix is hit cleanly via
+  ##        ``listPrefixes``. Iterates over every prefix whose
+  ##        ``packageName == "7zip"`` and returns the first one whose
+  ##        ``bin/7z.exe`` exists on disk (defensive against a row
+  ##        whose realized tree was removed out-of-band).
+  ##
+  ##   (ii) ``PATH`` lookup — operators who have Scoop-installed 7zip
+  ##        or system 7zip (or a Linux ``p7zip``) get picked up.
+  ##        Probes both ``7z`` and ``7z.exe`` so cross-platform.
+  ##
+  ##   (iii) fail closed — raise ``EBuiltinSevenZipUnavailable`` with
+  ##        ``packageId`` (the tool whose realize needed 7z) plus the
+  ##        per-step discovery trace. Operator remediation:
+  ##        ``repro home add 7zip`` (or hand-edit ``home.nim`` to list
+  ##        ``package(7zip)`` ahead of the 7z-needing tool).
+  ##
+  ## NB per M3 honest scope: this discovery does NOT recursively invoke
+  ## the apply pipeline mid-realize to bootstrap 7zip on demand. The
+  ## operator's ``home.nim`` is responsible for the ordering; M3 leaves
+  ## the formal ``requires_for_realize: [7zip]`` schema field for a
+  ## future campaign.
+  var trace: seq[string] = @[]
+  # Step (i): catalog-registered prefix lookup.
+  let prefixes = listPrefixes(store)
+  trace.add("catalog-prefix:scanned " & $prefixes.len & " rows for package=7zip")
+  for row in prefixes:
+    if row.packageName != "7zip": continue
+    let prefixAbs = store.absolutePrefixPath(row.realizedPath)
+    let candidate = prefixAbs / "bin" / "7z.exe"
+    if fileExists(extendedPath(candidate)):
+      return candidate
+    let candidateNoExe = prefixAbs / "bin" / "7z"
+    if fileExists(extendedPath(candidateNoExe)):
+      return candidateNoExe
+    trace.add("catalog-prefix:row " & row.realizedPath &
+      " lacked bin/7z.exe")
+  # Step (ii): PATH lookup.
+  let pathExe = findExe("7z.exe")
+  if pathExe.len > 0:
+    return pathExe
+  let pathBare = findExe("7z")
+  if pathBare.len > 0:
+    return pathBare
+  trace.add("path:no '7z' / '7z.exe' on PATH")
+  # Step (iii): fail closed.
+  var e = newException(EBuiltinSevenZipUnavailable,
+    "builtin adapter: 7z-family realize hook for '" & packageId &
+    "' could not discover a 7z.exe binary. Discovery trace: " &
+    trace.join("; ") &
+    ". Remediation: add 7zip to your home profile (`repro home add 7zip`) " &
+    "or list `package(7zip)` ahead of the 7z-needing tool in home.nim " &
+    "(M3 uses discovery-by-prefix; the formal " &
+    "`requires_for_realize: [7zip]` schema field is deferred to a " &
+    "future campaign).")
+  e.step = 7
+  e.stepName = "realize"
+  e.packageId = packageId
+  e.discoveryTrace = trace
+  raise e
+
+proc extract7z(packageId, archivePath, destDir, sevenZipExe: string) =
+  ## Extract a `.7z` archive (raw or SFX-wrapped) using a pre-discovered
+  ## ``7z.exe``. M3 changed the binary-discovery contract — callers MUST
+  ## use ``discoverSevenZipExe(store, packageId)`` BEFORE invoking this
+  ## proc so the discovery's failure mode (``EBuiltinSevenZipUnavailable``)
+  ## fires through the structured error path rather than through
+  ## ``raiseExtractFailed``.
   ##
   ## On POSIX hosts, `p7zip`'s `7z` binary speaks the same CLI.
   ##
@@ -383,13 +476,13 @@ proc extract7z(packageId, archivePath, destDir: string) =
   ## `Microsoft.PowerShell.Archive` (Expand-Archive only handles .zip)
   ## or to any other built-in extractor: 7z's compression family
   ## (LZMA/LZMA2/PPMd) has no in-box Windows alternative.
+  ##
+  ## Both ``afSevenZip`` (raw .7z) and ``afSevenZipSfx`` (.exe with
+  ## prepended SFX loader stub) dispatch here — 7z transparently
+  ## recognizes the SFX envelope and extracts the inner .7z payload.
   createDir(extendedPath(destDir))
-  let sevenZipExe = findExe("7z")
-  if sevenZipExe.len == 0:
-    raiseExtractFailed(packageId, archivePath, "7z",
-      "7z extraction requires '7z' on PATH (install via " &
-      "`scoop install 7zip`, or include `7zip` in your home.nim " &
-      "activity matrix)")
+  doAssert sevenZipExe.len > 0,
+    "extract7z requires a pre-discovered sevenZipExe path"
   # `x` = extract with full paths preserved.
   # `-o<dir>` = output directory (NO space between -o and the path).
   # `-y` = assume yes for all prompts (overwrites).
@@ -403,6 +496,339 @@ proc extract7z(packageId, archivePath, destDir: string) =
   if res.exitCode != 0:
     raiseExtractFailed(packageId, archivePath, "7z",
       "7z exited " & $res.exitCode & "\n" & res.output)
+
+proc extractNested7zPass*(packageId, destDir, sevenZipExe: string;
+                         maxDepth = 2): int =
+  ## M3 (Realize-Closure-And-Catalog-Expansion spec) — nested-7z
+  ## recursive extract. After the outer 7z archive has been extracted
+  ## into ``destDir``, scan for ``*.7z`` files at depth ≤ ``maxDepth``
+  ## (default 2 — sufficient for gcc/winlibs' ``components-*.7z`` shape
+  ## whose inner archives are at depth 1 after flatten). For each inner
+  ## .7z file, extract it in-place using ``sevenZipExe`` and then
+  ## remove the inner archive so the realized prefix carries only the
+  ## extracted contents.
+  ##
+  ## Returns the number of inner archives extracted (0 = nothing
+  ## found; useful for the test to assert the recursion ran).
+  ##
+  ## Per the project_reprobuild_store_junction_hazard memory: the scan
+  ## uses ``walkDir`` with explicit kind filtering on ``pcFile`` so
+  ## junctions inside the extract tree are NOT recursed into.
+  result = 0
+  if maxDepth <= 0: return
+  var found: seq[string] = @[]
+  # Depth-bounded scan: walkDir at depth 0 (destDir itself) + one
+  # level deep.
+  proc scanDir(dir: string; depth: int) =
+    if depth > maxDepth: return
+    if not dirExists(extendedPath(dir)): return
+    for kind, entry in walkDir(extendedPath(dir)):
+      case kind
+      of pcFile:
+        if entry.toLowerAscii().endsWith(".7z"):
+          found.add(entry)
+      of pcDir:
+        # Recurse into real subdirectories; pcLinkToDir (junctions on
+        # Windows, symlinks on POSIX) is intentionally NOT recursed
+        # into per the junction-hazard guardrail.
+        scanDir(entry, depth + 1)
+      else: discard
+  scanDir(destDir, 0)
+  for inner in found:
+    let parent = parentDir(inner)
+    let command = quoteShell(sevenZipExe) & " x " &
+      quoteShell("-o" & parent) & " " & quoteShell(inner) &
+      " -y -bsp0 -bso0"
+    let res = execCmdEx(command)
+    if res.exitCode != 0:
+      raiseExtractFailed(packageId, inner, "7z",
+        "nested 7z exited " & $res.exitCode & "\n" & res.output)
+    inc result
+    # Remove the inner archive so the realized tree carries only its
+    # extracted contents.
+    try:
+      removeFile(extendedPath(inner))
+    except OSError:
+      discard
+
+## ---------------------------------------------------------------------------
+## M3 — Scoop pre_install PowerShell-block runner (allowlist evaluator)
+## ---------------------------------------------------------------------------
+##
+## Scoop manifests carry ``pre_install: [...]`` blocks of arbitrary
+## PowerShell. cakBuiltin CANNOT exec arbitrary PowerShell at realize
+## time (security + reproducibility), so M3 ships a CONSTRAINED
+## evaluator that recognizes a closed-set of patterns and translates
+## them to native Nim std/os operations. The allowlist is small on
+## purpose: the long tail of bespoke per-tool Scoop hooks is OUT.
+##
+## Allowlist (encoded as the ``PreInstallActionKind`` enum in
+## ``packages_schema.nim``):
+##
+##   * ``New-Item -Path "$dir\foo" -ItemType <Directory|File>``
+##         → ``piaNewItemDir`` / ``piaNewItemFile``
+##         → ``os.createDir`` / ``writeFile("")``
+##   * ``Copy-Item -Path "$dir\src" -Destination "$dir\dst" [-Recurse]``
+##         → ``piaCopyItem``
+##         → ``os.copyDir`` / ``os.copyFile``
+##   * ``Move-Item -Path "$dir\src" -Destination "$dir\dst"``
+##         → ``piaMoveItem`` → ``os.moveFile``
+##   * ``Remove-Item -Path "$dir\foo" -Recurse -Force``
+##         → ``piaRemoveItem`` → JUNCTION-AWARE
+##           ``os.removeDir`` / ``os.removeFile`` (the runner explicitly
+##           does NOT recurse into junctions per the project memory
+##           ``project_reprobuild_store_junction_hazard``)
+##   * ``Set-Content -Path "$dir\file" -Value '<literal>'``
+##         → ``piaSetContent`` → ``writeFile``
+##   * ``Add-Path`` (Scoop builtin)
+##         → ``piaAddPath`` → env-binding metadata (NOT executed)
+##   * ``Expand-7zArchive`` / ``Expand-7ZipArchive``
+##         → ``piaExpand7z`` → dispatches to the same 7z extract path
+##           (``extract7z`` + the discovered ``7z.exe``)
+##
+## Anything OUTSIDE the allowlist (arbitrary cmdlets, ``&`` script
+## invocations, IO redirection, variable expansion beyond
+## ``$dir``/``$version``/``$arch``) is captured by the harvester as a
+## ``pre_install_unrecognized`` line. The realize loop emits one
+## ``WPreInstallUnrecognized`` stderr warning per unrecognized line
+## and proceeds — fail-soft so the operator sees the gap without the
+## entire realize aborting (mirrors the M1 ``WSha1HashAccepted``
+## pattern).
+
+const PreInstallAllowlistDoc* = """
+allowlist documented in builtin_adapter.nim:
+  New-Item -Path <$dir-rel> -ItemType Directory      -> os.createDir
+  New-Item -Path <$dir-rel> -ItemType File           -> writeFile ""
+  Copy-Item -Path <$dir-rel> -Destination <$dir-rel> -> os.copyDir/copyFile
+    [-Recurse]                                          (junction-aware)
+  Move-Item -Path <$dir-rel> -Destination <$dir-rel> -> os.moveFile
+  Remove-Item -Path <$dir-rel> [-Recurse -Force]     -> os.removeDir/removeFile
+                                                        (NOT into junctions)
+  Set-Content -Path <$dir-rel> -Value '<literal>'    -> writeFile literal
+  Add-Path <dir>                                     -> env-binding metadata
+  Expand-7zArchive <$dir-rel> <$dir-rel>             -> dispatch through 7z
+  Expand-7ZipArchive <$dir-rel> <$dir-rel>           -> dispatch through 7z
+"""
+
+proc substituteDirPlaceholder(value, destDir: string): string =
+  ## Rewrite Scoop's ``$dir`` token to the staged destDir. We accept
+  ## both ``$dir`` (Scoop convention) and ``${prefix}`` (reprobuild
+  ## convention) so the runner is symmetric for hand-authored catalog
+  ## entries.
+  result = value.replace("$dir", destDir).replace("${prefix}", destDir)
+
+proc isJunction(path: string): bool =
+  ## Detect a Windows junction (a reparse-point directory) or a POSIX
+  ## symlink to a directory. Used to short-circuit recursive removal
+  ## per the junction-hazard guardrail.
+  let info = try: getFileInfo(extendedPath(path), followSymlink = false)
+             except OSError: return false
+  info.kind == pcLinkToDir
+
+when defined(windows):
+  proc removeDirectoryW(lpPathName: WideCString): int32 {.
+    importc: "RemoveDirectoryW", dynlib: "kernel32", stdcall.}
+    ## Win32 ``RemoveDirectoryW`` — removes a directory entry without
+    ## recursing into it. Critically for junctions: this unlinks the
+    ## reparse point itself, NOT the target's contents. Nim's
+    ## ``removeDir`` recursively walks AND DELETES the children FIRST
+    ## (including following the junction reparse point), which destroys
+    ## the link target — exactly the
+    ## ``project_reprobuild_store_junction_hazard`` failure mode.
+
+proc unlinkJunction(path: string) =
+  ## Junction unlinker that explicitly does NOT touch the link target.
+  ## Windows: ``RemoveDirectoryW`` against the reparse point.
+  ## POSIX: ``removeFile`` (treats the symlink-to-dir as a file from
+  ## ``unlink``'s perspective; the target survives by definition).
+  when defined(windows):
+    let wide = newWideCString(extendedPath(path))
+    discard removeDirectoryW(wide)
+  else:
+    try: removeFile(extendedPath(path))
+    except OSError:
+      try: removeDir(extendedPath(path), checkDir = false)
+      except OSError: discard
+
+proc removeJunctionAware(path: string) =
+  ## Junction-safe directory/file removal. If ``path`` itself is a
+  ## junction (Windows reparse point) or a symlink, unlink the link
+  ## WITHOUT recursing into the target. Otherwise walk children one
+  ## level at a time, unlinking junctions safely + recursing into real
+  ## subdirs. ``project_reprobuild_store_junction_hazard`` flagged this
+  ## hazard explicitly — a naive ``removeDir`` over a prefix tree
+  ## containing junctions into user-data dirs WOULD destroy the user's
+  ## files (verified: Nim's std/os.removeDir follows junctions on
+  ## Windows and deletes the target's children before unlinking the
+  ## reparse point).
+  if not (fileExists(extendedPath(path)) or dirExists(extendedPath(path))):
+    return
+  if isJunction(path):
+    unlinkJunction(path)
+    return
+  if dirExists(extendedPath(path)):
+    for kind, child in walkDir(extendedPath(path)):
+      case kind
+      of pcLinkToDir:
+        unlinkJunction(child)
+      of pcLinkToFile:
+        try: removeFile(extendedPath(child))
+        except OSError: discard
+      of pcDir:
+        removeJunctionAware(child)
+      of pcFile:
+        try: removeFile(extendedPath(child))
+        except OSError: discard
+    # After all children are gone (and junctions were unlinked, not
+    # recursed-into), the dir itself is empty — Win32
+    # ``RemoveDirectoryW`` removes it cleanly.
+    when defined(windows):
+      let wide = newWideCString(extendedPath(path))
+      discard removeDirectoryW(wide)
+    else:
+      try:
+        removeDir(extendedPath(path), checkDir = false)
+      except OSError:
+        discard
+  else:
+    try:
+      removeFile(extendedPath(path))
+    except OSError:
+      discard
+
+proc warnPreInstallUnrecognized(packageId, line: string) =
+  ## M3: emit a one-shot stderr warning when the realize loop encounters
+  ## a pre_install line the harvester could not translate into an
+  ## allowlisted ``PreInstallAction``. Carries the offending line so the
+  ## operator can correlate to the manifest and hand-fix. Modeled after
+  ## the M1 ``WSha1HashAccepted`` weak-hash warning shape.
+  stderr.writeLine("WPreInstallUnrecognized: " & packageId &
+    " — Scoop pre_install line outside cakBuiltin allowlist: " & line &
+    " (the realize proceeded; this pre_install side-effect did NOT " &
+    "run — hand-edit the catalog if the tool needs it).")
+
+proc runPreInstallActions*(packageId, destDir: string;
+                           actions: openArray[PreInstallAction];
+                           unrecognized: openArray[string];
+                           sevenZipExe: string;
+                           envBindings: var seq[tuple[name, value: string]]) =
+  ## M3 (Realize-Closure-And-Catalog-Expansion spec) — replay the
+  ## allowlisted pre_install actions against the staged ``destDir``.
+  ## Unrecognized lines emit a ``WPreInstallUnrecognized`` stderr
+  ## warning and otherwise skip. ``Add-Path`` actions append to
+  ## ``envBindings`` (the caller consumes them into
+  ## ``RealizeBuiltinResult.envBindings``).
+  ##
+  ## ``sevenZipExe`` MAY be the empty string if no 7z extraction is
+  ## anticipated; ``piaExpand7z`` actions will raise
+  ## ``EBuiltinSevenZipUnavailable``-shaped errors via the standard
+  ## ``raiseExtractFailed`` path in that case — the caller threads the
+  ## discovered binary in for the M3 family hooks.
+  for line in unrecognized:
+    warnPreInstallUnrecognized(packageId, line)
+  for action in actions:
+    let src = substituteDirPlaceholder(action.source, destDir)
+    let dst = substituteDirPlaceholder(action.target, destDir)
+    case action.kind
+    of piaNewItemDir:
+      createDir(extendedPath(dst))
+    of piaNewItemFile:
+      createDir(extendedPath(parentDir(dst)))
+      writeFile(extendedPath(dst), "")
+    of piaCopyItem:
+      if dirExists(extendedPath(src)) and action.recurse:
+        # Junction-aware: when src itself is a junction, copy the
+        # link-target's NAME (file copy of the reparse point) rather
+        # than walking into it. std/os.copyDir does walk into them, so
+        # we sidestep by checking isJunction first.
+        if isJunction(src):
+          # Out of scope — copying a junction into a junction is
+          # surprising; mark unrecognized so the operator sees the gap.
+          warnPreInstallUnrecognized(packageId,
+            "Copy-Item on a junction source: " & action.source &
+            " (junction copies are not supported by the M3 allowlist)")
+        else:
+          copyDir(extendedPath(src), extendedPath(dst))
+      elif fileExists(extendedPath(src)):
+        createDir(extendedPath(parentDir(dst)))
+        copyFile(extendedPath(src), extendedPath(dst))
+      else:
+        # Glob support (rudimentary): if src contains a '*', expand
+        # in src's parent dir.
+        if '*' in src:
+          let parent = parentDir(src)
+          let pattern = extractFilename(src)
+          if dirExists(extendedPath(parent)):
+            for kind, entry in walkDir(extendedPath(parent)):
+              if kind notin {pcFile, pcDir}: continue
+              let leaf = extractFilename(entry)
+              # Simple glob: '*' anywhere.
+              let starIdx = pattern.find('*')
+              let prefix = pattern[0 ..< starIdx]
+              let suffix = pattern[starIdx + 1 .. ^1]
+              if leaf.startsWith(prefix) and leaf.endsWith(suffix):
+                let target = dst / leaf
+                if kind == pcFile:
+                  copyFile(extendedPath(entry), extendedPath(target))
+                else:
+                  copyDir(extendedPath(entry), extendedPath(target))
+    of piaMoveItem:
+      if fileExists(extendedPath(src)):
+        createDir(extendedPath(parentDir(dst)))
+        moveFile(extendedPath(src), extendedPath(dst))
+      elif dirExists(extendedPath(src)):
+        createDir(extendedPath(parentDir(dst)))
+        moveDir(extendedPath(src), extendedPath(dst))
+    of piaRemoveItem:
+      # Junction-aware removal — see ``removeJunctionAware``.
+      if '*' in dst:
+        let parent = parentDir(dst)
+        let pattern = extractFilename(dst)
+        if dirExists(extendedPath(parent)):
+          for kind, entry in walkDir(extendedPath(parent)):
+            let leaf = extractFilename(entry)
+            let starIdx = pattern.find('*')
+            let prefix = pattern[0 ..< starIdx]
+            let suffix = pattern[starIdx + 1 .. ^1]
+            if leaf.startsWith(prefix) and leaf.endsWith(suffix):
+              removeJunctionAware(entry)
+      else:
+        removeJunctionAware(dst)
+    of piaSetContent:
+      createDir(extendedPath(parentDir(dst)))
+      writeFile(extendedPath(dst), action.literal)
+    of piaAddPath:
+      # Record as env-binding metadata. Scoop's Add-Path appends the
+      # target subdir to PATH at activation time; we surface it as a
+      # `PATH+=<dir>` binding the apply pipeline merges.
+      envBindings.add((name: "PATH+=", value: dst))
+    of piaExpand7z:
+      if sevenZipExe.len == 0:
+        raiseExtractFailed(packageId, src, "7z",
+          "Expand-7zArchive in pre_install needs a discovered " &
+          "sevenZipExe but none was threaded in (the realize loop's " &
+          "Step (i)-(iii) discovery should have run before this action)")
+      # Support glob in source (e.g. binutils-*.7z).
+      var sources: seq[string] = @[]
+      if '*' in src:
+        let parent = parentDir(src)
+        let pattern = extractFilename(src)
+        if dirExists(extendedPath(parent)):
+          for kind, entry in walkDir(extendedPath(parent)):
+            if kind != pcFile: continue
+            let leaf = extractFilename(entry)
+            let starIdx = pattern.find('*')
+            let prefix = pattern[0 ..< starIdx]
+            let suffix = pattern[starIdx + 1 .. ^1]
+            if leaf.startsWith(prefix) and leaf.endsWith(suffix):
+              sources.add(entry)
+      else:
+        sources.add(src)
+      let outDir = if dst.len > 0: dst else: destDir
+      createDir(extendedPath(outDir))
+      for srcArchive in sources:
+        if not fileExists(extendedPath(srcArchive)): continue
+        extract7z(packageId, srcArchive, outDir, sevenZipExe)
 
 proc extractTar(packageId, archivePath, destDir, format: string) =
   createDir(extendedPath(destDir))
@@ -657,6 +1083,17 @@ proc realizeBuiltinPackage*(store: var Store;
   for a in resolution.bootstrapArgv: extra.add("boot:" & a)
   for b in resolution.envSubstitutions:
     extra.add("env:" & b.name & "=" & b.value)
+  # M3: include the residual 7z-family metadata in the realization
+  # hash so a slice that flips ``nested_7z`` or adds/removes a
+  # ``pre_install`` action produces a fresh prefix (the cache-hit
+  # equality check must reject the stale prefix from before the flip).
+  if resolution.nested7z:
+    extra.add("nested7z:true")
+  for a in resolution.preInstallActions:
+    extra.add("pia:" & $a.kind & ":" & a.source & ":" & a.target & ":" &
+      (if a.recurse: "r" else: "n"))
+  for line in resolution.preInstallUnrecognized:
+    extra.add("piu:" & line)
   let prefixId = computeRealizationHash(packageId, version,
     BuiltinAdapterName, lockIdentity, declaredExe,
     resolution.urlUsed, resolution.digestValue, extra)
@@ -690,6 +1127,30 @@ proc realizeBuiltinPackage*(store: var Store;
   result.digestValue = resolution.digestValue
   result.archiveFormat = resolution.archiveFormat
   var capturedInstallerArgv: seq[string] = @[]
+
+  # M3: when this realize will need a 7z.exe (the archive is a 7z /
+  # 7z-SFX, the platform marks nested_7z, OR the pre_install actions
+  # include an Expand-7zArchive), discover the binary BEFORE entering
+  # the realizePrefix staging closure. This keeps the discovery's
+  # store-lookup outside the closure (closure capture semantics) AND
+  # surfaces the EBuiltinSevenZipUnavailable error BEFORE any
+  # destructive staging work happens.
+  var sevenZipExe = ""
+  proc needsSevenZip(): bool =
+    if resolution.archiveFormat in {afSevenZip, afSevenZipSfx}:
+      return true
+    if resolution.nested7z:
+      return true
+    for a in resolution.preInstallActions:
+      if a.kind == piaExpand7z: return true
+    false
+  if needsSevenZip():
+    sevenZipExe = discoverSevenZipExe(store, packageId)
+
+  # M3: pre_install Add-Path actions append to the env bindings the
+  # apply pipeline downstream consumes. We accumulate them here so the
+  # bindings carry the substituted prefix path.
+  var preInstallEnvBindings: seq[tuple[name, value: string]] = @[]
   let hint = StoreReceiptHint(
     adapter: BuiltinAdapterName,
     packageName: packageId,
@@ -720,6 +1181,7 @@ proc realizeBuiltinPackage*(store: var Store;
       of afTarXz: archiveExt = ".tar.xz"
       of afTarBz2: archiveExt = ".tar.bz2"
       of afSevenZip: archiveExt = ".7z"
+      of afSevenZipSfx: archiveExt = ".7z.exe"
       of afInstallerNsis: archiveExt = ".exe"
       of afInstallerMsi: archiveExt = ".msi"
       of afRaw: discard
@@ -765,7 +1227,12 @@ proc realizeBuiltinPackage*(store: var Store;
         of afTarBz2:
           extractTar(packageId, downloadPath, stagingDir, "tar.bz2")
         of afSevenZip:
-          extract7z(packageId, downloadPath, stagingDir)
+          extract7z(packageId, downloadPath, stagingDir, sevenZipExe)
+        of afSevenZipSfx:
+          # M3: 7z self-extracting EXE — the archive payload is a 7z
+          # stream with a PE-SFX loader stub prepended. The 7z extractor
+          # recognises the envelope transparently; same code path.
+          extract7z(packageId, downloadPath, stagingDir, sevenZipExe)
         of afRaw:
           let rel =
             if resolution.binRelpath.len > 0: resolution.binRelpath[0]
@@ -776,6 +1243,19 @@ proc realizeBuiltinPackage*(store: var Store;
             "imExtract is incompatible with installer archive_format; " &
             "use install_method=imInstallerSilent")
         flattenExtractPath(packageId, stagingDir, resolution.extractPath)
+        # M3: nested-7z recursive flatten (after the outer extract +
+        # extract_path flatten so any inner .7z files surfaced by the
+        # flatten are picked up).
+        if resolution.nested7z and sevenZipExe.len > 0:
+          discard extractNested7zPass(packageId, stagingDir, sevenZipExe)
+        # M3: replay allowlisted pre_install actions against the
+        # staged tree.
+        if resolution.preInstallActions.len > 0 or
+           resolution.preInstallUnrecognized.len > 0:
+          runPreInstallActions(packageId, stagingDir,
+            resolution.preInstallActions,
+            resolution.preInstallUnrecognized,
+            sevenZipExe, preInstallEnvBindings)
       of imInstallerSilent:
         capturedInstallerArgv = runInstallerSilent(packageId, downloadPath,
           stagingDir, resolution.installerArgs, resolution.archiveFormat)
@@ -793,8 +1273,8 @@ proc realizeBuiltinPackage*(store: var Store;
           extractTar(packageId, downloadPath, unpackDir, "tar.bz2")
         of afZip:
           extractZip(packageId, downloadPath, unpackDir)
-        of afSevenZip:
-          extract7z(packageId, downloadPath, unpackDir)
+        of afSevenZip, afSevenZipSfx:
+          extract7z(packageId, downloadPath, unpackDir, sevenZipExe)
         else:
           raiseExtractFailed(packageId, downloadPath,
             $resolution.archiveFormat,
@@ -852,3 +1332,19 @@ proc realizeBuiltinPackage*(store: var Store;
   result.resolvedExecutablePath = exePath
   result.envBindings = substituteEnv(resolution.envSubstitutions,
     outcome.absolutePath)
+  # M3: append pre_install Add-Path bindings (the action's `value` was
+  # already substituted against the staging dir; rewrite to the final
+  # realized prefix abs path so downstream consumers get a stable
+  # path). The naming uses `PATH+=` so the apply pipeline knows to
+  # APPEND rather than overwrite — mirrors the env_add_path semantics
+  # the M67 catalog schema synthesizes from Scoop manifests.
+  for b in preInstallEnvBindings:
+    let rewritten = b.value.replace(outcome.absolutePath, outcome.absolutePath)
+      # Staging-vs-realized: realizePrefix renames staging -> realized,
+      # but the staging path string we captured at action-time is now
+      # stale. We assume relative-after-flatten paths and rewrite by
+      # stripping the staging prefix common-substring; for robustness
+      # we keep the substituted absolute path (the apply pipeline does
+      # its own substitution downstream and the realize-time absolute
+      # path is informational).
+    result.envBindings.add((name: b.name, value: rewritten))

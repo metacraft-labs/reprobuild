@@ -64,6 +64,13 @@ import ./packages/python3
 # M1 (Realize-Closure spec) — Pascal toolchain graduation. fpc's Scoop
 # manifest ships a sha1 digest, so the schema extension landed first.
 import ./packages/fpc
+# M3 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip catalog
+# prerequisite. Registered under the operator-facing tool name ``7zip``
+# (string); the underlying packages/<file>.nim is sevenzip.nim because
+# Nim identifiers cannot start with a digit. Hand-authored against the
+# upstream standalone 7zr.exe — see packages/sevenzip.nim's header for
+# the rationale + the operator-visible re-harvest caveat.
+import ./packages/sevenzip
 
 export packages_schema
 
@@ -105,6 +112,11 @@ const RegisteredTools* = [
   "python3",
   # M1 (Realize-Closure spec) — Pascal toolchain (sha1 weak-hash).
   "fpc",
+  # M3 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip as a
+  # catalog package. Discovery-by-prefix bootstraps the cakBuiltin 7z
+  # family hooks (SFX flatten + nested 7z + Scoop pre_install runner)
+  # without requiring a host PATH 7z.
+  "7zip",
 ]
 
 proc getCatalog*(toolName: string):
@@ -151,6 +163,8 @@ proc getCatalog*(toolName: string):
   of "python3":    selectIfNonEmpty(python3Catalog)
   # M1 (Realize-Closure spec) — Pascal toolchain.
   of "fpc":        selectIfNonEmpty(fpcCatalog)
+  # M3 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip.
+  of "7zip":       selectIfNonEmpty(sevenzipCatalog)
   else:
     none(seq[VersionedProvisioning])
 

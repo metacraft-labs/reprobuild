@@ -72,11 +72,20 @@ type
     ## "download a single binary, no extraction" case (e.g. a static
     ## ``rg.exe``). ``afInstallerNsis`` / ``afInstallerMsi`` mark
     ## installers that run silently via ``imInstallerSilent``.
+    ##
+    ## M3 (Realize-Closure-And-Catalog-Expansion spec) added
+    ## ``afSevenZipSfx`` — a 7z self-extracting archive (``.7z.exe`` /
+    ## ``.exe#/dl.7z`` shape). The payload is structurally a 7z archive
+    ## with a PE-SFX loader stub prepended; the 7z extractor transparently
+    ## handles both raw .7z and SFX-wrapped .7z, so the realize-time
+    ## dispatch is identical to ``afSevenZip`` plus the SFX classification
+    ## marker.
     afZip = "zip"
     afTarGz = "tar.gz"
     afTarXz = "tar.xz"
     afTarBz2 = "tar.bz2"
     afSevenZip = "7z"
+    afSevenZipSfx = "7z-sfx"
     afInstallerNsis = "installer-nsis"
     afInstallerMsi = "installer-msi"
     afRaw = "raw"
@@ -129,6 +138,47 @@ type
                            ## the M64 realize loop emits
                            ## ``WSha1HashAccepted`` to stderr.
     extract_path*: string  ## inner-dir to strip; "" = none
+    nested_7z*: bool       ## M3: when true, after the outer extraction
+                           ## the realize loop scans the extract dir for
+                           ## ``*.7z`` files and recursively extracts each
+                           ## in place (depth-bounded). Used for the
+                           ## gcc/winlibs ``components-*.7z`` shape whose
+                           ## payload is itself a sequence of inner .7z
+                           ## archives (binutils + mingw-w64+gcc). The
+                           ## harvester sets this when the manifest's
+                           ## ``pre_install`` block explicitly performs the
+                           ## nested extraction.
+
+  PreInstallActionKind* = enum
+    ## M3: a closed set of ``pre_install`` PowerShell shapes the
+    ## cakBuiltin realize loop recognizes and replays programmatically
+    ## (NOT via exec'ing PowerShell — that surface is too broad). The
+    ## harvester translates matching ``pre_install`` lines into these
+    ## actions; unmatched lines are captured verbatim in
+    ## ``pre_install_unrecognized`` and surfaced as a
+    ## ``WPreInstallUnrecognized`` warning at realize time.
+    piaNewItemDir = "new-item-dir"        ## New-Item -ItemType Directory
+    piaNewItemFile = "new-item-file"      ## New-Item -ItemType File
+    piaCopyItem = "copy-item"             ## Copy-Item -Path A -Destination B [-Recurse]
+    piaMoveItem = "move-item"             ## Move-Item -Path A -Destination B
+    piaRemoveItem = "remove-item"         ## Remove-Item -Path A [-Recurse -Force]
+    piaSetContent = "set-content"         ## Set-Content -Path A -Value "<literal>"
+    piaAddPath = "add-path"               ## Scoop Add-Path builtin → env metadata only
+    piaExpand7z = "expand-7z"             ## Expand-7zArchive / Expand-7ZipArchive
+
+  PreInstallAction* = object
+    ## M3: one structured ``pre_install`` action the realize loop
+    ## replays. Path arguments are stored ``$dir``-relative (or
+    ## ``${prefix}``-rewritten); the runner substitutes against the
+    ## staged extract directory at apply time. ``source`` / ``target``
+    ## are role-specific (Copy/Move use both; Remove + NewItem use
+    ## ``target``; Set-Content uses ``target`` + ``literal``; Expand-7z
+    ## uses ``source`` + ``target``).
+    kind*: PreInstallActionKind
+    source*: string          ## $dir-relative source (may contain * glob)
+    target*: string          ## $dir-relative target
+    recurse*: bool           ## Copy-Item -Recurse / Remove-Item -Recurse
+    literal*: string         ## Set-Content -Value literal
 
   VersionedProvisioning* = object
     ## One coexisting version of a tool. The campaign author writes
@@ -149,6 +199,25 @@ type
                                       ## reference the realized prefix
                                       ## via ``${prefix}`` (the M64
                                       ## realizer substitutes)
+    pre_install_actions*: seq[PreInstallAction]
+                                      ## M3: ordered list of allowlisted
+                                      ## ``pre_install`` actions the realize
+                                      ## loop replays AFTER extraction. The
+                                      ## harvester populates this from the
+                                      ## Scoop manifest's ``pre_install``
+                                      ## block when every line matches the
+                                      ## allowlist; lines that do not match
+                                      ## land in ``pre_install_unrecognized``.
+    pre_install_unrecognized*: seq[string]
+                                      ## M3: ``pre_install`` lines the
+                                      ## harvester could not translate into
+                                      ## an allowlisted ``PreInstallAction``.
+                                      ## The realize loop emits one
+                                      ## ``WPreInstallUnrecognized`` warning
+                                      ## per line at apply time so the
+                                      ## operator sees the gap. Realize does
+                                      ## NOT fail closed on this — the rest
+                                      ## of the install proceeds.
 
 # ---------------------------------------------------------------------------
 # Construction helpers
@@ -156,11 +225,13 @@ type
 
 proc initPlatformBinary*(cpu: PlatformCpu; os: PlatformOs; url: string;
                          sha256 = ""; sha512 = ""; sha1 = "";
-                         extract_path = ""): PlatformBinary =
+                         extract_path = "";
+                         nested_7z = false): PlatformBinary =
   PlatformBinary(
     cpu: cpu, os: os, url: url,
     sha256: sha256, sha512: sha512, sha1: sha1,
-    extract_path: extract_path)
+    extract_path: extract_path,
+    nested_7z: nested_7z)
 
 proc initVersionedProvisioning*(version: string;
                                 archive_format: ArchiveFormat;
@@ -170,7 +241,9 @@ proc initVersionedProvisioning*(version: string;
                                 installer_args: seq[string] = @[];
                                 pacman_packages: seq[string] = @[];
                                 bootstrap_argv: seq[string] = @[];
-                                env: openArray[(string, string)] = []):
+                                env: openArray[(string, string)] = [];
+                                pre_install_actions: seq[PreInstallAction] = @[];
+                                pre_install_unrecognized: seq[string] = @[]):
     VersionedProvisioning =
   result = VersionedProvisioning(
     version: version,
@@ -181,7 +254,9 @@ proc initVersionedProvisioning*(version: string;
     installer_args: installer_args,
     pacman_packages: pacman_packages,
     bootstrap_argv: bootstrap_argv,
-    env: initTable[string, string]())
+    env: initTable[string, string](),
+    pre_install_actions: pre_install_actions,
+    pre_install_unrecognized: pre_install_unrecognized)
   for pair in env:
     result.env[pair[0]] = pair[1]
 
@@ -443,9 +518,21 @@ proc archiveFormatIdent(af: ArchiveFormat): string =
   of afTarXz: "afTarXz"
   of afTarBz2: "afTarBz2"
   of afSevenZip: "afSevenZip"
+  of afSevenZipSfx: "afSevenZipSfx"
   of afInstallerNsis: "afInstallerNsis"
   of afInstallerMsi: "afInstallerMsi"
   of afRaw: "afRaw"
+
+proc preInstallActionKindIdent*(pia: PreInstallActionKind): string =
+  case pia
+  of piaNewItemDir: "piaNewItemDir"
+  of piaNewItemFile: "piaNewItemFile"
+  of piaCopyItem: "piaCopyItem"
+  of piaMoveItem: "piaMoveItem"
+  of piaRemoveItem: "piaRemoveItem"
+  of piaSetContent: "piaSetContent"
+  of piaAddPath: "piaAddPath"
+  of piaExpand7z: "piaExpand7z"
 
 proc installMethodIdent(im: InstallMethod): string =
   case im
@@ -457,14 +544,27 @@ proc installMethodIdent(im: InstallMethod): string =
 proc serializePlatformBinary(pb: PlatformBinary): string =
   # Field order: sha256, sha512, sha1 — sha1 last to make it
   # visually clear that it's the deprecated branch (M1 weak-hash
-  # acceptance).
+  # acceptance). ``nested_7z`` (M3) is emitted ONLY when true so the
+  # vast majority of catalog entries (all non-nested archives) keep
+  # their compact one-line shape and the existing harvester output
+  # bytes-equal-trees against the M67/M68 baseline.
   result = "PlatformBinary(cpu: " & cpuIdent(pb.cpu) &
     ", os: " & osIdent(pb.os) &
     ", url: " & escapeString(pb.url) &
     ", sha256: " & escapeString(pb.sha256) &
     ", sha512: " & escapeString(pb.sha512) &
     ", sha1: " & escapeString(pb.sha1) &
-    ", extract_path: " & escapeString(pb.extract_path) & ")"
+    ", extract_path: " & escapeString(pb.extract_path)
+  if pb.nested_7z:
+    result.add(", nested_7z: true")
+  result.add(")")
+
+proc serializePreInstallAction*(pia: PreInstallAction): string =
+  result = "PreInstallAction(kind: " & preInstallActionKindIdent(pia.kind) &
+    ", source: " & escapeString(pia.source) &
+    ", target: " & escapeString(pia.target) &
+    ", recurse: " & (if pia.recurse: "true" else: "false") &
+    ", literal: " & escapeString(pia.literal) & ")"
 
 proc serializeAsCode*(vp: VersionedProvisioning): string =
   ## Emit a Nim source fragment that constructs an equivalent
@@ -515,4 +615,24 @@ proc serializeAsCode*(vp: VersionedProvisioning): string =
   for i, k in keys:
     if i > 0: result.add(", ")
     result.add(escapeString(k) & ": " & escapeString(vp.env[k]))
-  result.add("}.toTable())")
+  result.add("}.toTable()")
+  # M3: emit pre_install_actions + pre_install_unrecognized ONLY when
+  # non-empty, so the M67/M68 baseline (every existing entry has
+  # neither) round-trips byte-identical through the harvester. Newer
+  # entries with actions/unrecognized lines render an explicit
+  # multi-line tail.
+  if vp.pre_install_actions.len > 0:
+    result.add(",\n  pre_install_actions: @[\n")
+    for i, pia in vp.pre_install_actions:
+      result.add("    " & serializePreInstallAction(pia))
+      if i + 1 < vp.pre_install_actions.len:
+        result.add(",")
+      result.add("\n")
+    result.add("  ]")
+  if vp.pre_install_unrecognized.len > 0:
+    result.add(",\n  pre_install_unrecognized: @[")
+    for i, line in vp.pre_install_unrecognized:
+      if i > 0: result.add(", ")
+      result.add(escapeString(line))
+    result.add("]")
+  result.add(")")

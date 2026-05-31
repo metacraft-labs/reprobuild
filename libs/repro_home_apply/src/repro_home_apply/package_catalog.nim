@@ -145,6 +145,13 @@ type
     pacmanPackages*: seq[string]
     bootstrapArgv*: seq[string]
     envSubstitutions*: seq[tuple[name, value: string]]
+    # M3 (Realize-Closure-And-Catalog-Expansion) — residual 7z family
+    # metadata. ``nested7z`` is per-platform (carried out of the
+    # selected ``PlatformBinary``); ``preInstallActions`` and
+    # ``preInstallUnrecognized`` are per-version (cross-platform).
+    nested7z*: bool
+    preInstallActions*: seq[PreInstallAction]
+    preInstallUnrecognized*: seq[string]
     # M65: per-resolution chain trace. Populated by `chainResolvePackage`
     # to record every adapter consulted, in order, with each adapter's
     # outcome + skip reason. On a successful resolution the trace ends
@@ -683,6 +690,10 @@ proc resolveBuiltinPackage*(packageId: string;
   result.resolution.installerArgs = picked.installer_args
   result.resolution.pacmanPackages = picked.pacman_packages
   result.resolution.bootstrapArgv = picked.bootstrap_argv
+  # M3: thread the residual 7z-family metadata through.
+  result.resolution.nested7z = pb.binary.nested_7z
+  result.resolution.preInstallActions = picked.pre_install_actions
+  result.resolution.preInstallUnrecognized = picked.pre_install_unrecognized
   # Use the first bin_relpath as the executable name (leaf only).
   if picked.bin_relpath.len > 0:
     result.resolution.executableName = picked.bin_relpath[0].extractFilename

@@ -5,15 +5,24 @@
 ## adapter on Windows. Re-harvest emits ONLY the catalog half;
 ## re-attach the Nix block by hand if you regenerate.
 ##
-## **Known M69 realize-time gaps.** Git-for-Windows ships as a
-## ``PortableGit-X-64-bit.7z.exe`` self-extracting archive that
-## Scoop downloads as ``dl.7z`` (via the ``#/dl.7z`` rename suffix)
-## and unpacks as a 7z archive — M64's cakBuiltin currently raises
-## ``EBuiltinExtractFailed`` on ``afSevenZip``. The manifest also
-## declares ``pre_install`` (restore persisted ``etc/gitconfig``) and
-## ``post_install`` (emit ``install-context.reg`` template files) hooks
-## that the harvester silently drops; a freshly-realized prefix will
-## ship ``bin/git.exe`` without the persisted system-level config.
+## **M3 update (Realize-Closure-And-Catalog-Expansion spec).** The
+## previously-documented M69 realize-time gap for git closed via M3:
+## the harvester now classifies git's ``PortableGit-X-64-bit.7z.exe``
+## URL as ``afSevenZipSfx`` and the realize loop dispatches through
+## the same 7z extractor (which transparently handles SFX-wrapped 7z
+## streams). The ``pre_install`` block (restore persisted
+## etc/gitconfig from ``$persist_dir``) is rejected by the cakBuiltin
+## allowlist — Scoop's ``$persist_dir`` is a Scoop-specific layout that
+## does not map to reprobuild's store. The full pre_install body lands
+## in ``pre_install_unrecognized`` and the realize loop emits a
+## ``WPreInstallUnrecognized`` warning per line at apply time so the
+## operator sees the gap. A freshly-realized git prefix carries
+## ``bin/git.exe`` + the full PortableGit tree WITHOUT the persisted
+## system-level config — fine for reprobuild's CI/dev use cases (the
+## tools that need system git config can pin a per-user gitconfig via
+## ``repro home apply`` env bindings). The ``post_install``
+## install-context.reg writes (Windows system-state mutation) remain
+## deferred per the campaign's system-vs-home boundary.
 
 import std/tables
 import repro_project_dsl
@@ -31,7 +40,7 @@ package git:
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 # ---------------------------------------------------------------------------
-# M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
+# M3-extended bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
 # Harvested from bucket: ScoopInstaller/Main
 # Versions (newest-first): 2.54.0
 # ---------------------------------------------------------------------------
@@ -39,15 +48,16 @@ package git:
 let gitCatalog* = @[
   VersionedProvisioning(
     version: "2.54.0",
-    archive_format: afSevenZip,
+    archive_format: afSevenZipSfx,
     install_method: imExtract,
     bin_relpath: @["bin\\sh.exe", "bin\\git.exe", "git-bash.exe", "usr\\bin\\gpg.exe", "usr\\bin\\gpg-agent.exe", "usr\\bin\\gpgconf.exe", "usr\\bin\\gpg-connect-agent.exe", "usr\\bin\\pinentry.exe"],
     platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe#/dl.7z", sha256: "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311", sha512: "", extract_path: ""),
-      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-arm64.7z.exe#/dl.7z", sha256: "f8e92cd3359fcbb96998cfd606a536ccc6dbfb23c04e12b29042f9ba45b6b0c7", sha512: "", extract_path: "")
+      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe#/dl.7z", sha256: "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311", sha512: "", sha1: "", extract_path: ""),
+      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-arm64.7z.exe#/dl.7z", sha256: "f8e92cd3359fcbb96998cfd606a536ccc6dbfb23c04e12b29042f9ba45b6b0c7", sha512: "", sha1: "", extract_path: "")
     ],
     installer_args: @[],
     pacman_packages: @[],
     bootstrap_argv: @[],
-    env: {"GIT_INSTALL_ROOT": "${prefix}"}.toTable())
+    env: {"GIT_INSTALL_ROOT": "${prefix}"}.toTable(),
+    pre_install_unrecognized: @["$config_path = Join-Path -Path $dir -ChildPath 'etc\\gitconfig'", "$config_path_persisted = Join-Path -Path $persist_dir -ChildPath 'etc\\gitconfig'", "if (Test-Path -LiteralPath $config_path_persisted -PathType Leaf) {", "    info \"Restoring system-level config from $config_path_persisted...\"", "    Copy-Item -Path $config_path_persisted -Destination $config_path -Force", "    info \"Adjusting paths in $config_path...\"", "    (Get-Content -Path $config_path -Encoding UTF8) -replace '(?<=git/)[\\d.]+(?=/)', $version | Set-Content -Path $config_path -Encoding UTF8", "}"])
 ]
