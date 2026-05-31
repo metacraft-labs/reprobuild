@@ -1,21 +1,34 @@
 <#
-  run-wsl-m69-posix.ps1 - HOST-SIDE runner for the M69 POSIX
+  run-wsl-m69-posix.ps1 - HOST-SIDE runner for the M69/M83 POSIX
   destructive-gate WSL harness.
 
   Creates a THROWAWAY Ubuntu 22.04 WSL distro (imported from the
-  official cloud-image rootfs tarball), runs all FOUR M69 Linux
-  destructive gates inside it sequentially in ONE distro session
-  (provision once, build + run each gate with its own
-  REPRO_M69_*_VM=1 env var, capture per-gate stdout/stderr/exit),
-  copies the output to D:\metacraft\wsl-m69-posix-out\, and
-  **unregisters the distro in a finally block** so a gate failure
-  does NOT leak a stale distro.
+  official cloud-image rootfs tarball), runs the M69 baseline Linux
+  destructive gates AND the M83 step-13 post-M69 / M83 Linux driver
+  gates inside it sequentially in ONE distro session (provision once,
+  build + run each gate with its own REPRO_M69_*_VM=1 env var,
+  capture per-gate stdout/stderr/exit), copies the output to
+  D:\metacraft\wsl-m69-posix-out\, and **unregisters the distro in a
+  finally block** so a gate failure does NOT leak a stale distro.
 
-  Gates exercised (all in one distro session):
+  Baseline M69 gates (all in one distro session):
     - passwd.user             (REPRO_M69_PASSWD_VM=1)
     - fs.systemFile           (REPRO_M69_FS_VM=1)
     - env.systemVariable      (REPRO_M69_ENV_VM=1)
     - systemd.systemUnit      (REPRO_M69_SYSTEMD_VM=1)
+
+  M83 step 13 gates (system-scope post-M69 + home-scope POSIX):
+    - linux.sysctl / polkitRule / sudoersRule / tmpfilesRule /
+      nixDaemonSetting / udevRule / firewallRule
+    - systemd.systemTimer
+    - os.timezone (POSIX) / os.hostname (POSIX) / passwd.group
+    - fs.userFile (POSIX) / fs.managedBlock (POSIX) /
+      env.userPath (POSIX) / shell.integration (POSIX)
+    - linux.dconfKey / linux.kdeConfigKey / systemd.userUnit
+  Gates that need PID-1 systemd / live dbus / live nftables kernel
+  hooks self-detect the missing prereq and write `SKIP: <gate>` to
+  the sentinel file rather than failing the harness; their real-
+  runtime exercise is deferred to a Hyper-V / real-Linux VM.
 
   HOST SAFETY: this script only ever writes inside three scoped dirs:
       D:\metacraft\wsl-m69-posix-cache\  (rootfs + Nim tarball cache)
@@ -42,7 +55,11 @@
 
 [CmdletBinding()]
 param(
-  [int]$TimeoutMinutes = 45,
+  # M83 step 13 raised the gate count from 4 to ~22; each gate's nim
+  # compile takes ~30-60 s plus a few seconds to run, so the new
+  # ceiling is ~30 min wall clock. 60 min default leaves headroom for
+  # a cold first run (rootfs download + apt-get + Nim extract).
+  [int]$TimeoutMinutes = 60,
   [switch]$KeepDistro
 )
 

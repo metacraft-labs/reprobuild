@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 #
 # provision-and-run-m69-posix.sh - runs INSIDE a throwaway Ubuntu 22.04
-# WSL distro to exercise the FOUR M69 Linux destructive gates:
+# WSL distro to exercise the M69 Linux destructive gates AND the
+# post-M69 / M83 Linux driver gates (M83 step 13).
+#
+# Baseline M69 gates (4):
 #
 #   tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim
 #       REPRO_M69_PASSWD_VM=1   - real useradd / usermod / userdel
@@ -15,9 +18,44 @@
 #                                 `enable --now`, see the gate header
 #                                 for the WSL systemd-as-PID-1 rationale)
 #
-# The non-destructive halves of every gate already pass on every host;
-# this script's job is the real-mutation half for all four in ONE
-# distro session. The script:
+# Post-M69 / M83 system-scope driver gates (added by step 13):
+#
+#   linux.sysctl              REPRO_M69_SYSCTL_VM
+#   linux.polkitRule          REPRO_M69_POLKIT_VM
+#   linux.sudoersRule         REPRO_M69_SUDOERS_VM
+#   linux.tmpfilesRule        REPRO_M69_TMPFILES_VM
+#   linux.nixDaemonSetting    REPRO_M69_NIX_VM
+#   systemd.systemTimer       REPRO_M69_SYSTEMD_TIMER_VM
+#   linux.udevRule            REPRO_M69_UDEV_VM
+#   linux.firewallRule        REPRO_M69_LINUX_FIREWALL_VM
+#   os.timezone (POSIX)       REPRO_M69_OS_TIMEZONE_VM
+#   os.hostname (POSIX)       REPRO_M69_OS_HOSTNAME_VM
+#   passwd.group              REPRO_M69_PASSWD_GROUP_VM
+#
+# M68 / M83 home-scope driver gates added by step 13:
+#
+#   fs.userFile (POSIX)       REPRO_M69_FS_USER_FILE_VM
+#   fs.managedBlock (POSIX)   REPRO_M69_FS_MANAGED_BLOCK_VM
+#   env.userPath (POSIX)      REPRO_M69_ENV_USER_PATH_VM
+#   shell.integration (POSIX) REPRO_M69_SHELL_INTEGRATION_VM
+#   linux.dconfKey            REPRO_M69_DCONF_KEY_VM
+#   linux.kdeConfigKey        REPRO_M69_KDE_CONFIG_KEY_VM
+#   systemd.userUnit          REPRO_M69_SYSTEMD_USER_UNIT_VM
+#
+# Gates that cannot realistically run inside a bare WSL Ubuntu 22.04
+# rootfs (no systemd-as-PID-1, no dbus session, no live nftables kernel
+# hooks, no KDE / dconf / udev daemons) are designed to write
+# `SKIP: <gate> (<reason>)` to the sentinel file rather than failing
+# the harness. The "what WSL cannot test, the next Linux VM catches"
+# guidance from the M83 step-13 design lets us validate coverage
+# parity for what WSL realistically supports.
+#
+# macOS-only drivers (`launchd.userAgent`, `launchd.systemDaemon`,
+# `macos.systemDefault`, `macos.userDefault`) are out of scope for
+# this harness — macOS testing happens on a separate Mac per the
+# 2026-05-28 directive.
+#
+# The script:
 #
 #   Stage A - install C toolchain (gcc + libsqlite3-dev + curl + xz-utils
 #             + systemd for the systemctl binary)
@@ -70,6 +108,12 @@ NIM_BIN="${NIM_ROOT}/bin/nim"
 
 PASSWD_TRACE_LOG="${OUT_DIR}/03-passwd-cmd-trace.log"
 SYSTEMD_TRACE_LOG="${OUT_DIR}/04-systemd-cmd-trace.log"
+
+# M83 step 13: the sentinel file is the gate's success signal. Each
+# new gate appends `OK: <name>` or `SKIP: <name> (<reason>)` to this
+# file; the orchestrator counts the lines at verdict time.
+SENTINEL_FILE="${OUT_DIR}/05-vm-gate-sentinels.txt"
+export REPRO_M69_VM_SENTINEL_FILE="${SENTINEL_FILE}"
 
 # ---- Result table accumulator ---------------------------------------------
 declare -A RESULTS
@@ -125,6 +169,7 @@ LOG_FILE="${OUT_DIR}/00-provision.log"
 : > "${LOG_FILE}" 2>/dev/null || true
 : > "${PASSWD_TRACE_LOG}" 2>/dev/null || true
 : > "${SYSTEMD_TRACE_LOG}" 2>/dev/null || true
+: > "${SENTINEL_FILE}" 2>/dev/null || true
 
 log "M69 POSIX destructive-gate WSL harness starting (multi-gate)."
 log "OUT_DIR        = ${OUT_DIR}"
@@ -139,20 +184,59 @@ trap '[ -f "${OUT_DIR}/DONE" ] || finalize "ERROR - script exited unexpectedly"'
 
 # ===========================================================================
 # Stage A - apt-install C toolchain + libsqlite3 + curl + xz + systemd
+#          + M83 step 13 packages for the post-M69 Linux driver gates.
 # ===========================================================================
-section "Stage A - apt-install gcc, libsqlite3-dev, curl, xz-utils, systemd"
+section "Stage A - apt-install baseline + M83 step 13 driver packages"
 export DEBIAN_FRONTEND=noninteractive
 # The rootfs ships without an updated apt cache; refresh once.
 # `systemd` brings the `systemctl` binary the systemd.systemUnit gate
 # needs even when systemd is NOT PID 1 - daemon-reload and `systemctl
 # show` parse from the unit file on disk regardless. We do NOT
-# activate systemd-as-PID-1 in this harness; the gate is scoped to
-# the file-on-disk + daemon-reload path per its header.
+# activate systemd-as-PID-1 in this harness; the gates that depend on
+# PID-1 systemd (the runtime-state paths) emit SKIP sentinels instead
+# of failing.
+#
+# M83 step 13 additions:
+#   - sudo: provides `visudo` for the linux.sudoersRule gate's
+#     `visudo -c -f <tmp>` validation step.
+#   - dconf-cli: provides the `dconf` binary the linux.dconfKey gate
+#     wraps. dconf still needs a live dbus session (which a bare WSL
+#     rootfs does NOT have); the gate's pre-check emits SKIP when the
+#     bus is unreachable.
+#   - libkf5config-bin: provides `kwriteconfig5` / `kreadconfig5` for
+#     the linux.kdeConfigKey gate. Best-effort; package may be
+#     unavailable in some apt mirrors.
+#   - nftables: provides the `nft` binary for linux.firewallRule.
+#     The WSL kernel typically lacks the netfilter hooks; the gate's
+#     pre-check emits SKIP when nftables is not reachable.
+#   - dbus / dbus-user-session: if installed, enables a best-effort
+#     attempt at systemctl --user / dconf bus activation. We do NOT
+#     activate the system dbus daemon — WSL without PID-1 systemd
+#     cannot do so consistently — so the gates that need a live bus
+#     fall back to SKIP.
+#   - kmod: provides `udevadm`'s prereqs. udev daemon itself is NOT
+#     running in this harness; linux.udevRule's gate catches the
+#     reload failure and emits SKIP.
 {
   apt-get update -y -qq 2>&1
+  # `dbus` (NOT `dbus-user-session`) is the minimum to get `dbus-daemon`
+  # for the optional session-bus startup; `dbus-user-session` pulls in
+  # `libpam-systemd` which mutates PAM and breaks the baseline
+  # passwd.user gate's `useradd`/`usermod` post-apply re-probes (the
+  # PAM hook adds extra setup that diverges from the canonical
+  # observed state). We do NOT install `dbus-user-session`.
+  #
+  # `kmod` is similarly NOT installed — udev is not running in this
+  # harness, and `kmod` pulls in shared libraries that perturb the
+  # other gates' PAM/setup flows.
   apt-get install -y --no-install-recommends \
     ca-certificates curl xz-utils gcc libc6-dev libsqlite3-dev passwd \
     systemd \
+    sudo \
+    dconf-cli \
+    libkf5config-bin \
+    nftables \
+    dbus \
     2>&1
 } >> "${LOG_FILE}" 2>&1
 APT_STATUS=$?
@@ -167,6 +251,12 @@ fi
 record "stageA_gcc_version"  "$(gcc --version 2>/dev/null | head -n1 || echo 'gcc not found')"
 record "stageA_useradd"      "$(which useradd 2>/dev/null || echo 'useradd not found')"
 record "stageA_systemctl"    "$(which systemctl 2>/dev/null || echo 'systemctl not found')"
+record "stageA_visudo"       "$(which visudo 2>/dev/null || echo 'visudo not found')"
+record "stageA_dconf"        "$(which dconf 2>/dev/null || echo 'dconf not found')"
+record "stageA_kwriteconfig5" "$(which kwriteconfig5 2>/dev/null || echo 'kwriteconfig5 not found')"
+record "stageA_nft"          "$(which nft 2>/dev/null || echo 'nft not found')"
+record "stageA_udevadm"      "$(which udevadm 2>/dev/null || echo 'udevadm not installed (kmod skipped)')"
+record "stageA_dbus_daemon"  "$(which dbus-daemon 2>/dev/null || echo 'dbus-daemon not found')"
 
 # ===========================================================================
 # Stage B - install Nim 2.2.8 from the cached prebuilt linux x64 tarball
@@ -260,7 +350,11 @@ else
   C_RQ=1
 fi
 
-# Size sanity check + assert every gate source is present.
+# Size sanity check + assert every baseline gate source is present.
+# M83 step 13 gate sources are checked best-effort: a missing M83 gate
+# is recorded but does not fail Stage C (the gate's own run-time
+# branch handles the missing-source case via the gate-list filter
+# below).
 ALL_GATES_PRESENT=1
 for src in \
     tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim \
@@ -394,9 +488,18 @@ run_gate() {
   # other gates' env vars are kept unset so an accidental cross-
   # pollination (one gate triggering another's destructive path) is
   # impossible.
+  #
+  # `REPRO_M69_VM_SENTINEL_FILE` is forwarded through `env -i` so the
+  # M83 step-13 gates know where to append their `OK:` / `SKIP:`
+  # lines. `DBUS_SESSION_BUS_ADDRESS` is forwarded so the dconf /
+  # systemd-user-unit gates can reach a live session bus (if one was
+  # started in the prologue).
   env -i \
     PATH="${PATH}" \
     HOME="${HOME:-/root}" \
+    REPRO_M69_VM_SENTINEL_FILE="${REPRO_M69_VM_SENTINEL_FILE:-${SENTINEL_FILE}}" \
+    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     "${env_var}=1" \
     "${bin_out}" >> "${run_out}" 2>&1
   local gate_exit=$?
@@ -513,6 +616,168 @@ done
 systemctl daemon-reload >> "${LOG_FILE}" 2>&1 || true
 
 # ===========================================================================
+# Stage E (continued) - M83 step 13: post-M69 / M83 Linux driver gates
+#
+# These gates were added by M83 step 13 to extend WSL coverage beyond
+# the 4 baseline M69 destructive gates. Each gate:
+#   * is independent (a failure in one does NOT poison the next);
+#   * writes `OK:` or `SKIP:` to ${SENTINEL_FILE};
+#   * cleans up its own artifacts on success.
+#
+# Gates that cannot realistically run in a bare WSL Ubuntu 22.04
+# rootfs without systemd-as-PID-1 (systemd.userUnit, os.timezone,
+# os.hostname, linux.firewallRule, linux.dconfKey, linux.kdeConfigKey,
+# linux.udevRule) self-detect the missing prerequisites and emit
+# `SKIP:` sentinels; the destructive paths are deferred to a real-
+# Linux / Hyper-V VM, exactly as M69's existing sandbox-deferred
+# runtime paths are.
+# ===========================================================================
+section "Stage E (M83 step 13) - post-M69 Linux driver gates"
+mkdir -p /tmp/repro-vm-test 2>/dev/null || true
+
+# Best-effort: ensure XDG_RUNTIME_DIR exists, then start a session
+# DBus daemon so the dconf gate has a bus to talk to. The system
+# dbus daemon needs systemd; we use the session bus form which only
+# needs the binary. If this fails the dconf gate's pre-check emits
+# SKIP cleanly.
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+if [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+  mkdir -p "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+  chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+fi
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
+  log "  starting session DBus daemon (best-effort for dconf gate)"
+  DBUS_LAUNCH_OUT=$(dbus-daemon --session --print-address --fork 2>>"${LOG_FILE}") || DBUS_LAUNCH_OUT=""
+  if [ -n "${DBUS_LAUNCH_OUT}" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_LAUNCH_OUT}"
+    log "    DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}"
+    log "    XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
+    record "stageE_dbus_session" "OK (${DBUS_SESSION_BUS_ADDRESS})"
+  else
+    log "    dbus-daemon --session failed; dconf gate will SKIP"
+    record "stageE_dbus_session" "FAIL"
+  fi
+else
+  record "stageE_dbus_session" "${DBUS_SESSION_BUS_ADDRESS:-not-attempted}"
+fi
+
+run_m83_gate() {
+  # A thinner wrapper than run_gate above: M83 step-13 gates are NOT
+  # tied to the passwd/systemd trace logs and have no trace pattern,
+  # so the wrapper just builds + runs + records exit.
+  # $1 = short name (e.g. linux-sysctl)
+  # $2 = gate source path (relative to repo)
+  # $3 = env-var to set (e.g. REPRO_M69_SYSCTL_VM)
+  local name="$1" src="$2" env_var="$3"
+  if [ ! -f "${REPO_WORK}/${src}" ]; then
+    log "  ${name}: source missing, skipping"
+    record "gateM83_${name}_exit" "SOURCE-MISSING"
+    return 0
+  fi
+  run_gate "${name}" "${src}" "${env_var}" "" "" || true
+}
+
+# --- System-scope post-M69 gates -------------------------------------------
+log ""
+log "------------------------------------------------------------"
+log "M83 system-scope gates"
+log "------------------------------------------------------------"
+run_m83_gate "linux-sysctl" \
+  "tests/e2e/m69/t_e2e_repro_infra_linux_sysctl_vm.nim" \
+  "REPRO_M69_SYSCTL_VM"
+run_m83_gate "linux-polkitrule" \
+  "tests/e2e/m69/t_e2e_repro_infra_linux_polkitrule_vm.nim" \
+  "REPRO_M69_POLKIT_VM"
+run_m83_gate "linux-sudoersrule" \
+  "tests/e2e/m69/t_e2e_repro_infra_linux_sudoersrule_vm.nim" \
+  "REPRO_M69_SUDOERS_VM"
+run_m83_gate "linux-tmpfilesrule" \
+  "tests/e2e/m69/t_e2e_repro_infra_linux_tmpfilesrule_vm.nim" \
+  "REPRO_M69_TMPFILES_VM"
+run_m83_gate "linux-nixdaemonsetting" \
+  "tests/e2e/m69/t_e2e_repro_infra_linux_nixdaemonsetting_vm.nim" \
+  "REPRO_M69_NIX_VM"
+run_m83_gate "systemd-system-timer" \
+  "tests/e2e/m69/t_e2e_repro_infra_systemd_system_timer_vm.nim" \
+  "REPRO_M69_SYSTEMD_TIMER_VM"
+run_m83_gate "linux-udevrule" \
+  "tests/e2e/m69/t_e2e_repro_infra_linux_udevrule_vm.nim" \
+  "REPRO_M69_UDEV_VM"
+run_m83_gate "linux-firewallrule" \
+  "tests/e2e/m69/t_e2e_repro_infra_linux_firewallrule_vm.nim" \
+  "REPRO_M69_LINUX_FIREWALL_VM"
+run_m83_gate "os-timezone-posix" \
+  "tests/e2e/m69/t_e2e_repro_infra_os_timezone_posix_vm.nim" \
+  "REPRO_M69_OS_TIMEZONE_VM"
+run_m83_gate "os-hostname-posix" \
+  "tests/e2e/m69/t_e2e_repro_infra_os_hostname_posix_vm.nim" \
+  "REPRO_M69_OS_HOSTNAME_VM"
+run_m83_gate "passwd-group" \
+  "tests/e2e/m69/t_e2e_repro_infra_passwd_group_vm.nim" \
+  "REPRO_M69_PASSWD_GROUP_VM"
+
+# --- Home-scope POSIX gates -----------------------------------------------
+log ""
+log "------------------------------------------------------------"
+log "M83 home-scope POSIX gates"
+log "------------------------------------------------------------"
+run_m83_gate "fs-user-file" \
+  "tests/e2e/m69/t_e2e_repro_home_fs_user_file_vm.nim" \
+  "REPRO_M69_FS_USER_FILE_VM"
+run_m83_gate "fs-managed-block" \
+  "tests/e2e/m69/t_e2e_repro_home_fs_managed_block_vm.nim" \
+  "REPRO_M69_FS_MANAGED_BLOCK_VM"
+run_m83_gate "env-user-path" \
+  "tests/e2e/m69/t_e2e_repro_home_env_user_path_vm.nim" \
+  "REPRO_M69_ENV_USER_PATH_VM"
+run_m83_gate "shell-integration" \
+  "tests/e2e/m69/t_e2e_repro_home_shell_integration_vm.nim" \
+  "REPRO_M69_SHELL_INTEGRATION_VM"
+run_m83_gate "linux-dconfkey" \
+  "tests/e2e/m69/t_e2e_repro_home_linux_dconfkey_vm.nim" \
+  "REPRO_M69_DCONF_KEY_VM"
+run_m83_gate "linux-kdeconfigkey" \
+  "tests/e2e/m69/t_e2e_repro_home_linux_kdeconfigkey_vm.nim" \
+  "REPRO_M69_KDE_CONFIG_KEY_VM"
+run_m83_gate "systemd-user-unit" \
+  "tests/e2e/m69/t_e2e_repro_home_systemd_user_unit_vm.nim" \
+  "REPRO_M69_SYSTEMD_USER_UNIT_VM"
+
+# --- M83 cleanup belt-and-braces -------------------------------------------
+# Each gate cleans up its own artifacts; this is defence in depth for
+# the cases where a gate exited non-zero before reaching its destroy
+# call.
+for f in /etc/sysctl.d/99-reprobuild-m83-vm-test-*.conf; do
+  [ -f "${f}" ] || continue; rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+for f in /etc/polkit-1/rules.d/99-reprobuild-m83-vm-test-*.rules; do
+  [ -f "${f}" ] || continue; rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+for f in /etc/sudoers.d/reprobuild-m83-vm-test-*; do
+  [ -f "${f}" ] || continue; rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+for f in /etc/tmpfiles.d/reprobuild-m83-vm-test-*.conf; do
+  [ -f "${f}" ] || continue; rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+for f in /etc/nix/nix.conf.d/99-reprobuild-m83-vm-test-*.conf; do
+  [ -f "${f}" ] || continue; rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+for f in /etc/systemd/system/repro-m83-vm-test-*.timer; do
+  [ -f "${f}" ] || continue; rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+for f in /etc/udev/rules.d/99-reprobuild-m83-vm-test-*.rules; do
+  [ -f "${f}" ] || continue; rm -f "${f}" >> "${LOG_FILE}" 2>&1 || true
+done
+# Stray groups left by a failed passwd.group gate.
+for g in $(getent group | awk -F: '/^reprom83vm/ {print $1}'); do
+  log "  cleanup: groupdel ${g}"
+  groupdel "${g}" >> "${LOG_FILE}" 2>&1 || true
+done
+systemctl daemon-reload >> "${LOG_FILE}" 2>&1 || true
+
+# ===========================================================================
 # Per-gate destructive-trace inline summary
 # ===========================================================================
 section "Stage E - destructive-trace inline summary"
@@ -546,18 +811,118 @@ record "gate_fs_system_file_exit"        "${FS_EXIT}"
 record "gate_env_system_variable_exit"   "${ENV_EXIT}"
 record "gate_systemd_system_unit_exit"   "${SYSTEMD_EXIT}"
 
-ALL_OK=1
+# Baseline M69 verdict: all four exits must be 0.
+BASELINE_OK=1
 for ec in "${PASSWD_EXIT}" "${FS_EXIT}" "${ENV_EXIT}" "${SYSTEMD_EXIT}"; do
   if [ "${ec}" != "0" ]; then
-    ALL_OK=0
+    BASELINE_OK=0
     break
   fi
 done
 
-if [ "${ALL_OK}" = "1" ]; then
-  finalize "PASS - all four M69 Linux destructive gates exited 0 inside the throwaway WSL distro."
+# M83 step 13 verdict: each gate's binary exits 0 on either OK or
+# SKIP (the SKIP path is explicit and intended — see the failure-
+# resistance note in the M83 step 13 design). A binary that exits
+# non-zero is a hard failure and is counted as such. We collect the
+# OK / SKIP / FAIL counts from the sentinel file PLUS the
+# `gateE_<name>_exit` records to spot binaries that crashed before
+# writing a sentinel line.
+M83_GATES_LIST=(
+  "linux-sysctl|linux.sysctl"
+  "linux-polkitrule|linux.polkitRule"
+  "linux-sudoersrule|linux.sudoersRule"
+  "linux-tmpfilesrule|linux.tmpfilesRule"
+  "linux-nixdaemonsetting|linux.nixDaemonSetting"
+  "systemd-system-timer|systemd.systemTimer"
+  "linux-udevrule|linux.udevRule"
+  "linux-firewallrule|linux.firewallRule"
+  "os-timezone-posix|os.timezone (POSIX)"
+  "os-hostname-posix|os.hostname (POSIX)"
+  "passwd-group|passwd.group"
+  "fs-user-file|fs.userFile (POSIX)"
+  "fs-managed-block|fs.managedBlock (POSIX)"
+  "env-user-path|env.userPath (POSIX)"
+  "shell-integration|shell.integration (POSIX)"
+  "linux-dconfkey|linux.dconfKey"
+  "linux-kdeconfigkey|linux.kdeConfigKey"
+  "systemd-user-unit|systemd.userUnit"
+)
+
+M83_OK_COUNT=0
+M83_SKIP_COUNT=0
+M83_FAIL_COUNT=0
+M83_FAIL_NAMES=""
+
+log ""
+log "------------------------------------------------------------"
+log "M83 step 13 per-gate verdict"
+log "------------------------------------------------------------"
+for entry in "${M83_GATES_LIST[@]}"; do
+  short="${entry%%|*}"
+  display="${entry##*|}"
+  exit_rec="${RESULTS[gateE_${short}_exit]:-MISSING}"
+  if [ "${exit_rec}" = "SOURCE-MISSING" ]; then
+    log "  ${display}: SOURCE-MISSING (gate file not in repo workdir)"
+    record "gateM83_${short}_verdict" "SOURCE-MISSING"
+    M83_FAIL_COUNT=$((M83_FAIL_COUNT + 1))
+    M83_FAIL_NAMES="${M83_FAIL_NAMES} ${display}"
+    continue
+  fi
+  if [ "${exit_rec}" = "MISSING" ]; then
+    log "  ${display}: NOT-RUN"
+    record "gateM83_${short}_verdict" "NOT-RUN"
+    M83_FAIL_COUNT=$((M83_FAIL_COUNT + 1))
+    M83_FAIL_NAMES="${M83_FAIL_NAMES} ${display}"
+    continue
+  fi
+  if [ "${exit_rec}" != "0" ]; then
+    log "  ${display}: FAIL (exit=${exit_rec})"
+    record "gateM83_${short}_verdict" "FAIL (exit=${exit_rec})"
+    M83_FAIL_COUNT=$((M83_FAIL_COUNT + 1))
+    M83_FAIL_NAMES="${M83_FAIL_NAMES} ${display}"
+    continue
+  fi
+  # Exit 0 — look at the sentinel for OK vs SKIP.
+  sentinel_line=$(grep -F ": ${display}" "${SENTINEL_FILE}" 2>/dev/null | tail -n1 || true)
+  if [ -z "${sentinel_line}" ]; then
+    # Binary exited 0 but did not write a sentinel — treat as FAIL
+    # because the test path that writes the sentinel was not reached.
+    log "  ${display}: NO-SENTINEL (exit 0 but no sentinel line)"
+    record "gateM83_${short}_verdict" "NO-SENTINEL"
+    M83_FAIL_COUNT=$((M83_FAIL_COUNT + 1))
+    M83_FAIL_NAMES="${M83_FAIL_NAMES} ${display}"
+    continue
+  fi
+  case "${sentinel_line}" in
+    OK:*)
+      log "  ${display}: PASS (${sentinel_line})"
+      record "gateM83_${short}_verdict" "PASS"
+      M83_OK_COUNT=$((M83_OK_COUNT + 1))
+      ;;
+    SKIP:*)
+      log "  ${display}: SKIP (${sentinel_line})"
+      record "gateM83_${short}_verdict" "SKIP"
+      M83_SKIP_COUNT=$((M83_SKIP_COUNT + 1))
+      ;;
+    *)
+      log "  ${display}: UNKNOWN-SENTINEL (${sentinel_line})"
+      record "gateM83_${short}_verdict" "UNKNOWN-SENTINEL"
+      M83_FAIL_COUNT=$((M83_FAIL_COUNT + 1))
+      M83_FAIL_NAMES="${M83_FAIL_NAMES} ${display}"
+      ;;
+  esac
+done
+
+record "m83_gates_passed"  "${M83_OK_COUNT}"
+record "m83_gates_skipped" "${M83_SKIP_COUNT}"
+record "m83_gates_failed"  "${M83_FAIL_COUNT}"
+
+if [ "${BASELINE_OK}" = "1" ] && [ "${M83_FAIL_COUNT}" -eq 0 ]; then
+  finalize "PASS - all four M69 baseline gates + ${M83_OK_COUNT} M83 step-13 gates exited 0 (${M83_SKIP_COUNT} SKIPped for unsupported WSL prerequisites)."
+elif [ "${BASELINE_OK}" = "1" ]; then
+  finalize "FAIL - baseline M69 gates passed but ${M83_FAIL_COUNT} M83 step-13 gate(s) failed:${M83_FAIL_NAMES} (passed=${M83_OK_COUNT}, skipped=${M83_SKIP_COUNT}). See 02-<gate>-run.txt + 01-<gate>-build.log + 05-vm-gate-sentinels.txt."
 else
-  finalize "FAIL - one or more gates exited non-zero (passwd=${PASSWD_EXIT} fs=${FS_EXIT} env=${ENV_EXIT} systemd=${SYSTEMD_EXIT}) - see 02-<gate>-run.txt + 01-<gate>-build.log."
+  finalize "FAIL - one or more baseline M69 gates exited non-zero (passwd=${PASSWD_EXIT} fs=${FS_EXIT} env=${ENV_EXIT} systemd=${SYSTEMD_EXIT}); M83 step-13: passed=${M83_OK_COUNT}, skipped=${M83_SKIP_COUNT}, failed=${M83_FAIL_COUNT}${M83_FAIL_NAMES}. See 02-<gate>-run.txt + 01-<gate>-build.log."
 fi
 
 # Disarm the trap so we don't double-finalize.
