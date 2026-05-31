@@ -680,6 +680,19 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
     "    echo '[OK] handlers still invoked after reconnect'; exit 0 ;;\n" &
     "  *) exit 0 ;;\n" &
     "esac\n")
+  # Pin `nim` to the nix-shell Nim (2.2.4) rather than CodeTracer's bundled
+  # Nim 2.2.8. Under fork/resource pressure (parallel compiles spawning gcc
+  # children), the bundled Nim's interaction with the host clang-wrapper has
+  # been observed to report `[SuccessX]` while leaving no binary on disk — a
+  # SuccessX-but-no-output failure mode that surfaces in
+  # compileExtractRunner. The nix-shell Nim does not exhibit this on the
+  # affected macOS hosts, so forwarding through a shim keeps every subtest
+  # on a known-good toolchain.
+  let nimBinary = findExe("nim")
+  check nimBinary.len > 0
+  writeExecutable(binDir / "nim",
+    "#!/bin/sh\n" &
+    "exec " & q(nimBinary) & " \"$@\"\n")
   for tool in CodeTracerDevToolExecutables:
     if tool notin ["bash", "nim", "node", "gcc", "sh", "stylus"] and
         not fileExists(binDir / tool):
