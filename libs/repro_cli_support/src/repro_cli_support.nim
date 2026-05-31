@@ -3208,6 +3208,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if eventSink != nil:
       eventSink("diagnostic", line, "{}")
     elif logMode != blmQuiet:
+      # Terminate any in-flight progress line on stderr before the stdout
+      # echo so captured output (execCmdEx merges stderr+stdout) keeps each
+      # diagnostic line on its own physical line. Without this, the
+      # progress renderer's `\r`-redrawn phase text on non-ANSI streams
+      # accumulates without a newline and gets concatenated with the next
+      # `echo` line, breaking helpers like `valueAfter` that look for a
+      # line that `startsWith(prefix)`.
+      progressRenderer.finishProgress()
       echo line
 
   template logAction(line: string) =
@@ -3215,6 +3223,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if eventSink != nil and logMode == blmActions:
       eventSink("diagnostic", line, "{}")
     elif logMode == blmActions:
+      progressRenderer.finishProgress()
       echo line
 
   proc usesRunQuotaBypass(runResult: BuildRunResult): bool =
