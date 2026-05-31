@@ -1956,8 +1956,30 @@ suite "e2e_local_reprobuild_project_build":
     check reportAction(firstReport, "produce"){"runQuotaBackend"}.getStr().len > 0
     check reportAction(firstReport, "produce"){"evidence"}{"depfileInputs"}.
       getElems().anyIt(it.getStr().endsWith("src/hidden.txt"))
-    check fileExists(projectRoot / ".repro" / "build" / "reprobuild" /
-      "build-engine-cache" / "action-cache" / "action-results.records")
+    # Phase 1 cache-scope migration (Provider-Compile-Tiering.md §"Cache Scope")
+    # moved the action cache out of the per-project ``.repro`` tree to a
+    # user-level shared root resolved by ``resolveActionCacheRoot``. Mirror that
+    # precedence here so the existence check tracks the live location.
+    let userActionCacheRoot = block:
+      let storeRoot = block:
+        let v = getEnv("REPROBUILD_STORE_ROOT")
+        if v.len > 0: v else: getEnv("REPRO_STORE_ROOT")
+      if storeRoot.len > 0:
+        storeRoot / "action-cache"
+      else:
+        when defined(windows):
+          let local = getEnv("LOCALAPPDATA")
+          let base = if local.len > 0: local
+                     else: getEnv("USERPROFILE") / "AppData" / "Local"
+          base / "repro" / "action-cache"
+        elif defined(macosx):
+          getEnv("HOME") / "Library" / "Caches" / "repro" / "action-cache"
+        else:
+          let xdg = getEnv("XDG_CACHE_HOME")
+          let base = if xdg.len > 0: xdg else: getEnv("HOME") / ".cache"
+          base / "repro" / "action-cache"
+    check fileExists(userActionCacheRoot / "action-cache" /
+      "action-results.records")
     let evidenceRoot = projectRoot / ".repro" / "build" / "reprobuild" /
       "build-engine-cache" / "dependency-evidence"
     for actionId in ["produce", "consume", "unrelated"]:
