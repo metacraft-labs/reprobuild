@@ -2198,9 +2198,25 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   let compileExecution = runCommand(command, cwd = workDir)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
+    # `runCommand` already raises on non-zero exit, so reaching this branch
+    # means the compiler reported success (typically `[SuccessX]`) but did
+    # not actually write the binary. This has been observed under
+    # fork/resource pressure with certain Nim/clang-wrapper combinations.
+    # Capture a directory listing to make the missing-output state visible
+    # for future triage instead of just claiming the file is absent.
+    let runnerExeDir = runnerExe.splitPath.head
+    var listing = ""
+    try:
+      let lsExec = runCommand(@["ls", "-la", runnerExeDir])
+      listing = lsExec.output
+    except CatchableError as ex:
+      listing = "(failed to list " & runnerExeDir & ": " & ex.msg & ")"
     raise newException(IOError,
-      "interface extraction runner was not compiled: " & runnerExe &
-        "\n" & compileExecution.output)
+      "interface extraction runner was not compiled (exit=" &
+        $compileExecution.exitCode &
+        ", compiler reported success but produced no binary): " &
+        runnerExe & "\ncompiler output:\n" & compileExecution.output &
+        "\ndirectory listing of " & runnerExeDir & ":\n" & listing)
   ensureExecutable(runnerExe)
   let execution = runCommand(@[runnerExe, artifactPath, stubPath, modulePath],
     cwd = workDir)
