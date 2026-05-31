@@ -679,6 +679,35 @@ proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
 
+proc writeCodeTracerToolStubs(binDir: string) =
+  ## Write `--version`-only stubs for tools declared by CodeTracer's
+  ## reprobuild.nim `uses:` clause that are not provided by the Nix devshell
+  ## and are not invoked by any selected action in these copied-checkout
+  ## subtests. Path-only tool resolution iterates every `uses:` entry, so the
+  ## subset tests need stubs even when the underlying actions are pruned.
+  ##
+  ## Keep this list in sync with codetracer/reprobuild.nim `uses:` minus the
+  ## tools already provided by the Nix devshell or by explicit fixture
+  ## helpers (gcc, clang, stylus, nim).
+  const stubbedTools = [
+    "cargo", "cargo-nextest", "nimble", "electron", "emcc", "flake8",
+    "llvm-config", "mdbook", "pcre-config", "playwright", "rustc",
+    "rustfmt", "rustup", "wasm-opt", "wasm-pack", "webpack-cli", "yarn"
+  ]
+  for tool in stubbedTools:
+    let stubPath = binDir / tool
+    if fileExists(stubPath):
+      continue
+    writeExecutable(stubPath,
+      "#!/bin/sh\n" &
+      "if [ \"${1:-}\" = \"--version\" ]; then\n" &
+      "  echo '" & tool & " 1.0.0'\n" &
+      "  exit 0\n" &
+      "fi\n" &
+      "echo 'codetracer copied-checkout fixture stub: " & tool &
+        " is not expected to be invoked in this subtest' >&2\n" &
+      "exit 127\n")
+
 proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let binDir = tempRoot / "codetracer-tool-bin"
   createDir(binDir)
@@ -696,6 +725,7 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let hostNim = findExe("nim")
   check hostNim.len > 0
   writeCodeTracerNimWrapper(binDir, hostNim)
+  writeCodeTracerToolStubs(binDir)
   binDir & $PathSep & getEnv("PATH")
 
 proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
