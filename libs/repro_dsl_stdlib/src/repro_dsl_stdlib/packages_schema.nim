@@ -25,12 +25,18 @@
 ##     the simplest design that supports M64 without locking the
 ##     campaign into a Table API.
 ##
-## **SHA validation.** Exactly one of ``sha256`` / ``sha512`` is
-## required per ``PlatformBinary``. ``validateVersionedProvisioning``
+## **SHA validation.** Exactly one of ``sha256`` / ``sha512`` / ``sha1``
+## is required per ``PlatformBinary``. ``validateVersionedProvisioning``
 ## (called from the M63 unit tests; will also be called from the M64
 ## realize loop) returns a structured error list rather than raising,
 ## so the harvester (M66) can batch-validate the whole catalog and
-## emit a single diagnostic report.
+## emit a single diagnostic report. M1 (Realize-Closure spec) extended
+## the schema to accept ``sha1`` as a *weak* hash — the harvester emits
+## ``HHashAlgorithmWeak`` for it and the realize loop emits
+## ``WSha1HashAccepted`` to stderr. ``sha1`` is accepted only because a
+## handful of Scoop manifests (notably ``freepascal``) ship nothing
+## stronger; operators should bump to ``sha256``/``sha512`` when the
+## upstream manifest is upgraded. ``md5`` remains rejected.
 ##
 ## **Honest scope.** M63 ships the data types + a runtime validator
 ## only. No realize logic, no harvester, no DSL macro integration with
@@ -42,6 +48,23 @@
 ## ``packages/jdk.nim`` carries a real entry (as the M49 reference).
 
 import std/tables
+
+# ---------------------------------------------------------------------------
+# Schema warning hook
+# ---------------------------------------------------------------------------
+#
+# M1 (Realize-Closure spec) wired a deprecation-warning sidechannel into
+# the validator: a ``PlatformBinary`` populated with ONLY ``sha1`` (the
+# weak case) is accepted but the validator emits a ``WSha1`` warning so
+# operators see the deprecation at construction/test time. The default
+# sink writes to ``stderr`` via ``logSchemaWarning``; the
+# ``validateVersionedProvisioningEx`` overload also returns the warnings
+# in a parallel ``seq[string]`` so test code can assert on them.
+
+proc logSchemaWarning*(msg: string) =
+  ## Default warning sink: stderr. Kept open for callers that want to
+  ## reroute warnings (e.g. the harvester's diagnostic stream).
+  stderr.writeLine(msg)
 
 type
   ArchiveFormat* = enum
@@ -95,8 +118,16 @@ type
     cpu*: PlatformCpu
     os*: PlatformOs
     url*: string
-    sha256*: string        ## hex-encoded; empty if sha512 is set
-    sha512*: string        ## hex-encoded; empty if sha256 is set
+    sha256*: string        ## hex-encoded (64 chars); empty if another
+                           ## digest is set
+    sha512*: string        ## hex-encoded (128 chars); empty if another
+                           ## digest is set
+    sha1*: string          ## hex-encoded (40 chars); WEAK — accepted
+                           ## only when the upstream manifest ships
+                           ## nothing stronger (e.g. freepascal). The
+                           ## harvester emits ``HHashAlgorithmWeak`` and
+                           ## the M64 realize loop emits
+                           ## ``WSha1HashAccepted`` to stderr.
     extract_path*: string  ## inner-dir to strip; "" = none
 
   VersionedProvisioning* = object
@@ -124,11 +155,11 @@ type
 # ---------------------------------------------------------------------------
 
 proc initPlatformBinary*(cpu: PlatformCpu; os: PlatformOs; url: string;
-                         sha256 = ""; sha512 = "";
+                         sha256 = ""; sha512 = ""; sha1 = "";
                          extract_path = ""): PlatformBinary =
   PlatformBinary(
     cpu: cpu, os: os, url: url,
-    sha256: sha256, sha512: sha512,
+    sha256: sha256, sha512: sha512, sha1: sha1,
     extract_path: extract_path)
 
 proc initVersionedProvisioning*(version: string;
@@ -163,21 +194,37 @@ proc initVersionedProvisioning*(version: string;
 # catalog in one pass. An empty result means the record is
 # well-formed.
 
-proc validatePlatformBinary*(pb: PlatformBinary; index: int):
+proc validatePlatformBinaryEx*(pb: PlatformBinary; index: int;
+                               warnings: var seq[string]):
     seq[string] =
+  ## Returns the structured-error list AND populates ``warnings`` with
+  ## non-fatal advisories (e.g. ``sha1`` weak-hash deprecation). See
+  ## ``validatePlatformBinary`` for the error-only signature.
   let prefix = "platforms[" & $index & "] (" & $pb.cpu & "-" & $pb.os & "): "
   if pb.url.len == 0:
     result.add(prefix & "url is required")
-  if pb.sha256.len == 0 and pb.sha512.len == 0:
-    result.add(prefix & "at least one of sha256 / sha512 is required")
-  if pb.sha256.len > 0 and pb.sha512.len > 0:
-    result.add(prefix & "only one of sha256 / sha512 may be set")
-  if pb.sha256.len > 0 and pb.sha256.len != 64:
+  let hasSha256 = pb.sha256.len > 0
+  let hasSha512 = pb.sha512.len > 0
+  let hasSha1   = pb.sha1.len > 0
+  let digestCount =
+    (if hasSha256: 1 else: 0) +
+    (if hasSha512: 1 else: 0) +
+    (if hasSha1: 1 else: 0)
+  if digestCount == 0:
+    result.add(prefix &
+      "at least one of sha256 / sha512 / sha1 is required")
+  if digestCount > 1:
+    result.add(prefix &
+      "only one of sha256 / sha512 / sha1 may be set")
+  if hasSha256 and pb.sha256.len != 64:
     result.add(prefix & "sha256 must be a 64-char hex digest (got " &
       $pb.sha256.len & " chars)")
-  if pb.sha512.len > 0 and pb.sha512.len != 128:
+  if hasSha512 and pb.sha512.len != 128:
     result.add(prefix & "sha512 must be a 128-char hex digest (got " &
       $pb.sha512.len & " chars)")
+  if hasSha1 and pb.sha1.len != 40:
+    result.add(prefix & "sha1 must be a 40-char hex digest (got " &
+      $pb.sha1.len & " chars)")
   for ch in pb.sha256:
     if ch notin {'0'..'9', 'a'..'f', 'A'..'F'}:
       result.add(prefix & "sha256 must be hex-encoded (offending char: '" &
@@ -188,29 +235,48 @@ proc validatePlatformBinary*(pb: PlatformBinary; index: int):
       result.add(prefix & "sha512 must be hex-encoded (offending char: '" &
         $ch & "')")
       break
+  for ch in pb.sha1:
+    if ch notin {'0'..'9', 'a'..'f', 'A'..'F'}:
+      result.add(prefix & "sha1 must be hex-encoded (offending char: '" &
+        $ch & "')")
+      break
+  # M1: weak-hash deprecation warning. Fires when ONLY sha1 is set AND
+  # the digest itself passes the length+hex shape checks (so we don't
+  # double-flag bogus values).
+  if hasSha1 and (not hasSha256) and (not hasSha512) and
+     pb.sha1.len == 40:
+    var hexOk = true
+    for ch in pb.sha1:
+      if ch notin {'0'..'9', 'a'..'f', 'A'..'F'}:
+        hexOk = false
+        break
+    if hexOk:
+      warnings.add(prefix & "sha1 digest is weaker than sha256; " &
+        "accepted because the upstream manifest ships nothing stronger. " &
+        "Bump to sha256/sha512 when upstream upgrades.")
 
-proc validateVersionedProvisioning*(vp: VersionedProvisioning):
+proc validatePlatformBinary*(pb: PlatformBinary; index: int):
     seq[string] =
-  ## Returns a list of validation errors; an empty result means the
-  ## record is well-formed. Validation rules:
-  ##   * ``version`` non-empty;
-  ##   * at least one ``platforms`` entry;
-  ##   * every platform entry passes ``validatePlatformBinary``;
-  ##   * no duplicate (cpu, os) pairs in ``platforms``;
-  ##   * ``imInstallerSilent`` records have at least one
-  ##     ``installer_args`` entry (the silent flag);
-  ##   * ``imMsys2Pacman`` records have at least one ``pacman_packages``
-  ##     entry;
-  ##   * ``imSourceBootstrap`` records have a non-empty ``bootstrap_argv``;
-  ##   * ``imExtract`` records have at least one ``bin_relpath`` entry
-  ##     (otherwise the realized prefix exposes no binary).
+  ## Backwards-compatible error-only validator. Warnings are emitted to
+  ## stderr via ``logSchemaWarning`` so callers that have not migrated
+  ## to ``validatePlatformBinaryEx`` still see the M1 deprecation note.
+  var warnings: seq[string] = @[]
+  result = validatePlatformBinaryEx(pb, index, warnings)
+  for w in warnings: logSchemaWarning("WSchema: " & w)
+
+proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
+                                      warnings: var seq[string]):
+    seq[string] =
+  ## Returns the structured-error list AND populates ``warnings`` with
+  ## non-fatal advisories (currently: the M1 sha1 weak-hash
+  ## deprecation per ``validatePlatformBinaryEx``).
   if vp.version.len == 0:
     result.add("version is required")
   if vp.platforms.len == 0:
     result.add("at least one platforms[] entry is required")
   var seenPairs: seq[string] = @[]
   for i, pb in vp.platforms:
-    result.add(validatePlatformBinary(pb, i))
+    result.add(validatePlatformBinaryEx(pb, i, warnings))
     let key = $pb.cpu & "-" & $pb.os
     if key in seenPairs:
       result.add("platforms[" & $i & "]: duplicate (cpu, os) pair '" &
@@ -234,19 +300,57 @@ proc validateVersionedProvisioning*(vp: VersionedProvisioning):
       result.add("install_method=imSourceBootstrap requires a " &
         "non-empty bootstrap_argv")
 
-proc validateCatalog*(entries: openArray[VersionedProvisioning]):
+proc validateVersionedProvisioning*(vp: VersionedProvisioning):
     seq[string] =
-  ## Validate a whole ``<tool>Catalog`` array. Each error is prefixed
-  ## with the entry's version so the diagnostic locates the bad slice.
+  ## Returns a list of validation errors; an empty result means the
+  ## record is well-formed. Validation rules:
+  ##   * ``version`` non-empty;
+  ##   * at least one ``platforms`` entry;
+  ##   * every platform entry passes ``validatePlatformBinary``;
+  ##   * no duplicate (cpu, os) pairs in ``platforms``;
+  ##   * ``imInstallerSilent`` records have at least one
+  ##     ``installer_args`` entry (the silent flag);
+  ##   * ``imMsys2Pacman`` records have at least one ``pacman_packages``
+  ##     entry;
+  ##   * ``imSourceBootstrap`` records have a non-empty ``bootstrap_argv``;
+  ##   * ``imExtract`` records have at least one ``bin_relpath`` entry
+  ##     (otherwise the realized prefix exposes no binary).
+  ##
+  ## Warnings (M1: sha1 weak-hash deprecation) are routed to
+  ## ``logSchemaWarning`` (stderr); use
+  ## ``validateVersionedProvisioningEx`` to capture them as a list.
+  var warnings: seq[string] = @[]
+  result = validateVersionedProvisioningEx(vp, warnings)
+  for w in warnings: logSchemaWarning("WSchema: " & w)
+
+proc validateCatalogEx*(entries: openArray[VersionedProvisioning];
+                        warnings: var seq[string]): seq[string] =
+  ## Errors-plus-warnings overload of ``validateCatalog``. Warnings
+  ## (currently: M1 sha1 weak-hash) are aggregated across all entries
+  ## with the version prefix that errors carry, so a downstream
+  ## diagnostic can correlate the warning to the slice.
   var seenVersions: seq[string] = @[]
   for i, vp in entries:
-    for err in validateVersionedProvisioning(vp):
+    var entryWarnings: seq[string] = @[]
+    for err in validateVersionedProvisioningEx(vp, entryWarnings):
       result.add("entries[" & $i & "] (version=" & vp.version & "): " & err)
+    for w in entryWarnings:
+      warnings.add("entries[" & $i & "] (version=" & vp.version & "): " & w)
     if vp.version.len > 0:
       if vp.version in seenVersions:
         result.add("entries[" & $i & "]: duplicate version '" &
           vp.version & "'")
       seenVersions.add(vp.version)
+
+proc validateCatalog*(entries: openArray[VersionedProvisioning]):
+    seq[string] =
+  ## Validate a whole ``<tool>Catalog`` array. Each error is prefixed
+  ## with the entry's version so the diagnostic locates the bad slice.
+  ## Warnings are routed to ``logSchemaWarning`` (stderr); use
+  ## ``validateCatalogEx`` to capture them as a list.
+  var warnings: seq[string] = @[]
+  result = validateCatalogEx(entries, warnings)
+  for w in warnings: logSchemaWarning("WSchema: " & w)
 
 # ---------------------------------------------------------------------------
 # Per-platform resolution
@@ -351,11 +455,15 @@ proc installMethodIdent(im: InstallMethod): string =
   of imSourceBootstrap: "imSourceBootstrap"
 
 proc serializePlatformBinary(pb: PlatformBinary): string =
+  # Field order: sha256, sha512, sha1 — sha1 last to make it
+  # visually clear that it's the deprecated branch (M1 weak-hash
+  # acceptance).
   result = "PlatformBinary(cpu: " & cpuIdent(pb.cpu) &
     ", os: " & osIdent(pb.os) &
     ", url: " & escapeString(pb.url) &
     ", sha256: " & escapeString(pb.sha256) &
     ", sha512: " & escapeString(pb.sha512) &
+    ", sha1: " & escapeString(pb.sha1) &
     ", extract_path: " & escapeString(pb.extract_path) & ")"
 
 proc serializeAsCode*(vp: VersionedProvisioning): string =

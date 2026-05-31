@@ -75,6 +75,13 @@ type
     dkManifest32BitIgnored = "HManifest32BitIgnored"
     dkUnknownArchitecture = "HUnknownArchitecture"
     dkHashAlgorithmUnsupported = "HHashAlgorithmUnsupported"
+    dkHashAlgorithmWeak = "HHashAlgorithmWeak"
+      ## M1 (Realize-Closure spec): emitted when the Scoop manifest
+      ## ships a ``sha1`` hash. The schema accepts sha1 under the M1
+      ## extension; this diagnostic is informational (does NOT fail
+      ## the parse) and asks the operator to bump to ``sha256`` if
+      ## upstream provides it. ``md5`` continues to be rejected via
+      ## ``dkHashAlgorithmUnsupported``.
     dkArchiveFormatUnknown = "HArchiveFormatUnknown"
 
   Diagnostic* = object
@@ -114,15 +121,23 @@ proc extractDirAt(node: JsonNode; index: int): string =
 
 proc splitHash(raw: string): tuple[algo: string; digest: string] =
   ## Scoop encodes the digest as either bare hex (sha256 default) or
-  ## ``<algo>:<hex>`` (sha512: / sha256: / md5: / etc.). Return a
-  ## normalized (algo, digest) tuple. ``algo`` is lower-case; empty
-  ## input yields ``("", "")``.
+  ## ``<algo>:<hex>`` (sha512: / sha256: / md5: / sha1: / etc.).
+  ## Return a normalized (algo, digest) tuple. ``algo`` is lower-case;
+  ## empty input yields ``("", "")``.
+  ##
+  ## M1 (Realize-Closure spec): a bare-hex digest of length exactly 40
+  ## is treated as ``sha1`` (a few Scoop manifests like ``freepascal``
+  ## ship the 40-char hex without an explicit prefix). The bare 64-char
+  ## case continues to mean sha256; the bare 128-char case means sha512.
   if raw.len == 0:
     return ("", "")
   let idx = raw.find(':')
   if idx < 0:
-    # Bare hex digest -> sha256 by Scoop convention.
-    return ("sha256", raw)
+    case raw.len
+    of 40: return ("sha1", raw)
+    of 128: return ("sha512", raw)
+    else: return ("sha256", raw)  # bare hex defaults to sha256 by
+                                  # Scoop convention (including 64-char)
   let prefix = raw[0 ..< idx].toLowerAscii()
   let rest = raw[idx + 1 .. ^1]
   (prefix, rest)
@@ -349,14 +364,20 @@ proc takePerArchSlice(arch: string; node: JsonNode; app: string;
   let (algo, digest) = splitHash(hashRaw)
   var sha256 = ""
   var sha512 = ""
+  var sha1 = ""
   case algo
   of "sha256": sha256 = digest
   of "sha512": sha512 = digest
+  of "sha1":
+    sha1 = digest
+    diags.add(Diagnostic(
+      kind: dkHashAlgorithmWeak, app: app,
+      detail: arch & ": sha1 hash accepted; upstream prefer sha256"))
   else:
     diags.add(Diagnostic(
       kind: dkHashAlgorithmUnsupported, app: app,
       detail: arch & ": hash algorithm '" & algo &
-        "' is not supported (M63 schema accepts sha256 / sha512 only)"))
+        "' is not supported (M63/M1 schema accepts sha256/sha512/sha1)"))
     return false
   let extractDir = if node.hasKey("extract_dir"):
                      extractDirAt(node["extract_dir"], 0)
@@ -365,7 +386,7 @@ proc takePerArchSlice(arch: string; node: JsonNode; app: string;
     cpu: cpuOf(arch),
     os: poWindows,
     url: url,
-    sha256: sha256, sha512: sha512,
+    sha256: sha256, sha512: sha512, sha1: sha1,
     extract_path: extractDir))
   true
 
@@ -508,13 +529,20 @@ proc parseScoopManifest*(app: string; raw: string;
       let (algo, digest) = splitHash(hashRaw)
       var sha256 = ""
       var sha512 = ""
+      var sha1 = ""
       case algo
       of "sha256": sha256 = digest
       of "sha512": sha512 = digest
+      of "sha1":
+        sha1 = digest
+        result.diagnostics.add(Diagnostic(
+          kind: dkHashAlgorithmWeak, app: app,
+          detail: "sha1 hash accepted; upstream prefer sha256"))
       else:
         result.diagnostics.add(Diagnostic(
           kind: dkHashAlgorithmUnsupported, app: app,
-          detail: "hash algorithm '" & algo & "' is not supported"))
+          detail: "hash algorithm '" & algo &
+            "' is not supported (M63/M1 schema accepts sha256/sha512/sha1)"))
         return
       let extractDir = if fauxNode.hasKey("extract_dir"):
                          extractDirAt(fauxNode["extract_dir"], 0)
@@ -522,7 +550,7 @@ proc parseScoopManifest*(app: string; raw: string;
       platforms.add(PlatformBinary(
         cpu: pcAny, os: poWindows,
         url: url,
-        sha256: sha256, sha512: sha512,
+        sha256: sha256, sha512: sha512, sha1: sha1,
         extract_path: extractDir))
     else:
       result.diagnostics.add(Diagnostic(

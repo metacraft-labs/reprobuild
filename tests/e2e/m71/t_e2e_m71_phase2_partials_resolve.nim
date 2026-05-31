@@ -62,22 +62,35 @@ const
     ## method (.phar wrapping for composer; gem install for ruby; etc.)
     ## isn't a cakBuiltin install_method yet.
 
-  Phase2NoCatalog = ["gnat", "fpc", "alire", "ocaml", "dune"]
+  Phase2NoCatalog = ["gnat", "alire", "ocaml", "dune"]
     ## No packages/<tool>.nim entry yet. The harness reports these as
     ## BLOCKED-NO-CATALOG; the M9 validate script SKIPs cleanly because
     ## the tool isn't on PATH (no realize path AT ALL — not even a
     ## broken one).
+    ##
+    ## M1 (Realize-Closure spec) graduated ``fpc`` out of this list:
+    ## the sha1 schema extension + the harvested ``packages/fpc.nim``
+    ## landed in M1, so fpc now resolves via cakBuiltin. The realize-
+    ## time gap (innosetup-style .exe installer with no installer
+    ## block) is M3 / M11 territory; for the resolver-level contract
+    ## fpc has graduated to M69DeferredButResolves below.
 
   Phase1Clean = ["jdk", "gradle", "dotnet-sdk", "zig"]
     ## M40 / M41 / M42 / M44 fixtures whose tools are CLEAN in the
     ## M67/M68 catalog. The M71 harness graduates them in LIVE mode.
 
   M69DeferredButResolves = ["swift", "ruby", "erlang", "git", "meson",
-                            "python3", "gcc"]
+                            "python3", "gcc", "fpc"]
     ## M69 deferred-8 list (minus composer, covered above). Catalog
     ## entry exists; resolver picks the cakBuiltin slice; realize
     ## raises a structured "not yet implemented" diagnostic at
     ## apply time. M71 doesn't close these — separate milestone.
+    ##
+    ## M1 (Realize-Closure spec) added ``fpc`` here: cakBuiltin
+    ## resolution works (sha1 schema extension landed), but the
+    ## upstream Scoop manifest is an innosetup ``.exe`` installer
+    ## with no ``installer:`` block. The realize-time installer
+    ## dispatch is M3 territory; the resolver-level contract holds.
 
 suite "M71 e2e: Phase-2 partials resolve via the production catalog":
 
@@ -171,10 +184,12 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
     #   haskell -> ghc + cabal       (CLEAN)
     #   php     -> php + composer    (php CLEAN; composer DEFERRED)
     #   ada     -> gnat              (NO-CATALOG)
-    #   pascal  -> fpc               (NO-CATALOG)
+    #   pascal  -> fpc               (DEFERRED-BUT-RESOLVES — M1
+    #              graduated the catalog half; realize is M3+)
     #   crystal -> crystal           (CLEAN)
     check "ghc" in Phase2Clean and "cabal" in Phase2Clean
     check "php" in Phase2Clean
     check "composer" in Phase2Deferred
-    check "gnat" in Phase2NoCatalog and "fpc" in Phase2NoCatalog
+    check "gnat" in Phase2NoCatalog
+    check "fpc" in M69DeferredButResolves
     check "crystal" in Phase2Clean

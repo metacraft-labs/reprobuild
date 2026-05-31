@@ -61,6 +61,9 @@ import ./packages/nim
 import ./packages/ninja
 import ./packages/node
 import ./packages/python3
+# M1 (Realize-Closure spec) — Pascal toolchain graduation. fpc's Scoop
+# manifest ships a sha1 digest, so the schema extension landed first.
+import ./packages/fpc
 
 export packages_schema
 
@@ -100,6 +103,8 @@ const RegisteredTools* = [
   "ninja",
   "node",
   "python3",
+  # M1 (Realize-Closure spec) — Pascal toolchain (sha1 weak-hash).
+  "fpc",
 ]
 
 proc getCatalog*(toolName: string):
@@ -144,6 +149,8 @@ proc getCatalog*(toolName: string):
   of "ninja":      selectIfNonEmpty(ninjaCatalog)
   of "node":       selectIfNonEmpty(nodeCatalog)
   of "python3":    selectIfNonEmpty(python3Catalog)
+  # M1 (Realize-Closure spec) — Pascal toolchain.
+  of "fpc":        selectIfNonEmpty(fpcCatalog)
   else:
     none(seq[VersionedProvisioning])
 

@@ -200,22 +200,39 @@ proc parseHexLine(raw: string): string =
           continue
       if hex.len > 128:
         break
-    if hex.len == 64 or hex.len == 128:
+    # 40 = sha1, 64 = sha256, 128 = sha512. M1 (Realize-Closure spec)
+    # extended this set to include 40-char sha1 so the realize loop's
+    # verifier dispatch can accept the weak-hash fallback.
+    if hex.len == 40 or hex.len == 64 or hex.len == 128:
       return hex.toLowerAscii()
   ""
 
 proc fileShaHex*(path: string; algorithm: string): string =
-  ## Compute the SHA-256 or SHA-512 hex digest of `path`. `algorithm`
-  ## ∈ {"sha256", "sha512"}.  Shells out — keeps the realize loop free
-  ## of a native hash dependency and matches the existing
+  ## Compute the SHA hex digest of `path`. `algorithm` ∈ {"sha256",
+  ## "sha512", "sha1"}.  Shells out — keeps the realize loop free of
+  ## a native hash dependency and matches the existing
   ## `repro_tool_profiles.fileSha256Hex` pattern.
-  if algorithm notin ["sha256", "sha512"]:
+  ##
+  ## M1 (Realize-Closure spec): ``sha1`` is supported as a *weak*
+  ## algorithm — the M64 realize loop emits ``WSha1HashAccepted`` to
+  ## stderr when it dispatches through this branch. ``sha1sum`` /
+  ## ``shasum -a 1`` / ``certutil -hashfile <f> SHA1`` / ``openssl
+  ## dgst -sha1`` are all standard.
+  if algorithm notin ["sha256", "sha512", "sha1"]:
     raise newException(ValueError,
       "builtin adapter: unsupported digest algorithm '" & algorithm & "'")
   let sumExe =
-    if algorithm == "sha256": "sha256sum"
-    else: "sha512sum"
-  let shasumArg = if algorithm == "sha256": "256" else: "512"
+    case algorithm
+    of "sha256": "sha256sum"
+    of "sha512": "sha512sum"
+    of "sha1":   "sha1sum"
+    else: ""  # unreachable
+  let shasumArg =
+    case algorithm
+    of "sha256": "256"
+    of "sha512": "512"
+    of "sha1":   "1"
+    else: ""  # unreachable
   let sumPath = findExe(sumExe)
   let shasumPath = findExe("shasum")
   let opensslPath = findExe("openssl")
@@ -711,6 +728,15 @@ proc realizeBuiltinPackage*(store: var Store;
       downloadToFile(resolution.urlUsed, downloadPath, packageId)
 
       # 2) Verify SHA.
+      # M1 (Realize-Closure spec): emit a one-shot stderr warning when
+      # verifying via the weak sha1 algorithm. The warning carries the
+      # tool name so the user can correlate it to a catalog entry and
+      # bump to sha256/sha512 when upstream upgrades.
+      if resolution.digestAlgorithm == "sha1":
+        stderr.writeLine("WSha1HashAccepted: " & packageId &
+          " — verifying via sha1 (upstream-provided; weak). " &
+          "Bump the catalog entry to sha256/sha512 when upstream " &
+          "publishes a stronger digest.")
       let observed = fileShaHex(downloadPath, resolution.digestAlgorithm)
       if observed != resolution.digestValue:
         var e = newException(EBuiltinDigestMismatch,

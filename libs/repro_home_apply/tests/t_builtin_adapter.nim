@@ -97,6 +97,25 @@ proc makeRawVp(version, url, sha256: string;
     ],
     env = {"TOOL_HOME": "${prefix}", "TOOL_BIN": "${prefix}/bin/tool"})
 
+proc makeRawVpSha1(version, url, sha1: string;
+                   binRelpath: seq[string] = @["bin/tool"]):
+    VersionedProvisioning =
+  ## Mirrors ``makeRawVp`` but populates the ``sha1`` field. Used by
+  ## the M1 test that exercises the sha1 verification path.
+  initVersionedProvisioning(
+    version = version,
+    archive_format = afRaw,
+    install_method = imExtract,
+    bin_relpath = binRelpath,
+    platforms = @[
+      initPlatformBinary(
+        cpu = detectHostCpu(),
+        os = detectHostOs(),
+        url = url,
+        sha1 = sha1),
+    ],
+    env = {"TOOL_HOME": "${prefix}", "TOOL_BIN": "${prefix}/bin/tool"})
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -526,3 +545,87 @@ suite "M64 — cakBuiltin adapter":
     check receipt.version == "4.0.0"
     check receipt.provenanceUrl == url
     check receipt.provenanceChecksum == "sha256:" & sha
+
+  # ===========================================================================
+  # M1 (Realize-Closure spec) — sha1 weak-hash realize path.
+  # ===========================================================================
+
+  test "test_m1_realize_accepts_sha1_digest":
+    ## Hermetic file:// realize against a fixture whose sha1 digest is
+    ## the slice's declared hash. The realize loop verifies via sha1
+    ## and the prefix lands successfully. Mirrors the SHA-256 happy-
+    ## path test up-suite.
+    let fixtureDir = FixtureRoot / "sha1-realize"
+    let storeDir = fixtureDir / "store"
+    let payloadDir = fixtureDir / "payload"
+    resetDir(fixtureDir)
+    resetDir(storeDir)
+    resetDir(payloadDir)
+    let payload = "sha1-tool-bytes-v1"
+    let payloadPath = payloadDir / "tool.bin"
+    createDir(extendedPath(parentDir(payloadPath)))
+    writeFile(extendedPath(payloadPath), payload)
+    # Use the adapter's own fileShaHex(sha1) to compute the truth
+    # digest — exercises the M1 sha1sum / certutil dispatch end-to-end.
+    let sha1 = fileShaHex(payloadPath, "sha1")
+    check sha1.len == 40
+    let url = fileToUrl(absolutePath(payloadPath))
+    let catalog = @[makeRawVpSha1("1.0.0", url, sha1,
+      binRelpath = @["bin/tool"])]
+    let res = resolveBuiltinPackage("sha1-tool", catalog)
+    check res.found
+    check res.resolution.digestAlgorithm == "sha1"
+    check res.resolution.digestValue == sha1
+
+    var store = openStore(storeDir)
+    defer: store.close()
+
+    let outR = realizeBuiltinPackage(store, res.resolution)
+    check (not outR.cacheHit)
+    check outR.digestAlgorithm == "sha1"
+    check outR.digestValue == sha1
+    # The realized prefix carries the payload at bin_relpath[0].
+    let realizedBin = outR.prefixAbsolutePath / "bin" / "tool"
+    check fileExists(extendedPath(realizedBin))
+    check readFile(extendedPath(realizedBin)) == payload
+
+  test "test_m1_realize_sha1_mismatch_fails_closed":
+    ## A 1-byte-mutated fixture must fail closed with the same error
+    ## shape sha256-mismatch produces (``EBuiltinDigestMismatch``).
+    let fixtureDir = FixtureRoot / "sha1-mismatch"
+    let storeDir = fixtureDir / "store"
+    let payloadDir = fixtureDir / "payload"
+    resetDir(fixtureDir)
+    resetDir(storeDir)
+    resetDir(payloadDir)
+    let payload = "real-bytes"
+    let payloadPath = payloadDir / "tool.bin"
+    createDir(extendedPath(parentDir(payloadPath)))
+    writeFile(extendedPath(payloadPath), payload)
+    let url = fileToUrl(absolutePath(payloadPath))
+    # Declare a sha1 digest that does NOT match the payload.
+    let wrong = "deadbeef".repeat(5)  # 40 hex chars
+    let catalog = @[makeRawVpSha1("1.0.0", url, wrong)]
+    let res = resolveBuiltinPackage("sha1-tool", catalog)
+    check res.found
+    check res.resolution.digestAlgorithm == "sha1"
+
+    var store = openStore(storeDir)
+    defer: store.close()
+
+    var raised = false
+    var expected = ""
+    var observed = ""
+    var expectedAlgo = ""
+    try:
+      discard realizeBuiltinPackage(store, res.resolution)
+    except EBuiltinDigestMismatch as err:
+      raised = true
+      expected = err.expectedDigest
+      observed = err.observedDigest
+      expectedAlgo = err.expectedAlgorithm
+    check raised
+    check expected == wrong
+    check expectedAlgo == "sha1"
+    check observed.len == 40
+    check expected != observed

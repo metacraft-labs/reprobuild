@@ -664,9 +664,18 @@ proc resolveBuiltinPackage*(packageId: string;
   if pb.binary.sha256.len > 0:
     result.resolution.digestAlgorithm = "sha256"
     result.resolution.digestValue = pb.binary.sha256.toLowerAscii()
-  else:
+  elif pb.binary.sha512.len > 0:
     result.resolution.digestAlgorithm = "sha512"
     result.resolution.digestValue = pb.binary.sha512.toLowerAscii()
+  else:
+    # M1 (Realize-Closure spec): sha1 is the weak fallback; the realize
+    # loop emits a ``WSha1HashAccepted`` warning when it runs. Slice
+    # validation in ``validateVersionedProvisioning`` already enforced
+    # that at least one of the three digests is populated, so reaching
+    # this arm without sha1 set is a schema-validator bug, not a runtime
+    # case.
+    result.resolution.digestAlgorithm = "sha1"
+    result.resolution.digestValue = pb.binary.sha1.toLowerAscii()
   result.resolution.archiveFormat = picked.archive_format
   result.resolution.installMethod = picked.install_method
   result.resolution.binRelpath = picked.bin_relpath

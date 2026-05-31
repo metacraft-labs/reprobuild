@@ -63,7 +63,7 @@ suite "M63 — VersionedProvisioning schema":
         sawUrl = true
     check sawUrl
 
-  test "negative: missing both sha256 and sha512 is rejected":
+  test "negative: missing all of sha256 / sha512 / sha1 is rejected":
     let pb = PlatformBinary(
       cpu: pcX86_64, os: poWindows,
       url: "https://example.test/tool.zip")
@@ -76,7 +76,7 @@ suite "M63 — VersionedProvisioning schema":
     check errors.len >= 1
     var sawSha = false
     for e in errors:
-      if "at least one of sha256 / sha512" in e:
+      if "at least one of sha256 / sha512 / sha1" in e:
         sawSha = true
     check sawSha
 
@@ -96,7 +96,7 @@ suite "M63 — VersionedProvisioning schema":
     check errors.len >= 1
     var sawConflict = false
     for e in errors:
-      if "only one of sha256 / sha512" in e:
+      if "only one of sha256 / sha512 / sha1" in e:
         sawConflict = true
     check sawConflict
 
@@ -301,6 +301,131 @@ suite "M63 — VersionedProvisioning schema":
       if "duplicate version" in e:
         sawDup = true
     check sawDup
+
+  # =========================================================================
+  # M1 (Realize-Closure spec) — sha1 weak-hash acceptance.
+  # =========================================================================
+
+  test "test_m1_schema_accepts_sha1":
+    ## sha1-only entry validates with 0 errors + 1 warning (the weak-
+    ## hash deprecation).
+    let pb = PlatformBinary(
+      cpu: pcX86_64, os: poWindows,
+      url: "https://example.test/tool.zip",
+      sha1: "0123456789abcdef0123456789abcdef01234567")
+    let vp = initVersionedProvisioning(
+      version = "1.0.0",
+      archive_format = afZip,
+      install_method = imExtract,
+      bin_relpath = @["bin/tool.exe"],
+      platforms = @[pb])
+    var warnings: seq[string] = @[]
+    let errors = validateVersionedProvisioningEx(vp, warnings)
+    if errors.len > 0:
+      checkpoint "errors: " & errors.join(" | ")
+    check errors.len == 0
+    check warnings.len == 1
+    check "sha1 digest is weaker than sha256" in warnings[0]
+
+  test "test_m1_schema_accepts_sha1: 40-char non-hex rejected":
+    let pb = PlatformBinary(
+      cpu: pcX86_64, os: poWindows,
+      url: "https://example.test/tool.zip",
+      sha1: "ZZZZ56789abcdef0123456789abcdef0123456789")
+    let vp = initVersionedProvisioning(
+      version = "1.0.0",
+      archive_format = afZip,
+      install_method = imExtract,
+      bin_relpath = @["bin/tool.exe"],
+      platforms = @[pb])
+    var warnings: seq[string] = @[]
+    let errors = validateVersionedProvisioningEx(vp, warnings)
+    var sawHex = false
+    for e in errors:
+      if "sha1 must be hex-encoded" in e:
+        sawHex = true
+    check sawHex
+    # No deprecation warning when the digest is malformed.
+    check warnings.len == 0
+
+  test "test_m1_schema_accepts_sha1: wrong-length sha1 rejected":
+    let pb = PlatformBinary(
+      cpu: pcX86_64, os: poWindows,
+      url: "https://example.test/tool.zip",
+      sha1: "abcd")
+    let vp = initVersionedProvisioning(
+      version = "1.0.0",
+      archive_format = afZip,
+      install_method = imExtract,
+      bin_relpath = @["bin/tool.exe"],
+      platforms = @[pb])
+    var warnings: seq[string] = @[]
+    let errors = validateVersionedProvisioningEx(vp, warnings)
+    var sawLen = false
+    for e in errors:
+      if "40-char hex digest" in e:
+        sawLen = true
+    check sawLen
+
+  test "test_m1_schema_accepts_sha1: sha1 + sha256 mutex preserved":
+    let pb = PlatformBinary(
+      cpu: pcX86_64, os: poWindows,
+      url: "https://example.test/tool.zip",
+      sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sha1:   "0123456789abcdef0123456789abcdef01234567")
+    let vp = initVersionedProvisioning(
+      version = "1.0.0",
+      archive_format = afZip,
+      install_method = imExtract,
+      bin_relpath = @["bin/tool.exe"],
+      platforms = @[pb])
+    var warnings: seq[string] = @[]
+    let errors = validateVersionedProvisioningEx(vp, warnings)
+    var sawMutex = false
+    for e in errors:
+      if "only one of sha256 / sha512 / sha1" in e:
+        sawMutex = true
+    check sawMutex
+
+  test "test_m1_schema_serializeAsCode_emits_sha1_last":
+    let pb = PlatformBinary(
+      cpu: pcX86_64, os: poWindows,
+      url: "https://example.test/tool.zip",
+      sha1: "0123456789abcdef0123456789abcdef01234567",
+      extract_path: "tool-1.0.0")
+    let vp = initVersionedProvisioning(
+      version = "1.0.0",
+      archive_format = afZip,
+      install_method = imExtract,
+      bin_relpath = @["bin/tool.exe"],
+      platforms = @[pb])
+    let src = serializeAsCode(vp)
+    check "sha1: \"0123456789abcdef0123456789abcdef01234567\"" in src
+    let sha256Idx = src.find("sha256:")
+    let sha512Idx = src.find("sha512:")
+    let sha1Idx = src.find("sha1:")
+    check sha256Idx >= 0
+    check sha512Idx > sha256Idx
+    check sha1Idx > sha512Idx
+
+  test "test_m1_schema_warning_on_sha1_only":
+    ## The warning IS emitted when only sha1 is set, and is NOT emitted
+    ## when sha256 is also set (the sha1 field there would be a schema
+    ## mutex error, not a deprecation case).
+    let pbSha1 = PlatformBinary(
+      cpu: pcX86_64, os: poWindows,
+      url: "https://example.test/tool.zip",
+      sha1: "0123456789abcdef0123456789abcdef01234567")
+    let pbSha256 = PlatformBinary(
+      cpu: pcX86_64, os: poWindows,
+      url: "https://example.test/tool.zip",
+      sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+    var warningsSha1: seq[string] = @[]
+    var warningsSha256: seq[string] = @[]
+    discard validatePlatformBinaryEx(pbSha1, 0, warningsSha1)
+    discard validatePlatformBinaryEx(pbSha256, 0, warningsSha256)
+    check warningsSha1.len == 1
+    check warningsSha256.len == 0
 
   test "serializeAsCode emits a non-empty Nim fragment":
     let pb = initPlatformBinary(

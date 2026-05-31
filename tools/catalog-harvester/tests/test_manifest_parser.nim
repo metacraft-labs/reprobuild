@@ -323,6 +323,73 @@ suite "M66 — Scoop manifest parser":
     # Cross-product: "bin" -> "bin/x.exe", "." -> "x.exe" (NOT "./x.exe")
     check p.entry.bin_relpath == @["bin/x.exe", "x.exe"]
 
+  # ===========================================================================
+  # M1 (Realize-Closure spec) — sha1 weak-hash acceptance
+  # ===========================================================================
+
+  test "M1: sha1 hash recognized and mapped to schema sha1 field":
+    ## A Scoop manifest with ``hash: "sha1:<40-char-hex>"`` translates
+    ## into a PlatformBinary whose ``sha1`` field is populated; sha256
+    ## and sha512 stay empty. ``validateVersionedProvisioning`` accepts
+    ## the entry (the weak-hash warning is non-fatal).
+    let raw = """{
+      "version": "3.2.2",
+      "url": "https://example.test/freepascal.7z",
+      "hash": "sha1:0123456789abcdef0123456789abcdef01234567",
+      "bin": "bin/fpc.exe"
+    }"""
+    let p = parseScoopManifest("fpc", raw)
+    check p.ok
+    check p.entry.platforms.len == 1
+    check p.entry.platforms[0].sha1 ==
+      "0123456789abcdef0123456789abcdef01234567"
+    check p.entry.platforms[0].sha256 == ""
+    check p.entry.platforms[0].sha512 == ""
+
+  test "M1: bare 40-char hex is treated as sha1":
+    ## Some Scoop manifests ship the bare 40-char hex with no algo
+    ## prefix (the harvester now detects this by length).
+    let raw = """{
+      "version": "3.2.2",
+      "url": "https://example.test/freepascal.7z",
+      "hash": "0123456789abcdef0123456789abcdef01234567",
+      "bin": "bin/fpc.exe"
+    }"""
+    let p = parseScoopManifest("fpc", raw)
+    check p.ok
+    check p.entry.platforms[0].sha1.len == 40
+    check p.entry.platforms[0].sha256 == ""
+
+  test "M1: sha1 emits HHashAlgorithmWeak diagnostic, not HHashAlgorithmUnsupported":
+    let raw = """{
+      "version": "3.2.2",
+      "url": "https://example.test/freepascal.7z",
+      "hash": "sha1:0123456789abcdef0123456789abcdef01234567",
+      "bin": "bin/fpc.exe"
+    }"""
+    let p = parseScoopManifest("fpc", raw)
+    check p.ok
+    check hasDiagnostic(p.diagnostics, dkHashAlgorithmWeak)
+    check (not hasDiagnostic(p.diagnostics, dkHashAlgorithmUnsupported))
+    # The diagnostic detail names the tool + the upgrade hint.
+    var sawHint = false
+    for d in p.diagnostics:
+      if d.kind == dkHashAlgorithmWeak and "prefer sha256" in d.detail:
+        sawHint = true
+    check sawHint
+
+  test "M1: md5 stays rejected (still HHashAlgorithmUnsupported)":
+    let raw = """{
+      "version": "1.0.0",
+      "url": "https://example.test/x.zip",
+      "hash": "md5:0123456789abcdef0123456789abcdef",
+      "bin": "x.exe"
+    }"""
+    let p = parseScoopManifest("x", raw)
+    check not p.ok
+    check hasDiagnostic(p.diagnostics, dkHashAlgorithmUnsupported)
+    check (not hasDiagnostic(p.diagnostics, dkHashAlgorithmWeak))
+
   test "M68: env_add_path '.' alone yields root-relative bins":
     ## Single-segment "." should behave like an empty env_add_path:
     ## the binDefaults end up at the prefix root.
