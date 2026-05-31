@@ -8,6 +8,17 @@
 ## Realize-Closure-And-Catalog-Expansion campaign extended the schema
 ## to accept sha1 with a deprecation warning, unblocking this harvest.
 ##
+## **M4 amendment (Realize-Closure-And-Catalog-Expansion spec)**: the
+## ``install_method`` flipped from ``imExtract`` (M1's placeholder
+## because the M1 schema half landed without a working realize path)
+## to ``imInstallerInnoSetup`` so the cakBuiltin realize loop
+## dispatches through the M4 innounp.exe extractor. The Scoop manifest
+## carries ``"innosetup": true`` (with NO ``installer:`` block — exactly
+## the shape M1's Outstanding Task note flagged as needing M4); the M4
+## harvester detects this marker and emits the right install_method.
+## After M4 lands, the M59 pascal-fpc Phase-2 partial graduates to
+## GRADUATE-PASS per M11.
+##
 ## **Provenance.** The sha1 digest below
 ## (``c3fc24290da7349e4fba763eaadd2a5bec07bfa3``) is verbatim from
 ## ScoopInstaller/Main's ``bucket/freepascal.json``. Re-harvest with
@@ -40,7 +51,7 @@ let fpcCatalog* = @[
   VersionedProvisioning(
     version: "3.2.2",
     archive_format: afRaw,
-    install_method: imExtract,
+    install_method: imInstallerInnoSetup,
     bin_relpath: @["bin\\i386-win32\\fp.exe", "bin\\i386-win32\\fpc.exe"],
     platforms: @[
       PlatformBinary(cpu: pcAny, os: poWindows, url: "https://downloads.sourceforge.net/project/freepascal/Win32/3.2.2/fpc-3.2.2.i386-win32.exe", sha256: "", sha512: "", sha1: "c3fc24290da7349e4fba763eaadd2a5bec07bfa3", extract_path: "")

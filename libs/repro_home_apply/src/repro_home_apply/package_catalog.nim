@@ -152,6 +152,12 @@ type
     nested7z*: bool
     preInstallActions*: seq[PreInstallAction]
     preInstallUnrecognized*: seq[string]
+    # M4 (Realize-Closure-And-Catalog-Expansion) — per-platform MSI
+    # admin-install override. When true, the realize loop uses
+    # ``msiexec /a`` instead of ``dark.exe`` for MSI extraction. The
+    # global ``CAKBUILTIN_PREFER_MSIEXEC=1`` env var has the same
+    # effect; this flag is the per-(cpu, os) override.
+    msiAdminInstall*: bool
     # M65: per-resolution chain trace. Populated by `chainResolvePackage`
     # to record every adapter consulted, in order, with each adapter's
     # outcome + skip reason. On a successful resolution the trace ends
@@ -694,6 +700,8 @@ proc resolveBuiltinPackage*(packageId: string;
   result.resolution.nested7z = pb.binary.nested_7z
   result.resolution.preInstallActions = picked.pre_install_actions
   result.resolution.preInstallUnrecognized = picked.pre_install_unrecognized
+  # M4: thread the per-platform MSI admin-install override through.
+  result.resolution.msiAdminInstall = pb.binary.msi_admin_install
   # Use the first bin_relpath as the executable name (leaf only).
   if picked.bin_relpath.len > 0:
     result.resolution.executableName = picked.bin_relpath[0].extractFilename

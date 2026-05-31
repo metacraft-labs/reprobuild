@@ -71,6 +71,23 @@ import ./packages/fpc
 # upstream standalone 7zr.exe — see packages/sevenzip.nim's header for
 # the rationale + the operator-visible re-harvest caveat.
 import ./packages/sevenzip
+# M4 (Realize-Closure-And-Catalog-Expansion spec) — Windows installer
+# family prerequisites:
+#   * wix3 — provides dark.exe for MSI extraction (imInstallerMsi +
+#     imInstallerNsisBundle realize hooks).
+#   * innounp — provides innounp.exe for Inno Setup extraction
+#     (imInstallerInnoSetup realize hook).
+# Both are catalog packages per the bundling-posture amendment (NO
+# vendored binaries); cakBuiltin discovers them via the standard
+# catalog-prefix → PATH → fail-closed order.
+import ./packages/wix3
+import ./packages/innounp
+# M4 amendment (post-live-smoke finding): lessmsi is the canonical
+# MSI-to-file-tree extractor. WiX dark.exe stays in the registry for
+# completeness (some operators use it for MSI decompilation) but the
+# M4 ``imInstallerMsi`` realize hook dispatches through lessmsi by
+# default. See packages/lessmsi.nim's header for the rationale.
+import ./packages/lessmsi
 
 export packages_schema
 
@@ -117,6 +134,15 @@ const RegisteredTools* = [
   # family hooks (SFX flatten + nested 7z + Scoop pre_install runner)
   # without requiring a host PATH 7z.
   "7zip",
+  # M4 (Realize-Closure-And-Catalog-Expansion spec) — WiX v3 + innounp
+  # as catalog packages. Discovery-by-prefix bootstraps the cakBuiltin
+  # Windows installer family hooks (MSI extract via dark.exe; NSIS+MSI
+  # bundle flatten; Inno Setup extract via innounp.exe) without
+  # requiring host PATH copies.
+  "wix3",
+  "innounp",
+  # M4 amendment: lessmsi as the canonical MSI extractor.
+  "lessmsi",
 ]
 
 proc getCatalog*(toolName: string):
@@ -165,6 +191,10 @@ proc getCatalog*(toolName: string):
   of "fpc":        selectIfNonEmpty(fpcCatalog)
   # M3 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip.
   of "7zip":       selectIfNonEmpty(sevenzipCatalog)
+  # M4 (Realize-Closure-And-Catalog-Expansion spec) — WiX v3 + innounp.
+  of "wix3":       selectIfNonEmpty(wix3Catalog)
+  of "innounp":    selectIfNonEmpty(innounpCatalog)
+  of "lessmsi":    selectIfNonEmpty(lessmsiCatalog)
   else:
     none(seq[VersionedProvisioning])
 

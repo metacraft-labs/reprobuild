@@ -6,25 +6,42 @@
 ## The M3 spec text predicted erlang would unblock via the basic
 ## ``afSevenZip`` dispatch ("7z auto-detects NSIS-wrapped 7z"). The
 ## live smoke against the upstream ``otp_win64_28.5.exe`` artifact
-## refutes that prediction — 7z reports ``Cannot open the file as
+## refuted that prediction — 7z reports ``Cannot open the file as
 ## [7z] archive`` on the downloaded bytes. The upstream installer is
 ## a *true* NSIS installer (not a 7z-with-NSIS-stub the way Git-for-
 ## Windows ships); the ``#/dl.7z`` Scoop rename is metadata-only and
-## does NOT change the file's on-disk structure. erlang therefore
-## requires either:
-##   (a) the imInstallerSilent path actually invoking the NSIS
-##       installer's ``Install.exe`` interactively (broken in cakBuiltin
-##       because the installer needs the un-extracted upstream bytes
-##       directly — out of M3 scope), OR
-##   (b) the M4 NSIS+MSI realize hook to drive ``installer.exe /S
-##       /D=<prefix>`` against the downloaded EXE.
+## does NOT change the file's on-disk structure.
 ##
-## **Catalog reflects upstream truth.** The catalog below records the
-## upstream manifest's installer block (install_method =
-## imInstallerSilent) so the cakBuiltin realize loop fails loudly with
-## an extraction-failed error rather than silently mis-classifying the
-## file. M4's installer-silent hook will pick this up cleanly.
-## **erlang remains BLOCKED on M4 — NOT a complete M3 unblock.**
+## **M4 amendment**: install_method flipped to ``imInstallerNsisBundle``
+## so the cakBuiltin realize loop dispatches through the M4 dark.exe
+## (Burn outer unwrap) + 7z (fallback) + lessmsi (per-MSI extract)
+## sandwich. **LIVE smoke status: STILL BLOCKED.** dark.exe rejects
+## the OTP installer with ``DARK0339: Stub executable does not contain
+## a .wixburn data section.`` (i.e. OTP is NOT a Burn bundle — it's a
+## bona-fide NSIS installer using the modern NSIS installer format that
+## the standalone 7zr.exe carried by ``packages/sevenzip.nim`` does NOT
+## handle (7zr is the "Reduced 7z" — supports only .7z and .lzma;
+## requires the FULL 7-Zip distribution to crack NSIS).
+##
+## **Root cause**: the M3 ``packages/sevenzip.nim`` chose the
+## standalone ``7zr.exe`` for bootstrap simplicity (no MSI dep).
+## The full 7-Zip ships as an MSI on Windows main — which now (post-M4)
+## CAN be extracted via lessmsi but requires re-harvesting the
+## sevenzip catalog with ``afInstallerMsi + imInstallerMsi``.
+## **Honest scope**: erlang's full unblock requires a follow-up M
+## that bumps the sevenzip catalog to the full 7-Zip distribution
+## (the MSI shape that ships the NSIS-aware 7z.exe). M4 lands the
+## Burn-bundle outer + per-MSI inner sandwich correctly (covers
+## python3 + swift); erlang's specific NSIS-installer format is a
+## downstream extraction-tool capability gap, not an M4 hook gap.
+##
+## **Honest scope continued**: the OTP installer historically writes
+## a per-user ``vcredist*`` redistributable side-effect and a
+## ``post_install`` ``Remove-Item $PLUGINSDIR vcredist*`` cleanup;
+## neither would be exercised by cakBuiltin's NSIS-bundle hook even
+## if the outer extraction worked (the M4 hook materializes the file
+## tree only; vcredist would need a separate cakBuiltin
+## ``vcredist2022`` catalog entry per the Scoop ``suggest`` block).
 
 import std/tables
 import repro_dsl_stdlib/packages_schema
@@ -33,13 +50,13 @@ export packages_schema
 let erlangCatalog* = @[
   VersionedProvisioning(
     version: "28.5",
-    archive_format: afSevenZip,
-    install_method: imInstallerSilent,
+    archive_format: afInstallerNsis,
+    install_method: imInstallerNsisBundle,
     bin_relpath: @["bin\\erl.exe", "bin\\erlc.exe", "bin\\escript.exe", "bin\\werl.exe"],
     platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/erlang/otp/releases/download/OTP-28.5/otp_win64_28.5.exe#/dl.7z", sha256: "46f56351e2e67865c6aaff83bcd0a7d97d73bea643a0531774dd9ba8fbee7dc0", sha512: "", extract_path: "")
+      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/erlang/otp/releases/download/OTP-28.5/otp_win64_28.5.exe", sha256: "46f56351e2e67865c6aaff83bcd0a7d97d73bea643a0531774dd9ba8fbee7dc0", sha512: "", extract_path: "")
     ],
-    installer_args: @["-sasl"],
+    installer_args: @[],
     pacman_packages: @[],
     bootstrap_argv: @[],
     env: {"ERLANG_HOME": "${prefix}"}.toTable())

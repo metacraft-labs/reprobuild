@@ -95,10 +95,26 @@ type
     ## prefix on disk. ``imExtract`` is the default common case; the
     ## other three mirror the M49–M62 ad-hoc installer / pacman /
     ## bootstrap-build escape hatches the campaign needs.
+    ##
+    ## M4 (Realize-Closure-And-Catalog-Expansion spec) added three
+    ## variants for the Windows installer families:
+    ##   * ``imInstallerMsi`` — extract an MSI via WiX ``dark.exe``
+    ##     (decompile to a file tree; no global state, no installer
+    ##     execution). The escape-hatch ``CAKBUILTIN_PREFER_MSIEXEC=1``
+    ##     env var swaps the dark.exe path for ``msiexec /a TARGETDIR``.
+    ##   * ``imInstallerNsisBundle`` — NSIS self-extracting executable
+    ##     whose payload is one or more inner MSIs. Realize unwraps the
+    ##     NSIS shell via 7z + dark, then per-MSI dark-extract + merge.
+    ##   * ``imInstallerInnoSetup`` — Inno-Setup-built installer (the
+    ##     freepascal shape, ``innosetup: true`` Scoop marker). Realize
+    ##     dispatches via the discovered ``innounp.exe``.
     imExtract = "extract"
     imInstallerSilent = "installer-silent"
     imMsys2Pacman = "msys2-pacman"
     imSourceBootstrap = "source-bootstrap"
+    imInstallerMsi = "installer-msi"
+    imInstallerNsisBundle = "installer-nsis-bundle"
+    imInstallerInnoSetup = "installer-inno-setup"
 
   PlatformCpu* = enum
     ## Coarse CPU enum. Matches the ``cpu_arch`` tokens the
@@ -148,6 +164,17 @@ type
                            ## harvester sets this when the manifest's
                            ## ``pre_install`` block explicitly performs the
                            ## nested extraction.
+    msi_admin_install*: bool
+                           ## M4: when true (and ``install_method`` is
+                           ## ``imInstallerMsi``), the realize loop uses
+                           ## ``msiexec /a <msi> /qn TARGETDIR=<dir>`` for
+                           ## the extraction instead of WiX ``dark.exe``.
+                           ## Operators may also flip the global default
+                           ## via ``CAKBUILTIN_PREFER_MSIEXEC=1`` (see
+                           ## ``builtin_adapter.nim``); this field is the
+                           ## per-platform override for MSIs whose
+                           ## custom-action table makes dark.exe fail
+                           ## silent-skip in practice.
 
   PreInstallActionKind* = enum
     ## M3: a closed set of ``pre_install`` PowerShell shapes the
@@ -157,6 +184,12 @@ type
     ## actions; unmatched lines are captured verbatim in
     ## ``pre_install_unrecognized`` and surfaced as a
     ## ``WPreInstallUnrecognized`` warning at realize time.
+    ##
+    ## M4 extends the allowlist with three Windows installer family
+    ## entries: ``Expand-DarkArchive``, ``Expand-MsiArchive``,
+    ## ``Expand-InnoArchive``. These cover the python3 + swift Scoop
+    ## ``installer.script`` patterns that the M3 spec-text deferred to
+    ## M4.
     piaNewItemDir = "new-item-dir"        ## New-Item -ItemType Directory
     piaNewItemFile = "new-item-file"      ## New-Item -ItemType File
     piaCopyItem = "copy-item"             ## Copy-Item -Path A -Destination B [-Recurse]
@@ -165,6 +198,9 @@ type
     piaSetContent = "set-content"         ## Set-Content -Path A -Value "<literal>"
     piaAddPath = "add-path"               ## Scoop Add-Path builtin → env metadata only
     piaExpand7z = "expand-7z"             ## Expand-7zArchive / Expand-7ZipArchive
+    piaExpandDark = "expand-dark"         ## M4: Expand-DarkArchive <msi> <dir>
+    piaExpandMsi = "expand-msi"           ## M4: Expand-MsiArchive <msi> <dir>
+    piaExpandInno = "expand-inno"         ## M4: Expand-InnoArchive <exe> <dir>
 
   PreInstallAction* = object
     ## M3: one structured ``pre_install`` action the realize loop
@@ -226,12 +262,14 @@ type
 proc initPlatformBinary*(cpu: PlatformCpu; os: PlatformOs; url: string;
                          sha256 = ""; sha512 = ""; sha1 = "";
                          extract_path = "";
-                         nested_7z = false): PlatformBinary =
+                         nested_7z = false;
+                         msi_admin_install = false): PlatformBinary =
   PlatformBinary(
     cpu: cpu, os: os, url: url,
     sha256: sha256, sha512: sha512, sha1: sha1,
     extract_path: extract_path,
-    nested_7z: nested_7z)
+    nested_7z: nested_7z,
+    msi_admin_install: msi_admin_install)
 
 proc initVersionedProvisioning*(version: string;
                                 archive_format: ArchiveFormat;
@@ -374,6 +412,13 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
     if vp.bootstrap_argv.len == 0:
       result.add("install_method=imSourceBootstrap requires a " &
         "non-empty bootstrap_argv")
+  of imInstallerMsi, imInstallerNsisBundle, imInstallerInnoSetup:
+    # M4: each Windows installer family needs at least one bin_relpath
+    # so the post-extract sanity check has something to verify against
+    # the realized prefix tree (mirrors imExtract).
+    if vp.bin_relpath.len == 0:
+      result.add("install_method=" & $vp.install_method &
+        " requires at least one bin_relpath entry")
 
 proc validateVersionedProvisioning*(vp: VersionedProvisioning):
     seq[string] =
@@ -533,6 +578,9 @@ proc preInstallActionKindIdent*(pia: PreInstallActionKind): string =
   of piaSetContent: "piaSetContent"
   of piaAddPath: "piaAddPath"
   of piaExpand7z: "piaExpand7z"
+  of piaExpandDark: "piaExpandDark"
+  of piaExpandMsi: "piaExpandMsi"
+  of piaExpandInno: "piaExpandInno"
 
 proc installMethodIdent(im: InstallMethod): string =
   case im
@@ -540,6 +588,9 @@ proc installMethodIdent(im: InstallMethod): string =
   of imInstallerSilent: "imInstallerSilent"
   of imMsys2Pacman: "imMsys2Pacman"
   of imSourceBootstrap: "imSourceBootstrap"
+  of imInstallerMsi: "imInstallerMsi"
+  of imInstallerNsisBundle: "imInstallerNsisBundle"
+  of imInstallerInnoSetup: "imInstallerInnoSetup"
 
 proc serializePlatformBinary(pb: PlatformBinary): string =
   # Field order: sha256, sha512, sha1 — sha1 last to make it
@@ -557,6 +608,10 @@ proc serializePlatformBinary(pb: PlatformBinary): string =
     ", extract_path: " & escapeString(pb.extract_path)
   if pb.nested_7z:
     result.add(", nested_7z: true")
+  # M4: msi_admin_install emitted only when true so the M67/M68 baseline
+  # round-trips byte-identical.
+  if pb.msi_admin_install:
+    result.add(", msi_admin_install: true")
   result.add(")")
 
 proc serializePreInstallAction*(pia: PreInstallAction): string =

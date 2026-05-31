@@ -110,6 +110,38 @@ type
     dkPreInstallSkippedAllRecognized = "HPreInstallSkippedAllRecognized"
       ## The whole ``pre_install`` block was a noop (e.g. just
       ## comments / whitespace); no actions emitted.
+    # M4 (Realize-Closure-And-Catalog-Expansion spec) — Windows
+    # installer family classification.
+    dkInstallMethodMsi = "HInstallMethodMsi"
+      ## The manifest's primary download is an ``.msi`` URL (or the
+      ## inferred ``archive_format`` is ``afInstallerMsi``); the
+      ## harvester emits ``install_method = imInstallerMsi`` so the
+      ## cakBuiltin realize loop dispatches through the M4 dark.exe
+      ## extractor (vs M3's NSIS imInstallerSilent path).
+    dkInstallMethodInnoSetup = "HInstallMethodInnoSetup"
+      ## The manifest carries ``"innosetup": true`` (regardless of
+      ## whether an ``installer:`` block is present); the harvester
+      ## emits ``install_method = imInstallerInnoSetup`` so the
+      ## cakBuiltin realize loop dispatches through the M4 innounp.exe
+      ## extractor. Required for the freepascal/fpc shape per M1's
+      ## Outstanding Task note.
+    dkInstallMethodNsisBundle = "HInstallMethodNsisBundle"
+      ## The manifest's ``installer.script`` block carries an
+      ## ``Expand-DarkArchive`` / ``Expand-MsiArchive`` pattern — i.e.
+      ## the outer ``.exe`` is an NSIS bundle wrapping inner MSIs
+      ## (the python3 + swift shape). The harvester emits
+      ## ``install_method = imInstallerNsisBundle`` so the cakBuiltin
+      ## realize loop dispatches through the M4 NSIS-unwrap + per-MSI
+      ## dark extractor.
+    dkInstallerScriptAllowlistEntry = "HInstallerScriptAllowlistEntry"
+      ## A line inside an ``installer.script`` block matched the M4
+      ## allowlist (Expand-DarkArchive / Expand-MsiArchive /
+      ## Expand-InnoArchive); translated into a structured
+      ## ``PreInstallAction``.
+    dkInstallerScriptUnrecognized = "HInstallerScriptUnrecognized"
+      ## A line inside an ``installer.script`` block did NOT match the
+      ## M4 allowlist; captured verbatim in
+      ## ``pre_install_unrecognized``.
 
   Diagnostic* = object
     kind*: DiagnosticKind
@@ -588,6 +620,50 @@ proc translatePreInstallLine(line: string;
       else: "$dir"
     return (true, PreInstallAction(kind: piaExpand7z,
       source: src, target: dst, recurse: false, literal: ""))
+  of "expand-darkarchive", "expand-msiarchive":
+    # M4: ``Expand-DarkArchive <msi> <dir>`` / ``Expand-MsiArchive
+    # <msi> <dir>``. Scoop's installer.script primitives for MSI
+    # extraction; both dispatch through the same cakBuiltin path.
+    # The harvester maps both into the matching PreInstallActionKind
+    # variant (piaExpandDark vs piaExpandMsi) so the realize loop's
+    # diagnostic can distinguish them, but the runtime dispatch is
+    # identical.
+    var positionals: seq[string] = @[]
+    for a in args:
+      if not a.startsWith("-"):
+        positionals.add(a)
+    if positionals.len < 1 or not isDirRootedPath(positionals[0]):
+      dropped.add(cmdlet & " source not $dir-rooted")
+      return (false, PreInstallAction())
+    let src = canonicalizeArg(positionals[0])
+    let dst =
+      if positionals.len >= 2 and isDirRootedPath(positionals[1]):
+        canonicalizeArg(positionals[1])
+      else: "$dir"
+    let kind =
+      if cmdlet == "expand-darkarchive": piaExpandDark else: piaExpandMsi
+    return (true, PreInstallAction(kind: kind,
+      source: src, target: dst, recurse: false, literal: ""))
+  of "expand-innoarchive":
+    # M4: ``Expand-InnoArchive <exe> <dir>``. NOT a stock Scoop
+    # cmdlet; M4 wires this in for forward compatibility with
+    # manifests that may grow it (innounp users currently roll their
+    # own; the catalog author can hand-write Expand-InnoArchive in
+    # an installer.script after M4).
+    var positionals: seq[string] = @[]
+    for a in args:
+      if not a.startsWith("-"):
+        positionals.add(a)
+    if positionals.len < 1 or not isDirRootedPath(positionals[0]):
+      dropped.add("Expand-InnoArchive source not $dir-rooted")
+      return (false, PreInstallAction())
+    let src = canonicalizeArg(positionals[0])
+    let dst =
+      if positionals.len >= 2 and isDirRootedPath(positionals[1]):
+        canonicalizeArg(positionals[1])
+      else: "$dir"
+    return (true, PreInstallAction(kind: piaExpandInno,
+      source: src, target: dst, recurse: false, literal: ""))
   else:
     dropped.add("cmdlet not in allowlist: " & cmdlet)
     return (false, PreInstallAction())
@@ -773,6 +849,20 @@ proc parseScoopManifest*(app: string; raw: string;
   let hasInstaller = (not installerNode.isNil) and
     installerNode.kind == JObject and
     (installerNode.hasKey("url") or installerNode.hasKey("file"))
+  # M4: ``installer.script`` is M4 territory — a NSIS+MSI bundle
+  # (python3, swift) ships the outer .exe as a Burn/NSIS shell whose
+  # extraction is gated entirely by the script (Expand-DarkArchive +
+  # Expand-MsiArchive). Detect the script-only shape so we can flip
+  # to imInstallerNsisBundle.
+  let hasInstallerScript = (not installerNode.isNil) and
+    installerNode.kind == JObject and
+    installerNode.hasKey("script")
+  # M4: ``"innosetup": true`` flips dispatch to imInstallerInnoSetup
+  # regardless of whether an installer block is present (the
+  # freepascal shape is "innosetup: true" + no installer block).
+  let hasInnoSetup = root.hasKey("innosetup") and
+    root["innosetup"].kind == JBool and
+    root["innosetup"].getBool()
 
   # ----- Per-platform slices -----
   var platforms: seq[PlatformBinary] = @[]
@@ -909,9 +999,45 @@ proc parseScoopManifest*(app: string; raw: string;
         "' classified as 7z self-extracting (afSevenZipSfx)"))
 
   # ----- install_method -----
+  # M4: dispatch priority — innosetup wins (cleanest signal), then
+  # installer.script (NSIS+MSI bundle), then a regular .msi URL, then
+  # installer-with-file (M3 NSIS imInstallerSilent), then bare extract.
   var installMethod = imExtract
   var installerArgs: seq[string] = @[]
-  if hasInstaller:
+  if hasInnoSetup:
+    installMethod = imInstallerInnoSetup
+    result.diagnostics.add(Diagnostic(
+      kind: dkInstallMethodInnoSetup, app: app,
+      detail: "manifest has innosetup: true; dispatching through M4 " &
+        "innounp.exe extractor"))
+  elif hasInstallerScript and not hasInstaller:
+    # Script-only block. Probe the script content for Expand-DarkArchive
+    # / Expand-MsiArchive — if either is present, treat as NSIS+MSI
+    # bundle. Otherwise the manifest's installer.script is a generic
+    # post-extract hook (we already drop those for safety per the
+    # M68 refinement); fall through to imExtract.
+    let scriptNode = installerNode["script"]
+    var scriptLines: seq[string] = @[]
+    case scriptNode.kind
+    of JString: scriptLines.add(scriptNode.getStr())
+    of JArray:
+      for child in scriptNode.items:
+        if child.kind == JString: scriptLines.add(child.getStr())
+    else: discard
+    var sawMsiExtract = false
+    for line in scriptLines:
+      let lower = line.toLowerAscii()
+      if "expand-darkarchive" in lower or "expand-msiarchive" in lower:
+        sawMsiExtract = true
+        break
+    if sawMsiExtract:
+      installMethod = imInstallerNsisBundle
+      result.diagnostics.add(Diagnostic(
+        kind: dkInstallMethodNsisBundle, app: app,
+        detail: "installer.script contains Expand-DarkArchive / " &
+          "Expand-MsiArchive; dispatching through M4 NSIS-unwrap + " &
+          "per-MSI dark extractor"))
+  elif hasInstaller:
     installMethod = imInstallerSilent
     let (argsResult, unknown) = installerArgsFor(installerNode, archiveFmt)
     installerArgs = argsResult
@@ -920,6 +1046,13 @@ proc parseScoopManifest*(app: string; raw: string;
         kind: dkInstallerArgsUnknown, app: app,
         detail: "installer block lacks 'args' and archive_format is " &
           $archiveFmt & "; please review the emitted installer_args"))
+  # M4: bare .msi URLs with no installer block → imInstallerMsi.
+  if installMethod == imExtract and archiveFmt == afInstallerMsi:
+    installMethod = imInstallerMsi
+    result.diagnostics.add(Diagnostic(
+      kind: dkInstallMethodMsi, app: app,
+      detail: "primary download is .msi; dispatching through M4 " &
+        "dark.exe extractor (override via CAKBUILTIN_PREFER_MSIEXEC=1)"))
 
   # ----- bin -----
   var diags: seq[Diagnostic] = @[]
@@ -958,6 +1091,23 @@ proc parseScoopManifest*(app: string; raw: string;
     preActions = translated.actions
     preUnrecognized = translated.unrecognized
     impliesNested = translated.impliesNested7z
+
+  # M4: when install_method == imInstallerNsisBundle, also harvest the
+  # installer.script lines through the same translator and append to
+  # preActions/preUnrecognized — they describe the per-tool flatten
+  # quirks (swift's LocalApp\Programs\Swift\ Move-Item dance,
+  # python3's appendpath.msi skip + tmp cleanup) that the realize loop
+  # replays AFTER the M4 bundle extractor materializes the merged file
+  # tree. The translator's allowlist now covers Expand-DarkArchive +
+  # Expand-MsiArchive; unrecognized lines (control flow, Get-ChildItem
+  # piping) land verbatim in preUnrecognized for the realize loop to
+  # surface as WPreInstallUnrecognized warnings.
+  if installMethod == imInstallerNsisBundle and hasInstallerScript:
+    let scriptNode = installerNode["script"]
+    let translated = translatePreInstall(scriptNode, app,
+      result.diagnostics)
+    for action in translated.actions: preActions.add(action)
+    for line in translated.unrecognized: preUnrecognized.add(line)
 
   # M3: nested_7z is per-platform. When pre_install actions imply a
   # nested extraction, mark every platform's nested_7z = true (the

@@ -52,7 +52,7 @@
 ## `file://` is exercised by the M64 unit tests (hermetic), HTTP/HTTPS
 ## is exercised by the optional integration gate.
 
-import std/[os, osproc, strutils, tables, times]
+import std/[algorithm, os, osproc, strutils, tables, times]
 when defined(windows):
   import std/widestrs
 from repro_core/paths import extendedPath
@@ -121,6 +121,56 @@ type
     packageId*: string
     rejectedLine*: string
 
+  EBuiltinDarkUnavailable* = object of EHomeApply
+    ## M4: the MSI / NSIS+MSI bundle realize hook needed a ``dark.exe``
+    ## (WiX v3 decompiler) but the discovery order (catalog-registered
+    ## ``wix3`` prefix → PATH → fail-closed) exhausted without finding
+    ## one. Carries the discovery trace so the operator sees exactly
+    ## which steps were attempted. Remediation:
+    ## ``repro home add wix3`` (or list ``package(wix3)`` ahead of the
+    ## MSI-needing tools in ``home.nim``).
+    ##
+    ## M4 amendment: this exception is retained for forward
+    ## compatibility but the M4 ``imInstallerMsi`` realize hook now
+    ## defaults to ``lessmsi`` (see ``EBuiltinLessmsiUnavailable``)
+    ## because WiX dark.exe extracts MSI metadata payloads, not the
+    ## logical install hierarchy.
+    packageId*: string
+    discoveryTrace*: seq[string]
+
+  EBuiltinLessmsiUnavailable* = object of EHomeApply
+    ## M4 (post-live-smoke amendment): the MSI / NSIS+MSI bundle
+    ## realize hook needed a ``lessmsi.exe`` but discovery exhausted
+    ## (catalog ``lessmsi`` prefix → PATH → fail). Remediation:
+    ## ``repro home add lessmsi``. Replaces the spec-text-proposed
+    ## ``EBuiltinDarkUnavailable`` as the practical fail-closed shape
+    ## for the M4 MSI realize hook.
+    packageId*: string
+    discoveryTrace*: seq[string]
+
+  EBuiltinInnounpUnavailable* = object of EHomeApply
+    ## M4: the Inno Setup realize hook needed an ``innounp.exe`` but
+    ## the discovery order (catalog-registered ``innounp`` prefix →
+    ## PATH → fail-closed) exhausted without finding one. Carries the
+    ## discovery trace so the operator sees exactly which steps were
+    ## attempted. Remediation: ``repro home add innounp`` (or list
+    ## ``package(innounp)`` ahead of the Inno-Setup-shipped tools in
+    ## ``home.nim``).
+    packageId*: string
+    discoveryTrace*: seq[string]
+
+  EBuiltinPrefixMergeConflict* = object of EHomeApply
+    ## M4: the NSIS+MSI bundle realize merged the per-MSI extract trees
+    ## into a single prefix and observed two MSIs writing the same
+    ## relpath with **different** content. Fails closed rather than
+    ## silently letting one MSI win. Carries the conflicting relpath +
+    ## the two source MSI basenames so the operator can hand-fix the
+    ## catalog (e.g. by adding a per-MSI extract_path override).
+    packageId*: string
+    conflictPath*: string
+    sourceA*: string
+    sourceB*: string
+
   RealizeBuiltinResult* = object
     ## Compact realize-side result the dispatcher in `realize.nim`
     ## packs into a `RealizedRecord`.
@@ -156,6 +206,16 @@ const
     ## When set, `imInstallerSilent` writes the recorded argv into
     ## the file named by this env var and skips the actual installer
     ## invocation. Used by the M64 unit tests.
+
+  BuiltinPreferMsiexecEnvVar* = "CAKBUILTIN_PREFER_MSIEXEC"
+    ## M4: when set to a non-empty value, the realize loop swaps the
+    ## default ``dark.exe`` MSI extractor for ``msiexec /a TARGETDIR``
+    ## (the native Windows administrative-install mode). Operator
+    ## escape hatch for MSIs whose custom-action tables make dark.exe
+    ## fail-silent-skip. ``PlatformBinary.msi_admin_install = true``
+    ## is the per-platform override; this env var is the global
+    ## override. Both paths produce a file tree at the prefix root
+    ## without writing to the registry.
 
 # ---------------------------------------------------------------------------
 # Digest helpers
@@ -462,6 +522,162 @@ proc discoverSevenZipExe*(store: var Store; packageId: string):
   e.discoveryTrace = trace
   raise e
 
+proc discoverDarkExe*(store: var Store; packageId: string): string =
+  ## M4 (Realize-Closure-And-Catalog-Expansion spec) discovery order
+  ## for the ``dark.exe`` binary the cakBuiltin Windows MSI realize
+  ## hooks need. Mirrors M3's ``discoverSevenZipExe`` pattern:
+  ##
+  ##   (i)  catalog-registered prefix — look up an already-realized
+  ##        ``wix3`` package in the current store. The hand-authored
+  ##        ``packages/wix3.nim`` ships ``dark.exe`` at the prefix root
+  ##        (the wix314-binaries.zip flattens directly there).
+  ##
+  ##   (ii) ``PATH`` lookup — operators who have Scoop-installed wix3
+  ##        legacy or system WiX get picked up.
+  ##
+  ##   (iii) fail closed — raise ``EBuiltinDarkUnavailable`` with the
+  ##        ``packageId`` (the tool whose realize needed dark.exe) plus
+  ##        the per-step discovery trace. Operator remediation:
+  ##        ``repro home add wix3``.
+  ##
+  ## Per the M3 honest-scope contract this discovery does NOT
+  ## recursively invoke the apply pipeline mid-realize to bootstrap
+  ## wix3 on demand; the operator's ``home.nim`` is responsible for
+  ## ordering ``package(wix3)`` ahead of the MSI-needing tools.
+  var trace: seq[string] = @[]
+  let prefixes = listPrefixes(store)
+  trace.add("catalog-prefix:scanned " & $prefixes.len & " rows for package=wix3")
+  for row in prefixes:
+    if row.packageName != "wix3": continue
+    let prefixAbs = store.absolutePrefixPath(row.realizedPath)
+    let candidate = prefixAbs / "dark.exe"
+    if fileExists(extendedPath(candidate)):
+      return candidate
+    let candidateBin = prefixAbs / "bin" / "dark.exe"
+    if fileExists(extendedPath(candidateBin)):
+      return candidateBin
+    trace.add("catalog-prefix:row " & row.realizedPath &
+      " lacked dark.exe / bin/dark.exe")
+  let pathExe = findExe("dark.exe")
+  if pathExe.len > 0:
+    return pathExe
+  let pathBare = findExe("dark")
+  if pathBare.len > 0:
+    return pathBare
+  trace.add("path:no 'dark' / 'dark.exe' on PATH")
+  var e = newException(EBuiltinDarkUnavailable,
+    "builtin adapter: MSI realize hook for '" & packageId &
+    "' could not discover a dark.exe (WiX v3 decompiler). " &
+    "Discovery trace: " & trace.join("; ") &
+    ". Remediation: add wix3 to your home profile (`repro home add wix3`) " &
+    "or list `package(wix3)` ahead of the MSI-needing tool in home.nim " &
+    "(M4 uses discovery-by-prefix; the formal " &
+    "`requires_for_realize: [wix3]` schema field is deferred to a " &
+    "future campaign). Operators wanting msiexec /a instead of " &
+    "dark.exe may set CAKBUILTIN_PREFER_MSIEXEC=1.")
+  e.step = 7
+  e.stepName = "realize"
+  e.packageId = packageId
+  e.discoveryTrace = trace
+  raise e
+
+proc discoverInnounpExe*(store: var Store; packageId: string): string =
+  ## M4 (Realize-Closure-And-Catalog-Expansion spec) discovery order
+  ## for the ``innounp.exe`` binary the cakBuiltin Inno Setup realize
+  ## hook needs. Mirrors ``discoverDarkExe`` / ``discoverSevenZipExe``.
+  ##
+  ##   (i)  catalog-registered prefix — look up an already-realized
+  ##        ``innounp`` package in the current store.
+  ##   (ii) ``PATH`` lookup — operators who have Scoop-installed
+  ##        innounp get picked up.
+  ##   (iii) fail closed — raise ``EBuiltinInnounpUnavailable``.
+  var trace: seq[string] = @[]
+  let prefixes = listPrefixes(store)
+  trace.add("catalog-prefix:scanned " & $prefixes.len & " rows for package=innounp")
+  for row in prefixes:
+    if row.packageName != "innounp": continue
+    let prefixAbs = store.absolutePrefixPath(row.realizedPath)
+    let candidate = prefixAbs / "innounp.exe"
+    if fileExists(extendedPath(candidate)):
+      return candidate
+    let candidateBin = prefixAbs / "bin" / "innounp.exe"
+    if fileExists(extendedPath(candidateBin)):
+      return candidateBin
+    trace.add("catalog-prefix:row " & row.realizedPath &
+      " lacked innounp.exe / bin/innounp.exe")
+  let pathExe = findExe("innounp.exe")
+  if pathExe.len > 0:
+    return pathExe
+  let pathBare = findExe("innounp")
+  if pathBare.len > 0:
+    return pathBare
+  trace.add("path:no 'innounp' / 'innounp.exe' on PATH")
+  var e = newException(EBuiltinInnounpUnavailable,
+    "builtin adapter: Inno Setup realize hook for '" & packageId &
+    "' could not discover an innounp.exe binary. Discovery trace: " &
+    trace.join("; ") &
+    ". Remediation: add innounp to your home profile " &
+    "(`repro home add innounp`) or list `package(innounp)` ahead of " &
+    "the Inno-Setup-shipped tool in home.nim (M4 uses discovery-by-" &
+    "prefix; the formal `requires_for_realize: [innounp]` schema " &
+    "field is deferred to a future campaign).")
+  e.step = 7
+  e.stepName = "realize"
+  e.packageId = packageId
+  e.discoveryTrace = trace
+  raise e
+
+proc discoverLessmsiExe*(store: var Store; packageId: string): string =
+  ## M4 amendment (post-live-smoke finding) discovery order for the
+  ## ``lessmsi.exe`` binary — the canonical "extract MSI to a real
+  ## file tree" tool used by the cakBuiltin MSI realize hook.
+  ##
+  ##   (i)  catalog-registered prefix — look up an already-realized
+  ##        ``lessmsi`` package.
+  ##   (ii) ``PATH`` lookup — operators who have Scoop-installed
+  ##        lessmsi get picked up.
+  ##   (iii) fail closed — raise ``EBuiltinLessmsiUnavailable``.
+  ##
+  ## Replaces the spec-text-proposed ``discoverDarkExe`` as the M4
+  ## default; ``discoverDarkExe`` is retained for future use cases
+  ## (MSI decompilation) but is not invoked by the M4 realize hooks.
+  var trace: seq[string] = @[]
+  let prefixes = listPrefixes(store)
+  trace.add("catalog-prefix:scanned " & $prefixes.len & " rows for package=lessmsi")
+  for row in prefixes:
+    if row.packageName != "lessmsi": continue
+    let prefixAbs = store.absolutePrefixPath(row.realizedPath)
+    let candidate = prefixAbs / "lessmsi.exe"
+    if fileExists(extendedPath(candidate)):
+      return candidate
+    let candidateBin = prefixAbs / "bin" / "lessmsi.exe"
+    if fileExists(extendedPath(candidateBin)):
+      return candidateBin
+    trace.add("catalog-prefix:row " & row.realizedPath &
+      " lacked lessmsi.exe / bin/lessmsi.exe")
+  let pathExe = findExe("lessmsi.exe")
+  if pathExe.len > 0:
+    return pathExe
+  let pathBare = findExe("lessmsi")
+  if pathBare.len > 0:
+    return pathBare
+  trace.add("path:no 'lessmsi' / 'lessmsi.exe' on PATH")
+  var e = newException(EBuiltinLessmsiUnavailable,
+    "builtin adapter: MSI realize hook for '" & packageId &
+    "' could not discover a lessmsi.exe binary. Discovery trace: " &
+    trace.join("; ") &
+    ". Remediation: add lessmsi to your home profile " &
+    "(`repro home add lessmsi`) or list `package(lessmsi)` ahead of " &
+    "the MSI-needing tool in home.nim. The msiexec /a admin-install " &
+    "fallback is available via CAKBUILTIN_PREFER_MSIEXEC=1 but is " &
+    "less hermetic (writes to a tmp TARGETDIR; some hosts surface a " &
+    "UAC prompt).")
+  e.step = 7
+  e.stepName = "realize"
+  e.packageId = packageId
+  e.discoveryTrace = trace
+  raise e
+
 proc extract7z(packageId, archivePath, destDir, sevenZipExe: string) =
   ## Extract a `.7z` archive (raw or SFX-wrapped) using a pre-discovered
   ## ``7z.exe``. M3 changed the binary-discovery contract — callers MUST
@@ -550,6 +766,339 @@ proc extractNested7zPass*(packageId, destDir, sevenZipExe: string;
       removeFile(extendedPath(inner))
     except OSError:
       discard
+
+## ---------------------------------------------------------------------------
+## M4 — Windows installer family extractors (MSI / NSIS+MSI / Inno Setup)
+## ---------------------------------------------------------------------------
+##
+## All three extractors materialize the installer's *file payload* into
+## a destination directory WITHOUT running the installer's side effects
+## (no registry writes, no COM registration, no Add/Remove Programs
+## entry). This is the cakBuiltin invariant for the M4 installer
+## families — extraction is hermetic; activation is the apply
+## pipeline's job (PATH / env binding through M65+).
+
+proc extractMsiViaDark(packageId, msiPath, destDir, darkExe: string) =
+  ## M4: extract an MSI via WiX ``dark.exe``. dark.exe decompiles the
+  ## MSI to a file tree under ``<destDir>/AdminProgramFiles64Folder``
+  ## (or similar WiX-named subtrees, depending on the MSI's directory
+  ## table). The per-tool flatten layer is the caller's responsibility
+  ## (extract_path / merge etc.).
+  ##
+  ## ``dark.exe -x <output-dir> <input.msi>`` is the canonical
+  ## file-extract invocation. dark also writes a decompiled
+  ## ``<msi-basename>.wxs`` source file at the destDir root that is
+  ## NOT a runtime artifact and is removed before the realized tree is
+  ## sealed (caller's responsibility).
+  createDir(extendedPath(destDir))
+  doAssert darkExe.len > 0,
+    "extractMsiViaDark requires a pre-discovered darkExe path"
+  let command = quoteShell(darkExe) & " -x " & quoteShell(destDir) &
+    " " & quoteShell(msiPath) & " -nologo"
+  let res = execCmdEx(command)
+  if res.exitCode != 0:
+    raiseExtractFailed(packageId, msiPath, "installer-msi",
+      "dark.exe exited " & $res.exitCode & "\n" & res.output)
+
+proc extractMsiViaMsiexec(packageId, msiPath, destDir: string) =
+  ## M4: extract an MSI via ``msiexec /a`` administrative-install.
+  ## Writes to ``<destDir>`` directly (TARGETDIR). Does NOT run the
+  ## installer's per-machine side effects (no registry writes, no Add/
+  ## Remove entry); the admin-install mode is the Windows-native MSI
+  ## file-extract path.
+  ##
+  ## Used when ``CAKBUILTIN_PREFER_MSIEXEC=1`` is set OR a
+  ## ``PlatformBinary.msi_admin_install = true`` per-platform override
+  ## opts in. dark.exe is the default for hermeticity.
+  createDir(extendedPath(destDir))
+  let msiexec = findExe("msiexec")
+  if msiexec.len == 0:
+    raiseExtractFailed(packageId, msiPath, "installer-msi",
+      "msiexec not on PATH; cannot perform admin install")
+  # /a = admin install; /qn = silent; TARGETDIR= absolute path required.
+  let command = quoteShell(msiexec) & " /a " & quoteShell(msiPath) &
+    " /qn TARGETDIR=" & quoteShell(absolutePath(destDir))
+  let res = execCmdEx(command)
+  if res.exitCode != 0:
+    raiseExtractFailed(packageId, msiPath, "installer-msi",
+      "msiexec /a exited " & $res.exitCode & "\n" & res.output)
+
+proc extractMsiViaLessmsi(packageId, msiPath, destDir, lessmsiExe: string) =
+  ## M4 amendment: extract an MSI via ``lessmsi`` (the canonical
+  ## Windows MSI-to-file-tree extractor; MIT-licensed; 3MB single-zip
+  ## distribution; Scoop main carries it). lessmsi writes files at the
+  ## MSI's logical install hierarchy under
+  ## ``<destDir>/SourceDir/<MSI's install path>/`` so the per-tool
+  ## ``extract_path`` field (e.g. ``SourceDir/PFiles64/Meson``) bridges
+  ## from the prefix root to the inner subtree.
+  ##
+  ## Replaces ``extractMsiViaDark`` as the M4 default; dark.exe stays
+  ## available for callers that explicitly want MSI decompilation
+  ## (e.g. a future M to inspect MSI metadata for compliance review).
+  createDir(extendedPath(destDir))
+  doAssert lessmsiExe.len > 0,
+    "extractMsiViaLessmsi requires a pre-discovered lessmsiExe path"
+  # lessmsi CLI:
+  #   lessmsi x <msi> [<outdir>/]
+  # The trailing slash on outdir matters: WITH slash, lessmsi writes
+  # ``<outdir>/SourceDir/...``; WITHOUT slash, lessmsi treats the arg
+  # as the basename (legacy compatibility).
+  let outDirSlash = destDir & DirSep
+  let command = quoteShell(lessmsiExe) & " x " & quoteShell(msiPath) &
+    " " & quoteShell(outDirSlash)
+  let res = execCmdEx(command)
+  if res.exitCode != 0:
+    raiseExtractFailed(packageId, msiPath, "installer-msi",
+      "lessmsi exited " & $res.exitCode & "\n" & res.output)
+
+proc dispatchMsiExtract*(packageId, msiPath, destDir,
+                         lessmsiOrDarkExe: string;
+                         msiAdminInstallOverride = false) =
+  ## M4: pick the MSI extractor per the (i) per-platform
+  ## ``msi_admin_install`` override OR (ii) the
+  ## ``CAKBUILTIN_PREFER_MSIEXEC`` env-var escape hatch OR (iii) the
+  ## default ``lessmsi`` path. Centralizes the decision so callers
+  ## (single-MSI realize + per-MSI bundle inner-loop) stay simple.
+  ##
+  ## **M4 amendment**: the third argument (formerly named ``darkExe``)
+  ## now carries the discovered ``lessmsi.exe`` path by default;
+  ## callers (the M4 realize loop + the M4 NSIS-bundle inner loop)
+  ## switched from ``discoverDarkExe`` to ``discoverLessmsiExe``. The
+  ## parameter is renamed for clarity in this proc's signature but the
+  ## semantics are: "the MSI extractor binary that ``dispatchMsiExtract``
+  ## should invoke when not falling back to msiexec".
+  let preferMsiexecEnv = getEnv(BuiltinPreferMsiexecEnvVar)
+  let useMsiexec = msiAdminInstallOverride or preferMsiexecEnv.len > 0
+  if useMsiexec:
+    extractMsiViaMsiexec(packageId, msiPath, destDir)
+  else:
+    extractMsiViaLessmsi(packageId, msiPath, destDir, lessmsiOrDarkExe)
+
+proc extractInnoSetup(packageId, exePath, destDir, innounpExe: string) =
+  ## M4: extract an Inno Setup installer via ``innounp.exe``. innounp
+  ## writes the installer's payload files into ``<destDir>``; ``-x``
+  ## = extract, ``-d<dir>`` = output dir, ``-y`` = assume yes for
+  ## prompts (overwrite).
+  ##
+  ## innounp's output layout maps Inno's ``{app}\`` subtree directly
+  ## under ``<destDir>\{app}\``. The per-tool flatten (typically
+  ## moving ``{app}\`` contents one level up) is the caller's
+  ## responsibility.
+  createDir(extendedPath(destDir))
+  doAssert innounpExe.len > 0,
+    "extractInnoSetup requires a pre-discovered innounpExe path"
+  # innounp v2.x CLI:
+  #   innounp -x [-q] [-y] [-dDIR] [-cEMBED] [-pPASS] FILE.exe [files]
+  # -x  = extract files
+  # -y  = assume yes for all prompts (overwrite)
+  # -q  = quiet (suppress per-file output)
+  # -d  = destination directory (NO space between -d and the path)
+  let command = quoteShell(innounpExe) & " -x -y -q " &
+    quoteShell("-d" & destDir) & " " & quoteShell(exePath)
+  let res = execCmdEx(command)
+  if res.exitCode != 0:
+    raiseExtractFailed(packageId, exePath, "installer-inno-setup",
+      "innounp exited " & $res.exitCode & "\n" & res.output)
+
+proc flattenInnoAppDir(destDir: string) =
+  ## M4: Inno Setup's standard layout places application files under
+  ## ``{app}\`` (a literal subdir named ``{app}``). After ``innounp -x``
+  ## extracts to ``<destDir>``, we flatten ``<destDir>\{app}\`` up to
+  ## the prefix root so ``bin_relpath`` like ``bin/fpc.exe`` resolves
+  ## directly. Other top-level Inno dirs (``{commonpf}\``, ``{tmp}\``,
+  ## ``embedded\``) survive at the prefix root because not every Inno
+  ## installer uses ``{app}``-exclusive layout.
+  ##
+  ## NB the literal subdir name is ``{app}`` (with curly braces) —
+  ## innounp uses Inno's directory constant tokens verbatim as
+  ## filesystem names. We do NOT rewrite the braces (other Inno tokens
+  ## like ``{commonpf}\`` may also appear and are left alone for the
+  ## per-tool catalog author to handle via extract_path).
+  let appDir = destDir / "{app}"
+  if not dirExists(extendedPath(appDir)):
+    return
+  for kind, entry in walkDir(extendedPath(appDir), relative = true):
+    let src = appDir / entry
+    let dst = destDir / entry
+    moveFile(extendedPath(src), extendedPath(dst))
+    if false: discard kind  # silence unused-warning
+  try:
+    removeDir(extendedPath(appDir))
+  except OSError:
+    discard
+
+proc fileBytesEqual(a, b: string): bool =
+  ## M4: byte-exact equality between two files. Used by the merge-
+  ## conflict detector to decide whether two MSIs writing the same
+  ## relpath are conflicting (different bytes) or compatible (same
+  ## bytes — currently rejected per the strict default; a future
+  ## milestone may relax).
+  let aBytes = readFile(extendedPath(a))
+  let bBytes = readFile(extendedPath(b))
+  aBytes == bBytes
+
+proc mergeIntoPrefixWithConflictCheck*(packageId, sourceLabel,
+                                        sourceDir, destDir: string) =
+  ## M4: copy every file from ``sourceDir`` into ``destDir``, raising
+  ## ``EBuiltinPrefixMergeConflict`` if a file already exists at the
+  ## target relpath AND its bytes differ. Same-content collisions
+  ## (two MSIs shipping byte-identical bytes for the same path)
+  ## ALSO reject under the strict M4 default — the M4 spec calls out
+  ## "a future milestone may relax to first-wins-if-byte-identical".
+  ## NB the strict-on-same-content choice is documented inline; if a
+  ## real package hits the case (no observed instance in M4's target
+  ## set), flip ``allowIdenticalDuplicate`` here.
+  let allowIdenticalDuplicate = false
+  proc walkAndMerge(srcRoot, destRoot, relPrefix: string) =
+    for kind, entry in walkDir(extendedPath(srcRoot)):
+      let leaf = extractFilename(entry)
+      let relpath = if relPrefix.len > 0: relPrefix & "/" & leaf else: leaf
+      let dest = destRoot / relpath
+      case kind
+      of pcFile:
+        if fileExists(extendedPath(dest)):
+          if allowIdenticalDuplicate and fileBytesEqual(entry, dest):
+            continue
+          # Conflict.
+          var e = newException(EBuiltinPrefixMergeConflict,
+            "builtin adapter: NSIS+MSI bundle merge conflict for '" &
+            packageId & "' at relpath '" & relpath &
+            "' — incoming source '" & sourceLabel &
+            "' would overwrite an existing file with different content. " &
+            "No silent overwrite; fix by adding a per-MSI extract_path " &
+            "override in the catalog entry to land each MSI under a " &
+            "distinct subtree.")
+          e.step = 7
+          e.stepName = "realize"
+          e.packageId = packageId
+          e.conflictPath = relpath
+          e.sourceA = "<prior MSI in merge order>"
+          e.sourceB = sourceLabel
+          raise e
+        createDir(extendedPath(parentDir(dest)))
+        copyFile(extendedPath(entry), extendedPath(dest))
+      of pcDir:
+        createDir(extendedPath(dest))
+        walkAndMerge(entry, destRoot, relpath)
+      else: discard
+  walkAndMerge(sourceDir, destDir, "")
+
+proc extractBurnBundleOuter(packageId, exePath, destDir, darkExe: string) =
+  ## M4: crack the outer Burn bundle shell of a Burn/NSIS+MSI bundle
+  ## ``.exe`` via WiX ``dark.exe -x``. Burn is WiX's native bundle
+  ## format; dark.exe enumerates the bundle's ``AttachedContainer/``
+  ## subtree (where the inner MSIs live) plus the ``UX/`` setup-UI
+  ## resources. Used as the FIRST pass of ``extractNsisMsiBundle``;
+  ## the per-inner-MSI extract uses ``lessmsi`` (via
+  ## ``dispatchMsiExtract``) so the M4 dispatch sandwiches dark
+  ## (outer) → lessmsi (inner).
+  ##
+  ## NB dark.exe drops a ``<exe-basename>.wxs`` file in the working
+  ## directory as a side effect (decompiled WiX source). We run
+  ## dark.exe with ``destDir`` as the working dir so the .wxs lands
+  ## INSIDE the scratch tree (and gets removed when the scratch dir
+  ## is cleaned up after the bundle merge).
+  createDir(extendedPath(destDir))
+  doAssert darkExe.len > 0,
+    "extractBurnBundleOuter requires a pre-discovered darkExe path"
+  let command = quoteShell(darkExe) & " -x " & quoteShell(destDir) &
+    " " & quoteShell(exePath) & " -nologo"
+  let res = execCmdEx(command, workingDir = destDir)
+  if res.exitCode != 0:
+    raiseExtractFailed(packageId, exePath, "installer-nsis-bundle",
+      "dark.exe (Burn unwrap) exited " & $res.exitCode & "\n" &
+      res.output)
+
+proc extractNsisMsiBundle*(packageId, exePath, destDir, lessmsiExe,
+                          darkExe, sevenZipExe: string;
+                          msiAdminInstallOverride = false) =
+  ## M4: extract a Burn/NSIS bundle whose payload is one or more MSIs
+  ## (the python3 + swift shape). Three-pass:
+  ##
+  ##   1. Crack the outer bundle shell. We try in order:
+  ##        (a) WiX ``dark.exe`` against the Burn bundle format
+  ##            (python3 + swift use this — the "Burn" Windows
+  ##            installer format is a WiX-specific shape; dark.exe
+  ##            cracks it cleanly into ``AttachedContainer/``);
+  ##        (b) ``7z`` against the outer shell (legacy NSIS
+  ##            installers that 7z handles natively — rare in the
+  ##            target set but kept as a fallback).
+  ##   2. Scan the unwrapped tree for ``*.msi`` files (typically
+  ##      under ``AttachedContainer/``). Gather in alphabetical order
+  ##      (deterministic merge order).
+  ##   3. For each MSI: dispatch ``dispatchMsiExtract`` (lessmsi by
+  ##      default; msiexec /a under the env-var escape hatch) into a
+  ##      per-MSI scratch dir, then merge the per-MSI tree into
+  ##      ``destDir`` via ``mergeIntoPrefixWithConflictCheck``.
+  ##
+  ## Honest scope: this is the M4 architectural shape. The python3 /
+  ## swift bundles in the wild may need per-tool flatten passes
+  ## (swift's ``LocalApp\Programs\Swift\`` reshuffle, python3's
+  ## appendpath.msi skip) — those land in the catalog's
+  ## ``pre_install_actions`` block. The base hook here materializes
+  ## the merged file tree; per-tool quirks are catalog metadata.
+  createDir(extendedPath(destDir))
+  let outerScratch = destDir & ".outer-scratch"
+  if dirExists(extendedPath(outerScratch)):
+    try: removeDir(extendedPath(outerScratch))
+    except OSError: discard
+  createDir(extendedPath(outerScratch))
+  # Step 1: try dark (Burn-bundle preferred) FIRST, fall back to 7z.
+  var outerCracked = false
+  if darkExe.len > 0:
+    try:
+      extractBurnBundleOuter(packageId, exePath, outerScratch, darkExe)
+      outerCracked = true
+    except EBuiltinExtractFailed:
+      outerCracked = false
+  if not outerCracked:
+    if sevenZipExe.len == 0:
+      raiseExtractFailed(packageId, exePath, "installer-nsis-bundle",
+        "outer-shell unwrap needs either dark.exe (Burn-bundle) or " &
+        "7z.exe (legacy NSIS) but neither was usable")
+    extract7z(packageId, exePath, outerScratch, sevenZipExe)
+  # Step 2: scan for MSI files. Inner MSIs typically live under
+  # ``AttachedContainer\`` (Burn bundles — python3 + swift) or at the
+  # outerScratch root ($PLUGINSDIR siblings for legacy NSIS).
+  var msis: seq[string] = @[]
+  proc scanForMsi(dir: string; depth: int) =
+    if depth > 3: return  # bound the search
+    if not dirExists(extendedPath(dir)): return
+    for kind, entry in walkDir(extendedPath(dir)):
+      case kind
+      of pcFile:
+        if entry.toLowerAscii().endsWith(".msi"):
+          msis.add(entry)
+      of pcDir:
+        scanForMsi(entry, depth + 1)
+      else: discard
+  scanForMsi(outerScratch, 0)
+  if msis.len == 0:
+    raiseExtractFailed(packageId, exePath, "installer-nsis-bundle",
+      "outer bundle unwrapped successfully but contained no .msi " &
+      "payload — the upstream may have changed shape; review the " &
+      "extracted tree at: " & outerScratch)
+  # Deterministic merge order: alphabetical by basename.
+  msis.sort do (a, b: string) -> int:
+    cmp(extractFilename(a).toLowerAscii(),
+        extractFilename(b).toLowerAscii())
+  # Step 3: per-MSI extract + merge.
+  for i, msi in msis:
+    let perMsiScratch = destDir & ".msi-scratch-" & $i
+    if dirExists(extendedPath(perMsiScratch)):
+      try: removeDir(extendedPath(perMsiScratch))
+      except OSError: discard
+    createDir(extendedPath(perMsiScratch))
+    dispatchMsiExtract(packageId, msi, perMsiScratch, lessmsiExe,
+      msiAdminInstallOverride)
+    mergeIntoPrefixWithConflictCheck(packageId,
+      extractFilename(msi), perMsiScratch, destDir)
+    try: removeDir(extendedPath(perMsiScratch))
+    except OSError: discard
+  # Cleanup the outer scratch tree so it does not pollute the realized
+  # prefix.
+  try: removeDir(extendedPath(outerScratch))
+  except OSError: discard
 
 ## ---------------------------------------------------------------------------
 ## M3 — Scoop pre_install PowerShell-block runner (allowlist evaluator)
@@ -711,7 +1260,10 @@ proc runPreInstallActions*(packageId, destDir: string;
                            actions: openArray[PreInstallAction];
                            unrecognized: openArray[string];
                            sevenZipExe: string;
-                           envBindings: var seq[tuple[name, value: string]]) =
+                           envBindings: var seq[tuple[name, value: string]];
+                           darkExe = "";
+                           innounpExe = "";
+                           msiAdminInstallOverride = false) =
   ## M3 (Realize-Closure-And-Catalog-Expansion spec) — replay the
   ## allowlisted pre_install actions against the staged ``destDir``.
   ## Unrecognized lines emit a ``WPreInstallUnrecognized`` stderr
@@ -829,6 +1381,41 @@ proc runPreInstallActions*(packageId, destDir: string;
       for srcArchive in sources:
         if not fileExists(extendedPath(srcArchive)): continue
         extract7z(packageId, srcArchive, outDir, sevenZipExe)
+    of piaExpandDark, piaExpandMsi:
+      # M4: Expand-DarkArchive + Expand-MsiArchive — Scoop's MSI
+      # extraction primitives. Both dispatch through the same MSI
+      # extractor (dark.exe by default, msiexec /a under the env-var
+      # escape hatch). Expand-MsiArchive is an alias for the same
+      # operation; Scoop's manifests use the two names interchangeably.
+      if darkExe.len == 0:
+        raiseExtractFailed(packageId, src, "installer-msi",
+          "Expand-DarkArchive/MsiArchive in pre_install needs a " &
+          "discovered darkExe but none was threaded in (the realize " &
+          "loop's Step (i)-(iii) discovery should have run before " &
+          "this action)")
+      let outDir = if dst.len > 0: dst else: destDir
+      createDir(extendedPath(outDir))
+      if not fileExists(extendedPath(src)):
+        raiseExtractFailed(packageId, src, "installer-msi",
+          "Expand-DarkArchive/MsiArchive source missing: " & src)
+      dispatchMsiExtract(packageId, src, outDir, darkExe,
+        msiAdminInstallOverride)
+    of piaExpandInno:
+      # M4: Expand-InnoArchive — Inno Setup extraction primitive
+      # (M4-introduced; Scoop does not historically ship this as a
+      # built-in cmdlet, but the M4 spec wires it into the allowlist
+      # for forward compatibility with manifests that grow it).
+      if innounpExe.len == 0:
+        raiseExtractFailed(packageId, src, "installer-inno-setup",
+          "Expand-InnoArchive in pre_install needs a discovered " &
+          "innounpExe but none was threaded in (the realize loop's " &
+          "Step (i)-(iii) discovery should have run before this action)")
+      let outDir = if dst.len > 0: dst else: destDir
+      createDir(extendedPath(outDir))
+      if not fileExists(extendedPath(src)):
+        raiseExtractFailed(packageId, src, "installer-inno-setup",
+          "Expand-InnoArchive source missing: " & src)
+      extractInnoSetup(packageId, src, outDir, innounpExe)
 
 proc extractTar(packageId, archivePath, destDir, format: string) =
   createDir(extendedPath(destDir))
@@ -1089,6 +1676,11 @@ proc realizeBuiltinPackage*(store: var Store;
   # equality check must reject the stale prefix from before the flip).
   if resolution.nested7z:
     extra.add("nested7z:true")
+  # M4: include the per-platform msi_admin_install override in the
+  # realization hash so a slice that flips dark.exe ↔ msiexec produces
+  # a fresh prefix.
+  if resolution.msiAdminInstall:
+    extra.add("msiAdminInstall:true")
   for a in resolution.preInstallActions:
     extra.add("pia:" & $a.kind & ":" & a.source & ":" & a.target & ":" &
       (if a.recurse: "r" else: "n"))
@@ -1141,11 +1733,62 @@ proc realizeBuiltinPackage*(store: var Store;
       return true
     if resolution.nested7z:
       return true
+    # M4: imInstallerNsisBundle also needs 7z to unwrap the NSIS shell.
+    if resolution.installMethod == imInstallerNsisBundle:
+      return true
     for a in resolution.preInstallActions:
       if a.kind == piaExpand7z: return true
     false
   if needsSevenZip():
     sevenZipExe = discoverSevenZipExe(store, packageId)
+
+  # M4: discover lessmsi.exe (MSI-to-file-tree extractor) when this
+  # realize will need it — imInstallerMsi, imInstallerNsisBundle, or a
+  # pre_install Expand-{Dark,Msi}Archive action. Same closure-capture
+  # rationale as the M3 7z discovery: discovery FIRST, destructive
+  # staging SECOND. The msiexec /a escape hatch lets us skip discovery
+  # entirely when the operator opted in.
+  #
+  # M4 also discovers dark.exe SEPARATELY for the Burn-bundle outer
+  # unwrap of imInstallerNsisBundle. Burn bundles (python3 + swift)
+  # are NOT 7z archives; dark.exe cracks them into AttachedContainer/
+  # with the inner MSIs. The sandwich: dark (outer) → lessmsi (inner).
+  var lessmsiExe = ""
+  var darkExe = ""
+  let preferMsiexec = getEnv(BuiltinPreferMsiexecEnvVar).len > 0
+  proc needsLessmsi(): bool =
+    if preferMsiexec: return false
+    if resolution.installMethod in {imInstallerMsi, imInstallerNsisBundle}:
+      # If the per-platform msi_admin_install override is set we also
+      # skip discovery (msiexec is the planned tool).
+      if resolution.msiAdminInstall: return false
+      return true
+    for a in resolution.preInstallActions:
+      if a.kind in {piaExpandDark, piaExpandMsi}: return true
+    false
+  proc needsDark(): bool =
+    # dark.exe is needed for Burn-bundle outer unwrap of
+    # imInstallerNsisBundle (python3 + swift) — independent of the
+    # msiexec override (which only affects the INNER per-MSI extract).
+    if resolution.installMethod == imInstallerNsisBundle:
+      return true
+    false
+  if needsLessmsi():
+    lessmsiExe = discoverLessmsiExe(store, packageId)
+  if needsDark():
+    darkExe = discoverDarkExe(store, packageId)
+
+  # M4: discover innounp.exe when imInstallerInnoSetup OR a pre_install
+  # Expand-InnoArchive action references it.
+  var innounpExe = ""
+  proc needsInnounp(): bool =
+    if resolution.installMethod == imInstallerInnoSetup:
+      return true
+    for a in resolution.preInstallActions:
+      if a.kind == piaExpandInno: return true
+    false
+  if needsInnounp():
+    innounpExe = discoverInnounpExe(store, packageId)
 
   # M3: pre_install Add-Path actions append to the env bindings the
   # apply pipeline downstream consumes. We accumulate them here so the
@@ -1255,10 +1898,65 @@ proc realizeBuiltinPackage*(store: var Store;
           runPreInstallActions(packageId, stagingDir,
             resolution.preInstallActions,
             resolution.preInstallUnrecognized,
-            sevenZipExe, preInstallEnvBindings)
+            sevenZipExe, preInstallEnvBindings,
+            darkExe = darkExe, innounpExe = innounpExe,
+            msiAdminInstallOverride = resolution.msiAdminInstall)
       of imInstallerSilent:
         capturedInstallerArgv = runInstallerSilent(packageId, downloadPath,
           stagingDir, resolution.installerArgs, resolution.archiveFormat)
+      of imInstallerMsi:
+        # M4: MSI extraction via lessmsi (default) or msiexec /a
+        # (CAKBUILTIN_PREFER_MSIEXEC=1 or platform.msi_admin_install).
+        # The extracted tree is left under stagingDir; the per-tool
+        # flatten happens via the extract_path mechanism below.
+        dispatchMsiExtract(packageId, downloadPath, stagingDir,
+          lessmsiExe, resolution.msiAdminInstall)
+        flattenExtractPath(packageId, stagingDir, resolution.extractPath)
+        if resolution.preInstallActions.len > 0 or
+           resolution.preInstallUnrecognized.len > 0:
+          runPreInstallActions(packageId, stagingDir,
+            resolution.preInstallActions,
+            resolution.preInstallUnrecognized,
+            sevenZipExe, preInstallEnvBindings,
+            darkExe = lessmsiExe, innounpExe = innounpExe,
+            msiAdminInstallOverride = resolution.msiAdminInstall)
+      of imInstallerNsisBundle:
+        # M4: Burn/NSIS bundle (python3 + swift shape). Sandwich:
+        # dark.exe cracks the outer Burn bundle into
+        # AttachedContainer/, then lessmsi extracts each inner MSI and
+        # merges with conflict detection. Honest scope: per-tool
+        # flatten quirks (swift's LocalApp\Programs\Swift\ reshuffle,
+        # python3's appendpath.msi skip) land in the catalog's
+        # pre_install_actions block.
+        extractNsisMsiBundle(packageId, downloadPath, stagingDir,
+          lessmsiExe, darkExe, sevenZipExe,
+          resolution.msiAdminInstall)
+        flattenExtractPath(packageId, stagingDir, resolution.extractPath)
+        if resolution.preInstallActions.len > 0 or
+           resolution.preInstallUnrecognized.len > 0:
+          runPreInstallActions(packageId, stagingDir,
+            resolution.preInstallActions,
+            resolution.preInstallUnrecognized,
+            sevenZipExe, preInstallEnvBindings,
+            darkExe = lessmsiExe, innounpExe = innounpExe,
+            msiAdminInstallOverride = resolution.msiAdminInstall)
+      of imInstallerInnoSetup:
+        # M4: Inno Setup extraction via innounp.exe (the freepascal /
+        # fpc shape). innounp lays the installer's payload out under
+        # ``<stagingDir>\{app}\``; ``flattenInnoAppDir`` moves the
+        # ``{app}\`` subtree up to the prefix root so bin_relpath like
+        # ``bin/fpc.exe`` resolves directly.
+        extractInnoSetup(packageId, downloadPath, stagingDir, innounpExe)
+        flattenInnoAppDir(stagingDir)
+        flattenExtractPath(packageId, stagingDir, resolution.extractPath)
+        if resolution.preInstallActions.len > 0 or
+           resolution.preInstallUnrecognized.len > 0:
+          runPreInstallActions(packageId, stagingDir,
+            resolution.preInstallActions,
+            resolution.preInstallUnrecognized,
+            sevenZipExe, preInstallEnvBindings,
+            darkExe = lessmsiExe, innounpExe = innounpExe,
+            msiAdminInstallOverride = resolution.msiAdminInstall)
       of imSourceBootstrap:
         # Unpack the source tarball into a sibling dir, run the
         # bootstrap, capture the binary into staging.

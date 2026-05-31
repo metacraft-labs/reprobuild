@@ -1,0 +1,12 @@
+{
+    "homepage": "https://example.test/innofakepascal",
+    "version": "1.0.0",
+    "description": "Synthetic Inno-Setup-shipped tool fixture for M4 harvester tests.",
+    "license": "Apache-2.0",
+    "url": "https://example.test/innofakepascal-1.0.0-win.exe",
+    "hash": "sha1:c3fc24290da7349e4fba763eaadd2a5bec07bfa3",
+    "innosetup": true,
+    "bin": [
+        "bin\\fakepascal.exe"
+    ]
+}

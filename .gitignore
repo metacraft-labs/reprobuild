@@ -26,3 +26,4 @@ references/*
 !references/README.md
 
 .DS_Store
+build/m4-live-smoke/
