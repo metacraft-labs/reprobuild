@@ -37,6 +37,10 @@ const
   KeyConfigOverrides = "configOverrides"
   KeyHosts        = "hosts"
   KeyResources    = "resources"
+  KeyAdapterPreference = "adapterPreference"
+    ## M2.5: per-OS adapter chain table. Backward-compat: the key is
+    ## OPTIONAL in the decoder — a pre-M2.5 RBPI artifact has no entry
+    ## and decodes to an empty adapterPreference table.
   KeyBody         = "body"
   KeyPredicate    = "predicate"
   KeyPkg          = "pkg"
@@ -172,6 +176,21 @@ proc encodeHosts(h: Table[string, seq[string]]): DynamicValue =
   hostEntries.sort(proc(a, b: DynamicMapEntry): int = cmp(a.key, b.key))
   cborMap(hostEntries)
 
+proc encodeAdapterPreference(ap: OrderedTable[string, seq[string]]):
+    DynamicValue =
+  ## M2.5: per-OS adapter chain table. Same shape as `encodeHosts` —
+  ## a CBOR map keyed on canonical OS tags (`"windows"`, `"linux"`,
+  ## `"darwin"`) whose values are CBOR arrays of adapter-name text
+  ## strings.
+  var apEntries: seq[DynamicMapEntry] = @[]
+  for osKey, chain in ap:
+    var adapters: seq[DynamicValue] = @[]
+    for a in chain:
+      adapters.add cborText(a)
+    apEntries.add entry(osKey, cborArray(adapters))
+  apEntries.sort(proc(a, b: DynamicMapEntry): int = cmp(a.key, b.key))
+  cborMap(apEntries)
+
 proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   var acts: seq[DynamicValue] = @[]
   for a in p.activities:
@@ -186,7 +205,9 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
             entry(KeyActivities, cborArray(acts)),
             entry(KeyConfigOverrides, cborArray(cfgs)),
             entry(KeyHosts, encodeHosts(p.hosts)),
-            entry(KeyResources, cborArray(ress))])
+            entry(KeyResources, cborArray(ress)),
+            entry(KeyAdapterPreference,
+              encodeAdapterPreference(p.adapterPreference))])
 
 proc encodeProfileIntentToBytes*(p: ProfileIntent): seq[byte] =
   ## CBOR-encode the `ProfileIntent`. Deterministic: same input bytes
@@ -339,6 +360,18 @@ proc decodeHosts(v: DynamicValue): Table[string, seq[string]] =
       acts.add expectText(it, "hosts.value")
     result[e.key] = acts
 
+proc decodeAdapterPreference(v: DynamicValue):
+    OrderedTable[string, seq[string]] =
+  ## M2.5: decode the per-OS adapter chain table. Mirrors `decodeHosts`
+  ## but writes to an OrderedTable so the iteration order is stable.
+  result = initOrderedTable[string, seq[string]]()
+  let entries = expectMap(v, "adapterPreference")
+  for e in entries:
+    var chain: seq[string] = @[]
+    for it in expectArray(e.value, "adapterPreference.value"):
+      chain.add expectText(it, "adapterPreference.value")
+    result[e.key] = chain
+
 proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   ## Round-trip with `encodeProfileIntentToBytes`. Raises
   ## `ERbpiCorrupt(field: "body")` on malformed CBOR or schema
@@ -364,6 +397,15 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   for r in expectArray(
       lookup(entries, KeyResources, "ProfileIntent"), KeyResources):
     result.resources.add decodeResource(r)
+  # M2.5: adapter preference is OPTIONAL — a pre-M2.5 RBPI artifact
+  # (cached before this codec extension) has no `KeyAdapterPreference`
+  # entry, in which case the decoded value carries an empty table.
+  var apFound = false
+  let apNode = lookupOpt(entries, KeyAdapterPreference, apFound)
+  if apFound:
+    result.adapterPreference = decodeAdapterPreference(apNode)
+  else:
+    result.adapterPreference = initOrderedTable[string, seq[string]]()
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers — wrap/unwrap the envelope around the CBOR body.

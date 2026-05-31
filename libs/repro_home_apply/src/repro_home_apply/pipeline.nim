@@ -1736,7 +1736,15 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # preview never calls `realizeScoopAdapter`, so no `scoop install`
   # runs. `previewPackageResolutions` lives in `realize.nim` so the
   # preview and the real dispatch share one resolution path.
-  for pp in previewPackageResolutions(applyPlan.packages):
+  #
+  # M2.5: resolve the per-host adapter chain from the parsed profile's
+  # `adapterPreference:` block (empty -> M65 platform default). Threaded
+  # into both the preview and the realize call sites so PLAN and apply
+  # report the same per-adapter verdict.
+  let previewAdapterChain = resolveAdapterChainFor(
+    applyPlan.adapterPreference, currentHostOsKey())
+  for pp in previewPackageResolutions(applyPlan.packages,
+      chain = previewAdapterChain):
     var item = PlanItem(category: "package", name: pp.packageId,
       detail: pp.detail)
     case pp.kind
@@ -2065,7 +2073,13 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       createDir(extendedPath(earlyGenDir))
 
       # ---- Step 7: realize packages -------------------------------------
-      let realized = realizePlannedPackages(store, applyPlan.packages)
+      # M2.5: same per-host chain selection the preview path uses, so
+      # `repro home apply --plan` and `repro home apply` cannot diverge
+      # on which adapter resolves a given package.
+      let realizeAdapterChain = resolveAdapterChainFor(
+        applyPlan.adapterPreference, currentHostOsKey())
+      let realized = realizePlannedPackages(store, applyPlan.packages,
+        chain = realizeAdapterChain)
       if shouldKillAfter(7):
         raiseKilledByTestHook(7)
 

@@ -410,6 +410,87 @@ proc parseResourcesSection(body: NimNode; profileVar: NimNode): NimNode =
           "constructor calls", body)
   result = rewriteResourcesBody(body, profileVar)
 
+proc parseAdapterPreferenceSection(body: NimNode; profileVar: NimNode): NimNode =
+  ## M2.5: `adapterPreference:` body is a list of `<os>: [adapter, ...]`
+  ## entries — same syntactic shape as `hosts:`. Per-OS keys are drawn
+  ## from `{windows, linux, darwin, macos}`; chain entries are drawn
+  ## from `{builtin, scoop, nix, path}`. Unknown OS or adapter names
+  ## raise a compile-time error naming the offending token. `macos` is
+  ## an alias for `darwin` and is canonicalized to `"darwin"` so a
+  ## single resolve-time lookup suffices.
+  const KnownOsKeys = ["windows", "linux", "darwin", "macos"]
+  const KnownAdapters = ["builtin", "scoop", "nix", "path"]
+  result = newNimNode(nnkStmtList)
+  if body.kind != nnkStmtList:
+    error("adapterPreference: expects an indented block of " &
+          "`<os>: [adapter, ...]` entries", body)
+  for entry in body:
+    if entry.kind != nnkCall or entry.len != 2:
+      error("adapterPreference entry must be `<os>: [adapter, ...]`",
+            entry)
+    var osKey: string
+    case entry[0].kind
+    of nnkIdent: osKey = $entry[0]
+    of nnkStrLit: osKey = entry[0].strVal
+    else:
+      error("adapterPreference OS key must be an identifier or string " &
+            "literal (one of: " & join(KnownOsKeys, ", ") & ")",
+            entry[0])
+    let osLc = toLowerAscii(osKey)
+    if osLc notin KnownOsKeys:
+      error("adapterPreference: unknown OS key '" & osKey &
+            "' (allowed: " & join(KnownOsKeys, ", ") & ")", entry[0])
+    let canonical = (if osLc == "macos": "darwin" else: osLc)
+    let listSrc = entry[1]
+    var bracketNode: NimNode
+    case listSrc.kind
+    of nnkStmtList:
+      if listSrc.len != 1:
+        error("adapterPreference entry body must be a single bracket list",
+              listSrc)
+      bracketNode = listSrc[0]
+    else:
+      bracketNode = listSrc
+    if bracketNode.kind notin {nnkBracket, nnkPrefix}:
+      error("adapterPreference entry value must be a `[adapter, ...]` " &
+            "bracket list", bracketNode)
+    let actualBracket =
+      if bracketNode.kind == nnkPrefix and bracketNode.len == 2 and
+         bracketNode[1].kind == nnkBracket:
+        bracketNode[1]
+      else:
+        bracketNode
+    var adapterNames: seq[string] = @[]
+    for item in actualBracket:
+      var aName: string
+      case item.kind
+      of nnkIdent: aName = $item
+      of nnkStrLit: aName = item.strVal
+      else:
+        error("adapterPreference chain entry must be an identifier or " &
+              "string literal (one of: " & join(KnownAdapters, ", ") &
+              ")", item)
+      let aLc = toLowerAscii(aName)
+      if aLc notin KnownAdapters:
+        error("adapterPreference: unknown adapter '" & aName &
+              "' (allowed: " & join(KnownAdapters, ", ") & ")", item)
+      adapterNames.add aLc
+    let osLit = newStrLitNode(canonical)
+    let tmpSym = genSym(nskVar, "adapterChain")
+    let inner = newNimNode(nnkStmtList)
+    inner.add quote do:
+      var `tmpSym`: seq[string] = @[]
+    for a in adapterNames:
+      let aLit = newStrLitNode(a)
+      inner.add quote do:
+        `tmpSym`.add `aLit`
+    inner.add quote do:
+      `profileVar`.adapterPreference[`osLit`] = `tmpSym`
+    let blk = newNimNode(nnkBlockStmt)
+    blk.add newEmptyNode()
+    blk.add inner
+    result.add blk
+
 proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   ## A top-level `activity name: body` form. Emit an
   ## ActivityIntent into __profileIntent.activities.
@@ -477,6 +558,11 @@ macro profile*(name: static[string]; body: untyped): untyped =
           if stmt.len < 2 or stmt[1].kind != nnkStmtList:
             error("resources must be `resources: <body>`", stmt)
           stmts.add parseResourcesSection(stmt[1], profSym)
+        of "adapterPreference":
+          if stmt.len < 2 or stmt[1].kind != nnkStmtList:
+            error("adapterPreference must be `adapterPreference: <body>`",
+                  stmt)
+          stmts.add parseAdapterPreferenceSection(stmt[1], profSym)
         else:
           error("unrecognised profile body form: " & $head, stmt)
       else:

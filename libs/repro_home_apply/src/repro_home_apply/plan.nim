@@ -87,6 +87,14 @@ type
     launchers*: seq[PlannedLauncher]
     configContributions*: seq[ConfigContribution]
     diagnostics*: seq[StowDiagnostic]
+    adapterPreference*: OrderedTable[string, seq[string]]
+      ## M2.5: per-OS adapter preference copied through from the parsed
+      ## `Profile.adapterPreference`. Keys are canonical OS tags
+      ## (`"windows"`, `"linux"`, `"darwin"`); values are the ordered
+      ## adapter chain (each entry drawn from the closed set
+      ## `{"builtin", "scoop", "nix", "path"}`). Empty table when the
+      ## profile carries no `adapterPreference:` block — realize +
+      ## preview then fall back to the M65 platform default chain.
     ## Order: packages by `packageId`, generated files by
     ## `(absoluteOutputPath, sourceKind, contributingPackage)`, launchers
     ## by `commandName`. The planner enforces this; `compareEqual`
@@ -199,6 +207,12 @@ proc buildPlan*(profile: Profile; profileDir, hostIdentity: string): ApplyPlan =
   result.hostIdentity = hostIdentity
   result.profilePath = profile.path
   result.profileDir = profileDir
+  # M2.5: copy the per-host adapter preference so the realize + preview
+  # call sites can honour it without re-loading the profile. An empty
+  # `Profile.adapterPreference` (no DSL block) becomes an empty
+  # `ApplyPlan.adapterPreference` — the realize/preview helpers then
+  # fall back to the M65 platform default chain.
+  result.adapterPreference = profile.adapterPreference
   let active = enabledActivitiesFor(profile, hostIdentity)
   for child in profile.root.children:
     if child.kind != nkActivity:

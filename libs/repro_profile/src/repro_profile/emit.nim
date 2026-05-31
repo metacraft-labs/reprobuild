@@ -142,6 +142,29 @@ proc encodeHosts(h: Table[string, seq[string]]): string =
     result.add "]"
   result.add "}"
 
+proc encodeAdapterPreference(ap: OrderedTable[string, seq[string]]): string =
+  ## M2.5: serialize the per-OS adapter chain table. Keys are emitted in
+  ## sorted order for determinism (the table is already OrderedTable but
+  ## we sort defensively so the JSON form is stable across construction
+  ## orderings).
+  var keys: seq[string] = @[]
+  for k in ap.keys:
+    keys.add k
+  keys.sort(cmp[string])
+  result = "{"
+  for i, k in keys:
+    if i > 0:
+      result.add ","
+    result.add encodeStr(k)
+    result.add ":["
+    let chain = ap[k]
+    for j, a in chain:
+      if j > 0:
+        result.add ","
+      result.add encodeStr(a)
+    result.add "]"
+  result.add "}"
+
 proc emitProfileIntentJson*(p: ProfileIntent): string =
   ## Serialise `p` to a deterministic JSON form. Field order is
   ## fixed (name, activities, configOverrides, hosts, resources).
@@ -168,6 +191,8 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
       result.add ","
     result.add encodeResource(r)
   result.add "]"
+  result.add ",\"adapterPreference\":" &
+    encodeAdapterPreference(p.adapterPreference)
   result.add "}"
 
 # ---------------------------------------------------------------------
@@ -252,6 +277,15 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
     for dep in r["dependsOn"]:
       ri.dependsOn.add parseAddress(dep)
     result.resources.add ri
+  # M2.5: `adapterPreference` is a JSON object whose values are arrays of
+  # adapter-name strings. Backward-compat: the key is optional — a JSON
+  # blob emitted by a pre-M2.5 producer simply yields an empty table.
+  if root.hasKey("adapterPreference"):
+    for osKey, chainNode in root["adapterPreference"]:
+      var chain: seq[string] = @[]
+      for it in chainNode:
+        chain.add it.getStr()
+      result.adapterPreference[osKey] = chain
 
 # ---------------------------------------------------------------------
 # Entry-point helper.

@@ -320,13 +320,88 @@ proc realizeBuiltinAdapter(store: var Store;
     result.provenance[i] = byte(ord(ch))
 
 # ---------------------------------------------------------------------------
+# M2.5 adapter-preference helpers
+# ---------------------------------------------------------------------------
+#
+# `resolveAdapterChainFor` picks the per-host chain to feed into M65's
+# `chainResolvePackage`. The rule (per M2.5 spec):
+#
+#   1. If the profile carries an `adapterPreference:` block AND the
+#      block has an entry for the current host's OS → use it.
+#   2. If the block is present but the current OS key is unspecified →
+#      fall back to the M65 platform default for that OS (NOT the
+#      empty chain).
+#   3. If the block is absent → fall back to the M65 platform default.
+#
+# Adapter-name → CatalogAdapterKind mapping is the closed set the M2.5
+# DSL parser already enforces; an unknown name here is a defensive
+# bug-check (the parsers reject unknown entries at parse time).
+
+proc currentHostOsKey*(): string =
+  ## Canonical OS key for the current host. Matches the DSL parser's
+  ## canonicalization (`macos` aliases to `darwin`).
+  when defined(windows):
+    "windows"
+  elif defined(linux):
+    "linux"
+  elif defined(macosx) or defined(osx):
+    "darwin"
+  else:
+    ""
+
+proc adapterNameToKind(name: string): CatalogAdapterKind =
+  ## Defensive: the parser already restricts the closed set.
+  case name
+  of "builtin": cakBuiltin
+  of "scoop":   cakScoop
+  of "nix":     cakNix
+  of "path":    cakPath
+  else:
+    raise newException(ValueError,
+      "internal: unknown adapter name '" & name &
+      "' reached resolveAdapterChainFor; the DSL parser must reject " &
+      "this earlier (closed set: builtin, scoop, nix, path)")
+
+proc resolveAdapterChainFor*(
+    adapterPreference: OrderedTable[string, seq[string]];
+    osKey: string): seq[CatalogAdapterKind] =
+  ## M2.5: pick the chain to feed into `chainResolvePackage` for a
+  ## given host OS. An empty preference table → the M65 platform
+  ## default chain. A present table that lacks the current OS key →
+  ## the M65 platform default chain for that OS (NOT the empty chain).
+  ## A present + matching entry → that entry's chain (an empty list
+  ## also falls back to the platform default for that OS).
+  if osKey in adapterPreference:
+    let names = adapterPreference[osKey]
+    if names.len > 0:
+      for n in names:
+        result.add adapterNameToKind(n)
+      return
+  # Fallback: M65 platform default for the named OS. Note this is
+  # keyed on the requested OS, NOT the host's OS — for tests this lets
+  # us assert "a Windows-only preference uses the Windows default on
+  # a non-Windows host" if we ever wire that up (today the helper is
+  # always called with the host's OS key so the distinction is moot,
+  # but the keying is correct).
+  case osKey
+  of "windows": result = WindowsDefaultChain
+  of "linux":   result = LinuxDefaultChain
+  of "darwin":  result = MacosDefaultChain
+  else:
+    # An unknown osKey (e.g. running on an OS the M65 chain doesn't
+    # know about) — defensive fallback to the path adapter.
+    result = @[cakPath]
+
+# ---------------------------------------------------------------------------
 # M72 production catalog dispatch
 # ---------------------------------------------------------------------------
 
 proc realizeViaProductionCatalog(store: var Store;
                                  cat: var ProductionCatalog;
                                  packageId: string;
-                                 requestedVersion = ""): RealizedRecord =
+                                 requestedVersion = "";
+                                 chain: seq[CatalogAdapterKind] = @[]):
+    RealizedRecord =
   ## M72+ production dispatch. Windows prefers Scoop; macOS/Linux can
   ## realize PATH-discovered tools through the universal path adapter.
   ##
@@ -350,7 +425,8 @@ proc realizeViaProductionCatalog(store: var Store;
         raiseRealizeFailed(packageId, "builtin", err.msg)
     let resolutionChain =
       try:
-        chainResolvePackage(cat, packageId, version = requestedVersion)
+        chainResolvePackage(cat, packageId, chain = chain,
+          version = requestedVersion)
       except EAdapterChainExhausted as err:
         raiseRealizeFailed(packageId, "<chain>", err.msg)
       except EUnknownPackage as err:
@@ -466,7 +542,8 @@ type
       ## ``builtinVersion``; for cakScoop ``resolvedVersion``. Empty for
       ## cakPath / cakNix.
 
-proc previewPackageResolutions*(packages: seq[PlannedPackage]):
+proc previewPackageResolutions*(packages: seq[PlannedPackage];
+    chain: seq[CatalogAdapterKind] = @[]):
     seq[PackagePreview] =
   ## M72 Deliverable 2 + M0 planner-path correctness fix: classify each
   ## planned package WITHOUT realizing it. The production catalog query
@@ -487,6 +564,14 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
   ## "missing". Unregistered packages with no pin keep the pre-M65
   ## ``resolvePackage`` fallback so the legacy non-catalog flows (e.g.
   ## pure-Scoop-only references) still preview cleanly.
+  ##
+  ## M2.5 (Realize-Closure-And-Catalog-Expansion): the `chain` parameter
+  ## carries the per-host `adapterPreference:` override (resolved
+  ## upstream from `ApplyPlan.adapterPreference` via
+  ## `resolveAdapterChainFor`). An empty `chain` falls back to the M65
+  ## platform default. Both this proc and `realizeViaProductionCatalog`
+  ## thread the same chain so PLAN-mode preview and the actual realize
+  ## report the same adapter verdict per package.
   let pathCatalog = parsePathCatalog()
   let scoopCatalog = parseScoopCatalog()
   var prodCatalog = openProductionCatalog()
@@ -533,7 +618,7 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
         var chainOk = true
         try:
           resolution = chainResolvePackage(prodCatalog, p.packageId,
-            version = p.requestedVersion)
+            chain = chain, version = p.requestedVersion)
         except EAdapterChainExhausted as err:
           preview.kind = ppkMissing
           preview.detail = "adapter-chain-exhausted: " & err.msg
@@ -635,7 +720,8 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage]):
 # ---------------------------------------------------------------------------
 
 proc realizePlannedPackages*(store: var Store;
-                             packages: seq[PlannedPackage]):
+                             packages: seq[PlannedPackage];
+                             chain: seq[CatalogAdapterKind] = @[]):
     seq[RealizedRecord] =
   ## Realize every planned package through its declared adapter.
   ##
@@ -643,6 +729,13 @@ proc realizePlannedPackages*(store: var Store;
   ## TEST-ONLY overrides and win over the production catalog. A package
   ## with no seam binding falls through to the production catalog
   ## (`package_catalog.resolvePackage`) — the M72 production path.
+  ##
+  ## M2.5: the optional `chain` carries the per-host
+  ## `adapterPreference:` override (resolved upstream from
+  ## `ApplyPlan.adapterPreference` via `resolveAdapterChainFor`). An
+  ## empty `chain` falls back to the M65 platform default. The chain is
+  ## passed into `realizeViaProductionCatalog` so the chain-routed
+  ## branch honours it.
   let pathCatalog = parsePathCatalog()
   let scoopCatalog = parseScoopCatalog()
   var prodCatalog = openProductionCatalog()
@@ -661,4 +754,10 @@ proc realizePlannedPackages*(store: var Store;
     else:
       # M72: no test-seam binding — resolve through the production
       # adapter catalog of the real host environment.
-      result.add(realizeViaProductionCatalog(store, prodCatalog, p.packageId))
+      # NOTE: `requestedVersion` is intentionally NOT threaded through
+      # here (M69-shaped pre-existing behaviour — the realize-side
+      # version pin lives behind a separate seam). M2.5 only adds the
+      # `chain` parameter so the per-host `adapterPreference:` override
+      # reaches `chainResolvePackage` at realize time.
+      result.add(realizeViaProductionCatalog(store, prodCatalog, p.packageId,
+        chain = chain))
