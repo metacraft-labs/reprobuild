@@ -14,9 +14,9 @@ proc runShell(command: openArray[string]; cwd = getCurrentDir();
 proc requireSuccess(command: openArray[string]; cwd = getCurrentDir();
                     pathValue = getEnv("PATH")): string =
   let res = runShell(command, cwd, pathValue)
-  check res.code == 0
   if res.code != 0:
     checkpoint(res.output)
+  check res.code == 0
   res.output
 
 proc requireFailure(command: openArray[string]; cwd = getCurrentDir();
@@ -82,7 +82,7 @@ suite "e2e_path_only_tool_interfaces":
     let target = fixtureRoot & "#ok"
 
     let okOutput = requireSuccess(@[reproBin, "build", target,
-      "--tool-provisioning=path"], repoRoot, pathValue)
+      "--tool-provisioning=path", "--log=actions"], repoRoot, pathValue)
     check okOutput.contains("provisioning-disabled mode active")
     check okOutput.contains("cachePortability: local-only")
 
@@ -119,7 +119,7 @@ suite "e2e_path_only_tool_interfaces":
     check readFile(inspectionPath).contains("\"cachePortability\": \"local-only\"")
 
     let cachedOutput = requireSuccess(@[reproBin, "build", target,
-      "--tool-provisioning=path"], repoRoot, pathValue)
+      "--tool-provisioning=path", "--log=actions"], repoRoot, pathValue)
     let cachedIdentity = readPathOnlyBuildIdentity(
       valueAfter(cachedOutput, "toolIdentity:"))
     check cachedIdentity.actionIdentities[0].actionFingerprint ==
@@ -131,7 +131,7 @@ suite "e2e_path_only_tool_interfaces":
     createDir(extraDir)
     let changedPathValue = pathValue & $PathSep & extraDir
     let changedOutput = requireSuccess(@[reproBin, "build", target,
-      "--tool-provisioning=path"], repoRoot, changedPathValue)
+      "--tool-provisioning=path", "--log=actions"], repoRoot, changedPathValue)
     let changedIdentity = readPathOnlyBuildIdentity(
       valueAfter(changedOutput, "toolIdentity:"))
     check changedIdentity.profiles[0].resolvedExecutablePath ==

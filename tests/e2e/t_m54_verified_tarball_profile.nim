@@ -184,7 +184,7 @@ suite "m54_verified_tarball_profile":
     writeProject(projectRoot, brokenPrimary, goodMirror, archive.sha256)
 
     let first = requireSuccess(shellCommand([reproBin, "build", projectRoot,
-      "--tool-provisioning=tarball"]), repoRoot)
+      "--tool-provisioning=tarball", "--log=actions"]), repoRoot)
     check first.contains("tool-provisioning=tarball")
     check first.contains("cachePortability: portable")
     check first.contains("action: tarball-run status=asSucceeded launched=true")
@@ -228,7 +228,7 @@ suite "m54_verified_tarball_profile":
 
     let prefixInfo = getFileInfo(profile.selectedStorePath)
     let second = requireSuccess(shellCommand([reproBin, "build", projectRoot,
-      "--tool-provisioning=tarball"]), repoRoot)
+      "--tool-provisioning=tarball", "--log=actions"]), repoRoot)
     if not actionLineCacheEffective(second, "tarball-run"):
       checkpoint(second)
     check actionLineCacheEffective(second, "tarball-run")
