@@ -124,7 +124,7 @@ suite "M71 Phase B: local cross-host activation-bundle evaluation":
     createDir(fixtureDir)
 
     writeFile(profileDir / "home.nim",
-      "import repro/profile\n\n" &
+      "import repro_profile\n\n" &
       "profile \"m71-phase-b\":\n" &
       "  activity default:\n" &
       "    common-base\n" &

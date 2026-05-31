@@ -187,7 +187,7 @@ proc stopLoopbackSshd(h: var SshHarness) =
 proc writeProfile(profileDir: string) =
   createDir(profileDir)
   writeFile(profileDir / "home.nim",
-    "import repro/profile\n\n" &
+    "import repro_profile\n\n" &
     "profile \"m71-phase-e\":\n" &
     "  activity " & ActivityName & ":\n" &
     "    " & PackageName & "\n")

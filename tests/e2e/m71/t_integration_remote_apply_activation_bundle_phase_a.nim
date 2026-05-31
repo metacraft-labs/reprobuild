@@ -110,10 +110,10 @@ suite "M71 Phase A: local activation bundle format and writer":
     createDir(fixtureDir)
 
     writeFile(profileDir / "home.nim",
-      "import repro/profile\n\n" &
+      "import repro_profile\n\n" &
       "profile \"m71-phase-a\":\n" &
       "  activity default:\n" &
-      "    m71-fixture\n")
+      "    `m71-fixture`\n")
 
     let exeName = when defined(windows): "m71-fixture.cmd" else: "m71-fixture"
     let exePath = fixtureDir / exeName

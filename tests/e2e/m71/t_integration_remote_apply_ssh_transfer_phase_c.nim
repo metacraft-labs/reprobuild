@@ -218,10 +218,10 @@ suite "M71 Phase C: SSH activation-bundle transfer/import":
       createDir(fixtureDir)
 
       writeFile(profileDir / "home.nim",
-        "import repro/profile\n\n" &
+        "import repro_profile\n\n" &
         "profile \"m71-phase-c\":\n" &
         "  activity default:\n" &
-        "    m71-fixture\n")
+        "    `m71-fixture`\n")
 
       let exeName = "m71-fixture"
       let exePath = fixtureDir / exeName
