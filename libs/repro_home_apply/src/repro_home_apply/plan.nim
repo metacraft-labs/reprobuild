@@ -18,7 +18,7 @@
 ## records into the same list and the suppression layer
 ## (`./suppression.nim`) deduplicates by absolute target path.
 
-import std/[algorithm, options, sets]
+import std/[algorithm, options, os, sets, strutils, tables]
 
 import repro_home_intent
 
