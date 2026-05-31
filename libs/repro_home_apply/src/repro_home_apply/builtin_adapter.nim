@@ -657,8 +657,23 @@ proc realizeBuiltinPackage*(store: var Store;
       # 1) Download.
       let downloadDir = stagingDir / ".repro-download"
       createDir(extendedPath(downloadDir))
+      # Suffix the download path with the archive's native extension so
+      # downstream extractors that dispatch on extension (PowerShell's
+      # Expand-Archive requires `.zip`; some `tar` wrappers parse the
+      # second-from-last segment) can recognise the file. Without this
+      # the `.<digits>` timestamp suffix is misread as the extension.
+      var archiveExt = ""
+      case resolution.archiveFormat
+      of afZip: archiveExt = ".zip"
+      of afTarGz: archiveExt = ".tar.gz"
+      of afTarXz: archiveExt = ".tar.xz"
+      of afTarBz2: archiveExt = ".tar.bz2"
+      of afSevenZip: archiveExt = ".7z"
+      of afInstallerNsis: archiveExt = ".exe"
+      of afInstallerMsi: archiveExt = ".msi"
+      of afRaw: discard
       let downloadPath = downloadDir / ("artifact." & $getCurrentProcessId() &
-        "." & $getTime().toUnix)
+        "." & $getTime().toUnix & archiveExt)
       downloadToFile(resolution.urlUsed, downloadPath, packageId)
 
       # 2) Verify SHA.
