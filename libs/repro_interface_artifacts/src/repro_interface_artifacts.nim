@@ -1663,6 +1663,18 @@ proc nimImportSpecs(line: string): seq[string] =
       return @[rest[0 ..< pos].strip()]
 
 proc discoverNimSources*(rootModulePath: string): seq[string] =
+  ## Enumerate the provider compile's input source set.
+  ##
+  ## Imports reachable from ``rootModulePath`` are included transitively
+  ## (only within the project root, never outside; std/ and pkg/ specs are
+  ## ignored). In addition every ``.nim`` file directly in the project
+  ## root is included even when it is not currently imported, so that
+  ## adding a sibling module to the project invalidates the provider
+  ## compile cache: a later edit to ``reprobuild.nim`` might import it,
+  ## and Nim's own compilation already treats project-root siblings as
+  ## eligible imports. Sibling enumeration is intentionally
+  ## non-recursive — subdirectory sources only enter the set through an
+  ## explicit import edge.
   let projectRoot = normalizedStampPath(parentDir(rootModulePath))
   var pending = @[normalizedStampPath(rootModulePath)]
   var seen = initHashSet[string]()
@@ -1680,6 +1692,16 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
           let localPath = localNimModulePath(path, projectRoot, expanded)
           if localPath.len > 0 and localPath notin seen:
             pending.add(localPath)
+  if dirExists(extendedPath(projectRoot)):
+    for kind, child in walkDir(projectRoot):
+      if kind notin {pcFile, pcLinkToFile}:
+        continue
+      if not (child.endsWith(".nim") or child.endsWith(".nims")):
+        continue
+      let normalized = normalizedStampPath(child)
+      if normalized notin seen:
+        seen.incl(normalized)
+        result.add(normalized)
   result.sort(system.cmp[string])
 
 proc reproLibSources(workDir: string): seq[string] =
