@@ -392,6 +392,33 @@ proc collectActivationCasBlobs(store: Store;
     cmp(activationDigestHex(a.digest), activationDigestHex(b.digest)))
   blobs
 
+proc isEnvBindingSynthesizedResource(rec: ResourceBinding): bool =
+  ## M69 synthesizes per-package env bindings as ResourceBindings with
+  ## kinds ``env.userPath`` / ``env.userVariable`` and addresses under
+  ## the ``home.package.<id>.`` namespace. These records exist purely
+  ## so the source-side drift detector can refresh observation on
+  ## re-apply; they MUST NOT leak into a cross-host activation bundle,
+  ## because the target's PATH/env layout is host-private and the
+  ## remote-activation path cannot replay resource bindings (see
+  ## ``validateRemoteActivationPayload`` in repro_cli_support/home).
+  ##
+  ## User-declared ``resources:`` entries may share these kinds (rare
+  ## per home-profile policy) but never live under
+  ## ``home.package.``, so the address prefix is the discriminator.
+  if rec.resourceKind != "env.userPath" and
+     rec.resourceKind != "env.userVariable":
+    return false
+  rec.resourceAddress.startsWith("home.package.")
+
+proc stripSynthesizedEnvBindings(manifest: ActivationManifest):
+    ActivationManifest =
+  result = manifest
+  var kept: seq[ResourceBinding]
+  for rec in manifest.resourceBindings:
+    if not isEnvBindingSynthesizedResource(rec):
+      kept.add(rec)
+  result.resourceBindings = kept
+
 proc buildActivationBundle*(stateDir: string; store: Store;
                             generationId = "current"): ActivationBundle =
   ## Assemble the deterministic in-memory bundle for an already
@@ -411,7 +438,7 @@ proc buildActivationBundle*(stateDir: string; store: Store;
     raiseActivationBundleCorrupt("<build>", "pointer",
       "pointer file is missing: " & ppath)
   let pointerBytes = bytesFromFile(ppath)
-  let envelope = decodePointerBytes(pointerBytes, ppath)
+  var envelope = decodePointerBytes(pointerBytes, ppath)
   let sourceIdHex = generationIdHex(envelope.generationId)
   if sourceIdHex != resolvedId:
     raiseActivationBundleCorrupt("<build>", "generationId",
@@ -422,17 +449,50 @@ proc buildActivationBundle*(stateDir: string; store: Store;
   result.sourceGenerationId = envelope.generationId
   result.hostIdentity = envelope.hostIdentity
   result.activationTimestamp = envelope.activationTimestamp
-  result.pointerEnvelopeBytes = pointerBytes
-  result.activationManifestBytes = store.readCasBlob(
+  let originalManifestBytes = store.readCasBlob(
     toPrefixId(envelope.activationManifestDigest))
   result.intentSnapshotBytes = store.readCasBlob(
     toPrefixId(envelope.intentSnapshotDigest))
-  result.configurableGraphBytes = store.readCasBlob(
+  let originalConfigurableGraphBytes = store.readCasBlob(
     toPrefixId(envelope.configurableGraphDigest))
   result.activationRuntimeKind = ActivationRuntimePlaceholderKind
   result.activationRuntimeBytes = @[]
-  let manifest = decodeManifestBytes(result.activationManifestBytes)
-  result.casBlobs = collectActivationCasBlobs(store, manifest)
+  let originalManifest = decodeManifestBytes(originalManifestBytes)
+  # Strip M69-synthesized per-package env-binding resources from the
+  # BUNDLE-bound manifest. The source-side manifest in CAS keeps the
+  # records (apply/rollback/plan depend on them for drift detection);
+  # only the cross-host bundle gets the filtered copy. If nothing is
+  # filtered the bytes are identical to the CAS blob and the envelope
+  # digest stays unchanged (CAS-dedup invariant).
+  let filteredManifest = stripSynthesizedEnvBindings(originalManifest)
+  if filteredManifest.resourceBindings.len ==
+      originalManifest.resourceBindings.len:
+    result.activationManifestBytes = originalManifestBytes
+    result.configurableGraphBytes = originalConfigurableGraphBytes
+    result.pointerEnvelopeBytes = pointerBytes
+  else:
+    result.activationManifestBytes = encodeManifest(filteredManifest)
+    let newManifestDigest = blake3.digest(result.activationManifestBytes)
+    # M71 Phase A placeholder convention (see repro_home_apply/pipeline:
+    # ``let rbcgBytes = manifestBytes``): when no real configurable
+    # graph has been authored yet the RBCG blob is the manifest blob
+    # itself, and the two envelope digests are equal. Mirror that
+    # equality in the bundle: if the source envelope used the placeholder
+    # convention, keep the bundled RBCG bytes identical to the filtered
+    # manifest bytes so the on-disk bundle invariant
+    # ``configurableGraphBytes == activationManifestBytes`` survives
+    # the strip. When the RBCG carries distinct bytes (M58+ once
+    # configurables are wired) we pass them through unchanged because
+    # only the manifest carries M69 resource records.
+    if envelope.configurableGraphDigest ==
+        envelope.activationManifestDigest:
+      result.configurableGraphBytes = result.activationManifestBytes
+      envelope.configurableGraphDigest = newManifestDigest
+    else:
+      result.configurableGraphBytes = originalConfigurableGraphBytes
+    envelope.activationManifestDigest = newManifestDigest
+    result.pointerEnvelopeBytes = encodePointer(envelope)
+  result.casBlobs = collectActivationCasBlobs(store, filteredManifest)
   for prefixDigest in envelope.realizedPrefixIds:
     result.prefixes.add(collectPrefixClosure(store, prefixDigest))
 
