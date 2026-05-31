@@ -94,11 +94,27 @@ type
     missingPath*: string
 
   EBuiltinInstallMethodUnsupported* = object of EHomeApply
-    ## M64 ships imExtract + imInstallerSilent + imSourceBootstrap.
-    ## imMsys2Pacman is deferred to M67 (OCaml entry).  This exception
-    ## fires when an unsupported method is requested.
+    ## M64 shipped imExtract + imInstallerSilent + imSourceBootstrap.
+    ## M6 (Realize-Closure-And-Catalog-Expansion spec) added
+    ## imMsys2Pacman. This exception fires only when a future variant is
+    ## requested before its realize hook lands.
     packageId*: string
     installMethod*: string
+
+  EBuiltinZstdUnavailable* = object of EHomeApply
+    ## M6 (Realize-Closure-And-Catalog-Expansion spec): the
+    ## ``afTarZst`` realize hook needed a zstd-capable extractor (full
+    ## ``7z.exe`` from the catalog ``7zip`` prefix, host
+    ## ``tar --zstd``, or host ``zstd``) but every step of the
+    ## discovery order exhausted. Carries the per-step trace so the
+    ## operator sees exactly which paths were tried. Remediation:
+    ## install Git for Windows (ships ``tar`` with the ``--zstd``
+    ## filter) OR install the full 7-Zip suite (the M3 hand-authored
+    ## ``packages/sevenzip.nim`` ships ``7zr.exe`` which does NOT
+    ## include the zstd codec; re-harvest sevenzip to the MSI shape
+    ## via the M11 follow-up).
+    packageId*: string
+    discoveryTrace*: seq[string]
 
   EBuiltinSevenZipUnavailable* = object of EHomeApply
     ## M3: the 7z-family realize hook needed a ``7z.exe`` but the
@@ -1808,6 +1824,263 @@ proc extractTar(packageId, archivePath, destDir, format: string) =
     raiseExtractFailed(packageId, archivePath, format,
       "tar exited " & $res.exitCode & "\n" & res.output)
 
+# ---------------------------------------------------------------------------
+# M6 (Realize-Closure-And-Catalog-Expansion spec) — .tar.zst extraction
+# ---------------------------------------------------------------------------
+#
+# The MSYS2 pacman repository ships every package as a zstd-compressed
+# tar (``.pkg.tar.zst``). M6's realize hook needs a zstd-capable
+# extractor; the discovery order mirrors M3/M4:
+#
+#   (i)  catalog-registered ``7zip`` prefix whose ``bin/7z.exe`` is the
+#        FULL 7-Zip distribution (26.01+ ships the zstd codec; the
+#        reduced ``7zr.exe`` does NOT). The M3 hand-authored
+#        ``packages/sevenzip.nim`` currently routes through 7zr; until
+#        the M11 follow-up re-harvests sevenzip to the MSI shape, this
+#        step typically misses on freshly-bootstrapped hosts.
+#   (ii) host ``tar`` with the ``--zstd`` filter (Git for Windows ships
+#        this).
+#   (iii) host ``zstd`` piped to ``tar`` (POSIX hosts with the
+#        upstream Facebook zstd binary).
+#   (iv) fail-closed with ``EBuiltinZstdUnavailable``.
+#
+# Per the bundling-posture amendment we do NOT vendor a zstd binary; the
+# spec's ``libs/repro_home_apply/vendor/zstd/`` deliverable is replaced
+# with the multi-strategy host discovery + the future re-harvested
+# sevenzip MSI catalog. Documented in the M6 spec note.
+
+proc probe7zZstdSupport(sevenZipExe: string): bool =
+  ## Probe whether the discovered ``7z.exe`` supports the zstd codec by
+  ## running ``7z i`` and looking for the zstd line. Cached implicitly
+  ## via the discoverer's own catalog-prefix lookup (the discovered path
+  ## is stable for a given store snapshot).
+  ##
+  ## ``7zr.exe`` (the reduced standalone) reports a small set of formats
+  ## that does NOT include zstd. The full ``7z.exe`` from the MSI suite
+  ## (or the upstream ``7z2601-extra.7z`` "extra" archive) ships the
+  ## codec and reports it via ``7z i``.
+  if sevenZipExe.len == 0: return false
+  let command = quoteShell(sevenZipExe) & " i"
+  let res = execCmdEx(command)
+  if res.exitCode != 0: return false
+  # The ``7z i`` output enumerates one format per line; the zstd entry
+  # looks like ``... zstd     zst tzst (.tar) ( B5 / FD``. A
+  # case-insensitive substring match on ``zstd`` is sufficient — no
+  # other format line carries that token.
+  res.output.toLowerAscii().contains("zstd")
+
+type
+  ZstdExtractorKind* = enum
+    zekSevenZip
+    zekTarFilter
+    zekZstdPipe
+
+  ZstdExtractor* = object
+    ## M6: the per-discovery result of ``discoverZstdExtractor``. Carries
+    ## the chosen strategy + the resolved binary path(s) so the per-
+    ## archive extraction call does not re-do discovery for each file.
+    case kind*: ZstdExtractorKind
+    of zekSevenZip:
+      sevenZipExe*: string  ## absolute path to a zstd-capable 7z.exe
+    of zekTarFilter:
+      tarExe*: string       ## absolute path to a ``tar`` with --zstd
+    of zekZstdPipe:
+      zstdExe*: string      ## absolute path to a zstd binary
+      tarExeForPipe*: string  ## absolute path to a tar that reads from
+                              ## stdin (any modern tar; the same one
+                              ## ``extractTar`` would discover)
+
+proc discoverZstdExtractor*(store: var Store; packageId: string):
+    ZstdExtractor =
+  ## M6: pick the best available zstd-capable extractor. Discovery order
+  ## documented in the module-level comment above. Raises
+  ## ``EBuiltinZstdUnavailable`` if every step misses.
+  ##
+  ## NB the catalog-prefix lookup probes for the FULL 7z (zstd codec
+  ## present), NOT just any ``bin/7z.exe``. The M3 hand-authored 7zr
+  ## entry will report no zstd support; we treat that as a miss and
+  ## fall through to host tools. Once sevenzip is re-harvested to the
+  ## MSI shape, this branch will hit cleanly.
+  var trace: seq[string] = @[]
+  # Step (i): catalog-registered 7zip prefix with zstd codec.
+  let prefixes = listPrefixes(store)
+  trace.add("catalog-prefix:scanned " & $prefixes.len & " rows for package=7zip")
+  for row in prefixes:
+    if row.packageName != "7zip": continue
+    let prefixAbs = store.absolutePrefixPath(row.realizedPath)
+    let candidate = prefixAbs / "bin" / "7z.exe"
+    if fileExists(extendedPath(candidate)):
+      if probe7zZstdSupport(candidate):
+        return ZstdExtractor(kind: zekSevenZip, sevenZipExe: candidate)
+      trace.add("catalog-prefix:row " & row.realizedPath &
+        " has bin/7z.exe but no zstd codec (likely reduced 7zr; " &
+        "re-harvest sevenzip to the MSI shape per M11 follow-up)")
+    let candidateBare = prefixAbs / "bin" / "7z"
+    if fileExists(extendedPath(candidateBare)):
+      if probe7zZstdSupport(candidateBare):
+        return ZstdExtractor(kind: zekSevenZip, sevenZipExe: candidateBare)
+      trace.add("catalog-prefix:row " & row.realizedPath &
+        " has bin/7z but no zstd codec")
+  # Step (i'): PATH-resident 7z with zstd (Scoop sevenzip ships the
+  # full codec set; useful for hosts where 7zip is host-installed).
+  let path7z = findExe("7z.exe")
+  if path7z.len > 0 and probe7zZstdSupport(path7z):
+    return ZstdExtractor(kind: zekSevenZip, sevenZipExe: path7z)
+  if path7z.len > 0:
+    trace.add("path:7z.exe present but no zstd codec")
+  else:
+    trace.add("path:no 7z.exe on PATH")
+  let path7zBare = findExe("7z")
+  if path7zBare.len > 0 and probe7zZstdSupport(path7zBare):
+    return ZstdExtractor(kind: zekSevenZip, sevenZipExe: path7zBare)
+  # Step (ii): host tar with zstd support. Probe two shapes:
+  #   * GNU tar's explicit ``--zstd`` filter (Git for Windows ships
+  #     this; check ``tar --help`` output).
+  #   * bsdtar (Windows 10+'s built-in ``C:\Windows\system32\tar.exe``,
+  #     macOS's stock tar) auto-detects .tar.zst when libarchive was
+  #     linked against libzstd; the ``tar --version`` output reveals
+  #     ``libzstd/<version>`` in that case.
+  let pathTar = findExe("tar")
+  if pathTar.len > 0:
+    let helpRes = execCmdEx(quoteShell(pathTar) & " --help")
+    if helpRes.exitCode == 0 and helpRes.output.contains("--zstd"):
+      return ZstdExtractor(kind: zekTarFilter, tarExe: pathTar)
+    # Probe the --version banner for bsdtar's libzstd linkage marker.
+    let versionRes = execCmdEx(quoteShell(pathTar) & " --version")
+    if versionRes.exitCode == 0 and
+       (versionRes.output.contains("libzstd") or
+        versionRes.output.contains("bsdtar")):
+      # bsdtar's transparent auto-detect — we invoke as ``tar -xf`` and
+      # rely on libarchive to recognize the zstd envelope. We surface
+      # this as zekTarFilter for the same call path; the extractTarZst
+      # implementation falls back to ``-xf`` when ``--zstd`` rejects.
+      return ZstdExtractor(kind: zekTarFilter, tarExe: pathTar)
+    trace.add("path:tar present but lacks --zstd filter and no " &
+      "libzstd linkage banner")
+  else:
+    trace.add("path:no tar on PATH")
+  # Step (iii): host zstd + host tar piped.
+  let pathZstd = findExe("zstd")
+  if pathZstd.len > 0 and pathTar.len > 0:
+    return ZstdExtractor(kind: zekZstdPipe, zstdExe: pathZstd,
+      tarExeForPipe: pathTar)
+  trace.add("path:no zstd on PATH (combined with a tar that lacks --zstd)")
+  # Step (iv): fail closed.
+  var e = newException(EBuiltinZstdUnavailable,
+    "builtin adapter: tar.zst realize hook for '" & packageId &
+    "' could not discover a zstd-capable extractor. Discovery trace: " &
+    trace.join("; ") &
+    ". Remediation: install Git for Windows (its bundled `tar` ships " &
+    "with the `--zstd` filter) OR ensure the catalog `7zip` package " &
+    "carries the FULL 7-Zip suite (the M3 hand-authored sevenzip.nim " &
+    "currently ships the reduced `7zr.exe` which lacks the zstd codec; " &
+    "re-harvest via the M11 follow-up MSI shape to fix this branch).")
+  e.step = 7
+  e.stepName = "realize"
+  e.packageId = packageId
+  e.discoveryTrace = trace
+  raise e
+
+proc extractTarZst*(packageId, archivePath, destDir: string;
+                    extractor: ZstdExtractor) =
+  ## M6: extract a ``.tar.zst`` archive into ``destDir`` using the
+  ## discovered extractor. Each strategy uses the SAME canonical
+  ## extraction shape (recursive, overwrite, no progress bar) so the
+  ## resulting tree is identical regardless of which path the
+  ## discoverer picked.
+  createDir(extendedPath(destDir))
+  case extractor.kind
+  of zekSevenZip:
+    # 7z handles .tar.zst in two passes natively (zstd -> tar) — we ask
+    # for the type explicitly via ``-ttar`` after a first ``zstd`` pass,
+    # but the simpler approach is to use ``-so`` (stdout) to pipe the
+    # decompressed tar into a second 7z that does ``-si -ttar``. To
+    # avoid the pipe + shell quoting complexity, we use the documented
+    # 7z idiom: extract the .tar.zst directly. 7z 26.01 transparently
+    # handles the two-layer envelope when invoked twice — first
+    # decompressing the zstd, then extracting the tar. The simpler
+    # one-shot form: a temporary ``.tar`` file produced by 7z, then
+    # extracted by tar. We use that to keep the codepath obvious.
+    let tmpTar = destDir / ".tmp.zst-decompressed.tar"
+    let decompressCmd = quoteShell(extractor.sevenZipExe) & " x " &
+      quoteShell("-o" & destDir) & " " & quoteShell(archivePath) &
+      " -y -bsp0 -bso0"
+    let decompressRes = execCmdEx(decompressCmd)
+    if decompressRes.exitCode != 0:
+      raiseExtractFailed(packageId, archivePath, "tar.zst",
+        "7z (zstd decompress) exited " & $decompressRes.exitCode &
+        "\n" & decompressRes.output)
+    # 7z drops the decompressed tar under destDir using the archive's
+    # leaf-name minus the .zst suffix. Locate it and extract.
+    discard tmpTar  # reserved name documented in the comment above
+    let baseLeaf = extractFilename(archivePath)
+    var decompressedTar = ""
+    if baseLeaf.toLowerAscii().endsWith(".zst"):
+      decompressedTar = destDir / baseLeaf[0 ..< baseLeaf.len - 4]
+    if decompressedTar.len == 0 or
+       not fileExists(extendedPath(decompressedTar)):
+      # Fallback: scan destDir for the first .tar produced by the
+      # decompression pass.
+      for kind, entry in walkDir(extendedPath(destDir)):
+        if kind == pcFile and entry.toLowerAscii().endsWith(".tar"):
+          decompressedTar = entry
+          break
+    if decompressedTar.len == 0 or
+       not fileExists(extendedPath(decompressedTar)):
+      raiseExtractFailed(packageId, archivePath, "tar.zst",
+        "7z decompressed the zstd envelope but no .tar landed under " &
+        destDir)
+    let tarCmd = quoteShell(extractor.sevenZipExe) & " x " &
+      quoteShell("-o" & destDir) & " " & quoteShell(decompressedTar) &
+      " -y -bsp0 -bso0"
+    let tarRes = execCmdEx(tarCmd)
+    if tarRes.exitCode != 0:
+      raiseExtractFailed(packageId, archivePath, "tar.zst",
+        "7z (tar extract from " & decompressedTar & ") exited " &
+        $tarRes.exitCode & "\n" & tarRes.output)
+    try:
+      removeFile(extendedPath(decompressedTar))
+    except OSError:
+      discard
+  of zekTarFilter:
+    # GNU tar: ``tar --zstd -xf`` (explicit filter).
+    # bsdtar: ``tar -xf`` (libarchive auto-detects the zstd envelope).
+    # We try the explicit filter first because it short-circuits
+    # libarchive's auto-detection cost on GNU tar; if --zstd is
+    # rejected (bsdtar prints "Option --zstd is not supported") we
+    # fall back to bare ``-xf``.
+    let cmdExplicit = quoteShell(extractor.tarExe) & " --zstd -xf " &
+      quoteShell(archivePath) & " -C " & quoteShell(destDir)
+    let resExplicit = execCmdEx(cmdExplicit)
+    if resExplicit.exitCode == 0:
+      discard
+    else:
+      let cmdAuto = quoteShell(extractor.tarExe) & " -xf " &
+        quoteShell(archivePath) & " -C " & quoteShell(destDir)
+      let resAuto = execCmdEx(cmdAuto)
+      if resAuto.exitCode != 0:
+        raiseExtractFailed(packageId, archivePath, "tar.zst",
+          "tar extraction failed (both --zstd and auto-detect):\n" &
+          "  --zstd exit=" & $resExplicit.exitCode & ": " &
+          resExplicit.output & "\n" &
+          "  -xf exit=" & $resAuto.exitCode & ": " & resAuto.output)
+  of zekZstdPipe:
+    # ``zstd -dc <archive> | tar -xf - -C <destDir>``. Cross-platform
+    # POSIX pipe shape. We use ``execShellCmd`` indirectly via
+    # ``execCmdEx`` because the shell-pipeline form needs the shell to
+    # parse the ``|``. ``execCmdEx`` runs through cmd.exe on Windows,
+    # which honors ``|`` natively — but Windows hosts typically take
+    # the (ii) path before falling through here, so this branch is
+    # primarily a POSIX path.
+    let command = quoteShell(extractor.zstdExe) & " -dc " &
+      quoteShell(archivePath) & " | " &
+      quoteShell(extractor.tarExeForPipe) & " -xf - -C " &
+      quoteShell(destDir)
+    let res = execCmdEx(command)
+    if res.exitCode != 0:
+      raiseExtractFailed(packageId, archivePath, "tar.zst",
+        "zstd | tar pipeline exited " & $res.exitCode & "\n" & res.output)
+
 proc flattenExtractPath(packageId, destDir, extractPath: string) =
   ## If `extract_path` is non-empty, the archive shipped its contents
   ## under that inner dir.  Move the inner-dir contents up to `destDir`
@@ -2170,6 +2443,18 @@ proc realizeBuiltinPackage*(store: var Store;
     launcherInterpreterPaths.add(
       discoverInterpreterExe(store, packageId, spec))
 
+  # M6: discover the zstd-capable extractor when this realize will need
+  # one (archive_format = afTarZst OR install_method = imMsys2Pacman —
+  # MSYS2 pacman packages are always .pkg.tar.zst). Same closure-
+  # capture rationale: discovery FIRST so EBuiltinZstdUnavailable
+  # raises before any destructive staging work.
+  var zstdExtractor: ZstdExtractor
+  var zstdExtractorReady = false
+  if resolution.archiveFormat == afTarZst or
+     resolution.installMethod == imMsys2Pacman:
+    zstdExtractor = discoverZstdExtractor(store, packageId)
+    zstdExtractorReady = true
+
   # M3: pre_install Add-Path actions append to the env bindings the
   # apply pipeline downstream consumes. We accumulate them here so the
   # bindings carry the substituted prefix path.
@@ -2203,6 +2488,7 @@ proc realizeBuiltinPackage*(store: var Store;
       of afTarGz: archiveExt = ".tar.gz"
       of afTarXz: archiveExt = ".tar.xz"
       of afTarBz2: archiveExt = ".tar.bz2"
+      of afTarZst: archiveExt = ".tar.zst"
       of afSevenZip: archiveExt = ".7z"
       of afSevenZipSfx: archiveExt = ".7z.exe"
       of afInstallerNsis: archiveExt = ".exe"
@@ -2249,6 +2535,12 @@ proc realizeBuiltinPackage*(store: var Store;
           extractTar(packageId, downloadPath, stagingDir, "tar.xz")
         of afTarBz2:
           extractTar(packageId, downloadPath, stagingDir, "tar.bz2")
+        of afTarZst:
+          # M6: zstd-compressed tar; route through the discovered zstd
+          # extractor (catalog 7z → host tar --zstd → host zstd pipe).
+          doAssert zstdExtractorReady,
+            "afTarZst dispatch reached without a discovered zstd extractor"
+          extractTarZst(packageId, downloadPath, stagingDir, zstdExtractor)
         of afSevenZip:
           extract7z(packageId, downloadPath, stagingDir, sevenZipExe)
         of afSevenZipSfx:
@@ -2358,6 +2650,10 @@ proc realizeBuiltinPackage*(store: var Store;
           extractTar(packageId, downloadPath, unpackDir, "tar.xz")
         of afTarBz2:
           extractTar(packageId, downloadPath, unpackDir, "tar.bz2")
+        of afTarZst:
+          doAssert zstdExtractorReady,
+            "afTarZst dispatch reached without a discovered zstd extractor"
+          extractTarZst(packageId, downloadPath, unpackDir, zstdExtractor)
         of afZip:
           extractZip(packageId, downloadPath, unpackDir)
         of afSevenZip, afSevenZipSfx:
@@ -2372,15 +2668,44 @@ proc realizeBuiltinPackage*(store: var Store;
         runSourceBootstrap(packageId, rootDir, stagingDir,
           resolution.bootstrapArgv, resolution.binRelpath)
       of imMsys2Pacman:
-        var e = newException(EBuiltinInstallMethodUnsupported,
-          "builtin adapter: imMsys2Pacman is deferred to M67 " &
-          "(OCaml entry) per the M64 outstanding-task list; cannot " &
-          "realize '" & packageId & "'")
-        e.step = 7
-        e.stepName = "realize"
-        e.packageId = packageId
-        e.installMethod = "imMsys2Pacman"
-        raise e
+        # M6 (Realize-Closure-And-Catalog-Expansion spec): realize a
+        # MSYS2 pacman package by extracting its ``.pkg.tar.zst`` payload
+        # into the staging dir. We DO NOT invoke pacman — the cakBuiltin
+        # invariant is download + extract; the ``pacman_packages`` list
+        # is the catalog-author audit trail (e.g.
+        # ``mingw-w64-x86_64-ocaml``), NOT a recursive package-manager
+        # call. Dependency resolution stays the operator's responsibility
+        # (list every needed MSYS2 package in home.nim).
+        #
+        # The archive_format MUST be ``afTarZst`` for imMsys2Pacman per
+        # the M6 schema; the validator (validateVersionedProvisioning)
+        # is not strict on the pairing today, so we assert it here for
+        # an explicit failure rather than a silent path mismatch.
+        if resolution.archiveFormat != afTarZst:
+          raiseExtractFailed(packageId, downloadPath,
+            $resolution.archiveFormat,
+            "imMsys2Pacman requires archive_format=afTarZst; got " &
+            $resolution.archiveFormat)
+        doAssert zstdExtractorReady,
+          "imMsys2Pacman dispatch reached without a discovered zstd extractor"
+        extractTarZst(packageId, downloadPath, stagingDir, zstdExtractor)
+        # Flatten the inner mingw64/ (or ucrt64/, clang64/, …) prefix
+        # subtree to the prefix root. extract_path is normally
+        # ``mingw64`` for MSYS2 mingw64-env packages; the harvester
+        # writes this verbatim. Reuses the same ``flattenExtractPath``
+        # the M64 imExtract path uses — no new code surface needed.
+        flattenExtractPath(packageId, stagingDir, resolution.extractPath)
+        # Replay any allowlisted pre_install actions (M3). MSYS2
+        # packages rarely declare any, but the hook is uniform with
+        # imExtract for forward compatibility.
+        if resolution.preInstallActions.len > 0 or
+           resolution.preInstallUnrecognized.len > 0:
+          runPreInstallActions(packageId, stagingDir,
+            resolution.preInstallActions,
+            resolution.preInstallUnrecognized,
+            sevenZipExe, preInstallEnvBindings,
+            darkExe = lessmsiExe, innounpExe = innounpExe,
+            msiAdminInstallOverride = resolution.msiAdminInstall)
 
       # M5: Scoop-style launcher emit. Runs AFTER install_method dispatch
       # so the target file (e.g. composer.phar) is already on disk, but

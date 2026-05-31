@@ -62,7 +62,7 @@ const
     ## method (.phar wrapping for composer; gem install for ruby; etc.)
     ## isn't a cakBuiltin install_method yet.
 
-  Phase2NoCatalog = ["gnat", "alire", "ocaml", "dune"]
+  Phase2NoCatalog = ["gnat", "alire", "dune"]
     ## No packages/<tool>.nim entry yet. The harness reports these as
     ## BLOCKED-NO-CATALOG; the M9 validate script SKIPs cleanly because
     ## the tool isn't on PATH (no realize path AT ALL — not even a
@@ -74,6 +74,18 @@ const
     ## time gap (innosetup-style .exe installer with no installer
     ## block) is M3 / M11 territory; for the resolver-level contract
     ## fpc has graduated to M69DeferredButResolves below.
+    ##
+    ## M6 (Realize-Closure spec) graduated ``ocaml`` out of this list:
+    ## the MSYS2 pacman harvester + ``afTarZst`` extractor + the
+    ## ``imMsys2Pacman`` realize hook landed in M6, so ocaml now both
+    ## RESOLVES and REALIZES via cakBuiltin end-to-end (the M6 LIVE
+    ## smoke materialized ``ocaml --version`` from a real MSYS2
+    ## .pkg.tar.zst). ocaml is in ``Phase2GraduatedToBuiltin`` below.
+    ## ``dune`` is NOT in MSYS2 (dune ships only as a source .tbz via
+    ## GitHub releases; the canonical Windows build path is opam,
+    ## which is itself bootstrapped from OCaml source) — deferred to
+    ## a future opam-harvester milestone, NOT M7's GitHub-Releases
+    ## binary harvester.
 
   Phase1Clean = ["jdk", "gradle", "dotnet-sdk", "zig"]
     ## M40 / M41 / M42 / M44 fixtures whose tools are CLEAN in the
@@ -91,6 +103,15 @@ const
     ## upstream Scoop manifest is an innosetup ``.exe`` installer
     ## with no ``installer:`` block. The realize-time installer
     ## dispatch is M3 territory; the resolver-level contract holds.
+
+  Phase2GraduatedToBuiltin = ["ocaml"]
+    ## Phase-2 packages that this campaign (Realize-Closure-And-
+    ## Catalog-Expansion) added to cakBuiltin end-to-end (both
+    ## resolver and realize hook). Unlike ``M69DeferredButResolves``
+    ## these tools have a working realize path — the cakBuiltin
+    ## ``imMsys2Pacman`` hook (M6) materializes a runnable prefix
+    ## from the upstream .pkg.tar.zst. ocaml was M6's LIVE-validated
+    ## end-to-end target.
 
 suite "M71 e2e: Phase-2 partials resolve via the production catalog":
 
@@ -175,6 +196,24 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
                        content.contains("package(\"" & pkg & "\"")
       check not blockedRef
 
+  test "Phase-2 graduated-to-builtin packages resolve AND have realize hooks":
+    # M6 (Realize-Closure-And-Catalog-Expansion spec) added the
+    # MSYS2-pacman harvester source + the cakBuiltin imMsys2Pacman
+    # realize hook + the ocaml catalog entry. Unlike the
+    # M69DeferredButResolves set, these tools have a working realize
+    # path — the M6 hermetic + LIVE smokes proved end-to-end
+    # extraction + bin_relpath resolution.
+    var prodCat = openProductionCatalog()
+    for pkg in Phase2GraduatedToBuiltin:
+      check isRegistered(pkg)
+      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin])
+      check res.adapter == cakBuiltin
+      check res.builtinVersion.len > 0
+      check res.urlUsed.len > 0
+      check res.digestAlgorithm in ["sha256", "sha512"]
+      check res.digestValue.len > 0
+      check res.binRelpath.len > 0
+
   test "graduation table covers exactly the five Phase-2 partial languages":
     # Sanity: the campaign's Phase-2 partial list is haskell / php /
     # ada / pascal / crystal (per the spec).
@@ -193,3 +232,10 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
     check "gnat" in Phase2NoCatalog
     check "fpc" in M69DeferredButResolves
     check "crystal" in Phase2Clean
+    # M6 graduation: ocaml is now GRADUATED-TO-BUILTIN (realize works
+    # end-to-end via cakBuiltin imMsys2Pacman + afTarZst). dune
+    # remains NO-CATALOG (not in MSYS2; opam-bootstrap deferred to
+    # a future milestone).
+    check "ocaml" in Phase2GraduatedToBuiltin
+    check "ocaml" notin Phase2NoCatalog
+    check "dune" in Phase2NoCatalog

@@ -36,31 +36,52 @@ import std/[os, parseopt, strutils, tables]
 import src/manifest_parser
 import src/bucket_clone
 import src/nim_emit
+import src/msys2_source
 import repro_dsl_stdlib/packages_schema
 
 const HelpText = """
-catalog-harvester — Scoop bucket harvester for the reprobuild M63 catalog.
+catalog-harvester — multi-source harvester for the reprobuild M63 catalog.
 
 USAGE
   catalog-harvester <subcommand> [options]
 
 SUBCOMMANDS
-  harvest   Clone Scoop bucket(s) and emit packages/<tool>.nim files.
+  harvest   Harvest one or more packages and emit packages/<tool>.nim files.
+            Default source is Scoop bucket cloning; the M6 ``--source
+            msys2:<package>`` shape pulls from the MSYS2 pacman repository
+            instead.
   inspect   Translate one manifest and print the result (no write).
   verify    Re-harvest a checked-in packages/<tool>.nim and assert
             byte-identical output (drift detector).
+
+SOURCE SELECTION
+  --source scoop                       (default) Scoop bucket cloning.
+  --source msys2:<package>             (M6) MSYS2 pacman repository.
+                                       <package> is either a full pacman
+                                       name (mingw-w64-x86_64-ocaml) or
+                                       a bare shorthand (ocaml) that the
+                                       harvester auto-prefixes per --env.
+  --env <mingw64|ucrt64|clang64|       (M6) MSYS2 environment to harvest
+        mingw32|msys>                  from. Defaults to mingw64.
+  --version <pin>                      (M6) Pin a specific upstream
+                                       version (e.g. 5.4.1). Default: the
+                                       latest version in the index.
 
 COMMON OPTIONS
   --bucket <spec>           Repeatable. <spec> is one of:
                               * <org>/<repo>      (GitHub shortname)
                               * https://… URL    (git clone URL)
                               * /path/to/local/  (local bucket dir)
+                            Scoop source only.
   --app <name>              Repeatable. If omitted, every manifest in
-                            the bucket is harvested.
+                            the bucket is harvested. For --source
+                            msys2:, --app overrides the catalog
+                            identifier (defaults to the package name).
   --output-dir <path>       For 'harvest': output directory; defaults
                             to libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/
   --version-history <N>     For 'harvest': walk N historical versions
-                            (default: 1). N > 1 unshallows the clone.
+                            (Scoop source only; default: 1). N > 1
+                            unshallows the clone.
   --dry-run                 For 'harvest': print what would be written
                             (file paths + first 10 lines) and exit 0.
   --no-refresh              Skip 'git pull' for cached buckets.
@@ -85,19 +106,30 @@ VERIFY-ONLY OPTIONS
 EXIT CODES
   0 = OK
   2 = bad CLI invocation
-  3 = harvest error (one or more manifests skipped or invalid)
+  3 = harvest error (one or more packages skipped or invalid)
   4 = verify drift detected
 
 ENVIRONMENT
-  XDG_CACHE_HOME / LOCALAPPDATA      Override bucket clone cache root.
+  XDG_CACHE_HOME / LOCALAPPDATA      Override bucket / msys2 cache root.
+  REPRO_M6_INDEX_FIXTURE_DIR         (M6) Override the MSYS2 repository
+                                     URL with a local fixture directory
+                                     (used by the hermetic test suite).
 """
 
 type
   Subcommand = enum
     scNone, scHarvest, scInspect, scVerify
 
+  HarvestSource = enum
+    hsScoop = "scoop"
+    hsMsys2 = "msys2"
+
   CliOptions = object
     sub: Subcommand
+    source: HarvestSource          ## M6: harvester source selector
+    msys2Packages: seq[string]     ## M6: --source msys2:<package> tails
+    msys2Env: Msys2Env             ## M6: --env (default mingw64)
+    msys2VersionPin: string        ## M6: --version <pin>
     buckets: seq[string]
     apps: seq[string]
     outputDir: string
@@ -125,6 +157,8 @@ type
 
 proc parseCli(argv: openArray[string]): CliOptions =
   result.sub = scNone
+  result.source = hsScoop
+  result.msys2Env = meMingw64
   result.outputDir = "libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/"
   result.versionHistory = 1
 
@@ -161,6 +195,38 @@ proc parseCli(argv: openArray[string]): CliOptions =
       case p.key
       of "bucket": result.buckets.add(p.val)
       of "app", "tool": result.apps.add(p.val)
+      of "source":
+        # ``--source scoop`` (default) | ``--source msys2:<package>``.
+        # Accepts the bare ``msys2`` form too (combine with --app to
+        # name the package; useful when the package name carries
+        # characters parseopt would split on).
+        let lower = p.val.strip().toLowerAscii()
+        if lower == "scoop":
+          result.source = hsScoop
+        elif lower == "msys2":
+          result.source = hsMsys2
+        elif lower.startsWith("msys2:"):
+          result.source = hsMsys2
+          let pkg = p.val[6 .. ^1].strip()
+          if pkg.len > 0: result.msys2Packages.add(pkg)
+        else:
+          stderr.writeLine("error: --source must be one of " &
+            "scoop, msys2, msys2:<package>; got '" & p.val & "'")
+          quit(2)
+      of "env":
+        case p.val.strip().toLowerAscii()
+        of "mingw64": result.msys2Env = meMingw64
+        of "ucrt64":  result.msys2Env = meUcrt64
+        of "clang64": result.msys2Env = meClang64
+        of "mingw32": result.msys2Env = meMingw32
+        of "msys":    result.msys2Env = meMsys
+        else:
+          stderr.writeLine("error: --env must be one of mingw64, " &
+            "ucrt64, clang64, mingw32, msys; got '" & p.val & "'")
+          quit(2)
+      of "version":
+        # MSYS2 source: pin a specific upstream version (5.4.1 etc.).
+        result.msys2VersionPin = p.val.strip()
       of "output-dir", "out": result.outputDir = p.val
       of "version-history", "with-history":
         try: result.versionHistory = parseInt(p.val)
@@ -344,7 +410,79 @@ proc sortCatalog(items: var seq[VersionedProvisioning]) =
 # Subcommands
 # ---------------------------------------------------------------------------
 
+proc cmdHarvestMsys2(opts: CliOptions): int =
+  ## M6: harvest one or more packages from an MSYS2 pacman repository.
+  ## Each ``--source msys2:<pkg>`` invocation contributes one package
+  ## to ``opts.msys2Packages``; a multi-package run reuses the same
+  ## ``--env`` selection.
+  if opts.msys2Packages.len == 0:
+    stderr.writeLine("error: --source msys2:<package> requires at " &
+      "least one package name. Pass e.g. " &
+      "'--source msys2:ocaml --env mingw64'.")
+    return 2
+  if opts.outputDir.len == 0:
+    stderr.writeLine("error: --output-dir is required")
+    return 2
+  if not opts.dryRun:
+    createDir(opts.outputDir)
+  var anyError = false
+  for packageHint in opts.msys2Packages:
+    # Pick the catalog tool identifier: the operator's --app overrides
+    # the default (the bare package name minus the env prefix).
+    var toolName = packageHint
+    if toolName.startsWith("mingw-w64-"):
+      # Strip the longest matching env prefix so e.g.
+      # ``mingw-w64-x86_64-ocaml`` -> ``ocaml``.
+      let envPrefix = envPackagePrefix(opts.msys2Env)
+      if envPrefix.len > 0 and toolName.startsWith(envPrefix):
+        toolName = toolName[envPrefix.len .. ^1]
+    if opts.apps.len == 1:
+      toolName = opts.apps[0]
+    elif opts.apps.len > 1:
+      stderr.writeLine("error: --source msys2 with multiple --app " &
+        "renames is ambiguous; pass exactly one --app or none")
+      return 2
+    var entry: VersionedProvisioning
+    try:
+      entry = harvestMsys2Package(opts.msys2Env, packageHint, toolName,
+        opts.msys2VersionPin)
+    except Msys2HarvestError as err:
+      stderr.writeLine("error: MSYS2 harvest of '" & packageHint &
+        "' (env=" & $opts.msys2Env & ") failed: " & err.msg)
+      anyError = true
+      continue
+    # Schema validation — surface any issues before writing the file.
+    var schemaWarnings: seq[string] = @[]
+    let schemaErrors = validateVersionedProvisioningEx(entry, schemaWarnings)
+    for w in schemaWarnings:
+      stderr.writeLine("WSchema [" & toolName & "]: " & w)
+    if schemaErrors.len > 0:
+      stderr.writeLine("error: harvested entry for '" & toolName &
+        "' failed schema validation:")
+      for e in schemaErrors:
+        stderr.writeLine("  - " & e)
+      anyError = true
+      continue
+    let bucketSpec = "msys2:" & $opts.msys2Env & "/" & packageHint
+    let body = emitCatalogFile(toolName, bucketSpec, @[entry])
+    let outPath = opts.outputDir / (toolName & ".nim")
+    if opts.dryRun:
+      echo "DRY-RUN would write " & outPath & " (version=" &
+        entry.version & ")"
+      var n = 0
+      for ln in body.splitLines:
+        if n >= 10: break
+        echo "    " & ln
+        inc n
+    else:
+      writeFile(outPath, body)
+      echo "harvested " & toolName & " " & entry.version & " -> " & outPath
+  if anyError: return 3
+  return 0
+
 proc cmdHarvest(opts: CliOptions): int =
+  if opts.source == hsMsys2:
+    return cmdHarvestMsys2(opts)
   if opts.buckets.len == 0:
     stderr.writeLine("error: --bucket is required for 'harvest'")
     return 2

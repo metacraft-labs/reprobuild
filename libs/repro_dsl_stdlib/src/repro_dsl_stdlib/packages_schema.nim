@@ -84,6 +84,15 @@ type
     afTarGz = "tar.gz"
     afTarXz = "tar.xz"
     afTarBz2 = "tar.bz2"
+    afTarZst = "tar.zst"
+      ## M6 (Realize-Closure-And-Catalog-Expansion spec): zstd-compressed
+      ## tarball. The canonical MSYS2 pacman package format
+      ## (``mingw-w64-<arch>-<name>-<version>-<rel>-any.pkg.tar.zst``) and
+      ## an increasingly common upstream tarball shape (rustup, Arch
+      ## Linux packages, ...). The cakBuiltin realize loop extracts via a
+      ## three-strategy discovery (catalog ``7zip`` prefix → host ``tar
+      ## --zstd`` → host ``zstd | tar``) — see ``extractTarZst`` in
+      ## builtin_adapter.nim.
     afSevenZip = "7z"
     afSevenZipSfx = "7z-sfx"
     afInstallerNsis = "installer-nsis"
@@ -111,6 +120,27 @@ type
     imExtract = "extract"
     imInstallerSilent = "installer-silent"
     imMsys2Pacman = "msys2-pacman"
+      ## M6 (Realize-Closure-And-Catalog-Expansion spec): provenance-
+      ## labelled variant of ``imExtract`` for ``.pkg.tar.zst`` payloads
+      ## harvested from the MSYS2 pacman repository. The realize-time
+      ## semantics are intentionally a strict subset of ``imExtract`` —
+      ## download, sha256 verify, extract via the discovered zstd-
+      ## capable extractor, flatten the inner ``<env>/`` subtree, replay
+      ## allowlisted pre_install actions. The dispatch does NOT invoke
+      ## pacman; the ``pacman_packages`` field is an audit trail (the
+      ## harvested MSYS2 package name, e.g. ``mingw-w64-x86_64-ocaml``)
+      ## that drives the schema validator + future drift detection
+      ## against repo.msys2.org, NOT a recursive package-manager call.
+      ## The catalog-author rationale for the separate enum (vs an
+      ## ``imExtract`` slice with ``archive_format=afTarZst``):
+      ## (i) self-documenting at the call site (catalog readers see at
+      ## a glance that the slice came from MSYS2);
+      ## (ii) the validator enforces ``pacman_packages.len >= 1`` AND
+      ## ``archive_format == afTarZst``, blocking malformed authoring;
+      ## (iii) future drift-detection / re-harvest tooling keys off
+      ## this discriminant to query repo.msys2.org for upstream version
+      ## bumps. Behavior at realize time IS the same as the equivalent
+      ## ``imExtract`` slice; the differentiation is provenance only.
     imSourceBootstrap = "source-bootstrap"
     imInstallerMsi = "installer-msi"
     imInstallerNsisBundle = "installer-nsis-bundle"
@@ -497,7 +527,16 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
   of imMsys2Pacman:
     if vp.pacman_packages.len == 0:
       result.add("install_method=imMsys2Pacman requires at least one " &
-        "pacman_packages entry")
+        "pacman_packages entry (the harvested MSYS2 package name, e.g. " &
+        "'mingw-w64-x86_64-ocaml')")
+    # M6: the M6 cakBuiltin realize hook downloads + extracts the
+    # ``.pkg.tar.zst`` and verifies bin_relpath against the realized
+    # prefix — same shape as imExtract. Require at least one bin_relpath
+    # entry so the post-extract sanity check has something to assert.
+    if vp.bin_relpath.len == 0:
+      result.add("install_method=imMsys2Pacman requires at least one " &
+        "bin_relpath entry (the realize hook flattens mingw64/ to the " &
+        "prefix root and verifies each bin_relpath exists post-extract)")
   of imSourceBootstrap:
     if vp.bootstrap_argv.len == 0:
       result.add("install_method=imSourceBootstrap requires a " &
@@ -681,6 +720,7 @@ proc archiveFormatIdent(af: ArchiveFormat): string =
   of afTarGz: "afTarGz"
   of afTarXz: "afTarXz"
   of afTarBz2: "afTarBz2"
+  of afTarZst: "afTarZst"
   of afSevenZip: "afSevenZip"
   of afSevenZipSfx: "afSevenZipSfx"
   of afInstallerNsis: "afInstallerNsis"

@@ -274,6 +274,9 @@ proc inferArchiveFormat(url: string; hasInstaller: bool):
     return (afTarXz, true)
   if clean.endsWith(".tar.bz2") or clean.endsWith(".tbz2"):
     return (afTarBz2, true)
+  if clean.endsWith(".tar.zst") or clean.endsWith(".tzst") or
+     clean.endsWith(".pkg.tar.zst"):
+    return (afTarZst, true)
   if clean.endsWith(".7z"):
     return (afSevenZip, true)
   if clean.endsWith(".zip"):

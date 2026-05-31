@@ -88,6 +88,14 @@ import ./packages/innounp
 # M4 ``imInstallerMsi`` realize hook dispatches through lessmsi by
 # default. See packages/lessmsi.nim's header for the rationale.
 import ./packages/lessmsi
+# M6 (Realize-Closure-And-Catalog-Expansion spec) — MSYS2 pacman
+# harvester source enables OCaml as a catalog package. The .pkg.tar.zst
+# format extracts via the M6 zstd-capable extractor discovery
+# (catalog 7z → host tar --zstd → host zstd pipe) and the realize hook
+# flattens the inner ``mingw64/`` subtree to the prefix root. Dependency
+# resolution stays the operator's responsibility — list every required
+# MSYS2 package in home.nim (e.g. flexdll, gmp).
+import ./packages/ocaml
 
 export packages_schema
 
@@ -143,6 +151,9 @@ const RegisteredTools* = [
   "innounp",
   # M4 amendment: lessmsi as the canonical MSI extractor.
   "lessmsi",
+  # M6 (Realize-Closure-And-Catalog-Expansion spec) — first MSYS2-
+  # harvested catalog tool.
+  "ocaml",
 ]
 
 proc getCatalog*(toolName: string):
@@ -195,6 +206,8 @@ proc getCatalog*(toolName: string):
   of "wix3":       selectIfNonEmpty(wix3Catalog)
   of "innounp":    selectIfNonEmpty(innounpCatalog)
   of "lessmsi":    selectIfNonEmpty(lessmsiCatalog)
+  # M6 (Realize-Closure-And-Catalog-Expansion spec) — MSYS2-harvested.
+  of "ocaml":      selectIfNonEmpty(ocamlCatalog)
   else:
     none(seq[VersionedProvisioning])
 
