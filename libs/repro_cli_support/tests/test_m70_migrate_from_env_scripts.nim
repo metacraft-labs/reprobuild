@@ -169,17 +169,19 @@ JDK_VERSION=21.0.5
     check "package(jdk, \"21.0.5\")" in plan.lines[0].text
 
   test "env-file pin with a version NOT in the catalog yields moMissingVersion":
-    # The catalog's zig slice is pinned at 0.16.0 (see
-    # packages/zig.nim); the legacy env file pins 0.13.0, so the
-    # migrator emits a TODO comment instead of a live package(...)
-    # line. The user must either bump the catalog or pin a known
-    # catalog version.
-    let parsed = parseEnvFile("ZIG_VERSION=0.13.0\n")
+    # The migrator emits a TODO comment instead of a live
+    # ``package(...)`` line when the pinned version isn't a known
+    # catalog slice. M2 widened zig's catalog to carry BOTH 0.16.0
+    # (HEAD) and 0.13.0 (M44 fixture pin backfill), so the
+    # historical "ZIG_VERSION=0.13.0 → moMissingVersion" probe is
+    # now a clean migrate; pin a fictitious version to keep the
+    # behavioural assertion intact.
+    let parsed = parseEnvFile("ZIG_VERSION=0.99.99\n")
     let plan = planMigration(parsed, "dev", initHashSet[string]())
     check plan.lines.len == 1
     check plan.lines[0].kind == moMissingVersion
     check plan.lines[0].tool == "zig"
-    check "version 0.13.0 not in catalog" in plan.lines[0].text
+    check "version 0.99.99 not in catalog" in plan.lines[0].text
 
   test "SWIFT_VERSION produces a deferred TODO (in deferred-8 list)":
     let parsed = parseEnvFile("SWIFT_VERSION=5.10.1\n")
@@ -214,9 +216,15 @@ JDK_VERSION=21.0.5
     check plan.lines[0].tool == "jdk"
 
   test "summary counts each outcome accurately":
+    # M2 widened zig's catalog to carry the 0.13.0 backfilled slice;
+    # the historical missing-version probe used ZIG_VERSION=0.13.0 to
+    # land on moMissingVersion. The behavioural assertion is
+    # preserved by pinning a fictitious version that the catalog
+    # genuinely does not carry — the count distribution stays
+    # identical to the pre-M2 fixture's expectation.
     let parsed = parseEnvFile("""
 JDK_VERSION=21.0.5
-ZIG_VERSION=0.13.0
+ZIG_VERSION=0.99.99
 SWIFT_VERSION=5.10.1
 FOOBAR_VERSION=1.0
 JDK_BUILD=11
@@ -225,7 +233,7 @@ JDK_BUILD=11
     let s = summarize(plan)
     check s.migrated == 1        # jdk (catalog version)
     check s.deferred == 1        # swift (deferred-8)
-    check s.missingVersion == 1  # zig (env pins 0.13.0; catalog has 0.16.0)
+    check s.missingVersion == 1  # zig (fictitious 0.99.99 not in catalog)
     check s.unknown == 1         # foobar
     check s.ignored == 1         # jdk_build
     check s.alreadyOwned == 0

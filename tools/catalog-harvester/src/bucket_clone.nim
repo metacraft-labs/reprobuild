@@ -82,10 +82,33 @@ proc runGit*(args: openArray[string]; cwd = ""):
     tuple[exitCode: int; output: string] =
   ## Run ``git`` and capture combined stdout+stderr. The harvester
   ## never needs git's stdout/stderr split — it's all advisory.
+  ##
+  ## M2 fix: previously this read from the child's stdout via
+  ## ``startProcess(...).outputStream.readAll()`` *before* calling
+  ## ``waitForExit``. On Windows that pattern truncates the captured
+  ## output to roughly the first pipe-buffer flush — for ``git log``
+  ## of a multi-year manifest (e.g. ``bucket/gradle.json`` with ~87
+  ## commits) only the head commit's hash made it back, so
+  ## ``commitVersionsFor`` returned a single entry and
+  ## ``--version-history N>1`` silently no-op'd. The fix is to drain
+  ## the stream in a chunked-read loop while the child is still
+  ## producing, then call ``waitForExit`` once the stream signals
+  ## EOF. See the M2 hand-off note for the reproduction (it
+  ## reproduces deterministically under PowerShell + the cached
+  ## ScoopInstaller/Main bucket post-``--fetch --unshallow``).
   let cmdArgs = @args
   let opts = {poUsePath, poStdErrToStdOut}
-  var p = startProcess("git", workingDir = cwd, args = cmdArgs, options = opts)
-  let outp = p.outputStream.readAll()
+  var p = startProcess("git", workingDir = cwd, args = cmdArgs,
+    options = opts)
+  var outp = newStringOfCap(4096)
+  var buf = newString(4096)
+  let stream = p.outputStream
+  while true:
+    let n = stream.readData(addr buf[0], buf.len)
+    if n <= 0: break
+    let prevLen = outp.len
+    outp.setLen(prevLen + n)
+    copyMem(addr outp[prevLen], addr buf[0], n)
   let rc = p.waitForExit()
   p.close()
   (rc, outp)
@@ -200,7 +223,17 @@ proc commitVersionsFor*(bucket: BucketRef; app: string):
   ## Returns an empty seq for local-directory buckets.
   if bucket.kind != bkGitRepository: return @[]
   let dir = manifestsDirOf(bucket)
+  # M2 fix: ``git show <sha>:<path>`` insists on forward slashes for
+  # the rev-spec path component even on Windows. Without this
+  # normalization the call returned rc=128 ("invalid object name") for
+  # every historical commit, so ``commitVersionsFor`` accumulated zero
+  # versions and ``--version-history N>1`` silently no-op'd. The
+  # earlier ``git log -- <path>`` tolerates either separator, so the
+  # bug surfaced only inside the loop body — and the head-version
+  # emit happened *before* the loop in ``harvestApp``, masking it
+  # entirely on the dry-run summary.
   let relPath = relativePath(dir / (app & ".json"), bucket.localRoot)
+    .replace('\\', '/')
   # ``--first-parent`` keeps the log linear across merges; we want
   # one entry per shipped version, not per merge fan-out.
   let (rc, output) = runGit(@["log", "--first-parent",
@@ -236,7 +269,11 @@ proc manifestAtCommit*(bucket: BucketRef; app: string; sha: string): string =
   ## an empty string if git can't find the path at that commit.
   if bucket.kind != bkGitRepository: return ""
   let dir = manifestsDirOf(bucket)
+  # M2 fix: forward-slash the rev-spec path; ``git show <sha>:<path>``
+  # rejects Windows-style backslashes (see the matching note in
+  # ``commitVersionsFor``).
   let relPath = relativePath(dir / (app & ".json"), bucket.localRoot)
+    .replace('\\', '/')
   let (rc, body) = runGit(@["show", sha & ":" & relPath],
     cwd = bucket.localRoot)
   if rc != 0: return ""
