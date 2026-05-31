@@ -10249,9 +10249,23 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         (if cycle == 1: " initial" else: " rebuild"),
         payloadJson = "{\"watchEvent\":\"cycle-start\",\"cycle\":" & $cycle &
           "}")
+      # Adapter: executeBuildTarget speaks the build-event shape; the watch
+      # caller's eventSink takes additional terminal/exitCode/path fields.
+      # Forwarding nested logSummary / logAction lines through the daemon
+      # protocol is required so user-visible echoes (selectedTarget=,
+      # scheduler=, defaultTarget=) reach the CLI instead of vanishing into
+      # the daemon log when this watch runs daemon-hosted.
+      let buildEventSink: BuildCommandEventSink =
+        if eventSink == nil:
+          nil
+        else:
+          proc(kind, message, payloadJson: string) =
+            eventSink(kind, message, payloadJson, false, 0, @[], "")
       let outcome = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
-        workRoot = workRoot)
+        workRoot = workRoot,
+        eventSink = buildEventSink,
+        cancelCheck = cancelCheck)
       emitWatchLine("repro watch: cycle " & $cycle & " result exitCode=" &
         $outcome.exitCode,
         payloadJson = "{\"watchEvent\":\"cycle-result\",\"cycle\":" & $cycle &
