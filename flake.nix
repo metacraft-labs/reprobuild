@@ -64,6 +64,7 @@
                   pkgs.lib.makeBinPath [
                     pkgs.bash
                     pkgs.coreutils
+                    pkgs.gnugrep
                     pkgs.just
                     pkgs.nim2
                   ]
@@ -94,6 +95,7 @@
 
             buildInputs = [
               pkgs.libblake3
+              pkgs.sqlite
               pkgs.xxHash
             ];
 
@@ -101,6 +103,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
+            SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
 
             buildPhase = ''
@@ -166,6 +169,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
+            SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [
               pkgs.just
@@ -175,7 +179,10 @@
               pkgs.clang
               pkgs.curl
               pkgs.libblake3
+              pkgs.p7zip
+              pkgs.sqlite
               pkgs.xxHash
+              pkgs.zip
               pkgs.zlib
               pkgs.nixfmt-rfc-style
               pkgs.repomix
