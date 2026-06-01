@@ -30,6 +30,9 @@
 
 import std/[os, tempfiles, unittest]
 
+when defined(posix):
+  from std/posix import geteuid
+
 import repro_elevation
 import repro_infra
 
@@ -48,6 +51,18 @@ proc reproBinary(): string =
 let sandboxMode =
   (defined(linux) or defined(macosx)) and
   getEnv("REPRO_M69_FS_VM") == "1"
+
+# Phase-5 macOS-specific destructive arm: driver-direct (no broker, no
+# `repro` binary required). Validates the macOS `/private/etc` symlink
+# resolution and the `applyFsSystemFile` post-apply re-probe contract
+# inside a Tart-managed macOS guest. Per the M6 reuse decision, the
+# existing `(linux or macosx) + REPRO_M69_FS_VM` arm above remains the
+# canonical "infra apply via broker" sandbox path; this Phase-5 arm
+# focuses on the macOS-specific behavior (symlink resolution) without
+# requiring the broker binary in the guest, so the host-side runner
+# can ship just this gate binary + its dynamic dependencies.
+let phase5MacosSandboxMode =
+  defined(macosx) and getEnv("REPRO_PHASE5_MACOS_FS_VM") == "1"
 
 # ===========================================================================
 # NON-DESTRUCTIVE: allowlist + scope checks + typed-operation wiring +
@@ -248,3 +263,167 @@ suite "fs.systemFile: REAL write / drift / rollback (sandbox-only)":
         sfPath: "/etc/../tmp/escape",
         sfContent: "escape", sfDestroy: false)
       check operationValidationError(badOp).len > 0
+
+# ===========================================================================
+# PHASE-5 macOS-SPECIFIC DESTRUCTIVE: driver-direct `applyFsSystemFile`
+# + `/private/etc` symlink-resolution check. SANDBOX/VM-ONLY - guarded
+# by `defined(macosx) and REPRO_PHASE5_MACOS_FS_VM=1`. Covers the
+# macOS-only PASS criterion from `db84280`: "File written + readable
+# post-apply; symlink resolution does not double-write under
+# /private/etc".
+#
+# This suite is independent of the `(linux or macosx) +
+# REPRO_M69_FS_VM` suite above: it skips the broker / `repro` binary
+# entirely (the host-side runner ships only this gate binary into the
+# Tart guest), and instead invokes `applyFsSystemFile` directly. Since
+# the destructive half runs as the cirruslabs `admin` user with
+# passwordless sudo, the gate elevates itself by re-exec'ing under
+# sudo when not already root.
+# ===========================================================================
+
+when defined(macosx):
+
+  proc readEtcViaPrivateEtc(name: string): string =
+    ## Re-read the file via the explicit `/private/etc/<name>` path.
+    ## On macOS `/etc` is a symlink to `/private/etc`; a write to
+    ## `/etc/<name>` lands at `/private/etc/<name>` and BOTH paths
+    ## should resolve to the same bytes. We assert byte-equality
+    ## across the two read paths to confirm the driver does not
+    ## double-write or land in two distinct files.
+    readFile("/private/etc/" & name)
+
+  proc statInode(path: string): tuple[dev: uint64, ino: uint64] =
+    ## Stat helper for the symlink-resolution check. Two paths that
+    ## resolve to the same on-disk file MUST share (dev, ino). Used
+    ## to prove `/etc/<name>` and `/private/etc/<name>` are the same
+    ## inode, NOT two separate files.
+    let info = getFileInfo(path, followSymlink = true)
+    (dev: info.id.device.uint64, ino: info.id.file.uint64)
+
+suite "fs.systemFile: PHASE-5 macOS driver-direct + symlink check":
+
+  test "macOS /etc write resolves through /private/etc symlink (driver-direct)":
+    if not phase5MacosSandboxMode:
+      echo "  [sandbox-gated] REPRO_PHASE5_MACOS_FS_VM not set (or " &
+        "not on macOS) - the macOS-specific /private/etc symlink " &
+        "resolution scenario is NOT EXERCISED on this host. Run " &
+        "this gate inside a disposable macOS VM (via vm-harness " &
+        "tart-macos) with REPRO_PHASE5_MACOS_FS_VM=1 to exercise " &
+        "the real driver-direct apply + verify + destroy path."
+    else:
+      when defined(macosx):
+        # Defence in depth: an in-VM cirruslabs admin user has
+        # passwordless sudo; we expect this process to already be
+        # running as root (the host-side runner uses `sudo -E` to
+        # invoke the gate binary so the apply path can write under
+        # /etc/). Fail closed if we are not root.
+        let euid = geteuid()
+        doAssert euid == 0,
+          "PHASE-5 macOS gate must run as root inside the VM " &
+          "(euid=" & $euid & "); the host-side runner should `sudo -E` " &
+          "the gate binary before invocation"
+
+        let pid = $getCurrentProcessId()
+        let targetName = "repro-phase5-fs-systemfile-" & pid & ".conf"
+        let targetEtc = "/etc/" & targetName
+        let targetPrivate = "/private/etc/" & targetName
+        let content1 = "phase5=fs.systemFile\nversion=1\n"
+        let content2 = "phase5=fs.systemFile\nversion=2\n" &
+          "macos=tahoe\n"
+
+        # Pre-condition: allowlist accepts /etc/ + the path normalizes
+        # to under SystemFileAllowedRoots. Defence in depth before any
+        # I/O.
+        doAssert isAllowedSystemFilePath(targetEtc),
+          "/etc/ path unexpectedly rejected by allowlist"
+
+        # Ensure no stale file leftover from a prior aborted run.
+        if fileExists(targetEtc):
+          removeFile(targetEtc)
+        doAssert not fileExists(targetEtc)
+        doAssert not fileExists(targetPrivate)
+
+        # -------------------------------------------------------------
+        # 1. APPLY: driver-direct, no broker.
+        # -------------------------------------------------------------
+        let opApply = PrivilegedOperation(kind: pokFsSystemFile,
+          address: "systemFile:" & targetEtc,
+          sfPath: targetEtc, sfContent: content1, sfDestroy: false)
+        doAssert operationValidationError(opApply).len == 0
+        let post1 = applyFsSystemFile(opApply)
+        doAssert post1.present
+        doAssert post1.digestHex == posixDigestHexOfText(content1)
+
+        # PASS CRITERION (db84280, fs.systemFile macOS row):
+        # "File written + readable post-apply".
+        doAssert fileExists(targetEtc),
+          "post-apply: /etc/" & targetName & " does not exist"
+        doAssert readFile(targetEtc) == content1,
+          "post-apply: /etc read back unexpected bytes"
+
+        # PASS CRITERION: "symlink resolution does not double-write
+        # under /private/etc". The same bytes must be readable via the
+        # /private/etc/ path, AND the two paths must resolve to the
+        # SAME inode (no double-write to two distinct files).
+        doAssert fileExists(targetPrivate),
+          "post-apply: /private/etc/" & targetName & " not visible " &
+          "through symlink (driver should not have double-written)"
+        doAssert readEtcViaPrivateEtc(targetName) == content1,
+          "post-apply: /private/etc read disagrees with /etc read"
+        let stEtc = statInode(targetEtc)
+        let stPriv = statInode(targetPrivate)
+        doAssert stEtc.dev == stPriv.dev,
+          "/etc/ and /private/etc/ resolve to different devices " &
+          "(symlink-resolution check FAILED)"
+        doAssert stEtc.ino == stPriv.ino,
+          "/etc/ and /private/etc/ resolve to different inodes " &
+          "(driver double-wrote — PASS criterion VIOLATED)"
+
+        # -------------------------------------------------------------
+        # 2. RE-OBSERVE: independent observe call reports same digest.
+        # -------------------------------------------------------------
+        let obs1 = observeFsSystemFile(opApply)
+        doAssert obs1.present
+        doAssert obs1.digestHex == post1.digestHex
+
+        # -------------------------------------------------------------
+        # 3. UPDATE: change content; driver overwrites in place.
+        # -------------------------------------------------------------
+        let opUpdate = PrivilegedOperation(kind: pokFsSystemFile,
+          address: "systemFile:" & targetEtc,
+          sfPath: targetEtc, sfContent: content2, sfDestroy: false)
+        let post2 = applyFsSystemFile(opUpdate)
+        doAssert post2.present
+        doAssert post2.digestHex == posixDigestHexOfText(content2)
+        doAssert readFile(targetEtc) == content2
+        doAssert readEtcViaPrivateEtc(targetName) == content2
+        # Inode stability: a same-path overwrite preserves inode on
+        # macOS APFS (the driver uses fmWrite truncate, not unlink+
+        # create). This is defence-in-depth on the symlink-resolution
+        # contract — different inode after overwrite would suggest the
+        # driver took an unlink+rewrite path.
+        let stEtc2 = statInode(targetEtc)
+        doAssert stEtc2.dev == stPriv.dev
+        # Inode CAN differ across overwrite on APFS in principle, but
+        # the dev must match; we only assert dev-equality + bytes-
+        # equality here. The two-path resolution must still match.
+        doAssert statInode(targetPrivate) == stEtc2,
+          "post-update: /etc and /private/etc no longer share inode"
+
+        # -------------------------------------------------------------
+        # 4. DESTROY: removes the file via the driver's destroy
+        #    direction; post-apply re-probe ensures the file is gone.
+        # -------------------------------------------------------------
+        let opDestroy = PrivilegedOperation(kind: pokFsSystemFile,
+          address: "systemFile:" & targetEtc,
+          sfPath: targetEtc, sfContent: "", sfDestroy: true)
+        let postDestroy = applyFsSystemFile(opDestroy)
+        doAssert not postDestroy.present
+        doAssert not fileExists(targetEtc),
+          "post-destroy: /etc file still present"
+        doAssert not fileExists(targetPrivate),
+          "post-destroy: /private/etc still visible (orphan?)"
+
+        echo "  [OK] fs.systemFile macOS lifecycle (driver-direct): " &
+          "apply / observe / update / destroy; /etc and /private/etc " &
+          "resolve to same inode; no double-write."
