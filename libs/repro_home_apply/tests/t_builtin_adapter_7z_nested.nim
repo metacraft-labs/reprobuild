@@ -64,7 +64,13 @@ proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
   let outcome = realizePrefix(store, prefixId, hint,
     proc (stagingDir: string; mechanism: var string) =
       createDir(extendedPath(stagingDir / "bin"))
-      copyFile(extendedPath(realExe),
+      # copyFile drops permissions to 0o644; on Linux that strips the
+      # exec bit and the seeded 7z fails realize with `Permission
+      # denied` when the adapter shells out. macOS happens to clone
+      # the source attributes for sibling-path copies often enough
+      # that the exec bit survives, but copyFileWithPermissions is
+      # the portable primitive.
+      copyFileWithPermissions(extendedPath(realExe),
         extendedPath(stagingDir / "bin" / "7z.exe"))
       let codecsDll = parentDir(realExe) / "7z.dll"
       if fileExists(extendedPath(codecsDll)):

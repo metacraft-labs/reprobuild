@@ -101,7 +101,10 @@ proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
   let outcome = realizePrefix(store, prefixId, hint,
     proc (stagingDir: string; mechanism: var string) =
       createDir(extendedPath(stagingDir / "bin"))
-      copyFile(extendedPath(realExe),
+      # See t_builtin_adapter_7z_nested.nim: copyFile drops the exec
+      # bit on Linux. Use copyFileWithPermissions so the seeded 7z
+      # stays runnable when the adapter shells out to it.
+      copyFileWithPermissions(extendedPath(realExe),
         extendedPath(stagingDir / "bin" / "7z.exe"))
       # Also copy any sibling DLLs the real 7z.exe needs (7-Zip splits
       # codec support out into 7z.dll). We probe for the DLL next to
