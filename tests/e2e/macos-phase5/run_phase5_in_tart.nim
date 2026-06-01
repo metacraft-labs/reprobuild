@@ -1,8 +1,8 @@
-## M7 + M8 + M9 host-side runner: drive the macOS Phase-5 driver-validation
-## gates inside a Tart-managed macOS guest.
+## M7 + M8 + M9 + M10 host-side runner: drive the macOS Phase-5
+## driver-validation gates inside a Tart-managed macOS guest.
 ##
-## Per the M7 + M8 + M9 deliverables, eight gates need their destructive
-## halves exercised inside a real macOS VM:
+## Per the M7 + M8 + M9 + M10 deliverables, ten gates need their
+## destructive halves exercised inside a real macOS VM:
 ##
 ##   1. fs.systemFile        — tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim
 ##                             + REPRO_PHASE5_MACOS_FS_VM=1 (M7; driver-direct
@@ -47,6 +47,26 @@
 ##                             LocalHostName` triple-slot apply + out-of-
 ##                             band `scutil --get` verification that ALL
 ##                             three slots are synchronized; needs root).
+##   9. launchd.systemDaemon — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_launchd_system_daemon.nim
+##                             + REPRO_PHASE5_MACOS_LAUNCHD_DAEMON_VM=1 (M10;
+##                             writes a disposable `/Library/LaunchDaemons/
+##                             <label>.plist` + `launchctl bootstrap system`,
+##                             verifies via out-of-band `launchctl print
+##                             system/<label>`, destroys via the driver
+##                             and asserts no orphaned plists; needs root
+##                             because /Library/LaunchDaemons/ writes +
+##                             `launchctl bootstrap system` are system-scope).
+##  10. launchd.userAgent    — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_launchd_user_agent.nim
+##                             + REPRO_PHASE5_MACOS_LAUNCHD_AGENT_VM=1 (M10;
+##                             writes a disposable `~/Library/LaunchAgents/
+##                             <label>.plist` + `launchctl bootstrap gui/
+##                             <uid>`, verifies via out-of-band `launchctl
+##                             print gui/<uid>/<label>`, destroys and
+##                             asserts no orphans; runs as the cirruslabs
+##                             admin user — NOT under sudo — because
+##                             agents live in the gui/<uid> domain).
 ##
 ## For each gate:
 ##   1. Cross-build the gate binary on the host (arm64 macOS host →
@@ -146,6 +166,18 @@ let Gates = @[
     sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_os_hostname.nim",
     envVar: "REPRO_PHASE5_MACOS_HOSTNAME_VM",
     needsRoot: true,                    # scutil --set needs root
+    timeoutSec: 180),
+  GateSpec(
+    name: "launchd-systemdaemon",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_launchd_system_daemon.nim",
+    envVar: "REPRO_PHASE5_MACOS_LAUNCHD_DAEMON_VM",
+    needsRoot: true,                    # /Library/LaunchDaemons/ + bootstrap system
+    timeoutSec: 180),
+  GateSpec(
+    name: "launchd-useragent",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_launchd_user_agent.nim",
+    envVar: "REPRO_PHASE5_MACOS_LAUNCHD_AGENT_VM",
+    needsRoot: false,                   # ~/Library/LaunchAgents/ + bootstrap gui/<uid>
     timeoutSec: 180)]
 
 # ---------------------------------------------------------------------------
@@ -334,7 +366,8 @@ proc main(): int =
   echo "[m7-runner] OK — all " & $Gates.len &
     " Phase-5 driver-validation gates PASS in Tart " &
     "(M7 fs.* primitives + M8 env / shell.integration arms + " &
-    "M9 macos.systemDefault / os.timezone / os.hostname arms)"
+    "M9 macos.systemDefault / os.timezone / os.hostname arms + " &
+    "M10 launchd.systemDaemon / launchd.userAgent arms)"
   return 0
 
 quit(main())
