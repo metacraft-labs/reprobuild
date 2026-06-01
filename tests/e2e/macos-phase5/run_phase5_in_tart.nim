@@ -1,8 +1,8 @@
-## M7 + M8 host-side runner: drive the macOS Phase-5 driver-validation
+## M7 + M8 + M9 host-side runner: drive the macOS Phase-5 driver-validation
 ## gates inside a Tart-managed macOS guest.
 ##
-## Per the M7 + M8 deliverables, five gates need their destructive halves
-## exercised inside a real macOS VM:
+## Per the M7 + M8 + M9 deliverables, eight gates need their destructive
+## halves exercised inside a real macOS VM:
 ##
 ##   1. fs.systemFile        — tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim
 ##                             + REPRO_PHASE5_MACOS_FS_VM=1 (M7; driver-direct
@@ -27,6 +27,26 @@
 ##                             hook applied to `~/.zshrc`, new interactive-
 ##                             shell verification of `_direnv_hook` in
 ##                             `precmd_functions`).
+##   6. macos.systemDefault  — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_macos_system_default.nim
+##                             + REPRO_PHASE5_MACOS_DEFAULTS_VM=1 (M9;
+##                             `defaults write /Library/Preferences/<test
+##                             domain>` apply / re-apply (no-op) / destroy
+##                             round-trip; needs root because the system-
+##                             scope plist lands under /Library/Preferences/).
+##   7. os.timezone          — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_os_timezone.nim
+##                             + REPRO_PHASE5_MACOS_TZ_VM=1 (M9;
+##                             `systemsetup -settimezone` apply +
+##                             out-of-band `systemsetup -gettimezone`
+##                             verification + restore prior; needs root).
+##   8. os.hostname          — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_os_hostname.nim
+##                             + REPRO_PHASE5_MACOS_HOSTNAME_VM=1 (M9;
+##                             `scutil --set ComputerName/HostName/
+##                             LocalHostName` triple-slot apply + out-of-
+##                             band `scutil --get` verification that ALL
+##                             three slots are synchronized; needs root).
 ##
 ## For each gate:
 ##   1. Cross-build the gate binary on the host (arm64 macOS host →
@@ -108,7 +128,25 @@ let Gates = @[
     needsRoot: false,                   # writes under $HOME (~/.zshrc)
     # Includes `brew install direnv` fallback + interactive zsh spawn;
     # `brew install` is the long pole on a cold guest.
-    timeoutSec: 600)]
+    timeoutSec: 600),
+  GateSpec(
+    name: "macos-systemdefault",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_macos_system_default.nim",
+    envVar: "REPRO_PHASE5_MACOS_DEFAULTS_VM",
+    needsRoot: true,                    # writes /Library/Preferences/<dom>
+    timeoutSec: 180),
+  GateSpec(
+    name: "os-timezone",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_os_timezone.nim",
+    envVar: "REPRO_PHASE5_MACOS_TZ_VM",
+    needsRoot: true,                    # systemsetup -settimezone needs root
+    timeoutSec: 180),
+  GateSpec(
+    name: "os-hostname",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_os_hostname.nim",
+    envVar: "REPRO_PHASE5_MACOS_HOSTNAME_VM",
+    needsRoot: true,                    # scutil --set needs root
+    timeoutSec: 180)]
 
 # ---------------------------------------------------------------------------
 # Build phase — one binary per gate.
@@ -295,7 +333,8 @@ proc main(): int =
     return 1
   echo "[m7-runner] OK — all " & $Gates.len &
     " Phase-5 driver-validation gates PASS in Tart " &
-    "(M7 fs.* primitives + M8 env / shell.integration arms)"
+    "(M7 fs.* primitives + M8 env / shell.integration arms + " &
+    "M9 macos.systemDefault / os.timezone / os.hostname arms)"
   return 0
 
 quit(main())

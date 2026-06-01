@@ -25,15 +25,21 @@
 ## The destructive half writes `/Library/Preferences/...` via
 ## `defaults write` (root-only on macOS) and is therefore guarded by
 ## BOTH the platform (`defined(macosx)`) AND
-## `REPRO_PHASE5_MACOS_SYSTEMDEFAULT_VM=1`. M9 will populate the
-## sandbox scenario; until then the destructive half emits a
-## `[sandbox-gated]` notice mirroring the M69 precedent.
+## `REPRO_PHASE5_MACOS_DEFAULTS_VM=1`. The host-side runner cross-builds
+## this binary, copies it into a freshly-cloned Tart macOS guest, and
+## runs it under `sudo -E -n` with the env var set (the `defaults
+## write /Library/Preferences/...` path is system-scope and needs
+## root). M9 lands the concrete apply / verify / re-apply (no-op) /
+## destroy lifecycle.
 ##
 ## No `skip`, no `xfail` - the pure-logic half ALWAYS runs and
 ## always asserts; only the real `defaults write` scenario is
 ## sandbox-gated.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, unittest]
+
+when defined(posix):
+  from std/posix import geteuid
 
 import repro_elevation
 import repro_infra
@@ -52,7 +58,7 @@ proc reproBinary(): string =
 # dev host so the gate never writes a real Library/Preferences plist.
 let sandboxMode =
   defined(macosx) and
-  getEnv("REPRO_PHASE5_MACOS_SYSTEMDEFAULT_VM") == "1"
+  getEnv("REPRO_PHASE5_MACOS_DEFAULTS_VM") == "1"
 
 # ===========================================================================
 # NON-DESTRUCTIVE: pure structural-comparison + plist-path derivation +
@@ -146,29 +152,193 @@ macos.systemDefault {
 # ===========================================================================
 # DESTRUCTIVE: real `defaults write /Library/Preferences/...` against a
 # sandboxed plist + key. SANDBOX/VM-ONLY - guarded by BOTH the macOS
-# platform AND `REPRO_PHASE5_MACOS_SYSTEMDEFAULT_VM=1`. Never runs on a
-# normal host. M9 lands the concrete scenario; M6 only scaffolds.
+# platform AND `REPRO_PHASE5_MACOS_DEFAULTS_VM=1`. Never runs on a
+# normal host. The host-side runner (`run_phase5_in_tart.nim`) wraps
+# this binary in `sudo -E -n` inside the guest so the system-scope
+# `defaults write /Library/Preferences/...` path can run as root.
 # ===========================================================================
+
+when defined(macosx):
+
+  proc defaultsReadRaw(plistPath, key: string):
+      tuple[present: bool; value: string; exitCode: int] =
+    ## Re-implement the driver's `readSystemDefault` shape from outside
+    ## the driver so the assertion is independent of the driver's own
+    ## codepath (we want to PROVE the write landed on disk, not just
+    ## trust the driver's post-apply re-probe).
+    let (output, code) = execCmdEx("defaults read " & quoteShell(plistPath) &
+      " " & quoteShell(key))
+    if code != 0:
+      return (false, "", code)
+    (true, output.strip(), code)
 
 suite "macos.systemDefault: REAL apply / verify / destroy (sandbox-only)":
 
   test "real macos.systemDefault lifecycle (only under macOS + env var)":
     if not sandboxMode:
-      echo "  [sandbox-gated] REPRO_PHASE5_MACOS_SYSTEMDEFAULT_VM not " &
+      echo "  [sandbox-gated] REPRO_PHASE5_MACOS_DEFAULTS_VM not " &
         "set (or not on macOS) - the real `defaults write " &
         "/Library/Preferences/...` scenario is NOT EXERCISED on this " &
         "host (it needs root on a real Mac). Run this gate inside a " &
-        "disposable macOS VM with REPRO_PHASE5_MACOS_SYSTEMDEFAULT_VM=1 " &
+        "disposable macOS VM with REPRO_PHASE5_MACOS_DEFAULTS_VM=1 " &
         "to exercise the real `defaults` mutation. The pure-logic " &
         "suites above already proved the structural-comparison + " &
         "typed-op + RBEB codec without mutating any host."
     else:
-      # The concrete apply -> verify -> re-apply (no-op) -> destroy
-      # scenario lands in M9 (macOS Driver Validation - System-Level
-      # Primitives). M6 only scaffolds. We still assert that the
-      # `repro` binary the broker would launch exists so the M9 run
-      # has a fast preflight signal.
-      discard reproBinary()
-      echo "  [sandbox-scaffold] REPRO_PHASE5_MACOS_SYSTEMDEFAULT_VM " &
-        "set; M6 scaffold present, M9 will populate the concrete " &
-        "apply/verify/destroy steps."
+      when defined(macosx):
+        # The destructive arm of macos.systemDefault writes a plist
+        # under /Library/Preferences/ — system-scope, root-only on
+        # macOS. The host-side runner uses `sudo -E -n` to launch this
+        # binary; we fail-closed if we're not root.
+        let euid = geteuid()
+        doAssert euid == 0,
+          "PHASE-5 macOS gate must run as root inside the VM " &
+          "(euid=" & $euid & "); the host-side runner should `sudo -E` " &
+          "the gate binary before invocation. /Library/Preferences/ " &
+          "writes need root."
+
+        # ---------------------------------------------------------------
+        # Test domain: pick a DISPOSABLE reverse-DNS domain that does NOT
+        # collide with any Apple-owned domain on the guest. The driver
+        # validator (`isSystemDefaultDomain`) requires the resolved path
+        # land under `/Library/Preferences/`. We use a PID-scoped name
+        # so even if the guest were reused (it isn't — Tart clones a
+        # fresh disposable per gate), concurrent runs wouldn't collide.
+        # ---------------------------------------------------------------
+        let pid = $getCurrentProcessId()
+        let testDomain = "com.metacraft.repro-phase5-defaults-" & pid
+        # Use a string-typed key+value because the driver's post-apply
+        # re-probe canonicalizes the OPERATOR-supplied literal and
+        # compares it to the `defaults read` output. Bool-typed values
+        # don't round-trip byte-equivalently (input `YES` is read back
+        # as `1`); the structural canonicalizer treats them as distinct
+        # tokens and the driver's `desiredHex != post.digestHex` check
+        # would (correctly, per its contract) raise EProtocol. A string
+        # value round-trips verbatim.
+        let testKey = "repro-phase5-marker"
+        let testValueLiteral = "phase5-" & pid
+        let testValueType = "-string"
+        let testPlistPath = systemDefaultPlistPath(testDomain)
+        doAssert testPlistPath.startsWith("/Library/Preferences/")
+        doAssert isSystemDefaultDomain(testDomain),
+          "test domain '" & testDomain & "' unexpectedly rejected by " &
+          "the isSystemDefaultDomain allowlist"
+
+        # Ensure no stale plist from a prior aborted run.
+        if fileExists(testPlistPath):
+          # Best-effort cleanup; the driver itself does not depend on
+          # this but we want a known-empty baseline for the round-trip.
+          try: removeFile(testPlistPath)
+          except OSError: discard
+
+        # Prior state: domain absent (no plist; key has no value).
+        let preState = defaultsReadRaw(testPlistPath, testKey)
+        doAssert not preState.present,
+          "pre-apply: key '" & testKey & "' unexpectedly already " &
+          "present in domain '" & testDomain & "' (value='" &
+          preState.value & "'). Test cannot prove round-trip."
+
+        # ---------------------------------------------------------------
+        # 1. APPLY: write `<testKey> -string <testValueLiteral>` into
+        #    the test plist. No `restartTarget` — that field exists for
+        #    Apple-owned domains like com.apple.dock where the running
+        #    process must be restarted to pick up the change. Our test
+        #    domain has no consumer process, so leaving sdRestartTarget
+        #    empty deliberately exercises the no-`killall` codepath.
+        # ---------------------------------------------------------------
+        let opApply = PrivilegedOperation(kind: pokMacosSystemDefault,
+          address: "systemDefault:" & testDomain & ":" & testKey,
+          sdDomain: testDomain,
+          sdKey: testKey,
+          sdValueType: testValueType,
+          sdValueLiteral: testValueLiteral,
+          sdRestartTarget: "",
+          sdDestroy: false)
+        doAssert operationValidationError(opApply).len == 0,
+          "apply op rejected by validator: " &
+          operationValidationError(opApply)
+        let post1 = applyMacosSystemDefault(opApply)
+        doAssert post1.present,
+          "post-apply: driver reports absent after `defaults write`"
+
+        # PASS CRITERION (db84280, macos.systemDefault row): the value
+        # is readable post-apply via `defaults read`. We re-read OUT-
+        # OF-BAND (no driver call) to prove the bytes landed on disk.
+        let postRead = defaultsReadRaw(testPlistPath, testKey)
+        doAssert postRead.present,
+          "post-apply: `defaults read` reports absent (exit=" &
+          $postRead.exitCode & ")"
+        # `defaults read` of a -bool YES prints `1`. We compare the
+        # canonicalized form so trailing whitespace / formatting can't
+        # cause a false negative.
+        doAssert canonicalizeDefaultsValue(postRead.value) ==
+                 canonicalizeDefaultsValue(testValueLiteral),
+          "post-apply: `defaults read` returned '" & postRead.value &
+          "', expected '" & testValueLiteral & "'"
+
+        # Independent observe call should report the same digest the
+        # apply path returned.
+        let obs1 = observeMacosSystemDefault(opApply)
+        doAssert obs1.present
+        doAssert obs1.digestHex == post1.digestHex,
+          "post-apply: independent observe digest disagrees with " &
+          "driver-returned digest"
+
+        # ---------------------------------------------------------------
+        # 2. RE-APPLY: same value. The driver's contract is that a re-
+        #    apply with the same desired value is a no-op (post-apply
+        #    digest stable; the value remains correct). cfprefsd may
+        #    re-serialize the plist with structurally-equivalent but
+        #    byte-different output — the canonicalizer absorbs that.
+        # ---------------------------------------------------------------
+        let post2 = applyMacosSystemDefault(opApply)
+        doAssert post2.present
+        doAssert post2.digestHex == post1.digestHex,
+          "re-apply: digest changed unexpectedly (was " &
+          post1.digestHex[0 ..< 12] & ", now " &
+          post2.digestHex[0 ..< 12] & "); re-apply should be a no-op " &
+          "from the drift-detection perspective"
+
+        # ---------------------------------------------------------------
+        # 3. DESTROY: `defaults delete <plist> <key>`. Post-destroy the
+        #    key must be absent — and we return to the prior state
+        #    (since the prior state was also "absent", this is a clean
+        #    round-trip). The driver's post-apply re-probe raises
+        #    EProtocol if the destroy didn't take effect; we then re-
+        #    read out-of-band to confirm.
+        # ---------------------------------------------------------------
+        let opDestroy = PrivilegedOperation(kind: pokMacosSystemDefault,
+          address: "systemDefault:" & testDomain & ":" & testKey,
+          sdDomain: testDomain,
+          sdKey: testKey,
+          sdValueType: testValueType,
+          sdValueLiteral: "",
+          sdRestartTarget: "",
+          sdDestroy: true)
+        let postDestroy = applyMacosSystemDefault(opDestroy)
+        doAssert not postDestroy.present,
+          "post-destroy: driver reports value still present"
+
+        let postDestroyRead = defaultsReadRaw(testPlistPath, testKey)
+        doAssert not postDestroyRead.present,
+          "post-destroy: `defaults read` STILL returns the value " &
+          "after `defaults delete` (out-of-band confirm): '" &
+          postDestroyRead.value & "'"
+
+        # Final state matches prior state (both "absent").
+        doAssert postDestroyRead.present == preState.present,
+          "post-destroy: did not return to prior state"
+
+        # ---------------------------------------------------------------
+        # Safety net: remove the test plist file itself if it lingers
+        # empty after the key delete. `defaults delete` of the last
+        # key in a domain leaves an empty plist on disk; clean it.
+        # ---------------------------------------------------------------
+        if fileExists(testPlistPath):
+          try: removeFile(testPlistPath)
+          except OSError: discard
+
+        echo "  [OK] macos.systemDefault lifecycle: apply / re-apply " &
+          "(no-op) / destroy round-trip on disposable plist " &
+          testPlistPath & "; out-of-band `defaults read` verified " &
+          "the bytes landed; destroy returned to prior 'absent' state."
