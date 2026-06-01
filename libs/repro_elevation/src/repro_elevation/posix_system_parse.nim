@@ -573,16 +573,46 @@ proc canonicalPasswdUserStateMaskedBy*(observed: PasswdUserObservation;
   ## observed home directory (the one `useradd` chose); the
   ## unmasked `canonicalPasswdUserState` stays unchanged for the
   ## drift-detection paths that need the literal observed value.
+  ##
+  ## Group semantics — ADDITIVE-only post-apply check (M11 fix). On
+  ## Linux a fresh `useradd --groups <list>` ends up with exactly
+  ## `<list>` as the supplementary set (because Linux's
+  ## `USERGROUPS_ENAB=yes` auto-creates a per-user primary that
+  ## `parsePasswdObservation` filters out, leaving only the
+  ## declared supplementary set). On macOS a fresh `sysadminctl
+  ## -addUser` makes the user a member of every "everyone-style"
+  ## default group (`everyone`, `localaccounts`, `_appstore`,
+  ## `_lpadmin`, `com.apple.access_*`, ...) — observed groups end
+  ## up as a STRICT SUPERSET of the declared set, never equal.
+  ## The original M82 post-apply contract compared groups as a SET
+  ## (observed must equal desired) which works on Linux but
+  ## fails-closed spuriously on macOS even when the apply
+  ## genuinely succeeded. M11 changes the masked-canonical to mask
+  ## groups DOWN to the intersection-with-desired: the observed
+  ## groups are filtered to the set the resource actually
+  ## declared, so the comparator checks "every declared group is
+  ## observed" (additive — the contract `passwd.group` itself
+  ## advertises) rather than "no extra groups exist" (subtractive
+  ## — never a property the resource pinned). A future
+  ## ~--strict-members~ resource attribute can flip the comparator
+  ## back to the strict form. The unmasked
+  ## `canonicalPasswdUserState` stays unchanged for the drift-
+  ## detection paths that need the literal observed value.
   if not observed.present:
     return "user:absent"
   let homeRendered =
     if desired.homeDir.len > 0: observed.homeDir else: "*"
   let shellRendered =
     if desired.shell.len > 0: observed.shell else: "*"
+  let desiredSet = normalizeGroupSet(desired.groups)
+  var groupsMasked: seq[string]
+  for g in normalizeGroupSet(observed.groups):
+    if g in desiredSet:
+      groupsMasked.add(g)
   "user:present;uid=*" &
     ";home=" & homeRendered &
     ";shell=" & shellRendered &
-    ";groups=" & normalizeGroupSet(observed.groups).join(",")
+    ";groups=" & groupsMasked.join(",")
 
 # ---------------------------------------------------------------------------
 # passwd.user command-argument construction. The `useradd` / `usermod`

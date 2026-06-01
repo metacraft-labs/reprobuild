@@ -1,8 +1,8 @@
-## M7 + M8 + M9 + M10 host-side runner: drive the macOS Phase-5
+## M7 + M8 + M9 + M10 + M11 host-side runner: drive the macOS Phase-5
 ## driver-validation gates inside a Tart-managed macOS guest.
 ##
-## Per the M7 + M8 + M9 + M10 deliverables, ten gates need their
-## destructive halves exercised inside a real macOS VM:
+## Per the M7 + M8 + M9 + M10 + M11 deliverables, twelve gates need
+## their destructive halves exercised inside a real macOS VM:
 ##
 ##   1. fs.systemFile        — tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim
 ##                             + REPRO_PHASE5_MACOS_FS_VM=1 (M7; driver-direct
@@ -67,6 +67,47 @@
 ##                             asserts no orphans; runs as the cirruslabs
 ##                             admin user — NOT under sudo — because
 ##                             agents live in the gui/<uid> domain).
+##  11. passwd.user (macOS)  — tests/e2e/m69/
+##                             t_e2e_repro_infra_passwd_user_safe_destroy.nim
+##                             + REPRO_M69_PASSWD_VM=1 (M11; REUSES the
+##                             existing M69 gate per the M6 punch-list —
+##                             the gate's destructive half is already
+##                             guarded by `(defined(linux) or
+##                             defined(macosx))` AND the macOS arm of the
+##                             driver was shipped earlier with `dscl . -read
+##                             /Users/<name>` + `sysadminctl -addUser` +
+##                             `dseditgroup` for extraGroups. M11 validates
+##                             that macOS arm in Tart for the first time;
+##                             ALSO implicitly re-validates the M82 post-
+##                             apply canonicalization fix on macOS — the
+##                             gate's create / safe-destroy cycle exercises
+##                             the masked-by-desired canonical-state digest
+##                             code path the M82 fix corrected. Needs root
+##                             because dscl + sysadminctl mutations land in
+##                             /var/db/dslocal and need system privileges).
+##  12. passwd.group (macOS) — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_passwd_group.nim
+##                             + REPRO_PHASE5_MACOS_PASSWD_GROUP_VM=1 (M11;
+##                             NEW destructive scenario AND M11 ships the
+##                             driver's macOS arm — see
+##                             libs/repro_elevation/src/repro_elevation/
+##                             posix_system_driver.nim, the
+##                             `when defined(macosx)` branch of
+##                             `applyPasswdGroup` / `destroyPasswdGroup` /
+##                             `observePasswdGroupRaw` added by M11. Uses
+##                             `dscl . -create /Groups/<name>` +
+##                             `PrimaryGroupID` computation +
+##                             `dseditgroup` for membership + `dscl . -delete
+##                             /Groups/<name>` for destroy; out-of-band
+##                             `dscl . -read /Groups/<name>` + `dseditgroup
+##                             -o read` witnesses verify the group's
+##                             registration. Asserts the driver does NOT
+##                             use `groupadd` (which is absent on stock
+##                             macOS — a `which groupadd` precondition
+##                             check makes the negative assertion
+##                             constructive). Needs root because dscl
+##                             mutations to /Local/Default/Groups are
+##                             system-scope).
 ##
 ## For each gate:
 ##   1. Cross-build the gate binary on the host (arm64 macOS host →
@@ -88,7 +129,7 @@
 ## Run with:
 ##   nim c -r --threads:on tests/e2e/macos-phase5/run_phase5_in_tart.nim
 ##
-## Exit code 0 = all 3 gates PASS; non-zero = at least one gate
+## Exit code 0 = all 12 gates PASS; non-zero = at least one gate
 ## failed (which one is logged to stderr).
 
 import std/[options, os, osproc, sequtils, strutils, tables, tempfiles,
@@ -178,6 +219,22 @@ let Gates = @[
     sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_launchd_user_agent.nim",
     envVar: "REPRO_PHASE5_MACOS_LAUNCHD_AGENT_VM",
     needsRoot: false,                   # ~/Library/LaunchAgents/ + bootstrap gui/<uid>
+    timeoutSec: 180),
+  GateSpec(
+    name: "passwd-user",
+    sourcePath: "tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim",
+    envVar: "REPRO_M69_PASSWD_VM",      # REUSES the existing M69 env var
+    needsRoot: true,                    # dscl + sysadminctl are system-scope
+    # sysadminctl -addUser on a fresh macOS guest is the slow step
+    # (account-creation triggers the user-template copy + the
+    # Spotlight-index registration for the new home dir); budget
+    # 240s like env-userpath.
+    timeoutSec: 240),
+  GateSpec(
+    name: "passwd-group",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_passwd_group.nim",
+    envVar: "REPRO_PHASE5_MACOS_PASSWD_GROUP_VM",
+    needsRoot: true,                    # dscl mutations to /Local/Default/Groups
     timeoutSec: 180)]
 
 # ---------------------------------------------------------------------------
@@ -367,7 +424,8 @@ proc main(): int =
     " Phase-5 driver-validation gates PASS in Tart " &
     "(M7 fs.* primitives + M8 env / shell.integration arms + " &
     "M9 macos.systemDefault / os.timezone / os.hostname arms + " &
-    "M10 launchd.systemDaemon / launchd.userAgent arms)"
+    "M10 launchd.systemDaemon / launchd.userAgent arms + " &
+    "M11 passwd.user (REUSES M69 gate) / passwd.group (NEW driver arm + scenario))"
   return 0
 
 quit(main())

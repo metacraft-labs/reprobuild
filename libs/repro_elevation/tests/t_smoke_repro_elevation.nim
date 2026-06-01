@@ -832,6 +832,46 @@ suite "repro_elevation: passwd.user pure logic (Phase C)":
     check canonicalPasswdUserStateMaskedBy(
       PasswdUserObservation(present: false), desired) == "user:absent"
 
+  test "canonicalPasswdUserStateMaskedBy: extra groups are tolerated (ADDITIVE-only — M11 fix)":
+    # The macOS `sysadminctl -addUser` makes a fresh user a member
+    # of many `everyone`-style default groups (`everyone`,
+    # `localaccounts`, `_appstore`, `com.apple.access_*`, ...) on
+    # top of whatever supplementary groups the resource declared.
+    # The pre-M11 post-apply re-probe compared the observed set
+    # against the desired set as a SET-EQUALITY check (digests
+    # had to be byte-equal) and fail-closed spuriously on macOS
+    # even though the apply genuinely succeeded. M11 narrows the
+    # comparator to ADDITIVE-only: the masked-observed canonical
+    # contains the INTERSECTION of observed-and-desired groups, so
+    # "every declared group is observed" suffices, "no extra
+    # groups exist" is no longer required.
+    let desired = PasswdUserDesired(name: "reprotest",
+      homeDir: "", shell: "", groups: @["admin"])
+    let observed = PasswdUserObservation(present: true,
+      uid: "502", primaryGroup: "staff",
+      homeDir: "/Users/reprotest", shell: "/bin/zsh",
+      groups: @["admin", "everyone", "localaccounts",
+        "_appstore", "_developer", "com.apple.access_ssh"])
+    # The masked observed is reduced to `groups=admin` — the
+    # intersection of observed-and-desired — matching the desired
+    # canonical byte-for-byte.
+    check canonicalPasswdUserStateMaskedBy(observed, desired) ==
+      canonicalPasswdUserDesired(desired)
+
+  test "canonicalPasswdUserStateMaskedBy: missing declared group is NOT tolerated (negative)":
+    # Conversely: if a DECLARED group is missing from the
+    # observation (the apply did not actually add the user to it),
+    # the masked-observed canonical drops the group and the
+    # comparator catches the drift.
+    let desired = PasswdUserDesired(name: "reprotest",
+      groups: @["admin", "wheel"])
+    let observed = PasswdUserObservation(present: true,
+      uid: "502", primaryGroup: "staff",
+      homeDir: "/Users/reprotest", shell: "/bin/zsh",
+      groups: @["admin"])              # missing "wheel"
+    check canonicalPasswdUserStateMaskedBy(observed, desired) !=
+      canonicalPasswdUserDesired(desired)
+
   test "parsePasswdObservation: primary group filtered out of supplementary set":
     # Debian / Ubuntu's `useradd reprotest --groups users` (with the
     # default `USERGROUPS_ENAB=yes`) creates a per-user primary
@@ -2159,8 +2199,19 @@ suite "repro_elevation: passwd.group pure surface":
     check privilegedOperationKindFromString("passwd.group") ==
       pokPasswdGroup
 
-  test "off-Linux passwd.group entry points raise ENotImplementedPlatform":
-    when not defined(linux):
+  test "off-POSIX passwd.group entry points raise ENotImplementedPlatform":
+    # M11 added a macOS arm (`dscl . -create /Groups/<name>` +
+    # `dseditgroup` + `dscl . -delete`) alongside the original Linux
+    # arm. Both POSIX arms shell out to real tools and need a real
+    # host to exercise — the assertion that off-platform entry points
+    # raise `ENotImplementedPlatform` therefore narrows from
+    # "off-Linux" (the pre-M11 statement) to "off-POSIX" (the
+    # post-M11 statement). The Linux smoke test for the Linux arm
+    # still lives in ~tests/e2e/m69/t_e2e_repro_infra_passwd_group_vm.nim~
+    # (gated on REPRO_M69_PASSWD_GROUP_VM=1); the macOS smoke test
+    # lives in ~tests/e2e/macos-phase5/t_e2e_macos_phase5_passwd_group.nim~
+    # (gated on REPRO_PHASE5_MACOS_PASSWD_GROUP_VM=1).
+    when not (defined(linux) or defined(macosx)):
       let op = PrivilegedOperation(kind: pokPasswdGroup,
         address: "docker",
         pgName: "docker",

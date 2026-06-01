@@ -1639,22 +1639,49 @@ proc applyLinuxSudoersRule*(op: PrivilegedOperation):
     raiseNotImplementedPlatform("linux.sudoersRule apply")
 
 # ===========================================================================
-# passwd.group — `groupadd` / `groupmod` / `gpasswd` (Linux).
+# passwd.group — `groupadd` / `groupmod` / `gpasswd` (Linux) or
+# `dscl . -create /Groups/<name>` / `dseditgroup` / `dscl . -delete`
+# (macOS, M11).
 #
-# The Linux-side companion to `passwd.user`. Membership is ADDITIVE-only
-# by default: a user already in the group but not declared by the
-# resource is REPORTED in the observation but NOT removed, so a profile
-# that converges only the membership it knows about does not silently
-# drop a manually-added admin. The destroy direction runs `groupdel`
-# and is gated by `--accept-passwd-destroy` (a removed group can break
-# file ownership), mirroring `passwd.user`.
+# Linux: the system-scope companion to `passwd.user`. Membership is
+# ADDITIVE-only by default: a user already in the group but not declared
+# by the resource is REPORTED in the observation but NOT removed, so a
+# profile that converges only the membership it knows about does not
+# silently drop a manually-added admin. The destroy direction runs
+# `groupdel` and is gated by `--accept-passwd-destroy` (a removed group
+# can break file ownership), mirroring `passwd.user`.
+#
+# macOS (M11): macOS has NO `groupadd` — local groups live in the
+# Directory Service database queried/mutated via `dscl . <op>
+# /Groups/<name>`. The driver mirrors the Linux structure but the
+# underlying tools are wholly different:
+#   * Create:   `dscl . -create /Groups/<name>` then
+#               `dscl . -create /Groups/<name> PrimaryGroupID <gid>`
+#               (the gid is either pinned by the resource or computed
+#               as max-of-existing + 1 in the user-group range to avoid
+#               collisions with Apple-owned groups).
+#   * Members:  `dseditgroup -o edit -a <member> -t user <name>` — the
+#               same primitive the `passwd.user` macOS arm uses for
+#               supplementary-group membership; safe in concurrent /
+#               re-apply scenarios (no-op when already a member).
+#   * Modify:   `dscl . -change /Groups/<name> PrimaryGroupID <old>
+#               <new>` for gid convergence.
+#   * Destroy:  `dscl . -delete /Groups/<name>` — full deletion
+#               including membership records.
+#   * Observe:  `dscl . -read /Groups/<name> PrimaryGroupID` +
+#               `GroupMembership` → assembled into the same colon-form
+#               the pure `parseGetentGroup` parser reads. Yields the
+#               SAME `PasswdGroupObservation` the Linux arm builds, so
+#               the desired-vs-observed diff + canonical digest +
+#               post-apply re-probe logic are SHARED cross-platform.
 # ===========================================================================
 
-when defined(linux):
+when defined(linux) or defined(macosx):
   proc desiredOf(op: PrivilegedOperation): PasswdGroupDesired =
     PasswdGroupDesired(name: op.pgName, gid: op.pgGid,
       members: op.pgMembers)
 
+when defined(linux):
   proc observePasswdGroupRaw(name: string): PasswdGroupObservation =
     ## Collect a group observation via `getent group <name>`. An exit
     ## code other than zero, or an empty output, means the group does
@@ -1664,11 +1691,100 @@ when defined(linux):
       return PasswdGroupObservation(present: false)
     parseGetentGroup(getentOut)
 
+elif defined(macosx):
+  proc dsclTrailingValue(raw: string): string =
+    ## Extract the value half of a `dscl . -read /Groups/<name> <key>`
+    ## response. `dscl` emits either:
+    ##   `<Key>: <value>`                 (single value, one line)
+    ## or:
+    ##   `<Key>:\n <value1>\n <value2>`   (multi-value, indented)
+    ## Both forms collapse to the space-separated set after the colon.
+    let stripped = raw.strip()
+    if stripped.len == 0:
+      return ""
+    let idx = stripped.find(':')
+    if idx < 0:
+      return stripped
+    var tail = stripped[idx + 1 .. ^1]
+    # Normalise newlines + leading whitespace into single spaces.
+    var flat = ""
+    for ch in tail:
+      if ch in {'\n', '\r', '\t'}:
+        flat.add(' ')
+      else:
+        flat.add(ch)
+    result = flat.strip()
+
+  proc observePasswdGroupRaw(name: string): PasswdGroupObservation =
+    ## Collect a group observation via `dscl . -read /Groups/<name>`.
+    ## Returns absent when the read fails (the group does not exist)
+    ## OR when the PrimaryGroupID is empty (a partial / orphan
+    ## record). The returned observation is built into the SAME
+    ## colon-form the Linux arm produces so the pure parser +
+    ## diff + canonical-digest logic is shared cross-platform.
+    let (gidOut, gidCode) = runArgv("dscl",
+      @[".", "-read", "/Groups/" & name, "PrimaryGroupID"])
+    if gidCode != 0:
+      return PasswdGroupObservation(present: false)
+    let gid = dsclTrailingValue(gidOut)
+    if gid.len == 0:
+      return PasswdGroupObservation(present: false)
+    # GroupMembership lists user-name members; missing key (exit 0,
+    # empty value) means the group has no members. `dscl` returns
+    # space-separated names which the synthetic-line parser
+    # converts to a comma-separated list.
+    let (memOut, memCode) = runArgv("dscl",
+      @[".", "-read", "/Groups/" & name, "GroupMembership"])
+    var members: seq[string]
+    if memCode == 0:
+      let raw = dsclTrailingValue(memOut)
+      for tok in raw.split({' ', '\t'}):
+        let m = tok.strip()
+        if m.len > 0 and m notin members:
+          members.add(m)
+    # Build the colon form: `name:*:<gid>:m1,m2`. The `*` is the
+    # password placeholder — `getent group` emits `x` or `*` on
+    # different distros; `parseGetentGroup` ignores field [1].
+    let synthetic = name & ":*:" & gid & ":" & members.join(",")
+    parseGetentGroup(synthetic)
+
+  proc nextFreeMacGroupGid(): string =
+    ## Compute a free PrimaryGroupID for a `dscl . -create /Groups/`
+    ## when the resource did NOT pin one. Strategy: enumerate existing
+    ## PrimaryGroupID values via `dscl . -list /Groups PrimaryGroupID`,
+    ## start at 600 (above the Apple-reserved low range and above the
+    ## typical admin-tooling range 80-100, while staying under the
+    ## non-system user range 500+ — 600..999 is the conventional
+    ## reprobuild-managed band on macOS), and return the first integer
+    ## not present. Falls back to 600 if the enumeration fails.
+    const Base = 600
+    var taken: seq[int]
+    let (listOut, listCode) = runArgv("dscl",
+      @[".", "-list", "/Groups", "PrimaryGroupID"])
+    if listCode == 0:
+      for line in listOut.splitLines():
+        let trimmed = line.strip()
+        if trimmed.len == 0:
+          continue
+        # Each line is `<name>  <gid>` (whitespace-separated).
+        let parts = trimmed.split({' ', '\t'})
+        if parts.len < 2:
+          continue
+        try:
+          let n = parseInt(parts[^1].strip())
+          taken.add(n)
+        except ValueError:
+          discard
+    var candidate = Base
+    while candidate in taken:
+      inc candidate
+    return $candidate
+
 proc observePasswdGroup*(op: PrivilegedOperation): ObservedOperationState =
   ## Re-observe a group account. `present` is true when the group
   ## exists; the digest covers the canonical observed state (gid +
   ## sorted member list).
-  when defined(linux):
+  when defined(linux) or defined(macosx):
     let obs = observePasswdGroupRaw(op.pgName)
     result.present = obs.present
     result.digestHex =
@@ -1679,9 +1795,10 @@ proc observePasswdGroup*(op: PrivilegedOperation): ObservedOperationState =
 
 proc destroyPasswdGroup*(op: PrivilegedOperation):
     ObservedOperationState =
-  ## Remove a group via `groupdel`. An already-absent group is not an
-  ## error for a destroy. The post-apply re-probe asserts the group
-  ## is no longer present.
+  ## Remove a group. Linux: `groupdel`. macOS: `dscl . -delete
+  ## /Groups/<name>`. An already-absent group is not an error for a
+  ## destroy. The post-apply re-probe asserts the group is no longer
+  ## present.
   when defined(linux):
     if observePasswdGroupRaw(op.pgName).present:
       let (delOut, delCode) = runArgv("groupdel",
@@ -1697,15 +1814,35 @@ proc destroyPasswdGroup*(op: PrivilegedOperation):
         "group still present after `groupdel`.")
     result.present = false
     result.digestHex = ZeroDigestHex
+  elif defined(macosx):
+    if observePasswdGroupRaw(op.pgName).present:
+      let (delOut, delCode) = runArgv("dscl",
+        @[".", "-delete", "/Groups/" & op.pgName])
+      if delCode != 0:
+        # If the group is gone after the failure (race), accept it.
+        if observePasswdGroupRaw(op.pgName).present:
+          raiseProtocol("passwd.group `dscl . -delete /Groups/" &
+            op.pgName & "` failed: " & delOut.strip())
+    if observePasswdGroupRaw(op.pgName).present:
+      raiseProtocol("passwd.group destroy of '" & op.pgName &
+        "' post-apply observation disagrees with desired state: " &
+        "group still present after `dscl . -delete /Groups/<name>`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
   else:
     raiseNotImplementedPlatform("passwd.group destroy")
 
 proc applyPasswdGroup*(op: PrivilegedOperation):
     ObservedOperationState =
-  ## Create / converge / remove a group. A fresh group is created via
-  ## `groupadd [--gid N] <name>`; an existing group's gid is converged
-  ## via `groupmod --gid N <name>`; membership additions are realised
-  ## via `usermod -aG <name> <user>` for each missing user.
+  ## Create / converge / remove a group. Linux: fresh group via
+  ## `groupadd [--gid N] <name>`, gid converged via `groupmod --gid N
+  ## <name>`, membership additions via `usermod -aG <name> <user>`.
+  ## macOS: fresh group via `dscl . -create /Groups/<name>` +
+  ## `PrimaryGroupID <gid>` (gid auto-computed when unpinned), gid
+  ## converged via `dscl . -change ... PrimaryGroupID <old> <new>`,
+  ## membership additions via `dseditgroup -o edit -a <member> -t
+  ## user <name>` (the same primitive the macOS `passwd.user` arm
+  ## uses).
   ## ADDITIVE-only: extras observed in the group but not declared are
   ## REPORTED in the observation but not removed (the driver does not
   ## ship a `--strict-members` mode yet).
@@ -1771,6 +1908,79 @@ proc applyPasswdGroup*(op: PrivilegedOperation):
       raiseProtocol("passwd.group '" & op.pgName &
         "' post-apply membership disagreement: declared members not " &
         "present after `usermod -aG`: " &
+        afterDiff.missingMembers.join(", ") & ".")
+    result.present = true
+    result.digestHex = posixDigestHexOfText(
+      canonicalPasswdGroupState(after))
+  elif defined(macosx):
+    if op.pgDestroy:
+      return destroyPasswdGroup(op)
+    let desired = desiredOf(op)
+    let before = observePasswdGroupRaw(op.pgName)
+    if not before.present:
+      # Create the group record. `dscl . -create /Groups/<name>` makes
+      # a bare group node; we then pin a `PrimaryGroupID` (either the
+      # resource's declared gid or a freshly-computed unused one).
+      let (crOut, crCode) = runArgv("dscl",
+        @[".", "-create", "/Groups/" & op.pgName])
+      if crCode != 0:
+        raiseProtocol("passwd.group `dscl . -create /Groups/" &
+          op.pgName & "` failed: " & crOut.strip())
+      let pinnedGid =
+        if desired.gid.len > 0: desired.gid
+        else: nextFreeMacGroupGid()
+      let (pgOut, pgCode) = runArgv("dscl",
+        @[".", "-create", "/Groups/" & op.pgName, "PrimaryGroupID",
+          pinnedGid])
+      if pgCode != 0:
+        # Best-effort cleanup of the half-created node before surfacing
+        # the error — leaves the directory cleaner if the gid pin
+        # fails for some reason.
+        discard runArgv("dscl",
+          @[".", "-delete", "/Groups/" & op.pgName])
+        raiseProtocol("passwd.group `dscl . -create /Groups/" &
+          op.pgName & " PrimaryGroupID " & pinnedGid & "` failed: " &
+          pgOut.strip())
+    else:
+      let diff = diffPasswdGroup(desired, before)
+      if diff.gidDiffers:
+        let (chOut, chCode) = runArgv("dscl",
+          @[".", "-change", "/Groups/" & op.pgName, "PrimaryGroupID",
+            before.gid, desired.gid])
+        if chCode != 0:
+          raiseProtocol("passwd.group `dscl . -change /Groups/" &
+            op.pgName & " PrimaryGroupID " & before.gid & " " &
+            desired.gid & "` failed: " & chOut.strip())
+    # Membership additions: re-observe then `dseditgroup -o edit -a`
+    # any declared member not yet in the group. `dseditgroup` is the
+    # macOS analogue of `usermod -aG`; it manipulates the same
+    # GroupMembership records the observer reads.
+    let mid = observePasswdGroupRaw(op.pgName)
+    let midDiff = diffPasswdGroup(desired, mid)
+    for member in midDiff.missingMembers:
+      let (deOut, deCode) = runArgv("dseditgroup",
+        @["-o", "edit", "-a", member, "-t", "user", op.pgName])
+      if deCode != 0:
+        raiseProtocol("passwd.group `dseditgroup -o edit -a " &
+          member & " -t user " & op.pgName & "` failed: " &
+          deOut.strip())
+    # Post-apply re-probe (weaker form — additive-only).
+    let after = observePasswdGroupRaw(op.pgName)
+    if not after.present:
+      raiseProtocol("passwd.group '" & op.pgName &
+        "' post-apply observation disagrees with desired state: " &
+        "`dscl . -create /Groups/<name>` returned exit 0 but the " &
+        "group does not exist — the driver fails closed rather than " &
+        "reporting a spurious success.")
+    let afterDiff = diffPasswdGroup(desired, after)
+    if afterDiff.gidDiffers:
+      raiseProtocol("passwd.group '" & op.pgName &
+        "' post-apply gid mismatch: observed gid '" & after.gid &
+        "', desired gid '" & op.pgGid & "'.")
+    if afterDiff.missingMembers.len > 0:
+      raiseProtocol("passwd.group '" & op.pgName &
+        "' post-apply membership disagreement: declared members not " &
+        "present after `dseditgroup -o edit -a`: " &
         afterDiff.missingMembers.join(", ") & ".")
     result.present = true
     result.digestHex = posixDigestHexOfText(

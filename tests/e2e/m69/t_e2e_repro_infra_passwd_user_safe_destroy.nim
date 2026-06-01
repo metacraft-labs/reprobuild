@@ -32,7 +32,7 @@
 ## runs and always asserts; only the real `useradd`/`userdel`
 ## scenario is sandbox-gated.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_elevation
 import repro_infra
@@ -262,10 +262,55 @@ suite "passwd.user: REAL create / safe-destroy / rollback (sandbox-only)":
       let stateDir = createTempDir("repro-m69-passwd-sb-", "")
       defer: removeDir(stateDir)
       let userName = "reprotest" & $getCurrentProcessId()
+      # The supplementary group MUST exist on the guest AND must
+      # NOT be the new user's primary group, or the post-apply re-
+      # probe will see a drift between desired (supplementary list
+      # includes `<g>`) and observed (the primary is filtered out
+      # of `id -nG`'s output by `parsePasswdObservation`, so a
+      # primary-group choice silently disappears from the
+      # observed supplementary set). The conventional choices are
+      # `users` on Linux (a real supplementary group present on
+      # every distro, never anyone's primary) and `admin` on
+      # macOS (gid 80, present on every macOS install, used as a
+      # supplementary group for administrators; the macOS default
+      # primary for a newly-`sysadminctl -addUser`-created user is
+      # `staff` gid 20, which is why `staff` is the wrong choice
+      # here — selecting `staff` would silently fail the post-
+      # apply re-probe because `staff` is filtered out as the
+      # primary). M11 widens the gate from Linux-only to
+      # Linux+macOS by selecting the platform-appropriate name;
+      # the destroy / rollback assertions are independent of
+      # which group is named.
+      const supplementaryGroup =
+        when defined(macosx): "admin"
+        else: "users"
       writeFile(stateDir / "system.nim",
         "passwd.user {\n  name = \"" & userName & "\"\n" &
-        "  groups = [\"users\"]\n}\n")
+        "  groups = [\"" & supplementaryGroup & "\"]\n}\n")
       let profileText = readFile(stateDir / "system.nim")
+      # M11 negative assertion: the macOS arm of passwd.user MUST
+      # NOT shell out to `useradd` (which does not exist on stock
+      # macOS — there is no GNU/Linux shadow-utils package
+      # installed by default). We cannot intercept arbitrary
+      # subprocess execs from this process, but we CAN assert
+      # `useradd` is absent on PATH: if the driver had tried to
+      # exec it, the subprocess would have failed with
+      # ENOENT / "command not found" and the post-apply re-probe
+      # below would have raised before the assertions succeed.
+      # The fact that the apply succeeds AND the user is observable
+      # via `dscl . -read /Users/<name>` is constructive proof the
+      # macOS arm used the dscl + sysadminctl path, not useradd.
+      # On Linux `useradd` is universally present, so the
+      # assertion is macOS-only.
+      when defined(macosx):
+        let (_, useraddCode) = execCmdEx("which useradd")
+        doAssert useraddCode != 0,
+          "test premise violated: `useradd` is on PATH on this " &
+          "macOS guest. The macOS arm of passwd.user asserts the " &
+          "driver does NOT use useradd (which would not exist on " &
+          "stock macOS); if a future guest ships useradd, this " &
+          "negative assertion needs to be re-thought (e.g. argv " &
+          "tracing via the Tier-2 macos-phase5-shims/ inventory)."
       var opts: ApplyOptions
       opts.stateDir = stateDir
       opts.hostIdentity = "sandbox-host"
@@ -275,6 +320,38 @@ suite "passwd.user: REAL create / safe-destroy / rollback (sandbox-only)":
       opts.noPreview = true
       # 1. Create the user.
       let created = runInfraApply(profileText, opts)
+      if created.errorCount != 0:
+        # M11 diagnostic — surface the actual error diagnostics so
+        # any guest-side driver failure (e.g. macOS dseditgroup
+        # silently failing against a non-existent supplementary
+        # group, or sysadminctl returning a non-zero exit) is
+        # debuggable from the host's gate output dump rather than
+        # requiring an interactive SSH into the disposable guest.
+        echo "  [diag] create errorCount=", created.errorCount,
+          " diagnostics:"
+        for d in created.diagnostics:
+          echo "    - ", d
+        when defined(macosx):
+          # Surface the directory-service state so the next
+          # iteration sees exactly what observePasswdUserRaw saw.
+          let (dsclOut, _) = execCmdEx("dscl . -read /Users/" &
+            userName & " UniqueID NFSHomeDirectory UserShell " &
+            "PrimaryGroupID 2>&1")
+          echo "  [diag] dscl . -read /Users/", userName, ":"
+          for line in dsclOut.splitLines():
+            echo "    | ", line
+          let (idGroupsOut, _) =
+            execCmdEx("id -nG " & userName & " 2>&1")
+          echo "  [diag] id -nG ", userName, ": ", idGroupsOut.strip()
+          let (idPrimaryOut, _) =
+            execCmdEx("id -gn " & userName & " 2>&1")
+          echo "  [diag] id -gn ", userName, ": ",
+            idPrimaryOut.strip()
+          let (memOut, _) = execCmdEx(
+            "dseditgroup -o read admin 2>&1")
+          echo "  [diag] dseditgroup -o read admin (members):"
+          for line in memOut.splitLines():
+            echo "    | ", line
       check created.errorCount == 0
       # 2. A destroy WITHOUT --accept-passwd-destroy is refused.
       var destroyOpts = opts
@@ -287,4 +364,9 @@ suite "passwd.user: REAL create / safe-destroy / rollback (sandbox-only)":
       # 3. WITH the flag the destroy succeeds.
       destroyOpts.acceptPasswdDestroy = true
       let removed = runInfraApply(profileText, destroyOpts)
+      if removed.errorCount != 0:
+        echo "  [diag] destroy errorCount=", removed.errorCount,
+          " diagnostics:"
+        for d in removed.diagnostics:
+          echo "    - ", d
       check removed.errorCount == 0
