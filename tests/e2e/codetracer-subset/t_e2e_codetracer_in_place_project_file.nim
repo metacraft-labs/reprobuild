@@ -1023,7 +1023,6 @@ when defined(macosx) or defined(linux):
       let selectedTarget = projectRoot & "#c-sudoku-object-with-generated-header"
       let selected = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
-      writeFile("/tmp/repro-debug-first-test.log", selected)
       check selected.contains("selectedTarget: c-sudoku-object-with-generated-header")
       check selected.contains("scheduler: actions=3")
       check selected.contains(
