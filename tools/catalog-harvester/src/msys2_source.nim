@@ -120,10 +120,14 @@ proc fileSha256Hex*(path: string): string =
   ##
   ## Mirrors ``builtin_adapter.fileShaHex`` — kept inline here so the
   ## harvester binary does not pull repro_home_apply into its link.
-  let sumExe = findExe("sha256sum")
-  let shasum = findExe("shasum")
-  let certutil = when defined(windows): findExe("certutil") else: ""
-  let openssl = findExe("openssl")
+  # `followSymlinks = false` keeps the symlink intact so coreutils'
+  # multi-call dispatch fires on the applet name. Otherwise on
+  # Nix-managed macOS `findExe` resolves to the coreutils multi-call
+  # binary and invoking it directly prints help and exits 1.
+  let sumExe = findExe("sha256sum", followSymlinks = false)
+  let shasum = findExe("shasum", followSymlinks = false)
+  let certutil = when defined(windows): findExe("certutil", followSymlinks = false) else: ""
+  let openssl = findExe("openssl", followSymlinks = false)
   let command =
     if sumExe.len > 0:
       quoteShell(sumExe) & " " & quoteShell(path)
