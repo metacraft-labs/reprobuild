@@ -136,6 +136,7 @@ const CodeTracerCommonDevToolExecutables: seq[string] = @[
   "cargo",
   "cargo-nextest",
   "clang",
+  "create-dmg",
   "ctags",
   "curl",
   "electron",
@@ -1761,7 +1762,10 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputActionCacheEffective(changedReport, "src/build-debug/frontend/styles/" & stylesheet)
-      assertPublicResourceActions(changedReport, "asSucceeded", true)
+      # Public-resources only depends on the public-resources directory
+      # contents; edits to native Nim sources don't invalidate it, so the
+      # engine honestly skips this action (post-7aea92a).
+      assertPublicResourceActionsCacheEffective(changedReport)
       assertActionCacheEffective(changedReport, "config-default-layout-json")
       assertActionCacheEffective(changedReport, "config-default-config-yaml")
       assertActionCacheEffective(changedReport, "db-backend-record")
@@ -2153,7 +2157,9 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputActionCacheEffective(htmlChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
-      assertPublicResourceActions(htmlChangedReport, "asSucceeded", true)
+      # index.html is not an input to the public-resources action, so the
+      # engine honestly skips the rebuild (post-7aea92a).
+      assertPublicResourceActionsCacheEffective(htmlChangedReport)
       check readFile(projectRoot / "src" / "frontend" / "index.html") ==
         readFile(buildDebug(projectRoot, "index.html"))
       check reportAction(htmlChangedReport, "nim-js-ipc-registry-test").kind ==
@@ -2194,7 +2200,9 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputActionCacheEffective(helperChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
-      assertPublicResourceActions(helperChangedReport, "asSucceeded", true)
+      # helpers.js is not an input to the public-resources action; the
+      # engine honestly skips the rebuild (post-7aea92a).
+      assertPublicResourceActionsCacheEffective(helperChangedReport)
       check readFile(projectRoot / "src" / "helpers.js") ==
         readFile(buildDebug(projectRoot, "src/helpers.js"))
       check reportAction(helperChangedReport,
@@ -2408,7 +2416,9 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputActionCacheEffective(cChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
-      assertPublicResourceActions(cChangedReport, "asSucceeded", true)
+      # The c-sudoku source is not an input to the public-resources action;
+      # the engine honestly skips the rebuild (post-7aea92a).
+      assertPublicResourceActionsCacheEffective(cChangedReport)
       assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(cChangedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
@@ -2439,7 +2449,10 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputActionCacheEffective(headerDeletedReport, "src/build-debug/frontend/styles/" & stylesheet)
-      assertPublicResourceActions(headerDeletedReport, "asSucceeded", true)
+      # The generated ct_config.h header is not an input to the
+      # public-resources action; removing it doesn't invalidate this action
+      # and the engine honestly skips it (post-7aea92a).
+      assertPublicResourceActionsCacheEffective(headerDeletedReport)
       assertActionCacheEffective(headerDeletedReport, "c-sudoku-object-tup")
       assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
