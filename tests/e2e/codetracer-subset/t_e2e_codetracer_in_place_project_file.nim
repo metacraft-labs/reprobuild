@@ -613,6 +613,12 @@ proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "db_connector")
   copyTree(codeTracerRoot / "src" / "shell-integrations",
     projectRoot / "src" / "shell-integrations")
+  # src/ct/online_sharing/collab_native_session.nim imports
+  # ../../frontend/viewmodel/collab/[join_session, reducer, session_core, types]
+  # so the native subset must include that collab viewmodel subtree (and its
+  # transport modules) even though the rest of src/frontend is omitted.
+  copyTree(codeTracerRoot / "src" / "frontend" / "viewmodel" / "collab",
+    projectRoot / "src" / "frontend" / "viewmodel" / "collab")
   discard requireSuccess(shellCommand([
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
@@ -810,8 +816,12 @@ proc build(reproBin, target, repoRoot, pathValue: string;
   var entries = @[("PATH", pathValue)]
   for item in env:
     entries.add(item)
+  # `selectedTarget:` / `scheduler:` / `action:` / `buildReport:` come from
+  # `logSummary`, which is silenced under the default `--log=quiet`. The test
+  # parses those lines, so opt into the actions log shape — same flag the
+  # forked CMake's `do_reprobuild_launch` passes (reprobuild-cmake@8b204955).
   let res = runShell(shellCommand([reproBin, "build", target,
-    "--tool-provisioning=path"], entries), repoRoot)
+    "--tool-provisioning=path", "--log=actions"], entries), repoRoot)
   if res.code != 0:
     checkpoint(res.output)
     checkpointBuildReportFailures(target.split("#")[0])
@@ -823,7 +833,8 @@ proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
   var entries = @[("PATH", pathValue)]
   for item in env:
     entries.add(item)
-  let res = runShell(shellCommand([reproBin, "build", "--tool-provisioning=path"],
+  let res = runShell(shellCommand([reproBin, "build",
+    "--tool-provisioning=path", "--log=actions"],
     entries), projectRoot)
   if res.code != 0:
     checkpoint(res.output)
@@ -1012,6 +1023,7 @@ when defined(macosx) or defined(linux):
       let selectedTarget = projectRoot & "#c-sudoku-object-with-generated-header"
       let selected = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
+      writeFile("/tmp/repro-debug-first-test.log", selected)
       check selected.contains("selectedTarget: c-sudoku-object-with-generated-header")
       check selected.contains("scheduler: actions=3")
       check selected.contains(
