@@ -867,12 +867,37 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
+proc assertActionCacheEffective(report: JsonNode; id: string) =
+  ## "Cache was effective for this action on this build" — accepts
+  ## either `asCacheHit` (cache decision hit + outputs had to be
+  ## restored from CAS) or `asUpToDate` (cache decision hit + outputs
+  ## already present, no restoration). Both are defined in
+  ## `libs/repro_build_engine/.../repro_build_engine.nim` `ActionStatus`
+  ## and both mean "this action did not rerun on this build"
+  ## (`launched == false` in either case). The narrower `assertAction`
+  ## remains in use for `asSucceeded`/`launched=true` checks where the
+  ## precise status matters. Mirrors the helper introduced in
+  ## `t_e2e_codetracer_build_subset_without_tup.nim` after the May-2026
+  ## engine cache-decision protocol split (commit 7aea92a).
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
+  check action{"launched"}.getBool() == false
+
 proc assertOutputAction(report: JsonNode; output, status: string;
                         launched: bool) =
   let action = reportActionWithDeclaredOutput(report, output)
   check action.kind != JNull
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
+
+proc assertOutputActionCacheEffective(report: JsonNode; output: string) =
+  ## Output-keyed counterpart to `assertActionCacheEffective`. See that
+  ## proc's docstring for the cache-effective semantics rationale.
+  let action = reportActionWithDeclaredOutput(report, output)
+  check action.kind != JNull
+  check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
+  check action{"launched"}.getBool() == false
 
 const publicResourceAction = "frontend-public-resources"
 
@@ -897,6 +922,10 @@ proc checkPublicResourceOutputs(projectRoot: string) =
 proc assertPublicResourceActions(report: JsonNode; status: string;
                                  launched: bool) =
   assertAction(report, publicResourceAction, status, launched)
+
+proc assertPublicResourceActionsCacheEffective(report: JsonNode) =
+  ## Cache-effective counterpart to `assertPublicResourceActions`.
+  assertActionCacheEffective(report, publicResourceAction)
 
 proc runNode(path: string; cwd = getCurrentDir(); pathValue = ""): string =
   let env =
@@ -1139,8 +1168,8 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-public-ui-js", "asCacheHit", false)
+      assertActionCacheEffective(secondReport, "frontend-ui-js")
+      assertActionCacheEffective(secondReport, "frontend-public-ui-js")
 
       let importedInput = projectRoot / "src" / "frontend" / "ui" /
         "calltrace.nim"
@@ -1238,9 +1267,8 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertAction(secondReport, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-src-subwindow-js", "asCacheHit",
-        false)
+      assertActionCacheEffective(secondReport, "frontend-subwindow-js")
+      assertActionCacheEffective(secondReport, "frontend-src-subwindow-js")
 
       let importedInput = projectRoot / "src" / "frontend" / "paths.nim"
       writeFile(importedInput, readFile(importedInput) &
@@ -1343,8 +1371,8 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertAction(secondReport, "frontend-index-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-src-index-js", "asCacheHit", false)
+      assertActionCacheEffective(secondReport, "frontend-index-js")
+      assertActionCacheEffective(secondReport, "frontend-src-index-js")
 
       let importedInput = projectRoot / "src" / "frontend" / "index" /
         "window.nim"
@@ -1449,7 +1477,7 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertAction(secondReport, "db-backend-record", "asCacheHit", false)
+      assertActionCacheEffective(secondReport, "db-backend-record")
 
       let nativeInput = projectRoot / "src" / "ct" / "db_backend_record.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -1547,9 +1575,10 @@ when defined(macosx) or defined(linux):
 
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
-      check second.contains("action: ct status=asCacheHit launched=false")
+      check (second.contains("action: ct status=asCacheHit launched=false") or
+        second.contains("action: ct status=asUpToDate launched=false"))
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertAction(secondReport, "ct", "asCacheHit", false)
+      assertActionCacheEffective(secondReport, "ct")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -1678,20 +1707,16 @@ when defined(macosx) or defined(linux):
       check second.contains("selectedTarget: codetracer")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       check secondReport{"actions"}.len == 24
-      assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-index-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-src-index-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-server-index-js", "asCacheHit",
-        false)
-      assertAction(secondReport, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-src-subwindow-js", "asCacheHit",
-        false)
-      assertAction(secondReport, "frontend-index-html", "asCacheHit", false)
-      assertAction(secondReport, "frontend-subwindow-html", "asCacheHit",
-        false)
-      assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
-        false)
+      assertActionCacheEffective(secondReport, "frontend-ui-js")
+      assertActionCacheEffective(secondReport, "frontend-public-ui-js")
+      assertActionCacheEffective(secondReport, "frontend-index-js")
+      assertActionCacheEffective(secondReport, "frontend-src-index-js")
+      assertActionCacheEffective(secondReport, "frontend-server-index-js")
+      assertActionCacheEffective(secondReport, "frontend-subwindow-js")
+      assertActionCacheEffective(secondReport, "frontend-src-subwindow-js")
+      assertActionCacheEffective(secondReport, "frontend-index-html")
+      assertActionCacheEffective(secondReport, "frontend-subwindow-html")
+      assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -1700,15 +1725,12 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(secondReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(secondReport, "asCacheHit", false)
-      assertAction(secondReport, "config-default-layout-json", "asCacheHit",
-        false)
-      assertAction(secondReport, "config-default-config-yaml", "asCacheHit",
-        false)
-      assertAction(secondReport, "db-backend-record", "asCacheHit", false)
-      assertAction(secondReport, "ct", "asCacheHit", false)
+        assertOutputActionCacheEffective(secondReport, "src/build-debug/frontend/styles/" & stylesheet)
+      assertPublicResourceActionsCacheEffective(secondReport)
+      assertActionCacheEffective(secondReport, "config-default-layout-json")
+      assertActionCacheEffective(secondReport, "config-default-config-yaml")
+      assertActionCacheEffective(secondReport, "db-backend-record")
+      assertActionCacheEffective(secondReport, "ct")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       let nativeSource = readFile(nativeInput)
@@ -1720,21 +1742,16 @@ when defined(macosx) or defined(linux):
       let changed = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
       let changedReport = parseFile(valueAfter(changed, "buildReport:"))
-      assertAction(changedReport, "frontend-ui-js", "asCacheHit", false)
-      assertAction(changedReport, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(changedReport, "frontend-index-js", "asCacheHit", false)
-      assertAction(changedReport, "frontend-src-index-js", "asCacheHit",
-        false)
-      assertAction(changedReport, "frontend-server-index-js", "asCacheHit",
-        false)
-      assertAction(changedReport, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(changedReport, "frontend-src-subwindow-js", "asCacheHit",
-        false)
-      assertAction(changedReport, "frontend-index-html", "asCacheHit", false)
-      assertAction(changedReport, "frontend-subwindow-html", "asCacheHit",
-        false)
-      assertAction(changedReport, "frontend-src-helpers-js", "asCacheHit",
-        false)
+      assertActionCacheEffective(changedReport, "frontend-ui-js")
+      assertActionCacheEffective(changedReport, "frontend-public-ui-js")
+      assertActionCacheEffective(changedReport, "frontend-index-js")
+      assertActionCacheEffective(changedReport, "frontend-src-index-js")
+      assertActionCacheEffective(changedReport, "frontend-server-index-js")
+      assertActionCacheEffective(changedReport, "frontend-subwindow-js")
+      assertActionCacheEffective(changedReport, "frontend-src-subwindow-js")
+      assertActionCacheEffective(changedReport, "frontend-index-html")
+      assertActionCacheEffective(changedReport, "frontend-subwindow-html")
+      assertActionCacheEffective(changedReport, "frontend-src-helpers-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -1743,14 +1760,11 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(changedReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
+        assertOutputActionCacheEffective(changedReport, "src/build-debug/frontend/styles/" & stylesheet)
       assertPublicResourceActions(changedReport, "asSucceeded", true)
-      assertAction(changedReport, "config-default-layout-json", "asCacheHit",
-        false)
-      assertAction(changedReport, "config-default-config-yaml", "asCacheHit",
-        false)
-      assertAction(changedReport, "db-backend-record", "asCacheHit", false)
+      assertActionCacheEffective(changedReport, "config-default-layout-json")
+      assertActionCacheEffective(changedReport, "config-default-config-yaml")
+      assertActionCacheEffective(changedReport, "db-backend-record")
       assertAction(changedReport, "ct", "asSucceeded", true)
       check reportAction(changedReport, "nim-js-ipc-registry-test").kind ==
         JNull
@@ -1830,8 +1844,7 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertAction(secondReport, "frontend-server-index-js", "asCacheHit",
-        false)
+      assertActionCacheEffective(secondReport, "frontend-server-index-js")
 
       let importedInput = projectRoot / "src" / "frontend" / "index" /
         "window.nim"
@@ -1912,7 +1925,7 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       check secondReport{"actions"}.len == 1
-      assertPublicResourceActions(secondReport, "asCacheHit", false)
+      assertPublicResourceActionsCacheEffective(secondReport)
 
       let addedSource = projectRoot / "src" / "public" / "resources" /
         "shared" / "add_file.svg"
@@ -2088,20 +2101,16 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-index-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-src-index-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-server-index-js", "asCacheHit",
-        false)
-      assertAction(secondReport, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-src-subwindow-js", "asCacheHit",
-        false)
-      assertAction(secondReport, "frontend-index-html", "asCacheHit", false)
-      assertAction(secondReport, "frontend-subwindow-html", "asCacheHit",
-        false)
-      assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
-        false)
+      assertActionCacheEffective(secondReport, "frontend-ui-js")
+      assertActionCacheEffective(secondReport, "frontend-public-ui-js")
+      assertActionCacheEffective(secondReport, "frontend-index-js")
+      assertActionCacheEffective(secondReport, "frontend-src-index-js")
+      assertActionCacheEffective(secondReport, "frontend-server-index-js")
+      assertActionCacheEffective(secondReport, "frontend-subwindow-js")
+      assertActionCacheEffective(secondReport, "frontend-src-subwindow-js")
+      assertActionCacheEffective(secondReport, "frontend-index-html")
+      assertActionCacheEffective(secondReport, "frontend-subwindow-html")
+      assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -2110,9 +2119,8 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(secondReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(secondReport, "asCacheHit", false)
+        assertOutputActionCacheEffective(secondReport, "src/build-debug/frontend/styles/" & stylesheet)
+      assertPublicResourceActionsCacheEffective(secondReport)
 
       let indexHtml = projectRoot / "src" / "frontend" / "index.html"
       writeFile(indexHtml, readFile(indexHtml) &
@@ -2125,24 +2133,17 @@ when defined(macosx) or defined(linux):
       check not htmlChanged.contains(
         "action: c-sudoku-object-with-generated-header")
       let htmlChangedReport = parseFile(valueAfter(htmlChanged, "buildReport:"))
-      assertAction(htmlChangedReport, "frontend-ui-js", "asCacheHit", false)
-      assertAction(htmlChangedReport, "frontend-public-ui-js", "asCacheHit",
-        false)
-      assertAction(htmlChangedReport, "frontend-index-js", "asCacheHit", false)
-      assertAction(htmlChangedReport, "frontend-src-index-js", "asCacheHit",
-        false)
-      assertAction(htmlChangedReport, "frontend-server-index-js", "asCacheHit",
-        false)
-      assertAction(htmlChangedReport, "frontend-subwindow-js", "asCacheHit",
-        false)
-      assertAction(htmlChangedReport, "frontend-src-subwindow-js",
-        "asCacheHit", false)
+      assertActionCacheEffective(htmlChangedReport, "frontend-ui-js")
+      assertActionCacheEffective(htmlChangedReport, "frontend-public-ui-js")
+      assertActionCacheEffective(htmlChangedReport, "frontend-index-js")
+      assertActionCacheEffective(htmlChangedReport, "frontend-src-index-js")
+      assertActionCacheEffective(htmlChangedReport, "frontend-server-index-js")
+      assertActionCacheEffective(htmlChangedReport, "frontend-subwindow-js")
+      assertActionCacheEffective(htmlChangedReport, "frontend-src-subwindow-js")
       assertAction(htmlChangedReport, "frontend-index-html", "asSucceeded",
         true)
-      assertAction(htmlChangedReport, "frontend-subwindow-html", "asCacheHit",
-        false)
-      assertAction(htmlChangedReport, "frontend-src-helpers-js", "asCacheHit",
-        false)
+      assertActionCacheEffective(htmlChangedReport, "frontend-subwindow-html")
+      assertActionCacheEffective(htmlChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -2151,8 +2152,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(htmlChangedReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
+        assertOutputActionCacheEffective(htmlChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
       assertPublicResourceActions(htmlChangedReport, "asSucceeded", true)
       check readFile(projectRoot / "src" / "frontend" / "index.html") ==
         readFile(buildDebug(projectRoot, "index.html"))
@@ -2174,23 +2174,15 @@ when defined(macosx) or defined(linux):
         "action: c-sudoku-object-with-generated-header")
       let helperChangedReport =
         parseFile(valueAfter(helperChanged, "buildReport:"))
-      assertAction(helperChangedReport, "frontend-ui-js", "asCacheHit", false)
-      assertAction(helperChangedReport, "frontend-public-ui-js", "asCacheHit",
-        false)
-      assertAction(helperChangedReport, "frontend-index-js", "asCacheHit",
-        false)
-      assertAction(helperChangedReport, "frontend-src-index-js", "asCacheHit",
-        false)
-      assertAction(helperChangedReport, "frontend-server-index-js",
-        "asCacheHit", false)
-      assertAction(helperChangedReport, "frontend-subwindow-js", "asCacheHit",
-        false)
-      assertAction(helperChangedReport, "frontend-src-subwindow-js",
-        "asCacheHit", false)
-      assertAction(helperChangedReport, "frontend-index-html", "asCacheHit",
-        false)
-      assertAction(helperChangedReport, "frontend-subwindow-html",
-        "asCacheHit", false)
+      assertActionCacheEffective(helperChangedReport, "frontend-ui-js")
+      assertActionCacheEffective(helperChangedReport, "frontend-public-ui-js")
+      assertActionCacheEffective(helperChangedReport, "frontend-index-js")
+      assertActionCacheEffective(helperChangedReport, "frontend-src-index-js")
+      assertActionCacheEffective(helperChangedReport, "frontend-server-index-js")
+      assertActionCacheEffective(helperChangedReport, "frontend-subwindow-js")
+      assertActionCacheEffective(helperChangedReport, "frontend-src-subwindow-js")
+      assertActionCacheEffective(helperChangedReport, "frontend-index-html")
+      assertActionCacheEffective(helperChangedReport, "frontend-subwindow-html")
       assertAction(helperChangedReport, "frontend-src-helpers-js",
         "asSucceeded", true)
       for stylesheet in [
@@ -2201,8 +2193,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(helperChangedReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
+        assertOutputActionCacheEffective(helperChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
       assertPublicResourceActions(helperChangedReport, "asSucceeded", true)
       check readFile(projectRoot / "src" / "helpers.js") ==
         readFile(buildDebug(projectRoot, "src/helpers.js"))
@@ -2364,22 +2355,19 @@ when defined(macosx) or defined(linux):
 
       let second = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertAction(secondReport, "generate-config-header", "asCacheHit", false)
+      assertActionCacheEffective(secondReport, "generate-config-header")
       assertAction(secondReport, "build-c-dir", "asUpToDate", false)
-      assertAction(secondReport, "nim-js-ipc-registry-test", "asCacheHit", false)
-      assertAction(secondReport, "frontend-ui-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-index-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-src-index-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-server-index-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(secondReport, "frontend-src-subwindow-js", "asCacheHit",
-        false)
-      assertAction(secondReport, "frontend-index-html", "asCacheHit", false)
-      assertAction(secondReport, "frontend-subwindow-html", "asCacheHit",
-        false)
-      assertAction(secondReport, "frontend-src-helpers-js", "asCacheHit",
-        false)
+      assertActionCacheEffective(secondReport, "nim-js-ipc-registry-test")
+      assertActionCacheEffective(secondReport, "frontend-ui-js")
+      assertActionCacheEffective(secondReport, "frontend-public-ui-js")
+      assertActionCacheEffective(secondReport, "frontend-index-js")
+      assertActionCacheEffective(secondReport, "frontend-src-index-js")
+      assertActionCacheEffective(secondReport, "frontend-server-index-js")
+      assertActionCacheEffective(secondReport, "frontend-subwindow-js")
+      assertActionCacheEffective(secondReport, "frontend-src-subwindow-js")
+      assertActionCacheEffective(secondReport, "frontend-index-html")
+      assertActionCacheEffective(secondReport, "frontend-subwindow-html")
+      assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -2388,36 +2376,29 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(secondReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(secondReport, "asCacheHit", false)
-      assertAction(secondReport, "c-sudoku-object-tup", "asCacheHit", false)
-      assertAction(secondReport, "c-sudoku-object-with-generated-header",
-        "asCacheHit", false)
+        assertOutputActionCacheEffective(secondReport, "src/build-debug/frontend/styles/" & stylesheet)
+      assertPublicResourceActionsCacheEffective(secondReport)
+      assertActionCacheEffective(secondReport, "c-sudoku-object-tup")
+      assertActionCacheEffective(secondReport, "c-sudoku-object-with-generated-header")
 
       let cSource = projectRoot / "test-programs" / "c_sudoku_solver" / "main.c"
       writeFile(cSource, readFile(cSource) &
         "\n/* reprobuild m29 selected-source edit */\n")
       let cChanged = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       let cChangedReport = parseFile(valueAfter(cChanged, "buildReport:"))
-      assertAction(cChangedReport, "generate-config-header", "asCacheHit", false)
+      assertActionCacheEffective(cChangedReport, "generate-config-header")
       assertAction(cChangedReport, "build-c-dir", "asUpToDate", false)
-      assertAction(cChangedReport, "nim-js-ipc-registry-test", "asCacheHit", false)
-      assertAction(cChangedReport, "frontend-ui-js", "asCacheHit", false)
-      assertAction(cChangedReport, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(cChangedReport, "frontend-index-js", "asCacheHit", false)
-      assertAction(cChangedReport, "frontend-src-index-js", "asCacheHit",
-        false)
-      assertAction(cChangedReport, "frontend-server-index-js", "asCacheHit",
-        false)
-      assertAction(cChangedReport, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(cChangedReport, "frontend-src-subwindow-js", "asCacheHit",
-        false)
-      assertAction(cChangedReport, "frontend-index-html", "asCacheHit", false)
-      assertAction(cChangedReport, "frontend-subwindow-html", "asCacheHit",
-        false)
-      assertAction(cChangedReport, "frontend-src-helpers-js", "asCacheHit",
-        false)
+      assertActionCacheEffective(cChangedReport, "nim-js-ipc-registry-test")
+      assertActionCacheEffective(cChangedReport, "frontend-ui-js")
+      assertActionCacheEffective(cChangedReport, "frontend-public-ui-js")
+      assertActionCacheEffective(cChangedReport, "frontend-index-js")
+      assertActionCacheEffective(cChangedReport, "frontend-src-index-js")
+      assertActionCacheEffective(cChangedReport, "frontend-server-index-js")
+      assertActionCacheEffective(cChangedReport, "frontend-subwindow-js")
+      assertActionCacheEffective(cChangedReport, "frontend-src-subwindow-js")
+      assertActionCacheEffective(cChangedReport, "frontend-index-html")
+      assertActionCacheEffective(cChangedReport, "frontend-subwindow-html")
+      assertActionCacheEffective(cChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -2426,8 +2407,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(cChangedReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
+        assertOutputActionCacheEffective(cChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
       assertPublicResourceActions(cChangedReport, "asSucceeded", true)
       assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(cChangedReport, "c-sudoku-object-with-generated-header",
@@ -2439,25 +2419,17 @@ when defined(macosx) or defined(linux):
       let headerDeletedReport = parseFile(valueAfter(headerDeleted, "buildReport:"))
       assertAction(headerDeletedReport, "generate-config-header", "asSucceeded", true)
       assertAction(headerDeletedReport, "build-c-dir", "asUpToDate", false)
-      assertAction(headerDeletedReport, "nim-js-ipc-registry-test", "asCacheHit", false)
-      assertAction(headerDeletedReport, "frontend-ui-js", "asCacheHit", false)
-      assertAction(headerDeletedReport, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(headerDeletedReport, "frontend-index-js", "asCacheHit",
-        false)
-      assertAction(headerDeletedReport, "frontend-src-index-js", "asCacheHit",
-        false)
-      assertAction(headerDeletedReport, "frontend-server-index-js",
-        "asCacheHit", false)
-      assertAction(headerDeletedReport, "frontend-subwindow-js", "asCacheHit",
-        false)
-      assertAction(headerDeletedReport, "frontend-src-subwindow-js",
-        "asCacheHit", false)
-      assertAction(headerDeletedReport, "frontend-index-html", "asCacheHit",
-        false)
-      assertAction(headerDeletedReport, "frontend-subwindow-html", "asCacheHit",
-        false)
-      assertAction(headerDeletedReport, "frontend-src-helpers-js",
-        "asCacheHit", false)
+      assertActionCacheEffective(headerDeletedReport, "nim-js-ipc-registry-test")
+      assertActionCacheEffective(headerDeletedReport, "frontend-ui-js")
+      assertActionCacheEffective(headerDeletedReport, "frontend-public-ui-js")
+      assertActionCacheEffective(headerDeletedReport, "frontend-index-js")
+      assertActionCacheEffective(headerDeletedReport, "frontend-src-index-js")
+      assertActionCacheEffective(headerDeletedReport, "frontend-server-index-js")
+      assertActionCacheEffective(headerDeletedReport, "frontend-subwindow-js")
+      assertActionCacheEffective(headerDeletedReport, "frontend-src-subwindow-js")
+      assertActionCacheEffective(headerDeletedReport, "frontend-index-html")
+      assertActionCacheEffective(headerDeletedReport, "frontend-subwindow-html")
+      assertActionCacheEffective(headerDeletedReport, "frontend-src-helpers-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -2466,10 +2438,9 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(headerDeletedReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asCacheHit", false)
+        assertOutputActionCacheEffective(headerDeletedReport, "src/build-debug/frontend/styles/" & stylesheet)
       assertPublicResourceActions(headerDeletedReport, "asSucceeded", true)
-      assertAction(headerDeletedReport, "c-sudoku-object-tup", "asCacheHit", false)
+      assertActionCacheEffective(headerDeletedReport, "c-sudoku-object-tup")
       assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
 
