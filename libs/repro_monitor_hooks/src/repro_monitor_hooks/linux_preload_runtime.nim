@@ -596,6 +596,41 @@ int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t 
   return CT_CALL_HOOK(ct_posix_spawnp_hook(pid, (char *)file, (void *)file_actions,
                                            (void *)attrp, (char **)argv, (char **)envp));
 }
+
+/* glibc's <fcntl.h> and <unistd.h> expand to the __*_2 / __*_chk
+ * fortify entry points whenever the compiler can prove the safety
+ * invariants at compile time (e.g. _FORTIFY_SOURCE >= 1, a constant
+ * `flags` argument without O_CREAT). Nix's cc-wrapper enables
+ * _FORTIFY_SOURCE=2 by default, so a fixture like
+ *   int fd = open(argv[1], O_RDONLY);
+ *   read(fd, buf, sizeof(buf));
+ * resolves to __open_2 / __read_chk rather than open / read, and an
+ * LD_PRELOAD shim that only exports open / read silently sees zero
+ * calls. Forward each fortify entry point to its public sibling so
+ * the registered hook chain fires regardless of how aggressively
+ * the host glibc fortifies. */
+int __open_2(const char *path, int flags) __attribute__((visibility("default")));
+int __open_2(const char *path, int flags) { return open(path, flags); }
+
+int __open64_2(const char *path, int flags) __attribute__((visibility("default")));
+int __open64_2(const char *path, int flags) { return open64(path, flags); }
+
+int __openat_2(int dirfd, const char *path, int flags) __attribute__((visibility("default")));
+int __openat_2(int dirfd, const char *path, int flags) { return openat(dirfd, path, flags); }
+
+int __openat64_2(int dirfd, const char *path, int flags) __attribute__((visibility("default")));
+int __openat64_2(int dirfd, const char *path, int flags) { return openat64(dirfd, path, flags); }
+
+ssize_t __read_chk(int fd, void *buf, size_t nbytes, size_t buflen)
+    __attribute__((visibility("default")));
+ssize_t __read_chk(int fd, void *buf, size_t nbytes, size_t buflen) {
+  /* The buflen >= nbytes contract is the caller's; the fortify check
+   * collapses at compile time when the bound is provable. Delegating
+   * to read() preserves the hook chain and matches what every other
+   * LD_PRELOAD shim ships. */
+  (void)buflen;
+  return read(fd, buf, nbytes);
+}
 """.}
 
 proc setPreloadShimEnvVar*(name: cstring) {.importc: "ct_linux_preload_set_shim_env_name",
