@@ -498,6 +498,15 @@ proc openStore*(root: string): Store =
   createDir(extendedPath(result.tmpRoot))
   createDir(extendedPath(result.gcPendingRoot))
   result.db = sqlite3_binding.open(result.indexPath)
+  # Keep index.db-wal / index.db-shm on disk even after the daemon
+  # opens-closes-the-store per request. Without this the default
+  # close-time checkpoint unlinks the sidecars, and the M66/M67 daemon
+  # realize gates that assert "store is in WAL mode" (fileExists on
+  # both sidecars after realization) trip on Linux. macOS happens to
+  # leak the same behaviour through dirent caching for long enough
+  # that the test sometimes passes there, but the persistent-WAL
+  # contract is the right primitive on both platforms.
+  result.db.enablePersistentWal()
   var opened = false
   try:
     let onDiskVersion = result.db.userVersion()

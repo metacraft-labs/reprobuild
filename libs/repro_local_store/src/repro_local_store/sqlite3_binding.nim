@@ -92,6 +92,8 @@ proc sqlite3_column_blob(stmt: Sqlite3Stmt; iCol: cint): pointer
 proc sqlite3_libversion(): cstring
 proc sqlite3_changes(db: Sqlite3): cint
 proc sqlite3_last_insert_rowid(db: Sqlite3): int64
+proc sqlite3_file_control(db: Sqlite3; zDbName: cstring; op: cint;
+                          pArg: pointer): cint
 
 {.pop.}
 
@@ -143,6 +145,23 @@ proc open*(path: string;
   let bc = sqlite3_busy_timeout(handle, cint(busyTimeoutMs))
   if bc != SqliteOk:
     raiseSqlite(handle, bc, "PRAGMA busy_timeout")
+
+const SqliteFcntlPersistWal* = cint(10)
+  ## Op code for sqlite3_file_control's SQLITE_FCNTL_PERSIST_WAL.
+  ## Stable across SQLite versions per the C API contract.
+
+proc enablePersistentWal*(db: Database) =
+  ## Tell SQLite to keep the auxiliary WAL and shared-memory files
+  ## around when the last connection closes. The default behaviour
+  ## checkpoints and unlinks both sidecars on close, which means a
+  ## daemon that opens-closes-the-store per request leaves behind only
+  ## ``index.db``. The local-store spec (``Local-Content-Addressed-
+  ## Store.md``) and the M66/M67 daemon-realize tests both expect
+  ## ``index.db-wal`` / ``index.db-shm`` to remain on disk between
+  ## requests as the "store is in WAL mode" evidence.
+  var one: cint = 1
+  discard sqlite3_file_control(db.handle, nil, SqliteFcntlPersistWal,
+    addr one)
 
 proc close*(db: var Database) =
   if db.handle != nil:
