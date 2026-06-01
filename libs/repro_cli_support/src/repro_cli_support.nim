@@ -7394,8 +7394,20 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       cancelOnDisconnect: true)
     let daemonResult = requestUserDaemonBuild(request, config.endpoint,
       proc(event: UserDaemonBuildEvent) =
-        if event.kind == bekDiagnostic and event.message.len > 0:
-          if event.payloadJson.contains("\"stream\":\"stderr\""):
+        # Daemon-side error paths (e.g. the "refusing implicit PATH
+        # fallback" ValueError when --tool-provisioning is omitted)
+        # surface as a single bekFinished event with severity=error
+        # whose message carries "daemon-hosted build failed: <inner>".
+        # Without printing those, the CLI exits non-zero with no
+        # diagnostic at all — and tests like
+        # t_e2e_codetracer_build_subset_without_tup that gate on the
+        # error text (`refusing implicit PATH fallback`) can't see it.
+        let isError = event.kind in {bekFinished, bekCancelled,
+            bekUnsupported} and event.severity == "error"
+        if (event.kind == bekDiagnostic or isError) and
+            event.message.len > 0:
+          if isError or
+              event.payloadJson.contains("\"stream\":\"stderr\""):
             stderr.write(event.message)
             if not event.message.endsWith("\n"):
               stderr.writeLine("")

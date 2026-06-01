@@ -329,8 +329,14 @@ proc writeProject(path: string; nimJsCommand, traceObjectCommand,
     "        outputs = @[" & nimString("build/c/main.with-header.o") & "])\n")
 
 proc build(reproBin, target, repoRoot, pathValue: string): string =
+  # Pass `--log=actions` so the per-action `action: ID status=... ` evidence
+  # lines appear in captured stdout. The default summary log only emits the
+  # `progress: bpkActionCompleted ...` markers plus the `scheduler:` /
+  # `providerInvocations:` / `buildReport:` headers; the assertions below
+  # that key on the per-action shape need the action-level log.
   requireSuccess("PATH=" & q(pathValue) & " " &
-    shellCommand([reproBin, "build", target, "--tool-provisioning=path"]),
+    shellCommand([reproBin, "build", target, "--tool-provisioning=path",
+                  "--log=actions"]),
     repoRoot)
 
 proc valueAfter(output, prefix: string): string =
@@ -350,6 +356,22 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action.kind != JNull
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
+
+proc assertActionCacheEffective(report: JsonNode; id: string) =
+  ## "Cache was effective for this action on this build" — accepts
+  ## either `asCacheHit` (cache decision hit + outputs had to be
+  ## restored from CAS) or `asUpToDate` (cache decision hit + outputs
+  ## already present, no restoration). Both are defined in
+  ## `libs/repro_build_engine/.../repro_build_engine.nim` `ActionStatus`
+  ## and both mean "this action did not rerun on this build"
+  ## (`launched == false` in either case). The narrower `assertAction`
+  ## remains in use for `asSucceeded`/`launched=true` checks where the
+  ## precise status matters. Mirrors the helper M51 introduced after
+  ## the May-2026 engine cache-decision protocol split.
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
+  check action{"launched"}.getBool() == false
 
 proc runNode(path, cwd, pathValue: string): string =
   requireSuccess("PATH=" & q(pathValue) & " " & shellCommand(["node", path]),
@@ -480,19 +502,19 @@ suite "e2e_codetracer_build_subset_without_tup":
 
     let second = build(reproBin, target, repoRoot, pathValue)
     let secondReport = parseFile(valueAfter(second, "buildReport:"))
-    assertAction(secondReport, "generate-config-header", "asCacheHit", false)
-    assertAction(secondReport, "nim-js-ipc-registry-test", "asCacheHit", false)
-    assertAction(secondReport, "c-sudoku-object-tup", "asCacheHit", false)
-    assertAction(secondReport, "c-sudoku-object-with-generated-header",
-      "asCacheHit", false)
+    assertActionCacheEffective(secondReport, "generate-config-header")
+    assertActionCacheEffective(secondReport, "nim-js-ipc-registry-test")
+    assertActionCacheEffective(secondReport, "c-sudoku-object-tup")
+    assertActionCacheEffective(secondReport,
+      "c-sudoku-object-with-generated-header")
 
     writeFile(projectRoot / "src" / "c" / "main.c",
       readFile(projectRoot / "src" / "c" / "main.c") &
         "\n/* reprobuild m20 selected-source edit */\n")
     let cChanged = build(reproBin, target, repoRoot, pathValue)
     let cChangedReport = parseFile(valueAfter(cChanged, "buildReport:"))
-    assertAction(cChangedReport, "generate-config-header", "asCacheHit", false)
-    assertAction(cChangedReport, "nim-js-ipc-registry-test", "asCacheHit", false)
+    assertActionCacheEffective(cChangedReport, "generate-config-header")
+    assertActionCacheEffective(cChangedReport, "nim-js-ipc-registry-test")
     assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
     assertAction(cChangedReport, "c-sudoku-object-with-generated-header",
       "asSucceeded", true)
@@ -501,8 +523,8 @@ suite "e2e_codetracer_build_subset_without_tup":
     let headerDeleted = build(reproBin, target, repoRoot, pathValue)
     let headerDeletedReport = parseFile(valueAfter(headerDeleted, "buildReport:"))
     assertAction(headerDeletedReport, "generate-config-header", "asSucceeded", true)
-    assertAction(headerDeletedReport, "nim-js-ipc-registry-test", "asCacheHit", false)
-    assertAction(headerDeletedReport, "c-sudoku-object-tup", "asCacheHit", false)
+    assertActionCacheEffective(headerDeletedReport, "nim-js-ipc-registry-test")
+    assertActionCacheEffective(headerDeletedReport, "c-sudoku-object-tup")
     assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
       "asSucceeded", true)
 
