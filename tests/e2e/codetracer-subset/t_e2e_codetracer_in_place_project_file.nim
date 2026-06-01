@@ -34,6 +34,12 @@ int main(int argc, char **argv) {
   }
 #if defined(__APPLE__)
   unsetenv("DYLD_INSERT_LIBRARIES");
+  /* /usr/bin/gcc honours DEVELOPER_DIR and dispatches via xcrun, whose
+     SDK bin lacks gcc and falls back to PATH — re-finding this proxy
+     and looping until kern.maxprocperuid is exhausted. Strip the SDK
+     pointers so the underlying gcc uses its built-in SDK lookup. */
+  unsetenv("DEVELOPER_DIR");
+  unsetenv("SDKROOT");
 #elif defined(__linux__)
   unsetenv("LD_PRELOAD");
   unsetenv("REPRO_MONITOR_SHIM_LIB");
