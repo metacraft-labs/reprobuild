@@ -1096,7 +1096,13 @@ proc runWatchCurrentProjectAndEdit(reproBin, projectRoot, pathValue, logPath,
 
 proc runWatchAndReplace(reproBin, target, repoRoot, pathValue, logPath,
                         editPath, oldText, newText: string; debounceMs = 50;
-                        env: openArray[(string, string)] = []): string =
+                        env: openArray[(string, string)] = [];
+                        readyIterations = 600): string =
+  ## `readyIterations` × 0.05s gives the wall-clock budget for cycle 1
+  ## to complete and the watcher to log `repro watch: watching paths=`.
+  ## The aggregate `#codetracer` target builds the full `ct` Nim binary
+  ## (24 actions) and needs well over the default 30 s on macOS; callers
+  ## that exercise such heavy targets pass a larger value.
   var envLines = "export PATH=" & q(pathValue) & "\n"
   for (name, value) in env:
     envLines.add("export " & name & "=" & q(value) & "\n")
@@ -1108,7 +1114,7 @@ proc runWatchAndReplace(reproBin, target, repoRoot, pathValue, logPath,
       " > " & q(logPath) & " 2>&1 &\n" &
     "pid=$!\n" &
     "ready=0\n" &
-    "for i in $(seq 1 600); do\n" &
+    "for i in $(seq 1 " & $readyIterations & "); do\n" &
     "  if grep -q 'repro watch: watching paths=' " & q(logPath) &
       "; then ready=1; break; fi\n" &
     "  if ! kill -0 \"$pid\" 2>/dev/null; then wait \"$pid\"; exit $?; fi\n" &
@@ -1503,9 +1509,16 @@ when defined(macosx):
       let pathValue = codeTracerHybridNimPathValue(codeTracerRoot, tempRoot)
       check requireSuccess("PATH=" & q(pathValue) & " " &
         shellCommand(["sh", "-c", "command -v nim"]), repoRoot).strip().len > 0
+      # Cycle 1 of the aggregate `#codetracer` target builds the full
+      # `ct` Nim binary plus 23 sibling actions; on macOS that exceeds
+      # the default 30 s readiness budget under load (observed ~30 s
+      # in CI just as cycle 1 was finishing — `checked=24/24 built=23/24
+      # running=1`). Give it a generous 4 min budget so the watch loop
+      # is guaranteed to log `watching paths=` before the test edits the
+      # source file.
       let log = runWatchAndReplace(reproBin, selectedTarget, repoRoot,
         pathValue, tempRoot / "codetracer-aggregate-watch.log", nativeInput,
-        oldText, newText, env = nativeEnv)
+        oldText, newText, env = nativeEnv, readyIterations = 4800)
       check log.contains("repro watch: target=" & selectedTarget)
       check log.contains("repro watch: event seen path=")
       check log.contains("repro watch: cycle 2 start rebuild")
