@@ -1,21 +1,32 @@
-## M7 host-side runner: drive the three POSIX-file-primitive gates
-## inside a Tart-managed macOS guest.
+## M7 + M8 host-side runner: drive the macOS Phase-5 driver-validation
+## gates inside a Tart-managed macOS guest.
 ##
-## Per the M7 deliverables, three gates need their destructive halves
+## Per the M7 + M8 deliverables, five gates need their destructive halves
 ## exercised inside a real macOS VM:
 ##
-##   1. fs.systemFile     — tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim
-##                          + REPRO_PHASE5_MACOS_FS_VM=1 (driver-direct
-##                          arm; reuses M69 file per M6 decision but
-##                          gates a NEW macOS-specific destructive suite
-##                          that does not need the broker / `repro`
-##                          binary).
-##   2. fs.userFile       — tests/e2e/macos-phase5/
-##                          t_e2e_macos_phase5_fs_user_file.nim
-##                          + REPRO_PHASE5_MACOS_FS_USERFILE_VM=1.
-##   3. fs.managedBlock   — tests/e2e/macos-phase5/
-##                          t_e2e_macos_phase5_fs_managed_block.nim
-##                          + REPRO_PHASE5_MACOS_FS_MANAGEDBLOCK_VM=1.
+##   1. fs.systemFile        — tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim
+##                             + REPRO_PHASE5_MACOS_FS_VM=1 (M7; driver-direct
+##                             arm; reuses M69 file per M6 decision but
+##                             gates a NEW macOS-specific destructive suite
+##                             that does not need the broker / `repro`
+##                             binary).
+##   2. fs.userFile          — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_fs_user_file.nim
+##                             + REPRO_PHASE5_MACOS_FS_USERFILE_VM=1 (M7).
+##   3. fs.managedBlock      — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_fs_managed_block.nim
+##                             + REPRO_PHASE5_MACOS_FS_MANAGEDBLOCK_VM=1 (M7).
+##   4. env.userPath/Variable — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_env_user_path.nim
+##                             + REPRO_PHASE5_MACOS_ENV_VM=1 (M8; PATH +
+##                             variable via `~/.zprofile`, new login-shell
+##                             verification, negative-launchctl assertion).
+##   5. shell.integration    — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_shell_integration.nim
+##                             + REPRO_PHASE5_MACOS_SHELL_VM=1 (M8; direnv
+##                             hook applied to `~/.zshrc`, new interactive-
+##                             shell verification of `_direnv_hook` in
+##                             `precmd_functions`).
 ##
 ## For each gate:
 ##   1. Cross-build the gate binary on the host (arm64 macOS host →
@@ -82,7 +93,22 @@ let Gates = @[
     sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_fs_managed_block.nim",
     envVar: "REPRO_PHASE5_MACOS_FS_MANAGEDBLOCK_VM",
     needsRoot: false,                   # writes under $HOME
-    timeoutSec: 180)]
+    timeoutSec: 180),
+  GateSpec(
+    name: "env-userpath",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_env_user_path.nim",
+    envVar: "REPRO_PHASE5_MACOS_ENV_VM",
+    needsRoot: false,                   # writes under $HOME (~/.zprofile)
+    # Includes new-shell verification (zsh -l spawn) + launchctl probe.
+    timeoutSec: 240),
+  GateSpec(
+    name: "shell-integration",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_shell_integration.nim",
+    envVar: "REPRO_PHASE5_MACOS_SHELL_VM",
+    needsRoot: false,                   # writes under $HOME (~/.zshrc)
+    # Includes `brew install direnv` fallback + interactive zsh spawn;
+    # `brew install` is the long pole on a cold guest.
+    timeoutSec: 600)]
 
 # ---------------------------------------------------------------------------
 # Build phase — one binary per gate.
@@ -267,7 +293,9 @@ proc main(): int =
   if anyFail:
     echo "[m7-runner] FAIL — at least one gate did not PASS"
     return 1
-  echo "[m7-runner] OK — all 3 Phase-5 POSIX-file gates PASS in Tart"
+  echo "[m7-runner] OK — all " & $Gates.len &
+    " Phase-5 driver-validation gates PASS in Tart " &
+    "(M7 fs.* primitives + M8 env / shell.integration arms)"
   return 0
 
 quit(main())
