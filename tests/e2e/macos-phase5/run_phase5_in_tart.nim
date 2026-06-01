@@ -1,8 +1,8 @@
-## M7 + M8 + M9 + M10 + M11 host-side runner: drive the macOS Phase-5
-## driver-validation gates inside a Tart-managed macOS guest.
+## M7 + M8 + M9 + M10 + M11 + M13 host-side runner: drive the macOS
+## Phase-5 driver-validation gates inside a Tart-managed macOS guest.
 ##
-## Per the M7 + M8 + M9 + M10 + M11 deliverables, twelve gates need
-## their destructive halves exercised inside a real macOS VM:
+## Per the M7 + M8 + M9 + M10 + M11 + M13 deliverables, fourteen gates
+## need their destructive halves exercised inside a real macOS VM:
 ##
 ##   1. fs.systemFile        — tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim
 ##                             + REPRO_PHASE5_MACOS_FS_VM=1 (M7; driver-direct
@@ -108,6 +108,43 @@
 ##                             constructive). Needs root because dscl
 ##                             mutations to /Local/Default/Groups are
 ##                             system-scope).
+##  13. pkg.homebrewFormula  — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_homebrew_formula.nim
+##                             + REPRO_PHASE5_MACOS_BREW_FORMULA_VM=1 (M13;
+##                             NEW destructive scenario for the existing
+##                             driver — see libs/repro_homebrew_adapter/
+##                             src/repro_homebrew_adapter/formula.nim,
+##                             shipped pre-M13 as part of M83 step 9
+##                             Driver A. Uses the generic open-source
+##                             fixture `jq`: `brew install jq` apply /
+##                             re-apply (no-op) / `brew uninstall jq`
+##                             destroy round-trip with out-of-band
+##                             `brew list --formula --versions jq` +
+##                             `<prefix>/bin/jq` symlink check; runs as
+##                             the cirruslabs admin user — NOT under
+##                             sudo — because Homebrew installs unelevated
+##                             under the user-writable prefix (/opt/
+##                             homebrew on Apple Silicon, /usr/local on
+##                             Intel)).
+##  14. pkg.homebrewCask     — tests/e2e/macos-phase5/
+##                             t_e2e_macos_phase5_homebrew_cask.nim
+##                             + REPRO_PHASE5_MACOS_BREW_CASK_VM=1 (M13;
+##                             NEW destructive scenario for the existing
+##                             driver — see libs/repro_homebrew_adapter/
+##                             src/repro_homebrew_adapter/cask.nim,
+##                             shipped pre-M13 as part of M83 step 9
+##                             Driver B. Uses the generic open-source
+##                             font fixture `font-fira-code`:
+##                             `brew install --cask font-fira-code`
+##                             apply / re-apply (no-op) / `brew uninstall
+##                             --cask font-fira-code` destroy round-trip
+##                             with out-of-band `brew list --cask
+##                             --versions font-fira-code` + ~/Library/
+##                             Fonts/FiraCode*.ttf font-drop check;
+##                             runs as the cirruslabs admin user — NOT
+##                             under sudo — because Homebrew Cask
+##                             installs unelevated and drops fonts under
+##                             the user's ~/Library/Fonts/).
 ##
 ## For each gate:
 ##   1. Cross-build the gate binary on the host (arm64 macOS host →
@@ -129,7 +166,7 @@
 ## Run with:
 ##   nim c -r --threads:on tests/e2e/macos-phase5/run_phase5_in_tart.nim
 ##
-## Exit code 0 = all 12 gates PASS; non-zero = at least one gate
+## Exit code 0 = all 14 gates PASS; non-zero = at least one gate
 ## failed (which one is logged to stderr).
 
 import std/[options, os, osproc, sequtils, strutils, tables, tempfiles,
@@ -235,7 +272,26 @@ let Gates = @[
     sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_passwd_group.nim",
     envVar: "REPRO_PHASE5_MACOS_PASSWD_GROUP_VM",
     needsRoot: true,                    # dscl mutations to /Local/Default/Groups
-    timeoutSec: 180)]
+    timeoutSec: 180),
+  GateSpec(
+    name: "homebrew-formula",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_homebrew_formula.nim",
+    envVar: "REPRO_PHASE5_MACOS_BREW_FORMULA_VM",
+    needsRoot: false,                   # brew runs unelevated as the admin user
+    # `brew install jq` on a cold cirruslabs guest can take a minute
+    # if Homebrew decides to refresh its index; once the bottle is
+    # cached the install is sub-10s. Budget 600s like shell-integration
+    # which has the same brew-install dependency.
+    timeoutSec: 600),
+  GateSpec(
+    name: "homebrew-cask",
+    sourcePath: "tests/e2e/macos-phase5/t_e2e_macos_phase5_homebrew_cask.nim",
+    envVar: "REPRO_PHASE5_MACOS_BREW_CASK_VM",
+    needsRoot: false,                   # brew --cask runs unelevated
+    # `brew install --cask font-fira-code` pulls a small ~5 MB bottle
+    # plus font installation under ~/Library/Fonts/. Same 600s budget
+    # as the formula gate (the index-refresh dominates on a cold guest).
+    timeoutSec: 600)]
 
 # ---------------------------------------------------------------------------
 # Build phase — one binary per gate.
@@ -425,7 +481,8 @@ proc main(): int =
     "(M7 fs.* primitives + M8 env / shell.integration arms + " &
     "M9 macos.systemDefault / os.timezone / os.hostname arms + " &
     "M10 launchd.systemDaemon / launchd.userAgent arms + " &
-    "M11 passwd.user (REUSES M69 gate) / passwd.group (NEW driver arm + scenario))"
+    "M11 passwd.user (REUSES M69 gate) / passwd.group (NEW driver arm + scenario) + " &
+    "M13 pkg.homebrewFormula (jq) / pkg.homebrewCask (font-fira-code))"
   return 0
 
 quit(main())
