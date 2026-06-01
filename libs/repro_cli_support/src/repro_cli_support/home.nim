@@ -3015,6 +3015,134 @@ proc runHomeRollback(args: openArray[string]): int =
     return 1
 
 # ---------------------------------------------------------------------------
+# `repro home gc` (M10 — Realize-Closure-And-Catalog-Expansion).
+# ---------------------------------------------------------------------------
+
+proc renderGcCandidate(c: GcCandidate): string =
+  ## One-line dry-run row: ``<size>  <package>@<version>  <path>``.
+  let label =
+    if c.packageName.len > 0: c.packageName & "@" & c.version
+    else: c.prefixIdHex[0 ..< min(12, c.prefixIdHex.len)]
+  let junctionTag = if c.isJunctionEntry: "  [junction]" else: ""
+  "  " & humanBytes(c.sizeBytes).align(12) & "  " & label & "  " &
+    c.absolutePath & junctionTag
+
+proc printGcHelp() =
+  echo "usage: repro home gc [--dry-run] [--force | -y] " &
+    "[--keep-generations N] [--store <dir>]"
+  echo ""
+  echo "Reclaim disk by deleting store prefixes that no live home-"
+  echo "profile generation references. Reads the generation registry"
+  echo "and the content-addressed store; mutates only the store's"
+  echo "filesystem (the registry is read-only)."
+  echo ""
+  echo "  --dry-run              Print the candidate list + footprint;"
+  echo "                         touches no disk state."
+  echo "  --force, -y            Skip the y/N confirmation prompt."
+  echo "  --keep-generations N   Preserve the N most-recent generations'"
+  echo "                         realized-prefix references (default 2;"
+  echo "                         the currently-active generation is"
+  echo "                         ALWAYS preserved regardless of rank)."
+  echo "  --store <dir>          Override the store root (mostly for"
+  echo "                         testing; default = $REPRO_STORE_ROOT"
+  echo "                         or the OS-XDG default)."
+
+proc runHomeGcCommand(args: openArray[string]): int =
+  ## `repro home gc` — orphan-prefix reclaim driver. Reads the M83
+  ## generation registry, walks the M56 store, identifies orphaned
+  ## prefixes, prints a footprint summary, and (unless --dry-run)
+  ## deletes them via the junction-aware-remove helper.
+  ##
+  ## EXPLICIT operator command only — never auto-runs. Per the M10
+  ## spec, the gc never deletes the active generation under any
+  ## circumstance: the keep-set always includes the currently-active
+  ## generation regardless of the --keep-generations rank.
+  var opts = GcOptions(keepGenerations: DefaultKeepGenerations)
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      printGcHelp()
+      return 0
+    elif a == "--dry-run":
+      opts.dryRun = true
+    elif a == "--force" or a == "-y":
+      opts.autoConfirm = true
+    elif a == "--keep-generations" or a.startsWith("--keep-generations="):
+      let raw = parseFlagValue(args, i, "--keep-generations")
+      var n: int
+      try:
+        n = parseInt(raw)
+      except ValueError:
+        stderr.writeLine("repro home gc: --keep-generations expects an " &
+          "integer; got '" & raw & "'")
+        return 2
+      if n < 1:
+        stderr.writeLine("repro home gc: --keep-generations must be >= 1 " &
+          "(the active generation is ALWAYS preserved); got " & $n)
+        return 2
+      opts.keepGenerations = n
+    elif a == "--store" or a.startsWith("--store="):
+      opts.storeRoot = parseFlagValue(args, i, "--store")
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home gc: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home gc: unexpected positional: " & a)
+      return 2
+    inc i
+  try:
+    let report = runHomeGc(opts)
+    # Header.
+    let storeRootEcho =
+      if opts.storeRoot.len > 0: opts.storeRoot else: resolveStoreRoot()
+    echo "repro home gc: store=" & storeRootEcho
+    echo "repro home gc: kept-generations=" &
+      $report.keptGenerationIds.len & " keep-N=" & $opts.keepGenerations
+    case report.outcome
+    of goNoCandidates:
+      echo "repro home gc: no orphaned prefixes — store is clean."
+      return 0
+    of goSkippedDryRun:
+      echo "repro home gc: dry-run — " & $report.candidates.len &
+        " orphaned prefix(es), " & humanBytes(report.candidateBytes) &
+        " reclaimable:"
+      for c in report.candidates:
+        echo renderGcCandidate(c)
+      echo "repro home gc: pass --force to delete (or rerun without " &
+        "--dry-run for the y/N prompt)."
+      return 0
+    of goSkippedCancelled:
+      echo "repro home gc: cancelled by operator — no prefixes deleted."
+      return 0
+    of goDeleted:
+      echo "repro home gc: deleted=" & $report.deletedCount &
+        " failed=" & $report.failedCount &
+        " reclaimed=" & humanBytes(report.reclaimedBytes)
+      if report.failures.len > 0:
+        for f in report.failures:
+          stderr.writeLine("repro home gc: FAILED to delete " &
+            f.absolutePath & ": " & f.error)
+        return 1
+      return 0
+  except EStateDirInvalid as e:
+    stderr.writeLine("repro home gc: " & e.msg)
+    return 1
+  except EPointerCorrupt as e:
+    stderr.writeLine("repro home gc: corrupt pointer at " & e.pointerPath &
+      " (field: " & e.field & "); refusing to gc against a corrupt " &
+      "registry — quarantine the generation directory and retry.")
+    return 1
+  except EGenerationDirInvalid as e:
+    stderr.writeLine("repro home gc: invalid generation directory " &
+      e.generationPath & " (" & e.msg & "); refusing to gc against a " &
+      "partial registry — clean up the leftover and retry.")
+    return 1
+  except CatchableError as e:
+    stderr.writeLine("repro home gc: error: " & e.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
 # `repro home migrate-from-env-scripts` (M70).
 # ---------------------------------------------------------------------------
 
@@ -3254,7 +3382,7 @@ proc runHomeCommand*(args: seq[string]): int =
     inc i
   if sub.len == 0:
     stderr.writeLine("usage: repro home {add | remove | enable | disable | " &
-      "list | why | history | apply | plan | rollback | set | get | " &
+      "list | why | history | apply | plan | rollback | gc | set | get | " &
       "adopt | resource | migrate-from-env-scripts} ...")
     return 2
   case sub
@@ -3272,6 +3400,7 @@ proc runHomeCommand*(args: seq[string]): int =
   of "__remote-activate": return runHomeRemoteActivate(subArgs)
   of "plan": return runHomePlan(subArgs)
   of "rollback": return runHomeRollback(subArgs)
+  of "gc": return runHomeGcCommand(subArgs)
   of "set": return runHomeSet(subArgs)
   of "get": return runHomeGet(subArgs)
   of "adopt": return runHomeAdopt(subArgs)

@@ -61,6 +61,7 @@ import repro_local_store
 import repro_dsl_stdlib/packages_schema
 
 import ./errors
+import ./junction_aware_remove
 import ./package_catalog
 
 type
@@ -1586,84 +1587,14 @@ proc substituteDirPlaceholder(value, destDir: string): string =
   ## entries.
   result = value.replace("$dir", destDir).replace("${prefix}", destDir)
 
-proc isJunction(path: string): bool =
-  ## Detect a Windows junction (a reparse-point directory) or a POSIX
-  ## symlink to a directory. Used to short-circuit recursive removal
-  ## per the junction-hazard guardrail.
-  let info = try: getFileInfo(extendedPath(path), followSymlink = false)
-             except OSError: return false
-  info.kind == pcLinkToDir
-
-when defined(windows):
-  proc removeDirectoryW(lpPathName: WideCString): int32 {.
-    importc: "RemoveDirectoryW", dynlib: "kernel32", stdcall.}
-    ## Win32 ``RemoveDirectoryW`` — removes a directory entry without
-    ## recursing into it. Critically for junctions: this unlinks the
-    ## reparse point itself, NOT the target's contents. Nim's
-    ## ``removeDir`` recursively walks AND DELETES the children FIRST
-    ## (including following the junction reparse point), which destroys
-    ## the link target — exactly the
-    ## ``project_reprobuild_store_junction_hazard`` failure mode.
-
-proc unlinkJunction(path: string) =
-  ## Junction unlinker that explicitly does NOT touch the link target.
-  ## Windows: ``RemoveDirectoryW`` against the reparse point.
-  ## POSIX: ``removeFile`` (treats the symlink-to-dir as a file from
-  ## ``unlink``'s perspective; the target survives by definition).
-  when defined(windows):
-    let wide = newWideCString(extendedPath(path))
-    discard removeDirectoryW(wide)
-  else:
-    try: removeFile(extendedPath(path))
-    except OSError:
-      try: removeDir(extendedPath(path), checkDir = false)
-      except OSError: discard
-
-proc removeJunctionAware(path: string) =
-  ## Junction-safe directory/file removal. If ``path`` itself is a
-  ## junction (Windows reparse point) or a symlink, unlink the link
-  ## WITHOUT recursing into the target. Otherwise walk children one
-  ## level at a time, unlinking junctions safely + recursing into real
-  ## subdirs. ``project_reprobuild_store_junction_hazard`` flagged this
-  ## hazard explicitly — a naive ``removeDir`` over a prefix tree
-  ## containing junctions into user-data dirs WOULD destroy the user's
-  ## files (verified: Nim's std/os.removeDir follows junctions on
-  ## Windows and deletes the target's children before unlinking the
-  ## reparse point).
-  if not (fileExists(extendedPath(path)) or dirExists(extendedPath(path))):
-    return
-  if isJunction(path):
-    unlinkJunction(path)
-    return
-  if dirExists(extendedPath(path)):
-    for kind, child in walkDir(extendedPath(path)):
-      case kind
-      of pcLinkToDir:
-        unlinkJunction(child)
-      of pcLinkToFile:
-        try: removeFile(extendedPath(child))
-        except OSError: discard
-      of pcDir:
-        removeJunctionAware(child)
-      of pcFile:
-        try: removeFile(extendedPath(child))
-        except OSError: discard
-    # After all children are gone (and junctions were unlinked, not
-    # recursed-into), the dir itself is empty — Win32
-    # ``RemoveDirectoryW`` removes it cleanly.
-    when defined(windows):
-      let wide = newWideCString(extendedPath(path))
-      discard removeDirectoryW(wide)
-    else:
-      try:
-        removeDir(extendedPath(path), checkDir = false)
-      except OSError:
-        discard
-  else:
-    try:
-      removeFile(extendedPath(path))
-    except OSError:
-      discard
+## ``isJunction`` / ``unlinkJunction`` / ``removeJunctionAware`` live in
+## ``./junction_aware_remove`` (extracted as M10's SINGLE source of
+## truth for the junction-hazard guardrail; see
+## ``project_reprobuild_store_junction_hazard`` and
+## ``feedback_nim_removedir_junction_destructive``). The M3 pre-install
+## runner here re-uses the helpers via the shared module — keep this
+## file's deletion path the ONLY one that does not call into stdlib's
+## ``removeDir`` against a tree that may contain junctions.
 
 proc warnPreInstallUnrecognized(packageId, line: string) =
   ## M3: emit a one-shot stderr warning when the realize loop encounters

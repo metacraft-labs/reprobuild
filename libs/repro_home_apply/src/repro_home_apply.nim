@@ -38,6 +38,8 @@ import repro_home_apply/stow
 import repro_home_apply/suppression
 import repro_home_apply/pipeline
 import repro_home_apply/resource_move
+import repro_home_apply/junction_aware_remove
+import repro_home_apply/gc
 
 export dep_graph
 export errors
@@ -54,3 +56,5 @@ export stow
 export suppression
 export resource_move
 export pipeline
+export junction_aware_remove
+export gc
