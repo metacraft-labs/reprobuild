@@ -29,6 +29,7 @@ import repro_home_intent
 import repro_home_apply/plan
 import repro_home_apply/catalog_lookup
 import repro_home_apply/package_catalog
+import repro_dsl_stdlib/packages_schema
 
 const TmpDir = "build/test-tmp/e2e-m69-builtin-catalog"
 
@@ -44,13 +45,17 @@ proc resolveAllChain(packageIds: openArray[(string, string)]):
   ## chain on Windows is `[cakBuiltin, cakScoop, cakPath]`; on
   ## Linux/macOS the order is different but the cakBuiltin branch
   ## fires first when a built-in slice exists for the (cpu, os) tuple.
-  ## All four fixture packages have Windows slices; the test verifies
-  ## the contract on the Windows arm.
+  ## All four fixture packages have Windows slices; this test verifies
+  ## the Windows arm of the contract regardless of the runner's actual
+  ## OS by pinning the host facts (the catalog is portable data; the
+  ## resolver-level contract is a pure-data operation on the catalog
+  ## for a stated target host).
   var prodCat = openProductionCatalog()
   let preferBuiltin = @[cakBuiltin]
   for (pkgId, requested) in packageIds:
     result.add chainResolvePackage(prodCat, pkgId,
-      chain = preferBuiltin, version = requested)
+      chain = preferBuiltin, version = requested,
+      hostCpu = pcX86_64, hostOs = poWindows)
 
 suite "M69 e2e: repro home apply against the builtin catalog":
 
@@ -103,7 +108,8 @@ profile "rt":
     for pkgId in ["cmake", "just", "nim", "ninja"]:
       var prodCat = openProductionCatalog()
       let chainRes = chainResolvePackage(prodCat, pkgId,
-        chain = @[cakBuiltin])
+        chain = @[cakBuiltin],
+        hostCpu = pcX86_64, hostOs = poWindows)
       let lookupRes = lookupCatalogSlice(pkgId)
       check chainRes.builtinVersion == lookupRes.resolvedVersion
 
