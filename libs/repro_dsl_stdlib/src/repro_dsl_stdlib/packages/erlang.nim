@@ -38,31 +38,40 @@
 ## returns the BEAM emulator version). **The 7z-capability blocker
 ## the M3/M4 docstring above predicted is GONE.**
 ##
-## **New blocker** (folded into M11): the current catalog
-## ``install_method = imInstallerNsisBundle`` dispatches through the M4
-## Burn/MSI sandwich (``extractNsisMsiBundle`` requires dark.exe to
-## crack the .wixburn section). The OTP installer is a bona-fide NSIS
-## installer with NO Burn outer, so dark.exe rejects it (``DARK0339:
-## Stub executable does not contain a .wixburn data section``). The
-## right path is direct ``extract7z`` against the NSIS .exe — exactly
-## what the M3 ``imExtract + afSevenZip`` code path does, but the
-## current schema blocks ``imExtract + afInstallerNsis`` at compile
-## time (see ``builtin_adapter.nim:2575``: ``imExtract is incompatible
-## with installer archive_format``). Unblocking erlang in M11 needs
-## EITHER:
-##   * a new ``imInstallerNsis`` (plain) install method that dispatches
-##     to ``extract7z`` directly (1-day add — three lines in the realize
-##     loop + the enum + a tiny test);
-##   * OR a schema relaxation that allows ``imExtract + afInstallerNsis``
-##     when the catalog explicitly opts in (more controversial — the
-##     current restriction is a useful guard).
-## AND the catalog's ``bin_relpath`` must change from
-## ``bin\\erl.exe`` to ``erts-<ver>\\bin\\erl.exe`` because OTP places
-## its runtime under the ``erts-<ver>`` subdir, not a flat ``bin/``.
-## A future re-harvest with ``--version-extract`` capturing the ``erts``
-## version is also possible, but the simpler fix is per-version
-## hand-edited bin_relpath in this file (OTP's erts version tracks
-## OTP-major; for OTP-28.x it is erts-16.x).
+## **M11 (Realize-Closure-And-Catalog-Expansion spec) closes the
+## carryover:** the M8-flagged "current catalog dispatches through the
+## Burn/MSI sandwich and dark.exe rejects OTP with ``DARK0339``" is
+## fixed by:
+##   1. a new ``imInstallerNsis`` (plain NSIS) install-method enum
+##      variant in ``packages_schema.nim`` that dispatches to
+##      ``extract7z`` directly on the .exe payload (no dark, no
+##      lessmsi, no per-MSI sandwich);
+##   2. the dispatch case in ``builtin_adapter.nim`` (mirror the
+##      ``imExtract + afSevenZip`` shape — the full 7-Zip 26.01
+##      MSI re-harvest from M8 transparently understands the modern
+##      NSIS installer envelope);
+##   3. the ``bin_relpath`` update below from ``bin\\erl.exe`` to
+##      ``erts-16.4\\bin\\erl.exe`` matching the actual OTP layout
+##      (``erts-<ver>/bin/erl.exe``). **Empirical correction**: the
+##      M8 retro hypothesized OTP 28.x ships ``erts-16.x`` matching
+##      the OTP minor version (28.5 → 16.5). The 2026-06-01 live
+##      probe of the actual installer (``7z l otp_win64_28.5.exe``)
+##      shows the inner tree carries ``erts-16.4``, not 16.5 (erts
+##      minor lags OTP minor by one in this release). OTP 28.5 also
+##      DROPPED ``werl.exe`` (the legacy Windows GUI wrapper —
+##      removed in OTP 26+; ``erl.exe`` is the canonical entry point
+##      on modern Windows OTP releases). The bin_relpath below
+##      reflects the true layout: ``erts-16.4\\bin\\erl.exe`` +
+##      ``erts-16.4\\bin\\erlc.exe`` + ``erts-16.4\\bin\\escript.exe``.
+##
+## LIVE-validated 2026-06-01 against the upstream
+## ``otp_win64_28.5.exe`` artifact via a focused home.nim profile
+## (single ``package(erlang, "28.5")``; host PATH 7z used via the M3
+## ``discoverSevenZipExe`` Step ii fallback to side-step the
+## 7zip/lessmsi pre-realize ordering issue in plan.nim's alphabetical
+## sort). ``erl -version`` returns the BEAM emulator version. See
+## the M11 LIVE smoke transcript in the campaign-close section of
+## ``Realize-Closure-And-Catalog-Expansion.milestones.org``.
 ##
 ## **Honest scope continued**: the OTP installer historically writes
 ## a per-user ``vcredist*`` redistributable side-effect and a
@@ -80,8 +89,8 @@ let erlangCatalog* = @[
   VersionedProvisioning(
     version: "28.5",
     archive_format: afInstallerNsis,
-    install_method: imInstallerNsisBundle,
-    bin_relpath: @["bin\\erl.exe", "bin\\erlc.exe", "bin\\escript.exe", "bin\\werl.exe"],
+    install_method: imInstallerNsis,
+    bin_relpath: @["erts-16.4\\bin\\erl.exe", "erts-16.4\\bin\\erlc.exe", "erts-16.4\\bin\\escript.exe"],
     platforms: @[
       PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/erlang/otp/releases/download/OTP-28.5/otp_win64_28.5.exe", sha256: "46f56351e2e67865c6aaff83bcd0a7d97d73bea643a0531774dd9ba8fbee7dc0", sha512: "", extract_path: "")
     ],

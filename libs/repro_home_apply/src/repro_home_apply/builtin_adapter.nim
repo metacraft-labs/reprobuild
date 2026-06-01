@@ -2344,6 +2344,11 @@ proc realizeBuiltinPackage*(store: var Store;
     # M4: imInstallerNsisBundle also needs 7z to unwrap the NSIS shell.
     if resolution.installMethod == imInstallerNsisBundle:
       return true
+    # M11: imInstallerNsis (plain NSIS — the erlang OTP shape) dispatches
+    # directly through extract7z. The full 7z.exe (M8 MSI re-harvest)
+    # transparently recognises the modern NSIS installer envelope.
+    if resolution.installMethod == imInstallerNsis:
+      return true
     for a in resolution.preInstallActions:
       if a.kind == piaExpand7z: return true
     false
@@ -2578,6 +2583,25 @@ proc realizeBuiltinPackage*(store: var Store;
         extractNsisMsiBundle(packageId, downloadPath, stagingDir,
           lessmsiExe, darkExe, sevenZipExe,
           resolution.msiAdminInstall)
+        flattenExtractPath(packageId, stagingDir, resolution.extractPath)
+        if resolution.preInstallActions.len > 0 or
+           resolution.preInstallUnrecognized.len > 0:
+          runPreInstallActions(packageId, stagingDir,
+            resolution.preInstallActions,
+            resolution.preInstallUnrecognized,
+            sevenZipExe, preInstallEnvBindings,
+            darkExe = lessmsiExe, innounpExe = innounpExe,
+            msiAdminInstallOverride = resolution.msiAdminInstall)
+      of imInstallerNsis:
+        # M11 (Realize-Closure-And-Catalog-Expansion spec): plain NSIS
+        # installer (the erlang OTP shape — bona-fide NSIS, NOT a Burn
+        # outer wrapping inner MSIs). The full ``7z.exe`` from the M8
+        # sevenzip MSI re-harvest transparently recognises the modern
+        # NSIS installer envelope and dumps its inner file tree —
+        # no dark.exe / no lessmsi / no per-MSI sandwich. The M8 retro
+        # documented this as the missing 3-line dispatch closing the
+        # erlang carryover; this case IS those three lines.
+        extract7z(packageId, downloadPath, stagingDir, sevenZipExe)
         flattenExtractPath(packageId, stagingDir, resolution.extractPath)
         if resolution.preInstallActions.len > 0 or
            resolution.preInstallUnrecognized.len > 0:

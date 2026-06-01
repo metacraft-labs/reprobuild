@@ -114,6 +114,17 @@ type
     ##   * ``imInstallerNsisBundle`` — NSIS self-extracting executable
     ##     whose payload is one or more inner MSIs. Realize unwraps the
     ##     NSIS shell via 7z + dark, then per-MSI dark-extract + merge.
+    ##   * ``imInstallerNsis`` — plain NSIS installer whose payload is a
+    ##     bona-fide file tree (NOT a Burn outer wrapping inner MSIs).
+    ##     The cakBuiltin realize hook dispatches via the discovered
+    ##     full ``7z.exe`` directly (which transparently understands the
+    ##     modern NSIS installer format). M11 (Realize-Closure-And-
+    ##     Catalog-Expansion spec) added this variant after the M8 live
+    ##     smoke proved erlang's OTP installer is a bona-fide NSIS
+    ##     installer with no Burn outer — dark.exe rejects it with
+    ##     ``DARK0339`` (no .wixburn section), but the full 7-Zip 26.01
+    ##     M8 re-harvest extracts it cleanly. See ``packages/erlang.nim``'s
+    ##     M11 header for the LIVE-validated trace.
     ##   * ``imInstallerInnoSetup`` — Inno-Setup-built installer (the
     ##     freepascal shape, ``innosetup: true`` Scoop marker). Realize
     ##     dispatches via the discovered ``innounp.exe``.
@@ -144,6 +155,7 @@ type
     imSourceBootstrap = "source-bootstrap"
     imInstallerMsi = "installer-msi"
     imInstallerNsisBundle = "installer-nsis-bundle"
+    imInstallerNsis = "installer-nsis"
     imInstallerInnoSetup = "installer-inno-setup"
 
   PlatformCpu* = enum
@@ -583,10 +595,14 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
     if vp.bootstrap_argv.len == 0:
       result.add("install_method=imSourceBootstrap requires a " &
         "non-empty bootstrap_argv")
-  of imInstallerMsi, imInstallerNsisBundle, imInstallerInnoSetup:
+  of imInstallerMsi, imInstallerNsisBundle, imInstallerNsis,
+     imInstallerInnoSetup:
     # M4: each Windows installer family needs at least one bin_relpath
     # so the post-extract sanity check has something to verify against
     # the realized prefix tree (mirrors imExtract).
+    # M11: imInstallerNsis joined the family — same bin_relpath rule
+    # (the realize hook calls extract7z on the .exe payload and the
+    # post-extract sanity check verifies each bin_relpath exists).
     if vp.bin_relpath.len == 0:
       result.add("install_method=" & $vp.install_method &
         " requires at least one bin_relpath entry")
@@ -803,6 +819,7 @@ proc installMethodIdent(im: InstallMethod): string =
   of imSourceBootstrap: "imSourceBootstrap"
   of imInstallerMsi: "imInstallerMsi"
   of imInstallerNsisBundle: "imInstallerNsisBundle"
+  of imInstallerNsis: "imInstallerNsis"
   of imInstallerInnoSetup: "imInstallerInnoSetup"
 
 proc serializePlatformBinary(pb: PlatformBinary): string =
