@@ -4,6 +4,14 @@
 ## ``justCatalog`` slice below is consumed by the M64 ``cakBuiltin``
 ## adapter on Windows. Re-harvest emits ONLY the catalog half;
 ## re-attach the Nix block by hand if you regenerate.
+##
+## **M9.5 merge note (hand-edited):** added a ``(pcX86_64, poLinux)``
+## platform slice harvested via ``--source gh-releases:casey/just
+## --asset-pattern 'just-1\.51\.0-x86_64-unknown-linux-musl\.tar\.gz'
+## --platform-os linux``. The Linux tarball is ``afTarGz`` + a flat
+## ``just`` binary (vs. the Windows ``afZip`` + ``just.exe``); both
+## encoded via the M9.5 per-platform overrides. The musl variant ships
+## a statically-linked binary so glibc-floor is not a concern.
 
 import std/tables
 import repro_project_dsl
@@ -33,7 +41,10 @@ let justCatalog* = @[
     install_method: imExtract,
     bin_relpath: @["just.exe"],
     platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/casey/just/releases/download/1.51.0/just-1.51.0-x86_64-pc-windows-msvc.zip", sha256: "09d1138b6845e73f04bff5e26be3f57663bddca25e36fe6241d28a5aa310b64e", sha512: "", extract_path: "")
+      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/casey/just/releases/download/1.51.0/just-1.51.0-x86_64-pc-windows-msvc.zip", sha256: "09d1138b6845e73f04bff5e26be3f57663bddca25e36fe6241d28a5aa310b64e", sha512: "", extract_path: ""),
+      # M9.5: Linux x86_64 slice. afTarGz (vs. Windows afZip) + flat
+      # ``just`` binary (vs. Windows ``just.exe``).
+      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://github.com/casey/just/releases/download/1.51.0/just-1.51.0-x86_64-unknown-linux-musl.tar.gz", sha256: "c8f085ca3e885723c341d06243fc291b5abfdc8bbe3b2c076b117de490387b59", sha512: "", sha1: "", extract_path: "", archive_format_override: afTarGz, has_archive_format_override: true, bin_relpath_override: @["just"])
     ],
     installer_args: @[],
     pacman_packages: @[],

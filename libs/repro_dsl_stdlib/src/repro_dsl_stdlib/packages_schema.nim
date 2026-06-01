@@ -205,6 +205,41 @@ type
                            ## per-platform override for MSIs whose
                            ## custom-action table makes dark.exe fail
                            ## silent-skip in practice.
+    archive_format_override*: ArchiveFormat
+                           ## M9.5 (Realize-Closure-And-Catalog-Expansion
+                           ## spec): per-platform override of the parent
+                           ## ``VersionedProvisioning.archive_format``.
+                           ## Only consulted when
+                           ## ``has_archive_format_override`` is true —
+                           ## ArchiveFormat has no natural unset sentinel.
+                           ## The M9.5 cross-OS catalog harvester pass
+                           ## needs this because a single tool's upstream
+                           ## ships different archive shapes per OS
+                           ## (e.g. gh ships a ``.zip`` on Windows and a
+                           ## ``.tar.gz`` on Linux). The Windows-only
+                           ## M67/M68 baseline never set this field; all
+                           ## existing catalog files round-trip byte-
+                           ## identical because the serializer emits this
+                           ## field ONLY when ``has_archive_format_override``
+                           ## is true.
+    has_archive_format_override*: bool
+                           ## M9.5: sentinel for archive_format_override.
+                           ## ``false`` (default) = use the parent
+                           ## VersionedProvisioning's archive_format.
+                           ## ``true`` = use ``archive_format_override``.
+    bin_relpath_override*: seq[string]
+                           ## M9.5: per-platform override of the parent
+                           ## ``VersionedProvisioning.bin_relpath``.
+                           ## ``@[]`` (default) = use the parent's
+                           ## bin_relpath. Non-empty = use this list
+                           ## instead. The M9.5 cross-OS pass needs this
+                           ## because Windows binaries have the ``.exe``
+                           ## suffix while Linux binaries do not, and
+                           ## per-OS archives ship binaries under
+                           ## different inner paths (e.g. gh's Linux
+                           ## tarball nests under
+                           ## ``gh_<ver>_linux_amd64/bin/`` while the
+                           ## Windows zip is flat ``bin\\gh.exe``).
 
   PreInstallActionKind* = enum
     ## M3: a closed set of ``pre_install`` PowerShell shapes the
@@ -381,13 +416,20 @@ proc initPlatformBinary*(cpu: PlatformCpu; os: PlatformOs; url: string;
                          sha256 = ""; sha512 = ""; sha1 = "";
                          extract_path = "";
                          nested_7z = false;
-                         msi_admin_install = false): PlatformBinary =
+                         msi_admin_install = false;
+                         archive_format_override = afZip;
+                         has_archive_format_override = false;
+                         bin_relpath_override: seq[string] = @[]):
+    PlatformBinary =
   PlatformBinary(
     cpu: cpu, os: os, url: url,
     sha256: sha256, sha512: sha512, sha1: sha1,
     extract_path: extract_path,
     nested_7z: nested_7z,
-    msi_admin_install: msi_admin_install)
+    msi_admin_install: msi_admin_install,
+    archive_format_override: archive_format_override,
+    has_archive_format_override: has_archive_format_override,
+    bin_relpath_override: bin_relpath_override)
 
 proc initVersionedProvisioning*(version: string;
                                 archive_format: ArchiveFormat;
@@ -783,6 +825,21 @@ proc serializePlatformBinary(pb: PlatformBinary): string =
   # round-trips byte-identical.
   if pb.msi_admin_install:
     result.add(", msi_admin_install: true")
+  # M9.5: archive_format_override + bin_relpath_override emitted ONLY when
+  # the per-platform override is in effect (has_archive_format_override
+  # true, or bin_relpath_override non-empty). The Windows-only M67/M68
+  # baseline never sets these — every existing catalog file round-trips
+  # byte-identical through the serializer.
+  if pb.has_archive_format_override:
+    result.add(", archive_format_override: " &
+      archiveFormatIdent(pb.archive_format_override))
+    result.add(", has_archive_format_override: true")
+  if pb.bin_relpath_override.len > 0:
+    result.add(", bin_relpath_override: @[")
+    for i, b in pb.bin_relpath_override:
+      if i > 0: result.add(", ")
+      result.add(escapeString(b))
+    result.add("]")
   result.add(")")
 
 proc serializePreInstallAction*(pia: PreInstallAction): string =

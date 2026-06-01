@@ -696,9 +696,22 @@ proc resolveBuiltinPackage*(packageId: string;
     # case.
     result.resolution.digestAlgorithm = "sha1"
     result.resolution.digestValue = pb.binary.sha1.toLowerAscii()
-  result.resolution.archiveFormat = picked.archive_format
+  # M9.5: per-platform overrides for archive_format + bin_relpath. The
+  # cross-OS catalog harvester pass (M9.5) needs them because a single
+  # tool's upstream ships different archive shapes per OS (e.g. gh ships
+  # ``.zip`` on Windows + ``.tar.gz`` on Linux) and the realized binary
+  # path differs by OS (``.exe`` suffix only on Windows). The default
+  # PlatformBinary leaves both unset → fall back to the VersionedProvisioning
+  # values.
+  if pb.binary.has_archive_format_override:
+    result.resolution.archiveFormat = pb.binary.archive_format_override
+  else:
+    result.resolution.archiveFormat = picked.archive_format
   result.resolution.installMethod = picked.install_method
-  result.resolution.binRelpath = picked.bin_relpath
+  if pb.binary.bin_relpath_override.len > 0:
+    result.resolution.binRelpath = pb.binary.bin_relpath_override
+  else:
+    result.resolution.binRelpath = picked.bin_relpath
   result.resolution.extractPath = pb.binary.extract_path
   result.resolution.installerArgs = picked.installer_args
   result.resolution.pacmanPackages = picked.pacman_packages
@@ -711,9 +724,17 @@ proc resolveBuiltinPackage*(packageId: string;
   result.resolution.msiAdminInstall = pb.binary.msi_admin_install
   # M5: thread the launcher_emit spec list through.
   result.resolution.launcherEmit = picked.launcher_emit
-  # Use the first bin_relpath as the executable name (leaf only).
-  if picked.bin_relpath.len > 0:
-    result.resolution.executableName = picked.bin_relpath[0].extractFilename
+  # Use the first bin_relpath as the executable name (leaf only). M9.5:
+  # honor the per-platform bin_relpath_override when present (the Linux
+  # binary is ``gh`` without the ``.exe`` suffix that the Windows slice
+  # carries).
+  let effectiveBinRelpath =
+    if pb.binary.bin_relpath_override.len > 0:
+      pb.binary.bin_relpath_override
+    else:
+      picked.bin_relpath
+  if effectiveBinRelpath.len > 0:
+    result.resolution.executableName = effectiveBinRelpath[0].extractFilename
   else:
     result.resolution.executableName = packageId
   # Stable env-substitution order — sort by key so the realize loop

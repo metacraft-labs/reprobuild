@@ -173,38 +173,60 @@ suite "M9 e2e: Linux home-profile resolver-contract":
       if trace.len >= 3:
         check trace[2].adapter == cakPath
 
-  test "cakBuiltin on Linux surfaces brePlatformNotSupported (today)":
-    # The current Linux catalog reality: every M67/M68 harvest pulled
-    # from Scoop, so no ``poLinux`` slice exists. The cakBuiltin step
-    # walks ``resolveBuiltinPackage``, hits ``selectPlatformBinary``,
-    # finds no (pcX86_64, poLinux) entry, and returns
-    # ``brePlatformNotSupported`` → ``csoSchemaError``. A future
-    # harvester pass will graduate this to ``csoResolved`` for tools
-    # whose upstream publishes a Linux tarball; this gate documents
-    # the current state so a future graduation breaks the gate (and
-    # the reviewer remembers to flip the assertion).
+  test "cakBuiltin on Linux: post-M9.5 graduated tools resolve; git skips":
+    ## M9.5 graduated 8 of the 9 tools listed here: ghc + cabal + crystal
+    ## (Phase-2 fixtures) and nim + just + gh + cmake + ninja (Phase-1
+    ## baseline). The only baseline-tool that remains
+    ## brePlatformNotSupported on Linux is ``git`` — Git-for-Windows
+    ## publishes no Linux asset; the Linux story for git is the distro
+    ## package manager (apt/dnf/pacman), which is M9.6+ territory per
+    ## the M9.5 honest-scope decision.
+    ##
+    ## The per-tool assertions below replace the pre-M9.5 "all skip"
+    ## branch. A reviewer adding more Linux slices in a future
+    ## milestone should extend the expected-resolved set and shrink
+    ## the expected-skip set accordingly.
+    const Pkg9_5GraduatedOnLinux = [
+      "ghc", "cabal", "crystal",
+      "nim", "just", "gh", "cmake", "ninja",
+    ]
+    const Pkg9_5StillSkippedOnLinux = ["git"]
     var cat = openProductionCatalog()
-    for pkg in @Phase2LinuxFixtures & @Phase1BaselineDevTools:
+    for pkg in Pkg9_5GraduatedOnLinux:
       var trace: seq[ChainStep]
       try:
         let res = chainResolvePackage(cat, pkg,
           chain = @[cakBuiltin],
           hostCpu = pcX86_64, hostOs = poLinux)
         trace = res.chainTrace
-        # If the chain RESOLVED via cakBuiltin on Linux today that
-        # means a Linux harvester pass landed — the gate's contract
-        # graduates and the reviewer should update the test to assert
-        # csoResolved. Until then, this branch should not execute.
+        check trace.len == 1
         check trace[0].adapter == cakBuiltin
         check trace[0].outcome == csoResolved
+      except EAdapterChainExhausted as e:
+        # Reaching this branch means a Linux slice that USED to resolve
+        # via cakBuiltin no longer does — a regression. The chain
+        # diagnostic in e.chainTrace should name the missing slice.
+        check false  # graduate-then-skip regression
+        trace = e.chainTrace
+        echo "REGRESSION: '", pkg, "' was supposed to resolve via cakBuiltin"
+        for step in trace:
+          echo "  ", step.adapter, " -> ", step.outcome, ": ", step.reason
+    for pkg in Pkg9_5StillSkippedOnLinux:
+      var trace: seq[ChainStep]
+      try:
+        let res = chainResolvePackage(cat, pkg,
+          chain = @[cakBuiltin],
+          hostCpu = pcX86_64, hostOs = poLinux)
+        trace = res.chainTrace
+        # Should NOT resolve — but if it does, M9.6 graduated this tool;
+        # the reviewer should move it into the GraduatedOnLinux list.
+        check trace[0].outcome != csoResolved
       except EAdapterChainExhausted as e:
         trace = e.chainTrace
         check trace.len == 1
         check trace[0].adapter == cakBuiltin
         check trace[0].outcome == csoSchemaError
-        # The reason carries the brePlatformNotSupported tag (the
-        # enum stringifies as "platform-not-supported"; the catalog
-        # diagnostic mentions the missing (cpu, os) tuple).
+        # The reason carries the brePlatformNotSupported tag.
         check ("platform-not-supported" in trace[0].reason) or
               ("os=linux" in trace[0].reason)
 
@@ -241,30 +263,25 @@ suite "M9 e2e: Linux home-profile resolver-contract":
                        content.contains("package(\"" & pkg & "\"")
       check not blockedRef
 
-  test "per-tool Linux classification matrix (honest documentation)":
-    ## CANARY: this test breaks when Linux URLs land in the catalog
-    ## (the M9.5 trigger). When ``builtinResolvedCount > 0`` or
-    ## ``nixResolvedCount > 0`` the assertions below must be updated to
-    ## reflect the new expected resolution counts per the per-tool
-    ## graduation table the harvester pass populates.
-    # The M9 hermetic gate doubles as documentation: for every tool
-    # the harness consults on Linux, classify by terminating outcome.
-    # On a vanilla Windows test runner the classification reflects the
-    # resolver-only contract; cakPath probes the host PATH so tools
-    # like ``git`` / ``cmake`` may resolve as path-resolved on a
-    # developer machine while a clean CI runner sees them as
-    # unresolvable-linux.
+  test "per-tool Linux classification matrix (post-M9.5)":
+    ## M9.5 (post-graduation): the canary's pre-M9.5 assertion
+    ## ``builtinResolvedCount == 0`` flipped to a fixed expected count
+    ## reflecting the per-tool graduation table M9.5 populated.
+    ##
+    ## **Graduated via cakBuiltin (Linux URLs added):** ghc + cabal +
+    ## crystal (Phase-2 fixtures) and nim + just + gh + cmake + ninja
+    ## (Phase-1 baseline) — 8 tools. The remaining baseline-dev-tool
+    ## ``git`` stays unresolvable-linux pending an apt/dnf/pacman
+    ## harvester (M9.6 territory).
+    ##
+    ## A reviewer adding more Linux slices in a future milestone should
+    ## bump ``ExpectedBuiltinResolvedOnLinux`` to match the new graduated
+    ## count.
+    const ExpectedBuiltinResolvedOnLinux = 8
     var classifications: Table[string, LinuxResolverOutcome]
     for pkg in @Phase2LinuxFixtures & @Phase1BaselineDevTools:
       let (outcome, _) = classifyLinuxResolution(pkg)
       classifications[pkg] = outcome
-    # Honest assertions:
-    #   * Today, NO tool should classify as builtin-resolved-linux-url
-    #     (the catalog half is awaiting a Linux harvester pass).
-    #   * Today, NO tool should classify as nix-resolved (the M21
-    #     resolver-side branch isn't wired).
-    #   * Every tool classifies as either path-resolved (host PATH
-    #     hit) or unresolvable-linux (clean runner / no tool).
     var builtinResolvedCount = 0
     var nixResolvedCount = 0
     var pathResolvedCount = 0
@@ -275,11 +292,28 @@ suite "M9 e2e: Linux home-profile resolver-contract":
       of lroNixResolved:             nixResolvedCount.inc
       of lroPathResolved:            pathResolvedCount.inc
       of lroUnresolvableLinux:       unresolvableCount.inc
-    # The two assertions that should hold UNTIL the Linux harvester
-    # pass lands. A future graduation will require updating these.
-    check builtinResolvedCount == 0
+    # Post-M9.5 graduation count.
+    check builtinResolvedCount == ExpectedBuiltinResolvedOnLinux
+    # Nix resolver-side branch is still M21 / parallel-agent territory.
     check nixResolvedCount == 0
-    # Defensive: at least one tool was classified (the matrix is non-
-    # empty).
+    # Defensive: every tool was classified (the matrix is non-empty
+    # and complete).
     check classifications.len == Phase2LinuxFixtures.len + Phase1BaselineDevTools.len
-    check pathResolvedCount + unresolvableCount == classifications.len
+    # The remaining (classifications.len - builtinResolvedCount) tools
+    # fall through to cakPath (host PATH hit) or terminate unresolvable.
+    check builtinResolvedCount + pathResolvedCount + unresolvableCount ==
+          classifications.len
+    # Per-tool assertion: every Phase-2 fixture graduated.
+    for pkg in Phase2LinuxFixtures:
+      check classifications[pkg] == lroBuiltinResolvedLinuxUrl
+    # Per-tool assertion: the 5 baseline tools that gained Linux slices
+    # in M9.5 graduated.
+    const Pkg9_5GraduatedBaseline = ["nim", "just", "gh", "cmake", "ninja"]
+    for pkg in Pkg9_5GraduatedBaseline:
+      check classifications[pkg] == lroBuiltinResolvedLinuxUrl
+    # ``git`` is the only baseline tool that stayed unresolvable via
+    # cakBuiltin. cakPath may resolve it on a developer machine (or
+    # leave it unresolvable on a clean CI runner) — both outcomes
+    # accepted.
+    check classifications["git"] in
+          {lroPathResolved, lroUnresolvableLinux}
