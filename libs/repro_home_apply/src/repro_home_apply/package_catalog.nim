@@ -36,7 +36,7 @@
 ## table is built lazily and memoized inside `ProductionCatalog`), not
 ## once per package.
 
-import std/[json, options, os, osproc, strutils, tables]
+import std/[json, options, os, osproc, sets, strutils, tables]
 from repro_core/paths import extendedPath
 
 # M64: the cakBuiltin adapter resolves against the M63 VersionedProvisioning
@@ -218,6 +218,98 @@ proc raiseUnknownPackage*(packageId: string;
   e.packageId = packageId
   e.searchedCatalogs = searched
   raise e
+
+# ---------------------------------------------------------------------------
+# M0 (Realize-Layer-Plumbing-Closures spec) — extractor-discovery edges
+# ---------------------------------------------------------------------------
+#
+# The realize loop's cakBuiltin adapter needs a small set of helper
+# executables (``7z.exe``, ``lessmsi.exe``, ``dark.exe``, ``innounp.exe``)
+# depending on the package's ``archive_format`` + ``install_method``.
+# When the operator bundles those extractors as catalog packages in the
+# SAME ``home.nim`` (the M3 bundling-posture decision from the
+# Realize-Closure-And-Catalog-Expansion predecessor campaign), the
+# realize-op order MUST honour these discovery edges — the consumer
+# cannot realize until its extractor's prefix exists.
+#
+# The mapping below is the M0 hard-coded form. A future milestone could
+# lift it to schema-driven catalog metadata (a ``requires_for_realize:``
+# field on ``VersionedProvisioning``); for M0 the small constant table is
+# the right tradeoff.
+#
+# Extractor-provider map (M0):
+#
+#   7z.exe       ← 7zip       (consumed by afSevenZip / afSevenZipSfx
+#                              archive formats and the imInstallerNsis
+#                              install method)
+#   lessmsi.exe  ← lessmsi    (consumed by imInstallerMsi)
+#   dark.exe     ← wix3       (consumed by imInstallerNsisBundle;
+#                              dark unwraps the Burn outer)
+#   lessmsi.exe  ← lessmsi    (also consumed by imInstallerNsisBundle;
+#                              extracts the inner MSIs after dark)
+#   innounp.exe  ← innounp    (consumed by imInstallerInnoSetup)
+
+const
+  ExtractorProvider7zip*    = "7zip"
+  ExtractorProviderLessmsi* = "lessmsi"
+  ExtractorProviderWix3*    = "wix3"
+  ExtractorProviderInnounp* = "innounp"
+
+proc extractorDependencies*(packageId: string;
+                            resolution: CatalogResolution): seq[string] =
+  ## Return the set of catalog-package names that must be realized BEFORE
+  ## ``packageId`` can be realized, derived from the resolution's
+  ## ``archive_format`` + ``install_method`` requirements.
+  ##
+  ## Hard-coded extractor-provider map (M0). Future enhancement:
+  ## schema-driven ``requires_for_realize:`` field in
+  ## ``VersionedProvisioning``.
+  ##
+  ## Returns an EMPTY seq when ``resolution.adapter`` is NOT ``cakBuiltin``
+  ## (Scoop / PATH / Nix adapters handle their own extraction — the
+  ## discovery edge does not apply). This matches the M0 spec's
+  ## Outstanding Task note: "topo edges that originate from a
+  ## cakScoop-resolved consumer are silently dropped".
+  ##
+  ## The returned seq never contains ``packageId`` itself (self-edges are
+  ## skipped) — even though e.g. ``sevenzip.nim`` itself uses
+  ## ``imInstallerMsi`` which needs ``lessmsi``, that's a real edge
+  ## (sevenzip → lessmsi); the self-edge filter is for the degenerate
+  ## case where the mapping ever points a package at itself.
+  if resolution.adapter != cakBuiltin:
+    return @[]
+  var deps: seq[string] = @[]
+  # archive_format-driven edges
+  case resolution.archiveFormat
+  of afSevenZip, afSevenZipSfx:
+    deps.add(ExtractorProvider7zip)
+  else:
+    discard
+  # install_method-driven edges (these override / extend the
+  # archive_format edges for the installer families)
+  case resolution.installMethod
+  of imInstallerNsis:
+    deps.add(ExtractorProvider7zip)
+  of imInstallerMsi:
+    deps.add(ExtractorProviderLessmsi)
+  of imInstallerNsisBundle:
+    # dark.exe to unwrap the Burn outer, lessmsi.exe to extract the
+    # inner MSIs. Order in the seq is stable so a downstream consumer
+    # that uses the order for tie-breaking gets a deterministic result.
+    deps.add(ExtractorProviderWix3)
+    deps.add(ExtractorProviderLessmsi)
+  of imInstallerInnoSetup:
+    deps.add(ExtractorProviderInnounp)
+  else:
+    discard
+  # Deduplicate while preserving first-seen order, and drop any
+  # self-edge (a package never depends on itself).
+  var seen = initHashSet[string]()
+  for d in deps:
+    if d == packageId: continue
+    if d in seen: continue
+    seen.incl d
+    result.add d
 
 # ---------------------------------------------------------------------------
 # Scoop environment discovery

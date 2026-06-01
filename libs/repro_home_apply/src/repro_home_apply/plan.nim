@@ -23,6 +23,9 @@ import std/[algorithm, options, os, sets, strutils, tables]
 import repro_home_intent
 
 import ./errors
+import ./package_catalog
+import ./catalog_lookup
+import repro_dsl_stdlib/packages_schema
 
 type
   PlannedPackage* = object
@@ -66,6 +69,18 @@ type
     ## package id (the typical case for the fixture profile).
     commandName*: string
     fromPackageId*: string
+
+  EPlanCycleDetected* = object of CatchableError
+    ## M0 (Realize-Layer-Plumbing-Closures spec): the planner's
+    ## topological sort over realize ops detected a cycle in the
+    ## extractor-discovery graph. Cycles are a catalog-authoring error
+    ## (the M0 hard-coded extractor map cannot loop with the current
+    ## enum-keyed mapping — discovery of a cycle therefore means a
+    ## future schema-driven ``requires_for_realize:`` field has been
+    ## mis-authored, OR a test deliberately injected one). The
+    ## exception carries the cycle participants so the operator can
+    ## name the offending catalog packages directly.
+    cycleParticipants*: seq[string]
 
   ConfigContribution* = object
     ## One `config: <pkg>: <key> = <value>` entry harvested from the
@@ -159,6 +174,176 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
 # Public entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# M0 (Realize-Layer-Plumbing-Closures spec) — topological sort over realize ops
+# ---------------------------------------------------------------------------
+#
+# Why topological?
+#
+# Pre-M0 the planner sorted ``PlannedPackage`` entries alphabetically by
+# ``packageId``. That is latent-buggy when a home profile bundles BOTH
+# an extractor catalog package and a consumer that needs the extractor
+# pre-realized (the M3 bundling-posture decision from the
+# Realize-Closure-And-Catalog-Expansion predecessor campaign): the
+# alphabetical order may schedule the consumer first, which then fails
+# closed because its extractor's prefix does not yet exist on disk.
+#
+# Concrete example surfaced by the predecessor campaign's M11 LIVE
+# smoke: a profile containing both ``package(7zip)`` and
+# ``package(lessmsi)`` alphabetically sorts ``7zip`` < ``lessmsi``, but
+# ``packages/sevenzip.nim`` uses ``imInstallerMsi`` which needs
+# ``lessmsi.exe`` pre-realized OR on PATH. The smoke side-stepped the
+# bug by using a single-package profile; M0 closes it for real.
+#
+# Algorithm: Kahn's topological sort over the discovery graph. For each
+# package, ``extractorDependencies`` (in ``./package_catalog.nim``)
+# returns the set of catalog-package names that must precede it. If a
+# dep packageId is NOT in the plan (the operator didn't bundle the
+# extractor; PATH discovery satisfies it), the edge is silently
+# dropped — the dep is satisfied externally. Among multiple ready
+# packages (no remaining unfulfilled deps), ties break alphabetically.
+# This preserves byte-identical output for plans with no extractor
+# edges (the M71 reference profile is the load-bearing stability case).
+#
+# Cycle detection: if any packages remain after Kahn's outer loop
+# exhausts the ready queue, the residue is the cycle (or cycles). The
+# planner raises ``EPlanCycleDetected`` naming the participants — the
+# spec calls cycles a catalog-authoring error so failing closed is
+# the right behaviour.
+
+type
+  ExtractorDepsCallback* =
+    proc (p: PlannedPackage): seq[string] {.closure.}
+    ## M0 test seam: callers (production AND the M0 hermetic test gate)
+    ## supply a callback computing each package's extractor deps. The
+    ## production callback (``defaultExtractorDeps``) looks the package
+    ## up in the built-in catalog registry; the test gate can inject a
+    ## synthetic dep map to exercise the cycle-detection arm.
+
+proc defaultExtractorDeps*(p: PlannedPackage): seq[string] =
+  ## Production extractor-dep resolver: looks ``p`` up in the M65
+  ## catalog registry, reads the resolved slice's
+  ## ``archive_format`` + ``install_method``, and delegates to
+  ## ``extractorDependencies``. Returns ``@[]`` for any package whose
+  ## catalog lookup fails (the M0 topo sort then treats the package as
+  ## edge-free — Scoop / PATH adapters handle their own extraction;
+  ## an unregistered package was already going to fail at realize time
+  ## with a clearer diagnostic than a planner-side error here).
+  try:
+    let slice = lookupCatalogSlice(p.packageId, p.requestedVersion)
+    # Synthesize a minimal CatalogResolution carrying just the fields
+    # ``extractorDependencies`` reads. The full resolution carries the
+    # post-chain adapter; at plan-time we ASSUME cakBuiltin (the M65
+    # Windows / Linux defaults' primary). If the operator overrode
+    # ``adapterPreference:`` to put cakScoop / cakPath first, the
+    # extractor edge is spurious (the consumer realizes via Scoop /
+    # PATH and skips the cakBuiltin extractor path) — but the edge
+    # only matters when BOTH the consumer AND the extractor are in
+    # the plan AND the consumer resolves via cakBuiltin. The
+    # plan-time approximation is safe: a spurious edge enforces an
+    # ordering that is harmless when the consumer no longer needs it.
+    let resolution = CatalogResolution(
+      adapter: cakBuiltin,
+      archiveFormat: slice.slice.archive_format,
+      installMethod: slice.slice.install_method)
+    return extractorDependencies(p.packageId, resolution)
+  except CatchableError:
+    return @[]
+
+proc topologicallySortPackages*(packages: seq[PlannedPackage];
+                                depsOf: ExtractorDepsCallback):
+    seq[PlannedPackage] =
+  ## M0: Kahn's algorithm over the extractor-discovery graph.
+  ##
+  ## Stability: among packages with no remaining unfulfilled deps,
+  ## ties break by alphabetical ``packageId`` — so a plan with no
+  ## discovery edges (the M71 reference profile is the canonical
+  ## case) sorts byte-identically to the pre-M0 alphabetical order.
+  ##
+  ## Edges to packageIds NOT in the input ``packages`` set are
+  ## silently dropped (the dep is satisfied externally — PATH, Scoop,
+  ## or simply already-installed). The spec calls this out
+  ## explicitly: "If a dep packageId is NOT in the plan ... the dep
+  ## is satisfied externally (PATH) and not modeled as a graph edge".
+  ##
+  ## Raises ``EPlanCycleDetected`` when a cycle is detected — that
+  ## means a catalog-authoring error (or a test deliberately injected
+  ## a cycle). The exception's ``cycleParticipants`` lists the
+  ## packageIds the algorithm could not schedule.
+
+  # Index of packageId → (input order, package). Input order is used
+  # only as a defensive secondary tiebreak; the primary tiebreak is
+  # alphabetical so the stability gate against the M71 reference
+  # profile holds.
+  var byId = initTable[string, PlannedPackage]()
+  for p in packages:
+    byId[p.packageId] = p
+
+  # Build the dep graph in BOTH directions.
+  #   ``unfulfilled[pkg]``   = set of in-plan deps still pending for `pkg`.
+  #   ``consumers[extractor]`` = set of packages that depend on `extractor`.
+  # We only model edges whose endpoint is ALSO in the input plan; deps
+  # pointing outside the plan are dropped (satisfied externally).
+  var unfulfilled = initTable[string, HashSet[string]]()
+  var consumers = initTable[string, HashSet[string]]()
+  for p in packages:
+    unfulfilled[p.packageId] = initHashSet[string]()
+  for p in packages:
+    let deps = depsOf(p)
+    for d in deps:
+      if d notin byId:
+        # External dep — drop the edge silently. The realize loop's
+        # cakBuiltin discovery will pick the extractor up via PATH
+        # (M3 bundling-posture decision: extractors live on PATH when
+        # not bundled in the home profile).
+        continue
+      if d == p.packageId:
+        # Defensive: a self-edge would deadlock Kahn's algorithm.
+        # ``extractorDependencies`` already filters self-edges, but
+        # double-belt the test-seam callback path.
+        continue
+      unfulfilled[p.packageId].incl d
+      if d notin consumers:
+        consumers[d] = initHashSet[string]()
+      consumers[d].incl p.packageId
+
+  # Kahn's outer loop. ``ready`` is the set of packages whose
+  # unfulfilled-deps set is empty. We re-sort it alphabetically each
+  # pass so the output order is deterministic.
+  var emitted: seq[PlannedPackage] = @[]
+  var remaining = packages.len
+  while remaining > 0:
+    var ready: seq[string] = @[]
+    for id, deps in unfulfilled.pairs:
+      if deps.len == 0:
+        ready.add(id)
+    if ready.len == 0:
+      # No ready packages but still entries in ``unfulfilled`` → cycle.
+      var cycle: seq[string] = @[]
+      for id in unfulfilled.keys:
+        cycle.add(id)
+      cycle.sort(cmp[string])
+      var e = newException(EPlanCycleDetected,
+        "plan.nim topological sort detected a cycle in the " &
+        "extractor-discovery graph among packages: [" &
+        cycle.join(", ") & "]. The M0 extractor-provider map is " &
+        "acyclic by construction, so reaching this branch means a " &
+        "catalog-authoring error introduced a circular dependency " &
+        "(or a hermetic test deliberately injected one).")
+      e.cycleParticipants = cycle
+      raise e
+    ready.sort(cmp[string])
+    let pick = ready[0]
+    emitted.add(byId[pick])
+    unfulfilled.del(pick)
+    # Relax every consumer of ``pick``.
+    if pick in consumers:
+      for c in consumers[pick]:
+        if c in unfulfilled:
+          unfulfilled[c].excl pick
+    dec remaining
+  emitted
+
 proc collectConfigContributions(profile: Profile): seq[ConfigContribution] =
   for ch in profile.root.children:
     if ch.kind != nkConfigBlock:
@@ -205,8 +390,13 @@ proc buildPlan*(profile: Profile; profileDir: string;
       continue
     seen.incl p.packageId
     deduped.add p
-  deduped.sort(proc(a, b: PlannedPackage): int = cmp(a.packageId, b.packageId))
-  result.packages = deduped
+  # M0 (Realize-Layer-Plumbing-Closures spec): replace the pre-M0
+  # alphabetical sort with a topological sort over the
+  # extractor-discovery graph. Stability for plans with no extractor
+  # edges (the M71 reference profile) is preserved by breaking ties
+  # alphabetically inside Kahn's algorithm. See the long comment block
+  # above ``topologicallySortPackages`` for the WHY.
+  result.packages = topologicallySortPackages(deduped, defaultExtractorDeps)
   # Phase A: every package contributes one launcher with the same name.
   for p in result.packages:
     result.launchers.add(PlannedLauncher(commandName: p.packageId,
