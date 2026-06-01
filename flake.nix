@@ -190,6 +190,14 @@
               pkgs.shellcheck
               pkgs.shfmt
               pkgs.typos
+            ]
+            # libbpf for the codetracer-subset `ct` build: CodeTracer's
+            # native monitor under src/ct/bpf_monitor_native.nim and
+            # src/ct/libbpf_wrapper.nim include <bpf/libbpf.h>, which is
+            # gated by Linux. macOS doesn't ship libbpf, so don't drag
+            # it into the dev shell there.
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              pkgs.libbpf
             ];
             shellHook = pre-commit-check.shellHook;
           };
