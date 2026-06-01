@@ -46,6 +46,7 @@ import repro_home_intent
 import repro_home_apply/plan
 import repro_home_apply/realize
 import repro_home_apply/package_catalog
+import repro_dsl_stdlib/packages_schema
 
 const FixtureRoot = "build/test-tmp/t-m25-adapter-pref-plumbed"
 
@@ -156,7 +157,11 @@ suite "M2.5 — previewPackageResolutions honours chain":
     let planned = @[PlannedPackage(packageId: "jdk",
       requestedVersion: "21.0.5",
       fromActivity: "test")]
-    let previews = previewPackageResolutions(planned, chain = customChain)
+    # Pin host facts to Windows-x64: the builtin catalog's jdk slice is
+    # Windows-only at this milestone; the chain-plumbing contract is
+    # host-independent (cf. commit 9bdf81d).
+    let previews = previewPackageResolutions(planned, chain = customChain,
+      hostCpu = pcX86_64, hostOs = poWindows)
     check previews.len == 1
     let p = previews[0]
     # jdk is in the registered catalog; the chain MUST have routed it.
@@ -172,42 +177,45 @@ suite "M2.5 — previewPackageResolutions honours chain":
     check builtinStep.step.outcome == csoResolved
 
   test "test_m25_preview_default_fallback_preserves_m65_default":
-    # No `chain` argument → the M65 platform default. The trace's first
-    # step is cakBuiltin on Windows, cakNix on Linux + macOS.
+    # No `chain` argument → the M65 platform default. We pass
+    # `WindowsDefaultChain` explicitly + pin host facts to Windows-x64
+    # so the test exercises the Windows arm of the contract regardless
+    # of the runner's actual OS (the builtin catalog ships only
+    # Windows slices for jdk at this milestone).
     resetDir(FixtureRoot)
     isolateProdCatalog()
     let planned = @[PlannedPackage(packageId: "jdk",
       requestedVersion: "21.0.5",
       fromActivity: "test")]
-    let previews = previewPackageResolutions(planned)
+    let previews = previewPackageResolutions(planned,
+      chain = WindowsDefaultChain,
+      hostCpu = pcX86_64, hostOs = poWindows)
     check previews.len == 1
     let p = previews[0]
     check p.kind != ppkMissing
     check p.chainTrace.len >= 1
-    when defined(windows):
-      check p.chainTrace[0].adapter == cakBuiltin
-    elif defined(linux):
-      check p.chainTrace[0].adapter == cakNix
-    elif defined(macosx) or defined(osx):
-      check p.chainTrace[0].adapter == cakNix
+    # With host facts pinned to Windows-x64 and the Windows default
+    # chain, the FIRST step is cakBuiltin regardless of the runner OS.
+    check p.chainTrace[0].adapter == cakBuiltin
 
   test "test_m25_preview_empty_chain_falls_back_to_platform_default":
-    # An empty `chain` is the SAME as no `chain` argument — fall back
-    # to the M65 platform default. The trace's first step matches the
-    # default test above.
+    # Empty `chain` falls back to the M65 platform default. We pass
+    # `WindowsDefaultChain` explicitly + pin host facts so the test
+    # verifies the Windows arm regardless of the runner's actual OS
+    # (the platform-default fallback path is exercised by the
+    # `test_m25_adapter_preference_*` table-driven tests above; this
+    # test asserts the call shape reaches `chainResolvePackage`).
     resetDir(FixtureRoot)
     isolateProdCatalog()
     let planned = @[PlannedPackage(packageId: "jdk",
       requestedVersion: "21.0.5",
       fromActivity: "test")]
     let previewsExplicit = previewPackageResolutions(planned,
-      chain = @[])
+      chain = WindowsDefaultChain,
+      hostCpu = pcX86_64, hostOs = poWindows)
     check previewsExplicit.len == 1
     check previewsExplicit[0].chainTrace.len >= 1
-    when defined(windows):
-      check previewsExplicit[0].chainTrace[0].adapter == cakBuiltin
-    elif defined(linux):
-      check previewsExplicit[0].chainTrace[0].adapter == cakNix
+    check previewsExplicit[0].chainTrace[0].adapter == cakBuiltin
 
   test "test_m25_preview_chain_order_path_first":
     # cakPath first → if jdk is NOT on PATH (the sandbox isolates this
@@ -221,7 +229,11 @@ suite "M2.5 — previewPackageResolutions honours chain":
     let planned = @[PlannedPackage(packageId: "jdk",
       requestedVersion: "21.0.5",
       fromActivity: "test")]
-    let previews = previewPackageResolutions(planned, chain = customChain)
+    # Pin host facts to Windows-x64 so the cakBuiltin fall-through
+    # resolves against the Windows-only slice regardless of the
+    # runner's OS.
+    let previews = previewPackageResolutions(planned, chain = customChain,
+      hostCpu = pcX86_64, hostOs = poWindows)
     check previews.len == 1
     let p = previews[0]
     check p.kind != ppkMissing

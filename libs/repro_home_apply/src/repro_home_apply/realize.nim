@@ -543,7 +543,9 @@ type
       ## cakPath / cakNix.
 
 proc previewPackageResolutions*(packages: seq[PlannedPackage];
-    chain: seq[CatalogAdapterKind] = @[]):
+    chain: seq[CatalogAdapterKind] = @[];
+    hostCpu = detectHostCpu();
+    hostOs = detectHostOs()):
     seq[PackagePreview] =
   ## M72 Deliverable 2 + M0 planner-path correctness fix: classify each
   ## planned package WITHOUT realizing it. The production catalog query
@@ -618,7 +620,8 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
         var chainOk = true
         try:
           resolution = chainResolvePackage(prodCatalog, p.packageId,
-            chain = chain, version = p.requestedVersion)
+            chain = chain, version = p.requestedVersion,
+            hostCpu = hostCpu, hostOs = hostOs)
         except EAdapterChainExhausted as err:
           preview.kind = ppkMissing
           preview.detail = "adapter-chain-exhausted: " & err.msg

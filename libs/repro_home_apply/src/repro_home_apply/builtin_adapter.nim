@@ -284,7 +284,7 @@ proc toHexLower(bytes: openArray[byte]): string =
 # SHA-256 / SHA-512 via shell-out, mirroring `fileSha256Hex` in
 # `repro_tool_profiles` so the realize loop shares the host tool
 # discovery logic (sha256sum → shasum → certutil → openssl).
-proc parseHexLine(raw: string): string =
+proc parseHexLine(raw: string; expectedLen: int = 0): string =
   ## Extract the first hex digest of expected length (64 or 128 chars)
   ## from `raw`. The verifier tools emit one of:
   ##   sha256sum:  "<hex>  <path>" or "\<hex> *<path>"  (the leading
@@ -304,13 +304,25 @@ proc parseHexLine(raw: string): string =
     if s.len == 0: continue
     # Strategy: walk the line and accumulate a hex prefix, skipping a
     # leading backslash (sha256sum's quoting marker) and intra-hex
-    # spaces (certutil's group-of-four formatting).
+    # spaces (certutil's group-of-four formatting). The moment we
+    # have a complete digest length (40/64/128 = sha1/sha256/sha512)
+    # we stop — guards against the sha256sum shape
+    # ``<digest>  <path>`` where the path may itself start with hex
+    # characters (e.g. ``build/...``).
     var hex = ""
     var started = false
     for ch in s:
       if ch in {'0'..'9', 'a'..'f', 'A'..'F'}:
         hex.add(ch)
         started = true
+        if expectedLen > 0 and hex.len == expectedLen:
+          # Peek-free early exit at the expected algorithm length.
+          # Guards against the sha256sum shape ``<digest>  <path>`` on
+          # paths whose filename happens to start with hex characters
+          # (e.g. ``build/...``) — without this exit we would
+          # accidentally consume those bytes into the digest because
+          # the loop collapses intra-hex whitespace for certutil.
+          return hex.toLowerAscii()
       elif (not started) and ch == '\\':
         # sha256sum's leading backslash quoting marker — skip.
         continue
@@ -360,10 +372,17 @@ proc fileShaHex*(path: string; algorithm: string): string =
     of "sha512": "512"
     of "sha1":   "1"
     else: ""  # unreachable
-  let sumPath = findExe(sumExe)
-  let shasumPath = findExe("shasum")
-  let opensslPath = findExe("openssl")
-  let certutilPath = when defined(windows): findExe("certutil") else: ""
+  # ``followSymlinks=false`` is load-bearing on Nix-managed macOS hosts
+  # where ``sha256sum`` / ``sha1sum`` / ``sha512sum`` are symlinks into
+  # the coreutils multi-call binary; resolving the symlink would
+  # invoke ``coreutils`` directly, which prints the help text instead
+  # of dispatching to the requested algorithm.
+  let sumPath = findExe(sumExe, followSymlinks = false)
+  let shasumPath = findExe("shasum", followSymlinks = false)
+  let opensslPath = findExe("openssl", followSymlinks = false)
+  let certutilPath =
+    when defined(windows): findExe("certutil", followSymlinks = false)
+    else: ""
   let command =
     if sumPath.len > 0:
       quoteShell(sumPath) & " " & quoteShell(path)
@@ -384,7 +403,13 @@ proc fileShaHex*(path: string; algorithm: string): string =
     raise newException(OSError,
       "builtin adapter: " & algorithm & " verifier exited " &
       $res.exitCode & " for " & path & "\n" & res.output)
-  let parsed = parseHexLine(res.output)
+  let expectedLen =
+    case algorithm
+    of "sha256": 64
+    of "sha512": 128
+    of "sha1":   40
+    else: 0
+  let parsed = parseHexLine(res.output, expectedLen)
   if parsed.len == 0:
     raise newException(OSError,
       "builtin adapter: " & algorithm &
