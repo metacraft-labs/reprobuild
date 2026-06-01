@@ -4837,7 +4837,13 @@ proc runDownCommand(args: openArray[string]): int =
   if not fileExists(extendedPath(metadataPath)):
     raise newException(IOError,
       "no authoritative Reprobuild dev session metadata at " & metadataPath)
-  let metadata = parseFile(extendedPath(metadataPath))
+  # readJsonFileResilient retries past the brief `writeFile(O_TRUNC)`
+  # window the dev-session supervisor produces every time it republishes
+  # session.json (status transitions, service events, etc.). Without the
+  # retry a parallel reader (us, plus the e2e test polling every 100 ms)
+  # observes a zero-byte file and raises `session.json(1, 0) Error: {
+  # expected`. See readJsonFileResilient for the race rationale.
+  let metadata = readJsonFileResilient(metadataPath)
   let httpBindValue = metadata{"httpBind"}.getStr()
   if httpBindValue.len == 0:
     raise newException(ValueError,
@@ -4859,7 +4865,7 @@ proc runDownCommand(args: openArray[string]): int =
   var waited = 0
   while waited <= 10000:
     if fileExists(extendedPath(metadataPath)):
-      let current = parseFile(extendedPath(metadataPath))
+      let current = readJsonFileResilient(metadataPath)
       if current{"status"}.getStr() == "down":
         echo "repro down: session " & current{"sessionId"}.getStr() &
           " down"
