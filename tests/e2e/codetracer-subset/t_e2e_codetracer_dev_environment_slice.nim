@@ -283,8 +283,12 @@ suite "e2e_codetracer_dev_environment_slice":
       if pathExists(daemon.socket):
         removeFile(daemon.socket)
 
+    # `--log=actions` ensures the per-action `action: ID status=... ` line
+    # the next assertion keys on is captured; the default summary log only
+    # emits the `progress: bpkActionCompleted ...` markers and the
+    # `scheduler:` / `providerInvocations:` / `buildReport:` headers.
     let build = requireSuccess(shellCommand([reproBin, "build", target,
-      "--tool-provisioning=nix"]), repoRoot)
+      "--tool-provisioning=nix", "--log=actions"]), repoRoot)
     check build.contains("tool-provisioning=nix")
     check build.contains("action: record-nix-sh status=asSucceeded launched=true")
     let buildIdentity = readPathOnlyBuildIdentity(valueAfter(build,
