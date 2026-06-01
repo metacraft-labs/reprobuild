@@ -1,5 +1,19 @@
 # M69 POSIX destructive-gate WSL harness
 
+> **Migration note (2026-06).** The lifecycle logic in
+> `run-wsl-m69-posix.ps1` and `provision-and-run-m69-posix.sh` is now
+> wrapped by the Nim
+> [`vm-harness`](https://github.com/metacraft-labs/vm-harness) library's
+> `WslBackend` adapter (M1 of the *Multi-OS VM Automation Campaign*; see
+> `metacraft/reprobuild-specs/Multi-OS-VM-Automation-Campaign.milestones.org`).
+> The PowerShell + bash scripts in this directory are Tier-2 reprobuild
+> orchestration and **continue to be the canonical entry point** for the
+> M69 POSIX WSL gates — no behavioural change. New consumers (the
+> `vm-harness` CLI, the AH Rust port, the unified driver harness) drive
+> the same scripts through `vm_harness.backends.wsl.runViaReproScript`
+> rather than invoking them directly, but the direct invocation paths
+> below remain supported and tested.
+
 A **throwaway WSL distro** test harness that runs the **real-mutation halves**
 of the M69 Linux destructive gates inside a disposable Ubuntu 22.04 WSL
 distribution - so the gates exercise real `useradd` / `usermod` / `userdel`

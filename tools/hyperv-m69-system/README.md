@@ -1,5 +1,19 @@
 # M69 system-scope destructive-gate Hyper-V harness
 
+> **Migration note (2026-06).** The lifecycle logic in
+> `run-hyperv-m69-system.ps1` and `provision-base-vm.ps1` is now wrapped
+> by the Nim
+> [`vm-harness`](https://github.com/metacraft-labs/vm-harness) library's
+> `HyperVBackend` adapter (M1 of the *Multi-OS VM Automation Campaign*;
+> see `metacraft/reprobuild-specs/Multi-OS-VM-Automation-Campaign.milestones.org`).
+> The PowerShell scripts in this directory are Tier-2 reprobuild
+> orchestration and **continue to be the canonical entry point** for the
+> M69 Hyper-V gates — no behavioural change. New consumers (the
+> `vm-harness` CLI, the AH Rust port, the unified driver harness) drive
+> the same scripts through `vm_harness.backends.hyperv.runViaReproScript`
+> rather than invoking them directly, but the direct invocation paths
+> below remain supported and tested.
+
 A **Hyper-V VM** test harness that runs the **real-mutation halves** of
 the two M69 Windows destructive gates inside a disposable, snapshot-
 revertable Windows guest - so the gates exercise real DISM /
