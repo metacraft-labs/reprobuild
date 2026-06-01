@@ -310,5 +310,9 @@ suite "c-cpp-make convention M17":
       let argv = inlineArgvOf(archiveActions[0])
       check argv.len >= 2
       let arg0Base = extractFilename(argv[0]).toLowerAscii
-      check arg0Base.startsWith("ar")
+      # `arDriver()` resolves the host's ar; accept plain `ar` plus
+      # toolchain-prefixed variants (`llvm-ar`, `gcc-ar`,
+      # `aarch64-linux-gnu-ar`, …) and the `.exe` suffix on Windows.
+      check arg0Base == "ar" or arg0Base == "ar.exe" or
+            arg0Base.endsWith("-ar") or arg0Base.endsWith("-ar.exe")
       check argv[1] == "rcs"
