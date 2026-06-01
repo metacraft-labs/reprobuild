@@ -1157,6 +1157,7 @@ proc restartCandidateReady(config: UserDaemonConfig;
   true
 
 proc daemonProcessArgs(config: UserDaemonConfig): seq[string]
+proc launchWithFork(exe: string; config: UserDaemonConfig)
 
 proc performDevSelfRestart(config: UserDaemonConfig;
                            listener: var Socket;
@@ -1178,10 +1179,20 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   try: listener.close() except CatchableError: discard
   removeEndpointFiles(config)
   releaseUserDaemonLock(daemonLock)
-  let process = startProcess(staged.imagePath,
-    args = daemonProcessArgs(nextConfig),
-    options = {poUsePath, poDaemon})
-  process.close()
+  # Use the same launchWithFork the initial launch uses (fork + setsid +
+  # dup2 stdio onto /dev/null and the log file + close inherited fds +
+  # execv). osproc.startProcess with poDaemon on POSIX leaves the child
+  # with stdio pipes that the parent immediately closes via
+  # process.close(); the new daemon then dies of SIGPIPE on the first
+  # write to stderr — the listener never binds, the test polls
+  # 'daemon status' for 20 s, and the restart appears to time out.
+  when defined(posix):
+    launchWithFork(staged.imagePath, nextConfig)
+  else:
+    let process = startProcess(staged.imagePath,
+      args = daemonProcessArgs(nextConfig),
+      options = {poUsePath, poDaemon})
+    process.close()
   logLine(config.logPath, "dev restart old process exiting runId=" & runId)
   true
 
@@ -1371,8 +1382,18 @@ proc systemdUnitName(config: UserDaemonConfig): string =
 proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
   when defined(linux):
     try:
+      # ExitType=cgroup is what lets the dev self-restart survive on
+      # Linux: the old daemon performs the fork+exec of the staged
+      # binary and then exits 0. With the default ExitType=main,
+      # systemd treats the unit as inactive the moment that main
+      # process exits, --collect removes it, and KillMode=control-group
+      # SIGKILLs every other PID in the cgroup — including the
+      # freshly-forked replacement. ExitType=cgroup keeps the unit
+      # active as long as any process in the cgroup is alive, so the
+      # replacement keeps running and can bind the endpoint.
       var args = @["systemd-run", "--user", "--unit=" & systemdUnitName(config),
-        "--collect", "--quiet", exe] & daemonProcessArgs(config)
+        "--collect", "--quiet", "-p", "ExitType=cgroup",
+        exe] & daemonProcessArgs(config)
       let res = execCmdEx(quoteCommand(args))
       if res.exitCode == 0:
         logLine(config.logPath, "launch requested backend=systemd-user unit=" &
