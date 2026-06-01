@@ -4028,6 +4028,18 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
                              interfacePath: string): int =
   if command.len == 0:
     raise newException(ValueError, "develop command is empty")
+  # Canonicalize projectRoot before plumbing it through both the child's
+  # working-directory and REPRO_PROJECT_ROOT. On macOS the system temp
+  # roots (/tmp, /var/folders/...) are symlinks into /private/..., and
+  # after the child shell chdirs into the working directory it sets PWD
+  # from getcwd(), which returns the realpath form. If the env var
+  # disagreed with PWD the user-visible contract (REPRO_PROJECT_ROOT =
+  # the shell's cwd) would break for any path that traverses a symlink.
+  let canonicalProjectRoot =
+    try:
+      expandFilename(projectRoot)
+    except OSError:
+      projectRoot
   let profileBinDirs = binDirsForDevelop(identity)
   let pathValue =
     if profileBinDirs.len > 0:
@@ -4035,7 +4047,7 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
     else:
       getEnv("PATH")
   let artifact = DevEnvArtifact(
-    projectRoot: projectRoot,
+    projectRoot: canonicalProjectRoot,
     selectedActivities: @["develop"],
     shellOps: @[
       DevEnvShellOp(kind: deskSetEnv, name: "PATH", value: pathValue),
@@ -4046,9 +4058,9 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
       DevEnvShellOp(kind: deskSetEnv, name: "REPRO_PROJECT_INTERFACE",
         value: interfacePath),
       DevEnvShellOp(kind: deskSetEnv, name: "REPRO_PROJECT_ROOT",
-        value: projectRoot)
+        value: canonicalProjectRoot)
     ])
-  runActivatedCommand(artifact, "", command, projectRoot)
+  runActivatedCommand(artifact, "", command, canonicalProjectRoot)
 
 proc valueAfterFlag(args: openArray[string]; flag: string): string =
   var i = 0
