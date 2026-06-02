@@ -33,10 +33,29 @@
 
 import std/[os, osproc, strutils, unittest]
 
+# Use ExeExt so we resolve to ``repro_catalog_harvester`` on POSIX and
+# ``repro_catalog_harvester.exe`` on Windows. The pre-portability shape
+# of this constant hardcoded ``.exe`` and broke ``just test`` on Linux.
 const HarvesterExe = currentSourcePath.parentDir.parentDir /
-  "repro_catalog_harvester.exe"
+  ("repro_catalog_harvester" & ExeExt)
+
+const HarvesterSrc = currentSourcePath.parentDir.parentDir /
+  "repro_catalog_harvester.nim"
 
 const FixturesDir = currentSourcePath.parentDir / "fixtures"
+
+proc ensureHarvesterBuilt() =
+  ## Build the harvester binary on demand so the test runner does not
+  ## depend on an external build orchestration step. Skipped when an
+  ## existing binary is already at ``HarvesterExe``.
+  if fileExists(HarvesterExe):
+    return
+  let cmd = "nim c --hints:off --verbosity:0 --out:" & quoteShell(HarvesterExe) &
+    " " & quoteShell(HarvesterSrc)
+  let (output, rc) = execCmdEx(cmd, options = {poStdErrToStdOut})
+  if rc != 0:
+    raise newException(IOError,
+      "could not build " & HarvesterExe & " for tests: " & output)
 
 proc runHarvester(args: openArray[string]): tuple[rc: int; output: string] =
   ## Spawn the harvester binary with ``args``, merging stderr into
@@ -59,6 +78,9 @@ proc tempOutDir(tag: string): string =
   dir
 
 suite "M8 follow-up — output app name validation":
+
+  setup:
+    ensureHarvesterBuilt()
 
   test "test_harvester_rejects_invalid_nim_identifier_app_name":
     # --app 7zip (no alias) → exit 2 + clear error message + no
