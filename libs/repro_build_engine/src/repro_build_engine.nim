@@ -42,6 +42,14 @@ type
     bakWriteText
     bakStamp
     bakPreserveTree
+    # M2 (Workspace-Management): a typed VCS operation (clone / fetch /
+    # switch) dispatched through a registered executor so the engine
+    # does not depend on the ``repro_workspace_vcs`` library. The
+    # external library registers its executor via
+    # ``registerWorkspaceVcsExecutor`` at module init time; if no
+    # executor is registered the engine fails closed with a clear
+    # diagnostic rather than silently no-op'ing.
+    bakWorkspaceVcs
 
   BuildAction* = object
     kind*: BuildActionKind
@@ -438,7 +446,8 @@ proc pathExists(path: string): bool =
     dirExists(extendedPath(path))
 
 proc outputPathReady(action: BuildAction; path: string): bool =
-  if action.kind in {bakCopyFile, bakWriteText, bakStamp} and
+  # M2: bakWorkspaceVcs receipts are plain files, same readiness rule.
+  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
@@ -1280,6 +1289,28 @@ proc inlineRunQuotaFailureResult(id, message: string): ActionResult =
     runQuotaBackend: "runquota-inline",
     runQuotaSocket: getEnv("RUNQUOTA_SOCKET", ""))
 
+type
+  WorkspaceVcsExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Hook installed by ``repro_workspace_vcs/git_actions`` (M2). The
+    ## engine dispatches every ``bakWorkspaceVcs`` action through the
+    ## currently registered executor. We keep the dispatch indirect so
+    ## the engine library does not need to depend on the VCS library
+    ## (which itself depends on the engine for ``BuildAction``).
+
+var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
+
+proc registerWorkspaceVcsExecutor*(executor: WorkspaceVcsExecutor) =
+  ## Register the per-thread executor for ``bakWorkspaceVcs`` actions.
+  ## M2's ``git_actions`` module calls this at module-init time. Tests
+  ## that exercise the engine in-process call it explicitly to install
+  ## a fresh executor bound to a resolved ``GitToolIdentity``.
+  workspaceVcsExecutor = executor
+
+proc clearWorkspaceVcsExecutor*() =
+  ## Clear the registered executor. Tests use this to assert the
+  ## fail-closed behavior when no executor is registered.
+  workspaceVcsExecutor = nil
+
 proc builtinPath(action: BuildAction; path: string): string =
   materialPath(action.cwd, path)
 
@@ -1455,6 +1486,26 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
             removeFile(extendedPath(stale))
       currentEntries.sort(system.cmp[string])
       writeManifestEntries(manifestPath, currentEntries)
+    of bakWorkspaceVcs:
+      # M2 dispatch: every ``bakWorkspaceVcs`` action runs through the
+      # executor registered by ``repro_workspace_vcs/git_actions``. The
+      # registered executor returns a fully-populated ``ActionResult``;
+      # we copy its status/exitCode/stderr through so the rest of the
+      # built-in pipeline (cache record, evidence collect) sees the
+      # same shape it would for any other built-in.
+      if workspaceVcsExecutor.isNil:
+        raiseEngine("bakWorkspaceVcs action requires registerWorkspaceVcsExecutor before runBuild: " &
+          action.id)
+      let vcsResult = workspaceVcsExecutor(action)
+      result.status = vcsResult.status
+      result.exitCode = vcsResult.exitCode
+      result.stdout = vcsResult.stdout
+      result.stderr = vcsResult.stderr
+      result.reason = vcsResult.reason
+      result.launched = vcsResult.launched
+      result.runQuotaBackend = if vcsResult.runQuotaBackend.len > 0:
+        vcsResult.runQuotaBackend else: result.runQuotaBackend
+      return
     of bakProcess:
       raiseEngine("process action cannot be executed as a built-in: " & action.id)
     result.status = asSucceeded
