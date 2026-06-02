@@ -249,6 +249,17 @@ proc raiseUnknownPackage*(packageId: string;
 #                              extracts the inner MSIs after dark)
 #   innounp.exe  ← innounp    (consumed by imInstallerInnoSetup)
 
+# TODO: schema-driven `requires_for_realize:` field on
+# `VersionedProvisioning` would replace this hard-coded map. Migration
+# starting point: move these consts into the per-tool catalog slice
+# (each affected `packages/<tool>.nim` declares its own
+# `requires_for_realize: @["7zip"]` or similar in the
+# `VersionedProvisioning` literal); then have `extractorDependencies`
+# below read `resolution.requiresForRealize` directly instead of
+# pattern-matching on `archive_format` / `install_method`. The case
+# statements in the proc body would collapse to a one-line passthrough.
+# See Realize-Layer-Plumbing-Closures.milestones.org M0 Outstanding
+# Tasks for the planned schema shape.
 const
   ExtractorProvider7zip*    = "7zip"
   ExtractorProviderLessmsi* = "lessmsi"

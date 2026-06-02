@@ -447,6 +447,77 @@ proc writeDiagnostics(diagnostics: openArray[Diagnostic]) =
     stderr.writeLine($d.kind & " [" & d.app & "]: " & d.detail)
 
 # ---------------------------------------------------------------------------
+# Output-app-name validation (Nim-identifier check)
+# ---------------------------------------------------------------------------
+
+proc isValidNimIdent(name: string): bool =
+  ## Nim identifier rules (matchFull ``^[A-Za-z_][A-Za-z0-9_]*$``):
+  ## first char is a letter or underscore; remaining chars are
+  ## alphanumerics or underscores. Hyphens, dots, leading digits, and
+  ## the empty string are all rejected.
+  if name.len == 0: return false
+  if name[0] notin {'a'..'z', 'A'..'Z', '_'}: return false
+  for ch in name:
+    if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}: return false
+  return true
+
+proc validateResolvedAppName(name: string) =
+  ## Fail fast (exit 2) if the resolved output app name (post-alias) is
+  ## not a usable Nim identifier. The harvester writes
+  ## ``packages/<name>.nim`` containing ``let <name>Catalog* = @[...]``;
+  ## a name like ``7zip`` would emit ``7zipCatalog`` which fails
+  ## ``nim check``. M8 reviewer flagged this for ``7zip`` /
+  ## ``dotnet-sdk``; the remedy is ``--app-alias <bad>=<good>``.
+  if isValidNimIdent(name): return
+  let reason =
+    if name.len == 0:
+      "an empty name is not a Nim identifier"
+    elif name[0] in {'0'..'9'}:
+      "Nim identifiers cannot start with a digit"
+    elif name[0] notin {'a'..'z', 'A'..'Z', '_'}:
+      "Nim identifiers must start with a letter or underscore"
+    else:
+      "Nim identifiers may only contain letters, digits, and underscores"
+  stderr.writeLine("repro_catalog_harvester: invalid output app name '" &
+    name & "' (" & reason & ").")
+  stderr.writeLine("  Re-run with --app-alias to specify a valid identifier, e.g.:")
+  stderr.writeLine("    --app-alias " & name & "=" & "sevenzip")
+  quit(2)
+
+proc validateResolvedAppNames(opts: CliOptions) =
+  ## Validate every output app name we can resolve BEFORE source-mode
+  ## dispatch — fail-fast before any network I/O or bucket clone.
+  ##
+  ## For the Scoop source, each ``--app <name>`` resolves through
+  ## ``opts.appAliases`` (when present) to the emitted catalog
+  ## identifier. We validate the resolved name. (Apps discovered by
+  ## bucket scan when no ``--app`` is given are validated lazily by
+  ## the per-emit code path; this proc only catches the explicit-flag
+  ## case the M8 bug exercised.)
+  ##
+  ## For the MSYS2 source, the resolved name is ``opts.apps[0]`` when
+  ## given (overriding the stripped package shorthand), else the
+  ## bare-package shorthand. Validate the explicit ``--app`` override.
+  ##
+  ## For the gh-releases source, the resolved name is
+  ## ``opts.ghOutputApp`` when given, else ``opts.ghRepo``. Validate
+  ## whichever is going to be used.
+  case opts.source
+  of hsScoop:
+    for app in opts.apps:
+      let resolved =
+        if app in opts.appAliases: opts.appAliases[app] else: app
+      validateResolvedAppName(resolved)
+  of hsMsys2:
+    if opts.apps.len >= 1:
+      validateResolvedAppName(opts.apps[0])
+  of hsGhReleases:
+    let resolved =
+      if opts.ghOutputApp.len > 0: opts.ghOutputApp else: opts.ghRepo
+    if resolved.len > 0:
+      validateResolvedAppName(resolved)
+
+# ---------------------------------------------------------------------------
 # Harvest one app (potentially multi-version)
 # ---------------------------------------------------------------------------
 
@@ -893,7 +964,12 @@ proc main(): int =
   of scNone:
     echo HelpText
     return 0
-  of scHarvest: return cmdHarvest(opts)
+  of scHarvest:
+    # M8 follow-up: fail fast on invalid-Nim-identifier output app
+    # names BEFORE any source-mode dispatch (so we don't clone /
+    # download anything just to emit uncompilable .nim).
+    validateResolvedAppNames(opts)
+    return cmdHarvest(opts)
   of scInspect: return cmdInspect(opts)
   of scVerify: return cmdVerify(opts)
 

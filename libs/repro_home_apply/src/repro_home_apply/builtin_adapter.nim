@@ -1093,9 +1093,19 @@ proc runLauncherEmit*(packageId, packageVersion, destDir: string;
         renderJarLauncherCmd(interp, targetRelFromBin, packageId,
           packageVersion))
     of lekScript:
-      # Defensive: discoverInterpreterExe already raised for lekScript;
-      # this is unreachable from the realize loop. Kept exhaustive for
-      # the case-statement.
+      # TODO: implement lekScript launcher emit when a catalog tool ships
+      # a wrapped bash/zsh/etc. script. M5 of the Realize-Closure-And-
+      # Catalog-Expansion campaign shipped lekPhar + lekJar only; the
+      # lekScript schema variant exists for forward-compat. Starting
+      # point: (1) add `renderScriptLauncherPs1` / `renderScriptLauncherCmd`
+      # mirroring the `renderPharLauncher*` procs above (use the
+      # interpreter's PATH-relative invocation form, no `-jar`); (2) extend
+      # `discoverInterpreterExe` (line ~882) to route lekScript to a new
+      # `discoverScriptInterpreterExe` keyed on `spec.interpreter_package_id`;
+      # (3) replace this doAssert with a writeFile pair like the lekPhar
+      # arm at line 1086. The defensive doAssert below stays as fail-fast
+      # until that path lands — discoverInterpreterExe also raises for
+      # lekScript so this arm is currently unreachable from realize.
       doAssert false,
         "runLauncherEmit: lekScript not implemented (M5 ships lekPhar + lekJar)"
 
