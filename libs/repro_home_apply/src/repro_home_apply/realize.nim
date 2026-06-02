@@ -109,6 +109,13 @@ type
       ## Per-tool environment variables (e.g. JAVA_HOME) with
       ## `${prefix}` already substituted. The apply pipeline merges
       ## these into the home generation's env export.
+    chainTrace*: seq[ChainStep]
+      ## M1 (Realize-Layer-Plumbing-Closures): per-resolution chain trace
+      ## populated by the chain-routed branch of
+      ## `realizeViaProductionCatalog` so the realize side reports the
+      ## same per-adapter trace `PackagePreview.chainTrace` exposes.
+      ## Empty for the legacy `resolvePackage` branch and for test-seam
+      ## bindings (path / scoop env-driven catalogs).
 
 # ---------------------------------------------------------------------------
 # Env-driven catalog
@@ -393,6 +400,43 @@ proc resolveAdapterChainFor*(
     result = @[cakPath]
 
 # ---------------------------------------------------------------------------
+# M1 (Realize-Layer-Plumbing-Closures) — chain-resolver test seam
+# ---------------------------------------------------------------------------
+#
+# Production callers leave ``chainResolveOverride`` nil; the realize-side
+# dispatcher then calls ``chainResolvePackage`` directly. Hermetic tests
+# in ``t_realize_honors_adapter_preference.nim`` and
+# ``t_realize_honors_requested_version.nim`` install a stub here to
+# (a) observe the ``chain`` + ``version`` args the realize side passes
+# through (so the M1 plumbing contract is testable without downloading
+# bytes), and (b) substitute a synthetic ``CatalogResolution`` that
+# points the dispatcher at a fixture path adapter — letting the realize
+# side run end-to-end on hermetic inputs.
+
+type
+  ChainResolveCallback* = proc (cat: var ProductionCatalog;
+                                packageId: string;
+                                chain: seq[CatalogAdapterKind];
+                                version: string;
+                                hostCpu: PlatformCpu;
+                                hostOs: PlatformOs): CatalogResolution
+    {.closure.}
+
+var chainResolveOverride*: ChainResolveCallback = nil
+  ## M1 test seam. Set to a non-nil closure to intercept the realize-side
+  ## ``chainResolvePackage`` call. NEVER set in production; the helpers
+  ## in `tests/t_realize_honors_*` set + reset around their test bodies.
+
+proc callChainResolve(cat: var ProductionCatalog;
+                      packageId: string;
+                      chain: seq[CatalogAdapterKind];
+                      version: string): CatalogResolution =
+  if chainResolveOverride != nil:
+    return chainResolveOverride(cat, packageId, chain, version,
+      detectHostCpu(), detectHostOs())
+  return chainResolvePackage(cat, packageId, chain = chain, version = version)
+
+# ---------------------------------------------------------------------------
 # M72 production catalog dispatch
 # ---------------------------------------------------------------------------
 
@@ -425,8 +469,7 @@ proc realizeViaProductionCatalog(store: var Store;
         raiseRealizeFailed(packageId, "builtin", err.msg)
     let resolutionChain =
       try:
-        chainResolvePackage(cat, packageId, chain = chain,
-          version = requestedVersion)
+        callChainResolve(cat, packageId, chain, requestedVersion)
       except EAdapterChainExhausted as err:
         raiseRealizeFailed(packageId, "<chain>", err.msg)
       except EUnknownPackage as err:
@@ -457,6 +500,11 @@ proc realizeViaProductionCatalog(store: var Store;
     if result.adapter != akBuiltin:
       result.cacheHit = resolutionChain.cacheHit
       result.resolvedVersion = resolutionChain.resolvedVersion
+    # M1 (Realize-Layer-Plumbing-Closures): expose the chain trace on the
+    # realized record so the realize-side symmetry gate can assert which
+    # adapter resolved each package. Empty for non-chain branches; one
+    # entry per adapter consulted on the chain branch.
+    result.chainTrace = resolutionChain.chainTrace
     return
 
   let resolution =
@@ -757,10 +805,16 @@ proc realizePlannedPackages*(store: var Store;
     else:
       # M72: no test-seam binding — resolve through the production
       # adapter catalog of the real host environment.
-      # NOTE: `requestedVersion` is intentionally NOT threaded through
-      # here (M69-shaped pre-existing behaviour — the realize-side
-      # version pin lives behind a separate seam). M2.5 only adds the
-      # `chain` parameter so the per-host `adapterPreference:` override
-      # reaches `chainResolvePackage` at realize time.
+      #
+      # M1 (Realize-Layer-Plumbing-Closures): thread BOTH the per-host
+      # `chain` (M2.5) AND `p.requestedVersion` (M69) into
+      # `realizeViaProductionCatalog`. The chain reaches
+      # `chainResolvePackage` so the operator-specified `adapterPreference:`
+      # override is honored at realize time as well as preview time; the
+      # version pin reaches `chainResolvePackage`'s `version` parameter so
+      # `package(jdk, "21.0.5")` resolves the pinned slice rather than the
+      # catalog HEAD. Both fixes were latent pre-M1 — preview honored
+      # both, realize honored neither.
       result.add(realizeViaProductionCatalog(store, prodCatalog, p.packageId,
+        requestedVersion = p.requestedVersion,
         chain = chain))
