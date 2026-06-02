@@ -103,7 +103,16 @@ type
     isPublished*: bool
     diagnostic*: string
 
-const PayloadVersion = "reprobuild.workspace-vcs.payload.v1"
+const PayloadVersion* = "reprobuild.workspace-vcs.payload.v1"
+  ## First-line magic of a git-flavored payload encoded into
+  ## ``builtinText``. The multiplexed executor (see
+  ## ``executeWorkspaceVcsAction`` below) consults the first line of
+  ## the encoded payload to discriminate git from hg actions: anything
+  ## that starts with ``PayloadVersion`` is dispatched into the git
+  ## implementations in this module, anything else is forwarded to the
+  ## hg sub-executor registered by ``hg_actions``. The constant is
+  ## exported (rather than module-private) only so ``hg_actions`` can
+  ## use a parallel magic without colliding by accident.
 
 proc opTag(op: GitVcsOp): string =
   case op
@@ -432,7 +441,63 @@ proc executeSwitch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResu
   writeReceipt(receiptPath, receipt)
   succeeded()
 
+type
+  WorkspaceVcsSubExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Callback shape used by sibling VCS backends (currently
+    ## ``hg_actions``) to plug a per-VCS executor into the single
+    ## ``bakWorkspaceVcs`` dispatcher this module owns.
+    ##
+    ## The dispatcher peeks at the first line of ``action.builtinText``;
+    ## if it matches ``PayloadVersion`` the action runs through git's
+    ## ``executeClone`` / ``executeFetch`` / ``executeSwitch`` arms, and
+    ## otherwise it is forwarded to whichever sub-executor was
+    ## registered for that magic. The engine sees exactly one
+    ## ``WorkspaceVcsExecutor`` (the multiplexer below), so the M2
+    ## engine seam survives unchanged into M3.
+
+var hgSubExecutor {.threadvar.}: WorkspaceVcsSubExecutor
+var hgSubMagic {.threadvar.}: string
+
+proc registerHgSubExecutor*(magic: string; executor: WorkspaceVcsSubExecutor) =
+  ## Install a sub-executor for hg actions. ``magic`` is the first line
+  ## the dispatcher will match against (parallel to git's
+  ## ``PayloadVersion``). Called by ``hg_actions`` at module-init time;
+  ## tests can re-install after ``clearWorkspaceVcsExecutor`` /
+  ## ``clearHgSubExecutor``.
+  hgSubMagic = magic
+  hgSubExecutor = executor
+
+proc clearHgSubExecutor*() =
+  hgSubMagic = ""
+  hgSubExecutor = nil
+
+proc payloadMagicLine(text: string): string =
+  ## Cheap discriminator: return the first non-empty line of the
+  ## encoded payload. We deliberately avoid running the full
+  ## ``decodePayload`` parser here — git's parser raises on any line
+  ## that is not in the git schema, which would mask a perfectly valid
+  ## hg payload as a "decode error".
+  let nl = text.find('\n')
+  if nl < 0: text else: text[0 ..< nl]
+
 proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
+  ## Single dispatcher that the engine sees as the registered
+  ## ``WorkspaceVcsExecutor``. The dispatcher reads the magic at the
+  ## head of the payload and routes to git's own per-op arms or to the
+  ## hg sub-executor registered via ``registerHgSubExecutor``. M2's
+  ## engine seam is unchanged; the multiplexing happens here, inside
+  ## the VCS library, where both VCSes are visible.
+  let magic = payloadMagicLine(action.builtinText)
+  if magic != PayloadVersion:
+    if hgSubExecutor.isNil or magic != hgSubMagic:
+      return failed("payload-decode-failed",
+        "bakWorkspaceVcs payload magic " & magic &
+          " is not handled by any registered VCS sub-executor" &
+          " (expected " & PayloadVersion &
+          (if hgSubMagic.len > 0: " or " & hgSubMagic else: "") & ")")
+    var subResult = hgSubExecutor(action)
+    subResult.id = action.id
+    return subResult
   var payload: GitVcsPayload
   try:
     payload = payloadFromAction(action)
