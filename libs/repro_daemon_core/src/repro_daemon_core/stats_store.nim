@@ -269,10 +269,11 @@ proc flushStatsObservations*(): StatsFlushResult =
   try:
     maybeTestFlushDelay()
     createDir(parentDir(result.storePath))
-    var file = open(result.storePath, fmAppend)
-    defer: file.close()
-    for node in pending:
-      file.writeLine($node)
+    block writePending:
+      var file = open(result.storePath, fmAppend)
+      defer: file.close()
+      for node in pending:
+        file.writeLine($node)
     result.flushed = pending.len
     processFlushedCount += pending.len
     let retained = retentionFiltered(readJsonLines(result.storePath))
