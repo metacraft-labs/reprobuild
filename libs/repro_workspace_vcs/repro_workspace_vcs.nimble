@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Workspace VCS tool identities and actions for Reprobuild"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

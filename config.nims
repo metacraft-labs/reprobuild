@@ -50,6 +50,7 @@ for libName in [
   "repro_cmake_trycompile",
   "repro_standard_provider_protocol",
   "repro_standard_provider",
+  "repro_workspace_vcs",
 ]:
   switch("path", "libs" / libName / "src")
 
