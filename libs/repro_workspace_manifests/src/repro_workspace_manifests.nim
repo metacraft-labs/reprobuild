@@ -7,7 +7,7 @@
 # `repro_workspace_manifests/reader.nim` for the comment carrying the SHA.
 
 import repro_workspace_manifests/[types, diagnostics, reader, resolver,
-  compose, sync_planner, manifest_refresh, lock_writer]
+  compose, sync_planner, manifest_refresh, lock_writer, workspace_branch]
 
 export types
 export diagnostics
@@ -17,3 +17,4 @@ export compose
 export sync_planner
 export manifest_refresh
 export lock_writer
+export workspace_branch

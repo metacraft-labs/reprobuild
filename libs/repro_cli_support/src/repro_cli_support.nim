@@ -11478,13 +11478,16 @@ proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
 
 proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs): ResolvedProject =
   ## Pick the right resolver / composer entry point. The composer wins
-  ## when ``<workspaceRoot>/.repo/workspace.toml`` exists (M8 semantics);
-  ## otherwise we look up the named project / variant under
-  ## ``<workspaceRoot>/.repo/manifests/`` (M6 / M7 semantics). A missing
-  ## name in either place surfaces as a structured ``ValueError`` naming
-  ## both candidate paths the user should look at.
+  ## when ``<workspaceRoot>/.repo/workspace.toml`` declares at least one
+  ## ``[[manifest]]`` layer (M8 semantics); otherwise we look up the
+  ## named project / variant under ``<workspaceRoot>/.repo/manifests/``
+  ## (M6 / M7 semantics). A metadata-only workspace.toml (M13 — written
+  ## by single-project init to record the active branch) routes to the
+  ## single-project path because the composer requires manifest layers.
+  ## A missing name in either place surfaces as a structured
+  ## ``ValueError`` naming both candidate paths the user should look at.
   let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if fileExists(workspaceToml):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     return composeManifestLayersFromFile(workspaceToml)
   let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
   let projectFile = manifestsRoot / "projects" /
@@ -11687,6 +11690,33 @@ proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
   result.report = report
   result.cloneFailures = cloneFailures
 
+  # M13: record the active workspace branch in .repo/workspace.toml so
+  # downstream commands (``repro workspace status``, M14 ``repro branch``,
+  # M15 ``repro checkout``) can read it back as a single source of truth.
+  # The branch value is the resolver's ``trunk`` (the manifest's
+  # documented default branch); when ``trunk`` is empty we fall back to
+  # ``defaultRevision``. We only write when we have a meaningful value
+  # AND no clone failures (writing on a half-broken init would record a
+  # branch the workspace cannot honor). The write is idempotent — if the
+  # composer mode already produced a workspace.toml with a branch, this
+  # call is a no-op (the writer preserves any pre-existing branch when
+  # we pass the same value, and the value comes from the same composed
+  # ``resolved.trunk``).
+  if cloneFailures == 0:
+    let branchValue =
+      if resolved.trunk.len > 0: resolved.trunk
+      elif resolved.defaultRevision.len > 0: resolved.defaultRevision
+      else: ""
+    if branchValue.len > 0:
+      try:
+        writeWorkspaceBranch(args.workspaceRoot,
+          project = resolved.projectName, branch = branchValue)
+      except WorkspaceManifestParseError as e:
+        # A malformed pre-existing workspace.toml shouldn't break init
+        # — surface a structured diagnostic on stderr and continue.
+        stderr.writeLine(
+          "workspace init: could not record active branch: " & e.msg)
+
 proc writeWorkspaceInitReport(report: WorkspaceInitReport) =
   let reportDir = report.workspaceRoot / ".repro" / "workspace"
   createDir(reportDir)
@@ -11873,14 +11903,34 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
 proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
-  ## Same dispatch rule as M9: prefer ``.repo/workspace.toml`` when
-  ## present (composer mode), otherwise look up the named project /
-  ## variant under ``.repo/manifests/``. A missing workspace.toml AND a
-  ## missing project argument is a structured error.
+  ## Same dispatch rule as M9: prefer ``.repo/workspace.toml`` when it
+  ## declares at least one ``[[manifest]]`` layer (composer mode),
+  ## otherwise look up the named project / variant under
+  ## ``.repo/manifests/``. A metadata-only workspace.toml (M13 — only
+  ## carrying ``[workspace].project`` / ``[workspace].branch``) is
+  ## treated as single-project mode because the composer requires
+  ## manifest layers. A missing workspace.toml AND a missing project
+  ## argument is a structured error.
   let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if fileExists(workspaceToml):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     return composeManifestLayersFromFile(workspaceToml)
   if parsed.projectName.len == 0:
+    # If a metadata-only workspace.toml records the project name, we
+    # can still resolve in single-project mode without the user having
+    # to repeat the project on the command line. The M5 reader has
+    # already validated that the file is well-formed by the time we
+    # get here (``isCompositionalWorkspaceToml`` parses it and treats
+    # any parse error as "fall back to single-project mode").
+    if fileExists(workspaceToml):
+      try:
+        let recordedProject =
+          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+        if recordedProject.len > 0:
+          var withProject = parsed
+          withProject.projectName = recordedProject
+          return resolveWorkspaceSyncProject(withProject)
+      except WorkspaceManifestParseError:
+        discard
     raise newException(ValueError,
       "`repro workspace sync` requires either `.repo/workspace.toml` " &
         "or a <project> argument; neither was present at " &
@@ -12358,19 +12408,32 @@ proc parseWorkspaceLockArgs(args: openArray[string]): WorkspaceLockArgs =
 
 proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
     tuple[resolved: ResolvedProject; workspaceLocal: Option[WorkspaceLocal]] =
-  ## Same dispatch rule as M10: prefer ``.repo/workspace.toml`` when
-  ## present (composer mode), otherwise look up the named project /
-  ## variant under ``.repo/manifests/``. Also returns the parsed
+  ## Same dispatch rule as M10: prefer ``.repo/workspace.toml`` when it
+  ## declares at least one ``[[manifest]]`` layer (composer mode),
+  ## otherwise look up the named project / variant under
+  ## ``.repo/manifests/``. A metadata-only workspace.toml (M13) routes
+  ## to single-project mode. Also returns the parsed
   ## ``WorkspaceLocal`` (when composer mode applies) so the caller can
   ## pick the anchor manifest layer for the lock destination.
   let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if fileExists(workspaceToml):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
     let resolved = composeManifestLayers(
       workspaceLocal, parsed.workspaceRoot, absToml)
     return (resolved, some(workspaceLocal))
   if parsed.projectName.len == 0:
+    # Allow a metadata-only workspace.toml to supply the project name.
+    if fileExists(workspaceToml):
+      try:
+        let recordedProject =
+          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+        if recordedProject.len > 0:
+          var withProject = parsed
+          withProject.projectName = recordedProject
+          return resolveWorkspaceLockProject(withProject)
+      except WorkspaceManifestParseError:
+        discard
     raise newException(ValueError,
       "`repro workspace lock` requires either `.repo/workspace.toml` " &
         "or a <project> argument; neither was present at " &
@@ -12844,15 +12907,28 @@ proc resolveWorkspaceStatusProject(parsed: WorkspaceStatusArgs):
     tuple[resolved: ResolvedProject;
           workspaceLocal: Option[WorkspaceLocal]] =
   ## Same dispatch rule as M10 / M11: prefer ``.repo/workspace.toml``
-  ## (composer mode), otherwise look up the named project / variant.
+  ## when it declares at least one ``[[manifest]]`` layer (composer
+  ## mode), otherwise look up the named project / variant. A
+  ## metadata-only workspace.toml (M13) routes to single-project mode.
   let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if fileExists(workspaceToml):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
     let resolved = composeManifestLayers(
       workspaceLocal, parsed.workspaceRoot, absToml)
     return (resolved, some(workspaceLocal))
   if parsed.projectName.len == 0:
+    # Allow a metadata-only workspace.toml to supply the project name.
+    if fileExists(workspaceToml):
+      try:
+        let recordedProject =
+          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+        if recordedProject.len > 0:
+          var withProject = parsed
+          withProject.projectName = recordedProject
+          return resolveWorkspaceStatusProject(withProject)
+      except WorkspaceManifestParseError:
+        discard
     raise newException(ValueError,
       "`repro workspace status` requires either `.repo/workspace.toml` " &
         "or a <project> argument; neither was present at " &
@@ -12915,21 +12991,41 @@ proc pickStatusManifestLayerRoot(workspaceRoot: string;
         return workspaceRoot / ".repo" / ("manifests-0-" & suffix)
   workspaceRoot / ".repo" / "manifests"
 
-proc deriveActiveBranch(workspaceLocal: Option[WorkspaceLocal];
+proc deriveActiveBranch(workspaceRoot: string;
+    workspaceLocal: Option[WorkspaceLocal];
     resolved: ResolvedProject; repos: seq[WorkspaceStatusRepoEntry]): string =
-  ## M12 heuristic for the workspace's active branch — placeholder for
-  ## M13's metadata-backed value. Precedence:
-  ##   1. ``.repo/workspace.toml``'s ``[workspace].branch`` field
-  ##      (when the composer dispatch path was taken AND the field is
-  ##      set).
+  ## M13 — Workspace-metadata-backed active branch, with the original
+  ## M12 heuristic preserved as a fallback for workspaces created
+  ## before M13 landed (no recorded ``[workspace].branch``). Precedence:
+  ##   1. ``.repo/workspace.toml``'s ``[workspace].branch`` field. M13
+  ##      writes this during ``repro workspace init`` (single-project
+  ##      mode) and the M8 composer-mode workspaces already carry it
+  ##      from the user's own metadata. Reading via
+  ##      ``readWorkspaceBranch`` covers BOTH composer- and
+  ##      single-project-mode workspaces uniformly, so we no longer
+  ##      need a separate composer-mode check before this branch.
   ##   2. The first repo whose live HEAD reports a non-empty branch
-  ##      (typical case: a clean workspace where every repo is on the
-  ##      same branch). The spec acknowledges this is a heuristic;
-  ##      M13 will replace it with a stored value.
+  ##      (the original M12 heuristic — typical case: a clean
+  ##      workspace where every repo is on the same branch). Used for
+  ##      legacy workspaces created before M13 wrote the metadata.
   ##   3. The resolver's ``trunk`` field (the manifest's documented
   ##      default branch, e.g. ``main``). Used when no live repo
   ##      checkout reports a current branch.
   ##   4. Empty string.
+  try:
+    let recorded = readWorkspaceBranch(workspaceRoot)
+    if recorded.isSome:
+      return recorded.get()
+  except WorkspaceManifestParseError:
+    # A malformed workspace.toml: fall back to the M12 heuristic so
+    # ``status`` still produces a useful answer. The dispatcher will
+    # have already surfaced the structured diagnostic if needed.
+    discard
+  # Composer-mode workspaces that pre-date M13 and never re-ran init
+  # carry their branch directly on the parsed ``WorkspaceLocal`` — the
+  # ``readWorkspaceBranch`` path above already covers them, but we
+  # leave this defensive check in place for parity with the M12
+  # heuristic when the strict reader had to bail out.
   if workspaceLocal.isSome and
       workspaceLocal.get().workspace.branch.isSome and
       workspaceLocal.get().workspace.branch.get().len > 0:
@@ -13066,7 +13162,7 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     report.repos.add(entry)
 
   report.activeBranch = deriveActiveBranch(
-    workspaceLocal, resolved, report.repos)
+    args.workspaceRoot, workspaceLocal, resolved, report.repos)
   report.exitCode = 0
   result = report
 
@@ -13192,12 +13288,25 @@ proc parseWorkspaceListArgs(args: openArray[string]): WorkspaceListArgs =
 proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
     ResolvedProject =
   ## Same dispatch rule as M9/M10/M11/status: prefer
-  ## ``.repo/workspace.toml`` (composer mode), otherwise look up the
-  ## named project / variant.
+  ## ``.repo/workspace.toml`` when it declares at least one
+  ## ``[[manifest]]`` layer (composer mode), otherwise look up the
+  ## named project / variant. A metadata-only workspace.toml (M13)
+  ## routes to single-project mode.
   let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if fileExists(workspaceToml):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     return composeManifestLayersFromFile(workspaceToml)
   if parsed.projectName.len == 0:
+    # Allow a metadata-only workspace.toml to supply the project name.
+    if fileExists(workspaceToml):
+      try:
+        let recordedProject =
+          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+        if recordedProject.len > 0:
+          var withProject = parsed
+          withProject.projectName = recordedProject
+          return resolveWorkspaceListProject(withProject)
+      except WorkspaceManifestParseError:
+        discard
     raise newException(ValueError,
       "`repro workspace list` requires either `.repo/workspace.toml` " &
         "or a <project> argument; neither was present at " &
@@ -13428,9 +13537,19 @@ proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
     report.hasLayeredWorkspace = false
     report.exitCode = 0
     return report
-  report.hasLayeredWorkspace = true
+  # M13: a metadata-only workspace.toml (zero ``[[manifest]]`` entries —
+  # written by M9 init in single-project mode to record the active
+  # branch) is NOT a layered workspace. Mirror the dispatch sites in
+  # init / sync / lock / status / list and treat such a file the same
+  # way we treat a missing workspace.toml.
   let absToml = absolutePath(workspaceToml)
   let workspaceLocal = readWorkspaceLocal(absToml)
+  if workspaceLocal.manifest.len == 0:
+    report.hasLayeredWorkspace = false
+    report.project = workspaceLocal.workspace.project
+    report.exitCode = 0
+    return report
+  report.hasLayeredWorkspace = true
   report.project = workspaceLocal.workspace.project
 
   # Compose the layers to learn which repo each layer ultimately
