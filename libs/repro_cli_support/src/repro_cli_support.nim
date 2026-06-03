@@ -12205,6 +12205,446 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
     stdout.writeLine(line)
   outcome.report.exitCode
 
+# ---- M11: `repro workspace lock` ------------------------------------------
+#
+# Generate ``locks/<project>/<trigger>-<short-sha>.toml`` from the live
+# VCS state of the workspace, per Workspace-Manifests.md
+# §"locks/<project>/<sha>.toml". The same code path is invoked by the
+# M16 post-commit hook with an explicit ``--sha=<commit>`` so a fresh
+# commit lands as its own lock entry.
+#
+# Steady-state semantics:
+#   1. Resolve the project (single-project M6 path) or compose layers
+#      (M8 path), exactly as M9/M10 do. The composer returns the live
+#      ``ResolvedRepo`` list — the same tuple the planner already
+#      consumes.
+#   2. Pick the manifest layer that will OWN the lock file. The lock
+#      lives in the manifest repo (per spec), and a workspace with
+#      multiple layers picks the FIRST layer (the "anchor" layer —
+#      typically the public manifest). The operator can override with
+#      ``--manifest-layer-root=PATH`` to target an internal/private
+#      layer instead.
+#   3. For every declared repo, gather a fresh observation: HEAD SHA
+#      via the M2 ``headShaQuery`` adapter; clean/dirty via
+#      ``isCleanQuery``; current branch via ``symbolic-ref --short``.
+#      A repo whose checkout is dirty short-circuits to refuse-and-
+#      report (exit 2). A locked snapshot of a dirty tree would lie:
+#      its recorded SHA wouldn't reproduce the working tree.
+#   4. Build the in-memory ``WorkspaceLockFile`` and the matching
+#      ``WorkspaceLockIndexEntry``, write the lock TOML, update the
+#      index, emit the structured stdout + ``lock-report.json``.
+#
+# Exit codes:
+#   0 — lock + index written (or already up-to-date).
+#   1 — IO failure, VCS query failure, or a missing trigger repo.
+#   2 — at least one declared checkout is dirty.
+
+type
+  WorkspaceLockRepoEntry* = object
+    ## One per locked repo in the JSON report. The ``branch`` field
+    ## is the advisory current branch (empty when the working tree is
+    ## detached); the lock TOML carries the same value.
+    name*: string
+    path*: string
+    remote*: string
+    revision*: string
+    branch*: string
+
+  WorkspaceLockDirtyEntry* = object
+    ## One per repo whose live checkout was DIRTY when the lock was
+    ## attempted. Carried separately from the locked entries so the
+    ## report has a per-case enumeration of refuse-and-report
+    ## outcomes.
+    name*: string
+    path*: string
+    reason*: string
+
+  WorkspaceLockReport* = object
+    ## Structured outcome of one ``repro workspace lock`` invocation.
+    ## ``lockFilePath`` and ``indexFilePath`` are the absolute paths
+    ## the writer landed on; ``triggerRepo`` + ``triggerSha`` reflect
+    ## the (repo, commit) tuple that anchored the lock filename.
+    ## ``replacedExistingEntry`` is true when the index updater
+    ## overwrote a pre-existing entry rather than appending — the
+    ## idempotent re-lock case.
+    project*: string
+    workspaceRoot*: string
+    manifestLayerRoot*: string
+    lockFilePath*: string
+    indexFilePath*: string
+    triggerRepo*: string
+    triggerSha*: string
+    createdAt*: string
+    workspaceBranch*: string
+    replacedExistingEntry*: bool
+    repos*: seq[WorkspaceLockRepoEntry]
+    dirty*: seq[WorkspaceLockDirtyEntry]
+    exitCode*: int
+
+  WorkspaceLockOutcome* = object
+    report*: WorkspaceLockReport
+
+proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["manifestLayerRoot"] = %report.manifestLayerRoot
+  result["lockFilePath"] = %report.lockFilePath
+  result["indexFilePath"] = %report.indexFilePath
+  result["triggerRepo"] = %report.triggerRepo
+  result["triggerSha"] = %report.triggerSha
+  result["createdAt"] = %report.createdAt
+  result["workspaceBranch"] = %report.workspaceBranch
+  result["replacedExistingEntry"] = %report.replacedExistingEntry
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["remote"] = %entry.remote
+    obj["revision"] = %entry.revision
+    obj["branch"] = %entry.branch
+    repos.add(obj)
+  result["repos"] = repos
+  var dirty = newJArray()
+  for entry in report.dirty:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["reason"] = %entry.reason
+    dirty.add(obj)
+  result["dirty"] = dirty
+  result["exitCode"] = %report.exitCode
+
+proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
+  if report.exitCode == 0:
+    result.add("workspace lock: wrote " & report.lockFilePath &
+      " (trigger=" & report.triggerRepo & "@" &
+      report.triggerSha & ")")
+    for entry in report.repos:
+      result.add("workspace lock: locked " & entry.path & " @ " &
+        entry.revision &
+        (if entry.branch.len > 0: " (branch " & entry.branch & ")" else: ""))
+    if report.replacedExistingEntry:
+      result.add("workspace lock: replaced existing index entry for (" &
+        report.triggerRepo & ", " & report.triggerSha & ")")
+  for entry in report.dirty:
+    result.add("workspace lock: refused — '" & entry.path &
+      "' is dirty (" & entry.reason & ")")
+
+type
+  WorkspaceLockArgs = object
+    workspaceRoot: string
+    projectName: string
+    manifestLayerRoot: string
+    triggerRepo: string
+    triggerSha: string
+    toolProvisioning: ToolProvisioningMode
+
+proc parseWorkspaceLockArgs(args: openArray[string]): WorkspaceLockArgs =
+  ## ``repro workspace lock`` argv parser. The single optional
+  ## positional is the project name (only required when no
+  ## ``.repo/workspace.toml`` is present — same dispatch rule as
+  ## M10's sync command). Optional flags:
+  ##   ``--workspace-root=PATH``
+  ##   ``--manifest-layer-root=PATH``
+  ##   ``--sha=SHA``           — explicit trigger commit (M16 hook)
+  ##   ``--trigger-repo=NAME``  — explicit trigger repo
+  ##   ``--tool-provisioning=path|nix|tarball|scoop``
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--manifest-layer-root" or
+        arg.startsWith("--manifest-layer-root="):
+      result.manifestLayerRoot = valueFromFlag(args, i,
+        "--manifest-layer-root")
+    elif arg == "--sha" or arg.startsWith("--sha="):
+      result.triggerSha = valueFromFlag(args, i, "--sha")
+    elif arg == "--trigger-repo" or arg.startsWith("--trigger-repo="):
+      result.triggerRepo = valueFromFlag(args, i, "--trigger-repo")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace lock` flag: " & arg)
+    elif result.projectName.len == 0:
+      result.projectName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro workspace lock`: " & arg)
+    inc i
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  if result.manifestLayerRoot.len > 0:
+    result.manifestLayerRoot = absolutePath(result.manifestLayerRoot)
+
+proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
+    tuple[resolved: ResolvedProject; workspaceLocal: Option[WorkspaceLocal]] =
+  ## Same dispatch rule as M10: prefer ``.repo/workspace.toml`` when
+  ## present (composer mode), otherwise look up the named project /
+  ## variant under ``.repo/manifests/``. Also returns the parsed
+  ## ``WorkspaceLocal`` (when composer mode applies) so the caller can
+  ## pick the anchor manifest layer for the lock destination.
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if fileExists(workspaceToml):
+    let absToml = absolutePath(workspaceToml)
+    let workspaceLocal = readWorkspaceLocal(absToml)
+    let resolved = composeManifestLayers(
+      workspaceLocal, parsed.workspaceRoot, absToml)
+    return (resolved, some(workspaceLocal))
+  if parsed.projectName.len == 0:
+    raise newException(ValueError,
+      "`repro workspace lock` requires either `.repo/workspace.toml` " &
+        "or a <project> argument; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" /
+    (parsed.projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" /
+    (parsed.projectName & ".toml")
+  if fileExists(projectFile):
+    return (resolveProject(projectFile), none(WorkspaceLocal))
+  if fileExists(variantFile):
+    return (resolveVariant(variantFile), none(WorkspaceLocal))
+  raise newException(ValueError,
+    "no project or variant named '" & parsed.projectName &
+      "' found under '" & manifestsRoot &
+      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+
+proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
+                           workspaceLocal: Option[WorkspaceLocal]): string =
+  ## Resolve the directory that will OWN the lock file. Priority:
+  ##   1. The explicit ``--manifest-layer-root`` flag (M16 callers,
+  ##      multi-tier setups).
+  ##   2. The first ``[[manifest]]`` layer in
+  ##      ``.repo/workspace.toml`` (composer mode). For ``local_path``
+  ##      layers the path is taken verbatim (relative to the
+  ##      workspace root); for ``url`` layers it's the on-disk
+  ##      checkout the composer materialised at
+  ##      ``<workspaceRoot>/.repo/manifests-<i>-<sanitized>``.
+  ##   3. ``<workspaceRoot>/.repo/manifests`` (single-project mode,
+  ##      matching M9/M10's resolver dispatch).
+  if parsed.manifestLayerRoot.len > 0:
+    return parsed.manifestLayerRoot
+  if workspaceLocal.isSome:
+    let local = workspaceLocal.get()
+    if local.manifest.len > 0:
+      let first = local.manifest[0]
+      if first.local_path.isSome and first.local_path.get().len > 0:
+        let raw = first.local_path.get()
+        if isAbsolute(raw):
+          return raw
+        return parsed.workspaceRoot / raw
+      if first.url.isSome and first.url.get().len > 0:
+        # Mirror the composer's directory-naming convention so the
+        # lock lands inside the same on-disk checkout the composer
+        # acquired the layer at.
+        let sanitizedSegments = block:
+          var raw1 = ""
+          for ch in first.url.get():
+            case ch
+            of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
+            else: raw1.add('-')
+          var collapsed = ""
+          var prevDash = false
+          for ch in raw1:
+            if ch == '-':
+              if not prevDash: collapsed.add(ch)
+              prevDash = true
+            else:
+              collapsed.add(ch)
+              prevDash = false
+          if collapsed.len > 80:
+            collapsed.setLen(80)
+          collapsed.strip(chars = {'-'},
+            leading = true, trailing = true)
+        let suffix =
+          if sanitizedSegments.len > 0: sanitizedSegments
+          else: "layer"
+        return parsed.workspaceRoot / ".repo" /
+          ("manifests-0-" & suffix)
+  parsed.workspaceRoot / ".repo" / "manifests"
+
+proc pickTriggerRepo(resolved: ResolvedProject;
+                     explicit: string): ResolvedRepo =
+  ## Choose the repo whose HEAD anchors the lock filename. The
+  ## explicit ``--trigger-repo=NAME`` flag wins; otherwise default to
+  ## the repo whose ``name`` matches the project name (the
+  ## "project-named anchor" pattern the spec example uses —
+  ## ``[[repo]] name = "reprobuild"`` in the ``reprobuild`` project
+  ## anchors lock files at ``locks/reprobuild/reprobuild-<sha>.toml``).
+  ## If no name match exists we fall back to the first declared repo.
+  if explicit.len > 0:
+    for repo in resolved.repos:
+      if repo.name == explicit:
+        return repo
+    raise newException(ValueError,
+      "trigger repo '" & explicit &
+        "' is not declared in project '" & resolved.projectName & "'")
+  for repo in resolved.repos:
+    if repo.name == resolved.projectName:
+      return repo
+  if resolved.repos.len == 0:
+    raise newException(ValueError,
+      "project '" & resolved.projectName &
+        "' declares no repos; cannot pick a trigger anchor")
+  resolved.repos[0]
+
+proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
+  ## End-to-end driver. (1) Resolve the project / compose layers.
+  ## (2) Pick the manifest layer that owns the lock. (3) Gather
+  ## live HEAD-SHA + clean/dirty + current-branch observations for
+  ## every declared repo. (4) Refuse on any dirty checkout. (5)
+  ## Build the lock model + index entry. (6) Write both files and
+  ## emit the structured report.
+  var report: WorkspaceLockReport
+  report.workspaceRoot = args.workspaceRoot
+
+  let (resolved, workspaceLocal) = resolveWorkspaceLockProject(args)
+  report.project = resolved.projectName
+
+  let manifestLayerRoot = pickManifestLayerRoot(args, workspaceLocal)
+  report.manifestLayerRoot = manifestLayerRoot
+
+  let identity = ensureGitToolResolvable(
+    args.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  # Observation pass. We gather all three values for every repo in
+  # one walk so the dirty refusal can land alongside the trigger-
+  # resolution check below.
+  var headShas = initTable[string, string]()
+  var currentBranches = initTable[string, string]()
+  var dirtyEntries: seq[WorkspaceLockDirtyEntry]
+  for repo in resolved.repos:
+    let repoPath = args.workspaceRoot / repo.path
+    if not dirExists(repoPath / ".git"):
+      raise newException(ValueError,
+        "repo '" & repo.path &
+          "' has no on-disk checkout at '" & repoPath &
+          "'; run `repro workspace init` or `repro workspace sync` first")
+    let headRes = queryGitState(headShaQuery(repoPath), identity)
+    if headRes.status != gqsOk:
+      raise newException(ValueError,
+        "could not query HEAD SHA for repo '" & repo.path &
+          "': " & headRes.diagnostic)
+    headShas[repo.path] = headRes.headSha
+    let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
+    let isClean =
+      if cleanRes.status == gqsOk: cleanRes.isClean
+      else: false
+    if not isClean:
+      let reason =
+        if cleanRes.status != gqsOk:
+          "clean/dirty probe failed: " & cleanRes.diagnostic
+        else:
+          "working tree has uncommitted changes"
+      dirtyEntries.add(WorkspaceLockDirtyEntry(
+        name: repo.name, path: repo.path, reason: reason))
+    let branchRes = gitRunPlain(identity,
+      ["-C", repoPath, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branchRes.code == 0:
+      let branch = branchRes.output.strip()
+      if branch.len > 0:
+        currentBranches[repo.path] = branch
+
+  # Refuse-and-report path: a lock at a dirty tree would lie about
+  # what the recorded SHA reproduces.
+  if dirtyEntries.len > 0:
+    report.dirty = dirtyEntries
+    report.exitCode = 2
+    result.report = report
+    return
+
+  let triggerRepo = pickTriggerRepo(resolved, args.triggerRepo)
+  let triggerSha =
+    if args.triggerSha.len > 0: args.triggerSha
+    else: headShas[triggerRepo.path]
+  if triggerSha.len == 0:
+    raise newException(ValueError,
+      "could not determine trigger SHA for repo '" &
+        triggerRepo.name & "' at path '" & triggerRepo.path & "'")
+
+  let createdAt = isoTimestampNow()
+  let createdBy = "repro workspace lock"
+  var workspaceBranch = ""
+  if workspaceLocal.isSome and workspaceLocal.get().workspace.branch.isSome:
+    workspaceBranch = workspaceLocal.get().workspace.branch.get()
+  elif resolved.trunk.len > 0:
+    workspaceBranch = resolved.trunk
+
+  var lock = buildLockFromLiveState(
+    project = resolved.projectName,
+    workspaceBranch = workspaceBranch,
+    createdAt = createdAt,
+    createdBy = createdBy,
+    resolved = resolved.repos,
+    headShasByPath = headShas,
+    currentBranchesByPath = currentBranches)
+
+  let lockPath = lockFilePath(manifestLayerRoot, resolved.projectName,
+    triggerRepo.name, triggerSha)
+  writeLockFile(lock, lockPath)
+  report.lockFilePath = lockPath
+
+  let indexPath = lockIndexPath(manifestLayerRoot, resolved.projectName)
+  let indexUpdate = updateLockIndex(indexPath,
+    WorkspaceLockIndexEntry(
+      triggerRepo: triggerRepo.name,
+      triggerSha: triggerSha,
+      lockFile: lockFileRepoRelativePath(resolved.projectName,
+        triggerRepo.name, triggerSha),
+      createdAt: createdAt))
+  report.indexFilePath = indexPath
+  report.replacedExistingEntry = indexUpdate.replaced
+  report.triggerRepo = triggerRepo.name
+  report.triggerSha = triggerSha
+  report.createdAt = createdAt
+  report.workspaceBranch = workspaceBranch
+
+  for entry in lock.repos:
+    report.repos.add(WorkspaceLockRepoEntry(
+      name: entry.name,
+      path: entry.path,
+      remote: entry.remoteName,
+      revision: entry.revision,
+      branch: entry.branch))
+  report.exitCode = 0
+  result.report = report
+
+proc writeWorkspaceLockReport(report: WorkspaceLockReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "lock-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runWorkspaceLockCommand*(args: openArray[string]): int =
+  ## ``repro workspace lock [<project>] [--workspace-root=PATH]
+  ## [--manifest-layer-root=PATH] [--sha=SHA] [--trigger-repo=NAME]
+  ## [--tool-provisioning=path|nix|tarball|scoop]``.
+  ##
+  ## Exit codes (per M11 design):
+  ##   - 0 — lock TOML written; index updated.
+  ##   - 1 — IO failure, VCS query failure, or a mis-specified
+  ##         trigger repo / SHA. Distinct from refuse-and-report.
+  ##   - 2 — at least one declared repo has a dirty working tree.
+  ##         The lock would lie about what the recorded SHA
+  ##         reproduces; the operator must commit, stash, or
+  ##         discard first.
+  let parsed = parseWorkspaceLockArgs(args)
+  let outcome = executeWorkspaceLock(parsed)
+  writeWorkspaceLockReport(outcome.report)
+  for line in renderLockTextLines(outcome.report):
+    stdout.writeLine(line)
+  outcome.report.exitCode
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -12518,6 +12958,23 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceSyncCommand(syncArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace sync: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "lock":
+    # M11 — `repro workspace lock`. Follows the same convention as
+    # M9/M10: the milestone spec names
+    # ``apps/repro/subcmds/workspace_lock.nim`` but the implementation
+    # lives in ``repro_cli_support`` for symmetry, reachable via
+    # ``runWorkspaceLockCommand``.
+    try:
+      let lockArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceLockCommand(lockArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace lock: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
