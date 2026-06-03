@@ -132,6 +132,62 @@ proc WideCharToMultiByte(CodePage: DWORD, dwFlags: DWORD,
 proc lstrlenW(lpString: LPCWSTR): int32
   {.importc, stdcall, dynlib: "kernel32".}
 
+# --- Grandchild injection: pull the shim into every CreateProcess descendant.
+# Without this, descendants of a shim-loaded process spawn naked — their
+# CreateFileW calls are not hooked, evidence vanishes, dev-env-edge caching
+# decides "no observed inputs" and serves stale artifacts.
+#
+# Mirrors the top-level injector in repro_monitor_depfile/windows_injector.nim:
+# spawn the child CREATE_SUSPENDED, allocate a buffer in its address space,
+# write our own DLL path into it, fire LoadLibraryW via CreateRemoteThread,
+# wait, free, resume the main thread (unless the caller had asked for
+# CREATE_SUSPENDED itself).
+
+const
+  CREATE_SUSPENDED = 0x00000004'u32
+  MEM_COMMIT = 0x00001000'u32
+  MEM_RESERVE = 0x00002000'u32
+  MEM_RELEASE = 0x00008000'u32
+  PAGE_READWRITE = 0x04'u32
+  INFINITE = 0xFFFFFFFF'u32
+  GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS = 0x00000004'u32
+  GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT = 0x00000002'u32
+
+type SIZE_T = uint
+
+proc GetModuleHandleExW(dwFlags: DWORD, lpModuleName: LPCWSTR,
+                        phModule: ptr HANDLE): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+proc GetModuleFileNameW(hModule: HANDLE, lpFilename: LPWSTR,
+                        nSize: DWORD): DWORD
+  {.importc, stdcall, dynlib: "kernel32".}
+proc GetModuleHandleW(lpModuleName: LPCWSTR): HANDLE
+  {.importc, stdcall, dynlib: "kernel32".}
+proc GetProcAddress(hModule: HANDLE, lpProcName: LPCSTR): pointer
+  {.importc, stdcall, dynlib: "kernel32".}
+proc VirtualAllocEx(hProcess: HANDLE, lpAddress: LPVOID, dwSize: SIZE_T,
+                    flAllocationType: DWORD, flProtect: DWORD): LPVOID
+  {.importc, stdcall, dynlib: "kernel32".}
+proc VirtualFreeEx(hProcess: HANDLE, lpAddress: LPVOID, dwSize: SIZE_T,
+                   dwFreeType: DWORD): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+proc WriteProcessMemory(hProcess: HANDLE, lpBaseAddress: LPVOID,
+                        lpBuffer: LPCVOID, nSize: SIZE_T,
+                        lpNumberOfBytesWritten: ptr SIZE_T): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+proc CreateRemoteThread(hProcess: HANDLE,
+                        lpThreadAttributes: LPSECURITY_ATTRIBUTES,
+                        dwStackSize: SIZE_T, lpStartAddress: pointer,
+                        lpParameter: LPVOID, dwCreationFlags: DWORD,
+                        lpThreadId: ptr DWORD): HANDLE
+  {.importc, stdcall, dynlib: "kernel32".}
+proc WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD): DWORD
+  {.importc, stdcall, dynlib: "kernel32".}
+proc ResumeThread(hThread: HANDLE): DWORD
+  {.importc, stdcall, dynlib: "kernel32".}
+proc CloseHandle(hObject: HANDLE): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+
 # --- Hook function pointer types (mirror the Win32 API signatures) ---------
 
 type
@@ -229,6 +285,11 @@ var
   fragmentDir: string
   nextProcessSeq: uint64 = 0
   handlePaths = initTable[uint64, string]()
+  # Grandchild injection: cache of our own DLL path (UTF-16, NUL-terminated)
+  # populated lazily on the first CreateProcessW dispatch. Used as the
+  # ``LoadLibraryW`` argument when re-injecting into spawned children.
+  selfDllPathW: seq[uint16] = @[]
+  selfDllPathReady: bool = false
 
 var disabled {.threadvar.}: int
 
@@ -800,7 +861,100 @@ proc snoopGetFileAttributesA(ctx: var hr.HookContext) {.raises: [].} =
     discard
   SetLastError(savedLastError)
 
+# Lazily populate the shim's own DLL path so we can re-inject it into
+# CreateProcess descendants. ``GetModuleHandleExW`` with
+# ``FROM_ADDRESS`` flag locates the module containing the address of
+# ``snoopCreateProcessW`` itself; that's our own DLL by definition. We
+# then read its file path with ``GetModuleFileNameW``. The
+# ``UNCHANGED_REFCOUNT`` flag avoids artificially bumping our own load
+# count.
+proc ensureSelfDllPath() =
+  if selfDllPathReady:
+    return
+  var hSelf: HANDLE = nil
+  # Cast through ``ByteAddress`` (Nim's ``int``-sized integer alias)
+  # so the C codegen emits ``(NU16*)(long)x`` instead of
+  # ``(NU16*)x``. Going through an integer breaks gcc's
+  # ``-Wincompatible-pointer-types`` warn-as-error path that fires on
+  # function-pointer → data-pointer direct conversions; the runtime
+  # bit pattern is the literal address of our own ``ensureSelfDllPath``
+  # function, which is the probe value ``GetModuleHandleExW`` needs.
+  let selfProbe = cast[ByteAddress](ensureSelfDllPath)
+  if GetModuleHandleExW(
+      GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS or
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+      cast[LPCWSTR](selfProbe),
+      addr hSelf) == 0 or hSelf == nil:
+    selfDllPathReady = true
+    return
+  var buf: array[1024, uint16]
+  let n = GetModuleFileNameW(hSelf, cast[LPWSTR](addr buf[0]),
+    DWORD(buf.len))
+  if n == 0'u32 or n >= DWORD(buf.len):
+    selfDllPathReady = true
+    return
+  selfDllPathW = newSeq[uint16](int(n) + 1)
+  for i in 0 ..< int(n):
+    selfDllPathW[i] = buf[i]
+  selfDllPathW[int(n)] = 0'u16
+  selfDllPathReady = true
+
+# Inject the shim DLL into ``hProcess`` by allocating a buffer in the
+# remote address space, writing our own DLL path into it, and firing
+# LoadLibraryW via CreateRemoteThread. LoadLibraryW's entry-point
+# address is identical in the child because kernel32 maps at the same
+# base across processes for the lifetime of the OS boot session.
+#
+# Returns true on success. Failures are swallowed silently — child
+# might still run with degraded (but correct) monitoring evidence,
+# which beats crashing the child or killing the parent.
+proc injectShimIntoChild(hProcess: HANDLE): bool {.raises: [].} =
+  if selfDllPathW.len == 0:
+    return false
+  let bufSize = SIZE_T(selfDllPathW.len * sizeof(uint16))
+  let remoteBuf = VirtualAllocEx(hProcess, nil, bufSize,
+    MEM_COMMIT or MEM_RESERVE, PAGE_READWRITE)
+  if remoteBuf == nil:
+    return false
+  defer: discard VirtualFreeEx(hProcess, remoteBuf, 0, MEM_RELEASE)
+  var written: SIZE_T = 0
+  if WriteProcessMemory(hProcess, remoteBuf, addr selfDllPathW[0],
+      bufSize, addr written) == 0:
+    return false
+  var kernel32Name = [uint16(ord('k')), uint16(ord('e')), uint16(ord('r')),
+    uint16(ord('n')), uint16(ord('e')), uint16(ord('l')),
+    uint16(ord('3')), uint16(ord('2')), uint16(ord('.')),
+    uint16(ord('d')), uint16(ord('l')), uint16(ord('l')), 0'u16]
+  let kernel32 = GetModuleHandleW(cast[LPCWSTR](addr kernel32Name[0]))
+  if kernel32 == nil:
+    return false
+  let loadLibraryW = GetProcAddress(kernel32, "LoadLibraryW")
+  if loadLibraryW == nil:
+    return false
+  let hThread = CreateRemoteThread(hProcess, nil, 0, loadLibraryW,
+    remoteBuf, 0, nil)
+  if hThread == nil:
+    return false
+  discard WaitForSingleObject(hThread, INFINITE)
+  discard CloseHandle(hThread)
+  true
+
 proc snoopCreateProcessW(ctx: var hr.HookContext) {.raises: [].} =
+  # Grandchild injection (Windows fs-snoop): force CREATE_SUSPENDED into
+  # the child's creation flags BEFORE the real CreateProcessW runs, so
+  # the child is suspended on its initial thread when control returns.
+  # We then inject our own DLL via CreateRemoteThread(LoadLibraryW),
+  # wait for LoadLibraryW to return inside the child, and resume the
+  # main thread — unless the original caller already asked for
+  # CREATE_SUSPENDED themselves, in which case we leave the suspension
+  # exactly as they requested.
+  let callerCreationFlags = DWORD(ctx.args[5])
+  let callerAskedForSuspended =
+    (callerCreationFlags and CREATE_SUSPENDED) != 0
+  if initialized and disabled == 0:
+    ensureSelfDllPath()
+    if selfDllPathW.len > 0:
+      ctx.args[5] = uint64(callerCreationFlags or CREATE_SUSPENDED)
   hr.callNext(ctx)
   let savedLastError = GetLastError()
   if disabled > 0 or not initialized:
@@ -823,11 +977,28 @@ proc snoopCreateProcessW(ctx: var hr.HookContext) {.raises: [].} =
     record.path = path
     record.detail = "CreateProcessW"
     emitRecord(record)
+    # On success, inject and (if needed) resume the main thread. The
+    # caller's flags determine whether we are responsible for the
+    # resume — if they passed CREATE_SUSPENDED we MUST NOT touch the
+    # main thread, otherwise the caller's own ResumeThread call later
+    # double-resumes.
+    if r != 0 and lpProcessInfo != nil and selfDllPathW.len > 0:
+      let pi = lpProcessInfo[]
+      discard injectShimIntoChild(pi.hProcess)
+      if not callerAskedForSuspended:
+        discard ResumeThread(pi.hThread)
   except CatchableError:
     discard
   SetLastError(savedLastError)
 
 proc snoopCreateProcessA(ctx: var hr.HookContext) {.raises: [].} =
+  let savedFlagsA = DWORD(ctx.args[5])
+  let callerAskedForSuspendedA =
+    (savedFlagsA and CREATE_SUSPENDED) != 0
+  if initialized and disabled == 0:
+    ensureSelfDllPath()
+    if selfDllPathW.len > 0:
+      ctx.args[5] = uint64(savedFlagsA or CREATE_SUSPENDED)
   hr.callNext(ctx)
   let savedLastError = GetLastError()
   if disabled > 0 or not initialized:
@@ -850,6 +1021,11 @@ proc snoopCreateProcessA(ctx: var hr.HookContext) {.raises: [].} =
     record.path = path
     record.detail = "CreateProcessA"
     emitRecord(record)
+    if r != 0 and lpProcessInfo != nil and selfDllPathW.len > 0:
+      let pi = lpProcessInfo[]
+      discard injectShimIntoChild(pi.hProcess)
+      if not callerAskedForSuspendedA:
+        discard ResumeThread(pi.hThread)
   except CatchableError:
     discard
   SetLastError(savedLastError)
