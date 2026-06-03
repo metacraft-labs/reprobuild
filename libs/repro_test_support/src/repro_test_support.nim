@@ -143,3 +143,29 @@ proc daemonSocketEndpoint*(name: string): string =
     r"\\.\pipe\" & name.replace('\\', '_').replace('/', '_')
   else:
     "/tmp" / (name & ".sock")
+
+proc runquotaSocketEndpoint*(name: string): string =
+  ## Per-test ``runquotad --socket`` argument that always lands on the
+  ## right transport: a Unix-socket path under ``/tmp`` on POSIX, a
+  ## Named-Pipe name in the kernel namespace on Windows. ``runquotad``
+  ## auto-maps a ``.sock``-shaped argument to a deterministic
+  ## ``\\.\pipe\runquota-<token>`` on Windows, but tests still need
+  ## to thread the SAME string into ``RUNQUOTA_SOCKET`` so the client
+  ## connects to the same instance.
+  when defined(windows):
+    r"\\.\pipe\runquotad-" & name.replace('\\', '_').replace('/', '_')
+  else:
+    "/tmp" / (name & ".sock")
+
+proc runquotaEndpointReachable*(endpoint: string): bool =
+  ## Polled readiness check used by ``ensureRunQuotaDaemon`` helpers
+  ## across the suite. The POSIX path is "the socket file appeared";
+  ## on Windows there is no file — the named pipe lives in
+  ## ``\\.\pipe\`` — so we fall back to ``fileExists`` on POSIX and
+  ## treat the daemon as ready on Windows once the process has not
+  ## crashed (the caller's process-alive check is the real signal
+  ## there).
+  when defined(windows):
+    endpoint.startsWith(r"\\.\pipe\") or endpoint.startsWith(r"\\?\pipe\")
+  else:
+    fileExists(endpoint)

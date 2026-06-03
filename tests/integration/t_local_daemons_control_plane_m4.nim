@@ -125,10 +125,17 @@ proc assertRunQuotaReport(output, socket: string) =
   check reportPath.len > 0
   let report = parseFile(reportPath)
   var found = false
+  # The backend identifier is platform-specific: the runquota daemon
+  # picks an implementation that matches the host's process-supervision
+  # primitives. Both branches still go through the SAME ``runquotad``
+  # frontend and surface the lease id + socket the same way.
+  const ExpectedBackend =
+    when defined(windows): "windows-osproc-jobobject"
+    else: "posix-fork-exec-poll"
   for action in report{"actions"}.getElems():
     if action{"id"}.getStr() == "m4-sleeper-action":
       found = true
-      check action{"runQuotaBackend"}.getStr() == "posix-fork-exec-poll"
+      check action{"runQuotaBackend"}.getStr() == ExpectedBackend
       check action{"runQuotaSocket"}.getStr() == socket
       check action{"leaseId"}.getBiggestInt() > 0
   check found
@@ -194,8 +201,10 @@ proc ensureRunQuotaDaemon(repoRoot, tempRoot: string): tuple[
       "runquotad/runquota binaries missing under " & runquotaRoot &
       "/build/bin; build them via the test harness " &
       "(scripts/run_tests.sh)")
-  let socketPath = "/tmp/repro-m4-rq-" & $getCurrentProcessId() & ".sock"
-  try: removeFile(socketPath) except OSError: discard
+  let socketPath = runquotaSocketEndpoint(
+    "repro-m4-rq-" & $getCurrentProcessId())
+  when defined(posix):
+    try: removeFile(socketPath) except OSError: discard
   let daemon = startProcess(daemonBin, args = [
     "--socket", socketPath,
     "--cpu-milli", "1000",
@@ -241,120 +250,119 @@ proc waitForSessionsContains(tempRoot, needle: string; timeoutSeconds = 10.0):
   final
 
 suite "Local daemons/control-plane M4 daemon-hosted builds":
-  when isNixSupported:
-    test "integration_daemon_build_matches_direct_report":
-      let tempRoot = createTempDir("repro-daemon-m4-parity", "")
-      defer:
-        stopDaemon(tempRoot)
-        removeDir(tempRoot)
+  test "integration_daemon_build_matches_direct_report":
+    let tempRoot = createTempDir("repro-daemon-m4-parity", "")
+    defer:
+      stopDaemon(tempRoot)
+      removeDir(tempRoot)
 
-      let directProject = tempRoot / "direct-project"
-      let daemonProject = tempRoot / "daemon-project"
-      copyFixtureProject(directProject)
-      copyFixtureProject(daemonProject)
+    let directProject = tempRoot / "direct-project"
+    let daemonProject = tempRoot / "daemon-project"
+    copyFixtureProject(directProject)
+    copyFixtureProject(daemonProject)
 
-      let directRoot = tempRoot / "direct"
-      let daemonRoot = tempRoot / "daemon"
-      let direct = requireSuccess(buildCommand(directProject, directRoot,
-        ["--daemon=off", "--no-runquota"], daemonRoot = tempRoot), repoRoot())
-      let daemon = requireSuccess(buildCommand(daemonProject, daemonRoot,
-        ["--daemon=require", "--no-runquota"], daemonRoot = tempRoot), repoRoot())
+    let directRoot = tempRoot / "direct"
+    let daemonRoot = tempRoot / "daemon"
+    let direct = requireSuccess(buildCommand(directProject, directRoot,
+      ["--daemon=off", "--no-runquota"], daemonRoot = tempRoot), repoRoot())
+    let daemon = requireSuccess(buildCommand(daemonProject, daemonRoot,
+      ["--daemon=require", "--no-runquota"], daemonRoot = tempRoot), repoRoot())
 
-      check direct.contains("project: localDaemonParity")
-      check daemon.contains("project: localDaemonParity")
-      check not daemon.contains("daemon build unsupported")
-      waitForOutput(directProject / "dist" / "copied.txt",
-        "direct-mode fixture\n")
-      waitForOutput(daemonProject / "dist" / "copied.txt",
-        "direct-mode fixture\n")
+    check direct.contains("project: localDaemonParity")
+    check daemon.contains("project: localDaemonParity")
+    check not daemon.contains("daemon build unsupported")
+    waitForOutput(directProject / "dist" / "copied.txt",
+      "direct-mode fixture\n")
+    waitForOutput(daemonProject / "dist" / "copied.txt",
+      "direct-mode fixture\n")
 
-      let directReport = valueAfter(direct, "buildReport:")
-      let daemonReport = valueAfter(daemon, "buildReport:")
-      check normalizedActionSummary(directReport) ==
-        normalizedActionSummary(daemonReport)
-      check normalizedActionEvidenceSummary(directReport, directProject,
-        daemonProject) == normalizedActionEvidenceSummary(daemonReport,
-        directProject, daemonProject)
-      check fileExists(actionCacheRecordsPath(directRoot))
-      check fileExists(actionCacheRecordsPath(daemonRoot))
-      let directRecordCount = countFramedActionCacheRecords(
-        actionCacheRecordsPath(directRoot))
-      let daemonRecordCount = countFramedActionCacheRecords(
-        actionCacheRecordsPath(daemonRoot))
-      check directRecordCount > 0
-      check directRecordCount == daemonRecordCount
+    let directReport = valueAfter(direct, "buildReport:")
+    let daemonReport = valueAfter(daemon, "buildReport:")
+    check normalizedActionSummary(directReport) ==
+      normalizedActionSummary(daemonReport)
+    check normalizedActionEvidenceSummary(directReport, directProject,
+      daemonProject) == normalizedActionEvidenceSummary(daemonReport,
+      directProject, daemonProject)
+    check fileExists(actionCacheRecordsPath(directRoot))
+    check fileExists(actionCacheRecordsPath(daemonRoot))
+    let directRecordCount = countFramedActionCacheRecords(
+      actionCacheRecordsPath(directRoot))
+    let daemonRecordCount = countFramedActionCacheRecords(
+      actionCacheRecordsPath(daemonRoot))
+    check directRecordCount > 0
+    check directRecordCount == daemonRecordCount
 
-    test "integration_daemon_build_uses_runquota":
-      let tempRoot = createTempDir("repro-daemon-m4-runquota", "")
-      let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
+  test "integration_daemon_build_uses_runquota":
+    let tempRoot = createTempDir("repro-daemon-m4-runquota", "")
+    let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
+    let previousPath = getEnv("PATH", "")
+    defer:
+      putEnv("RUNQUOTA_SOCKET", previousSocket)
+      putEnv("PATH", previousPath)
+      stopDaemon(tempRoot)
+      removeDir(tempRoot)
+
+    let projectRoot = tempRoot / "project"
+    writeSleeperProject(projectRoot, 1)
+    var runquota = ensureRunQuotaDaemon(repoRoot(), tempRoot)
+    putEnv("RUNQUOTA_SOCKET", runquota.socket)
+    defer:
+      runquota.process.terminate()
+      discard runquota.process.waitForExit()
+      runquota.process.close()
+      try: removeFile(runquota.socket) except OSError: discard
+
+    let output = requireSuccess(buildCommand(projectRoot, tempRoot,
+      ["--daemon=require"], env = [("RUNQUOTA_SOCKET", runquota.socket),
+        ("PATH", getEnv("PATH"))]), repoRoot())
+    check output.contains("runQuotaSocket: " & runquota.socket)
+    assertRunQuotaReport(output, runquota.socket)
+
+  test "integration_daemon_sessions_active_recent_and_cancelled":
+    when defined(posix):
+      let tempRoot = createTempDir("repro-daemon-m4-sessions", "")
       let previousPath = getEnv("PATH", "")
       defer:
-        putEnv("RUNQUOTA_SOCKET", previousSocket)
         putEnv("PATH", previousPath)
         stopDaemon(tempRoot)
         removeDir(tempRoot)
 
       let projectRoot = tempRoot / "project"
-      writeSleeperProject(projectRoot, 1)
-      var runquota = ensureRunQuotaDaemon(repoRoot(), tempRoot)
-      putEnv("RUNQUOTA_SOCKET", runquota.socket)
+      writeSleeperProject(projectRoot, 10)
+
+      let client = startProcess("env",
+        args = @[
+          "REPRO_DAEMON_ENDPOINT=" & daemonEndpoint(tempRoot),
+          "REPRO_DAEMON_STATE_DIR=" & daemonStateDir(tempRoot),
+          "REPROBUILD_STORE_ROOT=" & tempRoot / "store",
+          "PATH=" & getEnv("PATH"),
+          publicReproBin(), "build", projectRoot,
+          "--daemon=require",
+          "--tool-provisioning=path",
+          "--work-root=" & tempRoot / "work",
+          "--action-cache-root=" & tempRoot / "action-cache",
+          "--progress=quiet",
+          "--log=summary",
+          "--no-runquota"
+        ],
+        workingDir = repoRoot(),
+        options = {poUsePath, poStdErrToStdOut})
       defer:
-        runquota.process.terminate()
-        discard runquota.process.waitForExit()
-        runquota.process.close()
-        try: removeFile(runquota.socket) except OSError: discard
+        if client.running():
+          client.terminate()
+          discard client.waitForExit()
+        client.close()
 
-      let output = requireSuccess(buildCommand(projectRoot, tempRoot,
-        ["--daemon=require"], env = [("RUNQUOTA_SOCKET", runquota.socket),
-          ("PATH", getEnv("PATH"))]), repoRoot())
-      check output.contains("runQuotaSocket: " & runquota.socket)
-      assertRunQuotaReport(output, runquota.socket)
+      let active = waitForSessionsContains(tempRoot, "running")
+      check active.contains("build")
+      waitForOutput(projectRoot / "build" / "started.txt", "started\n",
+        timeoutSeconds = 120.0)
+      client.terminate()
+      discard client.waitForExit()
 
-    test "integration_daemon_sessions_active_recent_and_cancelled":
-      when defined(posix):
-        let tempRoot = createTempDir("repro-daemon-m4-sessions", "")
-        let previousPath = getEnv("PATH", "")
-        defer:
-          putEnv("PATH", previousPath)
-          stopDaemon(tempRoot)
-          removeDir(tempRoot)
-
-        let projectRoot = tempRoot / "project"
-        writeSleeperProject(projectRoot, 10)
-
-        let client = startProcess("env",
-          args = @[
-            "REPRO_DAEMON_ENDPOINT=" & daemonEndpoint(tempRoot),
-            "REPRO_DAEMON_STATE_DIR=" & daemonStateDir(tempRoot),
-            "REPROBUILD_STORE_ROOT=" & tempRoot / "store",
-            "PATH=" & getEnv("PATH"),
-            publicReproBin(), "build", projectRoot,
-            "--daemon=require",
-            "--tool-provisioning=path",
-            "--work-root=" & tempRoot / "work",
-            "--action-cache-root=" & tempRoot / "action-cache",
-            "--progress=quiet",
-            "--log=summary",
-            "--no-runquota"
-          ],
-          workingDir = repoRoot(),
-          options = {poUsePath, poStdErrToStdOut})
-        defer:
-          if client.running():
-            client.terminate()
-            discard client.waitForExit()
-          client.close()
-
-        let active = waitForSessionsContains(tempRoot, "running")
-        check active.contains("build")
-        waitForOutput(projectRoot / "build" / "started.txt", "started\n",
-          timeoutSeconds = 120.0)
-        client.terminate()
-        discard client.waitForExit()
-
-        let cancelled = waitForSessionsContains(tempRoot, "cancelled",
-          timeoutSeconds = 15.0)
-        check cancelled.contains("daemon-hosted build cancelled")
-        check not fileExists(projectRoot / "build" / "slept.txt")
-      else:
-        echo "[platform N/A] POSIX daemon build cancellation test"
+      let cancelled = waitForSessionsContains(tempRoot, "cancelled",
+        timeoutSeconds = 15.0)
+      check cancelled.contains("daemon-hosted build cancelled")
+      check not fileExists(projectRoot / "build" / "slept.txt")
+    else:
+      echo "[platform N/A] POSIX daemon build cancellation test"
