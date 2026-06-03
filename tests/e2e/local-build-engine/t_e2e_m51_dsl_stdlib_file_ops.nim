@@ -156,261 +156,262 @@ proc writeSymlinkOutputProject(path: string) =
     "    defaultTarget(all)\n")
 
 suite "m51_dsl_stdlib_file_ops":
-  test "m51_stdlib_copy_and_stamp_e2e":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m51-stdlib-copy", "")
-    defer: removeDir(tempRoot)
+  when isNixSupported:
+    test "m51_stdlib_copy_and_stamp_e2e":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m51-stdlib-copy", "")
+      defer: removeDir(tempRoot)
 
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
 
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "src")
-    writeFile(projectRoot / "src" / "input.txt", "alpha\n")
-    writeStdlibCopyProject(projectRoot / "reprobuild.nim")
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "src")
+      writeFile(projectRoot / "src" / "input.txt", "alpha\n")
+      writeStdlibCopyProject(projectRoot / "reprobuild.nim")
 
-    let first = build(reproBin, projectRoot, repoRoot)
-    check first.contains("scheduler: actions=2")
-    check first.contains("runquota=builtin")
-    check not first.contains(" cp ")
-    check not first.contains(" mkdir ")
-    check readFile(projectRoot / "out" / "copy.txt") == "alpha\n"
-    check readFile(projectRoot / "out" / "stamp.txt").contains("m51 stamp")
-    let firstReport = parseFile(valueAfter(first, "buildReport:"))
-    assertAction(firstReport, "copy", "asSucceeded", true)
-    assertAction(firstReport, "fs-stamp-out-2fstamp.txt", "asSucceeded", true)
+      let first = build(reproBin, projectRoot, repoRoot)
+      check first.contains("scheduler: actions=2")
+      check first.contains("runquota=builtin")
+      check not first.contains(" cp ")
+      check not first.contains(" mkdir ")
+      check readFile(projectRoot / "out" / "copy.txt") == "alpha\n"
+      check readFile(projectRoot / "out" / "stamp.txt").contains("m51 stamp")
+      let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      assertAction(firstReport, "copy", "asSucceeded", true)
+      assertAction(firstReport, "fs-stamp-out-2fstamp.txt", "asSucceeded", true)
 
-    let second = build(reproBin, projectRoot, repoRoot)
-    let secondReport = parseFile(valueAfter(second, "buildReport:"))
-    assertActionCacheEffective(secondReport, "copy")
-    assertActionCacheEffective(secondReport, "fs-stamp-out-2fstamp.txt")
+      let second = build(reproBin, projectRoot, repoRoot)
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      assertActionCacheEffective(secondReport, "copy")
+      assertActionCacheEffective(secondReport, "fs-stamp-out-2fstamp.txt")
 
-    writeFile(projectRoot / "src" / "input.txt", "beta\n")
-    let changed = build(reproBin, projectRoot, repoRoot)
-    let changedReport = parseFile(valueAfter(changed, "buildReport:"))
-    assertAction(changedReport, "copy", "asSucceeded", true)
-    assertAction(changedReport, "fs-stamp-out-2fstamp.txt", "asSucceeded", true)
-    check readFile(projectRoot / "out" / "copy.txt") == "beta\n"
+      writeFile(projectRoot / "src" / "input.txt", "beta\n")
+      let changed = build(reproBin, projectRoot, repoRoot)
+      let changedReport = parseFile(valueAfter(changed, "buildReport:"))
+      assertAction(changedReport, "copy", "asSucceeded", true)
+      assertAction(changedReport, "fs-stamp-out-2fstamp.txt", "asSucceeded", true)
+      check readFile(projectRoot / "out" / "copy.txt") == "beta\n"
 
-  test "m51_preserve_tree_cleanup_e2e":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m51-preserve-tree", "")
-    defer: removeDir(tempRoot)
+    test "m51_preserve_tree_cleanup_e2e":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m51-preserve-tree", "")
+      defer: removeDir(tempRoot)
 
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
 
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "assets" / "nested")
-    writeFile(projectRoot / "assets" / "keep.txt", "keep\n")
-    writeFile(projectRoot / "assets" / "nested" / "drop.txt", "drop\n")
-    writePreserveTreeProject(projectRoot / "reprobuild.nim")
-
-    let first = build(reproBin, projectRoot, repoRoot)
-    check first.contains("scheduler: actions=1")
-    let firstReport = parseFile(valueAfter(first, "buildReport:"))
-    assertAction(firstReport, "fs-preserveTree-mirror", "asSucceeded", true)
-    check readFile(projectRoot / "mirror" / "keep.txt") == "keep\n"
-    check readFile(projectRoot / "mirror" / "nested" / "drop.txt") == "drop\n"
-
-    let noop = build(reproBin, projectRoot, repoRoot)
-    let noopReport = parseFile(valueAfter(noop, "buildReport:"))
-    assertActionCacheEffective(noopReport, "fs-preserveTree-mirror")
-
-    removeFile(projectRoot / "assets" / "nested" / "drop.txt")
-    let second = build(reproBin, projectRoot, repoRoot)
-    # The earlier revision of this gate asserted
-    # `second.contains("providerInvocations: 1")` — i.e. that removing
-    # a tracked filesystem input forced the project provider to be
-    # re-invoked. The engine now performs filesystem-observation-driven
-    # action invalidation through the monitor/depfile layer without
-    # re-running the provider when the recipe text has not changed
-    # (provider invocations stay at 0 for input-set deltas of this
-    # shape). The correctness invariants the spec actually cares about
-    # are unchanged: the `fs-preserveTree-mirror` action re-runs
-    # (`asSucceeded` + `launched=true`), the kept input is preserved,
-    # and the dropped input is gone from the mirror. Those three are
-    # asserted directly below — the implementation-detail invocation
-    # count would have been a brittle gate independent of correctness.
-    let secondReport = parseFile(valueAfter(second, "buildReport:"))
-    assertAction(secondReport, "fs-preserveTree-mirror", "asSucceeded", true)
-    check fileExists(projectRoot / "mirror" / "keep.txt")
-    check not fileExists(projectRoot / "mirror" / "nested" / "drop.txt")
-
-  test "m51_preserve_tree_preserves_symlinks_e2e":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m51-preserve-tree-symlinks", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "assets" / "real-dir")
-    createDir(projectRoot / "assets" / "links")
-    writeFile(projectRoot / "assets" / "real-file.txt", "file target\n")
-    writeFile(projectRoot / "assets" / "real-dir" / "nested.txt",
-      "dir target\n")
-
-    var symlinkOk = true
-    try:
-      createSymlink("../real-file.txt",
-        projectRoot / "assets" / "links" / "file-link.txt")
-      createSymlink("real-dir", projectRoot / "assets" / "dir-link")
-    except OSError:
-      symlinkOk = false
-
-    if not symlinkOk:
-      checkpoint "platform-skip: host cannot create symlinks"
-    else:
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "assets" / "nested")
+      writeFile(projectRoot / "assets" / "keep.txt", "keep\n")
+      writeFile(projectRoot / "assets" / "nested" / "drop.txt", "drop\n")
       writePreserveTreeProject(projectRoot / "reprobuild.nim")
 
       let first = build(reproBin, projectRoot, repoRoot)
+      check first.contains("scheduler: actions=1")
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       assertAction(firstReport, "fs-preserveTree-mirror", "asSucceeded", true)
-      check readFile(projectRoot / "mirror" / "real-file.txt") ==
-        "file target\n"
-      check readFile(projectRoot / "mirror" / "real-dir" / "nested.txt") ==
-        "dir target\n"
-      check symlinkExists(projectRoot / "mirror" / "links" / "file-link.txt")
-      check symlinkExists(projectRoot / "mirror" / "dir-link")
-      check expandSymlink(projectRoot / "mirror" / "links" / "file-link.txt") ==
-        "../real-file.txt"
-      check expandSymlink(projectRoot / "mirror" / "dir-link") == "real-dir"
-      check readFile(projectRoot / "mirror" / "links" / "file-link.txt") ==
-        "file target\n"
-      check readFile(projectRoot / "mirror" / "dir-link" / "nested.txt") ==
-        "dir target\n"
+      check readFile(projectRoot / "mirror" / "keep.txt") == "keep\n"
+      check readFile(projectRoot / "mirror" / "nested" / "drop.txt") == "drop\n"
 
-      removeFile(projectRoot / "assets" / "links" / "file-link.txt")
+      let noop = build(reproBin, projectRoot, repoRoot)
+      let noopReport = parseFile(valueAfter(noop, "buildReport:"))
+      assertActionCacheEffective(noopReport, "fs-preserveTree-mirror")
+
+      removeFile(projectRoot / "assets" / "nested" / "drop.txt")
       let second = build(reproBin, projectRoot, repoRoot)
+      # The earlier revision of this gate asserted
+      # `second.contains("providerInvocations: 1")` — i.e. that removing
+      # a tracked filesystem input forced the project provider to be
+      # re-invoked. The engine now performs filesystem-observation-driven
+      # action invalidation through the monitor/depfile layer without
+      # re-running the provider when the recipe text has not changed
+      # (provider invocations stay at 0 for input-set deltas of this
+      # shape). The correctness invariants the spec actually cares about
+      # are unchanged: the `fs-preserveTree-mirror` action re-runs
+      # (`asSucceeded` + `launched=true`), the kept input is preserved,
+      # and the dropped input is gone from the mirror. Those three are
+      # asserted directly below — the implementation-detail invocation
+      # count would have been a brittle gate independent of correctness.
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertAction(secondReport, "fs-preserveTree-mirror", "asSucceeded", true)
-      check not symlinkExists(projectRoot / "mirror" / "links" / "file-link.txt")
-      check symlinkExists(projectRoot / "mirror" / "dir-link")
+      check fileExists(projectRoot / "mirror" / "keep.txt")
+      check not fileExists(projectRoot / "mirror" / "nested" / "drop.txt")
 
-  test "m51_builtin_file_outputs_replace_existing_symlinks":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m51-symlink-output", "")
-    defer: removeDir(tempRoot)
+    test "m51_preserve_tree_preserves_symlinks_e2e":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m51-preserve-tree-symlinks", "")
+      defer: removeDir(tempRoot)
 
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
 
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "src")
-    createDir(projectRoot / "assets")
-    createDir(projectRoot / "out")
-    createDir(projectRoot / "mirror")
-    createDir(projectRoot / "victims")
-    writeFile(projectRoot / "src" / "input.txt", "copy output\n")
-    writeFile(projectRoot / "assets" / "keep.txt", "tree output\n")
-    let copyVictim = projectRoot / "victims" / "copy-target.txt"
-    let treeVictim = projectRoot / "victims" / "tree-target.txt"
-    writeFile(copyVictim, "do not mutate copy target\n")
-    writeFile(treeVictim, "do not mutate tree target\n")
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "assets" / "real-dir")
+      createDir(projectRoot / "assets" / "links")
+      writeFile(projectRoot / "assets" / "real-file.txt", "file target\n")
+      writeFile(projectRoot / "assets" / "real-dir" / "nested.txt",
+        "dir target\n")
 
-    var symlinkOk = true
-    try:
-      createSymlink(copyVictim, projectRoot / "out" / "link-copy.txt")
-      createSymlink(treeVictim, projectRoot / "mirror" / "keep.txt")
-    except OSError:
-      symlinkOk = false
+      var symlinkOk = true
+      try:
+        createSymlink("../real-file.txt",
+          projectRoot / "assets" / "links" / "file-link.txt")
+        createSymlink("real-dir", projectRoot / "assets" / "dir-link")
+      except OSError:
+        symlinkOk = false
 
-    if not symlinkOk:
-      checkpoint "platform-skip: host cannot create symlinks"
-    else:
-      writeSymlinkOutputProject(projectRoot / "reprobuild.nim")
+      if not symlinkOk:
+        checkpoint "platform-skip: host cannot create symlinks"
+      else:
+        writePreserveTreeProject(projectRoot / "reprobuild.nim")
+
+        let first = build(reproBin, projectRoot, repoRoot)
+        let firstReport = parseFile(valueAfter(first, "buildReport:"))
+        assertAction(firstReport, "fs-preserveTree-mirror", "asSucceeded", true)
+        check readFile(projectRoot / "mirror" / "real-file.txt") ==
+          "file target\n"
+        check readFile(projectRoot / "mirror" / "real-dir" / "nested.txt") ==
+          "dir target\n"
+        check symlinkExists(projectRoot / "mirror" / "links" / "file-link.txt")
+        check symlinkExists(projectRoot / "mirror" / "dir-link")
+        check expandSymlink(projectRoot / "mirror" / "links" / "file-link.txt") ==
+          "../real-file.txt"
+        check expandSymlink(projectRoot / "mirror" / "dir-link") == "real-dir"
+        check readFile(projectRoot / "mirror" / "links" / "file-link.txt") ==
+          "file target\n"
+        check readFile(projectRoot / "mirror" / "dir-link" / "nested.txt") ==
+          "dir target\n"
+
+        removeFile(projectRoot / "assets" / "links" / "file-link.txt")
+        let second = build(reproBin, projectRoot, repoRoot)
+        let secondReport = parseFile(valueAfter(second, "buildReport:"))
+        assertAction(secondReport, "fs-preserveTree-mirror", "asSucceeded", true)
+        check not symlinkExists(projectRoot / "mirror" / "links" / "file-link.txt")
+        check symlinkExists(projectRoot / "mirror" / "dir-link")
+
+    test "m51_builtin_file_outputs_replace_existing_symlinks":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m51-symlink-output", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "src")
+      createDir(projectRoot / "assets")
+      createDir(projectRoot / "out")
+      createDir(projectRoot / "mirror")
+      createDir(projectRoot / "victims")
+      writeFile(projectRoot / "src" / "input.txt", "copy output\n")
+      writeFile(projectRoot / "assets" / "keep.txt", "tree output\n")
+      let copyVictim = projectRoot / "victims" / "copy-target.txt"
+      let treeVictim = projectRoot / "victims" / "tree-target.txt"
+      writeFile(copyVictim, "do not mutate copy target\n")
+      writeFile(treeVictim, "do not mutate tree target\n")
+
+      var symlinkOk = true
+      try:
+        createSymlink(copyVictim, projectRoot / "out" / "link-copy.txt")
+        createSymlink(treeVictim, projectRoot / "mirror" / "keep.txt")
+      except OSError:
+        symlinkOk = false
+
+      if not symlinkOk:
+        checkpoint "platform-skip: host cannot create symlinks"
+      else:
+        writeSymlinkOutputProject(projectRoot / "reprobuild.nim")
+
+        let first = build(reproBin, projectRoot, repoRoot)
+        let firstReport = parseFile(valueAfter(first, "buildReport:"))
+        assertAction(firstReport, "fs-copyFile-out-2flink-copy.txt",
+          "asSucceeded", true)
+        assertAction(firstReport, "fs-preserveTree-mirror", "asSucceeded", true)
+        check not symlinkExists(projectRoot / "out" / "link-copy.txt")
+        check not symlinkExists(projectRoot / "mirror" / "keep.txt")
+        check readFile(projectRoot / "out" / "link-copy.txt") == "copy output\n"
+        check readFile(projectRoot / "mirror" / "keep.txt") == "tree output\n"
+        check readFile(copyVictim) == "do not mutate copy target\n"
+        check readFile(treeVictim) == "do not mutate tree target\n"
+
+    test "m51_preserve_tree_excludes_prefixes":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m51-preserve-tree-excludes", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "assets" / "dist")
+      createDir(projectRoot / "assets" / "tmp" / "generated")
+      createDir(projectRoot / "assets" / "tmp" / "manual")
+      createDir(projectRoot / "mirror" / "dist")
+      createDir(projectRoot / "mirror" / "tmp" / "generated")
+      writeFile(projectRoot / "assets" / "keep.txt", "keep\n")
+      writeFile(projectRoot / "assets" / "dist" / "bundle.js", "excluded\n")
+      writeFile(projectRoot / "assets" / "tmp" / "generated" / "cache.txt",
+        "excluded nested\n")
+      writeFile(projectRoot / "assets" / "tmp" / "manual" / "note.txt",
+        "included nested\n")
+      writeFile(projectRoot / "mirror" / "dist" / "stale.js", "stale\n")
+      writeFile(projectRoot / "mirror" / "tmp" / "generated" / "stale.txt",
+        "stale nested\n")
+      writePreserveTreeExcludeProject(projectRoot / "reprobuild.nim")
 
       let first = build(reproBin, projectRoot, repoRoot)
+      check first.contains("scheduler: actions=1")
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      assertAction(firstReport, "fs-copyFile-out-2flink-copy.txt",
-        "asSucceeded", true)
       assertAction(firstReport, "fs-preserveTree-mirror", "asSucceeded", true)
-      check not symlinkExists(projectRoot / "out" / "link-copy.txt")
-      check not symlinkExists(projectRoot / "mirror" / "keep.txt")
-      check readFile(projectRoot / "out" / "link-copy.txt") == "copy output\n"
-      check readFile(projectRoot / "mirror" / "keep.txt") == "tree output\n"
-      check readFile(copyVictim) == "do not mutate copy target\n"
-      check readFile(treeVictim) == "do not mutate tree target\n"
+      let firstAction = reportAction(firstReport, "fs-preserveTree-mirror")
+      check readFile(projectRoot / "mirror" / "keep.txt") == "keep\n"
+      check readFile(projectRoot / "mirror" / "tmp" / "manual" / "note.txt") ==
+        "included nested\n"
+      check not fileExists(projectRoot / "mirror" / "dist" / "bundle.js")
+      check fileExists(projectRoot / "mirror" / "dist" / "stale.js")
+      check not fileExists(projectRoot / "mirror" / "tmp" / "generated" /
+        "cache.txt")
+      check fileExists(projectRoot / "mirror" / "tmp" / "generated" /
+        "stale.txt")
+      check declaredInputEndsWith(firstAction, "assets/keep.txt")
+      check declaredInputEndsWith(firstAction, "assets/tmp/manual/note.txt")
+      check not declaredInputEndsWith(firstAction, "assets/dist/bundle.js")
+      check not declaredInputEndsWith(firstAction,
+        "assets/tmp/generated/cache.txt")
 
-  test "m51_preserve_tree_excludes_prefixes":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m51-preserve-tree-excludes", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "assets" / "dist")
-    createDir(projectRoot / "assets" / "tmp" / "generated")
-    createDir(projectRoot / "assets" / "tmp" / "manual")
-    createDir(projectRoot / "mirror" / "dist")
-    createDir(projectRoot / "mirror" / "tmp" / "generated")
-    writeFile(projectRoot / "assets" / "keep.txt", "keep\n")
-    writeFile(projectRoot / "assets" / "dist" / "bundle.js", "excluded\n")
-    writeFile(projectRoot / "assets" / "tmp" / "generated" / "cache.txt",
-      "excluded nested\n")
-    writeFile(projectRoot / "assets" / "tmp" / "manual" / "note.txt",
-      "included nested\n")
-    writeFile(projectRoot / "mirror" / "dist" / "stale.js", "stale\n")
-    writeFile(projectRoot / "mirror" / "tmp" / "generated" / "stale.txt",
-      "stale nested\n")
-    writePreserveTreeExcludeProject(projectRoot / "reprobuild.nim")
-
-    let first = build(reproBin, projectRoot, repoRoot)
-    check first.contains("scheduler: actions=1")
-    let firstReport = parseFile(valueAfter(first, "buildReport:"))
-    assertAction(firstReport, "fs-preserveTree-mirror", "asSucceeded", true)
-    let firstAction = reportAction(firstReport, "fs-preserveTree-mirror")
-    check readFile(projectRoot / "mirror" / "keep.txt") == "keep\n"
-    check readFile(projectRoot / "mirror" / "tmp" / "manual" / "note.txt") ==
-      "included nested\n"
-    check not fileExists(projectRoot / "mirror" / "dist" / "bundle.js")
-    check fileExists(projectRoot / "mirror" / "dist" / "stale.js")
-    check not fileExists(projectRoot / "mirror" / "tmp" / "generated" /
-      "cache.txt")
-    check fileExists(projectRoot / "mirror" / "tmp" / "generated" /
-      "stale.txt")
-    check declaredInputEndsWith(firstAction, "assets/keep.txt")
-    check declaredInputEndsWith(firstAction, "assets/tmp/manual/note.txt")
-    check not declaredInputEndsWith(firstAction, "assets/dist/bundle.js")
-    check not declaredInputEndsWith(firstAction,
-      "assets/tmp/generated/cache.txt")
-
-    writeFile(projectRoot / "assets" / "dist" / "bundle.js",
-      "excluded changed\n")
-    let second = build(reproBin, projectRoot, repoRoot)
-    let secondReport = parseFile(valueAfter(second, "buildReport:"))
-    assertActionCacheEffective(secondReport, "fs-preserveTree-mirror")
+      writeFile(projectRoot / "assets" / "dist" / "bundle.js",
+        "excluded changed\n")
+      let second = build(reproBin, projectRoot, repoRoot)
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      assertActionCacheEffective(secondReport, "fs-preserveTree-mirror")

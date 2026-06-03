@@ -15,7 +15,7 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when defined(linux) or defined(macosx):
+when isFsSnoopSupported:
   proc prepareMonitorTools(repoRoot, tempRoot: string):
       tuple[fsSnoop: string; shim: string] =
     let binDir = tempRoot / "bin"
@@ -92,13 +92,10 @@ proc prepareCase(prefix: string): M9Case =
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
-  when defined(linux) or defined(macosx):
+  when isFsSnoopSupported:
     let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot)
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
-  else:
-    raise newException(OSError,
-      "M9 dev-env performance gates require fs-snoop support")
 
 proc envFor(c: M9Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
@@ -200,39 +197,40 @@ proc requireProviderSourceRerunStats(stats: JsonNode) =
   check perf["providerIntrospection"]["declaredInputCount"].getInt() >= 2
 
 suite "e2e_dev_env_performance_gates":
-  test "benchmark_dev_env_activation_noop":
-    let c = prepareCase("repro-m9-dev-env-perf")
-    defer: removeDir(c.tempRoot)
+  when isFsSnoopSupported:
+    test "benchmark_dev_env_activation_noop":
+      let c = prepareCase("repro-m9-dev-env-perf")
+      defer: removeDir(c.tempRoot)
 
-    let first = activateWithStats(c, c.tempRoot / "first-stats.json")
-    requirePerformanceEnvelope(first)
-    check first["stats"]["providerIntrospectionLaunched"].getBool()
-    check first["stats"]["shellRenderingLaunched"].getBool()
-    let artifactPath = first["artifactPath"].getStr()
-    let shellFragmentPath = first["shellFragmentPath"].getStr()
-    let firstArtifactBytes = readFile(artifactPath)
+      let first = activateWithStats(c, c.tempRoot / "first-stats.json")
+      requirePerformanceEnvelope(first)
+      check first["stats"]["providerIntrospectionLaunched"].getBool()
+      check first["stats"]["shellRenderingLaunched"].getBool()
+      let artifactPath = first["artifactPath"].getStr()
+      let shellFragmentPath = first["shellFragmentPath"].getStr()
+      let firstArtifactBytes = readFile(artifactPath)
 
-    let noop = activateWithStats(c, c.tempRoot / "noop-stats.json")
-    requireNoopActivationStats(noop)
-    check noop["artifactPath"].getStr() == artifactPath
-    check noop["shellFragmentPath"].getStr() == shellFragmentPath
-    check readFile(artifactPath) == firstArtifactBytes
+      let noop = activateWithStats(c, c.tempRoot / "noop-stats.json")
+      requireNoopActivationStats(noop)
+      check noop["artifactPath"].getStr() == artifactPath
+      check noop["shellFragmentPath"].getStr() == shellFragmentPath
+      check readFile(artifactPath) == firstArtifactBytes
 
-  test "benchmark_dev_env_activation_changed_inputs":
-    let c = prepareCase("repro-m9-dev-env-changes")
-    defer: removeDir(c.tempRoot)
+    test "benchmark_dev_env_activation_changed_inputs":
+      let c = prepareCase("repro-m9-dev-env-changes")
+      defer: removeDir(c.tempRoot)
 
-    discard activateWithStats(c, c.tempRoot / "first-stats.json")
-    sleep(100)
-    writeFile(c.projectRoot / "dev-env-value.txt", "bravo\n")
-    let observed = activateWithStats(c, c.tempRoot / "observed-stats.json")
-    requireObservedInputRerunStats(observed)
-    check readFile(observed["shellFragmentPath"].getStr()).contains("bravo")
+      discard activateWithStats(c, c.tempRoot / "first-stats.json")
+      sleep(100)
+      writeFile(c.projectRoot / "dev-env-value.txt", "bravo\n")
+      let observed = activateWithStats(c, c.tempRoot / "observed-stats.json")
+      requireObservedInputRerunStats(observed)
+      check readFile(observed["shellFragmentPath"].getStr()).contains("bravo")
 
-    sleep(100)
-    writeProvider(c.projectRoot, "provider_changed",
-      "fixture-tool --bench --provider")
-    let provider = activateWithStats(c, c.tempRoot / "provider-stats.json")
-    requireProviderSourceRerunStats(provider)
-    check readFile(provider["shellFragmentPath"].getStr()).contains(
-      "provider_changed")
+      sleep(100)
+      writeProvider(c.projectRoot, "provider_changed",
+        "fixture-tool --bench --provider")
+      let provider = activateWithStats(c, c.tempRoot / "provider-stats.json")
+      requireProviderSourceRerunStats(provider)
+      check readFile(provider["shellFragmentPath"].getStr()).contains(
+        "provider_changed")

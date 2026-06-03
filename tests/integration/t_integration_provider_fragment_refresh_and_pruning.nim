@@ -3,6 +3,8 @@ import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 import repro_core
 import repro_provider_runtime
 
+import repro_test_support
+
 const
   RootEntryPoint = "fixture.root"
   MemberEntryPoint = "fixture.member"
@@ -194,132 +196,133 @@ proc memberBodyHashes(snapshot: ProviderGraphSnapshot): seq[string] =
       result.add(fragment.entryPointBodyHash)
 
 suite "integration_provider_fragment_refresh_and_pruning":
-  test "provider runtime refreshes minimal fragments and prunes stale ownership":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m18-provider-runtime", "")
-    defer: removeDir(tempRoot)
-    let fixtureSourceDir = repoRoot / "build" / "provider-fixtures" /
-      splitPath(tempRoot).tail
-    createDir(fixtureSourceDir)
-    defer:
-      if dirExists(fixtureSourceDir):
-        removeDir(fixtureSourceDir)
+  when isNixSupported:
+    test "provider runtime refreshes minimal fragments and prunes stale ownership":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m18-provider-runtime", "")
+      defer: removeDir(tempRoot)
+      let fixtureSourceDir = repoRoot / "build" / "provider-fixtures" /
+        splitPath(tempRoot).tail
+      createDir(fixtureSourceDir)
+      defer:
+        if dirExists(fixtureSourceDir):
+          removeDir(fixtureSourceDir)
 
-    let srcDir = tempRoot / "src"
-    let binDir = tempRoot / "bin"
-    let storeRoot = tempRoot / "store"
-    let countsPath = tempRoot / "counts.log"
-    createDir(srcDir)
-    createDir(binDir)
-    createDir(storeRoot)
-    resetCounts(countsPath)
+      let srcDir = tempRoot / "src"
+      let binDir = tempRoot / "bin"
+      let storeRoot = tempRoot / "store"
+      let countsPath = tempRoot / "counts.log"
+      createDir(srcDir)
+      createDir(binDir)
+      createDir(storeRoot)
+      resetCounts(countsPath)
 
-    writeFile(srcDir / "a.txt", "alpha\n")
-    writeFile(srcDir / "b.txt", "bravo\n")
+      writeFile(srcDir / "a.txt", "alpha\n")
+      writeFile(srcDir / "b.txt", "bravo\n")
 
-    let providerSource = fixtureSourceDir / "fixture_provider.nim"
-    writeFixtureProvider(providerSource)
-    let providerV1 = compileProvider(providerSource, binDir / "provider-v1",
-      tempRoot / "nimcache-provider-v1")
+      let providerSource = fixtureSourceDir / "fixture_provider.nim"
+      writeFixtureProvider(providerSource)
+      let providerV1 = compileProvider(providerSource, binDir / "provider-v1",
+        tempRoot / "nimcache-provider-v1")
 
-    proc refresh(providerPath, artifactId: string; malformed = false;
-                 store = storeRoot; lockSlice = "lock-v1"): ProviderRefreshReport =
-      var extraArgs = @["--fixture-counts", countsPath]
-      if malformed:
-        extraArgs.add("--malformed-response")
-      refreshProviderGraph(RefreshConfig(
-        storeRoot: store,
-        providerBinaryPath: providerPath,
-        providerArtifactId: artifactId,
-        rootEntryPointId: RootEntryPoint,
-        rootArguments: srcDir,
-        namespace: "workspace",
-        lockSliceId: lockSlice,
-        activity: "build",
-        providerExtraArgs: extraArgs,
-        providerWorkingDir: repoRoot))
+      proc refresh(providerPath, artifactId: string; malformed = false;
+                   store = storeRoot; lockSlice = "lock-v1"): ProviderRefreshReport =
+        var extraArgs = @["--fixture-counts", countsPath]
+        if malformed:
+          extraArgs.add("--malformed-response")
+        refreshProviderGraph(RefreshConfig(
+          storeRoot: store,
+          providerBinaryPath: providerPath,
+          providerArtifactId: artifactId,
+          rootEntryPointId: RootEntryPoint,
+          rootArguments: srcDir,
+          namespace: "workspace",
+          lockSliceId: lockSlice,
+          activity: "build",
+          providerExtraArgs: extraArgs,
+          providerWorkingDir: repoRoot))
 
-    let cold = refresh(providerV1, ArtifactV1)
-    check nonEmptyLines(countsPath) == @["root", "member:a.txt", "member:b.txt"]
-    check cold.snapshot.fragments.len == 3
-    check memberFragmentCount(cold.snapshot) == 2
-    check fileExists(providerSnapshotPath(storeRoot))
-    let rawSnapshot = readFile(providerSnapshotPath(storeRoot))
-    check rawSnapshot.len > 12
-    check rawSnapshot[0 .. 3] == "RBPG"
-    check rawSnapshot[0] != '{'
+      let cold = refresh(providerV1, ArtifactV1)
+      check nonEmptyLines(countsPath) == @["root", "member:a.txt", "member:b.txt"]
+      check cold.snapshot.fragments.len == 3
+      check memberFragmentCount(cold.snapshot) == 2
+      check fileExists(providerSnapshotPath(storeRoot))
+      let rawSnapshot = readFile(providerSnapshotPath(storeRoot))
+      check rawSnapshot.len > 12
+      check rawSnapshot[0 .. 3] == "RBPG"
+      check rawSnapshot[0] != '{'
 
-    writeFile(srcDir / "a.txt", "alpha changed\n")
-    resetCounts(countsPath)
-    let changedMember = refresh(providerV1, ArtifactV1)
-    check nonEmptyLines(countsPath) == @["member:a.txt"]
-    check changedMember.invoked.len == 1
-    check changedMember.invoked[0].reason == girEvaluationInputChanged
-    check changedMember.earlyCutoffs.len == 1
-    check memberFragmentCount(changedMember.snapshot) == 2
+      writeFile(srcDir / "a.txt", "alpha changed\n")
+      resetCounts(countsPath)
+      let changedMember = refresh(providerV1, ArtifactV1)
+      check nonEmptyLines(countsPath) == @["member:a.txt"]
+      check changedMember.invoked.len == 1
+      check changedMember.invoked[0].reason == girEvaluationInputChanged
+      check changedMember.earlyCutoffs.len == 1
+      check memberFragmentCount(changedMember.snapshot) == 2
 
-    writeFile(srcDir / "c.txt", "charlie\n")
-    resetCounts(countsPath)
-    let addedMember = refresh(providerV1, ArtifactV1)
-    check nonEmptyLines(countsPath) == @["member:c.txt"]
-    check addedMember.invoked.len == 1
-    check addedMember.invoked[0].reason == girDirectoryMembershipChanged
-    check memberFragmentCount(addedMember.snapshot) == 3
+      writeFile(srcDir / "c.txt", "charlie\n")
+      resetCounts(countsPath)
+      let addedMember = refresh(providerV1, ArtifactV1)
+      check nonEmptyLines(countsPath) == @["member:c.txt"]
+      check addedMember.invoked.len == 1
+      check addedMember.invoked[0].reason == girDirectoryMembershipChanged
+      check memberFragmentCount(addedMember.snapshot) == 3
 
-    removeFile(srcDir / "b.txt")
-    resetCounts(countsPath)
-    let removedMember = refresh(providerV1, ArtifactV1)
-    check nonEmptyLines(countsPath).len == 0
-    check removedMember.prunedInvocationKeys.len == 1
-    check removedMember.effectIdentities().contains("build/b.txt.out")
-    check removedMember.edgeIds().contains("workspace:edge:b.txt")
-    check memberFragmentCount(removedMember.snapshot) == 2
+      removeFile(srcDir / "b.txt")
+      resetCounts(countsPath)
+      let removedMember = refresh(providerV1, ArtifactV1)
+      check nonEmptyLines(countsPath).len == 0
+      check removedMember.prunedInvocationKeys.len == 1
+      check removedMember.effectIdentities().contains("build/b.txt.out")
+      check removedMember.edgeIds().contains("workspace:edge:b.txt")
+      check memberFragmentCount(removedMember.snapshot) == 2
 
-    let providerV2 = compileProvider(providerSource, binDir / "provider-v2",
-      tempRoot / "nimcache-provider-v2", ["memberBodyV2"])
+      let providerV2 = compileProvider(providerSource, binDir / "provider-v2",
+        tempRoot / "nimcache-provider-v2", ["memberBodyV2"])
 
-    let lockStore = tempRoot / "lock-store"
-    createDir(lockStore)
-    resetCounts(countsPath)
-    discard refresh(providerV1, ArtifactV1, store = lockStore,
-      lockSlice = "lock-v1")
-    resetCounts(countsPath)
-    let lockChanged = refresh(providerV2, ArtifactV2, store = lockStore,
-      lockSlice = "lock-v2")
-    check nonEmptyLines(countsPath) == @["member:a.txt", "member:c.txt"]
-    check lockChanged.invoked.len == 2
-    check lockChanged.invoked.allIt(it.reason == girEntryPointBodyChanged)
-    check memberFragmentCount(lockChanged.snapshot) == 2
+      let lockStore = tempRoot / "lock-store"
+      createDir(lockStore)
+      resetCounts(countsPath)
+      discard refresh(providerV1, ArtifactV1, store = lockStore,
+        lockSlice = "lock-v1")
+      resetCounts(countsPath)
+      let lockChanged = refresh(providerV2, ArtifactV2, store = lockStore,
+        lockSlice = "lock-v2")
+      check nonEmptyLines(countsPath) == @["member:a.txt", "member:c.txt"]
+      check lockChanged.invoked.len == 2
+      check lockChanged.invoked.allIt(it.reason == girEntryPointBodyChanged)
+      check memberFragmentCount(lockChanged.snapshot) == 2
 
-    resetCounts(countsPath)
-    let bodyChanged = refresh(providerV2, ArtifactV2)
-    check nonEmptyLines(countsPath) == @["member:a.txt", "member:c.txt"]
-    check bodyChanged.invoked.len == 2
-    check bodyChanged.invoked.allIt(it.reason == girEntryPointBodyChanged)
-    check not nonEmptyLines(countsPath).contains("root")
-    check bodyChanged.earlyCutoffs.len == 2
-    check memberBodyHashes(bodyChanged.snapshot).allIt(it == MemberBodyHashV2)
+      resetCounts(countsPath)
+      let bodyChanged = refresh(providerV2, ArtifactV2)
+      check nonEmptyLines(countsPath) == @["member:a.txt", "member:c.txt"]
+      check bodyChanged.invoked.len == 2
+      check bodyChanged.invoked.allIt(it.reason == girEntryPointBodyChanged)
+      check not nonEmptyLines(countsPath).contains("root")
+      check bodyChanged.earlyCutoffs.len == 2
+      check memberBodyHashes(bodyChanged.snapshot).allIt(it == MemberBodyHashV2)
 
-    writeFile(srcDir / "a.txt", "alpha graph-shape unchanged\n")
-    resetCounts(countsPath)
-    let cutoff = refresh(providerV2, ArtifactV2)
-    check nonEmptyLines(countsPath) == @["member:a.txt"]
-    check cutoff.invoked.len == 1
-    check cutoff.earlyCutoffs.len == 1
+      writeFile(srcDir / "a.txt", "alpha graph-shape unchanged\n")
+      resetCounts(countsPath)
+      let cutoff = refresh(providerV2, ArtifactV2)
+      check nonEmptyLines(countsPath) == @["member:a.txt"]
+      check cutoff.invoked.len == 1
+      check cutoff.earlyCutoffs.len == 1
 
-    let beforeMalformed = readFile(providerSnapshotPath(storeRoot))
-    writeFile(srcDir / "a.txt", "malformed response should not publish\n")
-    resetCounts(countsPath)
-    expect EnvelopeError:
-      discard refresh(providerV2, ArtifactV2, malformed = true)
-    check readFile(providerSnapshotPath(storeRoot)) == beforeMalformed
-    check nonEmptyLines(countsPath).len == 0
+      let beforeMalformed = readFile(providerSnapshotPath(storeRoot))
+      writeFile(srcDir / "a.txt", "malformed response should not publish\n")
+      resetCounts(countsPath)
+      expect EnvelopeError:
+        discard refresh(providerV2, ArtifactV2, malformed = true)
+      check readFile(providerSnapshotPath(storeRoot)) == beforeMalformed
+      check nonEmptyLines(countsPath).len == 0
 
-    let badStore = tempRoot / "bad-store"
-    createDir(badStore)
-    writeFile(providerSnapshotPath(badStore), "corrupt-store")
-    resetCounts(countsPath)
-    expect EnvelopeError:
-      discard refresh(providerV2, ArtifactV2, store = badStore)
-    check readFile(providerSnapshotPath(badStore)) == "corrupt-store"
-    check nonEmptyLines(countsPath).len == 0
+      let badStore = tempRoot / "bad-store"
+      createDir(badStore)
+      writeFile(providerSnapshotPath(badStore), "corrupt-store")
+      resetCounts(countsPath)
+      expect EnvelopeError:
+        discard refresh(providerV2, ArtifactV2, store = badStore)
+      check readFile(providerSnapshotPath(badStore)) == "corrupt-store"
+      check nonEmptyLines(countsPath).len == 0

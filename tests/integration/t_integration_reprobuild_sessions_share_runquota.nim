@@ -201,141 +201,142 @@ proc checkRunQuotaReportDiagnostics(action: JsonNode; socket: string) =
   check action{"leaseId"}.getBiggestInt() > 0
 
 suite "integration_reprobuild_sessions_share_runquota":
-  test "two repro build sessions serialize default 1000 milliCPU actions through one daemon":
-    let repoRoot = getCurrentDir()
-    let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-    check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
-      "ipc_registry_test.nim")
-    check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
-      "main.c")
+  when isNixSupported:
+    test "two repro build sessions serialize default 1000 milliCPU actions through one daemon":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
+        "ipc_registry_test.nim")
+      check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
+        "main.c")
 
-    let tempRoot = createTempDir("repro-m22-shared-runquota", "")
-    let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
-    defer:
-      putEnv("RUNQUOTA_SOCKET", previousSocket)
-      removeDir(tempRoot)
+      let tempRoot = createTempDir("repro-m22-shared-runquota", "")
+      let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
+      defer:
+        putEnv("RUNQUOTA_SOCKET", previousSocket)
+        removeDir(tempRoot)
 
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
+      let reproBin = tempRoot / "repro"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-repro"),
+        "--out:" & reproBin,
+        repoRoot / "apps" / "repro" / "repro.nim"
+      ]), repoRoot)
 
-    let helperSource = tempRoot / "timing_helper.nim"
-    let helperBin = tempRoot / "timing-helper"
-    writeTimingHelper(helperSource)
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-helper"),
-      "--out:" & helperBin,
-      helperSource
-    ]), repoRoot)
+      let helperSource = tempRoot / "timing_helper.nim"
+      let helperBin = tempRoot / "timing-helper"
+      writeTimingHelper(helperSource)
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-helper"),
+        "--out:" & helperBin,
+        helperSource
+      ]), repoRoot)
 
-    let stampsDir = tempRoot / "stamps"
-    let gatePath = tempRoot / "release-gate"
-    let codeProject = tempRoot / "codetracer-project"
-    let fixtureProject = tempRoot / "fixture-project"
-    createDir(codeProject)
-    createDir(fixtureProject)
-    copySelectedCodeTracerFiles(codeTracerRoot, codeProject)
-    writeFile(fixtureProject / "input.txt", "fixture\n")
+      let stampsDir = tempRoot / "stamps"
+      let gatePath = tempRoot / "release-gate"
+      let codeProject = tempRoot / "codetracer-project"
+      let fixtureProject = tempRoot / "fixture-project"
+      createDir(codeProject)
+      createDir(fixtureProject)
+      copySelectedCodeTracerFiles(codeTracerRoot, codeProject)
+      writeFile(fixtureProject / "input.txt", "fixture\n")
 
-    const CodeAction = "m22-codetracer-sleep"
-    const FixtureAction = "m22-fixture-sleep"
-    writeProject(codeProject / "reprobuild.nim", "codeTracerM22", CodeAction,
-      helperBin, stampsDir / "codetracer.stamp", gatePath, "codetracer",
-      "build/codetracer.done",
-      ["src/frontend/tests/ipc_registry_test.nim", "src/c/main.c"],
-      "test -f src/frontend/tests/ipc_registry_test.nim\n" &
-        "test -f src/c/main.c\n")
-    writeProject(fixtureProject / "reprobuild.nim", "fixtureM22", FixtureAction,
-      helperBin, stampsDir / "fixture.stamp", gatePath, "fixture",
-      "build/fixture.done",
-      ["input.txt"])
+      const CodeAction = "m22-codetracer-sleep"
+      const FixtureAction = "m22-fixture-sleep"
+      writeProject(codeProject / "reprobuild.nim", "codeTracerM22", CodeAction,
+        helperBin, stampsDir / "codetracer.stamp", gatePath, "codetracer",
+        "build/codetracer.done",
+        ["src/frontend/tests/ipc_registry_test.nim", "src/c/main.c"],
+        "test -f src/frontend/tests/ipc_registry_test.nim\n" &
+          "test -f src/c/main.c\n")
+      writeProject(fixtureProject / "reprobuild.nim", "fixtureM22", FixtureAction,
+        helperBin, stampsDir / "fixture.stamp", gatePath, "fixture",
+        "build/fixture.done",
+        ["input.txt"])
 
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
 
-    let launchStart = nowMillis()
-    let codeBuild = startProcess(reproBin, workingDir = repoRoot,
-      args = ["build", codeProject, "--tool-provisioning=path",
-        "--log=actions", "--report=full"],
-      options = {poUsePath, poStdErrToStdOut})
-    let codeStartStamp = stampsDir / "codetracer.stamp.start"
-    for _ in 0 ..< 4800:
-      if pathExists(codeStartStamp) or codeBuild.peekExitCode() != -1:
-        break
-      sleep(25)
-    check pathExists(codeStartStamp)
+      let launchStart = nowMillis()
+      let codeBuild = startProcess(reproBin, workingDir = repoRoot,
+        args = ["build", codeProject, "--tool-provisioning=path",
+          "--log=actions", "--report=full"],
+        options = {poUsePath, poStdErrToStdOut})
+      let codeStartStamp = stampsDir / "codetracer.stamp.start"
+      for _ in 0 ..< 4800:
+        if pathExists(codeStartStamp) or codeBuild.peekExitCode() != -1:
+          break
+        sleep(25)
+      check pathExists(codeStartStamp)
 
-    let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
-      args = ["build", fixtureProject, "--tool-provisioning=path",
-        "--log=actions", "--report=full"],
-      options = {poUsePath, poStdErrToStdOut})
-    let launchEnd = nowMillis()
-    check launchEnd - launchStart < 150000
+      let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
+        args = ["build", fixtureProject, "--tool-provisioning=path",
+          "--log=actions", "--report=full"],
+        options = {poUsePath, poStdErrToStdOut})
+      let launchEnd = nowMillis()
+      check launchEnd - launchStart < 150000
 
-    var lastLeases = ""
-    var observedQueue = false
-    # Cold provider compilation can hold the only RunQuota slot before these
-    # public action leases become visible during a full-suite run.
-    for _ in 0 ..< 2400:
-      if hasQueuedAndRunningBuildLeases(daemon.cli, lastLeases):
-        observedQueue = true
-        break
-      if codeBuild.peekExitCode() != -1 and fixtureBuild.peekExitCode() != -1:
-        break
-      sleep(25)
-    writeFile(gatePath, "release\n")
-    if not observedQueue:
-      checkpoint(lastLeases)
-    check observedQueue
+      var lastLeases = ""
+      var observedQueue = false
+      # Cold provider compilation can hold the only RunQuota slot before these
+      # public action leases become visible during a full-suite run.
+      for _ in 0 ..< 2400:
+        if hasQueuedAndRunningBuildLeases(daemon.cli, lastLeases):
+          observedQueue = true
+          break
+        if codeBuild.peekExitCode() != -1 and fixtureBuild.peekExitCode() != -1:
+          break
+        sleep(25)
+      writeFile(gatePath, "release\n")
+      if not observedQueue:
+        checkpoint(lastLeases)
+      check observedQueue
 
-    let codeResult = collect(codeBuild)
-    let fixtureResult = collect(fixtureBuild)
-    if codeResult.code != 0:
-      checkpoint(codeResult.output)
-    if fixtureResult.code != 0:
-      checkpoint(fixtureResult.output)
-    check codeResult.code == 0
-    check fixtureResult.code == 0
+      let codeResult = collect(codeBuild)
+      let fixtureResult = collect(fixtureBuild)
+      if codeResult.code != 0:
+        checkpoint(codeResult.output)
+      if fixtureResult.code != 0:
+        checkpoint(fixtureResult.output)
+      check codeResult.code == 0
+      check fixtureResult.code == 0
 
-    for output in [codeResult.output, fixtureResult.output]:
-      check output.contains("runQuotaSocket: " & daemon.socket)
-      check output.contains("socket=" & daemon.socket)
-      check output.contains("runquota=posix-fork-exec-poll")
-      check output.contains("lease=")
+      for output in [codeResult.output, fixtureResult.output]:
+        check output.contains("runQuotaSocket: " & daemon.socket)
+        check output.contains("socket=" & daemon.socket)
+        check output.contains("runquota=posix-fork-exec-poll")
+        check output.contains("lease=")
 
-    let codeInterval = readInterval(stampsDir / "codetracer.stamp")
-    let fixtureInterval = readInterval(stampsDir / "fixture.stamp")
-    check codeInterval.label == "codetracer"
-    check fixtureInterval.label == "fixture"
-    check codeInterval.gateSeen
-    check fixtureInterval.gateSeen
-    check codeInterval.startMs < codeInterval.endMs
-    check fixtureInterval.startMs < fixtureInterval.endMs
-    check not codeInterval.overlaps(fixtureInterval)
+      let codeInterval = readInterval(stampsDir / "codetracer.stamp")
+      let fixtureInterval = readInterval(stampsDir / "fixture.stamp")
+      check codeInterval.label == "codetracer"
+      check fixtureInterval.label == "fixture"
+      check codeInterval.gateSeen
+      check fixtureInterval.gateSeen
+      check codeInterval.startMs < codeInterval.endMs
+      check fixtureInterval.startMs < fixtureInterval.endMs
+      check not codeInterval.overlaps(fixtureInterval)
 
-    let codeReport = valueAfter(codeResult.output, "buildReport:")
-    let fixtureReport = valueAfter(fixtureResult.output, "buildReport:")
-    checkRunQuotaReportDiagnostics(reportAction(codeReport, CodeAction),
-      daemon.socket)
-    checkRunQuotaReportDiagnostics(reportAction(fixtureReport, FixtureAction),
-      daemon.socket)
+      let codeReport = valueAfter(codeResult.output, "buildReport:")
+      let fixtureReport = valueAfter(fixtureResult.output, "buildReport:")
+      checkRunQuotaReportDiagnostics(reportAction(codeReport, CodeAction),
+        daemon.socket)
+      checkRunQuotaReportDiagnostics(reportAction(fixtureReport, FixtureAction),
+        daemon.socket)
 
-    let status = runQuotaJson(daemon.cli, ["status", "--json"])
-    check status{"active_sessions"}.getInt() == 0
-    check status{"active_leases"}.getInt() == 0
-    check status{"queued_leases"}.getInt() == 0
-    # Each build session runs its provider compilation through the build engine
-    # before the public test action, so the shared daemon observes two
-    # bootstrap leases and two action leases.
-    check status{"total_granted"}.getInt() == 4
-    check status{"total_finished"}.getInt() == 4
+      let status = runQuotaJson(daemon.cli, ["status", "--json"])
+      check status{"active_sessions"}.getInt() == 0
+      check status{"active_leases"}.getInt() == 0
+      check status{"queued_leases"}.getInt() == 0
+      # Each build session runs its provider compilation through the build engine
+      # before the public test action, so the shared daemon observes two
+      # bootstrap leases and two action leases.
+      check status{"total_granted"}.getInt() == 4
+      check status{"total_finished"}.getInt() == 4

@@ -9,6 +9,8 @@ import std/[net, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_home_generations
 import repro_local_store
 
+import repro_test_support
+
 const ProjectRoot = currentSourcePath().parentDir().parentDir()
   .parentDir().parentDir()
 
@@ -192,119 +194,120 @@ proc bytesAsString(bytes: openArray[byte]): string =
     result[i] = char(b)
 
 suite "M71 Phase C: SSH activation-bundle transfer/import":
-  test "bundle streams over real SSH once, then exact target CAS hit skips streaming":
-    when defined(windows):
-      doAssert false,
-        "M71 Phase C gate must not be skipped; provide a user-owned " &
-        "loopback sshd harness for Windows before running this gate there"
-    else:
-      let tempRoot = createTempDir("repro-m71-ssh-transfer-", "")
-      var sshd: SshHarness
-      defer:
-        stopLoopbackSshd(sshd)
-        try: removeDir(tempRoot) except OSError: discard
+  when isNixSupported:
+    test "bundle streams over real SSH once, then exact target CAS hit skips streaming":
+      when defined(windows):
+        doAssert false,
+          "M71 Phase C gate must not be skipped; provide a user-owned " &
+          "loopback sshd harness for Windows before running this gate there"
+      else:
+        let tempRoot = createTempDir("repro-m71-ssh-transfer-", "")
+        var sshd: SshHarness
+        defer:
+          stopLoopbackSshd(sshd)
+          try: removeDir(tempRoot) except OSError: discard
 
-      let stateDir = tempRoot / "source-state"
-      let sourceStoreRoot = tempRoot / "source-store"
-      let targetStoreRoot = tempRoot / "target-store"
-      let profileDir = tempRoot / "profile"
-      let homeDir = tempRoot / "home"
-      let fixtureDir = tempRoot / "fixture"
-      createDir(stateDir)
-      createDir(sourceStoreRoot)
-      createDir(targetStoreRoot)
-      createDir(profileDir)
-      createDir(homeDir)
-      createDir(fixtureDir)
+        let stateDir = tempRoot / "source-state"
+        let sourceStoreRoot = tempRoot / "source-store"
+        let targetStoreRoot = tempRoot / "target-store"
+        let profileDir = tempRoot / "profile"
+        let homeDir = tempRoot / "home"
+        let fixtureDir = tempRoot / "fixture"
+        createDir(stateDir)
+        createDir(sourceStoreRoot)
+        createDir(targetStoreRoot)
+        createDir(profileDir)
+        createDir(homeDir)
+        createDir(fixtureDir)
 
-      writeFile(profileDir / "home.nim",
-        "import repro_profile\n\n" &
-        "profile \"m71-phase-c\":\n" &
-        "  activity default:\n" &
-        "    `m71-fixture`\n")
+        writeFile(profileDir / "home.nim",
+          "import repro_profile\n\n" &
+          "profile \"m71-phase-c\":\n" &
+          "  activity default:\n" &
+          "    `m71-fixture`\n")
 
-      let exeName = "m71-fixture"
-      let exePath = fixtureDir / exeName
-      let exeContent = writeFixtureExe(exePath)
+        let exeName = "m71-fixture"
+        let exePath = fixtureDir / exeName
+        let exeContent = writeFixtureExe(exePath)
 
-      let env = @[
-        (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-        (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-        (k: "REPRO_STORE_ROOT", v: sourceStoreRoot),
-        (k: "HOME", v: homeDir),
-        (k: "USERPROFILE", v: homeDir),
-        (k: "REPRO_HOST", v: "m71-source-host"),
-        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m71-fixture"),
-        (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m71-fixture=" & exePath)]
+        let env = @[
+          (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+          (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+          (k: "REPRO_STORE_ROOT", v: sourceStoreRoot),
+          (k: "HOME", v: homeDir),
+          (k: "USERPROFILE", v: homeDir),
+          (k: "REPRO_HOST", v: "m71-source-host"),
+          (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m71-fixture"),
+          (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m71-fixture=" & exePath)]
 
-      let apply = runRepro(env, ["home", "apply"])
-      check apply.exitCode == 0
-      check apply.output.contains("applied generation ")
+        let apply = runRepro(env, ["home", "apply"])
+        check apply.exitCode == 0
+        check apply.output.contains("applied generation ")
 
-      let built = runRepro(env, ["home", "__build-bundle"])
-      check built.exitCode == 0
-      let bundleDigestHex = fieldValue(built.output, "bundleDigest")
+        let built = runRepro(env, ["home", "__build-bundle"])
+        check built.exitCode == 0
+        let bundleDigestHex = fieldValue(built.output, "bundleDigest")
 
-      sshd = startLoopbackSshd(tempRoot)
-      var transferArgs = @[
-        "home", "__transfer-bundle",
-        "--bundle-digest", bundleDigestHex,
-        "--store-root", sourceStoreRoot,
-        "--target", "localhost",
-        "--remote-repro", reproBinary(),
-        "--target-store-root", targetStoreRoot,
-        "--ssh", sshd.ssh,
-        "--port", $sshd.port]
-      for opt in [
-          "-F", "/dev/null",
-          "-o", "UserKnownHostsFile=" & sshd.knownHosts,
-          "-o", "GlobalKnownHostsFile=/dev/null",
-          "-o", "StrictHostKeyChecking=no",
-          "-o", "IdentitiesOnly=yes",
-          "-o", "PasswordAuthentication=no",
-          "-o", "KbdInteractiveAuthentication=no",
-          "-i", sshd.clientKey]:
-        transferArgs.add("--ssh-option")
-        transferArgs.add(opt)
+        sshd = startLoopbackSshd(tempRoot)
+        var transferArgs = @[
+          "home", "__transfer-bundle",
+          "--bundle-digest", bundleDigestHex,
+          "--store-root", sourceStoreRoot,
+          "--target", "localhost",
+          "--remote-repro", reproBinary(),
+          "--target-store-root", targetStoreRoot,
+          "--ssh", sshd.ssh,
+          "--port", $sshd.port]
+        for opt in [
+            "-F", "/dev/null",
+            "-o", "UserKnownHostsFile=" & sshd.knownHosts,
+            "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "IdentitiesOnly=yes",
+            "-o", "PasswordAuthentication=no",
+            "-o", "KbdInteractiveAuthentication=no",
+            "-i", sshd.clientKey]:
+          transferArgs.add("--ssh-option")
+          transferArgs.add(opt)
 
-      let first = runRepro([], transferArgs)
-      check first.exitCode == 0
-      check fieldValue(first.output, "transferStatus") == "sent"
-      check fieldValue(first.output, "bundleDigest") ==
-        bundleDigestHex.toLowerAscii()
-      check parseInt(fieldValue(first.output, "prefixesImported")) == 1
-      check parseInt(fieldValue(first.output, "prefixesAlreadyPresent")) == 0
-      check parseInt(fieldValue(first.output, "bytesReceived")) > 0
+        let first = runRepro([], transferArgs)
+        check first.exitCode == 0
+        check fieldValue(first.output, "transferStatus") == "sent"
+        check fieldValue(first.output, "bundleDigest") ==
+          bundleDigestHex.toLowerAscii()
+        check parseInt(fieldValue(first.output, "prefixesImported")) == 1
+        check parseInt(fieldValue(first.output, "prefixesAlreadyPresent")) == 0
+        check parseInt(fieldValue(first.output, "bytesReceived")) > 0
 
-      var targetStore = openStore(targetStoreRoot)
-      let bundleDigest = parsePrefixId(bundleDigestHex)
-      let targetBundleBytes = readCasBlob(targetStore, bundleDigest)
-      let targetBundle = decodeActivationBundleBytes(targetBundleBytes,
-        fieldValue(first.output, "targetBundlePath"))
-      check targetBundle.prefixes.len == 1
-      let rowsAfterFirst = targetStore.listPrefixes()
-      check rowsAfterFirst.len == 1
-      check targetStore.listRoots().len == 0
-      let row = rowsAfterFirst[0]
-      let targetPrefix = targetStore.absolutePrefixPath(row.realizedPath)
-      check dirExists(targetPrefix)
-      check fileExists(targetPrefix / ReceiptFileName)
-      let exeEntry = bundleFileEntry(targetBundle, exeName)
-      check exeEntry.found
-      check bytesAsString(exeEntry.entry.contentBytes) == exeContent
-      check readFile(targetPrefix / exeName) == exeContent
-      targetStore.close()
+        var targetStore = openStore(targetStoreRoot)
+        let bundleDigest = parsePrefixId(bundleDigestHex)
+        let targetBundleBytes = readCasBlob(targetStore, bundleDigest)
+        let targetBundle = decodeActivationBundleBytes(targetBundleBytes,
+          fieldValue(first.output, "targetBundlePath"))
+        check targetBundle.prefixes.len == 1
+        let rowsAfterFirst = targetStore.listPrefixes()
+        check rowsAfterFirst.len == 1
+        check targetStore.listRoots().len == 0
+        let row = rowsAfterFirst[0]
+        let targetPrefix = targetStore.absolutePrefixPath(row.realizedPath)
+        check dirExists(targetPrefix)
+        check fileExists(targetPrefix / ReceiptFileName)
+        let exeEntry = bundleFileEntry(targetBundle, exeName)
+        check exeEntry.found
+        check bytesAsString(exeEntry.entry.contentBytes) == exeContent
+        check readFile(targetPrefix / exeName) == exeContent
+        targetStore.close()
 
-      let second = runRepro([], transferArgs)
-      check second.exitCode == 0
-      check fieldValue(second.output, "transferStatus") == "already-present"
-      check parseInt(fieldValue(second.output, "prefixesImported")) == 0
-      check parseInt(fieldValue(second.output, "prefixesAlreadyPresent")) == 1
-      check fieldValue(second.output, "bytesReceived") == "0"
+        let second = runRepro([], transferArgs)
+        check second.exitCode == 0
+        check fieldValue(second.output, "transferStatus") == "already-present"
+        check parseInt(fieldValue(second.output, "prefixesImported")) == 0
+        check parseInt(fieldValue(second.output, "prefixesAlreadyPresent")) == 1
+        check fieldValue(second.output, "bytesReceived") == "0"
 
-      var targetStore2 = openStore(targetStoreRoot)
-      defer: targetStore2.close()
-      check targetStore2.listPrefixes().len == rowsAfterFirst.len
-      check targetStore2.listRoots().len == 0
-      check not fileExists(targetStoreRoot / "current")
-      check not dirExists(targetStoreRoot / "generations")
+        var targetStore2 = openStore(targetStoreRoot)
+        defer: targetStore2.close()
+        check targetStore2.listPrefixes().len == rowsAfterFirst.len
+        check targetStore2.listRoots().len == 0
+        check not fileExists(targetStoreRoot / "current")
+        check not dirExists(targetStoreRoot / "generations")

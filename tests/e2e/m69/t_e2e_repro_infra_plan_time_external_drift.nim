@@ -54,6 +54,8 @@ import std/[os, strutils, tables, tempfiles, unittest]
 import repro_elevation
 import repro_infra
 
+import repro_test_support
+
 const HostIdentity = "m82-phase-c-drift-gate-host"
 const FixedTimestamp = 1_700_000_000'i64
 
@@ -99,218 +101,219 @@ proc seedRecordedDigest(stateDir, address, postDigestHex: string) =
 # ---------------------------------------------------------------------------
 
 suite "integration_intra_batch_capability_to_service — drift half (M82 Phase C)":
+  when isNixSupported:
 
-  test "no recorded state => no drift findings on first apply ever":
-    # A fresh state dir has no current generation, no audit log: the
-    # planner emits a normal plan with an empty drift list. This is
-    # the BASELINE — every other scenario perturbs from here.
-    when defined(windows):
-      let scratch = allowlistedRoot()
-      defer:
-        try: removeDir(scratch) except CatchableError: discard
-      createDir(scratch)
-      let filePath = scratch / "baseline.conf"
-      let stateDir = createTempDir("m82c-drift-baseline-", "")
-      defer: removeDir(stateDir)
-      ensureSystemStateDir(stateDir)
-      let plan = producePlan(
-        profileFor(filePath, "X"), HostIdentity, now = FixedTimestamp,
-        opts = PlannerOptions(stateDir: stateDir))
-      check plan.driftFindings.len == 0
-    else:
-      # POSIX: writing /etc/ needs root. The pure-logic invariant —
-      # an empty `recorded` table yields no findings — is exercised
-      # exhaustively in the smoke suite. Re-assert it here on the
-      # public `loadRecordedDigests` API so the gate has a visible
-      # check on every host.
-      let stateDir = createTempDir("m82c-drift-baseline-", "")
-      defer: removeDir(stateDir)
-      ensureSystemStateDir(stateDir)
-      check loadRecordedDigests(stateDir).len == 0
+    test "no recorded state => no drift findings on first apply ever":
+      # A fresh state dir has no current generation, no audit log: the
+      # planner emits a normal plan with an empty drift list. This is
+      # the BASELINE — every other scenario perturbs from here.
+      when defined(windows):
+        let scratch = allowlistedRoot()
+        defer:
+          try: removeDir(scratch) except CatchableError: discard
+        createDir(scratch)
+        let filePath = scratch / "baseline.conf"
+        let stateDir = createTempDir("m82c-drift-baseline-", "")
+        defer: removeDir(stateDir)
+        ensureSystemStateDir(stateDir)
+        let plan = producePlan(
+          profileFor(filePath, "X"), HostIdentity, now = FixedTimestamp,
+          opts = PlannerOptions(stateDir: stateDir))
+        check plan.driftFindings.len == 0
+      else:
+        # POSIX: writing /etc/ needs root. The pure-logic invariant —
+        # an empty `recorded` table yields no findings — is exercised
+        # exhaustively in the smoke suite. Re-assert it here on the
+        # public `loadRecordedDigests` API so the gate has a visible
+        # check on every host.
+        let stateDir = createTempDir("m82c-drift-baseline-", "")
+        defer: removeDir(stateDir)
+        ensureSystemStateDir(stateDir)
+        check loadRecordedDigests(stateDir).len == 0
 
-  test "out-of-band mutation between plan and apply: actionable drift":
-    # SCENARIO: external drift between a first apply and a re-plan.
-    #
-    #   1. Cycle 1: apply profile P; the planner records that the
-    #      resource ended at content X (post-apply digest = X-digest).
-    #      We synthesize this audit record directly — the actual apply
-    #      pipeline is M69's territory; M82 Phase C is the plan-time
-    #      drift surface.
-    #
-    #   2. Out-of-band mutator changes the file content from X -> Y on
-    #      disk WITHOUT going through Reprobuild.
-    #
-    #   3. Cycle 2: re-plan against the SAME profile P (still asking
-    #      for content X). The planner reads:
-    #        recorded = X-digest (from the audit log)
-    #        observed = Y-digest (from the live file)
-    #        desired  = X-digest (from the profile)
-    #      `observed != recorded` AND `observed != desired` — the
-    #      classifier returns ACTIONABLE.
-    #
-    # The on-disk mutator dance runs on Windows under PROGRAMDATA
-    # (writable without root); on POSIX the e2e half is gated by root
-    # and falls back to the pure-logic invariant check.
-    when defined(windows):
-      let scratch = allowlistedRoot()
-      defer:
-        # The file is small + the dir is per-pid; clean up either way.
-        try: removeDir(scratch) except CatchableError: discard
-      createDir(scratch)
-      let filePath = scratch / "drifted.conf"
-      let desiredContent = "the profile says X"
-      let mutatedContent = "the world says Y"
-      let address = "systemFile:" & filePath
-      let stateDir = createTempDir("m82c-drift-actionable-", "")
-      defer: removeDir(stateDir)
-      # Cycle 1: assume apply ran; seed the recorded digest with the
-      # X content's digest. The planner uses this as `recorded`.
-      let postDigest = posixSystemDesiredDigestHex(PrivilegedOperation(
-        kind: pokFsSystemFile, address: address,
-        sfPath: filePath, sfContent: desiredContent, sfDestroy: false))
-      writeFile(filePath, desiredContent)  # what apply would have left
-      seedRecordedDigest(stateDir, address, postDigest)
-      # Out-of-band mutator: someone edits the file behind our back.
-      writeFile(filePath, mutatedContent)
-      # Cycle 2: re-plan the SAME profile.
-      let profileText = profileFor(filePath, desiredContent)
-      let plan = producePlan(profileText, HostIdentity,
-        now = FixedTimestamp,
-        opts = PlannerOptions(stateDir: stateDir))
-      check plan.driftFindings.len == 1
-      let f = plan.driftFindings[0]
-      check f.address == address
-      check f.classification == dcActionable
-      check f.recordedDigestHex == postDigest
-      check f.observedDigestHex != postDigest
-      check f.desiredDigestHex == postDigest    # profile content unchanged
-      check not f.accepted                      # no --accept-drift flag
-    else:
-      # POSIX: would need to write to /etc/ which requires root. The
-      # pure-logic invariant — the classifier — is platform-pure and
-      # is exercised in the smoke suite. Assert the same shape with
-      # synthesized digests here so the gate has SOMETHING to check
-      # on every host.
-      check classifyDrift("recorded-X", "observed-Y", "desired-X") ==
-        dcActionable
+    test "out-of-band mutation between plan and apply: actionable drift":
+      # SCENARIO: external drift between a first apply and a re-plan.
+      #
+      #   1. Cycle 1: apply profile P; the planner records that the
+      #      resource ended at content X (post-apply digest = X-digest).
+      #      We synthesize this audit record directly — the actual apply
+      #      pipeline is M69's territory; M82 Phase C is the plan-time
+      #      drift surface.
+      #
+      #   2. Out-of-band mutator changes the file content from X -> Y on
+      #      disk WITHOUT going through Reprobuild.
+      #
+      #   3. Cycle 2: re-plan against the SAME profile P (still asking
+      #      for content X). The planner reads:
+      #        recorded = X-digest (from the audit log)
+      #        observed = Y-digest (from the live file)
+      #        desired  = X-digest (from the profile)
+      #      `observed != recorded` AND `observed != desired` — the
+      #      classifier returns ACTIONABLE.
+      #
+      # The on-disk mutator dance runs on Windows under PROGRAMDATA
+      # (writable without root); on POSIX the e2e half is gated by root
+      # and falls back to the pure-logic invariant check.
+      when defined(windows):
+        let scratch = allowlistedRoot()
+        defer:
+          # The file is small + the dir is per-pid; clean up either way.
+          try: removeDir(scratch) except CatchableError: discard
+        createDir(scratch)
+        let filePath = scratch / "drifted.conf"
+        let desiredContent = "the profile says X"
+        let mutatedContent = "the world says Y"
+        let address = "systemFile:" & filePath
+        let stateDir = createTempDir("m82c-drift-actionable-", "")
+        defer: removeDir(stateDir)
+        # Cycle 1: assume apply ran; seed the recorded digest with the
+        # X content's digest. The planner uses this as `recorded`.
+        let postDigest = posixSystemDesiredDigestHex(PrivilegedOperation(
+          kind: pokFsSystemFile, address: address,
+          sfPath: filePath, sfContent: desiredContent, sfDestroy: false))
+        writeFile(filePath, desiredContent)  # what apply would have left
+        seedRecordedDigest(stateDir, address, postDigest)
+        # Out-of-band mutator: someone edits the file behind our back.
+        writeFile(filePath, mutatedContent)
+        # Cycle 2: re-plan the SAME profile.
+        let profileText = profileFor(filePath, desiredContent)
+        let plan = producePlan(profileText, HostIdentity,
+          now = FixedTimestamp,
+          opts = PlannerOptions(stateDir: stateDir))
+        check plan.driftFindings.len == 1
+        let f = plan.driftFindings[0]
+        check f.address == address
+        check f.classification == dcActionable
+        check f.recordedDigestHex == postDigest
+        check f.observedDigestHex != postDigest
+        check f.desiredDigestHex == postDigest    # profile content unchanged
+        check not f.accepted                      # no --accept-drift flag
+      else:
+        # POSIX: would need to write to /etc/ which requires root. The
+        # pure-logic invariant — the classifier — is platform-pure and
+        # is exercised in the smoke suite. Assert the same shape with
+        # synthesized digests here so the gate has SOMETHING to check
+        # on every host.
+        check classifyDrift("recorded-X", "observed-Y", "desired-X") ==
+          dcActionable
 
-  test "with --accept-drift the finding is annotated as accepted":
-    when defined(windows):
-      let scratch = allowlistedRoot()
-      defer:
-        try: removeDir(scratch) except CatchableError: discard
-      createDir(scratch)
-      let filePath = scratch / "accepted.conf"
-      let desiredContent = "the profile says X"
-      let mutatedContent = "the world says Y"
-      let address = "systemFile:" & filePath
-      let stateDir = createTempDir("m82c-drift-accepted-", "")
-      defer: removeDir(stateDir)
-      let postDigest = posixSystemDesiredDigestHex(PrivilegedOperation(
-        kind: pokFsSystemFile, address: address,
-        sfPath: filePath, sfContent: desiredContent, sfDestroy: false))
-      writeFile(filePath, desiredContent)
-      seedRecordedDigest(stateDir, address, postDigest)
-      writeFile(filePath, mutatedContent)
-      let profileText = profileFor(filePath, desiredContent)
-      let plan = producePlan(profileText, HostIdentity,
-        now = FixedTimestamp,
-        opts = PlannerOptions(stateDir: stateDir, acceptDrift: true))
-      check plan.driftFindings.len == 1
-      let f = plan.driftFindings[0]
-      check f.classification == dcActionable
-      check f.accepted
-      # The rendered drift output names the acceptance for the audit
-      # surface — `repro infra apply` prints this verbatim so the
-      # operator sees what was acknowledged.
-      let rendered = renderDriftFindings(plan.driftFindings)
-      check rendered.contains("accepted via --accept-drift")
-    else:
-      # Pure-logic invariant on POSIX: the accepted bit propagates
-      # into the rendered output.
-      let rendered = renderDriftFindings(@[DriftFinding(
-        address: "systemFile:/etc/x",
-        kind: "fs.systemFile",
-        recordedDigestHex: "aa", observedDigestHex: "bb",
-        desiredDigestHex: "cc",
-        classification: dcActionable, accepted: true)])
-      check rendered.contains("accepted via --accept-drift")
+    test "with --accept-drift the finding is annotated as accepted":
+      when defined(windows):
+        let scratch = allowlistedRoot()
+        defer:
+          try: removeDir(scratch) except CatchableError: discard
+        createDir(scratch)
+        let filePath = scratch / "accepted.conf"
+        let desiredContent = "the profile says X"
+        let mutatedContent = "the world says Y"
+        let address = "systemFile:" & filePath
+        let stateDir = createTempDir("m82c-drift-accepted-", "")
+        defer: removeDir(stateDir)
+        let postDigest = posixSystemDesiredDigestHex(PrivilegedOperation(
+          kind: pokFsSystemFile, address: address,
+          sfPath: filePath, sfContent: desiredContent, sfDestroy: false))
+        writeFile(filePath, desiredContent)
+        seedRecordedDigest(stateDir, address, postDigest)
+        writeFile(filePath, mutatedContent)
+        let profileText = profileFor(filePath, desiredContent)
+        let plan = producePlan(profileText, HostIdentity,
+          now = FixedTimestamp,
+          opts = PlannerOptions(stateDir: stateDir, acceptDrift: true))
+        check plan.driftFindings.len == 1
+        let f = plan.driftFindings[0]
+        check f.classification == dcActionable
+        check f.accepted
+        # The rendered drift output names the acceptance for the audit
+        # surface — `repro infra apply` prints this verbatim so the
+        # operator sees what was acknowledged.
+        let rendered = renderDriftFindings(plan.driftFindings)
+        check rendered.contains("accepted via --accept-drift")
+      else:
+        # Pure-logic invariant on POSIX: the accepted bit propagates
+        # into the rendered output.
+        let rendered = renderDriftFindings(@[DriftFinding(
+          address: "systemFile:/etc/x",
+          kind: "fs.systemFile",
+          recordedDigestHex: "aa", observedDigestHex: "bb",
+          desiredDigestHex: "cc",
+          classification: dcActionable, accepted: true)])
+        check rendered.contains("accepted via --accept-drift")
 
-  test "out-of-band mutator that lands AT desired: informational drift":
-    # The complement case: an external mutator changes the file to
-    # match desired (e.g. the operator manually applied the same
-    # change the profile asks for). The planner detects "world
-    # changed since last apply" (recorded != observed) but ALSO sees
-    # observed == desired, so it classifies the drift as
-    # INFORMATIONAL — heads-up only; the apply will no-op the
-    # resource.
-    when defined(windows):
-      let scratch = allowlistedRoot()
-      defer:
-        try: removeDir(scratch) except CatchableError: discard
-      createDir(scratch)
-      let filePath = scratch / "informational.conf"
-      let oldContent = "the OLD apply left this"
-      let desiredContent = "the profile NOW asks for this"
-      let address = "systemFile:" & filePath
-      let stateDir = createTempDir("m82c-drift-info-", "")
-      defer: removeDir(stateDir)
-      # Cycle 1: apply left the file at `oldContent` — the recorded
-      # postWriteDigest is `oldContent`'s digest.
-      let oldDigest = posixSystemDesiredDigestHex(PrivilegedOperation(
-        kind: pokFsSystemFile, address: address,
-        sfPath: filePath, sfContent: oldContent, sfDestroy: false))
-      writeFile(filePath, oldContent)
-      seedRecordedDigest(stateDir, address, oldDigest)
-      # Out-of-band: someone manually applies the SAME change the
-      # profile asks for. The live file now matches the new profile.
-      writeFile(filePath, desiredContent)
-      # Cycle 2: re-plan with the new profile.
-      let profileText = profileFor(filePath, desiredContent)
-      let plan = producePlan(profileText, HostIdentity,
-        now = FixedTimestamp,
-        opts = PlannerOptions(stateDir: stateDir))
-      check plan.driftFindings.len == 1
-      let f = plan.driftFindings[0]
-      check f.classification == dcInformational
-      check f.recordedDigestHex == oldDigest
-      # observed == desired (both = desiredContent's digest).
-      check f.observedDigestHex == f.desiredDigestHex
-      # The planner emits a no-op action because observed == desired.
-      var found = false
-      for op in plan.envelope.operations:
-        if op.address == address:
-          check op.action == "no-op"
-          found = true
-      check found
-    else:
-      # Pure-logic sanity check for the informational branch: the test
-      # cannot run the file-side scratch flow on this host, but the
-      # underlying classification is still exercised. Informational
-      # drift is defined as "OOB mutator landed observed AT desired";
-      # the recorded value is different from both because that is the
-      # whole point of *drift*. Keep observed and desired byte-equal so
-      # the assertion exercises the (observed == desired) branch.
-      check classifyDrift("recorded-X", "matches-desired-Y",
-        "matches-desired-Y") == dcInformational
+    test "out-of-band mutator that lands AT desired: informational drift":
+      # The complement case: an external mutator changes the file to
+      # match desired (e.g. the operator manually applied the same
+      # change the profile asks for). The planner detects "world
+      # changed since last apply" (recorded != observed) but ALSO sees
+      # observed == desired, so it classifies the drift as
+      # INFORMATIONAL — heads-up only; the apply will no-op the
+      # resource.
+      when defined(windows):
+        let scratch = allowlistedRoot()
+        defer:
+          try: removeDir(scratch) except CatchableError: discard
+        createDir(scratch)
+        let filePath = scratch / "informational.conf"
+        let oldContent = "the OLD apply left this"
+        let desiredContent = "the profile NOW asks for this"
+        let address = "systemFile:" & filePath
+        let stateDir = createTempDir("m82c-drift-info-", "")
+        defer: removeDir(stateDir)
+        # Cycle 1: apply left the file at `oldContent` — the recorded
+        # postWriteDigest is `oldContent`'s digest.
+        let oldDigest = posixSystemDesiredDigestHex(PrivilegedOperation(
+          kind: pokFsSystemFile, address: address,
+          sfPath: filePath, sfContent: oldContent, sfDestroy: false))
+        writeFile(filePath, oldContent)
+        seedRecordedDigest(stateDir, address, oldDigest)
+        # Out-of-band: someone manually applies the SAME change the
+        # profile asks for. The live file now matches the new profile.
+        writeFile(filePath, desiredContent)
+        # Cycle 2: re-plan with the new profile.
+        let profileText = profileFor(filePath, desiredContent)
+        let plan = producePlan(profileText, HostIdentity,
+          now = FixedTimestamp,
+          opts = PlannerOptions(stateDir: stateDir))
+        check plan.driftFindings.len == 1
+        let f = plan.driftFindings[0]
+        check f.classification == dcInformational
+        check f.recordedDigestHex == oldDigest
+        # observed == desired (both = desiredContent's digest).
+        check f.observedDigestHex == f.desiredDigestHex
+        # The planner emits a no-op action because observed == desired.
+        var found = false
+        for op in plan.envelope.operations:
+          if op.address == address:
+            check op.action == "no-op"
+            found = true
+        check found
+      else:
+        # Pure-logic sanity check for the informational branch: the test
+        # cannot run the file-side scratch flow on this host, but the
+        # underlying classification is still exercised. Informational
+        # drift is defined as "OOB mutator landed observed AT desired";
+        # the recorded value is different from both because that is the
+        # whole point of *drift*. Keep observed and desired byte-equal so
+        # the assertion exercises the (observed == desired) branch.
+        check classifyDrift("recorded-X", "matches-desired-Y",
+          "matches-desired-Y") == dcInformational
 
-  test "renderDriftFindings prints actionable + informational counts":
-    let findings = @[
-      DriftFinding(address: "systemFile:/a",
-        kind: "fs.systemFile", recordedDigestHex: "1",
-        observedDigestHex: "2", desiredDigestHex: "3",
-        classification: dcActionable),
-      DriftFinding(address: "systemFile:/b",
-        kind: "fs.systemFile", recordedDigestHex: "1",
-        observedDigestHex: "2", desiredDigestHex: "2",
-        classification: dcInformational)]
-    let rendered = renderDriftFindings(findings)
-    # Both classifications appear; the actionable summary surfaces
-    # the --accept-drift hint; the informational summary surfaces
-    # the no-op outcome.
-    check rendered.contains("[actionable]")
-    check rendered.contains("[informational]")
-    check rendered.contains("1 actionable drift finding")
-    check rendered.contains("1 informational drift finding")
-    check rendered.contains("--accept-drift")
-    check rendered.contains("no-op")
+    test "renderDriftFindings prints actionable + informational counts":
+      let findings = @[
+        DriftFinding(address: "systemFile:/a",
+          kind: "fs.systemFile", recordedDigestHex: "1",
+          observedDigestHex: "2", desiredDigestHex: "3",
+          classification: dcActionable),
+        DriftFinding(address: "systemFile:/b",
+          kind: "fs.systemFile", recordedDigestHex: "1",
+          observedDigestHex: "2", desiredDigestHex: "2",
+          classification: dcInformational)]
+      let rendered = renderDriftFindings(findings)
+      # Both classifications appear; the actionable summary surfaces
+      # the --accept-drift hint; the informational summary surfaces
+      # the no-op outcome.
+      check rendered.contains("[actionable]")
+      check rendered.contains("[informational]")
+      check rendered.contains("1 actionable drift finding")
+      check rendered.contains("1 informational drift finding")
+      check rendered.contains("--accept-drift")
+      check rendered.contains("no-op")

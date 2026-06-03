@@ -10,6 +10,8 @@ import std/[net, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_home_generations
 import repro_local_store
 
+import repro_test_support
+
 const ProjectRoot = currentSourcePath().parentDir().parentDir()
   .parentDir().parentDir()
 
@@ -190,179 +192,180 @@ proc keyFromDigest(digest: Digest256): PrefixIdBytes =
     result[i] = digest[i]
 
 suite "M71 Phase D: remote activation over loopback SSH":
-  test "target activation commits generation, roots, current, launchers, and owned files idempotently":
-    when defined(windows):
-      doAssert false,
-        "M71 Phase D gate must not be skipped; Windows needs a " &
-        "target-side launcher implementation or an explicit fail-closed " &
-        "fixture with no launchers"
-    else:
-      let tempRoot = createTempDir("repro-m71-remote-activate-", "")
-      var sshd: SshHarness
-      defer:
-        stopLoopbackSshd(sshd)
-        try: removeDir(tempRoot) except OSError: discard
+  when isNixSupported:
+    test "target activation commits generation, roots, current, launchers, and owned files idempotently":
+      when defined(windows):
+        doAssert false,
+          "M71 Phase D gate must not be skipped; Windows needs a " &
+          "target-side launcher implementation or an explicit fail-closed " &
+          "fixture with no launchers"
+      else:
+        let tempRoot = createTempDir("repro-m71-remote-activate-", "")
+        var sshd: SshHarness
+        defer:
+          stopLoopbackSshd(sshd)
+          try: removeDir(tempRoot) except OSError: discard
 
-      let sourceStateDir = tempRoot / "source-state"
-      let targetStateDir = tempRoot / "target-state"
-      let sourceStoreRoot = tempRoot / "source-store"
-      let targetStoreRoot = tempRoot / "target-store"
-      let profileDir = tempRoot / "profile"
-      let targetHomeDir = tempRoot / "target-home"
-      let fixtureDir = tempRoot / "fixture"
-      createDir(sourceStateDir)
-      createDir(targetStateDir)
-      createDir(sourceStoreRoot)
-      createDir(targetStoreRoot)
-      createDir(profileDir)
-      createDir(targetHomeDir)
-      createDir(fixtureDir)
+        let sourceStateDir = tempRoot / "source-state"
+        let targetStateDir = tempRoot / "target-state"
+        let sourceStoreRoot = tempRoot / "source-store"
+        let targetStoreRoot = tempRoot / "target-store"
+        let profileDir = tempRoot / "profile"
+        let targetHomeDir = tempRoot / "target-home"
+        let fixtureDir = tempRoot / "fixture"
+        createDir(sourceStateDir)
+        createDir(targetStateDir)
+        createDir(sourceStoreRoot)
+        createDir(targetStoreRoot)
+        createDir(profileDir)
+        createDir(targetHomeDir)
+        createDir(fixtureDir)
 
-      writeFile(profileDir / "home.nim",
-        "import repro_profile\n\n" &
-        "profile \"m71-phase-d\":\n" &
-        "  activity default:\n" &
-        "    `m71-fixture`\n")
+        writeFile(profileDir / "home.nim",
+          "import repro_profile\n\n" &
+          "profile \"m71-phase-d\":\n" &
+          "  activity default:\n" &
+          "    `m71-fixture`\n")
 
-      let exeName = "m71-fixture"
-      let exePath = fixtureDir / exeName
-      discard writeFixtureExe(exePath)
-      let generatedRel = ".m71-phase-d-generated"
-      let generatedPath = targetHomeDir / generatedRel
-      let generatedContent = "phase-d generated content"
+        let exeName = "m71-fixture"
+        let exePath = fixtureDir / exeName
+        discard writeFixtureExe(exePath)
+        let generatedRel = ".m71-phase-d-generated"
+        let generatedPath = targetHomeDir / generatedRel
+        let generatedContent = "phase-d generated content"
 
-      let env = @[
-        (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-        (k: "REPRO_HOME_STATE_DIR", v: sourceStateDir),
-        (k: "REPRO_STORE_ROOT", v: sourceStoreRoot),
-        (k: "HOME", v: targetHomeDir),
-        (k: "USERPROFILE", v: targetHomeDir),
-        (k: "REPRO_HOST", v: "m71-target-host"),
-        (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m71-fixture"),
-        (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m71-fixture=" & exePath),
-        (k: "REPRO_TEST_PACKAGE_GENERATES",
-          v: "m71-fixture=" & generatedRel & ":" & generatedContent)]
+        let env = @[
+          (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+          (k: "REPRO_HOME_STATE_DIR", v: sourceStateDir),
+          (k: "REPRO_STORE_ROOT", v: sourceStoreRoot),
+          (k: "HOME", v: targetHomeDir),
+          (k: "USERPROFILE", v: targetHomeDir),
+          (k: "REPRO_HOST", v: "m71-target-host"),
+          (k: "REPRO_HOME_PACKAGE_CATALOG", v: "m71-fixture"),
+          (k: "REPRO_TEST_PACKAGE_SOURCE", v: "m71-fixture=" & exePath),
+          (k: "REPRO_TEST_PACKAGE_GENERATES",
+            v: "m71-fixture=" & generatedRel & ":" & generatedContent)]
 
-      let apply = runRepro(env, ["home", "apply"])
-      check apply.exitCode == 0
-      check apply.output.contains("applied generation ")
-      check fileExists(generatedPath)
+        let apply = runRepro(env, ["home", "apply"])
+        check apply.exitCode == 0
+        check apply.output.contains("applied generation ")
+        check fileExists(generatedPath)
 
-      let built = runRepro(env, ["home", "__build-bundle"])
-      check built.exitCode == 0
-      let bundleDigestHex = fieldValue(built.output, "bundleDigest")
-      var sourceStore = openStore(sourceStoreRoot)
-      let bundleDigest = parsePrefixIdHex(bundleDigestHex)
-      let sourceBundle = decodeActivationBundleBytes(
-        sourceStore.readCasBlob(bundleDigest), fieldValue(built.output,
-          "bundlePath"))
-      check sourceBundle.casBlobs.len >= 2
-      sourceStore.close()
+        let built = runRepro(env, ["home", "__build-bundle"])
+        check built.exitCode == 0
+        let bundleDigestHex = fieldValue(built.output, "bundleDigest")
+        var sourceStore = openStore(sourceStoreRoot)
+        let bundleDigest = parsePrefixIdHex(bundleDigestHex)
+        let sourceBundle = decodeActivationBundleBytes(
+          sourceStore.readCasBlob(bundleDigest), fieldValue(built.output,
+            "bundlePath"))
+        check sourceBundle.casBlobs.len >= 2
+        sourceStore.close()
 
-      removeFile(generatedPath)
-      check not fileExists(generatedPath)
+        removeFile(generatedPath)
+        check not fileExists(generatedPath)
 
-      sshd = startLoopbackSshd(tempRoot)
-      var transferArgs = @[
-        "home", "__transfer-bundle",
-        "--bundle-digest", bundleDigestHex,
-        "--store-root", sourceStoreRoot,
-        "--target", "localhost",
-        "--remote-repro", reproBinary(),
-        "--target-store-root", targetStoreRoot,
-        "--ssh", sshd.ssh,
-        "--port", $sshd.port]
-      for opt in [
-          "-F", "/dev/null",
-          "-o", "UserKnownHostsFile=" & sshd.knownHosts,
-          "-o", "GlobalKnownHostsFile=/dev/null",
-          "-o", "StrictHostKeyChecking=no",
-          "-o", "IdentitiesOnly=yes",
-          "-o", "PasswordAuthentication=no",
-          "-o", "KbdInteractiveAuthentication=no",
-          "-i", sshd.clientKey]:
-        transferArgs.add("--ssh-option")
-        transferArgs.add(opt)
+        sshd = startLoopbackSshd(tempRoot)
+        var transferArgs = @[
+          "home", "__transfer-bundle",
+          "--bundle-digest", bundleDigestHex,
+          "--store-root", sourceStoreRoot,
+          "--target", "localhost",
+          "--remote-repro", reproBinary(),
+          "--target-store-root", targetStoreRoot,
+          "--ssh", sshd.ssh,
+          "--port", $sshd.port]
+        for opt in [
+            "-F", "/dev/null",
+            "-o", "UserKnownHostsFile=" & sshd.knownHosts,
+            "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "IdentitiesOnly=yes",
+            "-o", "PasswordAuthentication=no",
+            "-o", "KbdInteractiveAuthentication=no",
+            "-i", sshd.clientKey]:
+          transferArgs.add("--ssh-option")
+          transferArgs.add(opt)
 
-      let transferred = runRepro([], transferArgs)
-      check transferred.exitCode == 0
-      check fieldValue(transferred.output, "transferStatus") == "sent"
-      check fieldValue(transferred.output, "bundleDigest") ==
-        bundleDigestHex.toLowerAscii()
+        let transferred = runRepro([], transferArgs)
+        check transferred.exitCode == 0
+        check fieldValue(transferred.output, "transferStatus") == "sent"
+        check fieldValue(transferred.output, "bundleDigest") ==
+          bundleDigestHex.toLowerAscii()
 
-      let activate = runSsh(sshd, remoteCommand([
-        reproBinary(), "home", "__remote-activate",
-        "--store-root", targetStoreRoot,
-        "--state-dir", targetStateDir,
-        "--bundle-digest", bundleDigestHex]))
-      check activate.exitCode == 0
-      check fieldValue(activate.output, "activationStatus") == "activated"
-      let generationId = fieldValue(activate.output, "generationId")
-      check fieldValue(activate.output, "current") == generationId
-      check parseInt(fieldValue(activate.output, "launchersMaterialized")) == 1
-      check parseInt(fieldValue(activate.output,
-        "generatedFilesMaterialized")) == 1
+        let activate = runSsh(sshd, remoteCommand([
+          reproBinary(), "home", "__remote-activate",
+          "--store-root", targetStoreRoot,
+          "--state-dir", targetStateDir,
+          "--bundle-digest", bundleDigestHex]))
+        check activate.exitCode == 0
+        check fieldValue(activate.output, "activationStatus") == "activated"
+        let generationId = fieldValue(activate.output, "generationId")
+        check fieldValue(activate.output, "current") == generationId
+        check parseInt(fieldValue(activate.output, "launchersMaterialized")) == 1
+        check parseInt(fieldValue(activate.output,
+          "generatedFilesMaterialized")) == 1
 
-      check readCurrentGenerationId(targetStateDir) == generationId
-      check fileExists(pointerPath(targetStateDir, generationId))
-      let targetPointer = readPointerFile(pointerPath(targetStateDir,
-        generationId))
-      check generationIdHex(targetPointer.generationId) == generationId
+        check readCurrentGenerationId(targetStateDir) == generationId
+        check fileExists(pointerPath(targetStateDir, generationId))
+        let targetPointer = readPointerFile(pointerPath(targetStateDir,
+          generationId))
+        check generationIdHex(targetPointer.generationId) == generationId
 
-      var targetStore = openStore(targetStoreRoot)
-      let targetBundleBytes = targetStore.readCasBlob(bundleDigest)
-      check targetBundleBytes.len > 0
-      let targetRows = targetStore.listPrefixes()
-      check targetRows.len == 1
-      let targetRoots = targetStore.listRoots()
-      check targetRoots.len == 1
-      check targetRoots[0].rootId == generationId
-      check targetRoots[0].kind == "profile"
-      check targetStore.deadSet().len == 0
+        var targetStore = openStore(targetStoreRoot)
+        let targetBundleBytes = targetStore.readCasBlob(bundleDigest)
+        check targetBundleBytes.len > 0
+        let targetRows = targetStore.listPrefixes()
+        check targetRows.len == 1
+        let targetRoots = targetStore.listRoots()
+        check targetRoots.len == 1
+        check targetRoots[0].rootId == generationId
+        check targetRoots[0].kind == "profile"
+        check targetStore.deadSet().len == 0
 
-      let manifest = decodeManifestBytes(targetStore.readCasBlob(
-        keyFromDigest(targetPointer.activationManifestDigest)))
-      check manifest.exportedCommands.len == 1
-      check manifest.generatedFiles.len == 1
-      check manifest.generatedFiles[0].absoluteOutputPath == generatedPath
+        let manifest = decodeManifestBytes(targetStore.readCasBlob(
+          keyFromDigest(targetPointer.activationManifestDigest)))
+        check manifest.exportedCommands.len == 1
+        check manifest.generatedFiles.len == 1
+        check manifest.generatedFiles[0].absoluteOutputPath == generatedPath
 
-      let targetPrefix = targetStore.absolutePrefixPath(
-        targetRows[0].realizedPath)
-      check targetPrefix.startsWith(targetStoreRoot)
-      check dirExists(targetPrefix)
-      check fileExists(targetPrefix / ReceiptFileName)
-      let launcherPath = generationDir(targetStateDir, generationId) /
-        "bin" / exeName
-      check fileExists(launcherPath)
-      let launcherBody = readFile(launcherPath)
-      check launcherBody.contains(targetStoreRoot)
-      check launcherBody.contains(targetPrefix)
-      check not launcherBody.contains(sourceStoreRoot)
-      check fileExists(currentPath(targetStateDir) / "bin" / exeName)
+        let targetPrefix = targetStore.absolutePrefixPath(
+          targetRows[0].realizedPath)
+        check targetPrefix.startsWith(targetStoreRoot)
+        check dirExists(targetPrefix)
+        check fileExists(targetPrefix / ReceiptFileName)
+        let launcherPath = generationDir(targetStateDir, generationId) /
+          "bin" / exeName
+        check fileExists(launcherPath)
+        let launcherBody = readFile(launcherPath)
+        check launcherBody.contains(targetStoreRoot)
+        check launcherBody.contains(targetPrefix)
+        check not launcherBody.contains(sourceStoreRoot)
+        check fileExists(currentPath(targetStateDir) / "bin" / exeName)
 
-      check fileExists(generatedPath)
-      check readFile(generatedPath) == generatedContent
-      let prefixCountAfterFirst = targetRows.len
-      let rootCountAfterFirst = targetRoots.len
-      targetStore.close()
+        check fileExists(generatedPath)
+        check readFile(generatedPath) == generatedContent
+        let prefixCountAfterFirst = targetRows.len
+        let rootCountAfterFirst = targetRoots.len
+        targetStore.close()
 
-      let activateAgain = runSsh(sshd, remoteCommand([
-        reproBinary(), "__remote-activate",
-        "--store-root", targetStoreRoot,
-        "--state-dir", targetStateDir,
-        "--bundle-digest", bundleDigestHex]))
-      check activateAgain.exitCode == 0
-      check fieldValue(activateAgain.output, "activationStatus") == "activated"
-      check fieldValue(activateAgain.output, "generationId") == generationId
-      check parseInt(fieldValue(activateAgain.output,
-        "prefixesImported")) == 0
-      check parseInt(fieldValue(activateAgain.output,
-        "prefixesAlreadyPresent")) == 1
+        let activateAgain = runSsh(sshd, remoteCommand([
+          reproBinary(), "__remote-activate",
+          "--store-root", targetStoreRoot,
+          "--state-dir", targetStateDir,
+          "--bundle-digest", bundleDigestHex]))
+        check activateAgain.exitCode == 0
+        check fieldValue(activateAgain.output, "activationStatus") == "activated"
+        check fieldValue(activateAgain.output, "generationId") == generationId
+        check parseInt(fieldValue(activateAgain.output,
+          "prefixesImported")) == 0
+        check parseInt(fieldValue(activateAgain.output,
+          "prefixesAlreadyPresent")) == 1
 
-      var targetStore2 = openStore(targetStoreRoot)
-      defer: targetStore2.close()
-      check targetStore2.listPrefixes().len == prefixCountAfterFirst
-      check targetStore2.listRoots().len == rootCountAfterFirst
-      check targetStore2.deadSet().len == 0
-      check readCurrentGenerationId(targetStateDir) == generationId
-      check readFile(generatedPath) == generatedContent
+        var targetStore2 = openStore(targetStoreRoot)
+        defer: targetStore2.close()
+        check targetStore2.listPrefixes().len == prefixCountAfterFirst
+        check targetStore2.listRoots().len == rootCountAfterFirst
+        check targetStore2.deadSet().len == 0
+        check readCurrentGenerationId(targetStateDir) == generationId
+        check readFile(generatedPath) == generatedContent

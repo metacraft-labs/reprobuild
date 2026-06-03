@@ -49,6 +49,24 @@ const
     ## intent stay visible at every gate site and makes it
     ## trivial to grep for "everything that needs Nix".
 
+  isFsSnoopSupported* = defined(linux) or defined(macosx)
+    ## True on platforms where the dev-env tests can wire in
+    ## ``repro-fs-snoop`` and the monitor shim end-to-end.
+    ##
+    ## The shim itself exists for Windows
+    ## (``libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim``)
+    ## but the test-side integration is not yet there: the tests'
+    ## ``compileNim`` helper would need to pass
+    ## ``--path:<ct_interpose_src>`` and the IAT-patcher's
+    ## dependencies to compile the shim DLL on the fly, and the
+    ## fs-snoop launcher needs a Windows runtime path. Wiring that
+    ## up properly is a separate milestone — until then the dev-env
+    ## tests that need fs-snoop are gated to the platforms where
+    ## ``prepareMonitorTools`` is already implemented in-test.
+    ## When the Windows wiring lands, flip this constant + remove
+    ## the ``else: raise OSError`` fallbacks in the gated tests in
+    ## one commit.
+
 
 type
   CmdSpec* = object

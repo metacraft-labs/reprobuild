@@ -18,7 +18,7 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when defined(linux) or defined(macosx):
+when isFsSnoopSupported:
   proc prepareMonitorTools(repoRoot, tempRoot: string):
       tuple[fsSnoop: string; shim: string] =
     let binDir = tempRoot / "bin"
@@ -127,88 +127,86 @@ proc prepareCase(prefix: string): tuple[tempRoot, projectRoot, outDir,
   writeFixture(result.projectRoot)
   createDir(result.outDir)
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
-  when defined(linux) or defined(macosx):
+  when isFsSnoopSupported:
     let monitor = prepareMonitorTools(result.repoRoot,
       result.tempRoot / "monitor")
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
-  else:
-    raise newException(OSError,
-      "dev-env monitored edge tests require fs-snoop support")
 
 suite "e2e_dev_env_edge_cache":
-  test "e2e_dev_env_edge_noop_reuses_cached_artifact":
-    let c = prepareCase("repro-m3-dev-env-noop")
-    defer: removeDir(c.tempRoot)
-    let cfg = configFor(c.projectRoot, c.outDir, c.reproBin, c.fsSnoop,
-      c.shim, c.repoRoot)
+  when isFsSnoopSupported:
+    test "e2e_dev_env_edge_noop_reuses_cached_artifact":
+      let c = prepareCase("repro-m3-dev-env-noop")
+      defer: removeDir(c.tempRoot)
+      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin, c.fsSnoop,
+        c.shim, c.repoRoot)
 
-    let first = computeDevEnvEdge(cfg)
-    let firstBytes = first.artifactPath.readBytes()
-    check first.stats.providerIntrospectionLaunched
-    check first.stats.artifactWriteLaunched
-    check first.stats.shellRenderingLaunched
-    check first.artifactPath.artifactShellOp("AUX_VALUE").value == "alpha"
-    if not first.observedInputEndsWith("dev-env-value.txt"):
-      first.dumpIntrospectionEvidence()
-    check first.observedInputEndsWith("dev-env-value.txt")
+      let first = computeDevEnvEdge(cfg)
+      let firstBytes = first.artifactPath.readBytes()
+      check first.stats.providerIntrospectionLaunched
+      check first.stats.artifactWriteLaunched
+      check first.stats.shellRenderingLaunched
+      check first.artifactPath.artifactShellOp("AUX_VALUE").value == "alpha"
+      if not first.observedInputEndsWith("dev-env-value.txt"):
+        first.dumpIntrospectionEvidence()
+      check first.observedInputEndsWith("dev-env-value.txt")
 
-    let second = computeDevEnvEdge(cfg)
-    check second.artifactPath == first.artifactPath
-    check second.artifactPath.readBytes() == firstBytes
-    check not second.stats.providerBuildLaunched
-    check second.stats.providerBuildSkippedFresh
-    check not second.stats.providerIntrospectionLaunched
-    check second.stats.providerIntrospectionCacheHit
-    check second.stats.artifactWriteSkipped
-    check not second.stats.shellRenderingLaunched
-    check second.stats.shellRenderingCacheHit
-    check second.stats.shellRenderingSkipped
-    if not second.observedInputEndsWith("dev-env-value.txt"):
-      second.dumpIntrospectionEvidence()
-    check second.observedInputEndsWith("dev-env-value.txt")
+      let second = computeDevEnvEdge(cfg)
+      check second.artifactPath == first.artifactPath
+      check second.artifactPath.readBytes() == firstBytes
+      check not second.stats.providerBuildLaunched
+      check second.stats.providerBuildSkippedFresh
+      check not second.stats.providerIntrospectionLaunched
+      check second.stats.providerIntrospectionCacheHit
+      check second.stats.artifactWriteSkipped
+      check not second.stats.shellRenderingLaunched
+      check second.stats.shellRenderingCacheHit
+      check second.stats.shellRenderingSkipped
+      if not second.observedInputEndsWith("dev-env-value.txt"):
+        second.dumpIntrospectionEvidence()
+      check second.observedInputEndsWith("dev-env-value.txt")
 
-  test "e2e_dev_env_edge_reruns_on_observed_input_change":
-    let c = prepareCase("repro-m3-dev-env-observed")
-    defer: removeDir(c.tempRoot)
-    let cfg = configFor(c.projectRoot, c.outDir, c.reproBin, c.fsSnoop,
-      c.shim, c.repoRoot)
+    test "e2e_dev_env_edge_reruns_on_observed_input_change":
+      let c = prepareCase("repro-m3-dev-env-observed")
+      defer: removeDir(c.tempRoot)
+      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin, c.fsSnoop,
+        c.shim, c.repoRoot)
 
-    let first = computeDevEnvEdge(cfg)
-    let firstBytes = first.artifactPath.readBytes()
-    sleep(30)
-    writeFile(c.projectRoot / "dev-env-value.txt", "charlie\n")
-    let second = computeDevEnvEdge(cfg)
+      let first = computeDevEnvEdge(cfg)
+      let firstBytes = first.artifactPath.readBytes()
+      sleep(30)
+      writeFile(c.projectRoot / "dev-env-value.txt", "charlie\n")
+      let second = computeDevEnvEdge(cfg)
 
-    check second.stats.providerBuildSkippedFresh
-    check second.stats.providerIntrospectionLaunched
-    check second.stats.artifactWriteLaunched
-    check second.artifactPath.readBytes() != firstBytes
-    check second.artifactPath.artifactShellOp("AUX_VALUE").value == "charlie"
-    check second.observedInputEndsWith("dev-env-value.txt")
+      check second.stats.providerBuildSkippedFresh
+      check second.stats.providerIntrospectionLaunched
+      check second.stats.artifactWriteLaunched
+      check second.artifactPath.readBytes() != firstBytes
+      check second.artifactPath.artifactShellOp("AUX_VALUE").value == "charlie"
+      check second.observedInputEndsWith("dev-env-value.txt")
 
-  test "e2e_dev_env_edge_rebuilds_provider_on_project_change":
-    let c = prepareCase("repro-m3-dev-env-provider")
-    defer: removeDir(c.tempRoot)
-    let cfg = configFor(c.projectRoot, c.outDir, c.reproBin, c.fsSnoop,
-      c.shim, c.repoRoot)
+    test "e2e_dev_env_edge_rebuilds_provider_on_project_change":
+      let c = prepareCase("repro-m3-dev-env-provider")
+      defer: removeDir(c.tempRoot)
+      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin, c.fsSnoop,
+        c.shim, c.repoRoot)
 
-    let first = computeDevEnvEdge(cfg)
-    let firstProviderArtifactId = first.providerArtifactId
-    check first.artifactPath.artifactShellOp("FIXTURE_MODE").value == "dev"
-    sleep(30)
-    writeFile(c.projectRoot / "fixture_provider.nim",
-      providerText("changed", "nim c -d:changed src/main.nim"))
-    let second = computeDevEnvEdge(cfg)
+      let first = computeDevEnvEdge(cfg)
+      let firstProviderArtifactId = first.providerArtifactId
+      check first.artifactPath.artifactShellOp("FIXTURE_MODE").value == "dev"
+      sleep(30)
+      writeFile(c.projectRoot / "fixture_provider.nim",
+        providerText("changed", "nim c -d:changed src/main.nim"))
+      let second = computeDevEnvEdge(cfg)
 
-    check second.stats.providerBuildLaunched
-    check second.providerCompileAction.id == "__repro_provider_compile"
-    check second.providerCompileAction.status == asSucceeded
-    check second.stats.providerIntrospectionLaunched
-    check second.introspectionAction.evidence.declaredInputs.anyIt(
-      it == second.providerBinaryPath)
-    check second.providerArtifactId != firstProviderArtifactId
-    check second.artifactPath.artifactShellOp("FIXTURE_MODE").value ==
-      "changed"
-    check readDevEnvArtifact(second.artifactPath).tasks.anyIt(
-      it.command == "nim c -d:changed src/main.nim")
+      check second.stats.providerBuildLaunched
+      check second.providerCompileAction.id == "__repro_provider_compile"
+      check second.providerCompileAction.status == asSucceeded
+      check second.stats.providerIntrospectionLaunched
+      check second.introspectionAction.evidence.declaredInputs.anyIt(
+        it == second.providerBinaryPath)
+      check second.providerArtifactId != firstProviderArtifactId
+      check second.artifactPath.artifactShellOp("FIXTURE_MODE").value ==
+        "changed"
+      check readDevEnvArtifact(second.artifactPath).tasks.anyIt(
+        it.command == "nim c -d:changed src/main.nim")

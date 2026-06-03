@@ -133,105 +133,106 @@ proc writeProject(projectRoot, primaryUrl, mirrorUrl, expectedSha: string;
     "    defaultBuildAction(produced)\n")
 
 suite "m54_verified_tarball_profile":
-  test "m54_verified_tarball_profile_e2e":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m54-tarball", "")
-    defer: removeDir(tempRoot)
+  when isNixSupported:
+    test "m54_verified_tarball_profile_e2e":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m54-tarball", "")
+      defer: removeDir(tempRoot)
 
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
+      let reproBin = tempRoot / "repro"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-repro"),
+        "--out:" & reproBin,
+        repoRoot / "apps" / "repro" / "repro.nim"
+      ]), repoRoot)
 
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
 
-    let archive = writeToolArchive(tempRoot)
-    let corruptArchive = tempRoot / "m54tool-corrupt.tar.gz"
-    writeFile(corruptArchive, "corrupt archive bytes")
+      let archive = writeToolArchive(tempRoot)
+      let corruptArchive = tempRoot / "m54tool-corrupt.tar.gz"
+      writeFile(corruptArchive, "corrupt archive bytes")
 
-    let projectRoot = tempRoot / "project"
-    let brokenPrimary = "file://" & (tempRoot / "missing-primary.tar.gz")
-    let goodMirror = "file://" & archive.archivePath
-    writeProject(projectRoot, brokenPrimary, goodMirror, archive.sha256)
+      let projectRoot = tempRoot / "project"
+      let brokenPrimary = "file://" & (tempRoot / "missing-primary.tar.gz")
+      let goodMirror = "file://" & archive.archivePath
+      writeProject(projectRoot, brokenPrimary, goodMirror, archive.sha256)
 
-    let first = requireSuccess(shellCommand([reproBin, "build", projectRoot,
-      "--tool-provisioning=tarball", "--log=actions"]), repoRoot)
-    check first.contains("tool-provisioning=tarball")
-    check first.contains("cachePortability: portable")
-    check first.contains("action: tarball-run status=asSucceeded launched=true")
-    check readFile(projectRoot / "build" / "tarball-output.txt") ==
-      "m54:fixture-input\n"
+      let first = requireSuccess(shellCommand([reproBin, "build", projectRoot,
+        "--tool-provisioning=tarball", "--log=actions"]), repoRoot)
+      check first.contains("tool-provisioning=tarball")
+      check first.contains("cachePortability: portable")
+      check first.contains("action: tarball-run status=asSucceeded launched=true")
+      check readFile(projectRoot / "build" / "tarball-output.txt") ==
+        "m54:fixture-input\n"
 
-    let interfaceArtifact = readInterfaceArtifact(valueAfter(first, "interface:"))
-    check interfaceArtifact.projectInterface.toolUses.len == 1
-    check interfaceArtifact.projectInterface.toolUses[0].tarballProvisioning.len == 1
-    check interfaceArtifact.projectInterface.toolUses[0].tarballProvisioning[0].
-      sha256 == archive.sha256
+      let interfaceArtifact = readInterfaceArtifact(valueAfter(first, "interface:"))
+      check interfaceArtifact.projectInterface.toolUses.len == 1
+      check interfaceArtifact.projectInterface.toolUses[0].tarballProvisioning.len == 1
+      check interfaceArtifact.projectInterface.toolUses[0].tarballProvisioning[0].
+        sha256 == archive.sha256
 
-    let identityPath = valueAfter(first, "toolIdentity:")
-    let inspectionPath = valueAfter(first, "inspection:")
-    check identityPath.endsWith("tarball-tool-identities.rbtp")
-    check readFile(identityPath)[0 .. 3] == "RBTP"
-    let identity = readPathOnlyBuildIdentity(identityPath)
-    check identity.profiles.len == 1
-    let profile = identity.profiles[0]
-    check profile.installMethod == "tarball"
-    check profile.adapterStrength == asStrong
-    check profile.cachePortability == cpPortable
-    check profile.tarballUrl == brokenPrimary
-    check profile.tarballMirrors == @[goodMirror]
-    check profile.tarballSelectedUrl == goodMirror
-    check profile.tarballSha256 == archive.sha256
-    check profile.archiveType == "tar.gz"
-    check profile.stripComponents == 1
-    check profile.declaredExecutablePath == "bin/m54tool"
-    check profile.resolvedExecutablePath.endsWith("/bin/m54tool")
-    check profile.probes.len == 1
-    check profile.probes[0].output.contains("m54tool 1.0.0")
-    check fileExists(profile.selectedStorePath /
-      ".reprobuild-tarball-receipt.json")
+      let identityPath = valueAfter(first, "toolIdentity:")
+      let inspectionPath = valueAfter(first, "inspection:")
+      check identityPath.endsWith("tarball-tool-identities.rbtp")
+      check readFile(identityPath)[0 .. 3] == "RBTP"
+      let identity = readPathOnlyBuildIdentity(identityPath)
+      check identity.profiles.len == 1
+      let profile = identity.profiles[0]
+      check profile.installMethod == "tarball"
+      check profile.adapterStrength == asStrong
+      check profile.cachePortability == cpPortable
+      check profile.tarballUrl == brokenPrimary
+      check profile.tarballMirrors == @[goodMirror]
+      check profile.tarballSelectedUrl == goodMirror
+      check profile.tarballSha256 == archive.sha256
+      check profile.archiveType == "tar.gz"
+      check profile.stripComponents == 1
+      check profile.declaredExecutablePath == "bin/m54tool"
+      check profile.resolvedExecutablePath.endsWith("/bin/m54tool")
+      check profile.probes.len == 1
+      check profile.probes[0].output.contains("m54tool 1.0.0")
+      check fileExists(profile.selectedStorePath /
+        ".reprobuild-tarball-receipt.json")
 
-    let inspection = parseFile(inspectionPath)
-    check inspection{"profiles"}[0]{"installMethod"}.getStr() == "tarball"
-    check inspection{"profiles"}[0]{"tarballSelectedUrl"}.getStr() == goodMirror
-    check inspection{"profiles"}[0]{"resolvedExecutablePath"}.getStr() ==
-      profile.resolvedExecutablePath
+      let inspection = parseFile(inspectionPath)
+      check inspection{"profiles"}[0]{"installMethod"}.getStr() == "tarball"
+      check inspection{"profiles"}[0]{"tarballSelectedUrl"}.getStr() == goodMirror
+      check inspection{"profiles"}[0]{"resolvedExecutablePath"}.getStr() ==
+        profile.resolvedExecutablePath
 
-    let prefixInfo = getFileInfo(profile.selectedStorePath)
-    let second = requireSuccess(shellCommand([reproBin, "build", projectRoot,
-      "--tool-provisioning=tarball", "--log=actions"]), repoRoot)
-    if not actionLineCacheEffective(second, "tarball-run"):
-      checkpoint(second)
-    check actionLineCacheEffective(second, "tarball-run")
-    let secondIdentity = readPathOnlyBuildIdentity(valueAfter(second,
-      "toolIdentity:"))
-    check secondIdentity.profiles[0].selectedStorePath == profile.selectedStorePath
-    check secondIdentity.profiles[0].tarballSelectedUrl == goodMirror
-    check secondIdentity.profiles[0].profileFingerprint == profile.profileFingerprint
-    check getFileInfo(profile.selectedStorePath).lastWriteTime ==
-      prefixInfo.lastWriteTime
+      let prefixInfo = getFileInfo(profile.selectedStorePath)
+      let second = requireSuccess(shellCommand([reproBin, "build", projectRoot,
+        "--tool-provisioning=tarball", "--log=actions"]), repoRoot)
+      if not actionLineCacheEffective(second, "tarball-run"):
+        checkpoint(second)
+      check actionLineCacheEffective(second, "tarball-run")
+      let secondIdentity = readPathOnlyBuildIdentity(valueAfter(second,
+        "toolIdentity:"))
+      check secondIdentity.profiles[0].selectedStorePath == profile.selectedStorePath
+      check secondIdentity.profiles[0].tarballSelectedUrl == goodMirror
+      check secondIdentity.profiles[0].profileFingerprint == profile.profileFingerprint
+      check getFileInfo(profile.selectedStorePath).lastWriteTime ==
+        prefixInfo.lastWriteTime
 
-    let corruptRoot = tempRoot / "corrupt-project"
-    writeProject(corruptRoot, "file://" & (tempRoot / "missing-corrupt.tar.gz"),
-      "file://" & corruptArchive, archive.sha256)
-    let corrupt = requireFailure(shellCommand([reproBin, "build", corruptRoot,
-      "--tool-provisioning=tarball"]), repoRoot)
-    check corrupt.contains("sha256 mismatch")
-    check not fileExists(corruptRoot / "build" / "tarball-output.txt")
+      let corruptRoot = tempRoot / "corrupt-project"
+      writeProject(corruptRoot, "file://" & (tempRoot / "missing-corrupt.tar.gz"),
+        "file://" & corruptArchive, archive.sha256)
+      let corrupt = requireFailure(shellCommand([reproBin, "build", corruptRoot,
+        "--tool-provisioning=tarball"]), repoRoot)
+      check corrupt.contains("sha256 mismatch")
+      check not fileExists(corruptRoot / "build" / "tarball-output.txt")
 
-    let unsafeRoot = tempRoot / "unsafe-project"
-    writeProject(unsafeRoot, brokenPrimary, goodMirror, archive.sha256,
-      executablePath = "bin/../../m54tool")
-    let unsafe = requireFailure(shellCommand([reproBin, "build", unsafeRoot,
-      "--tool-provisioning=tarball"]), repoRoot)
-    check unsafe.contains("tarball executablePath must be relative")
-    check not fileExists(unsafeRoot / "build" / "tarball-output.txt")
+      let unsafeRoot = tempRoot / "unsafe-project"
+      writeProject(unsafeRoot, brokenPrimary, goodMirror, archive.sha256,
+        executablePath = "bin/../../m54tool")
+      let unsafe = requireFailure(shellCommand([reproBin, "build", unsafeRoot,
+        "--tool-provisioning=tarball"]), repoRoot)
+      check unsafe.contains("tarball executablePath must be relative")
+      check not fileExists(unsafeRoot / "build" / "tarball-output.txt")

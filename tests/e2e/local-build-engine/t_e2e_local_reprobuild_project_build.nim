@@ -965,10 +965,80 @@ proc resetTrace(path: string) =
     removeFile(path)
 
 suite "e2e_local_reprobuild_project_build":
-  when defined(macosx) or defined(linux):
-    test "public CLI automatic monitor policy records hidden inputs and invalidates cache":
+  when isNixSupported:
+    when defined(macosx) or defined(linux):
+      test "public CLI automatic monitor policy records hidden inputs and invalidates cache":
+        let repoRoot = getCurrentDir()
+        let tempRoot = createTempDir("repro-m32-local-monitor", "")
+        defer: removeDir(tempRoot)
+
+        var daemon = ensureRunQuotaDaemon(repoRoot)
+        defer:
+          daemon.process.terminate()
+          discard daemon.process.waitForExit()
+          daemon.process.close()
+          if pathExists(daemon.socket):
+            removeFile(daemon.socket)
+
+        let reproBin = tempRoot / "repro"
+        discard requireSuccess(shellCommand([
+          "nim", "c", "--verbosity:0", "--hints:off",
+          "--nimcache:" & (tempRoot / "nimcache-repro"),
+          "--out:" & reproBin,
+          repoRoot / "apps" / "repro" / "repro.nim"
+        ]), repoRoot)
+        let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+
+        let binDir = tempRoot / "fixture-bin"
+        writeMonitorFixtureTool(binDir)
+        let pathValue = binDir & $PathSep & getEnv("PATH")
+        let monitorEnv = [
+          ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+          ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+        ]
+
+        let projectRoot = tempRoot / "project"
+        createDir(projectRoot / "src")
+        createDir(projectRoot / "build")
+        writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
+        writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
+        writeMonitorProject(projectRoot / "reprobuild.nim")
+
+        let first = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
+        check first.contains("scheduler: actions=1")
+        check first.contains("action: produce status=asSucceeded launched=true")
+        let firstReport = parseFile(valueAfter(first, "buildReport:"))
+        let firstAction = reportAction(firstReport, "produce")
+        check firstAction{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
+        check firstAction{"evidence"}{"monitorReads"}.getElems().
+          anyIt(it.getStr().endsWith("src/hidden.txt"))
+        check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
+          @["producer"]
+
+        let outputV1 = readFile(projectRoot / "build" / "generated.txt")
+        let second = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
+        check actionLineCacheEffective(second, "produce")
+        check readFile(projectRoot / "build" / "generated.txt") == outputV1
+        check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
+          @["producer"]
+
+        writeFile(projectRoot / "src" / "hidden.txt", "hidden v2\n")
+        let hiddenChanged = build(reproBin, projectRoot, repoRoot, pathValue,
+          monitorEnv)
+        check hiddenChanged.contains(
+          "action: produce status=asSucceeded launched=true")
+        check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
+          @["producer", "producer"]
+        check readFile(projectRoot / "build" / "generated.txt").contains(
+          "hidden=hidden v2")
+
+    else:
+      test "automatic monitor project CLI E2E is skipped on this platform":
+        echo "SKIP: automatic monitor dependency gathering requires preload hooks"
+
+    test "public CLI lowers explicit make depfile policy and rejects incompatible monitor depfile":
       let repoRoot = getCurrentDir()
-      let tempRoot = createTempDir("repro-m32-local-monitor", "")
+      let tempRoot = createTempDir("repro-m32-policy-lowering", "")
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
@@ -986,406 +1056,154 @@ suite "e2e_local_reprobuild_project_build":
         "--out:" & reproBin,
         repoRoot / "apps" / "repro" / "repro.nim"
       ]), repoRoot)
-      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
 
-      let binDir = tempRoot / "fixture-bin"
-      writeMonitorFixtureTool(binDir)
+      let binDir = tempRoot / "bin"
+      writeFixtureTools(binDir)
       let pathValue = binDir & $PathSep & getEnv("PATH")
-      let monitorEnv = [
-        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
-        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
-      ]
+
+      let explicitRoot = tempRoot / "explicit"
+      createDir(explicitRoot / "src")
+      writeFile(explicitRoot / "src" / "visible.txt", "visible v1\n")
+      writeFile(explicitRoot / "src" / "hidden.txt", "hidden v1\n")
+      writePolicyProject(explicitRoot / "reprobuild.nim", "makeDepfilePolicy()")
+
+      let explicit = build(reproBin, explicitRoot, repoRoot, pathValue)
+      check explicit.contains("action: produce status=asSucceeded launched=true")
+      let explicitReport = parseFile(valueAfter(explicit, "buildReport:"))
+      let explicitAction = reportAction(explicitReport, "produce")
+      check explicitAction{"dependencyPolicyKind"}.getStr() == "dgRecognizedFormat"
+      check explicitAction{"evidence"}{"depfileInputs"}.getElems().
+        anyIt(it.getStr().endsWith("src/hidden.txt"))
+
+      let invalidRoot = tempRoot / "invalid"
+      createDir(invalidRoot / "src")
+      writeFile(invalidRoot / "src" / "visible.txt", "visible v1\n")
+      writeFile(invalidRoot / "src" / "hidden.txt", "hidden v1\n")
+      writePolicyProject(invalidRoot / "reprobuild.nim", "automaticMonitorPolicy()")
+
+      let invalid = requireFailure(shellCommand([reproBin, "build", invalidRoot,
+        "--tool-provisioning=path"], [("PATH", pathValue)]), repoRoot)
+      check invalid.contains("supplies legacy depfile and automatic monitor")
+      check invalid.contains("remove depfile or use makeDepfilePolicy")
+
+    test "public CLI selects an in-place project action and builds only its dependency closure":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m30-local-target-selection", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = tempRoot / "repro"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-repro"),
+        "--out:" & reproBin,
+        repoRoot / "apps" / "repro" / "repro.nim"
+      ]), repoRoot)
+
+      let binDir = tempRoot / "bin"
+      writeFixtureTools(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
 
       let projectRoot = tempRoot / "project"
       createDir(projectRoot / "src")
-      createDir(projectRoot / "build")
       writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
       writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
-      writeMonitorProject(projectRoot / "reprobuild.nim")
+      writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
+      writeProject(projectRoot / "reprobuild.nim")
 
-      let first = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
-      check first.contains("scheduler: actions=1")
-      check first.contains("action: produce status=asSucceeded launched=true")
-      let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      let firstAction = reportAction(firstReport, "produce")
-      check firstAction{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
-      check firstAction{"evidence"}{"monitorReads"}.getElems().
-        anyIt(it.getStr().endsWith("src/hidden.txt"))
+      let selected = build(reproBin, projectRoot & "#consume", repoRoot, pathValue)
+      check selected.contains("selectedTarget: consume")
+      check selected.contains("scheduler: actions=2")
+      check selected.contains("action: produce status=asSucceeded launched=true")
+      check selected.contains("action: consume status=asSucceeded launched=true")
+      check not selected.contains("action: unrelated")
       check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
-        @["producer"]
+        @["producer", "consumer"]
+      check nonEmptyLines(projectRoot / ".repro" / "tool-runs-unrelated.log").len == 0
+      check fileExists(projectRoot / "build" / "generated.txt")
+      check fileExists(projectRoot / "dist" / "final.txt")
+      check not fileExists(projectRoot / "dist" / "unrelated.txt")
 
-      let outputV1 = readFile(projectRoot / "build" / "generated.txt")
-      let second = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
-      check actionLineCacheEffective(second, "produce")
-      check readFile(projectRoot / "build" / "generated.txt") == outputV1
-      check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
-        @["producer"]
+      let selectedReport = parseFile(valueAfter(selected, "buildReport:"))
+      check selectedReport{"actions"}.len == 2
+      check reportAction(selectedReport, "produce"){"status"}.getStr() ==
+        "asSucceeded"
+      check reportAction(selectedReport, "consume"){"status"}.getStr() ==
+        "asSucceeded"
+      check reportAction(selectedReport, "unrelated").kind == JNull
 
-      writeFile(projectRoot / "src" / "hidden.txt", "hidden v2\n")
-      let hiddenChanged = build(reproBin, projectRoot, repoRoot, pathValue,
-        monitorEnv)
-      check hiddenChanged.contains(
-        "action: produce status=asSucceeded launched=true")
-      check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
-        @["producer", "producer"]
-      check readFile(projectRoot / "build" / "generated.txt").contains(
-        "hidden=hidden v2")
+      let unknown = requireFailure(shellCommand(@[reproBin, "build",
+        projectRoot & "#does-not-exist", "--tool-provisioning=path"],
+        @[(name: "PATH", value: pathValue)]), repoRoot)
+      check unknown.contains("unknown build target/action id: does-not-exist")
+      check unknown.contains("available:")
+      check unknown.contains("consume")
 
-  else:
-    test "automatic monitor project CLI E2E is skipped on this platform":
-      echo "SKIP: automatic monitor dependency gathering requires preload hooks"
-
-  test "public CLI lowers explicit make depfile policy and rejects incompatible monitor depfile":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m32-policy-lowering", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
-
-    let binDir = tempRoot / "bin"
-    writeFixtureTools(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let explicitRoot = tempRoot / "explicit"
-    createDir(explicitRoot / "src")
-    writeFile(explicitRoot / "src" / "visible.txt", "visible v1\n")
-    writeFile(explicitRoot / "src" / "hidden.txt", "hidden v1\n")
-    writePolicyProject(explicitRoot / "reprobuild.nim", "makeDepfilePolicy()")
-
-    let explicit = build(reproBin, explicitRoot, repoRoot, pathValue)
-    check explicit.contains("action: produce status=asSucceeded launched=true")
-    let explicitReport = parseFile(valueAfter(explicit, "buildReport:"))
-    let explicitAction = reportAction(explicitReport, "produce")
-    check explicitAction{"dependencyPolicyKind"}.getStr() == "dgRecognizedFormat"
-    check explicitAction{"evidence"}{"depfileInputs"}.getElems().
-      anyIt(it.getStr().endsWith("src/hidden.txt"))
-
-    let invalidRoot = tempRoot / "invalid"
-    createDir(invalidRoot / "src")
-    writeFile(invalidRoot / "src" / "visible.txt", "visible v1\n")
-    writeFile(invalidRoot / "src" / "hidden.txt", "hidden v1\n")
-    writePolicyProject(invalidRoot / "reprobuild.nim", "automaticMonitorPolicy()")
-
-    let invalid = requireFailure(shellCommand([reproBin, "build", invalidRoot,
-      "--tool-provisioning=path"], [("PATH", pathValue)]), repoRoot)
-    check invalid.contains("supplies legacy depfile and automatic monitor")
-    check invalid.contains("remove depfile or use makeDepfilePolicy")
-
-  test "public CLI selects an in-place project action and builds only its dependency closure":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m30-local-target-selection", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
-
-    let binDir = tempRoot / "bin"
-    writeFixtureTools(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "src")
-    writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
-    writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
-    writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
-    writeProject(projectRoot / "reprobuild.nim")
-
-    let selected = build(reproBin, projectRoot & "#consume", repoRoot, pathValue)
-    check selected.contains("selectedTarget: consume")
-    check selected.contains("scheduler: actions=2")
-    check selected.contains("action: produce status=asSucceeded launched=true")
-    check selected.contains("action: consume status=asSucceeded launched=true")
-    check not selected.contains("action: unrelated")
-    check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
-      @["producer", "consumer"]
-    check nonEmptyLines(projectRoot / ".repro" / "tool-runs-unrelated.log").len == 0
-    check fileExists(projectRoot / "build" / "generated.txt")
-    check fileExists(projectRoot / "dist" / "final.txt")
-    check not fileExists(projectRoot / "dist" / "unrelated.txt")
-
-    let selectedReport = parseFile(valueAfter(selected, "buildReport:"))
-    check selectedReport{"actions"}.len == 2
-    check reportAction(selectedReport, "produce"){"status"}.getStr() ==
-      "asSucceeded"
-    check reportAction(selectedReport, "consume"){"status"}.getStr() ==
-      "asSucceeded"
-    check reportAction(selectedReport, "unrelated").kind == JNull
-
-    let unknown = requireFailure(shellCommand(@[reproBin, "build",
-      projectRoot & "#does-not-exist", "--tool-provisioning=path"],
-      @[(name: "PATH", value: pathValue)]), repoRoot)
-    check unknown.contains("unknown build target/action id: does-not-exist")
-    check unknown.contains("available:")
-    check unknown.contains("consume")
-
-  test "public CLI no-target build uses current project default action":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m45-local-default-build", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
-
-    let binDir = tempRoot / "bin"
-    writeFixtureTools(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "src")
-    writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
-    writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
-    writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
-    writeProject(projectRoot / "reprobuild.nim")
-
-    let selected = buildCurrentProject(reproBin, projectRoot, pathValue)
-    check selected.contains("defaultTarget: consume")
-    check selected.contains("selectedTarget: consume")
-    check selected.contains("scheduler: actions=2")
-    check selected.contains("action: produce status=asSucceeded launched=true")
-    check selected.contains("action: consume status=asSucceeded launched=true")
-    check not selected.contains("action: unrelated")
-    check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
-      @["producer", "consumer"]
-    check nonEmptyLines(projectRoot / ".repro" / "tool-runs-unrelated.log").len == 0
-    check fileExists(projectRoot / "build" / "generated.txt")
-    check fileExists(projectRoot / "dist" / "final.txt")
-    check not fileExists(projectRoot / "dist" / "unrelated.txt")
-
-    let selectedReport = parseFile(valueAfter(selected, "buildReport:"))
-    check selectedReport{"actions"}.len == 2
-    check reportAction(selectedReport, "produce"){"status"}.getStr() ==
-      "asSucceeded"
-    check reportAction(selectedReport, "consume"){"status"}.getStr() ==
-      "asSucceeded"
-    check reportAction(selectedReport, "unrelated").kind == JNull
-
-  test "uses import path exposes typed tool package and declared paths infer dependency closure":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m46-uses-import-path", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let binDir = tempRoot / "bin"
-    writeM46FixtureTool(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let projectRoot = tempRoot / "project"
-    writeM46ImportedPackageProject(projectRoot / "reprobuild.nim")
-    writeFile(projectRoot / "src" / "input.txt", "v1\n")
-
-    let selected = build(reproBin, projectRoot & "#consume", repoRoot, pathValue)
-    check selected.contains("selectedTarget: consume")
-    check selected.contains("scheduler: actions=2")
-    check selected.contains("action: produce status=asSucceeded launched=true")
-    check selected.contains("action: consume status=asSucceeded launched=true")
-    check not selected.contains("action: direct")
-    check nonEmptyLines(projectRoot / ".repro" / "m46-tool-runs.log") ==
-      @["produce", "consume"]
-    check readFile(projectRoot / "dist" / "final.txt").contains("produced:v1")
-
-    let report = parseFile(valueAfter(selected, "buildReport:"))
-    check report{"actions"}.len == 2
-    check reportAction(report, "produce"){"status"}.getStr() == "asSucceeded"
-    check reportAction(report, "consume"){"status"}.getStr() == "asSucceeded"
-    check reportAction(report, "direct").kind == JNull
-
-    let direct = build(reproBin, projectRoot & "#direct", repoRoot, pathValue)
-    check direct.contains("selectedTarget: direct")
-    check direct.contains("scheduler: actions=1")
-    check direct.contains("action: direct status=asSucceeded launched=true")
-    check readFile(projectRoot / "dist" / "direct.txt") == "direct\n"
-
-  test "uses import path is opt-in for imported package helpers":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m46-no-implicit-import", "")
-    defer: removeDir(tempRoot)
-
-    let projectRoot = tempRoot / "project"
-    writeM46ProjectWithoutImportPath(projectRoot / "reprobuild.nim")
-    writeFile(projectRoot / "src" / "input.txt", "v1\n")
-
-    let output = requireFailure(shellCommand([
-      "nim", "check", "--verbosity:0", "--hints:off",
-      "--path:" & repoRoot / "libs" / "repro_project_dsl" / "src",
-      projectRoot / "reprobuild.nim"
-    ]), projectRoot)
-    check output.contains("m46Tool")
-
-  test "generated tool object records action and path roles without buildAction":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m47-typed-command-action", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let binDir = tempRoot / "bin"
-    writeM47GccFixtureTool(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let projectRoot = tempRoot / "project"
-    writeM47TypedCommandProject(projectRoot / "reprobuild.nim")
-    writeFile(projectRoot / "src" / "main.c", "int main(void) { return 0; }\n")
-    writeFile(projectRoot / "include" / "config.h", "#define CONFIG_VALUE 1\n")
-
-    let projectText = readFile(projectRoot / "reprobuild.nim")
-    check not projectText.contains("buildAction")
-    check not projectText.contains("inputs =")
-    check not projectText.contains("outputs =")
-
-    let output =
-      when defined(macosx) or defined(linux):
-        let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
-        let monitorEnv = [
-          ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
-          ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
-        ]
-        buildCurrentProject(reproBin, projectRoot, pathValue, monitorEnv)
-      else:
-        buildCurrentProject(reproBin, projectRoot, pathValue)
-    check output.contains("defaultTarget: compile-main")
-    check output.contains("selectedTarget: compile-main")
-    check output.contains("scheduler: actions=1")
-    check output.contains("action: compile-main status=asSucceeded launched=true")
-    check readFile(projectRoot / "build" / "main.o").contains(
-      "includes=include/config.h")
-
-    let report = parseFile(valueAfter(output, "buildReport:"))
-    let action = reportAction(report, "compile-main")
-    check action{"status"}.getStr() == "asSucceeded"
-    check action{"evidence"}{"declaredInputs"}.getElems().
-      anyIt(it.getStr().endsWith("src/main.c"))
-    check action{"evidence"}{"declaredInputs"}.getElems().
-      anyIt(it.getStr().endsWith("include/config.h"))
-    check action{"evidence"}{"declaredOutputs"}.getElems().
-      anyIt(it.getStr() == "build/main.o")
-
-  test "m52_stdlib_package_import_e2e":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m52-stdlib-packages", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    when defined(macosx) or defined(linux):
-      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
-      let monitorEnv = [
-        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
-        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
-      ]
-    else:
-      let monitorEnv: seq[(string, string)] = @[]
-    let binDir = tempRoot / "bin"
-    writeM52StdlibFixtureTools(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let projectRoot = tempRoot / "project"
-    writeM52StdlibProject(projectRoot / "reprobuild.nim")
-    writeFile(projectRoot / "src" / "main.nim", "echo \"m52\"\n")
-    writeFile(projectRoot / "src" / "main.c", "int main(void) { return 0; }\n")
-    writeFile(projectRoot / "styles" / "main.styl", "body\n  color #123\n")
-
-    let projectText = readFile(projectRoot / "reprobuild.nim")
-    check not projectText.contains("usesImportPath")
-    check not projectText.contains("defineCliInterface")
-    check not dirExists(projectRoot / "reprobuild" / "packages")
-
-    let output = buildCurrentProject(reproBin, projectRoot, pathValue,
-      monitorEnv)
-    check output.contains("defaultTarget: summary")
-    check output.contains("scheduler: actions=4")
-    check output.contains("action: summary status=asSucceeded launched=true")
-    check readFile(projectRoot / "build" / "main").contains("nim:c:src/main.nim")
-    check readFile(projectRoot / "build" / "main.o").contains(
-      "gcc:src/main.c:yes:yes")
-    check fileExists(projectRoot / "public" / "main.css")
-
-    let identity = readPathOnlyBuildIdentity(valueAfter(output, "toolIdentity:"))
-    check identity.profiles.len == 3
-    check identity.profiles.anyIt(it.executableName == "nim")
-    check identity.profiles.anyIt(it.executableName == "gcc")
-    check identity.profiles.anyIt(it.executableName == "stylus")
-
-    let report = parseFile(valueAfter(output, "buildReport:"))
-    check reportAction(report, "summary"){"runQuotaBackend"}.getStr() == "builtin"
-    let expectedStylusPolicy =
-      when defined(macosx) or defined(linux) or defined(windows):
-        "dgAutomaticMonitor"
-      else:
-        "dgDeclaredOnly"
-    check report{"actions"}.getElems().anyIt(
-      it{"id"}.getStr().startsWith("stylus-") and
-      it{"dependencyPolicyKind"}.getStr() == expectedStylusPolicy)
-
-  when defined(macosx) or defined(linux):
-    test "m52_stylus_import_monitoring_e2e":
+    test "public CLI no-target build uses current project default action":
       let repoRoot = getCurrentDir()
-      let tempRoot = createTempDir("repro-m52-stylus-monitor", "")
+      let tempRoot = createTempDir("repro-m45-local-default-build", "")
       defer: removeDir(tempRoot)
 
-      let stylusDir = realStylusPathDir(tempRoot)
-      check stylusDir.len > 0
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = tempRoot / "repro"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-repro"),
+        "--out:" & reproBin,
+        repoRoot / "apps" / "repro" / "repro.nim"
+      ]), repoRoot)
+
+      let binDir = tempRoot / "bin"
+      writeFixtureTools(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
+
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "src")
+      writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
+      writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
+      writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
+      writeProject(projectRoot / "reprobuild.nim")
+
+      let selected = buildCurrentProject(reproBin, projectRoot, pathValue)
+      check selected.contains("defaultTarget: consume")
+      check selected.contains("selectedTarget: consume")
+      check selected.contains("scheduler: actions=2")
+      check selected.contains("action: produce status=asSucceeded launched=true")
+      check selected.contains("action: consume status=asSucceeded launched=true")
+      check not selected.contains("action: unrelated")
+      check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
+        @["producer", "consumer"]
+      check nonEmptyLines(projectRoot / ".repro" / "tool-runs-unrelated.log").len == 0
+      check fileExists(projectRoot / "build" / "generated.txt")
+      check fileExists(projectRoot / "dist" / "final.txt")
+      check not fileExists(projectRoot / "dist" / "unrelated.txt")
+
+      let selectedReport = parseFile(valueAfter(selected, "buildReport:"))
+      check selectedReport{"actions"}.len == 2
+      check reportAction(selectedReport, "produce"){"status"}.getStr() ==
+        "asSucceeded"
+      check reportAction(selectedReport, "consume"){"status"}.getStr() ==
+        "asSucceeded"
+      check reportAction(selectedReport, "unrelated").kind == JNull
+
+    test "uses import path exposes typed tool package and declared paths infer dependency closure":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m46-uses-import-path", "")
+      defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1396,610 +1214,793 @@ suite "e2e_local_reprobuild_project_build":
           removeFile(daemon.socket)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
-      let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
-      let monitorEnv = [
-        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
-        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
-      ]
-      let pathValue = stylusDir & $PathSep & getEnv("PATH")
+      let binDir = tempRoot / "bin"
+      writeM46FixtureTool(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
+
+      let projectRoot = tempRoot / "project"
+      writeM46ImportedPackageProject(projectRoot / "reprobuild.nim")
+      writeFile(projectRoot / "src" / "input.txt", "v1\n")
+
+      let selected = build(reproBin, projectRoot & "#consume", repoRoot, pathValue)
+      check selected.contains("selectedTarget: consume")
+      check selected.contains("scheduler: actions=2")
+      check selected.contains("action: produce status=asSucceeded launched=true")
+      check selected.contains("action: consume status=asSucceeded launched=true")
+      check not selected.contains("action: direct")
+      check nonEmptyLines(projectRoot / ".repro" / "m46-tool-runs.log") ==
+        @["produce", "consume"]
+      check readFile(projectRoot / "dist" / "final.txt").contains("produced:v1")
+
+      let report = parseFile(valueAfter(selected, "buildReport:"))
+      check report{"actions"}.len == 2
+      check reportAction(report, "produce"){"status"}.getStr() == "asSucceeded"
+      check reportAction(report, "consume"){"status"}.getStr() == "asSucceeded"
+      check reportAction(report, "direct").kind == JNull
+
+      let direct = build(reproBin, projectRoot & "#direct", repoRoot, pathValue)
+      check direct.contains("selectedTarget: direct")
+      check direct.contains("scheduler: actions=1")
+      check direct.contains("action: direct status=asSucceeded launched=true")
+      check readFile(projectRoot / "dist" / "direct.txt") == "direct\n"
+
+    test "uses import path is opt-in for imported package helpers":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m46-no-implicit-import", "")
+      defer: removeDir(tempRoot)
+
+      let projectRoot = tempRoot / "project"
+      writeM46ProjectWithoutImportPath(projectRoot / "reprobuild.nim")
+      writeFile(projectRoot / "src" / "input.txt", "v1\n")
+
+      let output = requireFailure(shellCommand([
+        "nim", "check", "--verbosity:0", "--hints:off",
+        "--path:" & repoRoot / "libs" / "repro_project_dsl" / "src",
+        projectRoot / "reprobuild.nim"
+      ]), projectRoot)
+      check output.contains("m46Tool")
+
+    test "generated tool object records action and path roles without buildAction":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m47-typed-command-action", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let binDir = tempRoot / "bin"
+      writeM47GccFixtureTool(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
+
+      let projectRoot = tempRoot / "project"
+      writeM47TypedCommandProject(projectRoot / "reprobuild.nim")
+      writeFile(projectRoot / "src" / "main.c", "int main(void) { return 0; }\n")
+      writeFile(projectRoot / "include" / "config.h", "#define CONFIG_VALUE 1\n")
+
+      let projectText = readFile(projectRoot / "reprobuild.nim")
+      check not projectText.contains("buildAction")
+      check not projectText.contains("inputs =")
+      check not projectText.contains("outputs =")
+
+      let output =
+        when defined(macosx) or defined(linux):
+          let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+          let monitorEnv = [
+            ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+            ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+          ]
+          buildCurrentProject(reproBin, projectRoot, pathValue, monitorEnv)
+        else:
+          buildCurrentProject(reproBin, projectRoot, pathValue)
+      check output.contains("defaultTarget: compile-main")
+      check output.contains("selectedTarget: compile-main")
+      check output.contains("scheduler: actions=1")
+      check output.contains("action: compile-main status=asSucceeded launched=true")
+      check readFile(projectRoot / "build" / "main.o").contains(
+        "includes=include/config.h")
+
+      let report = parseFile(valueAfter(output, "buildReport:"))
+      let action = reportAction(report, "compile-main")
+      check action{"status"}.getStr() == "asSucceeded"
+      check action{"evidence"}{"declaredInputs"}.getElems().
+        anyIt(it.getStr().endsWith("src/main.c"))
+      check action{"evidence"}{"declaredInputs"}.getElems().
+        anyIt(it.getStr().endsWith("include/config.h"))
+      check action{"evidence"}{"declaredOutputs"}.getElems().
+        anyIt(it.getStr() == "build/main.o")
+
+    test "m52_stdlib_package_import_e2e":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m52-stdlib-packages", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      when defined(macosx) or defined(linux):
+        let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+        let monitorEnv = [
+          ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+          ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+        ]
+      else:
+        let monitorEnv: seq[(string, string)] = @[]
+      let binDir = tempRoot / "bin"
+      writeM52StdlibFixtureTools(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
+
+      let projectRoot = tempRoot / "project"
+      writeM52StdlibProject(projectRoot / "reprobuild.nim")
+      writeFile(projectRoot / "src" / "main.nim", "echo \"m52\"\n")
+      writeFile(projectRoot / "src" / "main.c", "int main(void) { return 0; }\n")
+      writeFile(projectRoot / "styles" / "main.styl", "body\n  color #123\n")
+
+      let projectText = readFile(projectRoot / "reprobuild.nim")
+      check not projectText.contains("usesImportPath")
+      check not projectText.contains("defineCliInterface")
+      check not dirExists(projectRoot / "reprobuild" / "packages")
+
+      let output = buildCurrentProject(reproBin, projectRoot, pathValue,
+        monitorEnv)
+      check output.contains("defaultTarget: summary")
+      check output.contains("scheduler: actions=4")
+      check output.contains("action: summary status=asSucceeded launched=true")
+      check readFile(projectRoot / "build" / "main").contains("nim:c:src/main.nim")
+      check readFile(projectRoot / "build" / "main.o").contains(
+        "gcc:src/main.c:yes:yes")
+      check fileExists(projectRoot / "public" / "main.css")
+
+      let identity = readPathOnlyBuildIdentity(valueAfter(output, "toolIdentity:"))
+      check identity.profiles.len == 3
+      check identity.profiles.anyIt(it.executableName == "nim")
+      check identity.profiles.anyIt(it.executableName == "gcc")
+      check identity.profiles.anyIt(it.executableName == "stylus")
+
+      let report = parseFile(valueAfter(output, "buildReport:"))
+      check reportAction(report, "summary"){"runQuotaBackend"}.getStr() == "builtin"
+      let expectedStylusPolicy =
+        when defined(macosx) or defined(linux) or defined(windows):
+          "dgAutomaticMonitor"
+        else:
+          "dgDeclaredOnly"
+      check report{"actions"}.getElems().anyIt(
+        it{"id"}.getStr().startsWith("stylus-") and
+        it{"dependencyPolicyKind"}.getStr() == expectedStylusPolicy)
+
+    when defined(macosx) or defined(linux):
+      test "m52_stylus_import_monitoring_e2e":
+        let repoRoot = getCurrentDir()
+        let tempRoot = createTempDir("repro-m52-stylus-monitor", "")
+        defer: removeDir(tempRoot)
+
+        let stylusDir = realStylusPathDir(tempRoot)
+        check stylusDir.len > 0
+
+        var daemon = ensureRunQuotaDaemon(repoRoot)
+        defer:
+          daemon.process.terminate()
+          discard daemon.process.waitForExit()
+          daemon.process.close()
+          if pathExists(daemon.socket):
+            removeFile(daemon.socket)
+
+        let reproBin = compilePublicReproTestBin(repoRoot)
+        let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+        let monitorEnv = [
+          ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
+          ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+        ]
+        let pathValue = stylusDir & $PathSep & getEnv("PATH")
+
+        let projectRoot = tempRoot / "project"
+        createDir(projectRoot / "styles")
+        writeM52StylusMonitorProject(projectRoot / "reprobuild.nim")
+        writeFile(projectRoot / "styles" / "palette.styl",
+          "primary = #123456\n")
+        writeFile(projectRoot / "styles" / "main.styl",
+          "@import \"palette\"\nbody\n  color primary\n")
+
+        let first = buildCurrentProject(reproBin, projectRoot, pathValue,
+          monitorEnv)
+        check first.contains("scheduler: actions=2")
+        check first.contains("action: style-main status=asSucceeded launched=true")
+        check first.contains(
+          "action: style-aggregate status=asSucceeded launched=true")
+        let firstReport = parseFile(valueAfter(first, "buildReport:"))
+        let styleMain = reportAction(firstReport, "style-main")
+        check styleMain{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
+        check styleMain{"evidence"}{"monitorReads"}.getElems().
+          anyIt(it.getStr().endsWith("styles/palette.styl"))
+
+        let second = buildCurrentProject(reproBin, projectRoot, pathValue,
+          monitorEnv)
+        let secondReport = parseFile(valueAfter(second, "buildReport:"))
+        check reportAction(secondReport, "style-main"){"status"}.getStr() in ["asCacheHit", "asUpToDate"]
+        check reportAction(secondReport, "style-aggregate"){"status"}.getStr() in ["asCacheHit", "asUpToDate"]
+
+        writeFile(projectRoot / "styles" / "palette.styl",
+          "primary = #654321\n")
+        let changed = buildCurrentProject(reproBin, projectRoot, pathValue,
+          monitorEnv)
+        let changedReport = parseFile(valueAfter(changed, "buildReport:"))
+        check reportAction(changedReport, "style-main"){"status"}.getStr() ==
+          "asSucceeded"
+        check reportAction(changedReport, "style-aggregate"){"status"}.getStr() ==
+          "asSucceeded"
+
+    test "standard filesystem operations lower to built-in build actions":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m53-builtin-fs", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let projectRoot = tempRoot / "project"
+      writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
+      let output = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      check output.contains("defaultTarget: stamp")
+      check output.contains(
+        "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
+      check output.contains("scheduler: actions=4")
+      check output.contains("action: write-source status=asSucceeded launched=true")
+      check output.contains("action: ensure-out status=asSucceeded launched=true")
+      check output.contains("action: copy-file status=asSucceeded launched=true")
+      check output.contains("action: stamp status=asSucceeded launched=true")
+      check readFile(projectRoot / "out" / "copy.txt") == "generated input\n"
+      check readFile(projectRoot / "out" / "stamp.txt") ==
+        "builtin fs aggregate\nout/copy.txt\n"
+
+      let report = parseFile(valueAfter(output, "buildReport:"))
+      check reportAction(report, "write-source"){"runQuotaBackend"}.getStr() ==
+        "builtin"
+      check reportAction(report, "copy-file"){"evidence"}{"declaredInputs"}.
+        getElems().anyIt(it.getStr().endsWith("src/input.txt"))
+      check reportAction(report, "stamp"){"evidence"}{"declaredOutputs"}.
+        getElems().anyIt(it.getStr() == "out/stamp.txt")
+
+      let progressOutput = buildCurrentProject(reproBin, projectRoot,
+        getEnv("PATH"), extraArgs = ["--progress=bar-line"])
+      check not progressOutput.contains(
+        "providerCompileAction: __repro_provider_compile")
+      # Progress format per docs/progress.md (May 2026 refresh, commit d3fc445):
+      # overlay bar `[####...####]` followed by `checked=N/M`. The legacy
+      # `repro [` prefix and `100%` suffix were dropped; `checked=4/4` is the
+      # full-progress marker (4/4 is implicitly 100% of the 4-action graph).
+      check progressOutput.contains("[")
+      check progressOutput.contains("]")
+      check progressOutput.contains("checked=4/4")
+
+      let quietOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
+        extraArgs = ["--progress=quiet", "--report=none"])
+      check quietOutput.strip() == ""
+
+      let diagnosticsPath = projectRoot / ".repro" / "progress-diagnostics.log"
+      let quietDiagnosticsOutput = buildCurrentProject(reproBin, projectRoot,
+        getEnv("PATH"), extraArgs = ["--progress=quiet", "--report=none",
+          "--diagnostics=" & diagnosticsPath])
+      check quietDiagnosticsOutput.strip() == ""
+      let diagnostics = readFile(diagnosticsPath)
+      check diagnostics.contains("scheduler: actions=4")
+      check diagnostics.contains("action: stamp status=")
+
+      let dotsOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
+        extraArgs = ["--progress=dots", "--log=quiet", "--report=none"])
+      check dotsOutput.contains("....")
+
+      let statsOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
+        extraArgs = ["--stats"])
+      check statsOutput.contains("metric")
+      check statsOutput.contains("count")
+      check statsOutput.contains("avg (us)")
+      check statsOutput.contains("total (ms)")
+      check statsOutput.contains("repro build total")
+      check statsOutput.contains("repro scheduler total")
+      check not statsOutput.contains("repro runquota probe")
+      let statsReport = parseFile(valueAfter(statsOutput, "buildReport:"))
+      check statsReport{"stats"}{"metrics"}.getElems().anyIt(
+        it{"name"}.getStr() == "repro build total")
+      check statsReport{"stats"}{"metrics"}.getElems().anyIt(
+        it{"name"}.getStr() == "repro scheduler total")
+      check not statsReport{"stats"}{"metrics"}.getElems().anyIt(
+        it{"name"}.getStr() == "repro runquota probe")
+      let providerCompileActions = statsReport{"providerCompileActions"}.getElems()
+      check providerCompileActions.len == 0
+
+    test "graph why and debug artifact inspect the materialized build graph":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m56-graph-why", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let projectRoot = tempRoot / "project"
+      writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
+      discard buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      discard requireSuccess(shellCommand([
+        reproBin, "build", "--tool-provisioning", "path",
+        "--progress", "quiet", "--log", "quiet"
+      ]), projectRoot)
+
+      let graphText = requireSuccess(shellCommand([
+        reproBin, "graph", "--tool-provisioning", "path",
+        "--focus", "copy-file"
+      ]), projectRoot)
+      check graphText.contains("build graph")
+      check graphText.contains("action copy-file")
+      check graphText.contains("directDependents: stamp")
+
+      let graphJson = parseJson(requireSuccess(shellCommand([
+        reproBin, "graph", "--tool-provisioning=path", "--json"
+      ]), projectRoot))
+      check graphJson{"schemaId"}.getStr() == "reprobuild.graph.build.v1"
+      check graphJson{"selectedActionId"}.getStr() == "stamp"
+      check graphJson{"actions"}.getElems().anyIt(
+        it{"id"}.getStr() == "copy-file")
+      let loweredGraphCachePath = graphJson{"loweredGraphCachePath"}.getStr()
+      check fileExists(loweredGraphCachePath)
+
+      let dotGraph = requireSuccess(shellCommand([
+        reproBin, "graph", "--tool-provisioning", "path",
+        "--format", "dot", "--focus", "copy-file"
+      ]), projectRoot)
+      check dotGraph.contains("digraph repro_build")
+      check dotGraph.contains("\"copy-file\"")
+      check dotGraph.contains("->")
+
+      let whyText = requireSuccess(shellCommand([
+        reproBin, "why", "copy-file", "--tool-provisioning=path"
+      ]), projectRoot)
+      check whyText.contains("why action copy-file")
+      check whyText.contains("path: stamp -> copy-file")
+      check whyText.contains("directDependents: stamp")
+      check whyText.contains("lastResult: status=")
+
+      let whyJson = parseJson(requireSuccess(shellCommand([
+        reproBin, "why", "copy-file", "--tool-provisioning", "path",
+        "--format", "json"
+      ]), projectRoot))
+      check whyJson{"schemaId"}.getStr() == "reprobuild.why.action.v1"
+      check whyJson{"path"}.getElems().mapIt(it.getStr()) ==
+        @["stamp", "copy-file"]
+      check whyJson{"lastResult"}{"id"}.getStr() == "copy-file"
+      check whyJson{"evidenceCounts"}{"declaredOutputs"}.getInt() >= 1
+
+      let artifactText = requireSuccess(shellCommand([
+        reproBin, "debug", "artifact", loweredGraphCachePath
+      ]), projectRoot)
+      check artifactText.contains("lowered graph cache")
+      check artifactText.contains("- copy-file")
+
+      let artifactJson = parseJson(requireSuccess(shellCommand([
+        reproBin, "debug", "artifact", loweredGraphCachePath,
+        "--format", "json"
+      ]), projectRoot))
+      check artifactJson{"schemaId"}.getStr() ==
+        "reprobuild.debug.lowered-graph-cache.v1"
+      check artifactJson{"actions"}.getElems().anyIt(
+        it{"id"}.getStr() == "stamp")
+
+    test "provider compile fast path skips no-op and invalidates provider sources":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m55-provider-fast-path", "")
+      defer: removeDir(tempRoot)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let projectRoot = tempRoot / "project"
+      let modulePath = projectRoot / "reprobuild.nim"
+      writeM53BuiltinFsProject(modulePath)
+
+      let first = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      check first.contains(
+        "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
+
+      let second = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      check not second.contains(
+        "providerCompileAction: __repro_provider_compile")
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      check secondReport{"providerCompileActions"}.getElems().len == 0
+
+      writeFile(modulePath, readFile(modulePath) &
+        "\n# private provider implementation salt one\n")
+      let changed = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      check changed.contains(
+        "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
+
+      writeFile(projectRoot / "provider_extra.nim",
+        "const providerExtraSalt* = \"added-source\"\n")
+      let added = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      check added.contains(
+        "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
+
+    test "public CLI work root override isolates metadata by worktree":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m54-work-root", "")
+      defer: removeDir(tempRoot)
+
+      let reproBin = compilePublicReproTestBin(repoRoot)
+      let sharedWorkRoot = tempRoot / "shared-work"
+      let projectA = tempRoot / "a" / "project"
+      let projectB = tempRoot / "b" / "project"
+      writeM53BuiltinFsProject(projectA / "reprobuild.nim")
+      writeM53BuiltinFsProject(projectB / "reprobuild.nim")
+
+      let outputA = build(reproBin, projectA, repoRoot, getEnv("PATH"),
+        extraArgs = ["--work-root=" & sharedWorkRoot])
+      let outputB = build(reproBin, projectB, repoRoot, getEnv("PATH"),
+        extraArgs = ["--work-root=" & sharedWorkRoot])
+
+      let interfaceA = valueAfter(outputA, "interface:")
+      let interfaceB = valueAfter(outputB, "interface:")
+      check interfaceA.startsWith(sharedWorkRoot & DirSep)
+      check interfaceB.startsWith(sharedWorkRoot & DirSep)
+      check interfaceA != interfaceB
+      check interfaceA.parentDir != interfaceB.parentDir
+      check fileExists(interfaceA)
+      check fileExists(interfaceB)
+      check not dirExists(projectA / ".repro" / "build")
+      check not dirExists(projectB / ".repro" / "build")
+
+    test "relative public CLI keeps RunQuota helper path stable across project cwd":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m35-relative-public-cli", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+
+      let binDir = tempRoot / "bin"
+      writeFixtureTools(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
+
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "src")
+      writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
+      writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
+      writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
+      writeProject(projectRoot / "reprobuild.nim")
+
+      let selected = requireSuccess(shellCommand([
+        "build/test-bin/repro", "build", projectRoot & "#consume",
+        "--tool-provisioning=path", "--log=actions"
+      ], [("PATH", pathValue)]), repoRoot)
+      check selected.contains("selectedTarget: consume")
+      check selected.contains("scheduler: actions=2")
+      check selected.contains("action: produce status=asSucceeded launched=true")
+      check selected.contains("action: consume status=asSucceeded launched=true")
+      check selected.contains("runquota=")
+      check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
+        @["producer", "consumer"]
+      let report = parseFile(valueAfter(selected, "buildReport:"))
+      check reportAction(report, "produce"){"runQuotaBackend"}.getStr().len > 0
+      check reportAction(report, "consume"){"runQuotaBackend"}.getStr().len > 0
+
+    test "public CLI reruns provider root for DSL directory enumeration inputs":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m40-directory-dsl", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+
+      let binDir = tempRoot / "bin"
+      writeFixtureTools(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
+
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "src" / "resources")
+      writeFile(projectRoot / "src" / "aggregate.txt", "aggregate\n")
+      writeFile(projectRoot / "src" / "resources" / "alpha.txt", "alpha\n")
+      writeFile(projectRoot / "src" / "resources" / "beta.txt", "beta\n")
+      writeDirectoryEnumerationProject(projectRoot / "reprobuild.nim")
+
+      let target = projectRoot & "#aggregate"
+      let first = requireSuccess(shellCommand([
+        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+        "--log=actions"
+      ], [("PATH", pathValue)]), repoRoot)
+      check first.contains("selectedTarget: aggregate")
+      check first.contains("providerInvocations: 1")
+      check first.contains("scheduler: actions=3")
+      check first.contains("action: copy-alpha.txt status=asSucceeded launched=true")
+      check first.contains("action: copy-beta.txt status=asSucceeded launched=true")
+      check fileExists(projectRoot / "dist" / "alpha.txt.out")
+      check fileExists(projectRoot / "dist" / "beta.txt.out")
+      check readFile(projectRoot / "dist" / "alpha.txt.out") == "alpha\n"
+
+      writeFile(projectRoot / "src" / "resources" / "gamma.txt", "gamma\n")
+      let added = requireSuccess(shellCommand([
+        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+        "--log=actions"
+      ], [("PATH", pathValue)]), repoRoot)
+      check added.contains("providerInvocations: 1")
+      check added.contains("scheduler: actions=4")
+      check added.contains("action: copy-gamma.txt status=asSucceeded launched=true")
+      check fileExists(projectRoot / "dist" / "gamma.txt.out")
+      check readFile(projectRoot / "dist" / "gamma.txt.out") == "gamma\n"
+
+      removeFile(projectRoot / "src" / "resources" / "beta.txt")
+      let removed = requireSuccess(shellCommand([
+        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+        "--log=actions"
+      ], [("PATH", pathValue)]), repoRoot)
+      check removed.contains("providerInvocations: 1")
+      check removed.contains("scheduler: actions=3")
+      check not removed.contains("action: copy-beta.txt")
+      let removedReport = parseFile(valueAfter(removed, "buildReport:"))
+      check removedReport{"actions"}.len == 3
+      check reportAction(removedReport, "copy-alpha.txt").kind != JNull
+      check reportAction(removedReport, "copy-gamma.txt").kind != JNull
+      check reportAction(removedReport, "copy-beta.txt").kind == JNull
+
+    test "provider foreach refreshes only changed directory members":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m52-provider-foreach", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      discard compilePublicReproTestBin(repoRoot)
+
+      let binDir = tempRoot / "bin"
+      writeM52StylusFixtureTool(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
 
       let projectRoot = tempRoot / "project"
       createDir(projectRoot / "styles")
-      writeM52StylusMonitorProject(projectRoot / "reprobuild.nim")
-      writeFile(projectRoot / "styles" / "palette.styl",
-        "primary = #123456\n")
-      writeFile(projectRoot / "styles" / "main.styl",
-        "@import \"palette\"\nbody\n  color primary\n")
+      writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v1\n")
+      writeFile(projectRoot / "styles" / "beta.styl", "beta-v1\n")
+      writeM52ForeachStylusProject(projectRoot / "reprobuild.nim")
+      let tracePath = tempRoot / "provider.trace"
+      let target = projectRoot
+      let traceEnv = [("PATH", pathValue), ("REPRO_PROVIDER_TRACE", tracePath)]
 
-      let first = buildCurrentProject(reproBin, projectRoot, pathValue,
-        monitorEnv)
+      let first = requireSuccess(shellCommand([
+        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+        "--log=actions"
+      ], traceEnv), repoRoot)
+      check first.contains("providerInvocations: 3")
       check first.contains("scheduler: actions=2")
-      check first.contains("action: style-main status=asSucceeded launched=true")
-      check first.contains(
-        "action: style-aggregate status=asSucceeded launched=true")
-      let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      let styleMain = reportAction(firstReport, "style-main")
-      check styleMain{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
-      check styleMain{"evidence"}{"monitorReads"}.getElems().
-        anyIt(it.getStr().endsWith("styles/palette.styl"))
+      check first.contains("action: style-alpha status=asSucceeded launched=true")
+      check first.contains("action: style-beta status=asSucceeded launched=true")
+      let firstTrace = nonEmptyLines(tracePath)
+      check firstTrace.anyIt(it.contains("prkGraphInvocation|m52Styles.root|"))
+      check firstTrace.anyIt(it.contains("alpha.styl|girNoPriorFragment"))
+      check firstTrace.anyIt(it.contains("beta.styl|girNoPriorFragment"))
 
-      let second = buildCurrentProject(reproBin, projectRoot, pathValue,
-        monitorEnv)
-      let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      check reportAction(secondReport, "style-main"){"status"}.getStr() in ["asCacheHit", "asUpToDate"]
-      check reportAction(secondReport, "style-aggregate"){"status"}.getStr() in ["asCacheHit", "asUpToDate"]
+      resetTrace(tracePath)
+      let second = requireSuccess(shellCommand([
+        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+        "--log=actions"
+      ], traceEnv), repoRoot)
+      check second.contains("providerInvocations: 0")
+      check actionLineCacheEffective(second, "style-alpha")
+      check actionLineCacheEffective(second, "style-beta")
+      check nonEmptyLines(tracePath).len == 0
 
-      writeFile(projectRoot / "styles" / "palette.styl",
-        "primary = #654321\n")
-      let changed = buildCurrentProject(reproBin, projectRoot, pathValue,
-        monitorEnv)
-      let changedReport = parseFile(valueAfter(changed, "buildReport:"))
-      check reportAction(changedReport, "style-main"){"status"}.getStr() ==
-        "asSucceeded"
-      check reportAction(changedReport, "style-aggregate"){"status"}.getStr() ==
-        "asSucceeded"
+      writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v2\n")
+      resetTrace(tracePath)
+      let contentChanged = requireSuccess(shellCommand([
+        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+        "--log=actions"
+      ], traceEnv), repoRoot)
+      check contentChanged.contains("providerInvocations: 0")
+      check contentChanged.contains(
+        "action: style-alpha status=asSucceeded launched=true")
+      check actionLineCacheEffective(contentChanged, "style-beta")
+      check readFile(projectRoot / "public" / "alpha.css").contains("alpha-v2")
+      check nonEmptyLines(tracePath).len == 0
 
-  test "standard filesystem operations lower to built-in build actions":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m53-builtin-fs", "")
-    defer: removeDir(tempRoot)
+      writeFile(projectRoot / "styles" / "gamma.styl", "gamma-v1\n")
+      resetTrace(tracePath)
+      let added = requireSuccess(shellCommand([
+        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+        "--log=actions"
+      ], traceEnv), repoRoot)
+      check added.contains("providerInvocations: 1")
+      check added.contains("scheduler: actions=3")
+      check added.contains("action: style-gamma status=asSucceeded launched=true")
+      let addedTrace = nonEmptyLines(tracePath)
+      check addedTrace.len == 1
+      check addedTrace[0].contains("prkGraphInvocation|m52Styles.foreach.0.style|")
+      check addedTrace[0].contains("gamma.styl|girDirectoryMembershipChanged")
 
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
+      removeFile(projectRoot / "styles" / "beta.styl")
+      resetTrace(tracePath)
+      let removed = requireSuccess(shellCommand([
+        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
+        "--log=actions"
+      ], traceEnv), repoRoot)
+      check removed.contains("providerInvocations: 0")
+      check removed.contains("scheduler: actions=2")
+      check not removed.contains("action: style-beta")
+      let removedReport = parseFile(valueAfter(removed, "buildReport:"))
+      check reportAction(removedReport, "style-alpha").kind != JNull
+      check reportAction(removedReport, "style-gamma").kind != JNull
+      check reportAction(removedReport, "style-beta").kind == JNull
+      check nonEmptyLines(tracePath).len == 0
 
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let projectRoot = tempRoot / "project"
-    writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
-    let output = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
-    check output.contains("defaultTarget: stamp")
-    check output.contains(
-      "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
-    check output.contains("scheduler: actions=4")
-    check output.contains("action: write-source status=asSucceeded launched=true")
-    check output.contains("action: ensure-out status=asSucceeded launched=true")
-    check output.contains("action: copy-file status=asSucceeded launched=true")
-    check output.contains("action: stamp status=asSucceeded launched=true")
-    check readFile(projectRoot / "out" / "copy.txt") == "generated input\n"
-    check readFile(projectRoot / "out" / "stamp.txt") ==
-      "builtin fs aggregate\nout/copy.txt\n"
+    test "public CLI builds local DSL project through provider, scheduler, cache, and depfile evidence":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m19-local-project", "")
+      defer: removeDir(tempRoot)
 
-    let report = parseFile(valueAfter(output, "buildReport:"))
-    check reportAction(report, "write-source"){"runQuotaBackend"}.getStr() ==
-      "builtin"
-    check reportAction(report, "copy-file"){"evidence"}{"declaredInputs"}.
-      getElems().anyIt(it.getStr().endsWith("src/input.txt"))
-    check reportAction(report, "stamp"){"evidence"}{"declaredOutputs"}.
-      getElems().anyIt(it.getStr() == "out/stamp.txt")
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
 
-    let progressOutput = buildCurrentProject(reproBin, projectRoot,
-      getEnv("PATH"), extraArgs = ["--progress=bar-line"])
-    check not progressOutput.contains(
-      "providerCompileAction: __repro_provider_compile")
-    # Progress format per docs/progress.md (May 2026 refresh, commit d3fc445):
-    # overlay bar `[####...####]` followed by `checked=N/M`. The legacy
-    # `repro [` prefix and `100%` suffix were dropped; `checked=4/4` is the
-    # full-progress marker (4/4 is implicitly 100% of the 4-action graph).
-    check progressOutput.contains("[")
-    check progressOutput.contains("]")
-    check progressOutput.contains("checked=4/4")
+      let reproBin = tempRoot / "repro"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-repro"),
+        "--out:" & reproBin,
+        repoRoot / "apps" / "repro" / "repro.nim"
+      ]), repoRoot)
 
-    let quietOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
-      extraArgs = ["--progress=quiet", "--report=none"])
-    check quietOutput.strip() == ""
+      let binDir = tempRoot / "bin"
+      writeFixtureTools(binDir)
+      let pathValue = binDir & $PathSep & getEnv("PATH")
 
-    let diagnosticsPath = projectRoot / ".repro" / "progress-diagnostics.log"
-    let quietDiagnosticsOutput = buildCurrentProject(reproBin, projectRoot,
-      getEnv("PATH"), extraArgs = ["--progress=quiet", "--report=none",
-        "--diagnostics=" & diagnosticsPath])
-    check quietDiagnosticsOutput.strip() == ""
-    let diagnostics = readFile(diagnosticsPath)
-    check diagnostics.contains("scheduler: actions=4")
-    check diagnostics.contains("action: stamp status=")
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot / "src")
+      writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
+      writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
+      writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
+      writeProject(projectRoot / "reprobuild.nim")
+      let target = projectRoot
+      let marker = projectRoot / ".repro" / "tool-runs.log"
+      let unrelatedMarker = projectRoot / ".repro" / "tool-runs-unrelated.log"
 
-    let dotsOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
-      extraArgs = ["--progress=dots", "--log=quiet", "--report=none"])
-    check dotsOutput.contains("....")
+      let first = build(reproBin, target, repoRoot, pathValue)
+      check first.contains("providerCompile:")
+      check first.contains("providerGraphSnapshot:")
+      check first.contains("scheduler: actions=3")
+      check first.contains("evidence=depfile:2")
+      check nonEmptyLines(marker) == @["producer", "consumer"]
+      check nonEmptyLines(unrelatedMarker) == @["consumer"]
+      check fileExists(projectRoot / "build" / "generated.txt")
+      check fileExists(projectRoot / "build" / "generated.d")
+      check fileExists(projectRoot / "dist" / "final.txt")
+      check fileExists(projectRoot / "dist" / "unrelated.txt")
 
-    let statsOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
-      extraArgs = ["--stats"])
-    check statsOutput.contains("metric")
-    check statsOutput.contains("count")
-    check statsOutput.contains("avg (us)")
-    check statsOutput.contains("total (ms)")
-    check statsOutput.contains("repro build total")
-    check statsOutput.contains("repro scheduler total")
-    check not statsOutput.contains("repro runquota probe")
-    let statsReport = parseFile(valueAfter(statsOutput, "buildReport:"))
-    check statsReport{"stats"}{"metrics"}.getElems().anyIt(
-      it{"name"}.getStr() == "repro build total")
-    check statsReport{"stats"}{"metrics"}.getElems().anyIt(
-      it{"name"}.getStr() == "repro scheduler total")
-    check not statsReport{"stats"}{"metrics"}.getElems().anyIt(
-      it{"name"}.getStr() == "repro runquota probe")
-    let providerCompileActions = statsReport{"providerCompileActions"}.getElems()
-    check providerCompileActions.len == 0
+      let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
+      check identity.profiles.len == 2
+      check identity.profiles[0].installMethod == "path"
+      check identity.profiles.allIt(it.adapterStrength == asWeak)
+      check identity.profiles.anyIt(it.resolvedExecutablePath == binDir / "m19-producer")
+      check identity.profiles.anyIt(it.resolvedExecutablePath == binDir / "m19-consumer")
 
-  test "graph why and debug artifact inspect the materialized build graph":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m56-graph-why", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let projectRoot = tempRoot / "project"
-    writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
-    discard buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
-    discard requireSuccess(shellCommand([
-      reproBin, "build", "--tool-provisioning", "path",
-      "--progress", "quiet", "--log", "quiet"
-    ]), projectRoot)
-
-    let graphText = requireSuccess(shellCommand([
-      reproBin, "graph", "--tool-provisioning", "path",
-      "--focus", "copy-file"
-    ]), projectRoot)
-    check graphText.contains("build graph")
-    check graphText.contains("action copy-file")
-    check graphText.contains("directDependents: stamp")
-
-    let graphJson = parseJson(requireSuccess(shellCommand([
-      reproBin, "graph", "--tool-provisioning=path", "--json"
-    ]), projectRoot))
-    check graphJson{"schemaId"}.getStr() == "reprobuild.graph.build.v1"
-    check graphJson{"selectedActionId"}.getStr() == "stamp"
-    check graphJson{"actions"}.getElems().anyIt(
-      it{"id"}.getStr() == "copy-file")
-    let loweredGraphCachePath = graphJson{"loweredGraphCachePath"}.getStr()
-    check fileExists(loweredGraphCachePath)
-
-    let dotGraph = requireSuccess(shellCommand([
-      reproBin, "graph", "--tool-provisioning", "path",
-      "--format", "dot", "--focus", "copy-file"
-    ]), projectRoot)
-    check dotGraph.contains("digraph repro_build")
-    check dotGraph.contains("\"copy-file\"")
-    check dotGraph.contains("->")
-
-    let whyText = requireSuccess(shellCommand([
-      reproBin, "why", "copy-file", "--tool-provisioning=path"
-    ]), projectRoot)
-    check whyText.contains("why action copy-file")
-    check whyText.contains("path: stamp -> copy-file")
-    check whyText.contains("directDependents: stamp")
-    check whyText.contains("lastResult: status=")
-
-    let whyJson = parseJson(requireSuccess(shellCommand([
-      reproBin, "why", "copy-file", "--tool-provisioning", "path",
-      "--format", "json"
-    ]), projectRoot))
-    check whyJson{"schemaId"}.getStr() == "reprobuild.why.action.v1"
-    check whyJson{"path"}.getElems().mapIt(it.getStr()) ==
-      @["stamp", "copy-file"]
-    check whyJson{"lastResult"}{"id"}.getStr() == "copy-file"
-    check whyJson{"evidenceCounts"}{"declaredOutputs"}.getInt() >= 1
-
-    let artifactText = requireSuccess(shellCommand([
-      reproBin, "debug", "artifact", loweredGraphCachePath
-    ]), projectRoot)
-    check artifactText.contains("lowered graph cache")
-    check artifactText.contains("- copy-file")
-
-    let artifactJson = parseJson(requireSuccess(shellCommand([
-      reproBin, "debug", "artifact", loweredGraphCachePath,
-      "--format", "json"
-    ]), projectRoot))
-    check artifactJson{"schemaId"}.getStr() ==
-      "reprobuild.debug.lowered-graph-cache.v1"
-    check artifactJson{"actions"}.getElems().anyIt(
-      it{"id"}.getStr() == "stamp")
-
-  test "provider compile fast path skips no-op and invalidates provider sources":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m55-provider-fast-path", "")
-    defer: removeDir(tempRoot)
-
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let projectRoot = tempRoot / "project"
-    let modulePath = projectRoot / "reprobuild.nim"
-    writeM53BuiltinFsProject(modulePath)
-
-    let first = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
-    check first.contains(
-      "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
-
-    let second = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
-    check not second.contains(
-      "providerCompileAction: __repro_provider_compile")
-    let secondReport = parseFile(valueAfter(second, "buildReport:"))
-    check secondReport{"providerCompileActions"}.getElems().len == 0
-
-    writeFile(modulePath, readFile(modulePath) &
-      "\n# private provider implementation salt one\n")
-    let changed = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
-    check changed.contains(
-      "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
-
-    writeFile(projectRoot / "provider_extra.nim",
-      "const providerExtraSalt* = \"added-source\"\n")
-    let added = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
-    check added.contains(
-      "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
-
-  test "public CLI work root override isolates metadata by worktree":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m54-work-root", "")
-    defer: removeDir(tempRoot)
-
-    let reproBin = compilePublicReproTestBin(repoRoot)
-    let sharedWorkRoot = tempRoot / "shared-work"
-    let projectA = tempRoot / "a" / "project"
-    let projectB = tempRoot / "b" / "project"
-    writeM53BuiltinFsProject(projectA / "reprobuild.nim")
-    writeM53BuiltinFsProject(projectB / "reprobuild.nim")
-
-    let outputA = build(reproBin, projectA, repoRoot, getEnv("PATH"),
-      extraArgs = ["--work-root=" & sharedWorkRoot])
-    let outputB = build(reproBin, projectB, repoRoot, getEnv("PATH"),
-      extraArgs = ["--work-root=" & sharedWorkRoot])
-
-    let interfaceA = valueAfter(outputA, "interface:")
-    let interfaceB = valueAfter(outputB, "interface:")
-    check interfaceA.startsWith(sharedWorkRoot & DirSep)
-    check interfaceB.startsWith(sharedWorkRoot & DirSep)
-    check interfaceA != interfaceB
-    check interfaceA.parentDir != interfaceB.parentDir
-    check fileExists(interfaceA)
-    check fileExists(interfaceB)
-    check not dirExists(projectA / ".repro" / "build")
-    check not dirExists(projectB / ".repro" / "build")
-
-  test "relative public CLI keeps RunQuota helper path stable across project cwd":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m35-relative-public-cli", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    discard compilePublicReproTestBin(repoRoot)
-
-    let binDir = tempRoot / "bin"
-    writeFixtureTools(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "src")
-    writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
-    writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
-    writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
-    writeProject(projectRoot / "reprobuild.nim")
-
-    let selected = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", projectRoot & "#consume",
-      "--tool-provisioning=path", "--log=actions"
-    ], [("PATH", pathValue)]), repoRoot)
-    check selected.contains("selectedTarget: consume")
-    check selected.contains("scheduler: actions=2")
-    check selected.contains("action: produce status=asSucceeded launched=true")
-    check selected.contains("action: consume status=asSucceeded launched=true")
-    check selected.contains("runquota=")
-    check nonEmptyLines(projectRoot / ".repro" / "tool-runs.log") ==
-      @["producer", "consumer"]
-    let report = parseFile(valueAfter(selected, "buildReport:"))
-    check reportAction(report, "produce"){"runQuotaBackend"}.getStr().len > 0
-    check reportAction(report, "consume"){"runQuotaBackend"}.getStr().len > 0
-
-  test "public CLI reruns provider root for DSL directory enumeration inputs":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m40-directory-dsl", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    discard compilePublicReproTestBin(repoRoot)
-
-    let binDir = tempRoot / "bin"
-    writeFixtureTools(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "src" / "resources")
-    writeFile(projectRoot / "src" / "aggregate.txt", "aggregate\n")
-    writeFile(projectRoot / "src" / "resources" / "alpha.txt", "alpha\n")
-    writeFile(projectRoot / "src" / "resources" / "beta.txt", "beta\n")
-    writeDirectoryEnumerationProject(projectRoot / "reprobuild.nim")
-
-    let target = projectRoot & "#aggregate"
-    let first = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-      "--log=actions"
-    ], [("PATH", pathValue)]), repoRoot)
-    check first.contains("selectedTarget: aggregate")
-    check first.contains("providerInvocations: 1")
-    check first.contains("scheduler: actions=3")
-    check first.contains("action: copy-alpha.txt status=asSucceeded launched=true")
-    check first.contains("action: copy-beta.txt status=asSucceeded launched=true")
-    check fileExists(projectRoot / "dist" / "alpha.txt.out")
-    check fileExists(projectRoot / "dist" / "beta.txt.out")
-    check readFile(projectRoot / "dist" / "alpha.txt.out") == "alpha\n"
-
-    writeFile(projectRoot / "src" / "resources" / "gamma.txt", "gamma\n")
-    let added = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-      "--log=actions"
-    ], [("PATH", pathValue)]), repoRoot)
-    check added.contains("providerInvocations: 1")
-    check added.contains("scheduler: actions=4")
-    check added.contains("action: copy-gamma.txt status=asSucceeded launched=true")
-    check fileExists(projectRoot / "dist" / "gamma.txt.out")
-    check readFile(projectRoot / "dist" / "gamma.txt.out") == "gamma\n"
-
-    removeFile(projectRoot / "src" / "resources" / "beta.txt")
-    let removed = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-      "--log=actions"
-    ], [("PATH", pathValue)]), repoRoot)
-    check removed.contains("providerInvocations: 1")
-    check removed.contains("scheduler: actions=3")
-    check not removed.contains("action: copy-beta.txt")
-    let removedReport = parseFile(valueAfter(removed, "buildReport:"))
-    check removedReport{"actions"}.len == 3
-    check reportAction(removedReport, "copy-alpha.txt").kind != JNull
-    check reportAction(removedReport, "copy-gamma.txt").kind != JNull
-    check reportAction(removedReport, "copy-beta.txt").kind == JNull
-
-  test "provider foreach refreshes only changed directory members":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m52-provider-foreach", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    discard compilePublicReproTestBin(repoRoot)
-
-    let binDir = tempRoot / "bin"
-    writeM52StylusFixtureTool(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "styles")
-    writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v1\n")
-    writeFile(projectRoot / "styles" / "beta.styl", "beta-v1\n")
-    writeM52ForeachStylusProject(projectRoot / "reprobuild.nim")
-    let tracePath = tempRoot / "provider.trace"
-    let target = projectRoot
-    let traceEnv = [("PATH", pathValue), ("REPRO_PROVIDER_TRACE", tracePath)]
-
-    let first = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-      "--log=actions"
-    ], traceEnv), repoRoot)
-    check first.contains("providerInvocations: 3")
-    check first.contains("scheduler: actions=2")
-    check first.contains("action: style-alpha status=asSucceeded launched=true")
-    check first.contains("action: style-beta status=asSucceeded launched=true")
-    let firstTrace = nonEmptyLines(tracePath)
-    check firstTrace.anyIt(it.contains("prkGraphInvocation|m52Styles.root|"))
-    check firstTrace.anyIt(it.contains("alpha.styl|girNoPriorFragment"))
-    check firstTrace.anyIt(it.contains("beta.styl|girNoPriorFragment"))
-
-    resetTrace(tracePath)
-    let second = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-      "--log=actions"
-    ], traceEnv), repoRoot)
-    check second.contains("providerInvocations: 0")
-    check actionLineCacheEffective(second, "style-alpha")
-    check actionLineCacheEffective(second, "style-beta")
-    check nonEmptyLines(tracePath).len == 0
-
-    writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v2\n")
-    resetTrace(tracePath)
-    let contentChanged = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-      "--log=actions"
-    ], traceEnv), repoRoot)
-    check contentChanged.contains("providerInvocations: 0")
-    check contentChanged.contains(
-      "action: style-alpha status=asSucceeded launched=true")
-    check actionLineCacheEffective(contentChanged, "style-beta")
-    check readFile(projectRoot / "public" / "alpha.css").contains("alpha-v2")
-    check nonEmptyLines(tracePath).len == 0
-
-    writeFile(projectRoot / "styles" / "gamma.styl", "gamma-v1\n")
-    resetTrace(tracePath)
-    let added = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-      "--log=actions"
-    ], traceEnv), repoRoot)
-    check added.contains("providerInvocations: 1")
-    check added.contains("scheduler: actions=3")
-    check added.contains("action: style-gamma status=asSucceeded launched=true")
-    let addedTrace = nonEmptyLines(tracePath)
-    check addedTrace.len == 1
-    check addedTrace[0].contains("prkGraphInvocation|m52Styles.foreach.0.style|")
-    check addedTrace[0].contains("gamma.styl|girDirectoryMembershipChanged")
-
-    removeFile(projectRoot / "styles" / "beta.styl")
-    resetTrace(tracePath)
-    let removed = requireSuccess(shellCommand([
-      "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-      "--log=actions"
-    ], traceEnv), repoRoot)
-    check removed.contains("providerInvocations: 0")
-    check removed.contains("scheduler: actions=2")
-    check not removed.contains("action: style-beta")
-    let removedReport = parseFile(valueAfter(removed, "buildReport:"))
-    check reportAction(removedReport, "style-alpha").kind != JNull
-    check reportAction(removedReport, "style-gamma").kind != JNull
-    check reportAction(removedReport, "style-beta").kind == JNull
-    check nonEmptyLines(tracePath).len == 0
-
-  test "public CLI builds local DSL project through provider, scheduler, cache, and depfile evidence":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m19-local-project", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
-
-    let binDir = tempRoot / "bin"
-    writeFixtureTools(binDir)
-    let pathValue = binDir & $PathSep & getEnv("PATH")
-
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot / "src")
-    writeFile(projectRoot / "src" / "visible.txt", "visible v1\n")
-    writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
-    writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
-    writeProject(projectRoot / "reprobuild.nim")
-    let target = projectRoot
-    let marker = projectRoot / ".repro" / "tool-runs.log"
-    let unrelatedMarker = projectRoot / ".repro" / "tool-runs-unrelated.log"
-
-    let first = build(reproBin, target, repoRoot, pathValue)
-    check first.contains("providerCompile:")
-    check first.contains("providerGraphSnapshot:")
-    check first.contains("scheduler: actions=3")
-    check first.contains("evidence=depfile:2")
-    check nonEmptyLines(marker) == @["producer", "consumer"]
-    check nonEmptyLines(unrelatedMarker) == @["consumer"]
-    check fileExists(projectRoot / "build" / "generated.txt")
-    check fileExists(projectRoot / "build" / "generated.d")
-    check fileExists(projectRoot / "dist" / "final.txt")
-    check fileExists(projectRoot / "dist" / "unrelated.txt")
-
-    let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-    check identity.profiles.len == 2
-    check identity.profiles[0].installMethod == "path"
-    check identity.profiles.allIt(it.adapterStrength == asWeak)
-    check identity.profiles.anyIt(it.resolvedExecutablePath == binDir / "m19-producer")
-    check identity.profiles.anyIt(it.resolvedExecutablePath == binDir / "m19-consumer")
-
-    let snapshotPath = valueAfter(first, "providerGraphSnapshot:")
-    let reportPath = valueAfter(first, "buildReport:")
-    check fileExists(snapshotPath)
-    check readFile(snapshotPath)[0 .. 3] == "RBPG"
-    check fileExists(reportPath)
-    let firstReport = parseFile(reportPath)
-    check firstReport{"providerInvocations"}.getInt() >= 1
-    check reportAction(firstReport, "produce"){"status"}.getStr() == "asSucceeded"
-    check reportAction(firstReport, "consume"){"status"}.getStr() == "asSucceeded"
-    check reportAction(firstReport, "produce"){"runQuotaBackend"}.getStr().len > 0
-    check reportAction(firstReport, "produce"){"evidence"}{"depfileInputs"}.
-      getElems().anyIt(it.getStr().endsWith("src/hidden.txt"))
-    # Phase 1 cache-scope migration (Provider-Compile-Tiering.md §"Cache Scope")
-    # moved the action cache out of the per-project ``.repro`` tree to a
-    # user-level shared root resolved by ``resolveActionCacheRoot``. Mirror that
-    # precedence here so the existence check tracks the live location.
-    let userActionCacheRoot = block:
-      let storeRoot = block:
-        let v = getEnv("REPROBUILD_STORE_ROOT")
-        if v.len > 0: v else: getEnv("REPRO_STORE_ROOT")
-      if storeRoot.len > 0:
-        storeRoot / "action-cache"
-      else:
-        when defined(windows):
-          let local = getEnv("LOCALAPPDATA")
-          let base = if local.len > 0: local
-                     else: getEnv("USERPROFILE") / "AppData" / "Local"
-          base / "repro" / "action-cache"
-        elif defined(macosx):
-          getEnv("HOME") / "Library" / "Caches" / "repro" / "action-cache"
+      let snapshotPath = valueAfter(first, "providerGraphSnapshot:")
+      let reportPath = valueAfter(first, "buildReport:")
+      check fileExists(snapshotPath)
+      check readFile(snapshotPath)[0 .. 3] == "RBPG"
+      check fileExists(reportPath)
+      let firstReport = parseFile(reportPath)
+      check firstReport{"providerInvocations"}.getInt() >= 1
+      check reportAction(firstReport, "produce"){"status"}.getStr() == "asSucceeded"
+      check reportAction(firstReport, "consume"){"status"}.getStr() == "asSucceeded"
+      check reportAction(firstReport, "produce"){"runQuotaBackend"}.getStr().len > 0
+      check reportAction(firstReport, "produce"){"evidence"}{"depfileInputs"}.
+        getElems().anyIt(it.getStr().endsWith("src/hidden.txt"))
+      # Phase 1 cache-scope migration (Provider-Compile-Tiering.md §"Cache Scope")
+      # moved the action cache out of the per-project ``.repro`` tree to a
+      # user-level shared root resolved by ``resolveActionCacheRoot``. Mirror that
+      # precedence here so the existence check tracks the live location.
+      let userActionCacheRoot = block:
+        let storeRoot = block:
+          let v = getEnv("REPROBUILD_STORE_ROOT")
+          if v.len > 0: v else: getEnv("REPRO_STORE_ROOT")
+        if storeRoot.len > 0:
+          storeRoot / "action-cache"
         else:
-          let xdg = getEnv("XDG_CACHE_HOME")
-          let base = if xdg.len > 0: xdg else: getEnv("HOME") / ".cache"
-          base / "repro" / "action-cache"
-    check fileExists(userActionCacheRoot / "action-cache" /
-      "action-results.records")
-    let evidenceRoot = projectRoot / ".repro" / "build" / "reprobuild" /
-      "build-engine-cache" / "dependency-evidence"
-    for actionId in ["produce", "consume", "unrelated"]:
-      let evidencePath = evidenceFile(evidenceRoot, actionId)
-      check evidencePath.len > 0
-      check fileExists(evidencePath)
-      check readFile(evidencePath)[0 .. 3] == "RBAR"
+          when defined(windows):
+            let local = getEnv("LOCALAPPDATA")
+            let base = if local.len > 0: local
+                       else: getEnv("USERPROFILE") / "AppData" / "Local"
+            base / "repro" / "action-cache"
+          elif defined(macosx):
+            getEnv("HOME") / "Library" / "Caches" / "repro" / "action-cache"
+          else:
+            let xdg = getEnv("XDG_CACHE_HOME")
+            let base = if xdg.len > 0: xdg else: getEnv("HOME") / ".cache"
+            base / "repro" / "action-cache"
+      check fileExists(userActionCacheRoot / "action-cache" /
+        "action-results.records")
+      let evidenceRoot = projectRoot / ".repro" / "build" / "reprobuild" /
+        "build-engine-cache" / "dependency-evidence"
+      for actionId in ["produce", "consume", "unrelated"]:
+        let evidencePath = evidenceFile(evidenceRoot, actionId)
+        check evidencePath.len > 0
+        check fileExists(evidencePath)
+        check readFile(evidencePath)[0 .. 3] == "RBAR"
 
-    let markerAfterFirst = readFile(marker)
-    let unrelatedMarkerAfterFirst = readFile(unrelatedMarker)
-    let second = build(reproBin, target, repoRoot, pathValue)
-    check readFile(marker) == markerAfterFirst
-    check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
-    check actionLineCacheEffective(second, "produce")
-    check actionLineCacheEffective(second, "consume")
-    check actionLineCacheEffective(second, "unrelated")
+      let markerAfterFirst = readFile(marker)
+      let unrelatedMarkerAfterFirst = readFile(unrelatedMarker)
+      let second = build(reproBin, target, repoRoot, pathValue)
+      check readFile(marker) == markerAfterFirst
+      check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
+      check actionLineCacheEffective(second, "produce")
+      check actionLineCacheEffective(second, "consume")
+      check actionLineCacheEffective(second, "unrelated")
 
-    writeFile(projectRoot / "src" / "hidden.txt", "hidden v2\n")
-    let hiddenChanged = build(reproBin, target, repoRoot, pathValue)
-    check nonEmptyLines(marker) == @["producer", "consumer", "producer",
-      "consumer"]
-    check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
-    check hiddenChanged.contains("action: produce status=asSucceeded launched=true")
-    check hiddenChanged.contains("action: consume status=asSucceeded launched=true")
-    check actionLineCacheEffective(hiddenChanged, "unrelated")
-    check readFile(projectRoot / "dist" / "final.txt").contains("hidden=hidden v2")
+      writeFile(projectRoot / "src" / "hidden.txt", "hidden v2\n")
+      let hiddenChanged = build(reproBin, target, repoRoot, pathValue)
+      check nonEmptyLines(marker) == @["producer", "consumer", "producer",
+        "consumer"]
+      check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
+      check hiddenChanged.contains("action: produce status=asSucceeded launched=true")
+      check hiddenChanged.contains("action: consume status=asSucceeded launched=true")
+      check actionLineCacheEffective(hiddenChanged, "unrelated")
+      check readFile(projectRoot / "dist" / "final.txt").contains("hidden=hidden v2")
 
-    removeFile(projectRoot / "build" / "generated.txt")
-    let upstreamOutputDeleted = build(reproBin, target, repoRoot, pathValue)
-    check nonEmptyLines(marker) == @["producer", "consumer", "producer",
-      "consumer", "producer", "consumer"]
-    check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
-    check upstreamOutputDeleted.contains(
-      "action: produce status=asSucceeded launched=true")
-    check upstreamOutputDeleted.contains(
-      "action: consume status=asSucceeded launched=true")
-    check actionLineCacheEffective(upstreamOutputDeleted, "unrelated")
+      removeFile(projectRoot / "build" / "generated.txt")
+      let upstreamOutputDeleted = build(reproBin, target, repoRoot, pathValue)
+      check nonEmptyLines(marker) == @["producer", "consumer", "producer",
+        "consumer", "producer", "consumer"]
+      check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
+      check upstreamOutputDeleted.contains(
+        "action: produce status=asSucceeded launched=true")
+      check upstreamOutputDeleted.contains(
+        "action: consume status=asSucceeded launched=true")
+      check actionLineCacheEffective(upstreamOutputDeleted, "unrelated")
 
-    let noFlag = requireFailure(shellCommand([reproBin, "build", target]), repoRoot)
-    check noFlag.contains("refusing implicit PATH fallback")
+      let noFlag = requireFailure(shellCommand([reproBin, "build", target]), repoRoot)
+      check noFlag.contains("refusing implicit PATH fallback")
 
-    let missingRoot = tempRoot / "missing-project"
-    writeMissingProject(missingRoot / "reprobuild.nim")
-    let missing = requireFailure(shellCommand(@[reproBin, "build",
-      missingRoot, "--tool-provisioning=path"],
-      @[(name: "PATH", value: pathValue)]), repoRoot)
-    check missing.contains("tool-resolution failed")
-    check missing.contains("m19-missing-tool")
-    check not fileExists(missingRoot / ".repro" / "missing-ran.log")
+      let missingRoot = tempRoot / "missing-project"
+      writeMissingProject(missingRoot / "reprobuild.nim")
+      let missing = requireFailure(shellCommand(@[reproBin, "build",
+        missingRoot, "--tool-provisioning=path"],
+        @[(name: "PATH", value: pathValue)]), repoRoot)
+      check missing.contains("tool-resolution failed")
+      check missing.contains("m19-missing-tool")
+      check not fileExists(missingRoot / ".repro" / "missing-ran.log")

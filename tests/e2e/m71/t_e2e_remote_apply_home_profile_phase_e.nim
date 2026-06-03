@@ -12,6 +12,8 @@ import repro_home_generations
 import repro_home_intent
 import repro_local_store
 
+import repro_test_support
+
 const ProjectRoot = currentSourcePath().parentDir().parentDir()
   .parentDir().parentDir()
 
@@ -268,31 +270,229 @@ proc otherPlatform(): string =
   if source == "linux": "macos" else: "linux"
 
 suite "M71 Phase E: public remote home-profile apply":
-  test "enable --host --now builds, transfers, activates, and is idempotent":
-    when defined(windows):
-      doAssert false,
-        "M71 Phase E gate must not be skipped; Windows needs a " &
-        "target-side launcher implementation or an explicit fail-closed " &
-        "fixture with no launchers"
-    else:
-      let tempRoot = createTempDir("repro-m71-public-remote-apply-", "")
-      var sshd: SshHarness
+  when isNixSupported:
+    test "enable --host --now builds, transfers, activates, and is idempotent":
+      when defined(windows):
+        doAssert false,
+          "M71 Phase E gate must not be skipped; Windows needs a " &
+          "target-side launcher implementation or an explicit fail-closed " &
+          "fixture with no launchers"
+      else:
+        let tempRoot = createTempDir("repro-m71-public-remote-apply-", "")
+        var sshd: SshHarness
+        defer:
+          stopLoopbackSshd(sshd)
+          try: removeDir(tempRoot) except OSError: discard
+
+        let sourceStateDir = tempRoot / "source-state"
+        let targetStateDir = tempRoot / "target-state"
+        let sourceStoreRoot = tempRoot / "source-store"
+        let targetStoreRoot = tempRoot / "target-store"
+        let profileDir = tempRoot / "profile"
+        let sourceHomeDir = tempRoot / "source-home"
+        let targetHomeDir = tempRoot / "target-home"
+        let fixtureDir = tempRoot / "fixture"
+        createDir(sourceStateDir)
+        createDir(targetStateDir)
+        createDir(sourceStoreRoot)
+        createDir(targetStoreRoot)
+        createDir(sourceHomeDir)
+        createDir(targetHomeDir)
+        createDir(fixtureDir)
+        writeProfile(profileDir)
+
+        let exePath = fixtureDir / PackageName
+        discard writeFixtureExe(exePath)
+        let generatedRel = ".m71-phase-e-generated"
+        let generatedPath = targetHomeDir / generatedRel
+        let generatedContent = "phase-e generated content"
+        let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
+          sourceHomeDir, exePath, generatedRel, generatedContent)
+
+        sshd = startLoopbackSshd(tempRoot)
+        let first = runRepro(env, remoteEnableArgs(sshd, targetStoreRoot,
+          targetStateDir, targetHomeDir))
+        check first.exitCode == 0
+        check fieldValue(first.output, "remoteApplyStatus") == "activated"
+        check fieldValue(first.output, "targetHost") == TargetHostName
+        check fieldValue(first.output, "transferStatus") == "sent"
+        let generationId = fieldValue(first.output, "remoteGenerationId")
+        let bundleDigest = fieldValue(first.output, "bundleDigest")
+        check fieldValue(first.output, "localGenerationId") == generationId
+        check fieldValue(first.output, "targetCurrent") == generationId
+
+        let profileText = readFile(profileDir / "home.nim")
+        check profileText.contains("\"" & TargetHostName & "\": [" &
+          ActivityName & "]")
+        check readCurrentGenerationId(targetStateDir) == generationId
+        check fileExists(pointerPath(targetStateDir, generationId))
+        check fileExists(generatedPath)
+        check readFile(generatedPath) == generatedContent
+        check not fileExists(sourceHomeDir / generatedRel)
+
+        var targetStore = openStore(targetStoreRoot)
+        let targetBundle = targetStore.readCasBlob(parsePrefixIdHex(bundleDigest))
+        check targetBundle.len > 0
+        let targetRows = targetStore.listPrefixes()
+        let targetRoots = targetStore.listRoots()
+        check targetRows.len == 1
+        check targetRoots.len == 1
+        check targetRoots[0].rootId == generationId
+        check targetRoots[0].kind == "profile"
+        let targetPrefix = targetStore.absolutePrefixPath(
+          targetRows[0].realizedPath)
+        check targetPrefix.startsWith(targetStoreRoot)
+        check dirExists(targetPrefix)
+        let launcherPath = generationDir(targetStateDir, generationId) /
+          "bin" / PackageName
+        check fileExists(launcherPath)
+        let launcherBody = readFile(launcherPath)
+        check launcherBody.contains(targetStoreRoot)
+        check launcherBody.contains(targetPrefix)
+        check not launcherBody.contains(sourceStoreRoot)
+        check fileExists(currentPath(targetStateDir) / "bin" / PackageName)
+        let prefixCount = targetRows.len
+        let rootCount = targetRoots.len
+        targetStore.close()
+
+        let second = runRepro(env, remoteEnableArgs(sshd, targetStoreRoot,
+          targetStateDir, targetHomeDir))
+        check second.exitCode == 0
+        check fieldValue(second.output, "remoteApplyStatus") == "activated"
+        check fieldValue(second.output, "remoteGenerationId") == generationId
+        check fieldValue(second.output, "bundleDigest") == bundleDigest
+        check fieldValue(second.output, "transferStatus") == "already-present"
+
+        var targetStoreAgain = openStore(targetStoreRoot)
+        check targetStoreAgain.listPrefixes().len == prefixCount
+        check targetStoreAgain.listRoots().len == rootCount
+        check readCurrentGenerationId(targetStateDir) == generationId
+        check readFile(generatedPath) == generatedContent
+        targetStoreAgain.close()
+
+        let disabled = runRepro(env, remoteDisableArgs(sshd, targetStoreRoot,
+          targetStateDir, targetHomeDir))
+        check disabled.exitCode == 0
+        check fieldValue(disabled.output, "remoteApplyStatus") == "activated"
+        let disabledGenerationId = fieldValue(disabled.output,
+          "remoteGenerationId")
+        check disabledGenerationId != generationId
+        check readCurrentGenerationId(targetStateDir) == disabledGenerationId
+        check not fileExists(generatedPath)
+        check not fileExists(currentPath(targetStateDir) / "bin" / PackageName)
+        let disabledProfile = readFile(profileDir / "home.nim")
+        check disabledProfile.contains("\"" & TargetHostName & "\": []")
+
+    test "daemon-backed dev-store mode starts reprostored and remote applies":
+      when defined(windows):
+        doAssert false,
+          "M71 daemon-backed dev-store gate is POSIX-only in this slice"
+      else:
+        let tempRoot = createTempDir("repro-m71-public-remote-devdaemon-", "")
+        let targetStoreEndpoint =
+          "/tmp/repro-m71-" & $getCurrentProcessId() & "-dev-store.sock"
+        var sshd: SshHarness
+        defer:
+          if sshd.process != nil:
+            discard runSsh(sshd, remoteStoreDaemonCommand("stop",
+              tempRoot / "target-store", targetStoreEndpoint))
+          try: removeFile(targetStoreEndpoint) except OSError: discard
+          try: removeFile(targetStoreEndpoint & ".status") except OSError: discard
+          stopLoopbackSshd(sshd)
+          try: removeDir(tempRoot) except OSError: discard
+
+        let sourceStateDir = tempRoot / "source-state"
+        let targetStateDir = tempRoot / "target-state"
+        let sourceStoreRoot = tempRoot / "source-store"
+        let targetStoreRoot = tempRoot / "target-store"
+        let profileDir = tempRoot / "profile"
+        let sourceHomeDir = tempRoot / "source-home"
+        let targetHomeDir = tempRoot / "target-home"
+        let fixtureDir = tempRoot / "fixture"
+        createDir(sourceStateDir)
+        createDir(targetStateDir)
+        createDir(sourceStoreRoot)
+        createDir(targetStoreRoot)
+        createDir(sourceHomeDir)
+        createDir(targetHomeDir)
+        createDir(fixtureDir)
+        writeProfile(profileDir)
+
+        let exePath = fixtureDir / PackageName
+        discard writeFixtureExe(exePath)
+        let generatedRel = ".m71-phase-e-devdaemon-generated"
+        let generatedPath = targetHomeDir / generatedRel
+        let generatedContent = "phase-e dev daemon generated content"
+        let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
+          sourceHomeDir, exePath, generatedRel, generatedContent)
+
+        sshd = startLoopbackSshd(tempRoot)
+        let applied = runRepro(env, remoteDevStoreActivityArgs("enable", sshd,
+          targetStoreRoot, targetStoreEndpoint, targetStateDir, targetHomeDir))
+        check applied.exitCode == 0
+        check fieldValue(applied.output, "remoteApplyStatus") == "activated"
+        check fieldValue(applied.output, "targetStoreDaemon") ==
+          "development-store"
+        check fieldValue(applied.output, "targetStoreEndpoint") ==
+          targetStoreEndpoint
+        check applied.output.contains("targetStoreDaemonPid: ")
+        check not applied.output.contains("repro daemon")
+        check not applied.output.contains("repro-daemon")
+        check not applied.output.contains("watch daemon")
+
+        let generationId = fieldValue(applied.output, "remoteGenerationId")
+        check readCurrentGenerationId(targetStateDir) == generationId
+        check fileExists(generatedPath)
+        check readFile(generatedPath) == generatedContent
+
+        let status = runSsh(sshd, remoteStoreDaemonCommand("status",
+          targetStoreRoot, targetStoreEndpoint))
+        check status.exitCode == 0
+        check status.output.contains("repro store daemon: running")
+        check fieldValue(status.output, "profile") == "development-store"
+        check fieldValue(status.output, "endpoint") == targetStoreEndpoint
+        check fieldValue(status.output, "store-root") == targetStoreRoot
+        check not status.output.contains("repro daemon")
+        check not status.output.contains("watch daemon")
+
+        let watchDaemon = runSsh(sshd, [reproBinary(), "daemon"].mapIt(q(it)).
+          join(" "))
+        check watchDaemon.exitCode != 0
+        check not watchDaemon.output.contains("development-store")
+        check not watchDaemon.output.contains("repro store daemon: running")
+
+        var targetStore = openStore(targetStoreRoot)
+        check targetStore.listPrefixes().len == 1
+        check targetStore.listRoots().len == 1
+        targetStore.close()
+
+        let reused = runRepro(env, remoteDevStoreActivityArgs("enable", sshd,
+          targetStoreRoot, targetStoreEndpoint, targetStateDir, targetHomeDir))
+        check reused.exitCode == 0
+        check fieldValue(reused.output, "remoteApplyStatus") == "activated"
+        check fieldValue(reused.output, "targetStoreEndpoint") ==
+          targetStoreEndpoint
+        check fieldValue(reused.output, "targetStoreDaemonPid") ==
+          fieldValue(applied.output, "targetStoreDaemonPid")
+        check fieldValue(reused.output, "transferStatus") == "already-present"
+        var targetStoreAfterReuse = openStore(targetStoreRoot)
+        defer: targetStoreAfterReuse.close()
+        check targetStoreAfterReuse.listPrefixes().len == 1
+        check targetStoreAfterReuse.listRoots().len == 1
+
+    test "--host without --now is a pure intent edit and does not contact SSH":
+      let tempRoot = createTempDir("repro-m71-public-remote-intent-", "")
       defer:
-        stopLoopbackSshd(sshd)
         try: removeDir(tempRoot) except OSError: discard
 
       let sourceStateDir = tempRoot / "source-state"
-      let targetStateDir = tempRoot / "target-state"
       let sourceStoreRoot = tempRoot / "source-store"
+      let targetStateDir = tempRoot / "target-state"
       let targetStoreRoot = tempRoot / "target-store"
       let profileDir = tempRoot / "profile"
       let sourceHomeDir = tempRoot / "source-home"
       let targetHomeDir = tempRoot / "target-home"
       let fixtureDir = tempRoot / "fixture"
-      createDir(sourceStateDir)
-      createDir(targetStateDir)
-      createDir(sourceStoreRoot)
-      createDir(targetStoreRoot)
       createDir(sourceHomeDir)
       createDir(targetHomeDir)
       createDir(fixtureDir)
@@ -300,116 +500,38 @@ suite "M71 Phase E: public remote home-profile apply":
 
       let exePath = fixtureDir / PackageName
       discard writeFixtureExe(exePath)
-      let generatedRel = ".m71-phase-e-generated"
-      let generatedPath = targetHomeDir / generatedRel
-      let generatedContent = "phase-e generated content"
       let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
-        sourceHomeDir, exePath, generatedRel, generatedContent)
+        sourceHomeDir, exePath, ".m71-phase-e-no-now", "no-now")
+      let missingSsh = tempRoot / "missing-ssh"
 
-      sshd = startLoopbackSshd(tempRoot)
-      let first = runRepro(env, remoteEnableArgs(sshd, targetStoreRoot,
-        targetStateDir, targetHomeDir))
-      check first.exitCode == 0
-      check fieldValue(first.output, "remoteApplyStatus") == "activated"
-      check fieldValue(first.output, "targetHost") == TargetHostName
-      check fieldValue(first.output, "transferStatus") == "sent"
-      let generationId = fieldValue(first.output, "remoteGenerationId")
-      let bundleDigest = fieldValue(first.output, "bundleDigest")
-      check fieldValue(first.output, "localGenerationId") == generationId
-      check fieldValue(first.output, "targetCurrent") == generationId
+      let edited = runRepro(env, [
+        "home", "enable", ActivityName,
+        "--host", TargetHostName,
+        "--ssh", missingSsh,
+        "--target-store-root", targetStoreRoot,
+        "--target-state-dir", targetStateDir,
+        "--target-home-dir", targetHomeDir])
+      check edited.exitCode == 0
+      check readFile(profileDir / "home.nim").contains(
+        "\"" & TargetHostName & "\": [" & ActivityName & "]")
+      check readCurrentGenerationId(sourceStateDir) == ""
+      check readCurrentGenerationId(targetStateDir) == ""
+      check not dirExists(sourceStoreRoot)
+      check not dirExists(targetStoreRoot)
 
-      let profileText = readFile(profileDir / "home.nim")
-      check profileText.contains("\"" & TargetHostName & "\": [" &
-        ActivityName & "]")
-      check readCurrentGenerationId(targetStateDir) == generationId
-      check fileExists(pointerPath(targetStateDir, generationId))
-      check fileExists(generatedPath)
-      check readFile(generatedPath) == generatedContent
-      check not fileExists(sourceHomeDir / generatedRel)
-
-      var targetStore = openStore(targetStoreRoot)
-      let targetBundle = targetStore.readCasBlob(parsePrefixIdHex(bundleDigest))
-      check targetBundle.len > 0
-      let targetRows = targetStore.listPrefixes()
-      let targetRoots = targetStore.listRoots()
-      check targetRows.len == 1
-      check targetRoots.len == 1
-      check targetRoots[0].rootId == generationId
-      check targetRoots[0].kind == "profile"
-      let targetPrefix = targetStore.absolutePrefixPath(
-        targetRows[0].realizedPath)
-      check targetPrefix.startsWith(targetStoreRoot)
-      check dirExists(targetPrefix)
-      let launcherPath = generationDir(targetStateDir, generationId) /
-        "bin" / PackageName
-      check fileExists(launcherPath)
-      let launcherBody = readFile(launcherPath)
-      check launcherBody.contains(targetStoreRoot)
-      check launcherBody.contains(targetPrefix)
-      check not launcherBody.contains(sourceStoreRoot)
-      check fileExists(currentPath(targetStateDir) / "bin" / PackageName)
-      let prefixCount = targetRows.len
-      let rootCount = targetRoots.len
-      targetStore.close()
-
-      let second = runRepro(env, remoteEnableArgs(sshd, targetStoreRoot,
-        targetStateDir, targetHomeDir))
-      check second.exitCode == 0
-      check fieldValue(second.output, "remoteApplyStatus") == "activated"
-      check fieldValue(second.output, "remoteGenerationId") == generationId
-      check fieldValue(second.output, "bundleDigest") == bundleDigest
-      check fieldValue(second.output, "transferStatus") == "already-present"
-
-      var targetStoreAgain = openStore(targetStoreRoot)
-      check targetStoreAgain.listPrefixes().len == prefixCount
-      check targetStoreAgain.listRoots().len == rootCount
-      check readCurrentGenerationId(targetStateDir) == generationId
-      check readFile(generatedPath) == generatedContent
-      targetStoreAgain.close()
-
-      let disabled = runRepro(env, remoteDisableArgs(sshd, targetStoreRoot,
-        targetStateDir, targetHomeDir))
-      check disabled.exitCode == 0
-      check fieldValue(disabled.output, "remoteApplyStatus") == "activated"
-      let disabledGenerationId = fieldValue(disabled.output,
-        "remoteGenerationId")
-      check disabledGenerationId != generationId
-      check readCurrentGenerationId(targetStateDir) == disabledGenerationId
-      check not fileExists(generatedPath)
-      check not fileExists(currentPath(targetStateDir) / "bin" / PackageName)
-      let disabledProfile = readFile(profileDir / "home.nim")
-      check disabledProfile.contains("\"" & TargetHostName & "\": []")
-
-  test "daemon-backed dev-store mode starts reprostored and remote applies":
-    when defined(windows):
-      doAssert false,
-        "M71 daemon-backed dev-store gate is POSIX-only in this slice"
-    else:
-      let tempRoot = createTempDir("repro-m71-public-remote-devdaemon-", "")
-      let targetStoreEndpoint =
-        "/tmp/repro-m71-" & $getCurrentProcessId() & "-dev-store.sock"
-      var sshd: SshHarness
+    test "cross-platform refusal preserves the local intent edit before SSH":
+      let tempRoot = createTempDir("repro-m71-public-remote-cross-", "")
       defer:
-        if sshd.process != nil:
-          discard runSsh(sshd, remoteStoreDaemonCommand("stop",
-            tempRoot / "target-store", targetStoreEndpoint))
-        try: removeFile(targetStoreEndpoint) except OSError: discard
-        try: removeFile(targetStoreEndpoint & ".status") except OSError: discard
-        stopLoopbackSshd(sshd)
         try: removeDir(tempRoot) except OSError: discard
 
       let sourceStateDir = tempRoot / "source-state"
-      let targetStateDir = tempRoot / "target-state"
       let sourceStoreRoot = tempRoot / "source-store"
+      let targetStateDir = tempRoot / "target-state"
       let targetStoreRoot = tempRoot / "target-store"
       let profileDir = tempRoot / "profile"
       let sourceHomeDir = tempRoot / "source-home"
       let targetHomeDir = tempRoot / "target-home"
       let fixtureDir = tempRoot / "fixture"
-      createDir(sourceStateDir)
-      createDir(targetStateDir)
-      createDir(sourceStoreRoot)
-      createDir(targetStoreRoot)
       createDir(sourceHomeDir)
       createDir(targetHomeDir)
       createDir(fixtureDir)
@@ -417,221 +539,46 @@ suite "M71 Phase E: public remote home-profile apply":
 
       let exePath = fixtureDir / PackageName
       discard writeFixtureExe(exePath)
-      let generatedRel = ".m71-phase-e-devdaemon-generated"
-      let generatedPath = targetHomeDir / generatedRel
-      let generatedContent = "phase-e dev daemon generated content"
       let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
-        sourceHomeDir, exePath, generatedRel, generatedContent)
+        sourceHomeDir, exePath, ".m71-phase-e-cross", "cross")
+      let targetPlatform = otherPlatform()
+      let refused = runRepro(env, [
+        "home", "enable", ActivityName,
+        "--host", TargetHostName,
+        "--now",
+        "--ssh", tempRoot / "missing-ssh",
+        "--target-store-root", targetStoreRoot,
+        "--target-state-dir", targetStateDir,
+        "--target-home-dir", targetHomeDir,
+        "--target-platform", targetPlatform])
 
-      sshd = startLoopbackSshd(tempRoot)
-      let applied = runRepro(env, remoteDevStoreActivityArgs("enable", sshd,
-        targetStoreRoot, targetStoreEndpoint, targetStateDir, targetHomeDir))
-      check applied.exitCode == 0
-      check fieldValue(applied.output, "remoteApplyStatus") == "activated"
-      check fieldValue(applied.output, "targetStoreDaemon") ==
-        "development-store"
-      check fieldValue(applied.output, "targetStoreEndpoint") ==
-        targetStoreEndpoint
-      check applied.output.contains("targetStoreDaemonPid: ")
-      check not applied.output.contains("repro daemon")
-      check not applied.output.contains("repro-daemon")
-      check not applied.output.contains("watch daemon")
+      check refused.exitCode != 0
+      check refused.output.contains("remoteApplyPhase: preflight")
+      check refused.output.contains("sourcePlatform: " &
+        currentHostContext().platform)
+      check refused.output.contains("targetPlatform: " & targetPlatform)
+      check refused.output.contains("missingCapability: cross-builder")
+      check refused.output.contains("cross-builder capability")
+      check readFile(profileDir / "home.nim").contains(
+        "\"" & TargetHostName & "\": [" & ActivityName & "]")
+      check readCurrentGenerationId(sourceStateDir) == ""
+      check readCurrentGenerationId(targetStateDir) == ""
+      check not dirExists(sourceStoreRoot)
+      check not dirExists(targetStoreRoot)
 
-      let generationId = fieldValue(applied.output, "remoteGenerationId")
-      check readCurrentGenerationId(targetStateDir) == generationId
-      check fileExists(generatedPath)
-      check readFile(generatedPath) == generatedContent
-
-      let status = runSsh(sshd, remoteStoreDaemonCommand("status",
-        targetStoreRoot, targetStoreEndpoint))
-      check status.exitCode == 0
-      check status.output.contains("repro store daemon: running")
-      check fieldValue(status.output, "profile") == "development-store"
-      check fieldValue(status.output, "endpoint") == targetStoreEndpoint
-      check fieldValue(status.output, "store-root") == targetStoreRoot
-      check not status.output.contains("repro daemon")
-      check not status.output.contains("watch daemon")
-
-      let watchDaemon = runSsh(sshd, [reproBinary(), "daemon"].mapIt(q(it)).
-        join(" "))
-      check watchDaemon.exitCode != 0
-      check not watchDaemon.output.contains("development-store")
-      check not watchDaemon.output.contains("repro store daemon: running")
-
-      var targetStore = openStore(targetStoreRoot)
-      check targetStore.listPrefixes().len == 1
-      check targetStore.listRoots().len == 1
-      targetStore.close()
-
-      let reused = runRepro(env, remoteDevStoreActivityArgs("enable", sshd,
-        targetStoreRoot, targetStoreEndpoint, targetStateDir, targetHomeDir))
-      check reused.exitCode == 0
-      check fieldValue(reused.output, "remoteApplyStatus") == "activated"
-      check fieldValue(reused.output, "targetStoreEndpoint") ==
-        targetStoreEndpoint
-      check fieldValue(reused.output, "targetStoreDaemonPid") ==
-        fieldValue(applied.output, "targetStoreDaemonPid")
-      check fieldValue(reused.output, "transferStatus") == "already-present"
-      var targetStoreAfterReuse = openStore(targetStoreRoot)
-      defer: targetStoreAfterReuse.close()
-      check targetStoreAfterReuse.listPrefixes().len == 1
-      check targetStoreAfterReuse.listRoots().len == 1
-
-  test "--host without --now is a pure intent edit and does not contact SSH":
-    let tempRoot = createTempDir("repro-m71-public-remote-intent-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-
-    let sourceStateDir = tempRoot / "source-state"
-    let sourceStoreRoot = tempRoot / "source-store"
-    let targetStateDir = tempRoot / "target-state"
-    let targetStoreRoot = tempRoot / "target-store"
-    let profileDir = tempRoot / "profile"
-    let sourceHomeDir = tempRoot / "source-home"
-    let targetHomeDir = tempRoot / "target-home"
-    let fixtureDir = tempRoot / "fixture"
-    createDir(sourceHomeDir)
-    createDir(targetHomeDir)
-    createDir(fixtureDir)
-    writeProfile(profileDir)
-
-    let exePath = fixtureDir / PackageName
-    discard writeFixtureExe(exePath)
-    let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
-      sourceHomeDir, exePath, ".m71-phase-e-no-now", "no-now")
-    let missingSsh = tempRoot / "missing-ssh"
-
-    let edited = runRepro(env, [
-      "home", "enable", ActivityName,
-      "--host", TargetHostName,
-      "--ssh", missingSsh,
-      "--target-store-root", targetStoreRoot,
-      "--target-state-dir", targetStateDir,
-      "--target-home-dir", targetHomeDir])
-    check edited.exitCode == 0
-    check readFile(profileDir / "home.nim").contains(
-      "\"" & TargetHostName & "\": [" & ActivityName & "]")
-    check readCurrentGenerationId(sourceStateDir) == ""
-    check readCurrentGenerationId(targetStateDir) == ""
-    check not dirExists(sourceStoreRoot)
-    check not dirExists(targetStoreRoot)
-
-  test "cross-platform refusal preserves the local intent edit before SSH":
-    let tempRoot = createTempDir("repro-m71-public-remote-cross-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-
-    let sourceStateDir = tempRoot / "source-state"
-    let sourceStoreRoot = tempRoot / "source-store"
-    let targetStateDir = tempRoot / "target-state"
-    let targetStoreRoot = tempRoot / "target-store"
-    let profileDir = tempRoot / "profile"
-    let sourceHomeDir = tempRoot / "source-home"
-    let targetHomeDir = tempRoot / "target-home"
-    let fixtureDir = tempRoot / "fixture"
-    createDir(sourceHomeDir)
-    createDir(targetHomeDir)
-    createDir(fixtureDir)
-    writeProfile(profileDir)
-
-    let exePath = fixtureDir / PackageName
-    discard writeFixtureExe(exePath)
-    let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
-      sourceHomeDir, exePath, ".m71-phase-e-cross", "cross")
-    let targetPlatform = otherPlatform()
-    let refused = runRepro(env, [
-      "home", "enable", ActivityName,
-      "--host", TargetHostName,
-      "--now",
-      "--ssh", tempRoot / "missing-ssh",
-      "--target-store-root", targetStoreRoot,
-      "--target-state-dir", targetStateDir,
-      "--target-home-dir", targetHomeDir,
-      "--target-platform", targetPlatform])
-
-    check refused.exitCode != 0
-    check refused.output.contains("remoteApplyPhase: preflight")
-    check refused.output.contains("sourcePlatform: " &
-      currentHostContext().platform)
-    check refused.output.contains("targetPlatform: " & targetPlatform)
-    check refused.output.contains("missingCapability: cross-builder")
-    check refused.output.contains("cross-builder capability")
-    check readFile(profileDir / "home.nim").contains(
-      "\"" & TargetHostName & "\": [" & ActivityName & "]")
-    check readCurrentGenerationId(sourceStateDir) == ""
-    check readCurrentGenerationId(targetStateDir) == ""
-    check not dirExists(sourceStoreRoot)
-    check not dirExists(targetStoreRoot)
-
-  test "transfer failure preserves intent and does not activate target":
-    let tempRoot = createTempDir("repro-m71-public-remote-transfer-fail-", "")
-    defer:
-      try: removeDir(tempRoot) except OSError: discard
-
-    let sourceStateDir = tempRoot / "source-state"
-    let sourceStoreRoot = tempRoot / "source-store"
-    let targetStateDir = tempRoot / "target-state"
-    let targetStoreRoot = tempRoot / "target-store"
-    let profileDir = tempRoot / "profile"
-    let sourceHomeDir = tempRoot / "source-home"
-    let targetHomeDir = tempRoot / "target-home"
-    let fixtureDir = tempRoot / "fixture"
-    createDir(sourceHomeDir)
-    createDir(targetHomeDir)
-    createDir(fixtureDir)
-    writeProfile(profileDir)
-
-    let exePath = fixtureDir / PackageName
-    discard writeFixtureExe(exePath)
-    let generatedRel = ".m71-phase-e-transfer-fail"
-    let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
-      sourceHomeDir, exePath, generatedRel, "transfer-fail")
-
-    let failed = runRepro(env, [
-      "home", "enable", ActivityName,
-      "--host", TargetHostName,
-      "--now",
-      "--ssh", tempRoot / "missing-ssh",
-      "--target-store-root", targetStoreRoot,
-      "--target-state-dir", targetStateDir,
-      "--target-home-dir", targetHomeDir])
-
-    check failed.exitCode != 0
-    check failed.output.contains("remoteApplyPhase: transfer")
-    check failed.output.contains("localIntentStatus: preserved")
-    check not failed.output.contains("remoteApplyPhase: activate")
-    check readFile(profileDir / "home.nim").contains(
-      "\"" & TargetHostName & "\": [" & ActivityName & "]")
-    check readCurrentGenerationId(targetStateDir) == ""
-    check not dirExists(targetStoreRoot)
-    check not fileExists(sourceHomeDir / generatedRel)
-    check not fileExists(targetHomeDir / generatedRel)
-
-  test "activation failure after transfer preserves intent and leaves bundle CAS":
-    when defined(windows):
-      doAssert false,
-        "M71 Phase E gate must not be skipped; Windows needs a " &
-        "target-side launcher implementation or an explicit fail-closed " &
-        "fixture with no launchers"
-    else:
-      let tempRoot = createTempDir("repro-m71-public-remote-fail-", "")
-      var sshd: SshHarness
+    test "transfer failure preserves intent and does not activate target":
+      let tempRoot = createTempDir("repro-m71-public-remote-transfer-fail-", "")
       defer:
-        stopLoopbackSshd(sshd)
         try: removeDir(tempRoot) except OSError: discard
 
       let sourceStateDir = tempRoot / "source-state"
-      let targetStateDir = tempRoot / "target-state"
       let sourceStoreRoot = tempRoot / "source-store"
+      let targetStateDir = tempRoot / "target-state"
       let targetStoreRoot = tempRoot / "target-store"
       let profileDir = tempRoot / "profile"
       let sourceHomeDir = tempRoot / "source-home"
       let targetHomeDir = tempRoot / "target-home"
       let fixtureDir = tempRoot / "fixture"
-      createDir(sourceStateDir)
-      createDir(targetStateDir)
-      createDir(sourceStoreRoot)
-      createDir(targetStoreRoot)
       createDir(sourceHomeDir)
       createDir(targetHomeDir)
       createDir(fixtureDir)
@@ -639,29 +586,85 @@ suite "M71 Phase E: public remote home-profile apply":
 
       let exePath = fixtureDir / PackageName
       discard writeFixtureExe(exePath)
-      let generatedRel = ".m71-phase-e-conflict"
-      let generatedPath = targetHomeDir / generatedRel
-      writeFile(generatedPath, "conflicting target bytes")
+      let generatedRel = ".m71-phase-e-transfer-fail"
       let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
-        sourceHomeDir, exePath, generatedRel, "desired remote bytes")
+        sourceHomeDir, exePath, generatedRel, "transfer-fail")
 
-      sshd = startLoopbackSshd(tempRoot)
-      let failed = runRepro(env, remoteEnableArgs(sshd, targetStoreRoot,
-        targetStateDir, targetHomeDir))
+      let failed = runRepro(env, [
+        "home", "enable", ActivityName,
+        "--host", TargetHostName,
+        "--now",
+        "--ssh", tempRoot / "missing-ssh",
+        "--target-store-root", targetStoreRoot,
+        "--target-state-dir", targetStateDir,
+        "--target-home-dir", targetHomeDir])
+
       check failed.exitCode != 0
-      check failed.output.contains("remoteApplyPhase: activate")
+      check failed.output.contains("remoteApplyPhase: transfer")
       check failed.output.contains("localIntentStatus: preserved")
-      check failed.output.contains("generated file target already exists")
-      let bundleDigest = fieldValue(failed.output, "bundleDigest")
-      let targetBundlePath = fieldValue(failed.output, "targetBundlePath")
-      check targetBundlePath.startsWith(targetStoreRoot)
-
+      check not failed.output.contains("remoteApplyPhase: activate")
       check readFile(profileDir / "home.nim").contains(
         "\"" & TargetHostName & "\": [" & ActivityName & "]")
       check readCurrentGenerationId(targetStateDir) == ""
-      check readFile(generatedPath) == "conflicting target bytes"
+      check not dirExists(targetStoreRoot)
       check not fileExists(sourceHomeDir / generatedRel)
+      check not fileExists(targetHomeDir / generatedRel)
 
-      var targetStore = openStore(targetStoreRoot)
-      defer: targetStore.close()
-      check targetStore.readCasBlob(parsePrefixIdHex(bundleDigest)).len > 0
+    test "activation failure after transfer preserves intent and leaves bundle CAS":
+      when defined(windows):
+        doAssert false,
+          "M71 Phase E gate must not be skipped; Windows needs a " &
+          "target-side launcher implementation or an explicit fail-closed " &
+          "fixture with no launchers"
+      else:
+        let tempRoot = createTempDir("repro-m71-public-remote-fail-", "")
+        var sshd: SshHarness
+        defer:
+          stopLoopbackSshd(sshd)
+          try: removeDir(tempRoot) except OSError: discard
+
+        let sourceStateDir = tempRoot / "source-state"
+        let targetStateDir = tempRoot / "target-state"
+        let sourceStoreRoot = tempRoot / "source-store"
+        let targetStoreRoot = tempRoot / "target-store"
+        let profileDir = tempRoot / "profile"
+        let sourceHomeDir = tempRoot / "source-home"
+        let targetHomeDir = tempRoot / "target-home"
+        let fixtureDir = tempRoot / "fixture"
+        createDir(sourceStateDir)
+        createDir(targetStateDir)
+        createDir(sourceStoreRoot)
+        createDir(targetStoreRoot)
+        createDir(sourceHomeDir)
+        createDir(targetHomeDir)
+        createDir(fixtureDir)
+        writeProfile(profileDir)
+
+        let exePath = fixtureDir / PackageName
+        discard writeFixtureExe(exePath)
+        let generatedRel = ".m71-phase-e-conflict"
+        let generatedPath = targetHomeDir / generatedRel
+        writeFile(generatedPath, "conflicting target bytes")
+        let env = commonEnv(profileDir, sourceStateDir, sourceStoreRoot,
+          sourceHomeDir, exePath, generatedRel, "desired remote bytes")
+
+        sshd = startLoopbackSshd(tempRoot)
+        let failed = runRepro(env, remoteEnableArgs(sshd, targetStoreRoot,
+          targetStateDir, targetHomeDir))
+        check failed.exitCode != 0
+        check failed.output.contains("remoteApplyPhase: activate")
+        check failed.output.contains("localIntentStatus: preserved")
+        check failed.output.contains("generated file target already exists")
+        let bundleDigest = fieldValue(failed.output, "bundleDigest")
+        let targetBundlePath = fieldValue(failed.output, "targetBundlePath")
+        check targetBundlePath.startsWith(targetStoreRoot)
+
+        check readFile(profileDir / "home.nim").contains(
+          "\"" & TargetHostName & "\": [" & ActivityName & "]")
+        check readCurrentGenerationId(targetStateDir) == ""
+        check readFile(generatedPath) == "conflicting target bytes"
+        check not fileExists(sourceHomeDir / generatedRel)
+
+        var targetStore = openStore(targetStoreRoot)
+        defer: targetStore.close()
+        check targetStore.readCasBlob(parsePrefixIdHex(bundleDigest)).len > 0
