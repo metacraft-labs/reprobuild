@@ -171,25 +171,13 @@ proc startFakeProtocolDaemon(tempRoot: string): owned(Process) =
   ## incompatible daemon: it binds the endpoint and responds to every
   ## connection with a single ``udkError`` frame carrying the
   ## canonical "user daemon protocol mismatch" message. The helper
-  ## binary is built lazily so the test compiles standalone.
+  ## binary is built up-front by ``scripts/run_tests.sh``; a missing
+  ## binary here is a harness configuration error.
   let helperBin = fakeProtocolHelperBin()
   if not fileExists(helperBin):
-    createDir(helperBin.parentDir)
-    let nimCache = repoRoot() / "build" / "nimcache" /
-      "fake_protocol_daemon_helper"
-    let nimArgs = @[
-      "c",
-      "--threads:on",
-      "--hints:off",
-      "--warnings:off",
-      "--nimcache:" & nimCache,
-      "--out:" & helperBin,
-      fakeProtocolHelperSource()
-    ]
-    let buildRes = runShell(shellCommand(@["nim"] & nimArgs), repoRoot())
-    if buildRes.code != 0:
-      checkpoint(buildRes.output)
-      check buildRes.code == 0
+    raise newException(OSError,
+      "fake-protocol-daemon helper missing at " & helperBin &
+      "; build it via the test harness (scripts/run_tests.sh)")
 
   try: removeFile(daemonEndpoint(tempRoot)) except OSError: discard
   result = startProcess(helperBin,

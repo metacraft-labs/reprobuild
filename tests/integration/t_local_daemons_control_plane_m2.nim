@@ -69,25 +69,15 @@ proc waitForEndpoint(endpoint: string) =
 proc startLiveEndpoint(endpoint: string): owned(Process) =
   ## Spawn the portable Nim helper that binds ``endpoint`` and
   ## accepts a small number of connections, then exits. The helper
-  ## binary is built lazily here so the test can run standalone
-  ## without forcing the harness to know about a new fixture.
+  ## binary is built up-front by ``scripts/run_tests.sh`` (per the
+  ## "no `just build` from inside a test" rule); a missing binary
+  ## here is a harness configuration error, not something the test
+  ## should attempt to recover from in-band.
   let helperBin = liveEndpointHelperBin()
   if not fileExists(helperBin):
-    createDir(helperBin.parentDir)
-    let nimCache = repoRoot() / "build" / "nimcache" / "live_endpoint_helper"
-    let nimArgs = @[
-      "c",
-      "--threads:on",
-      "--hints:off",
-      "--warnings:off",
-      "--nimcache:" & nimCache,
-      "--out:" & helperBin,
-      liveEndpointHelperSource()
-    ]
-    let buildRes = runShell(shellCommand(@["nim"] & nimArgs), repoRoot())
-    if buildRes.code != 0:
-      checkpoint(buildRes.output)
-      check buildRes.code == 0
+    raise newException(OSError,
+      "live-endpoint helper missing at " & helperBin & "; build it " &
+      "via the test harness (scripts/run_tests.sh)")
   startProcess(helperBin, args = @[endpoint],
     options = {poUsePath, poStdErrToStdOut})
 

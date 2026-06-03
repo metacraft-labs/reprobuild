@@ -44,6 +44,37 @@ case "$(uname -s)" in
 esac
 build_sibling "../runquota" "../runquota/build/bin/runquotad${exe_ext}"
 
+# Test-side helper binaries that more than one suite reuses. Building
+# them here once (instead of inside each test's setup) keeps the per-
+# test wall time predictable and avoids the Windows-specific failure
+# where parallel ``nim c`` invocations contend on the same nimcache
+# and lock each other out of the output file.
+build_test_helper() {
+  local source_path="$1"
+  local output_path="$2"
+  local cache_name="$3"
+  if [[ -x "${output_path}" ]]; then
+    return 0
+  fi
+  printf 'Building test helper: %s\n' "${output_path}" >&2
+  nim c \
+    --threads:on \
+    --hints:off \
+    --warnings:off \
+    --nimcache:"build/nimcache/${cache_name}" \
+    --out:"${output_path}" \
+    "${source_path}"
+}
+
+build_test_helper \
+  "tests/fixtures/local-daemons-control-plane/live-endpoint-helper/live_endpoint_helper.nim" \
+  "build/test-bin/live_endpoint_helper${exe_ext}" \
+  "live_endpoint_helper"
+build_test_helper \
+  "tests/fixtures/local-daemons-control-plane/fake-protocol-daemon-helper/fake_protocol_daemon_helper.nim" \
+  "build/test-bin/fake_protocol_daemon_helper${exe_ext}" \
+  "fake_protocol_daemon_helper"
+
 if [[ -f tests/e2e/home-generations/harness_apply_lock_holder.nim ]]; then
   nim c \
     --threads:on \
