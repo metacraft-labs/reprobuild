@@ -206,158 +206,159 @@ proc startFakeProtocolDaemon(tempRoot: string): owned(Process) =
   raise newException(IOError,
     "fake protocol daemon did not create endpoint: " & output)
 
-suite "Local daemons/control-plane M11 default daemon rollout and recovery":
-  test "integration_daemon_auto_fallback_and_direct_recovery":
-    let tempRoot = createTempDir("repro-daemon-m11-recovery", "")
-    defer:
+when isNixSupported:
+  suite "Local daemons/control-plane M11 default daemon rollout and recovery":
+    test "integration_daemon_auto_fallback_and_direct_recovery":
+      let tempRoot = createTempDir("repro-daemon-m11-recovery", "")
+      defer:
+        stopDaemon(tempRoot)
+        removeDir(tempRoot)
+
+      let unavailableProject = tempRoot / "unavailable-project"
+      writeCopyProject(unavailableProject, "daemonM11Unavailable", "fallback\n")
+      let blockedState = tempRoot / "blocked-state"
+      writeFile(blockedState, "not a directory\n")
+      let unavailable = requireSuccess(buildCommand(unavailableProject,
+        tempRoot, "unavailable-work", envExtra = [
+          ("REPRO_DAEMON_STATE_DIR", blockedState)
+        ]), repoRoot())
+      check unavailable.contains("repro build: daemon unavailable; falling back to direct mode:")
+      check unavailable.contains("project: daemonM11Unavailable")
+      waitForFileContent(unavailableProject / "dist" / "copied.txt",
+        "fallback\n", tempRoot)
+
+      let requireFailureOutput = requireFailure(buildCommand(
+        tempRoot / "require-project", tempRoot, "require-work",
+        ["--daemon=require"], envExtra = [
+          ("REPRO_DAEMON_STATE_DIR", blockedState)
+        ]), repoRoot())
+      check requireFailureOutput.contains(
+        "daemon mode required but repro-daemon is unavailable:")
+
+      let envOffProject = tempRoot / "env-off-project"
+      writeCopyProject(envOffProject, "daemonM11EnvOff", "env off\n")
+      let envOff = requireSuccess(buildCommand(envOffProject, tempRoot,
+        "env-off-work", envExtra = [("REPRO_DAEMON", "off")]), repoRoot())
+      check envOff.contains("project: daemonM11EnvOff")
+      check not envOff.contains("daemon unavailable")
+
+      let flagOffProject = tempRoot / "flag-off-project"
+      writeCopyProject(flagOffProject, "daemonM11FlagOff", "flag off\n")
+      let flagOff = requireSuccess(buildCommand(flagOffProject, tempRoot,
+        "flag-off-work", ["--daemon=off"], envExtra = [
+          ("REPRO_DAEMON", "require")
+        ]), repoRoot())
+      check flagOff.contains("project: daemonM11FlagOff")
+      check not flagOff.contains("daemon unavailable")
+
+      let staleProject = tempRoot / "stale-project"
+      writeCopyProject(staleProject, "daemonM11Stale", "stale\n")
+      # A "stale endpoint file" only exists on POSIX where the endpoint
+      # is an actual filesystem socket path. On Windows the endpoint
+      # lives in the kernel-managed ``\\.\pipe\`` namespace — the
+      # stale-file scenario simply does not apply there.
+      when defined(posix):
+        writeFile(daemonEndpoint(tempRoot), "stale endpoint\n")
+      let stale = requireSuccess(buildCommand(staleProject, tempRoot,
+        "stale-work"), repoRoot())
+      check stale.contains("project: daemonM11Stale")
+      check not stale.contains("daemon unavailable")
+      waitForFileContent(staleProject / "dist" / "copied.txt", "stale\n",
+        tempRoot)
+
       stopDaemon(tempRoot)
-      removeDir(tempRoot)
+      let mismatchProject = tempRoot / "mismatch-project"
+      writeCopyProject(mismatchProject, "daemonM11Mismatch", "mismatch\n")
+      var fake = startFakeProtocolDaemon(tempRoot)
+      defer:
+        if fake.running():
+          fake.terminate()
+          discard fake.waitForExit()
+        fake.close()
+      let mismatch = requireSuccess(buildCommand(mismatchProject, tempRoot,
+        "mismatch-work"), repoRoot())
+      check mismatch.contains("repro build: daemon unavailable; falling back to direct mode:")
+      check mismatch.contains("compatible status handshake") or
+        mismatch.contains("protocol mismatch")
+      waitForFileContent(mismatchProject / "dist" / "copied.txt",
+        "mismatch\n", tempRoot)
 
-    let unavailableProject = tempRoot / "unavailable-project"
-    writeCopyProject(unavailableProject, "daemonM11Unavailable", "fallback\n")
-    let blockedState = tempRoot / "blocked-state"
-    writeFile(blockedState, "not a directory\n")
-    let unavailable = requireSuccess(buildCommand(unavailableProject,
-      tempRoot, "unavailable-work", envExtra = [
-        ("REPRO_DAEMON_STATE_DIR", blockedState)
-      ]), repoRoot())
-    check unavailable.contains("repro build: daemon unavailable; falling back to direct mode:")
-    check unavailable.contains("project: daemonM11Unavailable")
-    waitForFileContent(unavailableProject / "dist" / "copied.txt",
-      "fallback\n", tempRoot)
+      let mismatchRequire = requireFailure(buildCommand(
+        tempRoot / "mismatch-require-project", tempRoot, "mismatch-require-work",
+        ["--daemon=require"]), repoRoot())
+      check mismatchRequire.contains(
+        "daemon mode required but repro-daemon is unavailable:")
+      check mismatchRequire.contains("compatible status handshake") or
+        mismatchRequire.contains("protocol mismatch")
 
-    let requireFailureOutput = requireFailure(buildCommand(
-      tempRoot / "require-project", tempRoot, "require-work",
-      ["--daemon=require"], envExtra = [
-        ("REPRO_DAEMON_STATE_DIR", blockedState)
-      ]), repoRoot())
-    check requireFailureOutput.contains(
-      "daemon mode required but repro-daemon is unavailable:")
+      let watchFallbackProject = tempRoot / "watch-fallback-project"
+      writeCopyProject(watchFallbackProject, "daemonM11WatchFallback",
+        "watch fallback\n")
+      let watchFallback = requireSuccess(watchCommand(watchFallbackProject,
+        tempRoot, "watch-fallback-work", ["--max-cycles=1"], envExtra = [
+          ("REPRO_DAEMON_STATE_DIR", blockedState)
+        ]), repoRoot())
+      check watchFallback.contains(
+        "repro watch: daemon unavailable; falling back to direct mode:")
+      check watchFallback.contains("repro watch: max cycles reached")
 
-    let envOffProject = tempRoot / "env-off-project"
-    writeCopyProject(envOffProject, "daemonM11EnvOff", "env off\n")
-    let envOff = requireSuccess(buildCommand(envOffProject, tempRoot,
-      "env-off-work", envExtra = [("REPRO_DAEMON", "off")]), repoRoot())
-    check envOff.contains("project: daemonM11EnvOff")
-    check not envOff.contains("daemon unavailable")
+    test "integration_daemon_default_output_matches_direct_mode":
+      let tempRoot = createTempDir("repro-daemon-m11-output", "")
+      defer:
+        stopDaemon(tempRoot)
+        removeDir(tempRoot)
 
-    let flagOffProject = tempRoot / "flag-off-project"
-    writeCopyProject(flagOffProject, "daemonM11FlagOff", "flag off\n")
-    let flagOff = requireSuccess(buildCommand(flagOffProject, tempRoot,
-      "flag-off-work", ["--daemon=off"], envExtra = [
-        ("REPRO_DAEMON", "require")
-      ]), repoRoot())
-    check flagOff.contains("project: daemonM11FlagOff")
-    check not flagOff.contains("daemon unavailable")
+      let directProject = tempRoot / "direct-project"
+      let daemonProject = tempRoot / "daemon-project"
+      writeCopyProject(directProject, "daemonM11Output", "same\n")
+      writeCopyProject(daemonProject, "daemonM11Output", "same\n")
 
-    let staleProject = tempRoot / "stale-project"
-    writeCopyProject(staleProject, "daemonM11Stale", "stale\n")
-    # A "stale endpoint file" only exists on POSIX where the endpoint
-    # is an actual filesystem socket path. On Windows the endpoint
-    # lives in the kernel-managed ``\\.\pipe\`` namespace — the
-    # stale-file scenario simply does not apply there.
-    when defined(posix):
-      writeFile(daemonEndpoint(tempRoot), "stale endpoint\n")
-    let stale = requireSuccess(buildCommand(staleProject, tempRoot,
-      "stale-work"), repoRoot())
-    check stale.contains("project: daemonM11Stale")
-    check not stale.contains("daemon unavailable")
-    waitForFileContent(staleProject / "dist" / "copied.txt", "stale\n",
-      tempRoot)
+      let direct = requireSuccess(buildCommand(directProject, tempRoot,
+        "direct-work", ["--daemon=off"]), repoRoot())
+      let daemonDefault = requireSuccess(buildCommand(daemonProject, tempRoot,
+        "daemon-work"), repoRoot())
+      check daemonDefault.contains("project: daemonM11Output")
+      check not daemonDefault.contains("daemon unavailable")
+      check not daemonDefault.contains("daemon build unsupported")
 
-    stopDaemon(tempRoot)
-    let mismatchProject = tempRoot / "mismatch-project"
-    writeCopyProject(mismatchProject, "daemonM11Mismatch", "mismatch\n")
-    var fake = startFakeProtocolDaemon(tempRoot)
-    defer:
-      if fake.running():
-        fake.terminate()
-        discard fake.waitForExit()
-      fake.close()
-    let mismatch = requireSuccess(buildCommand(mismatchProject, tempRoot,
-      "mismatch-work"), repoRoot())
-    check mismatch.contains("repro build: daemon unavailable; falling back to direct mode:")
-    check mismatch.contains("compatible status handshake") or
-      mismatch.contains("protocol mismatch")
-    waitForFileContent(mismatchProject / "dist" / "copied.txt",
-      "mismatch\n", tempRoot)
+      check normalizedBuildOutput(direct, tempRoot) ==
+        normalizedBuildOutput(daemonDefault, tempRoot)
+      check normalizedActionSummary(valueAfter(direct, "buildReport:")) ==
+        normalizedActionSummary(valueAfter(daemonDefault, "buildReport:"))
+      waitForFileContent(directProject / "dist" / "copied.txt", "same\n",
+        tempRoot)
+      waitForFileContent(daemonProject / "dist" / "copied.txt", "same\n",
+        tempRoot)
 
-    let mismatchRequire = requireFailure(buildCommand(
-      tempRoot / "mismatch-require-project", tempRoot, "mismatch-require-work",
-      ["--daemon=require"]), repoRoot())
-    check mismatchRequire.contains(
-      "daemon mode required but repro-daemon is unavailable:")
-    check mismatchRequire.contains("compatible status handshake") or
-      mismatchRequire.contains("protocol mismatch")
+      let sessions = waitForSessionsContains(tempRoot, "\tbuild\tsucceeded")
+      check sessions.contains("daemonM11Output") or sessions.contains(
+        daemonProject)
 
-    let watchFallbackProject = tempRoot / "watch-fallback-project"
-    writeCopyProject(watchFallbackProject, "daemonM11WatchFallback",
-      "watch fallback\n")
-    let watchFallback = requireSuccess(watchCommand(watchFallbackProject,
-      tempRoot, "watch-fallback-work", ["--max-cycles=1"], envExtra = [
-        ("REPRO_DAEMON_STATE_DIR", blockedState)
-      ]), repoRoot())
-    check watchFallback.contains(
-      "repro watch: daemon unavailable; falling back to direct mode:")
-    check watchFallback.contains("repro watch: max cycles reached")
+    test "default watch uses daemon-hosted sessions and direct watch stays explicit":
+      let tempRoot = createTempDir("repro-daemon-m11-watch", "")
+      defer:
+        stopDaemon(tempRoot)
+        removeDir(tempRoot)
 
-  test "integration_daemon_default_output_matches_direct_mode":
-    let tempRoot = createTempDir("repro-daemon-m11-output", "")
-    defer:
-      stopDaemon(tempRoot)
-      removeDir(tempRoot)
+      let daemonProject = tempRoot / "daemon-watch-project"
+      writeCopyProject(daemonProject, "daemonM11WatchDefault", "daemon watch\n")
+      let detached = requireSuccess(watchCommand(daemonProject, tempRoot,
+        "daemon-watch-work", ["--detach"]), repoRoot())
+      let sessionId = valueAfter(detached, "repro watch: detached session=")
+      check sessionId.len > 0
+      discard waitForSessionsContains(tempRoot, sessionId & "\twatch\twatching")
+      waitForFileContent(daemonProject / "dist" / "copied.txt",
+        "daemon watch\n", tempRoot)
+      let stopped = requireSuccess(shellCommand(@[
+        publicReproBin(), "watch",
+        "--stop=" & sessionId
+      ], daemonEnv(tempRoot)), repoRoot())
+      check stopped.contains("daemon-hosted watch stopped") or
+        stopped.contains("watch stop requested")
 
-    let directProject = tempRoot / "direct-project"
-    let daemonProject = tempRoot / "daemon-project"
-    writeCopyProject(directProject, "daemonM11Output", "same\n")
-    writeCopyProject(daemonProject, "daemonM11Output", "same\n")
-
-    let direct = requireSuccess(buildCommand(directProject, tempRoot,
-      "direct-work", ["--daemon=off"]), repoRoot())
-    let daemonDefault = requireSuccess(buildCommand(daemonProject, tempRoot,
-      "daemon-work"), repoRoot())
-    check daemonDefault.contains("project: daemonM11Output")
-    check not daemonDefault.contains("daemon unavailable")
-    check not daemonDefault.contains("daemon build unsupported")
-
-    check normalizedBuildOutput(direct, tempRoot) ==
-      normalizedBuildOutput(daemonDefault, tempRoot)
-    check normalizedActionSummary(valueAfter(direct, "buildReport:")) ==
-      normalizedActionSummary(valueAfter(daemonDefault, "buildReport:"))
-    waitForFileContent(directProject / "dist" / "copied.txt", "same\n",
-      tempRoot)
-    waitForFileContent(daemonProject / "dist" / "copied.txt", "same\n",
-      tempRoot)
-
-    let sessions = waitForSessionsContains(tempRoot, "\tbuild\tsucceeded")
-    check sessions.contains("daemonM11Output") or sessions.contains(
-      daemonProject)
-
-  test "default watch uses daemon-hosted sessions and direct watch stays explicit":
-    let tempRoot = createTempDir("repro-daemon-m11-watch", "")
-    defer:
-      stopDaemon(tempRoot)
-      removeDir(tempRoot)
-
-    let daemonProject = tempRoot / "daemon-watch-project"
-    writeCopyProject(daemonProject, "daemonM11WatchDefault", "daemon watch\n")
-    let detached = requireSuccess(watchCommand(daemonProject, tempRoot,
-      "daemon-watch-work", ["--detach"]), repoRoot())
-    let sessionId = valueAfter(detached, "repro watch: detached session=")
-    check sessionId.len > 0
-    discard waitForSessionsContains(tempRoot, sessionId & "\twatch\twatching")
-    waitForFileContent(daemonProject / "dist" / "copied.txt",
-      "daemon watch\n", tempRoot)
-    let stopped = requireSuccess(shellCommand(@[
-      publicReproBin(), "watch",
-      "--stop=" & sessionId
-    ], daemonEnv(tempRoot)), repoRoot())
-    check stopped.contains("daemon-hosted watch stopped") or
-      stopped.contains("watch stop requested")
-
-    let directProject = tempRoot / "direct-watch-project"
-    writeCopyProject(directProject, "daemonM11WatchDirect", "direct watch\n")
-    let directWatch = requireSuccess(watchCommand(directProject, tempRoot,
-      "direct-watch-work", ["--daemon=off", "--max-cycles=1"]), repoRoot())
-    check directWatch.contains("repro watch: cycle 1 start initial")
-    check directWatch.contains("repro watch: max cycles reached")
+      let directProject = tempRoot / "direct-watch-project"
+      writeCopyProject(directProject, "daemonM11WatchDirect", "direct watch\n")
+      let directWatch = requireSuccess(watchCommand(directProject, tempRoot,
+        "direct-watch-work", ["--daemon=off", "--max-cycles=1"]), repoRoot())
+      check directWatch.contains("repro watch: cycle 1 start initial")
+      check directWatch.contains("repro watch: max cycles reached")

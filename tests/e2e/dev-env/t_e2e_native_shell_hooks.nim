@@ -312,65 +312,66 @@ proc requireFishHook(c: M6Case; fish: string) =
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireNativeStats(statsPath)
 
-suite "e2e_native_shell_hooks":
-  when isNixSupported:
-    test "e2e_native_shell_hooks_bash_zsh_fish":
-      let c = prepareCase("repro-m6-native-shells")
-      defer: removeDir(c.tempRoot)
-      let fish = requireFish()
+when isNixSupported:
+  suite "e2e_native_shell_hooks":
+    when isNixSupported:
+      test "e2e_native_shell_hooks_bash_zsh_fish":
+        let c = prepareCase("repro-m6-native-shells")
+        defer: removeDir(c.tempRoot)
+        let fish = requireFish()
 
-      installNativeHooks(c)
-      requireBashHook(c)
-      requireZshHook(c)
-      requireFishHook(c, fish)
+        installNativeHooks(c)
+        requireBashHook(c)
+        requireZshHook(c)
+        requireFishHook(c, fish)
 
-      let bashWithUserBytes = "export USER_OWNED=1\n" & readFile(c.homeDir / ".bashrc")
-      writeFile(c.homeDir / ".bashrc", bashWithUserBytes)
-      discard requireRepro(c, @["hooks", "uninstall", "--shell", "bash"])
-      check readFile(c.homeDir / ".bashrc") == "export USER_OWNED=1\n"
+        let bashWithUserBytes = "export USER_OWNED=1\n" & readFile(c.homeDir / ".bashrc")
+        writeFile(c.homeDir / ".bashrc", bashWithUserBytes)
+        discard requireRepro(c, @["hooks", "uninstall", "--shell", "bash"])
+        check readFile(c.homeDir / ".bashrc") == "export USER_OWNED=1\n"
 
-    test "e2e_native_shell_hooks_nix_managed_rc_refused":
-      let c = prepareCase("repro-m6-native-nix-rc")
-      defer: removeDir(c.tempRoot)
+      test "e2e_native_shell_hooks_nix_managed_rc_refused":
+        let c = prepareCase("repro-m6-native-nix-rc")
+        defer: removeDir(c.tempRoot)
 
-      let storeDir = c.tempRoot / "nix" / "store" / "fake-home-manager"
-      createDir(storeDir)
-      let storeRc = storeDir / "bashrc"
-      let storeBytes = "# managed by home-manager\n"
-      writeFile(storeRc, storeBytes)
-      setFilePermissions(storeRc, {fpUserRead, fpGroupRead, fpOthersRead})
-      createSymlink(storeRc, c.homeDir / ".bashrc")
+        let storeDir = c.tempRoot / "nix" / "store" / "fake-home-manager"
+        createDir(storeDir)
+        let storeRc = storeDir / "bashrc"
+        let storeBytes = "# managed by home-manager\n"
+        writeFile(storeRc, storeBytes)
+        setFilePermissions(storeRc, {fpUserRead, fpGroupRead, fpOthersRead})
+        createSymlink(storeRc, c.homeDir / ".bashrc")
 
-      let res = runRepro(c, @["hooks", "ensure", "--shell", "bash"])
-      check res.exitCode != 0
-      check res.output.contains("Nix-managed symlink")
-      check res.output.contains("home-switch")
-      check symlinkExists(c.homeDir / ".bashrc")
-      check expandSymlink(c.homeDir / ".bashrc") == storeRc
-      check readFile(storeRc) == storeBytes
+        let res = runRepro(c, @["hooks", "ensure", "--shell", "bash"])
+        check res.exitCode != 0
+        check res.output.contains("Nix-managed symlink")
+        check res.output.contains("home-switch")
+        check symlinkExists(c.homeDir / ".bashrc")
+        check expandSymlink(c.homeDir / ".bashrc") == storeRc
+        check readFile(storeRc) == storeBytes
 
-  when defined(windows):
-    test "e2e_native_shell_hooks_powershell":
-      let c = prepareCase("repro-m6-native-powershell")
-      defer: removeDir(c.tempRoot)
-      let pwsh =
-        if findExe("pwsh").len > 0: findExe("pwsh") else: findExe("powershell")
-      if pwsh.len == 0:
-        raise newException(OSError,
-          "M6 PowerShell gate requires a real PowerShell binary")
-      discard requireRepro(c, @["hooks", "ensure", "--shell", "powershell"])
-      let env = c.envFor()
-      let statsPath = c.tempRoot / "powershell-native-stats.json"
-      env["REPRO_NATIVE_SHELL_STATS"] = statsPath
-      let script =
-        "cd " & psQuote(c.projectA) & "; " &
-        "Write-Output \"A:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
-        "cd " & psQuote(parentDir(c.projectA)) & "; " &
-        "Write-Output \"OUT:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\""
-      let res = runProgram(pwsh, @["-NoLogo", "-Command", script],
-        c.tempRoot, env)
-      check res.exitCode == 0
-      requireShellValue(res.output, "A:",
-        "A:alpha|one|" & c.projectA)
-      requireShellValue(res.output, "OUT:", "OUT:||")
-      requireNativeStats(statsPath)
+    when defined(windows):
+      test "e2e_native_shell_hooks_powershell":
+        let c = prepareCase("repro-m6-native-powershell")
+        defer: removeDir(c.tempRoot)
+        let pwsh =
+          if findExe("pwsh").len > 0: findExe("pwsh") else: findExe("powershell")
+        if pwsh.len == 0:
+          raise newException(OSError,
+            "M6 PowerShell gate requires a real PowerShell binary")
+        discard requireRepro(c, @["hooks", "ensure", "--shell", "powershell"])
+        let env = c.envFor()
+        let statsPath = c.tempRoot / "powershell-native-stats.json"
+        env["REPRO_NATIVE_SHELL_STATS"] = statsPath
+        let script =
+          "cd " & psQuote(c.projectA) & "; " &
+          "Write-Output \"A:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
+          "cd " & psQuote(parentDir(c.projectA)) & "; " &
+          "Write-Output \"OUT:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\""
+        let res = runProgram(pwsh, @["-NoLogo", "-Command", script],
+          c.tempRoot, env)
+        check res.exitCode == 0
+        requireShellValue(res.output, "A:",
+          "A:alpha|one|" & c.projectA)
+        requireShellValue(res.output, "OUT:", "OUT:||")
+        requireNativeStats(statsPath)
