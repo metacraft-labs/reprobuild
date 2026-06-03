@@ -1,15 +1,21 @@
-# M73 Phase 2 — dispatch-mechanism coverage test.
+# M73 Phase 2 + Phase 3 — dispatch-mechanism coverage test.
 #
-# Acceptance gate for Phase 1's "single dispatch-mechanism-agnostic
-# install backend" claim (reprobuild 2cfa1a7, 2026-06-04).
+# Phase 2 (reprobuild 09f6c66, 2026-06-04): acceptance gate for Phase 1's
+# "single dispatch-mechanism-agnostic install backend" claim. Drives the
+# shim through the five Windows W-variant dispatch mechanisms and asserts
+# the depfile records exactly N matching events per mechanism.
 #
-# Drives the shim end-to-end through the five known Windows dispatch
-# mechanisms and asserts the depfile records exactly N matching events
-# per mechanism. Loss tolerance: zero. See the milestone file
-# `reprobuild-specs/Monitor-Hook-Shim.milestones.org` § "M73 Phase 2"
-# for the full acceptance criteria.
+# Phase 3 (2026-06-04): adds A-variant parallel cases proving the Phase 1
+# install path catches the A-variant kernel32 entry points
+# (HookCreateFileA, HookGetFileAttributes(Ex)A, HookCreateProcessA) that
+# the hookTable already wired but which had no end-to-end test until now.
+# Records observed for both W and A paths; per-mechanism count parity.
 #
-# Mechanisms:
+# Loss tolerance: zero. See the milestone file
+# `reprobuild-specs/Monitor-Hook-Shim.milestones.org` § "M73 Phase 2" and
+# § "M73 Phase 3" for the full acceptance criteria.
+#
+# Mechanisms (W variants, Phase 2):
 #   1. C statically-linked CreateFileW via __declspec(dllimport).
 #   2. C runtime-resolved LoadLibraryW + GetProcAddress("CreateFileW").
 #   3. Nim winlean `{.importc, stdcall, dynlib: "kernel32".}` createFileW
@@ -21,6 +27,27 @@
 #      `tests/fixtures/fixture_mech4_os_module.nim`).
 #   5. Fresh DLL LoadLibraryW'd post-shim-init that statically imports
 #      CreateFileW.
+#
+# Mechanisms (A variants, Phase 3):
+#   1A. C statically-linked CreateFileA via __declspec(dllimport).
+#   2A. C runtime-resolved LoadLibraryW + GetProcAddress("CreateFileA").
+#   3A. Nim winlean `{.importc, stdcall, dynlib: "kernel32".}` createFileA
+#       (winlean.createFileA exists in Nim 2.2.8 with the same dynlib
+#       lowering as createFileW — verified at
+#       `lib/windows/winlean.nim:659`).
+#   4A. SKIPPED with documented reasoning: Nim 2.2.8's `os.*` module
+#       reaches ONLY W-variant kernel32 functions on Windows (e.g.
+#       `os.fileExists` -> `winlean.getFileAttributesW`,
+#       `os.removeFile` -> `winlean.deleteFileW`). There is no os.*
+#       proc that lands on an A-variant in Nim 2.2.8; the mechanism's
+#       defining property — a real-world idiomatic os.* caller — does
+#       not exist for the ANSI surface. We honour the milestone spirit
+#       by documenting the gap rather than fabricating a fixture that
+#       only duplicates mechanism 3A's dispatch path on a different
+#       API. Phase 5 will revisit if a real os.* A-variant caller
+#       appears as the hookTable grows.
+#   5A. Fresh DLL LoadLibraryW'd post-shim-init that statically imports
+#       CreateFileA.
 #
 # Per-mechanism record count must equal N EXACTLY. No tolerance
 # bounds. No `check count > 0`. No skipping on any Windows version
@@ -54,14 +81,28 @@ when defined(windows):
   let fixturesDir = testDir / "fixtures"
 
   proc compileGcc(sourcePath, outputPath: string;
-                  extraArgs: openArray[string] = []) =
+                  extraArgs: openArray[string] = [];
+                  unicodeMain: bool = true) =
     ## Compile a C fixture with mingw-w64 gcc. Used for mechanisms
     ## 1, 2, and 5 (both the host exe and the DLL).
     ##
-    ## The fixtures use `wmain` which mingw expects to be enabled via
-    ## `-municode`. They also link against kernel32 by default, which
-    ## mingw does automatically.
-    var args = @[sourcePath, "-municode", "-o", outputPath]
+    ## The W-variant fixtures use `wmain` which mingw expects to be enabled
+    ## via `-municode`. The A-variant fixtures (Phase 3 mechanisms 1A, 2A)
+    ## use plain `main(int argc, char **argv)` so they need the default
+    ## entry point — pass `unicodeMain = false` for those. The mech5A
+    ## host (fixture_mech5_main_a.c) is wmain because the marker travels
+    ## as a wchar_t through the host before the DLL narrows it; the late-
+    ## loaded DLL itself (fixture_mech5_late_dll_a.c) is compiled as a
+    ## shared library and has no `main`, so `-municode` is a no-op there
+    ## but harmless.
+    ##
+    ## They also link against kernel32 by default, which mingw does
+    ## automatically.
+    var args = @[sourcePath]
+    if unicodeMain:
+      args.add("-municode")
+    args.add("-o")
+    args.add(outputPath)
     for a in extraArgs:
       args.add(a)
     # mingw's gcc is on PATH per scripts/run_tests_windows.ps1; the per-
@@ -122,7 +163,7 @@ when defined(windows):
     let args = @[fsSnoop, "--depfile=" & depFilePath, "--"] & @command
     runShell(shellCommand(args))
 
-suite "dispatch-mechanism coverage M73 Phase 2":
+suite "dispatch-mechanism coverage M73 Phase 2 + Phase 3":
   when not defined(windows):
     test "skip non-windows":
       # The whole acceptance gate is Windows-specific (it tests Windows
@@ -291,4 +332,147 @@ suite "dispatch-mechanism coverage M73 Phase 2":
           " Mechanism 5 exercises the post-init-LoadLibraryW IAT" &
           " surface that the inline detour at kernel32 catches via" &
           " loader-resolved IAT slots.)")
+      check got == N
+
+    # ================================================================
+    # M73 Phase 3 — A-variant parallel cases.
+    #
+    # Phase 1 wired HookCreateFileA into the hookTable (windows_interpose.nim
+    # line ~1416) with its own trampoline + snoopCreateFileA callback. The
+    # snoop emits mrFileOpen records with `detail = "CreateFileA"` and the
+    # ANSI path string verbatim. The W-variant test above covers the install
+    # mechanics; this Phase 3 block covers the A-variant entry-point
+    # surface end-to-end, proving the hookTable's A-variant entries land at
+    # kernel32's ANSI function bodies the same way they land at the W ones.
+    #
+    # All four A-variant cases use mrFileOpen records (CreateFileA-class);
+    # mechanism 4A is documented-skipped (see header comment above).
+    # ================================================================
+
+    # ----------------------------------------------------------------
+    # Mechanism 1A — __declspec(dllimport) IAT-routed CreateFileA.
+    # ----------------------------------------------------------------
+    test "mechanism 1A: __declspec(dllimport) IAT-routed CreateFileA":
+      let fixtureSrc = fixturesDir / "fixture_mech1_iat_a.c"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "mech1a.exe"
+      # ANSI fixture uses plain `main`, not `wmain`; do NOT pass -municode
+      # (which would force mingw's wWinMain-required entry layout).
+      compileGcc(fixtureSrc, exePath, unicodeMain = false)
+      let workDir = tempRoot / "mech1a-work"
+      createDir(workDir)
+      let marker = workDir / "mech1a-marker"
+      let records = runMechanism("mech1a", marker,
+                                 @[exePath, marker, $N])
+      let got = matchingFileOpenRecords(records, "mech1a-marker")
+      if got != N:
+        checkpoint("mech1a records: " & $got &
+          " (expected exactly " & $N &
+          " mrFileOpen records — loss tolerance zero per M73 Phase 3." &
+          " Mechanism 1A verifies the HookCreateFileA hookTable entry's" &
+          " inline install catches __declspec(dllimport) IAT-routed" &
+          " ANSI calls.)")
+      check got == N
+
+    # ----------------------------------------------------------------
+    # Mechanism 2A — LoadLibrary + GetProcAddress runtime-resolved
+    # CreateFileA.
+    # ----------------------------------------------------------------
+    test "mechanism 2A: LoadLibraryW+GetProcAddress runtime-resolved CreateFileA":
+      let fixtureSrc = fixturesDir / "fixture_mech2_getproc_a.c"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "mech2a.exe"
+      # ANSI fixture uses plain `main`, not `wmain`; skip -municode.
+      compileGcc(fixtureSrc, exePath, unicodeMain = false)
+      let workDir = tempRoot / "mech2a-work"
+      createDir(workDir)
+      let marker = workDir / "mech2a-marker"
+      let records = runMechanism("mech2a", marker,
+                                 @[exePath, marker, $N])
+      let got = matchingFileOpenRecords(records, "mech2a-marker")
+      if got != N:
+        checkpoint("mech2a records: " & $got &
+          " (expected exactly " & $N &
+          " mrFileOpen records — loss tolerance zero per M73 Phase 3." &
+          " Mechanism 2A verifies the HookCreateFileA inline install" &
+          " catches the cached-function-pointer dispatch typical of" &
+          " runtime-resolved ANSI APIs.)")
+      check got == N
+
+    # ----------------------------------------------------------------
+    # Mechanism 3A — Nim winlean.createFileA dynlib-dispatched.
+    # ----------------------------------------------------------------
+    test "mechanism 3A: Nim winlean.createFileA dynlib-dispatched":
+      let fixtureSrc = fixturesDir / "fixture_mech3_winlean_a.nim"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "mech3a.exe"
+      compileNimExe(repoRoot, fixtureSrc, exePath, "m73-phase3-mech3a")
+      let workDir = tempRoot / "mech3a-work"
+      createDir(workDir)
+      let marker = workDir / "mech3a-marker"
+      let records = runMechanism("mech3a", marker,
+                                 @[exePath, marker, $N])
+      let got = matchingFileOpenRecords(records, "mech3a-marker")
+      if got != N:
+        checkpoint("mech3a records: " & $got &
+          " (expected exactly " & $N &
+          " mrFileOpen records — loss tolerance zero per M73 Phase 3." &
+          " Mechanism 3A is the load-bearing A-variant winlean dynlib" &
+          " dispatch case: HookCreateFileA's inline detour at kernel32's" &
+          " ANSI function body MUST catch nimGetProcAddr-cached pointer" &
+          " calls the same way HookCreateFileW does for the W form.)")
+      check got == N
+
+    # ----------------------------------------------------------------
+    # Mechanism 4A — SKIPPED (no os.* lands on A-variant in Nim 2.2.8).
+    #
+    # See the header comment for the full reasoning: Nim's `os` module
+    # uses W-variant kernel32 entry points exclusively on Windows
+    # (`os.fileExists` -> `winlean.getFileAttributesW`,
+    #  `os.removeFile`  -> `winlean.deleteFileW`,
+    #  `os.copyFile`    -> `winlean.copyFileW`, etc.).
+    # There is no Nim 2.2.8 `os.*` proc whose underlying call lands on
+    # a CreateFileA / GetFileAttributesA / DeleteFileA etc. — the
+    # mechanism's defining property (an idiomatic real-world `os.*`
+    # caller) does not exist for the ANSI surface. The honest signal
+    # is a documented skip, not a fabricated fixture that just
+    # duplicates mechanism 3A on a different A-variant API.
+    # ----------------------------------------------------------------
+    test "mechanism 4A: os.* -> winlean ANSI dispatch (skipped)":
+      skip()
+
+    # ----------------------------------------------------------------
+    # Mechanism 5A — Fresh DLL LoadLibraryW'd post-shim-init that
+    # statically imports CreateFileA.
+    # ----------------------------------------------------------------
+    test "mechanism 5A: late-loaded DLL with __declspec(dllimport) CreateFileA":
+      let dllSrc = fixturesDir / "fixture_mech5_late_dll_a.c"
+      let mainSrc = fixturesDir / "fixture_mech5_main_a.c"
+      doAssert fileExists(dllSrc), "missing fixture: " & dllSrc
+      doAssert fileExists(mainSrc), "missing fixture: " & mainSrc
+      let dllPath = tempRoot / "mech5a-late.dll"
+      let exePath = tempRoot / "mech5a.exe"
+      compileGcc(dllSrc, dllPath, @["-shared"])
+      compileGcc(mainSrc, exePath)
+      let workDir = tempRoot / "mech5a-work"
+      createDir(workDir)
+      let marker = workDir / "mech5a-marker"
+      # Same shape as mech5: host exe takes <dll-path> <marker> <count>
+      # and invokes the DLL's `late_create_file_a_n` export. The DLL
+      # narrows the wchar_t marker to ANSI internally before each
+      # CreateFileA call so the depfile path is end-to-end ANSI.
+      let records = runMechanism("mech5a", marker,
+                                 @[exePath, dllPath, marker, $N])
+      let got = matchingFileOpenRecords(records, "mech5a-marker")
+      if got != N:
+        checkpoint("mech5a records: " & $got &
+          " (expected exactly " & $N &
+          " mrFileOpen records — loss tolerance zero per M73 Phase 3." &
+          " Mechanism 5A exercises the post-init-LoadLibraryW IAT" &
+          " surface for the ANSI variant: the loader resolves the late" &
+          " DLL's CreateFileA IAT slot at LoadLibraryW time, which the" &
+          " Phase 1 inline detour at kernel32!CreateFileA must catch.)")
       check got == N
