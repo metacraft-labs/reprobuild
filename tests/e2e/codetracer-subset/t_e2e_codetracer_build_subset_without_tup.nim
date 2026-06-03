@@ -1,6 +1,7 @@
 import std/[json, os, osproc, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_tool_profiles
+import repro_test_support
 
 const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
@@ -16,43 +17,18 @@ type
 proc q(value: string): string =
   quoteShell(value)
 
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
-
-proc requireFailure(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  check res.code != 0
-  res.output
-
 proc pathHasExecutable(name, pathValue: string): bool =
   when defined(windows):
     findExe(name).len > 0
   else:
-    execCmdEx("PATH=" & q(pathValue) & " command -v " & q(name)).exitCode == 0
+    runShell(shellCommand(@["sh", "-c", "command -v " & q(name)],
+      @[(name: "PATH", value: pathValue)])).code == 0
 
 proc nixBuildOutPath(selector: string): string =
-  let res = execCmdEx(shellCommand([
+  let res = runShell(shellCommand(@[
     "nix", "build", "--no-link", "--print-out-paths", selector
   ]))
-  if res.exitCode != 0:
+  if res.code != 0:
     checkpoint(res.output)
     return ""
   for line in res.output.splitLines:
@@ -80,9 +56,9 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
   let socketPath = "/tmp/repro-m20-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -334,10 +310,9 @@ proc build(reproBin, target, repoRoot, pathValue: string): string =
   # `progress: bpkActionCompleted ...` markers plus the `scheduler:` /
   # `providerInvocations:` / `buildReport:` headers; the assertions below
   # that key on the per-action shape need the action-level log.
-  requireSuccess("PATH=" & q(pathValue) & " " &
-    shellCommand([reproBin, "build", target, "--tool-provisioning=path",
-                  "--log=actions"]),
-    repoRoot)
+  requireSuccess(shellCommand(@[reproBin, "build", target,
+    "--tool-provisioning=path", "--log=actions"],
+    @[(name: "PATH", value: pathValue)]), repoRoot)
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
@@ -374,14 +349,14 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
   check action{"launched"}.getBool() == false
 
 proc runNode(path, cwd, pathValue: string): string =
-  requireSuccess("PATH=" & q(pathValue) & " " & shellCommand(["node", path]),
-    cwd)
+  requireSuccess(shellCommand(@["node", path],
+    @[(name: "PATH", value: pathValue)]), cwd)
 
 proc directOracle(projectRoot, outputPath: string; command: openArray[string];
                   pathValue: string) =
   createDir(projectRoot / outputPath.splitPath.head)
-  discard requireSuccess("PATH=" & q(pathValue) & " " & shellCommand(command),
-    projectRoot)
+  discard requireSuccess(shellCommand(@command,
+    @[(name: "PATH", value: pathValue)]), projectRoot)
 
 proc mainSymbol(path, cwd: string): string =
   let output = requireSuccess(shellCommand(["nm", "-g", path]), cwd)

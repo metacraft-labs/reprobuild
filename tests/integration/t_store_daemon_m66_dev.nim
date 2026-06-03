@@ -3,6 +3,7 @@ import std/[json, os, osproc, re, streams, strtabs, strutils, tempfiles,
 
 import repro_local_store
 import repro_store_daemon
+import repro_test_support
 
 # Spec-layout invariants from
 # reprobuild-specs/Local-Content-Addressed-Store.md §"Why SQLite for the
@@ -75,10 +76,10 @@ proc repoRoot(): string =
   getCurrentDir()
 
 proc publicReproBin(): string =
-  repoRoot() / "build" / "bin" / "repro"
+  repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc reprostoredBin(): string =
-  repoRoot() / "build" / "bin" / "reprostored"
+  repoRoot() / "build" / "bin" / addFileExt("reprostored", ExeExt)
 
 proc makeEnv(endpoint, runtimeRoot: string): StringTableRef =
   result = newStringTable()
@@ -86,31 +87,6 @@ proc makeEnv(endpoint, runtimeRoot: string): StringTableRef =
     result[key] = value
   result["REPROSTORED_ENDPOINT"] = endpoint
   result["XDG_RUNTIME_DIR"] = runtimeRoot
-
-proc q(value: string): string = quoteShell(value)
-
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc requireSuccess(command: string; cwd = repoRoot()): string =
-  let res = execCmdEx(command, workingDir = cwd)
-  if res.exitCode != 0:
-    checkpoint(res.output)
-  check res.exitCode == 0
-  res.output
-
-proc requireFailure(command: string; cwd = repoRoot()): string =
-  let res = execCmdEx(command, workingDir = cwd)
-  if res.exitCode == 0:
-    checkpoint(res.output)
-  check res.exitCode != 0
-  res.output
 
 proc waitForStatus(endpoint, storeRoot: string; timeoutMs = 5000):
     StoreDaemonStatus =

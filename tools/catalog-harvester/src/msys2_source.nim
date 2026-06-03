@@ -422,18 +422,34 @@ proc tarListEntries*(archivePath: string): seq[string] =
       let s = line.strip(chars = {'\n', '\r', ' '})
       if s.len > 0: result.add(s)
     return
-  # Fallback B: zstd | tar pipeline.
+  # Fallback B: decompress to a temp .tar then list. We previously
+  # relied on a shell pipeline (``zstd -dc … | tar -tf -``) but
+  # ``cmd.exe`` on Windows mis-quotes the pipe when ``quoteShell``
+  # double-quotes both sides — zstd ends up seeing the literal ``|``
+  # and the downstream tar path as arguments. A two-step
+  # decompress-then-list avoids any shell-pipe interpretation and
+  # behaves identically on POSIX and Windows.
   let zstd = findExe("zstd")
   if zstd.len == 0:
     raise newException(Msys2HarvestError,
       "tar --zstd failed and no 'zstd' on PATH for fallback (tar " &
       "output: " & res1.output & ")")
-  let cmd2 = quoteShell(zstd) & " -dc " & quoteShell(archivePath) &
-    " | " & quoteShell(tar) & " -tf -"
-  let res2 = execCmdEx(cmd2)
+  let scratchTar = getTempDir() / ("msys2-tarlist-" &
+    $getCurrentProcessId() & "-" & archivePath.extractFilename & ".tar")
+  defer:
+    try: removeFile(scratchTar) except OSError: discard
+  let cmdDecompress = quoteShell(zstd) & " -dc -o " &
+    quoteShell(scratchTar) & " " & quoteShell(archivePath)
+  let resDecompress = execCmdEx(cmdDecompress)
+  if resDecompress.exitCode != 0:
+    raise newException(Msys2HarvestError,
+      "zstd decompress failed (exit " & $resDecompress.exitCode &
+      "): " & resDecompress.output)
+  let cmdList = quoteShell(tar) & " -tf " & quoteShell(scratchTar)
+  let res2 = execCmdEx(cmdList)
   if res2.exitCode != 0:
     raise newException(Msys2HarvestError,
-      "zstd | tar -tf pipeline failed (exit " & $res2.exitCode &
+      "tar -tf on decompressed scratch failed (exit " & $res2.exitCode &
       "): " & res2.output)
   for line in res2.output.splitLines:
     let s = line.strip(chars = {'\n', '\r', ' '})
@@ -466,13 +482,20 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
       " -C " & quoteShell(scratch) & " " & quoteShell(member)
     let resAuto = execCmdEx(cmdAuto)
     if resAuto.exitCode != 0:
-      # Fallback B: zstd | tar
+      # Fallback B: decompress to a scratch .tar then extract from
+      # it (see ``tarListEntries`` for the rationale — cmd.exe
+      # garbles the original shell-pipe form).
       let zstd = findExe("zstd")
       if zstd.len == 0:
         return false
-      let cmd2 = quoteShell(zstd) & " -dc " & quoteShell(archivePath) &
-        " | " & quoteShell(tar) & " -xf - -C " & quoteShell(scratch) &
-        " " & quoteShell(member)
+      let scratchTar = scratch / "archive.tar"
+      let cmdDecompress = quoteShell(zstd) & " -dc -o " &
+        quoteShell(scratchTar) & " " & quoteShell(archivePath)
+      let resDecompress = execCmdEx(cmdDecompress)
+      if resDecompress.exitCode != 0:
+        return false
+      let cmd2 = quoteShell(tar) & " -xf " & quoteShell(scratchTar) &
+        " -C " & quoteShell(scratch) & " " & quoteShell(member)
       let res2 = execCmdEx(cmd2)
       if res2.exitCode != 0:
         return false

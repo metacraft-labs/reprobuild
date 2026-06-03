@@ -61,7 +61,7 @@ proc repoRoot(): string =
   getCurrentDir()
 
 proc publicReproBin(): string =
-  repoRoot() / "build" / "bin" / "repro"
+  repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc daemonEndpoint(tempRoot: string): string =
   "/tmp" / (tempRoot.extractFilename & ".sock")

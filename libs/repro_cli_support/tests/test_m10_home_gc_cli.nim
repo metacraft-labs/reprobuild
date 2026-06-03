@@ -51,7 +51,7 @@ proc reproBinary(): string =
   when defined(windows):
     root / "build" / "bin" / "repro.exe"
   else:
-    root / "build" / "bin" / "repro"
+    root / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):

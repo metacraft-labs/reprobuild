@@ -1,19 +1,10 @@
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
+import repro_test_support
+
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
-
-proc shellCommand(args: openArray[string]): string =
-  args.mapIt(q(it)).join(" ")
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = execCmdEx(command, workingDir = cwd)
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "command failed with exit " & $res.exitCode & ": " & command &
-        "\n" & res.output)
-  res.output
 
 proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
                 appLib = false) =
@@ -222,8 +213,7 @@ proc waitForStatus(path, status: string; timeoutMs = 10000): JsonNode =
   raise newException(IOError, "timed out waiting for session status " & status)
 
 proc httpRequest(httpBindValue, path: string; httpMethod = "GET"): string =
-  let command = "python3 - " & q(httpBindValue) & " " & q(path) & " " &
-    q(httpMethod) & " <<'PY'\n" &
+  let script =
     "import http.client, sys, urllib.parse\n" &
     "u=urllib.parse.urlparse(sys.argv[1])\n" &
     "conn=http.client.HTTPConnection(u.hostname, u.port, timeout=5)\n" &
@@ -231,9 +221,9 @@ proc httpRequest(httpBindValue, path: string; httpMethod = "GET"): string =
     "resp=conn.getresponse()\n" &
     "body=resp.read().decode()\n" &
     "print(body, end='')\n" &
-    "sys.exit(0 if 200 <= resp.status < 300 else 1)\n" &
-    "PY"
-  requireSuccess(command)
+    "sys.exit(0 if 200 <= resp.status < 300 else 1)\n"
+  requireSuccess(shellCommand(@["python3", "-c", script,
+    httpBindValue, path, httpMethod]))
 
 proc statusJson(httpBindValue: string): JsonNode =
   parseJson(httpRequest(httpBindValue, "/status"))
@@ -273,7 +263,7 @@ proc pidAlive(pid: int): bool =
   when defined(windows):
     false
   else:
-    execCmdEx("kill -0 " & $pid).exitCode == 0
+    runShell(shellCommand(@["kill", "-0", $pid])).code == 0
 
 proc requirePidGone(pid: int) =
   for _ in 0 ..< 100:

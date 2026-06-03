@@ -1,25 +1,6 @@
 import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
 
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string]): string =
-  for index, arg in args:
-    if index > 0:
-      result.add(" ")
-    result.add(q(arg))
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
+import repro_test_support
 
 proc pathExists(path: string): bool =
   try:
@@ -131,10 +112,10 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string; cli: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
-  let cliBin = runquotaRoot / "build" / "bin" / "runquota"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
+  let cliBin = runquotaRoot / "build" / "bin" / addFileExt("runquota", ExeExt)
   if not fileExists(daemonBin) or not fileExists(cliBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
   let socketPath = "/tmp/repro-m22-rq-" & $getCurrentProcessId() & ".sock"
   if pathExists(socketPath):
     removeFile(socketPath)
@@ -152,9 +133,8 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   raise newException(OSError, "runquotad socket did not appear")
 
 proc runQuotaJson(cliPath: string; args: openArray[string]): JsonNode =
-  let command = shellCommand(@[cliPath] & @args)
-  let res = execCmdEx(command)
-  if res.exitCode != 0:
+  let res = runShell(shellCommand(@[cliPath] & @args))
+  if res.code != 0:
     raise newException(OSError, "runquota CLI failed: " & res.output)
   parseJson(res.output)
 

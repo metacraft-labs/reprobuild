@@ -1,23 +1,14 @@
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
+import repro_test_support
+
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
 
 when defined(windows):
   proc psQuote(value: string): string =
     "'" & value.replace("'", "''") & "'"
-
-proc shellCommand(args: openArray[string]): string =
-  args.mapIt(q(it)).join(" ")
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = execCmdEx(command, workingDir = cwd)
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "command failed with exit " & $res.exitCode & ": " & command &
-        "\n" & res.output)
-  res.output
 
 proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
                 appLib = false) =
@@ -172,11 +163,11 @@ proc nixFish(): string =
   let nix = findExe("nix")
   if nix.len == 0:
     return ""
-  let res = execCmdEx(shellCommand([
+  let res = runShell(shellCommand(@[
     nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
     "--extra-experimental-features", "nix-command flakes"
   ]))
-  if res.exitCode != 0:
+  if res.code != 0:
     return ""
   for line in res.output.splitLines():
     let candidate = line.strip()

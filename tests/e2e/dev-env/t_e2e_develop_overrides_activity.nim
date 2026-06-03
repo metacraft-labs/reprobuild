@@ -3,20 +3,10 @@ import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
 
 import repro_dev_env_artifacts
 import repro_provider_runtime
+import repro_test_support
 
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
-
-proc shellCommand(args: openArray[string]): string =
-  args.mapIt(q(it)).join(" ")
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = execCmdEx(command, workingDir = cwd)
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "command failed with exit " & $res.exitCode & ": " & command &
-        "\n" & res.output)
-  res.output
 
 proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
                 appLib = false) =
@@ -82,12 +72,15 @@ proc appProviderText(): string =
 proc writeAppFixture(dir: string) =
   createDir(dir)
   writeFile(dir / "reprobuild.nim", appProviderText())
-  discard requireSuccess("git init", dir)
-  discard requireSuccess("git add reprobuild.nim", dir)
-  discard requireSuccess(
-    "git -c user.email=reprobuild@example.invalid " &
-      "-c user.name='Reprobuild Test' commit -m 'initial app fixture'",
-    dir)
+  discard requireSuccess(shellCommand(@["git", "init"]), dir)
+  discard requireSuccess(shellCommand(@["git", "add", "reprobuild.nim"]), dir)
+  discard requireSuccess(shellCommand(@[
+    "git",
+    "-c", "user.email=reprobuild@example.invalid",
+    "-c", "user.name=Reprobuild Test",
+    "-c", "commit.gpgsign=false",
+    "commit", "-m", "initial app fixture"
+  ]), dir)
 
 proc writeLibFixture(dir: string) =
   createDir(dir)
@@ -207,8 +200,8 @@ suite "e2e_develop_overrides_activity":
     check not fileExists(c.appRoot / ".repro" / "local" /
       "develop-overrides.json")
     check readFile(c.appRoot / "reprobuild.nim") == projectBefore
-    check requireSuccess("git status --short --untracked-files=all",
-      c.appRoot).strip() == ""
+    check requireSuccess(shellCommand(@["git", "status", "--short",
+      "--untracked-files=all"]), c.appRoot).strip() == ""
     let metadata = parseJson(readFile(metadataPath))
     check metadata["schemaId"].getStr() == "reprobuild.develop-overrides.v1"
     check metadata["overrides"][0]["node"].getStr() == "fixture-lib"

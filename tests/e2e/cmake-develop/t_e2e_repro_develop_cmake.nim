@@ -1,30 +1,10 @@
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_tool_profiles
+import repro_test_support
 
 proc q(value: string): string =
   quoteShell(value)
-
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
 
 proc pathExists(path: string): bool =
   try:
@@ -68,7 +48,7 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
         raise newException(OSError, "`just build` in " & runquotaRoot &
           " failed with exit code " & $buildCode)
     else:
-      discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+      discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
   # The socket path needs platform-specific shape:
   #   Windows: a named pipe (\\.\pipe\...); the runquota daemon's --socket
   #            argument auto-detects this prefix and switches to pipe mode.
@@ -145,10 +125,10 @@ proc findExeInPath(name, pathValue: string): string =
   ""
 
 proc nixBuildBinDir(selector, executableName: string): string =
-  let res = execCmdEx(shellCommand([
+  let res = runShell(shellCommand(@[
     "nix", "build", "--no-link", "--print-out-paths", selector
   ]))
-  if res.exitCode != 0:
+  if res.code != 0:
     checkpoint(res.output)
     return ""
   for line in res.output.splitLines:

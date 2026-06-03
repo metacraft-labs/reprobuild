@@ -98,7 +98,7 @@ proc binaryPath(): string = getAppFilename()
 
 proc repoRoot(): string = getCurrentDir()
 
-proc reprostoredBin(): string = repoRoot() / "build" / "bin" / "reprostored"
+proc reprostoredBin(): string = repoRoot() / "build" / "bin" / addFileExt("reprostored", ExeExt)
 
 proc makeEnv(endpoint, runtimeRoot: string): StringTableRef =
   result = newStringTable()

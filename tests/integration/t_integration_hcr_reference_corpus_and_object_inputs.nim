@@ -1,29 +1,11 @@
 import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
+import repro_test_support
+
 include ../fixtures/hcr/reference_corpus_map
 
-proc q(value: string): string =
-  quoteShell(value)
-
-proc run(command: string; cwd = getCurrentDir()): tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
-
-proc shellCommand(args: openArray[string]): string =
-  for index, arg in args:
-    if index > 0:
-      result.add(" ")
-    result.add(q(arg))
-
 proc gitHead(repoPath: string): string =
-  requireSuccess("git -C " & q(repoPath) & " rev-parse HEAD").strip()
+  requireSuccess(shellCommand(@["git", "-C", repoPath, "rev-parse", "HEAD"])).strip()
 
 proc entryById(corpus: HcrReferenceCorpus; id: string): HcrReferenceEntry =
   for entry in corpus.entries:

@@ -1,40 +1,18 @@
 import std/[os, osproc, streams, strutils, tempfiles, times, unittest]
 
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
+import repro_test_support
 
 proc repoRoot(): string =
   getCurrentDir()
 
 proc publicReproBin(): string =
-  repoRoot() / "build" / "bin" / "repro"
+  repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc publicReproDaemonBin(): string =
-  repoRoot() / "build" / "bin" / "repro-daemon"
+  repoRoot() / "build" / "bin" / addFileExt("repro-daemon", ExeExt)
 
 proc daemonEndpoint(tempRoot: string): string =
-  "/tmp" / (tempRoot.extractFilename & ".sock")
+  daemonSocketEndpoint(tempRoot.extractFilename)
 
 proc daemonStateDir(tempRoot: string): string =
   tempRoot / "state"
@@ -62,9 +40,10 @@ proc stopDaemon(tempRoot: string) =
   let endpoint = daemonEndpoint(tempRoot)
   let deadline = epochTime() + 5.0
   while epochTime() < deadline:
-    let res = runShell("ps -axo command | " &
-      "grep " & q("repro-daemon --foreground --endpoint " & endpoint) &
-      " | grep -v grep", repoRoot())
+    let res = runShell(shellCommand(@["sh", "-c",
+      "ps -axo command | grep " &
+      quoteShell("repro-daemon --foreground --endpoint " & endpoint) &
+      " | grep -v grep"]), repoRoot())
     if res.code != 0:
       break
     sleep(100)
@@ -177,7 +156,7 @@ proc waitForSessionsContains(tempRoot, needle: string; timeoutSeconds = 20.0):
   final
 
 proc watchCommand(projectRoot, tempRoot, workName: string;
-                  extra: openArray[string] = []): string =
+                  extra: openArray[string] = []): CmdSpec =
   shellCommand(@[
     publicReproBin(), "watch", projectRoot,
     "--daemon=require",
@@ -187,7 +166,7 @@ proc watchCommand(projectRoot, tempRoot, workName: string;
   ] & @extra, daemonEnv(tempRoot))
 
 proc buildCommand(projectRoot, tempRoot: string; extra: openArray[string] = []):
-    string =
+    CmdSpec =
   shellCommand(@[
     publicReproBin(), "build", projectRoot,
     "--tool-provisioning=path",

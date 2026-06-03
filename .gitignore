@@ -27,3 +27,7 @@ references/*
 
 .DS_Store
 build/m4-live-smoke/
+
+# Python bytecode caches from unittest runners
+__pycache__/
+*.pyc

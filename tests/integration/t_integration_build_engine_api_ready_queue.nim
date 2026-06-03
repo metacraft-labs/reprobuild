@@ -34,7 +34,7 @@ proc removeIfExists(path: string) =
 proc ensureRunQuotaDaemon(repoRoot, tempRoot: string; cpuMilli = "32000"):
     tuple[process: owned(Process), socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
     discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
   let socketPath = "/tmp/repro-m12-rq-" & $getCurrentProcessId() & ".sock"
@@ -1204,7 +1204,7 @@ suite "integration_build_engine_api_ready_queue":
 
     check buildResult.trace.len >= actions.len
     check buildResult.trace[0].seq == 1'u64
-    let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin" / "runquota"
+    let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin" / addFileExt("runquota", ExeExt)
     let status = requireSuccess(q(runquotaBin) & " status", repoRoot)
     check status.contains("total_granted:")
     check status.contains("total_finished:")

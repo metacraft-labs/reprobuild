@@ -1,37 +1,17 @@
-import std/[net, os, osproc, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_core
 import repro_daemon_core
-
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string]): string =
-  var parts: seq[string] = @[]
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
+import repro_test_support
 
 proc repoRoot(): string =
   getCurrentDir()
 
 proc publicReproBin(): string =
-  repoRoot() / "build" / "bin" / "repro"
+  repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc daemonEndpoint(tempRoot: string): string =
-  "/tmp" / (tempRoot.extractFilename & ".sock")
+  daemonSocketEndpoint(tempRoot.extractFilename)
 
 proc daemonArgs(tempRoot: string): seq[string] =
   @[
@@ -40,7 +20,7 @@ proc daemonArgs(tempRoot: string): seq[string] =
     "--log", tempRoot / "state" / "logs" / "repro-daemon.log"
   ]
 
-proc reproDaemonCommand(tempRoot: string; action: string): string =
+proc reproDaemonCommand(tempRoot: string; action: string): CmdSpec =
   shellCommand(@[publicReproBin(), "daemon", action] & daemonArgs(tempRoot))
 
 proc stopDaemon(tempRoot: string) =
@@ -55,14 +35,17 @@ proc fieldValue(output, field: string): string =
   ""
 
 proc fakeMismatch(endpoint: string): string =
-  var socket = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
-  defer: socket.close()
-  socket.connectUnix(endpoint)
+  ## M1 protocol-version negotiation regression. We talk to the daemon
+  ## via the portable IPC abstraction so the test works against both
+  ## the POSIX AF_UNIX endpoint and the Windows Named Pipe endpoint
+  ## (per ``defaultUserDaemonEndpoint``).
+  let conn = connectIpc(endpoint)
+  defer: conn.closeIpcConn()
   let fake = binaryIdentity("m1-protocol-mismatch-fake-client",
     getAppFilename(), versionString())
-  socket.writeFrame(udkHello, helloBody(fake, UserDaemonFeatureFlags,
+  conn.writeFrame(udkHello, helloBody(fake, UserDaemonFeatureFlags,
     "protocol-mismatch-test", repoRoot(), protocolMajor = 999'u16))
-  let frame = socket.readFrame()
+  let frame = conn.readFrame()
   check frame.kind == udkError
   parseErrorBody(frame.body)
 

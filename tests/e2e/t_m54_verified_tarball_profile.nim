@@ -2,29 +2,7 @@ import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
 import repro_tool_profiles
-
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string]): string =
-  args.mapIt(q(it)).join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
-
-proc requireFailure(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  check res.code != 0
-  res.output
+import repro_test_support
 
 proc actionLineCacheEffective(log, id: string): bool =
   ## "Cache was effective for this action" — accepts either
@@ -54,9 +32,9 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
   let socketPath = "/tmp/repro-m54-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)

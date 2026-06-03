@@ -1,6 +1,7 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_tool_profiles
+import repro_test_support
 
 const MonitorFixtureSource = r"""
 #include <stdio.h>
@@ -183,35 +184,6 @@ int main(int argc, char **argv) {
 }
 """
 
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
-
-proc requireFailure(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  check res.code != 0
-  res.output
-
 proc actionLineCacheEffective(log, id: string): bool =
   ## "Cache was effective for this action on this build" check against
   ## the action-level log line emitted by `--log=actions`. Accepts
@@ -253,9 +225,9 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
   let socketPath = "/tmp/repro-m19-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -869,11 +841,11 @@ when defined(macosx) or defined(linux):
       return
     let npmRoot = tempRoot / "npm-stylus"
     createDir(npmRoot)
-    let res = execCmdEx(shellCommand([
+    let res = runShell(shellCommand(@[
       npm, "install", "--silent", "--no-audit", "--no-fund",
       "--prefix", npmRoot, "stylus@0.64.0"
     ]))
-    if res.exitCode != 0:
+    if res.code != 0:
       return ""
     let candidate = npmRoot / "node_modules" / ".bin" / "stylus"
     if fileExists(candidate):
@@ -1164,9 +1136,9 @@ suite "e2e_local_reprobuild_project_build":
       "asSucceeded"
     check reportAction(selectedReport, "unrelated").kind == JNull
 
-    let unknown = requireFailure("PATH=" & q(pathValue) & " " &
-      shellCommand([reproBin, "build", projectRoot & "#does-not-exist",
-        "--tool-provisioning=path"]), repoRoot)
+    let unknown = requireFailure(shellCommand(@[reproBin, "build",
+      projectRoot & "#does-not-exist", "--tool-provisioning=path"],
+      @[(name: "PATH", value: pathValue)]), repoRoot)
     check unknown.contains("unknown build target/action id: does-not-exist")
     check unknown.contains("available:")
     check unknown.contains("consume")
@@ -2023,9 +1995,9 @@ suite "e2e_local_reprobuild_project_build":
 
     let missingRoot = tempRoot / "missing-project"
     writeMissingProject(missingRoot / "reprobuild.nim")
-    let missing = requireFailure("PATH=" & q(pathValue) & " " &
-      shellCommand([reproBin, "build", missingRoot, "--tool-provisioning=path"]),
-      repoRoot)
+    let missing = requireFailure(shellCommand(@[reproBin, "build",
+      missingRoot, "--tool-provisioning=path"],
+      @[(name: "PATH", value: pathValue)]), repoRoot)
     check missing.contains("tool-resolution failed")
     check missing.contains("m19-missing-tool")
     check not fileExists(missingRoot / ".repro" / "missing-ran.log")

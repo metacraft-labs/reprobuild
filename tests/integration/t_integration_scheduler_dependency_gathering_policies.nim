@@ -6,6 +6,7 @@ import repro_core/paths as corepaths
 import repro_depfile
 import repro_hash
 import repro_runquota
+import repro_test_support
 
 const MonitorPolicyKinds = {
   dgAutomaticMonitor,
@@ -113,29 +114,6 @@ int main(int argc, char **argv) {
 }
 """
 
-proc q(value: string): string =
-  quoteShell(value)
-
-proc runShell(command: string; cwd = getCurrentDir()): tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  check res.code == 0
-  if res.code != 0:
-    checkpoint(res.output)
-  res.output
-
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
 proc pathExists(path: string): bool =
   try:
     discard getFileInfo(path, followSymlink = false)
@@ -146,9 +124,9 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process),
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
   let socketPath = "/tmp/repro-m17-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)

@@ -453,7 +453,7 @@ def direct_reprobuild_build_command(repro, binary_dir, target,
         args.append(f"{binary_dir}#{target}")
     args.extend([
         "--tool-provisioning=path",
-        f"--work-root={reprobuild_provider_dir(binary_dir)}",
+        f"--work-root={reprobuild_provider_dir(binary_dir).as_posix()}",
     ])
     if reprobuild_diagnostics == "stats":
         args.append("--stats")

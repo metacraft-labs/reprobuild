@@ -47,7 +47,7 @@ proc reproBinary(): string =
   when defined(windows):
     let candidate = ProjectRoot / "build" / "bin" / "repro.exe"
   else:
-    let candidate = ProjectRoot / "build" / "bin" / "repro"
+    let candidate = ProjectRoot / "build" / "bin" / addFileExt("repro", ExeExt)
   candidate
 
 # The real-mutation scenario is gated by BOTH the platform (POSIX) and

@@ -31,10 +31,10 @@ proc repoRoot(): string =
   getCurrentDir()
 
 proc publicReproBin(): string =
-  repoRoot() / "build" / "bin" / "repro"
+  repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc publicReproDaemonBin(): string =
-  repoRoot() / "build" / "bin" / "repro-daemon"
+  repoRoot() / "build" / "bin" / addFileExt("repro-daemon", ExeExt)
 
 proc daemonEndpoint(tempRoot: string): string =
   "/tmp" / (tempRoot.extractFilename & ".sock")

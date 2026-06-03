@@ -1,41 +1,19 @@
 import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
 
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
+import repro_test_support
 
 proc repoRoot(): string =
   getCurrentDir()
 
 proc publicReproBin(): string =
-  repoRoot() / "build" / "bin" / "repro"
+  repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc fixtureSource(): string =
   repoRoot() / "tests" / "fixtures" / "local-daemons-control-plane" /
     "direct-mode-parity" / "project"
 
 proc daemonEndpoint(tempRoot: string): string =
-  "/tmp" / (tempRoot.extractFilename & ".sock")
+  daemonSocketEndpoint(tempRoot.extractFilename)
 
 proc daemonStateDir(tempRoot: string): string =
   tempRoot / "state"
@@ -157,7 +135,7 @@ proc assertRunQuotaReport(output, socket: string) =
 
 proc buildCommand(projectRoot, tempRoot: string; extra: openArray[string] = [];
                   env: openArray[(string, string)] = [];
-                  daemonRoot = ""): string =
+                  daemonRoot = ""): CmdSpec =
   let daemonEnvRoot =
     if daemonRoot.len > 0: daemonRoot
     else: tempRoot
@@ -209,10 +187,10 @@ proc writeSleeperProject(projectRoot: string; sleepSeconds: int) =
 proc ensureRunQuotaDaemon(repoRoot, tempRoot: string): tuple[
     process: owned(Process); socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
-  let cliBin = runquotaRoot / "build" / "bin" / "runquota"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
+  let cliBin = runquotaRoot / "build" / "bin" / addFileExt("runquota", ExeExt)
   if not fileExists(daemonBin) or not fileExists(cliBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
   let socketPath = "/tmp/repro-m4-rq-" & $getCurrentProcessId() & ".sock"
   try: removeFile(socketPath) except OSError: discard
   let daemon = startProcess(daemonBin, args = [

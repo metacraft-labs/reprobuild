@@ -1,47 +1,18 @@
 import std/[os, osproc, strutils, tempfiles, unittest]
 
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
-
-proc requireFailure(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code == 0:
-    checkpoint(res.output)
-  check res.code != 0
-  res.output
+import repro_test_support
 
 proc repoRoot(): string =
   getCurrentDir()
 
 proc publicReproBin(): string =
-  repoRoot() / "build" / "bin" / "repro"
+  repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc userDaemonBin(): string =
-  repoRoot() / "build" / "bin" / "repro-daemon"
+  repoRoot() / "build" / "bin" / addFileExt("repro-daemon", ExeExt)
 
 proc storeDaemonBin(): string =
-  repoRoot() / "build" / "bin" / "reprostored"
+  repoRoot() / "build" / "bin" / addFileExt("reprostored", ExeExt)
 
 proc requireReproFailure(args: openArray[string]): string =
   requireFailure(shellCommand(@[publicReproBin()] & @args), repoRoot())

@@ -129,15 +129,16 @@ suite "M69 env_binding synthesis":
 
   test "bin-dir PATH record is emitted alongside env vars":
     # Use forward-slash separators so the test is host-independent:
-    # the M69 PATH record's value is a verbatim opaque string for the
-    # downstream PATH writer, but ``prefixBinDirs`` derives it via
-    # ``parentDir`` which honours the host's PathSep. Backslash
-    # separators are not parsed as path separators on POSIX, so the
-    # parent-dir walk produces ``""`` and the bin-dir lookup never
-    # finds an entry. Forward slashes round-trip on both Windows and
-    # POSIX without changing the assertion semantics.
-    let rec = makeRecord("jdk",
-      "C:/store/jdk/bin/javac.exe",
+    # backslashes are not path separators on POSIX, so the parent-dir
+    # walk produces ``""`` and the bin-dir lookup never finds an
+    # entry. Forward slashes round-trip on both Windows and POSIX.
+    # The expected bin dir is derived via ``parentDir`` so the
+    # assertion remains stable whether the host normalizes to ``/``
+    # (POSIX) or ``\`` (Windows) — the PATH writer consumes whatever
+    # separator the host's ``parentDir`` chooses.
+    let exePath = "C:/store/jdk/bin/javac.exe"
+    let expectedBinDir = exePath.parentDir
+    let rec = makeRecord("jdk", exePath,
       @[(name: "JAVA_HOME", value: "C:/store/jdk")])
     let plan = planEnvBindings(@[rec])
     let pathLookup = findResource(plan, "home.package.jdk.bin")
@@ -147,7 +148,7 @@ suite "M69 env_binding synthesis":
     # The recorded entry MUST be the parent of the resolved
     # executable (one PATH dir per realized prefix's bin dir).
     check pathLookup.r.pathEntries[0].endsWith("bin")
-    check "C:/store/jdk/bin" in pathLookup.r.pathEntries[0]
+    check pathLookup.r.pathEntries[0] == expectedBinDir
 
 suite "M69 env_binding: live-catalog round-trip":
   ## These tests exercise the catalog → planEnvBindings round-trip
