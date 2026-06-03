@@ -51,6 +51,7 @@ for libName in [
   "repro_standard_provider_protocol",
   "repro_standard_provider",
   "repro_workspace_vcs",
+  "repro_test_support",
 ]:
   switch("path", "libs" / libName / "src")
 
