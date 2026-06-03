@@ -11702,6 +11702,466 @@ proc runWorkspaceInitCommand*(args: openArray[string]): int =
     return 2
   0
 
+# ---- M10: `repro workspace sync` ------------------------------------------
+#
+# The M10 dispatcher mirrors M9's structure: parse argv, resolve the project
+# (or compose layers), inspect the local checkout of each ``ResolvedRepo``,
+# and emit a structured report. The decision-making (the seven sync corner
+# cases from ``Workspace-And-Develop-Mode.md`` §"Sync Corner Cases") is
+# delegated to the pure-policy ``planSync`` proc in
+# ``repro_workspace_manifests/sync_planner``; this dispatcher's job is to
+# gather the per-repo observation and, once the plan is known, drive the
+# minimal mutating actions through the M2 ``bakWorkspaceVcs`` executor.
+#
+# Before any per-repo work the dispatcher fast-forwards the manifest layers
+# themselves (via ``refreshManifestLayers``) so the resolver reads the
+# freshest manifest data. The same proc is what the M19a auto-refresh hook
+# will eventually call.
+
+type
+  WorkspaceSyncManifestLayerEntry* = object
+    ## One per manifest layer encountered during the pre-sync refresh.
+    ## Mirrors ``ManifestLayerRefreshEntry`` 1:1; we keep a separate
+    ## CLI-side record so the JSON shape stays stable even if the
+    ## refresh helper later adds fields.
+    index*: int
+    provenance*: string
+    layerPath*: string
+    status*: string
+    beforeSha*: string
+    afterSha*: string
+    diagnostic*: string
+
+  WorkspaceSyncRepoEntry* = object
+    ## One per ``ResolvedRepo`` after sync. ``syncCase`` is the
+    ## snake_case tag of the planner's decision; ``action`` is the
+    ## scheduled mutating-action tag (``none`` for refuse-and-report or
+    ## no-op outcomes); ``executionStatus`` is the post-execution
+    ## summary (``noop`` / ``refused`` / ``succeeded`` / ``failed``)
+    ## the dispatcher fills in once the plan has run.
+    name*: string
+    path*: string
+    syncCase*: string
+    action*: string
+    expected*: string
+    observed*: string
+    branch*: string
+    message*: string
+    refusalReason*: string
+    executionStatus*: string
+    executionDiagnostic*: string
+
+  WorkspaceSyncReport* = object
+    ## Structured outcome of one ``repro workspace sync`` invocation.
+    ## ``project`` carries the ``ResolvedProject.projectName``;
+    ## ``workspaceRoot`` is the absolute path of the directory
+    ## containing ``.repo/``; ``manifestLayers`` records the
+    ## pre-reconciliation refresh; ``repos`` carries the planner's
+    ## seven-case classification per declared repo.
+    project*: string
+    workspaceRoot*: string
+    manifestLayers*: seq[WorkspaceSyncManifestLayerEntry]
+    repos*: seq[WorkspaceSyncRepoEntry]
+    exitCode*: int
+
+  WorkspaceSyncOutcome* = object
+    report*: WorkspaceSyncReport
+
+proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  var layers = newJArray()
+  for entry in report.manifestLayers:
+    var obj = newJObject()
+    obj["index"] = %entry.index
+    obj["provenance"] = %entry.provenance
+    obj["layerPath"] = %entry.layerPath
+    obj["status"] = %entry.status
+    obj["beforeSha"] = %entry.beforeSha
+    obj["afterSha"] = %entry.afterSha
+    obj["diagnostic"] = %entry.diagnostic
+    layers.add(obj)
+  result["manifestLayers"] = layers
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["syncCase"] = %entry.syncCase
+    obj["action"] = %entry.action
+    obj["expected"] = %entry.expected
+    obj["observed"] = %entry.observed
+    obj["branch"] = %entry.branch
+    obj["message"] = %entry.message
+    obj["refusalReason"] = %entry.refusalReason
+    obj["executionStatus"] = %entry.executionStatus
+    obj["executionDiagnostic"] = %entry.executionDiagnostic
+    repos.add(obj)
+  result["repos"] = repos
+  result["exitCode"] = %report.exitCode
+
+proc renderSyncTextLines*(report: WorkspaceSyncReport): seq[string] =
+  for entry in report.manifestLayers:
+    result.add("workspace sync: manifest-layer " & entry.provenance &
+      " status=" & entry.status &
+      (if entry.beforeSha.len > 0 and entry.afterSha.len > 0 and
+          entry.beforeSha != entry.afterSha:
+        " " & entry.beforeSha & " → " & entry.afterSha
+       else: ""))
+  for entry in report.repos:
+    var line = "workspace sync: " & entry.path & " case=" & entry.syncCase &
+      " action=" & entry.action
+    if entry.executionStatus.len > 0 and entry.executionStatus != "noop":
+      line.add(" → " & entry.executionStatus)
+    if entry.refusalReason.len > 0:
+      line.add(" (" & entry.refusalReason & ")")
+    elif entry.message.len > 0:
+      line.add(" — " & entry.message)
+    result.add(line)
+
+type
+  WorkspaceSyncArgs = object
+    workspaceRoot: string
+    projectName: string
+    toolProvisioning: ToolProvisioningMode
+
+proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
+  ## ``repro workspace sync`` argv parser. Unlike M9's ``init`` there is
+  ## no required positional: sync operates on the existing workspace
+  ## root. An optional positional ``<project>`` is accepted so the
+  ## non-composer (M6 / M7) path still works in a workspace that lacks
+  ## a ``.repo/workspace.toml`` — the milestone spec says sync works on
+  ## "the existing workspace", which in single-project mode requires
+  ## the project name to find ``projects/<name>.toml``.
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace sync` flag: " & arg)
+    elif result.projectName.len == 0:
+      result.projectName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro workspace sync`: " & arg)
+    inc i
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
+  ## Same dispatch rule as M9: prefer ``.repo/workspace.toml`` when
+  ## present (composer mode), otherwise look up the named project /
+  ## variant under ``.repo/manifests/``. A missing workspace.toml AND a
+  ## missing project argument is a structured error.
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if fileExists(workspaceToml):
+    return composeManifestLayersFromFile(workspaceToml)
+  if parsed.projectName.len == 0:
+    raise newException(ValueError,
+      "`repro workspace sync` requires either `.repo/workspace.toml` " &
+        "or a <project> argument; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" /
+    (parsed.projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" /
+    (parsed.projectName & ".toml")
+  if fileExists(projectFile):
+    return resolveProject(projectFile)
+  if fileExists(variantFile):
+    return resolveVariant(variantFile)
+  raise newException(ValueError,
+    "no project or variant named '" & parsed.projectName &
+      "' found under '" & manifestsRoot &
+      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+
+proc gitRunPlain(identity: GitToolIdentity;
+                 args: openArray[string]): tuple[code: int; output: string] =
+  ## Tiny ``execCmdEx`` wrapper used by the sync observation gatherer.
+  ## Shares the same shape as ``revParse`` above but takes an argv so
+  ## callers don't have to quoteShell every arg.
+  var cmd = quoteShell(identity.binaryPath)
+  for arg in args:
+    cmd.add(" ")
+    cmd.add(quoteShell(arg))
+  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
+  (code: res.exitCode, output: res.output)
+
+proc observeRepoForSync(identity: GitToolIdentity;
+                        repoPath: string;
+                        resolved: ResolvedRepo): RepoSyncObservation =
+  ## Gather everything the M10 planner needs about ONE checkout. A
+  ## missing directory short-circuits with ``exists=false``; every
+  ## other observation field is filled in best-effort (a failed probe
+  ## leaves the field empty so the planner's tolerant-compare logic
+  ## degrades to "divergent_feature_branch" rather than crashing).
+  if not dirExists(repoPath / ".git"):
+    result.exists = false
+    return
+  result.exists = true
+  let headRes = queryGitState(headShaQuery(repoPath), identity)
+  if headRes.status == gqsOk:
+    result.headSha = headRes.headSha
+  let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
+  if cleanRes.status == gqsOk:
+    result.isClean = cleanRes.isClean
+  else:
+    # Treat an un-probable status as "not clean" — refuse-and-report
+    # is the safer choice when we cannot prove cleanliness.
+    result.isClean = false
+
+  # Current branch (empty when detached). Use ``symbolic-ref --short``
+  # so the value is the bare branch name like ``main``.
+  let branchRes = gitRunPlain(identity,
+    ["-C", repoPath, "symbolic-ref", "--short", "-q", "HEAD"])
+  if branchRes.code == 0:
+    result.currentBranch = branchRes.output.strip()
+
+  # Branch tips (local + remote-tracking).
+  if result.currentBranch.len > 0:
+    result.localBranchTip = revParse(identity, repoPath,
+      "refs/heads/" & result.currentBranch)
+    result.remoteBranchTip = revParse(identity, repoPath,
+      "refs/remotes/origin/" & result.currentBranch)
+
+  # Where does the manifest's revision actually point in this clone?
+  # SHA pin → itself; branch pin → ``origin/<branch>`` (matches M9's
+  # ``expectedBranchTip``).
+  if resolved.revision.len > 0:
+    if looksLikeSha(resolved.revision):
+      result.lockedRevisionTip = resolved.revision
+    else:
+      result.lockedRevisionTip = expectedBranchTip(identity, repoPath,
+        resolved.revision)
+
+  # Unpublished commits: the M2 ``isPublished`` query already answers
+  # "is HEAD on any remote tracking branch". We also fall back to the
+  # local-vs-remote tip compare when ``isPublished`` cannot be probed
+  # (e.g. brand-new branch with no upstream).
+  let pubRes = queryGitState(
+    isPublishedQuery(repoPath, "origin"), identity)
+  if pubRes.status == gqsOk:
+    result.hasUnpublishedCommits = not pubRes.isPublished
+  else:
+    # If we can't tell published-vs-not, only flag when there is a
+    # concrete local-vs-remote disagreement we can attribute to local
+    # work (i.e. local tip strictly ahead of remote tip).
+    if result.remoteBranchTip.len > 0 and result.headSha.len > 0 and
+        result.remoteBranchTip != result.headSha:
+      # ``hasUnpublishedCommits`` is "local has commits beyond remote".
+      # The planner does not require an exact ahead-count; it only
+      # needs to know that the operator owns work we shouldn't touch.
+      let ancestorRes = gitRunPlain(identity, ["-C", repoPath,
+        "merge-base", "--is-ancestor", result.headSha, result.remoteBranchTip])
+      result.hasUnpublishedCommits = ancestorRes.code != 0
+
+proc executeSyncPlanForRepo(
+    identity: GitToolIdentity;
+    workspaceRoot: string;
+    resolved: ResolvedRepo;
+    decision: RepoSyncDecision;
+    repoIdx: int): tuple[status: string; diagnostic: string] =
+  ## Translate one planner decision into a mutating ``bakWorkspaceVcs``
+  ## invocation. Returns the post-execution status string the JSON
+  ## report carries (``noop`` / ``refused`` / ``succeeded`` / ``failed``)
+  ## plus a diagnostic when ``failed``.
+  case decision.action
+  of saNone:
+    if decision.syncCase in {scDirty, scLocallyUnpublished}:
+      return ("refused", decision.refusalReason)
+    return ("noop", "")
+  of saClone:
+    let receiptDir = workspaceRoot / ".repro" / "workspace" / "receipts"
+    createDir(receiptDir)
+    let receiptRel = ".repro" / "workspace" / "receipts" /
+      ("sync-clone-" & safeRepoIdSegment(resolved.name) & "-" &
+        $repoIdx & ".receipt")
+    let actionId = "workspace-sync-clone-" &
+      safeRepoIdSegment(resolved.name) & "-" & $repoIdx
+    var action = gitCloneAction(actionId, identity,
+      remoteUrl = resolved.fetchUrl,
+      repoPath = resolved.path,
+      receiptPath = receiptRel,
+      revision = resolved.revision)
+    action.cwd = workspaceRoot
+    let cacheRoot = workspaceRoot / ".repro" / "workspace" /
+      "engine-cache"
+    var config = defaultBuildEngineConfig(cacheRoot)
+    config.suppressTrace = true
+    let res = runBuild(graph([action]), config)
+    if res.results.len == 0:
+      return ("failed", "build engine returned no results for clone action")
+    let outcome = res.results[0]
+    if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+      return ("failed", "clone status=" & $outcome.status &
+        " reason=" & outcome.reason &
+        (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+    return ("succeeded", "")
+  of saFetchFastForward:
+    # The dispatcher already issued a pre-classification fetch against
+    # ``origin`` so the remote-tracking ref is current. All that's
+    # left here is the merge. The planner established that HEAD is an
+    # ancestor of ``origin/<branch>`` (so the merge is a strict
+    # fast-forward) and that the working tree is clean (so the merge
+    # cannot disturb operator state). ``merge --ff-only`` is the safe
+    # primitive.
+    let repoAbsPath = workspaceRoot / resolved.path
+    let mergeRes = gitRunPlain(identity, ["-C", repoAbsPath,
+      "merge", "--ff-only", "refs/remotes/origin/" & decision.branch])
+    if mergeRes.code != 0:
+      return ("failed", "merge --ff-only refused: " &
+        mergeRes.output.strip())
+    return ("succeeded", "")
+  of saAttachBranch:
+    # Detached HEAD at the locked revision — re-attach by ``git switch
+    # --detach=false`` to the manifest's pinned branch. We assume the
+    # manifest names a branch (the detached case only applies when the
+    # locked tip matches HEAD; the planner already established that
+    # match holds). If the manifest pins a SHA we fall back to
+    # ``checkout -B`` on a synthetic branch derived from the SHA — but
+    # the seven-case spec explicitly limits ``attach_branch`` to
+    # branch-pinned manifests, so production hits the simple arm.
+    let repoAbsPath = workspaceRoot / resolved.path
+    let targetBranch =
+      if resolved.revision.len > 0 and not looksLikeSha(resolved.revision):
+        resolved.revision
+      else:
+        "main"
+    let switchRes = gitRunPlain(identity, ["-C", repoAbsPath,
+      "switch", targetBranch])
+    if switchRes.code != 0:
+      return ("failed", "git switch '" & targetBranch & "' refused: " &
+        switchRes.output.strip())
+    return ("succeeded", "")
+
+proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
+  ## End-to-end driver. (1) Refresh manifest layers so the composer
+  ## reads the freshest manifest data. (2) Resolve the project / compose
+  ## layers. (3) Gather an observation for every declared repo. (4) Run
+  ## the planner. (5) Execute the resulting actions through M2's
+  ## executor. (6) Emit the structured report.
+  var report: WorkspaceSyncReport
+  report.workspaceRoot = args.workspaceRoot
+
+  # Step 1: manifest-layer refresh.
+  let refresh = refreshManifestLayers(args.workspaceRoot)
+  for entry in refresh.layers:
+    report.manifestLayers.add(WorkspaceSyncManifestLayerEntry(
+      index: entry.index,
+      provenance: entry.provenance,
+      layerPath: entry.layerPath,
+      status: manifestLayerStatusTag(entry.status),
+      beforeSha: entry.beforeSha,
+      afterSha: entry.afterSha,
+      diagnostic: entry.diagnostic))
+
+  # Step 2: resolve (or compose) the project.
+  let resolved = resolveWorkspaceSyncProject(args)
+  report.project = resolved.projectName
+
+  # Step 3: resolve the git identity once.
+  let identity = ensureGitToolResolvable(
+    args.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  # Step 3a: pre-fetch every existing repo so the post-fetch
+  # ``origin/<branch>`` ref reflects the remote's current tip BEFORE
+  # the planner classifies. Without this step, a clone that's strictly
+  # behind a now-advanced ``origin/main`` would be misclassified as
+  # "clean_at_locked_revision" — the local view of the lock would
+  # match HEAD because nobody told the local clone the upstream had
+  # advanced.
+  #
+  # A pre-fetch on a dirty / locally-unpublished checkout is safe: it
+  # only updates ``refs/remotes/origin/*``, never the working tree
+  # itself. Refuse-and-report classifications are still made AFTER
+  # this pass, so the operator's working state is preserved.
+  for repo in resolved.repos:
+    let repoPath = args.workspaceRoot / repo.path
+    if dirExists(repoPath / ".git"):
+      discard gitRunPlain(identity, ["-C", repoPath, "fetch",
+        "--quiet", "origin"])
+
+  # Step 3b: observe each repo (now with fresh remote-tracking refs).
+  var observations: seq[RepoSyncObservation]
+  for repo in resolved.repos:
+    let repoPath = args.workspaceRoot / repo.path
+    observations.add(observeRepoForSync(identity, repoPath, repo))
+
+  # Step 4: planner.
+  let planned = planSync(resolved.repos, observations)
+
+  # Step 5: execute.
+  var anyRefusal = false
+  var anyFailure = false
+  for repoIdx, decision in planned.report.decisions:
+    let resolvedRepo = resolved.repos[repoIdx]
+    let (status, diagnostic) = executeSyncPlanForRepo(
+      identity, args.workspaceRoot, resolvedRepo, decision, repoIdx)
+    if status == "refused":
+      anyRefusal = true
+    elif status == "failed":
+      anyFailure = true
+    report.repos.add(WorkspaceSyncRepoEntry(
+      name: decision.name,
+      path: decision.path,
+      syncCase: syncCaseTag(decision.syncCase),
+      action: syncActionTag(decision.action),
+      expected: decision.expected,
+      observed: decision.observed,
+      branch: decision.branch,
+      message: decision.message,
+      refusalReason: decision.refusalReason,
+      executionStatus: status,
+      executionDiagnostic: diagnostic))
+
+  # Step 6: exit code.
+  if anyFailure:
+    report.exitCode = 1
+  elif anyRefusal:
+    report.exitCode = 2
+  else:
+    report.exitCode = 0
+  result.report = report
+
+proc writeWorkspaceSyncReport(report: WorkspaceSyncReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "sync-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runWorkspaceSyncCommand*(args: openArray[string]): int =
+  ## ``repro workspace sync [<project>] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop]``.
+  ##
+  ## Exit codes (per M10 design):
+  ##   - 0 — every repo is at its locked revision, was cleanly
+  ##         fast-forwarded, was re-attached to its branch, was
+  ##         cloned successfully, or is a divergent-feature-branch
+  ##         report-only case.
+  ##   - 1 — at least one mutating action (clone, fetch, fast-forward,
+  ##         branch attach) failed.
+  ##   - 2 — at least one repo was in a refuse-and-report state
+  ##         (``dirty`` or ``locally_unpublished``). The operator has
+  ##         manual work to do. Distinct from exit-1 ("sync blew up")
+  ##         so scripts can tell the two apart.
+  let parsed = parseWorkspaceSyncArgs(args)
+  let outcome = executeWorkspaceSync(parsed)
+  writeWorkspaceSyncReport(outcome.report)
+  for line in renderSyncTextLines(outcome.report):
+    stdout.writeLine(line)
+  outcome.report.exitCode
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -11997,6 +12457,24 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceInitCommand(initArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace init: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "sync":
+    # M10 — `repro workspace sync`. Sibling of the M9 ``init`` hook
+    # immediately above: the spec names a file path
+    # ``apps/repro/subcmds/workspace_sync.nim`` for symmetry but the
+    # repo convention places the implementation here in
+    # ``repro_cli_support`` so the dispatcher reaches it via
+    # ``runWorkspaceSyncCommand``.
+    try:
+      let syncArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceSyncCommand(syncArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace sync: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:

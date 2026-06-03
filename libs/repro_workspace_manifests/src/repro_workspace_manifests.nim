@@ -6,10 +6,13 @@
 # at b5b387e6fb2a7cc75d54a269b07cc6218361bd46 (v0.2.18) — see
 # `repro_workspace_manifests/reader.nim` for the comment carrying the SHA.
 
-import repro_workspace_manifests/[types, diagnostics, reader, resolver, compose]
+import repro_workspace_manifests/[types, diagnostics, reader, resolver,
+  compose, sync_planner, manifest_refresh]
 
 export types
 export diagnostics
 export reader
 export resolver
 export compose
+export sync_planner
+export manifest_refresh
