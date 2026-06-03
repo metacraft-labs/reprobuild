@@ -100,6 +100,13 @@ proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()) =
   ## another process." Wait until ``endpointAcceptsConnections``
   ## flips to false before returning, which guarantees both the
   ## listener AND the cleanup defers have run.
+  # Grab the daemon's state-dir BEFORE issuing the shutdown so we can
+  # poll for its lockfile to disappear once the endpoint flips quiet —
+  # querying after shutdown loses the race (the daemon might already
+  # be tearing down the listener when the status request lands).
+  let stateDir =
+    try: queryUserDaemonStatus(endpoint).stateDir
+    except CatchableError: ""
   block:
     var socket = connectUserDaemon(endpoint, commandMode = "stop")
     defer: socket.closeIpcConn()
@@ -114,18 +121,44 @@ proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()) =
   # Poll for endpoint quiescence. The daemon's listener-defer runs
   # FIRST (LIFO order) — that closes the IPC listener and flips
   # ``endpointAcceptsConnections`` to false. The lockfile release
-  # runs in the SECOND defer immediately after, so a small fixed
-  # grace period after the endpoint goes quiet is enough to make
-  # ``removeDir(stateDir)`` race-free in callers like
-  # ``tests/integration/t_local_daemons_control_plane_m*``.
+  # runs in the SECOND defer immediately after.
+  #
+  # Between the two defers the daemon also writes the final
+  # ``stopped`` line to its log + reads/removes the lockfile metadata,
+  # so the gap to a clean ``removeDir(stateDir)`` is a few hundred
+  # milliseconds on a healthy host. On a heavily-loaded Windows host
+  # the daemon process's scheduling latency between the two defers
+  # has been observed at >200 ms, hitting integration tests' defer
+  # chain with ``ERROR_SHARING_VIOLATION`` on the lockfile. After the
+  # endpoint flips quiet, poll for ``.repro-daemon.lock`` (which lives
+  # next to ``status/`` under the state-dir reported by the daemon's
+  # status response) to disappear — that file's removal IS the final
+  # action of ``releaseUserDaemonLock`` and is the canonical signal
+  # the cleanup chain has fully drained.
+  proc lockfileGone(stateDir: string): bool =
+    not fileExists(stateDir / ".repro-daemon.lock")
   let deadline = epochTime() + 5.0
   while epochTime() < deadline:
     if not endpointAcceptsConnections(endpoint):
-      # ``releaseUserDaemonLock`` is the next defer to run and does
-      # nothing but ``CloseHandle`` + ``removeFile`` synchronously.
-      # 200 ms covers a heavily-loaded Windows host comfortably.
-      sleep(200)
-      return
+      if stateDir.len == 0:
+        # We never got a state-dir from the pre-shutdown status
+        # query. Fall back to a fixed wait long enough for the
+        # daemon's lockfile defer to land on a busy Windows host.
+        sleep(1500)
+        return
+      let lockDeadline = epochTime() + 5.0
+      while epochTime() < lockDeadline:
+        if lockfileGone(stateDir):
+          # Lockfile is gone — and on Windows ``fileExists`` only
+          # returns false once the kernel has finalised the delete
+          # (no pending-delete state), so the lockfile handle is
+          # truly closed and ``removeDir(stateDir)`` can proceed.
+          return
+        sleep(25)
+      # The lockfile is still on disk 5 s after the endpoint went
+      # quiet — something is wedging the daemon's release defer.
+      # Surface it as the same time-out error as the outer loop.
+      break
     sleep(10)
   # Time-out: the daemon is still listening 5 s after ACK. That's a
   # real bug — surface it instead of silently returning.

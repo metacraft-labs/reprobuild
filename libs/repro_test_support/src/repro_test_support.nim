@@ -31,6 +31,9 @@
 
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
+when defined(windows):
+  import std/winlean
+
 const
   isNixSupported* = defined(linux) or defined(macosx)
     ## True on platforms where `nix` / `nix build` is a realistic
@@ -108,8 +111,79 @@ proc runShell*(cmd: CmdSpec; cwd = getCurrentDir()): CmdResult =
     env = envTable,
     options = {poStdErrToStdOut, poUsePath})
   defer: process.close()
-  result.output = process.outputStream.readAll()
-  result.code = process.waitForExit()
+  # Three interacting Nim 2.2.x pitfalls force this hand-rolled loop:
+  #
+  # (a) ``stream.readAll`` breaks the read loop the FIRST time
+  #     ``readData`` returns fewer than the 1 KiB buffer's worth — fine
+  #     for seekable file streams, catastrophic for pipes. On Windows
+  #     each child write arrives as its own ReadFile completion, so the
+  #     first short read aborts and everything after the child's first
+  #     stdout line is dropped.
+  #
+  # (b) Tests that invoke ``repro build --daemon=require`` (or
+  #     ``--daemon=auto`` with no running daemon) trigger
+  #     ``startUserDaemon`` inside the child. Even with ``poDaemon`` the
+  #     daemon grandchild inherits the child's stdout pipe handle on
+  #     Windows (CreateProcess with bInheritHandles=TRUE inherits ALL
+  #     inheritable handles in the calling process, including the
+  #     child's stdout WRITE end). A naive drain loop that waits for
+  #     the pipe to close hangs forever because the daemon stays alive
+  #     after the test child exits.
+  #
+  # (c) ``ReadFile`` on a Windows pipe is blocking. ``readLine`` /
+  #     ``readAll`` therefore wait indefinitely once the pipe has no
+  #     data but its handle is still held by the daemon grandchild.
+  #     ``execCmdEx`` itself hangs in this exact scenario.
+  #
+  # Cut through all three with the classic ``PeekNamedPipe`` poll:
+  # only ``ReadFile`` when ``PeekNamedPipe`` reports bytes available,
+  # otherwise check whether the IMMEDIATE child has exited and bail.
+  # The pipe-handle-still-open-via-grandchild becomes a non-issue —
+  # once the child's exit code materialises we walk away, leaving the
+  # daemon to its independent lifecycle.
+  when defined(windows):
+    const PollSleepMs = 25
+    let outHandle = Handle(process.outputHandle)
+    var buf {.noinit.}: array[4096, char]
+    while true:
+      var bytesAvail: int32 = 0
+      let peeked = peekNamedPipe(outHandle, lpTotalBytesAvail = addr bytesAvail)
+      if not peeked:
+        result.code = process.peekExitCode()
+        if result.code != -1:
+          break
+        sleep(PollSleepMs)
+        continue
+      if bytesAvail == 0:
+        result.code = process.peekExitCode()
+        if result.code != -1:
+          break
+        sleep(PollSleepMs)
+        continue
+      var bytesRead: int32 = 0
+      let toRead = min(int(bytesAvail), buf.len).int32
+      let ok = readFile(outHandle, addr buf[0], toRead, addr bytesRead, nil)
+      if ok == 0 or bytesRead == 0:
+        result.code = process.peekExitCode()
+        if result.code != -1:
+          break
+        sleep(PollSleepMs)
+        continue
+      let prev = result.output.len
+      result.output.setLen(prev + bytesRead)
+      copyMem(addr result.output[prev], addr buf[0], bytesRead)
+  else:
+    let outp = process.outputStream
+    result.code = -1
+    var line = newStringOfCap(120)
+    while true:
+      if outp.readLine(line):
+        result.output.add(line)
+        result.output.add("\n")
+      else:
+        result.code = process.peekExitCode()
+        if result.code != -1:
+          break
 
 proc requireSuccess*(cmd: CmdSpec; cwd = getCurrentDir()): string =
   ## Run ``cmd`` and assert exit-code 0. Returns the merged output so
