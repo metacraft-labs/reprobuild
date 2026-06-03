@@ -58,6 +58,7 @@ import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/go_direct as go_direct_convention
+import repro_test_support
 
 const
   ## ``parentDir`` four times lands at the ``reprobuild/`` repo root.
@@ -115,19 +116,23 @@ proc makeScratch(name: string): string =
     removeDir(result)
   createDir(result)
 
-suite "go-direct convention recognition":
+# Go is not part of the Windows dev-env (the host PATH the test
+# harness inherits does not include go.exe). Gate to platforms
+# where the convention can actually exercise go list -export.
+when isNixSupported:
+  suite "go-direct convention recognition":
 
-  test "recognize: positive — Mode 3 fixture (no go.mod, go available)":
-    if not goOnPath():
-      skip()
-    else:
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(Mode3Fixture)
-      check conv.recognize(Mode3Fixture, request)
+    test "recognize: positive — Mode 3 fixture (no go.mod, go available)":
+      if not goOnPath():
+        skip()
+      else:
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(Mode3Fixture)
+        check conv.recognize(Mode3Fixture, request)
 
-  test "recognize: negative — go.mod at the project root":
-    let dir = makeScratch("with-go-mod")
-    writeFile(dir / "repro.nim", """
+    test "recognize: negative — go.mod at the project root":
+      let dir = makeScratch("with-go-mod")
+      writeFile(dir / "repro.nim", """
 import repro_project_dsl
 
 package x:
@@ -692,6 +697,7 @@ suite "go-direct convention M36 cross-language cycle + undeclared":
       let dir = makeScratch("xlang-cycle")
       writeFile(dir / "repro.nim", """
 import repro_project_dsl
+import repro_test_support
 
 package cLibPkg:
   uses:

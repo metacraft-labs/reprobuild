@@ -406,8 +406,15 @@ proc tarListEntries*(archivePath: string): seq[string] =
       "harvester needs 'tar' on PATH to introspect MSYS2 packages " &
       "(Git for Windows ships tar with --zstd; alternatively install " &
       "the upstream GNU tar 1.31+)")
+  # Windows: GNU tar parses ``host:path`` as a remote, so a literal
+  # ``C:\Users\…\foo.tar.zst`` argument errors out with "Cannot
+  # connect to C: resolve failed". Pass ``--force-local`` so the
+  # argument is always treated as a local path. bsdtar tolerates the
+  # flag too (it ignores unknown long options) so we always pass it.
+  const ForceLocalFlag = when defined(windows): " --force-local" else: ""
   # Try the --zstd filter first (GNU tar).
-  let cmd1 = quoteShell(tar) & " --zstd -tf " & quoteShell(archivePath)
+  let cmd1 = quoteShell(tar) & ForceLocalFlag &
+    " --zstd -tf " & quoteShell(archivePath)
   let res1 = execCmdEx(cmd1)
   if res1.exitCode == 0:
     for line in res1.output.splitLines:
@@ -415,7 +422,8 @@ proc tarListEntries*(archivePath: string): seq[string] =
       if s.len > 0: result.add(s)
     return
   # Fallback A: bsdtar auto-detect via bare ``-tf``.
-  let cmdAuto = quoteShell(tar) & " -tf " & quoteShell(archivePath)
+  let cmdAuto = quoteShell(tar) & ForceLocalFlag &
+    " -tf " & quoteShell(archivePath)
   let resAuto = execCmdEx(cmdAuto)
   if resAuto.exitCode == 0:
     for line in resAuto.output.splitLines:
@@ -445,7 +453,8 @@ proc tarListEntries*(archivePath: string): seq[string] =
     raise newException(Msys2HarvestError,
       "zstd decompress failed (exit " & $resDecompress.exitCode &
       "): " & resDecompress.output)
-  let cmdList = quoteShell(tar) & " -tf " & quoteShell(scratchTar)
+  let cmdList = quoteShell(tar) & ForceLocalFlag &
+    " -tf " & quoteShell(scratchTar)
   let res2 = execCmdEx(cmdList)
   if res2.exitCode != 0:
     raise newException(Msys2HarvestError,
@@ -473,12 +482,17 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
   defer:
     try: removeDir(scratch)
     except OSError: discard
-  let cmd1 = quoteShell(tar) & " --zstd -xf " & quoteShell(archivePath) &
+  # ``--force-local`` keeps GNU tar from reading ``C:\path`` as
+  # ``host:path`` on Windows; same rationale as in ``tarListEntries``.
+  const ForceLocalFlag = when defined(windows): " --force-local" else: ""
+  let cmd1 = quoteShell(tar) & ForceLocalFlag &
+    " --zstd -xf " & quoteShell(archivePath) &
     " -C " & quoteShell(scratch) & " " & quoteShell(member)
   let res1 = execCmdEx(cmd1)
   if res1.exitCode != 0:
     # Fallback A: bsdtar auto-detect.
-    let cmdAuto = quoteShell(tar) & " -xf " & quoteShell(archivePath) &
+    let cmdAuto = quoteShell(tar) & ForceLocalFlag &
+      " -xf " & quoteShell(archivePath) &
       " -C " & quoteShell(scratch) & " " & quoteShell(member)
     let resAuto = execCmdEx(cmdAuto)
     if resAuto.exitCode != 0:
@@ -494,7 +508,8 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
       let resDecompress = execCmdEx(cmdDecompress)
       if resDecompress.exitCode != 0:
         return false
-      let cmd2 = quoteShell(tar) & " -xf " & quoteShell(scratchTar) &
+      let cmd2 = quoteShell(tar) & ForceLocalFlag &
+        " -xf " & quoteShell(scratchTar) &
         " -C " & quoteShell(scratch) & " " & quoteShell(member)
       let res2 = execCmdEx(cmd2)
       if res2.exitCode != 0:

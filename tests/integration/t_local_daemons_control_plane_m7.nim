@@ -132,85 +132,86 @@ proc waitForStatsStore(projectRoot: string; timeoutSeconds = 20.0) =
   raise newException(IOError, "timed out waiting for stats store")
 
 suite "Local daemons/control-plane M7 stats capture":
-  test "integration_daemon_stats_capture_opt_in":
-    let tempRoot = createTempDir("repro-daemon-m7-stats", "")
-    var daemon: owned(Process)
-    defer:
-      closeForegroundDaemon(daemon, tempRoot)
-      removeDir(tempRoot)
-    daemon = startForegroundDaemon(tempRoot)
+  when isNixSupported:
+    test "integration_daemon_stats_capture_opt_in":
+      let tempRoot = createTempDir("repro-daemon-m7-stats", "")
+      var daemon: owned(Process)
+      defer:
+        closeForegroundDaemon(daemon, tempRoot)
+        removeDir(tempRoot)
+      daemon = startForegroundDaemon(tempRoot)
 
-    let projectRoot = tempRoot / "project"
-    writeCopyProject(projectRoot, "daemonM7Stats", 2)
+      let projectRoot = tempRoot / "project"
+      writeCopyProject(projectRoot, "daemonM7Stats", 2)
 
-    let directCapture = requireFailure(shellCommand([
-      publicReproBin(), "build", projectRoot,
-      "--daemon=off",
-      "--tool-provisioning=path",
-      "--work-root=" & tempRoot / "direct-work",
-      "--stats-capture=timing",
-      "--no-runquota"
-    ], daemonEnv(tempRoot)), repoRoot())
-    check directCapture.contains(
-      "--stats-capture requires daemon-hosted build; direct-mode persistent " &
-        "capture is not implemented")
+      let directCapture = requireFailure(shellCommand([
+        publicReproBin(), "build", projectRoot,
+        "--daemon=off",
+        "--tool-provisioning=path",
+        "--work-root=" & tempRoot / "direct-work",
+        "--stats-capture=timing",
+        "--no-runquota"
+      ], daemonEnv(tempRoot)), repoRoot())
+      check directCapture.contains(
+        "--stats-capture requires daemon-hosted build; direct-mode persistent " &
+          "capture is not implemented")
 
-    discard requireSuccess(buildCommand(projectRoot, tempRoot, "work"),
-      repoRoot())
-    check not fileExists(statsStorePath(projectRoot))
+      discard requireSuccess(buildCommand(projectRoot, tempRoot, "work"),
+        repoRoot())
+      check not fileExists(statsStorePath(projectRoot))
 
-    let statusBefore = requireSuccess(shellCommand([
-      publicReproBin(), "stats", "status", "--project-root=" & projectRoot
-    ], daemonEnv(tempRoot)), repoRoot())
-    check statusBefore.contains("stats capture: disabled by default")
-    check statusBefore.contains("flushed: 0")
+      let statusBefore = requireSuccess(shellCommand([
+        publicReproBin(), "stats", "status", "--project-root=" & projectRoot
+      ], daemonEnv(tempRoot)), repoRoot())
+      check statusBefore.contains("stats capture: disabled by default")
+      check statusBefore.contains("flushed: 0")
 
-    discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-      ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
-    waitForStatsStore(projectRoot)
+      discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
+        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+      waitForStatsStore(projectRoot)
 
-    let statusAfter = requireSuccess(shellCommand([
-      publicReproBin(), "stats", "status", "--project-root=" & projectRoot
-    ], daemonEnv(tempRoot)), repoRoot())
-    check statusAfter.contains("format: jsonl observations + summary.json")
-    check statusAfter.contains("retention: raw-runs=50 window=90d")
-    check statusAfter.contains("timing=")
-    check statusAfter.contains("cache=")
-    check statusAfter.contains("runquota=")
-    check statusAfter.contains("deps=")
-    check statusAfter.contains("sessions=")
+      let statusAfter = requireSuccess(shellCommand([
+        publicReproBin(), "stats", "status", "--project-root=" & projectRoot
+      ], daemonEnv(tempRoot)), repoRoot())
+      check statusAfter.contains("format: jsonl observations + summary.json")
+      check statusAfter.contains("retention: raw-runs=50 window=90d")
+      check statusAfter.contains("timing=")
+      check statusAfter.contains("cache=")
+      check statusAfter.contains("runquota=")
+      check statusAfter.contains("deps=")
+      check statusAfter.contains("sessions=")
 
-    let overview = requireSuccess(shellCommand([
-      publicReproBin(), "stats", "overview", "--project-root=" & projectRoot
-    ], daemonEnv(tempRoot)), repoRoot())
-    check overview.contains("Stats window: runs=1")
-    check overview.contains("Actions: 2")
-    check overview.contains("Cache:")
-    check overview.contains("RunQuota:")
+      let overview = requireSuccess(shellCommand([
+        publicReproBin(), "stats", "overview", "--project-root=" & projectRoot
+      ], daemonEnv(tempRoot)), repoRoot())
+      check overview.contains("Stats window: runs=1")
+      check overview.contains("Actions: 2")
+      check overview.contains("Cache:")
+      check overview.contains("RunQuota:")
 
-    let invalid = requireFailure(shellCommand([
-      publicReproBin(), "build", projectRoot,
-      "--daemon=require",
-      "--tool-provisioning=path",
-      "--stats-capture=invalid"
-    ], daemonEnv(tempRoot)), repoRoot())
-    check invalid.contains("unsupported --stats-capture=invalid")
+      let invalid = requireFailure(shellCommand([
+        publicReproBin(), "build", projectRoot,
+        "--daemon=require",
+        "--tool-provisioning=path",
+        "--stats-capture=invalid"
+      ], daemonEnv(tempRoot)), repoRoot())
+      check invalid.contains("unsupported --stats-capture=invalid")
 
-  test "integration_stats_flush_not_in_build_hot_path":
-    let tempRoot = createTempDir("repro-daemon-m7-hot-path", "")
-    var daemon: owned(Process)
-    defer:
-      closeForegroundDaemon(daemon, tempRoot)
-      removeDir(tempRoot)
-    daemon = startForegroundDaemon(tempRoot)
+    test "integration_stats_flush_not_in_build_hot_path":
+      let tempRoot = createTempDir("repro-daemon-m7-hot-path", "")
+      var daemon: owned(Process)
+      defer:
+        closeForegroundDaemon(daemon, tempRoot)
+        removeDir(tempRoot)
+      daemon = startForegroundDaemon(tempRoot)
 
-    let projectRoot = tempRoot / "project"
-    writeCopyProject(projectRoot, "daemonM7HotPath", 1)
+      let projectRoot = tempRoot / "project"
+      writeCopyProject(projectRoot, "daemonM7HotPath", 1)
 
-    discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-      ["--stats-capture=timing,cache,runquota,deps,sessions"],
-      [("REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS", "8000")]), repoRoot())
-    check not fileExists(statsStorePath(projectRoot))
-    waitForStatsStore(projectRoot, timeoutSeconds = 20.0)
-    let summary = parseFile(projectRoot / ".repro" / "stats" / "summary.json")
-    check summary{"totalObservations"}.getInt() > 0
+      discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
+        ["--stats-capture=timing,cache,runquota,deps,sessions"],
+        [("REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS", "8000")]), repoRoot())
+      check not fileExists(statsStorePath(projectRoot))
+      waitForStatsStore(projectRoot, timeoutSeconds = 20.0)
+      let summary = parseFile(projectRoot / ".repro" / "stats" / "summary.json")
+      check summary{"totalObservations"}.getInt() > 0

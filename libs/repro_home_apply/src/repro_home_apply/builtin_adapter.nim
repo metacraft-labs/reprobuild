@@ -495,17 +495,14 @@ proc raiseExtractFailed(packageId, archivePath, archiveFormat,
 
 proc extractZip(packageId, archivePath, destDir: string) =
   createDir(extendedPath(destDir))
-  # Prefer `unzip` on POSIX hosts (universal) and fall back to
-  # PowerShell's Expand-Archive on Windows (built-in since Windows 8.1).
-  let unzip = findExe("unzip")
-  if unzip.len > 0:
-    let command = quoteShell(unzip) & " -q -o " & quoteShell(archivePath) &
-      " -d " & quoteShell(destDir)
-    let res = execCmdEx(command)
-    if res.exitCode != 0:
-      raiseExtractFailed(packageId, archivePath, "zip",
-        "unzip exited " & $res.exitCode & "\n" & res.output)
-    return
+  # On Windows we PREFER ``Expand-Archive`` because PowerShell-
+  # produced archives store paths with ``\\`` separators and the GNU
+  # ``unzip`` shipped by MSYS2 rejects those with "appears to use
+  # backslashes as path separators" (exit 1). ``Expand-Archive``
+  # round-trips its own archives correctly and also handles forward-
+  # slash archives produced by ``zip`` / ``7z``. On POSIX hosts we
+  # still prefer ``unzip`` because PowerShell is not universally
+  # available there.
   when defined(windows):
     let powershell = findExe("powershell")
     if powershell.len > 0:
@@ -519,9 +516,35 @@ proc extractZip(packageId, archivePath, destDir: string) =
         raiseExtractFailed(packageId, archivePath, "zip",
           "Expand-Archive exited " & $res.exitCode & "\n" & res.output)
       return
+  let unzip = findExe("unzip")
+  if unzip.len > 0:
+    let command = quoteShell(unzip) & " -q -o " & quoteShell(archivePath) &
+      " -d " & quoteShell(destDir)
+    let res = execCmdEx(command)
+    if res.exitCode != 0:
+      raiseExtractFailed(packageId, archivePath, "zip",
+        "unzip exited " & $res.exitCode & "\n" & res.output)
+    return
+  when not defined(windows):
+    # Final fallback on POSIX where PowerShell may exist via
+    # PowerShell Core; keep the original branch shape so a non-
+    # Windows host with PowerShell still has a path forward.
+    let powershell = findExe("powershell")
+    if powershell.len > 0:
+      let psCommand = "Expand-Archive -Path " & quoteShell(archivePath) &
+        " -DestinationPath " & quoteShell(destDir) & " -Force"
+      let command = quoteShell(powershell) &
+        " -NoProfile -ExecutionPolicy Bypass -Command " &
+        quoteShell(psCommand)
+      let res = execCmdEx(command)
+      if res.exitCode != 0:
+        raiseExtractFailed(packageId, archivePath, "zip",
+          "Expand-Archive exited " & $res.exitCode & "\n" & res.output)
+      return
   raiseExtractFailed(packageId, archivePath, "zip",
-    "no zip extractor available (tried unzip" &
-    (when defined(windows): ", powershell" else: "") & ")")
+    "no zip extractor available (tried " &
+    (when defined(windows): "powershell, " else: "") & "unzip" &
+    (when defined(windows): "" else: ", powershell") & ")")
 
 proc discoverSevenZipExe*(store: var Store; packageId: string):
     string =

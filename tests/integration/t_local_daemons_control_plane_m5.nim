@@ -177,118 +177,65 @@ proc buildCommand(projectRoot, tempRoot: string; extra: openArray[string] = []):
   ] & @extra, daemonEnv(tempRoot))
 
 suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
-  test "integration_daemon_hosts_two_watch_sessions":
-    let tempRoot = createTempDir("repro-daemon-m5-two-watch", "")
-    var daemon: owned(Process)
-    defer:
-      closeForegroundDaemon(daemon, tempRoot)
-      removeDir(tempRoot)
-    daemon = startForegroundDaemon(tempRoot)
+  when isNixSupported:
+    test "integration_daemon_hosts_two_watch_sessions":
+      let tempRoot = createTempDir("repro-daemon-m5-two-watch", "")
+      var daemon: owned(Process)
+      defer:
+        closeForegroundDaemon(daemon, tempRoot)
+        removeDir(tempRoot)
+      daemon = startForegroundDaemon(tempRoot)
 
-    let projectA = tempRoot / "project-a"
-    let projectB = tempRoot / "project-b"
-    writeWatchProject(projectA, "daemonM5WatchA", "a0\n")
-    writeWatchProject(projectB, "daemonM5WatchB", "b0\n")
+      let projectA = tempRoot / "project-a"
+      let projectB = tempRoot / "project-b"
+      writeWatchProject(projectA, "daemonM5WatchA", "a0\n")
+      writeWatchProject(projectB, "daemonM5WatchB", "b0\n")
 
-    let outA = requireSuccess(watchCommand(projectA, tempRoot, "work-a",
-      ["--detach"]), repoRoot())
-    let sessionA = sessionIdFromDetached(outA)
-    waitForFileContent(projectA / "dist" / "copied.txt", "a0\n", tempRoot)
-    discard waitForSessionsContains(tempRoot, sessionA & "\twatch\twatching")
+      let outA = requireSuccess(watchCommand(projectA, tempRoot, "work-a",
+        ["--detach"]), repoRoot())
+      let sessionA = sessionIdFromDetached(outA)
+      waitForFileContent(projectA / "dist" / "copied.txt", "a0\n", tempRoot)
+      discard waitForSessionsContains(tempRoot, sessionA & "\twatch\twatching")
 
-    let outB = requireSuccess(watchCommand(projectB, tempRoot, "work-b",
-      ["--detach"]), repoRoot())
-    let sessionB = sessionIdFromDetached(outB)
-    check sessionA != sessionB
+      let outB = requireSuccess(watchCommand(projectB, tempRoot, "work-b",
+        ["--detach"]), repoRoot())
+      let sessionB = sessionIdFromDetached(outB)
+      check sessionA != sessionB
 
-    waitForFileContent(projectB / "dist" / "copied.txt", "b0\n", tempRoot)
-    let active = waitForSessionsContains(tempRoot, "watching")
-    check active.contains(sessionA)
-    check active.contains(sessionB)
-    check active.contains("selectedRoots=")
-    check active.contains("tierState=single-tier")
+      waitForFileContent(projectB / "dist" / "copied.txt", "b0\n", tempRoot)
+      let active = waitForSessionsContains(tempRoot, "watching")
+      check active.contains(sessionA)
+      check active.contains(sessionB)
+      check active.contains("selectedRoots=")
+      check active.contains("tierState=single-tier")
 
-    waitForTimestampBoundary()
-    writeFile(projectA / "src" / "input.txt", "a1\n")
-    waitForFileContent(projectA / "dist" / "copied.txt", "a1\n", tempRoot)
-    check readFile(projectB / "dist" / "copied.txt") == "b0\n"
+      waitForTimestampBoundary()
+      writeFile(projectA / "src" / "input.txt", "a1\n")
+      waitForFileContent(projectA / "dist" / "copied.txt", "a1\n", tempRoot)
+      check readFile(projectB / "dist" / "copied.txt") == "b0\n"
 
-    waitForTimestampBoundary()
-    writeFile(projectB / "src" / "input.txt", "b1\n")
-    waitForFileContent(projectB / "dist" / "copied.txt", "b1\n", tempRoot)
-    discard requireSuccess(shellCommand(@[
-      publicReproBin(), "watch",
-      "--daemon=require",
-      "--stop=" & sessionA
-    ], daemonEnv(tempRoot)), repoRoot())
-    discard requireSuccess(shellCommand(@[
-      publicReproBin(), "watch",
-      "--daemon=require",
-      "--stop=" & sessionB
-    ], daemonEnv(tempRoot)), repoRoot())
-    let finishedA = waitForSessionsContains(tempRoot,
-      sessionA & "\twatch\tstopped", timeoutSeconds = 30.0)
-    let finishedB = waitForSessionsContains(tempRoot,
-      sessionB & "\twatch\tstopped", timeoutSeconds = 30.0)
-    check finishedA.contains(sessionA)
-    check finishedB.contains(sessionB)
-
-  test "integration_daemon_watch_detach_and_reattach":
-    let tempRoot = createTempDir("repro-daemon-m5-reattach", "")
-    var daemon: owned(Process)
-    defer:
-      closeForegroundDaemon(daemon, tempRoot)
-      removeDir(tempRoot)
-    daemon = startForegroundDaemon(tempRoot)
-
-    let projectRoot = tempRoot / "project"
-    writeWatchProject(projectRoot, "daemonM5Reattach", "r0\n")
-    let detached = requireSuccess(watchCommand(projectRoot, tempRoot, "work",
-      ["--detach"]), repoRoot())
-    let sessionId = sessionIdFromDetached(detached)
-    waitForFileContent(projectRoot / "dist" / "copied.txt", "r0\n", tempRoot)
-    discard waitForSessionsContains(tempRoot, sessionId & "\twatch\twatching")
-
-    waitForTimestampBoundary()
-    let attached = startProcess("env",
-      args = @[
-        "REPRO_DAEMON_ENDPOINT=" & daemonEndpoint(tempRoot),
-        "REPRO_DAEMON_STATE_DIR=" & daemonStateDir(tempRoot),
-        "REPROBUILD_STORE_ROOT=" & tempRoot / "store",
-        "PATH=" & getEnv("PATH"),
+      waitForTimestampBoundary()
+      writeFile(projectB / "src" / "input.txt", "b1\n")
+      waitForFileContent(projectB / "dist" / "copied.txt", "b1\n", tempRoot)
+      discard requireSuccess(shellCommand(@[
         publicReproBin(), "watch",
         "--daemon=require",
-        "--attach=" & sessionId
-      ],
-      workingDir = repoRoot(),
-      options = {poUsePath, poStdErrToStdOut})
-    defer:
-      if attached.running():
-        attached.terminate()
-        discard attached.waitForExit()
-      attached.close()
+        "--stop=" & sessionA
+      ], daemonEnv(tempRoot)), repoRoot())
+      discard requireSuccess(shellCommand(@[
+        publicReproBin(), "watch",
+        "--daemon=require",
+        "--stop=" & sessionB
+      ], daemonEnv(tempRoot)), repoRoot())
+      let finishedA = waitForSessionsContains(tempRoot,
+        sessionA & "\twatch\tstopped", timeoutSeconds = 30.0)
+      let finishedB = waitForSessionsContains(tempRoot,
+        sessionB & "\twatch\tstopped", timeoutSeconds = 30.0)
+      check finishedA.contains(sessionA)
+      check finishedB.contains(sessionB)
 
-    writeFile(projectRoot / "src" / "input.txt", "r1\n")
-    waitForFileContent(projectRoot / "dist" / "copied.txt", "r1\n", tempRoot)
-    discard requireSuccess(shellCommand(@[
-      publicReproBin(), "watch",
-      "--daemon=require",
-      "--stop=" & sessionId
-    ], daemonEnv(tempRoot)), repoRoot())
-
-    let exitCode = attached.waitForExit()
-    let output = attached.outputStream.readAll()
-    checkpoint(output)
-    check exitCode == 0
-    check output.contains("cycle 1 start initial")
-    check output.contains("event seen path=")
-    check output.contains("daemon-hosted watch stopped")
-    let stopped = waitForSessionsContains(tempRoot, "stopped")
-    check stopped.contains(sessionId)
-
-  test "integration_daemon_watch_macos_kqueue":
-    when defined(macosx):
-      let tempRoot = createTempDir("repro-daemon-m5-kqueue", "")
+    test "integration_daemon_watch_detach_and_reattach":
+      let tempRoot = createTempDir("repro-daemon-m5-reattach", "")
       var daemon: owned(Process)
       defer:
         closeForegroundDaemon(daemon, tempRoot)
@@ -296,61 +243,115 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
       daemon = startForegroundDaemon(tempRoot)
 
       let projectRoot = tempRoot / "project"
-      writeWatchProject(projectRoot, "daemonM5Kqueue", "k0\n")
-      let watcher = startProcess("env",
+      writeWatchProject(projectRoot, "daemonM5Reattach", "r0\n")
+      let detached = requireSuccess(watchCommand(projectRoot, tempRoot, "work",
+        ["--detach"]), repoRoot())
+      let sessionId = sessionIdFromDetached(detached)
+      waitForFileContent(projectRoot / "dist" / "copied.txt", "r0\n", tempRoot)
+      discard waitForSessionsContains(tempRoot, sessionId & "\twatch\twatching")
+
+      waitForTimestampBoundary()
+      let attached = startProcess("env",
         args = @[
           "REPRO_DAEMON_ENDPOINT=" & daemonEndpoint(tempRoot),
           "REPRO_DAEMON_STATE_DIR=" & daemonStateDir(tempRoot),
           "REPROBUILD_STORE_ROOT=" & tempRoot / "store",
-          publicReproBin(), "watch", projectRoot,
+          "PATH=" & getEnv("PATH"),
+          publicReproBin(), "watch",
           "--daemon=require",
-          "--tool-provisioning=path",
-          "--work-root=" & tempRoot / "work",
-          "--debounce-ms=50",
-          "--max-cycles=2"
+          "--attach=" & sessionId
         ],
         workingDir = repoRoot(),
         options = {poUsePath, poStdErrToStdOut})
       defer:
-        if watcher.running():
-          watcher.terminate()
-          discard watcher.waitForExit()
-        watcher.close()
+        if attached.running():
+          attached.terminate()
+          discard attached.waitForExit()
+        attached.close()
 
-      waitForFileContent(projectRoot / "dist" / "copied.txt", "k0\n",
-        tempRoot)
-      waitForTimestampBoundary()
-      writeFile(projectRoot / "src" / "input.txt", "k1\n")
-      waitForFileContent(projectRoot / "dist" / "copied.txt", "k1\n",
-        tempRoot)
-      let exitCode = watcher.waitForExit()
-      let output = watcher.outputStream.readAll()
+      writeFile(projectRoot / "src" / "input.txt", "r1\n")
+      waitForFileContent(projectRoot / "dist" / "copied.txt", "r1\n", tempRoot)
+      discard requireSuccess(shellCommand(@[
+        publicReproBin(), "watch",
+        "--daemon=require",
+        "--stop=" & sessionId
+      ], daemonEnv(tempRoot)), repoRoot())
+
+      let exitCode = attached.waitForExit()
+      let output = attached.outputStream.readAll()
+      checkpoint(output)
       check exitCode == 0
+      check output.contains("cycle 1 start initial")
       check output.contains("event seen path=")
-      check output.contains("detail=write") or output.contains("detail=extend") or
-        output.contains("detail=attrib") or output.contains("detail=rename")
-    else:
-      echo "[platform N/A] macOS kqueue daemon-hosted watch test"
+      check output.contains("daemon-hosted watch stopped")
+      let stopped = waitForSessionsContains(tempRoot, "stopped")
+      check stopped.contains(sessionId)
 
-  test "direct one-shot build and direct watch remain available":
-    let tempRoot = createTempDir("repro-daemon-m5-direct", "")
-    defer:
-      stopDaemon(tempRoot)
-      removeDir(tempRoot)
+    test "integration_daemon_watch_macos_kqueue":
+      when defined(macosx):
+        let tempRoot = createTempDir("repro-daemon-m5-kqueue", "")
+        var daemon: owned(Process)
+        defer:
+          closeForegroundDaemon(daemon, tempRoot)
+          removeDir(tempRoot)
+        daemon = startForegroundDaemon(tempRoot)
 
-    let projectRoot = tempRoot / "project"
-    writeWatchProject(projectRoot, "daemonM5Direct", "d0\n")
-    let buildOut = requireSuccess(buildCommand(projectRoot, tempRoot,
-      ["--daemon=off", "--no-runquota"]), repoRoot())
-    check buildOut.contains("project: daemonM5Direct")
-    waitForFileContent(projectRoot / "dist" / "copied.txt", "d0\n")
+        let projectRoot = tempRoot / "project"
+        writeWatchProject(projectRoot, "daemonM5Kqueue", "k0\n")
+        let watcher = startProcess("env",
+          args = @[
+            "REPRO_DAEMON_ENDPOINT=" & daemonEndpoint(tempRoot),
+            "REPRO_DAEMON_STATE_DIR=" & daemonStateDir(tempRoot),
+            "REPROBUILD_STORE_ROOT=" & tempRoot / "store",
+            publicReproBin(), "watch", projectRoot,
+            "--daemon=require",
+            "--tool-provisioning=path",
+            "--work-root=" & tempRoot / "work",
+            "--debounce-ms=50",
+            "--max-cycles=2"
+          ],
+          workingDir = repoRoot(),
+          options = {poUsePath, poStdErrToStdOut})
+        defer:
+          if watcher.running():
+            watcher.terminate()
+            discard watcher.waitForExit()
+          watcher.close()
 
-    let watchOut = requireSuccess(shellCommand(@[
-      publicReproBin(), "watch", projectRoot,
-      "--daemon=off",
-      "--tool-provisioning=path",
-      "--work-root=" & tempRoot / "direct-watch",
-      "--max-cycles=1"
-    ], daemonEnv(tempRoot)), repoRoot())
-    check watchOut.contains("repro watch: cycle 1 start initial")
-    check watchOut.contains("repro watch: max cycles reached")
+        waitForFileContent(projectRoot / "dist" / "copied.txt", "k0\n",
+          tempRoot)
+        waitForTimestampBoundary()
+        writeFile(projectRoot / "src" / "input.txt", "k1\n")
+        waitForFileContent(projectRoot / "dist" / "copied.txt", "k1\n",
+          tempRoot)
+        let exitCode = watcher.waitForExit()
+        let output = watcher.outputStream.readAll()
+        check exitCode == 0
+        check output.contains("event seen path=")
+        check output.contains("detail=write") or output.contains("detail=extend") or
+          output.contains("detail=attrib") or output.contains("detail=rename")
+      else:
+        echo "[platform N/A] macOS kqueue daemon-hosted watch test"
+
+    test "direct one-shot build and direct watch remain available":
+      let tempRoot = createTempDir("repro-daemon-m5-direct", "")
+      defer:
+        stopDaemon(tempRoot)
+        removeDir(tempRoot)
+
+      let projectRoot = tempRoot / "project"
+      writeWatchProject(projectRoot, "daemonM5Direct", "d0\n")
+      let buildOut = requireSuccess(buildCommand(projectRoot, tempRoot,
+        ["--daemon=off", "--no-runquota"]), repoRoot())
+      check buildOut.contains("project: daemonM5Direct")
+      waitForFileContent(projectRoot / "dist" / "copied.txt", "d0\n")
+
+      let watchOut = requireSuccess(shellCommand(@[
+        publicReproBin(), "watch", projectRoot,
+        "--daemon=off",
+        "--tool-provisioning=path",
+        "--work-root=" & tempRoot / "direct-watch",
+        "--max-cycles=1"
+      ], daemonEnv(tempRoot)), repoRoot())
+      check watchOut.contains("repro watch: cycle 1 start initial")
+      check watchOut.contains("repro watch: max cycles reached")

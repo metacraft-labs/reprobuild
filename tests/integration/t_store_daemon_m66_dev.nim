@@ -68,7 +68,9 @@ const
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 proc shortEndpoint(name: string): string =
-  "/tmp/repro-m66-" & $getCurrentProcessId() & "-" & name & ".sock"
+  # Portable AF_UNIX-or-Named-Pipe endpoint that matches what the
+  # store daemon's IPC abstraction expects on each platform.
+  daemonSocketEndpoint("repro-m66-" & $getCurrentProcessId() & "-" & name)
 
 proc binaryPath(): string = getAppFilename()
 

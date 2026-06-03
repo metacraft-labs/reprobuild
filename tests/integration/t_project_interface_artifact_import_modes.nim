@@ -6,8 +6,18 @@ import repro_core/paths as corepaths
 import repro_domain_types
 import repro_hash
 import repro_interface_artifacts
+import repro_test_support
 
-const ExpectedNimCompiler = staticExec("command -v nim").strip()
+# Resolve the host's ``nim`` once at compile time so the test can spawn
+# subprocesses by absolute path. ``command -v`` is POSIX-only; on
+# Windows we fall back to ``where nim``. Both return the canonical
+# executable path so the rest of the test works unchanged across
+# platforms.
+const ExpectedNimCompiler =
+  when defined(windows):
+    staticExec("where nim").splitLines()[0].strip()
+  else:
+    staticExec("command -v nim").strip()
 
 type
   ThinConsumerEdge = object
@@ -15,12 +25,10 @@ type
     declaredInputs: seq[string]
     actionFingerprint: ContentDigest
 
-proc q(value: string): string =
-  "'" & value.replace("'", "'\\''") & "'"
-
-proc runNim(args: openArray[string]; cwd = getCurrentDir()): tuple[code: int; output: string] =
-  let res = execCmdEx(args.mapIt(q(it)).join(" "), workingDir = cwd)
-  (code: res.exitCode, output: res.output)
+proc runNim(args: openArray[string]; cwd = getCurrentDir()):
+    tuple[code: int; output: string] =
+  let res = runShell(shellCommand(@args), cwd)
+  (code: res.code, output: res.output)
 
 proc requireNimSuccess(args: openArray[string]; cwd = getCurrentDir()): string =
   let res = runNim(args, cwd)

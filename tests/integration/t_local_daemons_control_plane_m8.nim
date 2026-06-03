@@ -157,138 +157,139 @@ proc waitForTimestampBoundary() =
   sleep(1100)
 
 suite "Local daemons/control-plane M8 graph and stats analysis":
-  test "integration_stats_rank_core_scopes":
-    let tempRoot = createTempDir("repro-daemon-m8-rank", "")
-    var daemon: owned(Process)
-    defer:
-      closeForegroundDaemon(daemon, tempRoot)
-      removeDir(tempRoot)
-    daemon = startForegroundDaemon(tempRoot)
+  when isNixSupported:
+    test "integration_stats_rank_core_scopes":
+      let tempRoot = createTempDir("repro-daemon-m8-rank", "")
+      var daemon: owned(Process)
+      defer:
+        closeForegroundDaemon(daemon, tempRoot)
+        removeDir(tempRoot)
+      daemon = startForegroundDaemon(tempRoot)
 
-    let projectRoot = tempRoot / "project"
-    writeCopyProject(projectRoot, "daemonM8Rank", 3)
-    discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-      ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
-    waitForStatsStore(projectRoot)
+      let projectRoot = tempRoot / "project"
+      writeCopyProject(projectRoot, "daemonM8Rank", 3)
+      discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
+        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+      waitForStatsStore(projectRoot)
 
-    let actions = runStatsJson(projectRoot, tempRoot,
-      ["rank", "--scope=actions", "--by=cache-miss-count"])
-    check actions{"schemaId"}.getStr() == "reprobuild.stats.rank.v1"
-    check actions{"scope"}.getStr() == "actions"
-    check actions{"rows"}.len > 0
+      let actions = runStatsJson(projectRoot, tempRoot,
+        ["rank", "--scope=actions", "--by=cache-miss-count"])
+      check actions{"schemaId"}.getStr() == "reprobuild.stats.rank.v1"
+      check actions{"scope"}.getStr() == "actions"
+      check actions{"rows"}.len > 0
 
-    let inputCount = runStatsJson(projectRoot, tempRoot,
-      ["rank", "--scope=actions", "--by=input-count"])
-    check inputCount{"metric"}.getStr() == "input-count"
-    check inputCount{"rows"}.len > 0
+      let inputCount = runStatsJson(projectRoot, tempRoot,
+        ["rank", "--scope=actions", "--by=input-count"])
+      check inputCount{"metric"}.getStr() == "input-count"
+      check inputCount{"rows"}.len > 0
 
-    let peakMemory = runStatsJson(projectRoot, tempRoot,
-      ["rank", "--scope=actions", "--by=peak-memory"])
-    check not peakMemory{"availability"}{"available"}.getBool()
-    check peakMemory{"availability"}{"reason"}.getStr().contains("not captured")
+      let peakMemory = runStatsJson(projectRoot, tempRoot,
+        ["rank", "--scope=actions", "--by=peak-memory"])
+      check not peakMemory{"availability"}{"available"}.getBool()
+      check peakMemory{"availability"}{"reason"}.getStr().contains("not captured")
 
-    let inputs = runStatsJson(projectRoot, tempRoot,
-      ["rank", "--scope=inputs", "--by=blast-radius"])
-    check inputs{"scope"}.getStr() == "inputs"
-    check inputs{"graph"}{"loweredGraphCachePath"}.getStr().len > 0
-    check inputs{"rows"}.len > 0
+      let inputs = runStatsJson(projectRoot, tempRoot,
+        ["rank", "--scope=inputs", "--by=blast-radius"])
+      check inputs{"scope"}.getStr() == "inputs"
+      check inputs{"graph"}{"loweredGraphCachePath"}.getStr().len > 0
+      check inputs{"rows"}.len > 0
 
-    let inputUnavailable = runStatsJson(projectRoot, tempRoot,
-      ["rank", "--scope=inputs", "--by=change-frequency"])
-    check not inputUnavailable{"availability"}{"available"}.getBool()
+      let inputUnavailable = runStatsJson(projectRoot, tempRoot,
+        ["rank", "--scope=inputs", "--by=change-frequency"])
+      check not inputUnavailable{"availability"}{"available"}.getBool()
 
-    let targets = runStatsJson(projectRoot, tempRoot,
-      ["rank", "--scope=targets", "--by=build-time"])
-    check targets{"scope"}.getStr() == "targets"
-    check targets{"rows"}.len > 0
+      let targets = runStatsJson(projectRoot, tempRoot,
+        ["rank", "--scope=targets", "--by=build-time"])
+      check targets{"scope"}.getStr() == "targets"
+      check targets{"rows"}.len > 0
 
-    let tools = runStatsJson(projectRoot, tempRoot,
-      ["rank", "--scope=tools", "--by=cache-hit-ratio"])
-    check tools{"scope"}.getStr() == "tools"
-    check tools{"rows"}.len > 0
+      let tools = runStatsJson(projectRoot, tempRoot,
+        ["rank", "--scope=tools", "--by=cache-hit-ratio"])
+      check tools{"scope"}.getStr() == "tools"
+      check tools{"rows"}.len > 0
 
-  test "integration_stats_snapshot_compare":
-    let tempRoot = createTempDir("repro-daemon-m8-snapshot", "")
-    var daemon: owned(Process)
-    defer:
-      closeForegroundDaemon(daemon, tempRoot)
-      removeDir(tempRoot)
-    daemon = startForegroundDaemon(tempRoot)
+    test "integration_stats_snapshot_compare":
+      let tempRoot = createTempDir("repro-daemon-m8-snapshot", "")
+      var daemon: owned(Process)
+      defer:
+        closeForegroundDaemon(daemon, tempRoot)
+        removeDir(tempRoot)
+      daemon = startForegroundDaemon(tempRoot)
 
-    let projectRoot = tempRoot / "project"
-    writeCopyProject(projectRoot, "daemonM8Snapshot", 2)
-    discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-      ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
-    waitForStatsStore(projectRoot)
+      let projectRoot = tempRoot / "project"
+      writeCopyProject(projectRoot, "daemonM8Snapshot", 2)
+      discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
+        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+      waitForStatsStore(projectRoot)
 
-    let baseline = runStatsJson(projectRoot, tempRoot,
-      ["snapshot", "--label=before"])
-    check baseline{"schemaId"}.getStr() == "reprobuild.stats.snapshot.v1"
-    check fileExists(projectRoot / ".repro" / "stats" / "snapshots" / "before.json")
+      let baseline = runStatsJson(projectRoot, tempRoot,
+        ["snapshot", "--label=before"])
+      check baseline{"schemaId"}.getStr() == "reprobuild.stats.snapshot.v1"
+      check fileExists(projectRoot / ".repro" / "stats" / "snapshots" / "before.json")
 
-    waitForTimestampBoundary()
-    writeFile(projectRoot / "src" / "input-0.txt", "changed\n")
-    discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-      ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
-    waitForStatsStore(projectRoot)
-    let candidate = runStatsJson(projectRoot, tempRoot,
-      ["snapshot", "--label=after"])
-    check candidate{"window"}{"observationCount"}.getInt() >=
-      baseline{"window"}{"observationCount"}.getInt()
+      waitForTimestampBoundary()
+      writeFile(projectRoot / "src" / "input-0.txt", "changed\n")
+      discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
+        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+      waitForStatsStore(projectRoot)
+      let candidate = runStatsJson(projectRoot, tempRoot,
+        ["snapshot", "--label=after"])
+      check candidate{"window"}{"observationCount"}.getInt() >=
+        baseline{"window"}{"observationCount"}.getInt()
 
-    let compare = runStatsJson(projectRoot, tempRoot,
-      ["compare", "--baseline=before", "--candidate=after"])
-    check compare{"schemaId"}.getStr() == "reprobuild.stats.compare.v1"
-    check compare{"deltas"}{"observationCount"}.getInt() >= 0
-    check compare{"rollupDeltas"}{"actionsByCacheMissCount"}.len > 0
-    check compare{"rollupDeltas"}{"actionsByCacheMissCount"}[0]{"actionId"}.getStr().len > 0
-    check compare{"rollupDeltas"}{"targetsByBuildTime"}.len > 0
+      let compare = runStatsJson(projectRoot, tempRoot,
+        ["compare", "--baseline=before", "--candidate=after"])
+      check compare{"schemaId"}.getStr() == "reprobuild.stats.compare.v1"
+      check compare{"deltas"}{"observationCount"}.getInt() >= 0
+      check compare{"rollupDeltas"}{"actionsByCacheMissCount"}.len > 0
+      check compare{"rollupDeltas"}{"actionsByCacheMissCount"}[0]{"actionId"}.getStr().len > 0
+      check compare{"rollupDeltas"}{"targetsByBuildTime"}.len > 0
 
-  test "integration_graph_analysis_views":
-    let tempRoot = createTempDir("repro-daemon-m8-graph", "")
-    var daemon: owned(Process)
-    defer:
-      closeForegroundDaemon(daemon, tempRoot)
-      removeDir(tempRoot)
-    daemon = startForegroundDaemon(tempRoot)
+    test "integration_graph_analysis_views":
+      let tempRoot = createTempDir("repro-daemon-m8-graph", "")
+      var daemon: owned(Process)
+      defer:
+        closeForegroundDaemon(daemon, tempRoot)
+        removeDir(tempRoot)
+      daemon = startForegroundDaemon(tempRoot)
 
-    let projectRoot = tempRoot / "project"
-    writeCopyProject(projectRoot, "daemonM8Graph", 2)
-    discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-      ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
-    waitForStatsStore(projectRoot)
+      let projectRoot = tempRoot / "project"
+      writeCopyProject(projectRoot, "daemonM8Graph", 2)
+      discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
+        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+      waitForStatsStore(projectRoot)
 
-    let baseGraph = runGraphJson(projectRoot, tempRoot, [])
-    let actionId = baseGraph{"actions"}[0]{"id"}.getStr()
-    let inputPath = baseGraph{"actions"}[0]{"inputs"}[0].getStr()
+      let baseGraph = runGraphJson(projectRoot, tempRoot, [])
+      let actionId = baseGraph{"actions"}[0]{"id"}.getStr()
+      let inputPath = baseGraph{"actions"}[0]{"inputs"}[0].getStr()
 
-    writeFile(projectRoot / "dist" / "output-0.txt", "sentinel\n")
-    let neighborhood = runGraphJson(projectRoot, tempRoot,
-      ["--view=neighborhood", "--focus=" & actionId])
-    check neighborhood{"schemaId"}.getStr() == "reprobuild.graph.analysis-view.v1"
-    check neighborhood{"view"}.getStr() == "neighborhood"
+      writeFile(projectRoot / "dist" / "output-0.txt", "sentinel\n")
+      let neighborhood = runGraphJson(projectRoot, tempRoot,
+        ["--view=neighborhood", "--focus=" & actionId])
+      check neighborhood{"schemaId"}.getStr() == "reprobuild.graph.analysis-view.v1"
+      check neighborhood{"view"}.getStr() == "neighborhood"
 
-    let inputs = runGraphJson(projectRoot, tempRoot,
-      ["--view=inputs", "--focus=" & actionId])
-    check inputs{"inputs"}.len > 0
+      let inputs = runGraphJson(projectRoot, tempRoot,
+        ["--view=inputs", "--focus=" & actionId])
+      check inputs{"inputs"}.len > 0
 
-    let dependents = runGraphJson(projectRoot, tempRoot,
-      ["--view=dependents", "--path=" & inputPath])
-    check dependents{"directDependentCount"}.getInt() > 0
+      let dependents = runGraphJson(projectRoot, tempRoot,
+        ["--view=dependents", "--path=" & inputPath])
+      check dependents{"directDependentCount"}.getInt() > 0
 
-    let blast = runGraphJson(projectRoot, tempRoot,
-      ["--view=blast-radius", "--path=" & inputPath])
-    check blast{"blastRadiusCount"}.getInt() >=
-      dependents{"directDependentCount"}.getInt()
+      let blast = runGraphJson(projectRoot, tempRoot,
+        ["--view=blast-radius", "--path=" & inputPath])
+      check blast{"blastRadiusCount"}.getInt() >=
+        dependents{"directDependentCount"}.getInt()
 
-    let critical = runGraphJson(projectRoot, tempRoot,
-      ["--view=critical-path", "--run=last"])
-    check critical{"view"}.getStr() == "critical-path"
-    check not critical{"availability"}{"available"}.getBool()
+      let critical = runGraphJson(projectRoot, tempRoot,
+        ["--view=critical-path", "--run=last"])
+      check critical{"view"}.getStr() == "critical-path"
+      check not critical{"availability"}{"available"}.getBool()
 
-    let partition = runGraphJson(projectRoot, tempRoot,
-      ["--view=partition-candidates", "--kind=dylib"])
-    check not partition{"availability"}{"available"}.getBool()
-    check partition{"availability"}{"reason"}.getStr().contains("deferred")
+      let partition = runGraphJson(projectRoot, tempRoot,
+        ["--view=partition-candidates", "--kind=dylib"])
+      check not partition{"availability"}{"available"}.getBool()
+      check partition{"availability"}{"reason"}.getStr().contains("deferred")
 
-    check readFile(projectRoot / "dist" / "output-0.txt") == "sentinel\n"
+      check readFile(projectRoot / "dist" / "output-0.txt") == "sentinel\n"
