@@ -111,13 +111,20 @@ proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()) =
       raise newException(UserDaemonClientError,
         "unexpected user-daemon shutdown frame: " & $frame.kind)
 
-  # Poll for endpoint quiescence. The deadline is generous — on
-  # Windows ``releaseUserDaemonLock`` synchronously removes the
-  # lockfile after closing the handle, so the loop typically returns
-  # on the first iteration.
+  # Poll for endpoint quiescence. The daemon's listener-defer runs
+  # FIRST (LIFO order) — that closes the IPC listener and flips
+  # ``endpointAcceptsConnections`` to false. The lockfile release
+  # runs in the SECOND defer immediately after, so a small fixed
+  # grace period after the endpoint goes quiet is enough to make
+  # ``removeDir(stateDir)`` race-free in callers like
+  # ``tests/integration/t_local_daemons_control_plane_m*``.
   let deadline = epochTime() + 5.0
   while epochTime() < deadline:
     if not endpointAcceptsConnections(endpoint):
+      # ``releaseUserDaemonLock`` is the next defer to run and does
+      # nothing but ``CloseHandle`` + ``removeFile`` synchronously.
+      # 200 ms covers a heavily-loaded Windows host comfortably.
+      sleep(200)
       return
     sleep(10)
   # Time-out: the daemon is still listening 5 s after ACK. That's a

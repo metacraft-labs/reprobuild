@@ -1290,6 +1290,11 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
   var listener = bindIpcListener(config.endpoint)
   var selfRestarting = false
   defer:
+    # The listener-defer runs BEFORE the daemonLock-defer (LIFO).
+    # Closing the listener flips ``endpointAcceptsConnections`` to
+    # false — the visible signal ``requestUserDaemonShutdown``
+    # polls on. The daemonLock-defer then releases the lockfile
+    # handle and unlinks ``.repro-daemon.lock``.
     closeIpcListener(listener)
     if not selfRestarting:
       removeEndpointFiles(config)
