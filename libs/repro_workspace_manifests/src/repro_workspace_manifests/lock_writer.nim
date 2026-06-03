@@ -355,6 +355,54 @@ proc updateLockIndex*(indexPath: string;
   createDir(parentDir(indexPath))
   writeFile(indexPath, serializeLockIndexToToml(result.index))
 
+# ---- M12 helpers: lock-index lookup for `repro workspace status` -----------
+
+proc latestLockIndexEntry*(index: WorkspaceLockIndexFile):
+    Option[WorkspaceLockIndexEntry] =
+  ## Return the index entry with the lexicographically-largest
+  ## ``createdAt`` timestamp (the RFC-3339 ``Z``-suffixed string the
+  ## writer emits sorts identically to chronological order, so plain
+  ## string ``cmp`` is the right primitive). Empty indices yield
+  ## ``none(WorkspaceLockIndexEntry)``. Used by M12's
+  ## ``repro workspace status`` to compare each live HEAD against the
+  ## most-recently-locked SHA.
+  if index.entries.len == 0:
+    return none(WorkspaceLockIndexEntry)
+  var best = 0
+  for i in 1 ..< index.entries.len:
+    if cmp(index.entries[i].createdAt,
+        index.entries[best].createdAt) > 0:
+      best = i
+  some(index.entries[best])
+
+proc readLatestLockedShasByPath*(manifestLayerRoot, project: string):
+    Table[string, string] =
+  ## Return a ``path -> revision`` map for the repos recorded in the
+  ## most-recently-written lock file for ``project`` under
+  ## ``<manifestLayerRoot>/locks/<project>/``. An empty / missing
+  ## index, or a missing lock file on disk, yields an empty table —
+  ## the caller's M12 status renderer then reports each repo as
+  ## ``no-lock-recorded`` without erroring.
+  result = initTable[string, string]()
+  let indexPath = lockIndexPath(manifestLayerRoot, project)
+  if not fileExists(indexPath):
+    return
+  let index = loadLockIndex(indexPath)
+  let latest = latestLockIndexEntry(index)
+  if latest.isNone:
+    return
+  # The index entry's ``lockFile`` is the manifest-layer-relative path
+  # (M11 emits ``"locks/<project>/<file>.toml"`` with forward slashes
+  # so it round-trips across hosts). Resolve it relative to the
+  # manifest layer root, normalising separators for the host OS.
+  let relLockFile = latest.get().lockFile.replace('/', DirSep)
+  let lockPath = manifestLayerRoot / relLockFile
+  if not fileExists(lockPath):
+    return
+  let lock = readLock(lockPath)
+  for repo in lock.repo:
+    result[repo.path] = repo.revision
+
 # ---- convenience: ensure stable ordering of repos --------------------------
 
 proc sortLockReposByPath*(lock: var WorkspaceLockFile) =

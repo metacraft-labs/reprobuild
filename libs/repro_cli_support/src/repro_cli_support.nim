@@ -12616,6 +12616,895 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
     stdout.writeLine(line)
   outcome.report.exitCode
 
+# ---- M12: `repro workspace status / list / manifests` ---------------------
+#
+# Three read-only introspection commands per
+# ``reprobuild-specs/CLI/workspace.md``:
+#
+#   * ``status``    — consumes the M4 evidence schema. Walks every repo
+#                     the resolver (or M8 composer) declares, gathers a
+#                     fresh ``WorkspaceVcsEvidence`` triple (head-sha,
+#                     is-clean, is-published), and compares each live
+#                     HEAD against the most-recently-locked SHA in the
+#                     M11 lock-index (when one is present). Emits a
+#                     workspace-level header (project, active branch,
+#                     manifest-layer drift flag) plus a per-repo body.
+#
+#   * ``list``      — walks the M6 resolver result and prints the
+#                     declared (name, path, remote, revision) tuples
+#                     plus M8 layer provenance / visibility tags. No
+#                     live VCS queries: this is purely "what does the
+#                     manifest say my workspace should contain".
+#
+#   * ``manifests`` — enumerates the M8 layer set declared in
+#                     ``.repo/workspace.toml``: per-layer URL or
+#                     local_path, visibility tier, the layer's on-disk
+#                     checkout path, and the list of composed repos
+#                     each layer ultimately contributed to. When no
+#                     workspace.toml is present, prints a single
+#                     "no layered workspace" line and exits 0.
+#
+# All three follow the M9/M10/M11 convention: parse argv, build a
+# typed report, render text lines, write the JSON artifact at
+# ``<workspaceRoot>/.repro/workspace/<command>-report.json``. Exit
+# codes are 0 on success and 1 on IO / resolve failure; there is no
+# refuse-and-report branch (these are read-only commands).
+#
+# ``--json`` mode: when set, suppress the text rendering and print
+# only the JSON report to stdout (in addition to writing it under
+# ``.repro/workspace/``). Convenient for scripts that want a single
+# parseable payload without the human-readable noise.
+
+# ---- M12 shared visibility-tag helper -------------------------------------
+
+proc visibilityTag(visibility: WorkspaceVisibility): string =
+  ## Stable string tag for a ``WorkspaceVisibility`` value, used by
+  ## both ``list`` and ``manifests`` for their JSON shape and text
+  ## rendering. Mirrors the strings the workspace.toml schema accepts
+  ## (with "personal" as the canonical name for the per-developer
+  ## tier; "private" is treated as a synonym in compose.nim).
+  case visibility
+  of wvPublic: "public"
+  of wvOrg: "org"
+  of wvTeam: "team"
+  of wvPersonal: "personal"
+
+# ---- M12.A: `repro workspace status` --------------------------------------
+
+type
+  WorkspaceStatusRepoEntry* = object
+    ## One per declared repo in the live workspace. ``lockState`` is
+    ## the three-valued comparison vs the most-recently-locked SHA:
+    ## ``at-lock`` / ``drifted-from-lock`` / ``no-lock-recorded``.
+    ## ``checkoutState`` is one of ``missing`` / ``dirty`` / ``clean``
+    ## and is derived from the M4 evidence ``isClean`` field plus a
+    ## directory-existence pre-check.
+    name*: string
+    path*: string
+    branch*: string
+    headSha*: string
+    isClean*: bool
+    isPublished*: bool
+    diagnostic*: string
+    expectedRevision*: string
+    checkoutState*: string
+    lockedRevision*: string
+    lockState*: string
+    manifestLayer*: string
+
+  WorkspaceStatusManifestEntry* = object
+    ## One per refreshed manifest layer (M10's ``refreshManifestLayers``
+    ## output). M12 mirrors the M10 sync report's shape so the JSON
+    ## stays uniform.
+    index*: int
+    provenance*: string
+    layerPath*: string
+    status*: string
+    beforeSha*: string
+    afterSha*: string
+    diagnostic*: string
+
+  WorkspaceStatusReport* = object
+    ## Structured outcome of one ``repro workspace status`` invocation.
+    ## ``activeBranch`` is the workspace's advisory branch — see the
+    ## comment on ``deriveActiveBranch`` for the heuristic M12 uses
+    ## (M13 will replace this with a metadata-backed value).
+    project*: string
+    workspaceRoot*: string
+    activeBranch*: string
+    manifestLayerRoot*: string
+    lockIndexPath*: string
+    hasLockIndex*: bool
+    manifestLayers*: seq[WorkspaceStatusManifestEntry]
+    repos*: seq[WorkspaceStatusRepoEntry]
+    summary*: tuple[clean, dirty, missing, drifted, atLock,
+      noLockRecorded: int]
+    exitCode*: int
+
+proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["activeBranch"] = %report.activeBranch
+  result["manifestLayerRoot"] = %report.manifestLayerRoot
+  result["lockIndexPath"] = %report.lockIndexPath
+  result["hasLockIndex"] = %report.hasLockIndex
+  var layers = newJArray()
+  for entry in report.manifestLayers:
+    var obj = newJObject()
+    obj["index"] = %entry.index
+    obj["provenance"] = %entry.provenance
+    obj["layerPath"] = %entry.layerPath
+    obj["status"] = %entry.status
+    obj["beforeSha"] = %entry.beforeSha
+    obj["afterSha"] = %entry.afterSha
+    obj["diagnostic"] = %entry.diagnostic
+    layers.add(obj)
+  result["manifestLayers"] = layers
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["branch"] = %entry.branch
+    obj["headSha"] = %entry.headSha
+    obj["isClean"] = %entry.isClean
+    obj["isPublished"] = %entry.isPublished
+    obj["diagnostic"] = %entry.diagnostic
+    obj["expectedRevision"] = %entry.expectedRevision
+    obj["checkoutState"] = %entry.checkoutState
+    obj["lockedRevision"] = %entry.lockedRevision
+    obj["lockState"] = %entry.lockState
+    obj["manifestLayer"] = %entry.manifestLayer
+    repos.add(obj)
+  result["repos"] = repos
+  var summary = newJObject()
+  summary["clean"] = %report.summary.clean
+  summary["dirty"] = %report.summary.dirty
+  summary["missing"] = %report.summary.missing
+  summary["drifted"] = %report.summary.drifted
+  summary["atLock"] = %report.summary.atLock
+  summary["noLockRecorded"] = %report.summary.noLockRecorded
+  result["summary"] = summary
+  result["exitCode"] = %report.exitCode
+
+proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
+  result.add("workspace status: project=" & report.project &
+    " branch=" & (if report.activeBranch.len > 0:
+                    report.activeBranch
+                  else: "<none>"))
+  if report.hasLockIndex:
+    result.add("workspace status: lock-index=" & report.lockIndexPath)
+  else:
+    result.add("workspace status: no lock-index recorded")
+  for entry in report.manifestLayers:
+    result.add("workspace status: manifest-layer " & entry.provenance &
+      " status=" & entry.status)
+  for entry in report.repos:
+    var line = "workspace status: " & entry.path & " " &
+      entry.checkoutState
+    if entry.branch.len > 0:
+      line.add(" branch=" & entry.branch)
+    if entry.headSha.len > 0:
+      line.add(" head=" & entry.headSha[0 ..< min(8, entry.headSha.len)])
+    line.add(" lock=" & entry.lockState)
+    if entry.diagnostic.len > 0:
+      line.add(" (" & entry.diagnostic & ")")
+    result.add(line)
+  result.add("workspace status: summary clean=" & $report.summary.clean &
+    " dirty=" & $report.summary.dirty &
+    " missing=" & $report.summary.missing &
+    " drifted=" & $report.summary.drifted &
+    " atLock=" & $report.summary.atLock &
+    " noLockRecorded=" & $report.summary.noLockRecorded)
+
+type
+  WorkspaceStatusArgs = object
+    workspaceRoot: string
+    projectName: string
+    json: bool
+    toolProvisioning: ToolProvisioningMode
+
+proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
+  ## ``repro workspace status`` argv parser. The single optional
+  ## positional is the project name (only required when no
+  ## ``.repo/workspace.toml`` is present — same dispatch rule as
+  ## M10's sync and M11's lock commands). Optional flags:
+  ##   ``--workspace-root=PATH``
+  ##   ``--tool-provisioning=path|nix|tarball|scoop``
+  ##   ``--json``  — print the JSON report to stdout in place of text.
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace status` flag: " & arg)
+    elif result.projectName.len == 0:
+      result.projectName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro workspace status`: " &
+          arg)
+    inc i
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveWorkspaceStatusProject(parsed: WorkspaceStatusArgs):
+    tuple[resolved: ResolvedProject;
+          workspaceLocal: Option[WorkspaceLocal]] =
+  ## Same dispatch rule as M10 / M11: prefer ``.repo/workspace.toml``
+  ## (composer mode), otherwise look up the named project / variant.
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if fileExists(workspaceToml):
+    let absToml = absolutePath(workspaceToml)
+    let workspaceLocal = readWorkspaceLocal(absToml)
+    let resolved = composeManifestLayers(
+      workspaceLocal, parsed.workspaceRoot, absToml)
+    return (resolved, some(workspaceLocal))
+  if parsed.projectName.len == 0:
+    raise newException(ValueError,
+      "`repro workspace status` requires either `.repo/workspace.toml` " &
+        "or a <project> argument; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" /
+    (parsed.projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" /
+    (parsed.projectName & ".toml")
+  if fileExists(projectFile):
+    return (resolveProject(projectFile), none(WorkspaceLocal))
+  if fileExists(variantFile):
+    return (resolveVariant(variantFile), none(WorkspaceLocal))
+  raise newException(ValueError,
+    "no project or variant named '" & parsed.projectName &
+      "' found under '" & manifestsRoot &
+      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+
+proc pickStatusManifestLayerRoot(workspaceRoot: string;
+    workspaceLocal: Option[WorkspaceLocal]): string =
+  ## Resolve the manifest-layer root that OWNS the lock-index for
+  ## status's drift comparison. Mirrors M11's ``pickManifestLayerRoot``
+  ## but without the ``--manifest-layer-root`` override (status is
+  ## read-only and uses the same anchor M11 wrote to).
+  if workspaceLocal.isSome:
+    let local = workspaceLocal.get()
+    if local.manifest.len > 0:
+      let first = local.manifest[0]
+      if first.local_path.isSome and first.local_path.get().len > 0:
+        let raw = first.local_path.get()
+        if isAbsolute(raw):
+          return raw
+        return workspaceRoot / raw
+      if first.url.isSome and first.url.get().len > 0:
+        # Mirror the composer's directory-naming convention so the
+        # status reader finds the lock written by the M11 dispatcher
+        # at the same on-disk path.
+        let sanitizedSegments = block:
+          var raw1 = ""
+          for ch in first.url.get():
+            case ch
+            of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
+            else: raw1.add('-')
+          var collapsed = ""
+          var prevDash = false
+          for ch in raw1:
+            if ch == '-':
+              if not prevDash: collapsed.add(ch)
+              prevDash = true
+            else:
+              collapsed.add(ch)
+              prevDash = false
+          if collapsed.len > 80:
+            collapsed.setLen(80)
+          collapsed.strip(chars = {'-'},
+            leading = true, trailing = true)
+        let suffix =
+          if sanitizedSegments.len > 0: sanitizedSegments
+          else: "layer"
+        return workspaceRoot / ".repo" / ("manifests-0-" & suffix)
+  workspaceRoot / ".repo" / "manifests"
+
+proc deriveActiveBranch(workspaceLocal: Option[WorkspaceLocal];
+    resolved: ResolvedProject; repos: seq[WorkspaceStatusRepoEntry]): string =
+  ## M12 heuristic for the workspace's active branch — placeholder for
+  ## M13's metadata-backed value. Precedence:
+  ##   1. ``.repo/workspace.toml``'s ``[workspace].branch`` field
+  ##      (when the composer dispatch path was taken AND the field is
+  ##      set).
+  ##   2. The first repo whose live HEAD reports a non-empty branch
+  ##      (typical case: a clean workspace where every repo is on the
+  ##      same branch). The spec acknowledges this is a heuristic;
+  ##      M13 will replace it with a stored value.
+  ##   3. The resolver's ``trunk`` field (the manifest's documented
+  ##      default branch, e.g. ``main``). Used when no live repo
+  ##      checkout reports a current branch.
+  ##   4. Empty string.
+  if workspaceLocal.isSome and
+      workspaceLocal.get().workspace.branch.isSome and
+      workspaceLocal.get().workspace.branch.get().len > 0:
+    return workspaceLocal.get().workspace.branch.get()
+  for entry in repos:
+    if entry.branch.len > 0:
+      return entry.branch
+  resolved.trunk
+
+proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
+  var report: WorkspaceStatusReport
+  report.workspaceRoot = args.workspaceRoot
+
+  let (resolved, workspaceLocal) = resolveWorkspaceStatusProject(args)
+  report.project = resolved.projectName
+
+  # Pre-resolution: gather the manifest-layer refresh result the
+  # M10 helper exposes. This populates the structured per-layer
+  # ``status`` field even when there is no workspace.toml (the helper
+  # returns an empty report in that case, which yields no entries).
+  # Note: we DO NOT mutate any layer here — the M10 helper only
+  # fetches + fast-forwards, which is the read-only behaviour M12's
+  # status command needs.
+  try:
+    let refresh = refreshManifestLayers(args.workspaceRoot)
+    for entry in refresh.layers:
+      report.manifestLayers.add(WorkspaceStatusManifestEntry(
+        index: entry.index,
+        provenance: entry.provenance,
+        layerPath: entry.layerPath,
+        status: manifestLayerStatusTag(entry.status),
+        beforeSha: entry.beforeSha,
+        afterSha: entry.afterSha,
+        diagnostic: entry.diagnostic))
+  except CatchableError:
+    # A refresh failure is non-fatal for read-only status: leave the
+    # manifestLayers slice empty and continue. The per-repo
+    # observation pass below still works.
+    discard
+
+  let manifestLayerRoot = pickStatusManifestLayerRoot(
+    args.workspaceRoot, workspaceLocal)
+  report.manifestLayerRoot = manifestLayerRoot
+
+  let indexPath = lockIndexPath(manifestLayerRoot, resolved.projectName)
+  report.lockIndexPath = indexPath
+  report.hasLockIndex = fileExists(indexPath)
+  let lockedShas =
+    if report.hasLockIndex:
+      readLatestLockedShasByPath(manifestLayerRoot, resolved.projectName)
+    else:
+      initTable[string, string]()
+
+  let identity = ensureGitToolResolvable(
+    args.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+  let toolDigest = digestHex(identity)
+  let observedAt = getTime().toUnix * 1000
+
+  for repo in resolved.repos:
+    let repoAbsPath = args.workspaceRoot / repo.path
+    var entry: WorkspaceStatusRepoEntry
+    entry.name = repo.name
+    entry.path = repo.path
+    entry.expectedRevision = repo.revision
+    entry.manifestLayer = repo.manifestLayer
+
+    if not dirExists(repoAbsPath / ".git"):
+      entry.checkoutState = "missing"
+      entry.lockState =
+        if repo.path in lockedShas: "missing-but-locked"
+        elif report.hasLockIndex: "no-lock-recorded"
+        else: "no-lock-recorded"
+      inc report.summary.missing
+      report.repos.add(entry)
+      continue
+
+    let headRes = queryGitState(headShaQuery(repoAbsPath), identity)
+    let cleanRes = queryGitState(isCleanQuery(repoAbsPath), identity)
+    let pubRes = queryGitState(
+      isPublishedQuery(repoAbsPath, "origin"), identity)
+    # Build the M4 evidence triple — head-sha / is-clean / is-published —
+    # so a future caller that wants the unified record can construct it
+    # from the same observation set we use here. We do not persist the
+    # SSZ envelope inside the M12 report (the JSON view is what status
+    # needs), but the three queries are what the M4 schema folds.
+    let evHeadSha = workspaceVcsEvidence.evidenceFor(
+      headRes, repo.path, wvqHeadSha, toolDigest, observedAt)
+    let evIsClean = workspaceVcsEvidence.evidenceFor(
+      cleanRes, repo.path, wvqIsClean, toolDigest, observedAt)
+    let evIsPub = workspaceVcsEvidence.evidenceFor(
+      pubRes, repo.path, wvqIsPublished, toolDigest, observedAt)
+
+    entry.headSha = evHeadSha.headSha
+    entry.isClean = evIsClean.status == wvesResolved and evIsClean.isClean
+    entry.isPublished = evIsPub.status == wvesResolved and evIsPub.isPublished
+
+    var diagnostic = ""
+    if evHeadSha.status == wvesFailed: diagnostic.add(evHeadSha.diagnostic)
+    if evIsClean.status == wvesFailed:
+      if diagnostic.len > 0: diagnostic.add("; ")
+      diagnostic.add(evIsClean.diagnostic)
+    entry.diagnostic = diagnostic
+
+    let branchRes = gitRunPlain(identity,
+      ["-C", repoAbsPath, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branchRes.code == 0:
+      entry.branch = branchRes.output.strip()
+
+    if not entry.isClean:
+      entry.checkoutState = "dirty"
+      inc report.summary.dirty
+    else:
+      entry.checkoutState = "clean"
+      inc report.summary.clean
+
+    if not report.hasLockIndex:
+      entry.lockState = "no-lock-recorded"
+      inc report.summary.noLockRecorded
+    elif repo.path notin lockedShas:
+      # Index exists but does not name this repo (e.g. the project's
+      # repo set has changed since the most recent lock).
+      entry.lockState = "no-lock-recorded"
+      inc report.summary.noLockRecorded
+    else:
+      entry.lockedRevision = lockedShas[repo.path]
+      if entry.lockedRevision == entry.headSha:
+        entry.lockState = "at-lock"
+        inc report.summary.atLock
+      else:
+        entry.lockState = "drifted-from-lock"
+        inc report.summary.drifted
+
+    report.repos.add(entry)
+
+  report.activeBranch = deriveActiveBranch(
+    workspaceLocal, resolved, report.repos)
+  report.exitCode = 0
+  result = report
+
+proc writeWorkspaceStatusReport(report: WorkspaceStatusReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "status-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runWorkspaceStatusCommand*(args: openArray[string]): int =
+  ## ``repro workspace status [<project>] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## Exit codes (per M12 design — read-only command):
+  ##   - 0 — status gathered (with whatever drift the live workspace
+  ##         exhibits — drift is information, not a failure).
+  ##   - 1 — IO failure, missing project, or resolver error.
+  let parsed = parseWorkspaceStatusArgs(args)
+  let report = executeWorkspaceStatus(parsed)
+  writeWorkspaceStatusReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderStatusTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
+# ---- M12.B: `repro workspace list` ----------------------------------------
+
+type
+  WorkspaceListRepoEntry* = object
+    ## One per declared repo in the resolved project. Mirrors the
+    ## ``ResolvedRepo`` field set the M6 resolver / M8 composer emit
+    ## without doing any live-VCS observation.
+    name*: string
+    path*: string
+    remote*: string
+    fetchUrl*: string
+    revision*: string
+    vcs*: string
+    stability*: string
+    manifestLayer*: string
+    visibility*: string
+    fragmentPath*: string
+
+  WorkspaceListReport* = object
+    ## Structured outcome of one ``repro workspace list`` invocation.
+    project*: string
+    workspaceRoot*: string
+    projectFile*: string
+    defaultRevision*: string
+    trunk*: string
+    repos*: seq[WorkspaceListRepoEntry]
+    exitCode*: int
+
+proc toJsonNode*(report: WorkspaceListReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["projectFile"] = %report.projectFile
+  result["defaultRevision"] = %report.defaultRevision
+  result["trunk"] = %report.trunk
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["remote"] = %entry.remote
+    obj["fetchUrl"] = %entry.fetchUrl
+    obj["revision"] = %entry.revision
+    obj["vcs"] = %entry.vcs
+    obj["stability"] = %entry.stability
+    obj["manifestLayer"] = %entry.manifestLayer
+    obj["visibility"] = %entry.visibility
+    obj["fragmentPath"] = %entry.fragmentPath
+    repos.add(obj)
+  result["repos"] = repos
+  result["exitCode"] = %report.exitCode
+
+proc renderListTextLines*(report: WorkspaceListReport): seq[string] =
+  result.add("workspace list: project=" & report.project &
+    (if report.trunk.len > 0: " trunk=" & report.trunk else: ""))
+  for entry in report.repos:
+    var line = "workspace list: " & entry.path & " name=" & entry.name &
+      " remote=" & entry.remote & " revision=" & entry.revision
+    if entry.manifestLayer.len > 0:
+      line.add(" layer=" & entry.manifestLayer)
+    line.add(" visibility=" & entry.visibility)
+    result.add(line)
+
+type
+  WorkspaceListArgs = object
+    workspaceRoot: string
+    projectName: string
+    json: bool
+
+proc parseWorkspaceListArgs(args: openArray[string]): WorkspaceListArgs =
+  ## ``repro workspace list`` argv parser. Same dispatch rules as
+  ## status — optional positional ``<project>`` for single-project
+  ## mode, ``--workspace-root=PATH``, ``--json``. No
+  ## ``--tool-provisioning``: list does no live VCS work.
+  result.workspaceRoot = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace list` flag: " & arg)
+    elif result.projectName.len == 0:
+      result.projectName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro workspace list`: " & arg)
+    inc i
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
+    ResolvedProject =
+  ## Same dispatch rule as M9/M10/M11/status: prefer
+  ## ``.repo/workspace.toml`` (composer mode), otherwise look up the
+  ## named project / variant.
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if fileExists(workspaceToml):
+    return composeManifestLayersFromFile(workspaceToml)
+  if parsed.projectName.len == 0:
+    raise newException(ValueError,
+      "`repro workspace list` requires either `.repo/workspace.toml` " &
+        "or a <project> argument; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" /
+    (parsed.projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" /
+    (parsed.projectName & ".toml")
+  if fileExists(projectFile):
+    return resolveProject(projectFile)
+  if fileExists(variantFile):
+    return resolveVariant(variantFile)
+  raise newException(ValueError,
+    "no project or variant named '" & parsed.projectName &
+      "' found under '" & manifestsRoot &
+      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+
+proc executeWorkspaceList(args: WorkspaceListArgs): WorkspaceListReport =
+  var report: WorkspaceListReport
+  report.workspaceRoot = args.workspaceRoot
+  let resolved = resolveWorkspaceListProject(args)
+  report.project = resolved.projectName
+  report.projectFile = resolved.projectFile
+  report.defaultRevision = resolved.defaultRevision
+  report.trunk = resolved.trunk
+  for repo in resolved.repos:
+    report.repos.add(WorkspaceListRepoEntry(
+      name: repo.name,
+      path: repo.path,
+      remote: repo.remoteName,
+      fetchUrl: repo.fetchUrl,
+      revision: repo.revision,
+      vcs: repo.vcs,
+      stability: repo.stability,
+      manifestLayer: repo.manifestLayer,
+      visibility: visibilityTag(repo.visibility),
+      fragmentPath: repo.fragmentPath))
+  report.exitCode = 0
+  result = report
+
+proc writeWorkspaceListReport(report: WorkspaceListReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "list-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runWorkspaceListCommand*(args: openArray[string]): int =
+  ## ``repro workspace list [<project>] [--workspace-root=PATH]
+  ## [--json]``.
+  ##
+  ## Exit codes (per M12 design — read-only command):
+  ##   - 0 — repo list emitted.
+  ##   - 1 — IO failure, missing project, or resolver error.
+  let parsed = parseWorkspaceListArgs(args)
+  let report = executeWorkspaceList(parsed)
+  writeWorkspaceListReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderListTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
+# ---- M12.C: `repro workspace manifests` -----------------------------------
+
+type
+  WorkspaceManifestsLayerEntry* = object
+    ## One per layer in ``.repo/workspace.toml``. ``url`` and
+    ## ``localPath`` are mutually exclusive (M5 enforces this at parse
+    ## time); ``layerCheckoutPath`` is the on-disk directory the
+    ## composer materialised (for ``url`` layers) or pointed at (for
+    ## ``local_path`` layers). ``contributedRepos`` lists the repo
+    ## names this layer ultimately contributed to the composed result
+    ## — i.e. the names whose ``manifestLayer`` field matches this
+    ## layer's provenance after the composer's shadow-merge resolved.
+    index*: int
+    url*: string
+    localPath*: string
+    visibility*: string
+    branch*: string
+    provenance*: string
+    layerCheckoutPath*: string
+    contributedRepos*: seq[string]
+
+  WorkspaceManifestsReport* = object
+    ## Structured outcome of one ``repro workspace manifests``
+    ## invocation. ``hasLayeredWorkspace`` is false when no
+    ## ``.repo/workspace.toml`` is present; in that case ``layers`` is
+    ## empty and the renderer prints a single "no layered workspace"
+    ## line. Otherwise ``layers`` carries one entry per declared layer
+    ## in source order.
+    workspaceRoot*: string
+    workspaceTomlPath*: string
+    hasLayeredWorkspace*: bool
+    project*: string
+    layers*: seq[WorkspaceManifestsLayerEntry]
+    exitCode*: int
+
+proc toJsonNode*(report: WorkspaceManifestsReport): JsonNode =
+  result = newJObject()
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["workspaceTomlPath"] = %report.workspaceTomlPath
+  result["hasLayeredWorkspace"] = %report.hasLayeredWorkspace
+  result["project"] = %report.project
+  var layers = newJArray()
+  for entry in report.layers:
+    var obj = newJObject()
+    obj["index"] = %entry.index
+    obj["url"] = %entry.url
+    obj["localPath"] = %entry.localPath
+    obj["visibility"] = %entry.visibility
+    obj["branch"] = %entry.branch
+    obj["provenance"] = %entry.provenance
+    obj["layerCheckoutPath"] = %entry.layerCheckoutPath
+    var contributed = newJArray()
+    for name in entry.contributedRepos:
+      contributed.add(%name)
+    obj["contributedRepos"] = contributed
+    layers.add(obj)
+  result["layers"] = layers
+  result["exitCode"] = %report.exitCode
+
+proc renderManifestsTextLines*(report: WorkspaceManifestsReport):
+    seq[string] =
+  if not report.hasLayeredWorkspace:
+    result.add("workspace manifests: no layered workspace " &
+      "(.repo/workspace.toml not present at " & report.workspaceRoot & ")")
+    return
+  result.add("workspace manifests: project=" & report.project &
+    " layers=" & $report.layers.len)
+  for entry in report.layers:
+    var line = "workspace manifests: layer[" & $entry.index & "] " &
+      entry.provenance & " visibility=" & entry.visibility
+    if entry.branch.len > 0:
+      line.add(" branch=" & entry.branch)
+    if entry.layerCheckoutPath.len > 0:
+      line.add(" checkout=" & entry.layerCheckoutPath)
+    line.add(" repos=" & $entry.contributedRepos.len)
+    result.add(line)
+
+type
+  WorkspaceManifestsArgs = object
+    workspaceRoot: string
+    json: bool
+
+proc parseWorkspaceManifestsArgs(args: openArray[string]):
+    WorkspaceManifestsArgs =
+  ## ``repro workspace manifests`` argv parser. No project positional
+  ## (the workspace.toml carries the project name); accepts only
+  ## ``--workspace-root=PATH`` and ``--json``.
+  result.workspaceRoot = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace manifests` flag: " & arg)
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro workspace manifests`: " &
+          arg)
+    inc i
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc layerProvenanceString(entry: ManifestLayer): string =
+  ## Mirror compose.nim's ``layerLabel`` so this report's
+  ## ``provenance`` field matches the value M8 stamped onto each
+  ## composed ``ResolvedRepo.manifestLayer``.
+  if entry.url.isSome and entry.url.get().len > 0:
+    entry.url.get()
+  elif entry.local_path.isSome and entry.local_path.get().len > 0:
+    entry.local_path.get()
+  else:
+    "<unknown manifest layer>"
+
+proc layerCheckoutPathFor(workspaceRoot: string; layerIdx: int;
+    entry: ManifestLayer): string =
+  ## Compute the on-disk checkout path the composer would have
+  ## materialised this layer at. For ``local_path`` layers this is
+  ## just the (resolved-relative-to-workspaceRoot) path the operator
+  ## supplied. For ``url`` layers we reproduce the composer's
+  ## directory naming so the path printed by this command matches
+  ## whatever M8 actually placed on disk.
+  if entry.local_path.isSome and entry.local_path.get().len > 0:
+    let raw = entry.local_path.get()
+    if isAbsolute(raw): return raw
+    return workspaceRoot / raw
+  if entry.url.isSome and entry.url.get().len > 0:
+    let sanitizedSegments = block:
+      var raw1 = ""
+      for ch in entry.url.get():
+        case ch
+        of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
+        else: raw1.add('-')
+      var collapsed = ""
+      var prevDash = false
+      for ch in raw1:
+        if ch == '-':
+          if not prevDash: collapsed.add(ch)
+          prevDash = true
+        else:
+          collapsed.add(ch)
+          prevDash = false
+      if collapsed.len > 80:
+        collapsed.setLen(80)
+      collapsed.strip(chars = {'-'}, leading = true, trailing = true)
+    let suffix =
+      if sanitizedSegments.len > 0: sanitizedSegments
+      else: "layer"
+    return workspaceRoot / ".repo" /
+      ("manifests-" & $layerIdx & "-" & suffix)
+  ""
+
+proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
+    WorkspaceManifestsReport =
+  var report: WorkspaceManifestsReport
+  report.workspaceRoot = args.workspaceRoot
+  let workspaceToml = args.workspaceRoot / ".repo" / "workspace.toml"
+  report.workspaceTomlPath = workspaceToml
+  if not fileExists(workspaceToml):
+    report.hasLayeredWorkspace = false
+    report.exitCode = 0
+    return report
+  report.hasLayeredWorkspace = true
+  let absToml = absolutePath(workspaceToml)
+  let workspaceLocal = readWorkspaceLocal(absToml)
+  report.project = workspaceLocal.workspace.project
+
+  # Compose the layers to learn which repo each layer ultimately
+  # contributed to the result (after the shadow-merge resolved).
+  # A composition failure (missing layer, bad URL) leaves the
+  # ``contributedRepos`` slice empty for the affected layer entries
+  # but still lets us emit the declared structure.
+  var contributedByProvenance = initTable[string, seq[string]]()
+  try:
+    let resolved = composeManifestLayers(
+      workspaceLocal, args.workspaceRoot, absToml)
+    for repo in resolved.repos:
+      let key =
+        if repo.manifestLayer.len > 0: repo.manifestLayer
+        else: "<unknown manifest layer>"
+      var current =
+        if key in contributedByProvenance: contributedByProvenance[key]
+        else: @[]
+      current.add(repo.name)
+      contributedByProvenance[key] = current
+  except CatchableError:
+    # Treat composition failures as "we know the declared layers but
+    # not the contribution map". The report still ships with the
+    # declared layer set so the operator sees the workspace shape.
+    discard
+
+  for layerIdx, entry in workspaceLocal.manifest:
+    let provenance = layerProvenanceString(entry)
+    var layerEntry = WorkspaceManifestsLayerEntry(
+      index: layerIdx,
+      url:
+        if entry.url.isSome: entry.url.get()
+        else: "",
+      localPath:
+        if entry.local_path.isSome: entry.local_path.get()
+        else: "",
+      visibility: entry.visibility,
+      branch:
+        if entry.branch.isSome: entry.branch.get()
+        else: "",
+      provenance: provenance,
+      layerCheckoutPath: layerCheckoutPathFor(
+        args.workspaceRoot, layerIdx, entry))
+    if provenance in contributedByProvenance:
+      layerEntry.contributedRepos = contributedByProvenance[provenance]
+    report.layers.add(layerEntry)
+  report.exitCode = 0
+  result = report
+
+proc writeWorkspaceManifestsReport(report: WorkspaceManifestsReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "manifests-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
+  ## ``repro workspace manifests [--workspace-root=PATH] [--json]``.
+  ##
+  ## Exit codes (per M12 design — read-only command):
+  ##   - 0 — layer set emitted (also when no workspace.toml is
+  ##         present; the report carries ``hasLayeredWorkspace =
+  ##         false`` and the text renderer prints the single
+  ##         "no layered workspace" line).
+  ##   - 1 — IO failure or malformed workspace.toml.
+  let parsed = parseWorkspaceManifestsArgs(args)
+  let report = executeWorkspaceManifests(parsed)
+  writeWorkspaceManifestsReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderManifestsTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -12946,6 +13835,51 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceLockCommand(lockArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace lock: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "status":
+    # M12 — `repro workspace status`. Same dispatch convention as
+    # M9/M10/M11: the milestone spec names
+    # ``apps/repro/subcmds/workspace_status.nim`` but the implementation
+    # lives in ``repro_cli_support`` so the dispatcher reaches it via
+    # ``runWorkspaceStatusCommand``.
+    try:
+      let statusArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceStatusCommand(statusArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace status: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "list":
+    # M12 — `repro workspace list`. Sibling of the status hook. See
+    # ``runWorkspaceListCommand`` for the implementation.
+    try:
+      let listArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceListCommand(listArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace list: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "manifests":
+    # M12 — `repro workspace manifests`. Last of the three M12 hooks;
+    # implementation in ``runWorkspaceManifestsCommand``.
+    try:
+      let manifestsArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceManifestsCommand(manifestsArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace manifests: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
