@@ -32,7 +32,7 @@ import repro_monitor_shim/windows_hook_registry as hr
 {.push raises: [].}
 
 # ---------------------------------------------------------------------------
-# M72 — inline-hook backend for the dynlib-resolved Win32 call sites.
+# M73 — dispatch-mechanism-agnostic install backend.
 #
 # IAT patching catches CRT-internal forwarding (statically-linked
 # ``__declspec(dllimport)`` callers like the C runtime's
@@ -47,13 +47,13 @@ import repro_monitor_shim/windows_hook_registry as hr
 # any dispatch mechanism", and the only place a call ALWAYS converges
 # is the function body in kernel32 itself.
 #
-# Mirror the codetracer-native-recorder's M50.2 inline-hook primitive
+# M72 introduced inline hooking for CreateProcessW/A only; M73 promotes
+# every hooked Win32 API to the same install path. Mirror the
+# codetracer-native-recorder's M50.2 inline-hook primitive
 # (``ct_inline_hook/install_windows.c``): install a 5-byte
-# ``JMP rel32`` at the start of ``kernel32!CreateProcessW`` /
-# ``kernel32!CreateProcessA`` redirecting to the same trampolines the
-# IAT path already routes through. The capture is now sourced from
-# the kernel32 function body, not from any per-module IAT slot, so
-# Nim dynlib calls land in our trampoline along with everything else.
+# ``JMP rel32`` at the start of each ``kernel32!Xxx`` function
+# redirecting to the existing trampolines. IAT patching is retained
+# only as the fallback for entries the inline backend rejects.
 #
 # The C source files live in the recorder repo's ``ct_inline_hook``
 # directory. Resolve their path at compile time, anchored on
@@ -81,6 +81,12 @@ when ctInlineHookAvailable:
   proc ctInlineHookInstall(target: pointer, hook: pointer,
                            outTrampoline: ptr pointer): cint
     {.importc: "ct_inline_hook_install", cdecl.}
+  proc ctInlineHookBeginTransaction(): cint
+    {.importc: "ct_inline_hook_begin_transaction", cdecl.}
+  proc ctInlineHookCommitTransaction(): cint
+    {.importc: "ct_inline_hook_commit_transaction", cdecl.}
+  proc ctInlineHookAbortTransaction(): cint
+    {.importc: "ct_inline_hook_abort_transaction", cdecl.}
 
 # --- Win32 typedefs ---------------------------------------------------------
 
@@ -719,10 +725,9 @@ proc originalCreateProcessA(ctx: var hr.HookContext) {.raises: [].} =
 #   4. Restore LastError     — caller sees what the kernel actually set.
 #
 # M11.7 outstanding follow-up: the Save/Restore dance can be retired once
-# the IAT path is replaced with the M50.2 inline-hook primitive (which
-# preserves LastError implicitly via the JMP rel32 trampoline). Today the
-# IAT-installed Nim trampoline still allocates inside the snoop body so
-# the dance is load-bearing.
+# the IAT fallback path is removed entirely (M73 Phase 6). Today the
+# trampoline (inline or IAT) still allocates inside the snoop body so
+# the dance is load-bearing regardless of which install path landed.
 
 proc snoopCreateFileW(ctx: var hr.HookContext) {.raises: [].} =
   hr.callNext(ctx)
@@ -1337,9 +1342,10 @@ proc trampolineCreateProcessA(lpApplicationName: LPCSTR,
 # --- Registry wiring -------------------------------------------------------
 #
 # Called once from repro_monitor_shim_init AFTER the registry has been
-# allocated but BEFORE IAT installation kicks in. Registers each snoop
-# callback at ShimSnoopPriority. The chain's ``original`` callback is set
-# inside installIATHooks below, once we know the captured origXxx pointer
+# allocated but BEFORE inline/IAT installation kicks in. Registers each
+# snoop callback at ShimSnoopPriority. The chain's ``original`` callback
+# is set by ``installInlineFor`` / ``installIatFor`` below, once we know
+# the captured origXxx pointer (or trampoline returned by ct_inline_hook)
 # is non-nil.
 
 proc registerMonitorSnoopCallbacks*() =
@@ -1355,108 +1361,253 @@ proc registerMonitorSnoopCallbacks*() =
   hr.registerMonitorHook(hr.HookCreateProcessW,     snoopCreateProcessW)
   hr.registerMonitorHook(hr.HookCreateProcessA,     snoopCreateProcessA)
 
-# --- IAT hook installation -------------------------------------------------
+# --- Unified install backend (M73 Phase 1) ---------------------------------
+#
+# Per Monitor-Hook-Shim.md §"Install Backend Requirement:
+# dispatch-mechanism-agnostic", the shim's install backend MUST catch every
+# call to a hooked Win32 API regardless of how the caller resolved the entry
+# point (IAT-routed, runtime-resolved via GetProcAddress, late-bound from a
+# DLL loaded after init, CRT-forwarded). The only point where every
+# dispatch mechanism converges is the kernel32 function body itself, so the
+# primary install for every hooked API is a 5-byte JMP rel32 inline detour
+# at the function body via ct_inline_hook. IAT patching is retained ONLY as
+# the fallback path for APIs whose prologue the ct_inline_hook length
+# decoder cannot safely relocate (see ct_inline_hook/install_windows.h
+# error code -2). A hook landing on the IAT fallback is by spec an
+# acceptance issue, not a permanent design choice — Phase 4 will install an
+# audit accessor that hard-fails on non-zero fallback counts.
+#
+# Expected install mechanism on supported Windows versions (Win10 1809+,
+# Win11): every hook lands on the INLINE path. The IAT fallback path is
+# reserved for the rare prologue layout the length decoder rejects; in
+# practice none of the eleven kernel32 APIs in this table have shipped
+# with such a prologue. The dispatch-mechanism coverage test (Phase 2)
+# proves all five caller dispatch mechanisms converge on the inline
+# trampoline; the install audit (Phase 4) verifies the first five bytes
+# of each kernel32 target are an E9-class detour after init.
 
-proc installIATHooks() =
-  # Windows: install the IAT redirections across every loaded module so we
-  # catch calls regardless of which DLL routed them. The IAT patcher returns
-  # the original function pointer that was previously in the slot, which we
-  # save once for pass-through (wired as the chain's ``original`` callback
-  # the FIRST time we see the slot — subsequent IAT slots already point at
-  # our trampoline so they'd shadow the real pointer with our hook). We try
-  # multiple source DLLs because some modern binaries link against
-  # ``api-ms-win-*`` umbrella sets or kernelbase directly rather than
-  # kernel32.
-  #
-  # M11.6 outstanding follow-up: the IAT walk in
-  # ``repro_monitor_shim/windows_iat_patcher.nim`` is by-name only and does
-  # not handle ordinal imports. ct_interpose's
-  # ``ct_interpose/iat_patcher.nim`` has the M49-Corpus #1 ordinal-aware
-  # walk; reprobuild's hook surface is all by-name kernel32 imports so this
-  # is not a live gap, but the structural divergence remains.
-  template hook(dll, name, tramp, storage, kind, origCb: untyped) =
-    if storage == nil:
-      let orig = patchIATAllModules(dll, name, cast[pointer](tramp))
+type
+  HookSpec = object
+    name: string                # e.g. "CreateFileW"
+    trampoline: pointer         # cast[pointer](trampolineCreateFileW)
+    origStorage: ptr pointer    # cast[ptr pointer](addr origCreateFileW)
+    origCallback: hr.HookCallback
+    iatDlls: seq[string]        # Fallback search list when inline rejects.
+
+const kernel32FileIatDlls = @[
+  "kernel32.dll", "kernelbase.dll",
+  "api-ms-win-core-file-l1-1-0.dll",
+  "api-ms-win-core-file-l1-2-0.dll",
+  "api-ms-win-core-file-l2-1-0.dll",
+  "api-ms-win-core-handle-l1-1-0.dll",
+  "api-ms-win-core-processthreads-l1-1-0.dll",
+  "api-ms-win-core-processthreads-l1-1-1.dll"
+]
+
+# Module-global hook table. Built once with the trampoline + origStorage
+# pointers — these are addresses of module-level statics so they're known
+# at module-init time; a `let` binding is sufficient.
+let hookTable {.global.}: seq[HookSpec] = @[
+  HookSpec(name: hr.HookCreateFileW,
+    trampoline: cast[pointer](trampolineCreateFileW),
+    origStorage: cast[ptr pointer](addr origCreateFileW),
+    origCallback: originalCreateFileW,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookCreateFileA,
+    trampoline: cast[pointer](trampolineCreateFileA),
+    origStorage: cast[ptr pointer](addr origCreateFileA),
+    origCallback: originalCreateFileA,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookReadFile,
+    trampoline: cast[pointer](trampolineReadFile),
+    origStorage: cast[ptr pointer](addr origReadFile),
+    origCallback: originalReadFile,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookWriteFile,
+    trampoline: cast[pointer](trampolineWriteFile),
+    origStorage: cast[ptr pointer](addr origWriteFile),
+    origCallback: originalWriteFile,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookCloseHandle,
+    trampoline: cast[pointer](trampolineCloseHandle),
+    origStorage: cast[ptr pointer](addr origCloseHandle),
+    origCallback: originalCloseHandle,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookGetFileAttributesExW,
+    trampoline: cast[pointer](trampolineGetFileAttributesExW),
+    origStorage: cast[ptr pointer](addr origGetFileAttributesExW),
+    origCallback: originalGetFileAttributesExW,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookGetFileAttributesExA,
+    trampoline: cast[pointer](trampolineGetFileAttributesExA),
+    origStorage: cast[ptr pointer](addr origGetFileAttributesExA),
+    origCallback: originalGetFileAttributesExA,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookGetFileAttributesW,
+    trampoline: cast[pointer](trampolineGetFileAttributesW),
+    origStorage: cast[ptr pointer](addr origGetFileAttributesW),
+    origCallback: originalGetFileAttributesW,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookGetFileAttributesA,
+    trampoline: cast[pointer](trampolineGetFileAttributesA),
+    origStorage: cast[ptr pointer](addr origGetFileAttributesA),
+    origCallback: originalGetFileAttributesA,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookCreateProcessW,
+    trampoline: cast[pointer](trampolineCreateProcessW),
+    origStorage: cast[ptr pointer](addr origCreateProcessW),
+    origCallback: originalCreateProcessW,
+    iatDlls: kernel32FileIatDlls),
+  HookSpec(name: hr.HookCreateProcessA,
+    trampoline: cast[pointer](trampolineCreateProcessA),
+    origStorage: cast[ptr pointer](addr origCreateProcessA),
+    origCallback: originalCreateProcessA,
+    iatDlls: kernel32FileIatDlls)
+]
+
+proc queueInlineInstall(spec: HookSpec; kernel32: HANDLE): cint =
+  ## Queue an inline JMP rel32 install for ``spec.name`` against
+  ## kernel32's body. Under an active transaction, the call returns 0 as
+  ## soon as the op is queued; the trampoline pointer is written into
+  ## ``spec.origStorage[]`` at commit time.
+  ##
+  ## Importantly, the ``out_trampoline`` argument we pass is
+  ## ``spec.origStorage`` itself (the module-global ``addr origXxx``).
+  ## Under a transaction the install primitive holds onto that pointer
+  ## and writes through it at commit; a stack-local pointer would
+  ## dangle by then. Wiring the chain's "original" callback MUST
+  ## therefore be deferred until after ``ctInlineHookCommitTransaction``
+  ## returns — otherwise, with the inline JMP already landed at the
+  ## kernel32 body but ``origXxx`` still holding the (now-patched) real
+  ## entry, the chain's "original" recurses through the trampoline.
+  when not ctInlineHookAvailable:
+    return -4
+  else:
+    if spec.origStorage[] != nil:
+      # Already installed (idempotent call). Treat as success.
+      return 0
+    let target = GetProcAddress(kernel32, cast[LPCSTR](spec.name.cstring))
+    if target == nil:
+      return -1
+    ctInlineHookInstall(target, spec.trampoline, spec.origStorage)
+
+proc installIatFor(spec: HookSpec) =
+  ## Fallback IAT install for an entry point that the inline path rejected.
+  ## Walks every fallback DLL the spec declares and patches the first IAT
+  ## slot that yields a non-nil original pointer; subsequent DLLs only
+  ## redirect (the chain already has the original wired).
+  for dll in spec.iatDlls:
+    if spec.origStorage[] == nil:
+      let orig = patchIATAllModules(dll.cstring, spec.name.cstring,
+                                    spec.trampoline)
       if orig != nil:
-        storage = cast[kind](orig)
-        hr.setOriginalCallback(name, origCb)
-        dbg("[repro_monitor_shim] hooked " & name & " from " & dll & "\n")
+        spec.origStorage[] = orig
+        hr.setOriginalCallback(spec.name, spec.origCallback)
+        dbg(cstring("[repro_monitor_shim] hooked " & spec.name &
+          " from " & dll & " (IAT fallback)\n"))
     else:
       # We already captured the real function pointer; only redirect the IAT.
-      discard patchIATAllModules(dll, name, cast[pointer](tramp))
+      discard patchIATAllModules(dll.cstring, spec.name.cstring,
+                                 spec.trampoline)
 
-  for dll in ["kernel32.dll", "kernelbase.dll",
-              "api-ms-win-core-file-l1-1-0.dll",
-              "api-ms-win-core-file-l1-2-0.dll",
-              "api-ms-win-core-file-l2-1-0.dll",
-              "api-ms-win-core-handle-l1-1-0.dll",
-              "api-ms-win-core-processthreads-l1-1-0.dll",
-              "api-ms-win-core-processthreads-l1-1-1.dll"]:
-    hook(dll, hr.HookCreateFileW,        trampolineCreateFileW,
-         origCreateFileW, CreateFileWProc, originalCreateFileW)
-    hook(dll, hr.HookCreateFileA,        trampolineCreateFileA,
-         origCreateFileA, CreateFileAProc, originalCreateFileA)
-    hook(dll, hr.HookReadFile,           trampolineReadFile,
-         origReadFile, ReadFileProc, originalReadFile)
-    hook(dll, hr.HookWriteFile,          trampolineWriteFile,
-         origWriteFile, WriteFileProc, originalWriteFile)
-    hook(dll, hr.HookCloseHandle,        trampolineCloseHandle,
-         origCloseHandle, CloseHandleProc, originalCloseHandle)
-    hook(dll, hr.HookGetFileAttributesExW, trampolineGetFileAttributesExW,
-         origGetFileAttributesExW, GetFileAttributesExWProc,
-         originalGetFileAttributesExW)
-    hook(dll, hr.HookGetFileAttributesExA, trampolineGetFileAttributesExA,
-         origGetFileAttributesExA, GetFileAttributesExAProc,
-         originalGetFileAttributesExA)
-    hook(dll, hr.HookGetFileAttributesW, trampolineGetFileAttributesW,
-         origGetFileAttributesW, GetFileAttributesWProc,
-         originalGetFileAttributesW)
-    hook(dll, hr.HookGetFileAttributesA, trampolineGetFileAttributesA,
-         origGetFileAttributesA, GetFileAttributesAProc,
-         originalGetFileAttributesA)
-    # M72: CreateProcessW/A are intentionally NOT installed via the
-    # IAT loop. Nim's ``startProcess`` resolves these from
-    # ``winlean.createProcessW`` through ``nimGetProcAddr`` (runtime
-    # dlsym), which bypasses the import address table entirely — so
-    # an IAT-only hook would miss every Nim-spawned grandchild.
-    # ``installInlineHooks`` below puts a 5-byte JMP rel32 at the
-    # function body in kernel32 instead; that catches both the IAT
-    # path (which would have landed at the same body anyway) and the
-    # nimGetProcAddr-resolved pointer path.
-
-proc installInlineHooks() =
-  ## Install inline detours for the Win32 entry points that Nim's
-  ## dynlib-resolved callers reach without going through the IAT.
-  ## See ``ct_inline_hook/install_windows.h`` for the underlying
-  ## primitive's contract.
-  when not ctInlineHookAvailable:
-    return
-  else:
+proc installAllHooks(): int =
+  ## Install every entry in ``hookTable``. Inline is preferred for every
+  ## hook (dispatch-mechanism-agnostic, per Monitor-Hook-Shim.md spec);
+  ## the IAT path is only walked for hooks the inline backend rejected.
+  ## All inline installs are grouped inside a single transaction so the
+  ## thread-suspend window happens once for the whole table rather than
+  ## once per hook (see ct_inline_hook/install_windows.h "Transactions").
+  ## Returns the count of hooks that fell through to the IAT fallback —
+  ## tests treat any non-zero count as an acceptance issue.
+  result = 0
+  var failed: seq[HookSpec] = @[]
+  # Per-spec record of "did the queued-install call succeed?" — only
+  # specs that queued successfully will have their trampoline filled at
+  # commit time, so only those should have ``setOriginalCallback`` wired
+  # post-commit. The same vector also tells us which specs need the IAT
+  # fallback (the ones where queueing was rejected OR commit failed).
+  var inlineQueued = newSeq[bool](hookTable.len)
+  var commitOk = false
+  when ctInlineHookAvailable:
     let kernel32 = GetModuleHandleA("kernel32.dll")
     if kernel32 == nil:
-      dbg("[repro_monitor_shim] installInlineHooks: kernel32 GetModuleHandle returned NULL\n")
-      return
+      dbg("[repro_monitor_shim] installAllHooks: kernel32 GetModuleHandle returned NULL; falling back to IAT for every hook\n")
+      for spec in hookTable:
+        failed.add(spec)
+    else:
+      let beginRc = ctInlineHookBeginTransaction()
+      let inTransaction = (beginRc == 0)
+      if not inTransaction:
+        dbg(cstring("[repro_monitor_shim] installAllHooks: begin_transaction failed rc=" & $beginRc & "; installing per-hook\n"))
+      for i, spec in hookTable:
+        let rc = queueInlineInstall(spec, kernel32)
+        if rc == 0:
+          inlineQueued[i] = true
+        else:
+          dbg(cstring("[repro_monitor_shim] inline-hook FAILED for " &
+            spec.name & " (rc=" & $rc & "); will try IAT fallback\n"))
+          failed.add(spec)
+      if inTransaction:
+        let commitRc = ctInlineHookCommitTransaction()
+        if commitRc == 0:
+          commitOk = true
+        else:
+          dbg(cstring("[repro_monitor_shim] installAllHooks: commit_transaction failed rc=" & $commitRc & "\n"))
+          # Commit failed -> ct_inline_hook rolls back the
+          # partially-applied batch and origStorage[] stays nil for
+          # every queued spec. Re-route them all to the IAT fallback.
+          for i, spec in hookTable:
+            if inlineQueued[i]:
+              inlineQueued[i] = false
+              failed.add(spec)
+      else:
+        # No transaction was active; each ctInlineHookInstall call ran
+        # synchronously and wrote spec.origStorage[] in-line. The
+        # successful ones are already committed.
+        commitOk = true
+  else:
+    # ct_inline_hook sources unavailable — every hook degrades to IAT.
+    for spec in hookTable:
+      failed.add(spec)
 
-    template installInline(name: cstring; tramp: untyped; storage: untyped;
-                           kind: untyped; origCb: untyped) =
-      if storage == nil:
-        let target = GetProcAddress(kernel32, name)
-        if target != nil:
-          var trampPtr: pointer = nil
-          let rc = ctInlineHookInstall(target, cast[pointer](tramp),
-                                       addr trampPtr)
-          if rc == 0 and trampPtr != nil:
-            storage = cast[kind](trampPtr)
-            hr.setOriginalCallback($name, origCb)
-            dbg("[repro_monitor_shim] inline-hooked " & $name & "\n")
+  # Post-commit pass 1: wire the chain's "original" callback for every
+  # spec whose inline install actually landed (trampoline pointer is now
+  # non-nil in spec.origStorage[]). Pass 1 runs to completion BEFORE any
+  # dbg log line — dbg itself dispatches through CreateFileA (and the
+  # CRT path under it touches GetFileAttributesW), and emitting a log
+  # line while any chain.original is still nil would short-circuit the
+  # log file's own CreateFileA / GetFileAttributesW calls to a fake "fail"
+  # path. Pass 2 below is the actual log emission, after every chain is
+  # fully wired.
+  var commitEmpty = newSeq[bool](hookTable.len)
+  when ctInlineHookAvailable:
+    if commitOk:
+      for i, spec in hookTable:
+        if inlineQueued[i]:
+          if spec.origStorage[] != nil:
+            hr.setOriginalCallback(spec.name, spec.origCallback)
           else:
-            dbg("[repro_monitor_shim] inline-hook FAILED for " & $name &
-              " (rc=" & $rc & ")\n")
+            commitEmpty[i] = true
+            failed.add(spec)
 
-    installInline("CreateProcessW", trampolineCreateProcessW,
-      origCreateProcessW, CreateProcessWProc, originalCreateProcessW)
-    installInline("CreateProcessA", trampolineCreateProcessA,
-      origCreateProcessA, CreateProcessAProc, originalCreateProcessA)
+  # Post-commit pass 2: emit diagnostic lines. By this point every spec
+  # in hookTable either has a wired chain (origStorage[] non-nil +
+  # chain.original set) or is on the failed list awaiting IAT fallback.
+  when ctInlineHookAvailable:
+    if commitOk:
+      for i, spec in hookTable:
+        if inlineQueued[i] and not commitEmpty[i]:
+          dbg(cstring("[repro_monitor_shim] inline-hooked " & spec.name & "\n"))
+        elif commitEmpty[i]:
+          dbg(cstring("[repro_monitor_shim] inline-hook commit-empty for " &
+            spec.name & "; will try IAT fallback\n"))
+
+  for spec in failed:
+    installIatFor(spec)
+    if spec.origStorage[] == nil:
+      dbg(cstring("[repro_monitor_shim] install FAILED for " & spec.name &
+        " (neither inline nor IAT landed a hook)\n"))
+  result = failed.len
 
 # --- Public exports ---------------------------------------------------------
 
@@ -1478,17 +1629,26 @@ proc repro_monitor_shim_init*(configPath: cstring): cint
   let dbgMsg = "[repro_monitor_shim] fragmentDir=" & fragmentDir & "\n"
   dbg(cstring(dbgMsg))
   # M26: initialise the hook registry + register the monitor's snoop
-  # callbacks BEFORE installing the IAT patches. installIATHooks wires the
-  # captured origXxx into the chain's ``original`` slot once it knows the
-  # real pointer; the snoop callbacks are already in place so the very
-  # first hooked call sees a fully-built chain.
+  # callbacks BEFORE installing the inline/IAT patches. installAllHooks
+  # wires the captured origXxx into the chain's ``original`` slot once
+  # the inline-hook trampoline (or IAT-captured real pointer) is in
+  # hand; the snoop callbacks are already in place so the very first
+  # hooked call sees a fully-built chain.
   hr.initShimRegistry()
   registerMonitorSnoopCallbacks()
   initialized = true
   release(initLockVar)
   recordProcessStart()
-  installIATHooks()
-  installInlineHooks()
+  # M73 Phase 1: single dispatch-mechanism-agnostic install pass.
+  # Prefers ct_inline_hook (5-byte JMP rel32 at the kernel32 function
+  # body — catches every dispatch mechanism), falls back to IAT
+  # patching only for entry points the inline backend rejects. The
+  # returned count is logged so any fall-through is visible in the
+  # debug output and a future control-ABI accessor (Phase 4) can
+  # surface it programmatically.
+  let iatFallbackCount = installAllHooks()
+  dbg(cstring("[repro_monitor_shim] installAllHooks: " &
+    $iatFallbackCount & " hook(s) fell through to IAT fallback\n"))
   dbg("[repro_monitor_shim] initialization complete\n")
   result = 0
 
