@@ -89,16 +89,42 @@ proc queryUserDaemonStatus*(endpoint = defaultUserDaemonEndpoint()):
     "unexpected user-daemon status frame: " & $frame.kind)
 
 proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()) =
-  var socket = connectUserDaemon(endpoint, commandMode = "stop")
-  defer: socket.closeIpcConn()
-  socket.writeFrame(udkShutdown)
-  let frame = socket.readFrame()
-  if frame.kind == udkShutdownAck:
-    return
-  if frame.kind == udkError:
-    raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+  ## Issue the shutdown request and wait for the daemon to RELEASE
+  ## its endpoint — not just to ACK. The daemon's listener loop sends
+  ## ``sdkShutdownAck`` from inside ``handleClient`` before its outer
+  ## ``defer`` chain runs (close listener, remove endpoint files,
+  ## release lock, remove lockfile). On Windows the lockfile + status
+  ## file removal lags the ACK by a few hundred microseconds; a
+  ## caller that immediately tries ``removeDir(tempRoot)`` then hits
+  ## "The process cannot access the file because it is being used by
+  ## another process." Wait until ``endpointAcceptsConnections``
+  ## flips to false before returning, which guarantees both the
+  ## listener AND the cleanup defers have run.
+  block:
+    var socket = connectUserDaemon(endpoint, commandMode = "stop")
+    defer: socket.closeIpcConn()
+    socket.writeFrame(udkShutdown)
+    let frame = socket.readFrame()
+    if frame.kind == udkError:
+      raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+    if frame.kind != udkShutdownAck:
+      raise newException(UserDaemonClientError,
+        "unexpected user-daemon shutdown frame: " & $frame.kind)
+
+  # Poll for endpoint quiescence. The deadline is generous — on
+  # Windows ``releaseUserDaemonLock`` synchronously removes the
+  # lockfile after closing the handle, so the loop typically returns
+  # on the first iteration.
+  let deadline = epochTime() + 5.0
+  while epochTime() < deadline:
+    if not endpointAcceptsConnections(endpoint):
+      return
+    sleep(10)
+  # Time-out: the daemon is still listening 5 s after ACK. That's a
+  # real bug — surface it instead of silently returning.
   raise newException(UserDaemonClientError,
-    "unexpected user-daemon shutdown frame: " & $frame.kind)
+    "user-daemon at " & endpoint & " accepted shutdown ACK but " &
+    "did not release its endpoint within 5 s")
 
 proc requestUserDaemonSessions*(endpoint = defaultUserDaemonEndpoint()):
     seq[UserDaemonSession] =
