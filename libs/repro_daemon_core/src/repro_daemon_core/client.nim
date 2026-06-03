@@ -1,4 +1,4 @@
-import std/[net, os, strutils, times]
+import std/[os, strutils, times]
 
 import repro_core
 
@@ -21,29 +21,11 @@ type
     sessionId*: string
     events*: seq[UserDaemonBuildEvent]
 
-proc endpointExists(endpoint: string): bool =
-  try:
-    discard getFileInfo(endpoint, followSymlink = false)
-    true
-  except OSError:
-    false
-
 proc userDaemonEndpointExists*(endpoint: string): bool =
-  endpointExists(endpoint)
+  endpointExistsLocal(endpoint)
 
 proc userDaemonEndpointAcceptsConnections*(endpoint: string): bool =
-  when defined(posix):
-    if not endpointExists(endpoint):
-      return false
-    var socket = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
-    defer: socket.close()
-    try:
-      socket.connectUnix(endpoint)
-      true
-    except CatchableError:
-      false
-  else:
-    false
+  endpointAcceptsConnections(endpoint)
 
 proc featureSet(flags: string): seq[string] =
   for raw in flags.split(','):
@@ -63,57 +45,52 @@ proc connectUserDaemon*(endpoint = defaultUserDaemonEndpoint();
                         projectRoot = "";
                         protocolMajor = UserDaemonProtocolMajor;
                         protocolMinor = UserDaemonProtocolMinor;
-                        requiredFeatures: openArray[string] = []): Socket =
-  when defined(posix):
-    result = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
-    result.connectUnix(endpoint)
-    let client = binaryIdentity(clientName, getAppFilename(), versionString())
-    result.writeFrame(udkHello, helloBody(client, UserDaemonFeatureFlags,
-      commandMode, projectRoot, protocolMajor, protocolMinor))
-    let ack = result.readFrame()
-    if ack.kind == udkError:
-      raise newException(UserDaemonClientError, parseErrorBody(ack.body))
-    if ack.kind != udkHelloAck:
-      raise newException(UserDaemonClientError,
-        "user daemon returned unexpected hello frame: " & $ack.kind)
-    let parsed = parseHelloAck(ack.body)
-    if parsed.major != UserDaemonProtocolMajor:
-      raise newException(UserDaemonClientError,
-        "user daemon protocol mismatch: client major " &
-        $UserDaemonProtocolMajor & ", daemon major " & $parsed.major)
-    requireDaemonFeatures(parsed.featureFlags.featureSet(), requiredFeatures)
-  else:
+                        requiredFeatures: openArray[string] = []): IpcConn =
+  try:
+    result = connectIpc(endpoint)
+  except IpcEndpointError as exc:
+    raise newException(UserDaemonClientError, exc.msg)
+  let client = binaryIdentity(clientName, getAppFilename(), versionString())
+  result.writeFrame(udkHello, helloBody(client, UserDaemonFeatureFlags,
+    commandMode, projectRoot, protocolMajor, protocolMinor))
+  let ack = result.readFrame()
+  if ack.kind == udkError:
+    raise newException(UserDaemonClientError, parseErrorBody(ack.body))
+  if ack.kind != udkHelloAck:
     raise newException(UserDaemonClientError,
-      "repro-daemon IPC is not implemented on this platform")
+      "user daemon returned unexpected hello frame: " & $ack.kind)
+  let parsed = parseHelloAck(ack.body)
+  if parsed.major != UserDaemonProtocolMajor:
+    raise newException(UserDaemonClientError,
+      "user daemon protocol mismatch: client major " &
+      $UserDaemonProtocolMajor & ", daemon major " & $parsed.major)
+  requireDaemonFeatures(parsed.featureFlags.featureSet(), requiredFeatures)
 
 proc queryUserDaemonStatus*(endpoint = defaultUserDaemonEndpoint()):
     UserDaemonStatus =
   result.endpoint = endpoint
-  when defined(posix):
-    if not endpointExists(endpoint):
-      result.running = false
-      return
-    var socket: Socket
-    try:
-      socket = connectUserDaemon(endpoint, commandMode = "status")
-    except CatchableError:
-      result.running = false
-      return
-    defer: socket.close()
-    socket.writeFrame(udkStatus)
-    let frame = socket.readFrame()
-    if frame.kind == udkStatusResponse:
-      return parseStatusBody(frame.body)
-    if frame.kind == udkError:
-      raise newException(UserDaemonClientError, parseErrorBody(frame.body))
-    raise newException(UserDaemonClientError,
-      "unexpected user-daemon status frame: " & $frame.kind)
-  else:
+  if not endpointExistsLocal(endpoint):
     result.running = false
+    return
+  var conn: IpcConn
+  try:
+    conn = connectUserDaemon(endpoint, commandMode = "status")
+  except CatchableError:
+    result.running = false
+    return
+  defer: conn.closeIpcConn()
+  conn.writeFrame(udkStatus)
+  let frame = conn.readFrame()
+  if frame.kind == udkStatusResponse:
+    return parseStatusBody(frame.body)
+  if frame.kind == udkError:
+    raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+  raise newException(UserDaemonClientError,
+    "unexpected user-daemon status frame: " & $frame.kind)
 
 proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()) =
   var socket = connectUserDaemon(endpoint, commandMode = "stop")
-  defer: socket.close()
+  defer: socket.closeIpcConn()
   socket.writeFrame(udkShutdown)
   let frame = socket.readFrame()
   if frame.kind == udkShutdownAck:
@@ -126,7 +103,7 @@ proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()) =
 proc requestUserDaemonSessions*(endpoint = defaultUserDaemonEndpoint()):
     seq[UserDaemonSession] =
   var socket = connectUserDaemon(endpoint, commandMode = "sessions")
-  defer: socket.close()
+  defer: socket.closeIpcConn()
   socket.writeFrame(udkSessions)
   let frame = socket.readFrame()
   if frame.kind == udkSessionsResponse:
@@ -145,7 +122,7 @@ proc requestUserDaemonBuild*(request: UserDaemonBuildRequest;
     projectRoot = request.projectRoot,
     requiredFeatures = ["build-routing", "build-events"])
   result.connectionUs = (epochTime() - connectStart) * 1_000_000.0
-  defer: socket.close()
+  defer: socket.closeIpcConn()
   socket.writeFrame(udkBuildRequest, buildRequestBody(request))
   while true:
     let frame = socket.readFrame()
@@ -172,7 +149,7 @@ proc requestUserDaemonWatchStart*(request: UserDaemonWatchRequest;
   var socket = connectUserDaemon(endpoint, commandMode = "watch",
     projectRoot = request.projectRoot,
     requiredFeatures = ["watch-routing", "watch-events", "watch-sessions"])
-  defer: socket.close()
+  defer: socket.closeIpcConn()
   socket.writeFrame(udkWatchStartRequest, watchRequestBody(request))
   while true:
     let frame = socket.readFrame()
@@ -205,7 +182,7 @@ proc requestUserDaemonWatchAttach*(sessionId: string;
     UserDaemonWatchResult =
   var socket = connectUserDaemon(endpoint, commandMode = "watch-attach",
     requiredFeatures = ["watch-routing", "watch-events", "watch-sessions"])
-  defer: socket.close()
+  defer: socket.closeIpcConn()
   socket.writeFrame(udkWatchAttachRequest, watchSessionRequestBody(
     UserDaemonWatchSessionRequest(sessionId: sessionId,
       cancelOnDisconnect: false)))
@@ -233,7 +210,7 @@ proc requestUserDaemonWatchStop*(sessionId: string;
     UserDaemonWatchResult =
   var socket = connectUserDaemon(endpoint, commandMode = "watch-stop",
     requiredFeatures = ["watch-routing", "watch-events", "watch-sessions"])
-  defer: socket.close()
+  defer: socket.closeIpcConn()
   socket.writeFrame(udkWatchStopRequest, watchSessionRequestBody(
     UserDaemonWatchSessionRequest(sessionId: sessionId)))
   let frame = socket.readFrame()
@@ -255,7 +232,7 @@ proc requestUserDaemonWatchDetach*(sessionId: string;
     UserDaemonWatchResult =
   var socket = connectUserDaemon(endpoint, commandMode = "watch-detach",
     requiredFeatures = ["watch-routing", "watch-events", "watch-sessions"])
-  defer: socket.close()
+  defer: socket.closeIpcConn()
   socket.writeFrame(udkWatchDetachRequest, watchSessionRequestBody(
     UserDaemonWatchSessionRequest(sessionId: sessionId)))
   let frame = socket.readFrame()

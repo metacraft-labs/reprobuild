@@ -1,4 +1,4 @@
-import std/[net, os, osproc, strtabs, strutils, times]
+import std/[os, osproc, strtabs, strutils, times]
 
 import repro_interface_artifacts
 import repro_local_store
@@ -17,6 +17,24 @@ when defined(posix):
   proc cFlock(fd: cint; operation: cint): cint
     {.importc: "flock", header: "<sys/file.h>".}
 
+when defined(windows):
+  import std/winlean
+
+  const
+    LOCKFILE_EXCLUSIVE_LOCK = 0x00000002'i32
+    LOCKFILE_FAIL_IMMEDIATELY = 0x00000001'i32
+    ERROR_LOCK_VIOLATION = 33'i32
+
+  proc lockFileExRaw(hFile: Handle; dwFlags: DWORD; dwReserved: DWORD;
+                     nNumberOfBytesToLockLow, nNumberOfBytesToLockHigh: DWORD;
+                     lpOverlapped: ptr OVERLAPPED): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "LockFileEx", sideEffect.}
+  proc unlockFileExRaw(hFile: Handle; dwReserved: DWORD;
+                       nNumberOfBytesToUnlockLow,
+                       nNumberOfBytesToUnlockHigh: DWORD;
+                       lpOverlapped: ptr OVERLAPPED): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "UnlockFileEx", sideEffect.}
+
 type
   StoreDaemonRuntimeError* = object of CatchableError
 
@@ -30,6 +48,8 @@ type
     token: string
     when defined(posix):
       fd: cint
+    when defined(windows):
+      handle: Handle
 
 const DevDaemonLockFileName = ".reprostored-dev.lock"
 
@@ -119,6 +139,47 @@ proc acquireDevDaemonLock(config: DevDaemonConfig): DevDaemonLock =
       $now.nanosecond
     writeFile(lockPath, lockMetadata(config, token))
     DevDaemonLock(held: true, lockPath: lockPath, token: token, fd: fd)
+  elif defined(windows):
+    createDir(config.storeRoot)
+    let lockPath = devDaemonLockPath(config.storeRoot)
+    let wpath = newWideCString(lockPath)
+    # SHARE_READ | SHARE_WRITE so the matching `writeFile(lockPath, ...)`
+    # below — and any concurrent contender's CreateFileW — succeeds and
+    # mutual exclusion is delegated to ``LockFileEx``.
+    let h = createFileW(wpath,
+      (GENERIC_READ or GENERIC_WRITE).DWORD,
+      (FILE_SHARE_READ or FILE_SHARE_WRITE).DWORD, nil,
+      OPEN_ALWAYS.DWORD, 0.DWORD, 0)
+    if h == INVALID_HANDLE_VALUE:
+      raise newException(StoreDaemonRuntimeError,
+        "failed to open daemon lockfile " & lockPath &
+          ", Windows error=" & $osLastError())
+    var overlapped: OVERLAPPED
+    let ok = lockFileExRaw(h,
+      (LOCKFILE_EXCLUSIVE_LOCK or LOCKFILE_FAIL_IMMEDIATELY).DWORD,
+      0.DWORD, 1.DWORD, 0.DWORD, addr overlapped)
+    if ok == 0:
+      let lockErr = int32(osLastError())
+      discard closeHandle(h)
+      if lockErr == ERROR_LOCK_VIOLATION:
+        var detail = ""
+        try:
+          detail = readFile(lockPath).strip()
+        except CatchableError:
+          discard
+        var msg = "daemon lock held by a live reprostored --dev for " &
+          "store root " & config.storeRoot & " (lockfile " & lockPath & ")"
+        if detail.len > 0:
+          msg.add("; " & detail.replace("\n", ", "))
+        raise newException(StoreDaemonRuntimeError, msg)
+      raise newException(StoreDaemonRuntimeError,
+        "failed to acquire daemon lockfile " & lockPath &
+          ", Windows error=" & $lockErr)
+    let now = getTime()
+    let token = $getCurrentProcessId() & "-" & $now.toUnix & "-" &
+      $now.nanosecond
+    writeFile(lockPath, lockMetadata(config, token))
+    DevDaemonLock(held: true, lockPath: lockPath, token: token, handle: h)
   else:
     DevDaemonLock(held: false)
 
@@ -135,6 +196,19 @@ proc releaseDevDaemonLock(lock: var DevDaemonLock) =
     if lock.fd >= 0:
       discard posix.close(lock.fd)
       lock.fd = -1
+  elif defined(windows):
+    if lock.handle != 0 and lock.handle != INVALID_HANDLE_VALUE:
+      var overlapped: OVERLAPPED
+      discard unlockFileExRaw(lock.handle, 0.DWORD, 1.DWORD, 0.DWORD,
+        addr overlapped)
+      discard closeHandle(lock.handle)
+      lock.handle = 0
+    try:
+      if fileExists(lock.lockPath) and
+          readFile(lock.lockPath).contains("token=" & lock.token & "\n"):
+        removeFile(lock.lockPath)
+    except CatchableError:
+      discard
   lock.held = false
 
 proc writeStatusFile(config: DevDaemonConfig) =
@@ -332,7 +406,7 @@ proc releaseRootDaemon(config: DevDaemonConfig; holderId, rootId: string) =
   defer: store.close()
   store.deleteRoot(scopedRootId(holderId, rootId))
 
-proc handleClient(socket: Socket; config: DevDaemonConfig; startedAt: Time;
+proc handleClient(socket: IpcConn; config: DevDaemonConfig; startedAt: Time;
                   shuttingDown: var bool; pending: var int) =
   let hello = socket.readFrame()
   if hello.kind != sdkHello:
@@ -386,61 +460,53 @@ proc handleClient(socket: Socket; config: DevDaemonConfig; startedAt: Time;
       errorBody("unsupported store-daemon message: " & $frame.kind))
 
 proc runDevDaemonForeground*(config: DevDaemonConfig): int =
-  when defined(posix):
-    var daemonLock = acquireDevDaemonLock(config)
-    defer:
-      releaseDevDaemonLock(daemonLock)
+  var daemonLock = acquireDevDaemonLock(config)
+  defer:
+    releaseDevDaemonLock(daemonLock)
 
-    try:
-      let existing = queryDevStatus(config.endpoint)
-      if existing.running:
-        if os.normalizedPath(existing.storeRoot) ==
-            os.normalizedPath(config.storeRoot):
-          stderr.writeLine("reprostored --dev: already running for " &
-            config.storeRoot)
-          return 0
-        stderr.writeLine("reprostored --dev: endpoint already hosts store " &
-          existing.storeRoot)
-        return 2
-    except CatchableError:
-      discard
+  try:
+    let existing = queryDevStatus(config.endpoint)
+    if existing.running:
+      if os.normalizedPath(existing.storeRoot) ==
+          os.normalizedPath(config.storeRoot):
+        stderr.writeLine("reprostored --dev: already running for " &
+          config.storeRoot)
+        return 0
+      stderr.writeLine("reprostored --dev: endpoint already hosts store " &
+        existing.storeRoot)
+      return 2
+  except CatchableError:
+    discard
 
-    block recoverAtStartup:
-      let report = recoverStoreRoot(config.storeRoot)
-      if report.indexRebuilt:
-        stderr.writeLine("reprostored --dev: rebuilt corrupt index.db; " &
-          "quarantine=" & report.indexQuarantineDir &
-          " reinserted-prefixes=" & $report.reinsertedPrefixes.len &
-          " quarantined-prefixes=" & $report.quarantinedPrefixes.len)
+  block recoverAtStartup:
+    let report = recoverStoreRoot(config.storeRoot)
+    if report.indexRebuilt:
+      stderr.writeLine("reprostored --dev: rebuilt corrupt index.db; " &
+        "quarantine=" & report.indexQuarantineDir &
+        " reinserted-prefixes=" & $report.reinsertedPrefixes.len &
+        " quarantined-prefixes=" & $report.quarantinedPrefixes.len)
 
+  removeEndpointFiles(config)
+  var listener = bindIpcListener(config.endpoint)
+  defer:
+    closeIpcListener(listener)
     removeEndpointFiles(config)
-    var listener = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
-    defer:
-      listener.close()
-      removeEndpointFiles(config)
-    listener.bindUnix(config.endpoint)
-    listener.listen()
-    writeStatusFile(config)
+  writeStatusFile(config)
 
-    let startedAt = getTime()
-    var shuttingDown = false
-    var pending = 0
-    while not shuttingDown:
-      var client: owned(Socket)
-      listener.accept(client)
+  let startedAt = getTime()
+  var shuttingDown = false
+  var pending = 0
+  while not shuttingDown:
+    var client = listener.acceptIpc()
+    try:
+      handleClient(client, config, startedAt, shuttingDown, pending)
+    except CatchableError as err:
       try:
-        handleClient(client, config, startedAt, shuttingDown, pending)
-      except CatchableError as err:
-        try:
-          client.writeFrame(sdkError, errorBody(err.msg))
-        except CatchableError:
-          discard
-      client.close()
-    0
-  else:
-    stderr.writeLine("reprostored --dev: development IPC is not implemented " &
-      "on this platform")
-    2
+        client.writeFrame(sdkError, errorBody(err.msg))
+      except CatchableError:
+        discard
+    client.closeIpcConn()
+  0
 
 proc reprostoredUsage*(): string =
   "usage: reprostored --dev [--store-root <path>] [--endpoint <path>]"

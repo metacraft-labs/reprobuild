@@ -1,6 +1,8 @@
-import std/[net, os, strutils]
+import std/[os, strutils]
 
 import repro_core
+import repro_daemon_core/ipc
+export ipc
 
 when defined(posix):
   import std/posix
@@ -116,7 +118,7 @@ proc readStringSeq(buf: openArray[byte]; pos: var int): seq[string] =
   for i in 0 ..< count:
     result[i] = buf.readString(pos)
 
-proc writeFrame*(socket: Socket; kind: StoreDaemonMessageKind;
+proc writeFrame*(conn: IpcConn; kind: StoreDaemonMessageKind;
                  body: openArray[byte] = []) =
   var frame: seq[byte] = @[]
   for ch in FrameMagic:
@@ -125,20 +127,11 @@ proc writeFrame*(socket: Socket; kind: StoreDaemonMessageKind;
   frame.writeU16Le(uint16(ord(kind)))
   frame.writeU32Le(uint32(body.len))
   frame.add(body)
-  socket.send(frame.textOf())
+  conn.sendByteString(frame.textOf())
 
-proc recvExact(socket: Socket; byteCount: int): seq[byte] =
-  result = newSeqOfCap[byte](byteCount)
-  while result.len < byteCount:
-    let chunk = socket.recv(byteCount - result.len)
-    if chunk.len == 0:
-      raise newException(IOError, "unexpected EOF reading store-daemon frame")
-    for ch in chunk:
-      result.add(byte(ord(ch)))
-
-proc readFrame*(socket: Socket): tuple[kind: StoreDaemonMessageKind;
+proc readFrame*(conn: IpcConn): tuple[kind: StoreDaemonMessageKind;
                                       body: seq[byte]] =
-  let header = socket.recvExact(12)
+  let header = conn.recvBytesExact(12)
   for i in 0 ..< 4:
     if header[i] != byte(ord(FrameMagic[i])):
       raise newException(ValueError, "bad store-daemon frame magic")
@@ -150,7 +143,7 @@ proc readFrame*(socket: Socket): tuple[kind: StoreDaemonMessageKind;
   let kindRaw = int(header.readU16Le(pos))
   let bodyLen = int(header.readU32Le(pos))
   result.kind = StoreDaemonMessageKind(kindRaw)
-  result.body = socket.recvExact(bodyLen)
+  result.body = conn.recvBytesExact(bodyLen)
 
 proc helloBody*(clientName: string): seq[byte] =
   result.writeU16Le(StoreDaemonProtocolVersion)

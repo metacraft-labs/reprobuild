@@ -1,6 +1,9 @@
-import std/[net, os, strutils, times]
+import std/[os, strutils, times]
 
 import repro_core
+
+import ./ipc
+export ipc
 
 when defined(posix):
   import std/posix
@@ -351,7 +354,7 @@ proc readSession(buf: openArray[byte]; pos: var int): UserDaemonSession =
     result.tierState = buf.readString(pos)
     result.lastResult = buf.readString(pos)
 
-proc writeFrame*(socket: Socket; kind: UserDaemonMessageKind;
+proc writeFrame*(conn: IpcConn; kind: UserDaemonMessageKind;
                  body: openArray[byte] = []) =
   var frame: seq[byte] = @[]
   for ch in FrameMagic:
@@ -359,20 +362,11 @@ proc writeFrame*(socket: Socket; kind: UserDaemonMessageKind;
   frame.writeU16Le(uint16(ord(kind)))
   frame.writeU32Le(uint32(body.len))
   frame.add(body)
-  socket.send(frame.textOf())
+  conn.sendByteString(frame.textOf())
 
-proc recvExact(socket: Socket; byteCount: int): seq[byte] =
-  result = newSeqOfCap[byte](byteCount)
-  while result.len < byteCount:
-    let chunk = socket.recv(byteCount - result.len)
-    if chunk.len == 0:
-      raise newException(IOError, "unexpected EOF reading user-daemon frame")
-    for ch in chunk:
-      result.add(byte(ord(ch)))
-
-proc readFrame*(socket: Socket): tuple[kind: UserDaemonMessageKind;
+proc readFrame*(conn: IpcConn): tuple[kind: UserDaemonMessageKind;
                                       body: seq[byte]] =
-  let header = socket.recvExact(10)
+  let header = conn.recvBytesExact(10)
   for i in 0 ..< 4:
     if header[i] != byte(ord(FrameMagic[i])):
       raise newException(ValueError, "bad user-daemon frame magic")
@@ -380,7 +374,7 @@ proc readFrame*(socket: Socket): tuple[kind: UserDaemonMessageKind;
   let kindRaw = int(header.readU16Le(pos))
   let bodyLen = int(header.readU32Le(pos))
   result.kind = UserDaemonMessageKind(kindRaw)
-  result.body = socket.recvExact(bodyLen)
+  result.body = conn.recvBytesExact(bodyLen)
 
 proc helloBody*(client: BinaryIdentity; featureFlags, commandMode,
                 projectRoot: string; protocolMajor = UserDaemonProtocolMajor;

@@ -1,4 +1,4 @@
-import std/[net, os, strutils]
+import std/[os, strutils]
 
 import repro_interface_artifacts
 import repro_local_store
@@ -13,47 +13,42 @@ proc scopedRootId*(holderId, rootId: string): string =
   "dev/" & $currentUid() & "/" & safePathSegment(holderId, "holder") & "/" &
     safePathSegment(rootId, "root")
 
-proc connectDevDaemon*(endpoint = defaultDevEndpoint()): Socket =
-  when defined(posix):
-    result = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
-    result.connectUnix(endpoint)
-    result.writeFrame(sdkHello, helloBody("repro-store-client"))
-    let ack = result.readFrame()
-    if ack.kind == sdkError:
-      raise newException(StoreDaemonClientError, parseErrorBody(ack.body))
-    if ack.kind != sdkHelloAck:
-      raise newException(StoreDaemonClientError,
-        "store daemon returned unexpected hello frame: " & $ack.kind)
-    let parsed = parseHelloAck(ack.body)
-    if parsed.version != StoreDaemonProtocolVersion or
-        parsed.profile != StoreDaemonProfileDev:
-      raise newException(StoreDaemonClientError,
-        "incompatible store daemon at " & endpoint)
-  else:
+proc connectDevDaemon*(endpoint = defaultDevEndpoint()): IpcConn =
+  try:
+    result = connectIpc(endpoint)
+  except IpcEndpointError as exc:
+    raise newException(StoreDaemonClientError, exc.msg)
+  result.writeFrame(sdkHello, helloBody("repro-store-client"))
+  let ack = result.readFrame()
+  if ack.kind == sdkError:
+    raise newException(StoreDaemonClientError, parseErrorBody(ack.body))
+  if ack.kind != sdkHelloAck:
     raise newException(StoreDaemonClientError,
-      "reprostored development IPC is not implemented on this platform")
+      "store daemon returned unexpected hello frame: " & $ack.kind)
+  let parsed = parseHelloAck(ack.body)
+  if parsed.version != StoreDaemonProtocolVersion or
+      parsed.profile != StoreDaemonProfileDev:
+    raise newException(StoreDaemonClientError,
+      "incompatible store daemon at " & endpoint)
 
 proc queryDevStatus*(endpoint = defaultDevEndpoint()): StoreDaemonStatus =
   result.endpoint = endpoint
-  when defined(posix):
-    var socket: Socket
-    try:
-      socket = connectDevDaemon(endpoint)
-    except CatchableError:
-      result.running = false
-      return
-    defer: socket.close()
-    socket.writeFrame(sdkStatus)
-    let frame = socket.readFrame()
-    if frame.kind == sdkStatusResponse:
-      result = parseStatusBody(frame.body)
-      return
-    if frame.kind == sdkError:
-      raise newException(StoreDaemonClientError, parseErrorBody(frame.body))
-    raise newException(StoreDaemonClientError,
-      "unexpected status frame: " & $frame.kind)
-  else:
+  var conn: IpcConn
+  try:
+    conn = connectDevDaemon(endpoint)
+  except CatchableError:
     result.running = false
+    return
+  defer: conn.closeIpcConn()
+  conn.writeFrame(sdkStatus)
+  let frame = conn.readFrame()
+  if frame.kind == sdkStatusResponse:
+    result = parseStatusBody(frame.body)
+    return
+  if frame.kind == sdkError:
+    raise newException(StoreDaemonClientError, parseErrorBody(frame.body))
+  raise newException(StoreDaemonClientError,
+    "unexpected status frame: " & $frame.kind)
 
 proc directSyntheticRealize*(req: SyntheticRealizeRequest):
     StoreDaemonRealizeResult =
@@ -89,8 +84,8 @@ proc directSyntheticRealize*(req: SyntheticRealizeRequest):
 proc realizeSyntheticViaDaemon*(req: SyntheticRealizeRequest;
                                 endpoint = defaultDevEndpoint()):
     StoreDaemonRealizeResult =
-  var socket = connectDevDaemon(endpoint)
-  defer: socket.close()
+  let socket = connectDevDaemon(endpoint)
+  defer: socket.closeIpcConn()
   socket.writeFrame(sdkSyntheticRealize, syntheticBody(req))
   let frame =
     try:
@@ -148,8 +143,8 @@ proc requestFromTarballUse*(useDef: InterfaceToolUse; storeRoot, holderId,
 proc realizeExternalViaDaemon(req: StoreDaemonExternalRealizeRequest;
                               kind: StoreDaemonMessageKind;
                               endpoint: string): StoreDaemonRealizeResult =
-  var socket = connectDevDaemon(endpoint)
-  defer: socket.close()
+  let socket = connectDevDaemon(endpoint)
+  defer: socket.closeIpcConn()
   socket.writeFrame(kind, externalRealizeBody(req))
   let frame =
     try:
@@ -191,8 +186,8 @@ proc scoopRealizationIsPerUserFallthrough*(): bool =
 
 proc releaseDevRoot*(holderId, rootId: string;
                      endpoint = defaultDevEndpoint()) =
-  var socket = connectDevDaemon(endpoint)
-  defer: socket.close()
+  let socket = connectDevDaemon(endpoint)
+  defer: socket.closeIpcConn()
   socket.writeFrame(sdkReleaseRoot, releaseRootBody(holderId, rootId))
   let frame = socket.readFrame()
   if frame.kind == sdkReleaseRootAck:
@@ -203,8 +198,8 @@ proc releaseDevRoot*(holderId, rootId: string;
     "unexpected release-root frame: " & $frame.kind)
 
 proc requestDevShutdown*(endpoint = defaultDevEndpoint()) =
-  var socket = connectDevDaemon(endpoint)
-  defer: socket.close()
+  let socket = connectDevDaemon(endpoint)
+  defer: socket.closeIpcConn()
   socket.writeFrame(sdkShutdown)
   let frame = socket.readFrame()
   if frame.kind == sdkShutdownAck:

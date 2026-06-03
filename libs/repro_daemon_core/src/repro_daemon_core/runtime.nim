@@ -17,6 +17,24 @@ when defined(posix):
   proc cFlock(fd: cint; operation: cint): cint
     {.importc: "flock", header: "<sys/file.h>".}
 
+when defined(windows):
+  import std/winlean
+
+  const
+    LOCKFILE_EXCLUSIVE_LOCK = 0x00000002'i32
+    LOCKFILE_FAIL_IMMEDIATELY = 0x00000001'i32
+    ERROR_LOCK_VIOLATION = 33'i32
+
+  proc lockFileExRaw(hFile: Handle; dwFlags: DWORD; dwReserved: DWORD;
+                     nNumberOfBytesToLockLow, nNumberOfBytesToLockHigh: DWORD;
+                     lpOverlapped: ptr OVERLAPPED): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "LockFileEx", sideEffect.}
+  proc unlockFileExRaw(hFile: Handle; dwReserved: DWORD;
+                       nNumberOfBytesToUnlockLow,
+                       nNumberOfBytesToUnlockHigh: DWORD;
+                       lpOverlapped: ptr OVERLAPPED): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "UnlockFileEx", sideEffect.}
+
 type
   UserDaemonRuntimeError* = object of CatchableError
 
@@ -64,6 +82,8 @@ type
     token: string
     when defined(posix):
       fd: cint
+    when defined(windows):
+      handle: Handle
 
   DevRestartState = object
     enabled: bool
@@ -278,6 +298,54 @@ proc acquireUserDaemonLock(config: UserDaemonConfig): UserDaemonLock =
       $nowTime.nanosecond
     writeFile(lockPath, lockMetadata(config, token))
     UserDaemonLock(held: true, lockPath: lockPath, token: token, fd: fd)
+  elif defined(windows):
+    # LockFileEx on a 1-byte range serves the same role as POSIX flock:
+    # the lock is automatically released when the handle closes (e.g.
+    # the daemon crashes), so a dead daemon never poisons the lockfile.
+    # We open the file read+write+share-read so a sibling can observe
+    # the metadata while we hold the exclusive lock.
+    createDir(config.stateDir)
+    let lockPath = config.stateDir / UserDaemonLockFileName
+    let wpath = newWideCString(lockPath)
+    # SHARE_READ | SHARE_WRITE so the matching `writeFile(lockPath, ...)`
+    # below — and any concurrent contender's CreateFileW — succeeds and
+    # the mutual-exclusion check is delegated to ``LockFileEx``. The
+    # lock itself enforces single-writer semantics: a second daemon
+    # opens the same file but fails the LOCKFILE_FAIL_IMMEDIATELY lock
+    # with ERROR_LOCK_VIOLATION (the case below).
+    let h = createFileW(wpath,
+      (GENERIC_READ or GENERIC_WRITE).DWORD,
+      (FILE_SHARE_READ or FILE_SHARE_WRITE).DWORD, nil,
+      OPEN_ALWAYS.DWORD, 0.DWORD, 0)
+    if h == INVALID_HANDLE_VALUE:
+      raise newException(UserDaemonRuntimeError,
+        "failed to open user-daemon lockfile " & lockPath & ", Windows " &
+        "error=" & $osLastError())
+    var overlapped: OVERLAPPED
+    let ok = lockFileExRaw(h,
+      (LOCKFILE_EXCLUSIVE_LOCK or LOCKFILE_FAIL_IMMEDIATELY).DWORD,
+      0.DWORD, 1.DWORD, 0.DWORD, addr overlapped)
+    if ok == 0:
+      let lockErr = int32(osLastError())
+      discard closeHandle(h)
+      if lockErr == ERROR_LOCK_VIOLATION:
+        var detail = ""
+        try:
+          detail = readFile(lockPath).strip()
+        except CatchableError:
+          discard
+        var msg = "user daemon lock is held by a live repro-daemon"
+        if detail.len > 0:
+          msg.add("; " & detail.replace("\n", ", "))
+        raise newException(UserDaemonRuntimeError, msg)
+      raise newException(UserDaemonRuntimeError,
+        "failed to acquire user-daemon lockfile " & lockPath &
+        ", Windows error=" & $lockErr)
+    let nowTime = getTime()
+    let token = $getCurrentProcessId() & "-" & $nowTime.toUnix & "-" &
+      $nowTime.nanosecond
+    writeFile(lockPath, lockMetadata(config, token))
+    UserDaemonLock(held: true, lockPath: lockPath, token: token, handle: h)
   else:
     UserDaemonLock(held: false)
 
@@ -294,6 +362,19 @@ proc releaseUserDaemonLock(lock: var UserDaemonLock) =
     if lock.fd >= 0:
       discard posix.close(lock.fd)
       lock.fd = -1
+  elif defined(windows):
+    if lock.handle != 0 and lock.handle != INVALID_HANDLE_VALUE:
+      var overlapped: OVERLAPPED
+      discard unlockFileExRaw(lock.handle, 0.DWORD, 1.DWORD, 0.DWORD,
+        addr overlapped)
+      discard closeHandle(lock.handle)
+      lock.handle = 0
+    try:
+      if fileExists(lock.lockPath) and
+          readFile(lock.lockPath).contains("token=" & lock.token & "\n"):
+        removeFile(lock.lockPath)
+    except CatchableError:
+      discard
   lock.held = false
 
 proc statusPath(config: UserDaemonConfig): string =
@@ -506,7 +587,7 @@ proc writeStatusFile(config: UserDaemonConfig; status: UserDaemonStatus) =
       status.previousStagedGenerationDir & "\n" &
     "featureFlags=" & status.featureFlags & "\n")
 
-proc handleHello(socket: Socket; config: UserDaemonConfig; generation: string;
+proc handleHello(socket: IpcConn; config: UserDaemonConfig; generation: string;
                  frameBody: openArray[byte]): bool =
   let hello = parseHello(frameBody)
   if hello.major != UserDaemonProtocolMajor:
@@ -650,25 +731,7 @@ proc buildResponseDelayMs(): int =
   except ValueError:
     0
 
-proc clientDisconnected(socket: Socket): bool =
-  when defined(posix):
-    let fd = socket.getFd()
-    var fds = TPollfd(fd: cast[cint](fd), events: POLLIN, revents: 0)
-    let rc = poll(addr(fds), Tnfds(1), 0.cint)
-    if rc <= 0:
-      return false
-    if (fds.revents and POLLHUP) != 0 or (fds.revents and POLLERR) != 0 or
-        (fds.revents and POLLNVAL) != 0:
-      return true
-    if (fds.revents and POLLIN) != 0:
-      var ch: char
-      let n = recv(fd, addr(ch), 1, MSG_PEEK)
-      return n == 0
-    false
-  else:
-    false
-
-proc waitForBuildUnsupportedOrDisconnect(socket: Socket; delayMs: int): bool =
+proc waitForBuildUnsupportedOrDisconnect(socket: IpcConn; delayMs: int): bool =
   ## Returns true when the attached client disconnected before the placeholder
   ## M3 unsupported response was sent.
   let deadline = epochTime() + float(delayMs) / 1000.0
@@ -687,7 +750,7 @@ proc flushStatsAfterTerminal(config: UserDaemonConfig; sessionId: string) =
     logLine(config.logPath, "stats flush failed session=" & sessionId &
       " error=" & flush.lastError)
 
-proc runBuildRequestWorker(socket: Socket; config: UserDaemonConfig;
+proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
                            request: UserDaemonBuildRequest;
                            session: var UserDaemonSession) =
   var eventId = 1'u64
@@ -725,7 +788,7 @@ proc runBuildRequestWorker(socket: Socket; config: UserDaemonConfig;
     emit(bekFinished, message, true, exitCode,
       if exitCode == 0: "info" else: "error",
       "{\"executor\":\"direct-build-entrypoint\"}")
-    try: socket.close() except CatchableError: discard
+    try: socket.closeIpcConn() except CatchableError: discard
     flushStatsAfterTerminal(config, session.sessionId)
     logLine(config.logPath, "build request finished session=" &
       session.sessionId & " exitCode=" & $exitCode)
@@ -748,7 +811,7 @@ proc runBuildRequestWorker(socket: Socket; config: UserDaemonConfig;
     logLine(config.logPath, "build request " & state & " session=" &
       session.sessionId & " message=" & message)
 
-proc handleBuildRequest(socket: Socket; config: UserDaemonConfig;
+proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
                         request: UserDaemonBuildRequest;
                         sessions: var seq[UserDaemonSession]) =
   let started = getTime()
@@ -799,7 +862,7 @@ proc handleBuildRequest(socket: Socket; config: UserDaemonConfig;
         except CatchableError as err:
           logLine(config.logPath, "build worker fatal session=" & sessionId &
             " error=" & err.msg)
-        try: socket.close() except CatchableError: discard
+        try: socket.closeIpcConn() except CatchableError: discard
         quit(0)
       logLine(config.logPath, "build worker started session=" & sessionId &
         " pid=" & $pid)
@@ -828,7 +891,7 @@ proc nextWatchEvent(runId, sessionId, projectRoot: string;
     payloadJson = payloadJson)
   result.command = "watch"
 
-proc runWatchRequestWorker(socket: Socket; config: UserDaemonConfig;
+proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
                            request: UserDaemonWatchRequest;
                            session: var UserDaemonSession;
                            streamToSocket: bool) =
@@ -894,7 +957,7 @@ proc runWatchRequestWorker(socket: Socket; config: UserDaemonConfig;
       exitCode, if exitCode == 0: "info" else: "error",
       "{\"executor\":\"direct-watch-entrypoint\"}", sessionRef[].watchedPaths,
       "exitCode=" & $exitCode)
-    try: socket.close() except CatchableError: discard
+    try: socket.closeIpcConn() except CatchableError: discard
     flushStatsAfterTerminal(config, sessionRef[].sessionId)
     logLine(config.logPath, "watch request finished session=" &
       sessionRef[].sessionId & " exitCode=" & $exitCode)
@@ -919,7 +982,7 @@ proc runWatchRequestWorker(socket: Socket; config: UserDaemonConfig;
     logLine(config.logPath, "watch request " & state & " session=" &
       sessionRef[].sessionId & " message=" & message)
 
-proc streamWatchSession(socket: Socket; config: UserDaemonConfig;
+proc streamWatchSession(socket: IpcConn; config: UserDaemonConfig;
                         sessionId: string; stopOnDisconnect: bool) =
   var offset = 0'i64
   var sawAny = false
@@ -942,7 +1005,7 @@ proc streamWatchSession(socket: Socket; config: UserDaemonConfig;
       return
     sleep(50)
 
-proc handleWatchStart(socket: Socket; config: UserDaemonConfig;
+proc handleWatchStart(socket: IpcConn; config: UserDaemonConfig;
                       request: UserDaemonWatchRequest;
                       sessions: var seq[UserDaemonSession]) =
   let started = getTime()
@@ -983,7 +1046,7 @@ proc handleWatchStart(socket: Socket; config: UserDaemonConfig;
       except CatchableError as err:
         logLine(config.logPath, "watch worker fatal session=" & sessionId &
           " error=" & err.msg)
-      try: socket.close() except CatchableError: discard
+      try: socket.closeIpcConn() except CatchableError: discard
       quit(0)
     logLine(config.logPath, "watch worker started session=" & sessionId &
       " pid=" & $pid)
@@ -994,7 +1057,7 @@ proc handleWatchStart(socket: Socket; config: UserDaemonConfig;
       streamToSocket = request.attached and not request.detached)
   sessions.removeSession(sessionId)
 
-proc handleWatchAttach(socket: Socket; config: UserDaemonConfig;
+proc handleWatchAttach(socket: IpcConn; config: UserDaemonConfig;
                        request: UserDaemonWatchSessionRequest) =
   if request.sessionId.len == 0:
     socket.writeFrame(udkError, errorBody("watch attach requires a session id"))
@@ -1012,13 +1075,13 @@ proc handleWatchAttach(socket: Socket; config: UserDaemonConfig;
       except CatchableError as err:
         logLine(config.logPath, "watch attach fatal session=" &
           request.sessionId & " error=" & err.msg)
-      try: socket.close() except CatchableError: discard
+      try: socket.closeIpcConn() except CatchableError: discard
       quit(0)
   else:
     streamWatchSession(socket, config, request.sessionId,
       request.cancelOnDisconnect)
 
-proc handleWatchStop(socket: Socket; config: UserDaemonConfig;
+proc handleWatchStop(socket: IpcConn; config: UserDaemonConfig;
                      request: UserDaemonWatchSessionRequest) =
   if request.sessionId.len == 0:
     socket.writeFrame(udkError, errorBody("watch stop requires a session id"))
@@ -1036,7 +1099,7 @@ proc handleWatchStop(socket: Socket; config: UserDaemonConfig;
   appendWatchEventRecord(config, request.sessionId, event)
   socket.writeFrame(udkWatchEvent, buildEventBody(event))
 
-proc handleWatchDetach(socket: Socket; config: UserDaemonConfig;
+proc handleWatchDetach(socket: IpcConn; config: UserDaemonConfig;
                        request: UserDaemonWatchSessionRequest) =
   if request.sessionId.len == 0:
     socket.writeFrame(udkError, errorBody("watch detach requires a session id"))
@@ -1053,7 +1116,7 @@ proc handleWatchDetach(socket: Socket; config: UserDaemonConfig;
   appendWatchEventRecord(config, request.sessionId, event)
   socket.writeFrame(udkWatchEvent, buildEventBody(event))
 
-proc handleClient(socket: Socket; config: UserDaemonConfig; startedAt: Time;
+proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
                   generation: string; shuttingDown: var bool;
                   sessions: var seq[UserDaemonSession];
                   devRestart: DevRestartState) =
@@ -1160,7 +1223,7 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string]
 proc launchWithFork(exe: string; config: UserDaemonConfig)
 
 proc performDevSelfRestart(config: UserDaemonConfig;
-                           listener: var Socket;
+                           listener: var IpcListener;
                            daemonLock: var UserDaemonLock;
                            state: var DevRestartState): bool =
   state.restartPending = true
@@ -1176,7 +1239,7 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   logLine(config.logPath, "dev restart launching source=" &
     state.sourceImagePath & " running=" & staged.imagePath & " runId=" &
     runId)
-  try: listener.close() except CatchableError: discard
+  closeIpcListener(listener)
   removeEndpointFiles(config)
   releaseUserDaemonLock(daemonLock)
   # Use the same launchWithFork the initial launch uses (fork + setsid +
@@ -1196,86 +1259,77 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   logLine(config.logPath, "dev restart old process exiting runId=" & runId)
   true
 
-when defined(posix):
-  proc listenerHasClient(listener: Socket; timeoutMs: int): bool =
-    let fd = listener.getFd()
-    var fds = TPollfd(fd: cast[cint](fd), events: POLLIN, revents: 0)
-    poll(addr(fds), Tnfds(1), cint(timeoutMs)) > 0 and
-      (fds.revents and POLLIN) != 0
-
 proc runUserDaemonForeground*(config: UserDaemonConfig): int =
-  when defined(posix):
+  # Named-pipe endpoints live under the kernel ``\\.\pipe\`` namespace
+  # which is NOT a filesystem directory; ``createDir`` on its
+  # parent would raise. Filesystem endpoints (AF_UNIX socket paths)
+  # still need their parent directory provisioned.
+  if endpointKindOf(config.endpoint) == ekUnixSocket:
     createDir(parentDir(config.endpoint))
-    createDir(config.stateDir)
-    createDir(parentDir(config.logPath))
-    var daemonLock = acquireUserDaemonLock(config)
-    defer:
-      releaseUserDaemonLock(daemonLock)
+  createDir(config.stateDir)
+  createDir(parentDir(config.logPath))
+  var daemonLock = acquireUserDaemonLock(config)
+  defer:
+    releaseUserDaemonLock(daemonLock)
 
-    let restartChild =
-      config.devMode and config.previousStagedGenerationDir.len > 0
-    if not restartChild:
+  let restartChild =
+    config.devMode and config.previousStagedGenerationDir.len > 0
+  if not restartChild:
+    try:
+      let existing = queryUserDaemonStatus(config.endpoint)
+      if existing.running:
+        stderr.writeLine("repro-daemon: already running at " &
+          config.endpoint)
+        return 0
+    except CatchableError:
+      discard
+
+  if not restartChild:
+    discard cleanupStaleUserDaemonDiscovery(config)
+  removeEndpointFiles(config)
+  var listener = bindIpcListener(config.endpoint)
+  var selfRestarting = false
+  defer:
+    closeIpcListener(listener)
+    if not selfRestarting:
+      removeEndpointFiles(config)
+      logLine(config.logPath, "stopped")
+
+  let startedAt = getTime()
+  let generation = generationFor(startedAt)
+  var devRestart = initDevRestartState(config)
+  cleanupPreviousStagedGeneration(config)
+  var sessions: seq[UserDaemonSession] = @[]
+  writeStatusFile(config, statusFor(config, startedAt, generation,
+    sessions.len, devRestart))
+  logLine(config.logPath, "started role=" & UserDaemonRole &
+    " endpoint=" & config.endpoint & " generation=" & generation &
+    " devMode=" & $config.devMode & " source=" &
+    devRestart.sourceImagePath & " running=" & devRestart.runningImagePath &
+    " restartRunId=" & devRestart.restartRunId)
+
+  var shuttingDown = false
+  while not shuttingDown:
+    if restartCandidateReady(config, devRestart):
+      writeStatusFile(config, statusFor(config, startedAt, generation,
+        countActiveSessionRecords(config), devRestart))
+      if performDevSelfRestart(config, listener, daemonLock, devRestart):
+        selfRestarting = true
+        return 0
+    if not listener.waitForClient(int(devRestartPollIntervalMs())):
+      continue
+    var client = listener.acceptIpc()
+    try:
+      handleClient(client, config, startedAt, generation, shuttingDown,
+        sessions, devRestart)
+    except CatchableError as err:
+      logLine(config.logPath, "client error: " & err.msg)
       try:
-        let existing = queryUserDaemonStatus(config.endpoint)
-        if existing.running:
-          stderr.writeLine("repro-daemon: already running at " &
-            config.endpoint)
-          return 0
+        client.writeFrame(udkError, errorBody(err.msg))
       except CatchableError:
         discard
-
-    if not restartChild:
-      discard cleanupStaleUserDaemonDiscovery(config)
-    removeEndpointFiles(config)
-    var listener = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
-    var selfRestarting = false
-    defer:
-      listener.close()
-      if not selfRestarting:
-        removeEndpointFiles(config)
-        logLine(config.logPath, "stopped")
-    listener.bindUnix(config.endpoint)
-    listener.listen()
-
-    let startedAt = getTime()
-    let generation = generationFor(startedAt)
-    var devRestart = initDevRestartState(config)
-    cleanupPreviousStagedGeneration(config)
-    var sessions: seq[UserDaemonSession] = @[]
-    writeStatusFile(config, statusFor(config, startedAt, generation,
-      sessions.len, devRestart))
-    logLine(config.logPath, "started role=" & UserDaemonRole &
-      " endpoint=" & config.endpoint & " generation=" & generation &
-      " devMode=" & $config.devMode & " source=" &
-      devRestart.sourceImagePath & " running=" & devRestart.runningImagePath &
-      " restartRunId=" & devRestart.restartRunId)
-
-    var shuttingDown = false
-    while not shuttingDown:
-      if restartCandidateReady(config, devRestart):
-        writeStatusFile(config, statusFor(config, startedAt, generation,
-          countActiveSessionRecords(config), devRestart))
-        if performDevSelfRestart(config, listener, daemonLock, devRestart):
-          selfRestarting = true
-          return 0
-      var client: owned(Socket)
-      if not listenerHasClient(listener, int(devRestartPollIntervalMs())):
-        continue
-      listener.accept(client)
-      try:
-        handleClient(client, config, startedAt, generation, shuttingDown,
-          sessions, devRestart)
-      except CatchableError as err:
-        logLine(config.logPath, "client error: " & err.msg)
-        try:
-          client.writeFrame(udkError, errorBody(err.msg))
-        except CatchableError:
-          discard
-      client.close()
-    0
-  else:
-    stderr.writeLine("repro-daemon: IPC is not implemented on this platform")
-    2
+    client.closeIpcConn()
+  0
 
 proc siblingUserDaemonPath*(publicCliPath: string): string =
   ## Locate the ``repro-daemon`` companion binary for the given ``repro``
