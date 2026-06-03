@@ -59,7 +59,10 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   let runquotaRoot = repoRoot.parentDir / "runquota"
   let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
+    raise newException(OSError,
+      "runquotad binary missing at " & daemonBin & "; build it via " &
+      "the test harness (scripts/run_tests.sh) — the test code must not " &
+      "spawn `just build` for the sibling repo")
   let socketPath = "/tmp/repro-m20-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)

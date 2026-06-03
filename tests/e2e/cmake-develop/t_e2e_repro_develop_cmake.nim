@@ -27,28 +27,17 @@ proc lastValueAfter(output, prefix: string): string =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  # Windows: build artifacts carry an .exe suffix; the binary path probe and
-  # the build fallback both need to account for it.
-  let daemonBin =
-    when defined(windows):
-      runquotaRoot / "build" / "bin" / "runquotad.exe"
-    else:
-      runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" /
+    addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    # Windows: cmd.exe-style `cd X && Y` composition doesn't survive
-    # execCmdEx's shell-less invocation. Spawn `just` directly with the
-    # working directory set so the build runs in `runquotaRoot`.
-    when defined(windows):
-      let buildProc = startProcess("just", workingDir = runquotaRoot,
-                                   args = @["build"],
-                                   options = {poUsePath, poParentStreams})
-      let buildCode = buildProc.waitForExit()
-      buildProc.close()
-      if buildCode != 0:
-        raise newException(OSError, "`just build` in " & runquotaRoot &
-          " failed with exit code " & $buildCode)
-    else:
-      discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
+    # The test harness (scripts/run_tests.sh) is responsible for
+    # building the sibling runquota before invoking the suite — see
+    # the prerequisite-build block at the top of that script. A
+    # missing binary here is a harness configuration error, not
+    # something the test should attempt to recover from in-band.
+    raise newException(OSError,
+      "runquotad binary missing at " & daemonBin & "; build it via " &
+      "the test harness (scripts/run_tests.sh)")
   # The socket path needs platform-specific shape:
   #   Windows: a named pipe (\\.\pipe\...); the runquota daemon's --socket
   #            argument auto-detects this prefix and switches to pipe mode.

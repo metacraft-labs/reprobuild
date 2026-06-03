@@ -5,6 +5,45 @@ mkdir -p build/test-bin build/nimcache
 
 bash ./scripts/build_apps.sh
 
+# Build out-of-repo test prerequisites BEFORE compiling the suite. The
+# tests assume sibling daemons (runquotad, the runquota CLI, etc.) are
+# already on disk — the test code must not spawn `just build` for a
+# neighbouring repo, both because that hangs the runner if the sibling
+# has its own slow build graph AND because the test author has no way
+# to control which version is built. The dev shell / CI runner is the
+# correct place to decide which siblings exist and which version to
+# build.
+#
+# We compile the sibling when its directory is present and the marker
+# binary is missing. The check is intentionally idempotent and silent
+# on a hot cache — a `just build` invocation on a fully-built tree is
+# a no-op.
+build_sibling() {
+  local sibling_dir="$1"
+  local marker_path="$2"
+  if [[ ! -d "${sibling_dir}" ]]; then
+    return 0
+  fi
+  if [[ -x "${marker_path}" ]]; then
+    return 0
+  fi
+  printf 'Building prerequisite: %s\n' "${sibling_dir}" >&2
+  (cd "${sibling_dir}" && just build)
+}
+
+# `runquotad` and `runquota` ship out of ../runquota. The Windows
+# binary carries `.exe`; the POSIX one does not. Both naming forms
+# are covered by listing the candidate paths explicitly.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    exe_ext=".exe"
+    ;;
+  *)
+    exe_ext=""
+    ;;
+esac
+build_sibling "../runquota" "../runquota/build/bin/runquotad${exe_ext}"
+
 if [[ -f tests/e2e/home-generations/harness_apply_lock_holder.nim ]]; then
   nim c \
     --threads:on \

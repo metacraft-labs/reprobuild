@@ -115,7 +115,10 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   let cliBin = runquotaRoot / "build" / "bin" / addFileExt("runquota", ExeExt)
   if not fileExists(daemonBin) or not fileExists(cliBin):
-    discard requireSuccess(shellCommand(@["just", "build"]), runquotaRoot)
+    raise newException(OSError,
+      "runquotad/runquota binaries missing under " & runquotaRoot &
+      "/build/bin; build them via the test harness " &
+      "(scripts/run_tests.sh)")
   let socketPath = "/tmp/repro-m22-rq-" & $getCurrentProcessId() & ".sock"
   if pathExists(socketPath):
     removeFile(socketPath)
