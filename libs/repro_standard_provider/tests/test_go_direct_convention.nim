@@ -221,128 +221,130 @@ func main() { C.puts(C.CString("hi")) }
       check conv.recognize(dir, request)
       removeDir(dir)
 
-suite "go-direct convention emit (Mode 3 fixture)":
+when isNixSupported:
+  suite "go-direct convention emit (Mode 3 fixture)":
 
-  test "emitFragment: produces per-member compile + link with importcfg wiring":
-    if not goOnPath():
-      skip()
-    else:
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(Mode3Fixture)
-      require conv.recognize(Mode3Fixture, request)
-      let fragment = conv.emitFragment(Mode3Fixture, request)
+    test "emitFragment: produces per-member compile + link with importcfg wiring":
+      if not goOnPath():
+        skip()
+      else:
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(Mode3Fixture)
+        require conv.recognize(Mode3Fixture, request)
+        let fragment = conv.emitFragment(Mode3Fixture, request)
 
-      var compileActions: seq[BuildActionDef] = @[]
-      var linkActions: seq[BuildActionDef] = @[]
-      for node in fragment.nodes:
-        if node.kind != gnkAction:
-          continue
-        let action = decodeBuildActionPayload(toBytes(node.payload))
-        if action.id.startsWith("go-direct-compile-"):
-          compileActions.add(action)
-        elif action.id.startsWith("go-direct-link-"):
-          linkActions.add(action)
+        var compileActions: seq[BuildActionDef] = @[]
+        var linkActions: seq[BuildActionDef] = @[]
+        for node in fragment.nodes:
+          if node.kind != gnkAction:
+            continue
+          let action = decodeBuildActionPayload(toBytes(node.payload))
+          if action.id.startsWith("go-direct-compile-"):
+            compileActions.add(action)
+          elif action.id.startsWith("go-direct-link-"):
+            linkActions.add(action)
 
-      check compileActions.len == 2  # mathlib + calc
-      check linkActions.len == 1     # calc only
+        check compileActions.len == 2  # mathlib + calc
+        check linkActions.len == 1     # calc only
 
-      var mathlibCompile: BuildActionDef
-      var calcCompile: BuildActionDef
-      var sawMathlib = false
-      var sawCalc = false
-      for action in compileActions:
-        if action.id == "go-direct-compile-mathlib":
-          mathlibCompile = action
-          sawMathlib = true
-        elif action.id == "go-direct-compile-calc":
-          calcCompile = action
-          sawCalc = true
-      check sawMathlib
-      check sawCalc
+        var mathlibCompile: BuildActionDef
+        var calcCompile: BuildActionDef
+        var sawMathlib = false
+        var sawCalc = false
+        for action in compileActions:
+          if action.id == "go-direct-compile-mathlib":
+            mathlibCompile = action
+            sawMathlib = true
+          elif action.id == "go-direct-compile-calc":
+            calcCompile = action
+            sawCalc = true
+        check sawMathlib
+        check sawCalc
 
-      # The mathlib compile output is <root>/.repro/build/mathlib/mathlib.a
-      var mathlibArchive = ""
-      for outPath in mathlibCompile.outputs:
-        let lower = outPath.toLowerAscii.replace('\\', '/')
-        if lower.endsWith("/mathlib.a"):
-          mathlibArchive = outPath
-      check mathlibArchive.len > 0
+        # The mathlib compile output is <root>/.repro/build/mathlib/mathlib.a
+        var mathlibArchive = ""
+        for outPath in mathlibCompile.outputs:
+          let lower = outPath.toLowerAscii.replace('\\', '/')
+          if lower.endsWith("/mathlib.a"):
+            mathlibArchive = outPath
+        check mathlibArchive.len > 0
 
-      # The mathlib compile argv uses ``-p mathlib`` (the library
-      # package name).
-      let mathlibArgv = inlineArgvOf(mathlibCompile)
-      var sawPMathlib = false
-      for i, token in mathlibArgv:
-        if token == "-p" and i + 1 < mathlibArgv.len and
-            mathlibArgv[i + 1] == "mathlib":
-          sawPMathlib = true
-      check sawPMathlib
+        # The mathlib compile argv uses ``-p mathlib`` (the library
+        # package name).
+        let mathlibArgv = inlineArgvOf(mathlibCompile)
+        var sawPMathlib = false
+        for i, token in mathlibArgv:
+          if token == "-p" and i + 1 < mathlibArgv.len and
+              mathlibArgv[i + 1] == "mathlib":
+            sawPMathlib = true
+        check sawPMathlib
 
-      # The calc compile argv uses ``-p main`` (executable members
-      # always compile under the magic package name).
-      let calcArgv = inlineArgvOf(calcCompile)
-      var sawPMain = false
-      for i, token in calcArgv:
-        if token == "-p" and i + 1 < calcArgv.len and
-            calcArgv[i + 1] == "main":
-          sawPMain = true
-      check sawPMain
+        # The calc compile argv uses ``-p main`` (executable members
+        # always compile under the magic package name).
+        let calcArgv = inlineArgvOf(calcCompile)
+        var sawPMain = false
+        for i, token in calcArgv:
+          if token == "-p" and i + 1 < calcArgv.len and
+              calcArgv[i + 1] == "main":
+            sawPMain = true
+        check sawPMain
 
-      # The calc compile argv carries ``-I <mathlib archive dir>`` so
-      # the bare ``mathlib`` import resolves at compile time.
-      var sawIMathlibDir = false
-      for i, token in calcArgv:
-        if token == "-I" and i + 1 < calcArgv.len:
-          let candidate = calcArgv[i + 1].toLowerAscii.replace('\\', '/')
-          if candidate.endsWith("/.repro/build/mathlib"):
-            sawIMathlibDir = true
-      check sawIMathlibDir
+        # The calc compile argv carries ``-I <mathlib archive dir>`` so
+        # the bare ``mathlib`` import resolves at compile time.
+        var sawIMathlibDir = false
+        for i, token in calcArgv:
+          if token == "-I" and i + 1 < calcArgv.len:
+            let candidate = calcArgv[i + 1].toLowerAscii.replace('\\', '/')
+            if candidate.endsWith("/.repro/build/mathlib"):
+              sawIMathlibDir = true
+        check sawIMathlibDir
 
-      # The calc compile deps include the mathlib compile action id
-      # (sequencing).
-      var sawMathlibCompileDep = false
-      for dep in calcCompile.deps:
-        if dep == mathlibCompile.id:
-          sawMathlibCompileDep = true
-      check sawMathlibCompileDep
+        # The calc compile deps include the mathlib compile action id
+        # (sequencing).
+        var sawMathlibCompileDep = false
+        for dep in calcCompile.deps:
+          if dep == mathlibCompile.id:
+            sawMathlibCompileDep = true
+        check sawMathlibCompileDep
 
-      let calcLink = linkActions[0]
-      check calcLink.id == "go-direct-link-calc"
+        let calcLink = linkActions[0]
+        check calcLink.id == "go-direct-link-calc"
 
-      # The link argv carries ``-L <mathlib archive dir>``.
-      let calcLinkArgv = inlineArgvOf(calcLink)
-      var sawLMathlibDir = false
-      for i, token in calcLinkArgv:
-        if token == "-L" and i + 1 < calcLinkArgv.len:
-          let candidate = calcLinkArgv[i + 1].toLowerAscii.replace('\\', '/')
-          if candidate.endsWith("/.repro/build/mathlib"):
-            sawLMathlibDir = true
-      check sawLMathlibDir
+        # The link argv carries ``-L <mathlib archive dir>``.
+        let calcLinkArgv = inlineArgvOf(calcLink)
+        var sawLMathlibDir = false
+        for i, token in calcLinkArgv:
+          if token == "-L" and i + 1 < calcLinkArgv.len:
+            let candidate = calcLinkArgv[i + 1].toLowerAscii.replace('\\', '/')
+            if candidate.endsWith("/.repro/build/mathlib"):
+              sawLMathlibDir = true
+        check sawLMathlibDir
 
-      # The link action's deps include the mathlib compile action id
-      # (sequencing).
-      var sawMathlibLinkDep = false
-      for dep in calcLink.deps:
-        if dep == mathlibCompile.id:
-          sawMathlibLinkDep = true
-      check sawMathlibLinkDep
+        # The link action's deps include the mathlib compile action id
+        # (sequencing).
+        var sawMathlibLinkDep = false
+        for dep in calcLink.deps:
+          if dep == mathlibCompile.id:
+            sawMathlibLinkDep = true
+        check sawMathlibLinkDep
 
-      # The link action's inputs include the upstream archive path
-      # (cache invalidation).
-      var sawMathlibArchiveInput = false
-      for inp in calcLink.inputs:
-        if inp == mathlibArchive:
-          sawMathlibArchiveInput = true
-      check sawMathlibArchiveInput
+        # The link action's inputs include the upstream archive path
+        # (cache invalidation).
+        var sawMathlibArchiveInput = false
+        for inp in calcLink.inputs:
+          if inp == mathlibArchive:
+            sawMathlibArchiveInput = true
+        check sawMathlibArchiveInput
 
-suite "go-direct convention dep validation":
+when isNixSupported:
+  suite "go-direct convention dep validation":
 
-  test "depends_on cycle is rejected before any compile fires":
-    if not goOnPath():
-      skip()
-    else:
-      let dir = makeScratch("cycle")
-      writeFile(dir / "repro.nim", """
+    test "depends_on cycle is rejected before any compile fires":
+      if not goOnPath():
+        skip()
+      else:
+        let dir = makeScratch("cycle")
+        writeFile(dir / "repro.nim", """
 import repro_project_dsl
 
 package alphaPkg:
@@ -403,14 +405,15 @@ depends_on onlyPkg: nonexistentPkg
 # (<root>/src/*.go).
 # ---------------------------------------------------------------------------
 
-suite "go-direct convention layout recognition":
+when isNixSupported:
+  suite "go-direct convention layout recognition":
 
-  test "layout B: multi-package workspace with per-<member>/*.go":
-    if not goOnPath():
-      skip()
-    else:
-      let dir = makeScratch("layout-b-recognise")
-      writeFile(dir / "repro.nim", """
+    test "layout B: multi-package workspace with per-<member>/*.go":
+      if not goOnPath():
+        skip()
+      else:
+        let dir = makeScratch("layout-b-recognise")
+        writeFile(dir / "repro.nim", """
 import repro_project_dsl
 
 package libPkg:
@@ -473,229 +476,233 @@ package soloPkg:
 # positional + the platform-specific Go runtime libs.
 # ---------------------------------------------------------------------------
 
-suite "go-direct convention M36 cross-language (forward direction)":
+when isNixSupported:
+  suite "go-direct convention M36 cross-language (forward direction)":
 
-  test "forward: Go binary uses cgo and picks up C archive via -ldflags":
-    if not goOnPath():
-      skip()
-    else:
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(Mode3MixedForwardFixture)
-      require conv.recognize(Mode3MixedForwardFixture, request)
-      let fragment = conv.emitFragment(Mode3MixedForwardFixture, request)
-
-      var archiveAction: BuildActionDef
-      var calcBuildAction: BuildActionDef
-      var sawArchive = false
-      var sawCalcBuild = false
-      var sawCcompile = false
-      for node in fragment.nodes:
-        if node.kind != gnkAction:
-          continue
-        let action = decodeBuildActionPayload(toBytes(node.payload))
-        if action.id == "go-xlang-ccpp-archive-mathlib":
-          archiveAction = action
-          sawArchive = true
-        elif action.id == "go-direct-build-calc":
-          calcBuildAction = action
-          sawCalcBuild = true
-        elif action.id.startsWith("go-xlang-ccpp-compile-mathlib"):
-          sawCcompile = true
-
-      # The convention emits at least: 1 per-source compile + 1 archive +
-      # 1 Go cgo build. The C/C++ helpers carry the go-xlang-ccpp- prefix
-      # to discriminate from the rust-direct convention's
-      # rust-xlang-ccpp- and the Nim convention's nim-xlang-ccpp-.
-      check sawArchive
-      check sawCalcBuild
-      check sawCcompile
-
-      # The archive output lands at .repro/build/mathlib/libmathlib.a
-      # (the cross-language schema shared with c-cpp-direct).
-      var archiveOutput = ""
-      for outPath in archiveAction.outputs:
-        let lower = outPath.toLowerAscii.replace('\\', '/')
-        if lower.endsWith("/libmathlib.a"):
-          archiveOutput = outPath
-      check archiveOutput.len > 0
-
-      # The calc build action's deps include the archive action id.
-      var sawArchiveDep = false
-      for dep in calcBuildAction.deps:
-        if dep == archiveAction.id:
-          sawArchiveDep = true
-      check sawArchiveDep
-
-      # The calc build action's inputs include the upstream archive
-      # (cache invalidation).
-      var sawArchiveInput = false
-      for inp in calcBuildAction.inputs:
-        if inp == archiveOutput:
-          sawArchiveInput = true
-      check sawArchiveInput
-
-      # The calc build argv carries the canonical cgo → C archive
-      # ldflags: ``-ldflags=-extldflags "-L<dir> -lmathlib"`` (the
-      # exact form Go's linker expects when forwarding to gcc's ld).
-      let calcArgv = inlineArgvOf(calcBuildAction)
-      var sawLdflags = false
-      var sawLmathlib = false
-      for token in calcArgv:
-        if token.startsWith("-ldflags=-extldflags"):
-          sawLdflags = true
-          if "-lmathlib" in token:
-            sawLmathlib = true
-      check sawLdflags
-      check sawLmathlib
-
-suite "go-direct convention M36 cross-language (reverse direction)":
-
-  test "reverse: Go library emits -buildmode=c-archive when consumed by C++":
-    if not goOnPath():
-      skip()
-    else:
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(Mode3MixedReverseFixture)
-      require conv.recognize(Mode3MixedReverseFixture, request)
-      let fragment = conv.emitFragment(Mode3MixedReverseFixture, request)
-
-      var goaddlibAction: BuildActionDef
-      var cppappLinkAction: BuildActionDef
-      var sawGoaddlib = false
-      var sawCppLink = false
-      var sawCppCompile = false
-      for node in fragment.nodes:
-        if node.kind != gnkAction:
-          continue
-        let action = decodeBuildActionPayload(toBytes(node.payload))
-        if action.id == "go-direct-c-archive-goaddlib":
-          goaddlibAction = action
-          sawGoaddlib = true
-        elif action.id == "go-xlang-ccpp-exec-link-cppapp":
-          cppappLinkAction = action
-          sawCppLink = true
-        elif action.id.startsWith("go-xlang-ccpp-exec-compile-cppapp"):
-          sawCppCompile = true
-      check sawGoaddlib
-      check sawCppLink
-      check sawCppCompile
-
-      # The goaddlib argv carries -buildmode=c-archive (NOT the M31
-      # ``go tool compile`` path).
-      let goaddlibArgv = inlineArgvOf(goaddlibAction)
-      var sawCArchiveFlag = false
-      for token in goaddlibArgv:
-        if token == "-buildmode=c-archive":
-          sawCArchiveFlag = true
-      check sawCArchiveFlag
-
-      # The goaddlib output lands at the canonical archive path
-      # .repro/build/goaddlib/libgoaddlib.a (shared schema with
-      # c-cpp-direct + Nim + Rust). Go's c-archive build mode also
-      # auto-emits a sibling libgoaddlib.h header in the same dir.
-      var goaddlibArchiveOut = ""
-      var sawHeaderOut = false
-      for outPath in goaddlibAction.outputs:
-        let lower = outPath.toLowerAscii.replace('\\', '/')
-        if lower.endsWith("/libgoaddlib.a"):
-          goaddlibArchiveOut = outPath
-        elif lower.endsWith("/libgoaddlib.h"):
-          sawHeaderOut = true
-      check goaddlibArchiveOut.len > 0
-      check sawHeaderOut
-
-      # The cppapp link action's deps include the goaddlib action id.
-      var sawGoaddlibDep = false
-      for dep in cppappLinkAction.deps:
-        if dep == goaddlibAction.id:
-          sawGoaddlibDep = true
-      check sawGoaddlibDep
-
-      # The cppapp link action's inputs include the upstream archive.
-      var sawGoaddlibInput = false
-      for inp in cppappLinkAction.inputs:
-        if inp == goaddlibArchiveOut:
-          sawGoaddlibInput = true
-      check sawGoaddlibInput
-
-      # The cppapp link argv carries the archive as a trailing
-      # positional AND the platform-specific Go runtime libs.
-      let cppappArgv = inlineArgvOf(cppappLinkAction)
-      var sawArchive = false
-      for token in cppappArgv:
-        if token == goaddlibArchiveOut:
-          sawArchive = true
-      check sawArchive
-      when defined(windows):
-        # Windows MinGW: -lws2_32 -lwinmm -lbcrypt -lntdll -luserenv
-        # -ladvapi32
-        var sawWs232 = false
-        var sawBcrypt = false
-        var sawNtdll = false
-        for token in cppappArgv:
-          if token == "-lws2_32": sawWs232 = true
-          if token == "-lbcrypt": sawBcrypt = true
-          if token == "-lntdll": sawNtdll = true
-        check sawWs232
-        check sawBcrypt
-        check sawNtdll
+    test "forward: Go binary uses cgo and picks up C archive via -ldflags":
+      if not goOnPath():
+        skip()
       else:
-        # POSIX: -lpthread -ldl -lm
-        var sawPthread = false
-        var sawDl = false
-        var sawM = false
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(Mode3MixedForwardFixture)
+        require conv.recognize(Mode3MixedForwardFixture, request)
+        let fragment = conv.emitFragment(Mode3MixedForwardFixture, request)
+
+        var archiveAction: BuildActionDef
+        var calcBuildAction: BuildActionDef
+        var sawArchive = false
+        var sawCalcBuild = false
+        var sawCcompile = false
+        for node in fragment.nodes:
+          if node.kind != gnkAction:
+            continue
+          let action = decodeBuildActionPayload(toBytes(node.payload))
+          if action.id == "go-xlang-ccpp-archive-mathlib":
+            archiveAction = action
+            sawArchive = true
+          elif action.id == "go-direct-build-calc":
+            calcBuildAction = action
+            sawCalcBuild = true
+          elif action.id.startsWith("go-xlang-ccpp-compile-mathlib"):
+            sawCcompile = true
+
+        # The convention emits at least: 1 per-source compile + 1 archive +
+        # 1 Go cgo build. The C/C++ helpers carry the go-xlang-ccpp- prefix
+        # to discriminate from the rust-direct convention's
+        # rust-xlang-ccpp- and the Nim convention's nim-xlang-ccpp-.
+        check sawArchive
+        check sawCalcBuild
+        check sawCcompile
+
+        # The archive output lands at .repro/build/mathlib/libmathlib.a
+        # (the cross-language schema shared with c-cpp-direct).
+        var archiveOutput = ""
+        for outPath in archiveAction.outputs:
+          let lower = outPath.toLowerAscii.replace('\\', '/')
+          if lower.endsWith("/libmathlib.a"):
+            archiveOutput = outPath
+        check archiveOutput.len > 0
+
+        # The calc build action's deps include the archive action id.
+        var sawArchiveDep = false
+        for dep in calcBuildAction.deps:
+          if dep == archiveAction.id:
+            sawArchiveDep = true
+        check sawArchiveDep
+
+        # The calc build action's inputs include the upstream archive
+        # (cache invalidation).
+        var sawArchiveInput = false
+        for inp in calcBuildAction.inputs:
+          if inp == archiveOutput:
+            sawArchiveInput = true
+        check sawArchiveInput
+
+        # The calc build argv carries the canonical cgo → C archive
+        # ldflags: ``-ldflags=-extldflags "-L<dir> -lmathlib"`` (the
+        # exact form Go's linker expects when forwarding to gcc's ld).
+        let calcArgv = inlineArgvOf(calcBuildAction)
+        var sawLdflags = false
+        var sawLmathlib = false
+        for token in calcArgv:
+          if token.startsWith("-ldflags=-extldflags"):
+            sawLdflags = true
+            if "-lmathlib" in token:
+              sawLmathlib = true
+        check sawLdflags
+        check sawLmathlib
+
+when isNixSupported:
+  suite "go-direct convention M36 cross-language (reverse direction)":
+
+    test "reverse: Go library emits -buildmode=c-archive when consumed by C++":
+      if not goOnPath():
+        skip()
+      else:
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(Mode3MixedReverseFixture)
+        require conv.recognize(Mode3MixedReverseFixture, request)
+        let fragment = conv.emitFragment(Mode3MixedReverseFixture, request)
+
+        var goaddlibAction: BuildActionDef
+        var cppappLinkAction: BuildActionDef
+        var sawGoaddlib = false
+        var sawCppLink = false
+        var sawCppCompile = false
+        for node in fragment.nodes:
+          if node.kind != gnkAction:
+            continue
+          let action = decodeBuildActionPayload(toBytes(node.payload))
+          if action.id == "go-direct-c-archive-goaddlib":
+            goaddlibAction = action
+            sawGoaddlib = true
+          elif action.id == "go-xlang-ccpp-exec-link-cppapp":
+            cppappLinkAction = action
+            sawCppLink = true
+          elif action.id.startsWith("go-xlang-ccpp-exec-compile-cppapp"):
+            sawCppCompile = true
+        check sawGoaddlib
+        check sawCppLink
+        check sawCppCompile
+
+        # The goaddlib argv carries -buildmode=c-archive (NOT the M31
+        # ``go tool compile`` path).
+        let goaddlibArgv = inlineArgvOf(goaddlibAction)
+        var sawCArchiveFlag = false
+        for token in goaddlibArgv:
+          if token == "-buildmode=c-archive":
+            sawCArchiveFlag = true
+        check sawCArchiveFlag
+
+        # The goaddlib output lands at the canonical archive path
+        # .repro/build/goaddlib/libgoaddlib.a (shared schema with
+        # c-cpp-direct + Nim + Rust). Go's c-archive build mode also
+        # auto-emits a sibling libgoaddlib.h header in the same dir.
+        var goaddlibArchiveOut = ""
+        var sawHeaderOut = false
+        for outPath in goaddlibAction.outputs:
+          let lower = outPath.toLowerAscii.replace('\\', '/')
+          if lower.endsWith("/libgoaddlib.a"):
+            goaddlibArchiveOut = outPath
+          elif lower.endsWith("/libgoaddlib.h"):
+            sawHeaderOut = true
+        check goaddlibArchiveOut.len > 0
+        check sawHeaderOut
+
+        # The cppapp link action's deps include the goaddlib action id.
+        var sawGoaddlibDep = false
+        for dep in cppappLinkAction.deps:
+          if dep == goaddlibAction.id:
+            sawGoaddlibDep = true
+        check sawGoaddlibDep
+
+        # The cppapp link action's inputs include the upstream archive.
+        var sawGoaddlibInput = false
+        for inp in cppappLinkAction.inputs:
+          if inp == goaddlibArchiveOut:
+            sawGoaddlibInput = true
+        check sawGoaddlibInput
+
+        # The cppapp link argv carries the archive as a trailing
+        # positional AND the platform-specific Go runtime libs.
+        let cppappArgv = inlineArgvOf(cppappLinkAction)
+        var sawArchive = false
         for token in cppappArgv:
-          if token == "-lpthread": sawPthread = true
-          if token == "-ldl": sawDl = true
-          if token == "-lm": sawM = true
-        check sawPthread
-        check sawDl
-        check sawM
+          if token == goaddlibArchiveOut:
+            sawArchive = true
+        check sawArchive
+        when defined(windows):
+          # Windows MinGW: -lws2_32 -lwinmm -lbcrypt -lntdll -luserenv
+          # -ladvapi32
+          var sawWs232 = false
+          var sawBcrypt = false
+          var sawNtdll = false
+          for token in cppappArgv:
+            if token == "-lws2_32": sawWs232 = true
+            if token == "-lbcrypt": sawBcrypt = true
+            if token == "-lntdll": sawNtdll = true
+          check sawWs232
+          check sawBcrypt
+          check sawNtdll
+        else:
+          # POSIX: -lpthread -ldl -lm
+          var sawPthread = false
+          var sawDl = false
+          var sawM = false
+          for token in cppappArgv:
+            if token == "-lpthread": sawPthread = true
+            if token == "-ldl": sawDl = true
+            if token == "-lm": sawM = true
+          check sawPthread
+          check sawDl
+          check sawM
 
-suite "go-direct convention M36 pure-Go regression":
+when isNixSupported:
+  suite "go-direct convention M36 pure-Go regression":
 
-  test "M31 fixture (pure Go workspace) still uses go tool compile / link":
-    # The go-mode3/binary-with-library fixture has no cgo and no C
-    # deps — so no member is usesCgo / cConsumable. The convention
-    # must STILL emit the M31 fast-path ``go-direct-compile-*`` +
-    # ``go-direct-link-*`` actions (NOT ``go-direct-build-*``). This
-    # is the load-bearing regression check for M31 behaviour.
-    if not goOnPath():
-      skip()
-    else:
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(Mode3Fixture)
-      require conv.recognize(Mode3Fixture, request)
-      let fragment = conv.emitFragment(Mode3Fixture, request)
-      var sawCompile = false
-      var sawLink = false
-      var sawCgoBuild = false
-      var sawCArchive = false
-      for node in fragment.nodes:
-        if node.kind != gnkAction:
-          continue
-        let action = decodeBuildActionPayload(toBytes(node.payload))
-        if action.id.startsWith("go-direct-compile-"):
-          sawCompile = true
-        elif action.id.startsWith("go-direct-link-"):
-          sawLink = true
-        elif action.id.startsWith("go-direct-build-"):
-          sawCgoBuild = true
-        elif action.id.startsWith("go-direct-c-archive-"):
-          sawCArchive = true
-      check sawCompile
-      check sawLink
-      check not sawCgoBuild
-      check not sawCArchive
+    test "M31 fixture (pure Go workspace) still uses go tool compile / link":
+      # The go-mode3/binary-with-library fixture has no cgo and no C
+      # deps — so no member is usesCgo / cConsumable. The convention
+      # must STILL emit the M31 fast-path ``go-direct-compile-*`` +
+      # ``go-direct-link-*`` actions (NOT ``go-direct-build-*``). This
+      # is the load-bearing regression check for M31 behaviour.
+      if not goOnPath():
+        skip()
+      else:
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(Mode3Fixture)
+        require conv.recognize(Mode3Fixture, request)
+        let fragment = conv.emitFragment(Mode3Fixture, request)
+        var sawCompile = false
+        var sawLink = false
+        var sawCgoBuild = false
+        var sawCArchive = false
+        for node in fragment.nodes:
+          if node.kind != gnkAction:
+            continue
+          let action = decodeBuildActionPayload(toBytes(node.payload))
+          if action.id.startsWith("go-direct-compile-"):
+            sawCompile = true
+          elif action.id.startsWith("go-direct-link-"):
+            sawLink = true
+          elif action.id.startsWith("go-direct-build-"):
+            sawCgoBuild = true
+          elif action.id.startsWith("go-direct-c-archive-"):
+            sawCArchive = true
+        check sawCompile
+        check sawLink
+        check not sawCgoBuild
+        check not sawCArchive
 
-suite "go-direct convention M36 cross-language cycle + undeclared":
+when isNixSupported:
+  suite "go-direct convention M36 cross-language cycle + undeclared":
 
-  test "forward cycle: Go binary depends_on C lib AND C lib depends_on Go app — rejected":
-    if not goOnPath():
-      skip()
-    else:
-      let dir = makeScratch("xlang-cycle")
-      writeFile(dir / "repro.nim", """
+    test "forward cycle: Go binary depends_on C lib AND C lib depends_on Go app — rejected":
+      if not goOnPath():
+        skip()
+      else:
+        let dir = makeScratch("xlang-cycle")
+        writeFile(dir / "repro.nim", """
 import repro_project_dsl
 import repro_test_support
 

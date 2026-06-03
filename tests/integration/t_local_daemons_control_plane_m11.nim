@@ -252,7 +252,12 @@ suite "Local daemons/control-plane M11 default daemon rollout and recovery":
 
     let staleProject = tempRoot / "stale-project"
     writeCopyProject(staleProject, "daemonM11Stale", "stale\n")
-    writeFile(daemonEndpoint(tempRoot), "stale endpoint\n")
+    # A "stale endpoint file" only exists on POSIX where the endpoint
+    # is an actual filesystem socket path. On Windows the endpoint
+    # lives in the kernel-managed ``\\.\pipe\`` namespace — the
+    # stale-file scenario simply does not apply there.
+    when defined(posix):
+      writeFile(daemonEndpoint(tempRoot), "stale endpoint\n")
     let stale = requireSuccess(buildCommand(staleProject, tempRoot,
       "stale-work"), repoRoot())
     check stale.contains("project: daemonM11Stale")
