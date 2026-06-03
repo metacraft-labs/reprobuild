@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "TOML workspace manifest reader + schema validator for Reprobuild"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

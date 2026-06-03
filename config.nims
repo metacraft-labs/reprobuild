@@ -52,6 +52,7 @@ for libName in [
   "repro_standard_provider",
   "repro_workspace_vcs",
   "repro_test_support",
+  "repro_workspace_manifests",
 ]:
   switch("path", "libs" / libName / "src")
 
@@ -89,6 +90,11 @@ addPackagePath("NIM_JSON_SERIALIZATION_SRC", [
   ".." / "codetracer" / "libs" / "nim-json-serialization",
   ".." / "nim-json-serialization",
 ], "json_serialization.nim")
+addPackagePath("NIM_TOML_SERIALIZATION_SRC", [
+  "libs" / "nim-toml-serialization" / "src",
+  ".." / "codetracer" / "libs" / "nim-toml-serialization",
+  ".." / "nim-toml-serialization",
+], "toml_serialization.nim")
 addPackagePath("SSZ_SERIALIZATION_SRC", [
   "libs" / "nim-ssz-serialization" / "src",
   ".." / "nim-ssz-serialization",
