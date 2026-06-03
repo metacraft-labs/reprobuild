@@ -14,6 +14,14 @@ import repro_project_dsl
 import repro_standard_provider_protocol
 import repro_runquota
 import repro_hash
+# M4: unified Workspace-VCS evidence record + derived JSON view.
+# ``writeBuildReport`` embeds the JSON view under the new
+# ``workspaceVcs`` top-level array; the SSZ codec lives in the same
+# module and stays the persistence path of record. The module physically
+# resides at ``libs/repro_workspace_vcs/src/evidence.nim`` and is
+# reachable here via ``config.nims``'s ``libs/repro_workspace_vcs/src``
+# path entry.
+import evidence as workspaceVcsEvidence
 import repro_tool_profiles
 import repro_local_store
 import repro_store_daemon
@@ -1708,7 +1716,16 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
                       cmakeRegenerationResult,
                       providerCompileResult,
-                      buildResult: BuildRunResult) =
+                      buildResult: BuildRunResult;
+                      workspaceVcs: openArray[
+                          workspaceVcsEvidence.WorkspaceVcsEvidence] = []) =
+  ## M4: ``workspaceVcs`` carries the unified Workspace-VCS evidence
+  ## seq accumulated by ``repro workspace status`` / ``repro check``
+  ## while invoking the M2/M3 query actions. Callers pass an empty seq
+  ## (the default) when no query observations occurred during the
+  ## reported build. The JSON view embedded under the
+  ## ``"workspaceVcs"`` key is derived from the same record the SSZ
+  ## codec persists; see ``libs/repro_workspace_vcs/src/evidence.nim``.
   var cmakeRegenerationActions = newJArray()
   for item in cmakeRegenerationResult.results:
     cmakeRegenerationActions.add(actionResultJson(item))
@@ -1736,6 +1753,7 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
     "providerInvocations": refresh.invoked.len,
     "actions": actions,
     "trace": trace,
+    "workspaceVcs": workspaceVcsEvidence.toJson(workspaceVcs),
     "stats": statsJson(buildResult.stats)
   }
   createDir(extendedPath(parentDir(path)))
