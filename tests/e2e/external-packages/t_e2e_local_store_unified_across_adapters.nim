@@ -22,6 +22,7 @@ import std/[os, osproc, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_interface_artifacts
 import repro_local_store
+import repro_test_support
 import repro_tool_profiles
 
 when defined(windows):
@@ -207,44 +208,38 @@ suite "e2e_local_store_unified_across_adapters":
           "still run end-to-end."
 
     # -----------------------------------------------------------------
-    # Nix adapter — non-Windows only
+    # Nix adapter — only compiled on platforms where Nix is a
+    # realistic provisioning option (Linux/macOS). The dev
+    # environment is required to make ``nix`` available on PATH; no
+    # runtime fallback / silent skip.
     # -----------------------------------------------------------------
-    when not defined(windows):
-      let nixExe = findExe("nix")
-      let nixAvailable = nixExe.len > 0
-      if nixAvailable:
-        # NB: we don't go through the public CLI for the Nix exercise —
-        # `resolveNixTool` is the library entry point and `storeRoot`
-        # tells it to seal the binary receipt and INSERT the index row.
-        var nixUse = InterfaceToolUse(
-          rawConstraint: "m56-nix",
-          packageSelector: "m56-nix@hello",
-          executableName: "hello",
-          location: SourceLocation(file: "fixture", line: 1))
-        nixUse.nixProvisioning = @[InterfaceNixProvisioning(
-          packageName: "m56-nix",
-          selector: "nixpkgs#hello",
-          executablePath: "bin/hello",
-          packageId: "m56-nix.hello",
-          lockIdentity: "nixpkgs#hello",
-          location: SourceLocation(file: "fixture", line: 2))]
-        let nixProfile = resolveNixTool(nixUse, storeRoot)
-        check nixProfile.installMethod == "nix"
-        # Nix profile keeps `selectedStorePath` pointing at the
-        # /nix/store source; the unified store gets a pointer prefix.
-        var unifiedNixPath = ""
-        for entry in nixProfile.realizedStorePaths:
-          if entry.startsWith(storeRoot / "prefixes"):
-            unifiedNixPath = entry
-        check unifiedNixPath.len > 0
-        discard validateBinaryReceipt(unifiedNixPath, "nix", "nix.m56-nix.hello",
-          "hello")
-      else:
-        echo "[platform N/A] Nix is not installed on this host; skipping " &
-          "the Nix sub-gate."
-    else:
-      echo "[platform N/A] Nix is not available on Windows hosts; skipping " &
-        "the Nix sub-gate per spec."
+    when isNixSupported:
+      # NB: we don't go through the public CLI for the Nix exercise —
+      # `resolveNixTool` is the library entry point and `storeRoot`
+      # tells it to seal the binary receipt and INSERT the index row.
+      var nixUse = InterfaceToolUse(
+        rawConstraint: "m56-nix",
+        packageSelector: "m56-nix@hello",
+        executableName: "hello",
+        location: SourceLocation(file: "fixture", line: 1))
+      nixUse.nixProvisioning = @[InterfaceNixProvisioning(
+        packageName: "m56-nix",
+        selector: "nixpkgs#hello",
+        executablePath: "bin/hello",
+        packageId: "m56-nix.hello",
+        lockIdentity: "nixpkgs#hello",
+        location: SourceLocation(file: "fixture", line: 2))]
+      let nixProfile = resolveNixTool(nixUse, storeRoot)
+      check nixProfile.installMethod == "nix"
+      # Nix profile keeps `selectedStorePath` pointing at the
+      # /nix/store source; the unified store gets a pointer prefix.
+      var unifiedNixPath = ""
+      for entry in nixProfile.realizedStorePaths:
+        if entry.startsWith(storeRoot / "prefixes"):
+          unifiedNixPath = entry
+      check unifiedNixPath.len > 0
+      discard validateBinaryReceipt(unifiedNixPath, "nix", "nix.m56-nix.hello",
+        "hello")
 
     # -----------------------------------------------------------------
     # The unified index now contains every successfully realized

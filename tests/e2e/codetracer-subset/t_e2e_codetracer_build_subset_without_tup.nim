@@ -24,23 +24,24 @@ proc pathHasExecutable(name, pathValue: string): bool =
     runShell(shellCommand(@["sh", "-c", "command -v " & q(name)],
       @[(name: "PATH", value: pathValue)])).code == 0
 
-proc nixBuildOutPath(selector: string): string =
-  let res = runShell(shellCommand(@[
-    "nix", "build", "--no-link", "--print-out-paths", selector
-  ]))
-  if res.code != 0:
+when isNixSupported:
+  proc nixBuildOutPath(selector: string): string =
+    let res = runShell(shellCommand(@[
+      "nix", "build", "--no-link", "--print-out-paths", selector
+    ]))
+    if res.code != 0:
+      checkpoint(res.output)
+      return ""
+    for line in res.output.splitLines:
+      let path = line.strip()
+      if path.startsWith("/nix/store/"):
+        return path
     checkpoint(res.output)
-    return ""
-  for line in res.output.splitLines:
-    let path = line.strip()
-    if path.startsWith("/nix/store/"):
-      return path
-  checkpoint(res.output)
-  ""
+    ""
 
 proc pathWithNixFallbackTools(pathValue: string): string =
   result = pathValue
-  when not defined(windows):
+  when isNixSupported:
     if not pathHasExecutable("node", result):
       let nodePath = nixBuildOutPath("nixpkgs#nodejs")
       if nodePath.len > 0:

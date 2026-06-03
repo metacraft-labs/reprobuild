@@ -31,6 +31,25 @@
 
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
+const
+  isNixSupported* = defined(linux) or defined(macosx)
+    ## True on platforms where `nix` / `nix build` is a realistic
+    ## option for hermetic tool provisioning. The constant exists so
+    ## tests can gate Nix-dependent fixtures at COMPILE time, e.g.
+    ##   when isNixSupported:
+    ##     proc requireFish(): string = ...
+    ##     test "e2e_fish_hook":
+    ##       discard requireFish()
+    ## On Windows the test body is excluded from the binary entirely;
+    ## the suite still compiles and the unrelated tests run. The
+    ## previous pattern (`findExe("nix")` runtime probe) was both
+    ## brittle (a stale `nix` shim on PATH hung the test) and led to
+    ## test bodies that pretended to be portable when their
+    ## production code was not. A single named constant lets the
+    ## intent stay visible at every gate site and makes it
+    ## trivial to grep for "everything that needs Nix".
+
+
 type
   CmdSpec* = object
     ## Bundle of the program path, its argv, and any per-invocation

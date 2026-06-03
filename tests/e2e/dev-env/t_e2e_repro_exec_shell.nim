@@ -205,32 +205,33 @@ when defined(windows):
       raise newException(OSError, "PowerShell source failed: " & res.output)
     res.output.firstNonEmptyLine()
 
-proc nixFish(): string =
-  let nix = findExe("nix")
-  if nix.len == 0:
-    return ""
-  let res = runShell(shellCommand(@[
-    nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
-    "--extra-experimental-features", "nix-command flakes"
-  ]))
-  if res.code != 0:
-    return ""
-  for line in res.output.splitLines():
-    let candidate = line.strip()
-    if candidate.startsWith("/nix/store/") and
-        fileExists(candidate / "bin" / "fish"):
-      return candidate / "bin" / "fish"
+when isNixSupported:
+  proc nixFish(): string =
+    let nix = findExe("nix")
+    if nix.len == 0:
+      return ""
+    let res = runShell(shellCommand(@[
+      nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
+      "--extra-experimental-features", "nix-command flakes"
+    ]))
+    if res.code != 0:
+      return ""
+    for line in res.output.splitLines():
+      let candidate = line.strip()
+      if candidate.startsWith("/nix/store/") and
+          fileExists(candidate / "bin" / "fish"):
+        return candidate / "bin" / "fish"
 
-proc requireFish(): string =
-  result = findExe("fish")
-  if result.len > 0:
-    return
-  result = nixFish()
-  if result.len > 0:
-    return
-  raise newException(OSError,
-    "M4 shell print gate requires a real fish binary; PATH has none and " &
-      "`nix build nixpkgs#fish` did not provide one")
+  proc requireFish(): string =
+    result = findExe("fish")
+    if result.len > 0:
+      return
+    result = nixFish()
+    if result.len > 0:
+      return
+    raise newException(OSError,
+      "M4 shell print gate requires a real fish binary; PATH has none " &
+        "and `nix build nixpkgs#fish` did not provide one")
 
 suite "e2e_repro_exec_shell_artifact_consumers":
   test "e2e_repro_exec_uses_cached_dev_env_artifact":
@@ -293,16 +294,17 @@ suite "e2e_repro_exec_shell_artifact_consumers":
     check jsonView["projectRoot"].getStr() == c.projectRoot
     check jsonView["tasks"][0]["name"].getStr() == "build"
 
-    let fish = requireFish()
-    let fishStatsPath = c.tempRoot / "fish-stats.json"
-    let fishText = requireRepro(c, @[
-      "shell", "--print-env=fish", c.projectRoot,
-      "--dev-env-stats=" & fishStatsPath
-    ])
-    requireShellCacheStats(fishStatsPath, artifactPath)
-    let fishPath = c.tempRoot / "dev-env.fish"
-    writeFile(fishPath, fishText)
-    check fishSourceValue(fish, fishPath, c.projectRoot) == expected
+    when isNixSupported:
+      let fish = requireFish()
+      let fishStatsPath = c.tempRoot / "fish-stats.json"
+      let fishText = requireRepro(c, @[
+        "shell", "--print-env=fish", c.projectRoot,
+        "--dev-env-stats=" & fishStatsPath
+      ])
+      requireShellCacheStats(fishStatsPath, artifactPath)
+      let fishPath = c.tempRoot / "dev-env.fish"
+      writeFile(fishPath, fishText)
+      check fishSourceValue(fish, fishPath, c.projectRoot) == expected
 
     when defined(windows):
       let pwsh =

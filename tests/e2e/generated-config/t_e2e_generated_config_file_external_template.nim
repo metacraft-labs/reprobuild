@@ -31,6 +31,7 @@ import std/[os, osproc, strutils, tables, unittest]
 import repro_dsl_stdlib/configurables
 import repro_dsl_stdlib/generated_config
 import repro_local_store
+import repro_test_support
 
 proc setupScope(tmpRoot: string): HomeScope =
   putEnv("REPRO_HOME_PROFILE_TARGET", tmpRoot)
@@ -61,44 +62,54 @@ proc pythonHasModule(pythonExe, moduleName: string): bool =
     if hadPythonPath:
       putEnv("PYTHONPATH", oldPythonPath)
 
-proc nixPythonWithJinja(): string =
+proc pythonWithJinjaViaOverride(): string =
+  ## The ``REPRO_TEST_JINJA_PYTHON`` env override is honoured on every
+  ## platform — sites can point at a pre-built python with jinja2
+  ## without involving Nix.
   let override = getEnv("REPRO_TEST_JINJA_PYTHON")
-  if override.len > 0:
-    if not pythonHasModule(override, "jinja2"):
+  if override.len == 0:
+    return ""
+  if not pythonHasModule(override, "jinja2"):
+    raise newException(IOError,
+      "REPRO_TEST_JINJA_PYTHON does not provide jinja2: " & override)
+  override
+
+when isNixSupported:
+  proc nixPythonWithJinja(): string =
+    let overridden = pythonWithJinjaViaOverride()
+    if overridden.len > 0:
+      return overridden
+
+    let nix = findExe("nix")
+    if nix.len == 0:
       raise newException(IOError,
-        "REPRO_TEST_JINJA_PYTHON does not provide jinja2: " & override)
-    return override
+        "host Python has no pip and nix is not available to provide Jinja")
 
-  let nix = findExe("nix")
-  if nix.len == 0:
+    let expr = "with import <nixpkgs> {}; " &
+      "python3.withPackages (ps: [ ps.jinja2 ])"
+    let built = execCmdEx(quoteShell(nix) &
+      " build --no-link --print-out-paths --impure --expr " &
+      quoteShell(expr))
+    if built.exitCode != 0:
+      raise newException(IOError,
+        "nix failed to provide a Python with Jinja: " & built.output)
+
+    var outPath = ""
+    for line in built.output.splitLines:
+      let stripped = line.strip()
+      if stripped.startsWith("/nix/store/"):
+        outPath = stripped
+    if outPath.len == 0:
+      raise newException(IOError,
+        "nix did not report an output path for Python with Jinja: " &
+        built.output)
+
+    for exe in [outPath / "bin" / "python3", outPath / "bin" / "python"]:
+      if fileExists(exe) and pythonHasModule(exe, "jinja2"):
+        return exe
     raise newException(IOError,
-      "host Python has no pip and nix is not available to provide Jinja")
-
-  let expr = "with import <nixpkgs> {}; " &
-    "python3.withPackages (ps: [ ps.jinja2 ])"
-  let built = execCmdEx(quoteShell(nix) &
-    " build --no-link --print-out-paths --impure --expr " &
-    quoteShell(expr))
-  if built.exitCode != 0:
-    raise newException(IOError,
-      "nix failed to provide a Python with Jinja: " & built.output)
-
-  var outPath = ""
-  for line in built.output.splitLines:
-    let stripped = line.strip()
-    if stripped.startsWith("/nix/store/"):
-      outPath = stripped
-  if outPath.len == 0:
-    raise newException(IOError,
-      "nix did not report an output path for Python with Jinja: " &
-      built.output)
-
-  for exe in [outPath / "bin" / "python3", outPath / "bin" / "python"]:
-    if fileExists(exe) and pythonHasModule(exe, "jinja2"):
-      return exe
-  raise newException(IOError,
-    "nix Python output does not contain a python executable with jinja2: " &
-    outPath)
+      "nix Python output does not contain a python executable with jinja2: " &
+      outPath)
 
 proc pipInstallPython(basePython, envDir: string): string =
   ## Return a Python executable with `pip` available. Prefer the
@@ -143,9 +154,19 @@ proc createJinjaEnv(envDir, pinned: string): JinjaInstall =
     try:
       installerPython = pipInstallPython(basePython, envDir)
     except IOError:
-      result.pythonExe = nixPythonWithJinja()
-      result.sitePackages = ""
-      return
+      let overridden = pythonWithJinjaViaOverride()
+      if overridden.len > 0:
+        result.pythonExe = overridden
+        result.sitePackages = ""
+        return
+      when isNixSupported:
+        result.pythonExe = nixPythonWithJinja()
+        result.sitePackages = ""
+        return
+      else:
+        raise newException(IOError,
+          "host Python has no pip; provide jinja2 via " &
+          "REPRO_TEST_JINJA_PYTHON or install pip into the host Python")
 
   if dirExists(envDir):
     removeDir(envDir)

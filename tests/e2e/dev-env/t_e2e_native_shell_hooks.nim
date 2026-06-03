@@ -159,32 +159,33 @@ proc requireRepro(c: M6Case; args: openArray[string]): string =
         args.join(" ") & "\n" & res.output)
   res.output
 
-proc nixFish(): string =
-  let nix = findExe("nix")
-  if nix.len == 0:
-    return ""
-  let res = runShell(shellCommand(@[
-    nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
-    "--extra-experimental-features", "nix-command flakes"
-  ]))
-  if res.code != 0:
-    return ""
-  for line in res.output.splitLines():
-    let candidate = line.strip()
-    if candidate.startsWith("/nix/store/") and
-        fileExists(candidate / "bin" / "fish"):
-      return candidate / "bin" / "fish"
+when isNixSupported:
+  proc nixFish(): string =
+    let nix = findExe("nix")
+    if nix.len == 0:
+      return ""
+    let res = runShell(shellCommand(@[
+      nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
+      "--extra-experimental-features", "nix-command flakes"
+    ]))
+    if res.code != 0:
+      return ""
+    for line in res.output.splitLines():
+      let candidate = line.strip()
+      if candidate.startsWith("/nix/store/") and
+          fileExists(candidate / "bin" / "fish"):
+        return candidate / "bin" / "fish"
 
-proc requireFish(): string =
-  result = findExe("fish")
-  if result.len > 0:
-    return
-  result = nixFish()
-  if result.len > 0:
-    return
-  raise newException(OSError,
-    "M6 native shell gate requires a real fish binary; PATH has none and " &
-      "`nix build nixpkgs#fish` did not provide one")
+  proc requireFish(): string =
+    result = findExe("fish")
+    if result.len > 0:
+      return
+    result = nixFish()
+    if result.len > 0:
+      return
+    raise newException(OSError,
+      "M6 native shell gate requires a real fish binary; PATH has none " &
+        "and `nix build nixpkgs#fish` did not provide one")
 
 proc requireShellValue(output, prefix, expected: string) =
   for line in output.splitLines():
@@ -306,40 +307,41 @@ proc requireFishHook(c: M6Case; fish: string) =
   requireNativeStats(statsPath)
 
 suite "e2e_native_shell_hooks":
-  test "e2e_native_shell_hooks_bash_zsh_fish":
-    let c = prepareCase("repro-m6-native-shells")
-    defer: removeDir(c.tempRoot)
-    let fish = requireFish()
+  when isNixSupported:
+    test "e2e_native_shell_hooks_bash_zsh_fish":
+      let c = prepareCase("repro-m6-native-shells")
+      defer: removeDir(c.tempRoot)
+      let fish = requireFish()
 
-    installNativeHooks(c)
-    requireBashHook(c)
-    requireZshHook(c)
-    requireFishHook(c, fish)
+      installNativeHooks(c)
+      requireBashHook(c)
+      requireZshHook(c)
+      requireFishHook(c, fish)
 
-    let bashWithUserBytes = "export USER_OWNED=1\n" & readFile(c.homeDir / ".bashrc")
-    writeFile(c.homeDir / ".bashrc", bashWithUserBytes)
-    discard requireRepro(c, @["hooks", "uninstall", "--shell", "bash"])
-    check readFile(c.homeDir / ".bashrc") == "export USER_OWNED=1\n"
+      let bashWithUserBytes = "export USER_OWNED=1\n" & readFile(c.homeDir / ".bashrc")
+      writeFile(c.homeDir / ".bashrc", bashWithUserBytes)
+      discard requireRepro(c, @["hooks", "uninstall", "--shell", "bash"])
+      check readFile(c.homeDir / ".bashrc") == "export USER_OWNED=1\n"
 
-  test "e2e_native_shell_hooks_nix_managed_rc_refused":
-    let c = prepareCase("repro-m6-native-nix-rc")
-    defer: removeDir(c.tempRoot)
+    test "e2e_native_shell_hooks_nix_managed_rc_refused":
+      let c = prepareCase("repro-m6-native-nix-rc")
+      defer: removeDir(c.tempRoot)
 
-    let storeDir = c.tempRoot / "nix" / "store" / "fake-home-manager"
-    createDir(storeDir)
-    let storeRc = storeDir / "bashrc"
-    let storeBytes = "# managed by home-manager\n"
-    writeFile(storeRc, storeBytes)
-    setFilePermissions(storeRc, {fpUserRead, fpGroupRead, fpOthersRead})
-    createSymlink(storeRc, c.homeDir / ".bashrc")
+      let storeDir = c.tempRoot / "nix" / "store" / "fake-home-manager"
+      createDir(storeDir)
+      let storeRc = storeDir / "bashrc"
+      let storeBytes = "# managed by home-manager\n"
+      writeFile(storeRc, storeBytes)
+      setFilePermissions(storeRc, {fpUserRead, fpGroupRead, fpOthersRead})
+      createSymlink(storeRc, c.homeDir / ".bashrc")
 
-    let res = runRepro(c, @["hooks", "ensure", "--shell", "bash"])
-    check res.exitCode != 0
-    check res.output.contains("Nix-managed symlink")
-    check res.output.contains("home-switch")
-    check symlinkExists(c.homeDir / ".bashrc")
-    check expandSymlink(c.homeDir / ".bashrc") == storeRc
-    check readFile(storeRc) == storeBytes
+      let res = runRepro(c, @["hooks", "ensure", "--shell", "bash"])
+      check res.exitCode != 0
+      check res.output.contains("Nix-managed symlink")
+      check res.output.contains("home-switch")
+      check symlinkExists(c.homeDir / ".bashrc")
+      check expandSymlink(c.homeDir / ".bashrc") == storeRc
+      check readFile(storeRc) == storeBytes
 
   when defined(windows):
     test "e2e_native_shell_hooks_powershell":

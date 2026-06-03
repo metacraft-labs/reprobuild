@@ -4,6 +4,7 @@ import std/[json, os, osproc, re, sequtils, streams, strtabs, strutils,
 import repro_interface_artifacts
 import repro_local_store
 import repro_store_daemon
+import repro_test_support
 import repro_tool_profiles
 
 # ---------------------------------------------------------------------------
@@ -328,30 +329,26 @@ suite "M67 daemon-mediated Nix and tarball realization":
           ReceiptFileName)
         check receipt.writerMode == "daemon"
 
-      when not defined(windows):
-        if findExe("nix").len > 0:
-          let nixPair = runPair("nix", endpoint, storeRoot, root)
-          verifyPairResult(nixPair, "nix", storeRoot)
-          assertSpecLayoutAfterRealize(storeRoot, nixPair.a["path"].getStr())
-          var store = openStore(storeRoot)
-          defer: store.close()
-          let rows = store.listPrefixes()
-          var nixRows = 0
-          var tarballRows = 0
-          for row in rows:
-            if row.adapter == "nix": inc nixRows
-            if row.adapter == "tarball": inc tarballRows
-          check nixRows == 1
-          check tarballRows == 1
-          check store.listRoots().len == 4
-          let receipt = readReceiptFile(nixPair.a["path"].getStr() /
-            ReceiptFileName)
-          check receipt.writerMode == "daemon"
-        else:
-          echo "[platform N/A] Nix is not installed on this host; skipping " &
-            "the Nix sub-gate. Tarball daemon realization still ran."
-      else:
-        echo "[platform N/A] Nix is not available on Windows hosts; skipping " &
-          "the Nix sub-gate per spec."
+      when isNixSupported:
+        # Nix is required on the dev environment; no runtime
+        # ``findExe("nix")`` probe — a missing nix means the test
+        # surface should fail rather than silently pass.
+        let nixPair = runPair("nix", endpoint, storeRoot, root)
+        verifyPairResult(nixPair, "nix", storeRoot)
+        assertSpecLayoutAfterRealize(storeRoot, nixPair.a["path"].getStr())
+        var store = openStore(storeRoot)
+        defer: store.close()
+        let rows = store.listPrefixes()
+        var nixRows = 0
+        var tarballRows = 0
+        for row in rows:
+          if row.adapter == "nix": inc nixRows
+          if row.adapter == "tarball": inc tarballRows
+        check nixRows == 1
+        check tarballRows == 1
+        check store.listRoots().len == 4
+        let receipt = readReceiptFile(nixPair.a["path"].getStr() /
+          ReceiptFileName)
+        check receipt.writerMode == "daemon"
 
       check scoopRealizationIsPerUserFallthrough()
