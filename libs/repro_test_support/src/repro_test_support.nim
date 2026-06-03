@@ -102,11 +102,17 @@ proc runShell*(cmd: CmdSpec; cwd = getCurrentDir()): CmdResult =
   var envTable = newStringTable()
   for k, v in envPairs(): envTable[k] = v
   for entry in cmd.env: envTable[entry.name] = entry.value
+  # ``poUsePath`` makes ``startProcess`` resolve ``cmd.args[0]`` against
+  # the inherited (and overlay-modified) ``PATH``. Without it the
+  # subprocess receives the unresolved command name as ``argv[0]``,
+  # ``execv`` fails with ``ENOENT``, and the OSError shows up as
+  # ``Could not find command: 'git'`` etc. — exactly the regression the
+  # post-test-support-sweep suite exhibited on Linux.
   let process = startProcess(cmd.args[0],
     workingDir = cwd,
     args = cmd.args[1..^1],
     env = envTable,
-    options = {poStdErrToStdOut})
+    options = {poStdErrToStdOut, poUsePath})
   defer: process.close()
   result.output = process.outputStream.readAll()
   result.code = process.waitForExit()
