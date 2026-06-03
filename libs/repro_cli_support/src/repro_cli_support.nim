@@ -92,6 +92,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [path]\n       " &
           programName &
+      " branch [<name>] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
+          programName &
       " watch [target[#name]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]]\n       " &
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
@@ -13624,6 +13626,558 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
+# ---- M14: `repro branch` (show / create) ----------------------------------
+#
+# Per ``reprobuild-specs/CLI/branch.md`` and Phase 4 of
+# ``reprobuild-specs/Workspace-Management.milestones.org``. Unlike the
+# M9–M12 family this is a TOP-LEVEL subcommand (``repro branch``, not
+# ``repro workspace branch``) — branch operations are the most frequent
+# workspace coordination commands and earn a short alias.
+#
+# Two forms:
+#
+#   * ``repro branch`` (no positional)
+#       Read-only show form. Returns the recorded
+#       ``[workspace].branch`` value from M13 metadata via
+#       ``readWorkspaceBranch``. Prints a clear "no active branch"
+#       diagnostic and still exits 0 when neither metadata nor a
+#       resolver result is available — the operator's question
+#       ("what branch am I on?") has a legitimate "none recorded"
+#       answer in a fresh workspace that pre-dates M13.
+#
+#   * ``repro branch <name>`` (create form)
+#       Per-repo plan: refuse-and-report when ANY participating repo
+#       is dirty (exit 2, no repo modified), refuse-and-report when
+#       ANY repo already carries a branch by that name at a different
+#       SHA (exit 2 — branch-name collision), idempotently treat a
+#       pre-existing branch by that name at the same HEAD as success,
+#       and otherwise schedule a ``gitBranchCreate`` action per repo.
+#       On success update the M13 metadata's ``[workspace].branch`` to
+#       ``<name>``.
+#
+# Exit codes:
+#   * 0 — show form succeeded; or create form succeeded (including
+#         the idempotent re-create case).
+#   * 1 — IO / VCS / resolve failure that wasn't a refuse-and-report.
+#   * 2 — at least one repo was dirty, OR at least one repo had a
+#         pre-existing branch by that name pointing at a different
+#         SHA (operator has manual work).
+
+type
+  BranchRepoOutcome* = enum
+    broCreated         ## ``gitBranchCreate`` ran successfully.
+    broAlreadyAtHead   ## Pre-existing branch at HEAD — idempotent.
+    broDirtyRefused    ## Repo was dirty; nothing scheduled.
+    broCollisionRefused
+                       ## Pre-existing branch at a different SHA.
+    broActionFailed    ## ``gitBranchCreate`` action returned non-OK.
+
+  BranchRepoEntry* = object
+    ## Per-repo line in the JSON report. ``existingSha`` carries the
+    ## SHA the colliding branch pointed at (empty unless ``outcome``
+    ## is ``collision_refused``); ``dirtyReason`` carries the
+    ## human-facing reason when ``outcome`` is ``dirty_refused``.
+    name*: string
+    path*: string
+    headSha*: string
+    outcome*: string
+    existingSha*: string
+    dirtyReason*: string
+    diagnostic*: string
+
+  BranchReport* = object
+    ## Structured outcome of one ``repro branch`` invocation.
+    ## ``form`` is ``show`` for the read-only path and ``create`` for
+    ## the workspace-wide creation path; ``branch`` is the value the
+    ## show form returned, or the requested name on the create path.
+    ## ``recordedBranch`` is the value of ``[workspace].branch`` AFTER
+    ## the command finished (so a successful create reflects the new
+    ## value; a refuse-and-report reflects whatever was already there).
+    project*: string
+    workspaceRoot*: string
+    form*: string
+    branch*: string
+    recordedBranch*: string
+    repos*: seq[BranchRepoEntry]
+    exitCode*: int
+
+proc branchOutcomeTag(outcome: BranchRepoOutcome): string =
+  case outcome
+  of broCreated: "created"
+  of broAlreadyAtHead: "already_at_head"
+  of broDirtyRefused: "dirty_refused"
+  of broCollisionRefused: "collision_refused"
+  of broActionFailed: "action_failed"
+
+proc toJsonNode*(report: BranchReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["form"] = %report.form
+  result["branch"] = %report.branch
+  result["recordedBranch"] = %report.recordedBranch
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["headSha"] = %entry.headSha
+    obj["outcome"] = %entry.outcome
+    obj["existingSha"] = %entry.existingSha
+    obj["dirtyReason"] = %entry.dirtyReason
+    obj["diagnostic"] = %entry.diagnostic
+    repos.add(obj)
+  result["repos"] = repos
+  result["exitCode"] = %report.exitCode
+
+proc renderBranchTextLines*(report: BranchReport): seq[string] =
+  if report.form == "show":
+    if report.branch.len > 0:
+      result.add("workspace branch: " & report.branch)
+    else:
+      result.add("workspace branch: <none recorded>")
+    return
+  # create form
+  for entry in report.repos:
+    var line = "workspace branch: " & entry.path & " " & entry.outcome
+    if entry.headSha.len > 0:
+      line.add(" head=" &
+        entry.headSha[0 ..< min(8, entry.headSha.len)])
+    if entry.existingSha.len > 0:
+      line.add(" existing=" &
+        entry.existingSha[0 ..< min(8, entry.existingSha.len)])
+    if entry.dirtyReason.len > 0:
+      line.add(" (" & entry.dirtyReason & ")")
+    elif entry.diagnostic.len > 0:
+      line.add(" (" & entry.diagnostic & ")")
+    result.add(line)
+  if report.exitCode == 0:
+    result.add("workspace branch: '" & report.branch &
+      "' created across " & $report.repos.len & " repos; metadata=" &
+      report.recordedBranch)
+
+type
+  BranchArgs = object
+    workspaceRoot: string
+    projectName: string
+    branchName: string
+    json: bool
+    toolProvisioning: ToolProvisioningMode
+
+proc parseBranchArgs*(args: openArray[string]): BranchArgs =
+  ## ``repro branch [<name>] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ## The positional, when present, is the new branch name. ``project``
+  ## is intentionally NOT a positional here — the M14 spec is a single
+  ## ``<name>`` slot, and the active project is recovered either from
+  ## a composer-mode ``.repo/workspace.toml`` or from a metadata-only
+  ## workspace.toml's ``[workspace].project`` field (the M13 schema).
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro branch` flag: " & arg)
+    elif result.branchName.len == 0:
+      result.branchName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro branch`: " & arg)
+    inc i
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveBranchProject(parsed: BranchArgs):
+    tuple[resolved: ResolvedProject;
+          workspaceLocal: Option[WorkspaceLocal]] =
+  ## Same dispatch rule as M9–M13: composer mode when
+  ## ``.repo/workspace.toml`` declares ``[[manifest]]`` layers,
+  ## single-project mode otherwise. The single-project path needs a
+  ## project name; we recover it from a metadata-only workspace.toml's
+  ## ``[workspace].project`` field rather than asking the user to
+  ## repeat it (M13's contract).
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+    let absToml = absolutePath(workspaceToml)
+    let workspaceLocal = readWorkspaceLocal(absToml)
+    let resolved = composeManifestLayers(
+      workspaceLocal, parsed.workspaceRoot, absToml)
+    return (resolved, some(workspaceLocal))
+  var projectName = parsed.projectName
+  if projectName.len == 0 and fileExists(workspaceToml):
+    try:
+      let recorded =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recorded.len > 0:
+        projectName = recorded
+    except WorkspaceManifestParseError:
+      discard
+  if projectName.len == 0:
+    raise newException(ValueError,
+      "`repro branch <name>` requires either `.repo/workspace.toml` " &
+        "or a project name recoverable from one; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+  if fileExists(projectFile):
+    return (resolveProject(projectFile), none(WorkspaceLocal))
+  if fileExists(variantFile):
+    return (resolveVariant(variantFile), none(WorkspaceLocal))
+  raise newException(ValueError,
+    "no project or variant named '" & projectName &
+      "' found under '" & manifestsRoot &
+      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+
+proc executeBranchShow(parsed: BranchArgs): BranchReport =
+  ## Read-only path. Returns the value recorded in M13 metadata. We
+  ## intentionally do NOT consult the live HEAD heuristic that
+  ## ``deriveActiveBranch`` falls back on — the M13 contract makes the
+  ## metadata-recorded value authoritative, and a workspace that has
+  ## never been initialised under M13 legitimately has no recorded
+  ## branch.
+  result.form = "show"
+  result.workspaceRoot = parsed.workspaceRoot
+  try:
+    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+    if recorded.isSome:
+      result.branch = recorded.get()
+      result.recordedBranch = recorded.get()
+  except WorkspaceManifestParseError as err:
+    result.recordedBranch = ""
+    result.exitCode = 1
+    # Surface the parse diagnostic via a synthetic repo entry so
+    # ``--json`` callers don't have to scrape stderr.
+    result.repos.add(BranchRepoEntry(
+      outcome: "metadata_unreadable",
+      diagnostic: err.msg))
+    return
+  # Best-effort project name recovery for the JSON report's
+  # ``project`` field. The show form never fails when no project is
+  # recoverable; we just leave the field empty.
+  if fileExists(parsed.workspaceRoot / ".repo" / "workspace.toml"):
+    try:
+      let local = readWorkspaceLocal(
+        absolutePath(parsed.workspaceRoot / ".repo" / "workspace.toml"))
+      if local.workspace.project.len > 0:
+        result.project = local.workspace.project
+    except WorkspaceManifestParseError:
+      discard
+  result.exitCode = 0
+
+proc executeBranchCreate(parsed: BranchArgs): BranchReport =
+  ## Workspace-wide create planner. Two-pass:
+  ##
+  ##   1. Observation pass — for every declared repo gather HEAD SHA,
+  ##      clean/dirty, and (if the branch already exists) the
+  ##      existing branch tip. Classify into:
+  ##      ``ready`` (clean, branch absent), ``ready-idempotent`` (clean,
+  ##      branch already at HEAD), ``collision`` (branch at a different
+  ##      SHA), ``dirty`` (working tree dirty).
+  ##
+  ##   2. Decision pass — if ANY repo classified as ``dirty`` or
+  ##      ``collision`` we refuse-and-report (exit 2). Otherwise we
+  ##      schedule ``gitBranchCreate`` actions for the ``ready`` repos
+  ##      and produce ``broCreated`` / ``broAlreadyAtHead`` per repo.
+  ##
+  ## On success the M13 metadata's ``[workspace].branch`` is updated
+  ## via ``writeWorkspaceBranch``. We perform the write AFTER the
+  ## per-repo plan succeeds so a refuse-and-report leaves the
+  ## metadata exactly as it was.
+  result.form = "create"
+  result.workspaceRoot = parsed.workspaceRoot
+  result.branch = parsed.branchName
+
+  let (resolved, _) = resolveBranchProject(parsed)
+  result.project = resolved.projectName
+
+  let identity = ensureGitToolResolvable(
+    parsed.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  # Observation pass.
+  type
+    RepoStateKind = enum
+      rsReady, rsReadyIdempotent, rsCollision, rsDirty, rsProbeFailed
+    RepoState = object
+      kind: RepoStateKind
+      repo: ResolvedRepo
+      repoPath: string
+      headSha: string
+      existingSha: string
+      reason: string
+
+  var states: seq[RepoState]
+  for repo in resolved.repos:
+    var state: RepoState
+    state.repo = repo
+    state.repoPath = parsed.workspaceRoot / repo.path
+    if not dirExists(state.repoPath / ".git"):
+      state.kind = rsProbeFailed
+      state.reason = "no on-disk checkout at '" & state.repoPath &
+        "'; run `repro workspace init` or `repro workspace sync` first"
+      states.add(state)
+      continue
+    let headRes = queryGitState(headShaQuery(state.repoPath), identity)
+    if headRes.status != gqsOk:
+      state.kind = rsProbeFailed
+      state.reason = "head-sha probe failed: " & headRes.diagnostic
+      states.add(state)
+      continue
+    state.headSha = headRes.headSha
+    let cleanRes = queryGitState(isCleanQuery(state.repoPath), identity)
+    if cleanRes.status != gqsOk:
+      state.kind = rsProbeFailed
+      state.reason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      states.add(state)
+      continue
+    if not cleanRes.isClean:
+      state.kind = rsDirty
+      state.reason = "working tree has uncommitted changes"
+      states.add(state)
+      continue
+    # Probe whether the branch already exists locally. ``git rev-parse
+    # --verify --quiet refs/heads/<name>`` exits 0 + emits the SHA
+    # when it does, exits 1 + emits nothing when it does not.
+    let probe = gitRunPlain(identity,
+      ["-C", state.repoPath, "rev-parse", "--verify", "--quiet",
+       "refs/heads/" & parsed.branchName])
+    if probe.code == 0:
+      let existing = probe.output.strip()
+      if existing == state.headSha:
+        state.kind = rsReadyIdempotent
+        state.existingSha = existing
+      else:
+        state.kind = rsCollision
+        state.existingSha = existing
+        state.reason = "branch '" & parsed.branchName &
+          "' already exists at " & existing & " (≠ HEAD " &
+          state.headSha & ")"
+    elif probe.output.strip().len == 0:
+      state.kind = rsReady
+    else:
+      state.kind = rsProbeFailed
+      state.reason = "git rev-parse --verify exited " & $probe.code &
+        ": " & probe.output.strip()
+    states.add(state)
+
+  # Decision pass.
+  var dirtyCount = 0
+  var collisionCount = 0
+  var probeFailures = 0
+  for state in states:
+    case state.kind
+    of rsDirty: inc dirtyCount
+    of rsCollision: inc collisionCount
+    of rsProbeFailed: inc probeFailures
+    else: discard
+
+  if probeFailures > 0:
+    # Probe failure is a hard error: we cannot reason about the
+    # workspace's state at all. Distinct from dirty/collision (which
+    # are operator-visible policy outcomes).
+    for state in states:
+      var entry = BranchRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        existingSha: state.existingSha)
+      case state.kind
+      of rsProbeFailed:
+        entry.outcome = "probe_failed"
+        entry.diagnostic = state.reason
+      of rsDirty:
+        entry.outcome = branchOutcomeTag(broDirtyRefused)
+        entry.dirtyReason = state.reason
+      of rsCollision:
+        entry.outcome = branchOutcomeTag(broCollisionRefused)
+        entry.diagnostic = state.reason
+      of rsReady:
+        entry.outcome = "ready"
+      of rsReadyIdempotent:
+        entry.outcome = branchOutcomeTag(broAlreadyAtHead)
+      result.repos.add(entry)
+    result.exitCode = 1
+    # Recorded branch is whatever the metadata currently has.
+    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+    if recorded.isSome:
+      result.recordedBranch = recorded.get()
+    return
+
+  if dirtyCount > 0 or collisionCount > 0:
+    # Refuse-and-report. Surface the per-repo classification but
+    # mutate nothing — even the clean repos sit untouched so the
+    # operator's "fix the blockers and re-run" loop is atomic.
+    for state in states:
+      var entry = BranchRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        existingSha: state.existingSha)
+      case state.kind
+      of rsDirty:
+        entry.outcome = branchOutcomeTag(broDirtyRefused)
+        entry.dirtyReason = state.reason
+      of rsCollision:
+        entry.outcome = branchOutcomeTag(broCollisionRefused)
+        entry.diagnostic = state.reason
+      of rsReady:
+        entry.outcome = "ready"
+      of rsReadyIdempotent:
+        entry.outcome = branchOutcomeTag(broAlreadyAtHead)
+      of rsProbeFailed:
+        entry.outcome = "probe_failed"
+        entry.diagnostic = state.reason
+      result.repos.add(entry)
+    result.exitCode = 2
+    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+    if recorded.isSome:
+      result.recordedBranch = recorded.get()
+    return
+
+  # Execute pass: schedule a ``gitBranchCreate`` action for every
+  # repo classified as ``rsReady``. The idempotent ``rsReadyIdempotent``
+  # repos already point their branch at HEAD; the executor would just
+  # short-circuit (already-at-head) so we skip scheduling at the
+  # planner level too — fewer actions in the engine graph.
+  var actions: seq[BuildAction]
+  var actionRepoIndex = initTable[string, int]()
+  let receiptDir = parsed.workspaceRoot / ".repro" / "workspace" / "receipts"
+  createDir(receiptDir)
+  for idx, state in states:
+    if state.kind != rsReady:
+      continue
+    let receiptRel = ".repro" / "workspace" / "receipts" /
+      ("branch-create-" & safeRepoIdSegment(state.repo.name) & "-" &
+       $idx & ".receipt")
+    let actionId = "workspace-branch-create-" &
+      safeRepoIdSegment(state.repo.name) & "-" & $idx
+    var action = gitBranchCreate(actionId, identity,
+      branchName = parsed.branchName,
+      repoPath = state.repo.path,
+      receiptPath = receiptRel)
+    action.cwd = parsed.workspaceRoot
+    actions.add(action)
+    actionRepoIndex[actionId] = idx
+
+  var perRepoOutcome = initTable[int, tuple[outcome: BranchRepoOutcome;
+                                            diagnostic: string]]()
+  if actions.len > 0:
+    let cacheRoot = parsed.workspaceRoot / ".repro" / "workspace" /
+      "engine-cache"
+    var config = defaultBuildEngineConfig(cacheRoot)
+    config.suppressTrace = true
+    let res = runBuild(graph(actions), config)
+    var outcomeById = initTable[string, ActionResult]()
+    for outcome in res.results:
+      outcomeById[outcome.id] = outcome
+    for action in actions:
+      let outcome = outcomeById.getOrDefault(action.id)
+      let idx = actionRepoIndex[action.id]
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        var diag = "status=" & $outcome.status &
+          " reason=" & outcome.reason
+        if outcome.stderr.len > 0:
+          diag.add(" stderr=" & outcome.stderr)
+        perRepoOutcome[idx] = (outcome: broActionFailed, diagnostic: diag)
+      else:
+        perRepoOutcome[idx] = (outcome: broCreated, diagnostic: "")
+
+  var actionFailures = 0
+  for idx, state in states:
+    var entry = BranchRepoEntry(
+      name: state.repo.name,
+      path: state.repo.path,
+      headSha: state.headSha,
+      existingSha: state.existingSha)
+    case state.kind
+    of rsReadyIdempotent:
+      entry.outcome = branchOutcomeTag(broAlreadyAtHead)
+    of rsReady:
+      let r = perRepoOutcome.getOrDefault(idx,
+        (outcome: broActionFailed,
+         diagnostic: "internal: missing action outcome"))
+      entry.outcome = branchOutcomeTag(r.outcome)
+      entry.diagnostic = r.diagnostic
+      if r.outcome == broActionFailed:
+        inc actionFailures
+    else:
+      # Unreachable here (probe-failed and refuse-and-report paths
+      # returned early above); keep the case exhaustive so a future
+      # state addition stays compile-safe.
+      entry.outcome = "internal_unexpected_state"
+    result.repos.add(entry)
+
+  if actionFailures > 0:
+    # An action failure under the engine is exit 1 (engine blew up),
+    # not exit 2 (operator policy). Record the metadata state we
+    # actually achieved — none.
+    result.exitCode = 1
+    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+    if recorded.isSome:
+      result.recordedBranch = recorded.get()
+    return
+
+  # Metadata update — write only after every per-repo action
+  # succeeded (or the idempotent re-run case classified them all as
+  # already-at-head).
+  try:
+    writeWorkspaceBranch(parsed.workspaceRoot,
+      project = resolved.projectName, branch = parsed.branchName)
+    result.recordedBranch = parsed.branchName
+  except WorkspaceManifestParseError as err:
+    # We made VCS-level branches; surfacing the metadata-write error
+    # as a non-zero exit is the safer signal so the operator notices
+    # and reconciles workspace.toml.
+    result.exitCode = 1
+    result.recordedBranch = ""
+    result.repos.add(BranchRepoEntry(
+      outcome: "metadata_write_failed",
+      diagnostic: err.msg))
+    return
+
+  result.exitCode = 0
+
+proc writeBranchReport(report: BranchReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "branch-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runBranchCommand*(args: openArray[string]): int =
+  ## ``repro branch [<name>] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## See the M14 block comment above for the contract. Always
+  ## writes a ``branch-report.json`` artifact under
+  ## ``<workspaceRoot>/.repro/workspace/`` so a script consumer has a
+  ## parseable record of what happened, in addition to the
+  ## stdout-formatted text lines.
+  let parsed = parseBranchArgs(args)
+  let report =
+    if parsed.branchName.len == 0:
+      executeBranchShow(parsed)
+    else:
+      executeBranchCreate(parsed)
+  writeBranchReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderBranchTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -13999,6 +14553,22 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceManifestsCommand(manifestsArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace manifests: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "branch":
+    # M14 — `repro branch [<name>]`. Top-level subcommand per
+    # ``reprobuild-specs/CLI/branch.md``: NOT under ``repro workspace``.
+    # Same convention deviation as M9–M12: the milestone spec names a
+    # planner path but the implementation lives in ``repro_cli_support``
+    # for symmetry, reachable via ``runBranchCommand``.
+    try:
+      let branchArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runBranchCommand(branchArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro branch: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:

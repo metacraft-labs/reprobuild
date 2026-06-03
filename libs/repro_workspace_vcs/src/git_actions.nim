@@ -54,12 +54,15 @@ const
   CloneReceiptHeader* = "reprobuild.workspace-vcs.clone-receipt.v1"
   FetchReceiptHeader* = "reprobuild.workspace-vcs.fetch-receipt.v1"
   SwitchReceiptHeader* = "reprobuild.workspace-vcs.switch-receipt.v1"
+  BranchCreateReceiptHeader* =
+    "reprobuild.workspace-vcs.branch-create-receipt.v1"
 
 type
   GitVcsOp* = enum
     gvoClone
     gvoFetch
     gvoSwitch
+    gvoBranchCreate
 
   GitVcsPayload* = object
     ## Compact per-action payload encoded into ``builtinText`` so the
@@ -119,12 +122,14 @@ proc opTag(op: GitVcsOp): string =
   of gvoClone: "clone"
   of gvoFetch: "fetch"
   of gvoSwitch: "switch"
+  of gvoBranchCreate: "branch-create"
 
 proc parseOpTag(tag: string): GitVcsOp =
   case tag
   of "clone": gvoClone
   of "fetch": gvoFetch
   of "switch": gvoSwitch
+  of "branch-create": gvoBranchCreate
   else:
     raise newException(ValueError,
       "unknown workspace-vcs operation tag: " & tag)
@@ -221,7 +226,7 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   case payload.op
   of gvoClone:
     discard
-  of gvoFetch, gvoSwitch:
+  of gvoFetch, gvoSwitch, gvoBranchCreate:
     result.writeString(payload.repoPath)
 
 proc actionFingerprint*(payload: GitVcsPayload): ContentDigest =
@@ -354,6 +359,21 @@ proc renderSwitchReceipt(payload: GitVcsPayload; headSha: string): string =
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
 
+proc renderBranchCreateReceipt(payload: GitVcsPayload;
+                               headSha, outcome: string): string =
+  ## ``outcome`` is one of ``created`` (the action actually invoked
+  ## ``git branch <name> <sha>``) or ``already-at-head`` (a pre-existing
+  ## branch by that name already pointed at HEAD — idempotent re-run).
+  result = BranchCreateReceiptHeader & "\n"
+  result.add("kind\t" & WorkspaceVcsKind & "\n")
+  result.add("operation\tbranch-create\n")
+  result.add("branch\t" & payload.branchName & "\n")
+  result.add("repo-path\t" & payload.repoPath & "\n")
+  result.add("head-sha\t" & headSha & "\n")
+  result.add("outcome\t" & outcome & "\n")
+  result.add("git-version\t" & payload.identityVersion & "\n")
+  result.add("git-identity\t" & payload.identityDigestHex & "\n")
+
 proc failed(reason, diagnostic: string): ActionResult =
   ## Structured failure result: ``reason`` is the contract field the
   ## test suite asserts on (e.g. ``"dirty"`` for the M2 switch-on-dirty
@@ -441,6 +461,70 @@ proc executeSwitch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResu
   writeReceipt(receiptPath, receipt)
   succeeded()
 
+proc resolveBranchSha(payload: GitVcsPayload; repoPath, branchName: string):
+    tuple[exists: bool; sha: string; diagnostic: string] =
+  ## Return whether ``branchName`` already exists locally and, if so,
+  ## the SHA its tip points at. ``git rev-parse --verify`` returns
+  ## a non-zero exit code when the ref does not exist — we treat that
+  ## as the canonical "branch does not exist" signal rather than
+  ## scraping the error text.
+  let res = runGit(payload,
+    ["-C", repoPath, "rev-parse", "--verify", "--quiet",
+     "refs/heads/" & branchName])
+  if res.exitCode == 0:
+    let sha = res.output.trimmed
+    if sha.len == 0:
+      return (exists: false, sha: "",
+        diagnostic: "git rev-parse --verify returned empty stdout for refs/heads/" &
+          branchName)
+    return (exists: true, sha: sha, diagnostic: "")
+  # ``--quiet`` plus a missing ref → exit 1 with empty stdout. Any
+  # other non-zero exit indicates a genuine probe failure.
+  if res.output.strip().len == 0:
+    return (exists: false, sha: "", diagnostic: "")
+  (exists: false, sha: "",
+    diagnostic: "git rev-parse --verify failed (" & $res.exitCode & "): " &
+      res.output.trimmed)
+
+proc executeBranchCreate(payload: GitVcsPayload;
+                         cwd, receiptPath: string): ActionResult =
+  ## Create a local branch pointing at the current HEAD without
+  ## switching to it. The action is idempotent: a pre-existing branch
+  ## by the same name pointing at HEAD short-circuits to
+  ## ``outcome = already-at-head``. A pre-existing branch pointing
+  ## elsewhere is a collision and fails with ``reason = "branch-collision"``
+  ## so the M14 planner can refuse the workspace-wide create
+  ## atomically.
+  let target = absoluteRepoPath(payload, cwd)
+  if not dirExists(target / ".git"):
+    return failed("branch-create-target-missing",
+      "branch-create target is not a git working tree: " & target)
+  let headRes = resolveHeadSha(payload, target)
+  if not headRes.ok:
+    return failed("branch-create-head-probe-failed", headRes.diagnostic)
+  let existing = resolveBranchSha(payload, target, payload.branchName)
+  if existing.diagnostic.len > 0:
+    return failed("branch-create-probe-failed", existing.diagnostic)
+  var outcome = "created"
+  if existing.exists:
+    if existing.sha == headRes.sha:
+      # Idempotent: branch already exists at HEAD. Record the receipt
+      # and succeed without re-invoking ``git branch``.
+      outcome = "already-at-head"
+    else:
+      return failed("branch-collision",
+        "branch '" & payload.branchName & "' already exists at " &
+          existing.sha & " (≠ HEAD " & headRes.sha & ") in " & target)
+  else:
+    let res = runGit(payload,
+      ["-C", target, "branch", payload.branchName, headRes.sha])
+    if res.exitCode != 0:
+      return failed("branch-create-failed",
+        "git branch exited " & $res.exitCode & ": " & res.output.trimmed)
+  let receipt = renderBranchCreateReceipt(payload, headRes.sha, outcome)
+  writeReceipt(receiptPath, receipt)
+  succeeded()
+
 type
   WorkspaceVcsSubExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
     ## Callback shape used by sibling VCS backends (currently
@@ -514,6 +598,8 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
   of gvoClone: result = executeClone(payload, action.cwd, receiptPath)
   of gvoFetch: result = executeFetch(payload, action.cwd, receiptPath)
   of gvoSwitch: result = executeSwitch(payload, action.cwd, receiptPath)
+  of gvoBranchCreate:
+    result = executeBranchCreate(payload, action.cwd, receiptPath)
   result.id = action.id
   # ``executeBuiltinAction`` wraps the returned ``ActionResult`` and
   # re-sets ``dependencyPolicyKind`` from the action's declared
@@ -587,6 +673,26 @@ proc gitSwitchAction*(id: string; identity: GitToolIdentity;
   ## dirty working tree and surfaces ``reason = "dirty"`` via the
   ## ``ActionResult`` (per M2 design rule 4).
   let payload = buildPayload(identity, gvoSwitch, "", "", branchName,
+    "", repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitBranchCreate*(id: string; identity: GitToolIdentity;
+                     branchName, repoPath, receiptPath: string;
+                     cwd = ""; deps: openArray[string] = [];
+                     cacheable = true): BuildAction =
+  ## Construct a cacheable branch-create action used by M14
+  ## (``repro branch <name>``). The executor invokes
+  ## ``git branch <name> <HEAD-sha>`` in the named working tree —
+  ## the branch is created from the current HEAD and the working tree
+  ## is NOT switched to it (M15 ``repro checkout`` is the switching
+  ## form). Idempotent: a pre-existing branch by the same name at
+  ## the same HEAD short-circuits to ``outcome = already-at-head``
+  ## in the receipt; a branch by that name at a different SHA fails
+  ## with ``reason = "branch-collision"``.
+  let payload = buildPayload(identity, gvoBranchCreate, "", "", branchName,
     "", repoPath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
