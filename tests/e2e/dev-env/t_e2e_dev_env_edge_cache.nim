@@ -18,31 +18,10 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when isFsSnoopSupported:
-  proc prepareMonitorTools(repoRoot, tempRoot: string):
-      tuple[fsSnoop: string; shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    let shimSource =
-      when defined(linux):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      else:
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-    compileNim(repoRoot, shimSource, result.shim, "m3-dev-env-monitor-shim",
-      appLib = true)
-    compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      result.fsSnoop, "m3-dev-env-fs-snoop")
+# prepareMonitorTools moved to libs/repro_test_support so the Windows
+# shim build (which needs ct_interpose source on the path) lives in
+# one place. cacheKey "m3-dev-env" matches the per-suite nimcache the
+# in-test copy used.
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "repro"
@@ -129,7 +108,7 @@ proc prepareCase(prefix: string): tuple[tempRoot, projectRoot, outDir,
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
   when isFsSnoopSupported:
     let monitor = prepareMonitorTools(result.repoRoot,
-      result.tempRoot / "monitor")
+      result.tempRoot / "monitor", "m3-dev-env")
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
 

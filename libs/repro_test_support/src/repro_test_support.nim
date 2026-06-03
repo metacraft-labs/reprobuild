@@ -49,23 +49,17 @@ const
     ## intent stay visible at every gate site and makes it
     ## trivial to grep for "everything that needs Nix".
 
-  isFsSnoopSupported* = defined(linux) or defined(macosx)
+  isFsSnoopSupported* = defined(linux) or defined(macosx) or defined(windows)
     ## True on platforms where the dev-env tests can wire in
     ## ``repro-fs-snoop`` and the monitor shim end-to-end.
     ##
-    ## The shim itself exists for Windows
-    ## (``libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim``)
-    ## but the test-side integration is not yet there: the tests'
-    ## ``compileNim`` helper would need to pass
-    ## ``--path:<ct_interpose_src>`` and the IAT-patcher's
-    ## dependencies to compile the shim DLL on the fly, and the
-    ## fs-snoop launcher needs a Windows runtime path. Wiring that
-    ## up properly is a separate milestone — until then the dev-env
-    ## tests that need fs-snoop are gated to the platforms where
-    ## ``prepareMonitorTools`` is already implemented in-test.
-    ## When the Windows wiring lands, flip this constant + remove
-    ## the ``else: raise OSError`` fallbacks in the gated tests in
-    ## one commit.
+    ## Windows uses an IAT-patching DLL injected via
+    ## ``CreateProcess(CREATE_SUSPENDED)`` + ``CreateRemoteThread``
+    ## (see ``libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim``).
+    ## The shim depends on ct_interpose's ``hook_registry`` —
+    ## ``prepareMonitorTools`` below threads ``--path:<ct_interpose_src>``
+    ## into the per-test ``compileNim`` invocation the same way
+    ## ``scripts/build_apps.sh`` does for the production build.
 
 
 type
@@ -169,3 +163,88 @@ proc runquotaEndpointReachable*(endpoint: string): bool =
     endpoint.startsWith(r"\\.\pipe\") or endpoint.startsWith(r"\\?\pipe\")
   else:
     fileExists(endpoint)
+
+type
+  MonitorTools* = object
+    fsSnoop*: string
+    shim*: string
+
+proc ctInterposeSrcPath*(repoRoot: string): string =
+  ## Locate the ct_interpose source tree the Windows monitor shim
+  ## depends on. Honours ``CT_INTERPOSE_SRC`` (the same env knob
+  ## ``scripts/build_apps.sh`` honours), then falls back to the
+  ## codetracer-native-recorder sibling checkout, then the in-tree
+  ## vendor copy. Returns the empty string when nothing is found —
+  ## the caller's compileNim call will then surface the missing
+  ## ``hook_registry.nim`` path as a normal compile error rather
+  ## than silently degrading.
+  let explicit = getEnv("CT_INTERPOSE_SRC")
+  if explicit.len > 0 and dirExists(explicit):
+    return explicit
+  let sibling = repoRoot.parentDir / "codetracer-native-recorder" /
+    "ct_interpose" / "src"
+  if dirExists(sibling):
+    return sibling
+  let vendored = repoRoot / "libs" / "repro_monitor_shim" / "vendor" /
+    "ct_interpose" / "src"
+  if dirExists(vendored):
+    return vendored
+  ""
+
+proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
+  ## Compile the per-test ``repro-fs-snoop`` binary AND the monitor
+  ## shim library on demand. The same surface that ``compileRepro``
+  ## (above) uses for the per-test ``repro`` binary, but for the
+  ## fs-snoop + shim pair.
+  ##
+  ## ``cacheKey`` differentiates per-suite ``nimcache`` directories
+  ## so two dev-env suites compiled into the same process don't
+  ## stomp each other's IR.
+  let binDir = tempRoot / "bin"
+  let libDir = tempRoot / "lib"
+  createDir(binDir)
+  createDir(libDir)
+  result.fsSnoop = binDir / addFileExt("repro-fs-snoop", ExeExt)
+  result.shim =
+    when defined(linux): libDir / "librepro_monitor_shim.so"
+    elif defined(windows): libDir / "repro_monitor_shim.dll"
+    else: libDir / "librepro_monitor_shim.dylib"
+  let shimSource =
+    when defined(linux):
+      repoRoot / "libs" / "repro_monitor_shim" / "src" /
+        "repro_monitor_shim" / "linux_preload.nim"
+    elif defined(windows):
+      repoRoot / "libs" / "repro_monitor_shim" / "src" /
+        "repro_monitor_shim" / "windows_interpose.nim"
+    else:
+      repoRoot / "libs" / "repro_monitor_shim" / "src" /
+        "repro_monitor_shim" / "macos_interpose.nim"
+
+  var shimArgs = @[
+    "nim", "c", "--app:lib", "--threads:on", "--verbosity:0",
+    "--hints:off", "--warnings:off",
+    "--nimcache:" & repoRoot / "build" / "nimcache" /
+      (cacheKey & "-monitor-shim"),
+    "--out:" & result.shim
+  ]
+  when defined(windows):
+    # Same shape as the Windows arm of ``scripts/build_apps.sh`` so
+    # the in-test shim build picks up the IAT patcher's stack.
+    let ctInterpose = ctInterposeSrcPath(repoRoot)
+    shimArgs.add(["--mm:orc", "--cc:gcc",
+      "--path:" & repoRoot / "libs" / "repro_monitor_depfile" / "src",
+      "--path:" & repoRoot / "libs" / "repro_core" / "src",
+      "--path:" & repoRoot / "libs" / "repro_monitor_shim" / "src"])
+    if ctInterpose.len > 0:
+      shimArgs.add("--path:" & ctInterpose)
+  shimArgs.add(shimSource)
+  discard requireSuccess(shellCommand(shimArgs), repoRoot)
+
+  let fsSnoopArgs = @[
+    "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
+    "--warnings:off",
+    "--nimcache:" & repoRoot / "build" / "nimcache" / (cacheKey & "-fs-snoop"),
+    "--out:" & result.fsSnoop,
+    repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim"
+  ]
+  discard requireSuccess(shellCommand(fsSnoopArgs), repoRoot)

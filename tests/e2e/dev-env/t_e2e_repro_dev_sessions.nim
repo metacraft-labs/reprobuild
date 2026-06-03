@@ -18,31 +18,7 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when isFsSnoopSupported:
-  proc prepareMonitorTools(repoRoot, tempRoot: string):
-      tuple[fsSnoop: string; shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    let shimSource =
-      when defined(linux):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      else:
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-    compileNim(repoRoot, shimSource, result.shim, "m8-dev-session-monitor-shim",
-      appLib = true)
-    compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      result.fsSnoop, "m8-dev-session-fs-snoop")
+# prepareMonitorTools is exported from libs/repro_test_support.
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "bin" / addFileExt("repro", ExeExt)
@@ -157,7 +133,7 @@ proc prepareCase(prefix: string; dev = false): M8Case =
     writeUpDownFixture(result.projectRoot)
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
   when isFsSnoopSupported:
-    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot)
+    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m8-dev-sessions")
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
 

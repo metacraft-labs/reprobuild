@@ -15,31 +15,7 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when isFsSnoopSupported:
-  proc prepareMonitorTools(repoRoot, tempRoot: string):
-      tuple[fsSnoop: string; shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    let shimSource =
-      when defined(linux):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      else:
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-    compileNim(repoRoot, shimSource, result.shim, "m5-dev-env-monitor-shim",
-      appLib = true)
-    compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      result.fsSnoop, "m5-dev-env-fs-snoop")
+# prepareMonitorTools is exported from libs/repro_test_support.
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "bin" / addFileExt("repro", ExeExt)
@@ -104,7 +80,7 @@ proc prepareCase(prefix: string): M5Case =
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
   result.direnvBin = requireDirenv()
   when isFsSnoopSupported:
-    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot)
+    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m6-direnv-hook")
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
 

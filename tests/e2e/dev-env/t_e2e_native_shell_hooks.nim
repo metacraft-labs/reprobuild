@@ -22,36 +22,8 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when defined(linux) or defined(macosx) or defined(windows):
-  proc prepareMonitorTools(repoRoot, tempRoot: string):
-      tuple[fsSnoop: string; shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / addFileExt("repro-fs-snoop", ExeExt)
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      elif defined(windows):
-        libDir / "repro_monitor_shim.dll"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    let shimSource =
-      when defined(linux):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      elif defined(windows):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "windows_interpose.nim"
-      else:
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-    compileNim(repoRoot, shimSource, result.shim, "m6-dev-env-monitor-shim",
-      appLib = true)
-    compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      result.fsSnoop, "m6-dev-env-fs-snoop")
+# prepareMonitorTools is exported from libs/repro_test_support and now
+# threads the ct_interpose source path through the Windows shim build.
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "bin" / addFileExt("repro", ExeExt)
@@ -119,7 +91,8 @@ proc prepareCase(prefix: string): M6Case =
   # also available — gate via ``isFsSnoopSupported`` like the rest
   # of the dev-env suite.
   when isFsSnoopSupported:
-    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot)
+    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot,
+      "m6-native-shell-hooks")
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
 
