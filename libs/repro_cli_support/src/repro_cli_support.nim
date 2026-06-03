@@ -22,6 +22,18 @@ import repro_hash
 # reachable here via ``config.nims``'s ``libs/repro_workspace_vcs/src``
 # path entry.
 import evidence as workspaceVcsEvidence
+# M9: `repro workspace init` drives the M6 / M7 resolver and the M8
+# composer through M2's `bakWorkspaceVcs` clone executor. The three
+# imports below are sufficient: ``repro_workspace_manifests`` re-exports
+# the typed records (``ResolvedProject`` / ``ResolvedRepo``), the
+# resolver entry points, the composer entry points, and the structured
+# ``WorkspaceManifestParseError``; ``git_tool`` / ``git_actions`` provide
+# the M1 / M2 surfaces this subcommand needs (``ensureGitToolResolvable``,
+# ``installGitVcsExecutor``, ``gitCloneAction`` plus the observation-only
+# ``headShaQuery`` / ``queryGitState`` pair used for the divergence check).
+import repro_workspace_manifests
+import git_tool
+import git_actions
 import repro_tool_profiles
 import repro_local_store
 import repro_store_daemon
@@ -11321,6 +11333,375 @@ proc installUserDaemonWatchExecutor() =
         else:
           delEnv(item.key))
 
+# ---- M9: `repro workspace init` -------------------------------------------
+#
+# Drive the M6 single-project resolver (or M7 variant composer, or M8
+# manifest-layer composer when ``.repo/workspace.toml`` is present) into
+# a ``bakWorkspaceVcs.clone`` build plan that materialises missing repos.
+# Existing repos are inspected via the M2 observation-only
+# ``headShaQuery`` and classified as ``up-to-date`` or ``divergence``;
+# the milestone deliberately does NOT auto-modify divergent checkouts —
+# the user resolves them by hand and re-runs ``repro workspace init``
+# (or, once M10 lands, ``repro workspace sync``).
+
+type
+  WorkspaceInitClonedEntry* = object
+    name*: string
+    path*: string
+    remote*: string
+    revision*: string
+
+  WorkspaceInitUpToDateEntry* = object
+    name*: string
+    path*: string
+    headSha*: string
+
+  WorkspaceInitDivergenceEntry* = object
+    name*: string
+    path*: string
+    expected*: string
+    observed*: string
+
+  WorkspaceInitReport* = object
+    ## Structured outcome of one ``repro workspace init`` invocation.
+    ## ``project`` carries the ``ResolvedProject.projectName`` (the
+    ## variant's or project's resolved name); ``workspaceRoot`` is the
+    ## absolute path of the directory containing ``.repo/``. The three
+    ## per-repo lists are emitted both as stdout text lines and as the
+    ## ``.repro/workspace/init-report.json`` machine-readable artifact.
+    project*: string
+    workspaceRoot*: string
+    cloned*: seq[WorkspaceInitClonedEntry]
+    upToDate*: seq[WorkspaceInitUpToDateEntry]
+    divergences*: seq[WorkspaceInitDivergenceEntry]
+
+  WorkspaceInitOutcome* = object
+    ## Internal aggregate the dispatcher consumes to compute the exit
+    ## code. ``cloneFailures > 0`` raises the exit code to 1; any
+    ## ``divergences`` (with no clone failure) raises it to 2.
+    report*: WorkspaceInitReport
+    cloneFailures*: int
+
+proc toJsonNode*(report: WorkspaceInitReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  var cloned = newJArray()
+  for entry in report.cloned:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["remote"] = %entry.remote
+    obj["revision"] = %entry.revision
+    cloned.add(obj)
+  result["cloned"] = cloned
+  var upToDate = newJArray()
+  for entry in report.upToDate:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["headSha"] = %entry.headSha
+    upToDate.add(obj)
+  result["upToDate"] = upToDate
+  var divergences = newJArray()
+  for entry in report.divergences:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["expected"] = %entry.expected
+    obj["observed"] = %entry.observed
+    divergences.add(obj)
+  result["divergences"] = divergences
+
+proc renderInitTextLines*(report: WorkspaceInitReport): seq[string] =
+  for entry in report.cloned:
+    result.add("workspace init: cloned " & entry.path & " from " &
+      entry.remote & " @ " & entry.revision)
+  for entry in report.upToDate:
+    result.add("workspace init: up-to-date " & entry.path)
+  for entry in report.divergences:
+    result.add("workspace init: divergence " & entry.path &
+      " expected=" & entry.expected &
+      " observed=" & entry.observed)
+
+type
+  WorkspaceInitArgs = object
+    projectName: string
+    workspaceRoot: string
+    toolProvisioning: ToolProvisioningMode
+
+proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
+  ## Parse ``repro workspace init`` argv. The single positional is the
+  ## project-or-variant bare name. Optional flags:
+  ##   ``--workspace-root=PATH``
+  ##   ``--tool-provisioning=path|nix|tarball|scoop``
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace init` flag: " & arg)
+    elif result.projectName.len == 0:
+      result.projectName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro workspace init`: " & arg)
+    inc i
+  if result.projectName.len == 0:
+    raise newException(ValueError,
+      "`repro workspace init` requires a <project-or-variant> name")
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs): ResolvedProject =
+  ## Pick the right resolver / composer entry point. The composer wins
+  ## when ``<workspaceRoot>/.repo/workspace.toml`` exists (M8 semantics);
+  ## otherwise we look up the named project / variant under
+  ## ``<workspaceRoot>/.repo/manifests/`` (M6 / M7 semantics). A missing
+  ## name in either place surfaces as a structured ``ValueError`` naming
+  ## both candidate paths the user should look at.
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if fileExists(workspaceToml):
+    return composeManifestLayersFromFile(workspaceToml)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" /
+    (parsed.projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" /
+    (parsed.projectName & ".toml")
+  if fileExists(projectFile):
+    return resolveProject(projectFile)
+  if fileExists(variantFile):
+    return resolveVariant(variantFile)
+  raise newException(ValueError,
+    "no project or variant named '" & parsed.projectName &
+      "' found under '" & manifestsRoot &
+      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+
+proc localHeadOrEmpty(identity: GitToolIdentity; repoPath: string): string =
+  ## Best-effort HEAD-SHA query. A failed observation returns the empty
+  ## string so the dispatcher can still emit a structured divergence
+  ## diagnostic (with ``observed=<empty>``) rather than abort the run.
+  let res = queryGitState(headShaQuery(repoPath), identity)
+  if res.status == gqsOk:
+    res.headSha
+  else:
+    ""
+
+proc revParse(identity: GitToolIdentity;
+              repoPath, refSpec: string): string =
+  ## Run ``git -C <repo> rev-parse <ref>`` and return the resolved SHA.
+  ## Returns the empty string on failure. The divergence check uses
+  ## this both for the local branch tip AND the remote-tracking branch
+  ## (typically ``origin/<branch>``) so a local checkout that has
+  ## diverged from the manifest's pinned remote tip surfaces correctly.
+  if refSpec.len == 0:
+    return ""
+  let res = execCmdEx(
+    quoteShell(identity.binaryPath) & " -C " & quoteShell(repoPath) &
+      " rev-parse " & quoteShell(refSpec),
+    options = {poStdErrToStdOut, poUsePath})
+  if res.exitCode == 0:
+    res.output.strip()
+  else:
+    ""
+
+proc expectedBranchTip(identity: GitToolIdentity;
+                       repoPath, branch: string): string =
+  ## Resolve the *expected* tip for a branch-pinned manifest. The
+  ## divergence check is "does the working tree's HEAD match what the
+  ## upstream branch points at" — we therefore consult the
+  ## remote-tracking branch first (``refs/remotes/origin/<branch>``
+  ## after a fresh clone) and fall back to the local branch only when
+  ## no remote-tracking ref exists. Any other arrangement would
+  ## misclassify a checkout that has local-only commits beyond the
+  ## manifest pin (which is exactly the divergence M9 must surface).
+  let remoteTip = revParse(identity, repoPath, "refs/remotes/origin/" & branch)
+  if remoteTip.len > 0:
+    return remoteTip
+  revParse(identity, repoPath, branch)
+
+proc looksLikeSha(value: string): bool =
+  ## Heuristic for the branch-vs-SHA divergence test. Git SHA-1s are
+  ## 40-character lowercase hex; SHA-256 builds extend to 64. A user
+  ## abbreviation of 7-39 hex characters is also accepted so an
+  ## explicit short SHA in the manifest is not misclassified as a
+  ## branch name.
+  if value.len < 7 or value.len > 64:
+    return false
+  for ch in value:
+    if ch notin {'0'..'9', 'a'..'f'}:
+      return false
+  true
+
+proc classifyExistingRepo(
+    identity: GitToolIdentity;
+    workspaceRoot: string;
+    repo: ResolvedRepo;
+    upToDate: var seq[WorkspaceInitUpToDateEntry];
+    divergences: var seq[WorkspaceInitDivergenceEntry]) =
+  ## A repo directory exists at ``<workspaceRoot>/<repo.path>``. Decide
+  ## whether it matches the manifest's declared revision (record as
+  ## up-to-date) or diverges (record as a structured divergence). The
+  ## milestone explicitly forbids auto-modifying a divergent checkout —
+  ## we observe and report.
+  let repoPath = workspaceRoot / repo.path
+  let headSha = localHeadOrEmpty(identity, repoPath)
+  if repo.revision.len == 0:
+    # Manifest didn't pin a revision; any non-empty HEAD is treated as
+    # up-to-date. An empty HEAD (bare directory? broken clone?) is a
+    # divergence so the user fixes it.
+    if headSha.len > 0:
+      upToDate.add(WorkspaceInitUpToDateEntry(
+        name: repo.name, path: repo.path, headSha: headSha))
+    else:
+      divergences.add(WorkspaceInitDivergenceEntry(
+        name: repo.name, path: repo.path,
+        expected: "<unspecified>", observed: ""))
+    return
+  if looksLikeSha(repo.revision):
+    if headSha.startsWith(repo.revision) or repo.revision.startsWith(headSha):
+      upToDate.add(WorkspaceInitUpToDateEntry(
+        name: repo.name, path: repo.path, headSha: headSha))
+    else:
+      divergences.add(WorkspaceInitDivergenceEntry(
+        name: repo.name, path: repo.path,
+        expected: repo.revision, observed: headSha))
+  else:
+    # Branch name. The repo matches when the local HEAD's SHA equals
+    # the remote-tracking branch's tip — i.e. ``origin/<branch>``.
+    # ``expectedBranchTip`` prefers the remote-tracking ref and falls
+    # back to the local branch when no remote-tracking ref exists.
+    # Any other state (detached HEAD, ahead of origin, behind origin)
+    # is a divergence: the user has work to do.
+    let branchTip = expectedBranchTip(identity, repoPath, repo.revision)
+    if branchTip.len > 0 and branchTip == headSha:
+      upToDate.add(WorkspaceInitUpToDateEntry(
+        name: repo.name, path: repo.path, headSha: headSha))
+    else:
+      divergences.add(WorkspaceInitDivergenceEntry(
+        name: repo.name, path: repo.path,
+        expected: (if branchTip.len > 0: branchTip else: repo.revision),
+        observed: headSha))
+
+proc safeRepoIdSegment(value: string): string =
+  for ch in value:
+    if ch in {'A'..'Z', 'a'..'z', '0'..'9', '-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('-')
+  if result.len == 0:
+    result = "repo"
+
+proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
+  ## End-to-end driver. Resolves the named project / variant, classifies
+  ## each declared repo against the on-disk workspace, schedules a
+  ## ``bakWorkspaceVcs.clone`` build plan for the missing ones, then
+  ## emits the structured report.
+  let resolved = resolveWorkspaceInitProject(args)
+  var report: WorkspaceInitReport
+  report.project = resolved.projectName
+  report.workspaceRoot = args.workspaceRoot
+  var cloneFailures = 0
+
+  # M9 requires git tool resolution before we can either query existing
+  # checkouts OR schedule a clone. Raising ``EGitToolUnresolved`` here
+  # surfaces the M1 structured error directly to the dispatcher.
+  let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  var cloneActions: seq[BuildAction]
+  var cloneEntries: seq[WorkspaceInitClonedEntry]
+  for idx, repo in resolved.repos:
+    let absPath = args.workspaceRoot / repo.path
+    if dirExists(absPath):
+      classifyExistingRepo(identity, args.workspaceRoot, repo,
+        report.upToDate, report.divergences)
+      continue
+    # Missing — schedule a clone. The receipt lives next to the working
+    # tree under a hidden ``.repro/workspace/receipts/`` subtree so the
+    # action cache has a stable per-repo output path that does not
+    # collide with anything inside the repo itself.
+    let receiptDir = args.workspaceRoot / ".repro" / "workspace" / "receipts"
+    createDir(receiptDir)
+    let receiptRel = ".repro" / "workspace" / "receipts" /
+      ("clone-" & safeRepoIdSegment(repo.name) & "-" & $idx & ".receipt")
+    let cloneId = "workspace-init-clone-" & safeRepoIdSegment(repo.name) &
+      "-" & $idx
+    var action = gitCloneAction(cloneId, identity,
+      remoteUrl = repo.fetchUrl,
+      repoPath = repo.path,
+      receiptPath = receiptRel,
+      revision = repo.revision)
+    action.cwd = args.workspaceRoot
+    cloneActions.add(action)
+    cloneEntries.add(WorkspaceInitClonedEntry(
+      name: repo.name, path: repo.path,
+      remote: repo.fetchUrl, revision: repo.revision))
+
+  if cloneActions.len > 0:
+    let cacheRoot = args.workspaceRoot / ".repro" / "workspace" /
+      "engine-cache"
+    var config = defaultBuildEngineConfig(cacheRoot)
+    config.suppressTrace = true
+    let res = runBuild(graph(cloneActions), config)
+    # The build engine returns outcomes in completion order. Re-key
+    # them by id so we can map each back to its source entry without
+    # depending on the engine's emission order.
+    var outcomeById = initTable[string, ActionResult]()
+    for outcome in res.results:
+      outcomeById[outcome.id] = outcome
+    for i, action in cloneActions:
+      let outcome = outcomeById.getOrDefault(action.id)
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        inc cloneFailures
+        stderr.writeLine("workspace init: clone failed for " &
+          cloneEntries[i].path & ": status=" & $outcome.status &
+          " reason=" & outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+      else:
+        report.cloned.add(cloneEntries[i])
+
+  result.report = report
+  result.cloneFailures = cloneFailures
+
+proc writeWorkspaceInitReport(report: WorkspaceInitReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "init-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runWorkspaceInitCommand*(args: openArray[string]): int =
+  ## ``repro workspace init <project-or-variant> [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop]``.
+  ##
+  ## Exit codes (per M9 design):
+  ##   - 0 — every missing repo cloned successfully AND no divergences.
+  ##   - 1 — at least one clone action failed (e.g. unreachable remote,
+  ##         malformed URL, the underlying git tool refused).
+  ##   - 2 — there were divergences in pre-existing checkouts. We did
+  ##         NOT auto-modify them; the user has work to do. Distinct
+  ##         from exit-1 ("init blew up") so scripts can tell the two
+  ##         apart.
+  let parsed = parseWorkspaceInitArgs(args)
+  let outcome = executeWorkspaceInit(parsed)
+  writeWorkspaceInitReport(outcome.report)
+  for line in renderInitTextLines(outcome.report):
+    stdout.writeLine(line)
+  if outcome.cloneFailures > 0:
+    return 1
+  if outcome.report.divergences.len > 0:
+    return 2
+  0
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -11599,6 +11980,23 @@ proc runThinApp*(programName: string): int =
       return runHooksCommand(hookArgs)
     except CatchableError as err:
       stderr.writeLine("repro hooks: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "init":
+    # M9 — `repro workspace init <project-or-variant>`. The milestone
+    # spec names the path ``apps/repro/subcmds/workspace_init.nim``;
+    # this repo's convention is "subcommands live in repro_cli_support,
+    # apps/<x>.nim stays a single-line shim", so the implementation
+    # lives in this file as ``runWorkspaceInitCommand`` instead.
+    try:
+      let initArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceInitCommand(initArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace init: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
