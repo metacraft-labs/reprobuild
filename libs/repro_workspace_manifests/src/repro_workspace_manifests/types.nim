@@ -100,6 +100,7 @@ type
   ProjectBody* = object
     name*: string
     default_revision*: Option[string]
+    default_remote*: Option[string]
     trunk*: Option[string]
 
   RemoteEntry* = object
