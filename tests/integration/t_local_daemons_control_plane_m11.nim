@@ -1,5 +1,6 @@
-import std/[json, net, os, osproc, streams, strutils, tempfiles, times, unittest]
+import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
 
+import repro_daemon_core
 import repro_test_support
 
 proc repoRoot(): string =
@@ -157,68 +158,65 @@ proc normalizedBuildOutput(output, tempRoot: string): seq[string] =
         line.startsWith("repro build:"):
       result.add(line.replace(tempRoot, "<tmp>"))
 
-const FakeProtocolDaemonScript = """
-import os
-import socket
-import struct
-import sys
-import time
+proc fakeProtocolHelperSource(): string =
+  repoRoot() / "tests" / "fixtures" / "local-daemons-control-plane" /
+    "fake-protocol-daemon-helper" / "fake_protocol_daemon_helper.nim"
 
-path = sys.argv[1]
-try:
-    os.unlink(path)
-except FileNotFoundError:
-    pass
-
-message = b"user daemon protocol mismatch: fake daemon major 99"
-body = struct.pack("<I", len(message)) + message
-response = b"RBUD" + struct.pack("<HI", 255, len(body)) + body
-
-server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-server.bind(path)
-server.listen(8)
-server.settimeout(0.2)
-deadline = time.time() + 20.0
-accepted = 0
-
-while time.time() < deadline and accepted < 20:
-    try:
-        client, _ = server.accept()
-    except socket.timeout:
-        continue
-    accepted += 1
-    try:
-        client.sendall(response)
-    except OSError:
-        pass
-    client.close()
-
-server.close()
-"""
+proc fakeProtocolHelperBin(): string =
+  repoRoot() / "build" / "test-bin" /
+    addFileExt("fake_protocol_daemon_helper", ExeExt)
 
 proc startFakeProtocolDaemon(tempRoot: string): owned(Process) =
+  ## Spawn the portable Nim helper that mimics a live, protocol-
+  ## incompatible daemon: it binds the endpoint and responds to every
+  ## connection with a single ``udkError`` frame carrying the
+  ## canonical "user daemon protocol mismatch" message. The helper
+  ## binary is built lazily so the test compiles standalone.
+  let helperBin = fakeProtocolHelperBin()
+  if not fileExists(helperBin):
+    createDir(helperBin.parentDir)
+    let nimCache = repoRoot() / "build" / "nimcache" /
+      "fake_protocol_daemon_helper"
+    let nimArgs = @[
+      "c",
+      "--threads:on",
+      "--hints:off",
+      "--warnings:off",
+      "--nimcache:" & nimCache,
+      "--out:" & helperBin,
+      fakeProtocolHelperSource()
+    ]
+    let buildRes = runShell(shellCommand(@["nim"] & nimArgs), repoRoot())
+    if buildRes.code != 0:
+      checkpoint(buildRes.output)
+      check buildRes.code == 0
+
   try: removeFile(daemonEndpoint(tempRoot)) except OSError: discard
-  result = startProcess("python3",
-    args = @["-c", FakeProtocolDaemonScript, daemonEndpoint(tempRoot)],
+  result = startProcess(helperBin,
+    args = @[daemonEndpoint(tempRoot)],
     workingDir = repoRoot(),
     options = {poUsePath, poStdErrToStdOut})
+
+  # Wait until the endpoint is reachable. ``connectIpc`` raises on
+  # failure (it can't distinguish "not bound yet" from "wrong
+  # endpoint" without a probe); a short retry loop matches the
+  # original Python fixture's startup timing.
   let deadline = epochTime() + 10.0
   while epochTime() < deadline:
-    var client = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
     try:
-      client.connectUnix(daemonEndpoint(tempRoot))
-      client.close()
+      var probe = connectIpc(daemonEndpoint(tempRoot))
+      probe.closeIpcConn()
       return
     except CatchableError:
-      try: client.close() except CatchableError: discard
-    sleep(25)
+      sleep(25)
   if result.running():
     result.terminate()
     discard result.waitForExit()
-  let output = if result.outputStream != nil: result.outputStream.readAll() else: ""
+  let output =
+    if result.outputStream != nil: result.outputStream.readAll() else: ""
   result.close()
-  raise newException(IOError, "fake protocol daemon did not create endpoint: " &
-    output)
+  raise newException(IOError,
+    "fake protocol daemon did not create endpoint: " & output)
 
 suite "Local daemons/control-plane M11 default daemon rollout and recovery":
   test "integration_daemon_auto_fallback_and_direct_recovery":

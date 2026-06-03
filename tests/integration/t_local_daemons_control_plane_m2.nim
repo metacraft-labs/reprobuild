@@ -1,61 +1,7 @@
 import std/[os, osproc, strutils, tempfiles, times, unittest]
 
-when defined(posix):
-  import std/net
-
-  const LiveEndpointScript = """
-import os
-import socket
-import sys
-import time
-
-path = sys.argv[1]
-try:
-    os.unlink(path)
-except FileNotFoundError:
-    pass
-
-server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-server.bind(path)
-server.listen(8)
-server.settimeout(0.2)
-deadline = time.time() + 15.0
-accepted = 0
-
-while time.time() < deadline and accepted < 8:
-    try:
-        client, _ = server.accept()
-    except socket.timeout:
-        continue
-    accepted += 1
-    client.close()
-
-server.close()
-"""
-
-when defined(windows):
-  import repro_daemon_core
-
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string]): string =
-  var parts: seq[string] = @[]
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
+import repro_daemon_core
+import repro_test_support
 
 proc repoRoot(): string =
   getCurrentDir()
@@ -63,8 +9,16 @@ proc repoRoot(): string =
 proc publicReproBin(): string =
   repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
+proc liveEndpointHelperSource(): string =
+  repoRoot() / "tests" / "fixtures" / "local-daemons-control-plane" /
+    "live-endpoint-helper" / "live_endpoint_helper.nim"
+
+proc liveEndpointHelperBin(): string =
+  repoRoot() / "build" / "test-bin" /
+    addFileExt("live_endpoint_helper", ExeExt)
+
 proc daemonEndpoint(tempRoot: string): string =
-  "/tmp" / (tempRoot.extractFilename & ".sock")
+  daemonSocketEndpoint(tempRoot.extractFilename)
 
 proc daemonArgs(tempRoot: string): seq[string] =
   @[
@@ -74,7 +28,7 @@ proc daemonArgs(tempRoot: string): seq[string] =
   ]
 
 proc reproDaemonCommand(tempRoot: string; action: string;
-                        extra: seq[string] = @[]): string =
+                        extra: seq[string] = @[]): CmdSpec =
   shellCommand(@[publicReproBin(), "daemon", action] & extra &
     daemonArgs(tempRoot))
 
@@ -93,103 +47,115 @@ proc waitForRunning(tempRoot: string) =
     if res.code == 0 and res.output.contains("repro daemon: running"):
       return
     sleep(25)
-  checkpoint(runShell(reproDaemonCommand(tempRoot, "status"), repoRoot()).output)
+  checkpoint(runShell(reproDaemonCommand(tempRoot, "status"),
+    repoRoot()).output)
   check false
 
-when defined(posix):
-  proc endpointPresent(endpoint: string): bool =
-    try:
-      discard getFileInfo(endpoint, followSymlink = false)
-      true
-    except OSError:
-      false
+proc endpointPresent(endpoint: string): bool =
+  endpointExistsLocal(endpoint)
 
-  proc endpointAcceptsConnections(endpoint: string): bool =
-    var socket = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
-    defer: socket.close()
-    try:
-      socket.connectUnix(endpoint)
-      true
-    except CatchableError:
-      false
+proc endpointAccepts(endpoint: string): bool =
+  endpointAcceptsConnections(endpoint)
 
-  proc waitForEndpoint(endpoint: string) =
-    let deadline = epochTime() + 5.0
-    while epochTime() < deadline:
-      if endpointAcceptsConnections(endpoint):
-        return
-      sleep(25)
-    checkpoint("endpoint did not accept connections: " & endpoint)
-    check false
+proc waitForEndpoint(endpoint: string) =
+  let deadline = epochTime() + 5.0
+  while epochTime() < deadline:
+    if endpointAccepts(endpoint):
+      return
+    sleep(25)
+  checkpoint("endpoint did not accept connections: " & endpoint)
+  check false
 
-  proc startLiveEndpoint(endpoint: string): owned(Process) =
-    startProcess("python3",
-      args = @["-c", LiveEndpointScript, endpoint],
-      options = {poUsePath, poStdErrToStdOut})
+proc startLiveEndpoint(endpoint: string): owned(Process) =
+  ## Spawn the portable Nim helper that binds ``endpoint`` and
+  ## accepts a small number of connections, then exits. The helper
+  ## binary is built lazily here so the test can run standalone
+  ## without forcing the harness to know about a new fixture.
+  let helperBin = liveEndpointHelperBin()
+  if not fileExists(helperBin):
+    createDir(helperBin.parentDir)
+    let nimCache = repoRoot() / "build" / "nimcache" / "live_endpoint_helper"
+    let nimArgs = @[
+      "c",
+      "--threads:on",
+      "--hints:off",
+      "--warnings:off",
+      "--nimcache:" & nimCache,
+      "--out:" & helperBin,
+      liveEndpointHelperSource()
+    ]
+    let buildRes = runShell(shellCommand(@["nim"] & nimArgs), repoRoot())
+    if buildRes.code != 0:
+      checkpoint(buildRes.output)
+      check buildRes.code == 0
+  startProcess(helperBin, args = @[endpoint],
+    options = {poUsePath, poStdErrToStdOut})
 
 suite "Local daemons/control-plane M2 platform launch and discovery":
   test "integration_user_daemon_sessions_idle_empty":
-    when defined(posix):
-      let tempRoot = createTempDir("repro-daemon-m2-sessions", "")
-      defer:
-        stopDaemon(tempRoot)
-        removeDir(tempRoot)
+    let tempRoot = createTempDir("repro-daemon-m2-sessions", "")
+    defer:
+      stopDaemon(tempRoot)
+      removeDir(tempRoot)
 
-      discard requireSuccess(reproDaemonCommand(tempRoot, "start"), repoRoot())
-      let sessions = requireSuccess(reproDaemonCommand(tempRoot, "sessions"),
-        repoRoot())
-      check sessions.strip() == "repro daemon sessions: none"
-    else:
-      echo "[platform N/A] POSIX user-daemon sessions test"
+    discard requireSuccess(reproDaemonCommand(tempRoot, "start"), repoRoot())
+    let sessions = requireSuccess(reproDaemonCommand(tempRoot, "sessions"),
+      repoRoot())
+    check sessions.strip() == "repro daemon sessions: none"
 
   test "integration_user_daemon_stale_discovery_repair":
-    when defined(posix):
-      let tempRoot = createTempDir("repro-daemon-m2-stale", "")
-      defer:
-        stopDaemon(tempRoot)
-        removeDir(tempRoot)
+    let tempRoot = createTempDir("repro-daemon-m2-stale", "")
+    defer:
+      stopDaemon(tempRoot)
+      removeDir(tempRoot)
 
-      createDir(parentDir(daemonEndpoint(tempRoot)))
-      writeFile(daemonEndpoint(tempRoot), "stale endpoint placeholder\n")
+    let endpoint = daemonEndpoint(tempRoot)
+    when endpointKindOf("") == ekUnixSocket or true:
+      # The stale-file scenario is meaningful only when the endpoint
+      # lives on a filesystem path — on Windows the kernel-managed
+      # named-pipe namespace has no notion of a stale file. The
+      # discovery-files (under ``state/``) are filesystem on every
+      # platform so the post-bind cleanup checks ARE still valid.
+      when defined(posix):
+        createDir(parentDir(endpoint))
+        writeFile(endpoint, "stale endpoint placeholder\n")
       createDir(parentDir(statusPath(tempRoot)))
       writeFile(statusPath(tempRoot), "pid=1\nendpoint=" &
-        daemonEndpoint(tempRoot) & "\n")
+        endpoint & "\n")
 
       let initial = requireSuccess(reproDaemonCommand(tempRoot, "status"),
         repoRoot())
       check initial.contains("repro daemon: not-running")
-      check not fileExists(daemonEndpoint(tempRoot))
+      when defined(posix):
+        check not fileExists(endpoint)
       check not fileExists(statusPath(tempRoot))
 
-      let liveEndpoint = startLiveEndpoint(daemonEndpoint(tempRoot))
-      defer:
-        if liveEndpoint.running():
-          liveEndpoint.terminate()
-          discard liveEndpoint.waitForExit()
-        liveEndpoint.close()
-      waitForEndpoint(daemonEndpoint(tempRoot))
-      createDir(parentDir(statusPath(tempRoot)))
-      writeFile(statusPath(tempRoot), "pid=2\nendpoint=" &
-        daemonEndpoint(tempRoot) & "\n")
-      let live = requireSuccess(reproDaemonCommand(tempRoot, "status"),
-        repoRoot())
-      check live.contains("repro daemon: not-running")
-      check endpointPresent(daemonEndpoint(tempRoot))
-      check fileExists(statusPath(tempRoot))
+    let liveEndpoint = startLiveEndpoint(endpoint)
+    defer:
       if liveEndpoint.running():
         liveEndpoint.terminate()
         discard liveEndpoint.waitForExit()
-      if endpointPresent(daemonEndpoint(tempRoot)):
-        removeFile(daemonEndpoint(tempRoot))
-      if fileExists(statusPath(tempRoot)):
-        removeFile(statusPath(tempRoot))
+      liveEndpoint.close()
+    waitForEndpoint(endpoint)
+    createDir(parentDir(statusPath(tempRoot)))
+    writeFile(statusPath(tempRoot), "pid=2\nendpoint=" & endpoint & "\n")
+    let live = requireSuccess(reproDaemonCommand(tempRoot, "status"),
+      repoRoot())
+    check live.contains("repro daemon: not-running")
+    check endpointPresent(endpoint)
+    check fileExists(statusPath(tempRoot))
+    if liveEndpoint.running():
+      liveEndpoint.terminate()
+      discard liveEndpoint.waitForExit()
+    when defined(posix):
+      try: removeFile(endpoint) except OSError: discard
+    if fileExists(statusPath(tempRoot)):
+      removeFile(statusPath(tempRoot))
 
-      discard requireSuccess(reproDaemonCommand(tempRoot, "start"), repoRoot())
-      check fileExists(statusPath(tempRoot))
-      discard requireSuccess(reproDaemonCommand(tempRoot, "status"), repoRoot())
-      check fileExists(statusPath(tempRoot))
-    else:
-      echo "[platform N/A] POSIX stale discovery repair test"
+    discard requireSuccess(reproDaemonCommand(tempRoot, "start"), repoRoot())
+    check fileExists(statusPath(tempRoot))
+    discard requireSuccess(reproDaemonCommand(tempRoot, "status"), repoRoot())
+    check fileExists(statusPath(tempRoot))
 
   test "integration_user_daemon_launch_macos":
     when defined(macosx):
@@ -203,8 +169,8 @@ suite "Local daemons/control-plane M2 platform launch and discovery":
         workingDir = repoRoot(),
         options = {poUsePath, poStdErrToStdOut})
       waitForRunning(tempRoot)
-      let fgSessions = requireSuccess(reproDaemonCommand(tempRoot, "sessions"),
-        repoRoot())
+      let fgSessions = requireSuccess(reproDaemonCommand(tempRoot,
+        "sessions"), repoRoot())
       check fgSessions.strip() == "repro daemon sessions: none"
       discard requireSuccess(reproDaemonCommand(tempRoot, "stop"), repoRoot())
       check foreground.waitForExit() == 0
@@ -217,8 +183,6 @@ suite "Local daemons/control-plane M2 platform launch and discovery":
       let logs = requireSuccess(reproDaemonCommand(tempRoot, "logs"),
         repoRoot())
       check logs.contains("launch requested backend=")
-    else:
-      echo "[platform N/A] macOS launch gate"
 
   test "integration_user_daemon_launch_linux":
     when defined(linux):
@@ -234,8 +198,6 @@ suite "Local daemons/control-plane M2 platform launch and discovery":
         repoRoot())
       check logs.contains("backend=systemd-user") or
         logs.contains("backend=posix-fork")
-    else:
-      echo "[platform N/A] Linux launch gate"
 
   test "integration_user_daemon_launch_windows":
     when defined(windows):
@@ -249,5 +211,3 @@ suite "Local daemons/control-plane M2 platform launch and discovery":
       check started.code == 0
       check started.output.contains("repro daemon: running")
       check defaultUserDaemonEndpoint().startsWith("\\\\.\\pipe\\")
-    else:
-      echo "[platform N/A] Windows launch gate"
