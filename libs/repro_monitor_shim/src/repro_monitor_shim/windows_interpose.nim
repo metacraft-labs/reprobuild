@@ -20,7 +20,7 @@ when not defined(windows):
 # the codetracer recorder when co-resident) can register against the
 # same chain at their own priorities without colliding with the shim.
 
-import std/[locks, os, tables]
+import std/[locks, os, strutils, tables]
 from repro_core/paths import extendedPath
 
 import repro_monitor_depfile/types
@@ -30,6 +30,57 @@ import repro_monitor_shim/windows_iat_patcher
 import repro_monitor_shim/windows_hook_registry as hr
 
 {.push raises: [].}
+
+# ---------------------------------------------------------------------------
+# M72 — inline-hook backend for the dynlib-resolved Win32 call sites.
+#
+# IAT patching catches CRT-internal forwarding (statically-linked
+# ``__declspec(dllimport)`` callers like the C runtime's
+# ``_wspawnvp`` → ``CreateProcessW``). It does NOT catch Nim's
+# ``{.importc, dynlib: "kernel32".}`` declarations: Nim's codegen
+# lowers those to ``nimGetProcAddr``-resolved function pointers cached
+# in a module-global, then calls through the pointer directly. The
+# IAT is bypassed entirely, so a Nim ``startProcess`` call spawns its
+# grandchild without the shim seeing the spawn — and without
+# propagating the shim into that grandchild for further capture. That
+# bypass is unacceptable: the monitor's contract is "no bypass under
+# any dispatch mechanism", and the only place a call ALWAYS converges
+# is the function body in kernel32 itself.
+#
+# Mirror the codetracer-native-recorder's M50.2 inline-hook primitive
+# (``ct_inline_hook/install_windows.c``): install a 5-byte
+# ``JMP rel32`` at the start of ``kernel32!CreateProcessW`` /
+# ``kernel32!CreateProcessA`` redirecting to the same trampolines the
+# IAT path already routes through. The capture is now sourced from
+# the kernel32 function body, not from any per-module IAT slot, so
+# Nim dynlib calls land in our trampoline along with everything else.
+#
+# The C source files live in the recorder repo's ``ct_inline_hook``
+# directory. Resolve their path at compile time, anchored on
+# ``currentSourcePath`` so a vendored copy under
+# ``libs/repro_monitor_shim/vendor/ct_inline_hook`` would also work
+# if the recorder sibling checkout is missing.
+
+const ctInlineHookDir {.strdefine.}: string =
+  currentSourcePath().parentDir().parentDir().parentDir().parentDir()
+    .parentDir().parentDir() /
+    "codetracer-native-recorder" / "ct_inline_hook"
+
+when fileExists(ctInlineHookDir / "install_windows.c"):
+  {.passC: "-I" & ctInlineHookDir & " -D_CRT_SECURE_NO_WARNINGS".}
+  {.compile: ctInlineHookDir / "length_decoder.c".}
+  {.compile: ctInlineHookDir / "rel32_fixup.c".}
+  {.compile: ctInlineHookDir / "install_windows.c".}
+  const ctInlineHookAvailable = true
+else:
+  {.warning: "ct_inline_hook sources not found at " & ctInlineHookDir &
+    "; Nim dynlib-resolved CreateProcessW calls will bypass the monitor.".}
+  const ctInlineHookAvailable = false
+
+when ctInlineHookAvailable:
+  proc ctInlineHookInstall(target: pointer, hook: pointer,
+                           outTrampoline: ptr pointer): cint
+    {.importc: "ct_inline_hook_install", cdecl.}
 
 # --- Win32 typedefs ---------------------------------------------------------
 
@@ -163,8 +214,17 @@ proc GetModuleFileNameW(hModule: HANDLE, lpFilename: LPWSTR,
   {.importc, stdcall, dynlib: "kernel32".}
 proc GetModuleHandleW(lpModuleName: LPCWSTR): HANDLE
   {.importc, stdcall, dynlib: "kernel32".}
+proc GetModuleHandleA(lpModuleName: LPCSTR): HANDLE
+  {.importc, stdcall, dynlib: "kernel32".}
 proc GetProcAddress(hModule: HANDLE, lpProcName: LPCSTR): pointer
   {.importc, stdcall, dynlib: "kernel32".}
+proc EnumProcessModulesEx(hProcess: HANDLE, lphModule: ptr pointer,
+                          cb: DWORD, lpcbNeeded: ptr DWORD,
+                          dwFilterFlag: DWORD): BOOL
+  {.importc, stdcall, dynlib: "psapi".}
+proc GetModuleBaseNameW(hProcess: HANDLE, hModule: HANDLE,
+                        lpBaseName: LPWSTR, nSize: DWORD): DWORD
+  {.importc, stdcall, dynlib: "psapi".}
 proc VirtualAllocEx(hProcess: HANDLE, lpAddress: LPVOID, dwSize: SIZE_T,
                     flAllocationType: DWORD, flProtect: DWORD): LPVOID
   {.importc, stdcall, dynlib: "kernel32".}
@@ -937,6 +997,68 @@ proc injectShimIntoChild(hProcess: HANDLE): bool {.raises: [].} =
     return false
   discard WaitForSingleObject(hThread, INFINITE)
   discard CloseHandle(hThread)
+  # The shim DLL is now mapped into the child but its
+  # ``repro_monitor_shim_init`` has NOT run — Nim doesn't expose
+  # user-code on DLL_PROCESS_ATTACH, so an explicit second
+  # CreateRemoteThread call against the init proc is required to
+  # actually arm the IAT + inline detours in the child. Mirror the
+  # production fs-snoop injector (``windows_injector.nim``): enumerate
+  # the child's loaded modules to find our shim DLL's child-side base,
+  # compute the init proc's RVA from our own copy, then
+  # CreateRemoteThread at (childBase + RVA).
+  var ourSelf: HANDLE = nil
+  if GetModuleHandleExW(
+      GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS or
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+      cast[LPCWSTR](cast[ByteAddress](ensureSelfDllPath)),
+      addr ourSelf) == 0 or ourSelf == nil:
+    return true  # DLL loaded but init won't run; degraded but not fatal
+  let ourInit = GetProcAddress(ourSelf, "repro_runtime_init")
+  if ourInit == nil:
+    return true
+  let ourBase = cast[uint](ourSelf)
+  let rva = cast[uint](ourInit) - ourBase
+  # Find the matching module in the child by basename.
+  var wantBaseName = newString(0)
+  block computeBaseName:
+    var i = selfDllPathW.len - 2  # skip terminating NUL
+    while i >= 0 and selfDllPathW[i] != 0'u16 and
+        char(selfDllPathW[i] and 0xFF) != '\\' and
+        char(selfDllPathW[i] and 0xFF) != '/':
+      dec i
+    inc i
+    while i < selfDllPathW.len and selfDllPathW[i] != 0'u16:
+      wantBaseName.add(char(selfDllPathW[i] and 0xFF))
+      inc i
+  if wantBaseName.len == 0:
+    return true
+  var childMods: array[1024, HANDLE]
+  var modCb: DWORD = 0
+  if EnumProcessModulesEx(hProcess, cast[ptr pointer](addr childMods[0]),
+      DWORD(sizeof(childMods)), addr modCb, 0x3'u32) == 0:
+    return true
+  let modCount = int(modCb) div sizeof(HANDLE)
+  var foundShim: HANDLE = nil
+  for i in 0 ..< min(modCount, 1024):
+    var nameBuf: array[1024, uint16]
+    let nameLen = GetModuleBaseNameW(hProcess, childMods[i],
+      cast[LPWSTR](addr nameBuf[0]), DWORD(nameBuf.len))
+    if nameLen == 0:
+      continue
+    var got = newString(int(nameLen))
+    for j in 0 ..< int(nameLen):
+      got[j] = char(nameBuf[j] and 0xFF)
+    if got.cmpIgnoreCase(wantBaseName) == 0:
+      foundShim = childMods[i]
+      break
+  if foundShim == nil:
+    return true
+  let childInit = cast[pointer](cast[uint](foundShim) + rva)
+  let initThread = CreateRemoteThread(hProcess, nil, 0, childInit,
+    nil, 0, nil)
+  if initThread != nil:
+    discard WaitForSingleObject(initThread, INFINITE)
+    discard CloseHandle(initThread)
   true
 
 proc snoopCreateProcessW(ctx: var hr.HookContext) {.raises: [].} =
@@ -1292,10 +1414,49 @@ proc installIATHooks() =
     hook(dll, hr.HookGetFileAttributesA, trampolineGetFileAttributesA,
          origGetFileAttributesA, GetFileAttributesAProc,
          originalGetFileAttributesA)
-    hook(dll, hr.HookCreateProcessW,     trampolineCreateProcessW,
-         origCreateProcessW, CreateProcessWProc, originalCreateProcessW)
-    hook(dll, hr.HookCreateProcessA,     trampolineCreateProcessA,
-         origCreateProcessA, CreateProcessAProc, originalCreateProcessA)
+    # M72: CreateProcessW/A are intentionally NOT installed via the
+    # IAT loop. Nim's ``startProcess`` resolves these from
+    # ``winlean.createProcessW`` through ``nimGetProcAddr`` (runtime
+    # dlsym), which bypasses the import address table entirely — so
+    # an IAT-only hook would miss every Nim-spawned grandchild.
+    # ``installInlineHooks`` below puts a 5-byte JMP rel32 at the
+    # function body in kernel32 instead; that catches both the IAT
+    # path (which would have landed at the same body anyway) and the
+    # nimGetProcAddr-resolved pointer path.
+
+proc installInlineHooks() =
+  ## Install inline detours for the Win32 entry points that Nim's
+  ## dynlib-resolved callers reach without going through the IAT.
+  ## See ``ct_inline_hook/install_windows.h`` for the underlying
+  ## primitive's contract.
+  when not ctInlineHookAvailable:
+    return
+  else:
+    let kernel32 = GetModuleHandleA("kernel32.dll")
+    if kernel32 == nil:
+      dbg("[repro_monitor_shim] installInlineHooks: kernel32 GetModuleHandle returned NULL\n")
+      return
+
+    template installInline(name: cstring; tramp: untyped; storage: untyped;
+                           kind: untyped; origCb: untyped) =
+      if storage == nil:
+        let target = GetProcAddress(kernel32, name)
+        if target != nil:
+          var trampPtr: pointer = nil
+          let rc = ctInlineHookInstall(target, cast[pointer](tramp),
+                                       addr trampPtr)
+          if rc == 0 and trampPtr != nil:
+            storage = cast[kind](trampPtr)
+            hr.setOriginalCallback($name, origCb)
+            dbg("[repro_monitor_shim] inline-hooked " & $name & "\n")
+          else:
+            dbg("[repro_monitor_shim] inline-hook FAILED for " & $name &
+              " (rc=" & $rc & ")\n")
+
+    installInline("CreateProcessW", trampolineCreateProcessW,
+      origCreateProcessW, CreateProcessWProc, originalCreateProcessW)
+    installInline("CreateProcessA", trampolineCreateProcessA,
+      origCreateProcessA, CreateProcessAProc, originalCreateProcessA)
 
 # --- Public exports ---------------------------------------------------------
 
@@ -1327,6 +1488,7 @@ proc repro_monitor_shim_init*(configPath: cstring): cint
   release(initLockVar)
   recordProcessStart()
   installIATHooks()
+  installInlineHooks()
   dbg("[repro_monitor_shim] initialization complete\n")
   result = 0
 

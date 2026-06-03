@@ -9,18 +9,6 @@ import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_interface_artifacts
 import repro_monitor_depfile/fs_snoop
-when defined(windows):
-  # Windows: the shim DLL is injected via
-  # CreateProcess(CREATE_SUSPENDED) + CreateRemoteThread(LoadLibraryW)
-  # at the fs-snoop boundary. When the introspection helper spawns
-  # the provider binary as its own grandchild, the standard
-  # Nim ``execCmdEx`` path uses ``winlean.createProcessW`` via
-  # ``nimGetProcAddr`` (runtime-resolved, NOT IAT-imported), which
-  # the monitor shim's IAT hooks can't reach. Re-use the same
-  # injector here so the grandchild also runs with the shim loaded
-  # and its CRT-mediated CreateFileW calls land in the shared
-  # ``REPRO_MONITOR_FRAGMENT_DIR``.
-  import repro_monitor_depfile/windows_injector
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider_protocol
@@ -4202,39 +4190,22 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   # for the full audit. ``execCmdEx`` drains incrementally via
   # ``readLine`` + ``peekExitCode``.
   #
-  # Windows grandchild evidence: when the build engine wrapped this
-  # process with ``repro-fs-snoop``, ``REPRO_MONITOR_SHIM_LIB`` +
-  # ``REPRO_MONITOR_FRAGMENT_DIR`` are set in our env. The PROVIDER
-  # subprocess we are about to spawn needs the shim DLL loaded into
-  # ITS address space so its CRT-mediated CreateFileW calls write
-  # records to the SAME fragment dir we will later collect into the
-  # depfile. Nim's ``execCmdEx`` → ``startProcess`` →
-  # ``winlean.createProcessW`` resolves the API at runtime via
-  # ``nimGetProcAddr`` (NOT through the IAT), so the shim's
-  # ``snoopCreateProcessW`` hook never sees it. Fall back to the
-  # same ``runWithMonitorShim`` injector that ``repro-fs-snoop``
-  # itself uses; on the success path the provider's output ends up
-  # on our own stdio (which the build engine captures as the
-  # action's diagnostic stream), and on the error path we surface
-  # the bare exit code — slightly less informative than the
-  # execCmdEx-captured output, but we accept that to recover the
-  # observed-input evidence the test rightly demands.
-  var exitCode: int
-  var output: string
-  when defined(windows):
-    let shimLib = getEnv("REPRO_MONITOR_SHIM_LIB")
-    if shimLib.len > 0:
-      let injection = runWithMonitorShim(argv, shimLib, cwd)
-      exitCode = injection.exitCode
-      output = ""
-    else:
-      (output, exitCode) = execCmdEx(quoteShellCommand(argv),
-        options = {poStdErrToStdOut, poUsePath},
-        workingDir = cwd)
-  else:
-    (output, exitCode) = execCmdEx(quoteShellCommand(argv),
-      options = {poStdErrToStdOut, poUsePath},
-      workingDir = cwd)
+  # Windows grandchild evidence: ``startProcess`` here used to spawn
+  # the provider through Nim's ``winlean.createProcessW`` (a
+  # ``nimGetProcAddr``-resolved pointer that bypasses the shim's IAT
+  # hook), so the provider grandchild ran naked and its CRT-mediated
+  # ``CreateFileW`` calls never recorded into the fragment dir. M72
+  # closes that gap at the shim layer by inline-detouring
+  # ``kernel32!CreateProcessW`` (``ct_inline_hook_install``); every
+  # call to CreateProcessW — IAT-routed, dynlib-resolved, or anything
+  # else — now lands in ``trampolineCreateProcessW``, whose
+  # ``snoopCreateProcessW`` re-injects the shim into the grandchild
+  # via the same ``CreateRemoteThread(LoadLibraryW)`` flow
+  # ``repro-fs-snoop`` uses to seed the top-level child. No
+  # subprocess-spawn-site rewrite needed here.
+  let (output, exitCode) = execCmdEx(quoteShellCommand(argv),
+    options = {poStdErrToStdOut, poUsePath},
+    workingDir = cwd)
   if exitCode != 0:
     raise newException(OSError,
       "provider exited with code " & $exitCode & ": " & output)
