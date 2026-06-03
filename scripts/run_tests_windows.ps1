@@ -67,7 +67,11 @@ foreach ($t in $tests) {
     $env:PATH = $extraPath + ";" + $env:PATH
     & $exe *> $log
     return $LASTEXITCODE
-  } -ArgumentList $t.FullName, $logFile, $RepoRoot, "D:\metacraft-dev-deps\nim\2.2.8\prebuilt\nim-2.2.8\bin;D:\metacraft-dev-deps\gcc\15.2.0\bin;D:\metacraft-dev-deps\go\1.23.4\bin"
+  } -ArgumentList $t.FullName, $logFile, $RepoRoot, ("D:\metacraft-dev-deps\python\3.12.10;" +
+    "D:\metacraft-dev-deps\python\3.12.10\Scripts;" +
+    "D:\metacraft-dev-deps\nim\2.2.8\prebuilt\nim-2.2.8\bin;" +
+    "D:\metacraft-dev-deps\gcc\15.2.0\bin;" +
+    "D:\metacraft-dev-deps\go\1.23.4\bin")
   $finished = Wait-Job -Job $job -Timeout $TimeoutSeconds
   if ($null -eq $finished) {
     Write-Host "TIMEOUT" -ForegroundColor Yellow
