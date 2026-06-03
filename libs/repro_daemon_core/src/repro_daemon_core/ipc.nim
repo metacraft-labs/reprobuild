@@ -22,8 +22,13 @@ import std/[os, strutils]
 
 when defined(posix):
   import std/[net, posix]
-  export Socket, AF_UNIX, SOCK_STREAM, IPPROTO_NONE, bindUnix, connectUnix,
-    POLLIN, POLLHUP, POLLERR, POLLNVAL
+  # Nim rejects exporting individual enum values (``cannot export:
+  # AF_UNIX; enum field cannot be exported individually``), so we only
+  # re-export the typed symbols and the helper procs from std/net and
+  # std/posix. Callers that need ``AF_UNIX``, ``SOCK_STREAM``,
+  # ``IPPROTO_NONE``, or the ``POLL*`` family ``import std/posix`` (or
+  # ``std/net``) themselves.
+  export Socket, bindUnix, connectUnix
 when defined(windows):
   import std/winlean
 
