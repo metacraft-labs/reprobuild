@@ -109,13 +109,19 @@ proc prepareCase(prefix: string): M6Case =
   writeFixture(result.projectA, "one", "alpha")
   writeFixture(result.projectB, "two", "beta")
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
-  when defined(linux) or defined(macosx) or defined(windows):
+  # The on-disk monitor shim path is only consumed by Linux/macOS
+  # tests (REPRO_MONITOR_SHIM_LIB plumbing). The Windows shim build
+  # depends on ct_interpose sources that ``compileNim`` here doesn't
+  # know how to wire; the Windows PowerShell hook test path itself is
+  # gated below via ``when defined(windows):`` so it never reaches the
+  # shim fields. Setting up ``fsSnoop`` / ``shim`` is therefore only
+  # meaningful on platforms where the full fs-snoop integration is
+  # also available — gate via ``isFsSnoopSupported`` like the rest
+  # of the dev-env suite.
+  when isFsSnoopSupported:
     let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot)
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
-  else:
-    raise newException(OSError,
-      "dev-env native shell tests require fs-snoop support")
 
 proc envFor(c: M6Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
