@@ -60,6 +60,22 @@ import diagnostics
 import reader
 
 type
+  WorkspaceVisibility* = enum
+    ## The four documented visibility tiers a manifest layer may declare
+    ## in `.repro/workspace.toml` (see Workspace-And-Develop-Mode.md
+    ## §"Workspace Composition and Manifest Layers"). The enum is shared
+    ## between M6's single-project resolver (which uses the default
+    ## `wvPublic` because no layer information is attached) and M8's
+    ## manifest-layer composer (which overwrites the field with the
+    ## actual layer's declared value). The "private" tier from the spec
+    ## maps to `wvPersonal` here — the workspace TOML uses the strings
+    ## "private" and "personal" interchangeably for the per-developer
+    ## tier; the enum carries one canonical name.
+    wvPublic
+    wvOrg
+    wvTeam
+    wvPersonal
+
   ResolvedRepo* = object
     ## Post-resolution facts for a single repo.
     ##
@@ -69,6 +85,13 @@ type
     ## fields carry the fragment's optional values with the documented
     ## defaults applied; `fragmentPath` is the include path the fragment
     ## was loaded from (useful for diagnostics and provenance reporting).
+    ##
+    ## The trailing `manifestLayer` and `visibility` fields are populated
+    ## by M8's `composeManifestLayers` with the URL / local path of the
+    ## manifest layer that declared the repo and that layer's declared
+    ## visibility tier. M6 + M7 leave them at the documented defaults
+    ## (empty string and `wvPublic`) because no layer information is
+    ## attached at the single-project resolution boundary.
     name*: string
     path*: string
     remoteName*: string
@@ -77,6 +100,8 @@ type
     vcs*: string
     stability*: string
     fragmentPath*: string
+    manifestLayer*: string
+    visibility*: WorkspaceVisibility
 
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
