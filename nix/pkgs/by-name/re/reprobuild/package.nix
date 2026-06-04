@@ -5,7 +5,7 @@
   just,
   nim2,
   libblake3,
-  xxHash,
+  xxhash,
   sqlite,
   symlinkJoin,
 }:
@@ -88,7 +88,7 @@ stdenv.mkDerivation (finalAttrs: {
   buildInputs = [
     libblake3
     sqlite
-    xxHash
+    xxhash
   ];
 
   # Every env var below mirrors the corresponding `flake.nix` assignment
@@ -101,7 +101,7 @@ stdenv.mkDerivation (finalAttrs: {
     REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
     RUNQUOTA_SRC = "${runquotaSrc}";
     SQLITE_PREFIX = "${sqlite.out}";
-    XXHASH_PREFIX = "${xxHash}";
+    XXHASH_PREFIX = "${xxhash}";
   };
 
   buildPhase = ''

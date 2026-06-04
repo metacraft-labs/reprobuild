@@ -39,17 +39,42 @@ or, from a flake that consumes reprobuild as an input,
 reprobuildPkg = pkgs.callPackage "${inputs.reprobuild}/nix/pkgs/by-name/re/reprobuild/package.nix" { };
 ```
 
-## Syncing into a `metacraft-labs/nixpkgs` clone
+## Syncing into the `metacraft-labs/nixpkgs` fork
 
-1. Copy `nix/pkgs/by-name/re/reprobuild/package.nix` into the
-   corresponding `pkgs/by-name/re/reprobuild/` path in your nixpkgs
-   clone.
-2. Modern nixpkgs (>= 23.11) auto-resolves `by-name/` entries; no
-   edit to `pkgs/top-level/all-packages.nix` is required. If your fork
-   pre-dates the `by-name` lookup, add
-   `reprobuild = callPackage ../pkgs/by-name/re/reprobuild/package.nix { };`
-   to the appropriate section.
-3. Verify with `nix-build -A reprobuild` from the nixpkgs root.
+The downstream fork lives at
+[`metacraft-labs/nixpkgs`](https://github.com/metacraft-labs/nixpkgs)
+and tracks `nixpkgs-unstable`. Both `reprobuild` and `codetracer`
+ship from there. To refresh the published `reprobuild` package
+after a `package.nix` change here:
+
+```sh
+git clone --single-branch --depth 1 \
+  --branch nixpkgs-unstable https://github.com/metacraft-labs/nixpkgs.git
+cd nixpkgs
+cp /path/to/reprobuild/nix/pkgs/by-name/re/reprobuild/package.nix \
+   pkgs/by-name/re/reprobuild/package.nix
+git commit -am 'reprobuild: sync from metacraft-labs/reprobuild'
+git push origin nixpkgs-unstable
+```
+
+Modern nixpkgs (>= 23.11) auto-resolves `by-name/` entries; no edit
+to `pkgs/top-level/all-packages.nix` is required. Verify with
+`nix-build -A reprobuild` from the nixpkgs root before pushing.
+
+To bring upstream changes into the fork (recommended on a regular
+cadence so dependents stay close to current nixpkgs), use a rebase
+flow rather than a merge:
+
+```sh
+git fetch upstream nixpkgs-unstable
+git rebase upstream/nixpkgs-unstable
+git push --force-with-lease origin nixpkgs-unstable
+```
+
+The fork's two metacraft-labs-specific package files
+(`pkgs/by-name/re/reprobuild/` and `pkgs/by-name/co/codetracer/`)
+do not collide with upstream paths, so the rebase is conflict-free
+in practice.
 
 ## Filling in the `src` hash
 
