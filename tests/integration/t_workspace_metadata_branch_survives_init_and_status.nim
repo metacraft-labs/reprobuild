@@ -64,7 +64,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M13 Tester'")
+    " config user.name \"M13 Tester\"")
   writeFile(workPath / "README.md", "M13 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -142,8 +142,8 @@ proc setupFixture(gitBin, slug: string): M13Fixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
     projectTomlWithRemotes(
-      "file://" & libAOrigin,
-      "file://" & libBOrigin))
+      fileUrl(libAOrigin),
+      fileUrl(libBOrigin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   result.workspaceRoot = workspaceRoot

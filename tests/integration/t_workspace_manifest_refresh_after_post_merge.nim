@@ -72,7 +72,7 @@ proc seedBareWithFiles(gitBin, scratch, barePath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M19a Tester'")
+    " config user.name \"M19a Tester\"")
   for entry in files:
     let absPath = workPath / entry[0]
     createDir(absPath.splitPath.head)
@@ -93,7 +93,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M19a Tester'")
+    " config user.name \"M19a Tester\"")
   writeFile(workPath / "README.md", "M19a participating-repo fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -107,11 +107,11 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name 'M19a Tester'")
+    " config user.name \"M19a Tester\"")
 
 const projectTomlBody = """
 schema = "reprobuild.workspace.project.v1"
@@ -191,7 +191,7 @@ suite "M19a — post-merge manifest auto-refresh (happy path)":
         ("projects/myproject.toml", projectTomlBody),
         ("repos/lib-a.toml", libATomlBody),
       ])
-      let layerUrl = "file://" & manifestBare
+      let layerUrl = fileUrl(manifestBare)
 
       # 2. Seed the participating repo (``lib-a``) origin + clone into
       #    the workspace.
@@ -218,7 +218,7 @@ suite "M19a — post-merge manifest auto-refresh (happy path)":
       # path normally does this; we shortcut it here so the test stays
       # focused on M19a's hook surface.
       discard requireGit(q(gitBin) & " clone " &
-        q("file://" & manifestBare) & " " & q(layerCheckoutPath))
+        q(fileUrl(manifestBare)) & " " & q(layerCheckoutPath))
       let preRefreshSha = requireGit(q(gitBin) & " -C " &
         q(layerCheckoutPath) & " rev-parse HEAD").strip()
 
@@ -227,11 +227,11 @@ suite "M19a — post-merge manifest auto-refresh (happy path)":
       let manifestSeedWork = scratch / "seed-bare-manifest.git"
       removeDir(manifestSeedWork)
       discard requireGit(q(gitBin) & " clone " &
-        q("file://" & manifestBare) & " " & q(manifestSeedWork))
+        q(fileUrl(manifestBare)) & " " & q(manifestSeedWork))
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
         " config user.email tester@example.invalid")
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
-        " config user.name 'M19a Tester'")
+        " config user.name \"M19a Tester\"")
       writeFile(manifestSeedWork / "repos" / "lib-b.toml",
         "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
         "[repo]\nname = \"lib-b\"\npath = \"lib-b\"\n" &
@@ -239,7 +239,7 @@ suite "M19a — post-merge manifest auto-refresh (happy path)":
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
         " add -A")
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
-        " commit -m 'second manifest commit'")
+        " commit -m \"second manifest commit\"")
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
         " push origin main")
       let upstreamTipSha = requireGit(q(gitBin) & " -C " &

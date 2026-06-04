@@ -346,8 +346,12 @@ proc renderFetchReceipt(payload: GitVcsPayload; headSha, fetchOutput: string): s
   result.add("head-sha\t" & headSha & "\n")
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
+  # ``execCmdEx`` on Windows preserves CRLF line endings from git's output.
+  # Drop ``\r`` first so the resulting receipt has no embedded carriage
+  # returns — otherwise the same logical fetch produces byte-different
+  # receipts across Linux and Windows hosts.
   result.add("fetch-output\t" &
-    fetchOutput.replace("\n", " ").strip() & "\n")
+    fetchOutput.replace("\r", "").replace("\n", " ").strip() & "\n")
 
 proc renderSwitchReceipt(payload: GitVcsPayload; headSha: string): string =
   result = SwitchReceiptHeader & "\n"
@@ -539,8 +543,18 @@ type
     ## ``WorkspaceVcsExecutor`` (the multiplexer below), so the M2
     ## engine seam survives unchanged into M3.
 
-var hgSubExecutor {.threadvar.}: WorkspaceVcsSubExecutor
-var hgSubMagic {.threadvar.}: string
+# Process-global (NOT {.threadvar.}). The sub-executor is registered once
+# at module-init time on the main thread by ``hg_actions`` and read from
+# whichever build-engine worker thread happens to dispatch a hg-flavored
+# ``bakWorkspaceVcs`` action. A threadvar would leave every worker thread
+# with the default (nil) and silently fail every hg action with
+# "no registered VCS sub-executor". The single-writer / many-reader access
+# pattern is sound without explicit synchronisation: ``installGitVcsExecutor``
+# only runs at module init, before the engine has spawned any workers,
+# so the publication is naturally ordered with respect to every later
+# read inside ``executeWorkspaceVcsAction``.
+var hgSubExecutor: WorkspaceVcsSubExecutor
+var hgSubMagic: string
 
 proc registerHgSubExecutor*(magic: string; executor: WorkspaceVcsSubExecutor) =
   ## Install a sub-executor for hg actions. ``magic`` is the first line
@@ -554,6 +568,15 @@ proc registerHgSubExecutor*(magic: string; executor: WorkspaceVcsSubExecutor) =
 proc clearHgSubExecutor*() =
   hgSubMagic = ""
   hgSubExecutor = nil
+
+proc currentHgSubExecutor(): tuple[executor: WorkspaceVcsSubExecutor;
+                                   magic: string] {.gcsafe.} =
+  ## Single-point gcsafe read of the module-global sub-executor. The
+  ## ``cast(gcsafe)`` is sound because writes only happen at module-init
+  ## time on the main thread (see the comment by the var declarations);
+  ## the build engine's worker threads only ever read.
+  {.cast(gcsafe).}:
+    result = (executor: hgSubExecutor, magic: hgSubMagic)
 
 proc payloadMagicLine(text: string): string =
   ## Cheap discriminator: return the first non-empty line of the
@@ -573,13 +596,14 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
   ## the VCS library, where both VCSes are visible.
   let magic = payloadMagicLine(action.builtinText)
   if magic != PayloadVersion:
-    if hgSubExecutor.isNil or magic != hgSubMagic:
+    let sub = currentHgSubExecutor()
+    if sub.executor.isNil or magic != sub.magic:
       return failed("payload-decode-failed",
         "bakWorkspaceVcs payload magic " & magic &
           " is not handled by any registered VCS sub-executor" &
           " (expected " & PayloadVersion &
-          (if hgSubMagic.len > 0: " or " & hgSubMagic else: "") & ")")
-    var subResult = hgSubExecutor(action)
+          (if sub.magic.len > 0: " or " & sub.magic else: "") & ")")
+    var subResult = sub.executor(action)
     subResult.id = action.id
     return subResult
   var payload: GitVcsPayload

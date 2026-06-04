@@ -71,7 +71,7 @@ proc seedBareWithFiles(gitBin, scratch, barePath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M12 Tester'")
+    " config user.name \"M12 Tester\"")
   for entry in files:
     let absPath = workPath / entry[0]
     createDir(absPath.splitPath.head)
@@ -160,8 +160,6 @@ revision = "main"
 """
 
 # ---- helpers --------------------------------------------------------------
-
-proc fileUrl(p: string): string = "file://" & p
 
 proc writeWorkspaceToml(workspaceRoot, body: string): string =
   let dotRepo = workspaceRoot / ".repo"

@@ -20,6 +20,7 @@
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
+import repro_test_support
 import repro_workspace_manifests
 import git_actions
 import repro_build_engine
@@ -51,7 +52,7 @@ proc seedBareWithFiles(gitBin, scratch, barePath: string;
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M8 Tester'")
+    " config user.name \"M8 Tester\"")
   for entry in files:
     let relPath = entry[0]
     let body = entry[1]
@@ -208,8 +209,6 @@ revision = "main"
 """
 
 # ---- helpers --------------------------------------------------------------
-
-proc fileUrl(p: string): string = "file://" & p
 
 proc writeWorkspaceToml(workspaceRoot, body: string): string =
   let dotRepo = workspaceRoot / ".repo"

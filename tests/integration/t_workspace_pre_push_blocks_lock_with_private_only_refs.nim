@@ -95,7 +95,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M26 Tester'")
+    " config user.name \"M26 Tester\"")
   writeFile(workPath / "README.md", "M26 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -109,11 +109,11 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name 'M26 Tester'")
+    " config user.name \"M26 Tester\"")
 
 # ---- manifest TOML --------------------------------------------------------
 #
@@ -213,7 +213,7 @@ proc seedManifestLayerRepo(gitBin, layerPath: string;
   discard requireGit(q(gitBin) & " -C " & q(layerPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(layerPath) &
-    " config user.name 'M26 Tester'")
+    " config user.name \"M26 Tester\"")
   # Stub an origin so the "is-published" probes M18 / M23 use for
   # sibling-repo checks have a remote to consult if needed. The
   # manifest-layer repo itself isn't probed by stages 1-3, but having
@@ -229,7 +229,7 @@ proc seedManifestLayerRepo(gitBin, layerPath: string;
     writeFile(absPath, body)
   discard requireGit(q(gitBin) & " -C " & q(layerPath) & " add -A")
   discard requireGit(q(gitBin) & " -C " & q(layerPath) &
-    " commit -m 'M26 fixture seed'")
+    " commit -m \"M26 fixture seed\"")
   discard requireGit(q(gitBin) & " -C " & q(layerPath) &
     " remote add origin " & q(bareOrigin))
   discard requireGit(q(gitBin) & " -C " & q(layerPath) &
@@ -243,14 +243,21 @@ proc writeWorkspaceToml(workspaceRoot, publicLayerPath,
   # Use ``local_path`` layers so the M26 stage's per-layer on-disk
   # lookup picks the literal directories the test seeded — no need to
   # mirror the composer's URL-sanitization machinery.
+  # Forward-slash the paths so the TOML basic strings don't trip the
+  # ``\U`` / ``\u`` escape rules on Windows (``C:\Users\...`` would
+  # otherwise be rejected by the strict reader). Nim's ``isAbsolute`` /
+  # ``dirExists`` on Windows accept forward-slash forms, so the
+  # composer reads them just fine.
+  let publicLocalPath = publicLayerPath.replace('\\', '/')
+  let privateLocalPath = privateLayerPath.replace('\\', '/')
   let body =
     "schema = \"reprobuild.workspace.local.v1\"\n\n" &
     "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n\n" &
     "[[manifest]]\n" &
-    "local_path = \"" & publicLayerPath & "\"\n" &
+    "local_path = \"" & publicLocalPath & "\"\n" &
     "visibility = \"public\"\n\n" &
     "[[manifest]]\n" &
-    "local_path = \"" & privateLayerPath & "\"\n" &
+    "local_path = \"" & privateLocalPath & "\"\n" &
     "visibility = \"private\"\n"
   writeFile(result, body)
 
@@ -288,14 +295,14 @@ proc setupFixture(gitBin, slug: string): M26Fixture =
 
   seedManifestLayerRepo(gitBin, result.publicLayerPath, [
     ("projects/myproject.toml", publicProjectToml(
-      "file://" & result.libPublicA.origin,
-      "file://" & result.libPublicB.origin)),
+      fileUrl(result.libPublicA.origin),
+      fileUrl(result.libPublicB.origin))),
     ("repos/lib-public-a.toml", libPublicAFragment),
     ("repos/lib-public-b.toml", libPublicBFragment),
   ])
   seedManifestLayerRepo(gitBin, result.privateLayerPath, [
     ("projects/myproject.toml", privateProjectToml(
-      "file://" & result.libPrivate.origin)),
+      fileUrl(result.libPrivate.origin))),
     ("repos/lib-private.toml", libPrivateFragment),
   ])
 
@@ -502,7 +509,15 @@ suite "M26 — pre-push lock visibility check":
       check failure["repo"].getStr() == "lib-private"
       check failure["source"].getStr() == lockRel
       check failure["remediation"].getStr().contains("lib-private")
-      check failure["remediation"].getStr().contains(fx.publicLayerPath)
+      # The remediation embeds the layer's ``provenance`` string, which
+      # is the ``local_path`` value from workspace.toml verbatim. On
+      # Windows the test seeds that value in forward-slash form (to
+      # avoid TOML basic-string ``\U`` escapes), so the substring may
+      # not match ``fx.publicLayerPath`` (native backslash form) byte
+      # for byte. Match either separator shape.
+      let remediationStr = failure["remediation"].getStr()
+      check remediationStr.contains(fx.publicLayerPath) or
+        remediationStr.contains(fx.publicLayerPath.replace('\\', '/'))
       check failure["evidence"].getStr().contains("private")
       check failure["evidence"].getStr().contains(lockRel)
 

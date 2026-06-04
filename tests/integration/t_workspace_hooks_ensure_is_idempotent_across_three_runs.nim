@@ -76,7 +76,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M17 Tester'")
+    " config user.name \"M17 Tester\"")
   writeFile(workPath / "README.md", "M17 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -90,11 +90,11 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name 'M17 Tester'")
+    " config user.name \"M17 Tester\"")
 
 # ---- manifest TOML strings ------------------------------------------------
 
@@ -188,9 +188,9 @@ proc setupFixture(gitBin, slug: string): M17Fixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
     projectTomlWith3Remotes(
-      "file://" & result.libA.origin,
-      "file://" & result.libB.origin,
-      "file://" & result.libC.origin))
+      fileUrl(result.libA.origin),
+      fileUrl(result.libB.origin),
+      fileUrl(result.libC.origin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
@@ -376,9 +376,20 @@ suite "M17 — repro hooks ensure --vcs (workspace-aware)":
       # repo runs the preserved user hook FIRST and propagates its
       # exit code (73). We feed an empty refs stdin so pre-push's
       # ``cat`` doesn't block.
+      # Convert Windows backslash paths to forward-slash form before
+      # handing them to ``sh``. Two layers of ``quoteShell`` plus the
+      # CRT command-line decoder otherwise eat backslashes that are
+      # not strictly followed by ``"``, leaving sh with mangled paths
+      # like ``cd C:UserszaharyAppData...`` and a "No such file" error.
+      # Git Bash sh on Windows accepts ``C:/Users/...`` natively, so
+      # the forward-slash form is the simplest portable shape.
+      let shLibB = (fx.workspaceRoot / "lib-b").replace('\\', '/')
+      let shHook = (libBHooks / "pre-push").replace('\\', '/')
       let dispatcherRun = runCmd("sh -c " &
-        q("cd " & q(fx.workspaceRoot / "lib-b") &
-          " && " & q(libBHooks / "pre-push") & " origin file://nowhere </dev/null"))
+        q("cd " & q(shLibB) &
+          " && " & q(shHook) & " origin file://nowhere </dev/null"))
+      if dispatcherRun.code != 73:
+        checkpoint("dispatcher output: " & dispatcherRun.output)
       check dispatcherRun.code == 73
 
   test "test_m17_hooks_ensure_refreshes_drifted_hook":

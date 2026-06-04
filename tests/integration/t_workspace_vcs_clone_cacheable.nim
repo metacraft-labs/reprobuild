@@ -15,6 +15,7 @@
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
+import repro_test_support
 import git_actions
 import git_tool
 import repro_build_engine
@@ -45,7 +46,7 @@ proc seedBareOrigin(gitBin, originPath, workPath: string) =
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M2 Tester'")
+    " config user.name \"M2 Tester\"")
   writeFile(workPath / "README.md", "M2 fixture\n")
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) &
@@ -81,7 +82,7 @@ suite "Workspace VCS — clone-action cache (M2)":
 
       proc cloneAction(): BuildAction =
         gitCloneAction("m2-clone", identity,
-          remoteUrl = "file://" & originPath,
+          remoteUrl = fileUrl(originPath),
           repoPath = cloneTargetRel,
           receiptPath = receiptRel,
           revision = "main")

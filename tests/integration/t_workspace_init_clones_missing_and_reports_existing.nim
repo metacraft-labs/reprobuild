@@ -80,7 +80,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M9 Tester'")
+    " config user.name \"M9 Tester\"")
   writeFile(workPath / "README.md", "M9 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -96,12 +96,12 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
   ## Pre-clone a bare origin into the workspace so the M9 dispatcher
   ## sees the repo as ``existing`` rather than ``missing``. Mirrors the
   ## file:// pattern the executor itself uses.
-  discard requireGit(q(gitBin) & " clone " & q("file://" & originPath) & " " &
+  discard requireGit(q(gitBin) & " clone " & q(fileUrl(originPath)) & " " &
     q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name 'M9 Tester'")
+    " config user.name \"M9 Tester\"")
 
 proc appendLocalCommit(gitBin, repoPath: string): string =
   ## Add a fresh local-only commit so the working tree HEAD diverges
@@ -111,7 +111,7 @@ proc appendLocalCommit(gitBin, repoPath: string): string =
   writeFile(repoPath / "local-only.txt", "diverged\n")
   discard requireGit(q(gitBin) & " -C " & q(repoPath) & " add local-only.txt")
   discard requireGit(q(gitBin) & " -C " & q(repoPath) &
-    " commit -m 'local-only divergence'")
+    " commit -m \"local-only divergence\"")
   result = requireGit(q(gitBin) & " -C " & q(repoPath) &
     " rev-parse HEAD").strip()
 
@@ -189,8 +189,8 @@ proc setupFixture(gitBin, slug: string): M9Fixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
     projectTomlWithRemotes(
-      "file://" & libAOrigin,
-      "file://" & libBOrigin))
+      fileUrl(libAOrigin),
+      fileUrl(libBOrigin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   result.workspaceRoot = workspaceRoot
@@ -327,8 +327,11 @@ suite "M9 — repro workspace init":
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check res.code == 1
-      check "projects/nonexistent.toml" in res.output
-      check "variants/nonexistent.toml" in res.output
+      # Error message embeds the on-disk file paths with the host
+      # separator (forward slash on POSIX, backslash on Windows), so
+      # match through Nim's ``/`` operator which adapts to the host.
+      check ("projects" / "nonexistent.toml") in res.output
+      check ("variants" / "nonexistent.toml") in res.output
 
   test "test_m9_init_no_workspace_root_uses_cwd":
     let gitBin = findExe("git")

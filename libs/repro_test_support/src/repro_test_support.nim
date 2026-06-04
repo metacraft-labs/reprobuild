@@ -203,6 +203,38 @@ proc requireFailure*(cmd: CmdSpec; cwd = getCurrentDir()): string =
   check res.code != 0
   res.output
 
+proc fileUrl*(path: string): string =
+  ## Build an RFC 8089 ``file://`` URL for a fixture path that is then
+  ## interpolated into a TOML basic string (a manifest, lock, project
+  ## file, etc.) AND/OR passed to ``git clone`` as a remote.
+  ##
+  ## On POSIX, ``path`` already starts with ``/`` so a plain
+  ## ``"file://" & path`` already yields the canonical three-slash form
+  ## ``file:///abs/path``. On Windows ``path`` looks like ``C:\Users\...``
+  ## and the same concatenation produces ``file://C:\Users\...`` — which
+  ## is doubly wrong:
+  ##
+  ## - RFC 8089 requires three slashes plus forward separators
+  ##   (``file:///C:/Users/...``); a two-slash form reads ``C:`` as the
+  ##   authority component.
+  ## - More damaging in practice: a TOML basic string interprets ``\U``
+  ##   as the start of an 8-hex-digit Unicode escape and ``\u`` as a
+  ##   4-hex-digit one. ``\Users`` is an invalid escape, so the strict
+  ##   reader rejects every workspace.toml / projects/*.toml fixture
+  ##   that was assembled with the raw concatenation. The toml-
+  ##   serialization library raises with an empty message in this case,
+  ##   making the failure mode opaque on Linux-reviewed tests when they
+  ##   run on a Windows host.
+  ##
+  ## The helper normalises both: forward slashes (TOML-safe + RFC-correct)
+  ## and the explicit three-slash prefix on Windows. ``git`` accepts the
+  ## normalised form on every supported host, so callers that previously
+  ## passed ``"file://" & path`` straight to ``git clone`` keep working.
+  when defined(windows):
+    "file:///" & path.replace('\\', '/')
+  else:
+    "file://" & path
+
 proc daemonSocketEndpoint*(name: string): string =
   ## Portable per-test endpoint name. AF_UNIX socket paths are picked
   ## under ``/tmp`` on POSIX; on Windows the equivalent name lives in

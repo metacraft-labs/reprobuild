@@ -72,6 +72,23 @@ proc validateSchema(path, content, expectedSchema: string) =
     raiseManifestError(path, "schema", expectedSchema, observed,
       "schema version mismatch")
 
+proc fallbackTomlMessage(): string =
+  ## Synthetic diagnostic for the case where status-im/nim-toml-serialization
+  ## raises a ``TomlError`` whose ``msg`` is the empty string. The empty-msg
+  ## arm is rare on Linux but reproducibly hit on Windows fixtures that
+  ## interpolate raw Windows paths into TOML basic strings: ``"C:\Users\..."``
+  ## is parsed as the invalid escape ``\U`` (TOML basic strings reserve
+  ## ``\u`` / ``\U`` for 4- / 8-hex-digit Unicode escapes). Without the
+  ## fallback the wrapped ``WorkspaceManifestParseError`` ends up with an
+  ## empty ``innerMessage`` and the diagnostic reads ``schema expected=X
+  ## observed=X:`` with no explanation. The fallback names the most likely
+  ## culprit so the next failure is actionable rather than opaque.
+  "TOML parser raised with no message; common cause: unescaped backslash " &
+    "in a basic string (\"...\") — TOML reads \\U / \\u / \\b / \\f / " &
+    "\\n / \\r / \\t / \\\" / \\\\ as escape sequences. If the value is a " &
+    "filesystem path or file:// URL, escape backslashes (\\\\) or switch to " &
+    "forward slashes / TOML literal strings ('...')."
+
 proc decodeStrict[T](path, content, expectedSchema: string;
                      RecordType: typedesc[T]): T =
   ## Strict-mode decode of the typed record. The `TomlUnknownFields` flag is
@@ -81,10 +98,12 @@ proc decodeStrict[T](path, content, expectedSchema: string;
   try:
     result = Toml.decode(content, RecordType)
   except TomlError as e:
+    let inner = if e.msg.len > 0: e.msg else: fallbackTomlMessage()
     let keyPath = extractStrictModeKeyPath(e.msg)
-    raiseManifestError(path, keyPath, expectedSchema, expectedSchema, e.msg)
+    raiseManifestError(path, keyPath, expectedSchema, expectedSchema, inner)
   except CatchableError as e:
-    raiseManifestError(path, "", expectedSchema, expectedSchema, e.msg)
+    let inner = if e.msg.len > 0: e.msg else: fallbackTomlMessage()
+    raiseManifestError(path, "", expectedSchema, expectedSchema, inner)
 
 template requireNonEmpty(path, expectedSchema, keyPath, value: untyped) =
   ## status-im/nim-toml-serialization silently fills a missing scalar with

@@ -81,7 +81,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M25 Tester'")
+    " config user.name \"M25 Tester\"")
   writeFile(workPath / "README.md", "M25 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -104,7 +104,7 @@ proc seedManifestBare(gitBin, scratch, barePath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M25 Tester'")
+    " config user.name \"M25 Tester\"")
   for entry in files:
     let relPath = entry[0]
     let body = entry[1]
@@ -117,8 +117,6 @@ proc seedManifestBare(gitBin, scratch, barePath: string;
   removeDir(barePath)
   discard requireGit(q(gitBin) & " clone --bare " & q(workPath) & " " &
     q(barePath))
-
-proc fileUrl(p: string): string = "file://" & p
 
 # ---- manifest TOML strings ------------------------------------------------
 #

@@ -38,7 +38,7 @@ proc configureRepo(gitBin, repoPath: string) =
   discard requireSuccess(q(gitBin) & " -C " & q(repoPath) &
     " config user.email tester@example.invalid")
   discard requireSuccess(q(gitBin) & " -C " & q(repoPath) &
-    " config user.name 'M2 Tester'")
+    " config user.name \"M2 Tester\"")
 
 proc seedTwoBranchOrigin(gitBin, originPath, workPath: string) =
   discard requireSuccess(q(gitBin) & " init --bare -b main " & q(originPath))

@@ -78,7 +78,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M22 Tester'")
+    " config user.name \"M22 Tester\"")
   writeFile(workPath / "README.md", "M22 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -141,7 +141,7 @@ proc setupFixture(gitBin, slug: string): M22Fixture =
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
-    projectTomlWithLibA("file://" & libAOrigin))
+    projectTomlWithLibA(fileUrl(libAOrigin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   result.workspaceRoot = workspaceRoot
 

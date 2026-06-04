@@ -74,7 +74,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M19 Tester'")
+    " config user.name \"M19 Tester\"")
   writeFile(workPath / "README.md", "M19 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -88,11 +88,11 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name 'M19 Tester'")
+    " config user.name \"M19 Tester\"")
 
 proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
   result =
@@ -182,9 +182,9 @@ proc setupFixture(gitBin, slug: string): M19Fixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
     projectTomlWith3Remotes(
-      "file://" & result.libA.origin,
-      "file://" & result.libB.origin,
-      "file://" & result.libC.origin))
+      fileUrl(result.libA.origin),
+      fileUrl(result.libB.origin),
+      fileUrl(result.libC.origin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
@@ -330,6 +330,17 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
     elif isRoot:
       # Root bypasses POSIX write permissions; the chmod-based fault
       # injection only fires for unprivileged users.
+      skip()
+    elif defined(windows):
+      # Nim's ``setFilePermissions`` on Windows maps to ``_chmod``,
+      # which only flips the read-only attribute on FILES and has no
+      # effect on directories. A directory whose write bit is "removed"
+      # remains fully writable to the current user, so the fault
+      # injection this test relies on cannot fire. Proper fault
+      # injection on Windows would require ACL changes via ``icacls``
+      # or P/Invoke — out of scope for the M19 contract test, which is
+      # about post-commit's downgrade behaviour, not about how we
+      # provoke the underlying IO failure.
       skip()
     else:
       let fx = setupFixture(gitBin, "writer-fails")

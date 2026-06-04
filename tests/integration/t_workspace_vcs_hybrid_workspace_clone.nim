@@ -20,6 +20,7 @@
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
+import repro_test_support
 import git_actions
 import git_tool
 import hg_actions
@@ -51,7 +52,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string) =
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M3 Tester'")
+    " config user.name \"M3 Tester\"")
   writeFile(workPath / "README.md", "M3 git fixture\n")
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireSuccess(q(gitBin) & " -C " & q(workPath) &
@@ -117,7 +118,7 @@ suite "Workspace VCS — hybrid git+hg workspace clone (M3)":
       let hgReceiptRel = "hg-clone-receipt"
 
       var gitAct = gitCloneAction("m3-git-clone", gitIdentity,
-        remoteUrl = "file://" & gitOrigin,
+        remoteUrl = fileUrl(gitOrigin),
         repoPath = gitTargetRel,
         receiptPath = gitReceiptRel,
         revision = "main")
@@ -135,7 +136,7 @@ suite "Workspace VCS — hybrid git+hg workspace clone (M3)":
       # ever loses the VCS-kind tag inside the fingerprint payload
       # this assertion catches it immediately.
       var gitParallel = gitCloneAction("m3-shared-id", gitIdentity,
-        remoteUrl = "file://" & gitOrigin,
+        remoteUrl = fileUrl(gitOrigin),
         repoPath = "shared",
         receiptPath = "shared-receipt",
         revision = "main")
@@ -214,7 +215,7 @@ suite "Workspace VCS — hybrid git+hg workspace clone (M3)":
       let secondWorkRoot = scratch / "workspace-second"
       createDir(secondWorkRoot)
       var gitAct2 = gitCloneAction("m3-git-clone", gitIdentity,
-        remoteUrl = "file://" & gitOrigin,
+        remoteUrl = fileUrl(gitOrigin),
         repoPath = gitTargetRel,
         receiptPath = gitReceiptRel,
         revision = "main")

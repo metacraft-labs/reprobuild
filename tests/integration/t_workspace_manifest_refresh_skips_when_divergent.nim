@@ -69,7 +69,7 @@ proc seedBareWithFiles(gitBin, scratch, barePath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M19a Tester'")
+    " config user.name \"M19a Tester\"")
   for entry in files:
     let absPath = workPath / entry[0]
     createDir(absPath.splitPath.head)
@@ -89,7 +89,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M19a Tester'")
+    " config user.name \"M19a Tester\"")
   writeFile(workPath / "README.md", "M19a participating-repo fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -103,11 +103,11 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name 'M19a Tester'")
+    " config user.name \"M19a Tester\"")
 
 const projectTomlBody = """
 schema = "reprobuild.workspace.project.v1"
@@ -178,7 +178,7 @@ suite "M19a — post-merge manifest auto-refresh (skips divergent layer)":
         ("projects/myproject.toml", projectTomlBody),
         ("repos/lib-a.toml", libATomlBody),
       ])
-      let layerUrl = "file://" & manifestBare
+      let layerUrl = fileUrl(manifestBare)
 
       let libOrigin = scratch / "origin-lib-a.git"
       let libSeed = scratch / "seed-lib-a"
@@ -192,7 +192,7 @@ suite "M19a — post-merge manifest auto-refresh (skips divergent layer)":
       check probe.layers.len == 1
       let layerCheckoutPath = probe.layers[0].layerPath
       discard requireGit(q(gitBin) & " clone " &
-        q("file://" & manifestBare) & " " & q(layerCheckoutPath))
+        q(fileUrl(manifestBare)) & " " & q(layerCheckoutPath))
       let seedSha = requireGit(q(gitBin) & " -C " &
         q(layerCheckoutPath) & " rev-parse HEAD").strip()
 
@@ -201,18 +201,18 @@ suite "M19a — post-merge manifest auto-refresh (skips divergent layer)":
       discard requireGit(q(gitBin) & " -C " & q(layerCheckoutPath) &
         " config user.email tester@example.invalid")
       discard requireGit(q(gitBin) & " -C " & q(layerCheckoutPath) &
-        " config user.name 'M19a Tester'")
+        " config user.name \"M19a Tester\"")
 
       # Advance upstream by one commit on ``main`` (push from a side
       # clone so the layer checkout is strictly behind).
       let manifestSeedWork = scratch / "seed-bare-manifest.git"
       removeDir(manifestSeedWork)
       discard requireGit(q(gitBin) & " clone " &
-        q("file://" & manifestBare) & " " & q(manifestSeedWork))
+        q(fileUrl(manifestBare)) & " " & q(manifestSeedWork))
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
         " config user.email tester@example.invalid")
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
-        " config user.name 'M19a Tester'")
+        " config user.name \"M19a Tester\"")
       writeFile(manifestSeedWork / "repos" / "lib-b.toml",
         "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
         "[repo]\nname = \"lib-b\"\npath = \"lib-b\"\n" &
@@ -220,7 +220,7 @@ suite "M19a — post-merge manifest auto-refresh (skips divergent layer)":
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
         " add -A")
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
-        " commit -m 'upstream advance'")
+        " commit -m \"upstream advance\"")
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
         " push origin main")
       let upstreamTip = requireGit(q(gitBin) & " -C " &
@@ -238,7 +238,7 @@ suite "M19a — post-merge manifest auto-refresh (skips divergent layer)":
       discard requireGit(q(gitBin) & " -C " & q(layerCheckoutPath) &
         " add -A")
       discard requireGit(q(gitBin) & " -C " & q(layerCheckoutPath) &
-        " commit -m 'local manifest divergence'")
+        " commit -m \"local manifest divergence\"")
       let preRefreshSha = requireGit(q(gitBin) & " -C " &
         q(layerCheckoutPath) & " rev-parse HEAD").strip()
       check preRefreshSha != upstreamTip

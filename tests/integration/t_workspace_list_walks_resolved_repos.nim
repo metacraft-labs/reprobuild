@@ -112,9 +112,9 @@ proc setupFixture(slug: string): M12ListFixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
     projectTomlWith3Remotes(
-      "file://" & result.scratch / "origin-lib-a.git",
-      "file://" & result.scratch / "origin-lib-b.git",
-      "file://" & result.scratch / "origin-lib-c.git"))
+      fileUrl(result.scratch / "origin-lib-a.git"),
+      fileUrl(result.scratch / "origin-lib-b.git"),
+      fileUrl(result.scratch / "origin-lib-c.git")))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)

@@ -70,7 +70,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M12 Tester'")
+    " config user.name \"M12 Tester\"")
   writeFile(workPath / "README.md", "M12 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -84,18 +84,18 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name 'M12 Tester'")
+    " config user.name \"M12 Tester\"")
 
 proc advanceCommit(gitBin, repoPath: string): string =
   ## Add one local commit to a clean checkout and return the new HEAD.
   writeFile(repoPath / "advance.txt", "advance\n")
   discard requireGit(q(gitBin) & " -C " & q(repoPath) & " add advance.txt")
   discard requireGit(q(gitBin) & " -C " & q(repoPath) &
-    " commit -m 'advance'")
+    " commit -m \"advance\"")
   result = requireGit(q(gitBin) & " -C " & q(repoPath) &
     " rev-parse HEAD").strip()
 
@@ -198,9 +198,9 @@ proc setupFixture(gitBin, slug: string): M12Fixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
     projectTomlWith3Remotes(
-      "file://" & result.libA.origin,
-      "file://" & result.libB.origin,
-      "file://" & result.libC.origin))
+      fileUrl(result.libA.origin),
+      fileUrl(result.libB.origin),
+      fileUrl(result.libC.origin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)

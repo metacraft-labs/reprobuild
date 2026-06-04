@@ -15433,9 +15433,26 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     result.exitCode = 0
     return
   let currentRepoAbs = parsed.currentRepo
+  # Robust same-path test. Bare ``==`` is too brittle on Windows: the
+  # workspace.toml's ``local_path`` may be written with forward
+  # slashes (the test fixtures do, to avoid TOML basic-string ``\U``
+  # escape collisions on Windows paths), while ``--current-repo`` is
+  # passed in native backslashed form. The same on-disk directory
+  # would then compare unequal and the gate would silently skip the
+  # visibility check. Normalise separators, casing, and absolute form
+  # before comparing.
+  proc samePath(a, b: string): bool =
+    if a == b: return true
+    let
+      aN = os.normalizedPath(absolutePath(a)).replace('\\', '/')
+      bN = os.normalizedPath(absolutePath(b)).replace('\\', '/')
+    when defined(windows):
+      aN.toLowerAscii == bN.toLowerAscii
+    else:
+      aN == bN
   var currentLayer = none(ManifestLayerLocation)
   for loc in layerLocations:
-    if loc.absPath == currentRepoAbs:
+    if samePath(loc.absPath, currentRepoAbs):
       currentLayer = some(loc)
       break
   if currentLayer.isNone:

@@ -83,7 +83,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name 'M11 Tester'")
+    " config user.name \"M11 Tester\"")
   writeFile(workPath / "README.md", "M11 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -97,11 +97,11 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name 'M11 Tester'")
+    " config user.name \"M11 Tester\"")
 
 proc dirtyTheTree(repoPath: string) =
   writeFile(repoPath / "dirty.txt", "uncommitted\n")
@@ -204,9 +204,9 @@ proc setupFixture(gitBin, slug: string): M11Fixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
     projectTomlWith3Remotes(
-      "file://" & result.libA.origin,
-      "file://" & result.libB.origin,
-      "file://" & result.libC.origin))
+      fileUrl(result.libA.origin),
+      fileUrl(result.libB.origin),
+      fileUrl(result.libC.origin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
@@ -410,7 +410,7 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
         q(fx.workspaceRoot / "lib-a") & " add advance.txt")
       discard requireGit(q(gitBin) & " -C " &
         q(fx.workspaceRoot / "lib-a") &
-        " commit -m 'advance the trigger'")
+        " commit -m \"advance the trigger\"")
       let newSha = requireGit(q(gitBin) & " -C " &
         q(fx.workspaceRoot / "lib-a") & " rev-parse HEAD").strip()
       check newSha != fx.libA.sha
