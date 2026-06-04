@@ -14470,11 +14470,11 @@ proc runManifestRefreshHookCommand*(hookName: string;
 
   return 0
 
-# ---- M18 / M23: `repro check --mode=pre-push` (publication gate) ----------
+# ---- M18 / M23 / M26: `repro check --mode=pre-push` (publication gate) ----
 #
 # The installed pre-push hook (M17 dispatcher) routes into the gate by
 # calling ``repro check --mode=pre-push --current-repo=PATH
-# --pushed-refs=FILE``. The gate runs five checks in order; the first
+# --pushed-refs=FILE``. The gate runs six checks in order; the first
 # failure short-circuits with a structured ``CheckFailure`` record:
 #
 #   1. ``branch-mismatch``  — pushed local branch != active workspace
@@ -14500,11 +14500,25 @@ proc runManifestRefreshHookCommand*(hookName: string;
 #                             (via the M11 ``executeWorkspaceLock``
 #                             driver) and only fails when creation
 #                             itself fails.
+#   6. ``lock_references_private_repo`` — M26: when the push touches
+#                             one or more ``locks/<project>/<file>.toml``
+#                             files in the current-repo (a manifest-layer
+#                             repo) AND that manifest layer is declared
+#                             ``visibility = "public"`` in
+#                             ``.repo/workspace.toml``, every repo
+#                             referenced by the touched locks must be
+#                             declared by at least one public manifest
+#                             layer. A repo declared ONLY in non-public
+#                             layers makes the lock unreproducible for
+#                             public-only operators; the gate refuses
+#                             the push so the operator either drops
+#                             the private references or publishes a
+#                             non-public lock instead.
 #
 # The exit-code contract matches the milestone:
 #   - 0 — every check passed (and the lock was created / refreshed
 #         if it had been missing or stale).
-#   - 2 — any of the five publication-gate checks failed.
+#   - 2 — any of the six publication-gate checks failed.
 #   - 1 — IO / resolve / VCS-tool failure unrelated to the gate logic.
 
 type
@@ -14519,13 +14533,15 @@ type
     ## is the short tag the spec mandates (``branch-mismatch`` /
     ## ``dirty`` / ``unpublished`` / ``lock-stale`` /
     ## ``lock-failure`` / ``develop_override_dirty`` /
-    ## ``develop_override_unpublished`` / ``develop_override_missing``);
+    ## ``develop_override_unpublished`` / ``develop_override_missing`` /
+    ## ``lock_references_private_repo``);
     ## ``remediation`` is the operator-facing next-step the JSON report
     ## and text diagnostic surface. ``source`` is populated by the M23
     ## develop-override stage with the override's filesystem path so
     ## the operator can locate the offending checkout without having to
-    ## re-read the override file; for the four M18 sibling-repo stages
-    ## ``source`` is left empty.
+    ## re-read the override file, and by the M26 lock-visibility stage
+    ## with the manifest-layer-relative path of the offending lock file.
+    ## For the four M18 sibling-repo stages ``source`` is left empty.
     repo*: string
     property*: string
     remediation*: string
@@ -14801,13 +14817,266 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
     return workspaceLocal.get().workspace.branch.get()
   resolved.trunk
 
+# ---- M26 helpers: lock-visibility classification --------------------------
+#
+# The publication gate's sixth stage inspects the manifest-layer repo
+# the operator is pushing FROM. The three load-bearing pieces are:
+#
+#   (a) The on-disk path of every ``[[manifest]]`` layer the workspace
+#       declares — needed to (i) tell whether ``--current-repo`` IS one
+#       of those layer repos and (ii) read each layer's
+#       ``projects/<p>.toml`` to discover which repos the layer declares.
+#       Mirrors ``compose.layerDirName`` / ``compose.sanitizeForPath``
+#       for ``url``-backed layers and the in-tree path for ``local_path``
+#       layers (matching ``pickManifestLayerRoot``'s convention).
+#
+#   (b) A per-repo-path visibility classification — which manifest layer
+#       tiers (``public`` / ``org`` / ``team`` / ``private``) declare
+#       each repo path. The M8 composer's merge rule overwrites earlier
+#       declarations when the same triple appears again, so we cannot
+#       rely on ``ResolvedRepo.visibility`` alone — we re-resolve each
+#       layer's project file and aggregate the tier set per path.
+#
+#   (c) Which lock files in ``locks/<project>/<file>.toml`` are touched
+#       by the pushed commits. Computed with ``git diff --name-only``
+#       between the remote-sha and the local-sha for each pushed ref;
+#       branch-creation pushes (zero remote-sha) fall back to a
+#       ``ls-tree`` enumeration of every lock file at the local-sha.
+
+type
+  ManifestLayerLocation* = object
+    ## One entry per ``[[manifest]]`` layer declared in
+    ## ``.repo/workspace.toml``. ``absPath`` is the on-disk directory
+    ## that owns the layer's project files and (for the first layer)
+    ## the lock files. ``visibility`` is the tier declared on the
+    ## ``[[manifest]]`` entry. ``provenance`` is the URL or local-path
+    ## string the layer was declared with — used in M26 diagnostics so
+    ## the operator can identify the offending layer at a glance.
+    index*: int
+    absPath*: string
+    provenance*: string
+    visibility*: WorkspaceVisibility
+
+proc sanitizeManifestUrlForPath(raw: string): string =
+  ## Mirror of ``compose.sanitizeForPath`` — the dotted alphanumeric +
+  ## dash subset, runs of dashes collapsed, capped at 80 chars, leading
+  ## / trailing dashes stripped. Lives here so M26 doesn't take a hard
+  ## dependency on a compose-private helper.
+  var raw1 = newStringOfCap(raw.len)
+  for ch in raw:
+    case ch
+    of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
+    else: raw1.add('-')
+  var collapsed = newStringOfCap(raw1.len)
+  var prevDash = false
+  for ch in raw1:
+    if ch == '-':
+      if not prevDash: collapsed.add(ch)
+      prevDash = true
+    else:
+      collapsed.add(ch)
+      prevDash = false
+  if collapsed.len > 80:
+    collapsed.setLen(80)
+  result = collapsed.strip(chars = {'-'}, leading = true, trailing = true)
+  if result.len == 0:
+    result = "layer"
+
+proc enumerateManifestLayerLocations(workspaceRoot: string;
+    workspaceLocal: Option[WorkspaceLocal]):
+      seq[ManifestLayerLocation] =
+  ## Build a list of on-disk locations for every ``[[manifest]]`` layer
+  ## in ``workspaceLocal``. ``url``-backed layers map to
+  ## ``<workspaceRoot>/.repo/manifests-<i>-<sanitized>/`` (the same
+  ## directory ``compose.acquireUrlLayer`` materialises); ``local_path``
+  ## layers map to their literal path (resolved against the workspace
+  ## root when relative). The ``visibility`` string from the TOML maps
+  ## via the same accept-set the composer uses (``private`` and
+  ## ``personal`` collapse to ``wvPersonal``).
+  if workspaceLocal.isNone:
+    return
+  let local = workspaceLocal.get()
+  for layerIdx, entry in local.manifest:
+    var loc = ManifestLayerLocation(index: layerIdx)
+    let visStr = entry.visibility.toLowerAscii()
+    case visStr
+    of "public": loc.visibility = wvPublic
+    of "org": loc.visibility = wvOrg
+    of "team": loc.visibility = wvTeam
+    of "private", "personal": loc.visibility = wvPersonal
+    else:
+      # An unknown tier means the workspace.toml is malformed; we still
+      # emit an entry (with the default ``wvPublic``) so subsequent gate
+      # logic doesn't crash. The strict reader path will surface the
+      # actual error to the operator separately.
+      loc.visibility = wvPublic
+    let hasUrl = entry.url.isSome and entry.url.get().len > 0
+    let hasLocal = entry.local_path.isSome and entry.local_path.get().len > 0
+    if hasUrl:
+      let url = entry.url.get()
+      loc.provenance = url
+      let suffix = sanitizeManifestUrlForPath(url)
+      loc.absPath = workspaceRoot / ".repo" /
+        ("manifests-" & $layerIdx & "-" & suffix)
+    elif hasLocal:
+      let raw = entry.local_path.get()
+      loc.provenance = raw
+      if isAbsolute(raw):
+        loc.absPath = raw
+      else:
+        loc.absPath = absolutePath(workspaceRoot / raw)
+    else:
+      # Malformed entry — keep going so other layers can still be
+      # inspected; the strict reader will surface the actual error.
+      continue
+    result.add(loc)
+
+proc classifyRepoPathVisibility(workspaceRoot: string;
+    layerLocations: openArray[ManifestLayerLocation];
+    projectName: string): Table[string, set[WorkspaceVisibility]] =
+  ## For each ``ResolvedRepo.path`` declared across the union of
+  ## manifest layers, return the set of visibility tiers that declare
+  ## the path. The result is a path-keyed map ``path -> {tiers}``. A
+  ## repo path declared exclusively in non-public tiers (the set
+  ## doesn't include ``wvPublic``) is what M26 considers
+  ## "private-only" — pushing such a path under a public-layer lock is
+  ## the violation the spec blocks.
+  result = initTable[string, set[WorkspaceVisibility]]()
+  for loc in layerLocations:
+    if not dirExists(loc.absPath):
+      continue
+    let projectFile = loc.absPath / "projects" / (projectName & ".toml")
+    if not fileExists(projectFile):
+      continue
+    var layerResolved: ResolvedProject
+    try:
+      layerResolved = resolveProject(projectFile)
+    except CatchableError:
+      # Re-resolution failure here is non-fatal for M26: the strict
+      # composer path (the rest of the gate) would already have surfaced
+      # any structural issue. Skipping the layer in the visibility map
+      # treats it as "no declarations" which is the conservative
+      # interpretation — a repo only declared here would NOT be marked
+      # as having public visibility, which is the safer default.
+      continue
+    for repo in layerResolved.repos:
+      if repo.path notin result:
+        result[repo.path] = {}
+      result[repo.path].incl(loc.visibility)
+
+proc visibilityTierLabelLocal(v: WorkspaceVisibility): string =
+  ## Local mirror of ``compose.visibilityTierLabel`` — kept private to
+  ## this module so M26 diagnostics use the same canonical lowercase
+  ## labels the M25 init diagnostics use (``private`` rather than
+  ## ``personal``).
+  case v
+  of wvPublic: "public"
+  of wvOrg: "org"
+  of wvTeam: "team"
+  of wvPersonal: "private"
+
+proc visibilitySetLabel(tiers: set[WorkspaceVisibility]): string =
+  ## Render a tier set as a stable ``visibility=<a>+<b>`` string for the
+  ## evidence field of the structured failure record. Tier order is
+  ## fixed by the enum order so the rendered string is byte-stable
+  ## across runs.
+  var parts: seq[string]
+  for v in [wvPublic, wvOrg, wvTeam, wvPersonal]:
+    if v in tiers:
+      parts.add(visibilityTierLabelLocal(v))
+  parts.join("+")
+
+proc lockPathsTouchedInPush(identity: GitToolIdentity;
+    currentRepo, refsPath, projectName: string): seq[string] =
+  ## Inspect the git ``pre-push`` refs stream and return the list of
+  ## ``locks/<project>/<file>.toml`` paths that the pushed commits
+  ## introduce or modify in ``currentRepo``. The lock-index TOML
+  ## (``index.toml``) is excluded — it's metadata, not a workspace
+  ## state record, and pruning it keeps M26's failure surface tight.
+  ##
+  ## Each ref-stream line is ``<local-ref> <local-sha> <remote-ref>
+  ## <remote-sha>``. We treat the line specially when:
+  ##
+  ##   - ``local-sha`` is all-zero (a deletion push) — nothing to
+  ##     inspect, skip the line.
+  ##   - ``remote-sha`` is all-zero (the branch is being created on
+  ##     the remote for the first time) — every lock file present at
+  ##     ``local-sha`` is "added" by this push, so we enumerate them
+  ##     with ``git ls-tree -r local-sha``.
+  ##   - Otherwise, we run ``git diff --name-only remote-sha
+  ##     local-sha`` and filter the output to the
+  ##     ``locks/<project>/`` prefix.
+  ##
+  ## Paths returned are repository-root-relative with forward slashes
+  ## (the form ``git`` emits). The caller resolves them against
+  ## ``currentRepo`` to read the lock file from disk.
+  if refsPath.len == 0 or not fileExists(refsPath):
+    return
+  if currentRepo.len == 0 or not dirExists(currentRepo / ".git"):
+    return
+  let zeroSha = "0000000000000000000000000000000000000000"
+  let lockPrefix = "locks/" & projectName & "/"
+  var seen = initHashSet[string]()
+  for rawLine in readFile(refsPath).splitLines():
+    let line = rawLine.strip()
+    if line.len == 0:
+      continue
+    let parts = line.split(' ')
+    if parts.len < 4:
+      continue
+    let localSha = parts[1]
+    let remoteSha = parts[3]
+    if localSha == zeroSha:
+      continue
+    var emitted: seq[string]
+    if remoteSha == zeroSha:
+      # Branch creation: every lock file at local-sha is "added".
+      let lsRes = gitRunPlain(identity,
+        ["-C", currentRepo, "ls-tree", "-r", "--name-only", localSha])
+      if lsRes.code != 0:
+        continue
+      for raw in lsRes.output.splitLines():
+        let p = raw.strip()
+        if p.startsWith(lockPrefix) and p.endsWith(".toml") and
+            not p.endsWith("/index.toml") and p != lockPrefix & "index.toml":
+          emitted.add(p)
+    else:
+      let diffRes = gitRunPlain(identity,
+        ["-C", currentRepo, "diff", "--name-only", remoteSha, localSha])
+      if diffRes.code != 0:
+        # A diff failure (e.g. the remote-sha is not in the local repo)
+        # falls back to enumerating every lock file at local-sha — the
+        # conservative answer is "treat every present lock as touched".
+        let lsRes = gitRunPlain(identity,
+          ["-C", currentRepo, "ls-tree", "-r", "--name-only", localSha])
+        if lsRes.code != 0:
+          continue
+        for raw in lsRes.output.splitLines():
+          let p = raw.strip()
+          if p.startsWith(lockPrefix) and p.endsWith(".toml") and
+              not p.endsWith("/index.toml") and p != lockPrefix & "index.toml":
+            emitted.add(p)
+      else:
+        for raw in diffRes.output.splitLines():
+          let p = raw.strip()
+          if p.startsWith(lockPrefix) and p.endsWith(".toml") and
+              not p.endsWith("/index.toml") and p != lockPrefix & "index.toml":
+            emitted.add(p)
+    for p in emitted:
+      if p notin seen:
+        seen.incl(p)
+        result.add(p)
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
-  ## Drive the five-stage gate. Each stage short-circuits on the first
+  ## Drive the six-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
   ## a time so the operator's next step is unambiguous. M23 inserted
   ## the develop-override cleanliness stage between the sibling-repo
   ## ``unpublished`` stage and the lock-currency stage; the stage is a
-  ## no-op when no ``.repro/develop-overrides.toml`` exists.
+  ## no-op when no ``.repro/develop-overrides.toml`` exists. M26 adds
+  ## the sixth ``lock_references_private_repo`` stage after the lock-
+  ## currency stage; the stage is a no-op when the current-repo is not
+  ## a manifest-layer repo or when no lock files are being pushed.
   result.mode = "pre-push"
   result.workspaceRoot = parsed.workspaceRoot
   result.currentRepo = parsed.currentRepo
@@ -15090,47 +15359,163 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.lockUpdate.indexFilePath = indexPath
       result.lockUpdate.triggerRepo = latest.get().triggerRepo
       result.lockUpdate.triggerSha = latest.get().triggerSha
+  else:
+    # Create or refresh the lock via the M11 driver. The driver writes
+    # the lock TOML, updates the index, and returns a structured report
+    # carrying the new lock-file path. The driver's own ``exitCode == 2``
+    # arm fires only on a dirty tree (which stage 2 above already ruled
+    # out), so any non-zero exit here is genuinely lock-failure.
+    var lockOutcome: WorkspaceLockOutcome
+    try:
+      lockOutcome = executeWorkspaceLock(lockArgs)
+    except CatchableError as err:
+      result.lockUpdate.kind = cluFailed
+      result.lockUpdate.diagnostic = err.msg
+      result.failures.add(CheckFailure(
+        repo: "",
+        property: "lock-failure",
+        remediation:
+          "investigate the lock writer error and re-run 'repro check'",
+        evidence: err.msg))
+      result.exitCode = 2
+      return
+    if lockOutcome.report.exitCode != 0:
+      result.lockUpdate.kind = cluFailed
+      let diag =
+        if lockOutcome.report.dirty.len > 0:
+          "lock writer refused: dirty siblings"
+        else: "lock writer exited with code " & $lockOutcome.report.exitCode
+      result.lockUpdate.diagnostic = diag
+      result.failures.add(CheckFailure(
+        repo: "",
+        property: "lock-failure",
+        remediation: "re-run 'repro workspace lock' to diagnose",
+        evidence: diag))
+      result.exitCode = 2
+      return
+    result.lockUpdate.lockFilePath = lockOutcome.report.lockFilePath
+    result.lockUpdate.indexFilePath = lockOutcome.report.indexFilePath
+    result.lockUpdate.triggerRepo = lockOutcome.report.triggerRepo
+    result.lockUpdate.triggerSha = lockOutcome.report.triggerSha
+    result.lockUpdate.kind =
+      if lockMissing: cluCreated else: cluRefreshed
+
+  # ---- 6. M26: lock visibility (public locks must not reference -----------
+  # private-only repos) ----------------------------------------------------
+  # The stage is a no-op unless ALL of the following hold:
+  #
+  #   - The workspace is compositional (``workspaceLocal.isSome``).
+  #   - ``--current-repo`` is one of the manifest-layer roots declared
+  #     in ``workspace.toml`` AND that layer is declared
+  #     ``visibility = "public"``. Pushes from a private manifest-layer
+  #     repo are out of scope: a private lock CAN reference private
+  #     repos, that's literally the point of a private manifest.
+  #   - The pushed refs introduce or modify at least one
+  #     ``locks/<project>/<file>.toml`` path in the current-repo (the
+  #     git-diff probe above). The lock-index TOML (``index.toml``) is
+  #     deliberately not treated as a "lock change" — it's metadata
+  #     about which locks exist, not the lock state itself.
+  #
+  # When triggered, the stage reads each touched lock file via the M5
+  # strict ``readLock`` reader, gathers the set of declared repo paths,
+  # and looks up each path in the per-path visibility map. A path that
+  # exists only in non-public layers (``wvPublic notin tiers``) is a
+  # violation: the lock cannot be reproduced by a public-only operator
+  # who cannot acquire the private layer, which is exactly the
+  # condition ``Workspace-And-Develop-Mode.md §"Interaction with
+  # Locking and Publication"`` proscribes.
+  let layerLocations = enumerateManifestLayerLocations(
+    parsed.workspaceRoot, workspaceLocal)
+  if layerLocations.len == 0:
     result.exitCode = 0
     return
-  # Create or refresh the lock via the M11 driver. The driver writes
-  # the lock TOML, updates the index, and returns a structured report
-  # carrying the new lock-file path. The driver's own ``exitCode == 2``
-  # arm fires only on a dirty tree (which stage 2 above already ruled
-  # out), so any non-zero exit here is genuinely lock-failure.
-  var lockOutcome: WorkspaceLockOutcome
-  try:
-    lockOutcome = executeWorkspaceLock(lockArgs)
-  except CatchableError as err:
-    result.lockUpdate.kind = cluFailed
-    result.lockUpdate.diagnostic = err.msg
-    result.failures.add(CheckFailure(
-      repo: "",
-      property: "lock-failure",
-      remediation:
-        "investigate the lock writer error and re-run 'repro check'",
-      evidence: err.msg))
-    result.exitCode = 2
+  if parsed.currentRepo.len == 0:
+    result.exitCode = 0
     return
-  if lockOutcome.report.exitCode != 0:
-    result.lockUpdate.kind = cluFailed
-    let diag =
-      if lockOutcome.report.dirty.len > 0:
-        "lock writer refused: dirty siblings"
-      else: "lock writer exited with code " & $lockOutcome.report.exitCode
-    result.lockUpdate.diagnostic = diag
-    result.failures.add(CheckFailure(
-      repo: "",
-      property: "lock-failure",
-      remediation: "re-run 'repro workspace lock' to diagnose",
-      evidence: diag))
-    result.exitCode = 2
+  let currentRepoAbs = parsed.currentRepo
+  var currentLayer = none(ManifestLayerLocation)
+  for loc in layerLocations:
+    if loc.absPath == currentRepoAbs:
+      currentLayer = some(loc)
+      break
+  if currentLayer.isNone:
+    result.exitCode = 0
     return
-  result.lockUpdate.lockFilePath = lockOutcome.report.lockFilePath
-  result.lockUpdate.indexFilePath = lockOutcome.report.indexFilePath
-  result.lockUpdate.triggerRepo = lockOutcome.report.triggerRepo
-  result.lockUpdate.triggerSha = lockOutcome.report.triggerSha
-  result.lockUpdate.kind =
-    if lockMissing: cluCreated else: cluRefreshed
+  if currentLayer.get().visibility != wvPublic:
+    # A non-public layer pushing locks is allowed to reference any
+    # tier. The spec only blocks public-lock references to private-only
+    # repos.
+    result.exitCode = 0
+    return
+  let touchedLocks = lockPathsTouchedInPush(
+    identity, currentRepoAbs, parsed.pushedRefsPath, resolved.projectName)
+  if touchedLocks.len == 0:
+    # No lock changes in this push — the rule is vacuously satisfied.
+    result.exitCode = 0
+    return
+  let pathVisibility = classifyRepoPathVisibility(
+    parsed.workspaceRoot, layerLocations, resolved.projectName)
+  for relLockPath in touchedLocks:
+    let absLockPath = currentRepoAbs / relLockPath.replace('/', DirSep)
+    if not fileExists(absLockPath):
+      # The touched-lock probe reported a path the diff included but
+      # which is no longer on disk (e.g. a renamed file). Treat as a
+      # gate refusal so the operator investigates rather than silently
+      # passing — the conservative answer.
+      result.failures.add(CheckFailure(
+        repo: "",
+        property: "lock_references_private_repo",
+        remediation: "investigate the touched lock file at " & relLockPath &
+          " — it appears in the pushed diff but is not on disk",
+        evidence: "lock-file-missing-on-disk: " & relLockPath,
+        source: relLockPath))
+      result.exitCode = 2
+      return
+    var parsedLock: Lock
+    try:
+      parsedLock = readLock(absLockPath)
+    except CatchableError as err:
+      # A malformed lock about to be pushed is itself a refusal-worthy
+      # condition — exit-1 (IO/parse) would mask the gate intent. We
+      # emit a structured failure with the parse error in the evidence.
+      result.failures.add(CheckFailure(
+        repo: "",
+        property: "lock_references_private_repo",
+        remediation: "fix lock-file parse error at " & relLockPath &
+          " before pushing",
+        evidence: "lock-parse-failed: " & err.msg,
+        source: relLockPath))
+      result.exitCode = 2
+      return
+    for lockedRepo in parsedLock.repo:
+      let tiers =
+        if lockedRepo.path in pathVisibility:
+          pathVisibility[lockedRepo.path]
+        else: {}
+      # An unknown path (not declared by any layer's project file) is
+      # treated as "private-only": no public layer publishes it, so a
+      # public-only operator cannot reproduce the entry. Skipping such
+      # paths silently would defeat the spec rule.
+      if wvPublic notin tiers:
+        let tierLabel =
+          if tiers.len > 0: visibilitySetLabel(tiers)
+          else: "<undeclared>"
+        let layerProv = currentLayer.get().provenance
+        result.failures.add(CheckFailure(
+          repo: lockedRepo.path,
+          property: "lock_references_private_repo",
+          remediation:
+            "remove the private-only repo '" & lockedRepo.path &
+            "' from the lock '" & relLockPath &
+            "' before publishing it to the public manifest layer '" &
+            layerProv & "', or publish the lock under a non-public " &
+            "manifest layer instead",
+          evidence: "lock=" & relLockPath &
+            " repo=" & lockedRepo.path &
+            " visibility=" & tierLabel,
+          source: relLockPath))
+        result.exitCode = 2
+        return
   result.exitCode = 0
 
 proc writeCheckReport(report: CheckReport) =
