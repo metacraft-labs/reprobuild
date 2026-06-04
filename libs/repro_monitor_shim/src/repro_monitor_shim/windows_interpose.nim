@@ -28,6 +28,7 @@ import repro_monitor_depfile/writer
 
 import repro_monitor_shim/windows_iat_patcher
 import repro_monitor_shim/windows_hook_registry as hr
+import repro_monitor_shim/install_audit
 
 {.push raises: [].}
 
@@ -1649,6 +1650,24 @@ proc repro_monitor_shim_init*(configPath: cstring): cint
   let iatFallbackCount = installAllHooks()
   dbg(cstring("[repro_monitor_shim] installAllHooks: " &
     $iatFallbackCount & " hook(s) fell through to IAT fallback\n"))
+  # M73 Phase 4: post-install audit. Walk the hookTable, resolve each
+  # spec's kernel32 address, and classify the first five bytes at the
+  # target. The audit MUST run synchronously here — Monitor-Hook-Shim.md
+  # §"Install Backend Requirement" requires the post-install state be
+  # captured before any other code can uninstall hooks. Cost is ~11 *
+  # (GetProcAddress + 5-byte read) = microseconds, well within the
+  # loader's critical-path budget.
+  block runAudit:
+    let kernel32 = GetModuleHandleA("kernel32.dll")
+    if kernel32 == nil:
+      dbg("[repro_monitor_shim] install-audit SKIPPED: " &
+        "GetModuleHandleA(kernel32.dll) returned NULL\n")
+      break runAudit
+    var targets: seq[(string, pointer)] = @[]
+    for spec in hookTable:
+      let addr0 = GetProcAddress(kernel32, cast[LPCSTR](spec.name.cstring))
+      targets.add((spec.name, addr0))
+    runInstallAudit(targets, dbg)
   dbg("[repro_monitor_shim] initialization complete\n")
   result = 0
 
