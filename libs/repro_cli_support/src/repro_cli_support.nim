@@ -4874,6 +4874,38 @@ proc runDevEnvExportCommand(args: openArray[string];
   else:
     parsed.projectRoot = os.normalizedPath(absolutePath(parsed.projectRoot))
 
+  # M77 — cache-key fast path. BEFORE the project file is even
+  # resolved or the selection's heavy ``resolveDevEnvSelection`` runs,
+  # hash the cache-key inputs and compare against ``$__REPRO_APPLIED``.
+  # On a match, emit the per-shell no-op script and exit 0 without
+  # touching the build engine, the project-interface extractor, or
+  # the develop-overrides resolver.
+  #
+  # Variable choice: the spec memo separates ``REPRO_APPLIED`` (the
+  # fast-path env var) from ``__REPRO_APPLIED`` (the activation
+  # marker). M77 collapses them onto the single ``__REPRO_APPLIED``
+  # name: the marker the activation script sets IS the cache key, the
+  # hook never has to copy it across env vars, and there is no
+  # observable difference between "applied" and "would short-circuit".
+  # The cost is one env-var slot of namespace overhead on the user's
+  # shell, which is already paid for by the marker.
+  let fastPathOverridesPath =
+    if parsed.developOverridesPath.len > 0:
+      os.normalizedPath(absolutePath(parsed.developOverridesPath))
+    else:
+      developOverridesMetadataPath(parsed.projectRoot)
+  let fastPathConfig = DevEnvEdgeConfig(
+    projectRoot: parsed.projectRoot,
+    activity:
+      if parsed.activity.len > 0: parsed.activity else: "default",
+    developOverridesPath: fastPathOverridesPath)
+  let candidateKey = computeDevEnvEdgeCacheKey(fastPathConfig)
+  let activeKey = getEnv("__REPRO_APPLIED")
+  if not parsed.allowStale and activeKey.len > 0 and
+      candidateKey == activeKey:
+    stdout.write(emitFastPathNoOpScript(parsed.shell))
+    return 0
+
   let resolved = resolveProjectFile(parsed.projectRoot)
   if resolved.path.len == 0:
     stderr.writeLine("repro dev-env export: " & parsed.projectRoot &
@@ -4904,7 +4936,12 @@ proc runDevEnvExportCommand(args: openArray[string];
     return 1
 
   var plan = devEnvArtifactToExportPlan(edge.artifactPath)
-  let fingerprint = artifact.artifactIdFingerprint()
+  # M77 — emit the cache-key as the ``__REPRO_APPLIED`` marker. The
+  # next prompt's fast path re-derives the same key from on-disk
+  # inputs and compares; a match short-circuits without any build
+  # engine work. Using the cache key (not the SSZ artifact ID) is what
+  # makes the fast path actually fast.
+  let fingerprint = candidateKey
   let manifestPath = rollbackManifestPath(edge.artifactPath)
   # M75 — emit the manifest path as a marker BEFORE the
   # ``__REPRO_APPLIED`` fingerprint so the hook's deactivation arm

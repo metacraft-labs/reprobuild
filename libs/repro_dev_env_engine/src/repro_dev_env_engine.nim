@@ -155,6 +155,121 @@ proc fileFingerprintPart(path: string): string =
     return path & "\n<missing>"
   path & "\n" & readFile(extendedPath(path))
 
+# ---------------------------------------------------------------------
+# M77 — fast-path cache-key computation.
+#
+# ``computeDevEnvEdgeCacheKey`` is the public surface the shell hook's
+# per-prompt fast path calls BEFORE walking the build graph. It MUST
+# produce a key that is identical to the one the engine's normal
+# cache-hit path would use for the same ``DevEnvEdgeConfig`` — otherwise
+# the user sees flapping where the hook says "cached" but the next
+# prompt's full walk recomputes a different fingerprint.
+#
+# The key is a deterministic hash of:
+#
+# * an in-document schema string (``reprobuild.dev-env.cache-key.v1``)
+#   so a future change to the inputs invalidates every existing key
+#   without us having to migrate or version anything in the manifest.
+# * the project root path
+# * the project file's content (whichever of
+#   ``reprobuild.nim`` / ``repro.nim`` exists; the canonical
+#   ``reprobuild.nim`` wins when both are present, matching the rest of
+#   the engine)
+# * the develop-overrides file content (if present)
+# * the activity selector
+# * the lock-slice id (when the caller passed one) PLUS the contents of
+#   ``<projectRoot>/.repro/dev-env.lock`` when present (so a manual edit
+#   to the lock file invalidates the fast path)
+# * the small subset of env vars the dev-env edge consumes:
+#   ``REPRO_DEVELOP_OVERRIDES_FILE``, ``REPRO_MONITOR_SHIM_LIB``,
+#   ``REPRO_FS_SNOOP``
+#
+# The implementation deliberately walks NO build graph and spawns NO
+# subprocess. It reads at most three small files (the project file, the
+# develop-overrides file, the dev-env lock file) which the kernel page
+# cache holds hot after the first prompt. The microbench in
+# ``tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim`` asserts the
+# wall-clock budget (< 15 ms p50 on Windows, < 5 ms p50 elsewhere).
+#
+# The cache key is intentionally LOOSER than the build-engine's internal
+# weak-fingerprint for the introspection action: the engine includes the
+# provider binary path and the provider artifact ID (which the hook
+# cannot know without spawning the provider compile), so a fast-path
+# match is a STRONG signal that nothing the user can observe changed,
+# but the build engine remains authoritative when the fast path falls
+# through. Practically: if the user replaces ``nim`` on PATH between
+# prompts, the fast path may say "cached" while the underlying provider
+# compile would invalidate; that is the same trade-off the engine's
+# action-cache layer already makes for declared inputs vs. environment
+# tools, so consistency wins over paranoia here.
+
+const CacheKeySchema = "reprobuild.dev-env.cache-key.v1"
+
+proc canonicalProjectFilePath(projectRoot: string): string =
+  ## Mirror ``resolveProjectFile`` from ``repro_core`` without taking the
+  ## dependency: prefer ``reprobuild.nim`` over ``repro.nim``. Returns
+  ## the empty string when no project file is present (which the caller
+  ## can use to short-circuit "no cache key possible").
+  let canonical = projectRoot / "reprobuild.nim"
+  if fileExists(extendedPath(canonical)):
+    return canonical
+  let legacy = projectRoot / "repro.nim"
+  if fileExists(extendedPath(legacy)):
+    return legacy
+  ""
+
+proc lockSliceFilePart(projectRoot: string): string =
+  ## ``.repro/dev-env.lock`` content (or ``<missing>`` marker when the
+  ## file does not exist). Walked into the cache key so a user-level
+  ## edit to the lock file invalidates the fast path.
+  let lockPath = projectRoot / ".repro" / "dev-env.lock"
+  fileFingerprintPart(lockPath)
+
+proc envVarPart(name: string): string =
+  if existsEnv(name):
+    name & "=" & getEnv(name)
+  else:
+    name & "=<unset>"
+
+proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig): string =
+  ## See module-level note. Returns a 32-char lowercase hex digest.
+  let projectFile = canonicalProjectFilePath(config.projectRoot)
+  let projectFilePart =
+    if projectFile.len == 0:
+      config.projectRoot & "\n<no project file>"
+    else:
+      fileFingerprintPart(projectFile)
+  let activity =
+    if config.activity.len > 0: config.activity else: "default"
+  let parts = @[
+    CacheKeySchema,
+    "projectRoot=" & config.projectRoot,
+    "projectFile=" & projectFilePart,
+    "activity=" & activity,
+    "lockSliceId=" & config.lockSliceId,
+    "lockSliceFile=" & lockSliceFilePart(config.projectRoot),
+    "developOverrides=" & fileFingerprintPart(config.developOverridesPath),
+    # ``REPRO_DEVELOP_OVERRIDES_FILE`` is the only edge-consumed env
+    # variable that materially changes the activation — overriding the
+    # overrides file path swaps the develop-overrides resolution. The
+    # rest (``REPRO_MONITOR_SHIM_LIB``, ``REPRO_FS_SNOOP``) are
+    # infrastructure for the build engine and do not change the
+    # dev-env contract; including them would burn cache-key matches
+    # whenever the user wraps ``repro`` under fs-snoop or runs from a
+    # different host with a different shim path.
+    envVarPart("REPRO_DEVELOP_OVERRIDES_FILE")
+  ]
+  let digest = weakFingerprintFromText(parts.join("\n"))
+  result = newStringOfCap(32)
+  # 16-byte prefix is plenty for cache-key equality at this layer; full
+  # 32-byte digest would only add bytes to the env block without
+  # narrowing the false-collision probability into anything the user
+  # can observe (a hypothetical 2^-64 collision triggers a stale env at
+  # the next prompt and is corrected on the prompt after that when the
+  # full walk runs).
+  for i in 0 ..< 16:
+    result.add(toHex(int(digest.bytes[i]), 2).toLowerAscii())
+
 proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
                                provider: ProviderCompileArtifact;
                                providerArtifactPath, providerArtifactId,

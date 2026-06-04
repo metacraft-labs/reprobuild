@@ -357,3 +357,27 @@ proc appendReproActiveManifestMarker*(plan: var ExportPlan;
   plan.add(ExportOp(kind: opMarker,
     markerName: ReproActiveManifestMarkerName,
     markerValue: manifestPath))
+
+# ---------------------------------------------------------------------
+# M77 — fast-path no-op emitter.
+#
+# When the cache-key fast path in ``repro dev-env export`` matches the
+# already-applied fingerprint we still emit SOMETHING — the shell hook
+# unconditionally ``eval``s our stdout, so we have to produce a script
+# that parses cleanly under each shell and does nothing observable. The
+# message text is informational; the leading ``:`` (bash/zsh) or ``#``
+# (fish/nushell/pwsh) is the load-bearing part.
+# ---------------------------------------------------------------------
+
+proc emitFastPathNoOpScript*(shell: ShellKind): string =
+  ## Per-shell no-op activation script emitted on a cache-key fast-path
+  ## hit. Asserted in ``tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim``.
+  case shell
+  of skBash, skZsh:
+    ": # repro shell hook: no-op (cache key unchanged)\n"
+  of skFish:
+    "# repro shell hook: no-op (cache key unchanged)\n"
+  of skNushell:
+    "# repro shell hook: no-op (cache key unchanged)\n"
+  of skPwsh:
+    "# repro shell hook: no-op (cache key unchanged)\n"
