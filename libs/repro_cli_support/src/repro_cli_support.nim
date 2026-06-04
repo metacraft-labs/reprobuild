@@ -14388,11 +14388,11 @@ proc runManifestRefreshHookCommand*(hookName: string;
 
   return 0
 
-# ---- M18: `repro check --mode=pre-push` (publication gate) ----------------
+# ---- M18 / M23: `repro check --mode=pre-push` (publication gate) ----------
 #
 # The installed pre-push hook (M17 dispatcher) routes into the gate by
 # calling ``repro check --mode=pre-push --current-repo=PATH
-# --pushed-refs=FILE``. The gate runs four checks in order; the first
+# --pushed-refs=FILE``. The gate runs five checks in order; the first
 # failure short-circuits with a structured ``CheckFailure`` record:
 #
 #   1. ``branch-mismatch``  — pushed local branch != active workspace
@@ -14401,7 +14401,18 @@ proc runManifestRefreshHookCommand*(hookName: string;
 #                             (M4 ``isCleanQuery`` evidence).
 #   3. ``unpublished``      — any sibling repo's HEAD is not reachable
 #                             on a remote (M4 ``isPublishedQuery``).
-#   4. ``lock-stale`` /     — workspace lock missing or any repo's
+#   4. ``develop_override_*`` — M23: every M20 develop-mode override
+#                             must exist on disk, have a clean working
+#                             tree, and have its HEAD published.
+#                             Properties:
+#                               ``develop_override_missing``
+#                               ``develop_override_dirty``
+#                               ``develop_override_unpublished``.
+#                             Absent ``.repro/develop-overrides.toml``
+#                             skips this stage entirely so the gate
+#                             stays bit-compatible with workspaces that
+#                             have never run ``repro develop``.
+#   5. ``lock-stale`` /     — workspace lock missing or any repo's
 #      ``lock-failure``        HEAD differs from the locked SHA;
 #                             the gate creates / refreshes the lock
 #                             (via the M11 ``executeWorkspaceLock``
@@ -14411,7 +14422,7 @@ proc runManifestRefreshHookCommand*(hookName: string;
 # The exit-code contract matches the milestone:
 #   - 0 — every check passed (and the lock was created / refreshed
 #         if it had been missing or stale).
-#   - 2 — any of the four publication-gate checks failed.
+#   - 2 — any of the five publication-gate checks failed.
 #   - 1 — IO / resolve / VCS-tool failure unrelated to the gate logic.
 
 type
@@ -14425,12 +14436,19 @@ type
     ## ``--current-repo`` for the branch-mismatch case); ``property``
     ## is the short tag the spec mandates (``branch-mismatch`` /
     ## ``dirty`` / ``unpublished`` / ``lock-stale`` /
-    ## ``lock-failure``); ``remediation`` is the operator-facing
-    ## next-step the JSON report and text diagnostic surface.
+    ## ``lock-failure`` / ``develop_override_dirty`` /
+    ## ``develop_override_unpublished`` / ``develop_override_missing``);
+    ## ``remediation`` is the operator-facing next-step the JSON report
+    ## and text diagnostic surface. ``source`` is populated by the M23
+    ## develop-override stage with the override's filesystem path so
+    ## the operator can locate the offending checkout without having to
+    ## re-read the override file; for the four M18 sibling-repo stages
+    ## ``source`` is left empty.
     repo*: string
     property*: string
     remediation*: string
     evidence*: string
+    source*: string
 
   CheckLockUpdateKind* = enum
     cluNone           ## No lock action taken (e.g. a pre-push check that
@@ -14489,6 +14507,7 @@ proc toJsonNode*(report: CheckReport): JsonNode =
     obj["property"] = %failure.property
     obj["remediation"] = %failure.remediation
     obj["evidence"] = %failure.evidence
+    obj["source"] = %failure.source
     failures.add(obj)
   result["failures"] = failures
   var lockObj = newJObject()
@@ -14701,9 +14720,12 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
   resolved.trunk
 
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
-  ## Drive the four-stage gate. Each stage short-circuits on the first
+  ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
-  ## a time so the operator's next step is unambiguous.
+  ## a time so the operator's next step is unambiguous. M23 inserted
+  ## the develop-override cleanliness stage between the sibling-repo
+  ## ``unpublished`` stage and the lock-currency stage; the stage is a
+  ## no-op when no ``.repro/develop-overrides.toml`` exists.
   result.mode = "pre-push"
   result.workspaceRoot = parsed.workspaceRoot
   result.currentRepo = parsed.currentRepo
@@ -14840,14 +14862,114 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.exitCode = 2
       return
 
-  # ---- 4. lock currency --------------------------------------------------
+  # ---- 4. develop-mode override cleanliness (M23) ------------------------
+  # The blocking condition reproduces
+  # ``Workspace-And-Develop-Mode.md`` §"Reproducibility And `repro check`":
+  # a develop-mode dependency with uncommitted modifications, or one
+  # that points at commits not pushed to an agreed remote, must not
+  # silently be folded into a published workspace lock. The stage is a
+  # no-op when ``.repro/develop-overrides.toml`` is absent (the common
+  # state for workspaces that have never run ``repro develop``).
+  let overridesOpt =
+    try:
+      readDevelopOverridesFile(parsed.workspaceRoot)
+    except WorkspaceManifestParseError as err:
+      # Surface the parse failure as a gate refusal rather than letting
+      # the outer ``try`` translate it into a generic exit-1. A
+      # malformed override file is the operator's problem and refusing
+      # the push is the only safe answer.
+      result.failures.add(CheckFailure(
+        repo: "",
+        property: "develop_override_missing",
+        remediation:
+          "fix '.repro/develop-overrides.toml' parse error before pushing",
+        evidence: err.msg,
+        source: developOverridesPath(parsed.workspaceRoot)))
+      result.exitCode = 2
+      return
+  if overridesOpt.isSome:
+    for entry in listOverrides(overridesOpt.get()):
+      let sourcePath =
+        if isAbsolute(entry.local_path): entry.local_path
+        else: absolutePath(parsed.workspaceRoot / entry.local_path)
+      if not dirExists(sourcePath):
+        result.failures.add(CheckFailure(
+          repo: entry.package,
+          property: "develop_override_missing",
+          remediation: "the develop-override at " & sourcePath &
+            " no longer exists; run 'repro develop " & entry.package &
+            " --source=PATH' to update it",
+          evidence: "override source path does not exist",
+          source: sourcePath))
+        result.exitCode = 2
+        return
+      # Skip non-git overrides — the M20 schema accepts overrides that
+      # point at any directory (the CLI even has a "register-only" arm
+      # that does not require a VCS root). Treat the absence of ``.git``
+      # the same way the M18 sibling-repo stages do: cleanliness and
+      # publication are vacuously satisfied because there is no VCS
+      # state to compare against. A future milestone can tighten this
+      # if non-git overrides become disallowed.
+      if not dirExists(sourcePath / ".git"):
+        continue
+      let cleanRes = queryGitState(isCleanQuery(sourcePath), identity)
+      if cleanRes.status != gqsOk:
+        result.failures.add(CheckFailure(
+          repo: entry.package,
+          property: "develop_override_dirty",
+          remediation: "commit or stash changes in " & sourcePath,
+          evidence: "clean-probe-failed: " & cleanRes.diagnostic,
+          source: sourcePath))
+        result.exitCode = 2
+        return
+      if not cleanRes.isClean:
+        result.failures.add(CheckFailure(
+          repo: entry.package,
+          property: "develop_override_dirty",
+          remediation: "commit or stash changes in " & sourcePath,
+          evidence: "working tree has uncommitted changes",
+          source: sourcePath))
+        result.exitCode = 2
+        return
+      let pubRes = queryGitState(
+        isPublishedQuery(sourcePath, "origin"), identity)
+      if pubRes.status != gqsOk:
+        result.failures.add(CheckFailure(
+          repo: entry.package,
+          property: "develop_override_unpublished",
+          remediation: "run 'git push' in " & sourcePath & " first",
+          evidence: "publish-probe-failed: " & pubRes.diagnostic,
+          source: sourcePath))
+        result.exitCode = 2
+        return
+      if not pubRes.isPublished:
+        let headRes = queryGitState(headShaQuery(sourcePath), identity)
+        let headSha =
+          if headRes.status == gqsOk: headRes.headSha
+          else: ""
+        let evidence =
+          if headSha.len > 0:
+            "HEAD " & headSha & " not on any remote-tracking branch"
+          else: "HEAD not on any remote-tracking branch"
+        result.failures.add(CheckFailure(
+          repo: entry.package,
+          property: "develop_override_unpublished",
+          remediation: "run 'git push' in " & sourcePath & " first",
+          evidence: evidence,
+          source: sourcePath))
+        result.exitCode = 2
+        return
+
+  # ---- 5. lock currency --------------------------------------------------
   # Pick the manifest-layer root the way M11 / M12 do, then read the
   # latest locked SHA per repo path. If the locked map covers every
   # participating repo and matches every observed HEAD, the lock is
   # ``already-current``. Otherwise the gate creates or refreshes the
   # lock by delegating to the M11 driver — its refusal arm (a dirty
   # sibling, exit 2) is unreachable here because stage 2 already
-  # short-circuited on any dirty tree.
+  # short-circuited on any dirty tree. Stage 4 (M23 develop-override
+  # cleanliness) also has to have passed: a dirty or unpublished
+  # override would otherwise be silently encoded into the lock.
   var lockArgs = WorkspaceLockArgs(
     workspaceRoot: parsed.workspaceRoot,
     toolProvisioning: parsed.toolProvisioning)
@@ -14941,11 +15063,12 @@ proc runCheckCommand*(args: openArray[string]): int =
   ## [--current-repo=PATH] [--pushed-refs=FILE]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
   ##
-  ## Exit codes (per M18 design):
+  ## Exit codes (per M18 / M23 design):
   ##   - 0 — every gate check passed; the lock was created / refreshed
   ##         when it was missing or stale.
   ##   - 2 — a publication-gate check (branch / clean / published /
-  ##         lock) failed. Git aborts the push.
+  ##         develop-override cleanliness / lock) failed. Git aborts
+  ##         the push.
   ##   - 1 — IO / resolve / VCS-tool failure unrelated to the gate.
   let parsed =
     try:
