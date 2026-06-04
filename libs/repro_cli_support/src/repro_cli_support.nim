@@ -44,6 +44,7 @@ import repro_hcr_linkgraph
 import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/dev_session
+import repro_cli_support/dev_env_shell_export
 import repro_cli_support/home
 import repro_cli_support/infra
 import repro_cli_support/mode1_loader
@@ -83,6 +84,8 @@ proc renderUsage*(programName: string): string =
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
       " shell [selector] [--activity=name] [--print-env=posix|fish|powershell|json] [--dev-env-stats=PATH]\n       " &
+          programName &
+      " dev-env export bash|zsh|fish|nushell|pwsh [--project-root=PATH] [--activity=name] [--develop-overrides=PATH] [--allow-stale]\n       " &
           programName &
       " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT]\n       " &
           programName &
@@ -4765,6 +4768,127 @@ proc runReproShellCommand(args: openArray[string];
       defaultInteractiveShell()
   spawnActivatedShell(artifact, edge.artifactPath, shellPath,
     parsed.selection.projectRoot)
+
+# M74 — ``repro dev-env export <shell>``.
+#
+# This is the inner CLI of the Shell-Direnv-Hook plan. The fast-path
+# cache-key check arrives in M77; this milestone always walks the
+# dev-env edge. The architecture is:
+#
+#   1. Parse positional ``<shell>`` first (so unknown shells fail with
+#      exit 2 BEFORE we touch the filesystem).
+#   2. Parse flags (``--project-root``, ``--activity``,
+#      ``--develop-overrides``, ``--allow-stale``).
+#   3. Resolve project root: explicit flag wins; else walk up from
+#      ``$PWD`` for ``repro.nim`` / ``reprobuild.nim`` / ``.repro/``.
+#   4. Walk the dev-env edge via ``computePublicDevEnv``.
+#   5. Read the RBDE artifact, convert to ``ExportPlan``, append the
+#      ``__REPRO_APPLIED`` marker, format, write to stdout.
+type
+  ParsedDevEnvExport = object
+    shell: ShellKind
+    projectRoot: string
+    activity: string
+    developOverridesPath: string
+    allowStale: bool
+
+proc parseDevEnvExportArgs(args: openArray[string]): ParsedDevEnvExport =
+  if args.len == 0:
+    raise newException(ValueError,
+      "repro dev-env export requires a shell argument " &
+        "(bash|zsh|fish|nushell|pwsh)")
+  result.shell = parseShellKind(args[0])
+  var i = 1
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--project-root" or arg.startsWith("--project-root="):
+      result.projectRoot = valueFromFlag(args, i, "--project-root")
+    elif arg == "--activity" or arg.startsWith("--activity="):
+      result.activity = valueFromFlag(args, i, "--activity")
+    elif arg == "--develop-overrides" or
+        arg.startsWith("--develop-overrides="):
+      result.developOverridesPath =
+        valueFromFlag(args, i, "--develop-overrides")
+    elif arg == "--allow-stale":
+      result.allowStale = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported dev-env export flag: " & arg)
+    else:
+      raise newException(ValueError,
+        "unexpected dev-env export argument: " & arg)
+    inc i
+  if result.activity.len == 0:
+    result.activity = "default"
+
+proc artifactIdFingerprint(artifact: DevEnvArtifact): string =
+  ## Deterministic, content-derived. The artifact's ``artifactId`` is
+  ## the canonical SSZ hash the codec computes; same bytes -> same
+  ## fingerprint across runs / hosts.
+  result = newStringOfCap(64)
+  for b in artifact.artifactId:
+    result.add(toHex(int(b), 2).toLowerAscii())
+
+proc runDevEnvExportCommand(args: openArray[string];
+                            publicCliPath: string): int =
+  ## ``repro dev-env export <shell>`` dispatch arm. Exit codes:
+  ##   0 — success
+  ##   1 — engine error (project not found, edge failure, ...)
+  ##   2 — usage error (unknown shell, bad flag)
+  var parsed: ParsedDevEnvExport
+  try:
+    parsed = parseDevEnvExportArgs(args)
+  except ExportPlanError as err:
+    stderr.writeLine("repro dev-env export: " & err.msg)
+    return 2
+  except ValueError as err:
+    stderr.writeLine("repro dev-env export: " & err.msg)
+    return 2
+
+  if parsed.projectRoot.len == 0:
+    parsed.projectRoot = findDevEnvProjectRoot(getCurrentDir())
+    if parsed.projectRoot.len == 0:
+      stderr.writeLine("repro dev-env export: no project root found; " &
+        "expected " & CanonicalProjectFileName & " or " &
+        LegacyProjectFileName &
+        " in the current directory or one of its parents")
+      return 1
+  else:
+    parsed.projectRoot = os.normalizedPath(absolutePath(parsed.projectRoot))
+
+  let resolved = resolveProjectFile(parsed.projectRoot)
+  if resolved.path.len == 0:
+    stderr.writeLine("repro dev-env export: " & parsed.projectRoot &
+      " does not contain " & CanonicalProjectFileName & " or " &
+      LegacyProjectFileName)
+    return 1
+
+  var selection = DevEnvCliSelection(
+    selector: parsed.projectRoot,
+    activity: parsed.activity)
+  try:
+    selection.resolveDevEnvSelection()
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env export: " & err.msg)
+    return 1
+  if parsed.developOverridesPath.len > 0:
+    selection.developOverridesPath =
+      os.normalizedPath(absolutePath(parsed.developOverridesPath))
+
+  let edge =
+    try:
+      computePublicDevEnv(selection, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro dev-env export: " & err.msg)
+      return 1
+  let artifact = readDevEnvArtifact(edge.artifactPath)
+  if not parsed.allowStale and emitDevEnvDiagnostics(artifact):
+    return 1
+
+  var plan = devEnvArtifactToExportPlan(edge.artifactPath)
+  plan.appendReproAppliedMarker(artifact.artifactIdFingerprint())
+  stdout.write(formatExportPlan(plan, parsed.shell))
+  0
 
 type
   ParsedDevSessionCommand = object
@@ -15468,6 +15592,22 @@ proc runThinApp*(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro shell: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
+      args[1] == "export":
+    # M74 — ``repro dev-env export <shell>``. New parent command
+    # ``dev-env`` for the Shell-Direnv-Hook plan (M74-M77). The
+    # ``export`` arm uses its own argv parser (positional ``<shell>``
+    # first, then ``--project-root`` / ``--activity`` /
+    # ``--develop-overrides`` / ``--allow-stale``), distinct from the
+    # legacy ``repro shell --print-env=...`` surface which lives off
+    # the ``shell`` parent and keeps its M3/M4 selector-then-flags
+    # idiom.
+    let exportArgs =
+      if args.len > 2:
+        args[2 .. ^1]
+      else:
+        @[]
+    return runDevEnvExportCommand(exportArgs, publicCliPath)
   if programName == "repro" and args.len > 0 and args[0] == "up":
     try:
       let upArgs =
