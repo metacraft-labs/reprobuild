@@ -6463,6 +6463,8 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
 # create / refresh the workspace lock).
 proc runCheckCommand*(args: openArray[string]): int
 proc runPostCommitLockCommand*(args: openArray[string]): int
+proc runManifestRefreshHookCommand*(hookName: string;
+                                    args: openArray[string]): int
 
 proc runHooksDispatchCommand(args: openArray[string]): int =
   ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
@@ -6509,11 +6511,18 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # M18 publication gate. Translate the dispatch argv into the
     # documented ``repro check`` surface and propagate the exit code
     # verbatim so the installed hook script can hand it back to git.
+    #
+    # When refsFile is empty the hook was invoked with no refs to
+    # push (or invoked without git context, as in M17's
+    # dispatch-noop test). git itself only fires pre-push when refs
+    # exist, so an empty refs file means "nothing to gate" — return
+    # 0 so dispatch stays a no-op until something is actually pushed.
+    if refsFile.len == 0:
+      return 0
     var checkArgs = @["--mode=pre-push"]
     if repoRoot.len > 0:
       checkArgs.add("--current-repo=" & repoRoot)
-    if refsFile.len > 0:
-      checkArgs.add("--pushed-refs=" & refsFile)
+    checkArgs.add("--pushed-refs=" & refsFile)
     return runCheckCommand(checkArgs)
   of "post-commit":
     # M19 best-effort lock refresh. Always exits 0 even when the lock
@@ -6527,10 +6536,31 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     if repoRoot.len > 0:
       postArgs.add("--current-repo=" & repoRoot)
     return runPostCommitLockCommand(postArgs)
+  of "post-merge", "post-checkout":
+    # M19a best-effort manifest-layer refresh. Always exits 0 — git
+    # must not see a non-zero hook status. The dispatcher peels the
+    # ``--repo-root`` flag off; the hook-supplied positional args
+    # (post-checkout: ``<prev> <new> <flag>``; post-merge: the squash
+    # flag) appear after ``--`` and are forwarded so the wrapper can
+    # short-circuit when ``prev == new``.
+    var refreshArgs: seq[string]
+    if repoRoot.len > 0:
+      refreshArgs.add("--current-repo=" & repoRoot)
+    # Find the ``--`` separator in the original args and forward
+    # everything after it as the hook-supplied positional argv.
+    var j = 1
+    while j < args.len and args[j] != "--":
+      inc j
+    if j < args.len:
+      refreshArgs.add("--")
+      for k in (j + 1) ..< args.len:
+        refreshArgs.add(args[k])
+    return runManifestRefreshHookCommand(hookName, refreshArgs)
   else:
-    # M17 ground state for the remaining two hooks: accept the argv,
-    # return 0, emit nothing. M19a replaces this branch when that
-    # milestone lands.
+    # M17 ground state for any remaining hook names: accept argv,
+    # return 0, emit nothing. (All four canonical hooks are now wired,
+    # so this branch is currently dead; it stays as a defensive
+    # fallback when ``VcsHookNames`` later grows.)
     return 0
 
 proc runHooksCommand(args: openArray[string]): int =
@@ -13693,6 +13723,174 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   writePostCommitReport(workspaceRoot, report)
   appendPostCommitLog(workspaceRoot,
     timestamp & " " & report.outcome & " " & report.diagnostic)
+  return 0
+
+# ---- M19a: post-merge / post-checkout manifest auto-refresh ---------------
+#
+# The M17-installed post-merge and post-checkout hook dispatchers route
+# here via ``repro hooks dispatch <hook-name> --repo-root <repo> --
+# <hook-args>``. Semantics mirror M19's post-commit wrapper:
+#
+#   - The hook NEVER blocks the originating git operation. Every error,
+#     skip, or success is captured as one line in
+#     ``$HOME/.cache/repro/manifest-refresh.log`` and the process exits
+#     0 unconditionally.
+#   - For ``post-checkout``, git supplies three positional args:
+#     ``<prev-head> <new-head> <flag>``. When ``prev == new`` the
+#     participating repo's HEAD did NOT move (a path-only checkout)
+#     and the spec mandates we skip SILENTLY — no log line.
+#   - For ``post-merge``, git supplies one positional arg (the squash
+#     flag). It is not load-bearing for the refresh decision; we accept
+#     it and ignore.
+#   - When the workspace root cannot be located (the participating repo
+#     is outside any ``.repo/``-rooted workspace), we skip silently with
+#     a single log line so the operator can correlate against the log.
+#   - The actual fast-forward semantics live in M10's
+#     ``refreshManifestLayers``; this wrapper just downgrades raises and
+#     translates per-layer ``ManifestLayerRefreshStatus`` values into
+#     append-only log lines.
+
+const manifestRefreshLogFile = "manifest-refresh.log"
+
+proc manifestRefreshCacheLogPath(): string =
+  ## ``$HOME/.cache/repro/manifest-refresh.log`` on POSIX; the
+  ## XDG-style cache root on every host. ``getHomeDir`` already returns
+  ## the right value on Windows (``%USERPROFILE%``), so the same
+  ## layout works there.
+  let xdg = getEnv("XDG_CACHE_HOME")
+  let cacheRoot =
+    if xdg.len > 0: xdg
+    else: getHomeDir() / ".cache"
+  cacheRoot / "repro" / manifestRefreshLogFile
+
+proc appendManifestRefreshLog(line: string) =
+  ## Append a single line to the manifest-refresh log. Never raises —
+  ## a failed log write must not block the originating git operation.
+  try:
+    let logPath = manifestRefreshCacheLogPath()
+    createDir(parentDir(logPath))
+    var f: File
+    if open(f, logPath, fmAppend):
+      f.writeLine(line)
+      f.close()
+  except CatchableError:
+    discard
+
+proc parseManifestRefreshArgs(args: openArray[string]):
+    tuple[currentRepo, workspaceRoot: string; positional: seq[string]] =
+  ## Minimal argv parser for the post-merge / post-checkout wrappers.
+  ## The dispatcher in ``runHooksDispatchCommand`` has already peeled
+  ## off ``--repo-root`` (and any other flag the canonical hook body
+  ## forwards), then placed the remaining hook-supplied positional
+  ## args (``post-merge`` ``<squash-flag>`` / ``post-checkout``
+  ## ``<prev> <new> <flag>``) after ``--``. Unknown flags are silently
+  ## ignored — the hook must never raise on argv shape.
+  var sawDoubleDash = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if not sawDoubleDash:
+      if arg == "--":
+        sawDoubleDash = true
+        inc i
+        continue
+      if arg == "--current-repo" or arg.startsWith("--current-repo="):
+        try: result.currentRepo = valueFromFlag(args, i, "--current-repo")
+        except CatchableError: discard
+      elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+        try: result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+        except CatchableError: discard
+      # Tolerate other flags (forward-compat) without recording them.
+    else:
+      result.positional.add(arg)
+    inc i
+
+proc runManifestRefreshHookCommand*(hookName: string;
+                                    args: openArray[string]): int =
+  ## Best-effort manifest-layer refresh for ``post-merge`` /
+  ## ``post-checkout`` dispatch. Always returns 0 — the originating git
+  ## operation must never see a non-zero hook status. The operator-facing
+  ## trace lives in ``$HOME/.cache/repro/manifest-refresh.log``.
+  let parsed = parseManifestRefreshArgs(args)
+  let timestamp = isoTimestampNow()
+
+  # post-checkout short-circuit: when git reports
+  # ``<prev-head> <new-head> <flag>`` with ``prev == new``, the
+  # participating repo's HEAD did NOT move and the spec says skip
+  # SILENTLY (no log line).
+  if hookName == "post-checkout" and parsed.positional.len >= 2:
+    let prev = parsed.positional[0]
+    let newer = parsed.positional[1]
+    if prev.len > 0 and prev == newer:
+      return 0
+
+  let workspaceRoot = resolvePostCommitWorkspaceRoot(
+    parsed.currentRepo, parsed.workspaceRoot)
+
+  if workspaceRoot.len == 0:
+    appendManifestRefreshLog(timestamp & " " & hookName &
+      " skipped: no workspace root reachable from --current-repo=" &
+      parsed.currentRepo)
+    return 0
+
+  if not fileExists(workspaceRoot / ".repo" / "workspace.toml"):
+    # No workspace.toml means M6/M7 single-project mode (or a freshly-
+    # initialised .repo): nothing to refresh. Log once so the operator
+    # can correlate; never raise.
+    appendManifestRefreshLog(timestamp & " " & hookName &
+      " skipped: no .repo/workspace.toml at " & workspaceRoot)
+    return 0
+
+  var report: ManifestRefreshReport
+  try:
+    report = refreshManifestLayers(workspaceRoot)
+  except CatchableError as err:
+    appendManifestRefreshLog(timestamp & " " & hookName &
+      " fetch failed: " & err.msg & " (workspace=" & workspaceRoot & ")")
+    return 0
+
+  if report.layers.len == 0:
+    # workspace.toml exists but declares no [[manifest]] layers — the
+    # M9-init single-project metadata-only shape. Nothing to do; emit
+    # one log line so the operator can audit hook activity.
+    appendManifestRefreshLog(timestamp & " " & hookName &
+      " noop: workspace declares no manifest layers (" &
+      workspaceRoot & ")")
+    return 0
+
+  for entry in report.layers:
+    let tag = manifestLayerStatusTag(entry.status)
+    case entry.status
+    of mrsRefreshed:
+      appendManifestRefreshLog(timestamp & " " & hookName & " " & tag &
+        " manifest refreshed: " & entry.beforeSha & " -> " &
+        entry.afterSha & " (layer=" & entry.provenance & ")")
+    of mrsUpToDate:
+      appendManifestRefreshLog(timestamp & " " & hookName & " " & tag &
+        " manifest already current at " & entry.afterSha &
+        " (layer=" & entry.provenance & ")")
+    of mrsSkippedLocal:
+      # Local-path layers are operator-maintained; the spec says they
+      # are not the workspace's job to refresh. Stay quiet — no log
+      # line — so the cache log stays focused on actionable signals.
+      discard
+    of mrsSkippedAbsent:
+      appendManifestRefreshLog(timestamp & " " & hookName & " " & tag &
+        " layer checkout not present yet (layer=" & entry.provenance &
+        "); next `repro workspace sync` will materialise it")
+    of mrsSkippedDirty:
+      appendManifestRefreshLog(timestamp & " " & hookName & " " & tag &
+        " manifest dirty, refresh deferred (layer=" & entry.provenance &
+        "): " & entry.diagnostic)
+    of mrsSkippedDivergent:
+      appendManifestRefreshLog(timestamp & " " & hookName & " " & tag &
+        " manifest diverged, refresh deferred (layer=" & entry.provenance &
+        "): " & entry.diagnostic)
+    of mrsFailed:
+      appendManifestRefreshLog(timestamp & " " & hookName & " " & tag &
+        " fetch failed (layer=" & entry.provenance & "): " &
+        entry.diagnostic)
+
   return 0
 
 # ---- M18: `repro check --mode=pre-push` (publication gate) ----------------
