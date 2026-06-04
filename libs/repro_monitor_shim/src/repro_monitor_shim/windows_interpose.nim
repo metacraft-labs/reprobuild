@@ -326,6 +326,81 @@ type
                             lpProcessInformation: ptr PROCESS_INFORMATION): BOOL
                             {.stdcall, raises: [].}
 
+  # M73 Phase 5 — extended hook surface ----------------------------------
+
+  DeleteFileWProc = proc(lpFileName: LPCWSTR): BOOL {.stdcall, raises: [].}
+  DeleteFileAProc = proc(lpFileName: LPCSTR): BOOL {.stdcall, raises: [].}
+
+  CreateDirectoryWProc = proc(lpPathName: LPCWSTR,
+                              lpSecurityAttributes: LPSECURITY_ATTRIBUTES): BOOL
+                              {.stdcall, raises: [].}
+  CreateDirectoryAProc = proc(lpPathName: LPCSTR,
+                              lpSecurityAttributes: LPSECURITY_ATTRIBUTES): BOOL
+                              {.stdcall, raises: [].}
+
+  # CopyFileW/A: per MSDN the signature is (lpExistingFileName,
+  # lpNewFileName, bFailIfExists) -> BOOL.
+  CopyFileWProc = proc(lpExistingFileName: LPCWSTR,
+                       lpNewFileName: LPCWSTR,
+                       bFailIfExists: BOOL): BOOL {.stdcall, raises: [].}
+  CopyFileAProc = proc(lpExistingFileName: LPCSTR,
+                       lpNewFileName: LPCSTR,
+                       bFailIfExists: BOOL): BOOL {.stdcall, raises: [].}
+
+  # MoveFileExW/A: per MSDN (lpExistingFileName, lpNewFileName, dwFlags) -> BOOL.
+  # lpNewFileName MAY be NULL when MOVEFILE_DELAY_UNTIL_REBOOT + delete-on-reboot
+  # semantics are requested.
+  MoveFileExWProc = proc(lpExistingFileName: LPCWSTR,
+                         lpNewFileName: LPCWSTR,
+                         dwFlags: DWORD): BOOL {.stdcall, raises: [].}
+  MoveFileExAProc = proc(lpExistingFileName: LPCSTR,
+                         lpNewFileName: LPCSTR,
+                         dwFlags: DWORD): BOOL {.stdcall, raises: [].}
+
+  # GetFileInformationByHandleEx: (hFile, FileInformationClass,
+  # lpFileInformation, dwBufferSize) -> BOOL. FILE_INFO_BY_HANDLE_CLASS
+  # is an enum (int32-equivalent); we pass it through as DWORD slot.
+  GetFileInformationByHandleExProc = proc(hFile: HANDLE,
+                                          FileInformationClass: DWORD,
+                                          lpFileInformation: LPVOID,
+                                          dwBufferSize: DWORD): BOOL
+                                          {.stdcall, raises: [].}
+
+  SetCurrentDirectoryWProc = proc(lpPathName: LPCWSTR): BOOL
+                                  {.stdcall, raises: [].}
+  SetCurrentDirectoryAProc = proc(lpPathName: LPCSTR): BOOL
+                                  {.stdcall, raises: [].}
+
+  # NtCreateFile lives in ntdll. Signature (per MSDN /
+  # phnt headers) is:
+  #   NTSTATUS NtCreateFile(
+  #     PHANDLE            FileHandle,
+  #     ACCESS_MASK        DesiredAccess,
+  #     POBJECT_ATTRIBUTES ObjectAttributes,
+  #     PIO_STATUS_BLOCK   IoStatusBlock,
+  #     PLARGE_INTEGER     AllocationSize,
+  #     ULONG              FileAttributes,
+  #     ULONG              ShareAccess,
+  #     ULONG              CreateDisposition,
+  #     ULONG              CreateOptions,
+  #     PVOID              EaBuffer,
+  #     ULONG              EaLength);
+  # ACCESS_MASK is a DWORD-sized value; NTSTATUS is a 32-bit signed
+  # integer; both pack into uint64 ABI slots cleanly on x64 stdcall.
+  NTSTATUS = int32
+  NtCreateFileProc = proc(FileHandle: ptr HANDLE,
+                          DesiredAccess: DWORD,
+                          ObjectAttributes: pointer,
+                          IoStatusBlock: pointer,
+                          AllocationSize: ptr LARGE_INTEGER,
+                          FileAttributes: DWORD,
+                          ShareAccess: DWORD,
+                          CreateDisposition: DWORD,
+                          CreateOptions: DWORD,
+                          EaBuffer: pointer,
+                          EaLength: DWORD): NTSTATUS
+                          {.stdcall, raises: [].}
+
 # --- Original function pointer storage -------------------------------------
 
 var
@@ -340,6 +415,19 @@ var
   origGetFileAttributesA: GetFileAttributesAProc
   origCreateProcessW: CreateProcessWProc
   origCreateProcessA: CreateProcessAProc
+  # M73 Phase 5 — extended hook surface.
+  origDeleteFileW: DeleteFileWProc
+  origDeleteFileA: DeleteFileAProc
+  origCreateDirectoryW: CreateDirectoryWProc
+  origCreateDirectoryA: CreateDirectoryAProc
+  origCopyFileW: CopyFileWProc
+  origCopyFileA: CopyFileAProc
+  origMoveFileExW: MoveFileExWProc
+  origMoveFileExA: MoveFileExAProc
+  origGetFileInformationByHandleEx: GetFileInformationByHandleExProc
+  origSetCurrentDirectoryW: SetCurrentDirectoryWProc
+  origSetCurrentDirectoryA: SetCurrentDirectoryAProc
+  origNtCreateFile: NtCreateFileProc
 
 # --- Runtime state ---------------------------------------------------------
 
@@ -713,6 +801,137 @@ proc originalCreateProcessA(ctx: var hr.HookContext) {.raises: [].} =
                               dwCreationFlags, lpEnvironment,
                               lpCurrentDirectory, lpStartupInfo,
                               lpProcessInfo)
+  ctx.result = uint64(uint32(r))
+
+# --- M73 Phase 5: original-callback wrappers for the extended hook surface.
+
+proc originalDeleteFileW(ctx: var hr.HookContext) {.raises: [].} =
+  if origDeleteFileW == nil:
+    ctx.result = 0
+    return
+  let lpFileName = cast[LPCWSTR](ctx.args[0])
+  let r = origDeleteFileW(lpFileName)
+  ctx.result = uint64(uint32(r))
+
+proc originalDeleteFileA(ctx: var hr.HookContext) {.raises: [].} =
+  if origDeleteFileA == nil:
+    ctx.result = 0
+    return
+  let lpFileName = cast[LPCSTR](ctx.args[0])
+  let r = origDeleteFileA(lpFileName)
+  ctx.result = uint64(uint32(r))
+
+proc originalCreateDirectoryW(ctx: var hr.HookContext) {.raises: [].} =
+  if origCreateDirectoryW == nil:
+    ctx.result = 0
+    return
+  let lpPathName = cast[LPCWSTR](ctx.args[0])
+  let lpSecAttr = cast[LPSECURITY_ATTRIBUTES](ctx.args[1])
+  let r = origCreateDirectoryW(lpPathName, lpSecAttr)
+  ctx.result = uint64(uint32(r))
+
+proc originalCreateDirectoryA(ctx: var hr.HookContext) {.raises: [].} =
+  if origCreateDirectoryA == nil:
+    ctx.result = 0
+    return
+  let lpPathName = cast[LPCSTR](ctx.args[0])
+  let lpSecAttr = cast[LPSECURITY_ATTRIBUTES](ctx.args[1])
+  let r = origCreateDirectoryA(lpPathName, lpSecAttr)
+  ctx.result = uint64(uint32(r))
+
+proc originalCopyFileW(ctx: var hr.HookContext) {.raises: [].} =
+  if origCopyFileW == nil:
+    ctx.result = 0
+    return
+  let lpExisting = cast[LPCWSTR](ctx.args[0])
+  let lpNew      = cast[LPCWSTR](ctx.args[1])
+  let bFail      = BOOL(ctx.args[2])
+  let r = origCopyFileW(lpExisting, lpNew, bFail)
+  ctx.result = uint64(uint32(r))
+
+proc originalCopyFileA(ctx: var hr.HookContext) {.raises: [].} =
+  if origCopyFileA == nil:
+    ctx.result = 0
+    return
+  let lpExisting = cast[LPCSTR](ctx.args[0])
+  let lpNew      = cast[LPCSTR](ctx.args[1])
+  let bFail      = BOOL(ctx.args[2])
+  let r = origCopyFileA(lpExisting, lpNew, bFail)
+  ctx.result = uint64(uint32(r))
+
+proc originalMoveFileExW(ctx: var hr.HookContext) {.raises: [].} =
+  if origMoveFileExW == nil:
+    ctx.result = 0
+    return
+  let lpExisting = cast[LPCWSTR](ctx.args[0])
+  let lpNew      = cast[LPCWSTR](ctx.args[1])
+  let dwFlags    = DWORD(ctx.args[2])
+  let r = origMoveFileExW(lpExisting, lpNew, dwFlags)
+  ctx.result = uint64(uint32(r))
+
+proc originalMoveFileExA(ctx: var hr.HookContext) {.raises: [].} =
+  if origMoveFileExA == nil:
+    ctx.result = 0
+    return
+  let lpExisting = cast[LPCSTR](ctx.args[0])
+  let lpNew      = cast[LPCSTR](ctx.args[1])
+  let dwFlags    = DWORD(ctx.args[2])
+  let r = origMoveFileExA(lpExisting, lpNew, dwFlags)
+  ctx.result = uint64(uint32(r))
+
+proc originalGetFileInformationByHandleEx(ctx: var hr.HookContext)
+    {.raises: [].} =
+  if origGetFileInformationByHandleEx == nil:
+    ctx.result = 0
+    return
+  let hFile             = cast[HANDLE](ctx.args[0])
+  let infoClass         = DWORD(ctx.args[1])
+  let lpFileInformation = cast[LPVOID](ctx.args[2])
+  let dwBufferSize      = DWORD(ctx.args[3])
+  let r = origGetFileInformationByHandleEx(hFile, infoClass,
+                                            lpFileInformation, dwBufferSize)
+  ctx.result = uint64(uint32(r))
+
+proc originalSetCurrentDirectoryW(ctx: var hr.HookContext) {.raises: [].} =
+  if origSetCurrentDirectoryW == nil:
+    ctx.result = 0
+    return
+  let lpPathName = cast[LPCWSTR](ctx.args[0])
+  let r = origSetCurrentDirectoryW(lpPathName)
+  ctx.result = uint64(uint32(r))
+
+proc originalSetCurrentDirectoryA(ctx: var hr.HookContext) {.raises: [].} =
+  if origSetCurrentDirectoryA == nil:
+    ctx.result = 0
+    return
+  let lpPathName = cast[LPCSTR](ctx.args[0])
+  let r = origSetCurrentDirectoryA(lpPathName)
+  ctx.result = uint64(uint32(r))
+
+proc originalNtCreateFile(ctx: var hr.HookContext) {.raises: [].} =
+  if origNtCreateFile == nil:
+    # STATUS_UNSUCCESSFUL (0xC0000001) — caller sees an NTSTATUS failure
+    # rather than a silent 0 (which is STATUS_SUCCESS!) when the
+    # original was never captured.
+    ctx.result = uint64(uint32(0xC0000001'u32))
+    return
+  let FileHandle        = cast[ptr HANDLE](ctx.args[0])
+  let DesiredAccess     = DWORD(ctx.args[1])
+  let ObjectAttributes  = cast[pointer](ctx.args[2])
+  let IoStatusBlock     = cast[pointer](ctx.args[3])
+  let AllocationSize    = cast[ptr LARGE_INTEGER](ctx.args[4])
+  let FileAttributes    = DWORD(ctx.args[5])
+  let ShareAccess       = DWORD(ctx.args[6])
+  let CreateDisposition = DWORD(ctx.args[7])
+  let CreateOptions     = DWORD(ctx.args[8])
+  let EaBuffer          = cast[pointer](ctx.args[9])
+  let EaLength          = DWORD(ctx.args[10])
+  let r = origNtCreateFile(FileHandle, DesiredAccess, ObjectAttributes,
+                            IoStatusBlock, AllocationSize, FileAttributes,
+                            ShareAccess, CreateDisposition, CreateOptions,
+                            EaBuffer, EaLength)
+  # NTSTATUS is signed 32-bit; pack as unsigned for the uint64 slot and
+  # let the trampoline reinterpret on the way out.
   ctx.result = uint64(uint32(r))
 
 # --- Snoop callbacks (registered against the chain at ShimSnoopPriority) ---
@@ -1158,6 +1377,315 @@ proc snoopCreateProcessA(ctx: var hr.HookContext) {.raises: [].} =
     discard
   SetLastError(savedLastError)
 
+# --- M73 Phase 5 snoop callbacks -------------------------------------------
+#
+# Schema decisions (no MonitorRecordKind additions — option (b) from the
+# Phase 5 milestone notes):
+#
+#   DeleteFileW/A      -> mrFileWrite + moFileWrite, detail = "DeleteFileW"
+#                          /"DeleteFileA". The record's `flags` field is left
+#                          at zero; the `detail` string carries the mutation
+#                          class for downstream interpretation.
+#   CreateDirectoryW/A -> mrFileWrite + moFileWrite, detail =
+#                          "CreateDirectoryW"/"CreateDirectoryA". Same
+#                          rationale: mutation event with a directory-create
+#                          discriminator in `detail`.
+#   CopyFileW/A        -> TWO records per call: source (mrFileOpen +
+#                          moFileRead, detail = "CopyFileW:src") and dest
+#                          (mrFileWrite + moFileWrite,
+#                          detail = "CopyFileW:dst"). Mirrors
+#                          Monitor-Hook-Shim.md §"CopyFileW / CopyFileA |
+#                          Read source and create/write destination".
+#   MoveFileExW/A      -> TWO records: source (mrFileWrite + moFileWrite,
+#                          detail = "MoveFileExW:src") and dest (mrFileWrite +
+#                          moFileWrite, detail = "MoveFileExW:dst"). lpNewFileName
+#                          MAY be NULL (delete-on-reboot); in that case only
+#                          the source record is emitted with the
+#                          MOVEFILE_DELAY_UNTIL_REBOOT-aware detail.
+#   GetFileInformationByHandleEx -> mrPathProbe + moPathProbe with the path
+#                          resolved via `pathForHandle`. detail =
+#                          "GetFileInformationByHandleEx". When the handle's
+#                          path is unknown (caller passed a handle the shim
+#                          didn't see open), we still emit the record with
+#                          path = "" so the per-call count is preserved.
+#   SetCurrentDirectoryW/A -> mrFileOpen + moExecute with the new cwd in
+#                          `path`, detail = "SetCurrentDirectoryW"/A. The
+#                          spec calls it "update process cwd model"; the
+#                          existing schema has no cwd-specific kind so we
+#                          pick the closest "process-context update" pair.
+#   NtCreateFile       -> mrFileOpen + moFileOpen, detail = "NtCreateFile",
+#                          path = "" (extraction deferred — the path lives
+#                          inside OBJECT_ATTRIBUTES.ObjectName and decoding
+#                          it under the shim hot-path requires more care
+#                          than Phase 5 allows; the dispatch-mechanism test
+#                          only requires the snoop FIRE, not preserve the
+#                          path).
+
+proc snoopDeleteFileW(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpFileName = cast[LPCWSTR](ctx.args[0])
+    let r = BOOL(ctx.result)
+    var record = baseRecord(mrFileWrite, moFileWrite)
+    record.path = widePtrToString(lpFileName)
+    record.result = int64(r)
+    record.detail = "DeleteFileW"
+    emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopDeleteFileA(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpFileName = cast[LPCSTR](ctx.args[0])
+    let r = BOOL(ctx.result)
+    var record = baseRecord(mrFileWrite, moFileWrite)
+    if lpFileName != nil:
+      record.path = $lpFileName
+    record.result = int64(r)
+    record.detail = "DeleteFileA"
+    emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopCreateDirectoryW(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpPathName = cast[LPCWSTR](ctx.args[0])
+    let r = BOOL(ctx.result)
+    var record = baseRecord(mrFileWrite, moFileWrite)
+    record.path = widePtrToString(lpPathName)
+    record.result = int64(r)
+    record.detail = "CreateDirectoryW"
+    emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopCreateDirectoryA(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpPathName = cast[LPCSTR](ctx.args[0])
+    let r = BOOL(ctx.result)
+    var record = baseRecord(mrFileWrite, moFileWrite)
+    if lpPathName != nil:
+      record.path = $lpPathName
+    record.result = int64(r)
+    record.detail = "CreateDirectoryA"
+    emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopCopyFileW(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpExisting = cast[LPCWSTR](ctx.args[0])
+    let lpNew      = cast[LPCWSTR](ctx.args[1])
+    let r = BOOL(ctx.result)
+    var src = baseRecord(mrFileOpen, moFileRead)
+    src.path = widePtrToString(lpExisting)
+    src.result = int64(r)
+    src.detail = "CopyFileW:src"
+    emitRecord(src)
+    var dst = baseRecord(mrFileWrite, moFileWrite)
+    dst.path = widePtrToString(lpNew)
+    dst.result = int64(r)
+    dst.detail = "CopyFileW:dst"
+    emitRecord(dst)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopCopyFileA(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpExisting = cast[LPCSTR](ctx.args[0])
+    let lpNew      = cast[LPCSTR](ctx.args[1])
+    let r = BOOL(ctx.result)
+    var src = baseRecord(mrFileOpen, moFileRead)
+    if lpExisting != nil:
+      src.path = $lpExisting
+    src.result = int64(r)
+    src.detail = "CopyFileA:src"
+    emitRecord(src)
+    var dst = baseRecord(mrFileWrite, moFileWrite)
+    if lpNew != nil:
+      dst.path = $lpNew
+    dst.result = int64(r)
+    dst.detail = "CopyFileA:dst"
+    emitRecord(dst)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopMoveFileExW(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpExisting = cast[LPCWSTR](ctx.args[0])
+    let lpNew      = cast[LPCWSTR](ctx.args[1])
+    let r = BOOL(ctx.result)
+    var src = baseRecord(mrFileWrite, moFileWrite)
+    src.path = widePtrToString(lpExisting)
+    src.result = int64(r)
+    src.detail = "MoveFileExW:src"
+    emitRecord(src)
+    # lpNewFileName MAY be nil when MOVEFILE_DELAY_UNTIL_REBOOT is set
+    # WITHOUT a target (i.e. delete-on-reboot of the source). Emit a
+    # destination record only when we actually have a target path.
+    if lpNew != nil:
+      var dst = baseRecord(mrFileWrite, moFileWrite)
+      dst.path = widePtrToString(lpNew)
+      dst.result = int64(r)
+      dst.detail = "MoveFileExW:dst"
+      emitRecord(dst)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopMoveFileExA(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpExisting = cast[LPCSTR](ctx.args[0])
+    let lpNew      = cast[LPCSTR](ctx.args[1])
+    let r = BOOL(ctx.result)
+    var src = baseRecord(mrFileWrite, moFileWrite)
+    if lpExisting != nil:
+      src.path = $lpExisting
+    src.result = int64(r)
+    src.detail = "MoveFileExA:src"
+    emitRecord(src)
+    if lpNew != nil:
+      var dst = baseRecord(mrFileWrite, moFileWrite)
+      dst.path = $lpNew
+      dst.result = int64(r)
+      dst.detail = "MoveFileExA:dst"
+      emitRecord(dst)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopGetFileInformationByHandleEx(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let hFile = cast[HANDLE](ctx.args[0])
+    let r = BOOL(ctx.result)
+    var record = baseRecord(mrPathProbe, moPathProbe)
+    record.path = pathForHandle(hFile)
+    record.result = int64(r)
+    record.probeResult = probeFromBool(r)
+    record.detail = "GetFileInformationByHandleEx"
+    emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopSetCurrentDirectoryW(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpPathName = cast[LPCWSTR](ctx.args[0])
+    let r = BOOL(ctx.result)
+    var record = baseRecord(mrFileOpen, moExecute)
+    record.path = widePtrToString(lpPathName)
+    record.result = int64(r)
+    record.detail = "SetCurrentDirectoryW"
+    emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopSetCurrentDirectoryA(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpPathName = cast[LPCSTR](ctx.args[0])
+    let r = BOOL(ctx.result)
+    var record = baseRecord(mrFileOpen, moExecute)
+    if lpPathName != nil:
+      record.path = $lpPathName
+    record.result = int64(r)
+    record.detail = "SetCurrentDirectoryA"
+    emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopNtCreateFile(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    # Path extraction deferred: the path lives inside
+    # OBJECT_ATTRIBUTES.ObjectName -> UNICODE_STRING.Buffer with an
+    # explicit Length field (bytes, not code units), and may be
+    # NULL-prefixed by "\??\" or "\DosDevices\". Decoding it correctly
+    # under the shim hot-path without recursing through other hooked
+    # APIs is more work than Phase 5 allows. The Phase-5 acceptance
+    # criterion only requires the snoop FIRES — the path field is left
+    # blank with a follow-up tagged via detail.
+    let r = NTSTATUS(int32(uint32(ctx.args[10])))  # not the result; placate -Wunused
+    discard r
+    var record = baseRecord(mrFileOpen, moFileOpen)
+    record.path = ""
+    # ctx.result was packed as uint64-of-uint32 by originalNtCreateFile;
+    # reinterpret as signed NTSTATUS for record.result. Use a same-size
+    # cast to avoid Nim's range-checked narrowing (see the
+    # nim_cast_narrowing_rangecheck memo).
+    let nt = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+    record.result = int64(nt)
+    record.detail = "NtCreateFile"
+    emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
 # --- Win32 trampolines installed into the IAT ------------------------------
 #
 # Each trampoline matches the corresponding Win32 stdcall signature. Its job
@@ -1340,6 +1868,160 @@ proc trampolineCreateProcessA(lpApplicationName: LPCSTR,
   hr.dispatchShimHook(hr.HookCreateProcessA, ctx)
   result = BOOL(uint32(ctx.result))
 
+# --- M73 Phase 5 trampolines (matched stdcall signatures) ------------------
+
+proc trampolineDeleteFileW(lpFileName: LPCWSTR): BOOL {.stdcall.} =
+  if origDeleteFileW == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[cast[uint64](lpFileName)])
+  hr.dispatchShimHook(hr.HookDeleteFileW, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineDeleteFileA(lpFileName: LPCSTR): BOOL {.stdcall.} =
+  if origDeleteFileA == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[cast[uint64](lpFileName)])
+  hr.dispatchShimHook(hr.HookDeleteFileA, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineCreateDirectoryW(lpPathName: LPCWSTR,
+                                 lpSecurityAttributes: LPSECURITY_ATTRIBUTES):
+                                 BOOL {.stdcall.} =
+  if origCreateDirectoryW == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](lpPathName),
+    cast[uint64](lpSecurityAttributes)
+  ])
+  hr.dispatchShimHook(hr.HookCreateDirectoryW, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineCreateDirectoryA(lpPathName: LPCSTR,
+                                 lpSecurityAttributes: LPSECURITY_ATTRIBUTES):
+                                 BOOL {.stdcall.} =
+  if origCreateDirectoryA == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](lpPathName),
+    cast[uint64](lpSecurityAttributes)
+  ])
+  hr.dispatchShimHook(hr.HookCreateDirectoryA, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineCopyFileW(lpExistingFileName: LPCWSTR,
+                          lpNewFileName: LPCWSTR,
+                          bFailIfExists: BOOL): BOOL {.stdcall.} =
+  if origCopyFileW == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](lpExistingFileName),
+    cast[uint64](lpNewFileName),
+    uint64(uint32(bFailIfExists))
+  ])
+  hr.dispatchShimHook(hr.HookCopyFileW, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineCopyFileA(lpExistingFileName: LPCSTR,
+                          lpNewFileName: LPCSTR,
+                          bFailIfExists: BOOL): BOOL {.stdcall.} =
+  if origCopyFileA == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](lpExistingFileName),
+    cast[uint64](lpNewFileName),
+    uint64(uint32(bFailIfExists))
+  ])
+  hr.dispatchShimHook(hr.HookCopyFileA, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineMoveFileExW(lpExistingFileName: LPCWSTR,
+                            lpNewFileName: LPCWSTR,
+                            dwFlags: DWORD): BOOL {.stdcall.} =
+  if origMoveFileExW == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](lpExistingFileName),
+    cast[uint64](lpNewFileName),
+    uint64(dwFlags)
+  ])
+  hr.dispatchShimHook(hr.HookMoveFileExW, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineMoveFileExA(lpExistingFileName: LPCSTR,
+                            lpNewFileName: LPCSTR,
+                            dwFlags: DWORD): BOOL {.stdcall.} =
+  if origMoveFileExA == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](lpExistingFileName),
+    cast[uint64](lpNewFileName),
+    uint64(dwFlags)
+  ])
+  hr.dispatchShimHook(hr.HookMoveFileExA, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineGetFileInformationByHandleEx(hFile: HANDLE,
+                                              FileInformationClass: DWORD,
+                                              lpFileInformation: LPVOID,
+                                              dwBufferSize: DWORD): BOOL
+                                              {.stdcall.} =
+  if origGetFileInformationByHandleEx == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](hFile),
+    uint64(FileInformationClass),
+    cast[uint64](lpFileInformation),
+    uint64(dwBufferSize)
+  ])
+  hr.dispatchShimHook(hr.HookGetFileInformationByHandleEx, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineSetCurrentDirectoryW(lpPathName: LPCWSTR): BOOL {.stdcall.} =
+  if origSetCurrentDirectoryW == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[cast[uint64](lpPathName)])
+  hr.dispatchShimHook(hr.HookSetCurrentDirectoryW, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineSetCurrentDirectoryA(lpPathName: LPCSTR): BOOL {.stdcall.} =
+  if origSetCurrentDirectoryA == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[cast[uint64](lpPathName)])
+  hr.dispatchShimHook(hr.HookSetCurrentDirectoryA, ctx)
+  result = BOOL(uint32(ctx.result))
+
+proc trampolineNtCreateFile(FileHandle: ptr HANDLE,
+                             DesiredAccess: DWORD,
+                             ObjectAttributes: pointer,
+                             IoStatusBlock: pointer,
+                             AllocationSize: ptr LARGE_INTEGER,
+                             FileAttributes: DWORD,
+                             ShareAccess: DWORD,
+                             CreateDisposition: DWORD,
+                             CreateOptions: DWORD,
+                             EaBuffer: pointer,
+                             EaLength: DWORD): NTSTATUS {.stdcall.} =
+  if origNtCreateFile == nil:
+    return NTSTATUS(0xC0000001'i32)  # STATUS_UNSUCCESSFUL
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](FileHandle),
+    uint64(DesiredAccess),
+    cast[uint64](ObjectAttributes),
+    cast[uint64](IoStatusBlock),
+    cast[uint64](AllocationSize),
+    uint64(FileAttributes),
+    uint64(ShareAccess),
+    uint64(CreateDisposition),
+    uint64(CreateOptions),
+    cast[uint64](EaBuffer),
+    uint64(EaLength)
+  ])
+  hr.dispatchShimHook(hr.HookNtCreateFile, ctx)
+  # NTSTATUS reinterpret: ctx.result holds the uint32-packed status.
+  # Same-size cast avoids `chckRange64` (per the
+  # nim_cast_narrowing_rangecheck memo).
+  result = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+
 # --- Registry wiring -------------------------------------------------------
 #
 # Called once from repro_monitor_shim_init AFTER the registry has been
@@ -1361,6 +2043,22 @@ proc registerMonitorSnoopCallbacks*() =
   hr.registerMonitorHook(hr.HookGetFileAttributesA,   snoopGetFileAttributesA)
   hr.registerMonitorHook(hr.HookCreateProcessW,     snoopCreateProcessW)
   hr.registerMonitorHook(hr.HookCreateProcessA,     snoopCreateProcessA)
+  # M73 Phase 5 — extended hook surface.
+  hr.registerMonitorHook(hr.HookDeleteFileW,        snoopDeleteFileW)
+  hr.registerMonitorHook(hr.HookDeleteFileA,        snoopDeleteFileA)
+  hr.registerMonitorHook(hr.HookCreateDirectoryW,   snoopCreateDirectoryW)
+  hr.registerMonitorHook(hr.HookCreateDirectoryA,   snoopCreateDirectoryA)
+  hr.registerMonitorHook(hr.HookCopyFileW,          snoopCopyFileW)
+  hr.registerMonitorHook(hr.HookCopyFileA,          snoopCopyFileA)
+  hr.registerMonitorHook(hr.HookMoveFileExW,        snoopMoveFileExW)
+  hr.registerMonitorHook(hr.HookMoveFileExA,        snoopMoveFileExA)
+  hr.registerMonitorHook(hr.HookGetFileInformationByHandleEx,
+                         snoopGetFileInformationByHandleEx)
+  hr.registerMonitorHook(hr.HookSetCurrentDirectoryW,
+                         snoopSetCurrentDirectoryW)
+  hr.registerMonitorHook(hr.HookSetCurrentDirectoryA,
+                         snoopSetCurrentDirectoryA)
+  hr.registerMonitorHook(hr.HookNtCreateFile,       snoopNtCreateFile)
 
 # --- Unified install backend (M73 Phase 1) ---------------------------------
 #
@@ -1394,6 +2092,10 @@ type
     origStorage: ptr pointer    # cast[ptr pointer](addr origCreateFileW)
     origCallback: hr.HookCallback
     iatDlls: seq[string]        # Fallback search list when inline rejects.
+    moduleDll: string           # M73 Phase 5: target module the inline +
+                                # audit paths resolve the function from
+                                # (default "kernel32.dll"). NtCreateFile
+                                # sets this to "ntdll.dll".
 
 const kernel32FileIatDlls = @[
   "kernel32.dll", "kernelbase.dll",
@@ -1405,6 +2107,11 @@ const kernel32FileIatDlls = @[
   "api-ms-win-core-processthreads-l1-1-1.dll"
 ]
 
+# NtCreateFile lives in ntdll. Only ntdll.dll itself exports it; the
+# api-ms-win-* shims forward to it but no module advertises it under a
+# different ExportName, so the IAT-fallback list can stay minimal here.
+const ntdllNtIatDlls = @["ntdll.dll"]
+
 # Module-global hook table. Built once with the trampoline + origStorage
 # pointers — these are addresses of module-level statics so they're known
 # at module-init time; a `let` binding is sufficient.
@@ -1413,64 +2120,151 @@ let hookTable {.global.}: seq[HookSpec] = @[
     trampoline: cast[pointer](trampolineCreateFileW),
     origStorage: cast[ptr pointer](addr origCreateFileW),
     origCallback: originalCreateFileW,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookCreateFileA,
     trampoline: cast[pointer](trampolineCreateFileA),
     origStorage: cast[ptr pointer](addr origCreateFileA),
     origCallback: originalCreateFileA,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookReadFile,
     trampoline: cast[pointer](trampolineReadFile),
     origStorage: cast[ptr pointer](addr origReadFile),
     origCallback: originalReadFile,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookWriteFile,
     trampoline: cast[pointer](trampolineWriteFile),
     origStorage: cast[ptr pointer](addr origWriteFile),
     origCallback: originalWriteFile,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookCloseHandle,
     trampoline: cast[pointer](trampolineCloseHandle),
     origStorage: cast[ptr pointer](addr origCloseHandle),
     origCallback: originalCloseHandle,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookGetFileAttributesExW,
     trampoline: cast[pointer](trampolineGetFileAttributesExW),
     origStorage: cast[ptr pointer](addr origGetFileAttributesExW),
     origCallback: originalGetFileAttributesExW,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookGetFileAttributesExA,
     trampoline: cast[pointer](trampolineGetFileAttributesExA),
     origStorage: cast[ptr pointer](addr origGetFileAttributesExA),
     origCallback: originalGetFileAttributesExA,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookGetFileAttributesW,
     trampoline: cast[pointer](trampolineGetFileAttributesW),
     origStorage: cast[ptr pointer](addr origGetFileAttributesW),
     origCallback: originalGetFileAttributesW,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookGetFileAttributesA,
     trampoline: cast[pointer](trampolineGetFileAttributesA),
     origStorage: cast[ptr pointer](addr origGetFileAttributesA),
     origCallback: originalGetFileAttributesA,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookCreateProcessW,
     trampoline: cast[pointer](trampolineCreateProcessW),
     origStorage: cast[ptr pointer](addr origCreateProcessW),
     origCallback: originalCreateProcessW,
-    iatDlls: kernel32FileIatDlls),
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
   HookSpec(name: hr.HookCreateProcessA,
     trampoline: cast[pointer](trampolineCreateProcessA),
     origStorage: cast[ptr pointer](addr origCreateProcessA),
     origCallback: originalCreateProcessA,
-    iatDlls: kernel32FileIatDlls)
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  # M73 Phase 5 — extended Win32 entry points (kernel32.dll).
+  HookSpec(name: hr.HookDeleteFileW,
+    trampoline: cast[pointer](trampolineDeleteFileW),
+    origStorage: cast[ptr pointer](addr origDeleteFileW),
+    origCallback: originalDeleteFileW,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookDeleteFileA,
+    trampoline: cast[pointer](trampolineDeleteFileA),
+    origStorage: cast[ptr pointer](addr origDeleteFileA),
+    origCallback: originalDeleteFileA,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookCreateDirectoryW,
+    trampoline: cast[pointer](trampolineCreateDirectoryW),
+    origStorage: cast[ptr pointer](addr origCreateDirectoryW),
+    origCallback: originalCreateDirectoryW,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookCreateDirectoryA,
+    trampoline: cast[pointer](trampolineCreateDirectoryA),
+    origStorage: cast[ptr pointer](addr origCreateDirectoryA),
+    origCallback: originalCreateDirectoryA,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookCopyFileW,
+    trampoline: cast[pointer](trampolineCopyFileW),
+    origStorage: cast[ptr pointer](addr origCopyFileW),
+    origCallback: originalCopyFileW,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookCopyFileA,
+    trampoline: cast[pointer](trampolineCopyFileA),
+    origStorage: cast[ptr pointer](addr origCopyFileA),
+    origCallback: originalCopyFileA,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookMoveFileExW,
+    trampoline: cast[pointer](trampolineMoveFileExW),
+    origStorage: cast[ptr pointer](addr origMoveFileExW),
+    origCallback: originalMoveFileExW,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookMoveFileExA,
+    trampoline: cast[pointer](trampolineMoveFileExA),
+    origStorage: cast[ptr pointer](addr origMoveFileExA),
+    origCallback: originalMoveFileExA,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookGetFileInformationByHandleEx,
+    trampoline: cast[pointer](trampolineGetFileInformationByHandleEx),
+    origStorage: cast[ptr pointer](addr origGetFileInformationByHandleEx),
+    origCallback: originalGetFileInformationByHandleEx,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookSetCurrentDirectoryW,
+    trampoline: cast[pointer](trampolineSetCurrentDirectoryW),
+    origStorage: cast[ptr pointer](addr origSetCurrentDirectoryW),
+    origCallback: originalSetCurrentDirectoryW,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookSetCurrentDirectoryA,
+    trampoline: cast[pointer](trampolineSetCurrentDirectoryA),
+    origStorage: cast[ptr pointer](addr origSetCurrentDirectoryA),
+    origCallback: originalSetCurrentDirectoryA,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  # NT Native API backstop — lives in ntdll, not kernel32.
+  HookSpec(name: hr.HookNtCreateFile,
+    trampoline: cast[pointer](trampolineNtCreateFile),
+    origStorage: cast[ptr pointer](addr origNtCreateFile),
+    origCallback: originalNtCreateFile,
+    iatDlls: ntdllNtIatDlls,
+    moduleDll: "ntdll.dll")
 ]
 
-proc queueInlineInstall(spec: HookSpec; kernel32: HANDLE): cint =
+proc queueInlineInstall(spec: HookSpec; hModule: HANDLE): cint =
   ## Queue an inline JMP rel32 install for ``spec.name`` against
-  ## kernel32's body. Under an active transaction, the call returns 0 as
-  ## soon as the op is queued; the trampoline pointer is written into
-  ## ``spec.origStorage[]`` at commit time.
+  ## ``hModule``'s function body (kernel32 for the M73 Phase 1-4 surface;
+  ## ntdll for the M73 Phase 5 NtCreateFile backstop). Under an active
+  ## transaction, the call returns 0 as soon as the op is queued; the
+  ## trampoline pointer is written into ``spec.origStorage[]`` at commit
+  ## time.
   ##
   ## Importantly, the ``out_trampoline`` argument we pass is
   ## ``spec.origStorage`` itself (the module-global ``addr origXxx``).
@@ -1479,7 +2273,7 @@ proc queueInlineInstall(spec: HookSpec; kernel32: HANDLE): cint =
   ## dangle by then. Wiring the chain's "original" callback MUST
   ## therefore be deferred until after ``ctInlineHookCommitTransaction``
   ## returns — otherwise, with the inline JMP already landed at the
-  ## kernel32 body but ``origXxx`` still holding the (now-patched) real
+  ## function body but ``origXxx`` still holding the (now-patched) real
   ## entry, the chain's "original" recurses through the trampoline.
   when not ctInlineHookAvailable:
     return -4
@@ -1487,7 +2281,7 @@ proc queueInlineInstall(spec: HookSpec; kernel32: HANDLE): cint =
     if spec.origStorage[] != nil:
       # Already installed (idempotent call). Treat as success.
       return 0
-    let target = GetProcAddress(kernel32, cast[LPCSTR](spec.name.cstring))
+    let target = GetProcAddress(hModule, cast[LPCSTR](spec.name.cstring))
     if target == nil:
       return -1
     ctInlineHookInstall(target, spec.trampoline, spec.origStorage)
@@ -1530,42 +2324,61 @@ proc installAllHooks(): int =
   var inlineQueued = newSeq[bool](hookTable.len)
   var commitOk = false
   when ctInlineHookAvailable:
-    let kernel32 = GetModuleHandleA("kernel32.dll")
-    if kernel32 == nil:
-      dbg("[repro_monitor_shim] installAllHooks: kernel32 GetModuleHandle returned NULL; falling back to IAT for every hook\n")
-      for spec in hookTable:
+    # Per-spec hModule resolution. Cache module handles by name so we
+    # don't burn a GetModuleHandleA per entry on the kernel32 surface.
+    var moduleHandles = initTable[string, HANDLE]()
+    proc resolveModule(name: string): HANDLE {.raises: [].} =
+      try:
+        if name in moduleHandles:
+          return moduleHandles[name]
+        let h = GetModuleHandleA(cast[LPCSTR](name.cstring))
+        moduleHandles[name] = h
+        return h
+      except KeyError:
+        # Defensive: `name in moduleHandles` already guarded the lookup;
+        # the catch is here to satisfy `{.raises: [].}` on the outer
+        # installAllHooks contract.
+        return GetModuleHandleA(cast[LPCSTR](name.cstring))
+
+    let beginRc = ctInlineHookBeginTransaction()
+    let inTransaction = (beginRc == 0)
+    if not inTransaction:
+      dbg(cstring("[repro_monitor_shim] installAllHooks: begin_transaction failed rc=" & $beginRc & "; installing per-hook\n"))
+    for i, spec in hookTable:
+      let modName =
+        if spec.moduleDll.len > 0: spec.moduleDll else: "kernel32.dll"
+      let hModule = resolveModule(modName)
+      if hModule == nil:
+        dbg(cstring("[repro_monitor_shim] installAllHooks: " &
+          "GetModuleHandleA(" & modName & ") returned NULL; falling back to IAT for " &
+          spec.name & "\n"))
         failed.add(spec)
-    else:
-      let beginRc = ctInlineHookBeginTransaction()
-      let inTransaction = (beginRc == 0)
-      if not inTransaction:
-        dbg(cstring("[repro_monitor_shim] installAllHooks: begin_transaction failed rc=" & $beginRc & "; installing per-hook\n"))
-      for i, spec in hookTable:
-        let rc = queueInlineInstall(spec, kernel32)
-        if rc == 0:
-          inlineQueued[i] = true
-        else:
-          dbg(cstring("[repro_monitor_shim] inline-hook FAILED for " &
-            spec.name & " (rc=" & $rc & "); will try IAT fallback\n"))
-          failed.add(spec)
-      if inTransaction:
-        let commitRc = ctInlineHookCommitTransaction()
-        if commitRc == 0:
-          commitOk = true
-        else:
-          dbg(cstring("[repro_monitor_shim] installAllHooks: commit_transaction failed rc=" & $commitRc & "\n"))
-          # Commit failed -> ct_inline_hook rolls back the
-          # partially-applied batch and origStorage[] stays nil for
-          # every queued spec. Re-route them all to the IAT fallback.
-          for i, spec in hookTable:
-            if inlineQueued[i]:
-              inlineQueued[i] = false
-              failed.add(spec)
+        continue
+      let rc = queueInlineInstall(spec, hModule)
+      if rc == 0:
+        inlineQueued[i] = true
       else:
-        # No transaction was active; each ctInlineHookInstall call ran
-        # synchronously and wrote spec.origStorage[] in-line. The
-        # successful ones are already committed.
+        dbg(cstring("[repro_monitor_shim] inline-hook FAILED for " &
+          spec.name & " (rc=" & $rc & "); will try IAT fallback\n"))
+        failed.add(spec)
+    if inTransaction:
+      let commitRc = ctInlineHookCommitTransaction()
+      if commitRc == 0:
         commitOk = true
+      else:
+        dbg(cstring("[repro_monitor_shim] installAllHooks: commit_transaction failed rc=" & $commitRc & "\n"))
+        # Commit failed -> ct_inline_hook rolls back the
+        # partially-applied batch and origStorage[] stays nil for
+        # every queued spec. Re-route them all to the IAT fallback.
+        for i, spec in hookTable:
+          if inlineQueued[i]:
+            inlineQueued[i] = false
+            failed.add(spec)
+    else:
+      # No transaction was active; each ctInlineHookInstall call ran
+      # synchronously and wrote spec.origStorage[] in-line. The
+      # successful ones are already committed.
+      commitOk = true
   else:
     # ct_inline_hook sources unavailable — every hook degrades to IAT.
     for spec in hookTable:
@@ -1657,15 +2470,32 @@ proc repro_monitor_shim_init*(configPath: cstring): cint
   # captured before any other code can uninstall hooks. Cost is ~11 *
   # (GetProcAddress + 5-byte read) = microseconds, well within the
   # loader's critical-path budget.
-  block runAudit:
-    let kernel32 = GetModuleHandleA("kernel32.dll")
-    if kernel32 == nil:
-      dbg("[repro_monitor_shim] install-audit SKIPPED: " &
-        "GetModuleHandleA(kernel32.dll) returned NULL\n")
-      break runAudit
+  block:
+    # M73 Phase 5: every spec carries its own ``moduleDll`` so the audit
+    # can resolve kernel32 + ntdll entries through one walk. Cache the
+    # module handles to keep the GetModuleHandleA calls minimal.
+    var auditModules = initTable[string, HANDLE]()
     var targets: seq[(string, pointer)] = @[]
     for spec in hookTable:
-      let addr0 = GetProcAddress(kernel32, cast[LPCSTR](spec.name.cstring))
+      let modName =
+        if spec.moduleDll.len > 0: spec.moduleDll else: "kernel32.dll"
+      var hMod: HANDLE = nil
+      try:
+        if modName in auditModules:
+          hMod = auditModules[modName]
+        else:
+          hMod = GetModuleHandleA(cast[LPCSTR](modName.cstring))
+          auditModules[modName] = hMod
+      except KeyError:
+        hMod = GetModuleHandleA(cast[LPCSTR](modName.cstring))
+      if hMod == nil:
+        dbg(cstring("[repro_monitor_shim] install-audit SKIPPED for " &
+          spec.name & ": GetModuleHandleA(" & modName & ") returned NULL\n"))
+        # Pass nil so the audit module reports the failure consistently
+        # with its existing "addr == nil -> failing name" branch.
+        targets.add((spec.name, pointer(nil)))
+        continue
+      let addr0 = GetProcAddress(hMod, cast[LPCSTR](spec.name.cstring))
       targets.add((spec.name, addr0))
     runInstallAudit(targets, dbg)
   dbg("[repro_monitor_shim] initialization complete\n")

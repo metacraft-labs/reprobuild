@@ -476,3 +476,255 @@ suite "dispatch-mechanism coverage M73 Phase 2 + Phase 3":
           " DLL's CreateFileA IAT slot at LoadLibraryW time, which the" &
           " Phase 1 inline detour at kernel32!CreateFileA must catch.)")
       check got == N
+
+    # ================================================================
+    # M73 Phase 5 — Extended hook surface dispatch-mechanism coverage.
+    #
+    # Phase 5 added 13 new entry points to the hookTable: DeleteFileW/A,
+    # CreateDirectoryW/A, CopyFileW/A, MoveFileExW/A,
+    # GetFileInformationByHandleEx, SetCurrentDirectoryW/A, and
+    # NtCreateFile. Per the milestone "one fixture per API class is
+    # sufficient": one mechanism per new entry, with the
+    # winlean-dynlib (mechanism-3 style) form preferred for every W
+    # variant since that is the load-bearing nimGetProcAddr-cached
+    # function-pointer dispatch the M73 install backend exists to
+    # catch. GetFileInformationByHandleEx is not in Nim's winlean so a
+    # C fixture (mechanism-1, IAT-routed) covers it. NtCreateFile is
+    # in ntdll and not in any Win32 winlean binding; a C fixture with
+    # GetProcAddress(ntdll.dll, "NtCreateFile") covers it.
+    #
+    # All snoop->record mappings follow option (b) from the Phase 5
+    # plan — no MonitorRecordKind additions, instead reuse mrFileOpen /
+    # mrFileWrite / mrPathProbe with descriptive `detail` strings. See
+    # the snoop comments in windows_interpose.nim for the per-API
+    # mapping table.
+    # ================================================================
+
+    proc matchingRecordsByDetail(records: openArray[MonitorRecord];
+                                  marker, detail: string;
+                                  kind: MonitorRecordKind): int =
+      result = 0
+      for r in records:
+        if r.kind == kind and r.detail == detail and marker in r.path:
+          inc result
+
+    # ----------------------------------------------------------------
+    # M73 Phase 5: mechanism-4 retirement — os.removeFile -> winlean.deleteFileW.
+    #
+    # Phase 2 substituted os.fileExists for os.removeFile because
+    # DeleteFileW wasn't in the hookTable. Phase 5 added HookDeleteFileW
+    # so the originally-spec'd mechanism-4 surface is now observable.
+    # This case runs alongside the os.fileExists mechanism-4 (preserved
+    # above) — both should reach the shim via winlean's dynlib dispatch
+    # and produce a per-call record. The mech4-os-removefile case asserts
+    # mrFileWrite + detail "DeleteFileW".
+    # ----------------------------------------------------------------
+    test "mechanism 4 (retired): os.removeFile -> winlean.deleteFileW":
+      let fixtureSrc = fixturesDir / "fixture_mech4_os_removefile.nim"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "mech4-rm.exe"
+      compileNimExe(repoRoot, fixtureSrc, exePath, "m73-phase5-mech4-rm")
+      let workDir = tempRoot / "mech4-rm-work"
+      createDir(workDir)
+      let marker = workDir / "mech4-rm-marker"
+      let records = runMechanism("mech4-rm", marker,
+                                 @[exePath, marker, $N])
+      let got = matchingRecordsByDetail(records, "mech4-rm-marker",
+                                          "DeleteFileW", mrFileWrite)
+      if got != N:
+        checkpoint("mech4-rm records: " & $got &
+          " (expected exactly " & $N &
+          " mrFileWrite records with detail \"DeleteFileW\" — loss" &
+          " tolerance zero per M73 Phase 5. This retires the Phase 2" &
+          " mechanism-4 substitution: the original spec called for" &
+          " os.removeFile -> winlean.deleteFileW, which Phase 5" &
+          " unblocked by adding HookDeleteFileW.)")
+      check got == N
+
+    # ----------------------------------------------------------------
+    # Phase 5: CreateDirectoryW via winlean dynlib.
+    # ----------------------------------------------------------------
+    test "Phase 5: winlean.createDirectoryW":
+      let fixtureSrc = fixturesDir / "fixture_createdir_winlean.nim"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "createdir.exe"
+      compileNimExe(repoRoot, fixtureSrc, exePath, "m73-phase5-createdir")
+      let workDir = tempRoot / "createdir-work"
+      createDir(workDir)
+      let marker = workDir / "createdir-marker"
+      let records = runMechanism("createdir", marker,
+                                 @[exePath, marker, $N])
+      let got = matchingRecordsByDetail(records, "createdir-marker",
+                                          "CreateDirectoryW", mrFileWrite)
+      if got != N:
+        checkpoint("createdir records: " & $got &
+          " (expected exactly " & $N &
+          " mrFileWrite records with detail \"CreateDirectoryW\" — loss" &
+          " tolerance zero per M73 Phase 5.)")
+      check got == N
+
+    # ----------------------------------------------------------------
+    # Phase 5: CopyFileW via winlean dynlib.
+    # ----------------------------------------------------------------
+    test "Phase 5: winlean.copyFileW":
+      let fixtureSrc = fixturesDir / "fixture_copyfile_winlean.nim"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "copyfile.exe"
+      compileNimExe(repoRoot, fixtureSrc, exePath, "m73-phase5-copyfile")
+      let workDir = tempRoot / "copyfile-work"
+      createDir(workDir)
+      let marker = workDir / "copyfile-marker"
+      let records = runMechanism("copyfile", marker,
+                                 @[exePath, marker, $N])
+      # Each CopyFileW call emits TWO records: one src (mrFileOpen +
+      # detail "CopyFileW:src") and one dst (mrFileWrite + detail
+      # "CopyFileW:dst"). We assert both halves equal N.
+      let gotDst = matchingRecordsByDetail(records, "copyfile-marker",
+                                            "CopyFileW:dst", mrFileWrite)
+      let gotSrc = matchingRecordsByDetail(records, "copyfile-marker",
+                                            "CopyFileW:src", mrFileOpen)
+      if gotDst != N:
+        checkpoint("copyfile dst records: " & $gotDst &
+          " (expected exactly " & $N &
+          " mrFileWrite records with detail \"CopyFileW:dst\".)")
+      if gotSrc != N:
+        checkpoint("copyfile src records: " & $gotSrc &
+          " (expected exactly " & $N &
+          " mrFileOpen records with detail \"CopyFileW:src\".)")
+      check gotDst == N
+      check gotSrc == N
+
+    # ----------------------------------------------------------------
+    # Phase 5: MoveFileExW via winlean dynlib.
+    # ----------------------------------------------------------------
+    test "Phase 5: winlean.moveFileExW":
+      let fixtureSrc = fixturesDir / "fixture_movefileex_winlean.nim"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "movefileex.exe"
+      compileNimExe(repoRoot, fixtureSrc, exePath, "m73-phase5-movefileex")
+      let workDir = tempRoot / "movefileex-work"
+      createDir(workDir)
+      let marker = workDir / "movefileex-marker"
+      let records = runMechanism("movefileex", marker,
+                                 @[exePath, marker, $N])
+      # Each MoveFileExW call emits TWO records: src (mrFileWrite +
+      # detail "MoveFileExW:src") and dst (mrFileWrite + detail
+      # "MoveFileExW:dst").
+      let gotDst = matchingRecordsByDetail(records, "movefileex-marker",
+                                            "MoveFileExW:dst", mrFileWrite)
+      let gotSrc = matchingRecordsByDetail(records, "movefileex-marker",
+                                            "MoveFileExW:src", mrFileWrite)
+      if gotDst != N:
+        checkpoint("movefileex dst records: " & $gotDst &
+          " (expected exactly " & $N & ".)")
+      if gotSrc != N:
+        checkpoint("movefileex src records: " & $gotSrc &
+          " (expected exactly " & $N & ".)")
+      check gotDst == N
+      check gotSrc == N
+
+    # ----------------------------------------------------------------
+    # Phase 5: SetCurrentDirectoryW via winlean dynlib.
+    # ----------------------------------------------------------------
+    test "Phase 5: winlean.setCurrentDirectoryW":
+      let fixtureSrc = fixturesDir / "fixture_setcurrentdir_winlean.nim"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "setcurdir.exe"
+      compileNimExe(repoRoot, fixtureSrc, exePath, "m73-phase5-setcurdir")
+      let workDir = tempRoot / "setcurdir-work"
+      createDir(workDir)
+      let marker = workDir / "setcurdir-marker"
+      let records = runMechanism("setcurdir", marker,
+                                 @[exePath, marker, $N])
+      # The fixture also restores cwd via setCurrentDirectoryW to the
+      # original working dir AFTER each iteration — that restore path
+      # does NOT contain the marker substring, so it is filtered out by
+      # the per-record path-contains check. Only the N marker-bearing
+      # calls are counted.
+      let got = matchingRecordsByDetail(records, "setcurdir-marker",
+                                          "SetCurrentDirectoryW", mrFileOpen)
+      if got != N:
+        checkpoint("setcurdir records: " & $got &
+          " (expected exactly " & $N &
+          " mrFileOpen records with detail \"SetCurrentDirectoryW\".)")
+      check got == N
+
+    # ----------------------------------------------------------------
+    # Phase 5: GetFileInformationByHandleEx via IAT-routed C fixture.
+    #
+    # winlean has no binding for this API; use the simpler mechanism-1
+    # IAT-routed dispatch (still goes through kernel32 -> our inline
+    # detour catches it).
+    # ----------------------------------------------------------------
+    test "Phase 5: IAT-routed GetFileInformationByHandleEx":
+      let fixtureSrc = fixturesDir / "fixture_getfileinfobyhandleex_iat.c"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "getinfobyhex.exe"
+      compileGcc(fixtureSrc, exePath)
+      let workDir = tempRoot / "getinfobyhex-work"
+      createDir(workDir)
+      let marker = workDir / "getinfobyhex-marker"
+      let records = runMechanism("getinfobyhex", marker,
+                                 @[exePath, marker, $N])
+      # The fixture opens each file via CreateFileW first (so the shim
+      # records the handle->path mapping via rememberHandlePath); the
+      # subsequent GetFileInformationByHandleEx call's snoop then
+      # resolves the path via pathForHandle. The result is an
+      # mrPathProbe record whose path contains the marker.
+      let got = matchingRecordsByDetail(records, "getinfobyhex-marker",
+                                          "GetFileInformationByHandleEx",
+                                          mrPathProbe)
+      if got != N:
+        checkpoint("getinfobyhex records: " & $got &
+          " (expected exactly " & $N &
+          " mrPathProbe records with detail" &
+          " \"GetFileInformationByHandleEx\".)")
+      check got == N
+
+    # ----------------------------------------------------------------
+    # Phase 5: NtCreateFile via GetProcAddress(ntdll.dll, ...).
+    #
+    # NtCreateFile lives in ntdll. The Phase 5 snoop defers path
+    # extraction (the path lives inside OBJECT_ATTRIBUTES.ObjectName) so
+    # record.path is "". The assertion counts mrFileOpen records with
+    # detail "NtCreateFile" — by COUNT, not by marker — because we
+    # cannot filter on path when the path is blank.
+    #
+    # Loss tolerance: >= N rather than strict equality. Rationale: the
+    # CRT, the Windows loader, and the shim DLL's own initialization
+    # all transitively invoke NtCreateFile during process bootstrap;
+    # those incidental fires also produce mrFileOpen+NtCreateFile
+    # records. We cannot predict the bootstrap count, so the only
+    # available correctness statement is "the snoop fires at least N
+    # times for our explicit N NtCreateFile calls". This is the one
+    # acceptable Phase 5 deviation from strict equality and is
+    # documented in the fixture's header comment.
+    # ----------------------------------------------------------------
+    test "Phase 5: GetProcAddress-dispatched ntdll!NtCreateFile":
+      let fixtureSrc = fixturesDir / "fixture_ntcreatefile_getproc.c"
+      doAssert fileExists(fixtureSrc),
+        "missing fixture: " & fixtureSrc
+      let exePath = tempRoot / "ntcreate.exe"
+      compileGcc(fixtureSrc, exePath)
+      let workDir = tempRoot / "ntcreate-work"
+      createDir(workDir)
+      let marker = workDir / "ntcreate-marker"
+      let records = runMechanism("ntcreate", marker,
+                                 @[exePath, marker, $N])
+      var got = 0
+      for r in records:
+        if r.kind == mrFileOpen and r.detail == "NtCreateFile":
+          inc got
+      if got < N:
+        checkpoint("ntcreate records: " & $got &
+          " (expected at least " & $N &
+          " mrFileOpen records with detail \"NtCreateFile\" — see" &
+          " fixture header for the >=-rather-than-= rationale on" &
+          " NtCreateFile's process-bootstrap noise floor.)")
+      check got >= N

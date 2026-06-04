@@ -93,13 +93,35 @@ const
   HookGetFileAttributesA* = "GetFileAttributesA"
   HookCreateProcessW* = "CreateProcessW"
   HookCreateProcessA* = "CreateProcessA"
+  # M73 Phase 5 — additional Win32 entry points from
+  # Monitor-Hook-Shim.md §Windows Hook Surface.
+  HookDeleteFileW* = "DeleteFileW"
+  HookDeleteFileA* = "DeleteFileA"
+  HookCreateDirectoryW* = "CreateDirectoryW"
+  HookCreateDirectoryA* = "CreateDirectoryA"
+  HookCopyFileW* = "CopyFileW"
+  HookCopyFileA* = "CopyFileA"
+  HookMoveFileExW* = "MoveFileExW"
+  HookMoveFileExA* = "MoveFileExA"
+  HookGetFileInformationByHandleEx* = "GetFileInformationByHandleEx"
+  HookSetCurrentDirectoryW* = "SetCurrentDirectoryW"
+  HookSetCurrentDirectoryA* = "SetCurrentDirectoryA"
+  # NT Native API backstop — lives in ntdll.dll, not kernel32.
+  HookNtCreateFile* = "NtCreateFile"
 
-const MonitorShimHookNames*: array[11, string] = [
+const MonitorShimHookNames*: array[23, string] = [
   HookCreateFileW, HookCreateFileA, HookReadFile, HookWriteFile,
   HookCloseHandle,
   HookGetFileAttributesExW, HookGetFileAttributesExA,
   HookGetFileAttributesW, HookGetFileAttributesA,
-  HookCreateProcessW, HookCreateProcessA
+  HookCreateProcessW, HookCreateProcessA,
+  HookDeleteFileW, HookDeleteFileA,
+  HookCreateDirectoryW, HookCreateDirectoryA,
+  HookCopyFileW, HookCopyFileA,
+  HookMoveFileExW, HookMoveFileExA,
+  HookGetFileInformationByHandleEx,
+  HookSetCurrentDirectoryW, HookSetCurrentDirectoryA,
+  HookNtCreateFile
 ]
 
 # --- Standard hook priorities ----------------------------------------------
