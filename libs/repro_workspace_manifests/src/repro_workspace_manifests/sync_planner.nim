@@ -96,6 +96,21 @@ type
     ##                          tracking ref (``git log @{u}..HEAD`` is
     ##                          non-empty, or the published-evidence
     ##                          query says ``isPublished=false``).
+    ## - ``workspaceFeatureStarted`` — M16 flag from the metadata.
+    ##                          When ``true`` AND the current checkout
+    ##                          is on the workspace's marked feature
+    ##                          branch, the planner switches the
+    ##                          "clean fast-forwardable" arm to
+    ##                          ``scDivergentFeatureBranch`` so sync
+    ##                          NO-OPS the working tree instead of
+    ##                          reconciling it to the lock's tip.
+    ## - ``workspaceBranch``   — the workspace's recorded branch
+    ##                          (M13). Empty when no metadata is
+    ##                          present. The planner uses this to gate
+    ##                          the started-mark policy to repos that
+    ##                          are actually on the marked branch — a
+    ##                          repo that happens to be on some OTHER
+    ##                          branch keeps the M10 baseline semantics.
     exists*: bool
     headSha*: string
     isClean*: bool
@@ -104,6 +119,8 @@ type
     remoteBranchTip*: string
     lockedRevisionTip*: string
     hasUnpublishedCommits*: bool
+    workspaceFeatureStarted*: bool
+    workspaceBranch*: string
 
   RepoSyncDecision* = object
     ## One repo's classification + chosen mutating action. The
@@ -257,6 +274,20 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   if observation.currentBranch.len > 0 and lockedTip.len > 0 and
       observation.remoteBranchTip.len > 0 and
       sameSha(observation.remoteBranchTip, lockedTip):
+    # M16 — the workspace's feature-started mark amplifies this case:
+    # if the workspace is marked AND the current branch is the marked
+    # feature branch, the operator is mid-feature and sync should NOT
+    # reconcile the working tree to the lock's tip. Treat as a
+    # divergent-feature-branch report-only outcome instead.
+    if observation.workspaceFeatureStarted and
+        observation.workspaceBranch.len > 0 and
+        observation.currentBranch == observation.workspaceBranch:
+      result.syncCase = scDivergentFeatureBranch
+      result.action = saNone
+      result.message = "feature branch '" & observation.currentBranch &
+        "' at '" & resolved.path &
+        "' is the workspace's marked started branch; sync preserves it"
+      return
     result.syncCase = scCleanFastForwardable
     result.action = saFetchFastForward
     result.message = "fast-forwarding '" & resolved.path & "' on branch " &

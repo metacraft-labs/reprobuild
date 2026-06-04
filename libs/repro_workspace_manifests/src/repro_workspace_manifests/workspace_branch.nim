@@ -61,6 +61,12 @@ template emitKv(buf: var string; key, value: string) =
   buf.add(tomlEscape(value))
   buf.add("\"\n")
 
+template emitKvBool(buf: var string; key: string; value: bool) =
+  buf.add(key)
+  buf.add(" = ")
+  buf.add(if value: "true" else: "false")
+  buf.add("\n")
+
 proc workspaceTomlPath*(workspaceRoot: string): string =
   ## Canonical absolute path of the workspace metadata file.
   workspaceRoot / ".repo" / "workspace.toml"
@@ -102,6 +108,14 @@ proc serializeWorkspaceLocalToToml*(local: WorkspaceLocal): string =
   emitKv(result, "project", local.workspace.project)
   if local.workspace.branch.isSome and local.workspace.branch.get().len > 0:
     emitKv(result, "branch", local.workspace.branch.get())
+  # M16: emit ``feature_started = true`` only when the flag is
+  # explicitly set. The ``none`` and ``some(false)`` cases both
+  # omit the key — the reader treats absent and ``false`` as
+  # equivalent, so omitting the key keeps the workspace.toml
+  # minimal in the steady state.
+  if local.workspace.feature_started.isSome and
+      local.workspace.feature_started.get() == true:
+    emitKvBool(result, "feature_started", true)
 
   for entry in local.manifest:
     result.add("\n[[manifest]]\n")
@@ -136,6 +150,23 @@ proc isCompositionalWorkspaceToml*(workspaceRoot: string): bool =
     # single-project mode (which will then either succeed or emit its
     # own missing-project diagnostic).
     return false
+
+proc readWorkspaceFeatureStarted*(workspaceRoot: string): bool =
+  ## M16 — Return ``true`` iff the workspace metadata records that the
+  ## current ``[workspace].branch`` value names a feature branch
+  ## the operator deliberately started via
+  ## ``repro workspace start <branch>``. Returns ``false`` when the
+  ## file is missing, the key is absent, or the key is present and
+  ## ``false``. A malformed workspace.toml propagates as
+  ## ``WorkspaceManifestParseError`` so the caller sees the same
+  ## diagnostic the M5 reader would have raised.
+  let path = workspaceTomlPath(workspaceRoot)
+  if not fileExists(path):
+    return false
+  let local = readWorkspaceLocal(path)
+  if local.workspace.feature_started.isSome:
+    return local.workspace.feature_started.get()
+  false
 
 proc readWorkspaceBranch*(workspaceRoot: string): Option[string] =
   ## Return the workspace's active branch as recorded in
@@ -198,4 +229,47 @@ proc writeWorkspaceBranch*(workspaceRoot, project, branch: string) =
     local.workspace.project = project
 
   local.workspace.branch = some(branch)
+  writeFile(path, serializeWorkspaceLocalToToml(local))
+
+proc writeWorkspaceBranchWithStarted*(workspaceRoot, project, branch: string;
+                                     featureStarted: bool) =
+  ## M16 variant of ``writeWorkspaceBranch`` that ALSO records the
+  ## feature-started mark. ``featureStarted = true`` writes
+  ## ``feature_started = true`` under ``[workspace]``; ``false`` clears
+  ## the field entirely (by setting the Option to ``none`` so the
+  ## serializer omits the key — the steady state for branches that are
+  ## NOT feature branches, e.g. ``main``).
+  ##
+  ## Semantics mirror ``writeWorkspaceBranch``: when the file already
+  ## exists in composer mode the existing project and manifest layers
+  ## are preserved verbatim; in single-project mode the file is created
+  ## from scratch with just the metadata keys. Idempotent: re-running
+  ## with the same arguments produces byte-identical output.
+  if branch.len == 0:
+    raiseManifestError(workspaceTomlPath(workspaceRoot),
+      "workspace.branch", schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      "writeWorkspaceBranchWithStarted refuses to record an empty branch name")
+
+  let path = workspaceTomlPath(workspaceRoot)
+  createDir(parentDir(path))
+
+  var local: WorkspaceLocal
+  if fileExists(path):
+    local = readWorkspaceLocal(path)
+  else:
+    if project.len == 0:
+      raiseManifestError(path, "workspace.project",
+        schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+        "writeWorkspaceBranchWithStarted requires a non-empty project when " &
+          "creating workspace.toml from scratch (single-project mode)")
+    local.schema = schemaWorkspaceLocalV1
+    local.workspace.project = project
+
+  local.workspace.branch = some(branch)
+  if featureStarted:
+    local.workspace.feature_started = some(true)
+  else:
+    # Clear the field. The serializer omits absent / false values, so
+    # ``none`` keeps the workspace.toml minimal.
+    local.workspace.feature_started = none(bool)
   writeFile(path, serializeWorkspaceLocalToToml(local))

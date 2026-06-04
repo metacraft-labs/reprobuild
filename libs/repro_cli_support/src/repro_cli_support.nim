@@ -12161,10 +12161,28 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         "--quiet", "origin"])
 
   # Step 3b: observe each repo (now with fresh remote-tracking refs).
+  # Read the workspace metadata once and propagate it onto every
+  # observation so the M16 planner arm has the started flag + the
+  # marked branch name when classifying each repo.
+  var featureStarted = false
+  var workspaceBranchName = ""
+  try:
+    featureStarted = readWorkspaceFeatureStarted(args.workspaceRoot)
+    let recordedBranch = readWorkspaceBranch(args.workspaceRoot)
+    if recordedBranch.isSome:
+      workspaceBranchName = recordedBranch.get()
+  except WorkspaceManifestParseError:
+    # Malformed metadata: degrade gracefully — the M10 baseline policy
+    # still applies (the started-mark is just not honored).
+    featureStarted = false
+    workspaceBranchName = ""
   var observations: seq[RepoSyncObservation]
   for repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
-    observations.add(observeRepoForSync(identity, repoPath, repo))
+    var obs = observeRepoForSync(identity, repoPath, repo)
+    obs.workspaceFeatureStarted = featureStarted
+    obs.workspaceBranch = workspaceBranchName
+    observations.add(obs)
 
   # Step 4: planner.
   let planned = planSync(resolved.repos, observations)
@@ -14702,9 +14720,23 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
     return
 
   # Metadata update — only after every per-repo action succeeded.
+  # M16: the feature-started mark is a per-workspace flag tied to the
+  # CURRENT recorded branch. Switching to a different branch implicitly
+  # leaves the "started" feature, so the mark is CLEARED unless the
+  # checkout target matches the branch that was already marked started
+  # (the no-op-style re-checkout case, where we keep the mark).
+  var preserveStartedMark = false
   try:
-    writeWorkspaceBranch(parsed.workspaceRoot,
-      project = resolved.projectName, branch = parsed.branchName)
+    if readWorkspaceFeatureStarted(parsed.workspaceRoot):
+      let recordedBranch = readWorkspaceBranch(parsed.workspaceRoot)
+      if recordedBranch.isSome and recordedBranch.get() == parsed.branchName:
+        preserveStartedMark = true
+  except WorkspaceManifestParseError:
+    preserveStartedMark = false
+  try:
+    writeWorkspaceBranchWithStarted(parsed.workspaceRoot,
+      project = resolved.projectName, branch = parsed.branchName,
+      featureStarted = preserveStartedMark)
     result.recordedBranch = parsed.branchName
   except WorkspaceManifestParseError as err:
     result.exitCode = 1
@@ -14738,6 +14770,466 @@ proc runCheckoutCommand*(args: openArray[string]): int =
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
     for line in renderCheckoutTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
+# --- M16: `repro workspace start <branch>` --------------------------------
+#
+# Per ``reprobuild-specs/Workspace-Management.milestones.org`` §M16.
+# Combination of M14 ``branch create`` + M15 ``checkout`` + the M16
+# "feature started" mark in workspace metadata. The mark is what tells
+# the M10 sync planner to NO-OP the "clean fast-forwardable" arm on
+# repos that sit on the marked workspace branch, so the operator's
+# feature work is preserved when the lock pins a different SHA.
+#
+# Behavior — three cases distinguished in observation:
+#
+#   1. The branch already exists on EVERY participating repo (locally,
+#      or via the standard ``origin`` remote): switch to it
+#      (M15 semantics) and set the mark.
+#   2. The branch is ABSENT on every participating repo (no local
+#      branch, no remote branch with that name): create it across
+#      every repo at current HEAD (M14 semantics), switch to it, and
+#      set the mark.
+#   3. Mixed: refuse-and-report (exit 2). Cleaning this up is
+#      operator work.
+#
+# In every case the started mark is the load-bearing M16 addition.
+# Refuses (exit 2) on any dirty repo (matches M14/M15 policy).
+#
+# Implementation strategy: rather than duplicate the M14 / M15
+# observation+execute machinery, we DELEGATE to ``executeBranchCreate``
+# or ``executeCheckout`` depending on the observation, then layer the
+# started-mark write on top. The metadata write inside those helpers
+# is overridden by a follow-up ``writeWorkspaceBranchWithStarted``
+# call so the started flag lands correctly even when the inner helper
+# wrote a metadata file that omitted the mark.
+
+type
+  WorkspaceStartRepoEntry* = object
+    ## One per-repo line in the start-report.json. Carries the
+    ## inner-helper's outcome tag (``created`` / ``switched`` /
+    ## ``already_at_head`` / ``already_on_branch`` / etc.) so the
+    ## report shape unifies the M14 and M15 vocabularies.
+    name*: string
+    path*: string
+    headSha*: string
+    previousBranch*: string
+    newBranch*: string
+    outcome*: string
+    dirtyReason*: string
+    diagnostic*: string
+
+  WorkspaceStartReport* = object
+    ## Structured outcome of one ``repro workspace start`` invocation.
+    ## ``mode`` is ``create`` when the branch was absent everywhere
+    ## (M14 path), ``switch`` when it was present everywhere (M15
+    ## path), or ``refused`` when neither full-create nor full-switch
+    ## applied. ``featureStarted`` is the recorded value of the
+    ## ``[workspace].feature_started`` flag AFTER the command finished.
+    project*: string
+    workspaceRoot*: string
+    branch*: string
+    mode*: string
+    recordedBranch*: string
+    featureStarted*: bool
+    repos*: seq[WorkspaceStartRepoEntry]
+    exitCode*: int
+
+proc toJsonNode*(report: WorkspaceStartReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["branch"] = %report.branch
+  result["mode"] = %report.mode
+  result["recordedBranch"] = %report.recordedBranch
+  result["featureStarted"] = %report.featureStarted
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["headSha"] = %entry.headSha
+    obj["previousBranch"] = %entry.previousBranch
+    obj["newBranch"] = %entry.newBranch
+    obj["outcome"] = %entry.outcome
+    obj["dirtyReason"] = %entry.dirtyReason
+    obj["diagnostic"] = %entry.diagnostic
+    repos.add(obj)
+  result["repos"] = repos
+  result["exitCode"] = %report.exitCode
+
+proc renderWorkspaceStartTextLines*(report: WorkspaceStartReport): seq[string] =
+  for entry in report.repos:
+    var line = "workspace start: " & entry.path & " " & entry.outcome
+    if entry.previousBranch.len > 0 and entry.newBranch.len > 0 and
+        entry.previousBranch != entry.newBranch:
+      line.add(" " & entry.previousBranch & " -> " & entry.newBranch)
+    elif entry.newBranch.len > 0:
+      line.add(" branch=" & entry.newBranch)
+    if entry.dirtyReason.len > 0:
+      line.add(" (" & entry.dirtyReason & ")")
+    elif entry.diagnostic.len > 0:
+      line.add(" (" & entry.diagnostic & ")")
+    result.add(line)
+  if report.exitCode == 0:
+    let markedSuffix =
+      if report.featureStarted: " [feature_started=true]"
+      else: ""
+    result.add("workspace start: '" & report.branch &
+      "' active across " & $report.repos.len & " repos; metadata=" &
+      report.recordedBranch & markedSuffix)
+
+type
+  WorkspaceStartArgs = object
+    workspaceRoot: string
+    projectName: string
+    branchName: string
+    json: bool
+    toolProvisioning: ToolProvisioningMode
+
+proc parseWorkspaceStartArgs*(args: openArray[string]): WorkspaceStartArgs =
+  ## ``repro workspace start <branch> [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``. Positional
+  ## ``<branch>`` is REQUIRED.
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace start` flag: " & arg)
+    elif result.branchName.len == 0:
+      result.branchName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro workspace start`: " & arg)
+    inc i
+  if result.branchName.len == 0:
+    raise newException(ValueError,
+      "`repro workspace start` requires a branch name positional argument")
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
+  result.workspaceRoot = parsed.workspaceRoot
+  result.branch = parsed.branchName
+
+  # Observation pass: walk every declared repo, classify (a) dirty
+  # (any-dirty refuses immediately), (b) branch present locally, (c)
+  # branch present on origin. We reuse ``resolveCheckoutProject`` so
+  # the dispatch rules stay aligned with M14/M15.
+  let parsedCheckout = CheckoutArgs(
+    workspaceRoot: parsed.workspaceRoot,
+    projectName: parsed.projectName,
+    branchName: parsed.branchName,
+    toolProvisioning: parsed.toolProvisioning)
+  let (resolved, _) = resolveCheckoutProject(parsedCheckout)
+  result.project = resolved.projectName
+
+  let identity = ensureGitToolResolvable(
+    parsed.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  type
+    StartRepoState = object
+      repo: ResolvedRepo
+      repoPath: string
+      headSha: string
+      previousBranch: string
+      isClean: bool
+      localHadBranch: bool
+      remoteHadBranch: bool
+      probeFailed: bool
+      probeReason: string
+
+  var states: seq[StartRepoState]
+  var anyDirty = false
+  var anyProbeFailed = false
+  var allHaveBranch = true   # local OR remote on EVERY repo
+  var noneHaveBranch = true  # neither local NOR remote on ANY repo
+  for repo in resolved.repos:
+    var state: StartRepoState
+    state.repo = repo
+    state.repoPath = parsed.workspaceRoot / repo.path
+    state.isClean = true
+    if not dirExists(state.repoPath / ".git"):
+      state.probeFailed = true
+      state.probeReason = "no on-disk checkout at '" & state.repoPath &
+        "'; run `repro workspace init` or `repro workspace sync` first"
+      anyProbeFailed = true
+      states.add(state)
+      continue
+    let headRes = queryGitState(headShaQuery(state.repoPath), identity)
+    if headRes.status != gqsOk:
+      state.probeFailed = true
+      state.probeReason = "head-sha probe failed: " & headRes.diagnostic
+      anyProbeFailed = true
+      states.add(state)
+      continue
+    state.headSha = headRes.headSha
+    let branchRes = gitRunPlain(identity,
+      ["-C", state.repoPath, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branchRes.code == 0:
+      state.previousBranch = branchRes.output.strip()
+    let cleanRes = queryGitState(isCleanQuery(state.repoPath), identity)
+    if cleanRes.status != gqsOk:
+      state.probeFailed = true
+      state.probeReason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      anyProbeFailed = true
+      states.add(state)
+      continue
+    state.isClean = cleanRes.isClean
+    if not state.isClean:
+      anyDirty = true
+      states.add(state)
+      continue
+    # Probe local branch.
+    let localProbe = gitRunPlain(identity,
+      ["-C", state.repoPath, "rev-parse", "--verify", "--quiet",
+       "refs/heads/" & parsed.branchName])
+    if localProbe.code == 0 and localProbe.output.strip().len > 0:
+      state.localHadBranch = true
+    # Probe remote branch (origin).
+    let remoteProbe = gitRunPlain(identity,
+      ["-C", state.repoPath, "ls-remote", "--heads", "origin",
+       parsed.branchName])
+    if remoteProbe.code == 0 and remoteProbe.output.strip().len > 0:
+      state.remoteHadBranch = true
+    if state.localHadBranch or state.remoteHadBranch:
+      noneHaveBranch = false
+    else:
+      allHaveBranch = false
+    states.add(state)
+
+  # Decision tree:
+  #
+  #   - Any probe failed → exit 1.
+  #   - Any repo dirty → exit 2, refuse and report.
+  #   - Branch present everywhere → SWITCH path (delegate to
+  #     ``executeCheckout``).
+  #   - Branch absent everywhere → CREATE path (delegate to
+  #     ``executeBranchCreate``).
+  #   - Mixed → exit 2 (refuse-and-report; the operator needs to
+  #     reconcile manually).
+  let recordedBranchPre = readWorkspaceBranch(parsed.workspaceRoot)
+  let recordedFeatureStartedPre =
+    try: readWorkspaceFeatureStarted(parsed.workspaceRoot)
+    except WorkspaceManifestParseError: false
+  if anyProbeFailed:
+    for state in states:
+      var entry = WorkspaceStartRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        previousBranch: state.previousBranch,
+        newBranch: state.previousBranch)
+      if state.probeFailed:
+        entry.outcome = "probe_failed"
+        entry.diagnostic = state.probeReason
+      elif not state.isClean:
+        entry.outcome = "dirty_refused"
+        entry.dirtyReason = "working tree has uncommitted changes"
+      else:
+        entry.outcome = "ready"
+      result.repos.add(entry)
+    result.exitCode = 1
+    result.mode = "refused"
+    if recordedBranchPre.isSome:
+      result.recordedBranch = recordedBranchPre.get()
+    result.featureStarted = recordedFeatureStartedPre
+    return
+  if anyDirty:
+    for state in states:
+      var entry = WorkspaceStartRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        previousBranch: state.previousBranch,
+        newBranch: state.previousBranch)
+      if not state.isClean:
+        entry.outcome = "dirty_refused"
+        entry.dirtyReason = "working tree has uncommitted changes"
+      else:
+        entry.outcome = "ready"
+      result.repos.add(entry)
+    result.exitCode = 2
+    result.mode = "refused"
+    if recordedBranchPre.isSome:
+      result.recordedBranch = recordedBranchPre.get()
+    result.featureStarted = recordedFeatureStartedPre
+    return
+  if not allHaveBranch and not noneHaveBranch:
+    # Mixed: some repos have the branch, some don't. Refuse cleanly.
+    for state in states:
+      var entry = WorkspaceStartRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        previousBranch: state.previousBranch,
+        newBranch: state.previousBranch)
+      if state.localHadBranch:
+        entry.outcome = "ready_local"
+      elif state.remoteHadBranch:
+        entry.outcome = "ready_remote"
+      else:
+        entry.outcome = "branch_missing"
+        entry.diagnostic = "branch '" & parsed.branchName &
+          "' absent locally and on remote 'origin' for this repo; " &
+          "`repro workspace start` requires either CREATE (absent " &
+          "everywhere) or SWITCH (present everywhere)"
+      result.repos.add(entry)
+    result.exitCode = 2
+    result.mode = "refused"
+    if recordedBranchPre.isSome:
+      result.recordedBranch = recordedBranchPre.get()
+    result.featureStarted = recordedFeatureStartedPre
+    return
+
+  if allHaveBranch:
+    # SWITCH path — delegate to executeCheckout, then layer the
+    # started mark on top.
+    result.mode = "switch"
+    let checkoutReport = executeCheckout(parsedCheckout)
+    for centry in checkoutReport.repos:
+      result.repos.add(WorkspaceStartRepoEntry(
+        name: centry.name,
+        path: centry.path,
+        headSha: centry.headSha,
+        previousBranch: centry.previousBranch,
+        newBranch: centry.newBranch,
+        outcome: centry.outcome,
+        dirtyReason: centry.dirtyReason,
+        diagnostic: centry.diagnostic))
+    if checkoutReport.exitCode != 0:
+      result.exitCode = checkoutReport.exitCode
+      result.recordedBranch = checkoutReport.recordedBranch
+      result.featureStarted = recordedFeatureStartedPre
+      return
+    # Set the started mark.
+    try:
+      writeWorkspaceBranchWithStarted(parsed.workspaceRoot,
+        project = resolved.projectName, branch = parsed.branchName,
+        featureStarted = true)
+      result.recordedBranch = parsed.branchName
+      result.featureStarted = true
+      result.exitCode = 0
+    except WorkspaceManifestParseError as err:
+      result.exitCode = 1
+      result.recordedBranch = checkoutReport.recordedBranch
+      result.featureStarted = recordedFeatureStartedPre
+      result.repos.add(WorkspaceStartRepoEntry(
+        outcome: "metadata_write_failed",
+        diagnostic: err.msg))
+    return
+
+  # CREATE path — branch is absent on every repo. Delegate to
+  # executeBranchCreate, then layer the started mark on top.
+  result.mode = "create"
+  let branchParsed = BranchArgs(
+    workspaceRoot: parsed.workspaceRoot,
+    projectName: parsed.projectName,
+    branchName: parsed.branchName,
+    toolProvisioning: parsed.toolProvisioning)
+  let createReport = executeBranchCreate(branchParsed)
+  for centry in createReport.repos:
+    # The M14 create report lacks ``previousBranch`` / ``newBranch``
+    # fields — fill them from the M16 observation states so the start
+    # report shape stays uniform.
+    var previousBranch = ""
+    for state in states:
+      if state.repo.name == centry.name:
+        previousBranch = state.previousBranch
+        break
+    var newBranch = ""
+    if createReport.exitCode == 0:
+      newBranch = parsed.branchName
+    else:
+      newBranch = previousBranch
+    result.repos.add(WorkspaceStartRepoEntry(
+      name: centry.name,
+      path: centry.path,
+      headSha: centry.headSha,
+      previousBranch: previousBranch,
+      newBranch: newBranch,
+      outcome: centry.outcome,
+      dirtyReason: centry.dirtyReason,
+      diagnostic: centry.diagnostic))
+  if createReport.exitCode != 0:
+    result.exitCode = createReport.exitCode
+    result.recordedBranch = createReport.recordedBranch
+    result.featureStarted = recordedFeatureStartedPre
+    return
+  # The M14 create form created the branch from HEAD but did NOT
+  # switch to it. M16's "start" semantics expect the workspace to be
+  # ON the new branch afterwards. Run executeCheckout to switch every
+  # repo onto the freshly created branch.
+  let switchReport = executeCheckout(parsedCheckout)
+  if switchReport.exitCode != 0:
+    # Translate the switch failure into the start report.
+    result.repos.setLen(0)
+    for centry in switchReport.repos:
+      result.repos.add(WorkspaceStartRepoEntry(
+        name: centry.name,
+        path: centry.path,
+        headSha: centry.headSha,
+        previousBranch: centry.previousBranch,
+        newBranch: centry.newBranch,
+        outcome: centry.outcome,
+        dirtyReason: centry.dirtyReason,
+        diagnostic: centry.diagnostic))
+    result.exitCode = switchReport.exitCode
+    result.recordedBranch = switchReport.recordedBranch
+    result.featureStarted = recordedFeatureStartedPre
+    return
+  # Now set the started mark.
+  try:
+    writeWorkspaceBranchWithStarted(parsed.workspaceRoot,
+      project = resolved.projectName, branch = parsed.branchName,
+      featureStarted = true)
+    result.recordedBranch = parsed.branchName
+    result.featureStarted = true
+    result.exitCode = 0
+  except WorkspaceManifestParseError as err:
+    result.exitCode = 1
+    result.recordedBranch = createReport.recordedBranch
+    result.featureStarted = recordedFeatureStartedPre
+    result.repos.add(WorkspaceStartRepoEntry(
+      outcome: "metadata_write_failed",
+      diagnostic: err.msg))
+
+proc writeWorkspaceStartReport(report: WorkspaceStartReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "start-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runWorkspaceStartCommand*(args: openArray[string]): int =
+  ## ``repro workspace start <branch> [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## M16 — combination of ``repro branch <name>`` + ``repro checkout
+  ## <name>`` + a "feature started" mark in metadata so future
+  ## ``repro workspace sync`` runs preserve the workspace branch even
+  ## when the lock pins different SHAs on it. See the M16 block
+  ## comment above for the contract.
+  let parsed = parseWorkspaceStartArgs(args)
+  let report = executeWorkspaceStart(parsed)
+  writeWorkspaceStartReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderWorkspaceStartTextLines(report):
       stdout.writeLine(line)
   report.exitCode
 
@@ -15102,6 +15594,24 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceListCommand(listArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace list: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "start":
+    # M16 — `repro workspace start <branch>`. Combination of M14
+    # ``branch create`` + M15 ``checkout`` + a "feature started"
+    # mark in workspace metadata. Same dispatch convention as M9–M12:
+    # the milestone spec gestures at a planner path but the
+    # implementation lives in ``repro_cli_support`` so the dispatcher
+    # reaches it via ``runWorkspaceStartCommand``.
+    try:
+      let startArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceStartCommand(startArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace start: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "manifests":
