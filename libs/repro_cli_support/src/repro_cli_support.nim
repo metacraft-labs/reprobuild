@@ -11237,7 +11237,502 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       "direct mode: " & err.msg)
     return runDirectWatch()
 
+# ---- M22: `repro develop <pkg>` (workspace-overlay form) ------------------
+#
+# M22 adds the workspace-overlay form documented in
+# ``reprobuild-specs/CLI/develop.md``: a bare positional ``<pkg>`` whose
+# resolution targets the M6/M7/M8 resolver's package set (the
+# ``ResolvedRepo.name`` of every repo declared by the active workspace).
+#
+# Two outcomes per invocation:
+#
+#   - ``--source=PATH`` provided: just register the override pointing at
+#     the existing on-disk checkout. No VCS clone is scheduled.
+#   - no ``--source``: clone the package's upstream URL into a workspace-
+#     local conventional location (``<workspaceRoot>/develop/<pkg>``)
+#     using the M2 ``bakWorkspaceVcs`` clone action, then register the
+#     override pointing at the freshly-cloned tree.
+#
+# In both cases the override entry is appended via the M20 immutable
+# ``addOverride`` helper and persisted with ``writeDevelopOverridesFile``.
+# The engine-rebuild step is deferred along with the M21 engine wiring;
+# the next ``repro build`` will pick up the override via the M21 resolver
+# contract once that wiring lands. M22 is purely the operator-visible
+# piece (clone + register + report).
+#
+# Exit codes (see ``CLI/develop.md`` Conflict And Reuse Rules):
+#   - 0  success: clone + register, register-only, or idempotent re-develop
+#         of the same package at the same source.
+#   - 1  IO / VCS / resolution failure (e.g. unknown package in project,
+#         missing ``--source`` path, clone failure, malformed manifest).
+#   - 2  refused: an override already exists for the package at a
+#         DIFFERENT on-disk source path. The operator must run
+#         ``repro develop --drop <pkg>`` (future M22b) or hand-edit the
+#         file before re-developing.
+#
+# JSON report path:
+#   ``<workspaceRoot>/.repro/workspace/develop-report.json``.
+
+type
+  WorkspaceDevelopReport* = object
+    ## Structured outcome of one ``repro develop <pkg>`` invocation in
+    ## the M22 workspace-overlay form. ``mode`` is one of:
+    ##
+    ##   - ``cloned``       — no ``--source`` provided; the dispatcher
+    ##                         cloned the package's upstream URL into
+    ##                         ``<workspaceRoot>/develop/<pkg>`` and
+    ##                         registered the override pointing at it.
+    ##   - ``registered``   — ``--source=PATH`` provided; the dispatcher
+    ##                         registered the override pointing at the
+    ##                         pre-existing checkout, with no clone.
+    ##   - ``idempotent``   — an override already existed for ``pkg`` at
+    ##                         the SAME on-disk path; the dispatcher
+    ##                         re-emitted the report and returned 0.
+    ##   - ``refused``      — an override already existed for ``pkg`` at
+    ##                         a DIFFERENT on-disk path; the dispatcher
+    ##                         did NOT modify the file and returned 2.
+    ##   - ``error``        — IO / VCS / resolve failure; the dispatcher
+    ##                         returned 1.
+    package*: string
+    source*: string
+    mode*: string
+    workspaceRoot*: string
+    project*: string
+    overridePackage*: string
+    overrideLocalPath*: string
+    overrideState*: string
+    overrideCreatedAt*: string
+    overrideProvenance*: string
+    diagnostic*: string
+    exitCode*: int
+
+proc toJsonNode*(report: WorkspaceDevelopReport): JsonNode =
+  result = newJObject()
+  result["pkg"] = %report.package
+  result["source"] = %report.source
+  result["mode"] = %report.mode
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["project"] = %report.project
+  var entry = newJObject()
+  entry["package"] = %report.overridePackage
+  entry["local_path"] = %report.overrideLocalPath
+  entry["state"] = %report.overrideState
+  entry["created_at"] = %report.overrideCreatedAt
+  if report.overrideProvenance.len > 0:
+    entry["provenance"] = %report.overrideProvenance
+  result["overrideEntry"] = entry
+  if report.diagnostic.len > 0:
+    result["diagnostic"] = %report.diagnostic
+  result["exitCode"] = %report.exitCode
+
+proc renderDevelopTextLines*(report: WorkspaceDevelopReport): seq[string] =
+  case report.mode
+  of "cloned":
+    result.add("repro develop: cloned " & report.package & " into " &
+      report.overrideLocalPath)
+    result.add("repro develop: registered override for " & report.package &
+      " (next build will pick it up via the M21 resolver)")
+  of "registered":
+    result.add("repro develop: registered override for " & report.package &
+      " → " & report.overrideLocalPath &
+      " (next build will pick it up via the M21 resolver)")
+  of "idempotent":
+    result.add("repro develop: " & report.package &
+      " already in develop mode at " & report.overrideLocalPath &
+      " (no change)")
+  of "refused":
+    result.add("repro develop: refused — override for " & report.package &
+      " already points at a different path: " & report.overrideLocalPath)
+    if report.diagnostic.len > 0:
+      result.add("repro develop: " & report.diagnostic)
+  else:
+    if report.diagnostic.len > 0:
+      result.add("repro develop: error — " & report.diagnostic)
+
+type
+  WorkspaceDevelopArgs = object
+    package: string
+    sourcePath: string
+    workspaceRoot: string
+    toolProvisioning: ToolProvisioningMode
+    json: bool
+    explicitWorkspaceRoot: bool
+    explicitSource: bool
+
+proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
+  ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## Mirrors the M9 ``parseWorkspaceInitArgs`` shape. The positional
+  ## ``<pkg>`` is required and must NOT be combined with ``--``,
+  ## ``--cmake``, ``--list``, or ``--into`` (those route to the existing
+  ## pre-M22 develop forms). ``--source`` and ``--workspace-root`` accept
+  ## both ``flag=value`` and ``flag value`` forms.
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--source" or arg.startsWith("--source="):
+      result.sourcePath = valueFromFlag(args, i, "--source")
+      result.explicitSource = true
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+      result.explicitWorkspaceRoot = true
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro develop` flag in M22 workspace-overlay form: " &
+          arg)
+    elif result.package.len == 0:
+      result.package = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro develop <pkg>`: " & arg)
+    inc i
+  if result.package.len == 0:
+    raise newException(ValueError,
+      "`repro develop <pkg>` requires a package name")
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveDevelopWorkspaceProject(
+    workspaceRoot: string): ResolvedProject =
+  ## M22 reuses the M9/M10 dispatch rule. Composer wins when
+  ## ``.repo/workspace.toml`` declares layers; otherwise we look up the
+  ## single recorded project name (via the M13 metadata-only
+  ## workspace.toml) or fall back to a single ``projects/*.toml`` if
+  ## exactly one exists. A workspace with no resolvable project surfaces
+  ## as a ``ValueError`` so the dispatcher exits 1 with a clear message.
+  let workspaceToml = workspaceRoot / ".repo" / "workspace.toml"
+  if isCompositionalWorkspaceToml(workspaceRoot):
+    return composeManifestLayersFromFile(workspaceToml)
+  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  if fileExists(workspaceToml):
+    try:
+      let recorded = readWorkspaceLocal(absolutePath(workspaceToml))
+      if recorded.workspace.project.len > 0:
+        let projectFile = manifestsRoot / "projects" /
+          (recorded.workspace.project & ".toml")
+        let variantFile = manifestsRoot / "variants" /
+          (recorded.workspace.project & ".toml")
+        if fileExists(projectFile):
+          return resolveProject(projectFile)
+        if fileExists(variantFile):
+          return resolveVariant(variantFile)
+    except WorkspaceManifestParseError:
+      discard
+  # Last resort: a workspace with exactly one ``projects/*.toml`` and no
+  # metadata file. M22's primary callers always have a workspace.toml
+  # (M9 init writes one) so this arm mostly serves tests that pre-seed
+  # only the project file.
+  let projectsDir = manifestsRoot / "projects"
+  if dirExists(projectsDir):
+    var candidates: seq[string]
+    for kind, path in walkDir(projectsDir):
+      if kind == pcFile and path.endsWith(".toml"):
+        candidates.add(path)
+    if candidates.len == 1:
+      return resolveProject(candidates[0])
+  raise newException(ValueError,
+    "`repro develop` could not resolve a project from workspace root '" &
+      workspaceRoot & "' (no .repo/workspace.toml and no single " &
+      "projects/*.toml under .repo/manifests/)")
+
+proc safeDevelopPathSegment(value: string): string =
+  ## File-system safe segment for the develop subdir. Mirrors
+  ## ``safeRepoIdSegment`` (only ASCII letters/digits and a couple of
+  ## punctuation chars survive untouched) but with a different name so
+  ## the two helpers can diverge later if needed.
+  for ch in value:
+    if ch in {'A'..'Z', 'a'..'z', '0'..'9', '-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('-')
+  if result.len == 0:
+    result = "pkg"
+
+proc cloneForDevelop(workspaceRoot, pkg, fetchUrl, revision: string;
+                    identity: GitToolIdentity): tuple[ok: bool; path: string;
+                                                    diagnostic: string] =
+  ## Schedule a one-shot ``bakWorkspaceVcs`` clone of ``fetchUrl`` into
+  ## ``<workspaceRoot>/develop/<pkg>``. The target directory must NOT
+  ## pre-exist (the clone action refuses to clone into a non-empty
+  ## path); the dispatcher checks for collisions before reaching here.
+  ## Returns the absolute target path on success.
+  let relTarget = "develop" / safeDevelopPathSegment(pkg)
+  let absTarget = workspaceRoot / relTarget
+  if dirExists(absTarget):
+    return (ok: false, path: absTarget,
+      diagnostic: "develop clone target already exists: " & absTarget)
+  let receiptDir = workspaceRoot / ".repro" / "workspace" / "receipts"
+  createDir(receiptDir)
+  let receiptRel = ".repro" / "workspace" / "receipts" /
+    ("develop-clone-" & safeDevelopPathSegment(pkg) & ".receipt")
+  let actionId = "workspace-develop-clone-" & safeDevelopPathSegment(pkg)
+  var action = gitCloneAction(actionId, identity,
+    remoteUrl = fetchUrl,
+    repoPath = relTarget,
+    receiptPath = receiptRel,
+    revision = revision)
+  action.cwd = workspaceRoot
+  let cacheRoot = workspaceRoot / ".repro" / "workspace" / "engine-cache"
+  var config = defaultBuildEngineConfig(cacheRoot)
+  config.suppressTrace = true
+  let res = runBuild(graph([action]), config)
+  if res.results.len == 0:
+    return (ok: false, path: absTarget,
+      diagnostic: "build engine returned no results for develop clone")
+  let outcome = res.results[0]
+  if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+    return (ok: false, path: absTarget,
+      diagnostic: "develop clone failed: status=" & $outcome.status &
+        " reason=" & outcome.reason &
+        (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+  (ok: true, path: absTarget, diagnostic: "")
+
+proc currentRfc3339Timestamp(): string =
+  ## ISO-8601 UTC timestamp formatted as ``YYYY-MM-DDTHH:MM:SSZ`` so the
+  ## M20 strict reader's ``created_at`` field round-trips byte-for-byte.
+  let t = utc(now())
+  t.format("yyyy-MM-dd'T'HH:mm:ss") & "Z"
+
+proc executeWorkspaceDevelop(args: WorkspaceDevelopArgs):
+    WorkspaceDevelopReport =
+  ## End-to-end M22 driver. (1) Resolve the active project. (2) Check
+  ## that ``args.package`` is declared as a ``ResolvedRepo.name``;
+  ## otherwise exit 1 naming the project file. (3) Decide between
+  ## clone-and-register and just-register. (4) Read the existing M20
+  ## override file (if any) and detect idempotent / collision arms.
+  ## (5) Persist the updated override via ``writeDevelopOverridesFile``.
+  result.package = args.package
+  result.workspaceRoot = args.workspaceRoot
+
+  # Step 1: resolve the workspace's active project.
+  var resolved: ResolvedProject
+  try:
+    resolved = resolveDevelopWorkspaceProject(args.workspaceRoot)
+  except CatchableError as err:
+    result.mode = "error"
+    result.diagnostic = err.msg
+    result.exitCode = 1
+    return result
+  result.project = resolved.projectName
+
+  # Step 2: verify the package is declared.
+  var matched: ResolvedRepo
+  var found = false
+  for repo in resolved.repos:
+    if repo.name == args.package:
+      matched = repo
+      found = true
+      break
+  if not found:
+    result.mode = "error"
+    result.diagnostic = "package '" & args.package &
+      "' is not declared in project '" & resolved.projectName &
+      "' (project file: " & resolved.projectFile & ")"
+    result.exitCode = 1
+    return result
+
+  # Step 3: determine the on-disk source path.
+  var sourcePath = ""
+  var willClone = false
+  if args.explicitSource:
+    if args.sourcePath.len == 0:
+      result.mode = "error"
+      result.diagnostic = "`--source` requires a path value"
+      result.exitCode = 1
+      return result
+    sourcePath = absolutePath(args.sourcePath)
+    if not dirExists(sourcePath):
+      result.mode = "error"
+      result.diagnostic = "`--source` path does not exist: " & sourcePath
+      result.exitCode = 1
+      return result
+  else:
+    sourcePath = absolutePath(
+      args.workspaceRoot / "develop" / safeDevelopPathSegment(args.package))
+    willClone = true
+  result.source = sourcePath
+
+  # Step 4: load the existing override file (if any) and check the
+  # idempotent / collision arms BEFORE doing any side-effecting work.
+  var existingFile: DevelopOverrides
+  let existingOpt =
+    try:
+      readDevelopOverridesFile(args.workspaceRoot)
+    except WorkspaceManifestParseError as e:
+      result.mode = "error"
+      result.diagnostic = "failed to read existing develop-overrides.toml: " &
+        e.msg
+      result.exitCode = 1
+      return result
+  if existingOpt.isSome:
+    existingFile = existingOpt.get()
+  else:
+    existingFile = newDevelopOverrides()
+
+  let priorOpt = findOverride(existingFile, args.package)
+  if priorOpt.isSome:
+    let prior = priorOpt.get()
+    let priorAbs = absolutePath(prior.local_path)
+    if priorAbs == sourcePath:
+      # Idempotent: same package, same path → no-op (exit 0).
+      result.mode = "idempotent"
+      result.overridePackage = prior.package
+      result.overrideLocalPath = prior.local_path
+      result.overrideState = prior.state
+      result.overrideCreatedAt = prior.created_at
+      if prior.provenance.isSome:
+        result.overrideProvenance = prior.provenance.get()
+      result.exitCode = 0
+      return result
+    else:
+      # Collision: same package, different path → refuse (exit 2).
+      result.mode = "refused"
+      result.overridePackage = prior.package
+      result.overrideLocalPath = prior.local_path
+      result.overrideState = prior.state
+      result.overrideCreatedAt = prior.created_at
+      if prior.provenance.isSome:
+        result.overrideProvenance = prior.provenance.get()
+      result.diagnostic = "existing override at " & prior.local_path &
+        " does not match requested source " & sourcePath &
+        "; drop or relocate the existing override before re-developing"
+      result.exitCode = 2
+      return result
+
+  # Step 5: clone if needed.
+  if willClone:
+    var identity: GitToolIdentity
+    try:
+      identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
+      installGitVcsExecutor()
+    except CatchableError as err:
+      result.mode = "error"
+      result.diagnostic = "git tool not resolvable: " & err.msg
+      result.exitCode = 1
+      return result
+    let cloneRes = cloneForDevelop(args.workspaceRoot, args.package,
+      matched.fetchUrl, matched.revision, identity)
+    if not cloneRes.ok:
+      result.mode = "error"
+      result.diagnostic = cloneRes.diagnostic
+      result.exitCode = 1
+      return result
+    sourcePath = cloneRes.path
+    result.source = sourcePath
+
+  # Step 6: register the override.
+  let stability = "editable"
+  let createdAt = currentRfc3339Timestamp()
+  let provenance = "repro develop " & args.package
+  var entry: repro_workspace_manifests.DevelopOverrideEntry
+  entry.package = args.package
+  entry.local_path = sourcePath
+  entry.state = stability
+  entry.created_at = createdAt
+  entry.provenance = some(provenance)
+  let updated = addOverride(existingFile, entry)
+  try:
+    writeDevelopOverridesFile(args.workspaceRoot, updated)
+  except CatchableError as err:
+    result.mode = "error"
+    result.diagnostic = "failed to write develop-overrides.toml: " & err.msg
+    result.exitCode = 1
+    return result
+
+  result.mode =
+    if willClone: "cloned"
+    else: "registered"
+  result.overridePackage = entry.package
+  result.overrideLocalPath = entry.local_path
+  result.overrideState = entry.state
+  result.overrideCreatedAt = entry.created_at
+  result.overrideProvenance = provenance
+  result.exitCode = 0
+
+proc writeWorkspaceDevelopReport(report: WorkspaceDevelopReport) =
+  ## Persist the JSON view alongside the other workspace dispatcher
+  ## reports (``init-report.json``, ``sync-report.json`` etc.) so
+  ## downstream tooling can read one well-known location.
+  if report.workspaceRoot.len == 0:
+    return
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  try:
+    createDir(reportDir)
+  except CatchableError:
+    return
+  let reportPath = reportDir / "develop-report.json"
+  try:
+    writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+  except CatchableError:
+    discard
+
+proc runWorkspaceDevelopCommand*(args: openArray[string]): int =
+  ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## M22 workspace-overlay dispatcher: clone the package (via M2 VCS
+  ## actions) or just register the override (when ``--source`` points at
+  ## a pre-existing checkout), then persist the entry in
+  ## ``<workspaceRoot>/.repro/develop-overrides.toml`` via M20.
+  let parsed = parseDevelopArgs(args)
+  let report = executeWorkspaceDevelop(parsed)
+  writeWorkspaceDevelopReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderDevelopTextLines(report):
+      if report.exitCode == 0:
+        stdout.writeLine(line)
+      else:
+        stderr.writeLine(line)
+  report.exitCode
+
+proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
+  ## Decide whether the argv looks like the M22 workspace-overlay form
+  ## (``repro develop <pkg> [--source=...] [--workspace-root=...]
+  ## [--json]``) as opposed to the pre-M22 surfaces (``--list``,
+  ## ``<dependency> --into=PATH``, ``<target> -- <command>``,
+  ## ``--cmake``). Returns true when at least one M22-distinctive
+  ## marker is present AND none of the pre-M22 markers are present.
+  ##
+  ## The M22-distinctive markers are: ``--source[=...]``, ``--json``,
+  ## ``--workspace-root[=...]``. The pre-M22 markers are: ``--list``,
+  ## ``--into[=...]``, ``--cmake``, ``--cmake-binary[=...]``,
+  ## ``--work-root[=...]``, ``--tool-provisioning[=...]``, ``--``
+  ## (the command separator).
+  var hasM22Marker = false
+  for arg in args:
+    if arg == "--source" or arg.startsWith("--source=") or
+        arg == "--json" or
+        arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      hasM22Marker = true
+    if arg == "--list" or
+        arg == "--into" or arg.startsWith("--into=") or
+        arg == "--cmake" or
+        arg == "--cmake-binary" or arg.startsWith("--cmake-binary=") or
+        arg == "--work-root" or arg.startsWith("--work-root=") or
+        arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning=") or
+        arg == "--":
+      return false
+  hasM22Marker
+
 proc runDevelopCommand(args: openArray[string]): int =
+  # M22 routing: when the argv carries an M22-distinctive flag
+  # (``--source``, ``--workspace-root``, ``--json``) and none of the
+  # pre-M22 markers (``--list``, ``--into``, ``--cmake``,
+  # ``--tool-provisioning``, ``--work-root``, ``--``), dispatch to the
+  # workspace-overlay form documented in ``CLI/develop.md``.
+  if looksLikeWorkspaceDevelopArgs(args):
+    return runWorkspaceDevelopCommand(args)
   var target = ""
   var mode = tpmUnspecified
   var command: seq[string] = @[]
