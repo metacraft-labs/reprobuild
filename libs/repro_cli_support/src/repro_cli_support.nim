@@ -46,6 +46,7 @@ import repro_cli_support/watch
 import repro_cli_support/dev_session
 import repro_cli_support/dev_env_shell_export
 import repro_cli_support/dev_env_rollback_manifest
+import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
 import repro_cli_support/infra
 import repro_cli_support/mode1_loader
@@ -89,6 +90,8 @@ proc renderUsage*(programName: string): string =
       " dev-env export bash|zsh|fish|nushell|pwsh [--project-root=PATH] [--activity=name] [--develop-overrides=PATH] [--allow-stale] [--pre-activation-env=PATH]\n       " &
           programName &
       " dev-env deactivate <rollback-manifest> [--shell=bash|zsh|fish|nushell|pwsh]\n       " &
+          programName &
+      " shell hook bash|zsh|fish|nushell|pwsh [--repro-bin=PATH]\n       " &
           programName &
       " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT]\n       " &
           programName &
@@ -5031,6 +5034,74 @@ proc runDevEnvDeactivateCommand(args: openArray[string]): int =
     return 3
 
   stdout.write(formatDeactivate(manifest, parsed.shell))
+  0
+
+# M76 — ``repro shell hook <shell>``.
+#
+# Emits the per-shell hook installation script. The user sources the
+# output ONCE at shell start (from ``~/.bashrc`` /
+# ``~/.config/fish/config.fish`` / ``$PROFILE`` / etc.). The emitted
+# script defines a ``__repro_shell_hook`` function that runs per
+# prompt / per cd, walks up from ``$PWD`` for the project root, and
+# composes the M74 ``dev-env export`` + M75 ``dev-env deactivate``
+# arms to drive activation/deactivation on cd.
+#
+# This is distinct from ``repro hooks`` (CLI/hooks.md), which manages
+# rc-file ENTRIES; ``repro shell hook`` only EMITS the per-shell
+# snippet that the user adds to their rc file (or pipes through
+# ``eval`` / ``source`` / ``Out-String | Invoke-Expression`` directly).
+#
+# Exit codes:
+#   0 — success
+#   2 — usage error (missing/unknown shell argument)
+type
+  ParsedShellHook = object
+    shell: ShellKind
+    reproBin: string  ## explicit path; otherwise we autodetect
+
+proc parseShellHookArgs(args: openArray[string]): ParsedShellHook =
+  if args.len == 0:
+    raise newException(ValueError,
+      "repro shell hook requires a shell argument " &
+        "(bash|zsh|fish|nushell|pwsh)")
+  result.shell = parseShellKind(args[0])
+  var i = 1
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--repro-bin" or arg.startsWith("--repro-bin="):
+      # Escape hatch for the test surface — embed an explicit absolute
+      # path to ``repro.exe`` so the hook does not depend on PATH
+      # resolution. Default (empty) means "use the bare ``repro``
+      # name and rely on PATH".
+      result.reproBin = valueFromFlag(args, i, "--repro-bin")
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported shell hook flag: " & arg)
+    else:
+      raise newException(ValueError,
+        "unexpected shell hook argument: " & arg)
+    inc i
+
+proc runShellHookCommand(args: openArray[string]): int =
+  ## ``repro shell hook <shell>`` dispatch arm.
+  var parsed: ParsedShellHook
+  try:
+    parsed = parseShellHookArgs(args)
+  except ExportPlanError as err:
+    stderr.writeLine("repro shell hook: " & err.msg)
+    return 2
+  except ValueError as err:
+    stderr.writeLine("repro shell hook: " & err.msg)
+    return 2
+
+  let script =
+    case parsed.shell
+    of skBash: renderBashHook(parsed.reproBin)
+    of skZsh: renderZshHook(parsed.reproBin)
+    of skFish: renderFishHook(parsed.reproBin)
+    of skNushell: renderNushellHook(parsed.reproBin)
+    of skPwsh: renderPwshHook(parsed.reproBin)
+  stdout.write(script)
   0
 
 type
@@ -16924,6 +16995,20 @@ proc runThinApp*(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro exec: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "shell" and
+      args[1] == "hook":
+    # M76 — ``repro shell hook <shell>``. Distinct from ``repro hooks``
+    # (rc-file entry management) and from ``repro shell`` (the M3/M4
+    # selector-then-flags activated-subshell). The dispatch order
+    # matters: we MUST match ``shell hook`` BEFORE the generic
+    # ``shell`` arm below, otherwise ``runReproShellCommand`` would
+    # interpret ``hook`` as a selector and explode.
+    let hookArgs =
+      if args.len > 2:
+        args[2 .. ^1]
+      else:
+        @[]
+    return runShellHookCommand(hookArgs)
   if programName == "repro" and args.len > 0 and args[0] == "shell":
     try:
       let shellArgs =
