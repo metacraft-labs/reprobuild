@@ -98,6 +98,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [path]\n       " &
           programName &
+      " check --mode=pre-push [--workspace-root=PATH] [--current-repo=PATH] [--pushed-refs=FILE] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
+          programName &
       " branch [<name>] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
           programName &
       " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
@@ -6347,15 +6349,20 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
     result.shellDirenv = true
     result.vcs = true
 
+# Forward declaration: M18 wires ``pre-push`` dispatch through the
+# ``repro check --mode=pre-push`` gate; the implementation lives further
+# down (after ``runWorkspaceLockCommand``, which the gate calls to
+# create / refresh the workspace lock).
+proc runCheckCommand*(args: openArray[string]): int
+
 proc runHooksDispatchCommand(args: openArray[string]): int =
   ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
   ## [--refs-file=PATH] -- [hook args...]``. Invoked by the managed
   ## VCS-hook scripts the M17 installer drops into every participating
-  ## repo. M17 wires this as a no-op: it accepts any known hook name
-  ## and any pass-through positional arguments, returns 0, and emits
-  ## nothing on stdout. M18 (pre-push publication gate) and M19 /
-  ## M19a (post-commit lock refresh + post-merge / post-checkout
-  ## manifest auto-refresh) replace the no-op with their real bodies.
+  ## repo. M17 wired this as a no-op; M18 replaces the ``pre-push``
+  ## arm with a call into ``repro check --mode=pre-push``. M19 / M19a
+  ## will register the post-commit / post-merge / post-checkout
+  ## bodies on top of the same contract.
   if args.len == 0:
     raise newException(ValueError,
       "repro hooks dispatch requires a hook name (one of: " &
@@ -6370,11 +6377,39 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     raise newException(ValueError,
       "unsupported hook name for dispatch: " & hookName &
         " (expected one of: " & VcsHookNames.join(", ") & ")")
-  # M17 no-op success. We deliberately accept and ignore the
-  # ``--repo-root`` / ``--refs-file`` / ``--`` pass-through arguments
-  # the installed scripts pass so future milestones can wire their
-  # bodies without renegotiating the dispatcher's argv contract.
-  0
+  # Parse the standard dispatch argv shape: ``--repo-root=PATH`` and
+  # (for pre-push) ``--refs-file=PATH``, optionally followed by ``--``
+  # and the hook's own positional arguments. The values are forwarded
+  # to the body via the documented ``repro check`` flag names so the
+  # gate logic stays oblivious to the dispatch wrapper.
+  var repoRoot = ""
+  var refsFile = ""
+  var i = 1
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--":
+      break
+    if arg == "--repo-root" or arg.startsWith("--repo-root="):
+      repoRoot = valueFromFlag(args, i, "--repo-root")
+    elif arg == "--refs-file" or arg.startsWith("--refs-file="):
+      refsFile = valueFromFlag(args, i, "--refs-file")
+    inc i
+  case hookName
+  of "pre-push":
+    # M18 publication gate. Translate the dispatch argv into the
+    # documented ``repro check`` surface and propagate the exit code
+    # verbatim so the installed hook script can hand it back to git.
+    var checkArgs = @["--mode=pre-push"]
+    if repoRoot.len > 0:
+      checkArgs.add("--current-repo=" & repoRoot)
+    if refsFile.len > 0:
+      checkArgs.add("--pushed-refs=" & refsFile)
+    return runCheckCommand(checkArgs)
+  else:
+    # M17 ground state for the other three hooks: accept the argv,
+    # return 0, emit nothing. M19 / M19a replace this branch when
+    # those milestones land.
+    return 0
 
 proc runHooksCommand(args: openArray[string]): int =
   if args.len > 0 and args[0] == "dispatch":
@@ -13307,6 +13342,587 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
     stdout.writeLine(line)
   outcome.report.exitCode
 
+# ---- M18: `repro check --mode=pre-push` (publication gate) ----------------
+#
+# The installed pre-push hook (M17 dispatcher) routes into the gate by
+# calling ``repro check --mode=pre-push --current-repo=PATH
+# --pushed-refs=FILE``. The gate runs four checks in order; the first
+# failure short-circuits with a structured ``CheckFailure`` record:
+#
+#   1. ``branch-mismatch``  — pushed local branch != active workspace
+#                             branch (M13 metadata).
+#   2. ``dirty``            — any sibling repo has a dirty working tree
+#                             (M4 ``isCleanQuery`` evidence).
+#   3. ``unpublished``      — any sibling repo's HEAD is not reachable
+#                             on a remote (M4 ``isPublishedQuery``).
+#   4. ``lock-stale`` /     — workspace lock missing or any repo's
+#      ``lock-failure``        HEAD differs from the locked SHA;
+#                             the gate creates / refreshes the lock
+#                             (via the M11 ``executeWorkspaceLock``
+#                             driver) and only fails when creation
+#                             itself fails.
+#
+# The exit-code contract matches the milestone:
+#   - 0 — every check passed (and the lock was created / refreshed
+#         if it had been missing or stale).
+#   - 2 — any of the four publication-gate checks failed.
+#   - 1 — IO / resolve / VCS-tool failure unrelated to the gate logic.
+
+type
+  CheckMode* = enum
+    cmPrePush
+
+  CheckFailure* = object
+    ## One structured failure record per gate failure. ``repo`` is the
+    ## workspace-relative path of the offending repo (or the empty
+    ## string when the failure is workspace-wide, e.g. a missing
+    ## ``--current-repo`` for the branch-mismatch case); ``property``
+    ## is the short tag the spec mandates (``branch-mismatch`` /
+    ## ``dirty`` / ``unpublished`` / ``lock-stale`` /
+    ## ``lock-failure``); ``remediation`` is the operator-facing
+    ## next-step the JSON report and text diagnostic surface.
+    repo*: string
+    property*: string
+    remediation*: string
+    evidence*: string
+
+  CheckLockUpdateKind* = enum
+    cluNone           ## No lock action taken (e.g. a pre-push check that
+                      ## short-circuited before the lock pass).
+    cluAlreadyCurrent ## Lock present and every repo's HEAD matches.
+    cluCreated        ## No prior lock existed; the gate created one.
+    cluRefreshed      ## Lock existed but was stale; the gate refreshed it.
+    cluFailed         ## Lock creation or refresh raised. The failure
+                      ## entry carries the structured reason; the gate
+                      ## exits with code 2.
+
+  CheckLockUpdate* = object
+    kind*: CheckLockUpdateKind
+    lockFilePath*: string
+    indexFilePath*: string
+    triggerRepo*: string
+    triggerSha*: string
+    diagnostic*: string
+
+  CheckReport* = object
+    ## Structured outcome of one ``repro check`` invocation. The JSON
+    ## form is written to ``<workspaceRoot>/.repro/workspace/check-report.json``
+    ## and (with ``--json``) also echoed to stdout.
+    mode*: string
+    workspaceRoot*: string
+    project*: string
+    activeBranch*: string
+    currentRepo*: string
+    pushedBranch*: string
+    pushedRefsPath*: string
+    failures*: seq[CheckFailure]
+    lockUpdate*: CheckLockUpdate
+    exitCode*: int
+
+proc lockUpdateKindTag(kind: CheckLockUpdateKind): string =
+  case kind
+  of cluNone: "none"
+  of cluAlreadyCurrent: "already-current"
+  of cluCreated: "created"
+  of cluRefreshed: "refreshed"
+  of cluFailed: "failed"
+
+proc toJsonNode*(report: CheckReport): JsonNode =
+  result = newJObject()
+  result["mode"] = %report.mode
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["project"] = %report.project
+  result["activeBranch"] = %report.activeBranch
+  result["currentRepo"] = %report.currentRepo
+  result["pushedBranch"] = %report.pushedBranch
+  result["pushedRefsPath"] = %report.pushedRefsPath
+  var failures = newJArray()
+  for failure in report.failures:
+    var obj = newJObject()
+    obj["repo"] = %failure.repo
+    obj["property"] = %failure.property
+    obj["remediation"] = %failure.remediation
+    obj["evidence"] = %failure.evidence
+    failures.add(obj)
+  result["failures"] = failures
+  var lockObj = newJObject()
+  lockObj["kind"] = %lockUpdateKindTag(report.lockUpdate.kind)
+  lockObj["lockFilePath"] = %report.lockUpdate.lockFilePath
+  lockObj["indexFilePath"] = %report.lockUpdate.indexFilePath
+  lockObj["triggerRepo"] = %report.lockUpdate.triggerRepo
+  lockObj["triggerSha"] = %report.lockUpdate.triggerSha
+  lockObj["diagnostic"] = %report.lockUpdate.diagnostic
+  result["lockUpdate"] = lockObj
+  result["exitCode"] = %report.exitCode
+
+proc renderCheckTextLines*(report: CheckReport): seq[string] =
+  result.add("repro check: mode=" & report.mode &
+    " project=" & report.project &
+    " branch=" & (if report.activeBranch.len > 0:
+                    report.activeBranch
+                  else: "<none>"))
+  for failure in report.failures:
+    var line = "repro check: " &
+      (if failure.repo.len > 0: failure.repo & ": " else: "") &
+      failure.property
+    if failure.remediation.len > 0:
+      line.add(" — " & failure.remediation)
+    if failure.evidence.len > 0:
+      line.add(" [" & failure.evidence & "]")
+    result.add(line)
+  case report.lockUpdate.kind
+  of cluNone:
+    discard
+  of cluAlreadyCurrent:
+    result.add("repro check: lock already current at " &
+      report.lockUpdate.lockFilePath)
+  of cluCreated:
+    result.add("repro check: lock created at " &
+      report.lockUpdate.lockFilePath)
+  of cluRefreshed:
+    result.add("repro check: lock refreshed at " &
+      report.lockUpdate.lockFilePath)
+  of cluFailed:
+    result.add("repro check: lock update FAILED: " &
+      report.lockUpdate.diagnostic)
+  if report.exitCode == 0 and report.failures.len == 0:
+    result.add("repro check: OK")
+
+type
+  CheckArgs* = object
+    mode*: CheckMode
+    workspaceRoot*: string
+    currentRepo*: string
+    pushedRefsPath*: string
+    json*: bool
+    toolProvisioning*: ToolProvisioningMode
+
+proc parseCheckMode(value: string): CheckMode =
+  case value
+  of "pre-push": cmPrePush
+  else:
+    raise newException(ValueError,
+      "unsupported --mode value for `repro check`: " & value &
+        " (expected: pre-push)")
+
+proc parseCheckArgs*(args: openArray[string]): CheckArgs =
+  ## ``repro check --mode=pre-push [--workspace-root=PATH]
+  ## [--current-repo=PATH] [--pushed-refs=FILE]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``. ``--mode``
+  ## is REQUIRED — there is no implicit mode in the M18 surface.
+  result.toolProvisioning = tpmPathOnly
+  var modeSet = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--mode" or arg.startsWith("--mode="):
+      result.mode = parseCheckMode(valueFromFlag(args, i, "--mode"))
+      modeSet = true
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--current-repo" or arg.startsWith("--current-repo="):
+      result.currentRepo = valueFromFlag(args, i, "--current-repo")
+    elif arg == "--pushed-refs" or arg.startsWith("--pushed-refs="):
+      result.pushedRefsPath = valueFromFlag(args, i, "--pushed-refs")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro check` flag: " & arg)
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro check`: " & arg)
+    inc i
+  if not modeSet:
+    raise newException(ValueError,
+      "`repro check` requires --mode=pre-push (no other modes are " &
+        "supported yet)")
+  if result.workspaceRoot.len == 0:
+    # When invoked from inside a participating repo (the usual hook
+    # call site) we walk up from ``--current-repo`` to discover the
+    # workspace root. Failing that, fall back to the process cwd.
+    if result.currentRepo.len > 0:
+      var probe = absolutePath(result.currentRepo)
+      while probe.len > 1:
+        if dirExists(probe / ".repo"):
+          result.workspaceRoot = probe
+          break
+        let parent = parentDir(probe)
+        if parent == probe: break
+        probe = parent
+    if result.workspaceRoot.len == 0:
+      result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  if result.currentRepo.len > 0:
+    result.currentRepo = absolutePath(result.currentRepo)
+  if result.pushedRefsPath.len > 0:
+    result.pushedRefsPath = absolutePath(result.pushedRefsPath)
+
+proc resolveCheckProject(parsed: CheckArgs):
+    tuple[resolved: ResolvedProject;
+          workspaceLocal: Option[WorkspaceLocal]] =
+  ## Same dispatch rule as M11 / M12: composer mode when
+  ## ``.repo/workspace.toml`` declares ``[[manifest]]`` layers,
+  ## otherwise single-project mode. A metadata-only workspace.toml (M13)
+  ## supplies the project name for the single-project branch.
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+    let absToml = absolutePath(workspaceToml)
+    let workspaceLocal = readWorkspaceLocal(absToml)
+    let resolved = composeManifestLayers(
+      workspaceLocal, parsed.workspaceRoot, absToml)
+    return (resolved, some(workspaceLocal))
+  var projectName = ""
+  if fileExists(workspaceToml):
+    try:
+      let recorded =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recorded.len > 0:
+        projectName = recorded
+    except WorkspaceManifestParseError:
+      discard
+  if projectName.len == 0:
+    raise newException(ValueError,
+      "`repro check --mode=pre-push` requires `.repo/workspace.toml` " &
+        "or a project name recoverable from one; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+  if fileExists(projectFile):
+    return (resolveProject(projectFile), none(WorkspaceLocal))
+  if fileExists(variantFile):
+    return (resolveVariant(variantFile), none(WorkspaceLocal))
+  raise newException(ValueError,
+    "no project or variant named '" & projectName &
+      "' found under '" & manifestsRoot &
+      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+
+proc parsePushedBranchFromRefs(refsPath: string): string =
+  ## Parse a git ``pre-push`` refs stream. Each line carries
+  ## ``<local-ref> <local-sha> <remote-ref> <remote-sha>``; we return
+  ## the FIRST non-deleting local branch's short name (``refs/heads/X``
+  ## → ``X``). An empty file / a file consisting only of deletions
+  ## (``local-sha`` is all zeroes) yields the empty string — the gate
+  ## treats that as "no branch claim" and skips the active-branch
+  ## comparison. Non-existent files also yield the empty string so the
+  ## hook stays robust against an empty stdin redirect.
+  if refsPath.len == 0 or not fileExists(refsPath):
+    return ""
+  let zeroSha = "0000000000000000000000000000000000000000"
+  for rawLine in readFile(refsPath).splitLines():
+    let line = rawLine.strip()
+    if line.len == 0:
+      continue
+    let parts = line.split(' ')
+    if parts.len < 2:
+      continue
+    let localRef = parts[0]
+    let localSha = parts[1]
+    if localSha == zeroSha:
+      # Branch deletion push — no source ref to attribute to the
+      # workspace branch.
+      continue
+    if localRef.startsWith("refs/heads/"):
+      return localRef["refs/heads/".len .. ^1]
+    return localRef
+  ""
+
+proc deriveCheckActiveBranch(parsed: CheckArgs;
+    workspaceLocal: Option[WorkspaceLocal];
+    resolved: ResolvedProject): string =
+  ## Mirror of M12's ``deriveActiveBranch`` but without per-repo
+  ## fallback: the pre-push gate must trust the recorded value rather
+  ## than guess from an in-flight checkout. Precedence:
+  ##   1. ``.repo/workspace.toml``'s ``[workspace].branch`` (M13).
+  ##   2. The ``workspaceLocal`` we already loaded (composer-mode
+  ##      shortcut that avoids re-reading the file).
+  ##   3. The resolver's ``trunk``.
+  try:
+    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+    if recorded.isSome:
+      return recorded.get()
+  except WorkspaceManifestParseError:
+    discard
+  if workspaceLocal.isSome and
+      workspaceLocal.get().workspace.branch.isSome and
+      workspaceLocal.get().workspace.branch.get().len > 0:
+    return workspaceLocal.get().workspace.branch.get()
+  resolved.trunk
+
+proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
+  ## Drive the four-stage gate. Each stage short-circuits on the first
+  ## failure — the spec is explicit that the gate names ONE failure at
+  ## a time so the operator's next step is unambiguous.
+  result.mode = "pre-push"
+  result.workspaceRoot = parsed.workspaceRoot
+  result.currentRepo = parsed.currentRepo
+  result.pushedRefsPath = parsed.pushedRefsPath
+
+  let (resolved, workspaceLocal) = resolveCheckProject(parsed)
+  result.project = resolved.projectName
+  result.activeBranch = deriveCheckActiveBranch(
+    parsed, workspaceLocal, resolved)
+
+  let identity = ensureGitToolResolvable(
+    parsed.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+  let toolDigest = digestHex(identity)
+  let observedAt = getTime().toUnix * 1000
+
+  # Build a name-keyed lookup of the offending repo. The ``--current-repo``
+  # flag is the directory the hook was invoked in; convert it to the
+  # workspace-relative path so all the per-repo gate stages report
+  # consistent identifiers.
+  var currentRepoPath = ""
+  var currentRepoName = ""
+  if parsed.currentRepo.len > 0:
+    for repo in resolved.repos:
+      let abs = absolutePath(parsed.workspaceRoot / repo.path)
+      if abs == parsed.currentRepo:
+        currentRepoPath = repo.path
+        currentRepoName = repo.name
+        break
+
+  # ---- 1. branch-mismatch ------------------------------------------------
+  result.pushedBranch = parsePushedBranchFromRefs(parsed.pushedRefsPath)
+  if result.activeBranch.len > 0 and result.pushedBranch.len > 0 and
+      result.pushedBranch != result.activeBranch:
+    let repoLabel =
+      if currentRepoPath.len > 0: currentRepoPath
+      elif parsed.currentRepo.len > 0: parsed.currentRepo
+      else: ""
+    result.failures.add(CheckFailure(
+      repo: repoLabel,
+      property: "branch-mismatch",
+      remediation: "run 'repro checkout " & result.activeBranch &
+        "' or push the active workspace branch instead",
+      evidence: "pushed=" & result.pushedBranch &
+        " active=" & result.activeBranch))
+    result.exitCode = 2
+    return
+
+  # Walk the participating repos for the cleanliness + publication
+  # passes. We gather the M4 evidence triple for every repo so the
+  # second / third stages can short-circuit cleanly while preserving
+  # the full observed state for the lock stage.
+  type
+    RepoObs = object
+      name: string
+      path: string
+      absPath: string
+      headSha: string
+      isClean: bool
+      isPublished: bool
+      cleanDiagnostic: string
+      pubDiagnostic: string
+      branch: string
+      hasGit: bool
+  var observations: seq[RepoObs]
+  for repo in resolved.repos:
+    let absRepo = parsed.workspaceRoot / repo.path
+    var obs = RepoObs(name: repo.name, path: repo.path, absPath: absRepo)
+    if not dirExists(absRepo / ".git"):
+      observations.add(obs)
+      continue
+    obs.hasGit = true
+    let headRes = queryGitState(headShaQuery(absRepo), identity)
+    if headRes.status == gqsOk:
+      obs.headSha = headRes.headSha
+    let cleanRes = queryGitState(isCleanQuery(absRepo), identity)
+    if cleanRes.status == gqsOk:
+      obs.isClean = cleanRes.isClean
+    else:
+      obs.cleanDiagnostic = cleanRes.diagnostic
+    let pubRes = queryGitState(
+      isPublishedQuery(absRepo, "origin"), identity)
+    if pubRes.status == gqsOk:
+      obs.isPublished = pubRes.isPublished
+    else:
+      obs.pubDiagnostic = pubRes.diagnostic
+    let branchRes = gitRunPlain(identity,
+      ["-C", absRepo, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branchRes.code == 0:
+      obs.branch = branchRes.output.strip()
+    observations.add(obs)
+  # M4 evidence records are intentionally not folded into the gate
+  # report yet — the gate carries its own short-circuiting structure
+  # and the unified evidence is already exposed by ``repro workspace
+  # status`` for general inspection. ``toolDigest`` and ``observedAt``
+  # are retained in scope so a future caller wishing to fold the
+  # observation triple into ``WorkspaceVcsEvidence`` can do so without
+  # re-querying the M1 identity binding.
+  discard toolDigest
+  discard observedAt
+  discard currentRepoName
+
+  # ---- 2. dirty ----------------------------------------------------------
+  for obs in observations:
+    if not obs.hasGit:
+      continue
+    if not obs.isClean:
+      let evidence =
+        if obs.cleanDiagnostic.len > 0:
+          "clean-probe-failed: " & obs.cleanDiagnostic
+        else: "working tree has uncommitted changes"
+      result.failures.add(CheckFailure(
+        repo: obs.path,
+        property: "dirty",
+        remediation: "commit or stash changes in " & obs.path,
+        evidence: evidence))
+      result.exitCode = 2
+      return
+
+  # ---- 3. unpublished ----------------------------------------------------
+  for obs in observations:
+    if not obs.hasGit:
+      continue
+    if not obs.isPublished:
+      let evidence =
+        if obs.pubDiagnostic.len > 0:
+          "publish-probe-failed: " & obs.pubDiagnostic
+        else: "HEAD " & obs.headSha & " not on any remote-tracking branch"
+      result.failures.add(CheckFailure(
+        repo: obs.path,
+        property: "unpublished",
+        remediation: "run 'git push' in " & obs.path & " first",
+        evidence: evidence))
+      result.exitCode = 2
+      return
+
+  # ---- 4. lock currency --------------------------------------------------
+  # Pick the manifest-layer root the way M11 / M12 do, then read the
+  # latest locked SHA per repo path. If the locked map covers every
+  # participating repo and matches every observed HEAD, the lock is
+  # ``already-current``. Otherwise the gate creates or refreshes the
+  # lock by delegating to the M11 driver — its refusal arm (a dirty
+  # sibling, exit 2) is unreachable here because stage 2 already
+  # short-circuited on any dirty tree.
+  var lockArgs = WorkspaceLockArgs(
+    workspaceRoot: parsed.workspaceRoot,
+    toolProvisioning: parsed.toolProvisioning)
+  let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
+  let indexPath = lockIndexPath(manifestLayerRoot, resolved.projectName)
+  let hasLockIndex = fileExists(indexPath)
+  let lockedShas =
+    if hasLockIndex:
+      readLatestLockedShasByPath(manifestLayerRoot, resolved.projectName)
+    else:
+      initTable[string, string]()
+  var lockMissing = not hasLockIndex
+  var lockStale = false
+  if not lockMissing:
+    if lockedShas.len == 0:
+      lockMissing = true
+    else:
+      for obs in observations:
+        if not obs.hasGit:
+          continue
+        if obs.path notin lockedShas:
+          lockStale = true
+          break
+        if lockedShas[obs.path] != obs.headSha:
+          lockStale = true
+          break
+  if not lockMissing and not lockStale:
+    result.lockUpdate.kind = cluAlreadyCurrent
+    # Surface the most-recent lock file path so the operator can audit
+    # which lock backed the check.
+    let lockedIndex = loadLockIndex(indexPath)
+    let latest = latestLockIndexEntry(lockedIndex)
+    if latest.isSome:
+      let rel = latest.get().lockFile.replace('/', DirSep)
+      result.lockUpdate.lockFilePath = manifestLayerRoot / rel
+      result.lockUpdate.indexFilePath = indexPath
+      result.lockUpdate.triggerRepo = latest.get().triggerRepo
+      result.lockUpdate.triggerSha = latest.get().triggerSha
+    result.exitCode = 0
+    return
+  # Create or refresh the lock via the M11 driver. The driver writes
+  # the lock TOML, updates the index, and returns a structured report
+  # carrying the new lock-file path. The driver's own ``exitCode == 2``
+  # arm fires only on a dirty tree (which stage 2 above already ruled
+  # out), so any non-zero exit here is genuinely lock-failure.
+  var lockOutcome: WorkspaceLockOutcome
+  try:
+    lockOutcome = executeWorkspaceLock(lockArgs)
+  except CatchableError as err:
+    result.lockUpdate.kind = cluFailed
+    result.lockUpdate.diagnostic = err.msg
+    result.failures.add(CheckFailure(
+      repo: "",
+      property: "lock-failure",
+      remediation:
+        "investigate the lock writer error and re-run 'repro check'",
+      evidence: err.msg))
+    result.exitCode = 2
+    return
+  if lockOutcome.report.exitCode != 0:
+    result.lockUpdate.kind = cluFailed
+    let diag =
+      if lockOutcome.report.dirty.len > 0:
+        "lock writer refused: dirty siblings"
+      else: "lock writer exited with code " & $lockOutcome.report.exitCode
+    result.lockUpdate.diagnostic = diag
+    result.failures.add(CheckFailure(
+      repo: "",
+      property: "lock-failure",
+      remediation: "re-run 'repro workspace lock' to diagnose",
+      evidence: diag))
+    result.exitCode = 2
+    return
+  result.lockUpdate.lockFilePath = lockOutcome.report.lockFilePath
+  result.lockUpdate.indexFilePath = lockOutcome.report.indexFilePath
+  result.lockUpdate.triggerRepo = lockOutcome.report.triggerRepo
+  result.lockUpdate.triggerSha = lockOutcome.report.triggerSha
+  result.lockUpdate.kind =
+    if lockMissing: cluCreated else: cluRefreshed
+  result.exitCode = 0
+
+proc writeCheckReport(report: CheckReport) =
+  ## Persist the structured JSON report at the spec-mandated location.
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "check-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runCheckCommand*(args: openArray[string]): int =
+  ## ``repro check --mode=pre-push [--workspace-root=PATH]
+  ## [--current-repo=PATH] [--pushed-refs=FILE]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## Exit codes (per M18 design):
+  ##   - 0 — every gate check passed; the lock was created / refreshed
+  ##         when it was missing or stale.
+  ##   - 2 — a publication-gate check (branch / clean / published /
+  ##         lock) failed. Git aborts the push.
+  ##   - 1 — IO / resolve / VCS-tool failure unrelated to the gate.
+  let parsed =
+    try:
+      parseCheckArgs(args)
+    except ValueError as err:
+      stderr.writeLine("repro check: " & err.msg)
+      return 1
+  case parsed.mode
+  of cmPrePush:
+    var report: CheckReport
+    try:
+      report = executeCheckPrePush(parsed)
+    except CatchableError as err:
+      stderr.writeLine("repro check: error: " & err.msg)
+      return 1
+    writeCheckReport(report)
+    if parsed.json:
+      stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+    else:
+      for line in renderCheckTextLines(report):
+        stdout.writeLine(line)
+    return report.exitCode
+
 # ---- M12: `repro workspace status / list / manifests` ---------------------
 #
 # Three read-only introspection commands per
@@ -16148,6 +16764,21 @@ proc runThinApp*(programName: string): int =
       return runHooksCommand(hookArgs)
     except CatchableError as err:
       stderr.writeLine("repro hooks: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "check":
+    # M18 — top-level `repro check` subcommand per CLI/check.md. The
+    # M17 pre-push dispatcher routes through this same entry point so
+    # the gate logic stays in one place and the operator can invoke
+    # it manually for diagnosis.
+    try:
+      let checkArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runCheckCommand(checkArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro check: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "init":
