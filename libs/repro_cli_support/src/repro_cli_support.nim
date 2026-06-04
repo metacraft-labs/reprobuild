@@ -5100,7 +5100,10 @@ const
   NativeShellManagedBlockPrefix = "repro-dev-env-native-"
   NativeShellActivationGuard = "REPRO_NATIVE_SHELL_HOOK_RUNNING"
   VcsDispatcherMarker = "reprobuild hook dispatcher"
-  VcsHookNames = ["pre-push", "post-commit"]
+  # M17: full VCS-hook bundle the workspace publication gate (M18)
+  # and the manifest auto-refresh hook (M19a) depend on. Order matters
+  # only for the deterministic JSON-report iteration.
+  VcsHookNames = ["pre-push", "post-commit", "post-merge", "post-checkout"]
 
 type
   HookActionKind = enum
@@ -5120,6 +5123,8 @@ type
     shellDirenv: bool
     vcs: bool
     nativeShells: seq[NativeShellKind]
+    workspaceRoot: string  ## M17: explicit --workspace-root override.
+    json: bool             ## M17: emit JSON to stdout in addition to the report file.
 
   NativeShellActivationRequest = object
     cwd: string
@@ -5752,51 +5757,75 @@ proc vcsDispatcherContent(hookName: string): string =
   result.add("exit 0\n")
 
 proc vcsManagedHookContent(hookName: string): string =
+  ## Canonical managed-hook body. M17 wires the dispatch path as
+  ## ``repro hooks dispatch <name>`` (no-op until later milestones
+  ## register a body). Drift detection compares the on-disk file to
+  ## this exact string, so any future change to the body bumps every
+  ## installed hook on the next ``ensure``.
   result = "#!/usr/bin/env sh\n"
   result.add("# reprobuild managed " & hookName & " hook\n")
+  result.add("# managed-by: reprobuild hooks ensure\n")
+  result.add("# dispatches to: repro hooks dispatch " & hookName & "\n")
   result.add("set -eu\n\n")
-  result.add("find_workspace_cmd() {\n")
-  result.add("  if [ -n \"${REPO_WORKSPACES_FRAMEWORK:-}\" ] && [ -x \"$REPO_WORKSPACES_FRAMEWORK/bin/workspace\" ]; then\n")
-  result.add("    printf '%s\\n' \"$REPO_WORKSPACES_FRAMEWORK/bin/workspace\"\n")
+  result.add("find_repro_cmd() {\n")
+  result.add("  if [ -n \"${REPROBUILD_REPRO:-}\" ] && [ -x \"$REPROBUILD_REPRO\" ]; then\n")
+  result.add("    printf '%s\\n' \"$REPROBUILD_REPRO\"\n")
   result.add("    return 0\n")
   result.add("  fi\n")
-  result.add("  dir=$PWD\n")
-  result.add("  while [ \"$dir\" != \"/\" ]; do\n")
-  result.add("    if [ -x \"$dir/repo-workspaces/bin/workspace\" ]; then\n")
-  result.add("      printf '%s\\n' \"$dir/repo-workspaces/bin/workspace\"\n")
-  result.add("      return 0\n")
-  result.add("    fi\n")
-  result.add("    if [ -x \"$dir/../repo-workspaces/bin/workspace\" ]; then\n")
-  result.add("      printf '%s\\n' \"$dir/../repo-workspaces/bin/workspace\"\n")
-  result.add("      return 0\n")
-  result.add("    fi\n")
-  result.add("    dir=$(dirname -- \"$dir\")\n")
-  result.add("  done\n")
-  result.add("  command -v workspace 2>/dev/null || return 1\n")
+  result.add("  if command -v repro >/dev/null 2>&1; then\n")
+  result.add("    command -v repro\n")
+  result.add("    return 0\n")
+  result.add("  fi\n")
+  result.add("  return 1\n")
   result.add("}\n\n")
   result.add("REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)\n")
   result.add("cd \"$REPO_ROOT\"\n")
-  result.add("if WORKSPACE_CMD=$(find_workspace_cmd); then\n")
+  result.add("if REPRO_CMD=$(find_repro_cmd); then\n")
   if hookName == "pre-push":
     result.add("  REFS_FILE=$(mktemp \"${TMPDIR:-/tmp}/reprobuild-pre-push-backend.XXXXXX\")\n")
     result.add("  trap 'rm -f \"$REFS_FILE\"' EXIT HUP INT TERM\n")
     result.add("  cat > \"$REFS_FILE\"\n")
-    result.add("  \"$WORKSPACE_CMD\" __hook pre-push --refs-file \"$REFS_FILE\" \"$@\"\n")
+    result.add("  \"$REPRO_CMD\" hooks dispatch " & hookName &
+      " --repo-root \"$REPO_ROOT\" --refs-file \"$REFS_FILE\" -- \"$@\"\n")
   else:
-    result.add("  \"$WORKSPACE_CMD\" __hook post-commit \"$@\"\n")
+    result.add("  \"$REPRO_CMD\" hooks dispatch " & hookName &
+      " --repo-root \"$REPO_ROOT\" -- \"$@\"\n")
   result.add("  exit $?\n")
   result.add("fi\n")
-  result.add("echo \"repro hooks: workspace VCS hook backend not found; skipping " &
+  result.add("echo \"repro hooks: repro CLI not found on PATH; skipping " &
     hookName & "\" >&2\n")
   result.add("exit 0\n")
 
-proc ensureVcsHook(hooksDir, hookName: string): bool =
+type
+  VcsHookEnsureOutcome* = enum
+    ## M17 status codes for ``repro hooks ensure --vcs``. Distinct from
+    ## the M18+ runtime outcomes the dispatcher itself can return.
+    vheoAlreadyUpToDate     ## Dispatcher + managed body already match canonical content.
+    vheoInstalled           ## A fresh install or a missing file was created.
+    vheoChainedUserHook     ## A pre-existing non-managed hook was preserved as ``<name>.repro-local``.
+    vheoRefreshedDrifted    ## Sentinel present but body diverged; rewrote canonical content.
+
+proc ensureVcsHookDetailed(hooksDir, hookName: string): VcsHookEnsureOutcome =
+  ## Idempotent installer for one (hooksDir, hookName) pair. Returns a
+  ## structured outcome so callers can surface per-repo per-hook status
+  ## in the JSON report and the human-readable summary line.
+  ##
+  ## Outcome priority (the higher-impact change wins when several apply):
+  ##   chained-user-hook  >  refreshed-drifted  >  installed  >  already-up-to-date
   createDir(extendedPath(hooksDir))
   let standard = hookPath(hooksDir, hookName)
   let local = localHookPath(hooksDir, hookName)
   let managed = managedHookPath(hooksDir, hookName)
+
+  var chainedUser = false
+  var anyChange = false
+  var refreshedDrift = false
+
+  # Stale sentinel-marked local file from an earlier `uninstall` run.
   if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):
-    result = removeFileIfExists(local) or result
+    anyChange = removeFileIfExists(local) or anyChange
+
+  # Pre-existing user-owned hook at the canonical path: chain it.
   if fileExists(extendedPath(standard)) and
       not isReprobuildVcsHook(standard, hookName):
     if fileExists(extendedPath(local)):
@@ -5805,11 +5834,228 @@ proc ensureVcsHook(hooksDir, hookName: string): bool =
           " is user-owned and " & local & " already exists")
     moveFileReplacing(standard, local)
     ensureExecutable(local)
-    result = true
-  result = writeExecutableIfChanged(managed,
-    vcsManagedHookContent(hookName)) or result
-  result = writeExecutableIfChanged(standard,
-    vcsDispatcherContent(hookName)) or result
+    chainedUser = true
+    anyChange = true
+
+  # Detect drift: file exists, sentinel matches, body diverges from canonical.
+  let canonicalManaged = vcsManagedHookContent(hookName)
+  if fileExists(extendedPath(managed)) and
+      isReprobuildVcsHook(managed, hookName) and
+      readFile(extendedPath(managed)) != canonicalManaged:
+    refreshedDrift = true
+  let canonicalDispatcher = vcsDispatcherContent(hookName)
+  if fileExists(extendedPath(standard)) and
+      isReprobuildVcsHook(standard, hookName) and
+      readFile(extendedPath(standard)) != canonicalDispatcher:
+    refreshedDrift = true
+
+  let managedChanged = writeExecutableIfChanged(managed, canonicalManaged)
+  let dispatcherChanged = writeExecutableIfChanged(standard, canonicalDispatcher)
+  anyChange = anyChange or managedChanged or dispatcherChanged
+
+  if chainedUser:
+    return vheoChainedUserHook
+  if refreshedDrift:
+    return vheoRefreshedDrifted
+  if anyChange:
+    return vheoInstalled
+  vheoAlreadyUpToDate
+
+proc ensureVcsHook(hooksDir, hookName: string): bool =
+  ## Back-compat single-hook installer that reports a single
+  ## "changed / unchanged" boolean. Retained so the legacy single-repo
+  ## ``runVcsHooksCommand`` path (used by ``repro hooks reinstall`` and
+  ## ``repro hooks uninstall``) keeps the same shape it had before
+  ## the workspace-aware M17 ``ensure`` path was added.
+  let outcome = ensureVcsHookDetailed(hooksDir, hookName)
+  outcome != vheoAlreadyUpToDate
+
+type
+  VcsHookEntry* = object
+    ## One per (repo, hookName) pair in the M17 JSON report. ``outcome``
+    ## is the lowercased ``vheo*`` string (``installed`` /
+    ## ``already-up-to-date`` / ``chained-user-hook`` /
+    ## ``refreshed-drifted``); ``hookPath`` and ``managedPath`` are the
+    ## absolute paths the installer touched (or would touch).
+    repo*: string
+    repoPath*: string
+    hook*: string
+    outcome*: string
+    hookPath*: string
+    managedPath*: string
+
+  HooksEnsureReport* = object
+    ## Structured outcome of one ``repro hooks ensure --vcs`` invocation
+    ## written to ``<workspaceRoot>/.repo/workspace/hooks-report.json``.
+    workspaceRoot*: string
+    mode*: string                  ## ``workspace`` or ``single-repo``.
+    project*: string               ## resolved project name (workspace mode).
+    repos*: seq[string]            ## participating repo names.
+    entries*: seq[VcsHookEntry]
+    summary*: Table[string, int]   ## outcome → count, e.g. {"installed": 8}.
+    exitCode*: int
+
+proc vcsHookOutcomeTag(outcome: VcsHookEnsureOutcome): string =
+  case outcome
+  of vheoAlreadyUpToDate: "already-up-to-date"
+  of vheoInstalled: "installed"
+  of vheoChainedUserHook: "chained-user-hook"
+  of vheoRefreshedDrifted: "refreshed-drifted"
+
+proc toJsonNode*(report: HooksEnsureReport): JsonNode =
+  result = newJObject()
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["mode"] = %report.mode
+  result["project"] = %report.project
+  var reposNode = newJArray()
+  for r in report.repos:
+    reposNode.add(%r)
+  result["repos"] = reposNode
+  var entriesNode = newJArray()
+  for e in report.entries:
+    var obj = newJObject()
+    obj["repo"] = %e.repo
+    obj["repoPath"] = %e.repoPath
+    obj["hook"] = %e.hook
+    obj["outcome"] = %e.outcome
+    obj["hookPath"] = %e.hookPath
+    obj["managedPath"] = %e.managedPath
+    entriesNode.add(obj)
+  result["entries"] = entriesNode
+  var summaryNode = newJObject()
+  # Sorted summary keys for stable JSON diffs.
+  var keys: seq[string]
+  for k in report.summary.keys: keys.add(k)
+  keys.sort()
+  for k in keys:
+    summaryNode[k] = %report.summary[k]
+  result["summary"] = summaryNode
+  result["exitCode"] = %report.exitCode
+
+# --- M17: workspace-wide participating-repo enumeration ------------------
+#
+# The installer must touch every repo declared by the active project /
+# variant. Reuse the same composer-or-resolver dispatch the M9-M16
+# subcommands use:
+#
+#   1. ``.repo/workspace.toml`` is compositional (M8 mode) → run the
+#      composer.
+#   2. otherwise look up the project name (from a metadata-only M13
+#      workspace.toml, then fall back to a single ``projects/*.toml``
+#      under ``.repo/manifests/projects/``).
+#   3. failing that, treat ``targetPath`` (or cwd) as a single git
+#      repo — same fallback path the legacy single-repo ``ensure``
+#      command used before M17.
+
+type
+  HookRepoTarget = object
+    name: string
+    repoPath: string  ## absolute path to the repo's working tree.
+
+proc detectWorkspaceProjectName(workspaceRoot: string): string =
+  ## When ``workspace.toml`` is metadata-only the project name lives in
+  ## ``[workspace].project``; when neither workspace.toml nor that field
+  ## is present we look for exactly one ``projects/*.toml`` under
+  ## ``.repo/manifests/projects/`` and use its stem.
+  let workspaceToml = workspaceRoot / ".repo" / "workspace.toml"
+  if fileExists(workspaceToml):
+    try:
+      let recorded =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recorded.len > 0:
+        return recorded
+    except WorkspaceManifestParseError:
+      discard
+  let projectsDir = workspaceRoot / ".repo" / "manifests" / "projects"
+  if dirExists(projectsDir):
+    var single = ""
+    var count = 0
+    for kind, path in walkDir(projectsDir):
+      if kind == pcFile and path.endsWith(".toml"):
+        inc count
+        single = path
+    if count == 1:
+      return extractFilename(single).changeFileExt("")
+  ""
+
+proc enumerateParticipatingRepos(workspaceRoot: string):
+    tuple[mode: string; projectName: string;
+          repos: seq[HookRepoTarget]] =
+  ## Returns ``(mode, projectName, repos)``. ``mode`` is
+  ## ``"workspace"`` when the workspace shell (workspace.toml or a
+  ## resolvable project file) is present, ``"single-repo"`` otherwise.
+  if isCompositionalWorkspaceToml(workspaceRoot):
+    let workspaceToml = absolutePath(
+      workspaceRoot / ".repo" / "workspace.toml")
+    let resolved = composeManifestLayersFromFile(workspaceToml)
+    result.mode = "workspace"
+    result.projectName = resolved.projectName
+    for repo in resolved.repos:
+      result.repos.add(HookRepoTarget(name: repo.name,
+        repoPath: workspaceRoot / repo.path))
+    return
+  let projectName = detectWorkspaceProjectName(workspaceRoot)
+  if projectName.len > 0:
+    let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+    let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
+    let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+    var resolved: ResolvedProject
+    if fileExists(projectFile):
+      resolved = resolveProject(projectFile)
+    elif fileExists(variantFile):
+      resolved = resolveVariant(variantFile)
+    else:
+      resolved.projectName = ""
+    if resolved.projectName.len > 0:
+      result.mode = "workspace"
+      result.projectName = resolved.projectName
+      for repo in resolved.repos:
+        result.repos.add(HookRepoTarget(name: repo.name,
+          repoPath: workspaceRoot / repo.path))
+      return
+  result.mode = "single-repo"
+  result.projectName = ""
+  # The single-repo path leaves ``repos`` empty; the caller falls back to
+  # ``gitHooksDir(targetPath)`` exactly like the pre-M17 implementation.
+
+proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
+  ## M17 workspace-aware ``ensure`` driver. Walks every participating
+  ## repo, installs the four canonical VCS hooks per repo, and returns
+  ## a structured report. Exit code follows: 0 when every entry is
+  ## ``installed`` / ``already-up-to-date`` / ``refreshed-drifted`` /
+  ## ``chained-user-hook`` (all "success" outcomes — no failure
+  ## classification exists for ensure on M17 since the installer either
+  ## writes the bytes or raises).
+  result.workspaceRoot = workspaceRoot
+  let enumerated = enumerateParticipatingRepos(workspaceRoot)
+  result.mode = enumerated.mode
+  result.project = enumerated.projectName
+  for repo in enumerated.repos:
+    result.repos.add(repo.name)
+  for repo in enumerated.repos:
+    if not dirExists(repo.repoPath / ".git"):
+      # Skip repos that the operator hasn't materialized yet — same
+      # rule the legacy repo-workspaces installer used.
+      continue
+    let hooksDir = gitHooksDir(repo.repoPath)
+    for hookName in VcsHookNames:
+      let outcome = ensureVcsHookDetailed(hooksDir, hookName)
+      let tag = vcsHookOutcomeTag(outcome)
+      result.entries.add(VcsHookEntry(
+        repo: repo.name,
+        repoPath: repo.repoPath,
+        hook: hookName,
+        outcome: tag,
+        hookPath: hookPath(hooksDir, hookName),
+        managedPath: managedHookPath(hooksDir, hookName)))
+      result.summary[tag] = result.summary.getOrDefault(tag, 0) + 1
+  result.exitCode = 0
+
+proc writeHooksEnsureReport(report: HooksEnsureReport) =
+  let reportDir = report.workspaceRoot / ".repo" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "hooks-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc uninstallVcsHook(hooksDir, hookName: string): bool =
   let standard = hookPath(hooksDir, hookName)
@@ -5831,7 +6077,26 @@ proc uninstallVcsHook(hooksDir, hookName: string): bool =
   if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):
     result = removeFileIfExists(local) or result
 
-proc runVcsHooksCommand(action: HookActionKind; targetPath: string) =
+proc resolveHooksWorkspaceRoot(parsed: ParsedHooksCommand): string =
+  ## Pick the workspace root for M17 enumeration. Priority:
+  ##   1. ``--workspace-root=PATH`` (explicit override).
+  ##   2. the positional ``[path]`` argument, when supplied.
+  ##   3. the current working directory.
+  ## The chosen path is normalised to an absolute path. We do NOT
+  ## require that it resolves to a workspace — single-repo targets
+  ## still flow through the legacy ``gitHooksDir`` fallback below.
+  var raw =
+    if parsed.workspaceRoot.len > 0: parsed.workspaceRoot
+    elif parsed.targetPath.len > 0: parsed.targetPath
+    else: getCurrentDir()
+  result = os.normalizedPath(absolutePath(raw))
+
+proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
+  ## Single-repo legacy path for ``reinstall`` / ``uninstall``. ``ensure``
+  ## now runs through the workspace-aware ``ensureWorkspaceHooks``
+  ## driver below; this proc handles the single-repo subset the older
+  ## actions still target.
+  let targetPath = parsed.targetPath
   let hooksDir = gitHooksDir(targetPath)
   let actionName =
     case action
@@ -5852,6 +6117,40 @@ proc runVcsHooksCommand(action: HookActionKind; targetPath: string) =
   let status = if changed: "updated" else: "already current"
   echo "repro hooks: VCS hooks " & actionName & " " & status & " at " &
     hooksDir
+
+proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
+  ## M17 entry point for ``repro hooks ensure --vcs``. Resolves the
+  ## workspace root, enumerates participating repos, installs the four
+  ## canonical VCS hooks per repo, writes ``hooks-report.json`` and (on
+  ## ``--json``) echoes the same JSON to stdout. Falls back to the
+  ## legacy single-repo path when the target is not inside a workspace
+  ## shell — that path is what ``.envrc`` triggers from non-workspace
+  ## projects.
+  let workspaceRoot = resolveHooksWorkspaceRoot(parsed)
+  let enumerated = enumerateParticipatingRepos(workspaceRoot)
+  if enumerated.mode == "single-repo":
+    # Single-repo fallback. Mirror the legacy stdout line so callers
+    # (notably ``.envrc``) don't lose their idempotent activation
+    # signal.
+    var single = parsed
+    if single.targetPath.len == 0:
+      single.targetPath = workspaceRoot
+    runVcsHooksCommand(hakEnsure, single)
+    return 0
+  var report = ensureWorkspaceHooks(workspaceRoot)
+  writeHooksEnsureReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    echo "repro hooks: ensured " & $report.entries.len &
+      " VCS hook(s) across " & $report.repos.len &
+      " repo(s) in workspace " & workspaceRoot
+    var keys: seq[string]
+    for k in report.summary.keys: keys.add(k)
+    keys.sort()
+    for k in keys:
+      echo "  " & k & ": " & $report.summary[k]
+  report.exitCode
 
 proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
   if args.len == 0:
@@ -5881,6 +6180,10 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
     of "--shell":
       result.nativeShells.add(parseNativeShell(valueFromFlag(args, i,
         "--shell")))
+    of "--workspace-root":
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    of "--json":
+      result.json = true
     else:
       if arg.startsWith("--shell="):
         var value = arg["--shell=".len .. ^1]
@@ -5888,6 +6191,8 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
           raise newException(ValueError,
             "missing value for --shell")
         result.nativeShells.add(parseNativeShell(value))
+      elif arg.startsWith("--workspace-root="):
+        result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
       elif arg.startsWith("-"):
         raise newException(ValueError, "unsupported hooks flag: " & arg)
       elif result.targetPath.len > 0:
@@ -5901,28 +6206,64 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
     result.shellDirenv = true
     result.vcs = true
 
+proc runHooksDispatchCommand(args: openArray[string]): int =
+  ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
+  ## [--refs-file=PATH] -- [hook args...]``. Invoked by the managed
+  ## VCS-hook scripts the M17 installer drops into every participating
+  ## repo. M17 wires this as a no-op: it accepts any known hook name
+  ## and any pass-through positional arguments, returns 0, and emits
+  ## nothing on stdout. M18 (pre-push publication gate) and M19 /
+  ## M19a (post-commit lock refresh + post-merge / post-checkout
+  ## manifest auto-refresh) replace the no-op with their real bodies.
+  if args.len == 0:
+    raise newException(ValueError,
+      "repro hooks dispatch requires a hook name (one of: " &
+      VcsHookNames.join(", ") & ")")
+  let hookName = args[0]
+  var found = false
+  for known in VcsHookNames:
+    if known == hookName:
+      found = true
+      break
+  if not found:
+    raise newException(ValueError,
+      "unsupported hook name for dispatch: " & hookName &
+        " (expected one of: " & VcsHookNames.join(", ") & ")")
+  # M17 no-op success. We deliberately accept and ignore the
+  # ``--repo-root`` / ``--refs-file`` / ``--`` pass-through arguments
+  # the installed scripts pass so future milestones can wire their
+  # bodies without renegotiating the dispatcher's argv contract.
+  0
+
 proc runHooksCommand(args: openArray[string]): int =
+  if args.len > 0 and args[0] == "dispatch":
+    let dispatchArgs =
+      if args.len > 1: args[1 .. ^1]
+      else: @[]
+    return runHooksDispatchCommand(dispatchArgs)
   let parsed = parseHooksCommand(args)
   case parsed.action
   of hakEnsure:
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath)
     if parsed.vcs:
-      runVcsHooksCommand(parsed.action, parsed.targetPath)
+      let code = runVcsHooksEnsureCommand(parsed)
+      if code != 0:
+        return code
     for shell in parsed.nativeShells:
       ensureNativeShellHook(shell)
   of hakReinstall:
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath, reinstall = true)
     if parsed.vcs:
-      runVcsHooksCommand(parsed.action, parsed.targetPath)
+      runVcsHooksCommand(parsed.action, parsed)
     for shell in parsed.nativeShells:
       ensureNativeShellHook(shell, reinstall = true)
   of hakUninstall:
     if parsed.shellDirenv:
       uninstallDirenvHook(parsed.targetPath)
     if parsed.vcs:
-      runVcsHooksCommand(parsed.action, parsed.targetPath)
+      runVcsHooksCommand(parsed.action, parsed)
     for shell in parsed.nativeShells:
       uninstallNativeShellHook(shell)
   0
