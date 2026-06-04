@@ -45,6 +45,7 @@ import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/dev_session
 import repro_cli_support/dev_env_shell_export
+import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/home
 import repro_cli_support/infra
 import repro_cli_support/mode1_loader
@@ -85,7 +86,9 @@ proc renderUsage*(programName: string): string =
           programName &
       " shell [selector] [--activity=name] [--print-env=posix|fish|powershell|json] [--dev-env-stats=PATH]\n       " &
           programName &
-      " dev-env export bash|zsh|fish|nushell|pwsh [--project-root=PATH] [--activity=name] [--develop-overrides=PATH] [--allow-stale]\n       " &
+      " dev-env export bash|zsh|fish|nushell|pwsh [--project-root=PATH] [--activity=name] [--develop-overrides=PATH] [--allow-stale] [--pre-activation-env=PATH]\n       " &
+          programName &
+      " dev-env deactivate <rollback-manifest> [--shell=bash|zsh|fish|nushell|pwsh]\n       " &
           programName &
       " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT]\n       " &
           programName &
@@ -4791,6 +4794,7 @@ type
     activity: string
     developOverridesPath: string
     allowStale: bool
+    preActivationEnvPath: string
 
 proc parseDevEnvExportArgs(args: openArray[string]): ParsedDevEnvExport =
   if args.len == 0:
@@ -4811,6 +4815,15 @@ proc parseDevEnvExportArgs(args: openArray[string]): ParsedDevEnvExport =
         valueFromFlag(args, i, "--develop-overrides")
     elif arg == "--allow-stale":
       result.allowStale = true
+    elif arg == "--pre-activation-env" or
+        arg.startsWith("--pre-activation-env="):
+      # M75 — shell hook writes its env to this file before calling
+      # ``export`` so the rollback manifest captures the SHELL's env,
+      # not the spawned child's env. Optional; when absent we fall
+      # back to the child process's own env (graceful-degradation
+      # path used by direct CLI invocation outside the hook).
+      result.preActivationEnvPath =
+        valueFromFlag(args, i, "--pre-activation-env")
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported dev-env export flag: " & arg)
@@ -4886,8 +4899,136 @@ proc runDevEnvExportCommand(args: openArray[string];
     return 1
 
   var plan = devEnvArtifactToExportPlan(edge.artifactPath)
-  plan.appendReproAppliedMarker(artifact.artifactIdFingerprint())
-  stdout.write(formatExportPlan(plan, parsed.shell))
+  let fingerprint = artifact.artifactIdFingerprint()
+  let manifestPath = rollbackManifestPath(edge.artifactPath)
+  # M75 — emit the manifest path as a marker BEFORE the
+  # ``__REPRO_APPLIED`` fingerprint so the hook's deactivation arm
+  # can locate the manifest via ``$__REPRO_ACTIVE_MANIFEST`` on the
+  # next cd-out.
+  plan.appendReproActiveManifestMarker(manifestPath)
+  plan.appendReproAppliedMarker(fingerprint)
+  let activationScript = formatExportPlan(plan, parsed.shell)
+
+  # M75 — write the rollback manifest alongside the RBDE artifact.
+  let preEnv =
+    if parsed.preActivationEnvPath.len > 0:
+      try:
+        readPreActivationEnv(parsed.preActivationEnvPath)
+      except CatchableError as err:
+        stderr.writeLine("repro dev-env export: " & err.msg)
+        return 1
+    else:
+      snapshotProcessEnv()
+  let manifest = buildRollbackManifest(plan, preEnv, fingerprint,
+    activationScript, parsed.shell)
+  try:
+    writeRollbackManifest(manifestPath, manifest)
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env export: " & err.msg)
+    return 1
+
+  stdout.write(activationScript)
+  0
+
+# M75 — ``repro dev-env deactivate <rollback-manifest>``.
+#
+# Reads the manifest, walks its ``vars`` array in REVERSE order, and
+# emits a per-shell script that restores the pre-activation values
+# of every var the matching activation touched. Tamper detection:
+# the deactivation emitter re-derives the activation script from the
+# manifest's referenced RBDE artifact and re-hashes it; mismatch
+# means the user has presumably edited their env manually since
+# activation. In that case we emit a no-op script + a stderr
+# diagnostic and exit with code 3 (distinct from 0 / 1 / 2 so the
+# shell hook can branch on it).
+type
+  ParsedDevEnvDeactivate = object
+    manifestPath: string
+    shell: ShellKind
+    shellSet: bool
+
+proc parseDevEnvDeactivateArgs(args: openArray[string]):
+    ParsedDevEnvDeactivate =
+  result.shell = skBash
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--shell" or arg.startsWith("--shell="):
+      result.shell = parseShellKind(valueFromFlag(args, i, "--shell"))
+      result.shellSet = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported dev-env deactivate flag: " & arg)
+    elif result.manifestPath.len == 0:
+      result.manifestPath = arg
+    else:
+      raise newException(ValueError,
+        "unexpected dev-env deactivate argument: " & arg)
+    inc i
+  if result.manifestPath.len == 0:
+    raise newException(ValueError,
+      "repro dev-env deactivate requires a rollback manifest path")
+
+proc runDevEnvDeactivateCommand(args: openArray[string]): int =
+  ## ``repro dev-env deactivate <rollback-manifest> [--shell=<shell>]``
+  ## dispatch arm. Exit codes:
+  ##   0 — success
+  ##   1 — engine error (manifest / artifact missing or corrupt)
+  ##   2 — usage error (unknown shell, missing argument)
+  ##   3 — tamper detected (activation hash mismatch)
+  var parsed: ParsedDevEnvDeactivate
+  try:
+    parsed = parseDevEnvDeactivateArgs(args)
+  except ExportPlanError as err:
+    stderr.writeLine("repro dev-env deactivate: " & err.msg)
+    return 2
+  except ValueError as err:
+    stderr.writeLine("repro dev-env deactivate: " & err.msg)
+    return 2
+
+  let manifest =
+    try:
+      readRollbackManifest(parsed.manifestPath)
+    except CatchableError as err:
+      stderr.writeLine("repro dev-env deactivate: " & err.msg)
+      return 1
+
+  # Locate the RBDE artifact. By construction the manifest path is
+  # ``<artifact>.rollback.json``, so strip the suffix to find the
+  # artifact. We use this only for the tamper-detection re-hash; the
+  # actual rollback data is fully self-contained in the manifest.
+  if not parsed.manifestPath.endsWith(".rollback.json"):
+    stderr.writeLine("repro dev-env deactivate: manifest path must end " &
+      "with '.rollback.json': " & parsed.manifestPath)
+    return 1
+  let artifactPath = parsed.manifestPath[0 ..< parsed.manifestPath.len -
+    ".rollback.json".len]
+  if not fileExists(artifactPath):
+    stderr.writeLine("repro dev-env deactivate: RBDE artifact missing " &
+      "(cannot verify tamper seal): " & artifactPath)
+    return 1
+
+  # Tamper detection: re-derive the activation script bytes from the
+  # on-disk artifact and re-hash, using the SHELL recorded in the
+  # manifest (NOT ``parsed.shell`` — the deactivation caller may
+  # request a different shell's deactivation syntax, e.g. user-side
+  # ``--shell=pwsh`` against a bash-activated manifest, and the hash
+  # seal must compare against the activation-time shell).
+  var rederivedPlan = devEnvArtifactToExportPlan(artifactPath)
+  rederivedPlan.appendReproActiveManifestMarker(parsed.manifestPath)
+  rederivedPlan.appendReproAppliedMarker(manifest.artifact)
+  let rederivedScript =
+    formatExportPlan(rederivedPlan, manifest.activationShell)
+  let rederivedHash = computeActivationScriptHash(rederivedScript)
+  if rederivedHash != manifest.activationScriptHash:
+    stderr.writeLine("repro dev-env deactivate: tamper detected — " &
+      "activation_script_hash mismatch (manifest: " &
+      manifest.activationScriptHash & ", recomputed: " &
+      rederivedHash & "). Env left as-is.")
+    stdout.write(emitNoOpScript(parsed.shell))
+    return 3
+
+  stdout.write(formatDeactivate(manifest, parsed.shell))
   0
 
 type
@@ -15949,6 +16090,21 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runDevEnvExportCommand(exportArgs, publicCliPath)
+  if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
+      args[1] == "deactivate":
+    # M75 — ``repro dev-env deactivate <rollback-manifest>``. Reads
+    # the manifest written by the matching ``export`` invocation and
+    # emits the per-shell rollback script. Tamper-detection: if the
+    # manifest's ``activation_script_hash`` differs from what the arm
+    # would re-derive from the same RBDE artifact, exit 3 with a
+    # no-op script + stderr diagnostic. The shell hook (M76) treats
+    # exit 3 as "leave env as-is and move on" per the spec.
+    let deactivateArgs =
+      if args.len > 2:
+        args[2 .. ^1]
+      else:
+        @[]
+    return runDevEnvDeactivateCommand(deactivateArgs)
   if programName == "repro" and args.len > 0 and args[0] == "up":
     try:
       let upArgs =

@@ -339,9 +339,21 @@ proc formatExportPlan*(plan: ExportPlan; shell: ShellKind): string =
 # CLI dispatch arm and the milestone test.
 # ---------------------------------------------------------------------
 
-const ReproAppliedMarkerName* = "__REPRO_APPLIED"
+const
+  ReproAppliedMarkerName* = "__REPRO_APPLIED"
+  ReproActiveManifestMarkerName* = "__REPRO_ACTIVE_MANIFEST"
 
 proc appendReproAppliedMarker*(plan: var ExportPlan; fingerprint: string) =
   plan.add(ExportOp(kind: opMarker,
     markerName: ReproAppliedMarkerName,
     markerValue: fingerprint))
+
+proc appendReproActiveManifestMarker*(plan: var ExportPlan;
+                                      manifestPath: string) =
+  ## M75 — record the rollback manifest path so the per-prompt hook
+  ## (M76) knows which manifest to feed ``repro dev-env deactivate``
+  ## on cd-out. Treated as a marker so the rollback emitter unsets it
+  ## (rather than restoring a pre-activation value).
+  plan.add(ExportOp(kind: opMarker,
+    markerName: ReproActiveManifestMarkerName,
+    markerValue: manifestPath))
