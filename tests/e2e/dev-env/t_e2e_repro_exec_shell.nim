@@ -1,19 +1,10 @@
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
+import repro_test_support
+
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
-
-proc shellCommand(args: openArray[string]): string =
-  args.mapIt(q(it)).join(" ")
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = execCmdEx(command, workingDir = cwd)
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "command failed with exit " & $res.exitCode & ": " & command &
-        "\n" & res.output)
-  res.output
 
 proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
                 appLib = false) =
@@ -27,31 +18,7 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when defined(linux) or defined(macosx):
-  proc prepareMonitorTools(repoRoot, tempRoot: string):
-      tuple[fsSnoop: string; shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    let shimSource =
-      when defined(linux):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      else:
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-    compileNim(repoRoot, shimSource, result.shim, "m4-dev-env-monitor-shim",
-      appLib = true)
-    compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      result.fsSnoop, "m4-dev-env-fs-snoop")
+# prepareMonitorTools is exported from libs/repro_test_support.
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "bin" / addFileExt("repro", ExeExt)
@@ -96,17 +63,19 @@ type
 
 proc prepareCase(prefix: string): M4Case =
   result.repoRoot = getCurrentDir()
-  result.tempRoot = createTempDir(prefix, "")
+  # Resolve symlinks (e.g. /tmp -> /private/tmp on macOS) so that paths the
+  # test passes into child processes match the paths the kernel reports back
+  # via getcwd / realpath. Without this, equality checks against c.projectRoot
+  # fail under `nix develop` where TMPDIR=/tmp/nix-shell.X but the OS resolves
+  # /tmp to /private/tmp at every syscall boundary.
+  result.tempRoot = expandFilename(createTempDir(prefix, ""))
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
-  when defined(linux) or defined(macosx):
-    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot)
+  when isFsSnoopSupported:
+    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m4-exec-shell")
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
-  else:
-    raise newException(OSError,
-      "dev-env public CLI tests require fs-snoop support")
 
 proc envFor(c: M4Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
@@ -209,175 +178,178 @@ when defined(windows):
       raise newException(OSError, "PowerShell source failed: " & res.output)
     res.output.firstNonEmptyLine()
 
-proc nixFish(): string =
-  let nix = findExe("nix")
-  if nix.len == 0:
-    return ""
-  let res = execCmdEx(shellCommand([
-    nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
-    "--extra-experimental-features", "nix-command flakes"
-  ]))
-  if res.exitCode != 0:
-    return ""
-  for line in res.output.splitLines():
-    let candidate = line.strip()
-    if candidate.startsWith("/nix/store/") and
-        fileExists(candidate / "bin" / "fish"):
-      return candidate / "bin" / "fish"
+when isNixSupported:
+  proc nixFish(): string =
+    let nix = findExe("nix")
+    if nix.len == 0:
+      return ""
+    let res = runShell(shellCommand(@[
+      nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
+      "--extra-experimental-features", "nix-command flakes"
+    ]))
+    if res.code != 0:
+      return ""
+    for line in res.output.splitLines():
+      let candidate = line.strip()
+      if candidate.startsWith("/nix/store/") and
+          fileExists(candidate / "bin" / "fish"):
+        return candidate / "bin" / "fish"
 
-proc requireFish(): string =
-  result = findExe("fish")
-  if result.len > 0:
-    return
-  result = nixFish()
-  if result.len > 0:
-    return
-  raise newException(OSError,
-    "M4 shell print gate requires a real fish binary; PATH has none and " &
-      "`nix build nixpkgs#fish` did not provide one")
+  proc requireFish(): string =
+    result = findExe("fish")
+    if result.len > 0:
+      return
+    result = nixFish()
+    if result.len > 0:
+      return
+    raise newException(OSError,
+      "M4 shell print gate requires a real fish binary; PATH has none " &
+        "and `nix build nixpkgs#fish` did not provide one")
 
 suite "e2e_repro_exec_shell_artifact_consumers":
-  test "e2e_repro_exec_uses_cached_dev_env_artifact":
-    let c = prepareCase("repro-m4-exec-cache")
-    defer: removeDir(c.tempRoot)
+  when isFsSnoopSupported:
+    test "e2e_repro_exec_uses_cached_dev_env_artifact":
+      let c = prepareCase("repro-m4-exec-cache")
+      defer: removeDir(c.tempRoot)
 
-    let firstStatsPath = c.tempRoot / "first-stats.json"
-    let first = runRepro(c, @[
-      "exec", c.projectRoot, "--dev-env-stats=" & firstStatsPath,
-      "--", "fixture-tool"
-    ])
-    check first.exitCode == 0
-    check first.output.contains("tool:alpha:dev:build")
-    let firstStats = parseJson(readFile(firstStatsPath))
-    let artifactPath = firstStats["artifactPath"].getStr()
-    let firstArtifact = readFile(artifactPath)
-    check firstStats["stats"]["providerIntrospectionLaunched"].getBool()
-    check firstStats["stats"]["artifactWriteLaunched"].getBool()
-    check firstStats.evidenceMentionsInput("dev-env-value.txt")
-
-    let secondStatsPath = c.tempRoot / "second-stats.json"
-    let second = runRepro(c, @[
-      "exec", c.projectRoot, "--dev-env-stats=" & secondStatsPath,
-      "--", "fixture-tool"
-    ])
-    check second.exitCode == 0
-    check second.output.contains("tool:alpha:dev:build")
-    let secondStats = parseJson(readFile(secondStatsPath))
-    check secondStats["artifactPath"].getStr() == artifactPath
-    check readFile(artifactPath) == firstArtifact
-    check not secondStats["stats"]["providerIntrospectionLaunched"].getBool()
-    check secondStats["stats"]["providerIntrospectionCacheHit"].getBool()
-    check secondStats["stats"]["artifactWriteSkipped"].getBool()
-    check secondStats.evidenceMentionsInput("dev-env-value.txt")
-
-  test "e2e_repro_shell_print_env_sources_successfully":
-    let c = prepareCase("repro-m4-shell-print")
-    defer: removeDir(c.tempRoot)
-    let expected = shellValueViaExec(c)
-
-    let posixStatsPath = c.tempRoot / "posix-stats.json"
-    let posixText = requireRepro(c, @[
-      "shell", "--print-env=posix", c.projectRoot,
-      "--dev-env-stats=" & posixStatsPath
-    ])
-    let artifactPath = parseJson(readFile(posixStatsPath))["artifactPath"].getStr()
-    check artifactPath.len > 0
-    requireShellCacheStats(posixStatsPath, artifactPath)
-    let posixPath = c.tempRoot / "dev-env.sh"
-    writeFile(posixPath, posixText)
-    check posixSourceValue(posixPath, c.projectRoot) == expected
-
-    let jsonStatsPath = c.tempRoot / "json-stats.json"
-    let jsonText = requireRepro(c, @[
-      "shell", "--print-env=json", c.projectRoot,
-      "--dev-env-stats=" & jsonStatsPath
-    ])
-    requireShellCacheStats(jsonStatsPath, artifactPath)
-    let jsonView = parseJson(jsonText)
-    check jsonView["projectRoot"].getStr() == c.projectRoot
-    check jsonView["tasks"][0]["name"].getStr() == "build"
-
-    let fish = requireFish()
-    let fishStatsPath = c.tempRoot / "fish-stats.json"
-    let fishText = requireRepro(c, @[
-      "shell", "--print-env=fish", c.projectRoot,
-      "--dev-env-stats=" & fishStatsPath
-    ])
-    requireShellCacheStats(fishStatsPath, artifactPath)
-    let fishPath = c.tempRoot / "dev-env.fish"
-    writeFile(fishPath, fishText)
-    check fishSourceValue(fish, fishPath, c.projectRoot) == expected
-
-    when defined(windows):
-      let pwsh =
-        if findExe("pwsh").len > 0: findExe("pwsh") else: findExe("powershell")
-      if pwsh.len == 0:
-        raise newException(OSError,
-          "M4 PowerShell shell print gate requires a real PowerShell binary")
-      let psStatsPath = c.tempRoot / "powershell-stats.json"
-      let psText = requireRepro(c, @[
-        "shell", "--print-env=powershell", c.projectRoot,
-        "--dev-env-stats=" & psStatsPath
+      let firstStatsPath = c.tempRoot / "first-stats.json"
+      let first = runRepro(c, @[
+        "exec", c.projectRoot, "--dev-env-stats=" & firstStatsPath,
+        "--", "fixture-tool"
       ])
-      requireShellCacheStats(psStatsPath, artifactPath)
-      let psPath = c.tempRoot / "dev-env.ps1"
-      writeFile(psPath, psText)
-      check powerShellSourceValue(pwsh, psPath, c.projectRoot) == expected
-    else:
-      let psStatsPath = c.tempRoot / "powershell-render-stats.json"
-      let psText = requireRepro(c, @[
-        "shell", "--print-env=powershell", c.projectRoot,
-        "--dev-env-stats=" & psStatsPath
+      check first.exitCode == 0
+      check first.output.contains("tool:alpha:dev:build")
+      let firstStats = parseJson(readFile(firstStatsPath))
+      let artifactPath = firstStats["artifactPath"].getStr()
+      let firstArtifact = readFile(artifactPath)
+      check firstStats["stats"]["providerIntrospectionLaunched"].getBool()
+      check firstStats["stats"]["artifactWriteLaunched"].getBool()
+      check firstStats.evidenceMentionsInput("dev-env-value.txt")
+
+      let secondStatsPath = c.tempRoot / "second-stats.json"
+      let second = runRepro(c, @[
+        "exec", c.projectRoot, "--dev-env-stats=" & secondStatsPath,
+        "--", "fixture-tool"
       ])
-      requireShellCacheStats(psStatsPath, artifactPath)
-      check psText.contains("$env:AUX_VALUE")
-      check psText.contains("$env:FIXTURE_MODE")
+      check second.exitCode == 0
+      check second.output.contains("tool:alpha:dev:build")
+      let secondStats = parseJson(readFile(secondStatsPath))
+      check secondStats["artifactPath"].getStr() == artifactPath
+      check readFile(artifactPath) == firstArtifact
+      check not secondStats["stats"]["providerIntrospectionLaunched"].getBool()
+      check secondStats["stats"]["providerIntrospectionCacheHit"].getBool()
+      check secondStats["stats"]["artifactWriteSkipped"].getBool()
+      check secondStats.evidenceMentionsInput("dev-env-value.txt")
 
-  test "e2e_repro_exec_exit_status_and_cwd":
-    let c = prepareCase("repro-m4-exec-status")
-    defer: removeDir(c.tempRoot)
+    test "e2e_repro_shell_print_env_sources_successfully":
+      let c = prepareCase("repro-m4-shell-print")
+      defer: removeDir(c.tempRoot)
+      let expected = shellValueViaExec(c)
 
-    let special = "semi;dollar$arg and quote' marker"
-    let script =
-      "pwd\n" &
-      "printf 'arg1=<%s>\\n' \"$1\"\n" &
-      "printf 'arg2=<%s>\\n' \"$2\"\n" &
-      "exit 17\n"
-    let res = runRepro(c, @[
-      "exec", c.projectRoot, "--", "sh", "-c", script,
-      "repro-test", "space arg", special
-    ])
-    check res.exitCode == 17
-    check res.output.splitLines()[0] == c.projectRoot
-    check res.output.contains("arg1=<space arg>")
-    check res.output.contains("arg2=<" & special & ">")
+      let posixStatsPath = c.tempRoot / "posix-stats.json"
+      let posixText = requireRepro(c, @[
+        "shell", "--print-env=posix", c.projectRoot,
+        "--dev-env-stats=" & posixStatsPath
+      ])
+      let artifactPath = parseJson(readFile(posixStatsPath))["artifactPath"].getStr()
+      check artifactPath.len > 0
+      requireShellCacheStats(posixStatsPath, artifactPath)
+      let posixPath = c.tempRoot / "dev-env.sh"
+      writeFile(posixPath, posixText)
+      check posixSourceValue(posixPath, c.projectRoot) == expected
 
-  test "e2e_repro_shell_spawn_uses_cached_dev_env_artifact":
-    let c = prepareCase("repro-m4-shell-spawn")
-    defer: removeDir(c.tempRoot)
+      let jsonStatsPath = c.tempRoot / "json-stats.json"
+      let jsonText = requireRepro(c, @[
+        "shell", "--print-env=json", c.projectRoot,
+        "--dev-env-stats=" & jsonStatsPath
+      ])
+      requireShellCacheStats(jsonStatsPath, artifactPath)
+      let jsonView = parseJson(jsonText)
+      check jsonView["projectRoot"].getStr() == c.projectRoot
+      check jsonView["tasks"][0]["name"].getStr() == "build"
 
-    let markerPath = c.projectRoot / "shell-spawn.txt"
-    let shellPath = c.tempRoot / "spawn-shell"
-    writeFile(shellPath,
-      "#!/bin/sh\n" &
-      "printf 'spawn:%s:%s:%s:%s\\n' \"$PWD\" \"$AUX_VALUE\" " &
-        "\"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_ARTIFACT\" > " &
-        q(markerPath) & "\n")
-    setFilePermissions(shellPath, {fpUserRead, fpUserWrite, fpUserExec,
-      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+      when isNixSupported:
+        let fish = requireFish()
+        let fishStatsPath = c.tempRoot / "fish-stats.json"
+        let fishText = requireRepro(c, @[
+          "shell", "--print-env=fish", c.projectRoot,
+          "--dev-env-stats=" & fishStatsPath
+        ])
+        requireShellCacheStats(fishStatsPath, artifactPath)
+        let fishPath = c.tempRoot / "dev-env.fish"
+        writeFile(fishPath, fishText)
+        check fishSourceValue(fish, fishPath, c.projectRoot) == expected
 
-    let statsPath = c.tempRoot / "spawn-stats.json"
-    let res = runRepro(c, @[
-      "shell", c.projectRoot, "--shell=" & shellPath,
-      "--dev-env-stats=" & statsPath
-    ])
-    check res.exitCode == 0
-    let stats = parseJson(readFile(statsPath))
-    let artifactPath = stats["artifactPath"].getStr()
-    check artifactPath.len > 0
-    check stats["command"].getStr() == "shell"
-    check stats["stats"]["providerIntrospectionLaunched"].getBool()
-    check stats["stats"]["artifactWriteLaunched"].getBool()
-    check stats.evidenceMentionsInput("dev-env-value.txt")
-    check readFile(markerPath).strip() ==
-      "spawn:" & c.projectRoot & ":alpha:dev:" & artifactPath
+      when defined(windows):
+        let pwsh =
+          if findExe("pwsh").len > 0: findExe("pwsh") else: findExe("powershell")
+        if pwsh.len == 0:
+          raise newException(OSError,
+            "M4 PowerShell shell print gate requires a real PowerShell binary")
+        let psStatsPath = c.tempRoot / "powershell-stats.json"
+        let psText = requireRepro(c, @[
+          "shell", "--print-env=powershell", c.projectRoot,
+          "--dev-env-stats=" & psStatsPath
+        ])
+        requireShellCacheStats(psStatsPath, artifactPath)
+        let psPath = c.tempRoot / "dev-env.ps1"
+        writeFile(psPath, psText)
+        check powerShellSourceValue(pwsh, psPath, c.projectRoot) == expected
+      else:
+        let psStatsPath = c.tempRoot / "powershell-render-stats.json"
+        let psText = requireRepro(c, @[
+          "shell", "--print-env=powershell", c.projectRoot,
+          "--dev-env-stats=" & psStatsPath
+        ])
+        requireShellCacheStats(psStatsPath, artifactPath)
+        check psText.contains("$env:AUX_VALUE")
+        check psText.contains("$env:FIXTURE_MODE")
+
+    test "e2e_repro_exec_exit_status_and_cwd":
+      let c = prepareCase("repro-m4-exec-status")
+      defer: removeDir(c.tempRoot)
+
+      let special = "semi;dollar$arg and quote' marker"
+      let script =
+        "pwd\n" &
+        "printf 'arg1=<%s>\\n' \"$1\"\n" &
+        "printf 'arg2=<%s>\\n' \"$2\"\n" &
+        "exit 17\n"
+      let res = runRepro(c, @[
+        "exec", c.projectRoot, "--", "sh", "-c", script,
+        "repro-test", "space arg", special
+      ])
+      check res.exitCode == 17
+      check res.output.splitLines()[0] == c.projectRoot
+      check res.output.contains("arg1=<space arg>")
+      check res.output.contains("arg2=<" & special & ">")
+
+    test "e2e_repro_shell_spawn_uses_cached_dev_env_artifact":
+      let c = prepareCase("repro-m4-shell-spawn")
+      defer: removeDir(c.tempRoot)
+
+      let markerPath = c.projectRoot / "shell-spawn.txt"
+      let shellPath = c.tempRoot / "spawn-shell"
+      writeFile(shellPath,
+        "#!/bin/sh\n" &
+        "printf 'spawn:%s:%s:%s:%s\\n' \"$PWD\" \"$AUX_VALUE\" " &
+          "\"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_ARTIFACT\" > " &
+          q(markerPath) & "\n")
+      setFilePermissions(shellPath, {fpUserRead, fpUserWrite, fpUserExec,
+        fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+      let statsPath = c.tempRoot / "spawn-stats.json"
+      let res = runRepro(c, @[
+        "shell", c.projectRoot, "--shell=" & shellPath,
+        "--dev-env-stats=" & statsPath
+      ])
+      check res.exitCode == 0
+      let stats = parseJson(readFile(statsPath))
+      let artifactPath = stats["artifactPath"].getStr()
+      check artifactPath.len > 0
+      check stats["command"].getStr() == "shell"
+      check stats["stats"]["providerIntrospectionLaunched"].getBool()
+      check stats["stats"]["artifactWriteLaunched"].getBool()
+      check stats.evidenceMentionsInput("dev-env-value.txt")
+      check readFile(markerPath).strip() ==
+        "spawn:" & c.projectRoot & ":alpha:dev:" & artifactPath

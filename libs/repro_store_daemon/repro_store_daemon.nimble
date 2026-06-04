@@ -1,0 +1,5 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild local store daemon protocol and development runtime"
+license = "MIT"
+requires "nim >= 2.2.0"

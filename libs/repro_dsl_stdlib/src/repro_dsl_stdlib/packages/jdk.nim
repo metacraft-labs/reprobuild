@@ -75,6 +75,30 @@ let jdkCatalog* = @[
         sha256 = "6f09d4a3598542313cca1540106d537c7092a54e415d569f7b928160a90d3128",
         extract_path = "jdk-21.0.5+11",
       ),
+      # M9.5: Linux x86_64 slice. Adoptium ships the same inner-dir
+      # layout (``jdk-21.0.5+11/bin/``) so extract_path matches; archive
+      # is .tar.gz (vs. Windows .zip) and the binaries lack the .exe
+      # suffix → both encoded via the M9.5 per-platform overrides.
+      # Adoptium's HotSpot Linux builds target glibc 2.17 (RHEL 7
+      # floor) per their release notes — matches the M9.5 spec's
+      # honest-scope target.
+      initPlatformBinary(
+        cpu = pcX86_64,
+        os = poLinux,
+        url = "https://github.com/adoptium/temurin21-binaries/releases/" &
+          "download/jdk-21.0.5%2B11/" &
+          "OpenJDK21U-jdk_x64_linux_hotspot_21.0.5_11.tar.gz",
+        sha256 = "3c654d98404c073b8a7e66bffb27f4ae3e7ede47d13284c132d40a83144bfd8c",
+        extract_path = "jdk-21.0.5+11",
+        archive_format_override = afTarGz,
+        has_archive_format_override = true,
+        bin_relpath_override = @[
+          "bin/javac",
+          "bin/java",
+          "bin/jar",
+          "bin/jlink",
+        ],
+      ),
     ],
     env = {"JAVA_HOME": "${prefix}"},
   ),

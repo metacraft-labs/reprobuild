@@ -2,35 +2,7 @@ import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
 import repro_tool_profiles
-
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
-
-proc requireFailure(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  check res.code != 0
-  res.output
+import repro_test_support
 
 proc pathExists(path: string): bool =
   try:
@@ -42,9 +14,11 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    raise newException(OSError,
+      "runquotad binary missing at " & daemonBin & "; build it via " &
+      "the test harness (scripts/run_tests.sh)")
   let socketPath = "/tmp/repro-m21-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -191,104 +165,113 @@ proc assertPackageProvisioningMetadata(interfacePath: string) =
       fail()
 
 suite "e2e_codetracer_dev_environment_slice":
-  test "m53_nix_provisioning_from_package_metadata":
-    let repoRoot = getCurrentDir()
-    let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-    check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
-      "ipc_registry_test.nim")
-    check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
-      "main.c")
+  # M53 tests the Nix provisioning end-to-end against the CodeTracer
+  # source tree — every step needs ``nix`` and ``/nix/store`` paths
+  # so the test body is excluded from the binary on platforms where
+  # Nix is not a realistic provisioning option.
+  when isNixSupported:
+    test "m53_nix_provisioning_from_package_metadata":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
+        "ipc_registry_test.nim")
+      check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
+        "main.c")
 
-    let tempRoot = createTempDir("repro-m21-codetracer-dev", "")
-    defer: removeDir(tempRoot)
+      let tempRoot = createTempDir("repro-m21-codetracer-dev", "")
+      defer: removeDir(tempRoot)
 
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
+      let reproBin = tempRoot / "repro"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-repro"),
+        "--out:" & reproBin,
+        repoRoot / "apps" / "repro" / "repro.nim"
+      ]), repoRoot)
 
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot)
-    copySelectedCodeTracerFiles(codeTracerRoot, projectRoot)
-    writeProject(projectRoot / "reprobuild.nim")
-    let target = projectRoot
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot)
+      copySelectedCodeTracerFiles(codeTracerRoot, projectRoot)
+      writeProject(projectRoot / "reprobuild.nim")
+      let target = projectRoot
 
-    let noFlag = requireFailure(shellCommand([reproBin, "develop", target]),
-      repoRoot)
-    check noFlag.contains("refusing implicit PATH fallback")
+      let noFlag = requireFailure(shellCommand([reproBin, "develop", target]),
+        repoRoot)
+      check noFlag.contains("refusing implicit PATH fallback")
 
-    let checks =
-      "set -eu\n" &
-      "test -f src/frontend/tests/ipc_registry_test.nim\n" &
-      "test -f src/frontend/index/ipc_registry.nim\n" &
-      "test -f src/frontend/lib/jslib.nim\n" &
-      "test -f src/c/main.c\n" &
-      "test -f \"$REPRO_TOOL_PROFILE_ARTIFACT\"\n" &
-      "test -f \"$REPRO_TOOL_PROFILE_INSPECTION\"\n" &
-      "test \"$REPRO_PROJECT_ROOT\" = \"$PWD\"\n" &
-      "for tool in nim node gcc sh stylus; do\n" &
-      "  path=$(command -v \"$tool\")\n" &
-      "  case \"$path\" in /nix/store/*/bin/$tool) ;; *) echo \"$tool=$path\"; exit 20;; esac\n" &
-      "  \"$tool\" --version >/dev/null\n" &
-      "  echo \"$tool=$path\"\n" &
-      "done\n" &
-      "echo M53_DEVELOP_OK\n"
-    let develop = requireSuccess(shellCommand([reproBin, "develop", target,
-      "--tool-provisioning=nix", "--", "sh", "-c", checks]), repoRoot)
-    check develop.contains("M53_DEVELOP_OK")
-    check develop.contains("tool-provisioning=nix")
-    for executableName in ["nim", "node", "gcc", "sh", "stylus"]:
-      check develop.contains(executableName & "=/nix/store/")
+      let checks =
+        "set -eu\n" &
+        "test -f src/frontend/tests/ipc_registry_test.nim\n" &
+        "test -f src/frontend/index/ipc_registry.nim\n" &
+        "test -f src/frontend/lib/jslib.nim\n" &
+        "test -f src/c/main.c\n" &
+        "test -f \"$REPRO_TOOL_PROFILE_ARTIFACT\"\n" &
+        "test -f \"$REPRO_TOOL_PROFILE_INSPECTION\"\n" &
+        "test \"$REPRO_PROJECT_ROOT\" = \"$PWD\"\n" &
+        "for tool in nim node gcc sh stylus; do\n" &
+        "  path=$(command -v \"$tool\")\n" &
+        "  case \"$path\" in /nix/store/*/bin/$tool) ;; *) echo \"$tool=$path\"; exit 20;; esac\n" &
+        "  \"$tool\" --version >/dev/null\n" &
+        "  echo \"$tool=$path\"\n" &
+        "done\n" &
+        "echo M53_DEVELOP_OK\n"
+      let develop = requireSuccess(shellCommand([reproBin, "develop", target,
+        "--tool-provisioning=nix", "--", "sh", "-c", checks]), repoRoot)
+      check develop.contains("M53_DEVELOP_OK")
+      check develop.contains("tool-provisioning=nix")
+      for executableName in ["nim", "node", "gcc", "sh", "stylus"]:
+        check develop.contains(executableName & "=/nix/store/")
 
-    let developIdentityPath = valueAfter(develop, "toolIdentity:")
-    let developInspectionPath = valueAfter(develop, "inspection:")
-    let developInterfacePath = valueAfter(develop, "interface:")
-    check fileExists(developIdentityPath)
-    check fileExists(developInspectionPath)
-    check fileExists(developInterfacePath)
-    check readFile(developIdentityPath)[0 .. 3] == "RBTP"
-    check readFile(developIdentityPath)[0] != '{'
-    assertPackageProvisioningMetadata(developInterfacePath)
-    let developIdentity = readPathOnlyBuildIdentity(developIdentityPath)
-    assertNixIdentity(developIdentity)
+      let developIdentityPath = valueAfter(develop, "toolIdentity:")
+      let developInspectionPath = valueAfter(develop, "inspection:")
+      let developInterfacePath = valueAfter(develop, "interface:")
+      check fileExists(developIdentityPath)
+      check fileExists(developInspectionPath)
+      check fileExists(developInterfacePath)
+      check readFile(developIdentityPath)[0 .. 3] == "RBTP"
+      check readFile(developIdentityPath)[0] != '{'
+      assertPackageProvisioningMetadata(developInterfacePath)
+      let developIdentity = readPathOnlyBuildIdentity(developIdentityPath)
+      assertNixIdentity(developIdentity)
 
-    let inspection = parseFile(developInspectionPath)
-    check inspection{"profiles"}.getElems().len == 5
-    for profile in inspection{"profiles"}:
-      check profile{"installMethod"}.getStr() == "nix"
-      check profile{"adapterStrength"}.getStr() == "strong"
-      check profile{"cachePortability"}.getStr() == "portable"
-      check profile{"declaredExecutablePath"}.getStr().len > 0
-      assertRealizedStorePaths(profile{"realizedStorePaths"}.getElems().
-        mapIt(it.getStr()))
-      check profile{"resolvedExecutablePath"}.getStr().startsWith("/nix/store/")
-      check profile{"probes"}[0]{"output"}.getStr().strip().len > 0
+      let inspection = parseFile(developInspectionPath)
+      check inspection{"profiles"}.getElems().len == 5
+      for profile in inspection{"profiles"}:
+        check profile{"installMethod"}.getStr() == "nix"
+        check profile{"adapterStrength"}.getStr() == "strong"
+        check profile{"cachePortability"}.getStr() == "portable"
+        check profile{"declaredExecutablePath"}.getStr().len > 0
+        assertRealizedStorePaths(profile{"realizedStorePaths"}.getElems().
+          mapIt(it.getStr()))
+        check profile{"resolvedExecutablePath"}.getStr().startsWith("/nix/store/")
+        check profile{"probes"}[0]{"output"}.getStr().strip().len > 0
 
-    let summary = requireSuccess(shellCommand([reproBin, "develop", target,
-      "--tool-provisioning=nix"]), repoRoot)
-    check summary.contains("tool: nim /nix/store/")
-    check summary.contains("tool: node /nix/store/")
-    check summary.contains("tool: gcc /nix/store/")
-    check summary.contains("tool: sh /nix/store/")
-    check summary.contains("tool: stylus /nix/store/")
+      let summary = requireSuccess(shellCommand([reproBin, "develop", target,
+        "--tool-provisioning=nix"]), repoRoot)
+      check summary.contains("tool: nim /nix/store/")
+      check summary.contains("tool: node /nix/store/")
+      check summary.contains("tool: gcc /nix/store/")
+      check summary.contains("tool: sh /nix/store/")
+      check summary.contains("tool: stylus /nix/store/")
 
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
 
-    let build = requireSuccess(shellCommand([reproBin, "build", target,
-      "--tool-provisioning=nix"]), repoRoot)
-    check build.contains("tool-provisioning=nix")
-    check build.contains("action: record-nix-sh status=asSucceeded launched=true")
-    let buildIdentity = readPathOnlyBuildIdentity(valueAfter(build,
-        "toolIdentity:"))
-    assertNixIdentity(buildIdentity)
-    check readFile(projectRoot / "build" / "nix-sh.txt").startsWith(
-      "/nix/store/")
+      # `--log=actions` ensures the per-action `action: ID status=... ` line
+      # the next assertion keys on is captured; the default summary log only
+      # emits the `progress: bpkActionCompleted ...` markers and the
+      # `scheduler:` / `providerInvocations:` / `buildReport:` headers.
+      let build = requireSuccess(shellCommand([reproBin, "build", target,
+        "--tool-provisioning=nix", "--log=actions"]), repoRoot)
+      check build.contains("tool-provisioning=nix")
+      check build.contains("action: record-nix-sh status=asSucceeded launched=true")
+      let buildIdentity = readPathOnlyBuildIdentity(valueAfter(build,
+          "toolIdentity:"))
+      assertNixIdentity(buildIdentity)
+      check readFile(projectRoot / "build" / "nix-sh.txt").startsWith(
+        "/nix/store/")

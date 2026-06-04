@@ -126,8 +126,16 @@ when defined(macosx):
 
       let fileOld = runSuccess(shellCommand(["file", oldObj]))
       let fileNew = runSuccess(shellCommand(["file", newObj]))
-      check fileOld.contains("Mach-O 64-bit arm64 object")
-      check fileNew.contains("Mach-O 64-bit arm64 object")
+      # Check Mach-O format + arm64 arch independently because the word
+      # ordering of `file(1)`'s Mach-O description has shifted across
+      # macOS releases (older: `Mach-O 64-bit arm64 object`, recent:
+      # `Mach-O 64-bit object arm64`). Both signals — the Mach-O
+      # 64-bit prefix and the arm64 token — must be present to
+      # confirm we built an arm64 Mach-O object, but the assertion
+      # must not pin a specific phrasing or it rots on every
+      # macOS/file upgrade.
+      check fileOld.contains("Mach-O 64-bit") and fileOld.contains("arm64")
+      check fileNew.contains("Mach-O 64-bit") and fileNew.contains("arm64")
 
       let oldGraph = parseMachOArm64Object(oldObj)
       let newGraph = parseMachOArm64Object(newObj)

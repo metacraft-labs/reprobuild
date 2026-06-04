@@ -53,6 +53,7 @@ import std/[os, strutils, unittest]
 from repro_core/paths import extendedPath
 
 import repro_dsl_stdlib/catalog_registry
+import repro_dsl_stdlib/packages_schema
 
 import repro_home_apply/plan
 import repro_home_apply/realize
@@ -158,7 +159,15 @@ suite "M0 — previewPackageResolutions routes through chainResolvePackage":
     resetDir(FixtureRoot)
     isolateProdCatalog()
 
-    let previews = previewPackageResolutions(m71PlannedPackages())
+    # Pin host facts to Windows-x64: the M68 builtin catalog ships
+    # Windows-only platform slices for the M71 reference profile, so
+    # this contract test verifies the Windows arm regardless of the
+    # runner's actual OS (cf. commit 9bdf81d for the e2e analog).
+    # We also pin the chain to the Windows M65 default so the chain
+    # selection does not bake in the runner's compile-time default.
+    let previews = previewPackageResolutions(m71PlannedPackages(),
+      chain = WindowsDefaultChain,
+      hostCpu = pcX86_64, hostOs = poWindows)
     check previews.len == M71Packages.len
 
     var missing: seq[string]
@@ -224,7 +233,9 @@ suite "M0 — previewPackageResolutions routes through chainResolvePackage":
       packageId: "definitely-not-registered-foobar",
       requestedVersion: "1.0.0",
       fromActivity: "test")]
-    let previews = previewPackageResolutions(plannedVersioned)
+    let previews = previewPackageResolutions(plannedVersioned,
+      chain = WindowsDefaultChain,
+      hostCpu = pcX86_64, hostOs = poWindows)
     check previews.len == 1
     let p = previews[0]
     check p.kind == ppkMissing
@@ -248,7 +259,9 @@ suite "M0 — previewPackageResolutions routes through chainResolvePackage":
       packageId: "jdk",
       requestedVersion: "9.9.9-nonexistent",
       fromActivity: "test")]
-    let previews = previewPackageResolutions(planned)
+    let previews = previewPackageResolutions(planned,
+      chain = WindowsDefaultChain,
+      hostCpu = pcX86_64, hostOs = poWindows)
     check previews.len == 1
     let p = previews[0]
     check p.kind == ppkMissing
@@ -271,7 +284,9 @@ suite "M0 — previewPackageResolutions routes through chainResolvePackage":
       planned.add(PlannedPackage(packageId: id,
         requestedVersion: "",
         fromActivity: "test"))
-    let previews = previewPackageResolutions(planned)
+    let previews = previewPackageResolutions(planned,
+      chain = WindowsDefaultChain,
+      hostCpu = pcX86_64, hostOs = poWindows)
     check previews.len == M69Deferred.len
     for pp in previews:
       check pp.kind != ppkMissing

@@ -20,7 +20,7 @@
 ##   that case fails closed with `EUnstructured` pointing at the manual
 ##   edit.
 
-import std/strutils
+import std/[strutils, tables]
 from repro_core/paths import extendedPath
 
 import ./errors
@@ -33,8 +33,20 @@ const
   ConfigHeader = "config"
   HostsHeader = "hosts"
   ResourcesHeader = "resources"
+  AdapterPreferenceHeader = "adapterPreference"
   WhenHeader = "when"
   IfHeader = "if"
+
+  KnownAdapterPreferenceOs* = ["windows", "linux", "darwin", "macos"]
+    ## M2.5: the closed set of OS keys recognized inside an
+    ## `adapterPreference:` block. `macos` is an alias for `darwin` and
+    ## is canonicalized to `"darwin"` at parse time so resolve-time
+    ## lookups use a single canonical key.
+
+  KnownAdapterPreferenceAdapters* = ["builtin", "scoop", "nix", "path"]
+    ## M2.5: the closed set of adapter names recognized inside an
+    ## `adapterPreference:` chain list. Any entry outside this set
+    ## raises a structured parse error.
 
   KnownResourceKinds* = ["env.userPath", "fs.managedBlock",
     "shell.integration", "env.userVariable", "windows.registryValue",
@@ -145,7 +157,8 @@ proc matchAnyHeader(line: string): tuple[ok: bool; keyword, rest: string;
   ## match-first is unnecessary because the keywords are all unique
   ## prefixes of distinct identifiers).
   for kw in [ProfileHeader, ActivityHeader, WhenHeader, IfHeader,
-             ConfigHeader, HostsHeader, ResourcesHeader]:
+             ConfigHeader, HostsHeader, ResourcesHeader,
+             AdapterPreferenceHeader]:
     let m = matchHeader(line, kw)
     if m.matched:
       return (true, m.keyword, m.rest, m.indent)
@@ -992,10 +1005,138 @@ proc parseResourcesBlock(ctx: ParseCtx; idx, parentIndent,
     resourcesEntries: entries)
 
 # ---------------------------------------------------------------------------
+# adapterPreference block parsing (M2.5).
+# ---------------------------------------------------------------------------
+#
+# Surface syntax:
+#
+#   adapterPreference:
+#     windows: [scoop, builtin, path]
+#     linux:   [nix, builtin, path]
+#     darwin:  [nix, path]
+#
+# Per-OS keys with chain-list values. The OS keys are the closed set
+# `KnownAdapterPreferenceOs`; chain entries are the closed set
+# `KnownAdapterPreferenceAdapters`. Unknown OS keys or unknown adapter
+# names raise EUnstructured. An empty list (e.g. `windows: []`) is
+# accepted; resolve-time falls back to the M65 platform default for
+# that OS when the seq is empty.
+
+proc canonicalizeOsKey(rawOsKey: string): string =
+  ## `macos` is an alias for `darwin`. Both canonicalize to `"darwin"`
+  ## so resolve-time lookups use a single key.
+  let lc = rawOsKey.toLowerAscii()
+  if lc == "macos":
+    "darwin"
+  else:
+    lc
+
+proc parseAdapterChainList(ctx: ParseCtx; idx: int; rawList: string;
+                           startCol: int): seq[string] =
+  ## Parse a `[adapter, adapter, ...]` list inline on the OS-key line.
+  ## The brackets are required. Whitespace around entries is stripped.
+  let s = rawList.strip()
+  if s.len < 2 or s[0] != '[' or s[^1] != ']':
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & rawList & "'",
+      "a `[adapter, ...]` chain list (e.g. `[scoop, builtin, path]`)")
+  let inner = s[1 ..< s.len - 1].strip()
+  if inner.len == 0:
+    return @[]
+  for piece in inner.split(","):
+    let adapter = piece.strip()
+    if adapter.len == 0:
+      raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+        "an empty adapter name in '" & rawList & "'",
+        "non-empty adapter identifiers (one of: " &
+          KnownAdapterPreferenceAdapters.join(", ") & ")")
+    for c in adapter:
+      if not (c.isAlphaAscii() or c.isDigit() or c == '_'):
+        raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+          "'" & adapter & "' inside the adapter chain",
+          "an adapter identifier of letters, digits, and `_`")
+    if adapter notin KnownAdapterPreferenceAdapters:
+      raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+        "'" & adapter & "' as an adapter name",
+        "one of: " & KnownAdapterPreferenceAdapters.join(", "))
+    result.add adapter
+
+proc parseAdapterPreferenceEntry(ctx: ParseCtx; idx, entryIndent: int;
+                                 outTable: var OrderedTable[string, seq[string]]) =
+  ## Parse a single `<os>: [adapter, ...]` line inside the
+  ## `adapterPreference:` block. The OS key is restricted to the closed
+  ## set `KnownAdapterPreferenceOs`; unknown keys raise a structured
+  ## parse error. `macos` is canonicalized to `darwin` so a profile
+  ## that writes either alias survives the canonicalization once.
+  let raw = ctx.lines[idx]
+  let trimmed = stripInlineComment(raw).trimTrailing()
+  let indent = countLeadingSpaces(trimmed)
+  # Extract the OS key: scan for the first `:` separator.
+  var i = indent
+  while i < trimmed.len and (trimmed[i].isAlphaAscii() or
+                             trimmed[i].isDigit() or trimmed[i] == '_'):
+    inc i
+  let osKey = trimmed[indent ..< i]
+  if osKey.len == 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "'" & trimmed[indent .. ^1] & "'",
+      "a `<os>: [adapter, ...]` entry inside `adapterPreference:`")
+  while i < trimmed.len and trimmed[i] in {' ', '\t'}:
+    inc i
+  if i >= trimmed.len or trimmed[i] != ':':
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "missing `:` after OS key '" & osKey & "'",
+      "a `:` separator before the adapter chain list")
+  inc i
+  while i < trimmed.len and trimmed[i] in {' ', '\t'}:
+    inc i
+  let rest = trimmed[i .. ^1]
+  if rest.len == 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, i + 1,
+      "missing chain list after '" & osKey & ":'",
+      "a `[adapter, ...]` chain list (e.g. `[scoop, builtin, path]`)")
+  let osKeyLc = osKey.toLowerAscii()
+  if osKeyLc notin KnownAdapterPreferenceOs:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "'" & osKey & "' as an OS key inside `adapterPreference:`",
+      "one of: " & KnownAdapterPreferenceOs.join(", "))
+  let canonical = canonicalizeOsKey(osKey)
+  if canonical in outTable:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "a second `" & osKey & ":` entry in `adapterPreference:`",
+      "exactly one entry per OS (note `macos` and `darwin` alias)")
+  let adapters = parseAdapterChainList(ctx, idx, rest, i)
+  outTable[canonical] = adapters
+
+proc parseAdapterPreferenceBlock(ctx: ParseCtx; idx, entryIndent: int):
+    OrderedTable[string, seq[string]] =
+  ## Parse the body of an `adapterPreference:` block. Each child line
+  ## must be a `<os>: [adapter, ...]` entry at `entryIndent`. Comments
+  ## and blank lines are skipped.
+  result = initOrderedTable[string, seq[string]]()
+  let endIdx = lastStructuralIdx(ctx.lines, idx + 1, entryIndent)
+  var i = idx + 1
+  while i <= endIdx:
+    let line = ctx.lines[i]
+    if isBlankOrComment(line):
+      inc i; continue
+    let ind = countLeadingSpaces(line)
+    if ind != entryIndent:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "'" & line.strip() & "' at indent " & $ind,
+        "content at indent " & $entryIndent)
+    parseAdapterPreferenceEntry(ctx, i, entryIndent, result)
+    inc i
+
+# ---------------------------------------------------------------------------
 # Profile body.
 # ---------------------------------------------------------------------------
 
-proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int): IntentNode =
+proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
+                      outAdapterPreference: var OrderedTable[string, seq[string]]):
+    IntentNode =
+  ## M2.5: also populates `outAdapterPreference` (empty table when no
+  ## `adapterPreference:` block was present).
   let headerLine = ctx.lines[profileHeaderIdx]
   let baseIndent = countLeadingSpaces(headerLine)
   let childIndent = baseIndent + ctx.indentStep
@@ -1012,6 +1153,7 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int): IntentNode =
   var sawConfig = false
   var sawHosts = false
   var sawResources = false
+  var sawAdapterPreference = false
   while i <= ctx.lines.high:
     let line = ctx.lines[i]
     if isBlankOrComment(line):
@@ -1037,7 +1179,8 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int): IntentNode =
     if not hm.ok:
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "'" & line.strip() & "'",
-        "one of `activity <name>:`, `config:`, `hosts:`, or `resources:`")
+        "one of `activity <name>:`, `config:`, `hosts:`, " &
+        "`resources:`, or `adapterPreference:`")
     case hm.keyword
     of ActivityHeader:
       let blk = parseActivity(ctx, i, childIndent,
@@ -1078,10 +1221,22 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int): IntentNode =
       result.children.add blk
       lastBodyIdx = blk.endLine - 1
       i = blk.endLine
+    of AdapterPreferenceHeader:
+      if sawAdapterPreference:
+        raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+          "a second `adapterPreference:` block",
+          "exactly one `adapterPreference:` block per profile")
+      sawAdapterPreference = true
+      let entryIndent = childIndent + ctx.indentStep
+      outAdapterPreference = parseAdapterPreferenceBlock(ctx, i, entryIndent)
+      let endIdx = lastStructuralIdx(ctx.lines, i + 1, entryIndent)
+      lastBodyIdx = endIdx
+      i = max(endIdx + 1, i + 1)
     else:
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "`" & hm.keyword & "` at the profile top level",
-        "one of `activity <name>:`, `config:`, `hosts:`, or `resources:`")
+        "one of `activity <name>:`, `config:`, `hosts:`, " &
+        "`resources:`, or `adapterPreference:`")
   result.endLine = lastBodyIdx + 1
 
 # ---------------------------------------------------------------------------
@@ -1098,10 +1253,12 @@ proc parseProfile*(profilePath, source: string): Profile =
   var ctx = ParseCtx(profilePath: profilePath, lines: rawLines, indentStep: 2)
   let headerLine = findProfileHeader(ctx)
   ctx.indentStep = detectIndentStep(ctx.lines, headerLine)
-  let root = parseProfileBody(ctx, headerLine - 1)
+  var adapterPreference = initOrderedTable[string, seq[string]]()
+  let root = parseProfileBody(ctx, headerLine - 1, adapterPreference)
   result = Profile(path: profilePath, lines: ctx.lines,
     lineEnding: ending, hasTrailingNewline: trailingNewline,
-    root: root, indentStep: ctx.indentStep)
+    root: root, indentStep: ctx.indentStep,
+    adapterPreference: adapterPreference)
 
 proc loadProfile*(profilePath: string): Profile =
   ## Read `profilePath` and parse it. `ENoProfile` and `EUnstructured`

@@ -1,5 +1,4 @@
 import std/[options, os, sets, strutils, tables, times]
-import std/memfiles except open
 
 when defined(linux):
   import std/posix
@@ -90,6 +89,15 @@ type
 
   FileMetadataCache* = object
     entries: Table[string, FileMetadata]
+    stats: FileMetadataCacheStats
+
+  FileMetadataCacheStats* = object
+    currentRunHits*: int
+    coldStats*: int
+    warmEntries*: int
+    warmRevalidated*: int
+    warmUnchanged*: int
+    warmChanged*: int
 
   ActionCacheLookupStatus* = enum
     aclMissNoRecord
@@ -141,6 +149,8 @@ const
     fpOthersExec, fpOthersWrite, fpOthersRead}
     # Windows: marked {.used.} because readPermissions only iterates this set
     # on POSIX hosts; on Windows we discard the recorded mask entirely.
+
+var processWarmFileMetadataEntries = initTable[string, FileMetadata]()
 
 proc byteString(bytes: openArray[byte]): string =
   result = newString(bytes.len)
@@ -370,14 +380,33 @@ proc clear*(cache: var FileMetadataCache) =
 proc invalidate*(cache: var FileMetadataCache; path: string) =
   cache.entries.del(path)
 
+proc metadataStats*(cache: FileMetadataCache): FileMetadataCacheStats =
+  cache.stats
+
 proc fingerprintMetadata(path: string;
                          cache: ptr FileMetadataCache): FileMetadata =
   if cache.isNil:
     return fingerprintMetadata(path)
   if cache[].entries.hasKey(path):
+    inc cache[].stats.currentRunHits
     return cache[].entries[path]
+  let hadWarmEntry = processWarmFileMetadataEntries.hasKey(path)
+  let priorMetadata =
+    if hadWarmEntry: processWarmFileMetadataEntries[path]
+    else: FileMetadata()
+  if hadWarmEntry:
+    inc cache[].stats.warmEntries
+    inc cache[].stats.warmRevalidated
+  else:
+    inc cache[].stats.coldStats
   result = fingerprintMetadata(path)
+  if hadWarmEntry:
+    if result == priorMetadata:
+      inc cache[].stats.warmUnchanged
+    else:
+      inc cache[].stats.warmChanged
   cache[].entries[path] = result
+  processWarmFileMetadataEntries[path] = result
 
 proc fileBytesForHash(path: string; metadata: FileMetadata): seq[byte] =
   if metadata.kind != ffkRegular:
@@ -853,9 +882,6 @@ proc hotIndexInputUnchanged(data: openArray[byte]; inputOffset: int;
   let recordedMetadata = readMetadata(data, pos)
   fingerprintMetadata(path, metadataCache) == recordedMetadata
 
-template mappedBytes(mapping: MemFile): untyped =
-  toOpenArray(cast[ptr UncheckedArray[byte]](mapping.mem), 0, mapping.size - 1)
-
 proc scanHotIndexMetadataInputs(data: openArray[byte];
                                 probes: openArray[HotMetadataProbe];
                                 metadataCache: ptr FileMetadataCache = nil):
@@ -914,13 +940,24 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     return HotMetadataScan(status: hmssUnavailable)
   if probes.len == 0:
     return HotMetadataScan(status: hmssHit)
+  # Read into an owned buffer rather than mmap. The hot index is the
+  # shared user-level action cache (~/Library/Caches/repro/...) which
+  # is written by every `repro build` invocation system-wide.
+  # ``writeFile`` opens with O_TRUNC, so a concurrent rewrite from a
+  # sibling test or build in the same suite would truncate the file
+  # underneath an mmap'd reader and dereferences past the new EOF
+  # raise SIGBUS on macOS (Nim's std/os.removeDir junction-hazard
+  # parallel — same class of unrecoverable signal). ``readFile``
+  # snapshots the bytes into our own seq, so the decode never touches
+  # the kernel mapping again. The trade-off is a single allocation +
+  # copy of the file; the hot index is bounded by
+  # ``ActionCacheCompactThreshold`` and the cost is amortised across
+  # the build's many cache hits.
   try:
-    var mapping = memfiles.open(extendedPath(cache.hotIndexPath), fmRead)
-    defer:
-      mapping.close()
-    if mapping.size <= 0:
+    let raw = bytes(readFile(extendedPath(cache.hotIndexPath)))
+    if raw.len <= 0:
       return HotMetadataScan(status: hmssUnavailable)
-    scanHotIndexMetadataInputs(mappedBytes(mapping), probes, metadataCache)
+    scanHotIndexMetadataInputs(raw, probes, metadataCache)
   except OSError, IOError:
     if cache.hotIndexRaw.len > 0:
       return scanHotIndexMetadataInputs(cache.hotIndexRaw, probes, metadataCache)
@@ -950,15 +987,29 @@ proc loadHotRecords(cache: var ActionCache) =
   cache.hotLoaded = true
   cache.hotByWeak.clear()
   if cache.hotIndexRawValid:
+    # Snapshot the hot index into an owned buffer before decoding. The
+    # shared user-level action cache (the default
+    # ~/Library/Caches/repro/... root on macOS, $XDG_CACHE_HOME/repro/...
+    # on Linux) is shared by every ``repro build`` invocation on the
+    # host — the test suite alone triggers dozens of overlapping
+    # truncate+rewrite cycles through ``writeHotIndex`` (which uses
+    # ``writeFile`` → open(O_TRUNC)). An mmap'd reader of the same
+    # file would dereference past the new EOF and take SIGBUS on
+    # macOS the moment a concurrent writer truncated the file. The
+    # observed failure mode landed inside ``decodeHotIndex`` at
+    # ``readString`` / ``readU64Le`` even though the application-level
+    # bounds checks pass against ``mapping.size`` — the kernel
+    # mapping itself is no longer backed once the file shrinks.
+    # ``readFile`` copies the bytes once into our own seq[byte], after
+    # which the decode is purely in-process memory.
     try:
-      var mapping = memfiles.open(extendedPath(cache.hotIndexPath), fmRead)
-      defer:
-        mapping.close()
-      let decoded = decodeHotIndex(mappedBytes(mapping))
-      cache.hotByWeak = decoded.records
-      cache.hotInputs = decoded.inputs
-      return
-    except EnvelopeError:
+      let raw = bytes(readFile(extendedPath(cache.hotIndexPath)))
+      if raw.len > 0:
+        let decoded = decodeHotIndex(raw)
+        cache.hotByWeak = decoded.records
+        cache.hotInputs = decoded.inputs
+        return
+    except EnvelopeError, OSError, IOError:
       cache.hotByWeak.clear()
       cache.hotInputs.setLen(0)
   if not fileExists(extendedPath(cache.hotRecordsPath)):
@@ -1176,7 +1227,7 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    let sourceMetadata = fingerprintMetadata(source)
+    let sourceMetadata = fingerprintMetadata(source, metadataCache)
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.

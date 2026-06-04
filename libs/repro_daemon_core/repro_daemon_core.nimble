@@ -1,0 +1,5 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild per-user daemon lifecycle and control protocol"
+license = "MIT"
+requires "nim >= 2.2.0"

@@ -44,12 +44,28 @@ import repro_cli_support/migrate_from_env_scripts
 # ---------------------------------------------------------------------------
 
 proc resolveRealEnvFilePath(): string =
+  ## Precedence: explicit $METACRAFT_ROOT (set by env.ps1 on Windows
+  ## hosts) → Windows fallback path → walk up from this test source
+  ## to discover the workspace root. The walk-up branch covers
+  ## Linux/macOS dev shells, where no env script auto-exports
+  ## METACRAFT_ROOT — the test repo lives at <workspace>/reprobuild,
+  ## so we ascend until we hit a directory carrying the canonical
+  ## windows/toolchain-versions.env file.
   let root = getEnv("METACRAFT_ROOT")
   if root.len > 0:
     return root / "windows" / "toolchain-versions.env"
   when defined(windows):
     return "D:/metacraft/windows/toolchain-versions.env"
   else:
+    var dir = currentSourcePath().parentDir
+    while dir.len > 0 and dir != "/":
+      let candidate = dir / "windows" / "toolchain-versions.env"
+      if fileExists(candidate):
+        return candidate
+      let parent = dir.parentDir
+      if parent == dir:
+        break
+      dir = parent
     return ""
 
 const ExpectedIgnoredSet = [

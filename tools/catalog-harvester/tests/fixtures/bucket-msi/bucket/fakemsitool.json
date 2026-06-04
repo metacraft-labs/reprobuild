@@ -1,0 +1,14 @@
+{
+    "version": "2.0.0",
+    "description": "Synthetic MSI-shipped tool fixture for M4 harvester tests.",
+    "homepage": "https://example.test/fakemsitool",
+    "license": "Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://example.test/fakemsitool-2.0.0-64.msi",
+            "hash": "ea8f6e328294fd2adc508a10d3a656b3c00c83cadc619a18fba19f2b589c3101"
+        }
+    },
+    "extract_dir": "PFiles64\\FakeMsi",
+    "bin": "fakemsitool.exe"
+}

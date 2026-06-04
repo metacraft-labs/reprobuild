@@ -285,4 +285,8 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
     lineEnding: "\n",
     hasTrailingNewline: true,
     root: root,
-    indentStep: 2)
+    indentStep: 2,
+    adapterPreference: p.adapterPreference)
+  ## M2.5: thread the per-OS adapter preference through the macro->text
+  ## adapter so both code paths feed the same field into the apply
+  ## pipeline downstream.

@@ -17,6 +17,16 @@
 ## carries an ``installer.script`` (``Add-Path -Path "$env:USERPROFILE\.nimble\bin"``)
 ## — a USERPROFILE PATH tweak, not a true installer, so M68's
 ## refined harvester correctly keeps ``install_method = imExtract``.
+##
+## **M9.5 merge note (hand-edited):** added a ``(pcX86_64, poLinux)``
+## platform slice manually (the Nim upstream publishes prebuilts on
+## ``nim-lang.org/download/``, NOT on GitHub Releases — so the M7
+## gh-releases harvester doesn't apply). URL pattern:
+## ``nim-<ver>-linux_x64.tar.xz``; sha256 lifted from upstream's
+## ``.sha256`` sidecar. archive_format_override = afTarXz (Windows is
+## afZip); bin_relpath_override drops the .exe suffix. Upstream Nim's
+## Linux build targets glibc 2.17+ (the prebuilt is statically linked
+## against the c runtime where feasible).
 
 import std/tables
 import repro_project_dsl
@@ -144,7 +154,11 @@ let nimCatalog* = @[
     install_method: imExtract,
     bin_relpath: @["bin\\atlas.exe", "bin\\nim.exe", "bin\\nimble.exe", "bin\\nimgrab.exe", "bin\\nimgrep.exe", "bin\\nimpretty.exe", "bin\\nimsuggest.exe", "bin\\vccexe.exe", "bin\\testament.exe"],
     platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://nim-lang.org/download/nim-2.2.10_x64.zip", sha256: "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f", sha512: "", extract_path: "nim-2.2.10")
+      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://nim-lang.org/download/nim-2.2.10_x64.zip", sha256: "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f", sha512: "", extract_path: "nim-2.2.10"),
+      # M9.5: Linux x86_64 slice. Upstream nim-lang.org Linux prebuilt;
+      # the inner dir is ``nim-<ver>/`` (same convention as Windows);
+      # archive_format_override = afTarXz; binaries lack .exe.
+      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz", sha256: "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211", sha512: "", sha1: "", extract_path: "nim-2.2.10", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["bin/atlas", "bin/nim", "bin/nimble", "bin/nimgrab", "bin/nimgrep", "bin/nimpretty", "bin/nimsuggest", "bin/testament"])
     ],
     installer_args: @[],
     pacman_packages: @[],

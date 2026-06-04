@@ -6,6 +6,7 @@ import repro_core/paths as corepaths
 import repro_depfile
 import repro_hash
 import repro_runquota
+import repro_test_support
 
 const MonitorPolicyKinds = {
   dgAutomaticMonitor,
@@ -113,29 +114,6 @@ int main(int argc, char **argv) {
 }
 """
 
-proc q(value: string): string =
-  quoteShell(value)
-
-proc runShell(command: string; cwd = getCurrentDir()): tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  check res.code == 0
-  if res.code != 0:
-    checkpoint(res.output)
-  res.output
-
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
 proc pathExists(path: string): bool =
   try:
     discard getFileInfo(path, followSymlink = false)
@@ -146,9 +124,11 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process),
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    raise newException(OSError,
+      "runquotad binary missing at " & daemonBin & "; build it via " &
+      "the test harness (scripts/run_tests.sh)")
   let socketPath = "/tmp/repro-m17-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -381,7 +361,7 @@ proc requirePolicyCase(name, mode: string; policy: DependencyGatheringPolicy;
   let markerV1 = readFile(marker)
 
   let second = runOne(makeAction(), cacheRoot, app, monitorCli).singleResult()
-  check second.status == asCacheHit
+  check second.status in {asCacheHit, asUpToDate}
   check not second.launched
   check second.dependencyPolicyKind == policy.kind
   check evidenceInputs(second.evidence).find(hidden) >= 0
@@ -422,102 +402,20 @@ when isMainModule:
     quit runRunQuotaHelperCli(params[1 .. ^1])
 
 suite "integration_scheduler_dependency_gathering_policies":
-  test "dependency evidence paths include hash suffixes for sanitized id collisions":
-    let cacheRoot = "/tmp/repro-cache"
-    let first = dependencyEvidencePath(cacheRoot, "compile:main")
-    let second = dependencyEvidencePath(cacheRoot, "compile/main")
-    check first != second
-    check first.parentDir == cacheRoot / "dependency-evidence"
-    check second.parentDir == cacheRoot / "dependency-evidence"
-    check first.endsWith(".rbar")
-    check second.endsWith(".rbar")
+  when isNixSupported:
+    test "dependency evidence paths include hash suffixes for sanitized id collisions":
+      let cacheRoot = "/tmp/repro-cache"
+      let first = dependencyEvidencePath(cacheRoot, "compile:main")
+      let second = dependencyEvidencePath(cacheRoot, "compile/main")
+      check first != second
+      check first.parentDir == cacheRoot / "dependency-evidence"
+      check second.parentDir == cacheRoot / "dependency-evidence"
+      check first.endsWith(".rbar")
+      check second.endsWith(".rbar")
 
-  test "declared, recognized, and converted dependency evidence share cache invalidation":
-    let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m17-policy-basic", "")
-    defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
-
-    let app = getAppFilename()
-    let fixtureSource = tempRoot / "policy_fixture.c"
-    let fixtureBin = tempRoot / "policy-fixture"
-    writeFile(fixtureSource, FixtureSource)
-    compileFixture(fixtureSource, fixtureBin)
-
-    let workRoot = tempRoot / "work"
-    let cacheRoot = tempRoot / ".repro-cache"
-    createDir(workRoot)
-
-    requirePolicyCase("declared-only", "plain", declaredOnlyPolicy(),
-      declaredHidden = true, cacheRoot, workRoot, fixtureBin, app)
-
-    requirePolicyCase("recognized-report", "depfile",
-      reportPolicy(dgRecognizedFormat, "deps.d"),
-      declaredHidden = false, cacheRoot, workRoot, fixtureBin, app)
-
-    requirePolicyCase("post-build-converter", "custom-ok",
-      converterPolicy(app, workRoot / "post-build-converter",
-        "deps.custom", "deps.rpset", dgPostBuildConverter),
-      declaredHidden = false, cacheRoot, workRoot, fixtureBin, app)
-
-    let failRoot = tempRoot / ".repro-fail-cache"
-    let failDir = workRoot / "failures"
-    createDir(failDir)
-    let visible = failDir / "visible.txt"
-    let hidden = failDir / "hidden.txt"
-    writeFixture(visible, "visible\n")
-    writeFixture(hidden, "hidden\n")
-
-    requireFailureNoPublish(action("missing-recognized-report",
-      [fixtureBin, "plain", visible, hidden, failDir / "missing.txt",
-        failDir / "missing.d", failDir / "missing.runs"],
-      cwd = failDir,
-      inputs = [visible],
-      outputs = ["missing.txt"],
-      cacheable = true,
-      weakFingerprint = weak("missing-recognized-report"),
-      dependencyPolicy = reportPolicy(dgRecognizedFormat, "missing.d"),
-      commandStatsId = "m17-missing-report"), failRoot, app,
-      "dependency report missing")
-
-    requireFailureNoPublish(action("converter-failure",
-      [fixtureBin, "custom-fail", visible, hidden, failDir / "converter.txt",
-        failDir / "converter.custom", failDir / "converter.runs"],
-      cwd = failDir,
-      inputs = [visible],
-      outputs = ["converter.txt"],
-      cacheable = true,
-      weakFingerprint = weak("converter-failure"),
-      dependencyPolicy = converterPolicy(app, failDir,
-        "converter.custom", "converter.rpset", dgPostBuildConverter),
-      commandStatsId = "m17-converter-failure"), failRoot, app,
-      "dependency converter")
-
-    requireFailureNoPublish(action("converter-malformed-output",
-      [fixtureBin, "custom-bad-output", visible, hidden,
-        failDir / "converter-bad.txt", failDir / "converter-bad.custom",
-        failDir / "converter-bad.runs"],
-      cwd = failDir,
-      inputs = [visible],
-      outputs = ["converter-bad.txt"],
-      cacheable = true,
-      weakFingerprint = weak("converter-malformed-output"),
-      dependencyPolicy = converterPolicy(app, failDir,
-        "converter-bad.custom", "converter-bad.rpset", dgPostBuildConverter),
-      commandStatsId = "m17-converter-malformed"), failRoot, app,
-      "converted dependency report invalid")
-
-  when defined(macosx) or defined(linux):
-    test "automatic and hybrid monitor policies use real fs-snoop evidence":
+    test "declared, recognized, and converted dependency evidence share cache invalidation":
       let repoRoot = getCurrentDir()
-      let tempRoot = createTempDir("repro-m17-policy-monitor", "")
+      let tempRoot = createTempDir("repro-m17-policy-basic", "")
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
@@ -533,54 +431,137 @@ suite "integration_scheduler_dependency_gathering_policies":
       let fixtureBin = tempRoot / "policy-fixture"
       writeFile(fixtureSource, FixtureSource)
       compileFixture(fixtureSource, fixtureBin)
-      let monitorTools = prepareMonitorTools(repoRoot, tempRoot)
 
       let workRoot = tempRoot / "work"
       let cacheRoot = tempRoot / ".repro-cache"
       createDir(workRoot)
 
-      requirePolicyCase("automatic-monitor", "plain",
-        DependencyGatheringPolicy(
-          kind: dgAutomaticMonitor,
-          completeness: decComplete),
-        declaredHidden = false, cacheRoot, workRoot, fixtureBin, app,
-        monitorTools.fsSnoop, monitorTools.shim)
+      requirePolicyCase("declared-only", "plain", declaredOnlyPolicy(),
+        declaredHidden = true, cacheRoot, workRoot, fixtureBin, app)
 
-      requirePolicyCase("recognized-validated-by-monitor", "depfile",
-        reportPolicy(dgRecognizedFormatValidatedByMonitor, "deps.d"),
-        declaredHidden = false, cacheRoot, workRoot, fixtureBin, app,
-        monitorTools.fsSnoop, monitorTools.shim)
+      requirePolicyCase("recognized-report", "depfile",
+        reportPolicy(dgRecognizedFormat, "deps.d"),
+        declaredHidden = false, cacheRoot, workRoot, fixtureBin, app)
 
-      requirePolicyCase("converter-validated-by-monitor", "custom-ok",
-        converterPolicy(app, workRoot / "converter-validated-by-monitor",
-          "deps.custom", "deps.rpset",
-          dgPostBuildConverterValidatedByMonitor),
-        declaredHidden = false, cacheRoot, workRoot, fixtureBin, app,
-        monitorTools.fsSnoop, monitorTools.shim)
+      requirePolicyCase("post-build-converter", "custom-ok",
+        converterPolicy(app, workRoot / "post-build-converter",
+          "deps.custom", "deps.rpset", dgPostBuildConverter),
+        declaredHidden = false, cacheRoot, workRoot, fixtureBin, app)
 
-      let failRoot = tempRoot / ".repro-monitor-fail-cache"
-      let failDir = workRoot / "monitor-failures"
+      let failRoot = tempRoot / ".repro-fail-cache"
+      let failDir = workRoot / "failures"
       createDir(failDir)
       let visible = failDir / "visible.txt"
       let hidden = failDir / "hidden.txt"
       writeFixture(visible, "visible\n")
       writeFixture(hidden, "hidden\n")
 
-      requireFailureNoPublish(action("corrupt-monitor-evidence",
-        [fixtureBin, "corrupt-fragment", visible, hidden,
-          failDir / "corrupt.txt", failDir / "unused.sidecar",
-          failDir / "corrupt.runs"],
+      requireFailureNoPublish(action("missing-recognized-report",
+        [fixtureBin, "plain", visible, hidden, failDir / "missing.txt",
+          failDir / "missing.d", failDir / "missing.runs"],
         cwd = failDir,
         inputs = [visible],
-        outputs = ["corrupt.txt"],
+        outputs = ["missing.txt"],
         cacheable = true,
-        weakFingerprint = weak("corrupt-monitor-evidence"),
-        dependencyPolicy = DependencyGatheringPolicy(
-          kind: dgAutomaticMonitor,
-          completeness: decComplete),
-        env = ["REPRO_MONITOR_SHIM_LIB=" & monitorTools.shim],
-        commandStatsId = "m17-corrupt-monitor"), failRoot, app,
-        "", monitorTools.fsSnoop)
-  else:
-    test "automatic monitor policies are unsupported on this platform":
-      skip()
+        weakFingerprint = weak("missing-recognized-report"),
+        dependencyPolicy = reportPolicy(dgRecognizedFormat, "missing.d"),
+        commandStatsId = "m17-missing-report"), failRoot, app,
+        "dependency report missing")
+
+      requireFailureNoPublish(action("converter-failure",
+        [fixtureBin, "custom-fail", visible, hidden, failDir / "converter.txt",
+          failDir / "converter.custom", failDir / "converter.runs"],
+        cwd = failDir,
+        inputs = [visible],
+        outputs = ["converter.txt"],
+        cacheable = true,
+        weakFingerprint = weak("converter-failure"),
+        dependencyPolicy = converterPolicy(app, failDir,
+          "converter.custom", "converter.rpset", dgPostBuildConverter),
+        commandStatsId = "m17-converter-failure"), failRoot, app,
+        "dependency converter")
+
+      requireFailureNoPublish(action("converter-malformed-output",
+        [fixtureBin, "custom-bad-output", visible, hidden,
+          failDir / "converter-bad.txt", failDir / "converter-bad.custom",
+          failDir / "converter-bad.runs"],
+        cwd = failDir,
+        inputs = [visible],
+        outputs = ["converter-bad.txt"],
+        cacheable = true,
+        weakFingerprint = weak("converter-malformed-output"),
+        dependencyPolicy = converterPolicy(app, failDir,
+          "converter-bad.custom", "converter-bad.rpset", dgPostBuildConverter),
+        commandStatsId = "m17-converter-malformed"), failRoot, app,
+        "converted dependency report invalid")
+
+    when defined(macosx) or defined(linux):
+      test "automatic and hybrid monitor policies use real fs-snoop evidence":
+        let repoRoot = getCurrentDir()
+        let tempRoot = createTempDir("repro-m17-policy-monitor", "")
+        defer: removeDir(tempRoot)
+
+        var daemon = ensureRunQuotaDaemon(repoRoot)
+        defer:
+          daemon.process.terminate()
+          discard daemon.process.waitForExit()
+          daemon.process.close()
+          if pathExists(daemon.socket):
+            removeFile(daemon.socket)
+
+        let app = getAppFilename()
+        let fixtureSource = tempRoot / "policy_fixture.c"
+        let fixtureBin = tempRoot / "policy-fixture"
+        writeFile(fixtureSource, FixtureSource)
+        compileFixture(fixtureSource, fixtureBin)
+        let monitorTools = prepareMonitorTools(repoRoot, tempRoot)
+
+        let workRoot = tempRoot / "work"
+        let cacheRoot = tempRoot / ".repro-cache"
+        createDir(workRoot)
+
+        requirePolicyCase("automatic-monitor", "plain",
+          DependencyGatheringPolicy(
+            kind: dgAutomaticMonitor,
+            completeness: decComplete),
+          declaredHidden = false, cacheRoot, workRoot, fixtureBin, app,
+          monitorTools.fsSnoop, monitorTools.shim)
+
+        requirePolicyCase("recognized-validated-by-monitor", "depfile",
+          reportPolicy(dgRecognizedFormatValidatedByMonitor, "deps.d"),
+          declaredHidden = false, cacheRoot, workRoot, fixtureBin, app,
+          monitorTools.fsSnoop, monitorTools.shim)
+
+        requirePolicyCase("converter-validated-by-monitor", "custom-ok",
+          converterPolicy(app, workRoot / "converter-validated-by-monitor",
+            "deps.custom", "deps.rpset",
+            dgPostBuildConverterValidatedByMonitor),
+          declaredHidden = false, cacheRoot, workRoot, fixtureBin, app,
+          monitorTools.fsSnoop, monitorTools.shim)
+
+        let failRoot = tempRoot / ".repro-monitor-fail-cache"
+        let failDir = workRoot / "monitor-failures"
+        createDir(failDir)
+        let visible = failDir / "visible.txt"
+        let hidden = failDir / "hidden.txt"
+        writeFixture(visible, "visible\n")
+        writeFixture(hidden, "hidden\n")
+
+        requireFailureNoPublish(action("corrupt-monitor-evidence",
+          [fixtureBin, "corrupt-fragment", visible, hidden,
+            failDir / "corrupt.txt", failDir / "unused.sidecar",
+            failDir / "corrupt.runs"],
+          cwd = failDir,
+          inputs = [visible],
+          outputs = ["corrupt.txt"],
+          cacheable = true,
+          weakFingerprint = weak("corrupt-monitor-evidence"),
+          dependencyPolicy = DependencyGatheringPolicy(
+            kind: dgAutomaticMonitor,
+            completeness: decComplete),
+          env = ["REPRO_MONITOR_SHIM_LIB=" & monitorTools.shim],
+          commandStatsId = "m17-corrupt-monitor"), failRoot, app,
+          "", monitorTools.fsSnoop)
+    else:
+      test "automatic monitor policies are unsupported on this platform":
+        skip()

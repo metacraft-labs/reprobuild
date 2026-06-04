@@ -52,7 +52,7 @@ proc reproBinary(): string =
   when defined(windows):
     ProjectRoot / "build" / "bin" / "repro.exe"
   else:
-    ProjectRoot / "build" / "bin" / "repro"
+    ProjectRoot / "build" / "bin" / addFileExt("repro", ExeExt)
 
 let sandboxMode =
   defined(linux) and

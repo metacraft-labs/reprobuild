@@ -83,6 +83,77 @@ type
       ## upstream provides it. ``md5`` continues to be rejected via
       ## ``dkHashAlgorithmUnsupported``.
     dkArchiveFormatUnknown = "HArchiveFormatUnknown"
+    # M3 (Realize-Closure-And-Catalog-Expansion spec) — residual 7z
+    # family classification.
+    dkSevenZipSfx = "HSevenZipSfx"
+      ## Recognized a 7z-SFX shape: the manifest's URL ends in
+      ## ``.7z.exe`` OR the URL has a Scoop ``#/dl.7z`` rename suffix
+      ## paired with a ``.exe`` upstream path AND no ``installer``
+      ## block — i.e. a self-extracting executable whose payload is a
+      ## 7z stream. Set ``archive_format = afSevenZipSfx``.
+    dkNested7z = "HNested7z"
+      ## The manifest's ``pre_install`` block contains an
+      ## ``Expand-7zArchive`` (or ``Expand-7ZipArchive``) invocation
+      ## paired with a corresponding ``Remove-Item *.7z`` cleanup —
+      ## i.e. the upstream archive contains additional 7z files that
+      ## need recursive extraction. Set the platform's ``nested_7z``
+      ## flag.
+    dkPreInstallAllowlistEntry = "HPreInstallAllowlistEntry"
+      ## Recognized a Scoop ``pre_install`` line that matches the
+      ## cakBuiltin allowlist; translated into a structured
+      ## ``PreInstallAction``.
+    dkPreInstallUnrecognized = "HPreInstallUnrecognized"
+      ## A ``pre_install`` line that escaped the cakBuiltin allowlist;
+      ## captured verbatim in the slice's
+      ## ``pre_install_unrecognized`` for the realize loop to surface
+      ## as a ``WPreInstallUnrecognized`` warning at apply time.
+    dkPreInstallSkippedAllRecognized = "HPreInstallSkippedAllRecognized"
+      ## The whole ``pre_install`` block was a noop (e.g. just
+      ## comments / whitespace); no actions emitted.
+    # M4 (Realize-Closure-And-Catalog-Expansion spec) — Windows
+    # installer family classification.
+    dkInstallMethodMsi = "HInstallMethodMsi"
+      ## The manifest's primary download is an ``.msi`` URL (or the
+      ## inferred ``archive_format`` is ``afInstallerMsi``); the
+      ## harvester emits ``install_method = imInstallerMsi`` so the
+      ## cakBuiltin realize loop dispatches through the M4 dark.exe
+      ## extractor (vs M3's NSIS imInstallerSilent path).
+    dkInstallMethodInnoSetup = "HInstallMethodInnoSetup"
+      ## The manifest carries ``"innosetup": true`` (regardless of
+      ## whether an ``installer:`` block is present); the harvester
+      ## emits ``install_method = imInstallerInnoSetup`` so the
+      ## cakBuiltin realize loop dispatches through the M4 innounp.exe
+      ## extractor. Required for the freepascal/fpc shape per M1's
+      ## Outstanding Task note.
+    dkInstallMethodNsisBundle = "HInstallMethodNsisBundle"
+      ## The manifest's ``installer.script`` block carries an
+      ## ``Expand-DarkArchive`` / ``Expand-MsiArchive`` pattern — i.e.
+      ## the outer ``.exe`` is an NSIS bundle wrapping inner MSIs
+      ## (the python3 + swift shape). The harvester emits
+      ## ``install_method = imInstallerNsisBundle`` so the cakBuiltin
+      ## realize loop dispatches through the M4 NSIS-unwrap + per-MSI
+      ## dark extractor.
+    dkInstallerScriptAllowlistEntry = "HInstallerScriptAllowlistEntry"
+      ## A line inside an ``installer.script`` block matched the M4
+      ## allowlist (Expand-DarkArchive / Expand-MsiArchive /
+      ## Expand-InnoArchive); translated into a structured
+      ## ``PreInstallAction``.
+    dkInstallerScriptUnrecognized = "HInstallerScriptUnrecognized"
+      ## A line inside an ``installer.script`` block did NOT match the
+      ## M4 allowlist; captured verbatim in
+      ## ``pre_install_unrecognized``.
+    # M5 (Realize-Closure-And-Catalog-Expansion spec) — Scoop-style
+    # launcher emit recognition.
+    dkLauncherEmitRecognized = "HLauncherEmitRecognized"
+      ## The harvester recognized a Scoop ``pre_install`` PowerShell
+      ## block that synthesizes a .phar / .jar / wrapped-script launcher
+      ## (composer's ``& php (Join-Path $PSScriptRoot "composer.phar")
+      ## @args`` shape, gradle's ``& java -jar ...`` shape, etc.) and
+      ## translated it to a ``launcher_emit`` slice instead of dropping
+      ## the lines into ``pre_install_unrecognized``. Informational —
+      ## does not fail the parse. The matched pattern is closed-set;
+      ## arbitrary pre_install PowerShell continues to land in
+      ## ``pre_install_unrecognized``.
 
   Diagnostic* = object
     kind*: DiagnosticKind
@@ -170,6 +241,31 @@ proc inferArchiveFormat(url: string; hasInstaller: bool):
   ## Match in longest-suffix-first order so ``.tar.gz`` wins over
   ## ``.gz``. ``hasInstaller`` short-circuits to NSIS/MSI for
   ## installer manifests with a ``.exe`` / ``.msi`` URL.
+  ##
+  ## M3 (Realize-Closure-And-Catalog-Expansion spec) — 7z-SFX
+  ## detection: an upstream URL ending in ``.7z.exe`` (the canonical
+  ## ip7z / Git-for-Windows SFX naming) classifies as
+  ## ``afSevenZipSfx``. The Scoop ``#/dl.7z`` rename trick is already
+  ## handled by ``extensionForFormatSniff`` collapsing the rename
+  ## suffix into the format-sniffed extension — so an upstream
+  ## ``...some-installer.exe#/dl.7z`` lands here as ``.7z`` and
+  ## dispatches to plain ``afSevenZip`` even though the upstream URL's
+  ## extension is ``.exe``. We probe the *original* URL for the
+  ## ``.7z.exe`` shape BEFORE the rename collapse so that
+  ## genuine-SFX-without-rename is correctly classified.
+  let originalLower = url.toLowerAscii()
+  # Probe the raw URL (before #-suffix stripping) for the .7z.exe shape.
+  # ``erlang/git/ruby`` typically use ``...XXX.exe#/dl.7z`` (already
+  # sniffed as .7z) → afSevenZip. A bare ``...XXX.7z.exe`` (no rename
+  # suffix) → afSevenZipSfx.
+  let hashIdx = originalLower.find('#')
+  let urlNoHash =
+    if hashIdx >= 0: originalLower[0 ..< hashIdx] else: originalLower
+  let qIdx = urlNoHash.find('?')
+  let urlNoQuery =
+    if qIdx >= 0: urlNoHash[0 ..< qIdx] else: urlNoHash
+  if urlNoQuery.endsWith(".7z.exe") and not hasInstaller:
+    return (afSevenZipSfx, true)
   let clean = extensionForFormatSniff(url).toLowerAscii()
   # Plain HTML pages or weird extensions fall through to afRaw.
   if clean.endsWith(".tar.gz") or clean.endsWith(".tgz"):
@@ -178,6 +274,9 @@ proc inferArchiveFormat(url: string; hasInstaller: bool):
     return (afTarXz, true)
   if clean.endsWith(".tar.bz2") or clean.endsWith(".tbz2"):
     return (afTarBz2, true)
+  if clean.endsWith(".tar.zst") or clean.endsWith(".tzst") or
+     clean.endsWith(".pkg.tar.zst"):
+    return (afTarZst, true)
   if clean.endsWith(".7z"):
     return (afSevenZip, true)
   if clean.endsWith(".zip"):
@@ -313,6 +412,448 @@ proc binRelpathsOf(node: JsonNode; app: string; diags: var seq[Diagnostic]):
     outPaths
   else: @[]
 
+## ---------------------------------------------------------------------------
+## M3 — pre_install allowlist translator
+## ---------------------------------------------------------------------------
+##
+## Scoop manifests carry ``pre_install: [...]`` blocks of PowerShell.
+## The harvester translates each LINE into either a structured
+## ``PreInstallAction`` (cakBuiltin allowlist hit) or records it
+## verbatim in ``pre_install_unrecognized``. The cakBuiltin realize
+## loop replays actions; unrecognized lines surface as
+## ``WPreInstallUnrecognized`` stderr warnings at apply time.
+##
+## The harvester does NOT execute PowerShell — it only does shape
+## recognition. The matcher is intentionally lenient (whitespace +
+## case-insensitive cmdlet names) but conservative on argument shapes
+## (only accepts $dir-rooted paths; anything reaching ``$persist_dir``,
+## ``$bucketsdir``, etc. lands in unrecognized).
+
+proc isDirRootedPath(arg: string): bool =
+  ## Path references must stay rooted under ``$dir`` (the realized
+  ## prefix). Scoop's ``$persist_dir`` / ``$bucketsdir`` /
+  ## ``$cachedir`` / ``$env:TMP`` references → unrecognized.
+  let s = arg.strip(chars = {' ', '\t', '"', '\''})
+  s.startsWith("$dir") or s.startsWith("$Dir") or s.startsWith("${dir}")
+
+proc unquoteArg(arg: string): string =
+  let s = arg.strip()
+  if s.len >= 2 and ((s.startsWith("\"") and s.endsWith("\"")) or
+                     (s.startsWith("'") and s.endsWith("'"))):
+    return s[1 ..< s.len - 1]
+  s
+
+proc canonicalizeArg(arg: string): string =
+  ## Normalize ``\\`` -> ``\`` (manifest authors double-escape
+  ## backslashes in JSON strings) and unquote. The realize loop's
+  ## ``substituteDirPlaceholder`` does the final $dir → staging dir
+  ## substitution.
+  unquoteArg(arg).replace("\\\\", "\\")
+
+proc splitPsArgs(rest: string): seq[string] =
+  ## Tokenize a PowerShell argv tail (after the cmdlet name). Honors
+  ## quoted strings (' and "), splits on whitespace otherwise. Returns
+  ## the tokens in order; the caller pairs them with named flags
+  ## (``-Path X -Destination Y``) or treats them as positional.
+  result = @[]
+  var i = 0
+  while i < rest.len:
+    let ch = rest[i]
+    if ch in {' ', '\t'}:
+      inc i; continue
+    if ch == '"' or ch == '\'':
+      let q = ch
+      var j = i + 1
+      while j < rest.len and rest[j] != q:
+        inc j
+      result.add(rest[i+1 ..< j])
+      i = j + 1
+    else:
+      var j = i
+      while j < rest.len and rest[j] notin {' ', '\t'}:
+        inc j
+      result.add(rest[i ..< j])
+      i = j
+
+proc parsePathFlags(args: openArray[string]):
+    tuple[path, destination, value: string; recurse, force: bool] =
+  ## Walk the ``args`` list looking for ``-Path``, ``-Destination``,
+  ## ``-Value``, ``-Recurse``, ``-Force`` flags (case-insensitive).
+  ## Positional args fall back: first positional → path, second →
+  ## destination/value.
+  var positional: seq[string] = @[]
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    let aL = a.toLowerAscii()
+    if aL in ["-path", "-literalpath"] and i + 1 < args.len:
+      result.path = args[i + 1]
+      i += 2
+    elif aL == "-destination" and i + 1 < args.len:
+      result.destination = args[i + 1]
+      i += 2
+    elif aL == "-value" and i + 1 < args.len:
+      result.value = args[i + 1]
+      i += 2
+    elif aL == "-recurse":
+      result.recurse = true
+      inc i
+    elif aL == "-force":
+      result.force = true
+      inc i
+    elif aL.startsWith("-"):
+      # Skip unknown named-flag values (one-arg consumption is the
+      # conservative default; this drops e.g. -Encoding utf8).
+      if i + 1 < args.len and not args[i + 1].startsWith("-"):
+        i += 2
+      else:
+        inc i
+    else:
+      positional.add(a)
+      inc i
+  if result.path.len == 0 and positional.len >= 1:
+    result.path = positional[0]
+  if result.destination.len == 0 and result.value.len == 0 and
+     positional.len >= 2:
+    result.destination = positional[1]
+
+proc translatePreInstallLine(line: string;
+                              dropped: var seq[string]):
+    tuple[ok: bool; action: PreInstallAction] =
+  ## Translate ONE pre_install PS line into a structured action. On
+  ## allowlist miss, return ``(false, default)`` so the caller records
+  ## the verbatim line in ``pre_install_unrecognized``. ``dropped`` is
+  ## populated with rejected-arg reasons (debug info).
+  let stripped = line.strip()
+  # Empty + comment-only lines are noops — return (false) and let the
+  # caller treat them as no-emit (NOT as unrecognized).
+  if stripped.len == 0 or stripped.startsWith("#"):
+    return (false, PreInstallAction())
+  # Multi-statement lines (e.g. `if (Test-Path ...) { ... }`) are
+  # out of allowlist; fail soft.
+  if stripped.contains("{") or stripped.contains("}") or
+     stripped.contains("if (") or stripped.contains("foreach") or
+     stripped.startsWith("&") or stripped.startsWith("$") or
+     stripped.startsWith("("):
+    dropped.add("control-flow / variable-assignment")
+    return (false, PreInstallAction())
+
+  # Split into cmdlet + arg list.
+  var idx = 0
+  while idx < stripped.len and stripped[idx] notin {' ', '\t'}: inc idx
+  let cmdlet = stripped[0 ..< idx].toLowerAscii()
+  let tail = if idx < stripped.len: stripped[idx + 1 .. ^1] else: ""
+  let args = splitPsArgs(tail)
+
+  case cmdlet
+  of "new-item":
+    let flags = parsePathFlags(args)
+    var itemType = ""
+    var j = 0
+    while j < args.len:
+      if args[j].toLowerAscii() == "-itemtype" and j + 1 < args.len:
+        itemType = args[j + 1].toLowerAscii()
+        break
+      inc j
+    if flags.path.len == 0 or not isDirRootedPath(flags.path):
+      dropped.add("New-Item path not $dir-rooted")
+      return (false, PreInstallAction())
+    case itemType
+    of "directory":
+      return (true, PreInstallAction(kind: piaNewItemDir,
+        source: "", target: canonicalizeArg(flags.path),
+        recurse: false, literal: ""))
+    of "file":
+      return (true, PreInstallAction(kind: piaNewItemFile,
+        source: "", target: canonicalizeArg(flags.path),
+        recurse: false, literal: ""))
+    else:
+      dropped.add("New-Item -ItemType not Directory/File")
+      return (false, PreInstallAction())
+  of "copy-item":
+    let flags = parsePathFlags(args)
+    if flags.path.len == 0 or flags.destination.len == 0 or
+       not isDirRootedPath(flags.path) or
+       not isDirRootedPath(flags.destination):
+      dropped.add("Copy-Item path/destination not $dir-rooted")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaCopyItem,
+      source: canonicalizeArg(flags.path),
+      target: canonicalizeArg(flags.destination),
+      recurse: flags.recurse, literal: ""))
+  of "move-item":
+    let flags = parsePathFlags(args)
+    if flags.path.len == 0 or flags.destination.len == 0 or
+       not isDirRootedPath(flags.path) or
+       not isDirRootedPath(flags.destination):
+      dropped.add("Move-Item path/destination not $dir-rooted")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaMoveItem,
+      source: canonicalizeArg(flags.path),
+      target: canonicalizeArg(flags.destination),
+      recurse: false, literal: ""))
+  of "remove-item":
+    let flags = parsePathFlags(args)
+    if flags.path.len == 0 or not isDirRootedPath(flags.path):
+      dropped.add("Remove-Item path not $dir-rooted")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaRemoveItem,
+      source: "", target: canonicalizeArg(flags.path),
+      recurse: flags.recurse, literal: ""))
+  of "set-content":
+    let flags = parsePathFlags(args)
+    if flags.path.len == 0 or not isDirRootedPath(flags.path):
+      dropped.add("Set-Content path not $dir-rooted")
+      return (false, PreInstallAction())
+    if flags.value.len == 0:
+      dropped.add("Set-Content -Value missing or non-literal")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaSetContent,
+      source: "", target: canonicalizeArg(flags.path),
+      recurse: false, literal: unquoteArg(flags.value)))
+  of "add-path":
+    # Scoop's Add-Path helper: ``Add-Path <dir>``.
+    if args.len < 1 or not isDirRootedPath(args[0]):
+      dropped.add("Add-Path target not $dir-rooted")
+      return (false, PreInstallAction())
+    return (true, PreInstallAction(kind: piaAddPath,
+      source: "", target: canonicalizeArg(args[0]),
+      recurse: false, literal: ""))
+  of "expand-7zarchive", "expand-7ziparchive":
+    # ``Expand-7zArchive <source> <destination>``.
+    var positionals: seq[string] = @[]
+    for a in args:
+      if not a.startsWith("-"):
+        positionals.add(a)
+    if positionals.len < 1 or not isDirRootedPath(positionals[0]):
+      dropped.add("Expand-7zArchive source not $dir-rooted")
+      return (false, PreInstallAction())
+    let src = canonicalizeArg(positionals[0])
+    let dst =
+      if positionals.len >= 2 and isDirRootedPath(positionals[1]):
+        canonicalizeArg(positionals[1])
+      else: "$dir"
+    return (true, PreInstallAction(kind: piaExpand7z,
+      source: src, target: dst, recurse: false, literal: ""))
+  of "expand-darkarchive", "expand-msiarchive":
+    # M4: ``Expand-DarkArchive <msi> <dir>`` / ``Expand-MsiArchive
+    # <msi> <dir>``. Scoop's installer.script primitives for MSI
+    # extraction; both dispatch through the same cakBuiltin path.
+    # The harvester maps both into the matching PreInstallActionKind
+    # variant (piaExpandDark vs piaExpandMsi) so the realize loop's
+    # diagnostic can distinguish them, but the runtime dispatch is
+    # identical.
+    var positionals: seq[string] = @[]
+    for a in args:
+      if not a.startsWith("-"):
+        positionals.add(a)
+    if positionals.len < 1 or not isDirRootedPath(positionals[0]):
+      dropped.add(cmdlet & " source not $dir-rooted")
+      return (false, PreInstallAction())
+    let src = canonicalizeArg(positionals[0])
+    let dst =
+      if positionals.len >= 2 and isDirRootedPath(positionals[1]):
+        canonicalizeArg(positionals[1])
+      else: "$dir"
+    let kind =
+      if cmdlet == "expand-darkarchive": piaExpandDark else: piaExpandMsi
+    return (true, PreInstallAction(kind: kind,
+      source: src, target: dst, recurse: false, literal: ""))
+  of "expand-innoarchive":
+    # M4: ``Expand-InnoArchive <exe> <dir>``. NOT a stock Scoop
+    # cmdlet; M4 wires this in for forward compatibility with
+    # manifests that may grow it (innounp users currently roll their
+    # own; the catalog author can hand-write Expand-InnoArchive in
+    # an installer.script after M4).
+    var positionals: seq[string] = @[]
+    for a in args:
+      if not a.startsWith("-"):
+        positionals.add(a)
+    if positionals.len < 1 or not isDirRootedPath(positionals[0]):
+      dropped.add("Expand-InnoArchive source not $dir-rooted")
+      return (false, PreInstallAction())
+    let src = canonicalizeArg(positionals[0])
+    let dst =
+      if positionals.len >= 2 and isDirRootedPath(positionals[1]):
+        canonicalizeArg(positionals[1])
+      else: "$dir"
+    return (true, PreInstallAction(kind: piaExpandInno,
+      source: src, target: dst, recurse: false, literal: ""))
+  else:
+    dropped.add("cmdlet not in allowlist: " & cmdlet)
+    return (false, PreInstallAction())
+
+proc recognizeLauncherEmitFromPreInstall*(lines: openArray[string];
+                                           app: string;
+                                           diags: var seq[Diagnostic]):
+    tuple[recognized: bool; spec: LauncherEmitSpec; consumedLines: seq[int]] =
+  ## M5: scan the pre_install lines for a Scoop-style launcher synthesis
+  ## shape. Currently recognizes the .phar wrap pattern (composer's
+  ## shape: lines containing ``& php`` + ``<name>.phar`` + the
+  ## eventual ``$dir\<name>.ps1`` write target). Returns the matched
+  ## ``LauncherEmitSpec`` AND the line indices the matcher consumed so
+  ## the caller can skip them in the unrecognized fallback.
+  ##
+  ## Recognition heuristic — closed-set, conservative:
+  ##   * the lines collectively reference ``& php`` (case-insensitive)
+  ##   * the lines collectively reference a ``<name>.phar`` literal
+  ##   * the lines collectively reference a ``$dir\<name>.ps1`` write
+  ##     target (Add-Content / Set-Content / `>` redirect) whose
+  ##     ``<name>`` matches the .phar's stem
+  ##
+  ## When all three match, emit ``LauncherEmitSpec(kind: lekPhar,
+  ## target: "<name>.phar", interpreter_package_id: "php",
+  ## launcher_name: "<name>")`` and mark every line that contributed
+  ## a match as consumed. Arbitrary additional pre_install logic (e.g.
+  ## composer's COMPOSER_HOME migration block) is left unconsumed and
+  ## flows through the existing unrecognized path so the operator sees
+  ## the gap.
+  ##
+  ## Java/jar shape (``& java -jar <name>.jar``) is detected with the
+  ## same pattern + ``jdk`` interpreter; M5 does not exercise it (no
+  ## current catalog tool uses it) but the schema supports it.
+  result.recognized = false
+  result.consumedLines = @[]
+  var pharStem = ""
+  var jarStem = ""
+  var sawPhpInvoke = false
+  var sawJavaJarInvoke = false
+  var ps1WriteStem = ""
+  var consumedCandidate: seq[int] = @[]
+  for i, raw in lines:
+    let line = raw.strip()
+    if line.len == 0: continue
+    let low = line.toLowerAscii()
+    # & php ... <name>.phar
+    if (low.contains("& php") or low.contains("&php")) and low.contains(".phar"):
+      sawPhpInvoke = true
+      consumedCandidate.add(i)
+      # Extract the .phar stem.
+      var idx = low.find(".phar")
+      if idx > 0:
+        var start = idx
+        while start > 0 and low[start - 1] notin {' ', '\t', '"', '\'',
+                                                   '\\', '/', '(', ')'}:
+          dec start
+        pharStem = line[start ..< idx]
+    # & java -jar ... <name>.jar
+    if (low.contains("& java") or low.contains("&java")) and
+       low.contains("-jar") and low.contains(".jar"):
+      sawJavaJarInvoke = true
+      consumedCandidate.add(i)
+      var idx = low.find(".jar")
+      if idx > 0:
+        var start = idx
+        while start > 0 and low[start - 1] notin {' ', '\t', '"', '\'',
+                                                   '\\', '/', '(', ')'}:
+          dec start
+        jarStem = line[start ..< idx]
+    # Add-Content / Set-Content / > redirect targeting $dir\<name>.ps1
+    if low.contains("$dir") and low.contains(".ps1") and
+       (low.contains("add-content") or low.contains("set-content") or
+        low.contains(">") or low.contains("out-file")):
+      consumedCandidate.add(i)
+      var idx = low.find(".ps1")
+      if idx > 0:
+        var start = idx
+        while start > 0 and low[start - 1] notin {' ', '\t', '"', '\'',
+                                                   '\\', '/'}:
+          dec start
+        ps1WriteStem = line[start ..< idx]
+  # Deduplicate consumed indices preserving order.
+  var seen: seq[int] = @[]
+  for i in consumedCandidate:
+    if i notin seen: seen.add(i)
+  consumedCandidate = seen
+  if sawPhpInvoke and pharStem.len > 0 and ps1WriteStem.len > 0 and
+     pharStem.toLowerAscii() == ps1WriteStem.toLowerAscii():
+    result.recognized = true
+    result.spec = LauncherEmitSpec(
+      kind: lekPhar,
+      target: pharStem & ".phar",
+      interpreter_package_id: "php",
+      launcher_name: pharStem)
+    result.consumedLines = consumedCandidate
+    diags.add(Diagnostic(
+      kind: dkLauncherEmitRecognized, app: app,
+      detail: "lekPhar launcher synthesis: target=" & pharStem &
+        ".phar interpreter=php launcher_name=" & pharStem &
+        " (consumed " & $consumedCandidate.len & " pre_install lines)"))
+    return
+  if sawJavaJarInvoke and jarStem.len > 0 and ps1WriteStem.len > 0 and
+     jarStem.toLowerAscii() == ps1WriteStem.toLowerAscii():
+    result.recognized = true
+    result.spec = LauncherEmitSpec(
+      kind: lekJar,
+      target: jarStem & ".jar",
+      interpreter_package_id: "jdk",
+      launcher_name: jarStem)
+    result.consumedLines = consumedCandidate
+    diags.add(Diagnostic(
+      kind: dkLauncherEmitRecognized, app: app,
+      detail: "lekJar launcher synthesis: target=" & jarStem &
+        ".jar interpreter=jdk launcher_name=" & jarStem &
+        " (consumed " & $consumedCandidate.len & " pre_install lines)"))
+
+proc translatePreInstall(node: JsonNode;
+                          app: string;
+                          diags: var seq[Diagnostic]):
+    tuple[actions: seq[PreInstallAction]; unrecognized: seq[string];
+          impliesNested7z: bool; launcherEmit: seq[LauncherEmitSpec]] =
+  ## Translate a Scoop ``pre_install`` JSON node (string | seq[string])
+  ## into the M3 schema. Detects the nested-7z idiom: presence of an
+  ## ``Expand-7zArchive`` ``*.7z`` glob (or a sibling cleanup
+  ## ``Remove-Item *.7z``) → ``impliesNested7z = true``.
+  result.impliesNested7z = false
+  if node.isNil: return
+  var lines: seq[string] = @[]
+  case node.kind
+  of JString: lines.add(node.getStr())
+  of JArray:
+    for child in node.items:
+      if child.kind == JString: lines.add(child.getStr())
+  else: return
+  if lines.len == 0: return
+  # M5: try the launcher-emit recognizer FIRST. If matched, the
+  # contributing lines are skipped in the per-line allowlist walk below
+  # (so we don't double-emit them as pre_install_unrecognized warnings).
+  let launcherMatch = recognizeLauncherEmitFromPreInstall(lines, app, diags)
+  if launcherMatch.recognized:
+    result.launcherEmit.add(launcherMatch.spec)
+  var sawExpandWildcard = false
+  var sawRemoveSevenZ = false
+  for idx, line in lines:
+    if launcherMatch.recognized and idx in launcherMatch.consumedLines:
+      continue
+    var dropped: seq[string] = @[]
+    let translation = translatePreInstallLine(line, dropped)
+    if translation.ok:
+      result.actions.add(translation.action)
+      diags.add(Diagnostic(
+        kind: dkPreInstallAllowlistEntry, app: app,
+        detail: "translated: " & line.strip()))
+      if translation.action.kind == piaExpand7z and
+         '*' in translation.action.source:
+        sawExpandWildcard = true
+      if translation.action.kind == piaRemoveItem and
+         translation.action.target.toLowerAscii().endsWith(".7z"):
+        sawRemoveSevenZ = true
+    elif line.strip().len == 0 or line.strip().startsWith("#"):
+      # Noop line — drop silently.
+      discard
+    else:
+      result.unrecognized.add(line)
+      let reason = if dropped.len > 0: dropped.join("; ") else: "no allowlist match"
+      diags.add(Diagnostic(
+        kind: dkPreInstallUnrecognized, app: app,
+        detail: line.strip() & " (" & reason & ")"))
+  result.impliesNested7z = sawExpandWildcard or sawRemoveSevenZ
+  if result.actions.len == 0 and result.unrecognized.len == 0 and
+     result.launcherEmit.len == 0:
+    diags.add(Diagnostic(
+      kind: dkPreInstallSkippedAllRecognized, app: app,
+      detail: "pre_install block was entirely comments / blank lines"))
+
 proc cpuOf(arch: string): PlatformCpu =
   case arch
   of "64bit": pcX86_64
@@ -444,6 +985,20 @@ proc parseScoopManifest*(app: string; raw: string;
   let hasInstaller = (not installerNode.isNil) and
     installerNode.kind == JObject and
     (installerNode.hasKey("url") or installerNode.hasKey("file"))
+  # M4: ``installer.script`` is M4 territory — a NSIS+MSI bundle
+  # (python3, swift) ships the outer .exe as a Burn/NSIS shell whose
+  # extraction is gated entirely by the script (Expand-DarkArchive +
+  # Expand-MsiArchive). Detect the script-only shape so we can flip
+  # to imInstallerNsisBundle.
+  let hasInstallerScript = (not installerNode.isNil) and
+    installerNode.kind == JObject and
+    installerNode.hasKey("script")
+  # M4: ``"innosetup": true`` flips dispatch to imInstallerInnoSetup
+  # regardless of whether an installer block is present (the
+  # freepascal shape is "innosetup: true" + no installer block).
+  let hasInnoSetup = root.hasKey("innosetup") and
+    root["innosetup"].kind == JBool and
+    root["innosetup"].getBool()
 
   # ----- Per-platform slices -----
   var platforms: seq[PlatformBinary] = @[]
@@ -571,11 +1126,54 @@ proc parseScoopManifest*(app: string; raw: string;
       kind: dkArchiveFormatUnknown, app: app,
       detail: "could not infer archive_format from URL '" &
         platforms[0].url & "'; defaulting to afRaw"))
+  # M3: emit the SFX-recognition diagnostic so operators can grep
+  # for the dkSevenZipSfx kind across a bulk-harvest log.
+  if archiveFmt == afSevenZipSfx:
+    result.diagnostics.add(Diagnostic(
+      kind: dkSevenZipSfx, app: app,
+      detail: "URL '" & platforms[0].url &
+        "' classified as 7z self-extracting (afSevenZipSfx)"))
 
   # ----- install_method -----
+  # M4: dispatch priority — innosetup wins (cleanest signal), then
+  # installer.script (NSIS+MSI bundle), then a regular .msi URL, then
+  # installer-with-file (M3 NSIS imInstallerSilent), then bare extract.
   var installMethod = imExtract
   var installerArgs: seq[string] = @[]
-  if hasInstaller:
+  if hasInnoSetup:
+    installMethod = imInstallerInnoSetup
+    result.diagnostics.add(Diagnostic(
+      kind: dkInstallMethodInnoSetup, app: app,
+      detail: "manifest has innosetup: true; dispatching through M4 " &
+        "innounp.exe extractor"))
+  elif hasInstallerScript and not hasInstaller:
+    # Script-only block. Probe the script content for Expand-DarkArchive
+    # / Expand-MsiArchive — if either is present, treat as NSIS+MSI
+    # bundle. Otherwise the manifest's installer.script is a generic
+    # post-extract hook (we already drop those for safety per the
+    # M68 refinement); fall through to imExtract.
+    let scriptNode = installerNode["script"]
+    var scriptLines: seq[string] = @[]
+    case scriptNode.kind
+    of JString: scriptLines.add(scriptNode.getStr())
+    of JArray:
+      for child in scriptNode.items:
+        if child.kind == JString: scriptLines.add(child.getStr())
+    else: discard
+    var sawMsiExtract = false
+    for line in scriptLines:
+      let lower = line.toLowerAscii()
+      if "expand-darkarchive" in lower or "expand-msiarchive" in lower:
+        sawMsiExtract = true
+        break
+    if sawMsiExtract:
+      installMethod = imInstallerNsisBundle
+      result.diagnostics.add(Diagnostic(
+        kind: dkInstallMethodNsisBundle, app: app,
+        detail: "installer.script contains Expand-DarkArchive / " &
+          "Expand-MsiArchive; dispatching through M4 NSIS-unwrap + " &
+          "per-MSI dark extractor"))
+  elif hasInstaller:
     installMethod = imInstallerSilent
     let (argsResult, unknown) = installerArgsFor(installerNode, archiveFmt)
     installerArgs = argsResult
@@ -584,6 +1182,13 @@ proc parseScoopManifest*(app: string; raw: string;
         kind: dkInstallerArgsUnknown, app: app,
         detail: "installer block lacks 'args' and archive_format is " &
           $archiveFmt & "; please review the emitted installer_args"))
+  # M4: bare .msi URLs with no installer block → imInstallerMsi.
+  if installMethod == imExtract and archiveFmt == afInstallerMsi:
+    installMethod = imInstallerMsi
+    result.diagnostics.add(Diagnostic(
+      kind: dkInstallMethodMsi, app: app,
+      detail: "primary download is .msi; dispatching through M4 " &
+        "dark.exe extractor (override via CAKBUILTIN_PREFER_MSIEXEC=1)"))
 
   # ----- bin -----
   var diags: seq[Diagnostic] = @[]
@@ -612,6 +1217,67 @@ proc parseScoopManifest*(app: string; raw: string;
       if v.kind == JString:
         envPairs.add((k, dollarDirToPrefix(v.getStr())))
 
+  # ----- M3: pre_install allowlist translation -----
+  var preActions: seq[PreInstallAction] = @[]
+  var preUnrecognized: seq[string] = @[]
+  var impliesNested = false
+  # M5: launcher_emit specs harvested from a recognized pre_install
+  # synthesis pattern (composer's .phar shape, future .jar wraps).
+  var launcherEmit: seq[LauncherEmitSpec] = @[]
+  if root.hasKey("pre_install"):
+    let translated = translatePreInstall(root["pre_install"], app,
+      result.diagnostics)
+    preActions = translated.actions
+    preUnrecognized = translated.unrecognized
+    impliesNested = translated.impliesNested7z
+    for spec in translated.launcherEmit: launcherEmit.add(spec)
+
+  # M4: when install_method == imInstallerNsisBundle, also harvest the
+  # installer.script lines through the same translator and append to
+  # preActions/preUnrecognized — they describe the per-tool flatten
+  # quirks (swift's LocalApp\Programs\Swift\ Move-Item dance,
+  # python3's appendpath.msi skip + tmp cleanup) that the realize loop
+  # replays AFTER the M4 bundle extractor materializes the merged file
+  # tree. The translator's allowlist now covers Expand-DarkArchive +
+  # Expand-MsiArchive; unrecognized lines (control flow, Get-ChildItem
+  # piping) land verbatim in preUnrecognized for the realize loop to
+  # surface as WPreInstallUnrecognized warnings.
+  if installMethod == imInstallerNsisBundle and hasInstallerScript:
+    let scriptNode = installerNode["script"]
+    let translated = translatePreInstall(scriptNode, app,
+      result.diagnostics)
+    for action in translated.actions: preActions.add(action)
+    for line in translated.unrecognized: preUnrecognized.add(line)
+    for spec in translated.launcherEmit: launcherEmit.add(spec)
+
+  # M3: nested_7z is per-platform. When pre_install actions imply a
+  # nested extraction, mark every platform's nested_7z = true (the
+  # nested-archive shape is upstream-uniform across CPUs for the M3
+  # target tools — gcc's components-*.7z ships the same payload on
+  # x86_64 + arm64 if/when the arm64 build lands).
+  if impliesNested:
+    for i in 0 ..< platforms.len:
+      platforms[i].nested_7z = true
+    result.diagnostics.add(Diagnostic(
+      kind: dkNested7z, app: app,
+      detail: "pre_install contains Expand-7zArchive + Remove-Item *.7z; " &
+        "platform nested_7z flag set"))
+
+  # M5: when a launcher_emit was harvested, the catalog's bin_relpath
+  # surface should be the LAUNCHERS we will emit at realize time, not
+  # the raw .phar / .jar payload. Override bin_relpath here when the
+  # auto-harvested value is empty / is just the payload file (composer's
+  # auto-harvest landed bin_relpath=["composer.ps1"] from the Scoop
+  # ``bin`` field; we replace it with the synthesized .ps1+.cmd pair so
+  # the M5 schema validator's launcher_name-in-bin_relpath sanity check
+  # holds).
+  if launcherEmit.len > 0:
+    var synthBins: seq[string] = @[]
+    for spec in launcherEmit:
+      synthBins.add("bin/" & spec.launcher_name & ".ps1")
+      synthBins.add("bin/" & spec.launcher_name & ".cmd")
+    binRelpath = synthBins
+
   # ----- Compose the VersionedProvisioning -----
   result.entry = initVersionedProvisioning(
     version = version,
@@ -620,5 +1286,8 @@ proc parseScoopManifest*(app: string; raw: string;
     bin_relpath = binRelpath,
     platforms = platforms,
     installer_args = installerArgs,
-    env = envPairs)
+    env = envPairs,
+    pre_install_actions = preActions,
+    pre_install_unrecognized = preUnrecognized,
+    launcher_emit = launcherEmit)
   result.ok = true

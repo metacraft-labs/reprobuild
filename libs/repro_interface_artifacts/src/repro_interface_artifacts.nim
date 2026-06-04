@@ -1,5 +1,5 @@
 import std/[algorithm, options, os, osproc, sequtils, sets, streams, strutils,
-            times]
+            tables, times]
 
 import cbor
 import repro_core
@@ -186,6 +186,24 @@ type
     providerFingerprint: ContentDigest
     outputBinaryFingerprint: ContentDigest
 
+  InterfaceArtifactWarmStats* = object
+    metadataColdReads*: int
+    metadataWarmHits*: int
+    metadataWarmMisses*: int
+    metadataRevalidatedSources*: int
+    metadataRevalidatedReproLibs*: int
+    artifactColdReads*: int
+    artifactWarmHits*: int
+    artifactWarmMisses*: int
+
+  WarmInterfaceExtractionCacheRecord = object
+    evidence: FileStamp
+    record: InterfaceExtractionCacheRecord
+
+  WarmProjectInterfaceArtifact = object
+    evidence: FileStamp
+    artifact: ProjectInterfaceArtifact
+
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
   EnvelopeVersion = 9'u16
@@ -207,6 +225,15 @@ const
     "reprobuild.providerFreshnessCache.v1"
 
 var cachedNimCompilerPath = ""
+var processWarmInterfaceMetadata =
+  initTable[string, WarmInterfaceExtractionCacheRecord]()
+var processWarmInterfaceArtifacts =
+  initTable[string, WarmProjectInterfaceArtifact]()
+var processWarmInterfaceStats: InterfaceArtifactWarmStats
+
+proc consumeInterfaceArtifactWarmStats*(): InterfaceArtifactWarmStats =
+  result = processWarmInterfaceStats
+  processWarmInterfaceStats = InterfaceArtifactWarmStats()
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -1636,6 +1663,18 @@ proc nimImportSpecs(line: string): seq[string] =
       return @[rest[0 ..< pos].strip()]
 
 proc discoverNimSources*(rootModulePath: string): seq[string] =
+  ## Enumerate the provider compile's input source set.
+  ##
+  ## Imports reachable from ``rootModulePath`` are included transitively
+  ## (only within the project root, never outside; std/ and pkg/ specs are
+  ## ignored). In addition every ``.nim`` file directly in the project
+  ## root is included even when it is not currently imported, so that
+  ## adding a sibling module to the project invalidates the provider
+  ## compile cache: a later edit to ``reprobuild.nim`` might import it,
+  ## and Nim's own compilation already treats project-root siblings as
+  ## eligible imports. Sibling enumeration is intentionally
+  ## non-recursive — subdirectory sources only enter the set through an
+  ## explicit import edge.
   let projectRoot = normalizedStampPath(parentDir(rootModulePath))
   var pending = @[normalizedStampPath(rootModulePath)]
   var seen = initHashSet[string]()
@@ -1653,6 +1692,16 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
           let localPath = localNimModulePath(path, projectRoot, expanded)
           if localPath.len > 0 and localPath notin seen:
             pending.add(localPath)
+  if dirExists(extendedPath(projectRoot)):
+    for kind, child in walkDir(projectRoot):
+      if kind notin {pcFile, pcLinkToFile}:
+        continue
+      if not (child.endsWith(".nim") or child.endsWith(".nims")):
+        continue
+      let normalized = normalizedStampPath(child)
+      if normalized notin seen:
+        seen.incl(normalized)
+        result.add(normalized)
   result.sort(system.cmp[string])
 
 proc reproLibSources(workDir: string): seq[string] =
@@ -1698,6 +1747,25 @@ proc fileStamp(path: string): FileStamp =
   let mtime = info.lastWriteTime
   result.mtimeNs = uint64(mtime.toUnix) * 1_000_000_000'u64 +
     uint64(mtime.nanosecond)
+
+proc cacheableWarmEvidence(stamp: FileStamp): bool =
+  stamp.kind == fskRegular
+
+proc readInterfaceArtifactWithWarm(path: string): ProjectInterfaceArtifact =
+  let evidence = fileStamp(path)
+  if processWarmInterfaceArtifacts.hasKey(path):
+    let warm = processWarmInterfaceArtifacts[path]
+    if cacheableWarmEvidence(evidence) and warm.evidence == evidence:
+      inc processWarmInterfaceStats.artifactWarmHits
+      return warm.artifact
+    inc processWarmInterfaceStats.artifactWarmMisses
+  else:
+    inc processWarmInterfaceStats.artifactColdReads
+  result = readInterfaceArtifact(path)
+  if cacheableWarmEvidence(evidence):
+    processWarmInterfaceArtifacts[path] = WarmProjectInterfaceArtifact(
+      evidence: evidence,
+      artifact: result)
 
 proc fileStamps(paths: openArray[string]): seq[FileStamp] =
   for path in paths:
@@ -1787,17 +1855,40 @@ proc writeInterfaceExtractionCacheRecord(artifactPath: string;
     reproLibStamps: reproLibStampsForCache(context.workDir),
     inputFingerprint: fingerprint)
   try:
-    writeFile(extendedPath(interfaceExtractionMetadataPath(artifactPath)),
+    let metadataPath = interfaceExtractionMetadataPath(artifactPath)
+    writeFile(extendedPath(metadataPath),
       toByteString(encodeInterfaceExtractionCacheRecord(record)))
+    let evidence = fileStamp(metadataPath)
+    if cacheableWarmEvidence(evidence):
+      processWarmInterfaceMetadata[metadataPath] =
+        WarmInterfaceExtractionCacheRecord(
+          evidence: evidence,
+          record: record)
   except CatchableError:
     discard
 
 proc readInterfaceExtractionCacheRecord(path: string):
     Option[InterfaceExtractionCacheRecord] =
-  if not fileExists(extendedPath(path)):
+  let evidence = fileStamp(path)
+  if evidence.kind == fskMissing:
     return none(InterfaceExtractionCacheRecord)
+  if processWarmInterfaceMetadata.hasKey(path):
+    let warm = processWarmInterfaceMetadata[path]
+    if cacheableWarmEvidence(evidence) and warm.evidence == evidence:
+      inc processWarmInterfaceStats.metadataWarmHits
+      return some(warm.record)
+    inc processWarmInterfaceStats.metadataWarmMisses
+  else:
+    inc processWarmInterfaceStats.metadataColdReads
   try:
-    return some(decodeInterfaceExtractionCacheRecord(fromByteString(readFile(extendedPath(path)))))
+    let record =
+      decodeInterfaceExtractionCacheRecord(fromByteString(readFile(extendedPath(path))))
+    if cacheableWarmEvidence(evidence):
+      processWarmInterfaceMetadata[path] =
+        WarmInterfaceExtractionCacheRecord(
+          evidence: evidence,
+          record: record)
+    return some(record)
   except CatchableError:
     return none(InterfaceExtractionCacheRecord)
 
@@ -1816,12 +1907,16 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
   let cached = record.get()
   if not interfaceContextsMatchForCache(cached.context, context):
     return none(ProjectInterfaceArtifact)
+  processWarmInterfaceStats.metadataRevalidatedSources +=
+    cached.sourceStamps.len
   if cached.sourceStamps != restampRecordedInputs(cached.sourceStamps):
     return none(ProjectInterfaceArtifact)
+  processWarmInterfaceStats.metadataRevalidatedReproLibs +=
+    cached.reproLibStamps.len
   if cached.reproLibStamps != restampRecordedInputs(cached.reproLibStamps):
     return none(ProjectInterfaceArtifact)
   try:
-    let artifact = readInterfaceArtifact(artifactPath)
+    let artifact = readInterfaceArtifactWithWarm(artifactPath)
     if artifact.interfaceFingerprint != cached.inputFingerprint:
       return none(ProjectInterfaceArtifact)
     return some(artifact)
@@ -1840,7 +1935,7 @@ proc cachedInterfaceArtifactByFingerprint(artifactPath, stubPath: string;
   if readFile(extendedPath(cachePath)).strip() != toHex(fingerprint.bytes):
     return none(ProjectInterfaceArtifact)
   try:
-    return some(readInterfaceArtifact(artifactPath))
+    return some(readInterfaceArtifactWithWarm(artifactPath))
   except CatchableError:
     return none(ProjectInterfaceArtifact)
 
@@ -2103,9 +2198,25 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   let compileExecution = runCommand(command, cwd = workDir)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
+    # `runCommand` already raises on non-zero exit, so reaching this branch
+    # means the compiler reported success (typically `[SuccessX]`) but did
+    # not actually write the binary. This has been observed under
+    # fork/resource pressure with certain Nim/clang-wrapper combinations.
+    # Capture a directory listing to make the missing-output state visible
+    # for future triage instead of just claiming the file is absent.
+    let runnerExeDir = runnerExe.splitPath.head
+    var listing = ""
+    try:
+      let lsExec = runCommand(@["ls", "-la", runnerExeDir])
+      listing = lsExec.output
+    except CatchableError as ex:
+      listing = "(failed to list " & runnerExeDir & ": " & ex.msg & ")"
     raise newException(IOError,
-      "interface extraction runner was not compiled: " & runnerExe &
-        "\n" & compileExecution.output)
+      "interface extraction runner was not compiled (exit=" &
+        $compileExecution.exitCode &
+        ", compiler reported success but produced no binary): " &
+        runnerExe & "\ncompiler output:\n" & compileExecution.output &
+        "\ndirectory listing of " & runnerExeDir & ":\n" & listing)
   ensureExecutable(runnerExe)
   let execution = runCommand(@[runnerExe, artifactPath, stubPath, modulePath],
     cwd = workDir)
@@ -2113,7 +2224,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
         "\n" & execution.output)
-  result = readInterfaceArtifact(artifactPath)
+  result = readInterfaceArtifactWithWarm(artifactPath)
   writeFile(extendedPath(interfaceExtractionCachePath(artifactPath)), toHex(
       inputFingerprint.bytes))
   writeInterfaceExtractionCacheRecord(artifactPath, fingerprintContext,

@@ -24,6 +24,11 @@ import ./registry
 const
   EnvironmentSubkey* = "Environment"
   UserPathBlockId* = "repro-home-userpath"
+    ## Legacy default sentinel id. Hand-written profiles that emit a
+    ## single `env.userPath` resource continue to write into this
+    ## block. The M69 emitter (`envUserPathResource`) sets a per-
+    ## resource block id so per-package PATH contributions don't
+    ## clobber each other in the shared rc file.
   UserPathRcEnvVar* = "REPRO_HOME_POSIX_PATH_RC"
 
 when defined(windows):
@@ -35,6 +40,11 @@ proc bytesOf(s: string): seq[byte] =
   result = newSeq[byte](s.len)
   for i, ch in s:
     result[i] = byte(ord(ch))
+
+proc bytesToString(b: openArray[byte]): string =
+  result = newString(b.len)
+  for i, x in b:
+    result[i] = char(x)
 
 # ---------------------------------------------------------------------------
 # `env.userVariable` driver.
@@ -123,6 +133,63 @@ proc posixPathBlockContent*(entries: openArray[string]): string =
     return ""
   "export PATH=" & quoted.join(":") & "${PATH:+:$PATH}\n"
 
+proc parsePosixPathBlockEntries*(blockText: string): seq[string] =
+  ## Inverse of `posixPathBlockContent`: walk the rendered block
+  ## fragment and recover the contributed entries verbatim, undoing
+  ## the single-quote escaping. Returns an empty seq when the block
+  ## doesn't match the expected `export PATH='...':'...'${PATH:+:$PATH}`
+  ## shape (e.g. user-edited content) — the caller treats that as a
+  ## "can't reduce to entries" signal and falls back to digesting the
+  ## raw bytes.
+  result = @[]
+  const Prefix = "export PATH="
+  const Suffix = "${PATH:+:$PATH}"
+  var body = blockText
+  # Strip a trailing newline if present (the renderer always appends
+  # one but the live block may have been re-saved without it).
+  while body.len > 0 and body[^1] == '\n':
+    body.setLen(body.len - 1)
+  if not body.startsWith(Prefix):
+    return @[]
+  body = body[Prefix.len .. ^1]
+  if not body.endsWith(Suffix):
+    return @[]
+  body = body[0 ..< body.len - Suffix.len]
+  if body.len == 0:
+    return @[]
+  # Walk: each entry is a single-quoted run; `'\"'\"'` represents an
+  # embedded `'`. Entries are separated by `:`.
+  var i = 0
+  while i < body.len:
+    if body[i] != '\'':
+      # Malformed — entries are always single-quoted.
+      return @[]
+    inc i
+    var entry = ""
+    while i < body.len:
+      if body[i] == '\'':
+        # Either end of the entry or the start of an embedded-quote
+        # escape sequence `'\"'\"'` ( closing-quote, double-quoted
+        # single-quote, opening-quote ).
+        if i + 4 < body.len and
+           body[i + 1] == '\"' and
+           body[i + 2] == '\'' and
+           body[i + 3] == '\"' and
+           body[i + 4] == '\'':
+          entry.add('\'')
+          i += 5
+          continue
+        # End of the entry.
+        inc i
+        break
+      entry.add(body[i])
+      inc i
+    result.add(entry)
+    if i < body.len:
+      if body[i] != ':':
+        return @[]
+      inc i
+
 proc readUserPathRaw*(): tuple[present: bool; raw: string; regType: uint32] =
   ## Read `HKCU\Environment\Path` (or `PATH`) as UTF-8. Returns
   ## `(present=false, "")` if no value is set yet. Tries both
@@ -194,11 +261,17 @@ proc computeMergedPath*(existing, contributed: openArray[string]):
 
 proc applyUserPath*(contributed: openArray[string];
                    priorContribution: openArray[string];
-                   hostFilePath = ""): seq[byte] =
+                   hostFilePath = "";
+                   blockId = ""): seq[byte] =
   ## Write the merged PATH back. Returns the bytes the executor
   ## should record as `payloadBytes` — the JOINED CONTRIBUTION
   ## (not the full PATH), so rollback knows exactly which entries
   ## to remove without touching unrelated user-added entries.
+  ##
+  ## `blockId` (POSIX only) selects the sentinel-delimited slice of
+  ## the rc file. Empty means "use the legacy default block id"
+  ## (`UserPathBlockId`); the M69 emitter passes a per-resource id
+  ## so per-package PATH contributions don't clobber each other.
   when defined(windows):
     let current = readUserPathRaw()
     var existingEntries =
@@ -223,18 +296,27 @@ proc applyUserPath*(contributed: openArray[string];
     let hostFile =
       if hostFilePath.len > 0: hostFilePath
       else: defaultUserPathHostFile()
+    let effBlockId =
+      if blockId.len > 0: blockId
+      else: UserPathBlockId
     if hostFile.len > 0:
-      discard applyManagedBlockResource(hostFile, UserPathBlockId,
+      discard applyManagedBlockResource(hostFile, effBlockId,
         posixPathBlockContent(contributed))
   # Recorded payload: the JOINED CONTRIBUTION bytes (UTF-8).
   let joined = joinPathEntries(contributed)
   result = bytesOf(joined)
 
 proc removeUserPathContribution*(contribution: openArray[string];
-                                 hostFilePath = "") =
+                                 hostFilePath = "";
+                                 blockId = "") =
   ## Destroy: remove only the recorded contribution entries from
   ## the live PATH. User-added entries (anything not in
   ## `contribution`) remain byte-identical.
+  ##
+  ## `blockId` (POSIX only) selects the sentinel-delimited slice
+  ## of the rc file. Empty means "use the legacy default block id"
+  ## so a destroy initiated against a recorded resource whose
+  ## identity carries the default still finds the block.
   when defined(windows):
     let current = readUserPathRaw()
     if not current.present:
@@ -260,11 +342,15 @@ proc removeUserPathContribution*(contribution: openArray[string];
     let hostFile =
       if hostFilePath.len > 0: hostFilePath
       else: defaultUserPathHostFile()
+    let effBlockId =
+      if blockId.len > 0: blockId
+      else: UserPathBlockId
     if hostFile.len > 0:
-      destroyManagedBlockResource(hostFile, UserPathBlockId)
+      destroyManagedBlockResource(hostFile, effBlockId)
 
 proc observeUserPath*(contribution: openArray[string];
-                      hostFilePath = ""): ObservedState =
+                      hostFilePath = "";
+                      blockId = ""): ObservedState =
   ## Observe the live PATH and reduce to the recorded form for
   ## drift comparison. The "observed digest" is computed over the
   ## subset of the desired contribution that's currently in PATH;
@@ -305,22 +391,53 @@ proc observeUserPath*(contribution: openArray[string];
     let hostFile =
       if hostFilePath.len > 0: hostFilePath
       else: defaultUserPathHostFile()
+    let effBlockId =
+      if blockId.len > 0: blockId
+      else: UserPathBlockId
     if hostFile.len == 0:
       result.present = false
       result.digest = zeroDigest()
       return
-    let observed = observeManagedBlock(hostFile, UserPathBlockId)
+    let observed = observeManagedBlock(hostFile, effBlockId)
     if not observed.present:
       result.present = false
       result.digest = zeroDigest()
       return
     let expected = posixPathBlockContent(contribution)
     let expectedBytes = bytesOf(expected)
-    let joined = bytesOf(joinPathEntries(contribution))
     result.present = true
     if observed.rawBytes == expectedBytes:
+      # The block IS exactly what we'd render for the desired
+      # contribution — digest the joined entries directly so the
+      # cache-hit short-circuit matches the recorded post-write
+      # digest byte-for-byte.
+      let joined = bytesOf(joinPathEntries(contribution))
       result.rawBytes = joined
       result.digest = digestOfBytes(joined)
     else:
-      result.rawBytes = observed.rawBytes
-      result.digest = observed.digest
+      # Live block doesn't match what we'd render NOW. Reduce to the
+      # same digest space (joined-entries bytes) by parsing the
+      # live block back to its entries. That way the digest we
+      # return is comparable to `recorded.postWriteDigest`, which
+      # is ALSO the joined-entries digest of whatever was last
+      # written — letting `decideAction`'s safe-update branch
+      # (`recorded.postWriteDigest == observed.digest`) fire when
+      # the live block reflects our last write but the desired
+      # contribution has since changed (the classic "two-package
+      # apply, then drop one" case).
+      #
+      # If the block is user-edited into a shape we can't parse, we
+      # fall back to the raw-bytes digest; the lifecycle algorithm
+      # then sees this as drift relative to the recorded digest,
+      # which is the correct outcome (the user wrote something
+      # outside our format and reconciliation requires explicit
+      # operator intent).
+      let liveEntries = parsePosixPathBlockEntries(
+        bytesToString(observed.rawBytes))
+      if liveEntries.len > 0:
+        let joined = bytesOf(joinPathEntries(liveEntries))
+        result.rawBytes = joined
+        result.digest = digestOfBytes(joined)
+      else:
+        result.rawBytes = observed.rawBytes
+        result.digest = observed.digest

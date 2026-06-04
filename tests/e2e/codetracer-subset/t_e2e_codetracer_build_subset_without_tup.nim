@@ -1,6 +1,7 @@
 import std/[json, os, osproc, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_tool_profiles
+import repro_test_support
 
 const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
@@ -16,55 +17,31 @@ type
 proc q(value: string): string =
   quoteShell(value)
 
-proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
-  for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
-
-proc requireFailure(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  check res.code != 0
-  res.output
-
 proc pathHasExecutable(name, pathValue: string): bool =
   when defined(windows):
     findExe(name).len > 0
   else:
-    execCmdEx("PATH=" & q(pathValue) & " command -v " & q(name)).exitCode == 0
+    runShell(shellCommand(@["sh", "-c", "command -v " & q(name)],
+      @[(name: "PATH", value: pathValue)])).code == 0
 
-proc nixBuildOutPath(selector: string): string =
-  let res = execCmdEx(shellCommand([
-    "nix", "build", "--no-link", "--print-out-paths", selector
-  ]))
-  if res.exitCode != 0:
+when isNixSupported:
+  proc nixBuildOutPath(selector: string): string =
+    let res = runShell(shellCommand(@[
+      "nix", "build", "--no-link", "--print-out-paths", selector
+    ]))
+    if res.code != 0:
+      checkpoint(res.output)
+      return ""
+    for line in res.output.splitLines:
+      let path = line.strip()
+      if path.startsWith("/nix/store/"):
+        return path
     checkpoint(res.output)
-    return ""
-  for line in res.output.splitLines:
-    let path = line.strip()
-    if path.startsWith("/nix/store/"):
-      return path
-  checkpoint(res.output)
-  ""
+    ""
 
 proc pathWithNixFallbackTools(pathValue: string): string =
   result = pathValue
-  when not defined(windows):
+  when isNixSupported:
     if not pathHasExecutable("node", result):
       let nodePath = nixBuildOutPath("nixpkgs#nodejs")
       if nodePath.len > 0:
@@ -80,9 +57,12 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    raise newException(OSError,
+      "runquotad binary missing at " & daemonBin & "; build it via " &
+      "the test harness (scripts/run_tests.sh) — the test code must not " &
+      "spawn `just build` for the sibling repo")
   let socketPath = "/tmp/repro-m20-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -329,9 +309,14 @@ proc writeProject(path: string; nimJsCommand, traceObjectCommand,
     "        outputs = @[" & nimString("build/c/main.with-header.o") & "])\n")
 
 proc build(reproBin, target, repoRoot, pathValue: string): string =
-  requireSuccess("PATH=" & q(pathValue) & " " &
-    shellCommand([reproBin, "build", target, "--tool-provisioning=path"]),
-    repoRoot)
+  # Pass `--log=actions` so the per-action `action: ID status=... ` evidence
+  # lines appear in captured stdout. The default summary log only emits the
+  # `progress: bpkActionCompleted ...` markers plus the `scheduler:` /
+  # `providerInvocations:` / `buildReport:` headers; the assertions below
+  # that key on the per-action shape need the action-level log.
+  requireSuccess(shellCommand(@[reproBin, "build", target,
+    "--tool-provisioning=path", "--log=actions"],
+    @[(name: "PATH", value: pathValue)]), repoRoot)
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
@@ -351,15 +336,31 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
+proc assertActionCacheEffective(report: JsonNode; id: string) =
+  ## "Cache was effective for this action on this build" — accepts
+  ## either `asCacheHit` (cache decision hit + outputs had to be
+  ## restored from CAS) or `asUpToDate` (cache decision hit + outputs
+  ## already present, no restoration). Both are defined in
+  ## `libs/repro_build_engine/.../repro_build_engine.nim` `ActionStatus`
+  ## and both mean "this action did not rerun on this build"
+  ## (`launched == false` in either case). The narrower `assertAction`
+  ## remains in use for `asSucceeded`/`launched=true` checks where the
+  ## precise status matters. Mirrors the helper M51 introduced after
+  ## the May-2026 engine cache-decision protocol split.
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
+  check action{"launched"}.getBool() == false
+
 proc runNode(path, cwd, pathValue: string): string =
-  requireSuccess("PATH=" & q(pathValue) & " " & shellCommand(["node", path]),
-    cwd)
+  requireSuccess(shellCommand(@["node", path],
+    @[(name: "PATH", value: pathValue)]), cwd)
 
 proc directOracle(projectRoot, outputPath: string; command: openArray[string];
                   pathValue: string) =
   createDir(projectRoot / outputPath.splitPath.head)
-  discard requireSuccess("PATH=" & q(pathValue) & " " & shellCommand(command),
-    projectRoot)
+  discard requireSuccess(shellCommand(@command,
+    @[(name: "PATH", value: pathValue)]), projectRoot)
 
 proc mainSymbol(path, cwd: string): string =
   let output = requireSuccess(shellCommand(["nm", "-g", path]), cwd)
@@ -373,138 +374,144 @@ proc jsonStringSet(node: JsonNode): seq[string] =
     result.add(item.getStr())
 
 suite "e2e_codetracer_build_subset_without_tup":
-  test "real CodeTracer sources build through DSL, provider, RunQuota, cache, and committed Tup command semantics":
-    let repoRoot = getCurrentDir()
-    let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-    let tupRulesPath = codeTracerRoot / "src" / "Tuprules.tup"
-    check fileExists(tupRulesPath)
-    let tupRules = loadTupRules(tupRulesPath)
-    assertCommittedTupSemantics(tupRules)
-    let nimJsActionCommand = withNimConfigPathContext(
-      tupCommand(tupRules, "!nim_js",
-        "src/frontend/tests/ipc_registry_test.nim", "tests/ipc_registry_test.js"),
-      codeTracerRoot)
-    let nimJsOracleCommand = withNimConfigPathContext(
-      tupCommand(tupRules, "!nim_js",
-        "src/frontend/tests/ipc_registry_test.nim", "oracle/ipc_registry_test.js"),
-      codeTracerRoot)
-    let traceObjectActionCommand = tupCommand(tupRules, "!trace_object_file",
-      "src/c/main.c", "build/c/main.tup.o")
-    let traceObjectOracleCommand = tupCommand(tupRules, "!trace_object_file",
-      "src/c/main.c", "oracle/main.o")
-    let generatedHeaderCommand = generatedHeaderCCommand(
-      traceObjectActionCommand, "build/generated/ct_config.h",
-      "build/c/main.with-header.o")
+  # The CodeTracer integration build exercises the full POSIX
+  # toolchain (nix + sh + runquotad) end-to-end against a sibling
+  # CodeTracer checkout. Gated to isNixSupported (which also
+  # excludes Windows where runquotad has no port yet) so the
+  # rest of the file still compiles cleanly cross-platform.
+  when isNixSupported:
+    test "real CodeTracer sources build through DSL, provider, RunQuota, cache, and committed Tup command semantics":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let tupRulesPath = codeTracerRoot / "src" / "Tuprules.tup"
+      check fileExists(tupRulesPath)
+      let tupRules = loadTupRules(tupRulesPath)
+      assertCommittedTupSemantics(tupRules)
+      let nimJsActionCommand = withNimConfigPathContext(
+        tupCommand(tupRules, "!nim_js",
+          "src/frontend/tests/ipc_registry_test.nim", "tests/ipc_registry_test.js"),
+        codeTracerRoot)
+      let nimJsOracleCommand = withNimConfigPathContext(
+        tupCommand(tupRules, "!nim_js",
+          "src/frontend/tests/ipc_registry_test.nim", "oracle/ipc_registry_test.js"),
+        codeTracerRoot)
+      let traceObjectActionCommand = tupCommand(tupRules, "!trace_object_file",
+        "src/c/main.c", "build/c/main.tup.o")
+      let traceObjectOracleCommand = tupCommand(tupRules, "!trace_object_file",
+        "src/c/main.c", "oracle/main.o")
+      let generatedHeaderCommand = generatedHeaderCCommand(
+        traceObjectActionCommand, "build/generated/ct_config.h",
+        "build/c/main.with-header.o")
 
-    let tempRoot = createTempDir("repro-m20-codetracer-subset", "")
-    defer: removeDir(tempRoot)
+      let tempRoot = createTempDir("repro-m20-codetracer-subset", "")
+      defer: removeDir(tempRoot)
 
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
 
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
+      let reproBin = tempRoot / "repro"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-repro"),
+        "--out:" & reproBin,
+        repoRoot / "apps" / "repro" / "repro.nim"
+      ]), repoRoot)
 
-    let projectRoot = tempRoot / "project"
-    createDir(projectRoot)
-    copySelectedCodeTracerFiles(codeTracerRoot, projectRoot)
-    writeProject(projectRoot / "reprobuild.nim", nimJsActionCommand,
-      traceObjectActionCommand, generatedHeaderCommand)
-    let target = projectRoot
-    let pathValue = pathWithNixFallbackTools(getEnv("PATH"))
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot)
+      copySelectedCodeTracerFiles(codeTracerRoot, projectRoot)
+      writeProject(projectRoot / "reprobuild.nim", nimJsActionCommand,
+        traceObjectActionCommand, generatedHeaderCommand)
+      let target = projectRoot
+      let pathValue = pathWithNixFallbackTools(getEnv("PATH"))
 
-    let first = build(reproBin, target, repoRoot, pathValue)
-    check first.contains("provisioning-disabled mode active")
-    check first.contains("providerCompile:")
-    check first.contains("providerGraphSnapshot:")
-    check first.contains("scheduler: actions=4")
-    check first.contains("action: generate-config-header status=asSucceeded launched=true")
-    check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
-    check first.contains("action: c-sudoku-object-tup status=asSucceeded launched=true")
-    check first.contains("action: c-sudoku-object-with-generated-header status=asSucceeded launched=true")
-    check fileExists(projectRoot / "build" / "generated" / "ct_config.h")
-    check fileExists(projectRoot / "tests" / "ipc_registry_test.js")
-    check fileExists(projectRoot / "build" / "c" / "main.tup.o")
-    check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
+      let first = build(reproBin, target, repoRoot, pathValue)
+      check first.contains("provisioning-disabled mode active")
+      check first.contains("providerCompile:")
+      check first.contains("providerGraphSnapshot:")
+      check first.contains("scheduler: actions=4")
+      check first.contains("action: generate-config-header status=asSucceeded launched=true")
+      check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
+      check first.contains("action: c-sudoku-object-tup status=asSucceeded launched=true")
+      check first.contains("action: c-sudoku-object-with-generated-header status=asSucceeded launched=true")
+      check fileExists(projectRoot / "build" / "generated" / "ct_config.h")
+      check fileExists(projectRoot / "tests" / "ipc_registry_test.js")
+      check fileExists(projectRoot / "build" / "c" / "main.tup.o")
+      check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
-    let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-    check identity.profiles.len == 4
-    check identity.profiles.allIt(it.installMethod == "path")
-    check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
-    check identity.profiles.anyIt(it.executableName == "nim")
-    check identity.profiles.anyIt(it.executableName == "node")
-    check identity.profiles.anyIt(it.executableName == "gcc")
-    check identity.profiles.anyIt(it.executableName == "sh")
+      let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
+      check identity.profiles.len == 4
+      check identity.profiles.allIt(it.installMethod == "path")
+      check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
+      check identity.profiles.anyIt(it.executableName == "nim")
+      check identity.profiles.anyIt(it.executableName == "node")
+      check identity.profiles.anyIt(it.executableName == "gcc")
+      check identity.profiles.anyIt(it.executableName == "sh")
 
-    let firstReport = parseFile(valueAfter(first, "buildReport:"))
-    assertAction(firstReport, "generate-config-header", "asSucceeded", true)
-    assertAction(firstReport, "nim-js-ipc-registry-test", "asSucceeded", true)
-    assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
-    assertAction(firstReport, "c-sudoku-object-with-generated-header",
-      "asSucceeded", true)
-    check reportAction(firstReport, "generate-config-header"){"runQuotaBackend"}.
-      getStr().len > 0
-    let tupCInputs = jsonStringSet(reportAction(firstReport, "c-sudoku-object-tup"){
-      "evidence"}{"declaredInputs"})
-    check tupCInputs.anyIt(it.endsWith("src/c/main.c"))
-    check not tupCInputs.anyIt(it.endsWith("build/generated/ct_config.h"))
-    let generatedHeaderCInputs = jsonStringSet(reportAction(firstReport,
-      "c-sudoku-object-with-generated-header"){
-      "evidence"}{"declaredInputs"})
-    check generatedHeaderCInputs.anyIt(it.endsWith("src/c/main.c"))
-    check generatedHeaderCInputs.anyIt(it.endsWith("build/generated/ct_config.h"))
+      let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      assertAction(firstReport, "generate-config-header", "asSucceeded", true)
+      assertAction(firstReport, "nim-js-ipc-registry-test", "asSucceeded", true)
+      assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
+      assertAction(firstReport, "c-sudoku-object-with-generated-header",
+        "asSucceeded", true)
+      check reportAction(firstReport, "generate-config-header"){"runQuotaBackend"}.
+        getStr().len > 0
+      let tupCInputs = jsonStringSet(reportAction(firstReport, "c-sudoku-object-tup"){
+        "evidence"}{"declaredInputs"})
+      check tupCInputs.anyIt(it.endsWith("src/c/main.c"))
+      check not tupCInputs.anyIt(it.endsWith("build/generated/ct_config.h"))
+      let generatedHeaderCInputs = jsonStringSet(reportAction(firstReport,
+        "c-sudoku-object-with-generated-header"){
+        "evidence"}{"declaredInputs"})
+      check generatedHeaderCInputs.anyIt(it.endsWith("src/c/main.c"))
+      check generatedHeaderCInputs.anyIt(it.endsWith("build/generated/ct_config.h"))
 
-    directOracle(projectRoot, "oracle/ipc_registry_test.js",
-      nimJsOracleCommand, pathValue)
-    check runNode("tests/ipc_registry_test.js", projectRoot, pathValue) ==
-      runNode("oracle/ipc_registry_test.js", projectRoot, pathValue)
-    check runNode("tests/ipc_registry_test.js", projectRoot, pathValue).contains(
-      "[OK] handlers still invoked after reconnect")
+      directOracle(projectRoot, "oracle/ipc_registry_test.js",
+        nimJsOracleCommand, pathValue)
+      check runNode("tests/ipc_registry_test.js", projectRoot, pathValue) ==
+        runNode("oracle/ipc_registry_test.js", projectRoot, pathValue)
+      check runNode("tests/ipc_registry_test.js", projectRoot, pathValue).contains(
+        "[OK] handlers still invoked after reconnect")
 
-    directOracle(projectRoot, "oracle/main.o", traceObjectOracleCommand,
-      pathValue)
-    check mainSymbol("build/c/main.tup.o", projectRoot) ==
-      mainSymbol("oracle/main.o", projectRoot)
-    check mainSymbol("build/c/main.with-header.o", projectRoot) ==
-      mainSymbol("oracle/main.o", projectRoot)
+      directOracle(projectRoot, "oracle/main.o", traceObjectOracleCommand,
+        pathValue)
+      check mainSymbol("build/c/main.tup.o", projectRoot) ==
+        mainSymbol("oracle/main.o", projectRoot)
+      check mainSymbol("build/c/main.with-header.o", projectRoot) ==
+        mainSymbol("oracle/main.o", projectRoot)
 
-    let second = build(reproBin, target, repoRoot, pathValue)
-    let secondReport = parseFile(valueAfter(second, "buildReport:"))
-    assertAction(secondReport, "generate-config-header", "asCacheHit", false)
-    assertAction(secondReport, "nim-js-ipc-registry-test", "asCacheHit", false)
-    assertAction(secondReport, "c-sudoku-object-tup", "asCacheHit", false)
-    assertAction(secondReport, "c-sudoku-object-with-generated-header",
-      "asCacheHit", false)
+      let second = build(reproBin, target, repoRoot, pathValue)
+      let secondReport = parseFile(valueAfter(second, "buildReport:"))
+      assertActionCacheEffective(secondReport, "generate-config-header")
+      assertActionCacheEffective(secondReport, "nim-js-ipc-registry-test")
+      assertActionCacheEffective(secondReport, "c-sudoku-object-tup")
+      assertActionCacheEffective(secondReport,
+        "c-sudoku-object-with-generated-header")
 
-    writeFile(projectRoot / "src" / "c" / "main.c",
-      readFile(projectRoot / "src" / "c" / "main.c") &
-        "\n/* reprobuild m20 selected-source edit */\n")
-    let cChanged = build(reproBin, target, repoRoot, pathValue)
-    let cChangedReport = parseFile(valueAfter(cChanged, "buildReport:"))
-    assertAction(cChangedReport, "generate-config-header", "asCacheHit", false)
-    assertAction(cChangedReport, "nim-js-ipc-registry-test", "asCacheHit", false)
-    assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
-    assertAction(cChangedReport, "c-sudoku-object-with-generated-header",
-      "asSucceeded", true)
+      writeFile(projectRoot / "src" / "c" / "main.c",
+        readFile(projectRoot / "src" / "c" / "main.c") &
+          "\n/* reprobuild m20 selected-source edit */\n")
+      let cChanged = build(reproBin, target, repoRoot, pathValue)
+      let cChangedReport = parseFile(valueAfter(cChanged, "buildReport:"))
+      assertActionCacheEffective(cChangedReport, "generate-config-header")
+      assertActionCacheEffective(cChangedReport, "nim-js-ipc-registry-test")
+      assertAction(cChangedReport, "c-sudoku-object-tup", "asSucceeded", true)
+      assertAction(cChangedReport, "c-sudoku-object-with-generated-header",
+        "asSucceeded", true)
 
-    removeFile(projectRoot / "build" / "generated" / "ct_config.h")
-    let headerDeleted = build(reproBin, target, repoRoot, pathValue)
-    let headerDeletedReport = parseFile(valueAfter(headerDeleted, "buildReport:"))
-    assertAction(headerDeletedReport, "generate-config-header", "asSucceeded", true)
-    assertAction(headerDeletedReport, "nim-js-ipc-registry-test", "asCacheHit", false)
-    assertAction(headerDeletedReport, "c-sudoku-object-tup", "asCacheHit", false)
-    assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
-      "asSucceeded", true)
+      removeFile(projectRoot / "build" / "generated" / "ct_config.h")
+      let headerDeleted = build(reproBin, target, repoRoot, pathValue)
+      let headerDeletedReport = parseFile(valueAfter(headerDeleted, "buildReport:"))
+      assertAction(headerDeletedReport, "generate-config-header", "asSucceeded", true)
+      assertActionCacheEffective(headerDeletedReport, "nim-js-ipc-registry-test")
+      assertActionCacheEffective(headerDeletedReport, "c-sudoku-object-tup")
+      assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
+        "asSucceeded", true)
 
-    let noFlag = requireFailure(shellCommand([reproBin, "build", target]), repoRoot)
-    check noFlag.contains("refusing implicit PATH fallback")
+      let noFlag = requireFailure(shellCommand([reproBin, "build", target]), repoRoot)
+      check noFlag.contains("refusing implicit PATH fallback")

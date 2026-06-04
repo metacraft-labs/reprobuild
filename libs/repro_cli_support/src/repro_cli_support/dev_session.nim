@@ -95,6 +95,28 @@ proc writeJsonFile(path: string; node: JsonNode) =
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), pretty(node) & "\n")
 
+proc readJsonFileResilient*(path: string): JsonNode =
+  # `parseFile` lifts the race that exists between a concurrent
+  # `writeFile` (open(O_TRUNC) → write → close) on the supervisor side
+  # and our `parseFile` on the reader side: the open(O_TRUNC) leaves a
+  # zero-byte file visible to us for a few hundred microseconds and
+  # parseJson raises `session.json(1, 0) Error: { expected`. The
+  # supervisor never leaves session.json empty for more than a single
+  # write() — retrying for up to ~250 ms is enough to step past the
+  # truncate window on macOS APFS / Linux page cache without papering
+  # over a real malformed-file bug (we re-raise after the retry budget
+  # is exhausted so corruption still surfaces).
+  var lastErr: ref CatchableError = nil
+  for attempt in 0 ..< 25:
+    try:
+      return parseFile(extendedPath(path))
+    except JsonParsingError as err:
+      lastErr = err
+    except IOError as err:
+      lastErr = err
+    sleep(10)
+  raise lastErr
+
 proc readJsonFile(path: string): JsonNode =
   parseFile(extendedPath(path))
 

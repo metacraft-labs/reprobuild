@@ -166,6 +166,11 @@ type
     profileDir*: string                ## "" → resolveProfileDir()
     profilePath*: string               ## "" → resolveProfilePath()
     host*: string                      ## "" → currentHost()
+    targetContext*: HostContext        ## M71 Phase B: explicit
+                                        ## target facts for local
+                                        ## cross-host evaluation.
+    hasTargetContext*: bool             ## false → use current-host
+                                        ## platform/arch facts.
     stateDir*: string                  ## "" → resolveStateDir()
     storeRoot*: string                 ## "" → resolveStoreRoot()
     homeDir*: string                   ## "" → getHomeDir()
@@ -211,6 +216,12 @@ type
                                         ## so downstream snapshot
                                         ## hashing reads the source
                                         ## file as intent input.
+    recordOnlyGeneratedFiles*: bool     ## M71 Phase E: source-side
+                                        ## remote-bundle evaluation.
+                                        ## Package-owned generated files
+                                        ## are recorded in the manifest
+                                        ## and CAS without writing the
+                                        ## target home path locally.
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -231,8 +242,23 @@ proc resolveOptions(opts: ApplyOptions): ApplyOptions =
     result.profileDir = resolveProfileDir()
   if result.profilePath.len == 0:
     result.profilePath = result.profileDir / HomeProfileAnchor
+  var ctx =
+    if result.hasTargetContext:
+      result.targetContext
+    else:
+      currentHostContext()
   if result.host.len == 0:
-    result.host = currentHost()
+    if ctx.host.len == 0:
+      ctx.host = currentHost()
+    result.host = ctx.host
+  else:
+    ctx.host = result.host
+  if ctx.platform.len == 0:
+    ctx.platform = currentHostContext().platform
+  if ctx.arch.len == 0:
+    ctx.arch = currentHostContext().arch
+  result.targetContext = ctx
+  result.hasTargetContext = true
   if result.stateDir.len == 0:
     result.stateDir = resolveStateDir()
   if result.storeRoot.len == 0:
@@ -1123,7 +1149,7 @@ proc resourceFromEntry(profilePath, homeDir: string;
       result.dependsOn = deps
       break
 
-proc collectProfileResources(profilePath, homeDir, host: string;
+proc collectProfileResources(profilePath, homeDir: string; ctx: HostContext;
                              nodes: seq[IntentNode];
                              into: var DesiredSet) =
   ## Walk a `resources:` block body, emitting one `Resource` per
@@ -1142,23 +1168,30 @@ proc collectProfileResources(profilePath, homeDir, host: string;
           "` in the profile's `resources:` block")
       into.add(r)
     of nkCondBlock:
-      if evaluateHostPredicate(node.predicateAst, host):
-        collectProfileResources(profilePath, homeDir, host,
+      if evaluateHostPredicate(node.predicateAst, ctx):
+        collectProfileResources(profilePath, homeDir, ctx,
           node.condChildren, into)
     else:
       discard
 
-proc parseProfileResources*(profile: Profile; homeDir, host: string):
+proc parseProfileResources*(profile: Profile; homeDir: string;
+                            ctx: HostContext):
     DesiredSet =
   ## M78: build a `DesiredSet` from the parsed profile's `resources:`
-  ## block. Predicates are resolved against `host`. Raises
+  ## block. Predicates are resolved against `ctx`. Raises
   ## `EUnstructured` on a malformed entry.
   result = initDesiredSet()
   let blkOpt = findResourcesBlock(profile)
   if blkOpt.isNone:
     return
-  collectProfileResources(profile.path, homeDir, host,
+  collectProfileResources(profile.path, homeDir, ctx,
     blkOpt.get.resourcesEntries, result)
+
+proc parseProfileResources*(profile: Profile; homeDir, host: string):
+    DesiredSet =
+  var ctx = currentHostContext()
+  ctx.host = host
+  parseProfileResources(profile, homeDir, ctx)
 
 proc resourceSeedString*(desired: DesiredSet): string =
   ## A deterministic textual rendering of a `DesiredSet`, fed into the
@@ -1253,7 +1286,8 @@ proc resourceSeedString*(desired: DesiredSet): string =
         "\x1e" & r.caskArgs.join(","))
     result.add('\x1d')
 
-proc composeDesiredResources*(profile: Profile; homeDir, host: string):
+proc composeDesiredResources*(profile: Profile; homeDir: string;
+                              ctx: HostContext):
     DesiredSet =
   ## M78: the resource step's source of truth. The profile's
   ## `resources:` block is the production source; `REPRO_TEST_RESOURCES`
@@ -1272,7 +1306,7 @@ proc composeDesiredResources*(profile: Profile; homeDir, host: string):
   ## any observation or write. Independent resources keep their
   ## declaration order, so the emitted action stream is byte-comparable
   ## across runs of the same profile text.
-  let profileSet = parseProfileResources(profile, homeDir, host)
+  let profileSet = parseProfileResources(profile, homeDir, ctx)
   let seam = parseSyntheticResources(homeDir)
   # Linearize the merged set (profile + seam override) into a seq so
   # `dep_graph` can index into it; profile entries first in
@@ -1295,6 +1329,12 @@ proc composeDesiredResources*(profile: Profile; homeDir, host: string):
   result = initDesiredSet()
   for r in sorted:
     result.resources[r.address] = r
+
+proc composeDesiredResources*(profile: Profile; homeDir, host: string):
+    DesiredSet =
+  var ctx = currentHostContext()
+  ctx.host = host
+  composeDesiredResources(profile, homeDir, ctx)
 
 proc parseSyntheticPackageManagedBlocks(homeDir: string;
                                         declaredPackages: seq[string]):
@@ -1391,6 +1431,18 @@ proc userPathHostFromIdentity(resourceId: string): string =
     let hash = resourceId.rfind('#')
     if hash > 0:
       resourceId[0 ..< hash]
+    else:
+      ""
+
+proc userPathBlockIdFromIdentity(resourceId: string): string =
+  ## Recover the per-resource block id from a POSIX `env.userPath`
+  ## identity (`<hostFile>#<blockId>`). Empty on Windows.
+  when defined(windows):
+    ""
+  else:
+    let hash = resourceId.rfind('#')
+    if hash > 0 and hash + 1 < resourceId.len:
+      resourceId[hash + 1 .. ^1]
     else:
       ""
 
@@ -1497,8 +1549,9 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
           live = observeUserVariable(rb.realWorldIdentity[bs + 1 .. ^1])
       of rkEnvUserPath:
         let entries = parseRecordedPathEntries(rb.payloadBytes)
-        live = observeUserPath(entries, userPathHostFromIdentity(
-          rb.realWorldIdentity))
+        live = observeUserPath(entries,
+          userPathHostFromIdentity(rb.realWorldIdentity),
+          userPathBlockIdFromIdentity(rb.realWorldIdentity))
       of rkWindowsStartup:
         let bs = rb.realWorldIdentity.rfind('\\')
         if bs > 0:
@@ -1699,7 +1752,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   let profile = resolveProfileFromOpts(opts)
 
   # ---- Step 4: build plan + synthetic seams + stow discovery ------------
-  var applyPlan = buildPlan(profile, opts.profileDir, opts.host)
+  var applyPlan = buildPlan(profile, opts.profileDir, opts.targetContext)
   var packageIds: seq[string]
   for p in applyPlan.packages:
     packageIds.add(p.packageId)
@@ -1726,7 +1779,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # (profile `resources:` block + `REPRO_TEST_RESOURCES` override),
   # so a change to a profile-declared resource produces a distinct id.
   let resourcesSeed = resourceSeedString(
-    composeDesiredResources(profile, opts.homeDir, opts.host))
+    composeDesiredResources(profile, opts.homeDir, opts.targetContext))
   let candidateId = deriveGenerationId(applyPlan, snapshotDig, resourcesSeed)
   result.generationIdHex = generationIdHex(candidateId)
   let activeGenIdHex = readCurrentGenerationId(opts.stateDir)
@@ -1736,7 +1789,15 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # preview never calls `realizeScoopAdapter`, so no `scoop install`
   # runs. `previewPackageResolutions` lives in `realize.nim` so the
   # preview and the real dispatch share one resolution path.
-  for pp in previewPackageResolutions(applyPlan.packages):
+  #
+  # M2.5: resolve the per-host adapter chain from the parsed profile's
+  # `adapterPreference:` block (empty -> M65 platform default). Threaded
+  # into both the preview and the realize call sites so PLAN and apply
+  # report the same per-adapter verdict.
+  let previewAdapterChain = resolveAdapterChainFor(
+    applyPlan.adapterPreference, currentHostOsKey())
+  for pp in previewPackageResolutions(applyPlan.packages,
+      chain = previewAdapterChain):
     var item = PlanItem(category: "package", name: pp.packageId,
       detail: pp.detail)
     case pp.kind
@@ -1813,7 +1874,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # M78: the desired set is the profile's `resources:` block, with
   # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
   let desiredResources = composeDesiredResources(profile, opts.homeDir,
-    opts.host)
+    opts.targetContext)
   # M69 Phase C follow-up: defence-in-depth layer 1 — the SAME
   # pre-dispatch gate as `runApply`. The `--plan` path composes the
   # plan via `composePlan` -> `observeResource` -> the observe procs
@@ -1950,7 +2011,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       raiseKilledByTestHook(3)
 
     # ---- Step 4: derive ApplyPlan (package walk + stow discovery) -------
-    var applyPlan = buildPlan(profile, opts.profileDir, opts.host)
+    var applyPlan = buildPlan(profile, opts.profileDir, opts.targetContext)
     # Phase B: pull in any synthetic package-output entries the test
     # hook declared. In production this seam will be fed by the M59
     # stdlib renderer.
@@ -1989,6 +2050,20 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     applyPlan.generatedFiles = suppressed.files
     for d in suppressed.diagnostics:
       applyPlan.diagnostics.add(d)
+    if opts.recordOnlyGeneratedFiles:
+      if stowEntries.len > 0:
+        raisePlanFailed("remote bundle evaluation cannot replay stow " &
+          "entries on the target yet")
+      let remoteDesiredResources = composeDesiredResources(profile,
+        opts.homeDir, opts.targetContext)
+      if remoteDesiredResources.len > 0:
+        raisePlanFailed("remote bundle evaluation cannot replay home " &
+          "resources on the target yet")
+      let syntheticBlocks = parseSyntheticPackageManagedBlocks(opts.homeDir,
+        packageIds)
+      if syntheticBlocks.len > 0:
+        raisePlanFailed("remote bundle evaluation cannot replay managed " &
+          "blocks on the target yet")
     result.diagnostics = applyPlan.diagnostics
     if shouldKillAfter(4):
       writeMarker(opts.stateDir, "", "killed-after-step-4")
@@ -2011,7 +2086,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # not taken). M68 Phase B: an adopt run also contributes its
       # adopt-address set so the adopted binding lands in a new id.
       var resourcesSeed = resourceSeedString(
-        composeDesiredResources(profile, opts.homeDir, opts.host))
+        composeDesiredResources(profile, opts.homeDir, opts.targetContext))
       if opts.adoptAddresses.len > 0:
         resourcesSeed.add("\x00adopt:")
         for a in opts.adoptAddresses:
@@ -2065,7 +2140,13 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       createDir(extendedPath(earlyGenDir))
 
       # ---- Step 7: realize packages -------------------------------------
-      let realized = realizePlannedPackages(store, applyPlan.packages)
+      # M2.5: same per-host chain selection the preview path uses, so
+      # `repro home apply --plan` and `repro home apply` cannot diverge
+      # on which adapter resolves a given package.
+      let realizeAdapterChain = resolveAdapterChainFor(
+        applyPlan.adapterPreference, currentHostOsKey())
+      let realized = realizePlannedPackages(store, applyPlan.packages,
+        chain = realizeAdapterChain)
       if shouldKillAfter(7):
         raiseKilledByTestHook(7)
 
@@ -2182,7 +2263,17 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             liveBuf[i] = byte(ord(ch))
           if digestOf(liveBuf) == candidateDigest:
             isCacheHit = true
-        if isCacheHit:
+        if opts.recordOnlyGeneratedFiles:
+          var staged: StagedFileRecord
+          staged.absoluteOutputPath = g.absoluteOutputPath
+          staged.sourceKind = pgfsPackageOutput
+          staged.contributingPackage = g.contributingPackage
+          staged.ownershipPolicy = gfoOwned
+          staged.hasPreWriteDigest = false
+          staged.postWriteDigest = candidateDigest
+          stagedFiles.add(staged)
+          inc rebuiltCount
+        elif isCacheHit:
           var staged: StagedFileRecord
           staged.absoluteOutputPath = g.absoluteOutputPath
           staged.sourceKind = pgfsPackageOutput
@@ -2232,7 +2323,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # spec line; M63 deferred the actual deletion work to a later
       # milestone, and we land it under M64 because rollback's
       # symmetry assumes apply already cleaned up.
-      if activeGenIdHex.len > 0:
+      if activeGenIdHex.len > 0 and not opts.recordOnlyGeneratedFiles:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
         if fileExists(extendedPath(prevPointerFile)):
           var newPaths: seq[string]
@@ -2303,8 +2394,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # `ResourceBinding` record for the manifest. `REPRO_TEST_RESOURCES`
       # remains as a TEST-ONLY override merged over the profile entries
       # by address (so existing M68/M70 gates keep working).
-      var desiredResources = composeDesiredResources(profile, opts.homeDir,
-        opts.host)
+      var desiredResources =
+        if opts.recordOnlyGeneratedFiles:
+          initDesiredSet()
+        else:
+          composeDesiredResources(profile, opts.homeDir, opts.targetContext)
       # M69 step 5: synthesize PATH + per-tool env var resources from
       # the realized records and merge them into the desired set. The
       # synthesis is by-package, so a re-apply with unchanged catalog
@@ -2314,11 +2408,14 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # profile is the source of truth, the synthesized records are a
       # fallback that fills the PATH/env binding gap when the profile
       # did not declare an explicit `env.userPath` / `env.userVariable`
-      # for the package.
-      let envBindingPlan = planEnvBindings(realized)
-      for synthRes in envBindingPlan.resources:
-        if synthRes.address notin desiredResources.resources:
-          desiredResources.resources[synthRes.address] = synthRes
+      # for the package. Skip when `recordOnlyGeneratedFiles` is set
+      # (remote-apply bundle build) so the bundle stays focused on
+      # generated files per 17e43c7's intent.
+      if not opts.recordOnlyGeneratedFiles:
+        let envBindingPlan = planEnvBindings(realized)
+        for synthRes in envBindingPlan.resources:
+          if synthRes.address notin desiredResources.resources:
+            desiredResources.resources[synthRes.address] = synthRes
       # M69 Phase C follow-up: defence-in-depth layer 1. The four
       # POSIX/macOS home drivers (`gsettings`, `defaults`,
       # `systemd_user`, `launchd_user`) interpolate operator-controlled
@@ -2333,7 +2430,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           raiseResourceDriver(addr1, $res.kind,
             "pre-dispatch validation", validationErr)
       var recordedBindings = initOrderedTable[string, RecordedBinding]()
-      if activeGenIdHex.len > 0:
+      if activeGenIdHex.len > 0 and not opts.recordOnlyGeneratedFiles:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
         if fileExists(extendedPath(prevPointerFile)):
           try:
@@ -2476,7 +2573,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               priorEntries = parseRecordedPathEntries(
                 recordedBindings[action.address].payloadBytes)
             postWriteBytes = applyUserPath(desired.pathEntries,
-              priorEntries, desired.pathHostFilePath)
+              priorEntries, desired.pathHostFilePath,
+              desired.pathBlockId)
             payloadKindStr = "joined-entries"
           of rkWindowsStartup:
             postWriteBytes = applyStartup(desired.startupName,
@@ -2623,8 +2721,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           of rkEnvUserPath:
             let priorEntries = parseRecordedPathEntries(prev.payloadBytes)
             let hostFile = userPathHostFromIdentity(prev.resourceId)
-            preWrite = observeUserPath(priorEntries, hostFile)
-            removeUserPathContribution(priorEntries, hostFile)
+            let blockId = userPathBlockIdFromIdentity(prev.resourceId)
+            preWrite = observeUserPath(priorEntries, hostFile, blockId)
+            removeUserPathContribution(priorEntries, hostFile, blockId)
           of rkWindowsStartup:
             preWrite = observeRecorded(action.address, prev)
             let bs = prev.resourceId.rfind('\\')

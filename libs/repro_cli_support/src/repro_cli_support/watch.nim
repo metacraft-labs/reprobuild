@@ -8,6 +8,11 @@ type
     path*: string
     detail*: string
 
+  FilesystemWatchCancelCheck* = proc(): bool
+
+proc watchCancelled(cancelCheck: FilesystemWatchCancelCheck): bool =
+  cancelCheck != nil and cancelCheck()
+
 when defined(macosx):
   type
     Kevent {.importc: "struct kevent", header: "<sys/event.h>", bycopy.} = object
@@ -145,9 +150,13 @@ when defined(macosx):
     else:
       watcher.watchedPaths.len
 
-  proc waitForEvent*(watcher: FilesystemWatcher): FilesystemWatchEvent =
+  proc waitForEvent*(watcher: FilesystemWatcher;
+                     cancelCheck: FilesystemWatchCancelCheck = nil):
+      FilesystemWatchEvent =
     var snapshots = watcher.snapshotWatchedPaths()
     while true:
+      if watchCancelled(cancelCheck):
+        raise newException(IOError, "filesystem watch cancelled")
       var event: Kevent
       var timeout = Timespec(tv_sec: 0, tv_nsec: 250_000_000)
       let n = kevent(watcher.kq, nil, 0, addr event, 1, addr timeout)
@@ -305,7 +314,8 @@ elif defined(linux):
         path: reportPath,
         detail: eventDetail(event.mask)))
 
-  proc readAvailable(watcher: FilesystemWatcher; blocking: bool) =
+  proc readAvailable(watcher: FilesystemWatcher; blocking: bool;
+                     cancelCheck: FilesystemWatchCancelCheck = nil) =
     var buffer = alloc(InotifyBufferBytes)
     defer: dealloc(buffer)
     while true:
@@ -314,19 +324,25 @@ elif defined(linux):
         watcher.queueEvents(bytesRead, buffer)
       elif bytesRead == 0:
         if blocking:
+          if watchCancelled(cancelCheck):
+            raise newException(IOError, "filesystem watch cancelled")
           continue
         break
       else:
         if blocking:
+          if watchCancelled(cancelCheck):
+            raise newException(IOError, "filesystem watch cancelled")
           sleep(20)
           continue
         break
       if blocking or watcher.pending.len > 0:
         break
 
-  proc waitForEvent*(watcher: FilesystemWatcher): FilesystemWatchEvent =
+  proc waitForEvent*(watcher: FilesystemWatcher;
+                     cancelCheck: FilesystemWatchCancelCheck = nil):
+      FilesystemWatchEvent =
     while watcher.pending.len == 0:
-      watcher.readAvailable(blocking = true)
+      watcher.readAvailable(blocking = true, cancelCheck = cancelCheck)
     watcher.pending.popFirst()
 
   proc drainDebouncedEvents*(watcher: FilesystemWatcher; debounceMs: int): int =
@@ -631,13 +647,17 @@ elif defined(windows):
         consumeBuffer(entry, bytes, watcher.pending)
       postRead(entry)
 
-  proc waitForEvent*(watcher: FilesystemWatcher): FilesystemWatchEvent =
+  proc waitForEvent*(watcher: FilesystemWatcher;
+                     cancelCheck: FilesystemWatchCancelCheck = nil):
+      FilesystemWatchEvent =
     # Windows: matches kqueue's blocking semantics. First drain anything
     # already buffered, then wait on the entries' OVERLAPPED.hEvent set
     # until at least one fires. WaitForMultipleObjects(bWaitAll=FALSE)
     # returns WAIT_OBJECT_0 + index of the first signalled handle.
     collectCompleted(watcher)
     while watcher.pending.len == 0:
+      if watchCancelled(cancelCheck):
+        raise newException(IOError, "filesystem watch cancelled")
       if watcher.entries.len == 0:
         raise newException(OSError, "filesystem watcher has no entries")
       var handles: WOHandleArray
@@ -655,7 +675,7 @@ elif defined(windows):
       # is DWORD; cast preserves the all-ones bit pattern that means "no
       # timeout". A 0xFFFFFFFF return value indicates WAIT_FAILED.
       let res = waitForMultipleObjects(DWORD(count),
-        cast[PWOHandleArray](addr handles), WINBOOL(0), cast[DWORD](INFINITE))
+        cast[PWOHandleArray](addr handles), WINBOOL(0), DWORD(250))
       if res == cast[DWORD](0xFFFFFFFF'u32):
         raise newException(OSError,
           "WaitForMultipleObjects failed: error " & $getLastError())
@@ -688,7 +708,11 @@ else:
   proc watchedPathCount*(watcher: FilesystemWatcher): int =
     0
 
-  proc waitForEvent*(watcher: FilesystemWatcher): FilesystemWatchEvent =
+  proc waitForEvent*(watcher: FilesystemWatcher;
+                     cancelCheck: FilesystemWatchCancelCheck = nil):
+      FilesystemWatchEvent =
+    if watchCancelled(cancelCheck):
+      raise newException(IOError, "filesystem watch cancelled")
     raise newException(OSError,
       "repro watch currently supports macOS kqueue and Windows " &
         "ReadDirectoryChangesW only; Linux backend is deferred")

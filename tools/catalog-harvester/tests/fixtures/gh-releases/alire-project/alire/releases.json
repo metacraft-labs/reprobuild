@@ -1,0 +1,86 @@
+[
+  {
+    "url": "https://api.github.com/repos/alire-project/alire/releases/100000002",
+    "html_url": "https://github.com/alire-project/alire/releases/tag/v2.1.1",
+    "id": 100000002,
+    "tag_name": "v2.1.1",
+    "name": "v2.1.1",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-05-25T12:33:58Z",
+    "published_at": "2026-05-29T06:06:40Z",
+    "assets": [
+      {
+        "id": 200000001,
+        "name": "alr-2.1.1-bin-x86_64-linux.zip",
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 12800698,
+        "digest": "sha256:09c66bcd8c35dd4b97b72c3d9b76e44caa6964a2db35aba069f396f00f1f64c7",
+        "browser_download_url": "https://github.com/alire-project/alire/releases/download/v2.1.1/alr-2.1.1-bin-x86_64-linux.zip"
+      },
+      {
+        "id": 200000002,
+        "name": "alr-2.1.1-bin-x86_64-windows.zip",
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 256,
+        "digest": "sha256:863013b1f94da6f3b7d0d5a74022ac3370424eeea9a470ebdb33d188d61b9125",
+        "browser_download_url": "https://github.com/alire-project/alire/releases/download/v2.1.1/alr-2.1.1-bin-x86_64-windows.zip"
+      },
+      {
+        "id": 200000003,
+        "name": "alr-2.1.1-installer-x86_64-windows.exe",
+        "content_type": "application/octet-stream",
+        "state": "uploaded",
+        "size": 1024,
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000003",
+        "browser_download_url": "https://github.com/alire-project/alire/releases/download/v2.1.1/alr-2.1.1-installer-x86_64-windows.exe"
+      }
+    ]
+  },
+  {
+    "url": "https://api.github.com/repos/alire-project/alire/releases/100000003",
+    "html_url": "https://github.com/alire-project/alire/releases/tag/v2.2.0-rc1",
+    "id": 100000003,
+    "tag_name": "v2.2.0-rc1",
+    "name": "v2.2.0-rc1",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-05-30T12:00:00Z",
+    "published_at": "2026-05-30T12:00:00Z",
+    "assets": [
+      {
+        "id": 200000010,
+        "name": "alr-2.2.0-rc1-bin-x86_64-windows.zip",
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 256,
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000010",
+        "browser_download_url": "https://github.com/alire-project/alire/releases/download/v2.2.0-rc1/alr-2.2.0-rc1-bin-x86_64-windows.zip"
+      }
+    ]
+  },
+  {
+    "url": "https://api.github.com/repos/alire-project/alire/releases/100000001",
+    "html_url": "https://github.com/alire-project/alire/releases/tag/v2.0.2",
+    "id": 100000001,
+    "tag_name": "v2.0.2",
+    "name": "v2.0.2",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2025-12-01T12:00:00Z",
+    "published_at": "2025-12-01T12:00:00Z",
+    "assets": [
+      {
+        "id": 200000020,
+        "name": "alr-2.0.2-bin-x86_64-windows.zip",
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 256,
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000020",
+        "browser_download_url": "https://github.com/alire-project/alire/releases/download/v2.0.2/alr-2.0.2-bin-x86_64-windows.zip"
+      }
+    ]
+  }
+]

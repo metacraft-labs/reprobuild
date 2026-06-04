@@ -42,6 +42,14 @@ type
     bakWriteText
     bakStamp
     bakPreserveTree
+    # M2 (Workspace-Management): a typed VCS operation (clone / fetch /
+    # switch) dispatched through a registered executor so the engine
+    # does not depend on the ``repro_workspace_vcs`` library. The
+    # external library registers its executor via
+    # ``registerWorkspaceVcsExecutor`` at module init time; if no
+    # executor is registered the engine fails closed with a clear
+    # diagnostic rather than silently no-op'ing.
+    bakWorkspaceVcs
 
   BuildAction* = object
     kind*: BuildActionKind
@@ -115,6 +123,7 @@ type
     inlineRunQuota*: bool
     dryRun*: bool
     progressCallback*: BuildProgressCallback
+    cancelCallback*: BuildCancelCallback
     statsEnabled*: bool
     suppressTrace*: bool
     skipCacheHitEvidence*: bool
@@ -189,6 +198,7 @@ type
     ready*: int
 
   BuildProgressCallback* = proc(event: BuildProgressEvent)
+  BuildCancelCallback* = proc(): bool
 
   RunningProcessKind = enum
     rpkHelperProcess
@@ -285,6 +295,10 @@ proc mergeStats*(stats: var BuildStats; other: BuildStats) =
         break
     if not merged:
       stats.metrics.add(metric)
+
+proc addCounterMetric(stats: var BuildStats; name: string; count: int) =
+  for _ in 0 ..< count:
+    stats.addMetric(name, 0.0)
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -432,7 +446,8 @@ proc pathExists(path: string): bool =
     dirExists(extendedPath(path))
 
 proc outputPathReady(action: BuildAction; path: string): bool =
-  if action.kind in {bakCopyFile, bakWriteText, bakStamp} and
+  # M2: bakWorkspaceVcs receipts are plain files, same readiness rule.
+  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
@@ -1274,6 +1289,28 @@ proc inlineRunQuotaFailureResult(id, message: string): ActionResult =
     runQuotaBackend: "runquota-inline",
     runQuotaSocket: getEnv("RUNQUOTA_SOCKET", ""))
 
+type
+  WorkspaceVcsExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Hook installed by ``repro_workspace_vcs/git_actions`` (M2). The
+    ## engine dispatches every ``bakWorkspaceVcs`` action through the
+    ## currently registered executor. We keep the dispatch indirect so
+    ## the engine library does not need to depend on the VCS library
+    ## (which itself depends on the engine for ``BuildAction``).
+
+var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
+
+proc registerWorkspaceVcsExecutor*(executor: WorkspaceVcsExecutor) =
+  ## Register the per-thread executor for ``bakWorkspaceVcs`` actions.
+  ## M2's ``git_actions`` module calls this at module-init time. Tests
+  ## that exercise the engine in-process call it explicitly to install
+  ## a fresh executor bound to a resolved ``GitToolIdentity``.
+  workspaceVcsExecutor = executor
+
+proc clearWorkspaceVcsExecutor*() =
+  ## Clear the registered executor. Tests use this to assert the
+  ## fail-closed behavior when no executor is registered.
+  workspaceVcsExecutor = nil
+
 proc builtinPath(action: BuildAction; path: string): string =
   materialPath(action.cwd, path)
 
@@ -1449,6 +1486,26 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
             removeFile(extendedPath(stale))
       currentEntries.sort(system.cmp[string])
       writeManifestEntries(manifestPath, currentEntries)
+    of bakWorkspaceVcs:
+      # M2 dispatch: every ``bakWorkspaceVcs`` action runs through the
+      # executor registered by ``repro_workspace_vcs/git_actions``. The
+      # registered executor returns a fully-populated ``ActionResult``;
+      # we copy its status/exitCode/stderr through so the rest of the
+      # built-in pipeline (cache record, evidence collect) sees the
+      # same shape it would for any other built-in.
+      if workspaceVcsExecutor.isNil:
+        raiseEngine("bakWorkspaceVcs action requires registerWorkspaceVcsExecutor before runBuild: " &
+          action.id)
+      let vcsResult = workspaceVcsExecutor(action)
+      result.status = vcsResult.status
+      result.exitCode = vcsResult.exitCode
+      result.stdout = vcsResult.stdout
+      result.stderr = vcsResult.stderr
+      result.reason = vcsResult.reason
+      result.launched = vcsResult.launched
+      result.runQuotaBackend = if vcsResult.runQuotaBackend.len > 0:
+        vcsResult.runQuotaBackend else: result.runQuotaBackend
+      return
     of bakProcess:
       raiseEngine("process action cannot be executed as a built-in: " & action.id)
     result.status = asSucceeded
@@ -1463,6 +1520,37 @@ proc resultIndex(ids: Table[string, int]; id: string): int =
     raiseEngine("internal missing result id: " & id)
   ids[id]
 
+type
+  WarmActionCache = ref object
+    cache: ActionCache
+    evidence: string
+
+var processWarmActionCaches = initTable[string, WarmActionCache]()
+
+proc durableEvidence(path: string): string =
+  try:
+    if not fileExists(extendedPath(path)):
+      return "missing"
+    let info = getFileInfo(extendedPath(path), followSymlink = false)
+    $info.size & ":" & $info.lastWriteTime.toUnix & ":" &
+      $info.lastWriteTime.nanosecond
+  except CatchableError:
+    "unavailable"
+
+proc actionCacheDurableEvidence(root: string): string =
+  durableEvidence(root / "action-results.hot.records") & "|" &
+    durableEvidence(root / "action-results.hot.index") & "|" &
+    durableEvidence(root / "action-results.records")
+
+proc warmActionCacheFor(root: string): WarmActionCache =
+  let evidence = actionCacheDurableEvidence(root)
+  if processWarmActionCaches.hasKey(root):
+    let warm = processWarmActionCaches[root]
+    if warm.evidence == evidence:
+      return warm
+  result = WarmActionCache(cache: openActionCache(root), evidence: evidence)
+  processWarmActionCaches[root] = result
+
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var stats: BuildStats
   proc statStart(): float =
@@ -1473,6 +1561,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc finishStat(name: string; started: float) =
     if config.statsEnabled:
       stats.addMetric(name, (epochTime() - started) * 1_000_000.0)
+
+  proc finishMetadataCacheStats(cache: FileMetadataCache) =
+    if not config.statsEnabled:
+      return
+    let metadataStats = cache.metadataStats()
+    stats.addCounterMetric("repro file metadata current-run hit",
+      metadataStats.currentRunHits)
+    stats.addCounterMetric("repro file metadata cold stat",
+      metadataStats.coldStats)
+    stats.addCounterMetric("repro file metadata warm revalidate",
+      metadataStats.warmRevalidated)
+    stats.addCounterMetric("repro file metadata warm unchanged",
+      metadataStats.warmUnchanged)
+    stats.addCounterMetric("repro file metadata warm changed",
+      metadataStats.warmChanged)
 
   let totalStart = statStart()
   let inferStart = statStart()
@@ -1490,6 +1593,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro graph validate", validateStart)
 
   let maxParallel = if config.maxParallelism == 0'u32: 1'u32 else: config.maxParallelism
+
+  proc cancellationRequested(): bool =
+    config.cancelCallback != nil and config.cancelCallback()
+
+  proc raiseIfCancelled() =
+    if cancellationRequested():
+      raiseEngine("build cancelled")
   let initStart = statStart()
   let cacheRoot = if config.cacheRoot.len == 0:
       getCurrentDir() / ".repro" / "build-engine-cache"
@@ -1507,10 +1617,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   let cas = openLocalCas(sharedRoot / "cas")
   finishStat("repro cas open", casOpenStart)
   let actionCacheOpenStart = statStart()
-  var cache = openActionCache(sharedRoot / "action-cache")
+  let warmCache = warmActionCacheFor(sharedRoot / "action-cache")
+  var cache = warmCache.cache
   finishStat("repro action cache open", actionCacheOpenStart)
   defer:
     cache.flushHotIndex()
+    warmCache.cache = cache
+    warmCache.evidence = actionCacheDurableEvidence(sharedRoot / "action-cache")
 
   proc cacheHitEvidence(action: BuildAction;
                         record: ActionResultRecord): PathSetEvidence =
@@ -1552,10 +1665,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         for action in buildGraph.actions:
           fastResult.results.add(ActionResult(
             id: action.id,
-            status: asUpToDate,
+            status: asCacheHit,
             cacheDecision: cdHit,
             dependencyPolicyKind: action.dependencyPolicy.kind))
         finishStat("repro cache hit result materialize", resultMaterializeStart)
+        finishMetadataCacheStats(metadataCache)
         fastResult.stats = stats
         return some(fastResult)
       of hmssMissingRecord, hmssInputChanged:
@@ -1605,11 +1719,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         else: hotRecords[i]
       fastResult.results.add(ActionResult(
         id: action.id,
-        status: asUpToDate,
+        status: asCacheHit,
         cacheDecision: cdHit,
         dependencyPolicyKind: action.dependencyPolicy.kind,
         evidence: cacheHitEvidence(action, record)))
     finishStat("repro cache hit result materialize", resultMaterializeStart)
+    finishMetadataCacheStats(metadataCache)
     fastResult.stats = stats
     some(fastResult)
 
@@ -1997,12 +2112,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
   try:
     while completed < buildGraph.actions.len:
+      raiseIfCancelled()
       ready.sort(readyCmp)
       var launchedAny = false
       var stagedInlineLaunches: seq[StagedInlineLaunch] = @[]
       var i = 0
       while i < ready.len and
           uint32(running.len + stagedInlineLaunches.len) < maxParallel:
+        raiseIfCancelled()
         let id = ready[i]
         var action = actionsById[id]
         let poolName = action.pool
@@ -2422,6 +2539,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let waitStart = statStart()
       var nextGrantPoll = 0.0
       while runIndex < 0:
+        raiseIfCancelled()
         if hasPendingInlineRunQuota() and epochTime() >= nextGrantPoll:
           runIndex = pollInlineRunQuotaGrants()
           nextGrantPoll = epochTime() + 0.025
@@ -2601,5 +2719,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if inlineRunQuotaSessionOpen:
       inlineRunQuotaSession.close()
   finishStat("repro scheduler total", totalStart)
+  finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats
   result = runResult

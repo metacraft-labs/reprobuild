@@ -1,23 +1,14 @@
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
+import repro_test_support
+
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
 
 when defined(windows):
   proc psQuote(value: string): string =
     "'" & value.replace("'", "''") & "'"
-
-proc shellCommand(args: openArray[string]): string =
-  args.mapIt(q(it)).join(" ")
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = execCmdEx(command, workingDir = cwd)
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "command failed with exit " & $res.exitCode & ": " & command &
-        "\n" & res.output)
-  res.output
 
 proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
                 appLib = false) =
@@ -31,36 +22,8 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when defined(linux) or defined(macosx) or defined(windows):
-  proc prepareMonitorTools(repoRoot, tempRoot: string):
-      tuple[fsSnoop: string; shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / addFileExt("repro-fs-snoop", ExeExt)
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      elif defined(windows):
-        libDir / "repro_monitor_shim.dll"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    let shimSource =
-      when defined(linux):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      elif defined(windows):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "windows_interpose.nim"
-      else:
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-    compileNim(repoRoot, shimSource, result.shim, "m6-dev-env-monitor-shim",
-      appLib = true)
-    compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      result.fsSnoop, "m6-dev-env-fs-snoop")
+# prepareMonitorTools is exported from libs/repro_test_support and now
+# threads the ct_interpose source path through the Windows shim build.
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "bin" / addFileExt("repro", ExeExt)
@@ -118,13 +81,20 @@ proc prepareCase(prefix: string): M6Case =
   writeFixture(result.projectA, "one", "alpha")
   writeFixture(result.projectB, "two", "beta")
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
-  when defined(linux) or defined(macosx) or defined(windows):
-    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot)
+  # The on-disk monitor shim path is only consumed by Linux/macOS
+  # tests (REPRO_MONITOR_SHIM_LIB plumbing). The Windows shim build
+  # depends on ct_interpose sources that ``compileNim`` here doesn't
+  # know how to wire; the Windows PowerShell hook test path itself is
+  # gated below via ``when defined(windows):`` so it never reaches the
+  # shim fields. Setting up ``fsSnoop`` / ``shim`` is therefore only
+  # meaningful on platforms where the full fs-snoop integration is
+  # also available — gate via ``isFsSnoopSupported`` like the rest
+  # of the dev-env suite.
+  when isFsSnoopSupported:
+    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot,
+      "m6-native-shell-hooks")
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
-  else:
-    raise newException(OSError,
-      "dev-env native shell tests require fs-snoop support")
 
 proc envFor(c: M6Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
@@ -168,32 +138,33 @@ proc requireRepro(c: M6Case; args: openArray[string]): string =
         args.join(" ") & "\n" & res.output)
   res.output
 
-proc nixFish(): string =
-  let nix = findExe("nix")
-  if nix.len == 0:
-    return ""
-  let res = execCmdEx(shellCommand([
-    nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
-    "--extra-experimental-features", "nix-command flakes"
-  ]))
-  if res.exitCode != 0:
-    return ""
-  for line in res.output.splitLines():
-    let candidate = line.strip()
-    if candidate.startsWith("/nix/store/") and
-        fileExists(candidate / "bin" / "fish"):
-      return candidate / "bin" / "fish"
+when isNixSupported:
+  proc nixFish(): string =
+    let nix = findExe("nix")
+    if nix.len == 0:
+      return ""
+    let res = runShell(shellCommand(@[
+      nix, "build", "--no-link", "--print-out-paths", "nixpkgs#fish",
+      "--extra-experimental-features", "nix-command flakes"
+    ]))
+    if res.code != 0:
+      return ""
+    for line in res.output.splitLines():
+      let candidate = line.strip()
+      if candidate.startsWith("/nix/store/") and
+          fileExists(candidate / "bin" / "fish"):
+        return candidate / "bin" / "fish"
 
-proc requireFish(): string =
-  result = findExe("fish")
-  if result.len > 0:
-    return
-  result = nixFish()
-  if result.len > 0:
-    return
-  raise newException(OSError,
-    "M6 native shell gate requires a real fish binary; PATH has none and " &
-      "`nix build nixpkgs#fish` did not provide one")
+  proc requireFish(): string =
+    result = findExe("fish")
+    if result.len > 0:
+      return
+    result = nixFish()
+    if result.len > 0:
+      return
+    raise newException(OSError,
+      "M6 native shell gate requires a real fish binary; PATH has none " &
+        "and `nix build nixpkgs#fish` did not provide one")
 
 proc requireShellValue(output, prefix, expected: string) =
   for line in output.splitLines():
@@ -314,64 +285,66 @@ proc requireFishHook(c: M6Case; fish: string) =
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireNativeStats(statsPath)
 
-suite "e2e_native_shell_hooks":
-  test "e2e_native_shell_hooks_bash_zsh_fish":
-    let c = prepareCase("repro-m6-native-shells")
-    defer: removeDir(c.tempRoot)
-    let fish = requireFish()
+when isNixSupported:
+  suite "e2e_native_shell_hooks":
+    when isNixSupported:
+      test "e2e_native_shell_hooks_bash_zsh_fish":
+        let c = prepareCase("repro-m6-native-shells")
+        defer: removeDir(c.tempRoot)
+        let fish = requireFish()
 
-    installNativeHooks(c)
-    requireBashHook(c)
-    requireZshHook(c)
-    requireFishHook(c, fish)
+        installNativeHooks(c)
+        requireBashHook(c)
+        requireZshHook(c)
+        requireFishHook(c, fish)
 
-    let bashWithUserBytes = "export USER_OWNED=1\n" & readFile(c.homeDir / ".bashrc")
-    writeFile(c.homeDir / ".bashrc", bashWithUserBytes)
-    discard requireRepro(c, @["hooks", "uninstall", "--shell", "bash"])
-    check readFile(c.homeDir / ".bashrc") == "export USER_OWNED=1\n"
+        let bashWithUserBytes = "export USER_OWNED=1\n" & readFile(c.homeDir / ".bashrc")
+        writeFile(c.homeDir / ".bashrc", bashWithUserBytes)
+        discard requireRepro(c, @["hooks", "uninstall", "--shell", "bash"])
+        check readFile(c.homeDir / ".bashrc") == "export USER_OWNED=1\n"
 
-  test "e2e_native_shell_hooks_nix_managed_rc_refused":
-    let c = prepareCase("repro-m6-native-nix-rc")
-    defer: removeDir(c.tempRoot)
+      test "e2e_native_shell_hooks_nix_managed_rc_refused":
+        let c = prepareCase("repro-m6-native-nix-rc")
+        defer: removeDir(c.tempRoot)
 
-    let storeDir = c.tempRoot / "nix" / "store" / "fake-home-manager"
-    createDir(storeDir)
-    let storeRc = storeDir / "bashrc"
-    let storeBytes = "# managed by home-manager\n"
-    writeFile(storeRc, storeBytes)
-    setFilePermissions(storeRc, {fpUserRead, fpGroupRead, fpOthersRead})
-    createSymlink(storeRc, c.homeDir / ".bashrc")
+        let storeDir = c.tempRoot / "nix" / "store" / "fake-home-manager"
+        createDir(storeDir)
+        let storeRc = storeDir / "bashrc"
+        let storeBytes = "# managed by home-manager\n"
+        writeFile(storeRc, storeBytes)
+        setFilePermissions(storeRc, {fpUserRead, fpGroupRead, fpOthersRead})
+        createSymlink(storeRc, c.homeDir / ".bashrc")
 
-    let res = runRepro(c, @["hooks", "ensure", "--shell", "bash"])
-    check res.exitCode != 0
-    check res.output.contains("Nix-managed symlink")
-    check res.output.contains("home-switch")
-    check symlinkExists(c.homeDir / ".bashrc")
-    check expandSymlink(c.homeDir / ".bashrc") == storeRc
-    check readFile(storeRc) == storeBytes
+        let res = runRepro(c, @["hooks", "ensure", "--shell", "bash"])
+        check res.exitCode != 0
+        check res.output.contains("Nix-managed symlink")
+        check res.output.contains("home-switch")
+        check symlinkExists(c.homeDir / ".bashrc")
+        check expandSymlink(c.homeDir / ".bashrc") == storeRc
+        check readFile(storeRc) == storeBytes
 
-  when defined(windows):
-    test "e2e_native_shell_hooks_powershell":
-      let c = prepareCase("repro-m6-native-powershell")
-      defer: removeDir(c.tempRoot)
-      let pwsh =
-        if findExe("pwsh").len > 0: findExe("pwsh") else: findExe("powershell")
-      if pwsh.len == 0:
-        raise newException(OSError,
-          "M6 PowerShell gate requires a real PowerShell binary")
-      discard requireRepro(c, @["hooks", "ensure", "--shell", "powershell"])
-      let env = c.envFor()
-      let statsPath = c.tempRoot / "powershell-native-stats.json"
-      env["REPRO_NATIVE_SHELL_STATS"] = statsPath
-      let script =
-        "cd " & psQuote(c.projectA) & "; " &
-        "Write-Output \"A:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
-        "cd " & psQuote(parentDir(c.projectA)) & "; " &
-        "Write-Output \"OUT:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\""
-      let res = runProgram(pwsh, @["-NoLogo", "-Command", script],
-        c.tempRoot, env)
-      check res.exitCode == 0
-      requireShellValue(res.output, "A:",
-        "A:alpha|one|" & c.projectA)
-      requireShellValue(res.output, "OUT:", "OUT:||")
-      requireNativeStats(statsPath)
+    when defined(windows):
+      test "e2e_native_shell_hooks_powershell":
+        let c = prepareCase("repro-m6-native-powershell")
+        defer: removeDir(c.tempRoot)
+        let pwsh =
+          if findExe("pwsh").len > 0: findExe("pwsh") else: findExe("powershell")
+        if pwsh.len == 0:
+          raise newException(OSError,
+            "M6 PowerShell gate requires a real PowerShell binary")
+        discard requireRepro(c, @["hooks", "ensure", "--shell", "powershell"])
+        let env = c.envFor()
+        let statsPath = c.tempRoot / "powershell-native-stats.json"
+        env["REPRO_NATIVE_SHELL_STATS"] = statsPath
+        let script =
+          "cd " & psQuote(c.projectA) & "; " &
+          "Write-Output \"A:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
+          "cd " & psQuote(parentDir(c.projectA)) & "; " &
+          "Write-Output \"OUT:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\""
+        let res = runProgram(pwsh, @["-NoLogo", "-Command", script],
+          c.tempRoot, env)
+        check res.exitCode == 0
+        requireShellValue(res.output, "A:",
+          "A:alpha|one|" & c.projectA)
+        requireShellValue(res.output, "OUT:", "OUT:||")
+        requireNativeStats(statsPath)

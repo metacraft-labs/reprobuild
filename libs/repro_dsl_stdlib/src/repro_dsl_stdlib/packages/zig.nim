@@ -16,6 +16,17 @@
 ## ``--version-history`` harvester walk reproduces both slices
 ## byte-identically *modulo* this merge note — verify drift on this
 ## file is expected per the M67 / M68 pattern.
+##
+## **M9.5 merge note (hand-edited):** added a ``(pcX86_64, poLinux)``
+## platform slice to BOTH the 0.16.0 and 0.13.0 versions (Zig ships on
+## ``ziglang.org/download/``, not GitHub Releases — the M7 gh-releases
+## harvester doesn't apply). URLs + sha256s lifted from upstream's
+## ``index.json``. archive_format_override = afTarXz (vs. Windows
+## afZip); the inner dir differs per release tagging convention
+## (``zig-x86_64-linux-<ver>/`` for 0.16.0, ``zig-linux-x86_64-<ver>/``
+## for 0.13.0); ``zig`` binary lacks .exe. Upstream Zig's Linux
+## prebuilt is statically linked against musl on the x86_64 path —
+## glibc floor is not a concern.
 
 import std/tables
 import repro_dsl_stdlib/packages_schema
@@ -29,7 +40,9 @@ let zigCatalog* = @[
     bin_relpath: @["zig.exe"],
     platforms: @[
       PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip", sha256: "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e", sha512: "", extract_path: "zig-x86_64-windows-0.16.0"),
-      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://ziglang.org/download/0.16.0/zig-aarch64-windows-0.16.0.zip", sha256: "aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef", sha512: "", extract_path: "zig-aarch64-windows-0.16.0")
+      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://ziglang.org/download/0.16.0/zig-aarch64-windows-0.16.0.zip", sha256: "aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef", sha512: "", extract_path: "zig-aarch64-windows-0.16.0"),
+      # M9.5: Linux x86_64 slice (0.16.0).
+      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz", sha256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00", sha512: "", sha1: "", extract_path: "zig-x86_64-linux-0.16.0", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["zig"])
     ],
     installer_args: @[],
     pacman_packages: @[],
@@ -42,7 +55,9 @@ let zigCatalog* = @[
     bin_relpath: @["zig.exe"],
     platforms: @[
       PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://ziglang.org/download/0.13.0/zig-windows-x86_64-0.13.0.zip", sha256: "d859994725ef9402381e557c60bb57497215682e355204d754ee3df75ee3c158", sha512: "", extract_path: "zig-windows-x86_64-0.13.0"),
-      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://ziglang.org/download/0.13.0/zig-windows-aarch64-0.13.0.zip", sha256: "95ff88427af7ba2b4f312f45d2377ce7a033e5e3c620c8caaa396a9aba20efda", sha512: "", extract_path: "zig-windows-aarch64-0.13.0")
+      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://ziglang.org/download/0.13.0/zig-windows-aarch64-0.13.0.zip", sha256: "95ff88427af7ba2b4f312f45d2377ce7a033e5e3c620c8caaa396a9aba20efda", sha512: "", extract_path: "zig-windows-aarch64-0.13.0"),
+      # M9.5: Linux x86_64 slice (0.13.0).
+      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz", sha256: "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea", sha512: "", sha1: "", extract_path: "zig-linux-x86_64-0.13.0", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["zig"])
     ],
     installer_args: @[],
     pacman_packages: @[],

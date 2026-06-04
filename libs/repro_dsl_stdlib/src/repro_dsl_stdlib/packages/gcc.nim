@@ -6,17 +6,29 @@
 ## Re-harvest emits ONLY the catalog half; re-attach the DSL block
 ## by hand if you regenerate.
 ##
-## **Known M69 realize-time gaps.** The catalog tracks the
-## nuwen.net ``components-20.0.7z`` distribution, which (a) is a 7z
-## archive — M64's cakBuiltin currently raises ``EBuiltinExtractFailed``
-## on ``afSevenZip``; and (b) requires a ``pre_install`` PowerShell
-## hook that expands ``binutils-*.7z`` and ``mingw-w64+gcc.7z``
-## (themselves contained inside the outer 7z) before any binary is
-## usable. The harvester silently drops the hook, so a freshly-realized
-## prefix will surface ``components-20.0/`` but no ``bin/gcc.exe``.
-## ``--bin-default gcc=gcc.exe,g++.exe,gfortran.exe`` records the
-## end-state binary names; M69 needs a nested-7z extractor + a
-## ``pre_install`` hook runner for this catalog to realize.
+## **M3 update (Realize-Closure-And-Catalog-Expansion spec).** The
+## previously-documented M69 realize-time gaps for gcc closed via M3:
+## the harvester now emits ``nested_7z = true`` on the platform slice
+## AND an allowlisted ``pre_install_actions`` list capturing the two
+## ``Expand-7zArchive`` invocations (binutils + mingw-w64+gcc). The
+## remaining ``Get-ChildItem | Remove-Item -Recurse -Force`` pipeline
+## lands in ``pre_install_unrecognized`` (pipelines are out of the
+## allowlist), but the nested_7z + the recursive extract pass remove
+## the inner archives anyway — the unrecognized line is a NO-OP
+## post-extraction, so the operator's only observable effect is the
+## one ``WPreInstallUnrecognized`` stderr warning at apply time.
+##
+## **Hand-edited bin_relpath divergence from the harvester.** The
+## harvester (driven by ``--bin-default gcc=gcc.exe,g++.exe,gfortran.exe``)
+## emits all three binaries. nuwen.net's components-20.0 distribution
+## ships gcc + g++ + binutils (as, ld, gcc-ar, gcc-nm, gcc-ranlib, etc.)
+## but does NOT ship a Fortran front-end. M3 live smoke verified the
+## bin/ tree carries gcc.exe + g++.exe + as.exe + ld.exe — and
+## ``gcc.exe --version`` returns ``(GCC) 15.2.0`` cleanly. We drop
+## ``bin/gfortran.exe`` from the catalog so the realize loop's
+## bin-existence sanity check passes. Operators who need Fortran
+## should harvest the winlibs ``components-mingw-w64-msvcrt-13.0.0-rev3``
+## (or newer) variant which DOES bundle a Fortran front-end.
 
 import std/tables
 import repro_project_dsl
@@ -54,7 +66,7 @@ package gcc:
           position = 0
 
 # ---------------------------------------------------------------------------
-# M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
+# M3-extended bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
 # Harvested from bucket: ScoopInstaller/Main
 # Versions (newest-first): 15.2.0
 # ---------------------------------------------------------------------------
@@ -64,12 +76,17 @@ let gccCatalog* = @[
     version: "15.2.0",
     archive_format: afSevenZip,
     install_method: imExtract,
-    bin_relpath: @["bin/gcc.exe", "bin/g++.exe", "bin/gfortran.exe"],
+    bin_relpath: @["bin/gcc.exe", "bin/g++.exe"],
     platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://nuwen.net/files/mingw/components-20.0.7z", sha256: "561d873b7f95dbb39a34b7ab00050dc6028808310a847721a8aea5e5b0bff1c9", sha512: "", extract_path: "components-20.0")
+      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://nuwen.net/files/mingw/components-20.0.7z", sha256: "561d873b7f95dbb39a34b7ab00050dc6028808310a847721a8aea5e5b0bff1c9", sha512: "", sha1: "", extract_path: "components-20.0", nested_7z: true)
     ],
     installer_args: @[],
     pacman_packages: @[],
     bootstrap_argv: @[],
-    env: {"CPLUS_INCLUDE_PATH": "${prefix}\\include", "C_INCLUDE_PATH": "${prefix}\\include"}.toTable())
+    env: {"CPLUS_INCLUDE_PATH": "${prefix}\\include", "C_INCLUDE_PATH": "${prefix}\\include"}.toTable(),
+    pre_install_actions: @[
+      PreInstallAction(kind: piaExpand7z, source: "$dir\\binutils-*.7z", target: "$dir", recurse: false, literal: ""),
+      PreInstallAction(kind: piaExpand7z, source: "$dir\\mingw-w64+gcc.7z", target: "$dir", recurse: false, literal: "")
+    ],
+    pre_install_unrecognized: @["Get-ChildItem \"$dir\\*.7z\" | Remove-Item -Recurse -Force"])
 ]

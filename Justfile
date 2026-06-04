@@ -258,6 +258,137 @@ integration_reprobuild_sessions_share_runquota:
         tests/integration/t_integration_reprobuild_sessions_share_runquota.nim \
         2>&1 | tee test-logs/integration_reprobuild_sessions_share_runquota.log
 
+local-daemons-m0:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m0 \
+        --out:build/test-bin/local_daemons_m0 \
+        tests/integration/t_local_daemons_control_plane_m0.nim \
+        2>&1 | tee test-logs/local-daemons-m0.log
+
+local-daemons-m1:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m1 \
+        --out:build/test-bin/local_daemons_m1 \
+        tests/integration/t_local_daemons_control_plane_m1.nim \
+        2>&1 | tee test-logs/local-daemons-m1.log
+
+local-daemons-m2:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m2 \
+        --out:build/test-bin/local_daemons_m2 \
+        tests/integration/t_local_daemons_control_plane_m2.nim \
+        2>&1 | tee test-logs/local-daemons-m2.log
+
+local-daemons-m3:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m3 \
+        --out:build/test-bin/local_daemons_m3 \
+        tests/integration/t_local_daemons_control_plane_m3.nim \
+        2>&1 | tee test-logs/local-daemons-m3.log
+
+local-daemons-m4:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    cd ../runquota && just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m4 \
+        --out:build/test-bin/local_daemons_m4 \
+        tests/integration/t_local_daemons_control_plane_m4.nim \
+        2>&1 | tee test-logs/local-daemons-m4.log
+
+local-daemons-m5:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m5 \
+        --out:build/test-bin/local_daemons_m5 \
+        tests/integration/t_local_daemons_control_plane_m5.nim \
+        2>&1 | tee test-logs/local-daemons-m5.log
+
+local-daemons-m6:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m6 \
+        --out:build/test-bin/local_daemons_m6 \
+        tests/integration/t_local_daemons_control_plane_m6.nim \
+        2>&1 | tee test-logs/local-daemons-m6.log
+
+local-daemons-m7:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m7 \
+        --out:build/test-bin/local_daemons_m7 \
+        tests/integration/t_local_daemons_control_plane_m7.nim \
+        2>&1 | tee test-logs/local-daemons-m7.log
+
+local-daemons-m8:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m8 \
+        --out:build/test-bin/local_daemons_m8 \
+        tests/integration/t_local_daemons_control_plane_m8.nim \
+        2>&1 | tee test-logs/local-daemons-m8.log
+
+local-daemons-m10:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m10 \
+        --out:build/test-bin/local_daemons_m10 \
+        tests/integration/t_local_daemons_control_plane_m10.nim \
+        2>&1 | tee test-logs/local-daemons-m10.log
+
+local-daemons-m11:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/local-daemons-m11 \
+        --out:build/test-bin/local_daemons_m11 \
+        tests/integration/t_local_daemons_control_plane_m11.nim \
+        2>&1 | tee test-logs/local-daemons-m11.log
+
+store-daemon-m66-dev:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/store-daemon-m66-dev \
+        --out:build/test-bin/store_daemon_m66_dev \
+        tests/integration/t_store_daemon_m66_dev.nim \
+        2>&1 | tee test-logs/store-daemon-m66-dev.log
+
+integration_daemon_nix_and_tarball_realize:
+    mkdir -p test-logs build/test-bin build/nimcache
+    just build
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_daemon_nix_and_tarball_realize \
+        --out:build/test-bin/integration_daemon_nix_and_tarball_realize \
+        tests/integration/t_integration_daemon_nix_and_tarball_realize.nim \
+        2>&1 | tee test-logs/integration_daemon_nix_and_tarball_realize.log
+
 integration_hcr_reference_corpus_and_object_inputs:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -648,6 +779,87 @@ integration_apply_lock_serializes:
         --out:build/test-bin/integration_apply_lock_serializes \
         tests/e2e/home-generations/t_integration_apply_lock_serializes.nim \
         2>&1 | tee test-logs/integration_apply_lock_serializes.log
+
+integration_remote_apply_activation_bundle_phase_a:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_activation_bundle_phase_a.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_remote_apply_activation_bundle_phase_a \
+        --out:build/test-bin/integration_remote_apply_activation_bundle_phase_a \
+        tests/e2e/m71/t_integration_remote_apply_activation_bundle_phase_a.nim \
+        2>&1 | tee test-logs/integration_remote_apply_activation_bundle_phase_a.log
+
+integration_remote_apply_cross_host_evaluation_phase_b:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_cross_host_evaluation_phase_b.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_remote_apply_cross_host_evaluation_phase_b \
+        --out:build/test-bin/integration_remote_apply_cross_host_evaluation_phase_b \
+        tests/e2e/m71/t_integration_remote_apply_cross_host_evaluation_phase_b.nim \
+        2>&1 | tee test-logs/integration_remote_apply_cross_host_evaluation_phase_b.log
+
+integration_remote_apply_ssh_transfer_phase_c:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_ssh_transfer_phase_c.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_remote_apply_ssh_transfer_phase_c \
+        --out:build/test-bin/integration_remote_apply_ssh_transfer_phase_c \
+        tests/e2e/m71/t_integration_remote_apply_ssh_transfer_phase_c.nim \
+        2>&1 | tee test-logs/integration_remote_apply_ssh_transfer_phase_c.log
+
+integration_remote_apply_remote_activation_phase_d:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_remote_activation_phase_d.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_remote_apply_remote_activation_phase_d \
+        --out:build/test-bin/integration_remote_apply_remote_activation_phase_d \
+        tests/e2e/m71/t_integration_remote_apply_remote_activation_phase_d.nim \
+        2>&1 | tee test-logs/integration_remote_apply_remote_activation_phase_d.log
+
+e2e_remote_apply_home_profile_phase_e:
+    mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/repro \
+        --out:build/bin/repro \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_remote_apply_home_profile_phase_e.build.log
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprostored \
+        --out:build/bin/reprostored \
+        apps/reprostored/reprostored.nim \
+        2>&1 | tee -a test-logs/e2e_remote_apply_home_profile_phase_e.build.log
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_remote_apply_home_profile_phase_e \
+        --out:build/test-bin/e2e_remote_apply_home_profile_phase_e \
+        tests/e2e/m71/t_e2e_remote_apply_home_profile_phase_e.nim \
+        2>&1 | tee test-logs/e2e_remote_apply_home_profile_phase_e.log
 
 e2e_repro_home_apply_fresh_install:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp

@@ -66,12 +66,21 @@ proc envUserPathResource*(packageId: string; binDirs: seq[string]):
   ## Build an ``env.userPath`` resource contributing ``binDirs`` to
   ## the user PATH. The address encodes the package id so a re-apply
   ## with the same package id cache-hits at the lifecycle planner.
+  ##
+  ## POSIX shell rc files carry MANY per-package PATH blocks side-by-
+  ## side; each home-package owns its own sentinel-delimited slice.
+  ## The block id is derived from the resource address (which is
+  ## already unique per package — ``home.package.<id>.bin``) so the
+  ## rc file ends up with one block per package, not one block
+  ## shared across all of them.
+  let address = "home.package." & packageId & ".bin"
   result = Resource(
     kind: rkEnvUserPath,
-    address: "home.package." & packageId & ".bin",
+    address: address,
     lifecyclePolicy: lpDefault,
     pathEntries: binDirs,
-    pathHostFilePath: defaultUserPathHostFile())
+    pathHostFilePath: defaultUserPathHostFile(),
+    pathBlockId: "repro-home-userpath:" & address)
 
 proc envUserVariableResource*(packageId, varName, value: string):
     Resource =

@@ -7,6 +7,7 @@ for libName in [
   "repro_platform",
   "repro_diagnostics",
   "repro_cli_support",
+  "repro_daemon_core",
   "blake3",
   "xxh3",
   "gxhash",
@@ -37,6 +38,7 @@ for libName in [
   "repro_dev_env_engine",
   "repro_tool_profiles",
   "repro_local_store",
+  "repro_store_daemon",
   "repro_launch_plan",
   "repro_runquota",
   "repro_build_engine",
@@ -48,6 +50,9 @@ for libName in [
   "repro_cmake_trycompile",
   "repro_standard_provider_protocol",
   "repro_standard_provider",
+  "repro_workspace_vcs",
+  "repro_test_support",
+  "repro_workspace_manifests",
 ]:
   switch("path", "libs" / libName / "src")
 
@@ -85,6 +90,11 @@ addPackagePath("NIM_JSON_SERIALIZATION_SRC", [
   ".." / "codetracer" / "libs" / "nim-json-serialization",
   ".." / "nim-json-serialization",
 ], "json_serialization.nim")
+addPackagePath("NIM_TOML_SERIALIZATION_SRC", [
+  "libs" / "nim-toml-serialization" / "src",
+  ".." / "codetracer" / "libs" / "nim-toml-serialization",
+  ".." / "nim-toml-serialization",
+], "toml_serialization.nim")
 addPackagePath("SSZ_SERIALIZATION_SRC", [
   "libs" / "nim-ssz-serialization" / "src",
   ".." / "nim-ssz-serialization",

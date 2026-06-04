@@ -64,6 +64,68 @@ import ./packages/python3
 # M1 (Realize-Closure spec) — Pascal toolchain graduation. fpc's Scoop
 # manifest ships a sha1 digest, so the schema extension landed first.
 import ./packages/fpc
+# M3 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip catalog
+# prerequisite. Registered under the operator-facing tool name ``7zip``
+# (string); the underlying packages/<file>.nim is sevenzip.nim because
+# Nim identifiers cannot start with a digit.
+#
+# **M8 transition**: replaced the hand-authored 7zr.exe bootstrap entry
+# with the harvested Scoop MSI catalog (re-harvest:
+# ``repro_catalog_harvester harvest --bucket ScoopInstaller/Main
+# --app 7zip --app-alias 7zip=sevenzip``). The MSI ships the full 7-Zip
+# distribution (CLI + GUI + plugins including the zstd codec — closes a
+# follow-up from M6's MSYS2 .zst extraction). M3's hand-authored
+# ``bin/7z.exe`` shape is gone; the MSI places ``7z.exe`` at the prefix
+# root after lessmsi flattens ``Files\7-Zip``. ``discoverSevenZipExe`` in
+# repro_home_apply was extended in M8 to probe both ``<prefix>/bin/7z.exe``
+# (legacy + synthetic test seeds) and ``<prefix>/7z.exe`` (M8 MSI shape).
+import ./packages/sevenzip
+# M4 (Realize-Closure-And-Catalog-Expansion spec) — Windows installer
+# family prerequisites:
+#   * wix3 — provides dark.exe for MSI extraction (imInstallerMsi +
+#     imInstallerNsisBundle realize hooks).
+#   * innounp — provides innounp.exe for Inno Setup extraction
+#     (imInstallerInnoSetup realize hook).
+# Both are catalog packages per the bundling-posture amendment (NO
+# vendored binaries); cakBuiltin discovers them via the standard
+# catalog-prefix → PATH → fail-closed order.
+import ./packages/wix3
+import ./packages/innounp
+# M4 amendment (post-live-smoke finding): lessmsi is the canonical
+# MSI-to-file-tree extractor. WiX dark.exe stays in the registry for
+# completeness (some operators use it for MSI decompilation) but the
+# M4 ``imInstallerMsi`` realize hook dispatches through lessmsi by
+# default. See packages/lessmsi.nim's header for the rationale.
+import ./packages/lessmsi
+# M6 (Realize-Closure-And-Catalog-Expansion spec) — MSYS2 pacman
+# harvester source enables OCaml as a catalog package. The .pkg.tar.zst
+# format extracts via the M6 zstd-capable extractor discovery
+# (catalog 7z → host tar --zstd → host zstd pipe) and the realize hook
+# flattens the inner ``mingw64/`` subtree to the prefix root. Dependency
+# resolution stays the operator's responsibility — list every required
+# MSYS2 package in home.nim (e.g. flexdll, gmp).
+import ./packages/ocaml
+# M7 (Realize-Closure-And-Catalog-Expansion spec) — GitHub Releases
+# harvester source. ``alire`` (Ada toolchain manager) is the first
+# end-to-end consumer; the ``alr-...-bin-x86_64-windows.zip`` asset
+# ships ``bin/alr.exe`` at the archive root, fitting cakBuiltin's
+# ``afZip + imExtract`` baseline without any new dispatch surface.
+import ./packages/alire
+# M8 (Realize-Closure-And-Catalog-Expansion spec) — bulk-harvest pass
+# over the M6 + M7 harvester sources. Two new GitHub-Releases-harvested
+# Windows toolchains land here:
+#   * ``gcc-winlibs`` — brechtsanders/winlibs_mingw distribution. Ships
+#     the full mingw-w64 GCC stack (gcc + g++ + gfortran + binutils ld)
+#     under ``mingw64/`` inside a ``.7z`` archive. Coexists with the M68
+#     ``gcc`` entry (nuwen.net components-20.0 via Scoop); the M68 entry
+#     lacks gfortran while winlibs bundles it.
+#   * ``llvm-mingw`` — mstorsjo/llvm-mingw distribution. Ships clang +
+#     clang++ + lld (ld.lld.exe) under a top-level
+#     ``llvm-mingw-<tag>-<crt>-<arch>/`` directory inside a ``.zip``.
+#     First clang-on-Windows catalog (M68 left clang DEFERRED per its
+#     header note — Scoop main has no ``clang.json``).
+import ./packages/gcc_winlibs
+import ./packages/llvm_mingw
 
 export packages_schema
 
@@ -105,6 +167,34 @@ const RegisteredTools* = [
   "python3",
   # M1 (Realize-Closure spec) — Pascal toolchain (sha1 weak-hash).
   "fpc",
+  # M3 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip as a
+  # catalog package. Discovery-by-prefix bootstraps the cakBuiltin 7z
+  # family hooks (SFX flatten + nested 7z + Scoop pre_install runner)
+  # without requiring a host PATH 7z.
+  "7zip",
+  # M4 (Realize-Closure-And-Catalog-Expansion spec) — WiX v3 + innounp
+  # as catalog packages. Discovery-by-prefix bootstraps the cakBuiltin
+  # Windows installer family hooks (MSI extract via dark.exe; NSIS+MSI
+  # bundle flatten; Inno Setup extract via innounp.exe) without
+  # requiring host PATH copies.
+  "wix3",
+  "innounp",
+  # M4 amendment: lessmsi as the canonical MSI extractor.
+  "lessmsi",
+  # M6 (Realize-Closure-And-Catalog-Expansion spec) — first MSYS2-
+  # harvested catalog tool.
+  "ocaml",
+  # M7 (Realize-Closure-And-Catalog-Expansion spec) — first
+  # GitHub-Releases-harvested catalog tool. Ada toolchain manager.
+  "alire",
+  # M8 (Realize-Closure-And-Catalog-Expansion spec) — bulk-harvest
+  # additions. ``gcc-winlibs`` is the operator-facing key for the
+  # winlibs-distributed GCC (coexists with the M68 ``gcc`` Scoop entry;
+  # winlibs ships gfortran which the nuwen.net components-20.0 does not).
+  # ``llvm-mingw`` is the operator-facing key for the mstorsjo/llvm-mingw
+  # clang+lld distribution (the first clang-on-Windows catalog entry).
+  "gcc-winlibs",
+  "llvm-mingw",
 ]
 
 proc getCatalog*(toolName: string):
@@ -151,6 +241,22 @@ proc getCatalog*(toolName: string):
   of "python3":    selectIfNonEmpty(python3Catalog)
   # M1 (Realize-Closure spec) — Pascal toolchain.
   of "fpc":        selectIfNonEmpty(fpcCatalog)
+  # M3 (Realize-Closure-And-Catalog-Expansion spec) — 7-Zip.
+  of "7zip":       selectIfNonEmpty(sevenzipCatalog)
+  # M4 (Realize-Closure-And-Catalog-Expansion spec) — WiX v3 + innounp.
+  of "wix3":       selectIfNonEmpty(wix3Catalog)
+  of "innounp":    selectIfNonEmpty(innounpCatalog)
+  of "lessmsi":    selectIfNonEmpty(lessmsiCatalog)
+  # M6 (Realize-Closure-And-Catalog-Expansion spec) — MSYS2-harvested.
+  of "ocaml":      selectIfNonEmpty(ocamlCatalog)
+  # M7 (Realize-Closure-And-Catalog-Expansion spec) — GitHub-Releases-harvested.
+  of "alire":      selectIfNonEmpty(alireCatalog)
+  # M8 (Realize-Closure-And-Catalog-Expansion spec) — bulk-harvest.
+  # The Nim-identifier filenames (``gcc_winlibs`` / ``llvm_mingw``) are
+  # mapped to the operator-facing hyphenated keys (``gcc-winlibs`` /
+  # ``llvm-mingw``).
+  of "gcc-winlibs": selectIfNonEmpty(gcc_winlibsCatalog)
+  of "llvm-mingw":  selectIfNonEmpty(llvm_mingwCatalog)
   else:
     none(seq[VersionedProvisioning])
 

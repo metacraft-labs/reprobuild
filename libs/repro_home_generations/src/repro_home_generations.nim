@@ -30,6 +30,7 @@ import repro_home_generations/state_dir
 import repro_home_generations/pointer
 import repro_home_generations/manifest
 import repro_home_generations/intent_snapshot
+import repro_home_generations/activation_bundle
 import repro_home_generations/locks
 import repro_home_generations/registry
 
@@ -38,5 +39,6 @@ export state_dir
 export pointer
 export manifest
 export intent_snapshot
+export activation_bundle
 export locks
 export registry

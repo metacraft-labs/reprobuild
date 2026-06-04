@@ -195,6 +195,18 @@ type
       pathHostFilePath*: string
         ## POSIX host rc file that receives the managed PATH block.
         ## Empty on Windows, where the target is HKCU\Environment\Path.
+      pathBlockId*: string
+        ## POSIX-only sentinel block id used to identify THIS resource's
+        ## slice of the shell rc file. Multiple `env.userPath`
+        ## resources (e.g. one per home-package) coexist in the same
+        ## rc file by owning DISTINCT sentinel-delimited blocks. Empty
+        ## means "use the legacy default" (single shared
+        ## `repro-home-userpath` block) — kept for backward
+        ## compatibility with hand-written profiles that emit a single
+        ## `env.userPath` resource. The M69 emitter sets a per-package
+        ## block id so per-package PATH resources don't clobber each
+        ## other. Ignored on Windows (HKCU\Environment\Path IS the
+        ## single shared blob by OS design).
     of rkWindowsStartup:
       startupName*: string              ## Run-key value name.
       startupCommand*: string           ## launch command.
@@ -594,7 +606,20 @@ proc realWorldIdentity*(r: Resource): string =
     when defined(windows):
       return "HKCU\\Environment\\Path"
     else:
-      return r.pathHostFilePath & "#repro-home-userpath"
+      # POSIX identity encodes both the host rc file AND the per-
+      # resource sentinel block id so multiple `env.userPath`
+      # resources (one per home-package) target distinct slices of
+      # the same rc file. The block id defaults to
+      # `repro-home-userpath` when not set (legacy single-block
+      # behavior) so hand-written profiles that emit just one
+      # `env.userPath` continue to work byte-for-byte. The recorded
+      # identity is split back at rollback / drift-observe time:
+      # see `userPathHostFromIdentity` and
+      # `userPathBlockIdFromIdentity`.
+      let blockId =
+        if r.pathBlockId.len > 0: r.pathBlockId
+        else: "repro-home-userpath"
+      return r.pathHostFilePath & "#" & blockId
   of rkWindowsStartup:
     return "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\" &
       r.startupName

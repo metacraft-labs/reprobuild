@@ -47,7 +47,7 @@
 ## entries to every existing ``packages/*.nim``; in M63 only
 ## ``packages/jdk.nim`` carries a real entry (as the M49 reference).
 
-import std/tables
+import std/[strutils, tables]
 
 # ---------------------------------------------------------------------------
 # Schema warning hook
@@ -72,11 +72,29 @@ type
     ## "download a single binary, no extraction" case (e.g. a static
     ## ``rg.exe``). ``afInstallerNsis`` / ``afInstallerMsi`` mark
     ## installers that run silently via ``imInstallerSilent``.
+    ##
+    ## M3 (Realize-Closure-And-Catalog-Expansion spec) added
+    ## ``afSevenZipSfx`` — a 7z self-extracting archive (``.7z.exe`` /
+    ## ``.exe#/dl.7z`` shape). The payload is structurally a 7z archive
+    ## with a PE-SFX loader stub prepended; the 7z extractor transparently
+    ## handles both raw .7z and SFX-wrapped .7z, so the realize-time
+    ## dispatch is identical to ``afSevenZip`` plus the SFX classification
+    ## marker.
     afZip = "zip"
     afTarGz = "tar.gz"
     afTarXz = "tar.xz"
     afTarBz2 = "tar.bz2"
+    afTarZst = "tar.zst"
+      ## M6 (Realize-Closure-And-Catalog-Expansion spec): zstd-compressed
+      ## tarball. The canonical MSYS2 pacman package format
+      ## (``mingw-w64-<arch>-<name>-<version>-<rel>-any.pkg.tar.zst``) and
+      ## an increasingly common upstream tarball shape (rustup, Arch
+      ## Linux packages, ...). The cakBuiltin realize loop extracts via a
+      ## three-strategy discovery (catalog ``7zip`` prefix → host ``tar
+      ## --zstd`` → host ``zstd | tar``) — see ``extractTarZst`` in
+      ## builtin_adapter.nim.
     afSevenZip = "7z"
+    afSevenZipSfx = "7z-sfx"
     afInstallerNsis = "installer-nsis"
     afInstallerMsi = "installer-msi"
     afRaw = "raw"
@@ -86,10 +104,59 @@ type
     ## prefix on disk. ``imExtract`` is the default common case; the
     ## other three mirror the M49–M62 ad-hoc installer / pacman /
     ## bootstrap-build escape hatches the campaign needs.
+    ##
+    ## M4 (Realize-Closure-And-Catalog-Expansion spec) added three
+    ## variants for the Windows installer families:
+    ##   * ``imInstallerMsi`` — extract an MSI via WiX ``dark.exe``
+    ##     (decompile to a file tree; no global state, no installer
+    ##     execution). The escape-hatch ``CAKBUILTIN_PREFER_MSIEXEC=1``
+    ##     env var swaps the dark.exe path for ``msiexec /a TARGETDIR``.
+    ##   * ``imInstallerNsisBundle`` — NSIS self-extracting executable
+    ##     whose payload is one or more inner MSIs. Realize unwraps the
+    ##     NSIS shell via 7z + dark, then per-MSI dark-extract + merge.
+    ##   * ``imInstallerNsis`` — plain NSIS installer whose payload is a
+    ##     bona-fide file tree (NOT a Burn outer wrapping inner MSIs).
+    ##     The cakBuiltin realize hook dispatches via the discovered
+    ##     full ``7z.exe`` directly (which transparently understands the
+    ##     modern NSIS installer format). M11 (Realize-Closure-And-
+    ##     Catalog-Expansion spec) added this variant after the M8 live
+    ##     smoke proved erlang's OTP installer is a bona-fide NSIS
+    ##     installer with no Burn outer — dark.exe rejects it with
+    ##     ``DARK0339`` (no .wixburn section), but the full 7-Zip 26.01
+    ##     M8 re-harvest extracts it cleanly. See ``packages/erlang.nim``'s
+    ##     M11 header for the LIVE-validated trace.
+    ##   * ``imInstallerInnoSetup`` — Inno-Setup-built installer (the
+    ##     freepascal shape, ``innosetup: true`` Scoop marker). Realize
+    ##     dispatches via the discovered ``innounp.exe``.
     imExtract = "extract"
     imInstallerSilent = "installer-silent"
     imMsys2Pacman = "msys2-pacman"
+      ## M6 (Realize-Closure-And-Catalog-Expansion spec): provenance-
+      ## labelled variant of ``imExtract`` for ``.pkg.tar.zst`` payloads
+      ## harvested from the MSYS2 pacman repository. The realize-time
+      ## semantics are intentionally a strict subset of ``imExtract`` —
+      ## download, sha256 verify, extract via the discovered zstd-
+      ## capable extractor, flatten the inner ``<env>/`` subtree, replay
+      ## allowlisted pre_install actions. The dispatch does NOT invoke
+      ## pacman; the ``pacman_packages`` field is an audit trail (the
+      ## harvested MSYS2 package name, e.g. ``mingw-w64-x86_64-ocaml``)
+      ## that drives the schema validator + future drift detection
+      ## against repo.msys2.org, NOT a recursive package-manager call.
+      ## The catalog-author rationale for the separate enum (vs an
+      ## ``imExtract`` slice with ``archive_format=afTarZst``):
+      ## (i) self-documenting at the call site (catalog readers see at
+      ## a glance that the slice came from MSYS2);
+      ## (ii) the validator enforces ``pacman_packages.len >= 1`` AND
+      ## ``archive_format == afTarZst``, blocking malformed authoring;
+      ## (iii) future drift-detection / re-harvest tooling keys off
+      ## this discriminant to query repo.msys2.org for upstream version
+      ## bumps. Behavior at realize time IS the same as the equivalent
+      ## ``imExtract`` slice; the differentiation is provenance only.
     imSourceBootstrap = "source-bootstrap"
+    imInstallerMsi = "installer-msi"
+    imInstallerNsisBundle = "installer-nsis-bundle"
+    imInstallerNsis = "installer-nsis"
+    imInstallerInnoSetup = "installer-inno-setup"
 
   PlatformCpu* = enum
     ## Coarse CPU enum. Matches the ``cpu_arch`` tokens the
@@ -129,6 +196,146 @@ type
                            ## the M64 realize loop emits
                            ## ``WSha1HashAccepted`` to stderr.
     extract_path*: string  ## inner-dir to strip; "" = none
+    nested_7z*: bool       ## M3: when true, after the outer extraction
+                           ## the realize loop scans the extract dir for
+                           ## ``*.7z`` files and recursively extracts each
+                           ## in place (depth-bounded). Used for the
+                           ## gcc/winlibs ``components-*.7z`` shape whose
+                           ## payload is itself a sequence of inner .7z
+                           ## archives (binutils + mingw-w64+gcc). The
+                           ## harvester sets this when the manifest's
+                           ## ``pre_install`` block explicitly performs the
+                           ## nested extraction.
+    msi_admin_install*: bool
+                           ## M4: when true (and ``install_method`` is
+                           ## ``imInstallerMsi``), the realize loop uses
+                           ## ``msiexec /a <msi> /qn TARGETDIR=<dir>`` for
+                           ## the extraction instead of WiX ``dark.exe``.
+                           ## Operators may also flip the global default
+                           ## via ``CAKBUILTIN_PREFER_MSIEXEC=1`` (see
+                           ## ``builtin_adapter.nim``); this field is the
+                           ## per-platform override for MSIs whose
+                           ## custom-action table makes dark.exe fail
+                           ## silent-skip in practice.
+    archive_format_override*: ArchiveFormat
+                           ## M9.5 (Realize-Closure-And-Catalog-Expansion
+                           ## spec): per-platform override of the parent
+                           ## ``VersionedProvisioning.archive_format``.
+                           ## Only consulted when
+                           ## ``has_archive_format_override`` is true —
+                           ## ArchiveFormat has no natural unset sentinel.
+                           ## The M9.5 cross-OS catalog harvester pass
+                           ## needs this because a single tool's upstream
+                           ## ships different archive shapes per OS
+                           ## (e.g. gh ships a ``.zip`` on Windows and a
+                           ## ``.tar.gz`` on Linux). The Windows-only
+                           ## M67/M68 baseline never set this field; all
+                           ## existing catalog files round-trip byte-
+                           ## identical because the serializer emits this
+                           ## field ONLY when ``has_archive_format_override``
+                           ## is true.
+    has_archive_format_override*: bool
+                           ## M9.5: sentinel for archive_format_override.
+                           ## ``false`` (default) = use the parent
+                           ## VersionedProvisioning's archive_format.
+                           ## ``true`` = use ``archive_format_override``.
+    bin_relpath_override*: seq[string]
+                           ## M9.5: per-platform override of the parent
+                           ## ``VersionedProvisioning.bin_relpath``.
+                           ## ``@[]`` (default) = use the parent's
+                           ## bin_relpath. Non-empty = use this list
+                           ## instead. The M9.5 cross-OS pass needs this
+                           ## because Windows binaries have the ``.exe``
+                           ## suffix while Linux binaries do not, and
+                           ## per-OS archives ship binaries under
+                           ## different inner paths (e.g. gh's Linux
+                           ## tarball nests under
+                           ## ``gh_<ver>_linux_amd64/bin/`` while the
+                           ## Windows zip is flat ``bin\\gh.exe``).
+
+  PreInstallActionKind* = enum
+    ## M3: a closed set of ``pre_install`` PowerShell shapes the
+    ## cakBuiltin realize loop recognizes and replays programmatically
+    ## (NOT via exec'ing PowerShell — that surface is too broad). The
+    ## harvester translates matching ``pre_install`` lines into these
+    ## actions; unmatched lines are captured verbatim in
+    ## ``pre_install_unrecognized`` and surfaced as a
+    ## ``WPreInstallUnrecognized`` warning at realize time.
+    ##
+    ## M4 extends the allowlist with three Windows installer family
+    ## entries: ``Expand-DarkArchive``, ``Expand-MsiArchive``,
+    ## ``Expand-InnoArchive``. These cover the python3 + swift Scoop
+    ## ``installer.script`` patterns that the M3 spec-text deferred to
+    ## M4.
+    piaNewItemDir = "new-item-dir"        ## New-Item -ItemType Directory
+    piaNewItemFile = "new-item-file"      ## New-Item -ItemType File
+    piaCopyItem = "copy-item"             ## Copy-Item -Path A -Destination B [-Recurse]
+    piaMoveItem = "move-item"             ## Move-Item -Path A -Destination B
+    piaRemoveItem = "remove-item"         ## Remove-Item -Path A [-Recurse -Force]
+    piaSetContent = "set-content"         ## Set-Content -Path A -Value "<literal>"
+    piaAddPath = "add-path"               ## Scoop Add-Path builtin → env metadata only
+    piaExpand7z = "expand-7z"             ## Expand-7zArchive / Expand-7ZipArchive
+    piaExpandDark = "expand-dark"         ## M4: Expand-DarkArchive <msi> <dir>
+    piaExpandMsi = "expand-msi"           ## M4: Expand-MsiArchive <msi> <dir>
+    piaExpandInno = "expand-inno"         ## M4: Expand-InnoArchive <exe> <dir>
+
+  LauncherEmitKind* = enum
+    ## M5 (Realize-Closure-And-Catalog-Expansion spec): closed-set
+    ## launcher-synthesis shapes the cakBuiltin realize loop emits AFTER
+    ## the extract / install_method dispatch completes. Each kind names a
+    ## wrap pattern Scoop's ``pre_install`` PowerShell idiomatically
+    ## synthesizes (composer's ``& php $dir\composer.phar @args`` shim,
+    ## the rare ``& java -jar $dir\<tool>.jar @args`` shim, the generic
+    ## wrapped-script shape). The interpreter binary is discovered at
+    ## realize time via the same catalog-prefix-first pattern as M3/M4
+    ## extractors (``discoverPhpExe`` / ``discoverJavaExe``); the
+    ## launcher file itself is generated inline via deterministic Nim
+    ## string concatenation — the M56 content-addressed store's digest
+    ## covers the launcher bytes.
+    lekPhar = "phar"     ## ``.phar`` wrap (composer); interpreter = php
+    lekJar = "jar"       ## ``.jar`` wrap (future gradle/maven); interpreter = jdk
+    lekScript = "script" ## generic wrapped-script shape (bash/python etc.)
+
+  LauncherEmitSpec* = object
+    ## M5: one launcher to emit at realize time. The realize loop
+    ## generates two files per spec under the prefix's ``bin/``
+    ## directory: ``<launcher_name>.ps1`` (PowerShell entry) and
+    ## ``<launcher_name>.cmd`` (cmd.exe entry on Windows). Both invoke
+    ## the discovered interpreter with the ``target`` (a relpath under
+    ## the prefix that points at the .phar / .jar / script file the
+    ## extract step deposited) and forward the user's argv.
+    ##
+    ## The ``interpreter_package_id`` is the catalog id whose realized
+    ## prefix supplies the interpreter binary (e.g. ``"php"`` for
+    ## composer, ``"jdk"`` for jar wrappers). The realize loop's
+    ## discovery falls through (catalog prefix -> PATH -> fail closed
+    ## with ``EBuiltinInterpreterUnavailable``) — same shape as M3's
+    ## 7z / M4's lessmsi discovery.
+    kind*: LauncherEmitKind
+    target*: string                   ## prefix-relative path to the
+                                      ## payload (e.g. "composer.phar").
+                                      ## The post-extract layout places
+                                      ## this file at <prefix>/<target>.
+    interpreter_package_id*: string   ## catalog package id of the
+                                      ## interpreter (e.g. "php", "jdk").
+    launcher_name*: string            ## bare name of the emitted
+                                      ## launchers (e.g. "composer" ->
+                                      ## "bin/composer.ps1" +
+                                      ## "bin/composer.cmd").
+
+  PreInstallAction* = object
+    ## M3: one structured ``pre_install`` action the realize loop
+    ## replays. Path arguments are stored ``$dir``-relative (or
+    ## ``${prefix}``-rewritten); the runner substitutes against the
+    ## staged extract directory at apply time. ``source`` / ``target``
+    ## are role-specific (Copy/Move use both; Remove + NewItem use
+    ## ``target``; Set-Content uses ``target`` + ``literal``; Expand-7z
+    ## uses ``source`` + ``target``).
+    kind*: PreInstallActionKind
+    source*: string          ## $dir-relative source (may contain * glob)
+    target*: string          ## $dir-relative target
+    recurse*: bool           ## Copy-Item -Recurse / Remove-Item -Recurse
+    literal*: string         ## Set-Content -Value literal
 
   VersionedProvisioning* = object
     ## One coexisting version of a tool. The campaign author writes
@@ -149,6 +356,69 @@ type
                                       ## reference the realized prefix
                                       ## via ``${prefix}`` (the M64
                                       ## realizer substitutes)
+    pre_install_actions*: seq[PreInstallAction]
+                                      ## M3: ordered list of allowlisted
+                                      ## ``pre_install`` actions the realize
+                                      ## loop replays AFTER extraction. The
+                                      ## harvester populates this from the
+                                      ## Scoop manifest's ``pre_install``
+                                      ## block when every line matches the
+                                      ## allowlist; lines that do not match
+                                      ## land in ``pre_install_unrecognized``.
+    pre_install_unrecognized*: seq[string]
+                                      ## M3: ``pre_install`` lines the
+                                      ## harvester could not translate into
+                                      ## an allowlisted ``PreInstallAction``.
+                                      ## The realize loop emits one
+                                      ## ``WPreInstallUnrecognized`` warning
+                                      ## per line at apply time so the
+                                      ## operator sees the gap. Realize does
+                                      ## NOT fail closed on this — the rest
+                                      ## of the install proceeds.
+    launcher_emit*: seq[LauncherEmitSpec]
+                                      ## M5 (Realize-Closure-And-Catalog-
+                                      ## Expansion spec): ordered list of
+                                      ## launcher shims the realize loop
+                                      ## emits AFTER extract / install_method
+                                      ## dispatch. Each spec yields
+                                      ## ``bin/<launcher_name>.ps1`` +
+                                      ## ``bin/<launcher_name>.cmd`` invoking
+                                      ## the discovered interpreter against
+                                      ## the spec's ``target`` (a prefix-
+                                      ## relative path the extract step
+                                      ## deposited). Used for ``.phar``
+                                      ## (composer; interpreter=php), ``.jar``
+                                      ## (future jdk-based tools), and
+                                      ## generic wrapped-script shapes.
+                                      ## Validation: every spec's
+                                      ## ``launcher_name`` must appear in
+                                      ## ``bin_relpath`` as a ``.ps1`` or
+                                      ## ``.cmd`` entry (sanity check that
+                                      ## the catalog declares the launchers
+                                      ## as its bin surface). Empty for the
+                                      ## vast majority of catalog entries —
+                                      ## the M67/M68 baseline round-trips
+                                      ## byte-identical when this field is
+                                      ## empty.
+                                      ##
+                                      ## **Placement trade-off (M5)**:
+                                      ## ``launcher_emit`` lives at the
+                                      ## ``VersionedProvisioning`` level
+                                      ## (cross-platform), NOT on
+                                      ## ``PlatformBinary``. The composer
+                                      ## .phar wrap is identical on every
+                                      ## platform (same php interpreter id,
+                                      ## same .phar payload name, same
+                                      ## launcher body), so version-level
+                                      ## placement avoids duplicating the
+                                      ## spec across per-platform slices.
+                                      ## A future tool needing DIFFERENT
+                                      ## launchers per arch / OS (e.g. a
+                                      ## bash-script on Linux + a .ps1 on
+                                      ## Windows) would need a schema
+                                      ## extension promoting this field to
+                                      ## the platform level. M5 ships the
+                                      ## simpler cross-platform shape.
 
 # ---------------------------------------------------------------------------
 # Construction helpers
@@ -156,11 +426,22 @@ type
 
 proc initPlatformBinary*(cpu: PlatformCpu; os: PlatformOs; url: string;
                          sha256 = ""; sha512 = ""; sha1 = "";
-                         extract_path = ""): PlatformBinary =
+                         extract_path = "";
+                         nested_7z = false;
+                         msi_admin_install = false;
+                         archive_format_override = afZip;
+                         has_archive_format_override = false;
+                         bin_relpath_override: seq[string] = @[]):
+    PlatformBinary =
   PlatformBinary(
     cpu: cpu, os: os, url: url,
     sha256: sha256, sha512: sha512, sha1: sha1,
-    extract_path: extract_path)
+    extract_path: extract_path,
+    nested_7z: nested_7z,
+    msi_admin_install: msi_admin_install,
+    archive_format_override: archive_format_override,
+    has_archive_format_override: has_archive_format_override,
+    bin_relpath_override: bin_relpath_override)
 
 proc initVersionedProvisioning*(version: string;
                                 archive_format: ArchiveFormat;
@@ -170,7 +451,10 @@ proc initVersionedProvisioning*(version: string;
                                 installer_args: seq[string] = @[];
                                 pacman_packages: seq[string] = @[];
                                 bootstrap_argv: seq[string] = @[];
-                                env: openArray[(string, string)] = []):
+                                env: openArray[(string, string)] = [];
+                                pre_install_actions: seq[PreInstallAction] = @[];
+                                pre_install_unrecognized: seq[string] = @[];
+                                launcher_emit: seq[LauncherEmitSpec] = @[]):
     VersionedProvisioning =
   result = VersionedProvisioning(
     version: version,
@@ -181,7 +465,10 @@ proc initVersionedProvisioning*(version: string;
     installer_args: installer_args,
     pacman_packages: pacman_packages,
     bootstrap_argv: bootstrap_argv,
-    env: initTable[string, string]())
+    env: initTable[string, string](),
+    pre_install_actions: pre_install_actions,
+    pre_install_unrecognized: pre_install_unrecognized,
+    launcher_emit: launcher_emit)
   for pair in env:
     result.env[pair[0]] = pair[1]
 
@@ -294,11 +581,60 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
   of imMsys2Pacman:
     if vp.pacman_packages.len == 0:
       result.add("install_method=imMsys2Pacman requires at least one " &
-        "pacman_packages entry")
+        "pacman_packages entry (the harvested MSYS2 package name, e.g. " &
+        "'mingw-w64-x86_64-ocaml')")
+    # M6: the M6 cakBuiltin realize hook downloads + extracts the
+    # ``.pkg.tar.zst`` and verifies bin_relpath against the realized
+    # prefix — same shape as imExtract. Require at least one bin_relpath
+    # entry so the post-extract sanity check has something to assert.
+    if vp.bin_relpath.len == 0:
+      result.add("install_method=imMsys2Pacman requires at least one " &
+        "bin_relpath entry (the realize hook flattens mingw64/ to the " &
+        "prefix root and verifies each bin_relpath exists post-extract)")
   of imSourceBootstrap:
     if vp.bootstrap_argv.len == 0:
       result.add("install_method=imSourceBootstrap requires a " &
         "non-empty bootstrap_argv")
+  of imInstallerMsi, imInstallerNsisBundle, imInstallerNsis,
+     imInstallerInnoSetup:
+    # M4: each Windows installer family needs at least one bin_relpath
+    # so the post-extract sanity check has something to verify against
+    # the realized prefix tree (mirrors imExtract).
+    # M11: imInstallerNsis joined the family — same bin_relpath rule
+    # (the realize hook calls extract7z on the .exe payload and the
+    # post-extract sanity check verifies each bin_relpath exists).
+    if vp.bin_relpath.len == 0:
+      result.add("install_method=" & $vp.install_method &
+        " requires at least one bin_relpath entry")
+  # M5: when launcher_emit is non-empty, every spec's launcher_name must
+  # appear in bin_relpath as a .ps1 / .cmd entry. The sanity check
+  # confirms the catalog declares the emitted launchers as the tool's
+  # public bin surface (so the post-extract bin-existence verification
+  # at apply time matches reality). Also catches typos in launcher_name.
+  for i, spec in vp.launcher_emit:
+    let prefix = "launcher_emit[" & $i & "] (kind=" & $spec.kind & "): "
+    if spec.launcher_name.len == 0:
+      result.add(prefix & "launcher_name is required")
+    if spec.target.len == 0:
+      result.add(prefix & "target is required (prefix-relative path " &
+        "to the payload file)")
+    if spec.interpreter_package_id.len == 0:
+      result.add(prefix & "interpreter_package_id is required (the " &
+        "catalog package whose realized prefix supplies the interpreter)")
+    if spec.launcher_name.len > 0 and vp.bin_relpath.len > 0:
+      let ps1Leaf = spec.launcher_name & ".ps1"
+      let cmdLeaf = spec.launcher_name & ".cmd"
+      var sawPs1 = false
+      var sawCmd = false
+      for b in vp.bin_relpath:
+        let leaf = b.split({'/', '\\'})[^1]
+        if leaf == ps1Leaf: sawPs1 = true
+        if leaf == cmdLeaf: sawCmd = true
+      if not (sawPs1 or sawCmd):
+        result.add(prefix & "launcher_name '" & spec.launcher_name &
+          "' has no matching .ps1 or .cmd entry in bin_relpath (declare " &
+          "the launcher files in bin_relpath so the post-extract sanity " &
+          "check matches reality)")
 
 proc validateVersionedProvisioning*(vp: VersionedProvisioning):
     seq[string] =
@@ -442,10 +778,38 @@ proc archiveFormatIdent(af: ArchiveFormat): string =
   of afTarGz: "afTarGz"
   of afTarXz: "afTarXz"
   of afTarBz2: "afTarBz2"
+  of afTarZst: "afTarZst"
   of afSevenZip: "afSevenZip"
+  of afSevenZipSfx: "afSevenZipSfx"
   of afInstallerNsis: "afInstallerNsis"
   of afInstallerMsi: "afInstallerMsi"
   of afRaw: "afRaw"
+
+proc launcherEmitKindIdent*(lek: LauncherEmitKind): string =
+  case lek
+  of lekPhar: "lekPhar"
+  of lekJar: "lekJar"
+  of lekScript: "lekScript"
+
+proc serializeLauncherEmitSpec*(spec: LauncherEmitSpec): string =
+  result = "LauncherEmitSpec(kind: " & launcherEmitKindIdent(spec.kind) &
+    ", target: " & escapeString(spec.target) &
+    ", interpreter_package_id: " & escapeString(spec.interpreter_package_id) &
+    ", launcher_name: " & escapeString(spec.launcher_name) & ")"
+
+proc preInstallActionKindIdent*(pia: PreInstallActionKind): string =
+  case pia
+  of piaNewItemDir: "piaNewItemDir"
+  of piaNewItemFile: "piaNewItemFile"
+  of piaCopyItem: "piaCopyItem"
+  of piaMoveItem: "piaMoveItem"
+  of piaRemoveItem: "piaRemoveItem"
+  of piaSetContent: "piaSetContent"
+  of piaAddPath: "piaAddPath"
+  of piaExpand7z: "piaExpand7z"
+  of piaExpandDark: "piaExpandDark"
+  of piaExpandMsi: "piaExpandMsi"
+  of piaExpandInno: "piaExpandInno"
 
 proc installMethodIdent(im: InstallMethod): string =
   case im
@@ -453,18 +817,54 @@ proc installMethodIdent(im: InstallMethod): string =
   of imInstallerSilent: "imInstallerSilent"
   of imMsys2Pacman: "imMsys2Pacman"
   of imSourceBootstrap: "imSourceBootstrap"
+  of imInstallerMsi: "imInstallerMsi"
+  of imInstallerNsisBundle: "imInstallerNsisBundle"
+  of imInstallerNsis: "imInstallerNsis"
+  of imInstallerInnoSetup: "imInstallerInnoSetup"
 
 proc serializePlatformBinary(pb: PlatformBinary): string =
   # Field order: sha256, sha512, sha1 — sha1 last to make it
   # visually clear that it's the deprecated branch (M1 weak-hash
-  # acceptance).
+  # acceptance). ``nested_7z`` (M3) is emitted ONLY when true so the
+  # vast majority of catalog entries (all non-nested archives) keep
+  # their compact one-line shape and the existing harvester output
+  # bytes-equal-trees against the M67/M68 baseline.
   result = "PlatformBinary(cpu: " & cpuIdent(pb.cpu) &
     ", os: " & osIdent(pb.os) &
     ", url: " & escapeString(pb.url) &
     ", sha256: " & escapeString(pb.sha256) &
     ", sha512: " & escapeString(pb.sha512) &
     ", sha1: " & escapeString(pb.sha1) &
-    ", extract_path: " & escapeString(pb.extract_path) & ")"
+    ", extract_path: " & escapeString(pb.extract_path)
+  if pb.nested_7z:
+    result.add(", nested_7z: true")
+  # M4: msi_admin_install emitted only when true so the M67/M68 baseline
+  # round-trips byte-identical.
+  if pb.msi_admin_install:
+    result.add(", msi_admin_install: true")
+  # M9.5: archive_format_override + bin_relpath_override emitted ONLY when
+  # the per-platform override is in effect (has_archive_format_override
+  # true, or bin_relpath_override non-empty). The Windows-only M67/M68
+  # baseline never sets these — every existing catalog file round-trips
+  # byte-identical through the serializer.
+  if pb.has_archive_format_override:
+    result.add(", archive_format_override: " &
+      archiveFormatIdent(pb.archive_format_override))
+    result.add(", has_archive_format_override: true")
+  if pb.bin_relpath_override.len > 0:
+    result.add(", bin_relpath_override: @[")
+    for i, b in pb.bin_relpath_override:
+      if i > 0: result.add(", ")
+      result.add(escapeString(b))
+    result.add("]")
+  result.add(")")
+
+proc serializePreInstallAction*(pia: PreInstallAction): string =
+  result = "PreInstallAction(kind: " & preInstallActionKindIdent(pia.kind) &
+    ", source: " & escapeString(pia.source) &
+    ", target: " & escapeString(pia.target) &
+    ", recurse: " & (if pia.recurse: "true" else: "false") &
+    ", literal: " & escapeString(pia.literal) & ")"
 
 proc serializeAsCode*(vp: VersionedProvisioning): string =
   ## Emit a Nim source fragment that constructs an equivalent
@@ -515,4 +915,36 @@ proc serializeAsCode*(vp: VersionedProvisioning): string =
   for i, k in keys:
     if i > 0: result.add(", ")
     result.add(escapeString(k) & ": " & escapeString(vp.env[k]))
-  result.add("}.toTable())")
+  result.add("}.toTable()")
+  # M3: emit pre_install_actions + pre_install_unrecognized ONLY when
+  # non-empty, so the M67/M68 baseline (every existing entry has
+  # neither) round-trips byte-identical through the harvester. Newer
+  # entries with actions/unrecognized lines render an explicit
+  # multi-line tail.
+  if vp.pre_install_actions.len > 0:
+    result.add(",\n  pre_install_actions: @[\n")
+    for i, pia in vp.pre_install_actions:
+      result.add("    " & serializePreInstallAction(pia))
+      if i + 1 < vp.pre_install_actions.len:
+        result.add(",")
+      result.add("\n")
+    result.add("  ]")
+  if vp.pre_install_unrecognized.len > 0:
+    result.add(",\n  pre_install_unrecognized: @[")
+    for i, line in vp.pre_install_unrecognized:
+      if i > 0: result.add(", ")
+      result.add(escapeString(line))
+    result.add("]")
+  # M5: launcher_emit emitted ONLY when non-empty so the M67/M68 baseline
+  # (every existing entry has none) round-trips byte-identical through
+  # the harvester. Composer (the M5 target) renders an explicit
+  # multi-line tail.
+  if vp.launcher_emit.len > 0:
+    result.add(",\n  launcher_emit: @[\n")
+    for i, spec in vp.launcher_emit:
+      result.add("    " & serializeLauncherEmitSpec(spec))
+      if i + 1 < vp.launcher_emit.len:
+        result.add(",")
+      result.add("\n")
+    result.add("  ]")
+  result.add(")")

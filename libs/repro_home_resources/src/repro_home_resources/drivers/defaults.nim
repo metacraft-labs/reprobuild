@@ -209,11 +209,23 @@ proc applyUserDefault*(domain, key, valueLiteral: string;
   ## `valueChanged = true`. The recorded payload bytes are the
   ## structurally-canonicalized value so drift comparison is stable.
   when defined(macosx):
-    # Every operator-controlled argument is `quoteShell`'d (defence-
-    # in-depth layer 2; `resourceValidationError` is layer 1).
+    # The recorded payload, observed bytes, and lifecycle digest are
+    # all over the STRUCTURALLY-CANONICALIZED value (see
+    # `canonicalizeDefaultsValue`, `observeUserDefault`, and the
+    # `rkMacosUserDefault` arm of `desiredDigestFor` in
+    # `lifecycle.nim`). The value that hits disk via `defaults write`
+    # must be the same canonical form so a round-trip
+    # `defaults read` produces bytes that match the desired digest —
+    # otherwise a literal like `'Dark'` would be stored verbatim
+    # (six bytes, surrounding quotes included) and the next observe
+    # would disagree with desired even though both canonicalize to
+    # `Dark`. Every operator-controlled argument is `quoteShell`'d
+    # (defence-in-depth layer 2; `resourceValidationError` is
+    # layer 1).
+    let canonical = canonicalizeDefaultsValue(valueLiteral)
     let (output, exitCode) = execCmdEx(
       "defaults write " & quoteShell(domain) & " " & quoteShell(key) &
-      " " & quoteShell(valueLiteral))
+      " " & quoteShell(canonical))
     if exitCode != 0:
       raiseUnsupportedDomain(domain,
         "defaults write returned exit " & $exitCode & ": " &
@@ -221,7 +233,6 @@ proc applyUserDefault*(domain, key, valueLiteral: string;
         "container)")
     if restartTarget.len > 0 and valueChanged:
       discard execCmd("killall " & quoteShell(restartTarget))
-    let canonical = canonicalizeDefaultsValue(valueLiteral)
     result = newSeq[byte](canonical.len)
     for i, ch in canonical:
       result[i] = byte(ord(ch))

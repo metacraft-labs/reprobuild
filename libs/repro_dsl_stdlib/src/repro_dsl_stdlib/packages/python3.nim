@@ -6,25 +6,33 @@
 ## ``python`` manifest with ``--app-alias python=python3``; re-attach
 ## the Nix block by hand if you regenerate.
 ##
-## **Known M69 realize-time gaps.** The Scoop ``python`` manifest's
-## download URL is a self-extracting CPython installer ``.exe`` (the
-## ``#/setup.exe`` rename makes Scoop save it as ``setup.exe``);
-## extraction is gated by a hefty ``installer.script`` that runs
-## ``Expand-DarkArchive`` to crack the MSI bundle open, then
-## ``Expand-MsiArchive`` on each ``.msi`` payload. The M68 harvester
-## refinement treats ``installer.script``-only blocks as post-extract
-## hooks (consistent with how ``post_install`` is dropped), so this
-## record currently emits ``install_method = imExtract +
-## archive_format = afRaw`` — cakBuiltin would deposit the raw
-## ``setup.exe`` at the prefix root without ever extracting it.
-## M69 needs either an ``installer.script`` runner or a
-## ``afSelfExtractingMsi`` archive_format with a built-in dark/msiexec
-## flatten step.
+## **M4 (Realize-Closure-And-Catalog-Expansion spec) update**: the
+## ``install_method`` flipped from ``imExtract`` to
+## ``imInstallerNsisBundle`` so the cakBuiltin realize loop dispatches
+## through the M4 NSIS-unwrap + per-MSI dark extractor. The Scoop
+## manifest's ``installer.script`` block carries the canonical
+## Expand-DarkArchive + Expand-MsiArchive pattern; M4's harvester
+## detects this and emits ``imInstallerNsisBundle``. The realize loop:
 ##
-## The manifest also carries a ``pre_install`` hook that materializes
-## PEP 514 registry files (``install-pep-514.reg``) and a separate
-## ``post_install`` (``python -E -s -m ensurepip``). Both are dropped;
-## a freshly-realized prefix will surface ``setup.exe`` only.
+##   1. 7z-unwraps the outer NSIS shell (the upstream
+##      ``python-<ver>-amd64.exe`` is a Burn/NSIS bundle from the
+##      CPython installer team).
+##   2. Locates the inner ``.msi`` payloads (core.msi + dev.msi +
+##      doc.msi + exe.msi + lib.msi + path.msi + pip.msi + tcltk.msi +
+##      test.msi + tools.msi).
+##   3. Per-MSI dark-extracts into a per-MSI scratch dir.
+##   4. Merges every per-MSI tree into the realized prefix with
+##      conflict detection (same-relpath + different-bytes raises
+##      ``EBuiltinPrefixMergeConflict``).
+##
+## **Honest scope**: python3's NSIS bundle has an ``add-to-PATH`` side
+## effect at install time. cakBuiltin's realize DOES NOT mutate the
+## host PATH — the PATH contribution flows through
+## ``repro_home_resources`` per M69. The ``install-pep-514.reg`` /
+## ``uninstall-pep-514.reg`` registry entries from the manifest's
+## ``pre_install`` block are also NOT replayed (out of M4 allowlist
+## scope — those would require ``reg import`` which has no safe
+## allowlist analogue).
 
 import std/tables
 import repro_project_dsl
@@ -46,17 +54,18 @@ package python3:
 # Harvested from bucket: ScoopInstaller/Main
 # Manifest app: python (renamed to ``python3`` via --app-alias)
 # Versions (newest-first): 3.14.5
+# M4 amendment: install_method = imInstallerNsisBundle (was imExtract).
 # ---------------------------------------------------------------------------
 
 let python3Catalog* = @[
   VersionedProvisioning(
     version: "3.14.5",
-    archive_format: afRaw,
-    install_method: imExtract,
-    bin_relpath: @["python.exe", "Lib\\idlelib\\idle.bat", "Lib\\idlelib\\idle.bat"],
+    archive_format: afInstallerNsis,
+    install_method: imInstallerNsisBundle,
+    bin_relpath: @["python.exe"],
     platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://www.python.org/ftp/python/3.14.5/python-3.14.5-amd64.exe#/setup.exe", sha256: "f9c09f5ed6f796fd1a8bc5ddfa41715a494b453c4781f0e35d5077cf9fa58f6d", sha512: "", extract_path: ""),
-      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://www.python.org/ftp/python/3.14.5/python-3.14.5-arm64.exe#/setup.exe", sha256: "f4a7df6ab4fa375cd7296127ff6b9a14fbd1313f51864ce020185deba10144fa", sha512: "", extract_path: "")
+      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://www.python.org/ftp/python/3.14.5/python-3.14.5-amd64.exe", sha256: "f9c09f5ed6f796fd1a8bc5ddfa41715a494b453c4781f0e35d5077cf9fa58f6d", sha512: "", extract_path: "SourceDir"),
+      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://www.python.org/ftp/python/3.14.5/python-3.14.5-arm64.exe", sha256: "f4a7df6ab4fa375cd7296127ff6b9a14fbd1313f51864ce020185deba10144fa", sha512: "", extract_path: "SourceDir")
     ],
     installer_args: @[],
     pacman_packages: @[],

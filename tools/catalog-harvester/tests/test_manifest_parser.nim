@@ -402,3 +402,124 @@ suite "M66 — Scoop manifest parser":
     let p = parseScoopManifest("x", raw, @["x.exe"])
     check p.ok
     check p.entry.bin_relpath == @["x.exe"]
+
+  test "M4: innosetup manifest emits imInstallerInnoSetup":
+    ## A Scoop manifest carrying ``innosetup: true`` (with no
+    ## ``installer:`` block, matching the freepascal shape) translates
+    ## to ``install_method == imInstallerInnoSetup`` and emits the
+    ## ``dkInstallMethodInnoSetup`` diagnostic so operators can grep
+    ## for it. The no-innosetup-key regression guard is the
+    ## ``bucket-simple`` case (already covered above): without the
+    ## marker, install_method stays imExtract.
+    let raw = readFixture("bucket-innosetup", "innofakepascal")
+    let p = parseScoopManifest("innofakepascal", raw)
+    check p.ok
+    check p.entry.install_method == imInstallerInnoSetup
+    check hasDiagnostic(p.diagnostics, dkInstallMethodInnoSetup)
+    # Validator accepts the new variant (M4 schema extension).
+    check validateVersionedProvisioning(p.entry).len == 0
+
+  test "M4: msi URL emits imInstallerMsi (was imExtract pre-M4)":
+    ## A Scoop manifest with a ``.msi`` URL and no installer block
+    ## translates to ``install_method == imInstallerMsi`` (so the
+    ## cakBuiltin realize loop dispatches through dark.exe) instead
+    ## of the pre-M4 default of ``imExtract`` (which would fail at
+    ## apply time because afInstallerMsi is incompatible with
+    ## imExtract). Emits the ``dkInstallMethodMsi`` diagnostic.
+    let raw = readFixture("bucket-msi", "fakemsitool")
+    let p = parseScoopManifest("fakemsitool", raw)
+    check p.ok
+    check p.entry.archive_format == afInstallerMsi
+    check p.entry.install_method == imInstallerMsi
+    check hasDiagnostic(p.diagnostics, dkInstallMethodMsi)
+    check p.entry.platforms[0].extract_path == "PFiles64\\Meson".replace(
+      "Meson", "FakeMsi")
+    check validateVersionedProvisioning(p.entry).len == 0
+
+  test "M4: installer.script with Expand-DarkArchive emits imInstallerNsisBundle":
+    ## A Scoop manifest whose installer.script contains
+    ## Expand-DarkArchive / Expand-MsiArchive (the python3 + swift
+    ## shape) translates to ``install_method == imInstallerNsisBundle``.
+    ## Emits the ``dkInstallMethodNsisBundle`` diagnostic and the
+    ## allowlisted script lines land in pre_install_actions.
+    let raw = readFixture("bucket-nsis-bundle", "fakebundle")
+    let p = parseScoopManifest("fakebundle", raw)
+    check p.ok
+    check p.entry.install_method == imInstallerNsisBundle
+    check hasDiagnostic(p.diagnostics, dkInstallMethodNsisBundle)
+    # The harvester translated both Expand-{Dark,Msi}Archive script
+    # lines into structured pre_install_actions.
+    var sawDark = false
+    var sawMsi = false
+    for action in p.entry.pre_install_actions:
+      if action.kind == piaExpandDark: sawDark = true
+      if action.kind == piaExpandMsi: sawMsi = true
+    check sawDark
+    check sawMsi
+    check validateVersionedProvisioning(p.entry).len == 0
+
+  test "M4: regression — bucket-simple manifest stays imExtract":
+    ## Regression guard: a manifest WITHOUT innosetup/MSI/installer-
+    ## script markers continues to translate to imExtract via the
+    ## pre-M4 dispatch.
+    let raw = readFixture("bucket-simple", "hello")
+    let p = parseScoopManifest("hello", raw)
+    check p.ok
+    check p.entry.install_method == imExtract
+    check (not hasDiagnostic(p.diagnostics, dkInstallMethodInnoSetup))
+    check (not hasDiagnostic(p.diagnostics, dkInstallMethodMsi))
+    check (not hasDiagnostic(p.diagnostics, dkInstallMethodNsisBundle))
+
+  test "M5: composer-shaped pre_install emits launcher_emit slice":
+    ## A Scoop manifest carrying the composer-style pre_install (& php
+    ## + composer.phar + Add-Content to $dir\composer.ps1) translates
+    ## to a launcher_emit slice instead of dropping every line into
+    ## pre_install_unrecognized. The emitted bin_relpath is the
+    ## .ps1+.cmd launcher pair (not the .phar payload), so the schema
+    ## validator's launcher_name-in-bin_relpath sanity check passes.
+    ## Tests both the recognizer + the bin_relpath override + the
+    ## diagnostic emission.
+    let raw = """{
+      "version": "2.10.0",
+      "url": "https://getcomposer.org/download/2.10.0/composer.phar",
+      "hash": "a346538851988ead111d11e3cbd7d372eeba44abd0af412e09890d3c21ea6c31",
+      "pre_install": [
+        "@(",
+        "    'if ($args.length -eq 1 -and ($args -eq \"selfupdate\" -or $args -eq \"self-update\")) { & scoop update composer }'",
+        "    'else { & php (Join-Path $PSScriptRoot \"composer.phar\") @args }'",
+        ") | Add-Content -Path \"$dir\\composer.ps1\""
+      ],
+      "bin": "composer.ps1"
+    }"""
+    let p = parseScoopManifest("composer", raw)
+    check p.ok
+    check p.entry.launcher_emit.len == 1
+    check p.entry.launcher_emit[0].kind == lekPhar
+    check p.entry.launcher_emit[0].target == "composer.phar"
+    check p.entry.launcher_emit[0].interpreter_package_id == "php"
+    check p.entry.launcher_emit[0].launcher_name == "composer"
+    # bin_relpath was overridden to the .ps1+.cmd pair.
+    check p.entry.bin_relpath == @["bin/composer.ps1", "bin/composer.cmd"]
+    # Diagnostic emitted.
+    check hasDiagnostic(p.diagnostics, dkLauncherEmitRecognized)
+    # Validator accepts the new shape.
+    check validateVersionedProvisioning(p.entry).len == 0
+
+  test "M5: non-composer pre_install does NOT emit launcher_emit":
+    ## Regression guard: a pre_install block that does NOT carry the
+    ## .phar + .ps1 + & php trio (e.g. a Set-Content for a config file)
+    ## stays in the existing pre_install_actions / unrecognized path
+    ## and emits NO launcher_emit slice.
+    let raw = """{
+      "version": "1.0.0",
+      "url": "https://example.test/x.zip",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "pre_install": [
+        "Set-Content -Path \"$dir\\etc\\config.ini\" -Value 'key=value'"
+      ],
+      "bin": "x.exe"
+    }"""
+    let p = parseScoopManifest("x", raw)
+    check p.ok
+    check p.entry.launcher_emit.len == 0
+    check (not hasDiagnostic(p.diagnostics, dkLauncherEmitRecognized))

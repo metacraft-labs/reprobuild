@@ -36,31 +36,129 @@ import std/[os, parseopt, strutils, tables]
 import src/manifest_parser
 import src/bucket_clone
 import src/nim_emit
+import src/msys2_source
+import src/gh_releases_source
 import repro_dsl_stdlib/packages_schema
 
 const HelpText = """
-catalog-harvester — Scoop bucket harvester for the reprobuild M63 catalog.
+catalog-harvester — multi-source harvester for the reprobuild M63 catalog.
 
 USAGE
   catalog-harvester <subcommand> [options]
 
 SUBCOMMANDS
-  harvest   Clone Scoop bucket(s) and emit packages/<tool>.nim files.
+  harvest   Harvest one or more packages and emit packages/<tool>.nim files.
+            Default source is Scoop bucket cloning; the M6 ``--source
+            msys2:<package>`` shape pulls from the MSYS2 pacman repository
+            instead.
   inspect   Translate one manifest and print the result (no write).
   verify    Re-harvest a checked-in packages/<tool>.nim and assert
             byte-identical output (drift detector).
+
+SOURCE SELECTION
+  --source scoop                       (default) Scoop bucket cloning.
+  --source msys2:<package>             (M6) MSYS2 pacman repository.
+                                       <package> is either a full pacman
+                                       name (mingw-w64-x86_64-ocaml) or
+                                       a bare shorthand (ocaml) that the
+                                       harvester auto-prefixes per --env.
+  --env <mingw64|ucrt64|clang64|       (M6) MSYS2 environment to harvest
+        mingw32|msys>                  from. Defaults to mingw64.
+  --version <pin>                      (M6 / M7) Pin a specific upstream
+                                       version (e.g. 5.4.1 for MSYS2; the
+                                       extracted version for gh-releases).
+                                       Default: the latest version.
+  --source gh-releases:<org>/<repo>    (M7) GitHub Releases API. Harvests
+                                       the latest non-prerelease release
+                                       (or the --version pin), picks the
+                                       asset matching --asset-pattern,
+                                       and emits a VersionedProvisioning.
+  --asset-pattern <regex>              (M7) REQUIRED for gh-releases.
+                                       Regex matched against each release
+                                       asset's name. The match is ALWAYS
+                                       anchored full-name (matchFull):
+                                       '.zip' will NOT match 'foo.zip' —
+                                       use '.*\.zip' instead. Zero matches
+                                       OR multiple matches both error
+                                       (the harvester never silently
+                                       picks the first match). Supported
+                                       regex subset: literals, '.', '*',
+                                       '+', '?', '^', '$', '\d', '\w',
+                                       '\s' (and uppercase negations),
+                                       '[abc]' / '[a-z]' / '[^abc]'
+                                       classes, and '(...)' capture
+                                       groups. Alternation '|',
+                                       non-greedy quantifiers,
+                                       backreferences, and
+                                       lookahead/behind are NOT
+                                       supported (M7 ships an in-process
+                                       matcher to avoid a runtime PCRE
+                                       DLL dependency). Example:
+                                       'alr-.*-bin-x86_64-windows\.zip'.
+  --version-extract <regex>            (M7) OPTIONAL regex with one
+                                       capture group extracting the
+                                       version from the tag (e.g.
+                                       '^v(.+)$' strips the leading 'v').
+                                       Default: tag verbatim.
+  --prerelease                         (M7) Include prereleases in the
+                                       candidate pool. Default: skip.
+  --output-app <name>                  (M7) Override the package name
+                                       written to packages/<name>.nim.
+                                       Default: the <repo> tail.
+  --bin-relpath <path>                 (M7) Repeatable. The realized
+                                       binary path under the prefix (e.g.
+                                       'bin/alr.exe'). REQUIRED because
+                                       M7 does not introspect the
+                                       downloaded archive.
+  --extract-path <path>                (M7) OPTIONAL inner-dir flatten
+                                       path. Used when the archive ships
+                                       its payload under a top-level
+                                       subdir (e.g. 'foo-1.2.3/'). The
+                                       realize hook strips it.
+  --platform-os <windows|linux|        (M7) OPTIONAL override of the
+        macos|any>                     inferred OS tag. Asset-name
+                                       inference looks for the literal
+                                       'windows' / 'linux' / 'macos' /
+                                       'darwin' tokens; M8 found that
+                                       winlibs (brechtsanders/winlibs_mingw)
+                                       and llvm-mingw (mstorsjo/llvm-mingw)
+                                       asset names omit the OS token
+                                       entirely, so passing
+                                       '--platform-os windows' explicitly
+                                       is REQUIRED for those harvests.
+  --platform-cpu <x86_64|aarch64|      (M7) OPTIONAL override of the
+        x86|any>                       inferred CPU tag.
+
+RATE LIMITS (gh-releases)
+  The GitHub API rate-limits at 60 requests/hour unauthenticated and
+  5000 requests/hour authenticated. The harvester forwards GITHUB_TOKEN
+  from the environment when set. Operators harvesting more than a few
+  catalogs in one session should export a token (the public_repo scope
+  is sufficient for public-repo harvests).
+
+RUNTIME REQUIREMENTS (gh-releases / msys2)
+  The harvester opens HTTPS connections to api.github.com and to MSYS2
+  mirrors. Nim's std/httpclient dynamically loads ``libcrypto-1_1-x64.dll``
+  + ``libssl-1_1-x64.dll`` on Windows x64; the reprobuild dev shell
+  (``repo-workspaces/env.ps1``) puts Nim's bin dir on PATH, which ships
+  both. If you invoke the harvester from a stripped-down shell you'll
+  see ``SSL support is not available`` — re-enter the dev shell.
 
 COMMON OPTIONS
   --bucket <spec>           Repeatable. <spec> is one of:
                               * <org>/<repo>      (GitHub shortname)
                               * https://… URL    (git clone URL)
                               * /path/to/local/  (local bucket dir)
+                            Scoop source only.
   --app <name>              Repeatable. If omitted, every manifest in
-                            the bucket is harvested.
+                            the bucket is harvested. For --source
+                            msys2:, --app overrides the catalog
+                            identifier (defaults to the package name).
   --output-dir <path>       For 'harvest': output directory; defaults
                             to libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/
   --version-history <N>     For 'harvest': walk N historical versions
-                            (default: 1). N > 1 unshallows the clone.
+                            (Scoop source only; default: 1). N > 1
+                            unshallows the clone.
   --dry-run                 For 'harvest': print what would be written
                             (file paths + first 10 lines) and exit 0.
   --no-refresh              Skip 'git pull' for cached buckets.
@@ -85,19 +183,51 @@ VERIFY-ONLY OPTIONS
 EXIT CODES
   0 = OK
   2 = bad CLI invocation
-  3 = harvest error (one or more manifests skipped or invalid)
+  3 = harvest error (one or more packages skipped or invalid)
   4 = verify drift detected
 
 ENVIRONMENT
-  XDG_CACHE_HOME / LOCALAPPDATA      Override bucket clone cache root.
+  XDG_CACHE_HOME / LOCALAPPDATA      Override bucket / msys2 / gh-releases
+                                     cache root.
+  REPRO_M6_INDEX_FIXTURE_DIR         (M6) Override the MSYS2 repository
+                                     URL with a local fixture directory
+                                     (used by the hermetic test suite).
+  REPRO_M7_API_FIXTURE_DIR           (M7) Override the GitHub Releases
+                                     API endpoint with a local fixture
+                                     directory (used by the hermetic
+                                     test suite).
+  GITHUB_TOKEN                       (M7) When set, the harvester forwards
+                                     it as Bearer auth on the GitHub API,
+                                     raising the rate limit from 60/hour
+                                     to 5000/hour.
 """
 
 type
   Subcommand = enum
     scNone, scHarvest, scInspect, scVerify
 
+  HarvestSource = enum
+    hsScoop = "scoop"
+    hsMsys2 = "msys2"
+    hsGhReleases = "gh-releases"
+
   CliOptions = object
     sub: Subcommand
+    source: HarvestSource          ## M6/M7: harvester source selector
+    msys2Packages: seq[string]     ## M6: --source msys2:<package> tails
+    msys2Env: Msys2Env             ## M6: --env (default mingw64)
+    msys2VersionPin: string        ## M6: --version <pin>
+    ghOrg: string                  ## M7: <org> from --source gh-releases:<org>/<repo>
+    ghRepo: string                 ## M7: <repo> from --source gh-releases:<org>/<repo>
+    ghAssetPattern: string         ## M7: --asset-pattern regex
+    ghVersionExtract: string       ## M7: --version-extract regex
+    ghVersionPin: string           ## M7: --version <pin> (post-extract)
+    ghOutputApp: string            ## M7: --output-app override
+    ghBinRelpath: seq[string]      ## M7: --bin-relpath (repeatable)
+    ghExtractPath: string          ## M7: --extract-path
+    ghIncludePrereleases: bool     ## M7: --prerelease flag
+    ghPlatformOs: PlatformOs       ## M7: --platform-os override (poAny = infer)
+    ghPlatformCpu: PlatformCpu     ## M7: --platform-cpu override (pcAny = infer)
     buckets: seq[string]
     apps: seq[string]
     outputDir: string
@@ -125,6 +255,10 @@ type
 
 proc parseCli(argv: openArray[string]): CliOptions =
   result.sub = scNone
+  result.source = hsScoop
+  result.msys2Env = meMingw64
+  result.ghPlatformOs = poAny
+  result.ghPlatformCpu = pcAny
   result.outputDir = "libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/"
   result.versionHistory = 1
 
@@ -132,7 +266,7 @@ proc parseCli(argv: openArray[string]): CliOptions =
   # / ``--key=value``. Flags that take no value are declared in
   # ``longNoVal`` so the parser knows to leave subsequent positionals
   # alone for them.
-  const longNoVal = @["dry-run", "no-refresh", "help"]
+  const longNoVal = @["dry-run", "no-refresh", "help", "prerelease"]
 
   var positionalSeen = false
   var p = initOptParser(@argv,
@@ -161,6 +295,95 @@ proc parseCli(argv: openArray[string]): CliOptions =
       case p.key
       of "bucket": result.buckets.add(p.val)
       of "app", "tool": result.apps.add(p.val)
+      of "source":
+        # ``--source scoop`` (default) | ``--source msys2:<package>`` (M6)
+        # | ``--source gh-releases:<org>/<repo>`` (M7).
+        let raw = p.val.strip()
+        let lower = raw.toLowerAscii()
+        if lower == "scoop":
+          result.source = hsScoop
+        elif lower == "msys2":
+          result.source = hsMsys2
+        elif lower.startsWith("msys2:"):
+          result.source = hsMsys2
+          let pkg = raw[6 .. ^1].strip()
+          if pkg.len > 0: result.msys2Packages.add(pkg)
+        elif lower == "gh-releases":
+          result.source = hsGhReleases
+        elif lower.startsWith("gh-releases:"):
+          result.source = hsGhReleases
+          let coords = raw[12 .. ^1].strip()
+          let slash = coords.find('/')
+          if slash <= 0 or slash == coords.len - 1:
+            stderr.writeLine("error: --source gh-releases:<org>/<repo> " &
+              "requires <org>/<repo>; got '" & coords & "'")
+            quit(2)
+          result.ghOrg = coords[0 ..< slash]
+          result.ghRepo = coords[slash + 1 .. ^1]
+        else:
+          stderr.writeLine("error: --source must be one of " &
+            "scoop, msys2, msys2:<package>, gh-releases:<org>/<repo>; " &
+            "got '" & p.val & "'")
+          quit(2)
+      of "env":
+        case p.val.strip().toLowerAscii()
+        of "mingw64": result.msys2Env = meMingw64
+        of "ucrt64":  result.msys2Env = meUcrt64
+        of "clang64": result.msys2Env = meClang64
+        of "mingw32": result.msys2Env = meMingw32
+        of "msys":    result.msys2Env = meMsys
+        else:
+          stderr.writeLine("error: --env must be one of mingw64, " &
+            "ucrt64, clang64, mingw32, msys; got '" & p.val & "'")
+          quit(2)
+      of "version":
+        # MSYS2 source: pin a specific upstream version (5.4.1 etc.).
+        # gh-releases source: pin a specific extracted version (2.1.1).
+        let pin = p.val.strip()
+        result.msys2VersionPin = pin
+        result.ghVersionPin = pin
+      of "asset-pattern":
+        # M7: regex applied to release.assets[].name; required for the
+        # gh-releases source.
+        result.ghAssetPattern = p.val
+      of "version-extract":
+        # M7: regex with one capture group; default is tag verbatim.
+        result.ghVersionExtract = p.val
+      of "prerelease":
+        # M7: include pre-release entries in the candidate pool.
+        result.ghIncludePrereleases = true
+      of "output-app":
+        # M7: override the package name written to packages/<name>.nim.
+        result.ghOutputApp = p.val.strip()
+      of "bin-relpath":
+        # M7: repeatable; the realized binary path under the prefix.
+        let val = p.val.strip()
+        if val.len > 0:
+          result.ghBinRelpath.add(val)
+      of "extract-path":
+        # M7: inner-dir flatten path (when the archive ships its payload
+        # under a top-level subdir).
+        result.ghExtractPath = p.val
+      of "platform-os":
+        case p.val.strip().toLowerAscii()
+        of "windows": result.ghPlatformOs = poWindows
+        of "linux":   result.ghPlatformOs = poLinux
+        of "macos":   result.ghPlatformOs = poMacos
+        of "any":     result.ghPlatformOs = poAny
+        else:
+          stderr.writeLine("error: --platform-os must be one of " &
+            "windows, linux, macos, any; got '" & p.val & "'")
+          quit(2)
+      of "platform-cpu":
+        case p.val.strip().toLowerAscii()
+        of "x86_64", "x64", "amd64": result.ghPlatformCpu = pcX86_64
+        of "aarch64", "arm64":       result.ghPlatformCpu = pcAArch64
+        of "x86", "i686", "i386":    result.ghPlatformCpu = pcX86
+        of "any":                    result.ghPlatformCpu = pcAny
+        else:
+          stderr.writeLine("error: --platform-cpu must be one of " &
+            "x86_64, aarch64, x86, any; got '" & p.val & "'")
+          quit(2)
       of "output-dir", "out": result.outputDir = p.val
       of "version-history", "with-history":
         try: result.versionHistory = parseInt(p.val)
@@ -222,6 +445,77 @@ proc parseCli(argv: openArray[string]): CliOptions =
 proc writeDiagnostics(diagnostics: openArray[Diagnostic]) =
   for d in diagnostics:
     stderr.writeLine($d.kind & " [" & d.app & "]: " & d.detail)
+
+# ---------------------------------------------------------------------------
+# Output-app-name validation (Nim-identifier check)
+# ---------------------------------------------------------------------------
+
+proc isValidNimIdent(name: string): bool =
+  ## Nim identifier rules (matchFull ``^[A-Za-z_][A-Za-z0-9_]*$``):
+  ## first char is a letter or underscore; remaining chars are
+  ## alphanumerics or underscores. Hyphens, dots, leading digits, and
+  ## the empty string are all rejected.
+  if name.len == 0: return false
+  if name[0] notin {'a'..'z', 'A'..'Z', '_'}: return false
+  for ch in name:
+    if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}: return false
+  return true
+
+proc validateResolvedAppName(name: string) =
+  ## Fail fast (exit 2) if the resolved output app name (post-alias) is
+  ## not a usable Nim identifier. The harvester writes
+  ## ``packages/<name>.nim`` containing ``let <name>Catalog* = @[...]``;
+  ## a name like ``7zip`` would emit ``7zipCatalog`` which fails
+  ## ``nim check``. M8 reviewer flagged this for ``7zip`` /
+  ## ``dotnet-sdk``; the remedy is ``--app-alias <bad>=<good>``.
+  if isValidNimIdent(name): return
+  let reason =
+    if name.len == 0:
+      "an empty name is not a Nim identifier"
+    elif name[0] in {'0'..'9'}:
+      "Nim identifiers cannot start with a digit"
+    elif name[0] notin {'a'..'z', 'A'..'Z', '_'}:
+      "Nim identifiers must start with a letter or underscore"
+    else:
+      "Nim identifiers may only contain letters, digits, and underscores"
+  stderr.writeLine("repro_catalog_harvester: invalid output app name '" &
+    name & "' (" & reason & ").")
+  stderr.writeLine("  Re-run with --app-alias to specify a valid identifier, e.g.:")
+  stderr.writeLine("    --app-alias " & name & "=" & "sevenzip")
+  quit(2)
+
+proc validateResolvedAppNames(opts: CliOptions) =
+  ## Validate every output app name we can resolve BEFORE source-mode
+  ## dispatch — fail-fast before any network I/O or bucket clone.
+  ##
+  ## For the Scoop source, each ``--app <name>`` resolves through
+  ## ``opts.appAliases`` (when present) to the emitted catalog
+  ## identifier. We validate the resolved name. (Apps discovered by
+  ## bucket scan when no ``--app`` is given are validated lazily by
+  ## the per-emit code path; this proc only catches the explicit-flag
+  ## case the M8 bug exercised.)
+  ##
+  ## For the MSYS2 source, the resolved name is ``opts.apps[0]`` when
+  ## given (overriding the stripped package shorthand), else the
+  ## bare-package shorthand. Validate the explicit ``--app`` override.
+  ##
+  ## For the gh-releases source, the resolved name is
+  ## ``opts.ghOutputApp`` when given, else ``opts.ghRepo``. Validate
+  ## whichever is going to be used.
+  case opts.source
+  of hsScoop:
+    for app in opts.apps:
+      let resolved =
+        if app in opts.appAliases: opts.appAliases[app] else: app
+      validateResolvedAppName(resolved)
+  of hsMsys2:
+    if opts.apps.len >= 1:
+      validateResolvedAppName(opts.apps[0])
+  of hsGhReleases:
+    let resolved =
+      if opts.ghOutputApp.len > 0: opts.ghOutputApp else: opts.ghRepo
+    if resolved.len > 0:
+      validateResolvedAppName(resolved)
 
 # ---------------------------------------------------------------------------
 # Harvest one app (potentially multi-version)
@@ -344,7 +638,172 @@ proc sortCatalog(items: var seq[VersionedProvisioning]) =
 # Subcommands
 # ---------------------------------------------------------------------------
 
+proc cmdHarvestMsys2(opts: CliOptions): int =
+  ## M6: harvest one or more packages from an MSYS2 pacman repository.
+  ## Each ``--source msys2:<pkg>`` invocation contributes one package
+  ## to ``opts.msys2Packages``; a multi-package run reuses the same
+  ## ``--env`` selection.
+  if opts.msys2Packages.len == 0:
+    stderr.writeLine("error: --source msys2:<package> requires at " &
+      "least one package name. Pass e.g. " &
+      "'--source msys2:ocaml --env mingw64'.")
+    return 2
+  if opts.outputDir.len == 0:
+    stderr.writeLine("error: --output-dir is required")
+    return 2
+  if not opts.dryRun:
+    createDir(opts.outputDir)
+  var anyError = false
+  for packageHint in opts.msys2Packages:
+    # Pick the catalog tool identifier: the operator's --app overrides
+    # the default (the bare package name minus the env prefix).
+    var toolName = packageHint
+    if toolName.startsWith("mingw-w64-"):
+      # Strip the longest matching env prefix so e.g.
+      # ``mingw-w64-x86_64-ocaml`` -> ``ocaml``.
+      let envPrefix = envPackagePrefix(opts.msys2Env)
+      if envPrefix.len > 0 and toolName.startsWith(envPrefix):
+        toolName = toolName[envPrefix.len .. ^1]
+    if opts.apps.len == 1:
+      toolName = opts.apps[0]
+    elif opts.apps.len > 1:
+      stderr.writeLine("error: --source msys2 with multiple --app " &
+        "renames is ambiguous; pass exactly one --app or none")
+      return 2
+    var entry: VersionedProvisioning
+    try:
+      entry = harvestMsys2Package(opts.msys2Env, packageHint, toolName,
+        opts.msys2VersionPin)
+    except Msys2HarvestError as err:
+      stderr.writeLine("error: MSYS2 harvest of '" & packageHint &
+        "' (env=" & $opts.msys2Env & ") failed: " & err.msg)
+      anyError = true
+      continue
+    # Schema validation — surface any issues before writing the file.
+    var schemaWarnings: seq[string] = @[]
+    let schemaErrors = validateVersionedProvisioningEx(entry, schemaWarnings)
+    for w in schemaWarnings:
+      stderr.writeLine("WSchema [" & toolName & "]: " & w)
+    if schemaErrors.len > 0:
+      stderr.writeLine("error: harvested entry for '" & toolName &
+        "' failed schema validation:")
+      for e in schemaErrors:
+        stderr.writeLine("  - " & e)
+      anyError = true
+      continue
+    let bucketSpec = "msys2:" & $opts.msys2Env & "/" & packageHint
+    let body = emitCatalogFile(toolName, bucketSpec, @[entry])
+    let outPath = opts.outputDir / (toolName & ".nim")
+    if opts.dryRun:
+      echo "DRY-RUN would write " & outPath & " (version=" &
+        entry.version & ")"
+      var n = 0
+      for ln in body.splitLines:
+        if n >= 10: break
+        echo "    " & ln
+        inc n
+    else:
+      writeFile(outPath, body)
+      echo "harvested " & toolName & " " & entry.version & " -> " & outPath
+  if anyError: return 3
+  return 0
+
+proc cmdHarvestGhReleases(opts: CliOptions): int =
+  ## M7: harvest one (org, repo, asset-pattern) tuple from the GitHub
+  ## Releases API. Emits packages/<output-app or repo>.nim.
+  if opts.ghOrg.len == 0 or opts.ghRepo.len == 0:
+    stderr.writeLine("error: --source gh-releases:<org>/<repo> requires " &
+      "an <org>/<repo> coordinate (e.g. 'alire-project/alire').")
+    return 2
+  if opts.ghAssetPattern.len == 0:
+    stderr.writeLine("error: --asset-pattern is required for the " &
+      "gh-releases source (the harvester does not auto-discover the " &
+      "right asset). Example: --asset-pattern 'alr-.*-windows-x86_64\\.zip'")
+    return 2
+  if opts.ghBinRelpath.len == 0:
+    stderr.writeLine("error: --bin-relpath is required for the " &
+      "gh-releases source (M7 does not introspect the downloaded " &
+      "archive). Example: --bin-relpath bin/alr.exe")
+    return 2
+  if opts.outputDir.len == 0:
+    stderr.writeLine("error: --output-dir is required")
+    return 2
+  if not opts.dryRun:
+    createDir(opts.outputDir)
+
+  let toolName =
+    if opts.ghOutputApp.len > 0: opts.ghOutputApp
+    else: opts.ghRepo
+  # Sanity-check toolName looks like a Nim identifier head: leading
+  # letter/underscore, only [A-Za-z0-9_] thereafter. (Mirrors the
+  # --app-alias check.)
+  if toolName.len == 0 or
+     toolName[0] notin {'a'..'z', 'A'..'Z', '_'}:
+    stderr.writeLine("error: derived tool name '" & toolName &
+      "' is not a valid Nim identifier head. Pass --output-app <name> " &
+      "to override.")
+    return 2
+  for ch in toolName:
+    if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+      stderr.writeLine("error: derived tool name '" & toolName &
+        "' contains invalid identifier character '" & $ch &
+        "'. Pass --output-app <name> to override.")
+      return 2
+
+  let harvestOpts = GhHarvestOpts(
+    org: opts.ghOrg,
+    repo: opts.ghRepo,
+    assetPattern: opts.ghAssetPattern,
+    versionExtract: opts.ghVersionExtract,
+    versionPin: opts.ghVersionPin,
+    includePrereleases: opts.ghIncludePrereleases,
+    overrideOs: opts.ghPlatformOs,
+    overrideCpu: opts.ghPlatformCpu,
+    binRelpath: opts.ghBinRelpath,
+    extractPath: opts.ghExtractPath)
+
+  var entry: VersionedProvisioning
+  try:
+    entry = harvestGhRelease(harvestOpts)
+  except GhRateLimitError as err:
+    stderr.writeLine("error: " & err.msg)
+    return 3
+  except GhReleasesHarvestError as err:
+    stderr.writeLine("error: gh-releases harvest of '" & opts.ghOrg &
+      "/" & opts.ghRepo & "' failed: " & err.msg)
+    return 3
+
+  var schemaWarnings: seq[string] = @[]
+  let schemaErrors = validateVersionedProvisioningEx(entry, schemaWarnings)
+  for w in schemaWarnings:
+    stderr.writeLine("WSchema [" & toolName & "]: " & w)
+  if schemaErrors.len > 0:
+    stderr.writeLine("error: harvested entry for '" & toolName &
+      "' failed schema validation:")
+    for e in schemaErrors:
+      stderr.writeLine("  - " & e)
+    return 3
+
+  let bucketSpec = "gh-releases:" & opts.ghOrg & "/" & opts.ghRepo
+  let body = emitCatalogFile(toolName, bucketSpec, @[entry])
+  let outPath = opts.outputDir / (toolName & ".nim")
+  if opts.dryRun:
+    echo "DRY-RUN would write " & outPath & " (version=" & entry.version & ")"
+    var n = 0
+    for ln in body.splitLines:
+      if n >= 10: break
+      echo "    " & ln
+      inc n
+  else:
+    writeFile(outPath, body)
+    echo "harvested " & toolName & " " & entry.version & " -> " & outPath
+  return 0
+
 proc cmdHarvest(opts: CliOptions): int =
+  if opts.source == hsMsys2:
+    return cmdHarvestMsys2(opts)
+  if opts.source == hsGhReleases:
+    return cmdHarvestGhReleases(opts)
   if opts.buckets.len == 0:
     stderr.writeLine("error: --bucket is required for 'harvest'")
     return 2
@@ -505,7 +964,12 @@ proc main(): int =
   of scNone:
     echo HelpText
     return 0
-  of scHarvest: return cmdHarvest(opts)
+  of scHarvest:
+    # M8 follow-up: fail fast on invalid-Nim-identifier output app
+    # names BEFORE any source-mode dispatch (so we don't clone /
+    # download anything just to emit uncompilable .nim).
+    validateResolvedAppNames(opts)
+    return cmdHarvest(opts)
   of scInspect: return cmdInspect(opts)
   of scVerify: return cmdVerify(opts)
 

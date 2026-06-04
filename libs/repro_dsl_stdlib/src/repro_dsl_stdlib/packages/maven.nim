@@ -13,6 +13,18 @@
 ## table and the cakBuiltin realizer would emit no ``MAVEN_HOME``
 ## resource. Re-attach this ``env`` entry by hand if you regenerate.
 ## Mirrors the M67 ruby / M68 nim merged-files pattern.
+##
+## **M9.5 merge note (hand-edited):** added a ``(pcX86_64, poLinux)``
+## platform slice manually (Maven ships on
+## ``archive.apache.org/dist/maven/``, not GitHub Releases — the M7
+## gh-releases harvester doesn't apply). URL pattern:
+## ``apache-maven-<ver>-bin.tar.gz``; sha512 (Apache mirror's
+## canonical digest) lifted from the upstream sidecar. archive_format_override
+## = afTarGz; the maven tarball ships a universal cross-platform Java
+## distribution under ``apache-maven-<ver>/``; the Linux launcher is
+## ``bin/mvn`` (the same script that's already in the Windows slice's
+## bin_relpath; the .cmd is windows-specific). Maven is a portable
+## Java app; glibc floor is whatever the underlying JDK enforces.
 
 import std/tables
 import repro_dsl_stdlib/packages_schema
@@ -25,7 +37,10 @@ let mavenCatalog* = @[
     install_method: imExtract,
     bin_relpath: @["bin/mvn.cmd", "bin/mvn"],
     platforms: @[
-      PlatformBinary(cpu: pcAny, os: poWindows, url: "https://dlcdn.apache.org/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.zip", sha256: "", sha512: "ed41650d42485cfc243fad22158caf9cbb5dc408ce7a09ddb94dd42a019de929ca43065bfa450612cf12bf78b5cafa3884b96c090de326ff590448c933454af3", extract_path: "apache-maven-3.9.16")
+      PlatformBinary(cpu: pcAny, os: poWindows, url: "https://dlcdn.apache.org/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.zip", sha256: "", sha512: "ed41650d42485cfc243fad22158caf9cbb5dc408ce7a09ddb94dd42a019de929ca43065bfa450612cf12bf78b5cafa3884b96c090de326ff590448c933454af3", extract_path: "apache-maven-3.9.16"),
+      # M9.5: Linux x86_64 slice. archive_format_override = afTarGz (vs.
+      # Windows afZip); bin_relpath_override drops the .cmd entry.
+      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz", sha256: "", sha512: "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6", sha1: "", extract_path: "apache-maven-3.9.16", archive_format_override: afTarGz, has_archive_format_override: true, bin_relpath_override: @["bin/mvn"])
     ],
     installer_args: @[],
     pacman_packages: @[],

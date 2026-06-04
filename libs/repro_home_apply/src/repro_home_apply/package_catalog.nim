@@ -36,7 +36,7 @@
 ## table is built lazily and memoized inside `ProductionCatalog`), not
 ## once per package.
 
-import std/[json, options, os, osproc, strutils, tables]
+import std/[json, options, os, osproc, sets, strutils, tables]
 from repro_core/paths import extendedPath
 
 # M64: the cakBuiltin adapter resolves against the M63 VersionedProvisioning
@@ -145,6 +145,26 @@ type
     pacmanPackages*: seq[string]
     bootstrapArgv*: seq[string]
     envSubstitutions*: seq[tuple[name, value: string]]
+    # M3 (Realize-Closure-And-Catalog-Expansion) — residual 7z family
+    # metadata. ``nested7z`` is per-platform (carried out of the
+    # selected ``PlatformBinary``); ``preInstallActions`` and
+    # ``preInstallUnrecognized`` are per-version (cross-platform).
+    nested7z*: bool
+    preInstallActions*: seq[PreInstallAction]
+    preInstallUnrecognized*: seq[string]
+    # M4 (Realize-Closure-And-Catalog-Expansion) — per-platform MSI
+    # admin-install override. When true, the realize loop uses
+    # ``msiexec /a`` instead of ``dark.exe`` for MSI extraction. The
+    # global ``CAKBUILTIN_PREFER_MSIEXEC=1`` env var has the same
+    # effect; this flag is the per-(cpu, os) override.
+    msiAdminInstall*: bool
+    # M5 (Realize-Closure-And-Catalog-Expansion) — Scoop-style launcher
+    # emit. After extract / install_method dispatch, the realize loop
+    # walks this sequence and synthesizes one .ps1 + one .cmd launcher
+    # per spec at ``<prefix>/bin/<launcher_name>.{ps1,cmd}`` invoking
+    # the discovered interpreter against the spec's prefix-relative
+    # ``target``. Composer's .phar wrap is the M5 anchor case.
+    launcherEmit*: seq[LauncherEmitSpec]
     # M65: per-resolution chain trace. Populated by `chainResolvePackage`
     # to record every adapter consulted, in order, with each adapter's
     # outcome + skip reason. On a successful resolution the trace ends
@@ -198,6 +218,109 @@ proc raiseUnknownPackage*(packageId: string;
   e.packageId = packageId
   e.searchedCatalogs = searched
   raise e
+
+# ---------------------------------------------------------------------------
+# M0 (Realize-Layer-Plumbing-Closures spec) — extractor-discovery edges
+# ---------------------------------------------------------------------------
+#
+# The realize loop's cakBuiltin adapter needs a small set of helper
+# executables (``7z.exe``, ``lessmsi.exe``, ``dark.exe``, ``innounp.exe``)
+# depending on the package's ``archive_format`` + ``install_method``.
+# When the operator bundles those extractors as catalog packages in the
+# SAME ``home.nim`` (the M3 bundling-posture decision from the
+# Realize-Closure-And-Catalog-Expansion predecessor campaign), the
+# realize-op order MUST honour these discovery edges — the consumer
+# cannot realize until its extractor's prefix exists.
+#
+# The mapping below is the M0 hard-coded form. A future milestone could
+# lift it to schema-driven catalog metadata (a ``requires_for_realize:``
+# field on ``VersionedProvisioning``); for M0 the small constant table is
+# the right tradeoff.
+#
+# Extractor-provider map (M0):
+#
+#   7z.exe       ← 7zip       (consumed by afSevenZip / afSevenZipSfx
+#                              archive formats and the imInstallerNsis
+#                              install method)
+#   lessmsi.exe  ← lessmsi    (consumed by imInstallerMsi)
+#   dark.exe     ← wix3       (consumed by imInstallerNsisBundle;
+#                              dark unwraps the Burn outer)
+#   lessmsi.exe  ← lessmsi    (also consumed by imInstallerNsisBundle;
+#                              extracts the inner MSIs after dark)
+#   innounp.exe  ← innounp    (consumed by imInstallerInnoSetup)
+
+# TODO: schema-driven `requires_for_realize:` field on
+# `VersionedProvisioning` would replace this hard-coded map. Migration
+# starting point: move these consts into the per-tool catalog slice
+# (each affected `packages/<tool>.nim` declares its own
+# `requires_for_realize: @["7zip"]` or similar in the
+# `VersionedProvisioning` literal); then have `extractorDependencies`
+# below read `resolution.requiresForRealize` directly instead of
+# pattern-matching on `archive_format` / `install_method`. The case
+# statements in the proc body would collapse to a one-line passthrough.
+# See Realize-Layer-Plumbing-Closures.milestones.org M0 Outstanding
+# Tasks for the planned schema shape.
+const
+  ExtractorProvider7zip*    = "7zip"
+  ExtractorProviderLessmsi* = "lessmsi"
+  ExtractorProviderWix3*    = "wix3"
+  ExtractorProviderInnounp* = "innounp"
+
+proc extractorDependencies*(packageId: string;
+                            resolution: CatalogResolution): seq[string] =
+  ## Return the set of catalog-package names that must be realized BEFORE
+  ## ``packageId`` can be realized, derived from the resolution's
+  ## ``archive_format`` + ``install_method`` requirements.
+  ##
+  ## Hard-coded extractor-provider map (M0). Future enhancement:
+  ## schema-driven ``requires_for_realize:`` field in
+  ## ``VersionedProvisioning``.
+  ##
+  ## Returns an EMPTY seq when ``resolution.adapter`` is NOT ``cakBuiltin``
+  ## (Scoop / PATH / Nix adapters handle their own extraction — the
+  ## discovery edge does not apply). This matches the M0 spec's
+  ## Outstanding Task note: "topo edges that originate from a
+  ## cakScoop-resolved consumer are silently dropped".
+  ##
+  ## The returned seq never contains ``packageId`` itself (self-edges are
+  ## skipped) — even though e.g. ``sevenzip.nim`` itself uses
+  ## ``imInstallerMsi`` which needs ``lessmsi``, that's a real edge
+  ## (sevenzip → lessmsi); the self-edge filter is for the degenerate
+  ## case where the mapping ever points a package at itself.
+  if resolution.adapter != cakBuiltin:
+    return @[]
+  var deps: seq[string] = @[]
+  # archive_format-driven edges
+  case resolution.archiveFormat
+  of afSevenZip, afSevenZipSfx:
+    deps.add(ExtractorProvider7zip)
+  else:
+    discard
+  # install_method-driven edges (these override / extend the
+  # archive_format edges for the installer families)
+  case resolution.installMethod
+  of imInstallerNsis:
+    deps.add(ExtractorProvider7zip)
+  of imInstallerMsi:
+    deps.add(ExtractorProviderLessmsi)
+  of imInstallerNsisBundle:
+    # dark.exe to unwrap the Burn outer, lessmsi.exe to extract the
+    # inner MSIs. Order in the seq is stable so a downstream consumer
+    # that uses the order for tie-breaking gets a deterministic result.
+    deps.add(ExtractorProviderWix3)
+    deps.add(ExtractorProviderLessmsi)
+  of imInstallerInnoSetup:
+    deps.add(ExtractorProviderInnounp)
+  else:
+    discard
+  # Deduplicate while preserving first-seen order, and drop any
+  # self-edge (a package never depends on itself).
+  var seen = initHashSet[string]()
+  for d in deps:
+    if d == packageId: continue
+    if d in seen: continue
+    seen.incl d
+    result.add d
 
 # ---------------------------------------------------------------------------
 # Scoop environment discovery
@@ -676,16 +799,45 @@ proc resolveBuiltinPackage*(packageId: string;
     # case.
     result.resolution.digestAlgorithm = "sha1"
     result.resolution.digestValue = pb.binary.sha1.toLowerAscii()
-  result.resolution.archiveFormat = picked.archive_format
+  # M9.5: per-platform overrides for archive_format + bin_relpath. The
+  # cross-OS catalog harvester pass (M9.5) needs them because a single
+  # tool's upstream ships different archive shapes per OS (e.g. gh ships
+  # ``.zip`` on Windows + ``.tar.gz`` on Linux) and the realized binary
+  # path differs by OS (``.exe`` suffix only on Windows). The default
+  # PlatformBinary leaves both unset → fall back to the VersionedProvisioning
+  # values.
+  if pb.binary.has_archive_format_override:
+    result.resolution.archiveFormat = pb.binary.archive_format_override
+  else:
+    result.resolution.archiveFormat = picked.archive_format
   result.resolution.installMethod = picked.install_method
-  result.resolution.binRelpath = picked.bin_relpath
+  if pb.binary.bin_relpath_override.len > 0:
+    result.resolution.binRelpath = pb.binary.bin_relpath_override
+  else:
+    result.resolution.binRelpath = picked.bin_relpath
   result.resolution.extractPath = pb.binary.extract_path
   result.resolution.installerArgs = picked.installer_args
   result.resolution.pacmanPackages = picked.pacman_packages
   result.resolution.bootstrapArgv = picked.bootstrap_argv
-  # Use the first bin_relpath as the executable name (leaf only).
-  if picked.bin_relpath.len > 0:
-    result.resolution.executableName = picked.bin_relpath[0].extractFilename
+  # M3: thread the residual 7z-family metadata through.
+  result.resolution.nested7z = pb.binary.nested_7z
+  result.resolution.preInstallActions = picked.pre_install_actions
+  result.resolution.preInstallUnrecognized = picked.pre_install_unrecognized
+  # M4: thread the per-platform MSI admin-install override through.
+  result.resolution.msiAdminInstall = pb.binary.msi_admin_install
+  # M5: thread the launcher_emit spec list through.
+  result.resolution.launcherEmit = picked.launcher_emit
+  # Use the first bin_relpath as the executable name (leaf only). M9.5:
+  # honor the per-platform bin_relpath_override when present (the Linux
+  # binary is ``gh`` without the ``.exe`` suffix that the Windows slice
+  # carries).
+  let effectiveBinRelpath =
+    if pb.binary.bin_relpath_override.len > 0:
+      pb.binary.bin_relpath_override
+    else:
+      picked.bin_relpath
+  if effectiveBinRelpath.len > 0:
+    result.resolution.executableName = effectiveBinRelpath[0].extractFilename
   else:
     result.resolution.executableName = packageId
   # Stable env-substitution order — sort by key so the realize loop

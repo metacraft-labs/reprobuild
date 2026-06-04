@@ -4,7 +4,7 @@
 ## indentation level so the editor can splice new lines in without
 ## disturbing surrounding formatting.
 
-import std/options
+import std/[options, tables]
 
 import ./predicate
 
@@ -113,6 +113,18 @@ type
     hasTrailingNewline*: bool
     root*: IntentNode                  ## the `profile <name>:` node
     indentStep*: int                   ## detected indent width (usually 2)
+    adapterPreference*: OrderedTable[string, seq[string]]
+      ## M2.5: per-OS adapter preference parsed from a top-level
+      ## `adapterPreference:` block inside the `profile` body. Keys are
+      ## canonical OS tags (`"windows"`, `"linux"`, `"darwin"`); values
+      ## are the ordered adapter chain (each entry drawn from the closed
+      ## set `{"builtin", "scoop", "nix", "path"}`). Empty table when
+      ## the block is absent — the realize / preview path then falls
+      ## back to the M65 platform default chain. A partial table (e.g.
+      ## only `"windows"` set) falls back to the M65 platform default
+      ## per missing OS at resolve time. `darwin` and `macos` are
+      ## aliased at parse time to the canonical `"darwin"` key so a
+      ## single lookup at resolve time suffices.
 
 proc lineCount*(p: Profile): int = p.lines.len
 

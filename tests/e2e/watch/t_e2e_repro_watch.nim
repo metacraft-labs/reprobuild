@@ -262,7 +262,7 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
     discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
   let socketPath = "/tmp/repro-m31-rq-" & $getCurrentProcessId() & ".sock"
@@ -605,7 +605,17 @@ proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
   copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
+  # Provide helpers.js at both the project root and `src/helpers.js`.
+  # The live codetracer reprobuild.nim was migrated (commit 4d9e44d9
+  # "feat(reprobuild): emit CodeTracer build-debug outputs") to read
+  # `src/helpers.js` as the input to `frontend-helpers-js`, with all
+  # build outputs routed through `src/build-debug/`. Keep the
+  # project-root copy for back-compat with code that still expects
+  # the legacy entry point.
+  createDir(projectRoot / "src")
   copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
+  copyFile(codeTracerRoot / "src" / "helpers.js",
+    projectRoot / "src" / "helpers.js")
   copyTree(codeTracerRoot / "src" / "frontend",
     projectRoot / "src" / "frontend")
   copyTree(codeTracerRoot / "src" / "common",
@@ -641,7 +651,11 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
 proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
   copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
+  # See note in copySelectedCodeTracerProject — provide both layouts.
+  createDir(projectRoot / "src")
   copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
+  copyFile(codeTracerRoot / "src" / "helpers.js",
+    projectRoot / "src" / "helpers.js")
   copyTree(codeTracerRoot / "src" / "frontend",
     projectRoot / "src" / "frontend")
   copyTree(codeTracerRoot / "src" / "common",
@@ -679,6 +693,35 @@ proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
 
+proc writeCodeTracerToolStubs(binDir: string) =
+  ## Write `--version`-only stubs for tools declared by CodeTracer's
+  ## reprobuild.nim `uses:` clause that are not provided by the Nix devshell
+  ## and are not invoked by any selected action in these copied-checkout
+  ## subtests. Path-only tool resolution iterates every `uses:` entry, so the
+  ## subset tests need stubs even when the underlying actions are pruned.
+  ##
+  ## Keep this list in sync with codetracer/reprobuild.nim `uses:` minus the
+  ## tools already provided by the Nix devshell or by explicit fixture
+  ## helpers (gcc, clang, stylus, nim).
+  const stubbedTools = [
+    "cargo", "cargo-nextest", "nimble", "electron", "emcc", "flake8",
+    "llvm-config", "mdbook", "pcre-config", "playwright", "rustc",
+    "rustfmt", "rustup", "wasm-opt", "wasm-pack", "webpack-cli", "yarn"
+  ]
+  for tool in stubbedTools:
+    let stubPath = binDir / tool
+    if fileExists(stubPath):
+      continue
+    writeExecutable(stubPath,
+      "#!/bin/sh\n" &
+      "if [ \"${1:-}\" = \"--version\" ]; then\n" &
+      "  echo '" & tool & " 1.0.0'\n" &
+      "  exit 0\n" &
+      "fi\n" &
+      "echo 'codetracer copied-checkout fixture stub: " & tool &
+        " is not expected to be invoked in this subtest' >&2\n" &
+      "exit 127\n")
+
 proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let binDir = tempRoot / "codetracer-tool-bin"
   createDir(binDir)
@@ -696,6 +739,7 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let hostNim = findExe("nim")
   check hostNim.len > 0
   writeCodeTracerNimWrapper(binDir, hostNim)
+  writeCodeTracerToolStubs(binDir)
   binDir & $PathSep & getEnv("PATH")
 
 proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
@@ -766,12 +810,33 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
+proc assertActionCacheEffective(report: JsonNode; id: string) =
+  ## "Cache was effective for this action on this build" — accepts
+  ## either `asCacheHit` (cache hit + outputs had to be restored from
+  ## CAS) or `asUpToDate` (cache hit + outputs already on disk, no
+  ## restoration). Both are defined in
+  ## `libs/repro_build_engine/.../repro_build_engine.nim`
+  ## `ActionStatus`; both leave `launched == false`. The engine picks
+  ## `asUpToDate` whenever the prior outputs survived between runs,
+  ## which is the common case in watch-rebuild scenarios — see
+  ## `completeSuccess(id, asUpToDate, cdHit, false, "outputs-present")`
+  ## vs `completeSuccess(id, asCacheHit, cdHit, false, "restored")`
+  ## in the engine.
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  let status = action{"status"}.getStr()
+  if status notin ["asCacheHit", "asUpToDate"]:
+    checkpoint("expected asCacheHit or asUpToDate for " & id &
+      ", got " & status)
+    fail()
+  check action{"launched"}.getBool() == false
+
 proc assertActionCachedOrSucceeded(report: JsonNode; id: string) =
   let action = reportAction(report, id)
   check action.kind != JNull
   let status = action{"status"}.getStr()
   let launched = action{"launched"}.getBool()
-  if status == "asCacheHit":
+  if status in ["asCacheHit", "asUpToDate"]:
     check launched == false
   elif status == "asSucceeded":
     check launched == true
@@ -784,6 +849,21 @@ proc assertOutputAction(report: JsonNode; output, status: string;
   check action.kind != JNull
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
+
+proc assertOutputActionCacheEffective(report: JsonNode; output: string) =
+  ## Output-key flavour of `assertActionCacheEffective`. Accepts
+  ## either `asCacheHit` or `asUpToDate` and requires `launched ==
+  ## false`. Used for per-stylesheet rebuild gates where the watch
+  ## cycle should not relaunch the action when the upstream input is
+  ## untouched.
+  let action = reportActionWithDeclaredOutput(report, output)
+  check action.kind != JNull
+  let status = action{"status"}.getStr()
+  if status notin ["asCacheHit", "asUpToDate"]:
+    checkpoint("expected asCacheHit or asUpToDate for output " &
+      output & ", got " & status)
+    fail()
+  check action{"launched"}.getBool() == false
 
 const publicResourceAction = "frontend-public-resources"
 
@@ -811,17 +891,24 @@ proc hasMonitorEvidence(action: JsonNode): bool =
   action{"evidence"}{"monitorReads"}.getElems().len > 0 or
     action{"evidence"}{"monitorProbes"}.getElems().len > 0
 
+const CodeTracerBuildDebugRoot = "src/build-debug"
+  ## Mirror of `BuildDebugRoot` in codetracer/reprobuild.nim. The live
+  ## reprobuild recipe routes frontend bundle outputs through this
+  ## directory; the test fixture must check the same layout.
+
 proc checkFrontendBundleOutputs(projectRoot: string) =
-  check fileExists(projectRoot / "public" / "ui.js")
-  check fileExists(projectRoot / "src" / "index.js")
-  check fileExists(projectRoot / "index.js.map")
-  check fileExists(projectRoot / "server_index.js")
-  check fileExists(projectRoot / "server_index.js.map")
-  check fileExists(projectRoot / "src" / "subwindow.js")
-  check fileExists(projectRoot / "subwindow.js.map")
-  check fileExists(projectRoot / "index.html")
-  check fileExists(projectRoot / "subwindow.html")
-  check fileExists(projectRoot / "src" / "helpers.js")
+  let buildDebug = projectRoot / CodeTracerBuildDebugRoot
+  check fileExists(buildDebug / "public" / "ui.js")
+  check fileExists(buildDebug / "src" / "index.js")
+  check fileExists(buildDebug / "index.js.map")
+  check fileExists(buildDebug / "server_index.js")
+  check fileExists(buildDebug / "server_index.js.map")
+  check fileExists(buildDebug / "src" / "subwindow.js")
+  check fileExists(buildDebug / "subwindow.js.map")
+  check fileExists(buildDebug / "index.html")
+  check fileExists(buildDebug / "subwindow.html")
+  check fileExists(buildDebug / "helpers.js")
+  check fileExists(buildDebug / "src" / "helpers.js")
   for stylesheet in [
     "default_white_theme.css",
     "default_dark_theme_electron.css",
@@ -830,24 +917,24 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
     "loader.css",
     "subwindow.css"
   ]:
-    check fileExists(projectRoot / "src" / "frontend" / "styles" /
-      stylesheet)
-  check fileExists(projectRoot / "public" / "resources" / "calltrace.js")
-  check fileExists(projectRoot / "public" / "third_party" / "io.js")
+    check fileExists(buildDebug / "frontend" / "styles" / stylesheet)
+  check fileExists(buildDebug / "public" / "resources" / "calltrace.js")
+  check fileExists(buildDebug / "public" / "third_party" / "io.js")
   check readFile(projectRoot / "src" / "frontend" / "index.html") ==
-    readFile(projectRoot / "index.html")
+    readFile(buildDebug / "index.html")
   check readFile(projectRoot / "src" / "frontend" / "subwindow.html") ==
-    readFile(projectRoot / "subwindow.html")
-  check readFile(projectRoot / "helpers.js") ==
-    readFile(projectRoot / "src" / "helpers.js")
+    readFile(buildDebug / "subwindow.html")
+  check readFile(projectRoot / "src" / "helpers.js") ==
+    readFile(buildDebug / "src" / "helpers.js")
 
 proc checkConfigOutputs(projectRoot: string) =
-  check fileExists(projectRoot / "config" / "default_layout.json")
-  check fileExists(projectRoot / "config" / "default_config.yaml")
+  let buildDebug = projectRoot / CodeTracerBuildDebugRoot
+  check fileExists(buildDebug / "config" / "default_layout.json")
+  check fileExists(buildDebug / "config" / "default_config.yaml")
   check readFile(projectRoot / "src" / "config" / "default_layout.json") ==
-    readFile(projectRoot / "config" / "default_layout.json")
+    readFile(buildDebug / "config" / "default_layout.json")
   check readFile(projectRoot / "src" / "config" / "default_config.yaml") ==
-    readFile(projectRoot / "config" / "default_config.yaml")
+    readFile(buildDebug / "config" / "default_config.yaml")
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "repro"
@@ -1009,7 +1096,13 @@ proc runWatchCurrentProjectAndEdit(reproBin, projectRoot, pathValue, logPath,
 
 proc runWatchAndReplace(reproBin, target, repoRoot, pathValue, logPath,
                         editPath, oldText, newText: string; debounceMs = 50;
-                        env: openArray[(string, string)] = []): string =
+                        env: openArray[(string, string)] = [];
+                        readyIterations = 600): string =
+  ## `readyIterations` × 0.05s gives the wall-clock budget for cycle 1
+  ## to complete and the watcher to log `repro watch: watching paths=`.
+  ## The aggregate `#codetracer` target builds the full `ct` Nim binary
+  ## (24 actions) and needs well over the default 30 s on macOS; callers
+  ## that exercise such heavy targets pass a larger value.
   var envLines = "export PATH=" & q(pathValue) & "\n"
   for (name, value) in env:
     envLines.add("export " & name & "=" & q(value) & "\n")
@@ -1021,7 +1114,7 @@ proc runWatchAndReplace(reproBin, target, repoRoot, pathValue, logPath,
       " > " & q(logPath) & " 2>&1 &\n" &
     "pid=$!\n" &
     "ready=0\n" &
-    "for i in $(seq 1 600); do\n" &
+    "for i in $(seq 1 " & $readyIterations & "); do\n" &
     "  if grep -q 'repro watch: watching paths=' " & q(logPath) &
       "; then ready=1; break; fi\n" &
     "  if ! kill -0 \"$pid\" 2>/dev/null; then wait \"$pid\"; exit $?; fi\n" &
@@ -1279,7 +1372,7 @@ when defined(macosx):
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
       check report{"actions"}.len == 3
-      assertAction(report, "generate-config-header", "asCacheHit", false)
+      assertActionCacheEffective(report, "generate-config-header")
       assertAction(report, "build-c-dir", "asUpToDate", false)
       assertAction(report, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
@@ -1329,7 +1422,10 @@ when defined(macosx):
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: frontend")
-      check log.contains("scheduler: actions=17")
+      # Action count includes 14 frontend actions + 6 stylus stylesheets
+      # (matches the live codetracer reprobuild.nim frontend aggregate
+      # at commits 4d9e44d9 + 9625af1a).
+      check log.contains("scheduler: actions=20")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: generate-config-header")
       check not log.contains("action: c-sudoku-object-tup")
@@ -1338,17 +1434,20 @@ when defined(macosx):
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 17
-      assertAction(report, "frontend-ui-js", "asCacheHit", false)
-      assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(report, "frontend-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-src-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-server-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(report, "frontend-src-subwindow-js", "asCacheHit", false)
+      check report{"actions"}.len == 20
+      assertActionCacheEffective(report, "frontend-ui-js")
+      assertActionCacheEffective(report, "frontend-public-ui-js")
+      assertActionCacheEffective(report, "frontend-index-js")
+      assertActionCacheEffective(report, "frontend-src-index-js")
+      assertActionCacheEffective(report, "frontend-server-index-js")
+      assertActionCacheEffective(report, "frontend-subwindow-js")
+      assertActionCacheEffective(report, "frontend-src-subwindow-js")
       assertAction(report, "frontend-index-html", "asSucceeded", true)
-      assertAction(report, "frontend-subwindow-html", "asCacheHit", false)
-      assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
+      assertActionCacheEffective(report, "frontend-subwindow-html")
+      assertActionCacheEffective(report, "frontend-helpers-js")
+      assertActionCacheEffective(report, "frontend-src-helpers-js")
+      assertActionCacheEffective(report, "nim-js-reload-reconnect-test")
+      assertActionCacheEffective(report, "reload-bootstrap-host-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -1357,9 +1456,9 @@ when defined(macosx):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(report,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
-      assertPublicResourceActions(report, "asCacheHit", false)
+        assertOutputActionCacheEffective(report,
+          CodeTracerBuildDebugRoot / "frontend" / "styles" / stylesheet)
+      assertPublicResourceCachedOrSucceeded(report)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull
       check reportAction(report, "c-sudoku-object-tup").kind == JNull
@@ -1410,37 +1509,51 @@ when defined(macosx):
       let pathValue = codeTracerHybridNimPathValue(codeTracerRoot, tempRoot)
       check requireSuccess("PATH=" & q(pathValue) & " " &
         shellCommand(["sh", "-c", "command -v nim"]), repoRoot).strip().len > 0
+      # Cycle 1 of the aggregate `#codetracer` target builds the full
+      # `ct` Nim binary plus 23 sibling actions; on macOS that exceeds
+      # the default 30 s readiness budget under load (observed ~30 s
+      # in CI just as cycle 1 was finishing — `checked=24/24 built=23/24
+      # running=1`). Give it a generous 4 min budget so the watch loop
+      # is guaranteed to log `watching paths=` before the test edits the
+      # source file.
       let log = runWatchAndReplace(reproBin, selectedTarget, repoRoot,
         pathValue, tempRoot / "codetracer-aggregate-watch.log", nativeInput,
-        oldText, newText, env = nativeEnv)
+        oldText, newText, env = nativeEnv, readyIterations = 4800)
       check log.contains("repro watch: target=" & selectedTarget)
       check log.contains("repro watch: event seen path=")
       check log.contains("repro watch: cycle 2 start rebuild")
       check log.contains("repro watch: max cycles reached")
       check log.contains("selectedTarget: codetracer")
-      check log.contains("scheduler: actions=21")
+      # codetracer aggregate now includes 20 frontend actions + 2 config
+      # actions + db-backend-record + ct (post-4d9e44d9 build-debug
+      # layout migration).
+      check log.contains("scheduler: actions=24")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: generate-config-header")
       check not log.contains("action: c-sudoku-object-tup")
       check not log.contains("action: c-sudoku-object-with-generated-header")
       checkFrontendBundleOutputs(projectRoot)
       checkConfigOutputs(projectRoot)
-      check fileExists(projectRoot / "src" / "bin" / "ct")
-      check fileExists(projectRoot / "src" / "bin" / "db-backend-record")
+      check fileExists(projectRoot / CodeTracerBuildDebugRoot / "bin" / "ct")
+      check fileExists(projectRoot / CodeTracerBuildDebugRoot / "bin" /
+        "db-backend-record")
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")
-      check report{"actions"}.len == 21
-      assertAction(report, "frontend-ui-js", "asCacheHit", false)
-      assertAction(report, "frontend-public-ui-js", "asCacheHit", false)
-      assertAction(report, "frontend-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-src-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-server-index-js", "asCacheHit", false)
-      assertAction(report, "frontend-subwindow-js", "asCacheHit", false)
-      assertAction(report, "frontend-src-subwindow-js", "asCacheHit", false)
-      assertAction(report, "frontend-index-html", "asCacheHit", false)
-      assertAction(report, "frontend-subwindow-html", "asCacheHit", false)
-      assertAction(report, "frontend-src-helpers-js", "asCacheHit", false)
+      check report{"actions"}.len == 24
+      assertActionCacheEffective(report, "frontend-ui-js")
+      assertActionCacheEffective(report, "frontend-public-ui-js")
+      assertActionCacheEffective(report, "frontend-index-js")
+      assertActionCacheEffective(report, "frontend-src-index-js")
+      assertActionCacheEffective(report, "frontend-server-index-js")
+      assertActionCacheEffective(report, "frontend-subwindow-js")
+      assertActionCacheEffective(report, "frontend-src-subwindow-js")
+      assertActionCacheEffective(report, "frontend-index-html")
+      assertActionCacheEffective(report, "frontend-subwindow-html")
+      assertActionCacheEffective(report, "frontend-helpers-js")
+      assertActionCacheEffective(report, "frontend-src-helpers-js")
+      assertActionCacheEffective(report, "nim-js-reload-reconnect-test")
+      assertActionCacheEffective(report, "reload-bootstrap-host-js")
       for stylesheet in [
         "default_white_theme.css",
         "default_dark_theme_electron.css",
@@ -1449,12 +1562,12 @@ when defined(macosx):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputAction(report,
-          "src/frontend/styles/" & stylesheet, "asCacheHit", false)
+        assertOutputActionCacheEffective(report,
+          CodeTracerBuildDebugRoot / "frontend" / "styles" / stylesheet)
       assertPublicResourceCachedOrSucceeded(report)
-      assertAction(report, "config-default-layout-json", "asCacheHit", false)
-      assertAction(report, "config-default-config-yaml", "asCacheHit", false)
-      assertAction(report, "db-backend-record", "asCacheHit", false)
+      assertActionCacheEffective(report, "config-default-layout-json")
+      assertActionCacheEffective(report, "config-default-config-yaml")
+      assertActionCacheEffective(report, "db-backend-record")
       assertAction(report, "ct", "asSucceeded", true)
       check reportAction(report, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(report, "generate-config-header").kind == JNull
@@ -1507,10 +1620,10 @@ when defined(macosx):
       check not log.contains("action: frontend-index-js")
       check not log.contains("action: nim-js-ipc-registry-test")
       check not log.contains("action: c-sudoku-object-tup")
-      check fileExists(projectRoot / "public" / "resources" / "shared" /
-        "add_file.svg")
-      check readFile(sourcePath) == readFile(projectRoot / "public" /
-        "resources" / "shared" / "add_file.svg")
+      let outputResource = projectRoot / CodeTracerBuildDebugRoot /
+        "public" / "resources" / "shared" / "add_file.svg"
+      check fileExists(outputResource)
+      check readFile(sourcePath) == readFile(outputResource)
 
       let report = parseFile(projectRoot / ".repro" / "build" /
         "reprobuild" / "build-report.json")

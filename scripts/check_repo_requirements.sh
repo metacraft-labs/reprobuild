@@ -59,8 +59,14 @@ require_contains flake.nix "checks ="
 require_contains flake.nix "git-hooks.lib"
 require_contains flake.nix "shellHook = pre-commit-check.shellHook"
 
+# Capture `just --summary` once: the inline `just | tr | grep -q`
+# form trips `set -o pipefail` under bash 5 when grep finds an early
+# match — closing the pipe SIGPIPEs `just`/`tr`, and pipefail surfaces
+# that 141 as a "missing recipe" false positive for whichever recipes
+# happen to sort first in just's output.
+just_recipes="$(just --summary | tr ' ' '\n')"
 for recipe in build test lint format fmt t bump-version bench bench-quick bench_reprobuild_core_mvp_performance bench_cmake_reprobuild_vs_ninja bench_cmake_reprobuild_vs_ninja_quick bench_cmake_reprobuild_vs_ninja_medium e2e_reprobuild_mvp_acceptance repomix check-repo-requirements; do
-  just --summary | tr ' ' '\n' | grep -Fxq "${recipe}" || fail "missing Justfile recipe ${recipe}"
+  printf '%s\n' "${just_recipes}" | grep -Fxq "${recipe}" || fail "missing Justfile recipe ${recipe}"
 done
 
 require_contains .github/workflows/ci.yml "run: nix develop --command just lint"

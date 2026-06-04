@@ -64,6 +64,7 @@
                   pkgs.lib.makeBinPath [
                     pkgs.bash
                     pkgs.coreutils
+                    pkgs.gnugrep
                     pkgs.just
                     pkgs.nim2
                   ]
@@ -94,6 +95,7 @@
 
             buildInputs = [
               pkgs.libblake3
+              pkgs.sqlite
               pkgs.xxHash
             ];
 
@@ -101,6 +103,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
+            SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
 
             buildPhase = ''
@@ -166,6 +169,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
+            SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [
               pkgs.just
@@ -175,7 +179,10 @@
               pkgs.clang
               pkgs.curl
               pkgs.libblake3
+              pkgs.p7zip
+              pkgs.sqlite
               pkgs.xxHash
+              pkgs.zip
               pkgs.zlib
               pkgs.nixfmt-rfc-style
               pkgs.repomix
@@ -183,6 +190,14 @@
               pkgs.shellcheck
               pkgs.shfmt
               pkgs.typos
+            ]
+            # libbpf for the codetracer-subset `ct` build: CodeTracer's
+            # native monitor under src/ct/bpf_monitor_native.nim and
+            # src/ct/libbpf_wrapper.nim include <bpf/libbpf.h>, which is
+            # gated by Linux. macOS doesn't ship libbpf, so don't drag
+            # it into the dev shell there.
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              pkgs.libbpf
             ];
             shellHook = pre-commit-check.shellHook;
           };

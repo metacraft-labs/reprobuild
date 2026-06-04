@@ -27,6 +27,16 @@
 ## byte-identically *modulo* this merge note + the ``GRADLE_HOME``
 ## env entry — verify drift on this file is expected per the M67 /
 ## M68 pattern.
+##
+## **M9.5 merge note (hand-edited):** added a ``(pcX86_64, poLinux)``
+## platform slice to BOTH the 9.5.1 and 8.10.2 versions. Gradle ships
+## a universal cross-platform ``-all.zip`` (or ``-bin.zip``) — same
+## archive, same sha256 across OSes. The Linux launcher is ``bin/gradle``
+## (the bash launcher script) vs. the Windows ``bin\\gradle.bat`` —
+## bin_relpath_override carries the platform-specific basename.
+## archive_format stays afZip; URL + sha256 are identical between the
+## Windows and Linux PlatformBinary entries. As a portable Java app,
+## glibc floor is whatever the underlying JDK enforces.
 
 import std/tables
 import repro_dsl_stdlib/packages_schema
@@ -39,7 +49,11 @@ let gradleCatalog* = @[
     install_method: imExtract,
     bin_relpath: @["bin\\gradle.bat"],
     platforms: @[
-      PlatformBinary(cpu: pcAny, os: poWindows, url: "https://services.gradle.org/distributions/gradle-9.5.1-all.zip", sha256: "c72fb9991f6025cbe337d52ba77e531b3faf62bdd3e348fe1ccee9f51c71adb0", sha512: "", extract_path: "gradle-9.5.1")
+      PlatformBinary(cpu: pcAny, os: poWindows, url: "https://services.gradle.org/distributions/gradle-9.5.1-all.zip", sha256: "c72fb9991f6025cbe337d52ba77e531b3faf62bdd3e348fe1ccee9f51c71adb0", sha512: "", extract_path: "gradle-9.5.1"),
+      # M9.5: Linux x86_64 slice (9.5.1). Same universal archive +
+      # sha256 as Windows; bin_relpath_override drops the .bat suffix
+      # for the bash launcher.
+      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://services.gradle.org/distributions/gradle-9.5.1-all.zip", sha256: "c72fb9991f6025cbe337d52ba77e531b3faf62bdd3e348fe1ccee9f51c71adb0", sha512: "", sha1: "", extract_path: "gradle-9.5.1", bin_relpath_override: @["bin/gradle"])
     ],
     installer_args: @[],
     pacman_packages: @[],
@@ -51,7 +65,10 @@ let gradleCatalog* = @[
     install_method: imExtract,
     bin_relpath: @["bin\\gradle.bat"],
     platforms: @[
-      PlatformBinary(cpu: pcAny, os: poWindows, url: "https://services.gradle.org/distributions/gradle-8.10.2-all.zip", sha256: "2ab88d6de2c23e6adae7363ae6e29cbdd2a709e992929b48b6530fd0c7133bd6", sha512: "", extract_path: "gradle-8.10.2")
+      PlatformBinary(cpu: pcAny, os: poWindows, url: "https://services.gradle.org/distributions/gradle-8.10.2-all.zip", sha256: "2ab88d6de2c23e6adae7363ae6e29cbdd2a709e992929b48b6530fd0c7133bd6", sha512: "", extract_path: "gradle-8.10.2"),
+      # M9.5: Linux x86_64 slice (8.10.2). Same universal archive +
+      # sha256 as Windows.
+      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://services.gradle.org/distributions/gradle-8.10.2-all.zip", sha256: "2ab88d6de2c23e6adae7363ae6e29cbdd2a709e992929b48b6530fd0c7133bd6", sha512: "", sha1: "", extract_path: "gradle-8.10.2", bin_relpath_override: @["bin/gradle"])
     ],
     installer_args: @[],
     pacman_packages: @[],

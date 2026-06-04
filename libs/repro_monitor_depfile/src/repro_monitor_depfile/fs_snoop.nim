@@ -11,6 +11,176 @@ import repro_monitor_depfile/writer
 when defined(windows):
   import repro_monitor_depfile/windows_injector
 
+# macOS: prepare a sandbox-tools directory holding non-SIP copies of the
+# common shell binaries that show up in monitored subprocess trees. The
+# shim's spawn hook (see repro_monitor_hooks/macos_interpose_runtime.nim)
+# rewrites SIP-protected exec paths to these copies so that
+# DYLD_INSERT_LIBRARIES is not stripped on the way into /bin/sh and
+# friends — the path-rewriting bypass documented in
+# codetracer-native-recorder/ct_interpose/src/ct_interpose/library_init.nim.
+# This is the "route B" minimum-viable populate referenced in the
+# Reprobuild M11+ integration plan; the binary list mirrors the SIP-
+# protected commands that ``osproc.execCmdEx``/``quoteShellCommand`` and
+# the dev-env activation pipeline reach for. When ct_interpose grows a
+# canonical populate routine, this list collapses to a single call.
+when defined(macosx):
+  import ct_interpose/propagation as ct_propagation
+
+  const reproSandboxBinaries = [
+    "/bin/sh",
+    "/bin/bash",
+    "/bin/dash",
+    "/bin/zsh",
+    "/usr/bin/env",
+    "/usr/bin/which"
+  ]
+
+  proc findNonSipAlternative(binaryName: string): string =
+    ## Walk PATH looking for an instance of ``binaryName`` that lives
+    ## outside the SIP-protected prefixes (``/bin``, ``/sbin``,
+    ## ``/usr/bin``, ``/usr/sbin``). On macOS 26 / arm64e, byte-copies
+    ## of system binaries refuse to execute (the kernel rejects them),
+    ## so the sandbox-tools tree has to symlink to a non-SIP alternative
+    ## — typically the Nix-provided shell on developer machines or the
+    ## Homebrew copy on others. Returns an empty string if no candidate
+    ## exists, in which case the caller falls back to a byte-copy.
+    let pathEnv = getEnv("PATH")
+    if pathEnv.len == 0:
+      return ""
+    for entry in pathEnv.split(PathSep):
+      if entry.len == 0:
+        continue
+      let candidate = entry / binaryName
+      if not fileExists(candidate):
+        continue
+      if ct_propagation.isSipProtected(candidate):
+        continue
+      return candidate
+    ""
+
+  proc populateReproSandboxTools(sandboxDir: string) =
+    if sandboxDir.len == 0:
+      return
+    try:
+      createDir(extendedPath(sandboxDir / "bin"))
+    except OSError, IOError:
+      return
+    for src in reproSandboxBinaries:
+      if not fileExists(src):
+        continue
+      let destPath = sandboxDir / src.strip(leading = true, trailing = false,
+                                            chars = {'/'})
+      if fileExists(destPath) or symlinkExists(destPath):
+        continue
+      try:
+        createDir(extendedPath(destPath.parentDir))
+      except OSError, IOError:
+        continue
+      let basename = src.extractFilename
+      let alternative = findNonSipAlternative(basename)
+      if alternative.len > 0:
+        try:
+          createSymlink(alternative, destPath)
+          continue
+        except OSError, IOError:
+          discard
+      # No non-SIP alternative on PATH — fall back to byte-copy. This
+      # is the documented path for Linux and pre-arm64e macOS; on
+      # macOS 26 / arm64e the copy will fail to execute and the spawn
+      # hook will fall back to the SIP-stripped original.
+      try:
+        discard ct_propagation.prepareSandboxCopy(src, sandboxDir)
+      except OSError, IOError:
+        discard
+
+  proc resolveExecutableInPath(name: string): string =
+    ## Resolve ``name`` against PATH the way ``posix_spawnp`` would so we
+    ## can read the file's shebang before the kernel does. Returns ``""``
+    ## when no executable instance is found. Skips path components that
+    ## look like absolute paths already so the caller can avoid double
+    ## resolution.
+    if name.len == 0:
+      return ""
+    if name.contains('/'):
+      if fileExists(name):
+        return name
+      return ""
+    let pathEnv = getEnv("PATH")
+    if pathEnv.len == 0:
+      return ""
+    for entry in pathEnv.split(PathSep):
+      if entry.len == 0:
+        continue
+      let candidate = entry / name
+      if fileExists(candidate):
+        return candidate
+    ""
+
+  proc readShebangInterpreter(scriptPath: string): tuple[interpreter: string;
+      extraArg: string] =
+    ## Read the ``#!`` line at the head of ``scriptPath``. Returns the
+    ## interpreter path (first token) and an optional second token (e.g.
+    ## ``/usr/bin/env python3`` → ("/usr/bin/env", "python3")). Returns
+    ## empty strings if the file is not a script or cannot be read.
+    var f: File
+    if not open(f, scriptPath, fmRead):
+      return ("", "")
+    defer: close(f)
+    var firstLine = ""
+    try:
+      if not f.readLine(firstLine):
+        return ("", "")
+    except IOError:
+      return ("", "")
+    if not firstLine.startsWith("#!"):
+      return ("", "")
+    let body = firstLine[2 .. ^1].strip()
+    if body.len == 0:
+      return ("", "")
+    let parts = body.splitWhitespace()
+    if parts.len == 0:
+      return ("", "")
+    if parts.len == 1:
+      (parts[0], "")
+    else:
+      (parts[0], parts[1 .. ^1].join(" "))
+
+  proc rewriteScriptCommandForSip(command: seq[string];
+                                  sandboxDir: string): seq[string] =
+    ## Detect whether ``command[0]`` (or, after PATH resolution) is a
+    ## shell-style script whose shebang interpreter falls under a
+    ## SIP-protected prefix. If so, rewrite the command to invoke the
+    ## non-SIP sandbox copy of the interpreter directly. This sidesteps
+    ## the kernel's shebang re-exec — which strips
+    ## ``DYLD_INSERT_LIBRARIES`` because the interpreter lives at
+    ## ``/bin/sh`` etc. — so the shim loads in the interpreter process
+    ## and observes the child's reads/writes.
+    ##
+    ## Returns ``command`` unchanged when the rewrite cannot be applied
+    ## (no script, interpreter is not SIP-protected, or no sandbox copy
+    ## exists).
+    if command.len == 0 or sandboxDir.len == 0:
+      return command
+    let resolved = resolveExecutableInPath(command[0])
+    if resolved.len == 0:
+      return command
+    let (interpreter, extraArg) = readShebangInterpreter(resolved)
+    if interpreter.len == 0:
+      return command
+    if not ct_propagation.isSipProtected(interpreter):
+      return command
+    let sandboxInterpreter = ct_propagation.rewriteSipPath(interpreter,
+      sandboxDir)
+    if sandboxInterpreter == interpreter or
+        not fileExists(sandboxInterpreter):
+      return command
+    result = @[sandboxInterpreter]
+    if extraArg.len > 0:
+      result.add(extraArg)
+    result.add(resolved)
+    if command.len > 1:
+      result.add(command[1 .. ^1])
+
 type
   ParsedFsSnoopCommand = object
     inspectMode: bool
@@ -224,7 +394,18 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
     defer: removeDir(extendedPath(fragmentDir))
     ensureParentDir(request.depFilePath)
 
+    # SIP bypass: ensure CT_SANDBOX_TOOLS_DIR exists and contains non-SIP
+    # copies of the shell binaries that monitored subprocesses commonly
+    # exec. Without this, /bin/sh (used by osproc.execCmdEx) loses
+    # DYLD_INSERT_LIBRARIES and the shim falls silent for the rest of
+    # the process tree.
+    var sandboxDir = getEnv("CT_SANDBOX_TOOLS_DIR")
+    if sandboxDir.len == 0:
+      sandboxDir = createLocalTempDir("repro-fs-snoop-sandbox-tools")
+    populateReproSandboxTools(sandboxDir)
+
     var oldEnv: seq[(string, string, bool)] = @[]
+    setEnvVar("CT_SANDBOX_TOOLS_DIR", sandboxDir, oldEnv)
     setEnvVar("DYLD_INSERT_LIBRARIES", injectionValue(shimLib), oldEnv)
     setEnvVar("REPRO_MONITOR_FRAGMENT_DIR", fragmentDir, oldEnv)
     setEnvVar("REPRO_MONITOR_OUTPUT", request.depFilePath, oldEnv)
@@ -232,12 +413,23 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
     setEnvVar("REPRO_MONITOR_SHIM_LIB", shimLib, oldEnv)
     defer: restoreEnv(oldEnv)
 
+    # SIP shebang bypass: if the target is a shell script whose
+    # interpreter (``#!/bin/sh`` etc.) lives under a SIP-protected
+    # prefix, ``posix_spawnp`` would let the kernel re-exec into the
+    # SIP-protected interpreter, stripping ``DYLD_INSERT_LIBRARIES`` so
+    # the shim never loads. Rewriting the invocation to the non-SIP
+    # sandbox interpreter (typically a symlink to a Nix or Homebrew
+    # shell, dropped into ``CT_SANDBOX_TOOLS_DIR`` by
+    # ``populateReproSandboxTools``) sidesteps that strip — the shim
+    # loads in the interpreter and observes the script's reads/writes.
+    let effectiveCommand = rewriteScriptCommandForSip(request.command,
+      sandboxDir)
     let childArgs =
-      if request.command.len > 1:
-        request.command[1 .. ^1]
+      if effectiveCommand.len > 1:
+        effectiveCommand[1 .. ^1]
       else:
         @[]
-    let process = startProcess(request.command[0],
+    let process = startProcess(effectiveCommand[0],
       args = childArgs,
       options = {poUsePath, poParentStreams})
     result = waitForExit(process)

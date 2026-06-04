@@ -87,6 +87,18 @@ proc userPathHostFromIdentity(resourceId: string): string =
     else:
       ""
 
+proc userPathBlockIdFromIdentity(resourceId: string): string =
+  ## Recover the per-resource block id from a POSIX `env.userPath`
+  ## identity (`<hostFile>#<blockId>`). Empty on Windows.
+  when defined(windows):
+    ""
+  else:
+    let hash = resourceId.rfind('#')
+    if hash > 0 and hash + 1 < resourceId.len:
+      resourceId[hash + 1 .. ^1]
+    else:
+      ""
+
 # ---------------------------------------------------------------------------
 # Generation-id resolution.
 # ---------------------------------------------------------------------------
@@ -569,7 +581,8 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
           of rkEnvUserPath:
             let entries = parseRecordedPathEntries(rec.payloadBytes)
             removeUserPathContribution(entries,
-              userPathHostFromIdentity(rec.realWorldIdentity))
+              userPathHostFromIdentity(rec.realWorldIdentity),
+              userPathBlockIdFromIdentity(rec.realWorldIdentity))
           of rkWindowsStartup:
             when defined(windows):
               let bs = rec.realWorldIdentity.rfind('\\')
@@ -629,7 +642,8 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
               priorContribution = parseRecordedPathEntries(
                 op.currentRecord.payloadBytes)
             discard applyUserPath(entries, priorContribution,
-              userPathHostFromIdentity(rec.realWorldIdentity))
+              userPathHostFromIdentity(rec.realWorldIdentity),
+              userPathBlockIdFromIdentity(rec.realWorldIdentity))
           of rkWindowsStartup:
             when defined(windows):
               let bs = rec.realWorldIdentity.rfind('\\')

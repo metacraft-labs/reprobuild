@@ -18,7 +18,7 @@ esac
 
 if [ "$(uname -s)" = "Darwin" ]; then
   nim c \
-    "${nim_mode_flags[@]}" \
+    ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
     --app:lib \
     --threads:on \
     --nimcache:build/nimcache/repro-monitor-shim-dylib \
@@ -28,7 +28,7 @@ fi
 
 if [ "$(uname -s)" = "Linux" ]; then
   nim c \
-    "${nim_mode_flags[@]}" \
+    ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
     --app:lib \
     --threads:on \
     --nimcache:build/nimcache/repro-monitor-shim-so \
@@ -52,7 +52,7 @@ case "$(uname -s)" in
       ct_interpose_src="libs/repro_monitor_shim/vendor/ct_interpose/src"
     fi
     nim c \
-      "${nim_mode_flags[@]}" \
+      ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
       --app:lib \
       --threads:on \
       --mm:orc \
@@ -79,8 +79,8 @@ while read -r name path extra_flags; do
   # shellcheck disable=SC2206
   extra_flag_array=(${extra_flags})
   nim c \
-    "${nim_mode_flags[@]}" \
-    "${extra_flag_array[@]}" \
+    ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
+    ${extra_flag_array[@]+"${extra_flag_array[@]}"} \
     --nimcache:"build/nimcache/${name}" \
     --out:"build/bin/${name}" \
     "${path}"
@@ -104,7 +104,7 @@ case "$(uname -s)" in
     dll_ext="so" ;;
 esac
 nim c \
-  "${nim_mode_flags[@]}" \
+  ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
   --app:lib \
   --threads:on \
   --mm:orc \

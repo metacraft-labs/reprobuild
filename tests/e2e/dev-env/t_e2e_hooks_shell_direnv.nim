@@ -1,19 +1,7 @@
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
-proc q(value: string): string =
-  "'" & value.replace("'", "'\\''") & "'"
-
-proc shellCommand(args: openArray[string]): string =
-  args.mapIt(q(it)).join(" ")
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = execCmdEx(command, workingDir = cwd)
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "command failed with exit " & $res.exitCode & ": " & command &
-        "\n" & res.output)
-  res.output
+import repro_test_support
 
 proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
                 appLib = false) =
@@ -27,31 +15,7 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when defined(linux) or defined(macosx):
-  proc prepareMonitorTools(repoRoot, tempRoot: string):
-      tuple[fsSnoop: string; shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    let shimSource =
-      when defined(linux):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      else:
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-    compileNim(repoRoot, shimSource, result.shim, "m5-dev-env-monitor-shim",
-      appLib = true)
-    compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      result.fsSnoop, "m5-dev-env-fs-snoop")
+# prepareMonitorTools is exported from libs/repro_test_support.
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "bin" / addFileExt("repro", ExeExt)
@@ -104,18 +68,21 @@ proc requireDirenv(): string =
 
 proc prepareCase(prefix: string): M5Case =
   result.repoRoot = getCurrentDir()
-  result.tempRoot = createTempDir(prefix, "")
+  # Resolve symlinks (e.g. /tmp -> /private/tmp on macOS) so the test's
+  # idea of projectRoot matches the path direnv stores in its allow database.
+  # direnv resolves the .envrc path via realpath before computing the allow
+  # hash; without this canonicalisation, `direnv allow` records the resolved
+  # /private/tmp/... path but `direnv exec /tmp/...` looks up the literal
+  # /tmp/... form, treats the file as un-allowed, and refuses to run.
+  result.tempRoot = expandFilename(createTempDir(prefix, ""))
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
   result.direnvBin = requireDirenv()
-  when defined(linux) or defined(macosx):
-    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot)
+  when isFsSnoopSupported:
+    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m6-direnv-hook")
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
-  else:
-    raise newException(OSError,
-      "dev-env direnv hook tests require fs-snoop support")
 
 proc envFor(c: M5Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
@@ -237,118 +204,119 @@ proc requireVcsHooksInstalled(c: M5Case): tuple[prePush: string; postCommit: str
   result.postCommit = readFile(dir / "post-commit")
 
 suite "e2e_hooks_shell_direnv":
-  test "e2e_hooks_shell_direnv_real_activation":
-    let c = prepareCase("repro-m5-direnv-real")
-    defer: removeDir(c.tempRoot)
+  when isFsSnoopSupported:
+    test "e2e_hooks_shell_direnv_real_activation":
+      let c = prepareCase("repro-m5-direnv-real")
+      defer: removeDir(c.tempRoot)
 
-    discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
-      c.projectRoot])
-    allowDirenv(c)
+      discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
+        c.projectRoot])
+      allowDirenv(c)
 
-    let statsPath = c.tempRoot / "direnv-real-stats.json"
-    check requireDirenvValue(c, statsPath) == "DIR:alpha|dev|dev-env.rbde|tool:alpha:dev"
-    let envrc = readFile(c.projectRoot / ".envrc")
-    check "repro-managed:repro-dev-env-direnv" in envrc
-    check "__repro-direnv-activate" in envrc
-    check "hooks ensure --vcs" in envrc
-    let hooksAfterDirenv = c.requireVcsHooksInstalled()
-    discard requireRepro(c, @["hooks", "ensure", "--vcs", c.projectRoot])
-    let hooksAfterExplicitEnsure = c.requireVcsHooksInstalled()
-    check hooksAfterExplicitEnsure == hooksAfterDirenv
+      let statsPath = c.tempRoot / "direnv-real-stats.json"
+      check requireDirenvValue(c, statsPath) == "DIR:alpha|dev|dev-env.rbde|tool:alpha:dev"
+      let envrc = readFile(c.projectRoot / ".envrc")
+      check "repro-managed:repro-dev-env-direnv" in envrc
+      check "__repro-direnv-activate" in envrc
+      check "hooks ensure --vcs" in envrc
+      let hooksAfterDirenv = c.requireVcsHooksInstalled()
+      discard requireRepro(c, @["hooks", "ensure", "--vcs", c.projectRoot])
+      let hooksAfterExplicitEnsure = c.requireVcsHooksInstalled()
+      check hooksAfterExplicitEnsure == hooksAfterDirenv
 
-    let stats = parseJson(readFile(statsPath))
-    check stats["command"].getStr() == "hooks shell-direnv"
-    check fileExists(stats["artifactPath"].getStr())
-    check stats["stats"]["providerIntrospectionLaunched"].getBool()
-    check stats["stats"]["artifactWriteLaunched"].getBool()
-    check stats["stats"]["shellRenderingLaunched"].getBool()
-    check stats.evidenceMentionsInput("dev-env-value.txt")
-    stats.requireNavigatorHotPath()
+      let stats = parseJson(readFile(statsPath))
+      check stats["command"].getStr() == "hooks shell-direnv"
+      check fileExists(stats["artifactPath"].getStr())
+      check stats["stats"]["providerIntrospectionLaunched"].getBool()
+      check stats["stats"]["artifactWriteLaunched"].getBool()
+      check stats["stats"]["shellRenderingLaunched"].getBool()
+      check stats.evidenceMentionsInput("dev-env-value.txt")
+      stats.requireNavigatorHotPath()
 
-  test "e2e_hooks_shell_direnv_noop_is_fast":
-    let c = prepareCase("repro-m5-direnv-noop")
-    defer: removeDir(c.tempRoot)
+    test "e2e_hooks_shell_direnv_noop_is_fast":
+      let c = prepareCase("repro-m5-direnv-noop")
+      defer: removeDir(c.tempRoot)
 
-    discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
-      c.projectRoot])
-    allowDirenv(c)
+      discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
+        c.projectRoot])
+      allowDirenv(c)
 
-    let firstStatsPath = c.tempRoot / "direnv-first-stats.json"
-    check requireDirenvValue(c, firstStatsPath) == "DIR:alpha|dev|dev-env.rbde|tool:alpha:dev"
-    let firstStats = parseJson(readFile(firstStatsPath))
-    let artifactPath = firstStats["artifactPath"].getStr()
-    let artifactBytes = readFile(artifactPath)
-    check firstStats["stats"]["providerIntrospectionLaunched"].getBool()
-    check firstStats["stats"]["shellRenderingLaunched"].getBool()
-    firstStats.requireNavigatorHotPath()
+      let firstStatsPath = c.tempRoot / "direnv-first-stats.json"
+      check requireDirenvValue(c, firstStatsPath) == "DIR:alpha|dev|dev-env.rbde|tool:alpha:dev"
+      let firstStats = parseJson(readFile(firstStatsPath))
+      let artifactPath = firstStats["artifactPath"].getStr()
+      let artifactBytes = readFile(artifactPath)
+      check firstStats["stats"]["providerIntrospectionLaunched"].getBool()
+      check firstStats["stats"]["shellRenderingLaunched"].getBool()
+      firstStats.requireNavigatorHotPath()
 
-    let secondStatsPath = c.tempRoot / "direnv-second-stats.json"
-    check requireDirenvValue(c, secondStatsPath) == "DIR:alpha|dev|dev-env.rbde|tool:alpha:dev"
-    let secondStats = parseJson(readFile(secondStatsPath))
-    check secondStats["artifactPath"].getStr() == artifactPath
-    check readFile(artifactPath) == artifactBytes
-    check not secondStats["stats"]["providerIntrospectionLaunched"].getBool()
-    check secondStats["stats"]["providerIntrospectionCacheHit"].getBool()
-    check secondStats["stats"]["artifactWriteSkipped"].getBool()
-    check not secondStats["stats"]["shellRenderingLaunched"].getBool()
-    check secondStats["stats"]["shellRenderingCacheHit"].getBool()
-    check secondStats.evidenceMentionsInput("dev-env-value.txt")
-    secondStats.requireNavigatorHotPath()
+      let secondStatsPath = c.tempRoot / "direnv-second-stats.json"
+      check requireDirenvValue(c, secondStatsPath) == "DIR:alpha|dev|dev-env.rbde|tool:alpha:dev"
+      let secondStats = parseJson(readFile(secondStatsPath))
+      check secondStats["artifactPath"].getStr() == artifactPath
+      check readFile(artifactPath) == artifactBytes
+      check not secondStats["stats"]["providerIntrospectionLaunched"].getBool()
+      check secondStats["stats"]["providerIntrospectionCacheHit"].getBool()
+      check secondStats["stats"]["artifactWriteSkipped"].getBool()
+      check not secondStats["stats"]["shellRenderingLaunched"].getBool()
+      check secondStats["stats"]["shellRenderingCacheHit"].getBool()
+      check secondStats.evidenceMentionsInput("dev-env-value.txt")
+      secondStats.requireNavigatorHotPath()
 
-  test "e2e_hooks_shell_direnv_conflict_and_uninstall":
-    let c = prepareCase("repro-m5-direnv-conflict")
-    defer: removeDir(c.tempRoot)
+    test "e2e_hooks_shell_direnv_conflict_and_uninstall":
+      let c = prepareCase("repro-m5-direnv-conflict")
+      defer: removeDir(c.tempRoot)
 
-    let envrcPath = c.projectRoot / ".envrc"
-    let userBytes = "export USER_OWNED=1\n# tail user bytes\n"
-    writeFile(envrcPath, userBytes)
+      let envrcPath = c.projectRoot / ".envrc"
+      let userBytes = "export USER_OWNED=1\n# tail user bytes\n"
+      writeFile(envrcPath, userBytes)
 
-    discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
-      c.projectRoot])
-    let withBlock = readFile(envrcPath)
-    check withBlock.contains(userBytes)
-    check withBlock.contains("repro-managed:repro-dev-env-direnv")
+      discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
+        c.projectRoot])
+      let withBlock = readFile(envrcPath)
+      check withBlock.contains(userBytes)
+      check withBlock.contains("repro-managed:repro-dev-env-direnv")
 
-    discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
-      c.projectRoot])
-    check readFile(envrcPath) == withBlock
+      discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
+        c.projectRoot])
+      check readFile(envrcPath) == withBlock
 
-    discard requireRepro(c, @["hooks", "uninstall", "--shell-direnv",
-      c.projectRoot])
-    check readFile(envrcPath) == userBytes
+      discard requireRepro(c, @["hooks", "uninstall", "--shell-direnv",
+        c.projectRoot])
+      check readFile(envrcPath) == userBytes
 
-    let conflictBytes =
-      "eval \"$(repro shell --print-env=posix .)\"\n# keep my conflict\n"
-    writeFile(envrcPath, conflictBytes)
-    let conflict = runRepro(c, @["hooks", "ensure", "--shell-direnv",
-      c.projectRoot])
-    check conflict.exitCode != 0
-    check conflict.output.contains("conflicting unmanaged .envrc")
-    check readFile(envrcPath) == conflictBytes
+      let conflictBytes =
+        "eval \"$(repro shell --print-env=posix .)\"\n# keep my conflict\n"
+      writeFile(envrcPath, conflictBytes)
+      let conflict = runRepro(c, @["hooks", "ensure", "--shell-direnv",
+        c.projectRoot])
+      check conflict.exitCode != 0
+      check conflict.output.contains("conflicting unmanaged .envrc")
+      check readFile(envrcPath) == conflictBytes
 
-    let hooks = c.hooksDir()
-    let userPrePush =
-      "#!/bin/sh\nprintf 'user pre-push hook\\n'\n"
-    let userPostCommit =
-      "#!/bin/sh\nprintf 'user post-commit hook\\n'\n"
-    writeExecutable(hooks / "pre-push", userPrePush)
-    writeExecutable(hooks / "post-commit", userPostCommit)
+      let hooks = c.hooksDir()
+      let userPrePush =
+        "#!/bin/sh\nprintf 'user pre-push hook\\n'\n"
+      let userPostCommit =
+        "#!/bin/sh\nprintf 'user post-commit hook\\n'\n"
+      writeExecutable(hooks / "pre-push", userPrePush)
+      writeExecutable(hooks / "post-commit", userPostCommit)
 
-    discard requireRepro(c, @["hooks", "ensure", "--vcs", c.projectRoot])
-    discard c.requireVcsHooksInstalled()
-    check readFile(hooks / "pre-push.repro-local") == userPrePush
-    check readFile(hooks / "post-commit.repro-local") == userPostCommit
+      discard requireRepro(c, @["hooks", "ensure", "--vcs", c.projectRoot])
+      discard c.requireVcsHooksInstalled()
+      check readFile(hooks / "pre-push.repro-local") == userPrePush
+      check readFile(hooks / "post-commit.repro-local") == userPostCommit
 
-    let dispatcherPrePush = readFile(hooks / "pre-push")
-    let dispatcherPostCommit = readFile(hooks / "post-commit")
-    discard requireRepro(c, @["hooks", "ensure", "--vcs", c.projectRoot])
-    check readFile(hooks / "pre-push") == dispatcherPrePush
-    check readFile(hooks / "post-commit") == dispatcherPostCommit
-    check readFile(hooks / "pre-push.repro-local") == userPrePush
-    check readFile(hooks / "post-commit.repro-local") == userPostCommit
+      let dispatcherPrePush = readFile(hooks / "pre-push")
+      let dispatcherPostCommit = readFile(hooks / "post-commit")
+      discard requireRepro(c, @["hooks", "ensure", "--vcs", c.projectRoot])
+      check readFile(hooks / "pre-push") == dispatcherPrePush
+      check readFile(hooks / "post-commit") == dispatcherPostCommit
+      check readFile(hooks / "pre-push.repro-local") == userPrePush
+      check readFile(hooks / "post-commit.repro-local") == userPostCommit
 
-    discard requireRepro(c, @["hooks", "uninstall", "--vcs", c.projectRoot])
-    check readFile(hooks / "pre-push") == userPrePush
-    check readFile(hooks / "post-commit") == userPostCommit
-    check not fileExists(hooks / "pre-push.repro-managed")
-    check not fileExists(hooks / "post-commit.repro-managed")
+      discard requireRepro(c, @["hooks", "uninstall", "--vcs", c.projectRoot])
+      check readFile(hooks / "pre-push") == userPrePush
+      check readFile(hooks / "post-commit") == userPostCommit
+      check not fileExists(hooks / "pre-push.repro-managed")
+      check not fileExists(hooks / "post-commit.repro-managed")

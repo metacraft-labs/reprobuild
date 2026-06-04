@@ -1,19 +1,10 @@
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
+import repro_test_support
+
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
-
-proc shellCommand(args: openArray[string]): string =
-  args.mapIt(q(it)).join(" ")
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = execCmdEx(command, workingDir = cwd)
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "command failed with exit " & $res.exitCode & ": " & command &
-        "\n" & res.output)
-  res.output
 
 proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
                 appLib = false) =
@@ -27,31 +18,7 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-when defined(linux) or defined(macosx):
-  proc prepareMonitorTools(repoRoot, tempRoot: string):
-      tuple[fsSnoop: string; shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    let shimSource =
-      when defined(linux):
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      else:
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-    compileNim(repoRoot, shimSource, result.shim, "m8-dev-session-monitor-shim",
-      appLib = true)
-    compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      result.fsSnoop, "m8-dev-session-fs-snoop")
+# prepareMonitorTools is exported from libs/repro_test_support.
 
 proc compileRepro(repoRoot, tempRoot: string): string =
   result = tempRoot / "bin" / addFileExt("repro", ExeExt)
@@ -165,13 +132,10 @@ proc prepareCase(prefix: string; dev = false): M8Case =
   else:
     writeUpDownFixture(result.projectRoot)
   result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
-  when defined(linux) or defined(macosx):
-    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot)
+  when isFsSnoopSupported:
+    let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m8-dev-sessions")
     result.fsSnoop = monitor.fsSnoop
     result.shim = monitor.shim
-  else:
-    raise newException(OSError,
-      "M8 dev session tests require a filesystem monitor backend")
 
 proc envFor(c: M8Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
@@ -222,8 +186,7 @@ proc waitForStatus(path, status: string; timeoutMs = 10000): JsonNode =
   raise newException(IOError, "timed out waiting for session status " & status)
 
 proc httpRequest(httpBindValue, path: string; httpMethod = "GET"): string =
-  let command = "python3 - " & q(httpBindValue) & " " & q(path) & " " &
-    q(httpMethod) & " <<'PY'\n" &
+  let script =
     "import http.client, sys, urllib.parse\n" &
     "u=urllib.parse.urlparse(sys.argv[1])\n" &
     "conn=http.client.HTTPConnection(u.hostname, u.port, timeout=5)\n" &
@@ -231,9 +194,9 @@ proc httpRequest(httpBindValue, path: string; httpMethod = "GET"): string =
     "resp=conn.getresponse()\n" &
     "body=resp.read().decode()\n" &
     "print(body, end='')\n" &
-    "sys.exit(0 if 200 <= resp.status < 300 else 1)\n" &
-    "PY"
-  requireSuccess(command)
+    "sys.exit(0 if 200 <= resp.status < 300 else 1)\n"
+  requireSuccess(shellCommand(@["python3", "-c", script,
+    httpBindValue, path, httpMethod]))
 
 proc statusJson(httpBindValue: string): JsonNode =
   parseJson(httpRequest(httpBindValue, "/status"))
@@ -273,7 +236,7 @@ proc pidAlive(pid: int): bool =
   when defined(windows):
     false
   else:
-    execCmdEx("kill -0 " & $pid).exitCode == 0
+    runShell(shellCommand(@["kill", "-0", $pid])).code == 0
 
 proc requirePidGone(pid: int) =
   for _ in 0 ..< 100:
@@ -283,107 +246,108 @@ proc requirePidGone(pid: int) =
   raise newException(OSError, "supervised service pid still alive: " & $pid)
 
 suite "e2e_repro_dev_sessions":
-  test "e2e_repro_up_down_supervises_real_services":
-    let c = prepareCase("repro-m8-up-down")
-    defer: removeDir(c.tempRoot)
+  when isFsSnoopSupported:
+    test "e2e_repro_up_down_supervises_real_services":
+      let c = prepareCase("repro-m8-up-down")
+      defer: removeDir(c.tempRoot)
 
-    let upOutput = requireRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
-    check upOutput.contains("repro up: session")
-    let metadata = waitForStatus(sessionMetadataPath(c.projectRoot), "up")
-    let httpBindValue = metadata["httpBind"].getStr()
-    let status = statusJson(httpBindValue)
-    check status["status"].getStr() == "up"
-    check status["services"].len == 2
-    check status["services"][0]["name"].getStr() == "db"
-    check status["services"][0]["ready"].getBool()
-    check status["services"][1]["name"].getStr() == "api"
-    check status["services"][1]["ready"].getBool()
-    check status["resources"].anyIt(it["path"].getStr().endsWith("state") and
-      it["status"].getStr() == "ready")
-    let pids = status["services"].mapIt(it["pid"].getInt())
-    check pids.allIt(it > 0)
-    check pids.allIt(pidAlive(it))
+      let upOutput = requireRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
+      check upOutput.contains("repro up: session")
+      let metadata = waitForStatus(sessionMetadataPath(c.projectRoot), "up")
+      let httpBindValue = metadata["httpBind"].getStr()
+      let status = statusJson(httpBindValue)
+      check status["status"].getStr() == "up"
+      check status["services"].len == 2
+      check status["services"][0]["name"].getStr() == "db"
+      check status["services"][0]["ready"].getBool()
+      check status["services"][1]["name"].getStr() == "api"
+      check status["services"][1]["ready"].getBool()
+      check status["resources"].anyIt(it["path"].getStr().endsWith("state") and
+        it["status"].getStr() == "ready")
+      let pids = status["services"].mapIt(it["pid"].getInt())
+      check pids.allIt(it > 0)
+      check pids.allIt(pidAlive(it))
 
-    let upEvents = sseEvents(httpBindValue, waitMs = 250)
-    let upKinds = eventKinds(upEvents)
-    check upKinds.kindIndex("resources.reconciled") >= 0
-    check upKinds.kindIndex("session.up") >= 0
-    check upKinds.kindIndex("resources.reconciled") <
-      upKinds.kindIndex("session.up")
+      let upEvents = sseEvents(httpBindValue, waitMs = 250)
+      let upKinds = eventKinds(upEvents)
+      check upKinds.kindIndex("resources.reconciled") >= 0
+      check upKinds.kindIndex("session.up") >= 0
+      check upKinds.kindIndex("resources.reconciled") <
+        upKinds.kindIndex("session.up")
 
-    let downOutput = requireRepro(c, @["down", c.projectRoot])
-    check downOutput.contains("repro down: session")
-    let down = waitForStatus(sessionMetadataPath(c.projectRoot), "down")
-    check down["stopOrder"].mapIt(it.getStr()) == @["api", "db"]
-    check down["services"].mapIt(it["pid"].getInt()) == pids
-    check down["services"].allIt(it["status"].getStr() == "stopped")
-    for pid in pids:
-      requirePidGone(pid)
-    let order = readFile(c.projectRoot / "state" / "order.log")
-    check order.find("db-start") < order.find("api-start")
-    check order.find("api-stop") < order.find("db-stop")
+      let downOutput = requireRepro(c, @["down", c.projectRoot])
+      check downOutput.contains("repro down: session")
+      let down = waitForStatus(sessionMetadataPath(c.projectRoot), "down")
+      check down["stopOrder"].mapIt(it.getStr()) == @["api", "db"]
+      check down["services"].mapIt(it["pid"].getInt()) == pids
+      check down["services"].allIt(it["status"].getStr() == "stopped")
+      for pid in pids:
+        requirePidGone(pid)
+      let order = readFile(c.projectRoot / "state" / "order.log")
+      check order.find("db-start") < order.find("api-start")
+      check order.find("api-stop") < order.find("db-stop")
 
-  test "e2e_repro_dev_watch_and_service_events":
-    let c = prepareCase("repro-m8-dev-watch", dev = true)
-    defer: removeDir(c.tempRoot)
+    test "e2e_repro_dev_watch_and_service_events":
+      let c = prepareCase("repro-m8-dev-watch", dev = true)
+      defer: removeDir(c.tempRoot)
 
-    var devProcess = startProcess(c.reproBin,
-      args = @[
-        "dev", c.projectRoot, "--foreground", "--http=127.0.0.1:0",
-        "--debounce-ms=100"
-      ],
-      workingDir = c.repoRoot,
-      env = c.envFor(),
-      options = {poUsePath, poStdErrToStdOut})
-    defer:
-      try:
-        if devProcess.running():
-          devProcess.terminate()
-      except CatchableError:
-        discard
-      devProcess.close()
+      var devProcess = startProcess(c.reproBin,
+        args = @[
+          "dev", c.projectRoot, "--foreground", "--http=127.0.0.1:0",
+          "--debounce-ms=100"
+        ],
+        workingDir = c.repoRoot,
+        env = c.envFor(),
+        options = {poUsePath, poStdErrToStdOut})
+      defer:
+        try:
+          if devProcess.running():
+            devProcess.terminate()
+        except CatchableError:
+          discard
+        devProcess.close()
 
-    let metadataPath = sessionMetadataPath(c.projectRoot)
-    let up = waitForStatus(metadataPath, "up", timeoutMs = 30000)
-    let httpBindValue = up["httpBind"].getStr()
-    check statusJson(httpBindValue)["services"][0]["ready"].getBool()
+      let metadataPath = sessionMetadataPath(c.projectRoot)
+      let up = waitForStatus(metadataPath, "up", timeoutMs = 30000)
+      let httpBindValue = up["httpBind"].getStr()
+      check statusJson(httpBindValue)["services"][0]["ready"].getBool()
 
-    while not fileExists(c.projectRoot / "state" / "watch.log"):
-      sleep(50)
-    check readFile(c.projectRoot / "state" / "watch.log").contains("task:one")
+      while not fileExists(c.projectRoot / "state" / "watch.log"):
+        sleep(50)
+      check readFile(c.projectRoot / "state" / "watch.log").contains("task:one")
 
-    writeFile(c.projectRoot / "watch-source.txt", "two\n")
-    var sawTwo = false
-    for _ in 0 ..< 100:
-      if fileExists(c.projectRoot / "state" / "watch.log") and
-          readFile(c.projectRoot / "state" / "watch.log").contains("task:two"):
-        sawTwo = true
-        break
-      sleep(50)
-    check sawTwo
+      writeFile(c.projectRoot / "watch-source.txt", "two\n")
+      var sawTwo = false
+      for _ in 0 ..< 100:
+        if fileExists(c.projectRoot / "state" / "watch.log") and
+            readFile(c.projectRoot / "state" / "watch.log").contains("task:two"):
+          sawTwo = true
+          break
+        sleep(50)
+      check sawTwo
 
-    let events = sseEvents(httpBindValue, waitMs = 750)
-    let sseKinds = eventKinds(events)
-    check "service.ready" in sseKinds
-    check "watch.filesystem.changed" in sseKinds
-    check "watch.cycle.started" in sseKinds
-    check "watch.task.finished" in sseKinds
-    check "watch.cycle.finished" in sseKinds
-    check sseKinds.kindCount("watch.cycle.started") >= 2
-    check sseKinds.kindCount("watch.task.finished") >= 2
-    check statusJson(httpBindValue)["watch"]["cycles"].getInt() >= 2
+      let events = sseEvents(httpBindValue, waitMs = 750)
+      let sseKinds = eventKinds(events)
+      check "service.ready" in sseKinds
+      check "watch.filesystem.changed" in sseKinds
+      check "watch.cycle.started" in sseKinds
+      check "watch.task.finished" in sseKinds
+      check "watch.cycle.finished" in sseKinds
+      check sseKinds.kindCount("watch.cycle.started") >= 2
+      check sseKinds.kindCount("watch.task.finished") >= 2
+      check statusJson(httpBindValue)["watch"]["cycles"].getInt() >= 2
 
-    discard requireRepro(c, @["down", c.projectRoot])
-    let output =
-      if devProcess.outputStream != nil: devProcess.outputStream.readAll()
-      else: ""
-    let exitCode = devProcess.waitForExit()
-    check exitCode == 0
-    check output.contains("watch-task:one")
-    check output.contains("watch-task:two")
-    let terminalKinds = terminalEventKinds(output)
-    for kind in ["service.ready", "watch.filesystem.changed",
-        "watch.cycle.started", "watch.task.finished", "watch.cycle.finished"]:
-      check kind in terminalKinds
-      check kind in sseKinds
-      check terminalKinds.kindCount(kind) == sseKinds.kindCount(kind)
+      discard requireRepro(c, @["down", c.projectRoot])
+      let output =
+        if devProcess.outputStream != nil: devProcess.outputStream.readAll()
+        else: ""
+      let exitCode = devProcess.waitForExit()
+      check exitCode == 0
+      check output.contains("watch-task:one")
+      check output.contains("watch-task:two")
+      let terminalKinds = terminalEventKinds(output)
+      for kind in ["service.ready", "watch.filesystem.changed",
+          "watch.cycle.started", "watch.task.finished", "watch.cycle.finished"]:
+        check kind in terminalKinds
+        check kind in sseKinds
+        check terminalKinds.kindCount(kind) == sseKinds.kindCount(kind)

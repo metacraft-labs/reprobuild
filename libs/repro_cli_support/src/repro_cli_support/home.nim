@@ -9,9 +9,9 @@
 ##   - A new `repro home apply` subcommand runs the pipeline directly.
 ##   - `add`, `remove`, `enable`, `disable` run the apply pipeline
 ##     inline after a successful edit unless `--no-apply` was passed.
-##   - `--now` on `enable`/`disable` is now the default behaviour (no
-##     extra effect); combining it with `--host <name>` is rejected
-##     because remote apply is deferred to M71.
+##   - `--now` on current-host `enable`/`disable` is the default local
+##     apply behaviour. `--host <name>` without `--now` is a pure
+##     intent edit; `--host <name> --now` drives M71 remote apply.
 ##
 ## ## Package-catalog lookup seam
 ##
@@ -33,15 +33,17 @@
 ## matches the spec's "do NOT load packages at runtime" rule for M61
 ## while still letting the gate exercise the error path.
 
-import std/[options, os, sets, strutils, tables, times]
+import std/[options, os, osproc, sets, streams, strutils, tables, times]
 from repro_core/paths import extendedPath
 
+import blake3
 import repro_home_intent
 import repro_home_generations
 import repro_home_apply
 import repro_home_apply/catalog_lookup
 import repro_home_resources
 import repro_home_rollback
+import repro_launch_plan
 import repro_local_store
 import repro_profile_intent
 import repro_profile_compile
@@ -191,6 +193,29 @@ proc parseFlagValue(args: openArray[string]; i: var int;
   if cur.startsWith(flag & "="):
     return cur[flag.len + 1 .. ^1]
   raise newException(ValueError, "internal: parseFlagValue called for " & flag)
+
+proc parseCliBool(raw, flag: string): bool =
+  case raw.toLowerAscii()
+  of "1", "true", "yes", "on":
+    true
+  of "0", "false", "no", "off":
+    false
+  else:
+    raise newException(ValueError,
+      "expected boolean value for " & flag & ", got '" & raw & "'")
+
+proc normalizeTargetPlatform(raw: string): string =
+  let p = raw.toLowerAscii()
+  if p notin ["linux", "macos", "windows", "bsd"]:
+    raise newException(ValueError,
+      "unsupported --target-platform '" & raw & "'")
+  p
+
+proc normalizeTargetArch(raw: string): string =
+  let a = raw.toLowerAscii()
+  if a notin ["x86_64", "arm64", "arm32"]:
+    raise newException(ValueError, "unsupported --target-arch '" & raw & "'")
+  a
 
 # ---------------------------------------------------------------------------
 # M83 Phase D + F3: compile-then-adapt path for `home.nim` profiles.
@@ -670,14 +695,41 @@ proc currentHostActivities(prof: Profile; host: string): seq[string] =
       return entry.hostActivities
   @[]
 
+type
+  RemoteApplyFlags = object
+    remoteRepro: string
+    targetStoreRoot: string
+    targetStoreDaemon: string
+    targetStoreEndpoint: string
+    targetStateDir: string
+    targetHomeDir: string
+    sshPath: string
+    sshOptions: seq[string]
+    port: int
+    targetPlatform: string
+    targetArch: string
+    targetWslGiven: bool
+    targetWsl: bool
+
+  EnableDisableFlags = object
+    activity: string
+    host: string
+    now: bool
+    noApply: bool
+    hostGiven: bool
+    ok: bool
+    exitCode: int
+    remote: RemoteApplyFlags
+
 proc parseEnableDisableFlags(name: string; args: openArray[string]):
-    tuple[activity, host: string; now, noApply, hostGiven, ok: bool;
-          exitCode: int] =
+    EnableDisableFlags =
   result.now = false
   result.noApply = false
   result.hostGiven = false
   result.ok = false
   result.exitCode = 2
+  result.remote.remoteRepro = "repro"
+  result.remote.sshPath = "ssh"
   var positional = ""
   var hostOverride = ""
   var i = 0
@@ -690,6 +742,64 @@ proc parseEnableDisableFlags(name: string; args: openArray[string]):
       result.now = true
     elif a == "--no-apply":
       result.noApply = true
+    elif a == "--remote-repro" or a.startsWith("--remote-repro="):
+      result.remote.remoteRepro = parseFlagValue(args, i, "--remote-repro")
+    elif a == "--target-store-root" or a.startsWith("--target-store-root="):
+      result.remote.targetStoreRoot = parseFlagValue(args, i,
+        "--target-store-root")
+    elif a == "--target-store-daemon" or
+        a.startsWith("--target-store-daemon="):
+      result.remote.targetStoreDaemon = parseFlagValue(args, i,
+        "--target-store-daemon")
+      if result.remote.targetStoreDaemon != "dev":
+        stderr.writeLine("repro home " & name &
+          ": --target-store-daemon supports only 'dev' in this pass")
+        return
+    elif a == "--target-store-endpoint" or
+        a.startsWith("--target-store-endpoint="):
+      result.remote.targetStoreEndpoint = parseFlagValue(args, i,
+        "--target-store-endpoint")
+    elif a == "--target-state-dir" or a.startsWith("--target-state-dir="):
+      result.remote.targetStateDir = parseFlagValue(args, i,
+        "--target-state-dir")
+    elif a == "--target-home-dir" or a.startsWith("--target-home-dir="):
+      result.remote.targetHomeDir = parseFlagValue(args, i,
+        "--target-home-dir")
+    elif a == "--ssh" or a.startsWith("--ssh="):
+      result.remote.sshPath = parseFlagValue(args, i, "--ssh")
+    elif a == "--port" or a.startsWith("--port="):
+      try:
+        result.remote.port = parseInt(parseFlagValue(args, i, "--port"))
+      except ValueError as err:
+        stderr.writeLine("repro home " & name & ": " & err.msg)
+        return
+    elif a == "--ssh-option" or a.startsWith("--ssh-option="):
+      result.remote.sshOptions.add(parseFlagValue(args, i, "--ssh-option"))
+    elif a == "--target-platform" or a.startsWith("--target-platform="):
+      try:
+        result.remote.targetPlatform = normalizeTargetPlatform(
+          parseFlagValue(args, i, "--target-platform"))
+      except ValueError as err:
+        stderr.writeLine("repro home " & name & ": " & err.msg)
+        return
+    elif a == "--target-arch" or a.startsWith("--target-arch="):
+      try:
+        result.remote.targetArch = normalizeTargetArch(parseFlagValue(args, i,
+          "--target-arch"))
+      except ValueError as err:
+        stderr.writeLine("repro home " & name & ": " & err.msg)
+        return
+    elif a == "--target-wsl":
+      result.remote.targetWsl = true
+      result.remote.targetWslGiven = true
+    elif a.startsWith("--target-wsl="):
+      try:
+        result.remote.targetWsl = parseCliBool(a["--target-wsl=".len .. ^1],
+          "--target-wsl")
+        result.remote.targetWslGiven = true
+      except ValueError as err:
+        stderr.writeLine("repro home " & name & ": " & err.msg)
+        return
     elif a.startsWith("--"):
       stderr.writeLine("repro home " & name & ": unknown flag: " & a)
       return
@@ -701,7 +811,12 @@ proc parseEnableDisableFlags(name: string; args: openArray[string]):
     inc i
   if positional.len == 0:
     stderr.writeLine("usage: repro home " & name &
-      " <activity> [--host NAME] [--now] [--no-apply]")
+      " <activity> [--host NAME] [--now] [--no-apply] " &
+      "[--remote-repro PATH] [--target-store-root PATH] " &
+      "[--target-store-daemon dev --target-store-endpoint PATH] " &
+      "[--target-state-dir PATH] [--target-home-dir PATH] [--ssh PATH] " &
+      "[--port N] [--ssh-option OPT] [--target-platform PLATFORM] " &
+      "[--target-arch ARCH] [--target-wsl[=true|false]]")
     return
   result.activity = positional
   result.host = if hostOverride.len > 0: hostOverride else: currentHost()
@@ -719,19 +834,18 @@ proc refuseDefaultGuard(name, activity: string): bool =
     return true
   false
 
+proc runRemoteApplyAfterEdit(name: string; parsed: EnableDisableFlags): int
+
 proc runHomeEnable(args: openArray[string]): int =
-  let parsed = parseEnableDisableFlags("enable", args)
+  var parsed: EnableDisableFlags
+  try:
+    parsed = parseEnableDisableFlags("enable", args)
+  except ValueError as err:
+    stderr.writeLine("repro home enable: " & err.msg)
+    return 2
   if not parsed.ok:
     return parsed.exitCode
   if refuseDefaultGuard("enable", parsed.activity):
-    return 1
-  # M63: `--now` + `--host <name>` requests remote apply. Remote apply
-  # is deferred to M71; reject the combination with a clear pointer.
-  if parsed.hostGiven and parsed.now and parsed.host != currentHost():
-    stderr.writeLine("repro home enable: --now combined with --host '" &
-      parsed.host & "' requests remote apply, which is deferred to M71. " &
-      "Run the command on '" & parsed.host & "' directly, or omit --host " &
-      "to apply locally.")
     return 1
   try:
     let profilePath = loadProfilePath()
@@ -749,20 +863,23 @@ proc runHomeEnable(args: openArray[string]): int =
     return 1
   if parsed.noApply:
     return 0
+  if parsed.hostGiven and parsed.host != currentHost():
+    if parsed.now:
+      return runRemoteApplyAfterEdit("enable", parsed)
+    return 0
   # M63: apply runs by default after a successful intent edit.
   return runApplyInline("enable")
 
 proc runHomeDisable(args: openArray[string]): int =
-  let parsed = parseEnableDisableFlags("disable", args)
+  var parsed: EnableDisableFlags
+  try:
+    parsed = parseEnableDisableFlags("disable", args)
+  except ValueError as err:
+    stderr.writeLine("repro home disable: " & err.msg)
+    return 2
   if not parsed.ok:
     return parsed.exitCode
   if refuseDefaultGuard("disable", parsed.activity):
-    return 1
-  if parsed.hostGiven and parsed.now and parsed.host != currentHost():
-    stderr.writeLine("repro home disable: --now combined with --host '" &
-      parsed.host & "' requests remote apply, which is deferred to M71. " &
-      "Run the command on '" & parsed.host & "' directly, or omit --host " &
-      "to apply locally.")
     return 1
   try:
     let profilePath = loadProfilePath()
@@ -781,6 +898,10 @@ proc runHomeDisable(args: openArray[string]): int =
     stderr.writeLine("repro home disable: error: " & e.msg)
     return 1
   if parsed.noApply:
+    return 0
+  if parsed.hostGiven and parsed.host != currentHost():
+    if parsed.now:
+      return runRemoteApplyAfterEdit("disable", parsed)
     return 0
   return runApplyInline("disable")
 
@@ -1106,30 +1227,1205 @@ proc runHomeApply(args: openArray[string]): int =
   return runApplyInline("apply")
 
 # ---------------------------------------------------------------------------
-# `repro home set` / `repro home get` (M65).
+# `repro home __build-bundle` (M71 Phase A, internal).
 # ---------------------------------------------------------------------------
 
-proc currentHostContext(): HostContext =
-  ## Construct a `HostContext` for the running interpreter so the
-  ## intent layer's `resolveEffectiveConfig` can evaluate predicates
-  ## the same way the apply pipeline will. M65's pre-validation is
-  ## the only call site; predicate evaluation in `set`/`get` cannot
-  ## diverge from apply or the diagnostic would be misleading.
-  result.host = currentHost()
+proc bytesToString(bytes: openArray[byte]): string =
+  result = newString(bytes.len)
+  for i, b in bytes:
+    result[i] = char(b)
+
+proc parseBundleTargetBool(raw: string): bool =
+  parseCliBool(raw, "--target-wsl")
+
+proc runHomeBuildBundle(args: openArray[string]): int =
+  ## Internal M71 command. Phase A bundles an already-realized local
+  ## generation. Phase B's `--evaluate` mode first performs a local
+  ## apply under explicit target facts, then bundles that generation.
+  ## This still does not perform SSH transfer or remote activation.
+  var generation = "current"
+  var generationGiven = false
+  var evaluate = false
+  var stateDir = ""
+  var storeRoot = ""
+  var profileDir = ""
+  var homeDir = ""
+  var outPath = ""
+  var targetHost = ""
+  var targetPlatform = ""
+  var targetArch = ""
+  var targetWslGiven = false
+  var targetWsl = false
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      echo "usage: repro home __build-bundle [--generation=current|<hex>] " &
+        "[--state-dir PATH] [--store-root PATH] [--out PATH]"
+      echo "       repro home __build-bundle --evaluate --target-host NAME " &
+        "[--target-platform linux|macos|windows|bsd] " &
+        "[--target-arch x86_64|arm64|arm32] [--target-wsl[=true|false]] " &
+        "[--profile-dir PATH] [--state-dir PATH] [--store-root PATH] " &
+        "[--home-dir PATH] [--out PATH]"
+      echo ""
+      echo "Build a local-only activation bundle and store it as a CAS blob"
+      echo "in the source store. --evaluate performs local target-fact"
+      echo "evaluation only; it does not transfer or activate remotely."
+      return 0
+    elif a == "--evaluate":
+      evaluate = true
+    elif a == "--generation" or a.startsWith("--generation="):
+      generation = parseFlagValue(args, i, "--generation")
+      generationGiven = true
+    elif a == "--state-dir" or a.startsWith("--state-dir="):
+      stateDir = parseFlagValue(args, i, "--state-dir")
+    elif a == "--store-root" or a.startsWith("--store-root="):
+      storeRoot = parseFlagValue(args, i, "--store-root")
+    elif a == "--profile-dir" or a.startsWith("--profile-dir="):
+      profileDir = parseFlagValue(args, i, "--profile-dir")
+    elif a == "--home-dir" or a.startsWith("--home-dir="):
+      homeDir = parseFlagValue(args, i, "--home-dir")
+    elif a == "--out" or a.startsWith("--out="):
+      outPath = parseFlagValue(args, i, "--out")
+    elif a == "--target-host" or a.startsWith("--target-host="):
+      targetHost = parseFlagValue(args, i, "--target-host")
+      evaluate = true
+    elif a == "--target-platform" or a.startsWith("--target-platform="):
+      targetPlatform = parseFlagValue(args, i, "--target-platform")
+      evaluate = true
+    elif a == "--target-arch" or a.startsWith("--target-arch="):
+      targetArch = parseFlagValue(args, i, "--target-arch")
+      evaluate = true
+    elif a == "--target-wsl":
+      targetWsl = true
+      targetWslGiven = true
+      evaluate = true
+    elif a.startsWith("--target-wsl="):
+      targetWsl = parseBundleTargetBool(a["--target-wsl=".len .. ^1])
+      targetWslGiven = true
+      evaluate = true
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home __build-bundle: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home __build-bundle: unexpected positional: " &
+        a)
+      return 2
+    inc i
+
+  try:
+    let resolvedStateDir =
+      if stateDir.len > 0: stateDir else: resolveStateDir()
+    let resolvedStoreRoot = resolveStoreRoot(storeRoot)
+    if evaluate:
+      if generationGiven and generation != "current":
+        raise newException(ValueError,
+          "--generation cannot select an existing generation in --evaluate mode")
+      var ctx = currentHostContext()
+      if targetHost.len > 0:
+        ctx.host = targetHost
+      if targetPlatform.len > 0:
+        ctx.platform = normalizeTargetPlatform(targetPlatform)
+      if targetArch.len > 0:
+        ctx.arch = normalizeTargetArch(targetArch)
+      if targetWslGiven:
+        ctx.isWsl = targetWsl
+        if targetWsl and targetPlatform.len == 0:
+          ctx.platform = "linux"
+      var applyOpts: ApplyOptions
+      applyOpts.profileDir = profileDir
+      if profileDir.len > 0:
+        # Both `repro_home_intent/host_identity` and
+        # `repro_profile_compile/sources` export a `HomeProfileAnchor`
+        # constant with the same value ("home.nim"). They are both
+        # transitively imported into this module via
+        # `repro_home_intent` and `repro_profile_compile`, so the bare
+        # identifier is ambiguous. Qualify against `host_identity`
+        # because that is the M60 home-profile authoritative anchor;
+        # the `sources.HomeProfileAnchor` in profile-compile is a
+        # later mirror used inside the profile-compile graph edge.
+        applyOpts.profilePath = profileDir / host_identity.HomeProfileAnchor
+      applyOpts.stateDir = resolvedStateDir
+      applyOpts.storeRoot = resolvedStoreRoot
+      applyOpts.homeDir = homeDir
+      applyOpts.host = ctx.host
+      applyOpts.targetContext = ctx
+      applyOpts.hasTargetContext = true
+      let applied = runApply(applyOpts)
+      generation = applied.generationIdHex
+    var store = openStore(resolvedStoreRoot)
+    defer:
+      try: store.close() except CatchableError: discard
+    let outcome = writeActivationBundle(resolvedStateDir, store, generation)
+    if outPath.len > 0:
+      let parent = parentDir(outPath)
+      if parent.len > 0:
+        createDir(extendedPath(parent))
+      writeFile(extendedPath(outPath), bytesToString(outcome.bundleBytes))
+    echo "generationId: " & outcome.generationIdHex
+    echo "bundleDigest: " & outcome.bundleDigestHex
+    echo "bundlePath: " & outcome.bundlePath
+    return 0
+  except EActivationBundleCorrupt as err:
+    stderr.writeLine("repro home __build-bundle: " & err.msg)
+    return 1
+  except EPointerCorrupt as err:
+    stderr.writeLine("repro home __build-bundle: corrupt pointer at " &
+      err.pointerPath & " (field: " & err.field & ")")
+    return 1
+  except StoreError as err:
+    stderr.writeLine("repro home __build-bundle: store error: " & err.msg)
+    return 1
+  except ValueError as err:
+    stderr.writeLine("repro home __build-bundle: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro home __build-bundle: error: " & err.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
+# `repro home __receive-bundle` / `__transfer-bundle` (M71 Phase C,
+# internal transfer/import only).
+# ---------------------------------------------------------------------------
+
+proc stringToBytes(text: string): seq[byte] =
+  result = newSeq[byte](text.len)
+  for i, ch in text:
+    result[i] = byte(ord(ch))
+
+proc boolField(value: bool): string =
+  if value: "true" else: "false"
+
+proc readBinaryFile(path: string): seq[byte] =
+  stringToBytes(readFile(extendedPath(path)))
+
+proc renderImportResult(res: ActivationBundleImportResult) =
+  echo "bundleDigest: " & res.bundleDigestHex
+  echo "targetBundlePath: " & res.targetBundlePath
+  echo "bundleStatus: " & (if res.bundleAlreadyPresent:
+    "already-present" else: "stored")
+  echo "prefixesImported: " & $res.prefixesImported
+  echo "prefixesAlreadyPresent: " & $res.prefixesAlreadyPresent
+  echo "bytesReceived: " & $res.bytesReceived
+
+proc runHomeReceiveBundle(args: openArray[string]): int =
+  var storeRoot = ""
+  var queryDigest = ""
+  var queryPrefixes: seq[string]
+  var expectedDigest = ""
+  var bundlePath = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      echo "usage: repro home __receive-bundle --store-root PATH " &
+        "[--query DIGEST [--query-prefix PREFIX...]]"
+      echo "       repro home __receive-bundle --store-root PATH " &
+        "[--expected-digest DIGEST] [--bundle PATH]"
+      echo ""
+      echo "Internal M71 target-side transfer/import command. Query mode"
+      echo "checks target CAS/prefix presence. Receive mode reads RBAB"
+      echo "bytes from stdin unless --bundle is supplied, stores the bundle"
+      echo "as target CAS, and imports prefix closures only. It does not"
+      echo "rotate generation pointers, register roots, or run activation."
+      return 0
+    elif a == "--store-root" or a.startsWith("--store-root="):
+      storeRoot = parseFlagValue(args, i, "--store-root")
+    elif a == "--query" or a.startsWith("--query="):
+      queryDigest = parseFlagValue(args, i, "--query")
+    elif a == "--query-prefix" or a.startsWith("--query-prefix="):
+      queryPrefixes.add(parseFlagValue(args, i, "--query-prefix"))
+    elif a == "--expected-digest" or a.startsWith("--expected-digest="):
+      expectedDigest = parseFlagValue(args, i, "--expected-digest")
+    elif a == "--bundle" or a.startsWith("--bundle="):
+      bundlePath = parseFlagValue(args, i, "--bundle")
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home __receive-bundle: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home __receive-bundle: unexpected positional: " &
+        a)
+      return 2
+    inc i
+  if storeRoot.len == 0:
+    stderr.writeLine("repro home __receive-bundle: --store-root is required")
+    return 2
+
+  try:
+    var store = openStore(resolveStoreRoot(storeRoot))
+    defer:
+      try: store.close() except CatchableError: discard
+    if queryDigest.len > 0:
+      let digest = parsePrefixIdHex(queryDigest)
+      let targetPath = store.casPath(digest)
+      var present = fileExists(extendedPath(targetPath))
+      if present:
+        try:
+          store.verifyCasBlob(digest)
+        except CatchableError:
+          present = false
+      echo "bundleDigest: " & queryDigest.toLowerAscii()
+      echo "bundlePresent: " & boolField(present)
+      echo "targetBundlePath: " & targetPath
+      var prefixPresent = 0
+      for raw in queryPrefixes:
+        let pid = parsePrefixIdHex(raw)
+        let lookup = store.lookupPrefix(pid)
+        let ok = lookup.found and
+          dirExists(extendedPath(store.absolutePrefixPath(lookup.row.realizedPath)))
+        if ok:
+          inc prefixPresent
+        echo "prefixStatus: " & raw.toLowerAscii() & " " &
+          (if ok: "present" else: "missing")
+      echo "prefixesPresent: " & $prefixPresent
+      echo "prefixesMissing: " & $(queryPrefixes.len - prefixPresent)
+      return 0
+
+    let bytes =
+      if bundlePath.len > 0: readBinaryFile(bundlePath)
+      else: stringToBytes(stdin.readAll())
+    let imported = importActivationBundleBytes(store, bytes,
+      expectedDigestHex = expectedDigest,
+      filePath = if bundlePath.len > 0: bundlePath else: "<stdin>")
+    renderImportResult(imported)
+    return 0
+  except EActivationBundleCorrupt as err:
+    stderr.writeLine("repro home __receive-bundle: " & err.msg)
+    return 1
+  except StoreError as err:
+    stderr.writeLine("repro home __receive-bundle: store error: " & err.msg)
+    return 1
+  except ValueError as err:
+    stderr.writeLine("repro home __receive-bundle: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro home __receive-bundle: error: " & err.msg)
+    return 1
+
+proc runCapture(program: string; args: seq[string]; input = ""):
+    tuple[exitCode: int; output: string] =
+  let p = startProcess(program, args = args,
+    options = {poUsePath, poStdErrToStdOut})
+  if input.len > 0:
+    p.inputStream().write(input)
+  p.inputStream().close()
+  result.output = p.outputStream().readAll()
+  result.exitCode = p.waitForExit()
+  p.close()
+
+proc remoteReceiveCommand(remoteRepro, targetStoreRoot: string;
+                          extra: openArray[string]): string =
+  var parts = @[remoteRepro, "home", "__receive-bundle",
+    "--store-root", targetStoreRoot]
+  for item in extra:
+    parts.add item
+  for idx, part in parts:
+    if idx > 0:
+      result.add(" ")
+    result.add(quoteShell(part))
+
+proc sshRun(sshPath, target: string; port: int; sshOptions: seq[string];
+            remoteCommand: string; input = ""):
+    tuple[exitCode: int; output: string] =
+  var args: seq[string]
+  for opt in sshOptions:
+    args.add opt
+  if port > 0:
+    args.add("-p")
+    args.add($port)
+  args.add(target)
+  args.add(remoteCommand)
+  runCapture(sshPath, args, input)
+
+proc fieldValueLoose(output, name: string): string =
+  let prefix = name & ": "
+  for line in output.splitLines():
+    if line.startsWith(prefix):
+      return line[prefix.len .. ^1].strip()
+  ""
+
+type
+  ERemoteTransferFailed = object of CatchableError
+
+  TransferBundleOptions = object
+    bundleDigestHex: string
+    storeRoot: string
+    target: string
+    remoteRepro: string
+    targetStoreRoot: string
+    sshPath: string
+    sshOptions: seq[string]
+    port: int
+
+  TransferBundleResult = object
+    transferStatus: string
+    bundleDigestHex: string
+    targetBundlePath: string
+    prefixesImported: string
+    prefixesAlreadyPresent: string
+    bytesReceived: string
+
+proc raiseRemoteTransfer(msg: string) {.noreturn.} =
+  raise newException(ERemoteTransferFailed, msg)
+
+proc transferActivationBundle(opts: TransferBundleOptions):
+    TransferBundleResult =
+  let bundleDigest = parsePrefixIdHex(opts.bundleDigestHex)
+  let resolvedStoreRoot = resolveStoreRoot(opts.storeRoot)
+  var store = openStore(resolvedStoreRoot)
+  defer:
+    try: store.close() except CatchableError: discard
+  let bundleBytes = store.readCasBlob(bundleDigest)
+  let bundle = decodeActivationBundleBytes(bundleBytes,
+    store.casPath(bundleDigest))
+
+  var queryExtra = @["--query", opts.bundleDigestHex]
+  for prefix in bundle.prefixes:
+    queryExtra.add("--query-prefix")
+    queryExtra.add(prefixIdHex(prefix.prefixId))
+  let query = sshRun(opts.sshPath, opts.target, opts.port, opts.sshOptions,
+    remoteReceiveCommand(opts.remoteRepro, opts.targetStoreRoot, queryExtra))
+  if query.exitCode != 0:
+    raiseRemoteTransfer("target query failed:\n" & query.output)
+
+  let bundlePresent = fieldValueLoose(query.output, "bundlePresent") == "true"
+  let targetBundlePath = fieldValueLoose(query.output, "targetBundlePath")
+  var receiveExtra: seq[string]
+  receiveExtra.add("--expected-digest")
+  receiveExtra.add(opts.bundleDigestHex)
+  result.transferStatus =
+    if bundlePresent:
+      if targetBundlePath.len == 0:
+        raise newException(ValueError,
+          "target query did not return targetBundlePath")
+      receiveExtra.add("--bundle")
+      receiveExtra.add(targetBundlePath)
+      "already-present"
+    else:
+      "sent"
+  let input = if bundlePresent: "" else: bytesToString(bundleBytes)
+  let recv = sshRun(opts.sshPath, opts.target, opts.port, opts.sshOptions,
+    remoteReceiveCommand(opts.remoteRepro, opts.targetStoreRoot, receiveExtra),
+    input)
+  if recv.exitCode != 0:
+    raiseRemoteTransfer("target receive failed:\n" & recv.output)
+
+  let recvTargetPath = fieldValueLoose(recv.output, "targetBundlePath")
+  result.bundleDigestHex = opts.bundleDigestHex.toLowerAscii()
+  result.targetBundlePath =
+    if recvTargetPath.len > 0: recvTargetPath else: targetBundlePath
+  result.prefixesImported = fieldValueLoose(recv.output, "prefixesImported")
+  result.prefixesAlreadyPresent = fieldValueLoose(recv.output,
+    "prefixesAlreadyPresent")
+  result.bytesReceived = if bundlePresent: "0" else: $bundleBytes.len
+
+proc renderTransferResult(res: TransferBundleResult) =
+  echo "transferStatus: " & res.transferStatus
+  echo "bundleDigest: " & res.bundleDigestHex
+  echo "targetBundlePath: " & res.targetBundlePath
+  echo "prefixesImported: " & res.prefixesImported
+  echo "prefixesAlreadyPresent: " & res.prefixesAlreadyPresent
+  echo "bytesReceived: " & res.bytesReceived
+
+type
+  RemoteBuildResult = object
+    localGenerationId: string
+    bundleDigestHex: string
+    bundlePath: string
+    sourceStateDir: string
+    sourceStoreRoot: string
+
+proc remoteApplyTargetContext(parsed: EnableDisableFlags): HostContext =
+  result = currentHostContext()
+  result.host = parsed.host
+  if parsed.remote.targetPlatform.len > 0:
+    result.platform = parsed.remote.targetPlatform
+  if parsed.remote.targetArch.len > 0:
+    result.arch = parsed.remote.targetArch
+  if parsed.remote.targetWslGiven:
+    result.isWsl = parsed.remote.targetWsl
+    if parsed.remote.targetWsl and parsed.remote.targetPlatform.len == 0:
+      result.platform = "linux"
+
+proc validateRemoteApplyPreflight(name: string;
+                                  parsed: EnableDisableFlags;
+                                  targetCtx: HostContext): int =
+  if parsed.remote.targetStoreRoot.len == 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-store-root is required for --host --now")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
+  if parsed.remote.targetStoreDaemon.len == 0 and
+      parsed.remote.targetStoreEndpoint.len > 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-store-endpoint requires --target-store-daemon=dev")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
+  if parsed.remote.targetStoreDaemon == "dev" and
+      parsed.remote.targetStoreEndpoint.len == 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-store-endpoint is required with " &
+      "--target-store-daemon=dev")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
+  if parsed.remote.targetStateDir.len == 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-state-dir is required for --host --now")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
+  if parsed.remote.targetHomeDir.len == 0:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: --target-home-dir is required for this remote apply " &
+      "implementation; refusing to evaluate against the source HOME")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("localIntentStatus: preserved")
+    return 2
+
+  let sourceCtx = currentHostContext()
+  if targetCtx.platform != sourceCtx.platform:
+    stderr.writeLine("repro home " & name & ": remote apply preflight " &
+      "failed: target platform '" & targetCtx.platform & "' differs from " &
+      "source platform '" & sourceCtx.platform & "', and no cross-builder " &
+      "capability is configured")
+    stderr.writeLine("remoteApplyStatus: failed")
+    stderr.writeLine("remoteApplyPhase: preflight")
+    stderr.writeLine("targetHost: " & parsed.host)
+    stderr.writeLine("sourcePlatform: " & sourceCtx.platform)
+    stderr.writeLine("targetPlatform: " & targetCtx.platform)
+    stderr.writeLine("missingCapability: cross-builder")
+    stderr.writeLine("localIntentStatus: preserved")
+    stderr.writeLine("hint: run the apply on the target host or configure " &
+      "a cross-builder before retrying")
+    return 1
+  0
+
+proc buildRemoteApplyBundle(parsed: EnableDisableFlags;
+                            targetCtx: HostContext): RemoteBuildResult =
+  result.sourceStateDir = resolveStateDir()
+  result.sourceStoreRoot = resolveStoreRoot()
+  var applyOpts: ApplyOptions
+  applyOpts.stateDir = result.sourceStateDir
+  applyOpts.storeRoot = result.sourceStoreRoot
+  applyOpts.homeDir = parsed.remote.targetHomeDir
+  applyOpts.host = parsed.host
+  applyOpts.targetContext = targetCtx
+  applyOpts.hasTargetContext = true
+  applyOpts.recordOnlyGeneratedFiles = true
+  let applied = runApply(applyOpts)
+  result.localGenerationId = applied.generationIdHex
+  var store = openStore(result.sourceStoreRoot)
+  defer:
+    try: store.close() except CatchableError: discard
+  let bundle = writeActivationBundle(result.sourceStateDir, store,
+    result.localGenerationId)
+  result.bundleDigestHex = bundle.bundleDigestHex
+  result.bundlePath = bundle.bundlePath
+
+proc remoteActivateCommand(remoteRepro, targetStoreRoot, targetStateDir,
+                           bundleDigestHex: string): string =
+  let parts = @[remoteRepro, "home", "__remote-activate",
+    "--store-root", targetStoreRoot,
+    "--state-dir", targetStateDir,
+    "--bundle-digest", bundleDigestHex]
+  for idx, part in parts:
+    if idx > 0:
+      result.add(" ")
+    result.add(quoteShell(part))
+
+type
+  ERemoteStoreDaemonFailed = object of CatchableError
+
+  RemoteStoreDaemonResult = object
+    enabled: bool
+    endpoint: string
+    storeRoot: string
+    profile: string
+    pid: string
+
+proc remoteStoreDaemonCommand(remoteRepro, action, targetStoreRoot,
+                              targetStoreEndpoint: string): string =
+  let parts = @[remoteRepro, "store", "daemon", action, "--dev",
+    "--store-root", targetStoreRoot, "--endpoint", targetStoreEndpoint]
+  for idx, part in parts:
+    if idx > 0:
+      result.add(" ")
+    result.add(quoteShell(part))
+
+proc requireRemoteStoreDaemon(parsed: EnableDisableFlags):
+    RemoteStoreDaemonResult =
+  if parsed.remote.targetStoreDaemon.len == 0:
+    return RemoteStoreDaemonResult(enabled: false)
+
+  let start = sshRun(parsed.remote.sshPath, parsed.host, parsed.remote.port,
+    parsed.remote.sshOptions,
+    remoteStoreDaemonCommand(parsed.remote.remoteRepro, "start",
+      parsed.remote.targetStoreRoot, parsed.remote.targetStoreEndpoint))
+  if start.exitCode != 0:
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon start failed:\n" & start.output)
+
+  let status = sshRun(parsed.remote.sshPath, parsed.host, parsed.remote.port,
+    parsed.remote.sshOptions,
+    remoteStoreDaemonCommand(parsed.remote.remoteRepro, "status",
+      parsed.remote.targetStoreRoot, parsed.remote.targetStoreEndpoint))
+  if status.exitCode != 0:
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon status failed:\n" & status.output)
+
+  let profile = fieldValueLoose(status.output, "profile")
+  let endpoint = fieldValueLoose(status.output, "endpoint")
+  let storeRoot = fieldValueLoose(status.output, "store-root")
+  if not status.output.contains("repro store daemon: running"):
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon is not running:\n" & status.output)
+  if profile != "development-store":
+    raise newException(ERemoteStoreDaemonFailed,
+      "target endpoint is not a development-store daemon:\n" & status.output)
+  if endpoint != parsed.remote.targetStoreEndpoint:
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon endpoint mismatch: expected " &
+      parsed.remote.targetStoreEndpoint & ", got " & endpoint)
+  if os.normalizedPath(storeRoot) !=
+      os.normalizedPath(parsed.remote.targetStoreRoot):
+    raise newException(ERemoteStoreDaemonFailed,
+      "target dev store daemon store-root mismatch: expected " &
+      parsed.remote.targetStoreRoot & ", got " & storeRoot)
+
+  RemoteStoreDaemonResult(
+    enabled: true,
+    endpoint: endpoint,
+    storeRoot: storeRoot,
+    profile: profile,
+    pid: fieldValueLoose(status.output, "pid"))
+
+proc printRemoteApplyFailure(name, phase, message: string;
+                             parsed: EnableDisableFlags;
+                             built: RemoteBuildResult;
+                             transferred: TransferBundleResult) =
+  stderr.writeLine("repro home " & name & ": remote apply phase '" & phase &
+    "' failed for target '" & parsed.host & "'")
+  stderr.writeLine("remoteApplyStatus: failed")
+  stderr.writeLine("remoteApplyPhase: " & phase)
+  stderr.writeLine("targetHost: " & parsed.host)
+  stderr.writeLine("localIntentStatus: preserved")
+  if built.localGenerationId.len > 0:
+    stderr.writeLine("localGenerationId: " & built.localGenerationId)
+  if built.bundleDigestHex.len > 0:
+    stderr.writeLine("bundleDigest: " & built.bundleDigestHex)
+  if built.bundlePath.len > 0:
+    stderr.writeLine("bundlePath: " & built.bundlePath)
+  if transferred.targetBundlePath.len > 0:
+    stderr.writeLine("targetBundlePath: " & transferred.targetBundlePath)
+  if transferred.transferStatus.len > 0:
+    stderr.writeLine("transferStatus: " & transferred.transferStatus)
+  stderr.writeLine("retryContext: rerun the same `repro home " & name & " " &
+    parsed.activity & " --host " & parsed.host & " --now` command after " &
+    "fixing the " & phase & " failure")
+  if message.len > 0:
+    stderr.writeLine(message)
+
+proc runRemoteApplyAfterEdit(name: string; parsed: EnableDisableFlags): int =
+  let targetCtx = remoteApplyTargetContext(parsed)
+  let preflight = validateRemoteApplyPreflight(name, parsed, targetCtx)
+  if preflight != 0:
+    return preflight
+
+  var built: RemoteBuildResult
+  var targetDaemon = RemoteStoreDaemonResult(enabled: false)
+  if parsed.remote.targetStoreDaemon.len > 0:
+    try:
+      targetDaemon = requireRemoteStoreDaemon(parsed)
+    except CatchableError as err:
+      printRemoteApplyFailure(name, "store-daemon", err.msg, parsed, built,
+        TransferBundleResult())
+      return 1
+
+  try:
+    built = buildRemoteApplyBundle(parsed, targetCtx)
+  except CatchableError as err:
+    printRemoteApplyFailure(name, "build", err.msg, parsed, built,
+      TransferBundleResult())
+    return 1
+
+  var transferred: TransferBundleResult
+  try:
+    transferred = transferActivationBundle(TransferBundleOptions(
+      bundleDigestHex: built.bundleDigestHex,
+      storeRoot: built.sourceStoreRoot,
+      target: parsed.host,
+      remoteRepro: parsed.remote.remoteRepro,
+      targetStoreRoot: parsed.remote.targetStoreRoot,
+      sshPath: parsed.remote.sshPath,
+      sshOptions: parsed.remote.sshOptions,
+      port: parsed.remote.port))
+  except CatchableError as err:
+    printRemoteApplyFailure(name, "transfer", err.msg, parsed, built,
+      transferred)
+    return 1
+
+  let activate = sshRun(parsed.remote.sshPath, parsed.host,
+    parsed.remote.port, parsed.remote.sshOptions,
+    remoteActivateCommand(parsed.remote.remoteRepro,
+      parsed.remote.targetStoreRoot, parsed.remote.targetStateDir,
+      built.bundleDigestHex))
+  if activate.exitCode != 0:
+    printRemoteApplyFailure(name, "activate", activate.output, parsed, built,
+      transferred)
+    return 1
+
+  echo "remoteApplyStatus: activated"
+  echo "targetHost: " & parsed.host
+  echo "localGenerationId: " & built.localGenerationId
+  echo "bundleDigest: " & built.bundleDigestHex
+  echo "bundlePath: " & built.bundlePath
+  echo "transferStatus: " & transferred.transferStatus
+  echo "targetBundlePath: " & transferred.targetBundlePath
+  if targetDaemon.enabled:
+    echo "targetStoreDaemon: " & targetDaemon.profile
+    echo "targetStoreEndpoint: " & targetDaemon.endpoint
+    echo "targetStoreDaemonPid: " & targetDaemon.pid
+  echo "remoteGenerationId: " & fieldValueLoose(activate.output,
+    "generationId")
+  echo "targetCurrent: " & fieldValueLoose(activate.output, "current")
+  return 0
+
+proc runHomeTransferBundle(args: openArray[string]): int =
+  var bundleDigestHex = ""
+  var storeRoot = ""
+  var target = ""
+  var remoteRepro = "repro"
+  var targetStoreRoot = ""
+  var sshPath = "ssh"
+  var sshOptions: seq[string]
+  var port = 0
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      echo "usage: repro home __transfer-bundle --bundle-digest HEX " &
+        "--target HOST --remote-repro PATH --target-store-root PATH " &
+        "[--store-root PATH] [--ssh PATH] [--port N] " &
+        "[--ssh-option OPT...]"
+      echo ""
+      echo "Internal M71 source-side SSH transfer command. It queries the"
+      echo "target first and skips streaming when the exact bundle CAS"
+      echo "object is already present. It imports the bundle into the"
+      echo "target store only; remote activation is Phase D."
+      return 0
+    elif a == "--bundle-digest" or a.startsWith("--bundle-digest="):
+      bundleDigestHex = parseFlagValue(args, i, "--bundle-digest")
+    elif a == "--store-root" or a.startsWith("--store-root="):
+      storeRoot = parseFlagValue(args, i, "--store-root")
+    elif a == "--target" or a.startsWith("--target="):
+      target = parseFlagValue(args, i, "--target")
+    elif a == "--remote-repro" or a.startsWith("--remote-repro="):
+      remoteRepro = parseFlagValue(args, i, "--remote-repro")
+    elif a == "--target-store-root" or a.startsWith("--target-store-root="):
+      targetStoreRoot = parseFlagValue(args, i, "--target-store-root")
+    elif a == "--ssh" or a.startsWith("--ssh="):
+      sshPath = parseFlagValue(args, i, "--ssh")
+    elif a == "--ssh-option" or a.startsWith("--ssh-option="):
+      sshOptions.add(parseFlagValue(args, i, "--ssh-option"))
+    elif a == "--port" or a.startsWith("--port="):
+      port = parseInt(parseFlagValue(args, i, "--port"))
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home __transfer-bundle: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home __transfer-bundle: unexpected positional: " &
+        a)
+      return 2
+    inc i
+
+  if bundleDigestHex.len == 0 or target.len == 0 or targetStoreRoot.len == 0:
+    stderr.writeLine("repro home __transfer-bundle: --bundle-digest, " &
+      "--target, and --target-store-root are required")
+    return 2
+
+  try:
+    let res = transferActivationBundle(TransferBundleOptions(
+      bundleDigestHex: bundleDigestHex,
+      storeRoot: storeRoot,
+      target: target,
+      remoteRepro: remoteRepro,
+      targetStoreRoot: targetStoreRoot,
+      sshPath: sshPath,
+      sshOptions: sshOptions,
+      port: port))
+    renderTransferResult(res)
+    return 0
+  except ERemoteTransferFailed as err:
+    stderr.writeLine("repro home __transfer-bundle: " & err.msg)
+    return 1
+  except StoreError as err:
+    stderr.writeLine("repro home __transfer-bundle: store error: " & err.msg)
+    return 1
+  except ValueError as err:
+    stderr.writeLine("repro home __transfer-bundle: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro home __transfer-bundle: error: " & err.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
+# `repro home __remote-activate` (M71 Phase D, internal target runtime).
+# ---------------------------------------------------------------------------
+
+type
+  ERemoteActivationFailed = object of CatchableError
+
+  RemoteActivationPayload = object
+    envelope: PointerEnvelope
+    manifest: ActivationManifest
+    generationIdHex: string
+
+proc raiseRemoteActivation(msg: string) {.noreturn.} =
+  raise newException(ERemoteActivationFailed, msg)
+
+proc keyFromDigest(digest: Digest256): PrefixIdBytes =
+  for i in 0 ..< 32:
+    result[i] = digest[i]
+
+proc digestBytesForActivation(bytes: openArray[byte]): Digest256 =
+  blake3.digest(bytes)
+
+proc currentPlatformName(): string =
   when defined(windows):
-    result.platform = "windows"
+    "windows"
   elif defined(macosx):
-    result.platform = "macos"
+    "macos"
   elif defined(linux):
-    result.platform = "linux"
+    "linux"
   else:
-    result.platform = "unknown"
-  when defined(amd64) or defined(x86_64):
-    result.arch = "x86_64"
-  elif defined(arm64) or defined(aarch64):
-    result.arch = "arm64"
+    "unknown"
+
+proc validateRemoteActivationPayload(bundle: ActivationBundle;
+                                     filePath: string):
+    RemoteActivationPayload =
+  let envelope = decodePointerBytes(bundle.pointerEnvelopeBytes,
+    filePath & ":pointer")
+  let generationId = generationIdHex(envelope.generationId)
+  if envelope.generationId != bundle.sourceGenerationId:
+    raiseRemoteActivation("pointer generation id " & generationId &
+      " does not match bundle source generation id " &
+      generationIdHex(bundle.sourceGenerationId))
+  if envelope.hostIdentity != bundle.hostIdentity:
+    raiseRemoteActivation("pointer host identity '" & envelope.hostIdentity &
+      "' does not match bundle host identity '" & bundle.hostIdentity & "'")
+  if envelope.activationTimestamp != bundle.activationTimestamp:
+    raiseRemoteActivation("pointer activation timestamp does not match bundle")
+  if digestBytesForActivation(bundle.activationManifestBytes) !=
+      envelope.activationManifestDigest:
+    raiseRemoteActivation("bundled activation manifest bytes do not hash to " &
+      "the pointer activationManifestDigest")
+  if digestBytesForActivation(bundle.intentSnapshotBytes) !=
+      envelope.intentSnapshotDigest:
+    raiseRemoteActivation("bundled intent snapshot bytes do not hash to " &
+      "the pointer intentSnapshotDigest")
+  if digestBytesForActivation(bundle.configurableGraphBytes) !=
+      envelope.configurableGraphDigest:
+    raiseRemoteActivation("bundled configurable graph bytes do not hash to " &
+      "the pointer configurableGraphDigest")
+
+  let manifest = decodeManifestBytes(bundle.activationManifestBytes,
+    filePath & ":manifest")
+  discard decodeSnapshotBytes(bundle.intentSnapshotBytes,
+    filePath & ":snapshot")
+
+  proc prefixInPointer(digest: Digest256): bool =
+    for p in envelope.realizedPrefixIds:
+      if p == digest:
+        return true
+    false
+
+  for pkg in manifest.realizedPackages:
+    if not prefixInPointer(pkg.realizedPrefixId):
+      raiseRemoteActivation("manifest package '" & pkg.packageId &
+        "' references a realized prefix not present in the pointer")
+
+  if manifest.managedBlocks.len > 0:
+    raiseRemoteActivation("remote activation cannot replay managed-block " &
+      "records yet; refusing to ignore " & $manifest.managedBlocks.len &
+      " managed block(s)")
+  if manifest.resourceBindings.len > 0:
+    raiseRemoteActivation("remote activation cannot replay resource binding " &
+      "records yet; refusing to ignore " & $manifest.resourceBindings.len &
+      " resource binding(s)")
+  for i, gf in manifest.generatedFiles:
+    if gf.ownershipPolicy != gfoOwned:
+      raiseRemoteActivation("remote activation supports only owned " &
+        "generated files; generatedFiles[" & $i & "] uses " &
+        $gf.ownershipPolicy)
+    if gf.stowSource.len > 0:
+      raiseRemoteActivation("remote activation cannot replay stow-generated " &
+        "file records yet: " & gf.absoluteOutputPath)
+    if gf.storeContentHash != gf.postWriteDigest:
+      raiseRemoteActivation("remote activation requires owned generated " &
+        "file content hash to equal post-write digest: " &
+        gf.absoluteOutputPath)
+
+  RemoteActivationPayload(
+    envelope: envelope,
+    manifest: manifest,
+    generationIdHex: generationId)
+
+proc ensurePointerPrefixesPresent(store: Store; envelope: PointerEnvelope) =
+  for i, digest in envelope.realizedPrefixIds:
+    let key = keyFromDigest(digest)
+    let lookup = store.lookupPrefix(key)
+    if not lookup.found:
+      raiseRemoteActivation("realized prefix " & prefixIdHex(key) &
+        " from pointer index " & $i & " is not imported in target store")
+    let abs = store.absolutePrefixPath(lookup.row.realizedPath)
+    if not dirExists(extendedPath(abs)):
+      raiseRemoteActivation("realized prefix " & prefixIdHex(key) &
+        " is indexed but missing on disk at " & abs)
+
+proc loadCurrentGeneratedFiles(stateDir: string; store: Store):
+    Table[string, GeneratedFile] =
+  result = initTable[string, GeneratedFile]()
+  let active = readCurrentGenerationId(stateDir)
+  if active.len == 0:
+    return
+  let env = readPointerFile(pointerPath(stateDir, active))
+  let manifestBytes = store.readCasBlob(keyFromDigest(
+    env.activationManifestDigest))
+  let manifest = decodeManifestBytes(manifestBytes,
+    "current generation " & active & " activation manifest")
+  for gf in manifest.generatedFiles:
+    result[gf.absoluteOutputPath] = gf
+
+proc currentGeneratedFileDigests(stateDir: string; store: Store):
+    Table[string, Digest256] =
+  result = initTable[string, Digest256]()
+  for path, gf in loadCurrentGeneratedFiles(stateDir, store):
+    result[path] = gf.postWriteDigest
+
+proc fileDigestForActivation(path: string): Digest256 =
+  digestBytesForActivation(readBinaryFile(path))
+
+proc atomicWriteActivationBytes(path: string; content: openArray[byte]) =
+  let parent = parentDir(path)
+  if parent.len > 0:
+    createDir(extendedPath(parent))
+  let tmp = path & ".repro-remote-activate.tmp"
+  writeFile(extendedPath(tmp), bytesToString(content))
+  if fileExists(extendedPath(path)) or symlinkExists(extendedPath(path)):
+    try:
+      removeFile(extendedPath(path))
+    except OSError as err:
+      try: removeFile(extendedPath(tmp)) except OSError: discard
+      raiseRemoteActivation("could not replace generated file " & path &
+        ": " & err.msg)
+  try:
+    moveFile(extendedPath(tmp), extendedPath(path))
+  except OSError as err:
+    try: removeFile(extendedPath(tmp)) except OSError: discard
+    raiseRemoteActivation("could not move generated file into place at " &
+      path & ": " & err.msg)
+
+proc materializeOwnedGeneratedFiles(store: Store; stateDir: string;
+                                    manifest: ActivationManifest): int =
+  let currentDigests = currentGeneratedFileDigests(stateDir, store)
+  for gf in manifest.generatedFiles:
+    let content = store.readCasBlob(keyFromDigest(gf.storeContentHash))
+    if digestBytesForActivation(content) != gf.postWriteDigest:
+      raiseRemoteActivation("CAS content for generated file does not match " &
+        "post-write digest: " & gf.absoluteOutputPath)
+    if fileExists(extendedPath(gf.absoluteOutputPath)):
+      let live = fileDigestForActivation(gf.absoluteOutputPath)
+      if live == gf.postWriteDigest:
+        inc result
+        continue
+      if gf.absoluteOutputPath in currentDigests:
+        if currentDigests[gf.absoluteOutputPath] != live:
+          raiseRemoteActivation("generated file drift at " &
+            gf.absoluteOutputPath & "; live bytes no longer match the " &
+            "current generation")
+      else:
+        raiseRemoteActivation("generated file target already exists outside " &
+          "remote activation state: " & gf.absoluteOutputPath)
+    atomicWriteActivationBytes(gf.absoluteOutputPath, content)
+    if fileDigestForActivation(gf.absoluteOutputPath) != gf.postWriteDigest:
+      raiseRemoteActivation("generated file post-write digest mismatch at " &
+        gf.absoluteOutputPath)
+    inc result
+
+proc removeRetiredOwnedGeneratedFiles(store: Store; stateDir: string;
+                                      manifest: ActivationManifest): int =
+  let currentFiles = loadCurrentGeneratedFiles(stateDir, store)
+  if currentFiles.len == 0:
+    return
+  var nextPaths = initHashSet[string]()
+  for gf in manifest.generatedFiles:
+    nextPaths.incl gf.absoluteOutputPath
+  for path, old in currentFiles:
+    if path in nextPaths:
+      continue
+    if old.ownershipPolicy != gfoOwned:
+      raiseRemoteActivation("remote activation cannot retire non-owned " &
+        "generated file from current generation: " & path)
+    if fileExists(extendedPath(path)):
+      let live = fileDigestForActivation(path)
+      if live != old.postWriteDigest:
+        raiseRemoteActivation("generated file drift at " & path &
+          "; live bytes no longer match the current generation")
+      try:
+        removeFile(extendedPath(path))
+      except OSError as err:
+        raiseRemoteActivation("could not remove retired generated file " &
+          path & ": " & err.msg)
+      inc result
+
+proc isSafeLauncherName(name: string): bool =
+  if name.len == 0 or name == "." or name == "..":
+    return false
+  for ch in name:
+    if ch == '/' or ch == '\\' or ch == '\0':
+      return false
+  true
+
+proc remapPrefixPathValue(value, sourcePrefix, targetPrefix: string): string =
+  if sourcePrefix.len == 0:
+    return value
+  value.replace(sourcePrefix, targetPrefix)
+
+proc remapLaunchPlanToTarget(plan: var LaunchPlan; targetPrefix: string) =
+  let sourcePrefix = plan.realizedPrefix
+  if sourcePrefix.len == 0:
+    raiseRemoteActivation("launch plan for " & plan.exportedCommand &
+      " has no realizedPrefix to remap")
+  plan.realizedPrefix = targetPrefix
+  plan.executablePath = remapPrefixPathValue(plan.executablePath,
+    sourcePrefix, targetPrefix)
+  if plan.hasWorkingDirectory:
+    plan.workingDirectory = remapPrefixPathValue(plan.workingDirectory,
+      sourcePrefix, targetPrefix)
+  for i in 0 ..< plan.runtimeLibraryDirs.len:
+    plan.runtimeLibraryDirs[i] = remapPrefixPathValue(
+      plan.runtimeLibraryDirs[i], sourcePrefix, targetPrefix)
+  for i in 0 ..< plan.environmentBindings.len:
+    plan.environmentBindings[i].value = remapPrefixPathValue(
+      plan.environmentBindings[i].value, sourcePrefix, targetPrefix)
+  for i in 0 ..< plan.executableBindings.len:
+    plan.executableBindings[i].executablePath = remapPrefixPathValue(
+      plan.executableBindings[i].executablePath, sourcePrefix, targetPrefix)
+  if not plan.executablePath.startsWith(targetPrefix):
+    raiseRemoteActivation("launch plan executable did not remap into target " &
+      "prefix for " & plan.exportedCommand)
+
+proc materializeRemoteLaunchers(store: Store; stateDir, generationId: string;
+                                manifest: ActivationManifest): int =
+  if manifest.exportedCommands.len == 0:
+    return 0
+  when defined(windows):
+    raiseRemoteActivation("remote activation launcher materialization is not " &
+      "implemented on Windows yet")
   else:
-    result.arch = "unknown"
+    let binDir = generationBinDir(stateDir, generationId)
+    createDir(extendedPath(binDir))
+    for command in manifest.exportedCommands:
+      if command.binDirArtifactKind != "launcher-script":
+        raiseRemoteActivation("remote activation supports only POSIX " &
+          "launcher-script artifacts; command " & command.commandName &
+          " records " & command.binDirArtifactKind)
+      if not isSafeLauncherName(command.commandName):
+        raiseRemoteActivation("unsafe exported command name: " &
+          command.commandName)
+      let launchKey = keyFromDigest(command.launchPlanDigest)
+      var plan = decodeLaunchPlan(store.readCasBlob(launchKey))
+      if plan.supportProfile.platform.len > 0 and
+          plan.supportProfile.platform != currentPlatformName():
+        raiseRemoteActivation("launch plan for " & command.commandName &
+          " targets platform " & plan.supportProfile.platform &
+          " but remote activation is running on " & currentPlatformName())
+      if plan.provenance.realizationHashHex.len == 0:
+        raiseRemoteActivation("launch plan for " & command.commandName &
+          " lacks realization-hash provenance")
+      let prefixKey = parsePrefixIdHex(plan.provenance.realizationHashHex)
+      let lookup = store.lookupPrefix(prefixKey)
+      if not lookup.found:
+        raiseRemoteActivation("launch plan for " & command.commandName &
+          " references missing target prefix " &
+          plan.provenance.realizationHashHex)
+      let targetPrefix = store.absolutePrefixPath(lookup.row.realizedPath)
+      if not dirExists(extendedPath(targetPrefix)):
+        raiseRemoteActivation("launch plan target prefix is missing on disk: " &
+          targetPrefix)
+      remapLaunchPlanToTarget(plan, targetPrefix)
+      plan.binding = when defined(macosx): lbkMacosScript else: lbkLinuxScript
+      let scriptPath = binDir / command.commandName
+      let scriptBody = generatePosixLauncherScript(plan,
+        when defined(macosx): "DYLD_LIBRARY_PATH" else: "LD_LIBRARY_PATH")
+      writeFile(extendedPath(scriptPath), scriptBody)
+      try:
+        setFilePermissions(extendedPath(scriptPath), {fpUserExec, fpUserWrite,
+          fpUserRead, fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
+      except OSError as err:
+        raiseRemoteActivation("could not set launcher permissions for " &
+          scriptPath & ": " & err.msg)
+      inc result
+
+proc runHomeRemoteActivate(args: openArray[string]): int =
+  var storeRoot = ""
+  var stateDir = ""
+  var bundleDigestHex = ""
+  var expectedDigest = ""
+  var bundlePath = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      echo "usage: repro home __remote-activate --store-root PATH " &
+        "--state-dir PATH --bundle-digest HEX"
+      echo "       repro home __remote-activate --store-root PATH " &
+        "--state-dir PATH --bundle PATH [--expected-digest HEX]"
+      echo ""
+      echo "Internal M71 target-side activation runtime. It loads a " &
+        "transferred RBAB bundle from target CAS (or --bundle), verifies " &
+        "the pointer-referenced payloads, imports prefixes/CAS blobs, " &
+        "materializes supported typed activation artifacts, commits the " &
+        "generation with roots/holds, then rotates current."
+      return 0
+    elif a == "--store-root" or a.startsWith("--store-root="):
+      storeRoot = parseFlagValue(args, i, "--store-root")
+    elif a == "--state-dir" or a.startsWith("--state-dir="):
+      stateDir = parseFlagValue(args, i, "--state-dir")
+    elif a == "--bundle-digest" or a.startsWith("--bundle-digest="):
+      bundleDigestHex = parseFlagValue(args, i, "--bundle-digest")
+    elif a == "--expected-digest" or a.startsWith("--expected-digest="):
+      expectedDigest = parseFlagValue(args, i, "--expected-digest")
+    elif a == "--bundle" or a.startsWith("--bundle="):
+      bundlePath = parseFlagValue(args, i, "--bundle")
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home __remote-activate: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home __remote-activate: unexpected positional: " &
+        a)
+      return 2
+    inc i
+
+  if storeRoot.len == 0 or stateDir.len == 0:
+    stderr.writeLine("repro home __remote-activate: --store-root and " &
+      "--state-dir are required")
+    return 2
+  if bundleDigestHex.len == 0 and bundlePath.len == 0:
+    stderr.writeLine("repro home __remote-activate: --bundle-digest or " &
+      "--bundle is required")
+    return 2
+  if bundleDigestHex.len > 0 and expectedDigest.len > 0 and
+      bundleDigestHex.toLowerAscii() != expectedDigest.toLowerAscii():
+    stderr.writeLine("repro home __remote-activate: --bundle-digest and " &
+      "--expected-digest disagree")
+    return 2
+
+  try:
+    ensureStateDir(stateDir)
+    var lock = acquireApplyLock(stateDir, timeoutSeconds = 30)
+    try:
+      var store = openStore(resolveStoreRoot(storeRoot))
+      defer:
+        try: store.close() except CatchableError: discard
+
+      let bytes =
+        if bundlePath.len > 0:
+          readBinaryFile(bundlePath)
+        else:
+          store.readCasBlob(parsePrefixIdHex(bundleDigestHex))
+      let expected =
+        if expectedDigest.len > 0: expectedDigest
+        elif bundleDigestHex.len > 0: bundleDigestHex
+        else: ""
+      let imported = importActivationBundleBytes(store, bytes,
+        expectedDigestHex = expected,
+        filePath = if bundlePath.len > 0: bundlePath else:
+          store.casPath(parsePrefixIdHex(bundleDigestHex)))
+      let bundle = decodeActivationBundleBytes(bytes,
+        if bundlePath.len > 0: bundlePath else: imported.targetBundlePath)
+      let payload = validateRemoteActivationPayload(bundle,
+        if bundlePath.len > 0: bundlePath else: imported.targetBundlePath)
+      ensurePointerPrefixesPresent(store, payload.envelope)
+
+      let launchersMaterialized = materializeRemoteLaunchers(store, stateDir,
+        payload.generationIdHex, payload.manifest)
+      let generatedFilesMaterialized = materializeOwnedGeneratedFiles(store,
+        stateDir, payload.manifest)
+      let generatedFilesRemoved = removeRetiredOwnedGeneratedFiles(store,
+        stateDir, payload.manifest)
+
+      var envelope = payload.envelope
+      writeGeneration(stateDir, envelope, bundle.activationManifestBytes,
+        bundle.intentSnapshotBytes, bundle.configurableGraphBytes, store)
+      rotateCurrent(stateDir, payload.generationIdHex)
+
+      echo "activationStatus: activated"
+      echo "bundleDigest: " & imported.bundleDigestHex
+      echo "targetBundlePath: " & imported.targetBundlePath
+      echo "generationId: " & payload.generationIdHex
+      echo "current: " & readCurrentGenerationId(stateDir)
+      echo "prefixesImported: " & $imported.prefixesImported
+      echo "prefixesAlreadyPresent: " & $imported.prefixesAlreadyPresent
+      echo "launchersMaterialized: " & $launchersMaterialized
+      echo "generatedFilesMaterialized: " & $generatedFilesMaterialized
+      echo "generatedFilesRemoved: " & $generatedFilesRemoved
+      return 0
+    finally:
+      releaseApplyLock(lock)
+  except ERemoteActivationFailed as err:
+    stderr.writeLine("repro home __remote-activate: " & err.msg)
+    return 1
+  except EActivationBundleCorrupt as err:
+    stderr.writeLine("repro home __remote-activate: " & err.msg)
+    return 1
+  except EPointerCorrupt as err:
+    stderr.writeLine("repro home __remote-activate: corrupt pointer at " &
+      err.pointerPath & " (field: " & err.field & ")")
+    return 1
+  except EManifestCorrupt as err:
+    stderr.writeLine("repro home __remote-activate: corrupt manifest at " &
+      err.manifestPath & " (field: " & err.field & ")")
+    return 1
+  except EIntentSnapshotCorrupt as err:
+    stderr.writeLine("repro home __remote-activate: corrupt intent snapshot " &
+      "at " & err.snapshotPath & " (field: " & err.field & ")")
+    return 1
+  except EApplyBusy as err:
+    stderr.writeLine("repro home __remote-activate: another apply/activation " &
+      "is in progress (lock " & err.lockPath & " held; waited " &
+      $err.waitedSeconds & "s).")
+    return 1
+  except StoreError as err:
+    stderr.writeLine("repro home __remote-activate: store error: " & err.msg)
+    return 1
+  except LaunchPlanCodecError as err:
+    stderr.writeLine("repro home __remote-activate: launch plan error: " &
+      err.msg)
+    return 1
+  except ValueError as err:
+    stderr.writeLine("repro home __remote-activate: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro home __remote-activate: error: " & err.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
+# `repro home set` / `repro home get` (M65).
+# ---------------------------------------------------------------------------
 
 proc splitPkgDotKey(raw: string): tuple[ok: bool; pkg, key: string] =
   let dot = raw.find('.')
@@ -1719,6 +3015,134 @@ proc runHomeRollback(args: openArray[string]): int =
     return 1
 
 # ---------------------------------------------------------------------------
+# `repro home gc` (M10 — Realize-Closure-And-Catalog-Expansion).
+# ---------------------------------------------------------------------------
+
+proc renderGcCandidate(c: GcCandidate): string =
+  ## One-line dry-run row: ``<size>  <package>@<version>  <path>``.
+  let label =
+    if c.packageName.len > 0: c.packageName & "@" & c.version
+    else: c.prefixIdHex[0 ..< min(12, c.prefixIdHex.len)]
+  let junctionTag = if c.isJunctionEntry: "  [junction]" else: ""
+  "  " & humanBytes(c.sizeBytes).align(12) & "  " & label & "  " &
+    c.absolutePath & junctionTag
+
+proc printGcHelp() =
+  echo "usage: repro home gc [--dry-run] [--force | -y] " &
+    "[--keep-generations N] [--store <dir>]"
+  echo ""
+  echo "Reclaim disk by deleting store prefixes that no live home-"
+  echo "profile generation references. Reads the generation registry"
+  echo "and the content-addressed store; mutates only the store's"
+  echo "filesystem (the registry is read-only)."
+  echo ""
+  echo "  --dry-run              Print the candidate list + footprint;"
+  echo "                         touches no disk state."
+  echo "  --force, -y            Skip the y/N confirmation prompt."
+  echo "  --keep-generations N   Preserve the N most-recent generations'"
+  echo "                         realized-prefix references (default 2;"
+  echo "                         the currently-active generation is"
+  echo "                         ALWAYS preserved regardless of rank)."
+  echo "  --store <dir>          Override the store root (mostly for"
+  echo "                         testing; default = $REPRO_STORE_ROOT"
+  echo "                         or the OS-XDG default)."
+
+proc runHomeGcCommand(args: openArray[string]): int =
+  ## `repro home gc` — orphan-prefix reclaim driver. Reads the M83
+  ## generation registry, walks the M56 store, identifies orphaned
+  ## prefixes, prints a footprint summary, and (unless --dry-run)
+  ## deletes them via the junction-aware-remove helper.
+  ##
+  ## EXPLICIT operator command only — never auto-runs. Per the M10
+  ## spec, the gc never deletes the active generation under any
+  ## circumstance: the keep-set always includes the currently-active
+  ## generation regardless of the --keep-generations rank.
+  var opts = GcOptions(keepGenerations: DefaultKeepGenerations)
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--help" or a == "-h":
+      printGcHelp()
+      return 0
+    elif a == "--dry-run":
+      opts.dryRun = true
+    elif a == "--force" or a == "-y":
+      opts.autoConfirm = true
+    elif a == "--keep-generations" or a.startsWith("--keep-generations="):
+      let raw = parseFlagValue(args, i, "--keep-generations")
+      var n: int
+      try:
+        n = parseInt(raw)
+      except ValueError:
+        stderr.writeLine("repro home gc: --keep-generations expects an " &
+          "integer; got '" & raw & "'")
+        return 2
+      if n < 1:
+        stderr.writeLine("repro home gc: --keep-generations must be >= 1 " &
+          "(the active generation is ALWAYS preserved); got " & $n)
+        return 2
+      opts.keepGenerations = n
+    elif a == "--store" or a.startsWith("--store="):
+      opts.storeRoot = parseFlagValue(args, i, "--store")
+    elif a.startsWith("--"):
+      stderr.writeLine("repro home gc: unknown flag: " & a)
+      return 2
+    else:
+      stderr.writeLine("repro home gc: unexpected positional: " & a)
+      return 2
+    inc i
+  try:
+    let report = runHomeGc(opts)
+    # Header.
+    let storeRootEcho =
+      if opts.storeRoot.len > 0: opts.storeRoot else: resolveStoreRoot()
+    echo "repro home gc: store=" & storeRootEcho
+    echo "repro home gc: kept-generations=" &
+      $report.keptGenerationIds.len & " keep-N=" & $opts.keepGenerations
+    case report.outcome
+    of goNoCandidates:
+      echo "repro home gc: no orphaned prefixes — store is clean."
+      return 0
+    of goSkippedDryRun:
+      echo "repro home gc: dry-run — " & $report.candidates.len &
+        " orphaned prefix(es), " & humanBytes(report.candidateBytes) &
+        " reclaimable:"
+      for c in report.candidates:
+        echo renderGcCandidate(c)
+      echo "repro home gc: pass --force to delete (or rerun without " &
+        "--dry-run for the y/N prompt)."
+      return 0
+    of goSkippedCancelled:
+      echo "repro home gc: cancelled by operator — no prefixes deleted."
+      return 0
+    of goDeleted:
+      echo "repro home gc: deleted=" & $report.deletedCount &
+        " failed=" & $report.failedCount &
+        " reclaimed=" & humanBytes(report.reclaimedBytes)
+      if report.failures.len > 0:
+        for f in report.failures:
+          stderr.writeLine("repro home gc: FAILED to delete " &
+            f.absolutePath & ": " & f.error)
+        return 1
+      return 0
+  except EStateDirInvalid as e:
+    stderr.writeLine("repro home gc: " & e.msg)
+    return 1
+  except EPointerCorrupt as e:
+    stderr.writeLine("repro home gc: corrupt pointer at " & e.pointerPath &
+      " (field: " & e.field & "); refusing to gc against a corrupt " &
+      "registry — quarantine the generation directory and retry.")
+    return 1
+  except EGenerationDirInvalid as e:
+    stderr.writeLine("repro home gc: invalid generation directory " &
+      e.generationPath & " (" & e.msg & "); refusing to gc against a " &
+      "partial registry — clean up the leftover and retry.")
+    return 1
+  except CatchableError as e:
+    stderr.writeLine("repro home gc: error: " & e.msg)
+    return 1
+
+# ---------------------------------------------------------------------------
 # `repro home migrate-from-env-scripts` (M70).
 # ---------------------------------------------------------------------------
 
@@ -1958,7 +3382,7 @@ proc runHomeCommand*(args: seq[string]): int =
     inc i
   if sub.len == 0:
     stderr.writeLine("usage: repro home {add | remove | enable | disable | " &
-      "list | why | history | apply | plan | rollback | set | get | " &
+      "list | why | history | apply | plan | rollback | gc | set | get | " &
       "adopt | resource | migrate-from-env-scripts} ...")
     return 2
   case sub
@@ -1970,8 +3394,13 @@ proc runHomeCommand*(args: seq[string]): int =
   of "why": return runHomeWhy(subArgs)
   of "history": return runHomeHistory(subArgs)
   of "apply": return runHomeApply(subArgs)
+  of "__build-bundle": return runHomeBuildBundle(subArgs)
+  of "__receive-bundle": return runHomeReceiveBundle(subArgs)
+  of "__transfer-bundle": return runHomeTransferBundle(subArgs)
+  of "__remote-activate": return runHomeRemoteActivate(subArgs)
   of "plan": return runHomePlan(subArgs)
   of "rollback": return runHomeRollback(subArgs)
+  of "gc": return runHomeGcCommand(subArgs)
   of "set": return runHomeSet(subArgs)
   of "get": return runHomeGet(subArgs)
   of "adopt": return runHomeAdopt(subArgs)

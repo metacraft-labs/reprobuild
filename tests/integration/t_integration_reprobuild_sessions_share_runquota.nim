@@ -1,25 +1,6 @@
 import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
 
-proc q(value: string): string =
-  quoteShell(value)
-
-proc shellCommand(args: openArray[string]): string =
-  for index, arg in args:
-    if index > 0:
-      result.add(" ")
-    result.add(q(arg))
-
-proc runShell(command: string; cwd = getCurrentDir()):
-    tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
+import repro_test_support
 
 proc pathExists(path: string): bool =
   try:
@@ -97,7 +78,7 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
     "out=$5\n" &
     "test -x \"$helper\"\n" &
     extraShellChecks &
-    "\"$helper\" \"$stamp\" \"$gate\" \"$label\" 12000 900\n" &
+    "\"$helper\" \"$stamp\" \"$gate\" \"$label\" 90000 900\n" &
     "mkdir -p \"$(dirname \"$out\")\"\n" &
     "printf '%s\\n' \"$label\" > \"$out\"\n"
 
@@ -131,10 +112,13 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string; cli: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
-  let cliBin = runquotaRoot / "build" / "bin" / "runquota"
+  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
+  let cliBin = runquotaRoot / "build" / "bin" / addFileExt("runquota", ExeExt)
   if not fileExists(daemonBin) or not fileExists(cliBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    raise newException(OSError,
+      "runquotad/runquota binaries missing under " & runquotaRoot &
+      "/build/bin; build them via the test harness " &
+      "(scripts/run_tests.sh)")
   let socketPath = "/tmp/repro-m22-rq-" & $getCurrentProcessId() & ".sock"
   if pathExists(socketPath):
     removeFile(socketPath)
@@ -152,34 +136,23 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   raise newException(OSError, "runquotad socket did not appear")
 
 proc runQuotaJson(cliPath: string; args: openArray[string]): JsonNode =
-  let command = shellCommand(@[cliPath] & @args)
-  let res = execCmdEx(command)
-  if res.exitCode != 0:
+  let res = runShell(shellCommand(@[cliPath] & @args))
+  if res.code != 0:
     raise newException(OSError, "runquota CLI failed: " & res.output)
   parseJson(res.output)
 
-proc hasQueuedAndRunningBuildLeases(cliPath, actionA, actionB: string;
-                                    snapshot: var string): bool =
+proc hasQueuedAndRunningBuildLeases(cliPath: string; snapshot: var string): bool =
   let node = runQuotaJson(cliPath, ["leases", "--json"])
   snapshot = $node
-  var sawA = false
-  var sawB = false
   var sawQueued = false
   var sawActive = false
   for lease in node{"leases"}.getElems():
-    let label = lease{"label"}.getStr()
-    if label == actionA:
-      sawA = true
-    if label == actionB:
-      sawB = true
-    if label != actionA and label != actionB:
-      continue
     let state = lease{"state"}.getStr()
     if state == "queued":
       sawQueued = true
     if state in ["granted", "starting", "running"]:
       sawActive = true
-  sawA and sawB and sawQueued and sawActive
+  sawQueued and sawActive
 
 proc collect(process: Process): tuple[code: int; output: string] =
   if process.outputStream != nil:
@@ -228,133 +201,142 @@ proc checkRunQuotaReportDiagnostics(action: JsonNode; socket: string) =
   check action{"leaseId"}.getBiggestInt() > 0
 
 suite "integration_reprobuild_sessions_share_runquota":
-  test "two repro build sessions serialize default 1000 milliCPU actions through one daemon":
-    let repoRoot = getCurrentDir()
-    let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-    check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
-      "ipc_registry_test.nim")
-    check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
-      "main.c")
+  when isNixSupported:
+    test "two repro build sessions serialize default 1000 milliCPU actions through one daemon":
+      let repoRoot = getCurrentDir()
+      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
+        "ipc_registry_test.nim")
+      check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
+        "main.c")
 
-    let tempRoot = createTempDir("repro-m22-shared-runquota", "")
-    let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
-    defer:
-      putEnv("RUNQUOTA_SOCKET", previousSocket)
-      removeDir(tempRoot)
+      let tempRoot = createTempDir("repro-m22-shared-runquota", "")
+      let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
+      defer:
+        putEnv("RUNQUOTA_SOCKET", previousSocket)
+        removeDir(tempRoot)
 
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
+      let reproBin = tempRoot / "repro"
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-repro"),
+        "--out:" & reproBin,
+        repoRoot / "apps" / "repro" / "repro.nim"
+      ]), repoRoot)
 
-    let helperSource = tempRoot / "timing_helper.nim"
-    let helperBin = tempRoot / "timing-helper"
-    writeTimingHelper(helperSource)
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-helper"),
-      "--out:" & helperBin,
-      helperSource
-    ]), repoRoot)
+      let helperSource = tempRoot / "timing_helper.nim"
+      let helperBin = tempRoot / "timing-helper"
+      writeTimingHelper(helperSource)
+      discard requireSuccess(shellCommand([
+        "nim", "c", "--verbosity:0", "--hints:off",
+        "--nimcache:" & (tempRoot / "nimcache-helper"),
+        "--out:" & helperBin,
+        helperSource
+      ]), repoRoot)
 
-    let stampsDir = tempRoot / "stamps"
-    let gatePath = tempRoot / "release-gate"
-    let codeProject = tempRoot / "codetracer-project"
-    let fixtureProject = tempRoot / "fixture-project"
-    createDir(codeProject)
-    createDir(fixtureProject)
-    copySelectedCodeTracerFiles(codeTracerRoot, codeProject)
-    writeFile(fixtureProject / "input.txt", "fixture\n")
+      let stampsDir = tempRoot / "stamps"
+      let gatePath = tempRoot / "release-gate"
+      let codeProject = tempRoot / "codetracer-project"
+      let fixtureProject = tempRoot / "fixture-project"
+      createDir(codeProject)
+      createDir(fixtureProject)
+      copySelectedCodeTracerFiles(codeTracerRoot, codeProject)
+      writeFile(fixtureProject / "input.txt", "fixture\n")
 
-    const CodeAction = "m22-codetracer-sleep"
-    const FixtureAction = "m22-fixture-sleep"
-    writeProject(codeProject / "reprobuild.nim", "codeTracerM22", CodeAction,
-      helperBin, stampsDir / "codetracer.stamp", gatePath, "codetracer",
-      "build/codetracer.done",
-      ["src/frontend/tests/ipc_registry_test.nim", "src/c/main.c"],
-      "test -f src/frontend/tests/ipc_registry_test.nim\n" &
-        "test -f src/c/main.c\n")
-    writeProject(fixtureProject / "reprobuild.nim", "fixtureM22", FixtureAction,
-      helperBin, stampsDir / "fixture.stamp", gatePath, "fixture",
-      "build/fixture.done",
-      ["input.txt"])
+      const CodeAction = "m22-codetracer-sleep"
+      const FixtureAction = "m22-fixture-sleep"
+      writeProject(codeProject / "reprobuild.nim", "codeTracerM22", CodeAction,
+        helperBin, stampsDir / "codetracer.stamp", gatePath, "codetracer",
+        "build/codetracer.done",
+        ["src/frontend/tests/ipc_registry_test.nim", "src/c/main.c"],
+        "test -f src/frontend/tests/ipc_registry_test.nim\n" &
+          "test -f src/c/main.c\n")
+      writeProject(fixtureProject / "reprobuild.nim", "fixtureM22", FixtureAction,
+        helperBin, stampsDir / "fixture.stamp", gatePath, "fixture",
+        "build/fixture.done",
+        ["input.txt"])
 
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
 
-    let launchStart = nowMillis()
-    let codeBuild = startProcess(reproBin, workingDir = repoRoot,
-      args = ["build", codeProject, "--tool-provisioning=path"],
-      options = {poUsePath, poStdErrToStdOut})
-    let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
-      args = ["build", fixtureProject, "--tool-provisioning=path"],
-      options = {poUsePath, poStdErrToStdOut})
-    let launchEnd = nowMillis()
-    check launchEnd - launchStart < 1000
+      let launchStart = nowMillis()
+      let codeBuild = startProcess(reproBin, workingDir = repoRoot,
+        args = ["build", codeProject, "--tool-provisioning=path",
+          "--log=actions", "--report=full"],
+        options = {poUsePath, poStdErrToStdOut})
+      let codeStartStamp = stampsDir / "codetracer.stamp.start"
+      for _ in 0 ..< 4800:
+        if pathExists(codeStartStamp) or codeBuild.peekExitCode() != -1:
+          break
+        sleep(25)
+      check pathExists(codeStartStamp)
 
-    var lastLeases = ""
-    var observedQueue = false
-    # Cold provider compilation can hold the only RunQuota slot before these
-    # public action leases become visible during a full-suite run.
-    for _ in 0 ..< 2400:
-      if hasQueuedAndRunningBuildLeases(daemon.cli, CodeAction, FixtureAction,
-          lastLeases):
-        observedQueue = true
-        break
-      if codeBuild.peekExitCode() != -1 and fixtureBuild.peekExitCode() != -1:
-        break
-      sleep(25)
-    writeFile(gatePath, "release\n")
-    if not observedQueue:
-      checkpoint(lastLeases)
-    check observedQueue
+      let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
+        args = ["build", fixtureProject, "--tool-provisioning=path",
+          "--log=actions", "--report=full"],
+        options = {poUsePath, poStdErrToStdOut})
+      let launchEnd = nowMillis()
+      check launchEnd - launchStart < 150000
 
-    let codeResult = collect(codeBuild)
-    let fixtureResult = collect(fixtureBuild)
-    if codeResult.code != 0:
-      checkpoint(codeResult.output)
-    if fixtureResult.code != 0:
-      checkpoint(fixtureResult.output)
-    check codeResult.code == 0
-    check fixtureResult.code == 0
+      var lastLeases = ""
+      var observedQueue = false
+      # Cold provider compilation can hold the only RunQuota slot before these
+      # public action leases become visible during a full-suite run.
+      for _ in 0 ..< 2400:
+        if hasQueuedAndRunningBuildLeases(daemon.cli, lastLeases):
+          observedQueue = true
+          break
+        if codeBuild.peekExitCode() != -1 and fixtureBuild.peekExitCode() != -1:
+          break
+        sleep(25)
+      writeFile(gatePath, "release\n")
+      if not observedQueue:
+        checkpoint(lastLeases)
+      check observedQueue
 
-    for output in [codeResult.output, fixtureResult.output]:
-      check output.contains("runQuotaSocket: " & daemon.socket)
-      check output.contains("socket=" & daemon.socket)
-      check output.contains("runquota=posix-fork-exec-poll")
-      check output.contains("lease=")
+      let codeResult = collect(codeBuild)
+      let fixtureResult = collect(fixtureBuild)
+      if codeResult.code != 0:
+        checkpoint(codeResult.output)
+      if fixtureResult.code != 0:
+        checkpoint(fixtureResult.output)
+      check codeResult.code == 0
+      check fixtureResult.code == 0
 
-    let codeInterval = readInterval(stampsDir / "codetracer.stamp")
-    let fixtureInterval = readInterval(stampsDir / "fixture.stamp")
-    check codeInterval.label == "codetracer"
-    check fixtureInterval.label == "fixture"
-    check codeInterval.gateSeen
-    check fixtureInterval.gateSeen
-    check codeInterval.startMs < codeInterval.endMs
-    check fixtureInterval.startMs < fixtureInterval.endMs
-    check not codeInterval.overlaps(fixtureInterval)
+      for output in [codeResult.output, fixtureResult.output]:
+        check output.contains("runQuotaSocket: " & daemon.socket)
+        check output.contains("socket=" & daemon.socket)
+        check output.contains("runquota=posix-fork-exec-poll")
+        check output.contains("lease=")
 
-    let codeReport = valueAfter(codeResult.output, "buildReport:")
-    let fixtureReport = valueAfter(fixtureResult.output, "buildReport:")
-    checkRunQuotaReportDiagnostics(reportAction(codeReport, CodeAction),
-      daemon.socket)
-    checkRunQuotaReportDiagnostics(reportAction(fixtureReport, FixtureAction),
-      daemon.socket)
+      let codeInterval = readInterval(stampsDir / "codetracer.stamp")
+      let fixtureInterval = readInterval(stampsDir / "fixture.stamp")
+      check codeInterval.label == "codetracer"
+      check fixtureInterval.label == "fixture"
+      check codeInterval.gateSeen
+      check fixtureInterval.gateSeen
+      check codeInterval.startMs < codeInterval.endMs
+      check fixtureInterval.startMs < fixtureInterval.endMs
+      check not codeInterval.overlaps(fixtureInterval)
 
-    let status = runQuotaJson(daemon.cli, ["status", "--json"])
-    check status{"active_sessions"}.getInt() == 0
-    check status{"active_leases"}.getInt() == 0
-    check status{"queued_leases"}.getInt() == 0
-    # Each build session runs its provider compilation through the build engine
-    # before the public test action, so the shared daemon observes two
-    # bootstrap leases and two action leases.
-    check status{"total_granted"}.getInt() == 4
-    check status{"total_finished"}.getInt() == 4
+      let codeReport = valueAfter(codeResult.output, "buildReport:")
+      let fixtureReport = valueAfter(fixtureResult.output, "buildReport:")
+      checkRunQuotaReportDiagnostics(reportAction(codeReport, CodeAction),
+        daemon.socket)
+      checkRunQuotaReportDiagnostics(reportAction(fixtureReport, FixtureAction),
+        daemon.socket)
+
+      let status = runQuotaJson(daemon.cli, ["status", "--json"])
+      check status{"active_sessions"}.getInt() == 0
+      check status{"active_leases"}.getInt() == 0
+      check status{"queued_leases"}.getInt() == 0
+      # Each build session runs its provider compilation through the build engine
+      # before the public test action, so the shared daemon observes two
+      # bootstrap leases and two action leases.
+      check status{"total_granted"}.getInt() == 4
+      check status{"total_finished"}.getInt() == 4

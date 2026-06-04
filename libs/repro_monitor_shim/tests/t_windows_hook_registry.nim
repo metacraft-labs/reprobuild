@@ -157,7 +157,15 @@ when defined(windows):
                      "ReadFile", "WriteFile", "CloseHandle",
                      "GetFileAttributesExW", "GetFileAttributesExA",
                      "GetFileAttributesW", "GetFileAttributesA",
-                     "CreateProcessW", "CreateProcessA"]
+                     "CreateProcessW", "CreateProcessA",
+                     # M73 Phase 5 — extended hook surface.
+                     "DeleteFileW", "DeleteFileA",
+                     "CreateDirectoryW", "CreateDirectoryA",
+                     "CopyFileW", "CopyFileA",
+                     "MoveFileExW", "MoveFileExA",
+                     "GetFileInformationByHandleEx",
+                     "SetCurrentDirectoryW", "SetCurrentDirectoryA",
+                     "NtCreateFile"]
     for e in expected:
       var found = false
       for n in hr.MonitorShimHookNames:

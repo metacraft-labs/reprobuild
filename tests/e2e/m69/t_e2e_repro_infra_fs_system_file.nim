@@ -43,7 +43,7 @@ proc reproBinary(): string =
   when defined(windows):
     ProjectRoot / "build" / "bin" / "repro.exe"
   else:
-    ProjectRoot / "build" / "bin" / "repro"
+    ProjectRoot / "build" / "bin" / addFileExt("repro", ExeExt)
 
 # The real-mutation scenario is gated by BOTH the platform (POSIX) and
 # an explicit opt-in env var. The env var is left UNSET on every CI /
