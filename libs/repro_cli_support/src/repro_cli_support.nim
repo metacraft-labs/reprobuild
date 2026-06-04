@@ -12668,6 +12668,19 @@ type
     expected*: string
     observed*: string
 
+  WorkspaceInitSkippedLayerEntry* = object
+    ## M25 — one per manifest layer that was dropped because the
+    ## operator passed ``--allow-missing-layers`` and the layer's URL
+    ## was unreachable. The four fields mirror
+    ## ``repro_workspace_manifests.SkippedLayer``. ``visibility`` is
+    ## the canonical lowercase tier label ("public" / "org" / "team" /
+    ## "private") so the JSON consumer can filter on it without
+    ## reinventing the enum string mapping.
+    index*: int
+    provenance*: string
+    visibility*: string
+    diagnostic*: string
+
   WorkspaceInitReport* = object
     ## Structured outcome of one ``repro workspace init`` invocation.
     ## ``project`` carries the ``ResolvedProject.projectName`` (the
@@ -12675,11 +12688,19 @@ type
     ## absolute path of the directory containing ``.repo/``. The three
     ## per-repo lists are emitted both as stdout text lines and as the
     ## ``.repro/workspace/init-report.json`` machine-readable artifact.
+    ##
+    ## ``skippedLayers`` (M25) is the list of manifest layers the
+    ## composer dropped because the operator passed
+    ## ``--allow-missing-layers`` and the layer's URL was unreachable.
+    ## A non-empty list does NOT raise the exit code on its own — the
+    ## operator opted into the skip explicitly — but downstream
+    ## inspection can tell which part of the workspace is missing.
     project*: string
     workspaceRoot*: string
     cloned*: seq[WorkspaceInitClonedEntry]
     upToDate*: seq[WorkspaceInitUpToDateEntry]
     divergences*: seq[WorkspaceInitDivergenceEntry]
+    skippedLayers*: seq[WorkspaceInitSkippedLayerEntry]
 
   WorkspaceInitOutcome* = object
     ## Internal aggregate the dispatcher consumes to compute the exit
@@ -12718,8 +12739,21 @@ proc toJsonNode*(report: WorkspaceInitReport): JsonNode =
     obj["observed"] = %entry.observed
     divergences.add(obj)
   result["divergences"] = divergences
+  var skipped = newJArray()
+  for entry in report.skippedLayers:
+    var obj = newJObject()
+    obj["index"] = %entry.index
+    obj["provenance"] = %entry.provenance
+    obj["visibility"] = %entry.visibility
+    obj["diagnostic"] = %entry.diagnostic
+    skipped.add(obj)
+  result["skippedLayers"] = skipped
 
 proc renderInitTextLines*(report: WorkspaceInitReport): seq[string] =
+  for entry in report.skippedLayers:
+    result.add("workspace init: skipped manifest layer " &
+      entry.provenance & " (visibility=" & entry.visibility &
+      ") — " & entry.diagnostic)
   for entry in report.cloned:
     result.add("workspace init: cloned " & entry.path & " from " &
       entry.remote & " @ " & entry.revision)
@@ -12735,14 +12769,25 @@ type
     projectName: string
     workspaceRoot: string
     toolProvisioning: ToolProvisioningMode
+    allowMissingLayers: bool
+      ## M25 — when set, the composer downgrades unreachable URL-backed
+      ## manifest layers from a fatal diagnostic to a structured
+      ## ``WorkspaceInitSkippedLayerEntry``. Used by public-only users
+      ## of a mixed workspace so they can still init the public subset.
+
+  WorkspaceInitResolution = object
+    project: ResolvedProject
+    skippedLayers: seq[WorkspaceInitSkippedLayerEntry]
 
 proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
   ## Parse ``repro workspace init`` argv. The single positional is the
   ## project-or-variant bare name. Optional flags:
   ##   ``--workspace-root=PATH``
   ##   ``--tool-provisioning=path|nix|tarball|scoop``
+  ##   ``--allow-missing-layers`` (M25)
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
+  result.allowMissingLayers = false
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -12752,6 +12797,12 @@ proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--allow-missing-layers":
+      # M25 — opt-in flag. Public-only users pass this when a workspace
+      # lists a private manifest layer they cannot fetch; the composer
+      # drops the unreachable layer and the init proceeds with the
+      # public subset.
+      result.allowMissingLayers = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace init` flag: " & arg)
@@ -12768,7 +12819,18 @@ proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
-proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs): ResolvedProject =
+proc visibilityLabel(v: WorkspaceVisibility): string =
+  ## Lowercase tier label used in the structured init report so the
+  ## downstream JSON consumer can filter on visibility without having
+  ## to know the enum's stringification.
+  case v
+  of wvPublic: "public"
+  of wvOrg: "org"
+  of wvTeam: "team"
+  of wvPersonal: "private"
+
+proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
+    WorkspaceInitResolution =
   ## Pick the right resolver / composer entry point. The composer wins
   ## when ``<workspaceRoot>/.repo/workspace.toml`` declares at least one
   ## ``[[manifest]]`` layer (M8 semantics); otherwise we look up the
@@ -12778,18 +12840,36 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs): ResolvedProject =
   ## single-project path because the composer requires manifest layers.
   ## A missing name in either place surfaces as a structured
   ## ``ValueError`` naming both candidate paths the user should look at.
+  ##
+  ## When ``parsed.allowMissingLayers`` is set (M25), the compositional
+  ## path uses the extended composer entry point so an unreachable
+  ## URL-backed layer is dropped and reported back to the caller rather
+  ## than aborting the whole init.
   let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
-    return composeManifestLayersFromFile(workspaceToml)
+    let options = ComposeOptions(
+      skipInaccessibleLayers: parsed.allowMissingLayers)
+    let composed = composeManifestLayersFromFileWithOptions(
+      workspaceToml, options)
+    result.project = composed.project
+    for sl in composed.skippedLayers:
+      result.skippedLayers.add(WorkspaceInitSkippedLayerEntry(
+        index: sl.index,
+        provenance: sl.provenance,
+        visibility: visibilityLabel(sl.visibility),
+        diagnostic: sl.diagnostic))
+    return
   let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
   let projectFile = manifestsRoot / "projects" /
     (parsed.projectName & ".toml")
   let variantFile = manifestsRoot / "variants" /
     (parsed.projectName & ".toml")
   if fileExists(projectFile):
-    return resolveProject(projectFile)
+    result.project = resolveProject(projectFile)
+    return
   if fileExists(variantFile):
-    return resolveVariant(variantFile)
+    result.project = resolveVariant(variantFile)
+    return
   raise newException(ValueError,
     "no project or variant named '" & parsed.projectName &
       "' found under '" & manifestsRoot &
@@ -12915,10 +12995,12 @@ proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## each declared repo against the on-disk workspace, schedules a
   ## ``bakWorkspaceVcs.clone`` build plan for the missing ones, then
   ## emits the structured report.
-  let resolved = resolveWorkspaceInitProject(args)
+  let resolution = resolveWorkspaceInitProject(args)
+  let resolved = resolution.project
   var report: WorkspaceInitReport
   report.project = resolved.projectName
   report.workspaceRoot = args.workspaceRoot
+  report.skippedLayers = resolution.skippedLayers
   var cloneFailures = 0
 
   # M9 requires git tool resolution before we can either query existing

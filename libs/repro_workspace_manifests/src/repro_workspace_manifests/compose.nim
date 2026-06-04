@@ -79,6 +79,68 @@ import repro_build_engine
 import git_tool
 import git_actions
 
+# ---- M25 public surface ---------------------------------------------------
+#
+# M25 ("private manifest layering integrated end-to-end") layers a small
+# options surface on top of the M8 composer:
+#
+# - The diagnostic for an unreachable URL-backed manifest layer carries a
+#   stable ``manifest-layer-unreachable:`` prefix and explicitly names the
+#   visibility tier ("public" / "org" / "team" / "private" / "personal").
+#   This is the "structured diagnostic naming the private layer" the M25
+#   spec requires when a public-only user runs ``repro workspace init`` on
+#   a workspace that lists a layer they cannot fetch.
+#
+# - ``ComposeOptions.skipInaccessibleLayers = true`` flips the failure
+#   mode: instead of raising, the offending layer is captured as a
+#   ``SkippedLayer`` entry and composition continues with the remaining
+#   layers. M9's ``runWorkspaceInitCommand`` surfaces this through the
+#   ``--allow-missing-layers`` CLI flag, so the public-only user can still
+#   ``init`` the public subset of a mixed workspace. The list of dropped
+#   layers is returned alongside the composed project so callers can
+#   record them in their structured reports.
+
+type
+  ComposeOptions* = object
+    ## Optional composer behavior toggles. The zero value reproduces the
+    ## strict M8 semantics: any layer failure is a fatal
+    ## ``WorkspaceManifestParseError``.
+    ##
+    ## ``skipInaccessibleLayers`` — when ``true``, an unreachable
+    ## URL-backed layer (clone failure) is downgraded to a structured
+    ## ``SkippedLayer`` entry in the result. The composer continues with
+    ## the remaining layers. A failed ``local_path`` layer is still
+    ## fatal — those are operator-controlled and a missing local path is
+    ## almost certainly a typo, not an access-control event.
+    skipInaccessibleLayers*: bool
+
+  SkippedLayer* = object
+    ## One per layer dropped because of an unreachable remote when
+    ## ``ComposeOptions.skipInaccessibleLayers`` is set. Carries enough
+    ## structured detail for ``runWorkspaceInitCommand`` to emit it in
+    ## the init-report JSON without losing the diagnostic.
+    index*: int
+    provenance*: string
+    visibility*: WorkspaceVisibility
+    diagnostic*: string
+
+  ComposeResult* = object
+    ## Extended composer outcome. Mirrors
+    ## ``composeManifestLayers`` for the ``project`` payload and adds the
+    ## skipped-layer list. ``composeManifestLayers`` keeps returning
+    ## ``ResolvedProject`` directly so existing callers don't change
+    ## shape; new callers (M25 init flow) use ``ComposeResult`` to access
+    ## ``skippedLayers``.
+    project*: ResolvedProject
+    skippedLayers*: seq[SkippedLayer]
+
+const
+  manifestLayerUnreachableTag* = "manifest-layer-unreachable:"
+    ## Stable marker prepended to the ``innerMessage`` of every
+    ## structured diagnostic raised when a URL-backed manifest layer
+    ## fails to fetch. JSON-mode consumers grep on this tag to tell an
+    ## access-denied event apart from a generic resolver error.
+
 # ---- helpers --------------------------------------------------------------
 
 proc visibilityFromString(layerLabel, raw: string): WorkspaceVisibility =
@@ -149,10 +211,23 @@ proc layerLabel(entry: ManifestLayer): string =
   else:
     "<unknown manifest layer>"
 
+proc visibilityTierLabel(v: WorkspaceVisibility): string =
+  ## Canonical lowercase label used in diagnostics. ``wvPersonal`` maps
+  ## back to ``"private"`` because the M25 spec language is "public /
+  ## private" (the schema-side "personal" synonym is for the
+  ## per-developer overlay; in diagnostics the broader "private" word is
+  ## what the operator expects to see).
+  case v
+  of wvPublic: "public"
+  of wvOrg: "org"
+  of wvTeam: "team"
+  of wvPersonal: "private"
+
 proc acquireUrlLayer(
     workspaceRoot, workspaceTomlPath: string;
     layerIdx: int;
-    entry: ManifestLayer): string =
+    entry: ManifestLayer;
+    visibility: WorkspaceVisibility): string =
   ## Acquire a `url`-backed manifest layer. Returns the absolute path of
   ## the on-disk checkout (a `manifests-<i>-<sanitized>` directory
   ## under `<workspaceRoot>/.repo/`).
@@ -165,6 +240,12 @@ proc acquireUrlLayer(
   ## layer as available without re-running the clone — the action cache
   ## otherwise restores only the receipt, not the working tree, so we
   ## cannot rely on a cache hit to re-materialize the manifest checkout.
+  ##
+  ## On fetch failure the raised diagnostic carries the stable
+  ## ``manifest-layer-unreachable:`` prefix and explicitly names the
+  ## visibility tier ("public" / "org" / "team" / "private") so a
+  ## public-only user reading the M9 init report can tell which layer
+  ## the access-control failure originated in (M25 contract).
   let dotRepo = workspaceRoot / ".repo"
   createDir(dotRepo)
   let target = dotRepo / layerDirName(layerIdx, entry)
@@ -172,6 +253,7 @@ proc acquireUrlLayer(
     return target
 
   let url = entry.url.get()
+  let tier = visibilityTierLabel(visibility)
   let revision =
     if entry.branch.isSome and entry.branch.get().len > 0:
       entry.branch.get()
@@ -184,8 +266,9 @@ proc acquireUrlLayer(
       raiseManifestError(workspaceTomlPath,
         "manifest[" & $layerIdx & "].url",
         schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
-        "cannot resolve git tool to acquire manifest layer '" & url &
-          "': " & err.msg)
+        manifestLayerUnreachableTag &
+          " cannot resolve git tool to acquire manifest layer (visibility=" &
+          tier & ") '" & url & "': " & err.msg)
   let receiptPath = dotRepo / (layerDirName(layerIdx, entry) & ".receipt")
   var action = gitCloneAction(
     "m8-manifest-clone-" & $layerIdx,
@@ -207,7 +290,9 @@ proc acquireUrlLayer(
     raiseManifestError(workspaceTomlPath,
       "manifest[" & $layerIdx & "].url",
       schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
-      "failed to clone manifest layer '" & url &
+      manifestLayerUnreachableTag &
+        " failed to clone manifest layer (visibility=" & tier &
+        ") '" & url &
         "' (status=" & $outcome.status &
         ", reason=" & outcome.reason &
         ", stderr=" & outcome.stderr & ")")
@@ -215,7 +300,8 @@ proc acquireUrlLayer(
     raiseManifestError(workspaceTomlPath,
       "manifest[" & $layerIdx & "].url",
       schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
-      "manifest layer '" & url &
+      manifestLayerUnreachableTag &
+        " manifest layer (visibility=" & tier & ") '" & url &
         "' clone reported success but the working tree does not exist at " &
         target)
   target
@@ -267,25 +353,25 @@ proc mergeLayerIntoResult(
 
 # ---- public entry points --------------------------------------------------
 
-proc composeManifestLayers*(
+proc composeManifestLayersWithOptions*(
     workspaceLocal: WorkspaceLocal;
     workspaceRoot: string;
-    workspaceTomlPath: string = ""): ResolvedProject =
-  ## Compose the manifest layers declared in `workspaceLocal` into a
-  ## single `ResolvedProject`. `workspaceRoot` is the absolute path of
-  ## the directory containing `.repo/` and is used to:
+    workspaceTomlPath: string = "";
+    options: ComposeOptions = ComposeOptions()): ComposeResult =
+  ## M25 extended composer entry point. Same semantics as
+  ## ``composeManifestLayers`` for the strict-default case (the zero
+  ## ``ComposeOptions`` value). When
+  ## ``options.skipInaccessibleLayers`` is set, a URL-backed layer whose
+  ## clone fails is downgraded to a ``SkippedLayer`` entry in the
+  ## result and composition continues with the remaining layers — the
+  ## public-only ``repro workspace init`` path required by M25.
   ##
-  ## - Anchor `url`-backed layer checkouts under
-  ##   `<workspaceRoot>/.repo/manifests-<i>-<sanitized>/`.
-  ## - Resolve `local_path` entries when their value is relative.
+  ## A failed ``local_path`` layer is still fatal even with the skip
+  ## flag set: those are operator-controlled and a missing local path
+  ## almost certainly means a typo, not an access-control event.
   ##
-  ## `workspaceTomlPath` is the absolute path of the `workspace.toml`
-  ## that produced `workspaceLocal`; it is carried on every structured
-  ## diagnostic as the `path` field so the user can tell which workspace
-  ## file led to the failure. When the caller has only the parsed
-  ## `WorkspaceLocal` and not the source path the empty string is
-  ## acceptable; in that case the diagnostic's `path` falls back to the
-  ## URL or local path of the offending layer.
+  ## A composition that drops every layer raises the original
+  ## diagnostic — there is no useful project to return.
   if not isAbsolute(workspaceRoot):
     raiseManifestError(workspaceTomlPath, "workspaceRoot",
       schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
@@ -304,6 +390,10 @@ proc composeManifestLayers*(
 
   var composed: ResolvedProject
   var seen = initTable[string, int]()
+  var skipped: seq[SkippedLayer]
+  var lastSkipDiagnostic = ""
+  var firstLayerSeen = false
+  var mergedAnyLayer = false
 
   for layerIdx, entry in workspaceLocal.manifest:
     let hasUrl = entry.url.isSome and entry.url.get().len > 0
@@ -324,11 +414,32 @@ proc composeManifestLayers*(
       if workspaceTomlPath.len > 0: workspaceTomlPath else: provenance,
       entry.visibility)
 
-    let layerRoot =
-      if hasUrl:
-        acquireUrlLayer(workspaceRoot, workspaceTomlPath, layerIdx, entry)
+    var layerRoot: string
+    if hasUrl:
+      if options.skipInaccessibleLayers:
+        try:
+          layerRoot = acquireUrlLayer(workspaceRoot, workspaceTomlPath,
+            layerIdx, entry, visibility)
+        except WorkspaceManifestParseError as err:
+          # Only the "manifest-layer-unreachable" diagnostics are
+          # eligible for the skip path. Other shape errors (e.g.
+          # malformed URL caught by another reader) still propagate.
+          if manifestLayerUnreachableTag in err.innerMessage:
+            skipped.add(SkippedLayer(
+              index: layerIdx,
+              provenance: provenance,
+              visibility: visibility,
+              diagnostic: err.msg))
+            lastSkipDiagnostic = err.msg
+            continue
+          else:
+            raise
       else:
-        acquireLocalPathLayer(workspaceRoot, workspaceTomlPath, layerIdx, entry)
+        layerRoot = acquireUrlLayer(workspaceRoot, workspaceTomlPath,
+          layerIdx, entry, visibility)
+    else:
+      layerRoot = acquireLocalPathLayer(workspaceRoot, workspaceTomlPath,
+        layerIdx, entry)
 
     let projectFile = layerRoot / "projects" / (projectName & ".toml")
     if not fileExists(projectFile):
@@ -353,19 +464,31 @@ proc composeManifestLayers*(
           "' failed to resolve project '" & projectName & "': " &
           err.msg)
 
-    # First layer establishes the project-level fields. Later layers
-    # legitimately may differ on `projectName` (only if a layer
-    # mis-declares the project file, which the file-exists check above
-    # would have rejected) — we treat the first layer as authoritative.
-    if layerIdx == 0:
+    # First successfully-acquired layer establishes the project-level
+    # fields. With ``skipInaccessibleLayers`` the first layer in source
+    # order may have been dropped; we then carry the FIRST layer that
+    # actually contributed repos as the project-level source of truth.
+    if not firstLayerSeen:
       composed.projectName = layerResolved.projectName
       composed.defaultRevision = layerResolved.defaultRevision
       composed.trunk = layerResolved.trunk
       composed.projectFile = layerResolved.projectFile
+      firstLayerSeen = true
 
     mergeLayerIntoResult(
       workspaceTomlPath, provenance, visibility,
       layerResolved, composed, seen)
+    mergedAnyLayer = true
+
+  if not mergedAnyLayer:
+    # Every layer was skipped — that means access-control denied the
+    # entire workspace, not "the public subset still resolves". Raise
+    # the most recent skip diagnostic so the operator sees something
+    # actionable rather than a silent empty composition.
+    raiseManifestError(workspaceTomlPath, "manifest",
+      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      "every manifest layer was inaccessible; composition produced no " &
+        "project (last diagnostic: " & lastSkipDiagnostic & ")")
 
   # Post-composition duplicate detection. The per-layer M6 resolver
   # already catches intra-layer duplicates; this pass guards against an
@@ -385,7 +508,36 @@ proc composeManifestLayers*(
           "') at indices " & $finalSeen[triple] & " and " & $i)
     finalSeen[triple] = i
 
-  result = composed
+  result.project = composed
+  result.skippedLayers = skipped
+
+proc composeManifestLayers*(
+    workspaceLocal: WorkspaceLocal;
+    workspaceRoot: string;
+    workspaceTomlPath: string = ""): ResolvedProject =
+  ## Compose the manifest layers declared in `workspaceLocal` into a
+  ## single `ResolvedProject`. `workspaceRoot` is the absolute path of
+  ## the directory containing `.repo/` and is used to:
+  ##
+  ## - Anchor `url`-backed layer checkouts under
+  ##   `<workspaceRoot>/.repo/manifests-<i>-<sanitized>/`.
+  ## - Resolve `local_path` entries when their value is relative.
+  ##
+  ## `workspaceTomlPath` is the absolute path of the `workspace.toml`
+  ## that produced `workspaceLocal`; it is carried on every structured
+  ## diagnostic as the `path` field so the user can tell which workspace
+  ## file led to the failure. When the caller has only the parsed
+  ## `WorkspaceLocal` and not the source path the empty string is
+  ## acceptable; in that case the diagnostic's `path` falls back to the
+  ## URL or local path of the offending layer.
+  ##
+  ## Strict-default wrapper around ``composeManifestLayersWithOptions``;
+  ## fails on any layer fetch failure (the M8 contract). Callers that
+  ## need the M25 ``--allow-missing-layers`` skip semantics use
+  ## ``composeManifestLayersWithOptions`` directly.
+  composeManifestLayersWithOptions(
+    workspaceLocal, workspaceRoot, workspaceTomlPath,
+    ComposeOptions()).project
 
 proc composeManifestLayersFromFile*(
     workspaceTomlPath: string): ResolvedProject =
@@ -399,3 +551,15 @@ proc composeManifestLayersFromFile*(
   # the two trailing components to recover the workspace root.
   let workspaceRoot = parentDir(parentDir(absToml))
   composeManifestLayers(workspaceLocal, workspaceRoot, absToml)
+
+proc composeManifestLayersFromFileWithOptions*(
+    workspaceTomlPath: string;
+    options: ComposeOptions = ComposeOptions()): ComposeResult =
+  ## ``composeManifestLayersFromFile`` sibling that takes the M25
+  ## ``ComposeOptions`` and returns the extended ``ComposeResult`` so
+  ## the caller can record any skipped layers in its structured report.
+  let absToml = absolutePath(workspaceTomlPath)
+  let workspaceLocal = readWorkspaceLocal(absToml)
+  let workspaceRoot = parentDir(parentDir(absToml))
+  composeManifestLayersWithOptions(
+    workspaceLocal, workspaceRoot, absToml, options)
