@@ -6354,14 +6354,16 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
 # down (after ``runWorkspaceLockCommand``, which the gate calls to
 # create / refresh the workspace lock).
 proc runCheckCommand*(args: openArray[string]): int
+proc runPostCommitLockCommand*(args: openArray[string]): int
 
 proc runHooksDispatchCommand(args: openArray[string]): int =
   ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
   ## [--refs-file=PATH] -- [hook args...]``. Invoked by the managed
   ## VCS-hook scripts the M17 installer drops into every participating
   ## repo. M17 wired this as a no-op; M18 replaces the ``pre-push``
-  ## arm with a call into ``repro check --mode=pre-push``. M19 / M19a
-  ## will register the post-commit / post-merge / post-checkout
+  ## arm with a call into ``repro check --mode=pre-push``; M19 replaces
+  ## the ``post-commit`` arm with an in-process call to the best-effort
+  ## lock refresh. M19a will register the post-merge / post-checkout
   ## bodies on top of the same contract.
   if args.len == 0:
     raise newException(ValueError,
@@ -6405,10 +6407,22 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     if refsFile.len > 0:
       checkArgs.add("--pushed-refs=" & refsFile)
     return runCheckCommand(checkArgs)
+  of "post-commit":
+    # M19 best-effort lock refresh. Always exits 0 even when the lock
+    # writer refuses, no workspace.toml exists, or the workspace is
+    # dirty: a commit must never be blocked by hook failure. The
+    # wrapper itself logs all error paths to
+    # ``<workspace>/.repro/workspace/post-commit-lock.log`` and writes
+    # the JSON report to ``post-commit-report.json`` so the operator
+    # can introspect the latest outcome.
+    var postArgs: seq[string]
+    if repoRoot.len > 0:
+      postArgs.add("--current-repo=" & repoRoot)
+    return runPostCommitLockCommand(postArgs)
   else:
-    # M17 ground state for the other three hooks: accept the argv,
-    # return 0, emit nothing. M19 / M19a replace this branch when
-    # those milestones land.
+    # M17 ground state for the remaining two hooks: accept the argv,
+    # return 0, emit nothing. M19a replaces this branch when that
+    # milestone lands.
     return 0
 
 proc runHooksCommand(args: openArray[string]): int =
@@ -13341,6 +13355,237 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
   for line in renderLockTextLines(outcome.report):
     stdout.writeLine(line)
   outcome.report.exitCode
+
+# ---- M19: post-commit lock refresh (best-effort) -------------------------
+#
+# The M17-installed post-commit hook dispatcher routes here via
+# ``repro hooks dispatch post-commit --repo-root <repo>``. Semantics are
+# strictly non-blocking: post-commit MUST exit 0 even when the lock
+# writer refuses, no workspace metadata is present, the workspace is
+# dirty, or any subprocess errors. The operator-facing trace lives in
+# ``<workspaceRoot>/.repro/workspace/post-commit-lock.log`` (append-only)
+# and in ``<workspaceRoot>/.repro/workspace/post-commit-report.json``
+# (overwritten on each run with the latest result).
+#
+# Design choice: a separate ``runPostCommitLockCommand`` wrapper around
+# the strict M11 ``runWorkspaceLockCommand`` was preferred over adding a
+# ``--best-effort`` flag to the workspace command itself. The strict
+# command keeps its 0/1/2 contract intact; the wrapper concentrates the
+# "downgrade every failure to exit 0 + a log line" policy in one place,
+# adds the M19-specific log/report layout, and avoids leaking the
+# best-effort surface into the operator-facing ``repro workspace lock``.
+
+type
+  PostCommitOutcome* = enum
+    pcoOk                ## Lock TOML + index updated.
+    pcoSkippedDirty      ## At least one sibling repo is dirty; strict
+                         ## M11 would have refused with exit 2. The
+                         ## post-commit policy is to skip silently.
+    pcoSkippedNoWorkspace ## No ``.repo/workspace.toml`` or no resolvable
+                          ## project; common in a freshly-cloned repo
+                          ## that has not been initialised.
+    pcoFailed            ## Lock writer raised (IO error, VCS query
+                         ## failure, etc.). Logged and downgraded.
+
+  PostCommitReport* = object
+    workspaceRoot*: string
+    currentRepo*: string
+    project*: string
+    outcome*: string
+    lockFilePath*: string
+    indexFilePath*: string
+    triggerRepo*: string
+    triggerSha*: string
+    diagnostic*: string
+    timestamp*: string
+    exitCode*: int
+
+proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
+  case outcome
+  of pcoOk: "ok"
+  of pcoSkippedDirty: "skipped-dirty"
+  of pcoSkippedNoWorkspace: "skipped-no-workspace"
+  of pcoFailed: "failed"
+
+proc toJsonNode*(report: PostCommitReport): JsonNode =
+  result = newJObject()
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["currentRepo"] = %report.currentRepo
+  result["project"] = %report.project
+  result["outcome"] = %report.outcome
+  result["lockFilePath"] = %report.lockFilePath
+  result["indexFilePath"] = %report.indexFilePath
+  result["triggerRepo"] = %report.triggerRepo
+  result["triggerSha"] = %report.triggerSha
+  result["diagnostic"] = %report.diagnostic
+  result["timestamp"] = %report.timestamp
+  result["exitCode"] = %report.exitCode
+
+proc resolvePostCommitWorkspaceRoot(currentRepo, workspaceRoot: string): string =
+  ## Walk up from ``--current-repo`` to find ``.repo/``. Matches the M18
+  ## ``parseCheckArgs`` heuristic so the dispatch wiring stays uniform.
+  if workspaceRoot.len > 0:
+    return absolutePath(workspaceRoot)
+  if currentRepo.len > 0:
+    var probe = absolutePath(currentRepo)
+    while probe.len > 1:
+      if dirExists(probe / ".repo"):
+        return probe
+      let parent = parentDir(probe)
+      if parent == probe: break
+      probe = parent
+  ""
+
+proc writePostCommitReport(workspaceRoot: string;
+                           report: PostCommitReport) =
+  ## Best-effort write of the JSON report. Never raises (a failing
+  ## report write is itself just logged below).
+  try:
+    let reportDir = workspaceRoot / ".repro" / "workspace"
+    createDir(reportDir)
+    let reportPath = reportDir / "post-commit-report.json"
+    writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+  except CatchableError:
+    discard
+
+proc appendPostCommitLog(workspaceRoot, line: string) =
+  ## Append a single line to ``post-commit-lock.log``. Never raises —
+  ## a failed log write must not block the commit.
+  try:
+    let reportDir = workspaceRoot / ".repro" / "workspace"
+    createDir(reportDir)
+    let logPath = reportDir / "post-commit-lock.log"
+    var f: File
+    if open(f, logPath, fmAppend):
+      f.writeLine(line)
+      f.close()
+  except CatchableError:
+    discard
+
+proc parsePostCommitArgs(args: openArray[string]):
+    tuple[currentRepo, workspaceRoot, triggerSha, triggerRepo: string;
+          toolProvisioning: ToolProvisioningMode] =
+  ## Minimal argv parser for the post-commit wrapper. The dispatcher
+  ## installs ``--current-repo=PATH``; the rest are pass-throughs the
+  ## operator can supply when invoking ``repro workspace post-commit``
+  ## manually. Unknown flags are silently ignored — post-commit must
+  ## never raise on argv shape.
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--":
+      inc i
+      continue
+    if arg == "--current-repo" or arg.startsWith("--current-repo="):
+      try: result.currentRepo = valueFromFlag(args, i, "--current-repo")
+      except CatchableError: discard
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      try: result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+      except CatchableError: discard
+    elif arg == "--sha" or arg.startsWith("--sha="):
+      try: result.triggerSha = valueFromFlag(args, i, "--sha")
+      except CatchableError: discard
+    elif arg == "--trigger-repo" or arg.startsWith("--trigger-repo="):
+      try: result.triggerRepo = valueFromFlag(args, i, "--trigger-repo")
+      except CatchableError: discard
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      try:
+        result.toolProvisioning = parseToolProvisioning(
+          valueFromFlag(args, i, "--tool-provisioning"))
+      except CatchableError: discard
+    inc i
+
+proc runPostCommitLockCommand*(args: openArray[string]): int =
+  ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
+  ## operator-facing manual entry point) routes here. The M19 policy is
+  ## "best-effort": every failure is captured into the JSON report +
+  ## the log file, and the process exits 0 so the originating commit
+  ## never sees a non-zero hook status.
+  let parsed = parsePostCommitArgs(args)
+  let timestamp = isoTimestampNow()
+  let workspaceRoot = resolvePostCommitWorkspaceRoot(
+    parsed.currentRepo, parsed.workspaceRoot)
+
+  var report: PostCommitReport
+  report.workspaceRoot = workspaceRoot
+  report.currentRepo = parsed.currentRepo
+  report.timestamp = timestamp
+  report.exitCode = 0
+
+  # No workspace metadata reachable → skip silently, log once.
+  if workspaceRoot.len == 0 or
+      not fileExists(workspaceRoot / ".repo" / "workspace.toml"):
+    report.outcome = postCommitOutcomeTag(pcoSkippedNoWorkspace)
+    report.diagnostic =
+      if workspaceRoot.len == 0:
+        "no workspace root found from --current-repo=" & parsed.currentRepo
+      else:
+        "no .repo/workspace.toml at " & workspaceRoot
+    if workspaceRoot.len > 0:
+      writePostCommitReport(workspaceRoot, report)
+      appendPostCommitLog(workspaceRoot,
+        timestamp & " " & report.outcome & " " & report.diagnostic)
+    return 0
+
+  # Build the strict M11 args from the dispatched argv and invoke the
+  # M11 executor in-process. Any raise is downgraded to ``pcoFailed``.
+  var lockArgs: WorkspaceLockArgs
+  lockArgs.workspaceRoot = workspaceRoot
+  lockArgs.triggerSha = parsed.triggerSha
+  lockArgs.triggerRepo = parsed.triggerRepo
+  lockArgs.toolProvisioning = parsed.toolProvisioning
+
+  var raised = false
+  var raisedDiagnostic = ""
+  var outcome: WorkspaceLockOutcome
+  try:
+    outcome = executeWorkspaceLock(lockArgs)
+  except CatchableError as err:
+    raised = true
+    raisedDiagnostic = err.msg
+
+  if raised:
+    report.outcome = postCommitOutcomeTag(pcoFailed)
+    report.diagnostic = raisedDiagnostic
+    writePostCommitReport(workspaceRoot, report)
+    appendPostCommitLog(workspaceRoot,
+      timestamp & " " & report.outcome & " " & raisedDiagnostic)
+    return 0
+
+  report.project = outcome.report.project
+  report.lockFilePath = outcome.report.lockFilePath
+  report.indexFilePath = outcome.report.indexFilePath
+  report.triggerRepo = outcome.report.triggerRepo
+  report.triggerSha = outcome.report.triggerSha
+
+  case outcome.report.exitCode
+  of 0:
+    report.outcome = postCommitOutcomeTag(pcoOk)
+    report.diagnostic = "wrote " & outcome.report.lockFilePath
+    # Best-effort write of the M11 lock-report.json so a manual
+    # invocation matches the operator-facing surface.
+    try: writeWorkspaceLockReport(outcome.report)
+    except CatchableError: discard
+  of 2:
+    # Strict M11 exit-2 = dirty working tree. The post-commit policy
+    # is "skip silently" — the operator already saw the diff during
+    # the just-completed commit and may have intentionally left
+    # sibling repos untouched.
+    report.outcome = postCommitOutcomeTag(pcoSkippedDirty)
+    var dirtyNames: seq[string]
+    for e in outcome.report.dirty: dirtyNames.add(e.path)
+    report.diagnostic = "dirty sibling(s): " & dirtyNames.join(", ")
+  else:
+    report.outcome = postCommitOutcomeTag(pcoFailed)
+    report.diagnostic = "executeWorkspaceLock returned exit code " &
+      $outcome.report.exitCode
+
+  writePostCommitReport(workspaceRoot, report)
+  appendPostCommitLog(workspaceRoot,
+    timestamp & " " & report.outcome & " " & report.diagnostic)
+  return 0
 
 # ---- M18: `repro check --mode=pre-push` (publication gate) ----------------
 #
