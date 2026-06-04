@@ -94,6 +94,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " branch [<name>] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
           programName &
+      " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
+          programName &
       " watch [target[#name]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]]\n       " &
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
@@ -14178,6 +14180,567 @@ proc runBranchCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
+# --- M15: `repro checkout <branch>` ---------------------------------------
+#
+# Top-level subcommand per ``reprobuild-specs/CLI/checkout.md``. Same
+# convention deviation flagged by M9—M14: the milestone description hints
+# at a separate planner module, but the actual implementation lives here
+# alongside ``runBranchCommand`` so we reuse the M9/M10/M11/M12/M14
+# resolver-and-composer dispatch helpers without a third copy.
+#
+# Two-pass design (mirrors M14 ``executeBranchCreate``):
+#
+#   Pass 1 — per-repo observation. For each declared repo gather HEAD
+#     SHA, clean/dirty, current branch (so we can detect the no-op
+#     ``already-on-branch`` case), local-branch existence, and (if the
+#     branch does not exist locally) remote-tracking existence on the
+#     standard ``origin`` remote.
+#
+#     Classification (in priority order):
+#       - ``rsRefMissing`` — no on-disk checkout / probe failed.
+#       - ``rsDirty`` — working tree has uncommitted changes.
+#       - ``rsAlreadyOnBranch`` — clean and ``HEAD`` is the requested
+#         branch (no action needed).
+#       - ``rsReadyLocal`` — clean, the requested branch already exists
+#         as ``refs/heads/<name>`` locally; we can call
+#         ``gitSwitchAction`` directly.
+#       - ``rsReadyFetchAndTrack`` — clean, branch is absent locally but
+#         present on ``origin``; we need ``gitFetchAction`` first, then
+#         ``gitSwitchAction`` (git ``switch`` DWIMs the tracking branch
+#         when ``refs/remotes/origin/<name>`` is present).
+#       - ``rsBranchMissing`` — clean, branch absent both locally AND on
+#         every configured remote (refuse).
+#
+#   Pass 2 — decision. If ANY repo is ``rsBranchMissing``, ``rsDirty``,
+#     or ``rsRefMissing`` we refuse-and-report with exit 2 (or exit 1
+#     for the probe-failed case) and mutate NOTHING (matching M14's
+#     atomicity rule). Otherwise:
+#       - ``rsReadyLocal`` repos get a ``gitSwitchAction``.
+#       - ``rsReadyFetchAndTrack`` repos get a chained
+#         ``gitFetchAction`` then ``gitSwitchAction``. The switch
+#         action declares the fetch's receipt as a dep so they run in
+#         order in the build graph.
+#       - ``rsAlreadyOnBranch`` repos schedule no action.
+#     On full success we update ``[workspace].branch`` via
+#     ``writeWorkspaceBranch`` so M13 metadata follows the on-disk
+#     state.
+#
+# Exit codes:
+#   0 — success (every repo switched / fetched-and-switched /
+#       already-on-branch).
+#   1 — IO / VCS / probe / engine failure.
+#   2 — operator-visible refuse (any dirty repo, OR the requested
+#       branch is missing in any repo locally and remotely).
+#
+# The JSON report at ``<workspaceRoot>/.repro/workspace/checkout-report.json``
+# carries the per-repo classification, previous branch, new branch, and
+# the post-command ``recordedBranch`` (the M13 metadata value).
+
+type
+  CheckoutRepoOutcome* = enum
+    croSwitched           ## Local branch existed; ``git switch`` ran.
+    croFetchedAndSwitched ## Remote-only branch; fetched + tracked.
+    croAlreadyOnBranch    ## Already on the requested branch (no-op).
+    croDirtyRefused       ## Repo dirty; nothing scheduled.
+    croBranchMissingRefused
+                          ## Branch absent locally AND on every remote.
+    croProbeFailed        ## Pre-pass probe failed for this repo.
+    croActionFailed       ## A scheduled action returned non-OK.
+
+  CheckoutRepoEntry* = object
+    ## Per-repo line in the JSON report. ``previousBranch`` is the
+    ## branch the repo was on going into the command (empty when
+    ## detached); ``newBranch`` is what it is on after — typically the
+    ## requested branch on success, the unchanged ``previousBranch`` on
+    ## a refuse.
+    name*: string
+    path*: string
+    headSha*: string
+    previousBranch*: string
+    newBranch*: string
+    outcome*: string
+    remoteHadBranch*: bool
+    localHadBranch*: bool
+    dirtyReason*: string
+    diagnostic*: string
+
+  CheckoutReport* = object
+    ## Structured outcome of one ``repro checkout`` invocation.
+    ## ``branch`` is the requested branch; ``recordedBranch`` is what
+    ## ``[workspace].branch`` carries AFTER the command finished (the
+    ## new branch on success, the pre-existing value on refuse).
+    project*: string
+    workspaceRoot*: string
+    branch*: string
+    recordedBranch*: string
+    repos*: seq[CheckoutRepoEntry]
+    exitCode*: int
+
+proc checkoutOutcomeTag(outcome: CheckoutRepoOutcome): string =
+  case outcome
+  of croSwitched: "switched"
+  of croFetchedAndSwitched: "fetched_and_switched"
+  of croAlreadyOnBranch: "already_on_branch"
+  of croDirtyRefused: "dirty_refused"
+  of croBranchMissingRefused: "branch_missing_refused"
+  of croProbeFailed: "probe_failed"
+  of croActionFailed: "action_failed"
+
+proc toJsonNode*(report: CheckoutReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["branch"] = %report.branch
+  result["recordedBranch"] = %report.recordedBranch
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["headSha"] = %entry.headSha
+    obj["previousBranch"] = %entry.previousBranch
+    obj["newBranch"] = %entry.newBranch
+    obj["outcome"] = %entry.outcome
+    obj["remoteHadBranch"] = %entry.remoteHadBranch
+    obj["localHadBranch"] = %entry.localHadBranch
+    obj["dirtyReason"] = %entry.dirtyReason
+    obj["diagnostic"] = %entry.diagnostic
+    repos.add(obj)
+  result["repos"] = repos
+  result["exitCode"] = %report.exitCode
+
+proc renderCheckoutTextLines*(report: CheckoutReport): seq[string] =
+  for entry in report.repos:
+    var line = "workspace checkout: " & entry.path & " " & entry.outcome
+    if entry.previousBranch.len > 0 and entry.newBranch.len > 0 and
+        entry.previousBranch != entry.newBranch:
+      line.add(" " & entry.previousBranch & " -> " & entry.newBranch)
+    elif entry.newBranch.len > 0:
+      line.add(" branch=" & entry.newBranch)
+    if entry.dirtyReason.len > 0:
+      line.add(" (" & entry.dirtyReason & ")")
+    elif entry.diagnostic.len > 0:
+      line.add(" (" & entry.diagnostic & ")")
+    result.add(line)
+  if report.exitCode == 0:
+    result.add("workspace checkout: '" & report.branch &
+      "' active across " & $report.repos.len &
+      " repos; metadata=" & report.recordedBranch)
+
+type
+  CheckoutArgs = object
+    workspaceRoot: string
+    projectName: string
+    branchName: string
+    json: bool
+    toolProvisioning: ToolProvisioningMode
+
+proc parseCheckoutArgs*(args: openArray[string]): CheckoutArgs =
+  ## ``repro checkout <branch> [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``. The
+  ## positional ``<branch>`` is REQUIRED — unlike ``repro branch`` the
+  ## argument-less form is not a defined surface for M15.
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro checkout` flag: " & arg)
+    elif result.branchName.len == 0:
+      result.branchName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro checkout`: " & arg)
+    inc i
+  if result.branchName.len == 0:
+    raise newException(ValueError,
+      "`repro checkout` requires a branch name positional argument")
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveCheckoutProject(parsed: CheckoutArgs):
+    tuple[resolved: ResolvedProject;
+          workspaceLocal: Option[WorkspaceLocal]] =
+  ## Same dispatch rule as M14 ``resolveBranchProject``: composer mode
+  ## when ``.repo/workspace.toml`` declares ``[[manifest]]`` layers,
+  ## single-project mode otherwise. The single-project path recovers
+  ## the project name from a metadata-only workspace.toml's
+  ## ``[workspace].project`` field (the M13 schema).
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+    let absToml = absolutePath(workspaceToml)
+    let workspaceLocal = readWorkspaceLocal(absToml)
+    let resolved = composeManifestLayers(
+      workspaceLocal, parsed.workspaceRoot, absToml)
+    return (resolved, some(workspaceLocal))
+  var projectName = parsed.projectName
+  if projectName.len == 0 and fileExists(workspaceToml):
+    try:
+      let recorded =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recorded.len > 0:
+        projectName = recorded
+    except WorkspaceManifestParseError:
+      discard
+  if projectName.len == 0:
+    raise newException(ValueError,
+      "`repro checkout <branch>` requires either `.repo/workspace.toml` " &
+        "or a project name recoverable from one; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+  if fileExists(projectFile):
+    return (resolveProject(projectFile), none(WorkspaceLocal))
+  if fileExists(variantFile):
+    return (resolveVariant(variantFile), none(WorkspaceLocal))
+  raise newException(ValueError,
+    "no project or variant named '" & projectName &
+      "' found under '" & manifestsRoot &
+      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+
+proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
+  result.workspaceRoot = parsed.workspaceRoot
+  result.branch = parsed.branchName
+
+  let (resolved, _) = resolveCheckoutProject(parsed)
+  result.project = resolved.projectName
+
+  let identity = ensureGitToolResolvable(
+    parsed.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  # Observation pass.
+  type
+    RepoStateKind = enum
+      rsReadyLocal, rsReadyFetchAndTrack, rsAlreadyOnBranch,
+      rsBranchMissing, rsDirty, rsProbeFailed
+    RepoState = object
+      kind: RepoStateKind
+      repo: ResolvedRepo
+      repoPath: string
+      headSha: string
+      previousBranch: string
+      localHadBranch: bool
+      remoteHadBranch: bool
+      reason: string
+
+  var states: seq[RepoState]
+  for repo in resolved.repos:
+    var state: RepoState
+    state.repo = repo
+    state.repoPath = parsed.workspaceRoot / repo.path
+    if not dirExists(state.repoPath / ".git"):
+      state.kind = rsProbeFailed
+      state.reason = "no on-disk checkout at '" & state.repoPath &
+        "'; run `repro workspace init` or `repro workspace sync` first"
+      states.add(state)
+      continue
+    let headRes = queryGitState(headShaQuery(state.repoPath), identity)
+    if headRes.status != gqsOk:
+      state.kind = rsProbeFailed
+      state.reason = "head-sha probe failed: " & headRes.diagnostic
+      states.add(state)
+      continue
+    state.headSha = headRes.headSha
+    # Current branch (empty when detached). ``symbolic-ref --short -q``
+    # prints the branch name and exits non-zero in the detached state
+    # rather than emitting an error to stderr.
+    let branchRes = gitRunPlain(identity,
+      ["-C", state.repoPath, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branchRes.code == 0:
+      state.previousBranch = branchRes.output.strip()
+    let cleanRes = queryGitState(isCleanQuery(state.repoPath), identity)
+    if cleanRes.status != gqsOk:
+      state.kind = rsProbeFailed
+      state.reason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      states.add(state)
+      continue
+    if not cleanRes.isClean:
+      state.kind = rsDirty
+      state.reason = "working tree has uncommitted changes"
+      states.add(state)
+      continue
+    # No-op short circuit: already on the requested branch.
+    if state.previousBranch == parsed.branchName:
+      state.kind = rsAlreadyOnBranch
+      state.localHadBranch = true
+      states.add(state)
+      continue
+    # Probe local branch.
+    let localProbe = gitRunPlain(identity,
+      ["-C", state.repoPath, "rev-parse", "--verify", "--quiet",
+       "refs/heads/" & parsed.branchName])
+    if localProbe.code == 0 and localProbe.output.strip().len > 0:
+      state.localHadBranch = true
+      state.kind = rsReadyLocal
+      states.add(state)
+      continue
+    if localProbe.code != 0 and localProbe.output.strip().len != 0:
+      # Genuine probe failure (not just "missing ref"): bail.
+      state.kind = rsProbeFailed
+      state.reason = "git rev-parse --verify exited " &
+        $localProbe.code & ": " & localProbe.output.strip()
+      states.add(state)
+      continue
+    # Local branch missing — probe the configured remote. We ask
+    # ``git ls-remote --heads <remote> <branch>`` rather than relying
+    # on the remote-tracking ref (which may be stale) so we get a
+    # truthful answer even before any fetch. The standard remote name
+    # after ``git clone`` is ``origin``.
+    let remoteName =
+      if repo.remoteName.len > 0: "origin" else: "origin"
+    let lsRemote = gitRunPlain(identity,
+      ["-C", state.repoPath, "ls-remote", "--heads", remoteName,
+       parsed.branchName])
+    if lsRemote.code != 0:
+      # Network / config failure: treat as probe-failed so the
+      # operator sees the real diagnostic rather than a misleading
+      # "branch missing" verdict.
+      state.kind = rsProbeFailed
+      state.reason = "git ls-remote --heads " & remoteName & " " &
+        parsed.branchName & " exited " & $lsRemote.code & ": " &
+        lsRemote.output.strip()
+      states.add(state)
+      continue
+    if lsRemote.output.strip().len == 0:
+      state.kind = rsBranchMissing
+      state.reason = "branch '" & parsed.branchName &
+        "' is absent locally and not present on remote '" &
+        remoteName & "'"
+      states.add(state)
+      continue
+    state.remoteHadBranch = true
+    state.kind = rsReadyFetchAndTrack
+    states.add(state)
+
+  # Decision pass.
+  var dirtyCount = 0
+  var missingCount = 0
+  var probeFailures = 0
+  for state in states:
+    case state.kind
+    of rsDirty: inc dirtyCount
+    of rsBranchMissing: inc missingCount
+    of rsProbeFailed: inc probeFailures
+    else: discard
+
+  if probeFailures > 0 or dirtyCount > 0 or missingCount > 0:
+    # Refuse-and-report path: mutate nothing, surface the per-repo
+    # classification. ``rsReadyLocal`` / ``rsReadyFetchAndTrack`` repos
+    # report ``ready_*`` (the work was scheduled-then-cancelled by the
+    # decision pass) rather than the post-success tag.
+    for state in states:
+      var entry = CheckoutRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        previousBranch: state.previousBranch,
+        remoteHadBranch: state.remoteHadBranch,
+        localHadBranch: state.localHadBranch)
+      case state.kind
+      of rsAlreadyOnBranch:
+        entry.outcome = checkoutOutcomeTag(croAlreadyOnBranch)
+        entry.newBranch = parsed.branchName
+      of rsDirty:
+        entry.outcome = checkoutOutcomeTag(croDirtyRefused)
+        entry.dirtyReason = state.reason
+        entry.newBranch = state.previousBranch
+      of rsBranchMissing:
+        entry.outcome = checkoutOutcomeTag(croBranchMissingRefused)
+        entry.diagnostic = state.reason
+        entry.newBranch = state.previousBranch
+      of rsProbeFailed:
+        entry.outcome = checkoutOutcomeTag(croProbeFailed)
+        entry.diagnostic = state.reason
+        entry.newBranch = state.previousBranch
+      of rsReadyLocal:
+        entry.outcome = "ready_local"
+        entry.newBranch = state.previousBranch
+      of rsReadyFetchAndTrack:
+        entry.outcome = "ready_fetch_and_track"
+        entry.newBranch = state.previousBranch
+      result.repos.add(entry)
+    result.exitCode =
+      if probeFailures > 0: 1
+      else: 2
+    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+    if recorded.isSome:
+      result.recordedBranch = recorded.get()
+    return
+
+  # Execute pass: schedule a ``gitFetchAction`` (for the
+  # fetch-and-track group) chained to a ``gitSwitchAction``, and a
+  # bare ``gitSwitchAction`` for the local-ready group. The
+  # ``rsAlreadyOnBranch`` repos schedule no action — the executor
+  # would refuse to no-op a ``switch`` to the current branch with
+  # any noisier diagnostic than necessary, so we just skip it.
+  var actions: seq[BuildAction]
+  var switchActionByIdx = initTable[int, string]()
+  let receiptDir = parsed.workspaceRoot / ".repro" / "workspace" / "receipts"
+  createDir(receiptDir)
+  for idx, state in states:
+    case state.kind
+    of rsReadyLocal:
+      let receiptRel = ".repro" / "workspace" / "receipts" /
+        ("checkout-switch-" & safeRepoIdSegment(state.repo.name) &
+         "-" & $idx & ".receipt")
+      let actionId = "workspace-checkout-switch-" &
+        safeRepoIdSegment(state.repo.name) & "-" & $idx
+      var action = gitSwitchAction(actionId, identity,
+        branchName = parsed.branchName,
+        repoPath = state.repo.path,
+        receiptPath = receiptRel)
+      action.cwd = parsed.workspaceRoot
+      actions.add(action)
+      switchActionByIdx[idx] = actionId
+    of rsReadyFetchAndTrack:
+      let fetchReceiptRel = ".repro" / "workspace" / "receipts" /
+        ("checkout-fetch-" & safeRepoIdSegment(state.repo.name) &
+         "-" & $idx & ".receipt")
+      let fetchActionId = "workspace-checkout-fetch-" &
+        safeRepoIdSegment(state.repo.name) & "-" & $idx
+      var fetchAction = gitFetchAction(fetchActionId, identity,
+        remoteName = "origin",
+        repoPath = state.repo.path,
+        receiptPath = fetchReceiptRel)
+      fetchAction.cwd = parsed.workspaceRoot
+      actions.add(fetchAction)
+      let switchReceiptRel = ".repro" / "workspace" / "receipts" /
+        ("checkout-switch-" & safeRepoIdSegment(state.repo.name) &
+         "-" & $idx & ".receipt")
+      let switchActionId = "workspace-checkout-switch-" &
+        safeRepoIdSegment(state.repo.name) & "-" & $idx
+      # The switch declares the fetch action's id as a dep so the
+      # engine orders them. ``git switch`` DWIMs the tracking branch
+      # off the ``origin/<name>`` ref the fetch just populated.
+      var switchAction = gitSwitchAction(switchActionId, identity,
+        branchName = parsed.branchName,
+        repoPath = state.repo.path,
+        receiptPath = switchReceiptRel,
+        deps = @[fetchActionId])
+      switchAction.cwd = parsed.workspaceRoot
+      actions.add(switchAction)
+      switchActionByIdx[idx] = switchActionId
+    else:
+      discard
+
+  var perRepoOutcome = initTable[int, tuple[outcome: CheckoutRepoOutcome;
+                                            diagnostic: string]]()
+  if actions.len > 0:
+    let cacheRoot = parsed.workspaceRoot / ".repro" / "workspace" /
+      "engine-cache"
+    var config = defaultBuildEngineConfig(cacheRoot)
+    config.suppressTrace = true
+    let res = runBuild(graph(actions), config)
+    var outcomeById = initTable[string, ActionResult]()
+    for outcome in res.results:
+      outcomeById[outcome.id] = outcome
+    for idx, state in states:
+      if not switchActionByIdx.hasKey(idx):
+        continue
+      let switchId = switchActionByIdx[idx]
+      let outcome = outcomeById.getOrDefault(switchId)
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        var diag = "status=" & $outcome.status &
+          " reason=" & outcome.reason
+        if outcome.stderr.len > 0:
+          diag.add(" stderr=" & outcome.stderr)
+        perRepoOutcome[idx] = (outcome: croActionFailed, diagnostic: diag)
+      else:
+        let tag =
+          if state.kind == rsReadyFetchAndTrack: croFetchedAndSwitched
+          else: croSwitched
+        perRepoOutcome[idx] = (outcome: tag, diagnostic: "")
+
+  var actionFailures = 0
+  for idx, state in states:
+    var entry = CheckoutRepoEntry(
+      name: state.repo.name,
+      path: state.repo.path,
+      headSha: state.headSha,
+      previousBranch: state.previousBranch,
+      remoteHadBranch: state.remoteHadBranch,
+      localHadBranch: state.localHadBranch)
+    case state.kind
+    of rsAlreadyOnBranch:
+      entry.outcome = checkoutOutcomeTag(croAlreadyOnBranch)
+      entry.newBranch = parsed.branchName
+    of rsReadyLocal, rsReadyFetchAndTrack:
+      let r = perRepoOutcome.getOrDefault(idx,
+        (outcome: croActionFailed,
+         diagnostic: "internal: missing action outcome"))
+      entry.outcome = checkoutOutcomeTag(r.outcome)
+      entry.diagnostic = r.diagnostic
+      entry.newBranch =
+        if r.outcome == croActionFailed: state.previousBranch
+        else: parsed.branchName
+      if r.outcome == croActionFailed:
+        inc actionFailures
+    else:
+      # Unreachable: refuse / probe-failed paths returned early above.
+      entry.outcome = "internal_unexpected_state"
+      entry.newBranch = state.previousBranch
+    result.repos.add(entry)
+
+  if actionFailures > 0:
+    result.exitCode = 1
+    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+    if recorded.isSome:
+      result.recordedBranch = recorded.get()
+    return
+
+  # Metadata update — only after every per-repo action succeeded.
+  try:
+    writeWorkspaceBranch(parsed.workspaceRoot,
+      project = resolved.projectName, branch = parsed.branchName)
+    result.recordedBranch = parsed.branchName
+  except WorkspaceManifestParseError as err:
+    result.exitCode = 1
+    result.recordedBranch = ""
+    result.repos.add(CheckoutRepoEntry(
+      outcome: "metadata_write_failed",
+      diagnostic: err.msg))
+    return
+
+  result.exitCode = 0
+
+proc writeCheckoutReport(report: CheckoutReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "checkout-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runCheckoutCommand*(args: openArray[string]): int =
+  ## ``repro checkout <branch> [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## See the M15 block comment above for the contract. Always writes a
+  ## ``checkout-report.json`` artifact under
+  ## ``<workspaceRoot>/.repro/workspace/`` so a script consumer has a
+  ## parseable record of what happened, in addition to the
+  ## stdout-formatted text lines.
+  let parsed = parseCheckoutArgs(args)
+  let report = executeCheckout(parsed)
+  writeCheckoutReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderCheckoutTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -14569,6 +15132,21 @@ proc runThinApp*(programName: string): int =
       return runBranchCommand(branchArgs)
     except CatchableError as err:
       stderr.writeLine("repro branch: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and
+      (args[0] == "checkout" or args[0] == "co"):
+    # M15 — `repro checkout <branch>` (and the `co` alias per
+    # CLI/checkout.md). Top-level subcommand: switches every
+    # participating repo to the named branch and updates M13 metadata.
+    try:
+      let checkoutArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runCheckoutCommand(checkoutArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro " & args[0] & ": error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
