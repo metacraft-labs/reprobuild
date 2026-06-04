@@ -66,6 +66,13 @@ type
       ## hook itself is emitted as a plain Nim proc by the macro; this flag
       ## is the inspection point the M1 engine reads to decide whether to
       ## invoke it.
+    implicitTargetNameHookCallType*: string
+      ## Named-Targets M1: when ``hasImplicitTargetNameHook`` is true, the
+      ## user-written parameter type from the hook spec
+      ## (``implicitTargetName(call: <T>): string``). The M1 wrapper emits
+      ## code at every typed-tool call site that constructs an instance of
+      ## ``<T>`` from the call's actual flag values and passes it to
+      ## ``implicitTargetNameFor<TitleExportName>``.
     sourceFile*: string
     sourceLine*: int
 
@@ -201,12 +208,63 @@ type
     commandStatsId*: string
     dependencyPolicy*: BuildActionDependencyPolicy
     actionCachePolicy*: ActionCacheFingerprintPolicy
+    targetNames*: seq[string]
+      ## Named-Targets M1: implicit names recorded per build edge. One
+      ## entry per flag in the call's subcommand's cumulative
+      ## ``outputFlags`` set whose value the call supplied, reduced to
+      ## a basename with conventional artifact extensions stripped. When
+      ## the executable defines an ``implicitTargetName`` hook the
+      ## first (canonical) entry is replaced by the hook's return value;
+      ## auxiliary entries from additional output flags remain.
+    sourceFile*: string
+    sourceLine*: int
 
   BuildTargetDef* = object
     name*: string
     actions*: seq[string]
     targets*: seq[string]
+    sourceFile*: string
+    sourceLine*: int
 
   BuildPoolDef* = object
     name*: string
     capacity*: uint32
+
+  TargetExportKind* = enum
+    ## Named-Targets M1: per-edge target-name origin marker.
+    tekImplicit  ## Computed from ``outputs`` statements and optional hook.
+    tekExplicit  ## Declared via ``target "name", handle`` in the DSL.
+
+  TargetExportEntry* = object
+    ## Named-Targets M1: one row in the project-scoped target-export
+    ## table for every implicit or explicit target name. Edges with
+    ## multiple ``targetNames`` contribute one entry per name, all
+    ## carrying the same ``actionId`` so a single edge is selectable
+    ## by any of its names.
+    name*: string
+      ## The implicit name (basename after extension stripping, or
+      ## the hook's return value) or the explicit ``target "name", ...``
+      ## label.
+    kind*: TargetExportKind
+    owningPackage*: string
+    actionId*: string
+      ## Engine handle: the ``BuildActionDef.id`` of the edge that
+      ## produces this target. M2 will use the qualified
+      ## ``<owningPackage>:<name>`` form to disambiguate cross-package
+      ## collisions.
+    sourceFile*: string
+    sourceLine*: int
+
+  TargetExportAmbiguity* = object
+    ## Named-Targets M1: cross-package ambiguity record. When two or
+    ## more packages register the same unqualified name, one entry is
+    ## kept here listing the candidate qualified forms (``<package>:<name>``)
+    ## so M2's resolver can surface the diagnostic.
+    name*: string
+    candidates*: seq[string]
+      ## ``<owningPackage>:<name>`` candidate strings, in registration
+      ## order.
+
+  TargetExportTable* = object
+    entries*: seq[TargetExportEntry]
+    ambiguities*: seq[TargetExportAmbiguity]

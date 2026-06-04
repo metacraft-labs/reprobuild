@@ -119,6 +119,19 @@ while IFS= read -r -d '' test_file; do
     libs/repro_standard_provider/tests/*|*/libs/repro_standard_provider/tests/*)
       extra_flags+=("--define:reproProviderMode")
       ;;
+    # Named-Targets M1 engine tests: the new ``t_engine_implicit_*``
+    # / ``t_engine_target_export_*`` / ``t_engine_multiple_outputs_*``
+    # suites under ``libs/repro_build_engine/tests/`` invoke
+    # ``buildPackageFragment`` directly to assert against the
+    # normalized provider-graph artifact. That entry point is gated
+    # on ``reproProviderMode`` in
+    # ``libs/repro_project_dsl/src/repro_project_dsl/runtime_provider.nim``,
+    # so the test file needs the same define.
+    libs/repro_build_engine/tests/t_engine_implicit_*|*/libs/repro_build_engine/tests/t_engine_implicit_*|\
+    libs/repro_build_engine/tests/t_engine_multiple_outputs_*|*/libs/repro_build_engine/tests/t_engine_multiple_outputs_*|\
+    libs/repro_build_engine/tests/t_engine_target_export_*|*/libs/repro_build_engine/tests/t_engine_target_export_*)
+      extra_flags+=("--define:reproProviderMode")
+      ;;
   esac
   # Use the `${arr[@]+"${arr[@]}"}` idiom so the expansion is a no-op
   # when `extra_flags` is empty. macOS's bundled Bash 3.2.57 aborts under

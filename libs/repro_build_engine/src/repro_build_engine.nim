@@ -74,6 +74,14 @@ type
     dependencyPolicy*: DependencyGatheringPolicy
     builtinText*: string
     builtinEntries*: seq[string]
+    targetNames*: seq[string]
+      ## Named-Targets M1: implicit names this edge contributes to the
+      ## project-scoped target-export table. Populated when the DSL
+      ## lowering decodes a ``BuildActionDef`` whose typed-tool call
+      ## site carried ``outputs`` flags or an ``implicitTargetName``
+      ## hook. Engine-internal constructors leave this empty —
+      ## anonymous edges remain selectable via the existing
+      ## ``<path>[#<action>]`` fragment form.
 
   BuildPool* = object
     name*: string

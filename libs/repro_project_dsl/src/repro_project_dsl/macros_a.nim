@@ -405,6 +405,17 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
           stmt[0].kind == nnkObjConstr and stmt[0].len >= 1 and
           identText(stmt[0][0]).normalize == "implicittargetname":
         result.hasImplicitTargetNameHook = true
+        # Named-Targets M1: capture the user-written parameter type from
+        # the first ``ExprColonExpr`` (``call: T``) so the wrapper
+        # emitted at every typed-tool call site can construct a ``T``
+        # instance from the call's flag values. We deliberately use the
+        # raw ``.repr`` form: Nim parses generic types like
+        # ``MyCall[Foo]`` as a single AST node and we want to round-trip
+        # whatever the author wrote (including qualified names from
+        # imported modules).
+        if stmt[0].len >= 2 and stmt[0][1].kind == nnkExprColonExpr and
+            stmt[0][1].len == 2:
+          result.implicitTargetNameHookCallType = stmt[0][1][1].repr
 
 proc libraryKindLiteral(node: NimNode; fallback: LibraryKind): LibraryKind =
   ## Parse a ``kind:`` value inside a ``library foo:`` body. Accepts
@@ -959,6 +970,8 @@ proc packageLiteral(pkg: PackageDef): string =
     result.add("ExecutableDef(exportName: " & escForCode(exe.exportName) &
       ", binaryName: " & escForCode(exe.binaryName) &
       ", hasImplicitTargetNameHook: " & $exe.hasImplicitTargetNameHook &
+      ", implicitTargetNameHookCallType: " &
+        escForCode(exe.implicitTargetNameHookCallType) &
       ", sourceFile: " & escForCode(exe.sourceFile) &
       ", sourceLine: " & $exe.sourceLine & ", commands: @[")
     for cmdIndex, cmd in exe.commands:
@@ -1136,6 +1149,83 @@ proc toolActionFormal(param: CliParamDef): string =
 proc toolActionArgExpr(param: CliParamDef): string =
   argBuilder(param)
 
+proc outputFlagsLiteral(outputFlags: openArray[string]): string =
+  ## Named-Targets M1: render the cumulative outputFlags as a Nim
+  ## ``@[...]`` literal that the wrapper passes to
+  ## ``computeImplicitTargetNames`` at runtime.
+  result = "@["
+  for i, flagName in outputFlags:
+    if i > 0:
+      result.add(", ")
+    result.add(escForCode(flagName))
+  result.add("]")
+
+proc hookCallRecordExpr(callTypeRepr: string;
+                        params: openArray[CliParamDef]): string =
+  ## Named-Targets M1: build the typed-call-record constructor source
+  ## for the implicit-target-name hook. The user wrote
+  ## ``implicitTargetName(call: T): string = ...`` and we know ``T``
+  ## from ``ExecutableDef.implicitTargetNameHookCallType``. We project
+  ## every CLI parameter into a same-named field of ``T``. Nim's type
+  ## checker raises if ``T`` is missing a field — the user is on the
+  ## hook (pun intended) for keeping their record type in sync with
+  ## the CLI flag schema.
+  result = callTypeRepr & "("
+  for i, param in params:
+    if i > 0:
+      result.add(", ")
+    # Field name in the record matches the CLI flag name; value comes
+    # from the wrapper's formal parameter of the same name (backticked
+    # if the name collides with a Nim keyword).
+    result.add(param.name & ": " & escapeNimIdent(param.name))
+  result.add(")")
+
+proc emitTargetNameWiring(packageNameLit: string;
+                          outputFlags: openArray[string];
+                          params: openArray[CliParamDef];
+                          hookProcName: string;
+                          hookCallTypeRepr: string;
+                          sourceFileLit: string;
+                          sourceLineLit: string;
+                          indent = "  "): string =
+  ## Named-Targets M1: generate the post-``recordToolInvocation``
+  ## suffix that
+  ##
+  ##   * computes implicit names from the call's actual flag values,
+  ##   * invokes the per-tool hook when one is registered (replacing
+  ##     the canonical first entry),
+  ##   * writes the names back onto the engine's edge record, and
+  ##   * registers per-name rows in the project-scoped target-export
+  ##     table, including the call-site source location so collision
+  ##     diagnostics can cite both sides.
+  ##
+  ## Empty ``outputFlags`` and no hook elide the whole block — the edge
+  ## stays anonymous, per spec.
+  if outputFlags.len == 0 and hookProcName.len == 0:
+    return ""
+  let flagsLit = outputFlagsLiteral(outputFlags)
+  result.add(indent & "var implicitNames = computeImplicitTargetNames(call, " &
+    flagsLit & ")\n")
+  if hookProcName.len > 0 and hookCallTypeRepr.len > 0:
+    # Hook overrides the canonical (first) name. When no implicit
+    # names exist yet (because the call elided every output flag, or
+    # because no ``outputs`` statement was declared) we still
+    # materialise the hook's return value as the first/only name —
+    # the hook's purpose is to give those edges a name.
+    let recordCtor = hookCallRecordExpr(hookCallTypeRepr, params)
+    result.add(indent & "let hookName = " & hookProcName & "(" & recordCtor &
+      ")\n")
+    result.add(indent & "if implicitNames.len > 0:\n")
+    result.add(indent & "  implicitNames[0] = hookName\n")
+    result.add(indent & "else:\n")
+    result.add(indent & "  implicitNames.add(hookName)\n")
+  result.add(indent & "if implicitNames.len > 0:\n")
+  result.add(indent & "  setRegisteredActionTargetNames(result.id, " &
+    "implicitNames)\n")
+  result.add(indent & "  registerImplicitTargetExports(result.id, " &
+    packageNameLit & ", implicitNames, " & sourceFileLit & ", " &
+    sourceLineLit & ")\n")
+
 proc toolActionWrapperCode(pkg: PackageDef): string =
   let typeName = titleIdent(pkg.packageName)
   let valueName = packageValueIdent(pkg.packageName)
@@ -1180,12 +1270,29 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       ", " & escForCode(cmd.providerEntrypointId) & ", cliArgs)\n")
     result.add("  let selectedActionId = if actionId.len > 0: actionId " &
       "else: defaultToolActionId(call)\n")
-    result.add("  recordToolInvocation(selectedActionId, call, " &
+    result.add("  result = recordToolInvocation(selectedActionId, call, " &
       "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "dependencyPolicy = " &
       dependencyPolicyCode(cmd.dependencyPolicy) & ")\n")
+    # Named-Targets M1: append the implicit-target-name wiring suffix.
+    # The wrapper proc returns a ``BuildActionDef``, and ``result.id``
+    # is the engine-side handle the export table cites.
+    let hookProc =
+      if exe.hasImplicitTargetNameHook and
+          exe.implicitTargetNameHookCallType.len > 0:
+        "implicitTargetNameFor" & titleIdent(exe.exportName)
+      else:
+        ""
+    result.add(emitTargetNameWiring(
+      packageNameLit = escForCode(pkg.packageName),
+      outputFlags = cmd.outputFlags,
+      params = cmd.params,
+      hookProcName = hookProc,
+      hookCallTypeRepr = exe.implicitTargetNameHookCallType,
+      sourceFileLit = escForCode(cmd.sourceFile),
+      sourceLineLit = $cmd.sourceLine))
 
 proc wrapperCode(pkg: PackageDef; recordActions = false): string =
   if recordActions:
@@ -1526,6 +1633,37 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
       result.dependencyPolicy = parseInterfaceDependencyPolicy(stmt,
         result.dependencyPolicy)
       continue
+    # Named-Targets M0/M1: ``outputs <flag> [<flag>...]`` declares the
+    # cumulative output set for this subcommand. ``defineCliInterface``
+    # has no parent scope so the lexical-scope rule degenerates to
+    # "every named flag must be declared at the root of the
+    # interface body OR on this subcommand"; both are visible via
+    # ``commonParams + result.params`` at this point.
+    if calleeName(stmt).normalize == "outputs":
+      if stmt.len < 2:
+        error("outputs requires at least one flag name", stmt)
+      var operands: seq[NimNode] = @[]
+      for i in 1 ..< stmt.len:
+        collectOutputsOperands(stmt[i], operands)
+      if operands.len == 0:
+        error("outputs requires at least one flag name", stmt)
+      for operand in operands:
+        if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+          error("outputs expects a flag name identifier, got: " &
+            operand.repr, operand)
+        let flagName = identText(operand)
+        var visible = false
+        for param in result.params:
+          if param.name == flagName:
+            visible = true
+            break
+        if not visible:
+          error("outputs: '" & flagName &
+            "' is not declared at the root of this defineCliInterface " &
+            "body or on this subcmd", stmt)
+        if result.outputFlags.find(flagName) < 0:
+          result.outputFlags.add(flagName)
+      continue
     var stack: seq[string] = @[]
     for expandedStmt in expandInterfaceParamStmt(stmt, paramGroups, stack):
       let name = calleeName(expandedStmt).normalize
@@ -1621,12 +1759,30 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       escForCode(command.providerEntrypointId) & ", cliArgs)\n")
     result.add("  let selectedActionId = if actionId.len > 0: actionId " &
       "else: defaultToolActionId(call)\n")
-    result.add("  recordToolInvocation(selectedActionId, call, " &
+    result.add("  result = recordToolInvocation(selectedActionId, call, " &
       "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "dependencyPolicy = " &
       dependencyPolicyCode(command.dependencyPolicy) & ")\n")
+    # Named-Targets M1: ``defineCliInterface`` has no per-tool naming
+    # hook (those live on ``executable`` inside a ``package`` block),
+    # and the wrapper is not bound to a package — the call site's
+    # package isn't propagated through the typed-tool call protocol.
+    # We still compute implicit names from the outputs flags and stamp
+    # them on the edge record so the engine sees them, but we register
+    # under ``toolId`` as the owning package. Callers that want a
+    # proper per-package home for the export rows should declare the
+    # tool inside a ``package`` block instead of using
+    # ``defineCliInterface`` directly.
+    result.add(emitTargetNameWiring(
+      packageNameLit = escForCode(toolId),
+      outputFlags = command.outputFlags,
+      params = command.params,
+      hookProcName = "",
+      hookCallTypeRepr = "",
+      sourceFileLit = escForCode(command.sourceFile),
+      sourceLineLit = $command.sourceLine))
 
 macro defineCliInterface*(toolSymbol: untyped;
                           toolId: static string;

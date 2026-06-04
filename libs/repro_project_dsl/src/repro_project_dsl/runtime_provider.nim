@@ -63,6 +63,11 @@ when defined(reproProviderMode):
   proc buildTargetNode(namespace, name: string): string =
     namespace & ":metadata:build-target:" & sanitizeNodePart(name)
 
+  proc targetExportTableNode(namespace: string): string =
+    ## Named-Targets M1: single metadata node id under which the
+    ## project-scoped target-export table travels.
+    namespace & ":metadata:target-export-table"
+
   proc addChildSpecsFromInputs(fragment: var GraphFragment) =
     for input in fragment.evaluationInputs:
       if input.kind != gevDirectoryEnumeration or
@@ -86,18 +91,34 @@ when defined(reproProviderMode):
     resetBuildTargetRegistry()
     resetBuildPoolRegistry()
     resetDefaultBuildActionRegistry()
+    resetTargetExportRegistry()
     resetProviderEvaluationInputRegistry()
     currentProviderProjectRoot = request.arguments
+    # Named-Targets M1: stash the current package as the per-edge
+    # owning-package override so typed-tool wrappers defined in a
+    # different package still attribute edges to THIS package's
+    # ``build:`` body when they fire.
+    setCurrentOwningPackageOverride(pkg.packageName)
     try:
       if buildProc != nil:
         buildProc()
     finally:
       currentProviderProjectRoot = ""
+      clearCurrentOwningPackageOverride()
     let actions = inferDeclaredActionDeps(
       registeredBuildActions(), request.arguments)
     let targets = registeredBuildTargets()
     let pools = registeredBuildPools()
     let defaultAction = registeredDefaultBuildAction()
+    # Named-Targets M1: roll up explicit ``target "name", handle``
+    # declarations into the same project-scoped export table as the
+    # implicit names recorded at typed-tool call sites. The implicit
+    # rows were registered during ``buildProc`` evaluation; the
+    # explicit rows go in here because the package name only becomes
+    # available at fragment-construction time.
+    for target in targets:
+      registerExplicitTargetExport(target, pkg.packageName)
+    let exportTable = registeredTargetExports()
     result = GraphFragment(
       entryPointId: request.entryPointId,
       entryPointBodyHash: request.entryPointBodyHash,
@@ -127,6 +148,16 @@ when defined(reproProviderMode):
         kind: gnkMetadata,
         stableName: "reprobuild.build-pool.v1",
         payload: poolPayload(pool)))
+    # Named-Targets M1: surface the project-scoped target-export table
+    # as a single ``gnkMetadata`` node so ``repro graph`` and the M2
+    # CLI resolver can consume it directly out of the GraphFragment.
+    # Always emitted (even when empty) so consumers can rely on the
+    # node's presence as a schema version marker.
+    result.nodes.add(GraphNode(
+      id: targetExportTableNode(request.namespace),
+      kind: gnkMetadata,
+      stableName: "reprobuild.target-export-table.v1",
+      payload: targetExportTablePayload(exportTable)))
     if includeDefault and defaultAction.len > 0:
       var found = false
       for action in actions:

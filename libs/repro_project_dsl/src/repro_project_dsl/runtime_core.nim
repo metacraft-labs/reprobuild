@@ -3,6 +3,24 @@ var buildActionRegistry: seq[BuildActionDef] = @[]
 var buildTargetRegistry: seq[BuildTargetDef] = @[]
 var buildPoolRegistry: seq[BuildPoolDef] = @[]
 var defaultBuildActionRegistry = ""
+var targetExportRegistry: TargetExportTable = TargetExportTable()
+  ## Named-Targets M1: project-scoped per-package target-export rows
+  ## (implicit + explicit) collected during ``buildProc`` evaluation.
+  ## The provider rolls these into the normalized graph artifact when
+  ## emitting the GraphFragment so ``repro graph`` / ``repro why`` and
+  ## the M2 CLI resolver consume one source of truth.
+
+var currentOwningPackageOverride = ""
+  ## Named-Targets M1: thread-local stash naming the package whose
+  ## ``buildProc`` is currently executing. ``buildPackageFragment``
+  ## (in ``runtime_provider.nim``) writes this before invoking the
+  ## generated ``buildXyzPackage`` proc and clears it on exit. The
+  ## ``recordImplicitTargetExports`` path consults this override so
+  ## edges produced via a typed-tool wrapper defined in package A but
+  ## called from package B's ``build:`` body are attributed to B (the
+  ## edge's home), not A (the tool's home). When the override is
+  ## empty the M1 wiring falls back to the literal package name the
+  ## macro baked into the wrapper at expansion time.
 
 type
   WorkspaceDepEdge* = object
@@ -42,13 +60,27 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 10'u16
+  BuildActionPayloadVersion = 11'u16
+    ## v11: Named-Targets M1 — appends ``targetNames: seq[string]`` after
+    ## the action cache policy so the engine and downstream consumers
+    ## see the same implicit-name set as the project-scoped export
+    ## table. Older payloads (v1..v10) decode with an empty
+    ## ``targetNames`` list.
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
-  BuildTargetPayloadVersion = 1'u16
+  BuildTargetPayloadVersion = 2'u16
+    ## v2: Named-Targets M1 — appends ``sourceFile`` + ``sourceLine`` so
+    ## collision diagnostics from the target-export table can cite the
+    ## explicit ``target "name", handle`` call site. v1 payloads decode
+    ## with empty source-location strings.
   BuildPoolPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('P')),
     byte(ord('L'))]
   BuildPoolPayloadVersion = 1'u16
+  TargetExportTablePayloadMagic = [byte(ord('R')), byte(ord('T')),
+    byte(ord('E')), byte(ord('T'))]
+    ## Named-Targets M1: tag for the project-scoped target-export table
+    ## payload carried as a metadata node on the GraphFragment.
+  TargetExportTablePayloadVersion = 1'u16
 
 proc resetPackageRegistry*() {.dynOrStatic.} =
   registry.setLen(0)
@@ -99,6 +131,34 @@ proc registeredBuildPools*(): seq[BuildPoolDef] {.dynOrStatic.} =
 
 proc resetDefaultBuildActionRegistry*() {.dynOrStatic.} =
   defaultBuildActionRegistry = ""
+
+proc resetTargetExportRegistry*() {.dynOrStatic.} =
+  ## Named-Targets M1: reset the per-package target-export registry.
+  ## Called by ``buildPackageFragment`` between package evaluations so
+  ## entries don't leak across fragments.
+  targetExportRegistry = TargetExportTable()
+
+proc registeredTargetExports*(): TargetExportTable {.dynOrStatic.} =
+  ## Named-Targets M1: return the rolled-up target-export table for the
+  ## current evaluation.
+  targetExportRegistry
+
+proc setCurrentOwningPackageOverride*(name: string) {.dynOrStatic.} =
+  ## Named-Targets M1: set the active per-edge ``owningPackage`` while
+  ## a package's ``buildProc`` is running. ``buildPackageFragment`` is
+  ## the only caller; tests can set the override directly when
+  ## exercising the export-table helpers in isolation.
+  currentOwningPackageOverride = name
+
+proc clearCurrentOwningPackageOverride*() {.dynOrStatic.} =
+  ## Named-Targets M1: clear the override (paired with
+  ## ``setCurrentOwningPackageOverride`` around the ``buildProc`` call).
+  currentOwningPackageOverride = ""
+
+proc currentOwningPackage*(): string {.dynOrStatic.} =
+  ## Named-Targets M1: return the active override, or empty when no
+  ## ``buildProc`` is currently running.
+  currentOwningPackageOverride
 
 proc defaultBuildAction*(id: string) {.dynOrStatic.} =
   defaultBuildActionRegistry = id
@@ -608,6 +668,213 @@ proc declaredOutputPaths*(call: PublicCliCall): seq[string] {.dynOrStatic.} =
     if arg.role == carOutput:
       result.addRoleValues(arg)
 
+# ---------------------------------------------------------------------------
+# Named-Targets M1: implicit-name basename rule + project-scoped exports.
+# ---------------------------------------------------------------------------
+
+const
+  ## Conventional artifact extensions stripped by the M1 basename rule.
+  ## Order matters: ``.so.<ver>`` is detected separately by a regex-free
+  ## match inside ``stripArtifactExtension``. The single-token suffixes
+  ## below cover the rest.
+  artifactSingleExts = [".exe", ".dll", ".dylib", ".lib", ".so", ".a",
+    ".o", ".obj", ".d"]
+
+proc isFilesystemShapedValue*(value: string): bool {.dynOrStatic.} =
+  ## Named-Targets M1: a value is "filesystem-shaped" — and therefore
+  ## eligible for the basename + extension-stripping rule — when it
+  ## contains a path separator (``/`` or ``\\``) OR when the last
+  ## segment after splitting on path separators contains a ``.``.
+  ## Non-filesystem-shaped values pass through verbatim per the spec.
+  if value.len == 0:
+    return false
+  for ch in value:
+    if ch == '/' or ch == '\\':
+      return true
+  # No separators: only filesystem-shaped if the value itself looks
+  # like a file (last segment contains a dot).
+  '.' in value
+
+proc lastPathSegment(value: string): string =
+  var i = value.len
+  while i > 0:
+    let ch = value[i - 1]
+    if ch == '/' or ch == '\\':
+      break
+    dec i
+  if i >= value.len:
+    return value
+  value[i ..< value.len]
+
+proc stripArtifactExtension(name: string): string =
+  ## Apply the M1 basename rule's extension-stripping step. Handles the
+  ## ``.so.<ver>`` form (e.g. ``libfoo.so.1.2``) by matching a ``.so.``
+  ## marker and dropping everything from that point. The single-token
+  ## suffixes (``.exe``, ``.dll``, ``.dylib``, ``.lib``, ``.so``,
+  ## ``.a``, ``.o``, ``.obj``) are stripped if they appear at the end.
+  result = name
+  let lower = result.toLowerAscii()
+  # ``.so.<ver>`` — handle before ``.so`` so ``libfoo.so.1.2`` collapses
+  # to ``libfoo`` rather than ``libfoo.so.1``.
+  let soVerMarker = ".so."
+  let soVerPos = lower.find(soVerMarker)
+  if soVerPos > 0:
+    return result[0 ..< soVerPos]
+  for ext in artifactSingleExts:
+    if lower.endsWith(ext):
+      return result[0 ..< result.len - ext.len]
+
+proc applyImplicitTargetNameBasenameRule*(value: string): string {.dynOrStatic.} =
+  ## Named-Targets M1 §"Basename Rule" canonicalisation. Non-path values
+  ## pass through verbatim; filesystem-shaped values are reduced to
+  ## their basename, with conventional artifact extensions stripped.
+  if not isFilesystemShapedValue(value):
+    return value
+  stripArtifactExtension(lastPathSegment(value))
+
+proc callArgEncodedValue*(call: PublicCliCall; flagName: string):
+    tuple[present: bool; value: string] {.dynOrStatic.} =
+  ## Look up a flag (or positional) by ``name`` on a ``PublicCliCall``
+  ## and return its encoded value. ``present`` is false when the call
+  ## did not supply a value for the flag (the macro elides the arg in
+  ## that case). ``seq[string]``-typed args report their join-encoded
+  ## form; M1 does not consume those in the canonical-name slot
+  ## (multiple names would be ambiguous), but auxiliary names from
+  ## ``outputs`` lists may still produce one entry per element.
+  for arg in call.arguments:
+    if arg.name == flagName:
+      return (present: true, value: arg.encodedValue)
+  (present: false, value: "")
+
+proc computeImplicitTargetNames*(call: PublicCliCall;
+                                  outputFlags: openArray[string]):
+    seq[string] {.dynOrStatic.} =
+  ## Named-Targets M1: walk the call's ``outputFlags`` set in declaration
+  ## order, read each flag's value from ``call.arguments``, and apply
+  ## the basename + extension-stripping rule. Flags whose values were
+  ## not supplied at the call site contribute no entry. ``seq[string]``
+  ## flags expand to one entry per element (in declaration order).
+  for flagName in outputFlags:
+    var matched = false
+    for arg in call.arguments:
+      if arg.name != flagName:
+        continue
+      matched = true
+      if arg.nimType.normalize == "seq[string]":
+        if arg.encodedValue.len == 0:
+          break
+        for item in arg.encodedValue.split("\x1f"):
+          if item.len > 0:
+            result.add(applyImplicitTargetNameBasenameRule(item))
+      elif arg.nimType.normalize == "bool":
+        break
+      else:
+        if arg.encodedValue.len > 0:
+          result.add(applyImplicitTargetNameBasenameRule(arg.encodedValue))
+      break
+    if not matched:
+      discard
+
+proc raiseTargetCollision(name, owningPackage: string;
+                          existing, addition: TargetExportEntry) {.noreturn.} =
+  raise newException(ValueError,
+    "duplicate implicit target name '" & name & "' within package '" &
+      owningPackage & "': first registered for action '" & existing.actionId &
+      "' at " & existing.sourceFile & ":" & $existing.sourceLine &
+      "; re-registered for action '" & addition.actionId & "' at " &
+      addition.sourceFile & ":" & $addition.sourceLine)
+
+proc qualifiedExportName(owningPackage, name: string): string =
+  owningPackage & ":" & name
+
+proc registerTargetExportEntry(entry: TargetExportEntry) =
+  ## Append one entry to ``targetExportRegistry.entries``, applying the
+  ## same-package collision rule (raise) and the cross-package
+  ## ambiguity rule (record in ``ambiguities``).
+  for existing in targetExportRegistry.entries:
+    if existing.name == entry.name and
+        existing.owningPackage == entry.owningPackage and
+        existing.actionId != entry.actionId:
+      raiseTargetCollision(entry.name, entry.owningPackage, existing, entry)
+
+  targetExportRegistry.entries.add(entry)
+
+  # Cross-package ambiguity bookkeeping: collect every package that
+  # has registered ``entry.name`` so far. When two or more distinct
+  # packages share the name, surface it under the unqualified form.
+  var packages: seq[string] = @[]
+  for existing in targetExportRegistry.entries:
+    if existing.name == entry.name:
+      if packages.find(existing.owningPackage) < 0:
+        packages.add(existing.owningPackage)
+  if packages.len >= 2:
+    var candidates: seq[string] = @[]
+    for pkg in packages:
+      candidates.add(qualifiedExportName(pkg, entry.name))
+    var foundExisting = false
+    for i in 0 ..< targetExportRegistry.ambiguities.len:
+      if targetExportRegistry.ambiguities[i].name == entry.name:
+        targetExportRegistry.ambiguities[i].candidates = candidates
+        foundExisting = true
+        break
+    if not foundExisting:
+      targetExportRegistry.ambiguities.add(TargetExportAmbiguity(
+        name: entry.name,
+        candidates: candidates))
+
+proc registerImplicitTargetExports*(actionId, owningPackage: string;
+                                    names: openArray[string];
+                                    sourceFile: string;
+                                    sourceLine: int) {.dynOrStatic.} =
+  ## Named-Targets M1: register one ``TargetExportEntry`` per implicit
+  ## name on the edge. Multi-name edges (auxiliary outputs) contribute
+  ## multiple rows pointing at the same ``actionId``. Same-name
+  ## within-package collisions raise. Cross-package collisions are
+  ## recorded as ambiguities consumed by the M2 resolver.
+  ##
+  ## ``actionId`` and the call-site source location are passed
+  ## explicitly so the emit-site macro can supply them without the
+  ## helper having to walk the action registry. The effective owning
+  ## package is the active ``buildPackageFragment`` override when set
+  ## (the call site's package); otherwise the literal ``owningPackage``
+  ## the macro baked into the wrapper at expansion time (the tool's
+  ## package — fallback for direct DSL helpers and tests).
+  let effectiveOwner =
+    if currentOwningPackageOverride.len > 0:
+      currentOwningPackageOverride
+    else:
+      owningPackage
+  for name in names:
+    if name.len == 0:
+      continue
+    registerTargetExportEntry(TargetExportEntry(
+      name: name,
+      kind: tekImplicit,
+      owningPackage: effectiveOwner,
+      actionId: actionId,
+      sourceFile: sourceFile,
+      sourceLine: sourceLine))
+
+proc registerExplicitTargetExport*(target: BuildTargetDef;
+                                   owningPackage: string) {.dynOrStatic.} =
+  ## Named-Targets M1: surface a ``target "name", handle`` declaration
+  ## in the target-export table as a ``tekExplicit`` row. The
+  ## ``actionId`` is the first action handle the target references
+  ## (most explicit targets attach to exactly one action; the
+  ## aggregate-over-many form falls back to the target's own name as
+  ## the handle). Collision/ambiguity logic matches the implicit case.
+  if target.name.len == 0:
+    return
+  let handle =
+    if target.actions.len > 0: target.actions[0] else: target.name
+  registerTargetExportEntry(TargetExportEntry(
+    name: target.name,
+    kind: tekExplicit,
+    owningPackage: owningPackage,
+    actionId: handle,
+    sourceFile: target.sourceFile,
+    sourceLine: target.sourceLine))
+
 proc recordCommandAction*(id: string; call: PublicCliCall;
                           deps: openArray[string] = [];
                           extraInputs: openArray[string] = [];
@@ -639,6 +906,20 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
     commandStatsId = commandStatsId,
     dependencyPolicy = dependencyPolicy,
     actionCachePolicy = actionCachePolicy)
+
+proc setRegisteredActionTargetNames*(actionId: string;
+                                     names: openArray[string]) {.dynOrStatic.} =
+  ## Named-Targets M1: write the computed implicit target names back
+  ## onto the registry's ``BuildActionDef`` so that downstream consumers
+  ## (graph emission, ``repro graph``, ``repro why``) see the same names
+  ## as the per-package target-export table. The lookup walks the
+  ## registry in registration order; on hit the entry is updated in
+  ## place. No-op when the id is not present (defensive — the wrapper
+  ## always calls this immediately after ``recordToolInvocation``).
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].targetNames = @names
+      return
 
 proc recordToolInvocation*(id: string; call: PublicCliCall;
                            deps: openArray[string] = [];
@@ -1077,6 +1358,8 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   payload.writeString(action.commandStatsId)
   payload.writeDependencyPolicy(action.dependencyPolicy)
   payload.writeActionCachePolicy(action.actionCachePolicy)
+  # v11: Named-Targets M1 implicit target names.
+  payload.writeStringSeq(action.targetNames)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -1092,7 +1375,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      BuildActionPayloadVersion}:
+      9'u16, 10'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -1121,6 +1404,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.actionCachePolicy = readActionCachePolicy(bytes, pos)
   else:
     result.actionCachePolicy = defaultActionCachePolicy()
+  if version >= 11'u16:
+    result.targetNames = readStringSeq(bytes, pos)
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
@@ -1132,6 +1417,8 @@ proc encodeBuildTargetPayload*(target: BuildTargetDef): seq[byte] {.dynOrStatic.
   payload.writeString(target.name)
   payload.writeStringSeq(target.actions)
   payload.writeStringSeq(target.targets)
+  payload.writeString(target.sourceFile)
+  payload.writeU32Le(uint32(max(target.sourceLine, 0)))
 
   result.add(BuildTargetPayloadMagic)
   result.writeU16Le(BuildTargetPayloadVersion)
@@ -1146,7 +1433,7 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
       raisePayload("unknown build target payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != BuildTargetPayloadVersion:
+  if version notin {1'u16, BuildTargetPayloadVersion}:
     raisePayload("unsupported build target payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -1154,6 +1441,9 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
   result.name = readString(bytes, pos)
   result.actions = readStringSeq(bytes, pos)
   result.targets = readStringSeq(bytes, pos)
+  if version >= 2'u16:
+    result.sourceFile = readString(bytes, pos)
+    result.sourceLine = int(readU32Le(bytes, pos))
   if pos != bytes.len:
     raisePayload("trailing build target payload bytes")
 
@@ -1190,6 +1480,84 @@ proc decodeBuildPoolPayload*(bytes: openArray[byte]): BuildPoolDef {.dynOrStatic
 
 proc poolPayload*(pool: BuildPoolDef): string {.dynOrStatic.} =
   fromBytes(encodeBuildPoolPayload(pool))
+
+proc writeTargetExportEntry(outp: var seq[byte]; entry: TargetExportEntry) =
+  outp.writeString(entry.name)
+  outp.writeByte(byte(ord(entry.kind)))
+  outp.writeString(entry.owningPackage)
+  outp.writeString(entry.actionId)
+  outp.writeString(entry.sourceFile)
+  outp.writeU32Le(uint32(max(entry.sourceLine, 0)))
+
+proc readTargetExportEntry(bytes: openArray[byte]; pos: var int):
+    TargetExportEntry =
+  result.name = readString(bytes, pos)
+  let kindByte = readByte(bytes, pos)
+  if kindByte > byte(ord(tekExplicit)):
+    raisePayload("invalid target export entry kind")
+  result.kind = TargetExportKind(kindByte)
+  result.owningPackage = readString(bytes, pos)
+  result.actionId = readString(bytes, pos)
+  result.sourceFile = readString(bytes, pos)
+  result.sourceLine = int(readU32Le(bytes, pos))
+
+proc writeTargetExportAmbiguity(outp: var seq[byte];
+                                ambiguity: TargetExportAmbiguity) =
+  outp.writeString(ambiguity.name)
+  outp.writeStringSeq(ambiguity.candidates)
+
+proc readTargetExportAmbiguity(bytes: openArray[byte]; pos: var int):
+    TargetExportAmbiguity =
+  result.name = readString(bytes, pos)
+  result.candidates = readStringSeq(bytes, pos)
+
+proc encodeTargetExportTablePayload*(table: TargetExportTable):
+    seq[byte] {.dynOrStatic.} =
+  ## Named-Targets M1: SSZ-style frame around the project-scoped
+  ## target-export table. The table travels as the payload of a single
+  ## ``gnkMetadata`` node on the GraphFragment (stableName
+  ## ``reprobuild.target-export-table.v1``) so ``repro graph`` and the
+  ## M2 CLI resolver consume one source of truth.
+  var payload: seq[byte] = @[]
+  payload.writeU32Le(uint32(table.entries.len))
+  for entry in table.entries:
+    payload.writeTargetExportEntry(entry)
+  payload.writeU32Le(uint32(table.ambiguities.len))
+  for ambiguity in table.ambiguities:
+    payload.writeTargetExportAmbiguity(ambiguity)
+
+  result.add(TargetExportTablePayloadMagic)
+  result.writeU16Le(TargetExportTablePayloadVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
+    TargetExportTable {.dynOrStatic.} =
+  if bytes.len < 10:
+    raisePayload("truncated target export table envelope")
+  for i in 0 ..< TargetExportTablePayloadMagic.len:
+    if bytes[i] != TargetExportTablePayloadMagic[i]:
+      raisePayload("unknown target export table payload magic")
+  var pos = 4
+  let version = readU16Le(bytes, pos)
+  if version != TargetExportTablePayloadVersion:
+    raisePayload("unsupported target export table payload version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raisePayload("target export table payload length mismatch")
+  let entryCount = int(readU32Le(bytes, pos))
+  result.entries = newSeq[TargetExportEntry](entryCount)
+  for i in 0 ..< entryCount:
+    result.entries[i] = readTargetExportEntry(bytes, pos)
+  let ambiguityCount = int(readU32Le(bytes, pos))
+  result.ambiguities = newSeq[TargetExportAmbiguity](ambiguityCount)
+  for i in 0 ..< ambiguityCount:
+    result.ambiguities[i] = readTargetExportAmbiguity(bytes, pos)
+  if pos != bytes.len:
+    raisePayload("trailing target export table payload bytes")
+
+proc targetExportTablePayload*(table: TargetExportTable): string {.dynOrStatic.} =
+  fromBytes(encodeTargetExportTablePayload(table))
 
 proc callIdentity*(call: PublicCliCall): string {.dynOrStatic.} =
   var parts = @[call.packageName, call.executableName, call.subcommand,

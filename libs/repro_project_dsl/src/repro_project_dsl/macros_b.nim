@@ -303,8 +303,12 @@ macro package*(name: untyped; body: untyped): untyped =
     "registerPackageDef(" & packageLiteral(pkg) & ")\n" &
     wrapperCode(pkg, recordActions))
   result = newStmtList()
-  result.add(generated)
+  # Named-Targets M1: emit the per-tool ``implicitTargetName`` hook
+  # procs BEFORE the typed-tool wrapper procs so the wrapper's
+  # generated call site (``implicitTargetNameFor<TitleExportName>``)
+  # type-checks against the already-declared hook.
   result.add(collectImplicitTargetNameHooks(body))
+  result.add(generated)
   result.add(buildCode(pkg, body))
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =

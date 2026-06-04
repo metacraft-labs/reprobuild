@@ -921,6 +921,14 @@ proc lowerDependencyPolicy(actionId, depfile: string;
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string; actionPathPrefix = ""): BuildAction =
   let payload = decodeBuildActionPayload(toBytes(node.payload))
+  # Named-Targets M1: copy implicit-target names off the decoded
+  # payload onto every constructed ``BuildAction`` at the bottom of
+  # this proc. The action constructors below don't know about
+  # ``targetNames``; we stamp the field after the engine factory
+  # returns so the engine-side edge record matches the DSL-side
+  # ``BuildActionDef`` and the target-export table.
+  defer:
+    result.targetNames = payload.targetNames
   let actionCachePolicy =
     case payload.actionCachePolicy
     of acfpTimestamp:
