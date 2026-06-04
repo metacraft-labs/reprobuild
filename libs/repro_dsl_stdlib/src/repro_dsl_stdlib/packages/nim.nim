@@ -103,6 +103,12 @@ package nim:
           role = input,
           position = 0
 
+        # Named-Targets M0: the primary output flag for ``nim c`` is
+        # ``--out:`` (the existing typed-tool wrapper exposes it as
+        # ``output``). M1 consumes this to derive an implicit target
+        # name per build edge.
+        outputs output
+
       subcmd "js":
         flag defines is seq[string],
           alias = "-d:",
@@ -140,6 +146,10 @@ package nim:
         pos source is string,
           role = input,
           position = 0
+
+        # Named-Targets M0: same convention as ``subcmd "c"`` — the
+        # ``--out:`` flag value supplies the implicit target name.
+        outputs output
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

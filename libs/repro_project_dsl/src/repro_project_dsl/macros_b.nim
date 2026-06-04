@@ -184,6 +184,116 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
               quit runPackageProvider(`pkgLiteral`, `procName`, `defsLiteral`,
                 `dispatchName`)
 
+proc indentBody(text: string): string =
+  ## Two-space-indent every non-empty line. Used by
+  ## ``collectImplicitTargetNameHooks`` to inline a hook body into a
+  ## generated ``proc … = …`` snippet without losing leading whitespace.
+  result = ""
+  for line in text.splitLines():
+    if line.len == 0:
+      result.add("\n")
+    else:
+      result.add("  ")
+      result.add(line)
+      result.add("\n")
+
+proc tryParseHookSpec(stmt: NimNode):
+    tuple[matched: bool; formalsRepr: string; returnTypeRepr: string;
+          bodyRepr: string] =
+  ## Named-Targets M0 hook recogniser.
+  ##
+  ## The user-facing syntax for the per-tool hook is
+  ##
+  ##   ``implicitTargetName(call: T): string = body``
+  ##
+  ## which is a complete Nim proc declaration in isolation, but Nim's
+  ## parser cannot interpret it as such *inside the executable body* —
+  ## that context only takes expressions and statement-list-tagged
+  ## calls. As a consequence the construct parses into a peculiar AST
+  ## that we reverse-engineer here:
+  ##
+  ## .. code-block::
+  ##
+  ##   Call
+  ##     ObjConstr
+  ##       Ident "implicitTargetName"
+  ##       ExprColonExpr(call, T)        # one per formal parameter
+  ##     StmtList
+  ##       Asgn(<return-type>, <body>)   # ``: ReturnType = body`` collapse
+  ##
+  ## If the StmtList lacks the ``Asgn`` head we treat the body as a
+  ## plain block returning ``string`` (the M0 default). Anything else
+  ## is a parse failure and we surface ``matched=false`` so the
+  ## ``package`` macro can leave the hook unemitted (the inspection
+  ## bit on ``ExecutableDef`` still gets set so the M1 engine knows a
+  ## hook *was* declared even if the form is unrecognised).
+  result.returnTypeRepr = "string"
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return
+  if stmt.len != 2:
+    return
+  let head = stmt[0]
+  let tail = stmt[1]
+  var formals: seq[string] = @[]
+  if head.kind == nnkObjConstr and head.len >= 1 and
+      identText(head[0]).normalize == "implicittargetname":
+    for j in 1 ..< head.len:
+      let child = head[j]
+      if child.kind == nnkExprColonExpr and child.len == 2:
+        formals.add(identText(child[0]) & ": " & child[1].repr)
+      else:
+        return
+  else:
+    return
+  if tail.kind != nnkStmtList:
+    return
+  # Two shapes for the body:
+  #   * Single child Asgn(<return-type>, <expr>) — the ``: T = body``
+  #     collapse described above.
+  #   * Anything else — treat the whole StmtList as the proc body and
+  #     keep the default ``string`` return type.
+  if tail.len == 1 and tail[0].kind == nnkAsgn and tail[0].len == 2:
+    result.returnTypeRepr = tail[0][0].repr
+    result.bodyRepr = tail[0][1].repr
+  else:
+    result.bodyRepr = tail.repr
+  result.formalsRepr = formals.join("; ")
+  result.matched = true
+
+proc collectImplicitTargetNameHooks(pkgBody: NimNode): NimNode =
+  ## Named-Targets M0: walk the ``package <name>:`` body and emit one
+  ## hook proc for every ``executable <name>:`` block that carries an
+  ## ``implicitTargetName(call: T): string`` body. The proc name is
+  ## ``implicitTargetNameFor<TitleExportName>`` so multiple executables
+  ## in the same package don't collide, and the typed call record is
+  ## whatever the author wrote in the formal parameters — the DSL just
+  ## rebinds the body verbatim and lets Nim type-check the result. The
+  ## M1 engine looks the proc up by name when ``hasImplicitTargetNameHook``
+  ## is set on the corresponding ``ExecutableDef``.
+  result = newStmtList()
+  for stmt in pkgBody:
+    if calleeName(stmt).normalize != "executable":
+      continue
+    if stmt.len < 3:
+      continue
+    let exeName = identText(stmt[1])
+    let exeBody = stmt[2]
+    for exeStmt in exeBody:
+      # ``implicitTargetName(call: T): string = body`` parses as a Call
+      # whose head is an ``ObjConstr`` (see ``tryParseHookSpec``). The
+      # Call's callee is the ObjConstr, not a plain ident, so the
+      # ordinary ``calleeName`` lookup against ``implicittargetname``
+      # never matches — we walk the executable body looking for the
+      # ObjConstr shape directly.
+      let spec = tryParseHookSpec(exeStmt)
+      if not spec.matched:
+        continue
+      let procName = "implicitTargetNameFor" & titleIdent(exeName)
+      let procSrc = "proc " & procName & "*(" & spec.formalsRepr &
+        "): " & spec.returnTypeRepr & " =\n" &
+        indentBody(spec.bodyRepr)
+      result.add(parseStmt(procSrc))
+
 macro package*(name: untyped; body: untyped): untyped =
   let pkg = parsePackageDef(name, body)
   let recordActions = collectBuildStatements(body).len == 0 and
@@ -194,6 +304,7 @@ macro package*(name: untyped; body: untyped): untyped =
     wrapperCode(pkg, recordActions))
   result = newStmtList()
   result.add(generated)
+  result.add(collectImplicitTargetNameHooks(body))
   result.add(buildCode(pkg, body))
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =

@@ -40,9 +40,19 @@ type
 
   CliCommandDef* = object
     name*: string
+    path*: seq[string]
+      ## Full lexical path from the cli root to this command. For a top-level
+      ## ``subcmd "build"``, the path is ``@["build"]``. For a nested
+      ## ``subcmd "build": subcmd "target"`` the inner command has path
+      ## ``@["build", "target"]``. Anonymous ``call:`` keeps the path empty.
     params*: seq[CliParamDef]
     dependencyPolicy*: BuildActionDependencyPolicy
     providerEntrypointId*: string
+    outputFlags*: seq[string]
+      ## Named-Targets M0: cumulative union of every ``outputs`` statement on
+      ## the lexical path from the cli root to this command, materialised per
+      ## subcommand at parse time. The DSL only records names; the M1 engine
+      ## evaluates them against actual call values and runs the basename rule.
     sourceFile*: string
     sourceLine*: int
 
@@ -50,6 +60,12 @@ type
     exportName*: string
     binaryName*: string
     commands*: seq[CliCommandDef]
+    hasImplicitTargetNameHook*: bool
+      ## Named-Targets M0: true when the ``executable`` body contains an
+      ## ``implicitTargetName(call: <TypedCallRecord>): string`` block. The
+      ## hook itself is emitted as a plain Nim proc by the macro; this flag
+      ## is the inspection point the M1 engine reads to decide whether to
+      ## invoke it.
     sourceFile*: string
     sourceLine*: int
 

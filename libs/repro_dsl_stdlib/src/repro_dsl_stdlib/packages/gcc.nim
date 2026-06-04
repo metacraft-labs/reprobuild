@@ -65,6 +65,11 @@ package gcc:
           role = input,
           position = 0
 
+        # Named-Targets M0: ``-o`` is the primary output, exposed as
+        # ``output`` in the typed-tool wrapper. M1 reads this to assign
+        # an implicit target name to each compile edge.
+        outputs output
+
 # ---------------------------------------------------------------------------
 # M3-extended bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
 # Harvested from bucket: ScoopInstaller/Main

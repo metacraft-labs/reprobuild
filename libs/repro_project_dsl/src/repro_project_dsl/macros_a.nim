@@ -6,6 +6,15 @@ proc identText(node: NimNode): string =
     result = ""
     for child in node:
       result.add(identText(child))
+  of nnkOutTy:
+    # The Nim keyword ``out`` is parsed as an ``OutTy`` node when it
+    # appears in a position that could begin an ``out T`` parameter
+    # type annotation. In CLI parameter declarations (``flag out is
+    # string``) and ``outputs`` statements the name ``out`` is a plain
+    # identifier, so we project ``OutTy`` back to its literal spelling
+    # rather than calling ``repr`` (which produces ``"out string"`` or
+    # similar when the OutTy node has children).
+    result = "out"
   else:
     result = node.repr
 
@@ -205,35 +214,159 @@ proc parseCommandDependencyPolicy(node: NimNode;
     if not ignoredValue.isNil:
       result.ignoredInputPrefixes = stringSeqLiteral(ignoredValue)
 
-proc parseCommand(packageName, executableName: string; node: NimNode;
-                  defaultPolicy: BuildActionDependencyPolicy;
-                  commonParams: openArray[CliParamDef] = []): CliCommandDef =
-  let loc = lineFile(node)
-  let head = calleeName(node).normalize
-  case head
-  of "call":
-    result.name = ""
-  of "subcmd":
-    result.name = stringLiteral(node[1])
+proc collectOutputsOperands(node: NimNode; sink: var seq[NimNode]) =
+  ## Flatten the operand list of an ``outputs`` statement into a sequence
+  ## of identifier (or AccQuoted) nodes.
+  ##
+  ## Nim's parser interprets the keyword ``out`` in
+  ## ``outputs out depfile`` as the start of an ``out T`` parameter type
+  ## annotation, producing nodes like:
+  ##
+  ##   Command(outputs, OutTy)              # ``outputs out``
+  ##   Command(outputs, OutTy(depfile))     # ``outputs out depfile``
+  ##   Command(outputs, OutTy, depfile)     # ``outputs out, depfile``
+  ##   Command(outputs, Command(a, OutTy))  # ``outputs a out``
+  ##
+  ## Each ``OutTy`` node represents the literal flag name ``"out"``; we
+  ## translate it back to an ident here and continue walking its
+  ## children so the trailing flag names survive. AccQuoted survives
+  ## un-parsed (so users may also write `` outputs `out` ``).
+  case node.kind
+  of nnkIdent, nnkSym, nnkAccQuoted:
+    sink.add(node)
+  of nnkOutTy:
+    # Synthesise an ``out`` ident attributed to the OutTy node so the
+    # source-location plumbing below stays meaningful.
+    let outIdent = ident("out")
+    outIdent.copyLineInfo(node)
+    sink.add(outIdent)
+    for child in node:
+      collectOutputsOperands(child, sink)
+  of nnkCommand, nnkCall, nnkPar, nnkBracket:
+    for child in node:
+      collectOutputsOperands(child, sink)
   else:
-    error("CLI command expects call: or subcmd \"name\":", node)
+    sink.add(node)
+
+proc collectDeclaredFlagNames(body: NimNode; output: var seq[string]) =
+  ## Walk a ``cli:`` body (or any sub-body) and accumulate the names of
+  ## every ``pos``/``flag``/``boolflag`` declaration encountered.
+  ## Used by ``outputs`` validation to distinguish "declared on a sibling
+  ## subcmd" (scoping error) from "does not exist" (typo).
+  case body.kind
+  of nnkCall, nnkCommand:
+    let head = calleeName(body).normalize
+    if head in ["pos", "flag", "boolflag"] and body.len >= 2:
+      let parsed = parseIsTypedHead(body[1], head & " parameter")
+      let paramName = if parsed.matched: parsed.name else: identText(body[1])
+      output.add(paramName)
+    for i in 0 ..< body.len:
+      collectDeclaredFlagNames(body[i], output)
+  of nnkStmtList:
+    for child in body:
+      collectDeclaredFlagNames(child, output)
+  else:
+    discard
+
+proc parseCliScope(packageName, executableName: string; body: NimNode;
+                   path: seq[string]; isRoot: bool;
+                   parentParams: openArray[CliParamDef];
+                   parentOutputFlags: openArray[string];
+                   parentPolicy: BuildActionDependencyPolicy;
+                   wholeBody: NimNode;
+                   commands: var seq[CliCommandDef]): CliCommandDef =
+  ## Named-Targets M0: walk a ``cli:`` body or a ``subcmd`` body in
+  ## source order, tracking the visible-flag set so that ``outputs``
+  ## statements can be validated against the lexical-scope rule on the
+  ## spot. Nested ``subcmd`` bodies recurse with a snapshot of the
+  ## visible set; every encountered command emits one ``CliCommandDef``
+  ## into ``commands``, and the function returns the command corresponding
+  ## to the current scope (an "anchor" the caller can inspect).
+  ##
+  ## ``wholeBody`` is the enclosing ``cli:`` body — kept so the
+  ## "not in lexical scope" diagnostic can disambiguate sibling-subcmd
+  ## flag references from genuinely unknown names.
+  let loc = lineFile(body)
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  result.path = path
+  result.name =
+    if path.len == 0: "" else: path[^1]
   result.providerEntrypointId =
     if result.name.len == 0:
       packageName & "." & executableName & ".call"
     else:
-      packageName & "." & executableName & "." & result.name
-  result.dependencyPolicy = defaultPolicy
-  result.params = @commonParams
-  result.sourceFile = loc.file
-  result.sourceLine = loc.line
-  let body = node[node.len - 1]
+      packageName & "." & executableName & "." & path.join(".")
+  result.dependencyPolicy = parentPolicy
+  result.params = @parentParams
+  result.outputFlags = @parentOutputFlags
+
   for stmt in body:
-    let name = calleeName(stmt).normalize
-    if name == "dependencypolicy":
+    let head = calleeName(stmt).normalize
+    case head
+    of "dependencypolicy":
       result.dependencyPolicy = parseCommandDependencyPolicy(stmt,
         result.dependencyPolicy)
-    elif name == "pos" or name == "flag" or name == "boolflag":
-      result.params.add(parseParam(stmt))
+    of "pos":
+      if isRoot:
+        error("top-level CLI parameters before subcommands must be flags",
+          stmt)
+      let param = parseParam(stmt)
+      result.params.add(param)
+    of "flag", "boolflag":
+      var param = parseParam(stmt)
+      if isRoot:
+        param.placement = capBeforeSubcommand
+      result.params.add(param)
+    of "outputs":
+      # Validate every named operand against the currently visible set.
+      # We need a per-operand check that also detects the
+      # sibling-subcmd case (`not in lexical scope` vs `does not exist`).
+      if stmt.len < 2:
+        error("outputs requires at least one flag name", stmt)
+      var operands: seq[NimNode] = @[]
+      for i in 1 ..< stmt.len:
+        collectOutputsOperands(stmt[i], operands)
+      if operands.len == 0:
+        error("outputs requires at least one flag name", stmt)
+      for operand in operands:
+        if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+          error("outputs expects a flag name identifier, got: " &
+            operand.repr, operand)
+        let flagName = identText(operand)
+        var visible = false
+        for param in result.params:
+          if param.name == flagName:
+            visible = true
+            break
+        if not visible:
+          var declaredSomewhere: seq[string] = @[]
+          collectDeclaredFlagNames(wholeBody, declaredSomewhere)
+          if declaredSomewhere.find(flagName) >= 0:
+            error("outputs: '" & flagName &
+              "' is not in lexical scope (declared on a sibling subcmd, " &
+              "not on this subcmd or an enclosing one)", stmt)
+          else:
+            error("outputs: '" & flagName &
+              "' does not exist (no flag or positional by that name " &
+              "declared in this cli interface)", stmt)
+        if result.outputFlags.find(flagName) < 0:
+          result.outputFlags.add(flagName)
+    of "call", "subcmd":
+      let childName =
+        if head == "call": "" else: stringLiteral(stmt[1])
+      var childPath = path
+      if childName.len > 0:
+        childPath.add(childName)
+      let childBody = stmt[stmt.len - 1]
+      discard parseCliScope(packageName, executableName, childBody,
+        childPath, false, result.params, result.outputFlags,
+        result.dependencyPolicy, wholeBody, commands)
+    else:
+      discard
+
+  if not isRoot:
+    commands.add(result)
 
 proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
   let loc = lineFile(node)
@@ -248,26 +381,30 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       result.binaryName = stringLiteral(stmt[1])
     of "cli":
       let cliBody = stmt[1]
-      var defaultPolicy = defaultDependencyPolicy()
-      var commonParams: seq[CliParamDef] = @[]
-      for cliStmt in cliBody:
-        let name = calleeName(cliStmt).normalize
-        if name == "dependencypolicy":
-          defaultPolicy = parseCommandDependencyPolicy(cliStmt, defaultPolicy)
-        elif name == "flag" or name == "boolflag":
-          var param = parseParam(cliStmt)
-          param.placement = capBeforeSubcommand
-          commonParams.add(param)
-        elif name == "pos":
-          error("top-level CLI parameters before subcommands must be flags",
-            cliStmt)
-      for cliStmt in cliBody:
-        let name = calleeName(cliStmt).normalize
-        if name == "call" or name == "subcmd":
-          result.commands.add(parseCommand(packageName, result.exportName,
-            cliStmt, defaultPolicy, commonParams))
+      var commands: seq[CliCommandDef] = @[]
+      # A root scope walk validates ``outputs`` statements that appear
+      # directly under ``cli:`` and seeds the cumulative output set that
+      # each subcommand inherits, all in one source-order pass.
+      let rootCmd = parseCliScope(packageName, result.exportName, cliBody,
+        @[], true, @[], @[], defaultDependencyPolicy(), cliBody, commands)
+      discard rootCmd
+      # ``parseCliScope`` only emits non-root commands into ``commands``.
+      # Existing call sites — the wrapper generator, the interface
+      # artifact pipeline, etc. — expect one ``CliCommandDef`` per
+      # ``call:`` or ``subcmd``, never one for the synthetic root scope.
+      result.commands.add(commands)
     else:
-      discard
+      # Named-Targets M0: detect the
+      # ``implicitTargetName(call: T): string = body`` shape, which
+      # Nim parses as ``Call(ObjConstr(Ident "implicitTargetName",
+      # ExprColonExpr(call, T)), StmtList(...))``. We only flip the
+      # inspection bit here; ``collectImplicitTargetNameHooks`` (in
+      # ``macros_b``) emits the actual proc. The M1 engine reads
+      # ``hasImplicitTargetNameHook`` to decide whether to invoke it.
+      if stmt.kind in {nnkCall, nnkCommand} and stmt.len == 2 and
+          stmt[0].kind == nnkObjConstr and stmt[0].len >= 1 and
+          identText(stmt[0][0]).normalize == "implicittargetname":
+        result.hasImplicitTargetNameHook = true
 
 proc libraryKindLiteral(node: NimNode; fallback: LibraryKind): LibraryKind =
   ## Parse a ``kind:`` value inside a ``library foo:`` body. Accepts
@@ -821,15 +958,27 @@ proc packageLiteral(pkg: PackageDef): string =
       result.add(", ")
     result.add("ExecutableDef(exportName: " & escForCode(exe.exportName) &
       ", binaryName: " & escForCode(exe.binaryName) &
+      ", hasImplicitTargetNameHook: " & $exe.hasImplicitTargetNameHook &
       ", sourceFile: " & escForCode(exe.sourceFile) &
       ", sourceLine: " & $exe.sourceLine & ", commands: @[")
     for cmdIndex, cmd in exe.commands:
       if cmdIndex > 0:
         result.add(", ")
       result.add("CliCommandDef(name: " & escForCode(cmd.name) &
-        ", providerEntrypointId: " & escForCode(cmd.providerEntrypointId) &
+        ", path: @[")
+      for pathIndex, segment in cmd.path:
+        if pathIndex > 0:
+          result.add(", ")
+        result.add(escForCode(segment))
+      result.add("], providerEntrypointId: " &
+          escForCode(cmd.providerEntrypointId) &
         ", dependencyPolicy: " & dependencyPolicyCode(cmd.dependencyPolicy) &
-        ", sourceFile: " & escForCode(cmd.sourceFile) &
+        ", outputFlags: @[")
+      for ofIndex, flagName in cmd.outputFlags:
+        if ofIndex > 0:
+          result.add(", ")
+        result.add(escForCode(flagName))
+      result.add("], sourceFile: " & escForCode(cmd.sourceFile) &
         ", sourceLine: " & $cmd.sourceLine & ", params: @[")
       for paramIndex, param in cmd.params:
         if paramIndex > 0:
@@ -871,28 +1020,6 @@ proc nimDefault(nimType: string): string =
   else:
     "default(" & nimType & ")"
 
-proc argBuilder(param: CliParamDef): string =
-  let kindCode =
-    if param.kind == cpkPositional:
-      "cpkPositional"
-    else:
-      "cpkFlag"
-  let helper =
-    case param.role
-    of carInput:
-      if param.nimType.normalize == "seq[string]": "inputArgSeq" else: "inputArg"
-    of carOutput:
-      if param.nimType.normalize == "seq[string]": "outputArgSeq" else: "outputArg"
-    of carOrdinary:
-      if param.nimType.normalize == "seq[string]": "cliArgSeq" else: "cliArg"
-  let metaArgs = ", " & kindCode & ", " & $param.position & ", " &
-    escForCode(param.alias) & ", " & $param.format & ", " &
-    $param.placement & ", " & $param.repeated
-  if param.nimType.normalize == "seq[string]":
-    helper & "(\"" & param.name & "\", " & param.name & metaArgs & ")"
-  else:
-    helper & "(\"" & param.name & "\", " & param.name & metaArgs & ")"
-
 proc validGeneratedIdent(text: string): bool =
   const keywords = [
     "addr", "and", "as", "asm", "bind", "block", "break", "case", "cast",
@@ -912,6 +1039,46 @@ proc validGeneratedIdent(text: string): bool =
     if not (ch.isAlphaNumeric() or ch == '_'):
       return false
   true
+
+proc escapeNimIdent(text: string): string =
+  ## Backtick-quote a generated identifier that collides with a Nim
+  ## keyword (e.g. ``out``, ``type``). Pass-through for ordinary names.
+  ## Used in ``toolActionFormal`` / ``interfaceFormal`` and the matching
+  ## arg-builder paths so flag declarations like ``flag out is string``
+  ## survive code generation; without this they expand into
+  ## ``proc c*(pkg: …; out: string = "")`` which fails Nim's keyword
+  ## check on the formal parameter name.
+  if validGeneratedIdent(text):
+    text
+  else:
+    "`" & text & "`"
+
+proc argBuilder(param: CliParamDef): string =
+  let kindCode =
+    if param.kind == cpkPositional:
+      "cpkPositional"
+    else:
+      "cpkFlag"
+  let helper =
+    case param.role
+    of carInput:
+      if param.nimType.normalize == "seq[string]": "inputArgSeq" else: "inputArg"
+    of carOutput:
+      if param.nimType.normalize == "seq[string]": "outputArgSeq" else: "outputArg"
+    of carOrdinary:
+      if param.nimType.normalize == "seq[string]": "cliArgSeq" else: "cliArg"
+  let metaArgs = ", " & kindCode & ", " & $param.position & ", " &
+    escForCode(param.alias) & ", " & $param.format & ", " &
+    $param.placement & ", " & $param.repeated
+  # Read-side: backtick-quote the formal so a flag named after a Nim
+  # keyword (``out``) still resolves to the formal parameter at the
+  # call site instead of triggering a parser error.
+  let valueRef = escapeNimIdent(param.name)
+  if param.nimType.normalize == "seq[string]":
+    helper & "(\"" & param.name & "\", " & valueRef & metaArgs & ")"
+  else:
+    helper & "(\"" & param.name & "\", " & valueRef & metaArgs & ")"
+
 
 proc commandProcName(cmdName: string): string =
   if validGeneratedIdent(cmdName):
@@ -948,20 +1115,21 @@ proc commandCallableName(cmdName: string): string =
     commandProcName(cmdName)
 
 proc shouldEmitArgCondition(param: CliParamDef): string =
+  let formalRef = escapeNimIdent(param.name)
   if param.required:
     return "true"
   case param.nimType.normalize
   of "bool":
-    param.name
+    formalRef
   of "int":
-    param.name & " != 0"
+    formalRef & " != 0"
   of "seq[string]":
-    param.name & ".len > 0"
+    formalRef & ".len > 0"
   else:
-    param.name & ".len > 0"
+    formalRef & ".len > 0"
 
 proc toolActionFormal(param: CliParamDef): string =
-  result = param.name & ": " & param.nimType
+  result = escapeNimIdent(param.name) & ": " & param.nimType
   if not param.required:
     result.add(" = " & nimDefault(param.nimType))
 
@@ -1057,7 +1225,7 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
       let procName = commandProcName(cmd.name)
       var signature = procName & "|" & cmd.name
       for param in cmd.params:
-        var spec = param.name & ": " & param.nimType
+        var spec = escapeNimIdent(param.name) & ": " & param.nimType
         if not param.required:
           spec.add(" = " & nimDefault(param.nimType))
         params.add(spec)
@@ -1079,7 +1247,7 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
       var params: seq[string] = @["pkg: " & typeName]
       var argCalls: seq[string] = @[]
       for param in cmd.params:
-        var spec = param.name & ": " & param.nimType
+        var spec = escapeNimIdent(param.name) & ": " & param.nimType
         if not param.required:
           spec.add(" = " & nimDefault(param.nimType))
         params.add(spec)
@@ -1382,7 +1550,7 @@ proc interfaceParamDefault(param: CliParamDef): string =
   nimDefault(param.nimType)
 
 proc interfaceFormal(param: CliParamDef): string =
-  result = param.name & ": " & param.nimType
+  result = escapeNimIdent(param.name) & ": " & param.nimType
   let defaultValue = interfaceParamDefault(param)
   if defaultValue.len > 0:
     result.add(" = " & defaultValue)
@@ -1390,23 +1558,25 @@ proc interfaceFormal(param: CliParamDef): string =
 proc interfaceArgExpr(param: CliParamDef): string =
   let kindCode =
     if param.kind == cpkPositional: "cpkPositional" else: "cpkFlag"
+  let valueRef = escapeNimIdent(param.name)
   cliArgHelperName(param) & "(" & escForCode(param.name) & ", " &
-    param.name & ", " & kindCode & ", " & $param.position & ", " &
+    valueRef & ", " & kindCode & ", " & $param.position & ", " &
     escForCode(param.alias) & ", " & $param.format & ", " &
     $param.placement & ", " & $param.repeated & ")"
 
 proc shouldRecordCondition(param: CliParamDef): string =
+  let formalRef = escapeNimIdent(param.name)
   if param.required:
     return "true"
   case param.nimType.normalize
   of "bool":
-    param.name
+    formalRef
   of "int":
-    param.name & " != 0"
+    formalRef & " != 0"
   of "seq[string]":
-    param.name & ".len > 0"
+    formalRef & ".len > 0"
   else:
-    param.name & ".len > 0"
+    formalRef & ".len > 0"
 
 proc interfaceProcName(command: CliCommandDef): string =
   if command.name.len == 0:
