@@ -55,6 +55,7 @@ package nim:
         flag mm is string,
           alias = "--mm:",
           format = concat
+        boolFlag threadsOn is bool, alias = "--threads:on"
         boolFlag hintsOff is bool, alias = "--hints:off"
         boolFlag warningsOff is bool, alias = "--warnings:off"
         flag disabledHints is seq[string],

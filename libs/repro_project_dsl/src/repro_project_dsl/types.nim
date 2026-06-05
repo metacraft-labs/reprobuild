@@ -88,6 +88,40 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  TestDef* = object
+    ## Test-Edges-And-Parallel-Runner M0: parsed shape of a ``test
+    ## <ident>:`` block. The block ident contributes the kebab-cased
+    ## implicit name used in the default output path
+    ## (``build/test-bin/<ident-kebab>``); the resulting edge's
+    ## ``targetNames`` are derived by the M1 wiring from the synthesised
+    ## ``output`` argument's basename per Named-Targets M1, NOT from
+    ## the ident itself.
+    ##
+    ## The DSL collects these defs onto ``PackageDef.tests`` purely as
+    ## an inspection record; the actual ``BuildActionDef`` is materialised
+    ## by code emitted from ``synthesizeTestBuildStatements`` and merged
+    ## into the package's ``build:`` body by ``macros_b``'s
+    ## ``collectBuildStatements`` walker. The edge is marked
+    ## ``kind = bakTest`` at materialisation time via
+    ## ``setRegisteredActionKind``.
+    ident*: string
+      ## Original Nim identifier of the block (e.g. ``localBuildEngineSmoke``).
+    kebabName*: string
+      ## Lower-cased, dash-separated form of ``ident`` (the default
+      ## implicit name; overridden by ``nameOverride`` when set).
+    nameOverride*: string
+      ## Value of the ``name "..."`` setter when supplied; empty otherwise.
+    source*: string
+      ## Value of the required ``source "..."`` setter — the test's
+      ## single Nim entry-point path.
+    hasExplicitBuild*: bool
+      ## True when the block carried an explicit ``build:`` body. The
+      ## materialisation code emits that body verbatim and tags its
+      ## resulting edge ``bakTest``; the default ``nim.c(...)`` synthesis
+      ## is skipped in that case so the user keeps full control.
+    sourceFile*: string
+    sourceLine*: int
+
   PackageUseDef* = object
     rawConstraint*: string
     packageSelector*: string
@@ -139,6 +173,11 @@ type
     defaultToolProvisioning*: string
     executables*: seq[ExecutableDef]
     libraries*: seq[LibraryDef]
+    tests*: seq[TestDef]
+      ## Test-Edges-And-Parallel-Runner M0: parsed ``test <ident>:`` blocks
+      ## declared at the top level of the package body. The collection is
+      ## inspection-only — the actual build edges are emitted from code
+      ## injected into the package's ``build:`` body by ``macros_b``.
     toolUses*: seq[PackageUseDef]
     nixProvisioning*: seq[NixPackageProvisioningDef]
     tarballProvisioning*: seq[TarballProvisioningDef]
@@ -194,6 +233,20 @@ type
     packageName*: string
     executableName*: string
 
+  BuildActionEdgeKind* = enum
+    ## Test-Edges-And-Parallel-Runner M0: per-edge metadata marker that
+    ## classifies a build action. ``bakAction`` is the default for every
+    ## ordinary build edge (e.g. a typed-tool wrapper call inside a
+    ## ``build:`` body). ``bakTest`` is set on edges synthesised by the
+    ## DSL ``test`` block so downstream consumers (``repro test``,
+    ## ``repro why``, the protocol-level runner) can enumerate test
+    ## edges via the normalized-graph artifact without scanning the
+    ## whole graph. Implicit-name resolution remains uniform across
+    ## kinds — this field carries metadata, not target-export
+    ## semantics.
+    bakAction
+    bakTest
+
   BuildActionDef* = object
     id*: string
     call*: PublicCliCall
@@ -216,6 +269,11 @@ type
       ## the executable defines an ``implicitTargetName`` hook the
       ## first (canonical) entry is replaced by the hook's return value;
       ## auxiliary entries from additional output flags remain.
+    kind*: BuildActionEdgeKind
+      ## Test-Edges-And-Parallel-Runner M0: per-edge kind marker. Defaults
+      ## to ``bakAction``; the DSL ``test`` block re-tags its synthesised
+      ## edge as ``bakTest`` via ``setRegisteredActionKind`` so consumers
+      ## can enumerate test edges from the normalized-graph artifact.
     sourceFile*: string
     sourceLine*: int
 
