@@ -497,108 +497,6 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
       # forms in M12.
       discard
 
-proc kebabCaseFromIdent*(ident: string): string =
-  ## Test-Edges-And-Parallel-Runner M0: lower a Nim identifier (typically
-  ## ``camelCase`` or ``PascalCase``) to its kebab-case form. Used by
-  ## ``parseTest`` to derive the default implicit name and default
-  ## output-path basename for a ``test <ident>:`` block. The transform
-  ## is the same one applied by ``selectorModuleName`` modulo the
-  ## separator character (dash vs underscore).
-  ##
-  ## Examples:
-  ##   - ``localBuildEngineSmoke``  -> ``local-build-engine-smoke``
-  ##   - ``HCRAgentSpawn``          -> ``hcr-agent-spawn``
-  ##   - ``alt``                    -> ``alt``
-  ##
-  ## Non-alphanumeric characters become dashes; runs of dashes collapse
-  ## to one; trailing/leading dashes are trimmed. An all-non-alphanumeric
-  ## input falls back to the literal ``"test"`` so downstream paths
-  ## stay non-empty.
-  var previousWasWord = false
-  for ch in ident:
-    if ch.isAlphaNumeric():
-      if ch.isUpperAscii() and previousWasWord and
-          result.len > 0 and result[^1] != '-':
-        result.add('-')
-      result.add(ch.toLowerAscii())
-      previousWasWord = true
-    else:
-      if result.len > 0 and result[^1] != '-':
-        result.add('-')
-      previousWasWord = false
-  while result.len > 0 and result[^1] == '-':
-    result.setLen(result.len - 1)
-  if result.len == 0:
-    result = "test"
-
-proc parseTest(packageName: string; node: NimNode): TestDef =
-  ## Test-Edges-And-Parallel-Runner M0: parse a ``test <ident>:`` block.
-  ## Body grammar:
-  ##
-  ##   * ``source "..."`` — required single Nim entry-point path.
-  ##   * ``name "..."`` — optional override applied to the synthesised
-  ##     ``output`` argument (and therefore to the implicit name via
-  ##     Named-Targets M1's basename rule).
-  ##   * ``uses:`` — optional package-uses set (parsed but not yet
-  ##     consumed in M0; reserved for the M1 wiring that lifts each
-  ##     declared test into the project's overall solver constraint
-  ##     graph).
-  ##   * ``build:`` — optional body that overrides the default
-  ##     synthesised ``nim.c(...)`` call. When supplied, the user's
-  ##     statements are used verbatim and the default synthesis is
-  ##     skipped — the user keeps full control of the typed-tool surface,
-  ##     including the ``output`` parameter that supplies the implicit
-  ##     name.
-  discard packageName
-  let loc = lineFile(node)
-  if node.len < 2:
-    error("test expects a Nim identifier name", node)
-  result.ident = identText(node[1])
-  if result.ident.len == 0:
-    error("test expects a non-empty identifier name", node[1])
-  result.kebabName = kebabCaseFromIdent(result.ident)
-  result.sourceFile = loc.file
-  result.sourceLine = loc.line
-  if node.len < 3:
-    error("test expects a body containing a `source \"...\"` setter", node)
-  let body = node[2]
-  if body.kind != nnkStmtList:
-    error("test expects an indented body", node)
-  for stmt in body:
-    case calleeName(stmt).normalize
-    of "source":
-      if stmt.len != 2:
-        error("source: requires exactly one string literal", stmt)
-      result.source = stringLiteral(stmt[1])
-    of "name":
-      if stmt.len != 2:
-        error("name: requires exactly one string literal", stmt)
-      result.nameOverride = stringLiteral(stmt[1])
-    of "uses":
-      # Body is parsed and accepted in M0 for forward-compatibility with
-      # M1's per-test ``uses:`` propagation; the entries are not yet
-      # surfaced to the solver. The presence check below ensures a
-      # malformed ``uses:`` block raises early.
-      if stmt.len < 2:
-        error("uses: requires a body or at least one constraint", stmt)
-    of "build":
-      if stmt.len < 2:
-        error("build: requires a body", stmt)
-      let buildBody = stmt[stmt.len - 1]
-      if buildBody.kind != nnkStmtList or buildBody.len == 0:
-        error("test build: body must contain at least one statement", stmt)
-      result.hasExplicitBuild = true
-    of "discard":
-      discard
-    else:
-      # Unknown setter — surface a clear error rather than silently
-      # accepting forward-incompatible spellings.
-      error("unsupported test body member: " & calleeName(stmt) &
-        " (expected source / name / uses / build)", stmt)
-  if result.source.len == 0:
-    error("test '" & result.ident & "' is missing a required `source \"...\"` " &
-      "entry-point declaration", node)
-
 proc selectorFromConstraint(value: string): string =
   let parts = value.strip().splitWhitespace()
   if parts.len == 0:
@@ -935,8 +833,6 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       result.executables.add(parseExecutable(result.packageName, stmt))
     elif calleeName(stmt).normalize == "library":
       result.libraries.add(parseLibrary(result.packageName, stmt))
-    elif calleeName(stmt).normalize == "test":
-      result.tests.add(parseTest(result.packageName, stmt))
     elif calleeName(stmt).normalize in ["defaulttoolprovisioning", "toolprovisioning"]:
       if stmt.len != 2:
         error("defaultToolProvisioning expects exactly one string literal", stmt)
@@ -1122,17 +1018,6 @@ proc packageLiteral(pkg: PackageDef): string =
       ", kind: " & $lib.kind &
       ", sourceFile: " & escForCode(lib.sourceFile) &
       ", sourceLine: " & $lib.sourceLine & ")")
-  result.add("], tests: @[")
-  for testIndex, testDef in pkg.tests:
-    if testIndex > 0:
-      result.add(", ")
-    result.add("TestDef(ident: " & escForCode(testDef.ident) &
-      ", kebabName: " & escForCode(testDef.kebabName) &
-      ", nameOverride: " & escForCode(testDef.nameOverride) &
-      ", source: " & escForCode(testDef.source) &
-      ", hasExplicitBuild: " & $testDef.hasExplicitBuild &
-      ", sourceFile: " & escForCode(testDef.sourceFile) &
-      ", sourceLine: " & $testDef.sourceLine & ")")
   result.add("])")
 
 proc nimDefault(nimType: string): string =

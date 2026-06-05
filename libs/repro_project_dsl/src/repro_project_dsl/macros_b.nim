@@ -37,116 +37,6 @@ proc foreachParts(stmt: NimNode): tuple[matched: bool; iteratorName: string;
   result.body = stmt[2]
   result.matched = true
 
-proc indentBody(text: string): string =
-  ## Two-space-indent every non-empty line. Used by
-  ## ``collectImplicitTargetNameHooks`` to inline a hook body into a
-  ## generated ``proc … = …`` snippet without losing leading whitespace,
-  ## and by ``testBlockBuildStatements`` to nest a user-supplied
-  ## ``build:`` body inside a generated ``block:`` binding.
-  result = ""
-  for line in text.splitLines():
-    if line.len == 0:
-      result.add("\n")
-    else:
-      result.add("  ")
-      result.add(line)
-      result.add("\n")
-
-proc testBlockBuildStatements(testStmt: NimNode): NimNode =
-  ## Test-Edges-And-Parallel-Runner M0: synthesise the build statements
-  ## that materialise a ``test <ident>:`` block as a typed-tool build
-  ## edge.
-  ##
-  ## When the block carries an explicit ``build:`` body, that body's
-  ## statements are emitted verbatim inside a ``let __testEdge =
-  ## block: <body>`` binding — the ``block:`` form makes a sequence
-  ## of statements evaluate to its last expression, which the M0
-  ## contract requires to be the typed-tool call that returns a
-  ## ``BuildActionDef``. The result's ``id`` is then tagged
-  ## ``kind = bakTest`` via ``setRegisteredActionKind``.
-  ##
-  ## When no explicit ``build:`` body is supplied, we synthesise the
-  ## default
-  ##
-  ##   ``nim.c(source = "<source>",
-  ##           output = "build/test-bin/" & <implicitName>,
-  ##           threadsOn = true, hintsOff = true, warningsOff = true)``
-  ##
-  ## where ``<implicitName>`` is the ``name "..."`` override when
-  ## supplied or the ident-kebab form of the block otherwise. The flag
-  ## spelling matches the existing ``boolFlag`` declarations on the
-  ## bundled ``nim`` typed-tool wrapper (``threadsOn`` -> ``--threads:on``,
-  ## ``hintsOff`` -> ``--hints:off``, ``warningsOff`` -> ``--warnings:off``);
-  ## ``output`` matches the typed-tool wrapper's ``--out:``-aliased
-  ## parameter, and the M1 wiring derives the edge's implicit target
-  ## name from its filesystem basename per the Named-Targets M1
-  ## basename rule.
-  result = newStmtList()
-  if testStmt.len < 3:
-    return
-  let identNode = testStmt[1]
-  let body = testStmt[2]
-  if body.kind != nnkStmtList:
-    return
-  let testIdentText = identText(identNode)
-  if testIdentText.len == 0:
-    return
-  let implicitName = kebabCaseFromIdent(testIdentText)
-  var source = ""
-  var nameOverride = ""
-  var explicitBuildBody: NimNode = nil
-  for stmt in body:
-    case calleeName(stmt).normalize
-    of "source":
-      if stmt.len == 2:
-        source = stringLiteral(stmt[1])
-    of "name":
-      if stmt.len == 2:
-        nameOverride = stringLiteral(stmt[1])
-    of "build":
-      if stmt.len >= 2:
-        explicitBuildBody = stmt[stmt.len - 1]
-    else:
-      discard
-  if source.len == 0:
-    return
-  let effectiveName =
-    if nameOverride.len > 0: nameOverride else: implicitName
-  # The implicit name is kebab-cased; for the local binding identifier
-  # we need a valid Nim ident, so swap dashes for underscores.
-  let edgeIdent = "reprobuildTestEdge_" &
-    generatedIdentPart(implicitName)
-  if explicitBuildBody != nil:
-    let bodyCopy = copyNimTree(explicitBuildBody)
-    let bindingSrc = "let " & edgeIdent &
-      " = block:\n" & indentBody(bodyCopy.repr) &
-      "setRegisteredActionKind(" & edgeIdent & ".id, bakTest)\n"
-    let parsed = parseStmt(bindingSrc)
-    for child in parsed:
-      result.add(child)
-  else:
-    # ``usesImportCode`` aliases the bundled ``nim`` typed-tool module
-    # as ``nim_module`` and the package value lives at
-    # ``nim_module.nim`` (its bare ``nim`` symbol). The bare module name
-    # itself is interpreted as a module reference (``void``), so the
-    # method-call form must qualify through the alias — ``nim.c(...)``
-    # would not resolve. ``uses: "nim >=2.2 <3.0"`` in the surrounding
-    # package is therefore a precondition for the default synthesised
-    # body to type-check; absent that ``uses:`` line, the user keeps
-    # full control by supplying an explicit ``build:`` body and the
-    # default path is never emitted.
-    let defaultSrc =
-      "let " & edgeIdent & " = nim_module.nim.c(\n" &
-      "    source = " & escForCode(source) & ",\n" &
-      "    output = " & escForCode("build/test-bin/" & effectiveName) & ",\n" &
-      "    threadsOn = true,\n" &
-      "    hintsOff = true,\n" &
-      "    warningsOff = true)\n" &
-      "setRegisteredActionKind(" & edgeIdent & ".id, bakTest)\n"
-    let parsed = parseStmt(defaultSrc)
-    for child in parsed:
-      result.add(child)
-
 proc collectBuildStatements(pkgBody: NimNode): NimNode =
   result = newStmtList()
   for stmt in pkgBody:
@@ -159,12 +49,6 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
         if calleeName(exeStmt).normalize == "build":
           for buildStmt in exeStmt[1]:
             result.add(buildStmt)
-    elif calleeName(stmt).normalize == "test":
-      # Test-Edges-And-Parallel-Runner M0: inline the synthesised
-      # statements that record the test as a build edge into the
-      # package's overall build body.
-      for synthStmt in testBlockBuildStatements(stmt):
-        result.add(synthStmt)
 
 proc collectDevEnvStatements(pkgBody: NimNode): NimNode =
   result = newStmtList()
@@ -299,6 +183,19 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
             else:
               quit runPackageProvider(`pkgLiteral`, `procName`, `defsLiteral`,
                 `dispatchName`)
+
+proc indentBody(text: string): string =
+  ## Two-space-indent every non-empty line. Used by
+  ## ``collectImplicitTargetNameHooks`` to inline a hook body into a
+  ## generated ``proc … = …`` snippet without losing leading whitespace.
+  result = ""
+  for line in text.splitLines():
+    if line.len == 0:
+      result.add("\n")
+    else:
+      result.add("  ")
+      result.add(line)
+      result.add("\n")
 
 proc tryParseHookSpec(stmt: NimNode):
     tuple[matched: bool; formalsRepr: string; returnTypeRepr: string;

@@ -60,14 +60,7 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 12'u16
-    ## v12: Test-Edges-And-Parallel-Runner M0 — appends a single
-    ## ``kind: BuildActionEdgeKind`` byte after the ``targetNames`` list
-    ## so the normalized-graph artifact carries the per-edge marker that
-    ## distinguishes ordinary edges (``bakAction``) from DSL ``test``-
-    ## block-emitted edges (``bakTest``). Older payloads (v1..v11)
-    ## decode with ``kind = bakAction``.
-    ##
+  BuildActionPayloadVersion = 11'u16
     ## v11: Named-Targets M1 — appends ``targetNames: seq[string]`` after
     ## the action cache policy so the engine and downstream consumers
     ## see the same implicit-name set as the project-scoped export
@@ -928,19 +921,6 @@ proc setRegisteredActionTargetNames*(actionId: string;
       buildActionRegistry[i].targetNames = @names
       return
 
-proc setRegisteredActionKind*(actionId: string;
-                              kind: BuildActionEdgeKind) {.dynOrStatic.} =
-  ## Test-Edges-And-Parallel-Runner M0: tag a previously-recorded build
-  ## edge with a per-edge kind marker. The DSL ``test`` block calls this
-  ## immediately after the synthesised (or user-supplied) typed-tool
-  ## invocation returns its ``BuildActionDef`` so the resulting edge
-  ## carries ``kind = bakTest`` through the normalized-graph artifact.
-  ## No-op when the id is not present (defensive).
-  for i in 0 ..< buildActionRegistry.len:
-    if buildActionRegistry[i].id == actionId:
-      buildActionRegistry[i].kind = kind
-      return
-
 proc recordToolInvocation*(id: string; call: PublicCliCall;
                            deps: openArray[string] = [];
                            extraInputs: openArray[string] = [];
@@ -1380,8 +1360,6 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   payload.writeActionCachePolicy(action.actionCachePolicy)
   # v11: Named-Targets M1 implicit target names.
   payload.writeStringSeq(action.targetNames)
-  # v12: Test-Edges-And-Parallel-Runner M0 — per-edge kind marker.
-  payload.writeByte(byte(ord(action.kind)))
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -1397,7 +1375,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      9'u16, 10'u16, 11'u16, BuildActionPayloadVersion}:
+      9'u16, 10'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -1428,13 +1406,6 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.actionCachePolicy = defaultActionCachePolicy()
   if version >= 11'u16:
     result.targetNames = readStringSeq(bytes, pos)
-  if version >= 12'u16:
-    let kindByte = readByte(bytes, pos)
-    if kindByte > byte(ord(bakTest)):
-      raisePayload("invalid build action edge kind in payload")
-    result.kind = BuildActionEdgeKind(kindByte)
-  else:
-    result.kind = bakAction
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

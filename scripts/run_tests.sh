@@ -142,16 +142,6 @@ while IFS= read -r -d '' test_file; do
     libs/repro_build_engine/tests/t_engine_target_export_*|*/libs/repro_build_engine/tests/t_engine_target_export_*)
       extra_flags+=("--define:reproProviderMode")
       ;;
-    # Test-Edges-And-Parallel-Runner M0 DSL tests: the ``t_dsl_test_block_*``
-    # suite under ``libs/repro_project_dsl/tests/`` drives
-    # ``buildPackageFragment`` directly so it can assert against the
-    # synthesised ``BuildActionDef`` (``targetNames``, ``kind = bakTest``,
-    # the ``output`` argument and the bool-flag argv values) produced by
-    # the new ``test`` block sugar. That entry point is gated on
-    # ``reproProviderMode`` in ``runtime_provider.nim``.
-    libs/repro_project_dsl/tests/t_dsl_test_block_*|*/libs/repro_project_dsl/tests/t_dsl_test_block_*)
-      extra_flags+=("--define:reproProviderMode")
-      ;;
     # Named-Targets M2 ambiguity resolver test: builds two fragments
     # via ``buildPackageFragment`` (provider-mode-gated) so it asserts
     # the cross-package resolver path in-process without standing up
