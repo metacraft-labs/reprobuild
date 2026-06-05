@@ -97,9 +97,19 @@ while IFS= read -r -d '' test_file; do
   found=1
   test_name="$(basename "${test_file}" .nim)"
   extra_flags=()
-  if [[ "${test_name}" == "t_hcr_agent_process_target" ]] &&
+  if [[ "${test_name}" == "t_hcr_agent_process_target" ||
+        "${test_name}" == "t_e2e_repro_watch_hcr_multi_target_independent_patches" ||
+        "${test_name}" == "t_e2e_repro_watch_hcr_one_target_agent_inject_failure" ]] &&
       [[ "$(uname -s)" == "Darwin" ]] &&
       [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then
+    # Named-Targets M4: the two M4 multi-target HCR e2e tests live in
+    # ``tests/e2e/hcr-watch/`` and depend on the same Mach-O patch-
+    # extraction primitives as ``t_hcr_agent_process_target``. They are
+    # gated ``when defined(macosx) and defined(arm64)`` and need the
+    # same patchable-function-entry / __HCR-segprot compile flags so
+    # the per-target HCR session lifecycle's
+    # ``objectFunctionBytes`` / ``minimalAarch64EhFrameTemplate``
+    # codepaths land valid bytes.
     extra_flags+=(
       "--passC:-fpatchable-function-entry=16,0"
       "--passL:-Wl,-segprot,__HCR,rwx,rwx"

@@ -107,7 +107,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
           programName &
-      " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]]\n       " &
+      " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...]\n       " &
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
           programName &
@@ -10948,6 +10948,17 @@ const CodetracerHcrSupportProfile =
 
 type
   HcrWatchConfig = object
+    targetName: string
+      ## Named-Targets M4: the target name this HCR config attaches to.
+      ## Empty for the legacy single-target convenience surface (the
+      ## ``--hcr-agent-socket`` / ``--hcr-artifacts`` / ``--hcr-metadata``
+      ## flag triad). For the multi-target surface added in M4, every
+      ## ``--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA]`` flag produces a
+      ## ``HcrWatchConfig`` whose ``targetName`` is the selector spelling
+      ## the user passed on the CLI (matching the M3
+      ## ``parseAndResolveSelectors`` output). The target name appears in
+      ## every HCR event payload (§3.4 SSE event table) so consumers can
+      ## route events back to a specific target.
     socketPath: string
     artifacts: string
     metadataPath: string
@@ -10980,6 +10991,23 @@ type
     connected: bool
     oldObject: string
     newObject: string
+    baselineSourceDigest: string
+      ## Named-Targets M4 (metadata mode): the digest of the metadata
+      ## source file at baseline time. Used by ``deliverHcrWatchPatch``
+      ## to detect "this target's source did NOT change this cycle" so
+      ## the per-target patch lifecycle can silently skip (raise
+      ## ``HcrWatchNoChange``) rather than delivering a no-op patch.
+      ## Multi-target HCR (HCR §3.2) needs this so a multi-target run
+      ## "no patch is delivered to b" when b's closure didn't change.
+    fallbackOnly: bool
+      ## Named-Targets M4 per-target failure isolation: when a session's
+      ## baseline / patch lifecycle raises, this flag is flipped and the
+      ## session falls back to the ordinary rebuild path for the rest of
+      ## the watch loop. ``hcr/patchFailed`` is emitted exactly once on
+      ## the failing target so SSE consumers see the failure exactly
+      ## once. Other sessions in the seq are unaffected (per HCR
+      ## §3.2 "Multi-Target HCR" — "a failure to inject the agent into
+      ## one target does not stop the others").
 
 proc writeJsonFile(path: string; node: JsonNode) =
   createDir(extendedPath(parentDir(path)))
@@ -11000,6 +11028,31 @@ proc objectFunctionBytes(objectPath, symbolName: string): seq[byte] =
 proc hcrWatchEnabled(config: HcrWatchConfig): bool =
   config.socketPath.len > 0 or config.artifacts.len > 0 or
     config.metadataPath.len > 0
+
+proc hcrEventTargetLabel(config: HcrWatchConfig): string =
+  ## Named-Targets M4: the ``target`` value carried in every HCR SSE
+  ## payload. Falls back to ``"default"`` for the legacy single-target
+  ## ``--hcr-agent-socket`` surface so the JSON schema stays uniform
+  ## across single- and multi-target runs.
+  if config.targetName.len > 0:
+    config.targetName
+  else:
+    "default"
+
+proc hcrEventPayload(config: HcrWatchConfig; extra: JsonNode = nil):
+    string =
+  ## Named-Targets M4 §3.4 (HCR SSE event payloads gain a ``target``
+  ## field): build the JSON payload for an ``hcr/*`` watch event.
+  ## ``extra`` may contribute additional fields per the SSE event table
+  ## (``patchId``, ``error``, etc.). The ``target`` field is always
+  ## present so multi-target SSE consumers can route every event.
+  var node = %*{
+    "target": hcrEventTargetLabel(config)
+  }
+  if extra != nil and extra.kind == JObject:
+    for key, value in extra.pairs:
+      node[key] = value
+  $node
 
 proc validateHcrWatchConfig(config: HcrWatchConfig) =
   if not config.hcrWatchEnabled:
@@ -11139,6 +11192,16 @@ proc captureInferredHcrWatchBaseline*(projectRoot, buildReportPath,
     copyFile(extendedPath(result[i].objectPath),
       extendedPath(result[i].generation0Object))
 
+type
+  HcrWatchNoChange* = object of CatchableError
+    ## Named-Targets M4: raised by ``inferHcrWatchPatch`` when none of
+    ## the baselines saw a code change in this cycle. Per-target multi-
+    ## target HCR catches this distinctly from real injection failures:
+    ## a no-change cycle is silent (the target's source didn't change,
+    ## so there is nothing to patch), while a real failure (missing
+    ## metadata, agent disconnect, malformed object) emits
+    ## ``hcr/patchFailed`` and falls back.
+
 proc inferHcrWatchPatch*(baselines: openArray[HcrWatchObjectBaseline];
                          artifacts: string; cycle: int):
     HcrWatchInferredPatch =
@@ -11167,7 +11230,7 @@ proc inferHcrWatchPatch*(baselines: openArray[HcrWatchObjectBaseline];
           objectSymbol: entry.name)
 
   if candidates.len == 0:
-    raise newException(ValueError,
+    raise newException(HcrWatchNoChange,
       "HCR watch did not find a changed function in rebuilt object outputs")
   if candidates.len > 1:
     var names: seq[string]
@@ -11193,6 +11256,22 @@ proc inferHcrWatchPatch*(baselines: openArray[HcrWatchObjectBaseline];
     oldObject: candidate.baseline.generation0Object,
     newObject: newObject)
 
+type
+  WatchHcrEventEmit = proc(eventKind: string; message: string;
+                           payloadJson: string) {.closure.}
+    ## Named-Targets M4: per-target HCR SSE emit hook handed to the
+    ## ``captureHcrWatchBaseline`` / ``deliverHcrWatchPatch`` procs by
+    ## ``runWatchCommand``. The hook is wired to the shared watch SSE
+    ## event stream (``emitWatchLine``) so every HCR event lands in the
+    ## same stream as ``cycle-start`` / ``rebuild-queued`` and carries a
+    ## ``target`` field per HCR/CLI-Integration §3.4.
+
+proc emitHcrEvent(emit: WatchHcrEventEmit; config: HcrWatchConfig;
+                  eventKind, message: string; extra: JsonNode = nil) =
+  if emit == nil:
+    return
+  emit(eventKind, message, hcrEventPayload(config, extra))
+
 proc initHcrWatchSession(config: HcrWatchConfig): HcrWatchSession =
   config.validateHcrWatchConfig()
   result.enabled = config.hcrWatchEnabled
@@ -11205,12 +11284,29 @@ proc initHcrWatchSession(config: HcrWatchConfig): HcrWatchSession =
 proc closeHcrWatchSession(session: var HcrWatchSession) =
   if session.enabled:
     if session.connected:
-      session.connection.close()
+      try: session.connection.close()
+      except CatchableError: discard
       session.connected = false
-    session.listener.close()
+    try: session.listener.close()
+    except CatchableError: discard
+    # Named-Targets M4: ``runDirectWatch`` may call this early via the
+    # per-target failure-isolation block AND again in the final defer.
+    # Mark ``enabled = false`` so the second call is a cheap no-op.
+    session.enabled = false
+
+proc targetLogSuffix(config: HcrWatchConfig): string =
+  ## Named-Targets M4: stdout suffix that names which target the HCR
+  ## log line belongs to. Empty string for single-target runs so the
+  ## legacy log shape (used by existing tests like
+  ## ``t_e2e_hcr_watch_inference``) keeps its byte layout.
+  if config.targetName.len > 0:
+    " target=" & config.targetName
+  else:
+    ""
 
 proc captureHcrWatchBaseline(session: var HcrWatchSession;
-                             outcome: BuildCommandOutcome) =
+                             outcome: BuildCommandOutcome;
+                             emit: WatchHcrEventEmit = nil) =
   if not session.enabled:
     return
   if session.config.metadataPath.len > 0:
@@ -11224,6 +11320,12 @@ proc captureHcrWatchBaseline(session: var HcrWatchSession;
       (safePathSegment(session.metadata.functionName, "patch") & "-generation0.o")
     copyFile(extendedPath(session.metadata.objectPath),
       extendedPath(session.oldObject))
+    # Named-Targets M4: record baseline source digest so multi-target
+    # metadata-mode runs can detect "this target's source did not
+    # change this cycle" and skip patch delivery silently.
+    if fileExists(extendedPath(session.metadata.sourcePath)):
+      session.baselineSourceDigest =
+        hcrSourceDigest(session.metadata.sourcePath)
     writeJsonFile(session.config.artifacts / "hcr-watch-baseline.json", %*{
       "schemaId": "reprobuild.hcr.watch-baseline.v1",
       "supportProfile": CodetracerHcrSupportProfile,
@@ -11236,7 +11338,7 @@ proc captureHcrWatchBaseline(session: var HcrWatchSession;
       "generation0Object": session.oldObject
     })
     echo "repro watch: hcr baseline captured object=" &
-      session.metadata.objectPath
+      session.metadata.objectPath & targetLogSuffix(session.config)
   else:
     session.inferredBaselines = captureInferredHcrWatchBaseline(
       outcome.projectRoot, outcome.buildReportPath, session.config.artifacts)
@@ -11254,19 +11356,29 @@ proc captureHcrWatchBaseline(session: var HcrWatchSession;
       "objects": objects
     })
     echo "repro watch: hcr baseline inferred objects=" &
-      $session.inferredBaselines.len
-  echo "repro watch: hcr waiting for agent socket=" & session.config.socketPath
+      $session.inferredBaselines.len & targetLogSuffix(session.config)
+  echo "repro watch: hcr waiting for agent socket=" &
+    session.config.socketPath & targetLogSuffix(session.config)
   flushStdout()
+  # Named-Targets M4: emit the baseline event into the shared SSE stream
+  # so per-target HCR consumers see the agent-injection lifecycle as it
+  # progresses, even on the cycle-1 baseline.
+  emit.emitHcrEvent(session.config, "hcr/agentWaiting",
+    "repro watch: hcr waiting for agent socket=" & session.config.socketPath,
+    %*{"socket": session.config.socketPath})
   session.connection = acceptHcrAgentConnection(session.listener)
   session.connected = true
   discard session.client.receiveAgentMessage(session.connection)
   session.client.sendCoordinatorMessage(
     session.connection, session.client.coordinatorHelloAckMessage())
-  echo "repro watch: hcr agent connected"
+  echo "repro watch: hcr agent connected" & targetLogSuffix(session.config)
   flushStdout()
+  emit.emitHcrEvent(session.config, "hcr/agentConnected",
+    "repro watch: hcr agent connected")
 
 proc deliverHcrWatchPatch(session: var HcrWatchSession;
-                          outcome: BuildCommandOutcome; cycle: int) =
+                          outcome: BuildCommandOutcome; cycle: int;
+                          emit: WatchHcrEventEmit = nil) =
   if not session.enabled:
     return
   if not session.connected:
@@ -11279,6 +11391,20 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
       raise newException(ValueError,
         "HCR watch object does not exist after rebuild: " &
           session.metadata.objectPath)
+    # Named-Targets M4: in multi-target metadata-mode runs, the source
+    # digest comparison tells us this target's owned closure did NOT
+    # change this cycle (the rebuild was a cache hit for our target).
+    # Per HCR §3.2, a target whose closure didn't change MUST NOT
+    # receive a patch — raise ``HcrWatchNoChange`` so the per-target
+    # lifecycle loop silently skips delivery for this cycle.
+    if session.config.targetName.len > 0 and
+        session.baselineSourceDigest.len > 0 and
+        fileExists(extendedPath(session.metadata.sourcePath)):
+      let nowDigest = hcrSourceDigest(session.metadata.sourcePath)
+      if nowDigest == session.baselineSourceDigest:
+        raise newException(HcrWatchNoChange,
+          "HCR watch: target '" & session.config.targetName &
+            "' source unchanged this cycle")
     session.newObject = session.config.artifacts /
       (safePathSegment(session.metadata.functionName, "patch") & "-generation" &
         $(cycle - 1) & ".o")
@@ -11291,7 +11417,8 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
     session.oldObject = inferred.oldObject
     session.newObject = inferred.newObject
     echo "repro watch: hcr inferred changed function=" &
-      session.metadata.functionName & " object=" & session.metadata.objectPath
+      session.metadata.functionName & " object=" & session.metadata.objectPath &
+      targetLogSuffix(session.config)
   if not fileExists(extendedPath(session.metadata.sourcePath)):
     raise newException(ValueError,
       "HCR watch source does not exist after rebuild: " &
@@ -11318,6 +11445,15 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
     debugObjectBytes = objectBytes,
     unwindMetadataBytes = minimalAarch64EhFrameTemplate(),
     sourceGenerationMap = [sourceGeneration])
+  # Named-Targets M4 §3.4: emit ``hcr/patchCompiling`` for the SSE
+  # consumer before the patch is sent to the agent. ``target`` is the
+  # per-target label set on the config.
+  emit.emitHcrEvent(session.config, "hcr/patchCompiling",
+    "repro watch: hcr patch compiling patchId=" & request.patchId,
+    %*{
+      "patchId": request.patchId,
+      "files": %*[session.metadata.sourcePath]
+    })
   session.client.sendCoordinatorMessage(
     session.connection, session.client.coordinatorPatchRequestMessage(request))
   while session.client.session.state == hssPatchRequested:
@@ -11364,8 +11500,19 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
   if session.client.patchApplied.isNone:
     raise newException(ValueError,
       "HCR watch did not receive a patchApplied response")
-  echo "repro watch: hcr patch applied patchId=" & request.patchId
+  echo "repro watch: hcr patch applied patchId=" & request.patchId &
+    targetLogSuffix(session.config)
   flushStdout()
+  # Named-Targets M4 §3.4: ``hcr/patchApplied`` carries ``target`` so
+  # SSE consumers can route per-target events.
+  var functions = newJArray()
+  functions.add(%session.metadata.functionName)
+  emit.emitHcrEvent(session.config, "hcr/patchApplied",
+    "repro watch: hcr patch applied patchId=" & request.patchId,
+    %*{
+      "patchId": request.patchId,
+      "functions": functions
+    })
 
 proc runWatchCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
@@ -11380,6 +11527,13 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   var debounceMs = 250
   var workRoot = ""
   var hcrConfig: HcrWatchConfig
+  # Named-Targets M4: per-target HCR config seq, populated by the
+  # repeatable ``--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA]`` flag.
+  # The legacy single-target triad (``--hcr-agent-socket`` etc.)
+  # populates ``hcrConfig`` above; M4 keeps that surface for backward
+  # compatibility (the existing ``t_e2e_hcr_watch_inference`` test
+  # exercises it).
+  var hcrTargetConfigs: seq[HcrWatchConfig] = @[]
   var daemonMode = bdmAuto
   var daemonModeExplicit = false
   var detach = false
@@ -11448,6 +11602,35 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       raise newException(ValueError,
         "--hcr-metadata requires an inline value, for example " &
           "--hcr-metadata=build/hcr-metadata.json")
+    elif arg.startsWith("--hcr-target="):
+      # Named-Targets M4: repeatable per-target HCR binding. Format:
+      #   --hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA]
+      # Each occurrence binds one HCR agent to the named positional
+      # target. The colon delimiter is fine here because socket /
+      # artifacts / metadata paths in the existing watch CLI never
+      # contain a literal ``:``; if that constraint ever bites, the M5
+      # ``<package>:<name>`` work can promote ``--hcr-target`` to a
+      # structured JSON form. The per-target lifecycles are
+      # independent (HCR §3.2 "Multi-Target HCR") — see the failure
+      # isolation block in ``runDirectWatch`` below.
+      let raw = arg.split("=", maxsplit = 1)[1]
+      let parts = raw.split(':')
+      if parts.len < 3 or parts.len > 4 or parts[0].len == 0 or
+          parts[1].len == 0 or parts[2].len == 0:
+        raise newException(ValueError,
+          "--hcr-target expects NAME:SOCKET:ARTIFACTS[:METADATA] " &
+            "(got '" & raw & "')")
+      var perTarget: HcrWatchConfig
+      perTarget.targetName = parts[0]
+      perTarget.socketPath = parts[1]
+      perTarget.artifacts = parts[2]
+      if parts.len == 4:
+        perTarget.metadataPath = parts[3]
+      hcrTargetConfigs.add(perTarget)
+    elif arg == "--hcr-target":
+      raise newException(ValueError,
+        "--hcr-target requires an inline value, for example " &
+          "--hcr-target=alpha:/tmp/a.sock:.repro/hcr-alpha")
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported watch flag: " & arg)
     else:
@@ -11546,7 +11729,11 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     daemonCarriedEnvironment()
 
   proc runDaemonWatch(): int =
-    if hcrConfig.hcrWatchEnabled:
+    if hcrConfig.hcrWatchEnabled or hcrTargetConfigs.len > 0:
+      # Named-Targets M4: per-target HCR bindings inherit the same
+      # daemon-hosted HCR limitation as the legacy single-target HCR
+      # surface — both flavours fall back to direct mode under
+      # ``--daemon=off``.
       raise newException(DaemonBuildUnsupported,
         "daemon-hosted HCR watch is deferred; use --daemon=off")
     let config = defaultUserDaemonConfig()
@@ -11604,15 +11791,41 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         "daemonHosted": true,
         "maxCycles": maxCycles
       })
+    let anyHcrEnabled = hcrConfig.hcrWatchEnabled or hcrTargetConfigs.len > 0
     echo "repro watch: target=" & target & " tool-provisioning=" &
       mode.modeName & " debounceMs=" & $debounceMs &
       (if maxCycles > 0: " maxCycles=" & $maxCycles else: " maxCycles=unbounded") &
-      (if hcrConfig.hcrWatchEnabled: " hcr=enabled" else: " hcr=disabled")
+      (if anyHcrEnabled: " hcr=enabled" else: " hcr=disabled") &
+      (if hcrTargetConfigs.len > 0:
+         " hcr-targets=" & $hcrTargetConfigs.len
+       else:
+         "")
     flushStdout()
 
-    var hcrSession = initHcrWatchSession(hcrConfig)
+    # Named-Targets M4 ----------------------------------------------------
+    # Each ``--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA]`` adds one HCR
+    # session to ``hcrSessions``. The legacy single-target triad still
+    # contributes one anonymous-target session so existing single-target
+    # tests stay untouched. Per HCR §3.2 "Multi-Target HCR", every
+    # session's patch lifecycle runs independently; a failure on one
+    # session does NOT stop the others (see the per-session try/except
+    # below).
+    # --------------------------------------------------------------------
+    var hcrSessions: seq[HcrWatchSession] = @[]
+    if hcrConfig.hcrWatchEnabled:
+      hcrSessions.add(initHcrWatchSession(hcrConfig))
+    for cfg in hcrTargetConfigs:
+      hcrSessions.add(initHcrWatchSession(cfg))
     defer:
-      hcrSession.closeHcrWatchSession()
+      for i in 0 ..< hcrSessions.len:
+        hcrSessions[i].closeHcrWatchSession()
+
+    # The shared SSE emit hook for HCR events — wires each per-target
+    # ``hcr/*`` event into the watch event stream so SSE consumers can
+    # route by ``target`` (HCR/CLI-Integration §3.4).
+    let hcrEmit: WatchHcrEventEmit =
+      proc(eventKind, message, payloadJson: string) =
+        emitWatchLine(message, payloadJson = payloadJson)
 
     var cycle = 0
     while true:
@@ -11649,11 +11862,43 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         lastResult = "cycle=" & $cycle & " exitCode=" & $outcome.exitCode)
       if outcome.exitCode != 0:
         return outcome.exitCode
-      if hcrSession.enabled:
-        if cycle == 1:
-          hcrSession.captureHcrWatchBaseline(outcome)
-        else:
-          hcrSession.deliverHcrWatchPatch(outcome, cycle)
+      # Named-Targets M4: per-target HCR session lifecycle. Each enabled
+      # session runs its own baseline (cycle 1) or patch delivery (cycle
+      # N>1). A failure on any single session is isolated: the session
+      # is marked ``fallbackOnly`` (no further HCR patches, plain
+      # rebuilds only) and ``hcr/patchFailed`` is emitted exactly once
+      # carrying ``target: NAME``. Other sessions in the seq keep going
+      # — HCR §3.2 "Multi-Target HCR": "a failure to inject the agent
+      # into one target does not stop the others".
+      for i in 0 ..< hcrSessions.len:
+        if not hcrSessions[i].enabled or hcrSessions[i].fallbackOnly:
+          continue
+        try:
+          if cycle == 1:
+            hcrSessions[i].captureHcrWatchBaseline(outcome, hcrEmit)
+          else:
+            hcrSessions[i].deliverHcrWatchPatch(outcome, cycle, hcrEmit)
+        except HcrWatchNoChange:
+          # Named-Targets M4: this target's source files did not change
+          # this cycle. The rebuild was a cache hit for the target's
+          # closure; per HCR §3.2 "patch lifecycles are independent",
+          # we silently skip patch delivery (no SSE event) and leave
+          # the session ready for the next cycle.
+          discard
+        except CatchableError as err:
+          hcrSessions[i].fallbackOnly = true
+          let errMsg = err.msg
+          let targetLabel = hcrEventTargetLabel(hcrSessions[i].config)
+          emitWatchLine("repro watch: hcr patch failed target=" &
+              targetLabel & " error=" & errMsg & " (falling back to rebuilds)",
+            payloadJson = hcrEventPayload(hcrSessions[i].config, %*{
+              "error": errMsg,
+              "fallback": "rebuild"
+            }))
+          # Close the failing session's listener / connection so the
+          # socket file is released; subsequent cycles short-circuit
+          # the lifecycle calls via ``fallbackOnly``.
+          hcrSessions[i].closeHcrWatchSession()
       if maxCycles > 0 and cycle >= maxCycles:
         emitWatchLine("repro watch: max cycles reached",
           payloadJson = "{\"watchEvent\":\"max-cycles\"}", terminal = true,
