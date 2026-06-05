@@ -1566,7 +1566,14 @@ proc reproLibPathFlags(workDir: string): seq[string] =
   if dirExists(extendedPath(libsRoot)):
     # TODO(win-longpath): walk results escape; needs review
     for path in walkDir(libsRoot):
-      if path.kind == pcDir:
+      # Test-Edges-And-Parallel-Runner M1 carry-over: also follow
+      # ``pcLinkToDir`` so cross-repo libraries vendored into
+      # ``libs/`` via symlink (the codetracer-side
+      # ``ct_test_nim_unittest`` adapter, today; future framework
+      # adapters tomorrow) get their ``src/`` tree onto ``--path``.
+      # The downstream check ``dirExists(<src>)`` still filters out
+      # broken / non-Nim-shaped entries.
+      if path.kind in {pcDir, pcLinkToDir}:
         let src = path.path / "src"
         if dirExists(extendedPath(src)):
           result.add("--path:" & src)

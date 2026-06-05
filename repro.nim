@@ -38,6 +38,16 @@
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 
+# Test-Edges-And-Parallel-Runner M1: ``ct_test_nim_unittest`` is the
+# codetracer-side Nim-unittest framework adapter that supplies the
+# ``buildNimUnittest.build(...)`` typed-tool used by every entry in
+# the generated ``repro.tests.nim`` (included below inside the
+# ``package reprobuild:`` body). The module re-exports
+# ``repro_project_dsl`` so the import order is fine either way.
+# ``config.nims`` adds ``../ct-test/libs/ct_test_nim_unittest/src`` to
+# the Nim path.
+import ct_test_nim_unittest
+
 package reprobuild:
   uses:
     # Toolchain floor — mirrors flake.nix's nativeBuildInputs.
@@ -68,6 +78,13 @@ package reprobuild:
     # The dev-env artifact codec links against nim-ssz-serialization
     # (see config.nims's SSZ_SERIALIZATION_SRC slot).
     "ssz-serialization"
+
+    # Test-Edges-And-Parallel-Runner M1: codetracer-supplied
+    # Nim-unittest framework adapter. Each entry in the generated
+    # ``repro.tests.nim`` (included below) calls
+    # ``buildNimUnittest.build(...)`` from this module so the test
+    # binaries become typed-output build edges.
+    "ct_test_nim_unittest"
 
   # Library declaration — every ``.nim`` file under ``libs/<name>/src``
   # that ``config.nims`` adds to ``--path`` is importable when this
@@ -113,6 +130,16 @@ package reprobuild:
 
   executable reproStandardProvider:
     name: "repro-standard-provider"
+
+  # Test-Edges-And-Parallel-Runner M1: declared typed-output build
+  # edges for every ``t_*.nim`` / ``test_*.nim`` file under tests/,
+  # libs/*/tests/, and tools/*/tests/. The included file is generated
+  # by ``scripts/generate_test_edges.nim``; do not edit it by hand.
+  # The file emits its own ``build:`` block (collected by the package
+  # macro via ``collectBuildStatements``) plus a final
+  # ``aggregate("test", @[...])`` so ``repro build test`` schedules
+  # every test-binary compilation in one engine pass.
+  include "repro.tests.nim"
 
   build:
     # Option (A) from the repo packaging memo: wrap scripts/build_apps.sh

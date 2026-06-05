@@ -2,6 +2,25 @@ import std/[os, strutils]
 
 switch("styleCheck", "hint")
 
+# Test-Edges-And-Parallel-Runner M1: ``repro.nim`` includes the
+# generated ``repro.tests.nim`` whose entries call
+# ``buildNimUnittest.build(...)`` from the codetracer-side
+# ``ct_test_nim_unittest`` adapter. The adapter re-exports
+# ``ct_test_interface`` so both module paths land on ``--path``.
+let ctTestRoot = block:
+  let fromEnv = getEnv("CT_TEST_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "ct-test"
+for ctTestLib in [
+  "ct_test_interface",
+  "ct_test_nim_unittest",
+]:
+  let candidate = ctTestRoot / "libs" / ctTestLib / "src"
+  if dirExists(candidate):
+    switch("path", candidate)
+
 for libName in [
   "repro_core",
   "repro_platform",

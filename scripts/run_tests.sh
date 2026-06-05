@@ -1,6 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Test-Edges-And-Parallel-Runner M1 — the suite is now described as
+# declared typed-output build edges in ``repro.tests.nim`` (generated
+# by ``scripts/generate_test_edges.nim`` and ``include``d from
+# ``repro.nim`` inside the ``package reprobuild:`` body). Each entry
+# is a ``buildNimUnittest.build(...)`` call whose typed-output handle
+# (``NimUnittestBinary``) points at ``build/test-bin/<basename>``. The
+# aggregate target ``test`` selects every edge in one engine pass.
+#
+# This script:
+#   1. Builds the apps + non-test prerequisites (sibling daemons,
+#      legacy ``nim c`` test helpers, etc.) the same way the M0 script
+#      did. Those are still expressed outside the engine for now.
+#   2. Compiles the provider-mode-gated tests by hand: the
+#      ``ct_test_nim_unittest`` adapter's ``cli:`` block doesn't yet
+#      accept a ``defines:`` parameter (see the M1 spec). The path
+#      rules that drove the per-test ``--define:reproProviderMode``
+#      injection in the legacy script are preserved here as a
+#      carry-forward — a follow-on milestone teaches the adapter the
+#      parameter and reroutes these tests through the engine like the
+#      rest.
+#   3. Invokes ``repro build test`` to compile every other test binary
+#      via the engine (action cache + parallel scheduler).
+#   4. Runs each ``build/test-bin/t_*`` / ``build/test-bin/test_*``
+#      binary sequentially, surfacing per-test exit codes and respecting
+#      ``REPRO_TEST_FAIL_FAST``.
+
 mkdir -p build/test-bin build/nimcache
 
 bash ./scripts/build_apps.sh
@@ -13,11 +39,6 @@ bash ./scripts/build_apps.sh
 # to control which version is built. The dev shell / CI runner is the
 # correct place to decide which siblings exist and which version to
 # build.
-#
-# We compile the sibling when its directory is present and the marker
-# binary is missing. The check is intentionally idempotent and silent
-# on a hot cache — a `just build` invocation on a fully-built tree is
-# a no-op.
 build_sibling() {
   local sibling_dir="$1"
   local marker_path="$2"
@@ -31,9 +52,6 @@ build_sibling() {
   (cd "${sibling_dir}" && just build)
 }
 
-# `runquotad` and `runquota` ship out of ../runquota. The Windows
-# binary carries `.exe`; the POSIX one does not. Both naming forms
-# are covered by listing the candidate paths explicitly.
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     exe_ext=".exe"
@@ -48,7 +66,9 @@ build_sibling "../runquota" "../runquota/build/bin/runquotad${exe_ext}"
 # them here once (instead of inside each test's setup) keeps the per-
 # test wall time predictable and avoids the Windows-specific failure
 # where parallel ``nim c`` invocations contend on the same nimcache
-# and lock each other out of the output file.
+# and lock each other out of the output file. These are NOT test
+# binaries themselves — they're helpers the tests spawn — so they
+# stay outside the typed-edge graph.
 build_test_helper() {
   local source_path="$1"
   local output_path="$2"
@@ -84,8 +104,126 @@ if [[ -f tests/e2e/home-generations/harness_apply_lock_holder.nim ]]; then
     tests/e2e/home-generations/harness_apply_lock_holder.nim
 fi
 
+# Provider-mode carry-forward: ``--define:reproProviderMode`` for the
+# tests that exercise ``buildPackageFragment`` directly. These remain
+# direct ``nim c`` invocations until the ``ct_test_nim_unittest``
+# adapter accepts a ``defines:`` parameter (see the M1 spec comment in
+# ``scripts/generate_test_edges.nim``).
+needs_provider_mode() {
+  local test_file="$1"
+  case "${test_file}" in
+    libs/repro_standard_provider/tests/*|*/libs/repro_standard_provider/tests/*)
+      return 0 ;;
+    libs/repro_build_engine/tests/t_engine_implicit_*|*/libs/repro_build_engine/tests/t_engine_implicit_*|\
+    libs/repro_build_engine/tests/t_engine_multiple_outputs_*|*/libs/repro_build_engine/tests/t_engine_multiple_outputs_*|\
+    libs/repro_build_engine/tests/t_engine_target_export_*|*/libs/repro_build_engine/tests/t_engine_target_export_*)
+      return 0 ;;
+    libs/repro_build_engine/tests/t_engine_typed_output_*|*/libs/repro_build_engine/tests/t_engine_typed_output_*|\
+    libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_*|*/libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_*)
+      return 0 ;;
+    tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim|*/tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim)
+      return 0 ;;
+    tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim|*/tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# Some tests need extra compile flags beyond --define:reproProviderMode
+# (M4 HCR multi-target tests on Darwin arm64). Surface those as a per-
+# test list; they fall under the same direct-nim-c carry-forward as the
+# provider-mode tests until the adapter grows the right knobs.
+hcr_extra_flags() {
+  local test_name="$1"
+  if [[ "${test_name}" == "t_hcr_agent_process_target" ||
+        "${test_name}" == "t_e2e_repro_watch_hcr_multi_target_independent_patches" ||
+        "${test_name}" == "t_e2e_repro_watch_hcr_one_target_agent_inject_failure" ]] &&
+      [[ "$(uname -s)" == "Darwin" ]] &&
+      [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then
+    printf '%s\n' "--passC:-fpatchable-function-entry=16,0"
+    printf '%s\n' "--passL:-Wl,-segprot,__HCR,rwx,rwx"
+  fi
+}
+
+compile_carry_forward_test() {
+  local test_file="$1"
+  local test_name
+  test_name="$(basename "${test_file}" .nim)"
+  local extra_flags=()
+  if needs_provider_mode "${test_file}"; then
+    extra_flags+=("--define:reproProviderMode")
+  fi
+  while IFS= read -r flag; do
+    [[ -n "${flag}" ]] && extra_flags+=("${flag}")
+  done < <(hcr_extra_flags "${test_name}")
+  printf 'Compiling carry-forward test: %s\n' "${test_file}" >&2
+  nim c \
+    --threads:on \
+    --hints:off \
+    --warnings:off \
+    ${extra_flags[@]+"${extra_flags[@]}"} \
+    --nimcache:"build/nimcache/${test_name}" \
+    --out:"build/test-bin/${test_name}" \
+    "${test_file}"
+}
+
+carry_forward_tests=()
+engine_built_tests=()
+while IFS= read -r -d '' test_file; do
+  if needs_provider_mode "${test_file}"; then
+    carry_forward_tests+=("${test_file}")
+  else
+    engine_built_tests+=("${test_file}")
+  fi
+done < <(
+  find tests -type f -name 't_*.nim' -print0
+  find libs -path '*/tests/t_*.nim' -type f -print0
+  find libs -path '*/tests/test_*.nim' -type f -print0
+  find tools -path '*/tests/test_*.nim' -type f -print0 2>/dev/null
+)
+
+# HCR carry-forward: a handful of macOS arm64 tests need extra
+# compile flags beyond the --define carry-forward. They are not
+# provider-mode tests, but they still need the direct-nim-c path
+# until the adapter grows the right knobs.
+for test_file in "${engine_built_tests[@]}"; do
+  test_name="$(basename "${test_file}" .nim)"
+  if [[ -n "$(hcr_extra_flags "${test_name}")" ]]; then
+    carry_forward_tests+=("${test_file}")
+  fi
+done
+
+# Move the HCR-tagged tests out of the engine-built list. ``comm`` is
+# not always available with the right options across platforms, so we
+# do the set difference in pure shell.
+filtered_engine_tests=()
+for test_file in "${engine_built_tests[@]}"; do
+  test_name="$(basename "${test_file}" .nim)"
+  if [[ -n "$(hcr_extra_flags "${test_name}")" ]]; then
+    continue
+  fi
+  filtered_engine_tests+=("${test_file}")
+done
+engine_built_tests=("${filtered_engine_tests[@]}")
+
+# Compile the carry-forward tests by hand.
+for test_file in "${carry_forward_tests[@]+"${carry_forward_tests[@]}"}"; do
+  compile_carry_forward_test "${test_file}"
+done
+
+# Engine-driven build of the remaining test binaries. ``repro build
+# test`` selects the aggregate emitted by ``repro.tests.nim`` so a
+# single engine pass schedules every typed-edge compilation with
+# action-cache reuse + parallelism.
+if [[ "${#engine_built_tests[@]}" -gt 0 ]]; then
+  printf 'Building %d test binaries via repro build test\n' \
+    "${#engine_built_tests[@]}" >&2
+  ./build/bin/repro build test
+fi
+
+# Python tests run before the Nim suite so a Python regression surfaces
+# fast and doesn't get buried in the Nim output.
 found=0
-failed_tests=()
 while IFS= read -r -d '' test_file; do
   found=1
   python3 "${test_file}"
@@ -93,95 +231,32 @@ done < <(
   find tests -type f -name 'test_*.py' -print0
 )
 
-while IFS= read -r -d '' test_file; do
+# Run every compiled Nim test binary. We iterate the same source list
+# we used to drive the build so missing binaries surface as failures
+# (instead of silently being skipped).
+failed_tests=()
+all_tests=("${carry_forward_tests[@]+"${carry_forward_tests[@]}"}" \
+  "${engine_built_tests[@]+"${engine_built_tests[@]}"}")
+
+# Stable run order: source-path lex sort so failure output is
+# reproducible across invocations.
+mapfile -t all_tests < <(printf '%s\n' \
+  "${all_tests[@]+"${all_tests[@]}"}" | LC_ALL=C sort)
+
+for test_file in "${all_tests[@]+"${all_tests[@]}"}"; do
   found=1
   test_name="$(basename "${test_file}" .nim)"
-  extra_flags=()
-  if [[ "${test_name}" == "t_hcr_agent_process_target" ||
-        "${test_name}" == "t_e2e_repro_watch_hcr_multi_target_independent_patches" ||
-        "${test_name}" == "t_e2e_repro_watch_hcr_one_target_agent_inject_failure" ]] &&
-      [[ "$(uname -s)" == "Darwin" ]] &&
-      [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then
-    # Named-Targets M4: the two M4 multi-target HCR e2e tests live in
-    # ``tests/e2e/hcr-watch/`` and depend on the same Mach-O patch-
-    # extraction primitives as ``t_hcr_agent_process_target``. They are
-    # gated ``when defined(macosx) and defined(arm64)`` and need the
-    # same patchable-function-entry / __HCR-segprot compile flags so
-    # the per-target HCR session lifecycle's
-    # ``objectFunctionBytes`` / ``minimalAarch64EhFrameTemplate``
-    # codepaths land valid bytes.
-    extra_flags+=(
-      "--passC:-fpatchable-function-entry=16,0"
-      "--passL:-Wl,-segprot,__HCR,rwx,rwx"
-    )
+  test_binary="build/test-bin/${test_name}${exe_ext}"
+  if [[ ! -x "${test_binary}" ]]; then
+    printf 'missing test binary: %s\n' "${test_binary}" >&2
+    failed_tests+=("${test_file}")
+    if [[ "${REPRO_TEST_FAIL_FAST:-0}" == "1" ]]; then
+      break
+    fi
+    continue
   fi
-  # Provider-mode tests gate on `--define:reproProviderMode` because the
-  # libs/repro_standard_provider conventions exercise procs that are
-  # `when defined(reproProviderMode)`-gated in repro_project_dsl/runtime_provider.nim
-  # (buildPackageFragment / GraphFragment / StoredGraphFragment /
-  # nimEmitFragment). The standard-provider binary itself ships this define
-  # via apps/entrypoints.txt; the convention tests under
-  # libs/repro_standard_provider/tests/ need the same define to compile.
-  # Path-based detection keeps the runner schema-free and avoids per-test
-  # sidecar files. (Tests under libs/repro_cmake_trycompile/tests/ do not
-  # need the define — only the provider conventions do.)
-  case "${test_file}" in
-    libs/repro_standard_provider/tests/*|*/libs/repro_standard_provider/tests/*)
-      extra_flags+=("--define:reproProviderMode")
-      ;;
-    # Named-Targets M1 engine tests: the new ``t_engine_implicit_*``
-    # / ``t_engine_target_export_*`` / ``t_engine_multiple_outputs_*``
-    # suites under ``libs/repro_build_engine/tests/`` invoke
-    # ``buildPackageFragment`` directly to assert against the
-    # normalized provider-graph artifact. That entry point is gated
-    # on ``reproProviderMode`` in
-    # ``libs/repro_project_dsl/src/repro_project_dsl/runtime_provider.nim``,
-    # so the test file needs the same define.
-    libs/repro_build_engine/tests/t_engine_implicit_*|*/libs/repro_build_engine/tests/t_engine_implicit_*|\
-    libs/repro_build_engine/tests/t_engine_multiple_outputs_*|*/libs/repro_build_engine/tests/t_engine_multiple_outputs_*|\
-    libs/repro_build_engine/tests/t_engine_target_export_*|*/libs/repro_build_engine/tests/t_engine_target_export_*)
-      extra_flags+=("--define:reproProviderMode")
-      ;;
-    # Typed-Outputs M1 engine tests: same gate as the Named-Targets M1
-    # ``t_engine_*`` suites — invoke ``buildPackageFragment`` directly
-    # to assert against the normalized provider-graph artifact (the
-    # typed-output payload entries + the method-call-dispatch edge).
-    libs/repro_build_engine/tests/t_engine_typed_output_*|*/libs/repro_build_engine/tests/t_engine_typed_output_*|\
-    libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_*|*/libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_*)
-      extra_flags+=("--define:reproProviderMode")
-      ;;
-    # Named-Targets M2 ambiguity resolver test: builds two fragments
-    # via ``buildPackageFragment`` (provider-mode-gated) so it asserts
-    # the cross-package resolver path in-process without standing up
-    # the multi-fragment provider machinery. The other three M2 e2e
-    # tests are normal CLI invocations and don't need the define.
-    tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim|*/tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim)
-      extra_flags+=("--define:reproProviderMode")
-      ;;
-    # Named-Targets M5 qualified-target resolution test: same
-    # in-process pattern as the M2 ambiguity test — drives
-    # ``buildPackageFragment`` directly to assert the
-    # qualified-form resolution path in-process.
-    tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim|*/tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim)
-      extra_flags+=("--define:reproProviderMode")
-      ;;
-  esac
-  # Use the `${arr[@]+"${arr[@]}"}` idiom so the expansion is a no-op
-  # when `extra_flags` is empty. macOS's bundled Bash 3.2.57 aborts under
-  # `set -u` on a bare `"${extra_flags[@]}"` against an empty array;
-  # Bash 4+ tolerates it. Same fix as scripts/build_apps.sh.
-  #
-  # Continue past per-test failures so we surface every failing test in
-  # one run instead of aborting at the first failure. The aggregate exit
-  # code is computed after the loop. Set REPRO_TEST_FAIL_FAST=1 to
-  # restore the legacy stop-at-first-failure behaviour.
   set +e
-  nim c -r \
-    --threads:on \
-    ${extra_flags[@]+"${extra_flags[@]}"} \
-    --nimcache:"build/nimcache/${test_name}" \
-    --out:"build/test-bin/${test_name}" \
-    "${test_file}"
+  "${test_binary}"
   test_rc=$?
   set -e
   if (( test_rc != 0 )); then
@@ -192,15 +267,7 @@ while IFS= read -r -d '' test_file; do
       break
     fi
   fi
-done < <(
-  find tests -type f -name 't*.nim' -print0
-  find libs -path '*/tests/t*.nim' -type f -print0
-  # M66 harvester: tools/catalog-harvester/tests/test_*.nim — discovery is
-  # name-prefixed `test_` (not `t*`) to distinguish maintainer-tool tests
-  # from library / repository tests. The runner's existing add-extra-flags
-  # logic doesn't apply to them (no provider-mode, no HCR).
-  find tools -path '*/tests/test_*.nim' -type f -print0 2>/dev/null
-)
+done
 
 if [ "${found}" -eq 0 ]; then
   echo "no Nim tests found" >&2
