@@ -1,44 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Test-Edges-And-Parallel-Runner M1 — the suite is now described as
-# declared typed-output build edges in ``repro.tests.nim`` (generated
-# by ``scripts/generate_test_edges.nim`` and ``include``d from
-# ``repro.nim`` inside the ``package reprobuild:`` body). Each entry
-# is a ``buildNimUnittest.build(...)`` call whose typed-output handle
-# (``NimUnittestBinary``) points at ``build/test-bin/<basename>``. The
-# aggregate target ``test`` selects every edge in one engine pass.
+# Test-Edges-And-Parallel-Runner M3 — ``scripts/run_tests.sh`` is now
+# a thin shim around the protocol-level parallel runner shipped at
+# ``tools/test-runner/repro_test_runner.nim``. The build phase is
+# unchanged (sibling daemons, test helpers, the provider-mode
+# carry-forward ``nim c`` loop, then ``repro build test`` for the
+# engine-driven majority); execution is delegated to the new runner,
+# which speaks the Tier-1 binary protocol shipped in
+# ``ct_test_unittest_parallel`` (M2) and fans out per-test ``--run``
+# invocations across ``nproc`` workers.
 #
-# This script:
-#   1. Builds the apps + non-test prerequisites (sibling daemons,
-#      legacy ``nim c`` test helpers, etc.) the same way the M0 script
-#      did. Those are still expressed outside the engine for now.
-#   2. Compiles the provider-mode-gated tests by hand: the
-#      ``ct_test_nim_unittest`` adapter's ``cli:`` block doesn't yet
-#      accept a ``defines:`` parameter (see the M1 spec). The path
-#      rules that drove the per-test ``--define:reproProviderMode``
-#      injection in the legacy script are preserved here as a
-#      carry-forward — a follow-on milestone teaches the adapter the
-#      parameter and reroutes these tests through the engine like the
-#      rest.
-#   3. Invokes ``repro build test`` to compile every other test binary
-#      via the engine (action cache + parallel scheduler).
-#   4. Runs each ``build/test-bin/t_*`` / ``build/test-bin/test_*``
-#      binary sequentially, surfacing per-test exit codes and respecting
-#      ``REPRO_TEST_FAIL_FAST``.
+# The provider-mode carry-forward loop stays for now: the
+# ``ct_test_nim_unittest`` adapter learned a ``defines:`` parameter in
+# M2 but the mechanical migration of the affected test sources to
+# routed-through-engine builds is tracked separately. M3 keeps the
+# carry-forward in place so all 385 test binaries land in
+# ``build/test-bin/`` either way; the runner doesn't care which build
+# path produced them.
 
-mkdir -p build/test-bin build/nimcache
+mkdir -p build/test-bin build/nimcache test-logs
 
 bash ./scripts/build_apps.sh
 
-# Build out-of-repo test prerequisites BEFORE compiling the suite. The
-# tests assume sibling daemons (runquotad, the runquota CLI, etc.) are
-# already on disk — the test code must not spawn `just build` for a
-# neighbouring repo, both because that hangs the runner if the sibling
-# has its own slow build graph AND because the test author has no way
-# to control which version is built. The dev shell / CI runner is the
-# correct place to decide which siblings exist and which version to
-# build.
+# Build out-of-repo test prerequisites BEFORE compiling the suite.
 build_sibling() {
   local sibling_dir="$1"
   local marker_path="$2"
@@ -62,13 +47,7 @@ case "$(uname -s)" in
 esac
 build_sibling "../runquota" "../runquota/build/bin/runquotad${exe_ext}"
 
-# Test-side helper binaries that more than one suite reuses. Building
-# them here once (instead of inside each test's setup) keeps the per-
-# test wall time predictable and avoids the Windows-specific failure
-# where parallel ``nim c`` invocations contend on the same nimcache
-# and lock each other out of the output file. These are NOT test
-# binaries themselves — they're helpers the tests spawn — so they
-# stay outside the typed-edge graph.
+# Test-side helper binaries that more than one suite reuses.
 build_test_helper() {
   local source_path="$1"
   local output_path="$2"
@@ -106,9 +85,8 @@ fi
 
 # Provider-mode carry-forward: ``--define:reproProviderMode`` for the
 # tests that exercise ``buildPackageFragment`` directly. These remain
-# direct ``nim c`` invocations until the ``ct_test_nim_unittest``
-# adapter accepts a ``defines:`` parameter (see the M1 spec comment in
-# ``scripts/generate_test_edges.nim``).
+# direct ``nim c`` invocations until per-edge migration through the
+# ``defines:`` adapter parameter is mechanical-merged.
 needs_provider_mode() {
   local test_file="$1"
   case "${test_file}" in
@@ -129,10 +107,6 @@ needs_provider_mode() {
   return 1
 }
 
-# Some tests need extra compile flags beyond --define:reproProviderMode
-# (M4 HCR multi-target tests on Darwin arm64). Surface those as a per-
-# test list; they fall under the same direct-nim-c carry-forward as the
-# provider-mode tests until the adapter grows the right knobs.
 hcr_extra_flags() {
   local test_name="$1"
   if [[ "${test_name}" == "t_hcr_agent_process_target" ||
@@ -183,9 +157,7 @@ done < <(
 )
 
 # HCR carry-forward: a handful of macOS arm64 tests need extra
-# compile flags beyond the --define carry-forward. They are not
-# provider-mode tests, but they still need the direct-nim-c path
-# until the adapter grows the right knobs.
+# compile flags beyond the --define carry-forward.
 for test_file in "${engine_built_tests[@]}"; do
   test_name="$(basename "${test_file}" .nim)"
   if [[ -n "$(hcr_extra_flags "${test_name}")" ]]; then
@@ -193,9 +165,6 @@ for test_file in "${engine_built_tests[@]}"; do
   fi
 done
 
-# Move the HCR-tagged tests out of the engine-built list. ``comm`` is
-# not always available with the right options across platforms, so we
-# do the set difference in pure shell.
 filtered_engine_tests=()
 for test_file in "${engine_built_tests[@]}"; do
   test_name="$(basename "${test_file}" .nim)"
@@ -206,15 +175,10 @@ for test_file in "${engine_built_tests[@]}"; do
 done
 engine_built_tests=("${filtered_engine_tests[@]}")
 
-# Compile the carry-forward tests by hand.
 for test_file in "${carry_forward_tests[@]+"${carry_forward_tests[@]}"}"; do
   compile_carry_forward_test "${test_file}"
 done
 
-# Engine-driven build of the remaining test binaries. ``repro build
-# test`` selects the aggregate emitted by ``repro.tests.nim`` so a
-# single engine pass schedules every typed-edge compilation with
-# action-cache reuse + parallelism.
 if [[ "${#engine_built_tests[@]}" -gt 0 ]]; then
   printf 'Building %d test binaries via repro build test\n' \
     "${#engine_built_tests[@]}" >&2
@@ -223,61 +187,34 @@ fi
 
 # Python tests run before the Nim suite so a Python regression surfaces
 # fast and doesn't get buried in the Nim output.
-found=0
 while IFS= read -r -d '' test_file; do
-  found=1
   python3 "${test_file}"
 done < <(
   find tests -type f -name 'test_*.py' -print0
 )
 
-# Run every compiled Nim test binary. We iterate the same source list
-# we used to drive the build so missing binaries surface as failures
-# (instead of silently being skipped).
-failed_tests=()
-all_tests=("${carry_forward_tests[@]+"${carry_forward_tests[@]}"}" \
-  "${engine_built_tests[@]+"${engine_built_tests[@]}"}")
-
-# Stable run order: source-path lex sort so failure output is
-# reproducible across invocations.
-mapfile -t all_tests < <(printf '%s\n' \
-  "${all_tests[@]+"${all_tests[@]}"}" | LC_ALL=C sort)
-
-for test_file in "${all_tests[@]+"${all_tests[@]}"}"; do
-  found=1
-  test_name="$(basename "${test_file}" .nim)"
-  test_binary="build/test-bin/${test_name}${exe_ext}"
-  if [[ ! -x "${test_binary}" ]]; then
-    printf 'missing test binary: %s\n' "${test_binary}" >&2
-    failed_tests+=("${test_file}")
-    if [[ "${REPRO_TEST_FAIL_FAST:-0}" == "1" ]]; then
-      break
-    fi
-    continue
-  fi
-  set +e
-  "${test_binary}"
-  test_rc=$?
-  set -e
-  if (( test_rc != 0 )); then
-    failed_tests+=("${test_file}")
-    if [[ "${REPRO_TEST_FAIL_FAST:-0}" == "1" ]]; then
-      printf '\n[REPRO_TEST_FAIL_FAST] aborting after first failure: %s\n' \
-        "${test_file}" >&2
-      break
-    fi
-  fi
-done
-
-if [ "${found}" -eq 0 ]; then
-  echo "no Nim tests found" >&2
-  exit 1
+# M3 runner: build if missing, then delegate the entire Nim test
+# execution phase to the parallel runner. The runner discovers test
+# binaries under ``build/test-bin/``, probes each for the M2
+# protocol surface, and fans out per-test invocations across
+# ``nproc`` workers. Sequential per-binary execution is gone.
+runner_bin="build/bin/repro_test_runner${exe_ext}"
+if [[ ! -x "${runner_bin}" ]]; then
+  printf 'Building test runner: %s\n' "${runner_bin}" >&2
+  nim c \
+    -d:release \
+    --threads:on \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/repro_test_runner \
+    --out:"${runner_bin}" \
+    tools/test-runner/repro_test_runner.nim
 fi
 
-if (( ${#failed_tests[@]} > 0 )); then
-  printf '\n========== FAILED TESTS (%d) ==========\n' "${#failed_tests[@]}" >&2
-  for t in "${failed_tests[@]}"; do
-    printf '  %s\n' "$t" >&2
-  done
-  exit 1
-fi
+# The runner already ran ``repro build test`` for us above; tell it to
+# skip its own build step so we don't double-build.
+"${runner_bin}" \
+  --no-build \
+  --bin-dir=build/test-bin \
+  --summary-json=test-logs/parallel-run.json \
+  --results-dir=test-logs/results
