@@ -1113,8 +1113,19 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # ``targetNames``; we stamp the field after the engine factory
   # returns so the engine-side edge record matches the DSL-side
   # ``BuildActionDef`` and the target-export table.
+  #
+  # Typed-Outputs M1: same plumbing for the per-output (fieldName,
+  # types, path) entries — the engine consumes them downstream
+  # without re-parsing the DSL.
   defer:
     result.targetNames = payload.targetNames
+    var engineTypedOutputs: seq[EngineTypedOutput]
+    for entry in payload.typedOutputs:
+      engineTypedOutputs.add(EngineTypedOutput(
+        fieldName: entry.fieldName,
+        types: entry.types,
+        path: entry.path))
+    result.typedOutputs = engineTypedOutputs
   let actionCachePolicy =
     case payload.actionCachePolicy
     of acfpTimestamp:

@@ -14,13 +14,20 @@ import std/[unittest]
 
 import repro_project_dsl
 
+# Typed-Outputs M1 update: the wrapper now binds the typed field via
+# ``<FieldType>(path: <pathExpr>)``, so we need a non-primitive type
+# with a ``path`` field. Bare ``string`` does not have a constructor of
+# that shape, so we declare a small handle type for the result.
+type TestResultsHandle = object
+  path: string
+
 # CLI-only declaration: no ``build:``, no ``uses:``.
 package tDslExecutableCliOnlyAdapter:
   executable NimUnittestBinary:
     cli:
       subcmd "run":
         flag filter is string
-        outputs results is string, filter
+        outputs results is TestResultsHandle, filter
       subcmd "list":
         discard
 
@@ -63,7 +70,7 @@ suite "t_dsl_executable_cli_only_no_build":
     check runCmd.name == "run"
     check runCmd.typedOutputs.len == 1
     check runCmd.typedOutputs[0].fieldName == "results"
-    check runCmd.typedOutputs[0].types == @["string"]
+    check runCmd.typedOutputs[0].types == @["TestResultsHandle"]
     check listCmd.name == "list"
     check listCmd.typedOutputs.len == 0
     # Consumer side: the package compiles (parser accepts the body).

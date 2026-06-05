@@ -12,6 +12,9 @@ import repro_project_dsl
 
 type
   NimUnittestBinary = object
+    ## Typed-Outputs M1 update: the wrapper now binds via
+    ## ``NimUnittestBinary(path: <pathExpr>)``.
+    path: string
   InstallableExecutable = object
 
 package tDslOutputsTypedMultipleInterfacesPkg:

@@ -10,6 +10,9 @@ import std/[macros, strutils, unittest]
 import repro_project_dsl
 
 type CargoTestBinary = object
+  ## Typed-Outputs M1 update: the wrapper now binds via
+  ## ``CargoTestBinary(path: <pathExpr>)``.
+  path: string
 
 package tDslOutputsTypedComplexPathExpressionPkg:
   executable buildCargoTest:

@@ -1349,6 +1349,72 @@ proc emitTargetNameWiring(packageNameLit: string;
     packageNameLit & ", implicitNames, " & sourceFileLit & ", " &
     sourceLineLit & ")\n")
 
+proc typedOutputTypesLiteral(types: openArray[string]): string =
+  ## Typed-Outputs M1: render a typed-output's ``types`` field as a
+  ## ``@[<type>...]`` string literal for the engine-side payload entry.
+  ## Each type identifier is recorded as the source ``.repr`` so
+  ## downstream consumers (CLI resolver, ``repro why``, the codetracer
+  ## ``repro test`` integration) see the same spelling the user wrote.
+  result = "@["
+  for i, typeName in types:
+    if i > 0:
+      result.add(", ")
+    result.add(escForCode(typeName))
+  result.add("]")
+
+proc emitBuildEdgeSubtypeDecl(subtypeName: string;
+                              typedOutputs: openArray[TypedOutputDef];
+                              indent = "  "): string =
+  ## Typed-Outputs M0/M1: emit the ``type`` declaration for the per-call
+  ## ``BuildEdge`` subtype. Shared between the package-block wrapper
+  ## (``toolActionWrapperCode``) and ``defineCliInterface``'s emission
+  ## path so both surface typed fields with the same shape. The first
+  ## ``types`` entry names the static field type; further entries flow
+  ## through to the engine-side typed-output payload at call time.
+  result.add(indent & subtypeName & "* = object\n")
+  result.add(indent & "  action*: BuildActionDef\n")
+  for td in typedOutputs:
+    let fieldType =
+      if td.types.len > 0: td.types[0] else: "BuildActionDef"
+    result.add(indent & "  " & escapeNimIdent(td.fieldName) & "*: " &
+      fieldType & "\n")
+
+proc emitTypedOutputBindings(typedOutputs: openArray[TypedOutputDef];
+                             actionRef: string;
+                             indent = "  "): string =
+  ## Typed-Outputs M1: emit the per-call path-binding suffix.
+  ##
+  ##   * Evaluates each ``pathExpr`` in the call-site flag scope. The
+  ##     ``pathExpr`` is stored as the ``.repr`` of the source-site
+  ##     NimNode (the M0 deviation — see ``TypedOutputDef`` doc); we
+  ##     inline it directly into the generated source so the outer
+  ##     ``parseStmt`` reparses it for us. This is the M1 "reparse" hook
+  ##     the spec mentions.
+  ##   * Constructs ``result.<fieldName> = <FieldType>(path: <pathValue>)``
+  ##     so framework adapter types like ``NimUnittestBinary`` carry the
+  ##     bound path through to UFCS method calls like
+  ##     ``edge.testBinary.run(...)``.
+  ##   * Appends one ``BuildActionTypedOutput`` row on the engine-side
+  ##     ``BuildActionDef`` so the (fieldName, types, path) triple
+  ##     survives the payload codec round-trip and downstream consumers
+  ##     can identify the output without re-parsing the DSL.
+  for td in typedOutputs:
+    let fieldType =
+      if td.types.len > 0: td.types[0] else: "BuildActionDef"
+    let pathLocal = "typedOutputPath_" & td.fieldName
+    let typesLit = typedOutputTypesLiteral(td.types)
+    # Inline the user's pathExpr source verbatim; ``parseStmt`` of the
+    # surrounding wrapper-code string re-parses it in the call-site
+    # flag scope. Brace it in a ``block:`` so even a multi-statement
+    # path expression compiles to a single rhs (M0's stored repr
+    # collapses to one expression for the common cases).
+    result.add(indent & "let " & pathLocal & " = " & td.pathExpr & "\n")
+    result.add(indent & "result." & escapeNimIdent(td.fieldName) &
+      " = " & fieldType & "(path: " & pathLocal & ")\n")
+    result.add(indent & "appendRegisteredActionTypedOutput(" & actionRef &
+      ".id, " & escForCode(td.fieldName) & ", " & typesLit & ", " &
+      pathLocal & ")\n")
+
 proc toolActionWrapperCode(pkg: PackageDef): string =
   let typeName = titleIdent(pkg.packageName)
   let valueName = packageValueIdent(pkg.packageName)
@@ -1386,16 +1452,7 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       result.add("type\n")
       emittedTypeBlock = true
     let subtypeName = buildEdgeSubtypeName(exe.exportName, cmd.name)
-    result.add("  " & subtypeName & "* = object\n")
-    result.add("    action*: BuildActionDef\n")
-    for td in cmd.typedOutputs:
-      # Field type comes from the first declared interface; additional
-      # interfaces are recorded on ``TypedOutputDef.types`` for M1's
-      # framework-recognition pass to consume off-band.
-      let fieldType =
-        if td.types.len > 0: td.types[0] else: "BuildActionDef"
-      result.add("    " & escapeNimIdent(td.fieldName) & "*: " &
-        fieldType & "\n")
+    result.add(emitBuildEdgeSubtypeDecl(subtypeName, cmd.typedOutputs))
   for cmd in exe.commands:
     var formals = @["pkg: " & typeName]
     for param in cmd.params:
@@ -1437,16 +1494,15 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "dependencyPolicy = " &
       dependencyPolicyCode(cmd.dependencyPolicy) & ")\n")
-    # Typed-Outputs M0: leave the typed fields at their default value.
-    # M1 will reparse ``td.pathExpr`` and bind the runtime path; for
-    # now the compile-time shape is the only contract — fields exist
-    # and resolve to ``types[0]``.
+    # Typed-Outputs M1: bind each typed-output field by evaluating its
+    # ``pathExpr`` in the call-site flag scope. The shared
+    # ``emitTypedOutputBindings`` helper handles both the typed-handle
+    # field assignment (``result.<field> = <FieldType>(path: ...)``)
+    # and the engine-side ``BuildActionTypedOutput`` append so the
+    # (fieldName, types, path) triple round-trips through the payload
+    # codec to downstream consumers.
     if typedReturn:
-      for td in cmd.typedOutputs:
-        let fieldType =
-          if td.types.len > 0: td.types[0] else: "BuildActionDef"
-        result.add("  result." & escapeNimIdent(td.fieldName) &
-          " = default(" & fieldType & ")\n")
+      result.add(emitTypedOutputBindings(cmd.typedOutputs, actionRef))
     # Named-Targets M1: append the implicit-target-name wiring suffix.
     # The wrapper proc returns either ``BuildActionDef`` directly (no
     # typed outputs) or a ``BuildEdge`` subtype with an embedded
@@ -1942,6 +1998,21 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
   result.add(
     "when not declared(reprobuildPackageMarker):\n" &
     "  proc reprobuildPackageMarker*() = discard\n")
+  # Typed-Outputs M1 (unification): if any command declares typed
+  # outputs, emit the same ``BuildEdge`` subtype shape the package-
+  # block wrapper uses so ``defineCliInterface``-driven typed-tool
+  # surfaces (the in-tree ``gccCompile`` / ``nimC`` fixtures, codetracer
+  # adapter packages once they migrate) carry the same per-call typed
+  # field set as their ``package``-block counterparts.
+  var emittedTypeBlock = false
+  for command in commands:
+    if command.typedOutputs.len == 0:
+      continue
+    if not emittedTypeBlock:
+      result.add("type\n")
+      emittedTypeBlock = true
+    let subtypeName = buildEdgeSubtypeName(toolSymbol, command.name)
+    result.add(emitBuildEdgeSubtypeDecl(subtypeName, command.typedOutputs))
   for command in commands:
     var formals = @["tool: Tool[" & escForCode(toolId) & "]"]
     for param in command.params:
@@ -1955,8 +2026,14 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     formals.add("cacheable = true")
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
+    let typedReturn = command.typedOutputs.len > 0
+    let returnType =
+      if typedReturn: buildEdgeSubtypeName(toolSymbol, command.name)
+      else: "BuildActionDef"
+    let actionRef =
+      if typedReturn: "result.action" else: "result"
     result.add("proc " & interfaceProcName(command) & "*( " &
-      formals.join("; ") & "): BuildActionDef {.discardable.} =\n")
+      formals.join("; ") & "): " & returnType & " {.discardable.} =\n")
     result.add("  discard tool\n")
     result.add("  var cliArgs: seq[PublicCliArg] = @[]\n")
     for param in command.params:
@@ -1967,12 +2044,18 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       escForCode(command.providerEntrypointId) & ", cliArgs)\n")
     result.add("  let selectedActionId = if actionId.len > 0: actionId " &
       "else: defaultToolActionId(call)\n")
-    result.add("  result = recordToolInvocation(selectedActionId, call, " &
+    result.add("  " & actionRef &
+      " = recordToolInvocation(selectedActionId, call, " &
       "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "dependencyPolicy = " &
       dependencyPolicyCode(command.dependencyPolicy) & ")\n")
+    # Typed-Outputs M1: bind typed fields against the call-site flag
+    # values via the shared helper (the ``package``-block wrapper uses
+    # the same one).
+    if typedReturn:
+      result.add(emitTypedOutputBindings(command.typedOutputs, actionRef))
     # Named-Targets M1: ``defineCliInterface`` has no per-tool naming
     # hook (those live on ``executable`` inside a ``package`` block),
     # and the wrapper is not bound to a package — the call site's
@@ -1983,14 +2066,33 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     # proper per-package home for the export rows should declare the
     # tool inside a ``package`` block instead of using
     # ``defineCliInterface`` directly.
-    result.add(emitTargetNameWiring(
-      packageNameLit = escForCode(toolId),
-      outputFlags = command.outputFlags,
-      params = command.params,
-      hookProcName = "",
-      hookCallTypeRepr = "",
-      sourceFileLit = escForCode(command.sourceFile),
-      sourceLineLit = $command.sourceLine))
+    #
+    # Bridge the typed-return case onto the same
+    # ``emitTargetNameWiring`` template by switching from a literal
+    # ``result.id`` to ``<actionRef>.id``. We emit the wiring inline
+    # rather than through the helper when typed outputs are present
+    # because the helper hard-codes ``result.id``.
+    if typedReturn:
+      if command.outputFlags.len > 0:
+        let flagsLit = outputFlagsLiteral(command.outputFlags)
+        result.add("  var implicitNames = computeImplicitTargetNames(call, " &
+          flagsLit & ")\n")
+        result.add("  if implicitNames.len > 0:\n")
+        result.add("    setRegisteredActionTargetNames(" & actionRef &
+          ".id, implicitNames)\n")
+        result.add("    registerImplicitTargetExports(" & actionRef &
+          ".id, " & escForCode(toolId) & ", implicitNames, " &
+          escForCode(command.sourceFile) & ", " &
+          $command.sourceLine & ")\n")
+    else:
+      result.add(emitTargetNameWiring(
+        packageNameLit = escForCode(toolId),
+        outputFlags = command.outputFlags,
+        params = command.params,
+        hookProcName = "",
+        hookCallTypeRepr = "",
+        sourceFileLit = escForCode(command.sourceFile),
+        sourceLineLit = $command.sourceLine))
 
 macro defineCliInterface*(toolSymbol: untyped;
                           toolId: static string;

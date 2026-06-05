@@ -142,6 +142,14 @@ while IFS= read -r -d '' test_file; do
     libs/repro_build_engine/tests/t_engine_target_export_*|*/libs/repro_build_engine/tests/t_engine_target_export_*)
       extra_flags+=("--define:reproProviderMode")
       ;;
+    # Typed-Outputs M1 engine tests: same gate as the Named-Targets M1
+    # ``t_engine_*`` suites — invoke ``buildPackageFragment`` directly
+    # to assert against the normalized provider-graph artifact (the
+    # typed-output payload entries + the method-call-dispatch edge).
+    libs/repro_build_engine/tests/t_engine_typed_output_*|*/libs/repro_build_engine/tests/t_engine_typed_output_*|\
+    libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_*|*/libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_*)
+      extra_flags+=("--define:reproProviderMode")
+      ;;
     # Named-Targets M2 ambiguity resolver test: builds two fragments
     # via ``buildPackageFragment`` (provider-mode-gated) so it asserts
     # the cross-package resolver path in-process without standing up

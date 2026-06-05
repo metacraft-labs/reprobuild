@@ -225,6 +225,21 @@ type
     packageName*: string
     executableName*: string
 
+  BuildActionTypedOutput* = object
+    ## Typed-Outputs M1: one entry per typed ``outputs <field> is
+    ## <Type>..., <pathExpr>`` declaration that fires at a typed-tool
+    ## call site. The wrapper proc evaluates the ``pathExpr`` against
+    ## the call-site flag values and records the resulting path here
+    ## together with the declared field name and type identifiers.
+    ##
+    ## Downstream consumers (the CLI resolver, ``repro why``, the
+    ## codetracer ``repro test`` integration) read this list directly
+    ## off the build edge to identify outputs implementing interfaces
+    ## like ``TestBinary`` without re-parsing the DSL.
+    fieldName*: string
+    types*: seq[string]
+    path*: string
+
   BuildActionDef* = object
     id*: string
     call*: PublicCliCall
@@ -247,6 +262,15 @@ type
       ## the executable defines an ``implicitTargetName`` hook the
       ## first (canonical) entry is replaced by the hook's return value;
       ## auxiliary entries from additional output flags remain.
+    typedOutputs*: seq[BuildActionTypedOutput]
+      ## Typed-Outputs M1: per-output (fieldName, types, path) entries
+      ## populated at typed-tool wrapper-proc emission time. The
+      ## ``path`` value is the runtime evaluation of the declared
+      ## ``pathExpr`` against the call's flag values. Carries through
+      ## the payload codec (v12+) so the engine and downstream
+      ## consumers can identify framework-specific outputs (e.g.
+      ## those implementing ``TestBinary``) without re-parsing the
+      ## DSL.
     sourceFile*: string
     sourceLine*: int
 

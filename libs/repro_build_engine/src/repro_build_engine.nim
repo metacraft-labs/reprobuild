@@ -51,6 +51,15 @@ type
     # diagnostic rather than silently no-op'ing.
     bakWorkspaceVcs
 
+  EngineTypedOutput* = object
+    ## Typed-Outputs M1: engine-side mirror of
+    ## ``repro_project_dsl.BuildActionTypedOutput``. Decoupled by a
+    ## distinct type so the engine doesn't take a hard dependency on
+    ## the project-DSL package.
+    fieldName*: string
+    types*: seq[string]
+    path*: string
+
   BuildAction* = object
     kind*: BuildActionKind
     id*: string
@@ -82,6 +91,14 @@ type
       ## hook. Engine-internal constructors leave this empty —
       ## anonymous edges remain selectable via the existing
       ## ``<path>[#<action>]`` fragment form.
+    typedOutputs*: seq[EngineTypedOutput]
+      ## Typed-Outputs M1: per-output (fieldName, types, path) entries
+      ## populated when the DSL lowering decodes a ``BuildActionDef``
+      ## carrying typed-output declarations (``outputs <field> is
+      ## <Type>..., <pathExpr>``). Downstream consumers (CLI resolver,
+      ## ``repro why``, the codetracer ``repro test`` integration)
+      ## identify framework-specific outputs by interface tag from
+      ## this list rather than re-parsing the DSL.
 
   BuildPool* = object
     name*: string

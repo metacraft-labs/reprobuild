@@ -14,6 +14,10 @@ import repro_project_dsl
 # references. ``object`` is enough; the test asserts via
 ## ``typeof(edge.testBinary) is NimUnittestBinary``.
 type NimUnittestBinary* = object
+  ## Typed-Outputs M1 update: the wrapper now binds the typed field via
+  ## ``NimUnittestBinary(path: <pathExpr>)``, so the type must carry a
+  ## ``path`` field.
+  path*: string
 
 package tDslOutputsTypedFieldEmittedPkg:
   executable buildNimUnittest:

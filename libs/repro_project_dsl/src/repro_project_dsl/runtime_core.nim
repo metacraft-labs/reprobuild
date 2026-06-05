@@ -60,12 +60,17 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 11'u16
-    ## v11: Named-Targets M1 — appends ``targetNames: seq[string]`` after
-    ## the action cache policy so the engine and downstream consumers
-    ## see the same implicit-name set as the project-scoped export
-    ## table. Older payloads (v1..v10) decode with an empty
-    ## ``targetNames`` list.
+  BuildActionPayloadVersion = 12'u16
+    ## v12: Typed-Outputs M1 — appends a length-prefixed list of
+    ## ``BuildActionTypedOutput`` entries after ``targetNames``. Each
+    ## entry serialises ``fieldName: string``, ``types: seq[string]``,
+    ## ``path: string`` so engine consumers can identify typed
+    ## outputs (e.g. ``TestBinary``) without re-parsing the DSL.
+    ## v11 payloads decode with an empty ``typedOutputs`` list.
+    ##
+    ## v11: Named-Targets M1 — appended ``targetNames: seq[string]``
+    ## after the action cache policy. Older payloads (v1..v10) decode
+    ## with an empty ``targetNames`` list.
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
   BuildTargetPayloadVersion = 2'u16
@@ -921,6 +926,25 @@ proc setRegisteredActionTargetNames*(actionId: string;
       buildActionRegistry[i].targetNames = @names
       return
 
+proc appendRegisteredActionTypedOutput*(actionId: string;
+                                        fieldName: string;
+                                        types: openArray[string];
+                                        path: string) {.dynOrStatic.} =
+  ## Typed-Outputs M1: append one ``BuildActionTypedOutput`` row to the
+  ## registry entry's ``typedOutputs`` list. The typed-tool wrapper
+  ## proc calls this once per ``TypedOutputDef`` immediately after
+  ## ``recordToolInvocation`` so the engine artifact carries the
+  ## resolved (fieldName, types, path) triple. No-op when the id is
+  ## not present (defensive — same shape as
+  ## ``setRegisteredActionTargetNames``).
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].typedOutputs.add(BuildActionTypedOutput(
+        fieldName: fieldName,
+        types: @types,
+        path: path))
+      return
+
 proc recordToolInvocation*(id: string; call: PublicCliCall;
                            deps: openArray[string] = [];
                            extraInputs: openArray[string] = [];
@@ -1360,6 +1384,12 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   payload.writeActionCachePolicy(action.actionCachePolicy)
   # v11: Named-Targets M1 implicit target names.
   payload.writeStringSeq(action.targetNames)
+  # v12: Typed-Outputs M1 per-output typed entries.
+  payload.writeU32Le(uint32(action.typedOutputs.len))
+  for typedOutput in action.typedOutputs:
+    payload.writeString(typedOutput.fieldName)
+    payload.writeStringSeq(typedOutput.types)
+    payload.writeString(typedOutput.path)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -1375,7 +1405,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      9'u16, 10'u16, BuildActionPayloadVersion}:
+      9'u16, 10'u16, 11'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -1406,6 +1436,13 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.actionCachePolicy = defaultActionCachePolicy()
   if version >= 11'u16:
     result.targetNames = readStringSeq(bytes, pos)
+  if version >= 12'u16:
+    let typedOutputCount = int(readU32Le(bytes, pos))
+    result.typedOutputs = newSeq[BuildActionTypedOutput](typedOutputCount)
+    for i in 0 ..< typedOutputCount:
+      result.typedOutputs[i].fieldName = readString(bytes, pos)
+      result.typedOutputs[i].types = readStringSeq(bytes, pos)
+      result.typedOutputs[i].path = readString(bytes, pos)
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

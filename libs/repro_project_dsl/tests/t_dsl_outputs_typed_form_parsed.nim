@@ -14,6 +14,11 @@ import repro_project_dsl
 # references. M0 only needs the identifier to resolve at the call site;
 # M1 will populate the field's runtime value.
 type NimUnittestBinary = object
+  ## Typed-Outputs M1: the typed-tool wrapper now constructs the typed
+  ## handle via ``NimUnittestBinary(path: <pathExpr>)`` so the type
+  ## must expose a ``path`` field. The M0 test only asserted the
+  ## compile-time shape; the M1 binding requires this field.
+  path: string
 
 package tDslOutputsTypedFormParsedPkg:
   executable buildNimUnittest:
