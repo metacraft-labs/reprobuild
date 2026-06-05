@@ -77,7 +77,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
           programName &
       " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
@@ -299,6 +299,109 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
 
 proc moduleForTarget(target: string): string =
   parseBuildTarget(target).modulePath
+
+type
+  BuildSelectorKind* = enum
+    ## Named-Targets M2: how a positional ``repro build`` argument is
+    ## interpreted by the resolver. The path / fragment forms preserve
+    ## the legacy ``parseBuildTarget`` behavior; the name forms go
+    ## through the project's M1 target-export table.
+    bskPath        ## Path / directory / fragment selector (legacy form).
+    bskName        ## Unqualified implicit or explicit target name.
+    bskQualified   ## ``<package>:<name>`` cross-package disambiguator.
+
+  ClassifiedBuildSelector* = object
+    raw*: string
+    kind*: BuildSelectorKind
+    package*: string  ## Only set for ``bskQualified``.
+    name*: string     ## ``bskName``: the bare name. ``bskQualified``:
+                      ## the post-``:`` half. ``bskPath``: empty.
+
+  BuildTargetAmbiguousError* = object of CatchableError
+    ## Raised by the M2 resolver when a name selector matches more than
+    ## one package. The CLI top-level catches this and exits 2 with
+    ## ``target_ambiguous`` diagnostic listing the qualified candidates.
+    selectorName*: string
+    candidates*: seq[string]
+
+  BuildTargetUnknownError* = object of CatchableError
+    ## Raised by the M2 resolver when a name selector matches no edge.
+    ## The CLI top-level catches this and exits 2 with the
+    ## ``unknown_target`` diagnostic and Levenshtein candidates.
+    selectorName*: string
+    suggestions*: seq[string]
+
+proc renderAmbiguousTargetDiagnostic*(err: BuildTargetAmbiguousError): string =
+  ## Named-Targets M2 ``target_ambiguous`` stderr diagnostic. Shared by
+  ## the top-level CLI dispatch arm and the daemon-side
+  ## ``installUserDaemonBuildExecutor`` hook so the two code paths
+  ## cannot drift. Lines are terminated with ``\n`` and the returned
+  ## string ends with a trailing newline, matching the ``writeLine``
+  ## semantics of the original direct-mode emission.
+  result.add("repro build: error: target_ambiguous: target '")
+  result.add(err.selectorName)
+  result.add("' is exported by multiple packages\n")
+  result.add("repro build: candidates:\n")
+  for cand in err.candidates:
+    result.add("  ")
+    result.add(cand)
+    result.add('\n')
+  result.add("repro build: hint: re-run with the qualified " &
+    "<package>:<name> form\n")
+
+proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
+  ## Named-Targets M2 ``unknown_target`` stderr diagnostic. Shared by
+  ## the top-level CLI dispatch arm and the daemon-side
+  ## ``installUserDaemonBuildExecutor`` hook so the two code paths
+  ## cannot drift. Lines are terminated with ``\n`` and the returned
+  ## string ends with a trailing newline.
+  result.add("repro build: error: unknown_target: no build target matches '")
+  result.add(err.selectorName)
+  result.add("'\n")
+  if err.suggestions.len > 0:
+    result.add("repro build: did you mean:\n")
+    for cand in err.suggestions:
+      result.add("  ")
+      result.add(cand)
+      result.add('\n')
+
+proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
+  ## Named-Targets M2 / [CLI/build.md §"Target Selection"] discriminator.
+  ## A selector is a *path / fragment* selector when ANY of these holds:
+  ## - it contains ``/`` or ``\\`` (path separator),
+  ## - it contains ``.`` (file extension or relative-path marker),
+  ## - it contains ``#`` (fragment selector),
+  ## - it names an existing path on disk (file or directory).
+  ##
+  ## Otherwise it is a *name* selector. Names containing a single ``:``
+  ## (and no other special chars) are treated as the qualified
+  ## ``<package>:<name>`` form so M2 can disambiguate cross-package
+  ## collisions even though M5 fully polishes the surface.
+  result = ClassifiedBuildSelector(raw: raw)
+  if raw.len == 0:
+    result.kind = bskPath
+    return
+  for ch in raw:
+    if ch == '/' or ch == '\\' or ch == '.' or ch == '#':
+      result.kind = bskPath
+      return
+  if fileExists(extendedPath(raw)) or dirExists(extendedPath(raw)):
+    result.kind = bskPath
+    return
+  let colon = raw.find(':')
+  if colon > 0 and colon < raw.high:
+    # ``<package>:<name>`` qualified form. Only accept when neither half
+    # is empty AND there's exactly one ``:`` (so Windows drive letters
+    # like ``C:\foo`` already get filtered by the path-shape check
+    # above on ``\\``).
+    let secondColon = raw.find(':', colon + 1)
+    if secondColon < 0:
+      result.kind = bskQualified
+      result.package = raw[0 ..< colon]
+      result.name = raw[colon + 1 .. ^1]
+      return
+  result.kind = bskName
+  result.name = raw
 
 proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
   let workRoot = configuredWorkRoot(explicitWorkRoot)
@@ -1135,11 +1238,100 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       else:
         @[])
 
-proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
-                           identity: PathOnlyBuildIdentity;
-                           projectRoot: string;
-                           selectedActionId = ""):
+proc levenshtein(a, b: string): int =
+  ## Named-Targets M2 ``unknown_target`` diagnostic helper. A small
+  ## inline edit-distance implementation rather than ``std/editdistance``
+  ## so the resolver stays self-contained and predictable across the
+  ## CLI's existing import surface. O(len(a)*len(b)) time / O(len(b))
+  ## extra memory; the resolver only ever calls this against the
+  ## handful of names in the project's target-export table.
+  if a.len == 0: return b.len
+  if b.len == 0: return a.len
+  var prev = newSeq[int](b.len + 1)
+  var curr = newSeq[int](b.len + 1)
+  for j in 0 .. b.len:
+    prev[j] = j
+  for i in 1 .. a.len:
+    curr[0] = i
+    for j in 1 .. b.len:
+      let cost =
+        if a[i - 1] == b[j - 1]: 0
+        else: 1
+      var v = prev[j] + 1
+      if curr[j - 1] + 1 < v:
+        v = curr[j - 1] + 1
+      if prev[j - 1] + cost < v:
+        v = prev[j - 1] + cost
+      curr[j] = v
+    swap(prev, curr)
+  prev[b.len]
+
+proc topLevenshteinCandidates(query: string; candidates: openArray[string];
+                              limit = 3): seq[string] =
+  ## Return up to ``limit`` candidate names from ``candidates`` ordered
+  ## by ascending Levenshtein distance to ``query``. Used by the M2
+  ## ``unknown_target`` diagnostic.
+  if candidates.len == 0:
+    return @[]
+  var scored: seq[tuple[name: string; dist: int]] = @[]
+  for name in candidates:
+    scored.add((name: name, dist: levenshtein(query, name)))
+  scored.sort(proc(a, b: tuple[name: string; dist: int]): int =
+    if a.dist != b.dist: a.dist - b.dist
+    else: cmp(a.name, b.name))
+  for i in 0 ..< min(limit, scored.len):
+    result.add(scored[i].name)
+
+proc aggregateTargetExportTable*(snapshot: ProviderGraphSnapshot):
+    TargetExportTable =
+  ## Named-Targets M2 aggregation: ``buildPackageFragment`` runs per
+  ## package in isolation, so each fragment carries only the rows
+  ## emitted while that package's ``build:`` body was running. The M2
+  ## resolver needs a project-scoped view, so this proc walks every
+  ## fragment's ``reprobuild.target-export-table.v1`` metadata node and
+  ## merges the rows. Cross-package ambiguity is re-computed here
+  ## because per-fragment ambiguity records only see same-name within a
+  ## single package's call set.
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.target-export-table.v1":
+        let perPackage = decodeTargetExportTablePayload(toBytes(node.payload))
+        for entry in perPackage.entries:
+          result.entries.add(entry)
+  # Re-derive cross-package ambiguity over the unioned rows. A name is
+  # ambiguous when two or more distinct ``owningPackage`` values claim
+  # it. Per-fragment ambiguities (same-name collisions within one
+  # package) are already raised as build-time errors at M1, so they
+  # never reach M2.
+  var packagesByName = initTable[string, seq[string]]()
+  for entry in result.entries:
+    if not packagesByName.hasKey(entry.name):
+      packagesByName[entry.name] = @[]
+    if packagesByName[entry.name].find(entry.owningPackage) < 0:
+      packagesByName[entry.name].add(entry.owningPackage)
+  for name, pkgs in packagesByName.pairs:
+    if pkgs.len >= 2:
+      var candidates: seq[string] = @[]
+      for pkg in pkgs:
+        candidates.add(pkg & ":" & name)
+      candidates.sort()
+      result.ambiguities.add(TargetExportAmbiguity(name: name,
+        candidates: candidates))
+
+proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
+                            identity: PathOnlyBuildIdentity;
+                            projectRoot: string;
+                            selectedActionIds: openArray[string]):
     tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
+  ## Named-Targets M2: accept multiple selectors and union their
+  ## dependency closures in a single engine pass. Each selector may be
+  ## an action id, an explicit ``target "name", handle`` label, an
+  ## implicit target name carried by the M1 export table, or a
+  ## qualified ``<package>:<name>`` form. When a selector matches more
+  ## than one package, raises ``BuildTargetAmbiguousError``. When it
+  ## matches no edge, raises ``BuildTargetUnknownError`` with up to
+  ## three closest known names.
   let profiles = profileIndex(identity)
   let actionPathPrefix = toolPathPrefix(profiles)
   var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
@@ -1196,7 +1388,15 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
     node.payload = actionPayload(publicPayload(item.payload))
     lowerGraphAction(node, profiles, projectRoot, actionPathPrefix)
 
-  if selectedActionId.len == 0:
+  # When no selector is provided, schedule every emitted edge — the
+  # legacy "build everything" behavior preserved from the single-target
+  # entry point.
+  var hasSelector = false
+  for s in selectedActionIds:
+    if s.len > 0:
+      hasSelector = true
+      break
+  if not hasSelector:
     for item in actionNodes:
       result.actions.add(lowerItem(item))
     return
@@ -1204,30 +1404,111 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
   var byId = initTable[string, BuildActionDef]()
   for item in actionNodes:
     byId[item.payload.id] = item.payload
-  if not byId.hasKey(selectedActionId) and
-      not targets.hasKey(selectedActionId):
-    var available: seq[string] = @[]
+
+  # Named-Targets M2: aggregate every fragment's target-export table
+  # into one project-scoped view. Cross-package ambiguity is re-derived
+  # over the unioned rows because per-fragment ambiguity records only
+  # see same-name collisions within one package's call set.
+  let exportTable = aggregateTargetExportTable(snapshot)
+  var entriesByQualified = initTable[string, TargetExportEntry]()
+  var entriesByName = initTable[string, seq[TargetExportEntry]]()
+  for entry in exportTable.entries:
+    let qualified = entry.owningPackage & ":" & entry.name
+    if not entriesByQualified.hasKey(qualified):
+      entriesByQualified[qualified] = entry
+    if not entriesByName.hasKey(entry.name):
+      entriesByName[entry.name] = @[]
+    entriesByName[entry.name].add(entry)
+
+  proc resolveSelectorToActionId(selector: string): string =
+    ## Returns the action id (or explicit target name) the selector
+    ## resolves to. Raises ``BuildTargetAmbiguousError`` or
+    ## ``BuildTargetUnknownError`` per the M2 diagnostic contract.
+    # Try qualified ``<package>:<name>`` first — the form the
+    # ambiguity diagnostic asks the user to re-run with.
+    let colon = selector.find(':')
+    if colon > 0 and colon < selector.high:
+      if entriesByQualified.hasKey(selector):
+        return entriesByQualified[selector].actionId
+      # When the qualified form doesn't match a row, fall through to
+      # the unqualified path below so we still attempt action-id /
+      # explicit-target lookup (preserving the legacy behavior for
+      # action ids that happen to contain a ``:``).
+
+    # Existing action id (legacy ``parseBuildTarget`` ``#<id>`` form).
+    if byId.hasKey(selector):
+      return selector
+    # Existing ``target "name", handle`` label.
+    if targets.hasKey(selector):
+      return selector
+
+    # M2 implicit / explicit target-name lookup.
+    if entriesByName.hasKey(selector):
+      var ownerPackages: seq[string] = @[]
+      var lastEntry: TargetExportEntry
+      for entry in entriesByName[selector]:
+        if ownerPackages.find(entry.owningPackage) < 0:
+          ownerPackages.add(entry.owningPackage)
+        lastEntry = entry
+      if ownerPackages.len > 1:
+        var candidates: seq[string] = @[]
+        for pkg in ownerPackages:
+          candidates.add(pkg & ":" & selector)
+        candidates.sort()
+        var err = newException(BuildTargetAmbiguousError,
+          "target '" & selector & "' is exported by multiple packages: " &
+            candidates.join(", ") &
+            " — re-run with the qualified <package>:<name> form")
+        err.selectorName = selector
+        err.candidates = candidates
+        raise err
+      return lastEntry.actionId
+
+    # Nothing matched — surface ``unknown_target`` with Levenshtein
+    # suggestions over the known action ids, explicit target labels,
+    # and implicit names.
+    var known: seq[string] = @[]
     for item in actionNodes:
-      available.add(item.payload.id)
-    for target in targets.values:
-      available.add(target.name)
-    available.sort()
-    raise newException(ValueError,
-      "unknown build target/action id: " & selectedActionId &
-        (if available.len > 0:
-          " (available: " & available.join(", ") & ")"
+      if known.find(item.payload.id) < 0:
+        known.add(item.payload.id)
+    for name in targets.keys:
+      if known.find(name) < 0:
+        known.add(name)
+    for name in entriesByName.keys:
+      if known.find(name) < 0:
+        known.add(name)
+    let suggestions = topLevenshteinCandidates(selector, known)
+    var err = newException(BuildTargetUnknownError,
+      "unknown build target: " & selector &
+        (if suggestions.len > 0:
+          " (did you mean: " & suggestions.join(", ") & "?)"
+        elif known.len > 0:
+          " (available: " & known.join(", ") & ")"
         else: " (project defines no build actions or targets)"))
+    err.selectorName = selector
+    err.suggestions = suggestions
+    raise err
+
+  var resolvedRoots: seq[string] = @[]
+  for selector in selectedActionIds:
+    if selector.len == 0:
+      continue
+    let resolved = resolveSelectorToActionId(selector)
+    if resolvedRoots.find(resolved) < 0:
+      resolvedRoots.add(resolved)
 
   var selected = initHashSet[string]()
   var visitingTargets = initHashSet[string]()
   var expandedTargets = initHashSet[string]()
+  var currentSelector = ""
+
   proc includeClosure(actionId: string) =
     if selected.contains(actionId):
       return
     if not byId.hasKey(actionId):
       raise newException(ValueError,
         "unknown dependency " & actionId & " while selecting build target " &
-          selectedActionId)
+          currentSelector)
     selected.incl(actionId)
     for dep in byId[actionId].deps:
       includeClosure(dep)
@@ -1241,7 +1522,7 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
     if not targets.hasKey(targetName):
       raise newException(ValueError,
         "unknown build target " & targetName & " while selecting " &
-          selectedActionId)
+          currentSelector)
     visitingTargets.incl(targetName)
     let target = targets[targetName]
     for depTarget in target.targets:
@@ -1251,13 +1532,29 @@ proc lowerProviderSnapshot(snapshot: ProviderGraphSnapshot;
     visitingTargets.excl(targetName)
     expandedTargets.incl(targetName)
 
-  if targets.hasKey(selectedActionId):
-    includeTarget(selectedActionId)
-  else:
-    includeClosure(selectedActionId)
+  for root in resolvedRoots:
+    currentSelector = root
+    if targets.hasKey(root):
+      includeTarget(root)
+    else:
+      includeClosure(root)
   for item in actionNodes:
     if selected.contains(item.payload.id):
       result.actions.add(lowerItem(item))
+
+proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
+                            identity: PathOnlyBuildIdentity;
+                            projectRoot: string;
+                            selectedActionId = ""):
+    tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
+  ## Single-selector entry point preserved for the existing call sites
+  ## (graph / why / etc.). The Named-Targets M2 multi-selector resolver
+  ## lives on the ``openArray[string]`` overload above; this wrapper
+  ## delegates to it with a one-element selector list.
+  if selectedActionId.len == 0:
+    lowerProviderSnapshot(snapshot, identity, projectRoot, [""])
+  else:
+    lowerProviderSnapshot(snapshot, identity, projectRoot, [selectedActionId])
 
 proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
   for fragment in snapshot.fragments:
@@ -3157,8 +3454,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         bypassRunQuotaExplicit = false;
                         benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
-                        cancelCheck: BuildCancelCallback = nil):
+                        cancelCheck: BuildCancelCallback = nil;
+                        extraNameSelectors: seq[string] = @[]):
     BuildCommandOutcome =
+  ## ``extraNameSelectors`` carries the Named-Targets M2 name-shaped
+  ## positional arguments AFTER the first positional has been folded
+  ## into ``target``. They join the closure union inside
+  ## ``lowerProviderSnapshot`` so multi-target ``repro build`` runs in
+  ## a single engine pass. Path-shaped positionals stay on the legacy
+  ## one-call-per-target path (handled in ``runBuildCommand``).
   # Configure-level aggregation: when REPRO_STATS_DIR is set, each repro
   # build invocation drops a JSON record into that directory. The companion
   # ``scripts/aggregate-stats.py`` script rolls them up into a single
@@ -3593,8 +3897,22 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         logSummary("defaultTarget: " & selectedActionId)
     let graphLowerStart = statStart(statsEnabled)
     progressRenderer.renderPhase("lowering trycompile graph")
-    let lowered = lowerProviderSnapshot(refresh.snapshot, synthIdentity,
-      result.projectRoot, selectedActionId)
+    # Named-Targets M2: union the first selector (action id or default)
+    # with any extra name-shaped positional selectors so the closure
+    # is computed once.
+    var selectorList: seq[string] = @[]
+    if selectedActionId.len > 0:
+      selectorList.add(selectedActionId)
+    for extra in extraNameSelectors:
+      if extra.len > 0 and selectorList.find(extra) < 0:
+        selectorList.add(extra)
+    let lowered =
+      if selectorList.len == 0:
+        lowerProviderSnapshot(refresh.snapshot, synthIdentity,
+          result.projectRoot, "")
+      else:
+        lowerProviderSnapshot(refresh.snapshot, synthIdentity,
+          result.projectRoot, selectorList)
     finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
     if prepareOnly:
       # PrimeProviderMetadata's prepare-only invocation used to compile
@@ -3689,8 +4007,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           logSummary("defaultTarget: " & selectedActionId)
       let graphLowerStart = statStart(statsEnabled)
       progressRenderer.renderPhase("lowering standard provider graph")
-      let lowered = lowerProviderSnapshot(refresh.snapshot, synthIdentity,
-        result.projectRoot, selectedActionId)
+      # Named-Targets M2 multi-selector union (see trycompile branch above).
+      var selectorList: seq[string] = @[]
+      if selectedActionId.len > 0:
+        selectorList.add(selectedActionId)
+      for extra in extraNameSelectors:
+        if extra.len > 0 and selectorList.find(extra) < 0:
+          selectorList.add(extra)
+      let lowered =
+        if selectorList.len == 0:
+          lowerProviderSnapshot(refresh.snapshot, synthIdentity,
+            result.projectRoot, "")
+        else:
+          lowerProviderSnapshot(refresh.snapshot, synthIdentity,
+            result.projectRoot, selectorList)
       finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
       result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
       return
@@ -3846,12 +4176,25 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if selectedActionId.len > 0:
         logSummary("defaultTarget: " & selectedActionId)
 
+    # Named-Targets M2: union the first selector with any extra
+    # name-shaped positional selectors for the lowering pass. The
+    # lowered-graph cache is keyed by a single ``selectedActionId``, so
+    # when extra selectors are present we skip the cache and recompute
+    # — the cache schema upgrade to keyed-on-selector-set is M5 work.
+    var selectorList: seq[string] = @[]
+    if selectedActionId.len > 0:
+      selectorList.add(selectedActionId)
+    for extra in extraNameSelectors:
+      if extra.len > 0 and selectorList.find(extra) < 0:
+        selectorList.add(extra)
+    let multiTarget = extraNameSelectors.len > 0
+
     let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv)
     let graphCacheReadStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
     let cachedLowered =
-      if forceRebuild:
+      if forceRebuild or multiTarget:
         none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
       else:
         warmReadFreshLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
@@ -3865,16 +4208,22 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       else:
         let graphLowerStart = statStart(statsEnabled)
         progressRenderer.renderPhase("lowering project graph")
-        let computed = lowerProviderSnapshot(refresh.snapshot, identity,
-          projectRoot, selectedActionId)
+        let computed =
+          if selectorList.len == 0:
+            lowerProviderSnapshot(refresh.snapshot, identity,
+              projectRoot, "")
+          else:
+            lowerProviderSnapshot(refresh.snapshot, identity,
+              projectRoot, selectorList)
         finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
         let cacheWriteStart = statStart(statsEnabled)
-        writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
-          modulePath, projectRoot, selectedActionId, pathEnv, graphCacheKey,
-          computed)
-        if selectDefaultAction and parsedTarget.selectedActionId.len == 0:
-          writeLoweredGraphCache(loweredGraphCachePath(outDir, ""), modulePath,
-            projectRoot, "", pathEnv, graphCacheKey, computed)
+        if not multiTarget:
+          writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
+            modulePath, projectRoot, selectedActionId, pathEnv, graphCacheKey,
+            computed)
+          if selectDefaultAction and parsedTarget.selectedActionId.len == 0:
+            writeLoweredGraphCache(loweredGraphCachePath(outDir, ""), modulePath,
+              projectRoot, "", pathEnv, graphCacheKey, computed)
         finishStat(buildStats, statsEnabled, "repro lowered graph cache write",
           cacheWriteStart)
         computed
@@ -8028,6 +8377,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      cancelCheck: BuildCancelCallback = nil): int =
   let originalArgs = @args
   var target = ""
+  var positionalSelectors: seq[string] = @[]
   var mode = tpmUnspecified
   var workRoot = ""
   var daemonMode = bdmAuto
@@ -8116,14 +8466,67 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       bypassRunQuota = false
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported build flag: " & arg)
-    elif target.len == 0:
-      target = arg
     else:
-      raise newException(ValueError, "unexpected build argument: " & arg)
+      # Named-Targets M2: collect every positional. Classification into
+      # path vs. name selectors happens below so the build dispatch can
+      # fold name-shaped selectors into one engine pass.
+      positionalSelectors.add(arg)
     inc i
 
-  let targetWasOmitted = target.len == 0
-  if targetWasOmitted:
+  # ----------------------------------------------------------------
+  # Named-Targets M2 positional resolution. Classify every selector
+  # via ``classifyBuildSelector``; the first path-shaped selector (or
+  # the current directory when there's none) becomes the engine's
+  # project anchor, and every name-shaped selector contributes its
+  # closure to ``extraNameSelectors`` so the build runs in one pass.
+  # ----------------------------------------------------------------
+  var extraNameSelectors: seq[string] = @[]
+  if positionalSelectors.len == 0:
+    target = ""
+  else:
+    var anchorSet = false
+    var firstNameSelector = ""
+    for sel in positionalSelectors:
+      let classified = classifyBuildSelector(sel)
+      case classified.kind
+      of bskPath:
+        if not anchorSet:
+          target = sel
+          anchorSet = true
+        else:
+          # Multiple path-shaped selectors against the same engine pass
+          # is out of scope for M2 (the engine still expects exactly one
+          # project anchor). Reject explicitly rather than silently
+          # dropping the extra.
+          raise newException(ValueError,
+            "repro build: multiple path / fragment selectors are not " &
+              "supported in M2 (got '" & target & "' and '" & sel &
+              "'); name-shaped selectors may follow a single path anchor")
+      of bskName, bskQualified:
+        if not anchorSet and firstNameSelector.len == 0:
+          firstNameSelector = sel
+        else:
+          if extraNameSelectors.find(sel) < 0:
+            extraNameSelectors.add(sel)
+    if not anchorSet:
+      # All selectors are name-shaped. Anchor the build at the current
+      # directory and let ``parseBuildTarget`` route the first name
+      # through the fragment / action-selection codepath. The remaining
+      # names go into ``extraNameSelectors`` so the lowering pass takes
+      # their union.
+      if firstNameSelector.len > 0:
+        target = "." & "#" & firstNameSelector
+      else:
+        target = "."
+    elif firstNameSelector.len > 0 and extraNameSelectors.find(firstNameSelector) < 0:
+      # Path anchor + name selectors: the path is the project root, and
+      # every name selector contributes its closure on top.
+      extraNameSelectors.add(firstNameSelector)
+
+  let targetWasOmitted = target.len == 0 or
+    (target == "." and extraNameSelectors.len == 0 and
+      positionalSelectors.len == 0)
+  if target.len == 0:
     target = "."
 
   if not daemonModeExplicit:
@@ -8211,7 +8614,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         bypassRunQuotaExplicit = bypassRunQuota,
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
-        cancelCheck = cancelCheck).exitCode
+        cancelCheck = cancelCheck,
+        extraNameSelectors = extraNameSelectors).exitCode
       if statsCapture.enabled and daemonHosted:
         enqueueStatsObservation(scgSessions, "build-finish", %*{
           "exitCode": result
@@ -12580,11 +12984,40 @@ proc installUserDaemonBuildExecutor() =
         emit(eventKind, message, false, 0, "info", payloadJson)
       proc buildCancelRequested(): bool =
         cancelCheck != nil and cancelCheck()
-      result = runBuildCommand(request.rawArgs, cliPath,
-        forceDirect = true,
-        daemonHosted = true,
-        eventSink = emitBuildCommandEvent,
-        cancelCheck = buildCancelRequested)
+      try:
+        result = runBuildCommand(request.rawArgs, cliPath,
+          forceDirect = true,
+          daemonHosted = true,
+          eventSink = emitBuildCommandEvent,
+          cancelCheck = buildCancelRequested)
+      except BuildTargetAmbiguousError as err:
+        # Named-Targets M2: mirror the top-level CLI dispatch arm's
+        # ``target_ambiguous`` translation inside the daemon-side
+        # executor so the daemon-hosted path produces identical exit
+        # code 2 + stderr text. The diagnostic is emitted as a
+        # ``bekDiagnostic`` event carrying ``"stream":"stderr"`` in
+        # its payload; the client-side ``runDaemonBuild`` event
+        # handler routes such events verbatim to stderr. The
+        # following ``bekFinished`` is emitted with ``terminal=true``
+        # and exit code 2 so the daemon's terminal-emit guard
+        # suppresses the generic "daemon-hosted build failed" line
+        # that would otherwise tail the diagnostic.
+        emit(bekDiagnostic, renderAmbiguousTargetDiagnostic(err[]),
+          false, 0, "error",
+          "{\"stream\":\"stderr\",\"diagnostic\":\"target_ambiguous\"}")
+        emit(bekFinished, "", true, 2, "error",
+          "{\"diagnostic\":\"target_ambiguous\"}")
+        result = 2
+      except BuildTargetUnknownError as err:
+        # Named-Targets M2: same translation for the
+        # ``unknown_target`` diagnostic. Shared formatter keeps the
+        # daemon-hosted and direct-mode emissions byte-identical.
+        emit(bekDiagnostic, renderUnknownTargetDiagnostic(err[]),
+          false, 0, "error",
+          "{\"stream\":\"stderr\",\"diagnostic\":\"unknown_target\"}")
+        emit(bekFinished, "", true, 2, "error",
+          "{\"diagnostic\":\"unknown_target\"}")
+        result = 2
     finally:
       try:
         setCurrentDir(previousCwd)
@@ -18315,6 +18748,22 @@ proc runThinApp*(programName: string): int =
         else:
           @[]
       return runBuildCommand(buildArgs, publicCliPath)
+    except BuildTargetAmbiguousError as err:
+      # Named-Targets M2 ``target_ambiguous`` diagnostic. Exit 2 per the
+      # CLI-build §"Target Selection" contract; the message names the
+      # qualified candidates so the user can re-run with the
+      # ``<package>:<name>`` form. The diagnostic text is rendered by a
+      # shared helper so the daemon-side translation in
+      # ``installUserDaemonBuildExecutor`` produces identical bytes.
+      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+      return 2
+    except BuildTargetUnknownError as err:
+      # Named-Targets M2 ``unknown_target`` diagnostic. Exit 2 with
+      # Levenshtein top-3 suggestions when the project's target-export
+      # table has near-matches. Text rendered by the shared helper that
+      # the daemon-side hook also calls.
+      stderr.write(renderUnknownTargetDiagnostic(err[]))
+      return 2
     except CatchableError as err:
       stderr.writeLine("repro build: error: " & err.msg)
       return 1

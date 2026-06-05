@@ -785,9 +785,19 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
       else: "daemon-hosted build failed"
     updateSessionState(config, session,
       if exitCode == 0: "succeeded" else: "failed", exitCode, message)
-    emit(bekFinished, message, true, exitCode,
-      if exitCode == 0: "info" else: "error",
-      "{\"executor\":\"direct-build-entrypoint\"}")
+    if not terminalSent:
+      # The executor may have already emitted its own terminal event
+      # carrying a domain-specific message (e.g. the Named-Targets M2
+      # ``unknown_target`` / ``target_ambiguous`` translation in
+      # ``installUserDaemonBuildExecutor``). When it has, we MUST NOT
+      # tail the diagnostic with the generic "daemon-hosted build
+      # failed" status line — the client-side stderr router would
+      # surface that as a second, contradicting error line. Honour
+      # ``terminalSent`` and skip the generic emit in that case;
+      # the session state update above still records the outcome.
+      emit(bekFinished, message, true, exitCode,
+        if exitCode == 0: "info" else: "error",
+        "{\"executor\":\"direct-build-entrypoint\"}")
     try: socket.closeIpcConn() except CatchableError: discard
     flushStatsAfterTerminal(config, session.sessionId)
     logLine(config.logPath, "build request finished session=" &

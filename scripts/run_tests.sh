@@ -132,6 +132,14 @@ while IFS= read -r -d '' test_file; do
     libs/repro_build_engine/tests/t_engine_target_export_*|*/libs/repro_build_engine/tests/t_engine_target_export_*)
       extra_flags+=("--define:reproProviderMode")
       ;;
+    # Named-Targets M2 ambiguity resolver test: builds two fragments
+    # via ``buildPackageFragment`` (provider-mode-gated) so it asserts
+    # the cross-package resolver path in-process without standing up
+    # the multi-fragment provider machinery. The other three M2 e2e
+    # tests are normal CLI invocations and don't need the define.
+    tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim|*/tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim)
+      extra_flags+=("--define:reproProviderMode")
+      ;;
   esac
   # Use the `${arr[@]+"${arr[@]}"}` idiom so the expansion is a no-op
   # when `extra_flags` is empty. macOS's bundled Bash 3.2.57 aborts under
