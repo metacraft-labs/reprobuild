@@ -963,10 +963,19 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
       elif exitCode == 0: "daemon-hosted watch finished"
       else: "daemon-hosted watch failed"
     updateSessionState(config, sessionRef[], state, exitCode, message)
-    emitEvent(if stopped: bekCancelled else: bekFinished, message, true,
-      exitCode, if exitCode == 0: "info" else: "error",
-      "{\"executor\":\"direct-watch-entrypoint\"}", sessionRef[].watchedPaths,
-      "exitCode=" & $exitCode)
+    if not terminalSent:
+      # Mirror the Named-Targets M2 ``runBuildRequestWorker`` guard: the
+      # executor may have already emitted its own terminal event (e.g.
+      # the M3 ``unknown_target`` / ``target_ambiguous`` translation in
+      # ``installUserDaemonWatchExecutor``). When it has, tailing a
+      # generic "daemon-hosted watch failed" line would surface as a
+      # second, contradicting error on the client. The session state
+      # update above still records the outcome.
+      emitEvent(if stopped: bekCancelled else: bekFinished, message, true,
+        exitCode, if exitCode == 0: "info" else: "error",
+        "{\"executor\":\"direct-watch-entrypoint\"}",
+        sessionRef[].watchedPaths,
+        "exitCode=" & $exitCode)
     try: socket.closeIpcConn() except CatchableError: discard
     flushStatsAfterTerminal(config, sessionRef[].sessionId)
     logLine(config.logPath, "watch request finished session=" &

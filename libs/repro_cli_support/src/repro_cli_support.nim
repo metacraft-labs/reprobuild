@@ -107,7 +107,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
           programName &
-      " watch [target[#name]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]]\n       " &
+      " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]]\n       " &
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
           programName &
@@ -402,6 +402,89 @@ proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
       return
   result.kind = bskName
   result.name = raw
+
+type
+  ResolvedPositionalSelectors* = object
+    ## Named-Targets M3 shared resolver output. ``runBuildCommand`` and
+    ## ``runWatchCommand`` both consume this so the path-vs-name
+    ## discriminator + multi-target lowering are implemented in exactly
+    ## one place.
+    target*: string
+      ## The engine's project anchor. For path-shaped positionals this
+      ## is the original selector verbatim; for name-only invocations it
+      ## is ``"."`` or ``".#<firstName>"`` so the legacy
+      ## ``parseBuildTarget`` codepath still resolves a module.
+    extraNameSelectors*: seq[string]
+      ## Name-shaped positionals beyond the first. The lowering pass in
+      ## ``lowerProviderSnapshot`` unions every selector's dependency
+      ## closure in one engine pass.
+    targetWasOmitted*: bool
+      ## True when no positional was supplied. ``runBuildCommand`` uses
+      ## this to flip ``selectDefaultAction = true``; watch sets the
+      ## same flag for the same reason.
+
+proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
+                               command: string): ResolvedPositionalSelectors =
+  ## Named-Targets M3: shared path-vs-name resolver for ``repro build``
+  ## and ``repro watch``. Mirrors the rules in
+  ## [CLI/build.md §"Target Selection"] and
+  ## [CLI/watch.md §"Target Selection"]:
+  ##
+  ## - The first positional whose ``classifyBuildSelector`` kind is
+  ##   ``bskPath`` becomes the engine's project anchor (``target``).
+  ##   A second path-shaped positional is rejected — the engine still
+  ##   expects exactly one project anchor in M3 (qualified-name +
+  ##   ``--list-targets`` polish lands in M5).
+  ## - The first name-shaped positional, when no path anchor is present,
+  ##   becomes ``".#<name>"`` so ``parseBuildTarget`` routes it through
+  ##   the fragment / action-selection codepath. When a path anchor is
+  ##   present, the first name-shaped positional joins
+  ##   ``extraNameSelectors`` instead.
+  ## - Every other name-shaped positional appends to
+  ##   ``extraNameSelectors``. ``lowerProviderSnapshot`` unions their
+  ##   closures with the anchor's in one engine pass.
+  ##
+  ## ``command`` is the user-visible verb (``"repro build"`` /
+  ## ``"repro watch"``) so the duplicate-path-anchor diagnostic blames
+  ## the right command.
+  result.targetWasOmitted = positionalSelectors.len == 0
+  if positionalSelectors.len == 0:
+    result.target = ""
+    return
+  var anchorSet = false
+  var firstNameSelector = ""
+  for sel in positionalSelectors:
+    let classified = classifyBuildSelector(sel)
+    case classified.kind
+    of bskPath:
+      if not anchorSet:
+        result.target = sel
+        anchorSet = true
+      else:
+        raise newException(ValueError,
+          command & ": multiple path / fragment selectors are not " &
+            "supported in M3 (got '" & result.target & "' and '" & sel &
+            "'); name-shaped selectors may follow a single path anchor")
+    of bskName, bskQualified:
+      if not anchorSet and firstNameSelector.len == 0:
+        firstNameSelector = sel
+      else:
+        if result.extraNameSelectors.find(sel) < 0:
+          result.extraNameSelectors.add(sel)
+  if not anchorSet:
+    # All selectors are name-shaped. Anchor at the current directory
+    # and let ``parseBuildTarget`` route the first name through the
+    # fragment / action-selection codepath. Remaining names go into
+    # ``extraNameSelectors`` so the lowering pass takes their union.
+    if firstNameSelector.len > 0:
+      result.target = "." & "#" & firstNameSelector
+    else:
+      result.target = "."
+  elif firstNameSelector.len > 0 and
+      result.extraNameSelectors.find(firstNameSelector) < 0:
+    # Path anchor + name selectors: the path is the project root, and
+    # every name selector contributes its closure on top.
+    result.extraNameSelectors.add(firstNameSelector)
 
 proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
   let workRoot = configuredWorkRoot(explicitWorkRoot)
@@ -8474,58 +8557,19 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     inc i
 
   # ----------------------------------------------------------------
-  # Named-Targets M2 positional resolution. Classify every selector
-  # via ``classifyBuildSelector``; the first path-shaped selector (or
-  # the current directory when there's none) becomes the engine's
-  # project anchor, and every name-shaped selector contributes its
-  # closure to ``extraNameSelectors`` so the build runs in one pass.
+  # Named-Targets M2 positional resolution lives in the shared M3
+  # ``parseAndResolveSelectors`` helper so ``runBuildCommand`` and
+  # ``runWatchCommand`` cannot drift. The helper classifies every
+  # selector via ``classifyBuildSelector``; the first path-shaped
+  # selector (or the current directory when there's none) becomes the
+  # engine's project anchor, and every name-shaped selector contributes
+  # its closure to ``extraNameSelectors`` so the build runs in one
+  # pass.
   # ----------------------------------------------------------------
-  var extraNameSelectors: seq[string] = @[]
-  if positionalSelectors.len == 0:
-    target = ""
-  else:
-    var anchorSet = false
-    var firstNameSelector = ""
-    for sel in positionalSelectors:
-      let classified = classifyBuildSelector(sel)
-      case classified.kind
-      of bskPath:
-        if not anchorSet:
-          target = sel
-          anchorSet = true
-        else:
-          # Multiple path-shaped selectors against the same engine pass
-          # is out of scope for M2 (the engine still expects exactly one
-          # project anchor). Reject explicitly rather than silently
-          # dropping the extra.
-          raise newException(ValueError,
-            "repro build: multiple path / fragment selectors are not " &
-              "supported in M2 (got '" & target & "' and '" & sel &
-              "'); name-shaped selectors may follow a single path anchor")
-      of bskName, bskQualified:
-        if not anchorSet and firstNameSelector.len == 0:
-          firstNameSelector = sel
-        else:
-          if extraNameSelectors.find(sel) < 0:
-            extraNameSelectors.add(sel)
-    if not anchorSet:
-      # All selectors are name-shaped. Anchor the build at the current
-      # directory and let ``parseBuildTarget`` route the first name
-      # through the fragment / action-selection codepath. The remaining
-      # names go into ``extraNameSelectors`` so the lowering pass takes
-      # their union.
-      if firstNameSelector.len > 0:
-        target = "." & "#" & firstNameSelector
-      else:
-        target = "."
-    elif firstNameSelector.len > 0 and extraNameSelectors.find(firstNameSelector) < 0:
-      # Path anchor + name selectors: the path is the project root, and
-      # every name selector contributes its closure on top.
-      extraNameSelectors.add(firstNameSelector)
-
-  let targetWasOmitted = target.len == 0 or
-    (target == "." and extraNameSelectors.len == 0 and
-      positionalSelectors.len == 0)
+  let resolved = parseAndResolveSelectors(positionalSelectors, "repro build")
+  target = resolved.target
+  var extraNameSelectors: seq[string] = resolved.extraNameSelectors
+  let targetWasOmitted = resolved.targetWasOmitted
   if target.len == 0:
     target = "."
 
@@ -11330,6 +11374,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
                      cancelCheck: BuildCancelCallback = nil): int =
   let originalArgs = @args
   var target = ""
+  var positionalSelectors: seq[string] = @[]
   var mode = tpmUnspecified
   var maxCycles = 0
   var debounceMs = 250
@@ -11405,10 +11450,11 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
           "--hcr-metadata=build/hcr-metadata.json")
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported watch flag: " & arg)
-    elif target.len == 0:
-      target = arg
     else:
-      raise newException(ValueError, "unexpected watch argument: " & arg)
+      # Named-Targets M3: watch inherits the M2 multi-selector surface.
+      # Classification into path vs. name selectors happens below via
+      # the shared ``parseAndResolveSelectors`` helper.
+      positionalSelectors.add(arg)
 
   if not daemonModeExplicit:
     daemonMode = configuredBuildDaemonMode()
@@ -11448,15 +11494,32 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     if daemonMode == bdmOff:
       raise newException(ValueError,
         "--attach requires --daemon=auto|require or REPRO_DAEMON=auto|require")
+    if positionalSelectors.len > 0:
+      raise newException(ValueError,
+        "--attach is incompatible with positional target selectors")
     return runDaemonAttach()
   if stopSessionId.len > 0:
     if daemonMode == bdmOff:
       raise newException(ValueError,
         "--stop requires --daemon=auto|require or REPRO_DAEMON=auto|require")
+    if positionalSelectors.len > 0:
+      raise newException(ValueError,
+        "--stop is incompatible with positional target selectors")
     return runDaemonStop()
 
-  let targetWasOmitted = target.len == 0
-  if targetWasOmitted:
+  # ----------------------------------------------------------------
+  # Named-Targets M3: watch inherits the M2 multi-selector resolver via
+  # the shared ``parseAndResolveSelectors`` helper. The resolver turns
+  # ``repro watch name1 name2`` into the project anchor + the union of
+  # every name's dependency closure; ``lowerProviderSnapshot`` then
+  # builds them in one engine pass and ``watchPathsFromReport`` unions
+  # the inputs so the watcher monitors every selected closure.
+  # ----------------------------------------------------------------
+  let resolved = parseAndResolveSelectors(positionalSelectors, "repro watch")
+  target = resolved.target
+  let extraNameSelectors = resolved.extraNameSelectors
+  let targetWasOmitted = resolved.targetWasOmitted
+  if target.len == 0:
     target = "."
   if mode notin {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
     raise newException(ValueError,
@@ -11489,6 +11552,17 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     let config = defaultUserDaemonConfig()
     let projectRoot = requestProjectRoot()
     discard startUserDaemon(publicCliPath, config)
+    # Named-Targets M3: ``selectedRoots`` carries the full user-facing
+    # selector list (path anchor + every name selector) so observers of
+    # the daemon session register can see what the cycle is watching.
+    # The daemon-side executor re-runs ``runWatchCommand`` against the
+    # request's ``rawArgs``, so the shared resolver runs once on the
+    # client and once on the worker — both invocations are pure and
+    # produce identical resolutions.
+    var selectedRoots = @[target]
+    for sel in extraNameSelectors:
+      if selectedRoots.find(sel) < 0:
+        selectedRoots.add(sel)
     let request = UserDaemonWatchRequest(
       runId: watchRunId(),
       target: target,
@@ -11504,7 +11578,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       cancelOnDisconnect: not detach,
       debounceMs: debounceMs,
       maxCycles: maxCycles,
-      selectedRoots: @[target])
+      selectedRoots: selectedRoots)
     let daemonResult = requestUserDaemonWatchStart(request, config.endpoint,
       renderDaemonWatchEvent)
     if detach:
@@ -11565,7 +11639,8 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         selectDefaultAction = targetWasOmitted,
         workRoot = workRoot,
         eventSink = buildEventSink,
-        cancelCheck = cancelCheck)
+        cancelCheck = cancelCheck,
+        extraNameSelectors = extraNameSelectors)
       emitWatchLine("repro watch: cycle " & $cycle & " result exitCode=" &
         $outcome.exitCode,
         payloadJson = "{\"watchEvent\":\"cycle-result\",\"cycle\":" & $cycle &
@@ -13064,11 +13139,39 @@ proc installUserDaemonWatchExecutor() =
           watchedPaths, lastResult)
       proc watchCancelRequested(): bool =
         cancelCheck != nil and cancelCheck()
-      result = runWatchCommand(request.rawArgs, cliPath,
-        forceDirect = true,
-        daemonHosted = true,
-        eventSink = emitWatchCommandEvent,
-        cancelCheck = watchCancelRequested)
+      try:
+        result = runWatchCommand(request.rawArgs, cliPath,
+          forceDirect = true,
+          daemonHosted = true,
+          eventSink = emitWatchCommandEvent,
+          cancelCheck = watchCancelRequested)
+      except BuildTargetAmbiguousError as err:
+        # Named-Targets M3: mirror the M2 ``installUserDaemonBuildExecutor``
+        # arm so daemon-hosted watch produces the same exit code 2 +
+        # stderr text as the direct-mode CLI dispatch. The diagnostic is
+        # emitted as a ``bekDiagnostic`` event with ``"stream":"stderr"``;
+        # the client-side ``runDaemonWatch`` event renderer routes it to
+        # stderr verbatim. The terminal ``bekFinished`` carries exit code
+        # 2 so the daemon's terminal-emit guard suppresses the generic
+        # "daemon-hosted watch failed" status line.
+        emit(bekDiagnostic, renderAmbiguousTargetDiagnostic(err[]),
+          false, 0, "error",
+          "{\"stream\":\"stderr\",\"diagnostic\":\"target_ambiguous\"}",
+          @[], "")
+        emit(bekFinished, "", true, 2, "error",
+          "{\"diagnostic\":\"target_ambiguous\"}", @[], "")
+        result = 2
+      except BuildTargetUnknownError as err:
+        # Named-Targets M3: same translation for ``unknown_target``. The
+        # shared ``renderUnknownTargetDiagnostic`` keeps the daemon-hosted
+        # and direct-mode emissions byte-identical with ``repro build``.
+        emit(bekDiagnostic, renderUnknownTargetDiagnostic(err[]),
+          false, 0, "error",
+          "{\"stream\":\"stderr\",\"diagnostic\":\"unknown_target\"}",
+          @[], "")
+        emit(bekFinished, "", true, 2, "error",
+          "{\"diagnostic\":\"unknown_target\"}", @[], "")
+        result = 2
     finally:
       try:
         setCurrentDir(previousCwd)
@@ -19058,6 +19161,20 @@ proc runThinApp*(programName: string): int =
         else:
           @[]
       return runWatchCommand(watchArgs, publicCliPath)
+    except BuildTargetAmbiguousError as err:
+      # Named-Targets M3: watch inherits the shared M2 resolver, so the
+      # ``target_ambiguous`` diagnostic surfaces identically. The shared
+      # ``renderAmbiguousTargetDiagnostic`` helper keeps the watch and
+      # build emissions byte-identical at the resolver seam.
+      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+      return 2
+    except BuildTargetUnknownError as err:
+      # Named-Targets M3: same translation for the ``unknown_target``
+      # diagnostic. The daemon-side translation lives in
+      # ``installUserDaemonWatchExecutor``; both paths render via
+      # ``renderUnknownTargetDiagnostic``.
+      stderr.write(renderUnknownTargetDiagnostic(err[]))
+      return 2
     except CatchableError as err:
       stderr.writeLine("repro watch: error: " & err.msg)
       return 1
