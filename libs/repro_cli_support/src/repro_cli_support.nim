@@ -77,7 +77,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
@@ -1402,6 +1402,111 @@ proc aggregateTargetExportTable*(snapshot: ProviderGraphSnapshot):
       result.ambiguities.add(TargetExportAmbiguity(name: name,
         candidates: candidates))
 
+type
+  TargetResolutionKind* = enum
+    ## Named-Targets M5: how a single selector was resolved against the
+    ## project-scoped target-export table. Recorded in the build report
+    ## under ``targetResolution`` so JSON consumers see the same shape as
+    ## the CLI text diagnostics.
+    trkResolved
+    trkAmbiguous
+    trkUnknown
+
+  TargetResolutionRecord* = object
+    selector*: string
+    kind*: TargetResolutionKind
+    actionId*: string         ## ``trkResolved``: the engine handle the
+                              ## selector resolved to.
+    owningPackage*: string    ## ``trkResolved``: the package whose call
+                              ## emitted this edge (empty for explicit
+                              ## ``target "..."`` labels and action ids).
+    candidates*: seq[string]  ## ``trkAmbiguous``: the sorted qualified
+                              ## ``<package>:<name>`` candidates.
+    suggestions*: seq[string] ## ``trkUnknown``: top-3 Levenshtein
+                              ## suggestions over known target names.
+
+proc resolveTargetExportSelector*(exportTable: TargetExportTable;
+                                  knownActionIds: openArray[string];
+                                  knownExplicitTargets: openArray[string];
+                                  selector: string): TargetResolutionRecord =
+  ## Named-Targets M5: shared name-lookup that ``runGraphCommand`` /
+  ## ``runWhyCommand`` use to translate a bare name or qualified
+  ## ``<package>:<name>`` selector into an action id BEFORE handing the
+  ## selector to ``parseBuildTarget``. Mirrors the in-lowering resolver
+  ## inside ``lowerProviderSnapshot`` so the two code paths cannot
+  ## drift. The return record is also embedded in the build report by
+  ## ``writeBuildReport`` (M5 diagnostic-taxonomy polish).
+  result.selector = selector
+
+  # Build the same indexes the lowering resolver computes.
+  var entriesByQualified = initTable[string, TargetExportEntry]()
+  var entriesByName = initTable[string, seq[TargetExportEntry]]()
+  for entry in exportTable.entries:
+    let qualified = entry.owningPackage & ":" & entry.name
+    if not entriesByQualified.hasKey(qualified):
+      entriesByQualified[qualified] = entry
+    if not entriesByName.hasKey(entry.name):
+      entriesByName[entry.name] = @[]
+    entriesByName[entry.name].add(entry)
+
+  # 1. Qualified ``<package>:<name>``.
+  let colon = selector.find(':')
+  if colon > 0 and colon < selector.high:
+    let secondColon = selector.find(':', colon + 1)
+    if secondColon < 0 and entriesByQualified.hasKey(selector):
+      let entry = entriesByQualified[selector]
+      result.kind = trkResolved
+      result.actionId = entry.actionId
+      result.owningPackage = entry.owningPackage
+      return
+
+  # 2. Existing explicit target / action id pass-through.
+  for actionId in knownActionIds:
+    if actionId == selector:
+      result.kind = trkResolved
+      result.actionId = selector
+      return
+  for explicitName in knownExplicitTargets:
+    if explicitName == selector:
+      result.kind = trkResolved
+      result.actionId = selector
+      return
+
+  # 3. Bare implicit name.
+  if entriesByName.hasKey(selector):
+    var ownerPackages: seq[string] = @[]
+    var lastEntry: TargetExportEntry
+    for entry in entriesByName[selector]:
+      if ownerPackages.find(entry.owningPackage) < 0:
+        ownerPackages.add(entry.owningPackage)
+      lastEntry = entry
+    if ownerPackages.len > 1:
+      var candidates: seq[string] = @[]
+      for pkg in ownerPackages:
+        candidates.add(pkg & ":" & selector)
+      candidates.sort()
+      result.kind = trkAmbiguous
+      result.candidates = candidates
+      return
+    result.kind = trkResolved
+    result.actionId = lastEntry.actionId
+    result.owningPackage = lastEntry.owningPackage
+    return
+
+  # 4. Unknown — synthesize Levenshtein suggestions.
+  var known: seq[string] = @[]
+  for actionId in knownActionIds:
+    if known.find(actionId) < 0:
+      known.add(actionId)
+  for explicitName in knownExplicitTargets:
+    if known.find(explicitName) < 0:
+      known.add(explicitName)
+  for name in entriesByName.keys:
+    if known.find(name) < 0:
+      known.add(name)
+  result.kind = trkUnknown
+  result.suggestions = topLevenshteinCandidates(selector, known)
+
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
                             projectRoot: string;
@@ -2127,13 +2232,38 @@ proc actionResultJson(item: ActionResult): JsonNode =
     "evidence": evidenceJson(item.evidence)
   }
 
+proc targetResolutionJson(record: TargetResolutionRecord): JsonNode =
+  ## Named-Targets M5: serialise one resolver outcome for the build
+  ## report's ``targetResolution`` array. Mirrors the CLI text
+  ## diagnostic taxonomy (``resolved`` / ``ambiguous`` / ``unknown``)
+  ## so JSON consumers see the same shape as the stderr lines.
+  let kindText =
+    case record.kind
+    of trkResolved: "resolved"
+    of trkAmbiguous: "ambiguous"
+    of trkUnknown: "unknown"
+  result = %*{
+    "selector": record.selector,
+    "kind": kindText
+  }
+  case record.kind
+  of trkResolved:
+    result["actionId"] = %record.actionId
+    result["package"] = %record.owningPackage
+  of trkAmbiguous:
+    result["candidates"] = jsonStringSeq(record.candidates)
+  of trkUnknown:
+    result["suggestions"] = jsonStringSeq(record.suggestions)
+
 proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
                       cmakeRegenerationResult,
                       providerCompileResult,
                       buildResult: BuildRunResult;
                       workspaceVcs: openArray[
-                          workspaceVcsEvidence.WorkspaceVcsEvidence] = []) =
+                          workspaceVcsEvidence.WorkspaceVcsEvidence] = [];
+                      targetResolutions:
+                          openArray[TargetResolutionRecord] = []) =
   ## M4: ``workspaceVcs`` carries the unified Workspace-VCS evidence
   ## seq accumulated by ``repro workspace status`` / ``repro check``
   ## while invoking the M2/M3 query actions. Callers pass an empty seq
@@ -2141,6 +2271,12 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
   ## reported build. The JSON view embedded under the
   ## ``"workspaceVcs"`` key is derived from the same record the SSZ
   ## codec persists; see ``libs/repro_workspace_vcs/src/evidence.nim``.
+  ##
+  ## Named-Targets M5: ``targetResolutions`` carries one record per
+  ## user-supplied selector classified by the M2 resolver. Empty when
+  ## no positional was supplied (the legacy default-action path). The
+  ## per-selector ``kind`` field mirrors the CLI text diagnostics
+  ## (``resolved`` / ``ambiguous`` / ``unknown``).
   var cmakeRegenerationActions = newJArray()
   for item in cmakeRegenerationResult.results:
     cmakeRegenerationActions.add(actionResultJson(item))
@@ -2158,6 +2294,9 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
       "event": event.event,
       "detail": event.detail
     })
+  var targetResolutionArr = newJArray()
+  for record in targetResolutions:
+    targetResolutionArr.add(targetResolutionJson(record))
   let root = %*{
     "providerBinary": provider.outputBinaryPath,
     "providerFingerprint": digestHex(provider.providerFingerprint),
@@ -2169,6 +2308,7 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
     "actions": actions,
     "trace": trace,
     "workspaceVcs": workspaceVcsEvidence.toJson(workspaceVcs),
+    "targetResolution": targetResolutionArr,
     "stats": statsJson(buildResult.stats)
   }
   createDir(extendedPath(parentDir(path)))
@@ -4272,6 +4412,44 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         selectorList.add(extra)
     let multiTarget = extraNameSelectors.len > 0
 
+    # Named-Targets M5: classify every user-supplied selector against
+    # the project-scoped target-export table so the build report records
+    # the resolver's outcome (``resolved`` / ``ambiguous`` / ``unknown``)
+    # under ``targetResolution``. This is descriptive — the engine has
+    # already used the selectors to assemble ``selectorList`` above.
+    # Ambiguous / unknown selectors that survive to this point are the
+    # action-id / explicit-target labels the user passed directly (the
+    # M2 dispatch would have raised a typed exception for unresolvable
+    # name selectors before reaching here).
+    var targetResolutions: seq[TargetResolutionRecord] = @[]
+    block computeTargetResolutions:
+      let exportTable = aggregateTargetExportTable(refresh.snapshot)
+      var actionIds: seq[string] = @[]
+      var explicitTargets: seq[string] = @[]
+      var seenAction = initHashSet[string]()
+      var seenExplicit = initHashSet[string]()
+      for fragment in refresh.snapshot.fragments:
+        for node in fragment.nodes:
+          if node.kind == gnkAction:
+            let payload = decodeBuildActionPayload(toBytes(node.payload))
+            if not seenAction.containsOrIncl(payload.id):
+              actionIds.add(payload.id)
+          elif node.kind == gnkMetadata and
+              node.stableName == "reprobuild.build-target.v1":
+            let targetDef = decodeBuildTargetPayload(toBytes(node.payload))
+            if not seenExplicit.containsOrIncl(targetDef.name):
+              explicitTargets.add(targetDef.name)
+      var userSelectors: seq[string] = @[]
+      if parsedTarget.fragmentKind == tfkActionSelection and
+          parsedTarget.selectedActionId.len > 0:
+        userSelectors.add(parsedTarget.selectedActionId)
+      for extra in extraNameSelectors:
+        if extra.len > 0 and userSelectors.find(extra) < 0:
+          userSelectors.add(extra)
+      for sel in userSelectors:
+        targetResolutions.add(resolveTargetExportSelector(exportTable,
+          actionIds, explicitTargets, sel))
+
     let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv)
     let graphCacheReadStart = statStart(statsEnabled)
@@ -4416,7 +4594,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if reportMode == brmFull:
       let reportStart = statStart(statsEnabled)
       writeBuildReport(reportPath, provider, refresh, cmakeRegenerationResult,
-        providerCompileResult, buildResult)
+        providerCompileResult, buildResult,
+        targetResolutions = targetResolutions)
       finishStat(buildStats, statsEnabled, "repro report write", reportStart)
       buildResult.stats = buildStats
       result.buildReportPath = reportPath
@@ -8453,6 +8632,14 @@ proc runDepsCommand(args: openArray[string]): int =
     stderr.writeLine("repro deps: unknown subcommand: " & sub)
     return 2
 
+# Named-Targets M5 forward declaration: the actual definition lives after
+# ``prepareBuildGraphInspection`` (which the implementation calls) further
+# down in this file.
+proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
+                           publicCliPath, workRoot: string;
+                           asJson: bool; packageFilter: string;
+                           bypassRunQuota: bool): int
+
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
@@ -8482,6 +8669,14 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
+  # Named-Targets M5: ``--list-targets`` enumerates every implicit /
+  # explicit target name visible in the current project's target-export
+  # table. ``--list-targets-json`` is the JSON view; ``--list-targets``
+  # alone prints a text table. ``--package=NAME`` filters the output to
+  # one owning package.
+  var listTargets = false
+  var listTargetsJson = false
+  var listTargetsPackage = ""
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -8489,6 +8684,21 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       daemonMode = parseBuildDaemonMode(valueFromFlag(args, i, "--daemon"),
         "--daemon")
       daemonModeExplicit = true
+    elif arg == "--list-targets":
+      listTargets = true
+    elif arg == "--list-targets-json":
+      listTargets = true
+      listTargetsJson = true
+    elif arg == "--json" and listTargets:
+      # ``repro build --list-targets --json`` is the spec-mandated
+      # shape; accept ``--json`` as a follower of ``--list-targets``
+      # without consuming the flag for any other build subcommand
+      # surface. The ordering check above keeps the bare ``--json``
+      # token unrecognised for non-list-targets invocations so the
+      # legacy "unsupported build flag" error still fires.
+      listTargetsJson = true
+    elif arg == "--package" or arg.startsWith("--package="):
+      listTargetsPackage = valueFromFlag(args, i, "--package")
     elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(valueFromFlag(args, i,
         "--tool-provisioning"))
@@ -8572,6 +8782,16 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   let targetWasOmitted = resolved.targetWasOmitted
   if target.len == 0:
     target = "."
+
+  # Named-Targets M5: ``--list-targets`` short-circuits the engine pass.
+  # The flag's job is to list every implicit / explicit target name
+  # visible in the project's aggregated target-export table so users can
+  # discover what `repro build NAME` accepts. Implementation lives in
+  # ``runListTargetsCommand`` (declared further down so it can call
+  # ``prepareBuildGraphInspection``).
+  if listTargets:
+    return runListTargetsCommand(target, mode, publicCliPath, workRoot,
+      listTargetsJson, listTargetsPackage, bypassRunQuota)
 
   if not daemonModeExplicit:
     daemonMode = configuredBuildDaemonMode()
@@ -8797,6 +9017,17 @@ type
     defaultActionId: string
     actions: seq[BuildAction]
     pools: seq[BuildPool]
+    targetExportTable: TargetExportTable
+      ## Named-Targets M5: cross-fragment aggregate of every package's
+      ## ``reprobuild.target-export-table.v1`` metadata node. Populated by
+      ## ``prepareBuildGraphInspection`` and used by ``runGraphCommand``
+      ## / ``runWhyCommand`` / ``--list-targets`` so the inspection
+      ## surface honours implicit / explicit target names without a
+      ## second pass over the snapshot.
+    explicitTargetNames: seq[string]
+      ## Named-Targets M5: every explicit ``target "name", handle`` label
+      ## visible in the lowered graph, captured before lowering so
+      ## ``resolveTargetExportSelector`` can pass it through.
 
 proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
   case value.normalize()
@@ -9255,6 +9486,88 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       computed
   result.actions = lowered.actions
   result.pools = lowered.pools
+  # Named-Targets M5: surface the project-scoped target-export table and
+  # the explicit-target labels so ``runGraphCommand`` / ``runWhyCommand``
+  # / ``--list-targets`` can route name-shaped selectors through the
+  # shared ``resolveTargetExportSelector`` helper without a second pass
+  # over the snapshot.
+  result.targetExportTable = aggregateTargetExportTable(refresh.snapshot)
+  for fragment in refresh.snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        if result.explicitTargetNames.find(target.name) < 0:
+          result.explicitTargetNames.add(target.name)
+
+proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
+                           publicCliPath, workRoot: string;
+                           asJson: bool; packageFilter: string;
+                           bypassRunQuota: bool): int =
+  ## Named-Targets M5: enumerate every implicit / explicit target name
+  ## carried by the project's aggregated target-export table. Entries
+  ## are sorted by ``(package, name)`` for deterministic CLI output and
+  ## JSON consumers. ``packageFilter`` (if non-empty) restricts the
+  ## listing to one owning package.
+  var effectiveMode = mode
+  if effectiveMode == tpmUnspecified:
+    effectiveMode = tpmPathOnly
+  var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+  try:
+    let info = prepareBuildGraphInspection(target, effectiveMode,
+      publicCliPath, selectDefaultAction = false, workRoot = workRoot)
+    var entries: seq[TargetExportEntry] = @[]
+    for entry in info.targetExportTable.entries:
+      if packageFilter.len > 0 and entry.owningPackage != packageFilter:
+        continue
+      entries.add(entry)
+    entries.sort(proc(a, b: TargetExportEntry): int =
+      let pkgCmp = cmp(a.owningPackage, b.owningPackage)
+      if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
+    if asJson:
+      var arr = newJArray()
+      for entry in entries:
+        arr.add(%*{
+          "name": entry.name,
+          "kind": (if entry.kind == tekImplicit: "implicit" else: "explicit"),
+          "package": entry.owningPackage,
+          "actionId": entry.actionId,
+          "source-file": entry.sourceFile,
+          "source-line": entry.sourceLine
+        })
+      var node = %*{
+        "schemaId": "reprobuild.list-targets.v1",
+        "projectRoot": info.projectRoot,
+        "modulePath": info.modulePath,
+        "targets": arr
+      }
+      if packageFilter.len > 0:
+        node["package"] = %packageFilter
+      echo $node
+    else:
+      if entries.len == 0:
+        if packageFilter.len > 0:
+          echo "repro build --list-targets: no targets for package=" &
+            packageFilter
+        else:
+          echo "repro build --list-targets: no named targets in this project"
+      else:
+        echo "kind     package                   name                      source"
+        for entry in entries:
+          let kindText =
+            if entry.kind == tekImplicit: "implicit" else: "explicit"
+          let source = entry.sourceFile & ":" & $entry.sourceLine
+          echo kindText & "  " & entry.owningPackage & "  " &
+            entry.name & "  " & source
+    return 0
+  finally:
+    if autoRunQuota != nil:
+      try:
+        autoRunQuota.terminate()
+        discard autoRunQuota.waitForExit()
+        autoRunQuota.close()
+      except CatchableError:
+        discard
 
 proc renderFocusedGraphJson(info: BuildGraphInspection; focus: string): JsonNode =
   let action = requireAction(info.actions, focus)
@@ -10510,14 +10823,50 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
   if positionals.len >= 2:
     focus = positionals[1]
   let targetWasOmitted = target.len == 0
-  if targetWasOmitted:
+  # Named-Targets M5: if the first positional is a bare or
+  # qualified name (not a path/fragment selector), route it through
+  # the shared resolver. The project anchor stays the current
+  # directory; the resolved action id flows into ``focus`` so the
+  # downstream `--view=neighborhood`/`--view=inputs` paths and the
+  # `actions` / `text` renderers receive it as their focal action.
+  var nameSelector = ""
+  if not targetWasOmitted:
+    let classified = classifyBuildSelector(target)
+    if classified.kind in {bskName, bskQualified}:
+      nameSelector = target
+      target = "."
+  if target.len == 0:
     target = "."
 
   var autoRunQuota = startAutoRunQuotaIfNeeded(false)
   try:
     let info = prepareBuildGraphInspection(target, mode, publicCliPath,
-      selectDefaultAction = targetWasOmitted,
+      selectDefaultAction = targetWasOmitted or nameSelector.len > 0,
       workRoot = workRoot)
+    if nameSelector.len > 0:
+      var actionIds: seq[string] = @[]
+      for action in info.actions:
+        actionIds.add(action.id)
+      let resolution = resolveTargetExportSelector(info.targetExportTable,
+        actionIds, info.explicitTargetNames, nameSelector)
+      case resolution.kind
+      of trkResolved:
+        focus = resolution.actionId
+      of trkAmbiguous:
+        var err = newException(BuildTargetAmbiguousError,
+          "target '" & nameSelector &
+            "' is exported by multiple packages: " &
+            resolution.candidates.join(", ") &
+            " — re-run with the qualified <package>:<name> form")
+        err.selectorName = nameSelector
+        err.candidates = resolution.candidates
+        raise err
+      of trkUnknown:
+        var err = newException(BuildTargetUnknownError,
+          "unknown build target: " & nameSelector)
+        err.selectorName = nameSelector
+        err.suggestions = resolution.suggestions
+        raise err
     if view == "actions":
       discard
     elif view == "neighborhood":
@@ -10848,6 +11197,22 @@ proc runWhyCommand(args: openArray[string]; publicCliPath: string): int =
     raise newException(ValueError,
       "missing why subject; use repro why <package-or-action> or " &
         "repro why --action=<action-id>")
+  # Named-Targets M5: when the second positional is a path or a bare
+  # name, the user may have intended the *name* to be the subject. The
+  # legacy single-positional form already worked because the subject
+  # came first and the target was current directory. The two-positional
+  # ``repro why subject target`` form keeps the ambiguity. We classify
+  # ``target``: a name-shaped value is rejected to keep behaviour
+  # predictable — the user should re-run as ``repro why <name>`` with
+  # one positional.
+  let targetClassified =
+    if target.len == 0: ClassifiedBuildSelector(kind: bskPath)
+    else: classifyBuildSelector(target)
+  if target.len > 0 and targetClassified.kind in {bskName, bskQualified}:
+    raise newException(ValueError,
+      "repro why: the second positional must be a path or fragment " &
+        "selector; got the name-shaped value '" & target &
+        "' (re-run as `repro why " & target & "` with one positional)")
   if target.len == 0:
     target = "."
 
@@ -10856,6 +11221,39 @@ proc runWhyCommand(args: openArray[string]; publicCliPath: string): int =
     let info = prepareBuildGraphInspection(target, mode, publicCliPath,
       selectDefaultAction = true,
       workRoot = workRoot)
+    # Named-Targets M5: route the subject through the shared
+    # ``resolveTargetExportSelector`` helper so the bare implicit name
+    # and qualified ``<package>:<name>`` forms reach the same action id
+    # they would have via ``repro build NAME``. Action ids and explicit
+    # ``target "..."`` labels still resolve via the legacy
+    # ``requireAction`` lookup; only the name forms need translation.
+    if not explicitAction:
+      let subjClassified = classifyBuildSelector(subject)
+      if subjClassified.kind in {bskName, bskQualified}:
+        var actionIds: seq[string] = @[]
+        for action in info.actions:
+          actionIds.add(action.id)
+        let resolution = resolveTargetExportSelector(info.targetExportTable,
+          actionIds, info.explicitTargetNames, subject)
+        case resolution.kind
+        of trkResolved:
+          subject = resolution.actionId
+        of trkAmbiguous:
+          var err = newException(BuildTargetAmbiguousError,
+            "target '" & subject &
+              "' is exported by multiple packages: " &
+              resolution.candidates.join(", ") &
+              " — re-run with the qualified <package>:<name> form")
+          err.selectorName = subject
+          err.candidates = resolution.candidates
+          raise err
+        of trkUnknown:
+          # Fall through to the legacy ``requireAction`` lookup below
+          # so action ids that happen to lack a path/fragment shape
+          # still work without surfacing the diagnostic. The
+          # ``requireAction`` failure will raise its own ValueError
+          # with the candidate-action list.
+          discard
     try:
       discard requireAction(info.actions, subject)
     except ValueError:
@@ -11603,34 +12001,76 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         "--hcr-metadata requires an inline value, for example " &
           "--hcr-metadata=build/hcr-metadata.json")
     elif arg.startsWith("--hcr-target="):
-      # Named-Targets M4: repeatable per-target HCR binding. Format:
-      #   --hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA]
-      # Each occurrence binds one HCR agent to the named positional
-      # target. The colon delimiter is fine here because socket /
-      # artifacts / metadata paths in the existing watch CLI never
-      # contain a literal ``:``; if that constraint ever bites, the M5
-      # ``<package>:<name>`` work can promote ``--hcr-target`` to a
-      # structured JSON form. The per-target lifecycles are
-      # independent (HCR §3.2 "Multi-Target HCR") — see the failure
-      # isolation block in ``runDirectWatch`` below.
+      # Named-Targets M4 + M5: repeatable per-target HCR binding.
+      # Two shapes are accepted (the parser picks based on the first
+      # token):
+      #   1. Legacy colon-delimited NAME:SOCKET:ARTIFACTS[:METADATA].
+      #      Fine when NAME is a bare implicit name with no ``:``.
+      #   2. M5 key=value form ``name=NAME,socket=SOCKET,artifacts=
+      #      ARTIFACTS[,metadata=METADATA]`` so a qualified
+      #      ``<package>:<name>`` target like ``pkgA:cli`` survives
+      #      without colliding with the SOCKET position. The key=value
+      #      shape is recognised when the raw value starts with
+      #      ``name=`` — any other input falls through to the colon
+      #      parser so existing CLI invocations stay byte-compatible.
       let raw = arg.split("=", maxsplit = 1)[1]
-      let parts = raw.split(':')
-      if parts.len < 3 or parts.len > 4 or parts[0].len == 0 or
-          parts[1].len == 0 or parts[2].len == 0:
-        raise newException(ValueError,
-          "--hcr-target expects NAME:SOCKET:ARTIFACTS[:METADATA] " &
-            "(got '" & raw & "')")
       var perTarget: HcrWatchConfig
-      perTarget.targetName = parts[0]
-      perTarget.socketPath = parts[1]
-      perTarget.artifacts = parts[2]
-      if parts.len == 4:
-        perTarget.metadataPath = parts[3]
+      if raw.startsWith("name="):
+        # M5 structured form. Split on ``,`` and unpack each
+        # ``key=value`` pair. Required keys: ``name``, ``socket``,
+        # ``artifacts``; optional: ``metadata``. Whitespace inside
+        # values is preserved, but the parser does not unescape ``,``
+        # (paths should not contain literal commas; if that ever
+        # bites we can promote to a JSON form).
+        var nameVal = ""
+        var socketVal = ""
+        var artifactsVal = ""
+        var metadataVal = ""
+        for pair in raw.split(','):
+          let eq = pair.find('=')
+          if eq <= 0:
+            raise newException(ValueError,
+              "--hcr-target: expected key=value pair, got '" & pair & "'")
+          let key = pair[0 ..< eq]
+          let value = pair[eq + 1 .. ^1]
+          case key
+          of "name": nameVal = value
+          of "socket": socketVal = value
+          of "artifacts": artifactsVal = value
+          of "metadata": metadataVal = value
+          else:
+            raise newException(ValueError,
+              "--hcr-target: unknown key '" & key &
+                "' (expected name|socket|artifacts|metadata)")
+        if nameVal.len == 0 or socketVal.len == 0 or artifactsVal.len == 0:
+          raise newException(ValueError,
+            "--hcr-target structured form requires non-empty " &
+              "name=, socket=, and artifacts= keys (got '" & raw & "')")
+        perTarget.targetName = nameVal
+        perTarget.socketPath = socketVal
+        perTarget.artifacts = artifactsVal
+        perTarget.metadataPath = metadataVal
+      else:
+        # Legacy colon-delimited NAME:SOCKET:ARTIFACTS[:METADATA].
+        let parts = raw.split(':')
+        if parts.len < 3 or parts.len > 4 or parts[0].len == 0 or
+            parts[1].len == 0 or parts[2].len == 0:
+          raise newException(ValueError,
+            "--hcr-target expects NAME:SOCKET:ARTIFACTS[:METADATA] " &
+              "or name=NAME,socket=SOCKET,artifacts=ARTIFACTS" &
+              "[,metadata=METADATA] (got '" & raw & "')")
+        perTarget.targetName = parts[0]
+        perTarget.socketPath = parts[1]
+        perTarget.artifacts = parts[2]
+        if parts.len == 4:
+          perTarget.metadataPath = parts[3]
       hcrTargetConfigs.add(perTarget)
     elif arg == "--hcr-target":
       raise newException(ValueError,
         "--hcr-target requires an inline value, for example " &
-          "--hcr-target=alpha:/tmp/a.sock:.repro/hcr-alpha")
+          "--hcr-target=alpha:/tmp/a.sock:.repro/hcr-alpha " &
+          "or --hcr-target=name=pkgA:cli,socket=/tmp/a.sock," &
+          "artifacts=.repro/hcr-alpha")
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported watch flag: " & arg)
     else:
@@ -19051,6 +19491,17 @@ proc runThinApp*(programName: string): int =
         else:
           @[]
       return runGraphCommand(graphArgs, publicCliPath)
+    except BuildTargetAmbiguousError as err:
+      # Named-Targets M5 ``target_ambiguous`` diagnostic for the
+      # graph arm. Same shape as ``repro build`` so JSON consumers
+      # and test harnesses can rely on the unified text.
+      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+      return 2
+    except BuildTargetUnknownError as err:
+      # Named-Targets M5 ``unknown_target`` diagnostic with the M2
+      # Levenshtein candidates.
+      stderr.write(renderUnknownTargetDiagnostic(err[]))
+      return 2
     except CatchableError as err:
       stderr.writeLine("repro graph: error: " & err.msg)
       return 1
@@ -19062,6 +19513,12 @@ proc runThinApp*(programName: string): int =
         else:
           @[]
       return runWhyCommand(whyArgs, publicCliPath)
+    except BuildTargetAmbiguousError as err:
+      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+      return 2
+    except BuildTargetUnknownError as err:
+      stderr.write(renderUnknownTargetDiagnostic(err[]))
+      return 2
     except CatchableError as err:
       stderr.writeLine("repro why: error: " & err.msg)
       return 1

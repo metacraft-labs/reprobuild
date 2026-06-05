@@ -150,6 +150,13 @@ while IFS= read -r -d '' test_file; do
     tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim|*/tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim)
       extra_flags+=("--define:reproProviderMode")
       ;;
+    # Named-Targets M5 qualified-target resolution test: same
+    # in-process pattern as the M2 ambiguity test — drives
+    # ``buildPackageFragment`` directly to assert the
+    # qualified-form resolution path in-process.
+    tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim|*/tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim)
+      extra_flags+=("--define:reproProviderMode")
+      ;;
   esac
   # Use the `${arr[@]+"${arr[@]}"}` idiom so the expansion is a no-op
   # when `extra_flags` is empty. macOS's bundled Bash 3.2.57 aborts under
