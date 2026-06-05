@@ -16,6 +16,7 @@ let ctTestRoot = block:
 for ctTestLib in [
   "ct_test_interface",
   "ct_test_nim_unittest",
+  "ct_test_unittest_parallel",
 ]:
   let candidate = ctTestRoot / "libs" / ctTestLib / "src"
   if dirExists(candidate):
