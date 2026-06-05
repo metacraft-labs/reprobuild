@@ -268,10 +268,77 @@ proc collectDeclaredFlagNames(body: NimNode; output: var seq[string]) =
   else:
     discard
 
+proc typeIdentRepr(node: NimNode): string =
+  ## Typed-Outputs M0: render one type identifier from the comma-separated
+  ## type list of a typed ``outputs`` statement. Accepts a bare ident
+  ## (``NimUnittestBinary``), a dotted ident (``cargo.CargoTestBinary``),
+  ## or an arbitrary AST whose ``.repr`` is the user-facing source form.
+  ## The string is what we hand to the wrapper code generator and what
+  ## the field's static type resolves to at typed-tool call sites.
+  case node.kind
+  of nnkIdent, nnkSym:
+    $node
+  of nnkAccQuoted:
+    var acc = ""
+    for child in node:
+      acc.add(typeIdentRepr(child))
+    acc
+  of nnkDotExpr, nnkBracketExpr:
+    node.repr
+  else:
+    node.repr
+
+proc isTypedOutputsHead(stmt: NimNode): bool =
+  ## Typed-Outputs M0: the typed form
+  ## ``outputs <fieldName> is <Type1>[, <Type2>...], <pathExpression>``
+  ## is distinguished from the M0 untyped form
+  ## ``outputs <flag> [<flag>...]`` by the presence of an
+  ## ``Infix(is, fieldName, FirstType)`` as the first operand. The
+  ## untyped form parses as a flat sequence of identifiers (with
+  ## ``OutTy`` nodes standing in for the literal ``out`` keyword).
+  if stmt.len < 2:
+    return false
+  let head = stmt[1]
+  head.kind == nnkInfix and head.len == 3 and head[0].eqIdent("is")
+
+proc parseTypedOutputsStatement(stmt: NimNode): TypedOutputDef =
+  ## Typed-Outputs M0: parse one statement of the typed form
+  ##
+  ##   ``outputs <fieldName> is <Type1>[, <Type2>...], <pathExpression>``
+  ##
+  ## The first comma-separated argument is the ``Infix(is, ...)`` node
+  ## carrying ``<fieldName>`` and ``<Type1>``. Subsequent operands up to
+  ## the second-to-last are additional types; the last operand is the
+  ## path expression, preserved verbatim (``.repr``) so M1 can
+  ## ``parseExpr`` it back at action-emission time without re-running
+  ## the macro.
+  let loc = lineFile(stmt)
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  if stmt.len < 3:
+    error("typed outputs requires at least one type and a path expression, " &
+      "e.g. ``outputs fieldName is SomeType, pathExpr``", stmt)
+  let head = stmt[1]
+  if head.kind != nnkInfix or head.len != 3 or not head[0].eqIdent("is"):
+    error("typed outputs expects ``<fieldName> is <Type>`` as the first " &
+      "operand", stmt)
+  if head[1].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    error("typed outputs: field name must be an identifier", head[1])
+  result.fieldName = identText(head[1])
+  result.types.add(typeIdentRepr(head[2]))
+  # Operands [2 ..< ^1] are additional type identifiers; operand [^1]
+  # is the path expression. ``stmt.len`` is always >= 3 at this point
+  # (the early check above), so the path operand exists.
+  for i in 2 ..< stmt.len - 1:
+    result.types.add(typeIdentRepr(stmt[i]))
+  let pathOperand = stmt[stmt.len - 1]
+  result.pathExpr = pathOperand.repr
+
 proc parseCliScope(packageName, executableName: string; body: NimNode;
                    path: seq[string]; isRoot: bool;
                    parentParams: openArray[CliParamDef];
                    parentOutputFlags: openArray[string];
+                   parentTypedOutputs: openArray[TypedOutputDef];
                    parentPolicy: BuildActionDependencyPolicy;
                    wholeBody: NimNode;
                    commands: var seq[CliCommandDef]): CliCommandDef =
@@ -300,6 +367,7 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
   result.dependencyPolicy = parentPolicy
   result.params = @parentParams
   result.outputFlags = @parentOutputFlags
+  result.typedOutputs = @parentTypedOutputs
 
   for stmt in body:
     let head = calleeName(stmt).normalize
@@ -319,39 +387,60 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
         param.placement = capBeforeSubcommand
       result.params.add(param)
     of "outputs":
-      # Validate every named operand against the currently visible set.
-      # We need a per-operand check that also detects the
-      # sibling-subcmd case (`not in lexical scope` vs `does not exist`).
+      # Typed-Outputs M0: distinguish the typed form
+      # ``outputs <fieldName> is <Type>[, <Type>...], <pathExpression>``
+      # from the Named-Targets M0 untyped form
+      # ``outputs <flag> [<flag>...]``. The typed form's first operand
+      # is an ``Infix(is, ...)`` node — bare flag idents never carry an
+      # ``is`` infix, so the dispatch is unambiguous.
       if stmt.len < 2:
         error("outputs requires at least one flag name", stmt)
-      var operands: seq[NimNode] = @[]
-      for i in 1 ..< stmt.len:
-        collectOutputsOperands(stmt[i], operands)
-      if operands.len == 0:
-        error("outputs requires at least one flag name", stmt)
-      for operand in operands:
-        if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
-          error("outputs expects a flag name identifier, got: " &
-            operand.repr, operand)
-        let flagName = identText(operand)
-        var visible = false
-        for param in result.params:
-          if param.name == flagName:
-            visible = true
+      if isTypedOutputsHead(stmt):
+        let td = parseTypedOutputsStatement(stmt)
+        # Disallow duplicate ``fieldName`` declarations along the
+        # lexical path so the generated ``BuildEdge`` subtype has a
+        # well-defined set of fields. Parent-scope inherited entries
+        # are compared by ``fieldName`` to keep the rule symmetric
+        # with the untyped ``outputFlags`` accumulation.
+        var duplicate = false
+        for existing in result.typedOutputs:
+          if existing.fieldName == td.fieldName:
+            duplicate = true
             break
-        if not visible:
-          var declaredSomewhere: seq[string] = @[]
-          collectDeclaredFlagNames(wholeBody, declaredSomewhere)
-          if declaredSomewhere.find(flagName) >= 0:
-            error("outputs: '" & flagName &
-              "' is not in lexical scope (declared on a sibling subcmd, " &
-              "not on this subcmd or an enclosing one)", stmt)
-          else:
-            error("outputs: '" & flagName &
-              "' does not exist (no flag or positional by that name " &
-              "declared in this cli interface)", stmt)
-        if result.outputFlags.find(flagName) < 0:
-          result.outputFlags.add(flagName)
+        if not duplicate:
+          result.typedOutputs.add(td)
+      else:
+        # Validate every named operand against the currently visible set.
+        # We need a per-operand check that also detects the
+        # sibling-subcmd case (`not in lexical scope` vs `does not exist`).
+        var operands: seq[NimNode] = @[]
+        for i in 1 ..< stmt.len:
+          collectOutputsOperands(stmt[i], operands)
+        if operands.len == 0:
+          error("outputs requires at least one flag name", stmt)
+        for operand in operands:
+          if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+            error("outputs expects a flag name identifier, got: " &
+              operand.repr, operand)
+          let flagName = identText(operand)
+          var visible = false
+          for param in result.params:
+            if param.name == flagName:
+              visible = true
+              break
+          if not visible:
+            var declaredSomewhere: seq[string] = @[]
+            collectDeclaredFlagNames(wholeBody, declaredSomewhere)
+            if declaredSomewhere.find(flagName) >= 0:
+              error("outputs: '" & flagName &
+                "' is not in lexical scope (declared on a sibling subcmd, " &
+                "not on this subcmd or an enclosing one)", stmt)
+            else:
+              error("outputs: '" & flagName &
+                "' does not exist (no flag or positional by that name " &
+                "declared in this cli interface)", stmt)
+          if result.outputFlags.find(flagName) < 0:
+            result.outputFlags.add(flagName)
     of "call", "subcmd":
       let childName =
         if head == "call": "" else: stringLiteral(stmt[1])
@@ -361,7 +450,7 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
       let childBody = stmt[stmt.len - 1]
       discard parseCliScope(packageName, executableName, childBody,
         childPath, false, result.params, result.outputFlags,
-        result.dependencyPolicy, wholeBody, commands)
+        result.typedOutputs, result.dependencyPolicy, wholeBody, commands)
     else:
       discard
 
@@ -386,7 +475,8 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       # directly under ``cli:`` and seeds the cumulative output set that
       # each subcommand inherits, all in one source-order pass.
       let rootCmd = parseCliScope(packageName, result.exportName, cliBody,
-        @[], true, @[], @[], defaultDependencyPolicy(), cliBody, commands)
+        @[], true, @[], @[], @[], defaultDependencyPolicy(), cliBody,
+        commands)
       discard rootCmd
       # ``parseCliScope`` only emits non-root commands into ``commands``.
       # Existing call sites — the wrapper generator, the interface
@@ -991,6 +1081,19 @@ proc packageLiteral(pkg: PackageDef): string =
         if ofIndex > 0:
           result.add(", ")
         result.add(escForCode(flagName))
+      result.add("], typedOutputs: @[")
+      for tdIndex, td in cmd.typedOutputs:
+        if tdIndex > 0:
+          result.add(", ")
+        result.add("TypedOutputDef(fieldName: " & escForCode(td.fieldName) &
+          ", types: @[")
+        for typeIndex, typeName in td.types:
+          if typeIndex > 0:
+            result.add(", ")
+          result.add(escForCode(typeName))
+        result.add("], pathExpr: " & escForCode(td.pathExpr) &
+          ", sourceFile: " & escForCode(td.sourceFile) &
+          ", sourceLine: " & $td.sourceLine & ")")
       result.add("], sourceFile: " & escForCode(cmd.sourceFile) &
         ", sourceLine: " & $cmd.sourceLine & ", params: @[")
       for paramIndex, param in cmd.params:
@@ -1103,10 +1206,12 @@ proc commandProcName(cmdName: string): string =
     else:
       result.add("_" & toHex(ord(ch), 2).toLowerAscii())
 
-proc titleIdent(text: string): string =
+proc titleCase(text: string): string =
+  ## Typed-Outputs M0: lowercase-with-underscores -> CamelCase. Shared
+  ## by ``titleIdent`` (which appends a ``Package`` suffix) and the
+  ## per-tool-call ``BuildEdge`` subtype namer in
+  ## ``buildEdgeSubtypeName`` (which does not).
   let normalized = selectorModuleName(text)
-  if normalized.len == 0:
-    return "Package"
   var capitalizeNext = true
   for ch in normalized:
     if ch == '_':
@@ -1116,7 +1221,25 @@ proc titleIdent(text: string): string =
       capitalizeNext = false
     else:
       result.add(ch)
+
+proc titleIdent(text: string): string =
+  let normalized = selectorModuleName(text)
+  if normalized.len == 0:
+    return "Package"
+  result = titleCase(text)
   result.add("Package")
+
+proc buildEdgeSubtypeName(exeExportName, cmdName: string): string =
+  ## Typed-Outputs M0: per-tool-call ``BuildEdge`` subtype name. The
+  ## convention is ``<TitleExportName><TitleCmdName>Edge`` — for
+  ## ``executable buildNimUnittest:`` whose call is anonymous (``call:``
+  ## or no subcommand) this yields ``BuildNimUnittestEdge``; for
+  ## ``executable nim:`` with ``subcmd "c"`` it yields ``NimCEdge``.
+  ## Empty ``cmdName`` collapses to just ``<TitleExportName>Edge``.
+  result = titleCase(exeExportName)
+  if cmdName.len > 0:
+    result.add(titleCase(cmdName))
+  result.add("Edge")
 
 proc packageValueIdent(text: string): string =
   selectorModuleName(text)
@@ -1245,6 +1368,34 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
   if pkg.executables.len != 1:
     return
   let exe = pkg.executables[0]
+  # Typed-Outputs M0: emit a per-tool-call ``BuildEdge`` subtype for
+  # every command whose ``typedOutputs`` is non-empty. The subtype has
+  # one typed field per ``TypedOutputDef`` (field type = ``types[0]``);
+  # the embedded ``action: BuildActionDef`` preserves access to the
+  # engine-side edge record so existing call paths
+  # (``setRegisteredActionTargetNames(edge.action.id, ...)``,
+  # ``combineActionDeps``, etc.) still compose. Commands without typed
+  # outputs keep returning ``BuildActionDef`` unchanged so the M0
+  # ``outputs <flag>...`` form and every untyped in-tree wrapper
+  # (``nim.c``, ``gcc.compile``, ``stylus``) stay binary-compatible.
+  var emittedTypeBlock = false
+  for cmd in exe.commands:
+    if cmd.typedOutputs.len == 0:
+      continue
+    if not emittedTypeBlock:
+      result.add("type\n")
+      emittedTypeBlock = true
+    let subtypeName = buildEdgeSubtypeName(exe.exportName, cmd.name)
+    result.add("  " & subtypeName & "* = object\n")
+    result.add("    action*: BuildActionDef\n")
+    for td in cmd.typedOutputs:
+      # Field type comes from the first declared interface; additional
+      # interfaces are recorded on ``TypedOutputDef.types`` for M1's
+      # framework-recognition pass to consume off-band.
+      let fieldType =
+        if td.types.len > 0: td.types[0] else: "BuildActionDef"
+      result.add("    " & escapeNimIdent(td.fieldName) & "*: " &
+        fieldType & "\n")
   for cmd in exe.commands:
     var formals = @["pkg: " & typeName]
     for param in cmd.params:
@@ -1258,8 +1409,17 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     formals.add("cacheable = true")
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
+    let typedReturn = cmd.typedOutputs.len > 0
+    let returnType =
+      if typedReturn: buildEdgeSubtypeName(exe.exportName, cmd.name)
+      else: "BuildActionDef"
+    # ``actionRef`` reads through to the engine-side ``BuildActionDef``
+    # record regardless of which return shape we picked, so the M1
+    # target-name wiring below stays branch-free.
+    let actionRef =
+      if typedReturn: "result.action" else: "result"
     result.add("proc " & commandCallableName(cmd.name) & "*( " &
-      formals.join("; ") & "): BuildActionDef {.discardable.} =\n")
+      formals.join("; ") & "): " & returnType & " {.discardable.} =\n")
     result.add("  discard pkg\n")
     result.add("  var cliArgs: seq[PublicCliArg] = @[]\n")
     for param in cmd.params:
@@ -1270,29 +1430,60 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       ", " & escForCode(cmd.providerEntrypointId) & ", cliArgs)\n")
     result.add("  let selectedActionId = if actionId.len > 0: actionId " &
       "else: defaultToolActionId(call)\n")
-    result.add("  result = recordToolInvocation(selectedActionId, call, " &
+    result.add("  " & actionRef &
+      " = recordToolInvocation(selectedActionId, call, " &
       "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "dependencyPolicy = " &
       dependencyPolicyCode(cmd.dependencyPolicy) & ")\n")
+    # Typed-Outputs M0: leave the typed fields at their default value.
+    # M1 will reparse ``td.pathExpr`` and bind the runtime path; for
+    # now the compile-time shape is the only contract — fields exist
+    # and resolve to ``types[0]``.
+    if typedReturn:
+      for td in cmd.typedOutputs:
+        let fieldType =
+          if td.types.len > 0: td.types[0] else: "BuildActionDef"
+        result.add("  result." & escapeNimIdent(td.fieldName) &
+          " = default(" & fieldType & ")\n")
     # Named-Targets M1: append the implicit-target-name wiring suffix.
-    # The wrapper proc returns a ``BuildActionDef``, and ``result.id``
-    # is the engine-side handle the export table cites.
+    # The wrapper proc returns either ``BuildActionDef`` directly (no
+    # typed outputs) or a ``BuildEdge`` subtype with an embedded
+    # ``action: BuildActionDef`` field, so ``actionRef`` resolves to
+    # the same engine-side edge record both ways.
     let hookProc =
       if exe.hasImplicitTargetNameHook and
           exe.implicitTargetNameHookCallType.len > 0:
         "implicitTargetNameFor" & titleIdent(exe.exportName)
       else:
         ""
-    result.add(emitTargetNameWiring(
-      packageNameLit = escForCode(pkg.packageName),
-      outputFlags = cmd.outputFlags,
-      params = cmd.params,
-      hookProcName = hookProc,
-      hookCallTypeRepr = exe.implicitTargetNameHookCallType,
-      sourceFileLit = escForCode(cmd.sourceFile),
-      sourceLineLit = $cmd.sourceLine))
+    let wiringIndent = "  "
+    # The M1 wiring code template references ``result.id`` directly;
+    # when the return type is the typed subtype we need ``result.action.id``.
+    # Generate the wiring as a small inline block parameterised by
+    # ``actionRef``.
+    if cmd.outputFlags.len > 0 or hookProc.len > 0:
+      let flagsLit = outputFlagsLiteral(cmd.outputFlags)
+      result.add(wiringIndent &
+        "var implicitNames = computeImplicitTargetNames(call, " &
+        flagsLit & ")\n")
+      if hookProc.len > 0 and exe.implicitTargetNameHookCallType.len > 0:
+        let recordCtor = hookCallRecordExpr(
+          exe.implicitTargetNameHookCallType, cmd.params)
+        result.add(wiringIndent & "let hookName = " & hookProc & "(" &
+          recordCtor & ")\n")
+        result.add(wiringIndent & "if implicitNames.len > 0:\n")
+        result.add(wiringIndent & "  implicitNames[0] = hookName\n")
+        result.add(wiringIndent & "else:\n")
+        result.add(wiringIndent & "  implicitNames.add(hookName)\n")
+      result.add(wiringIndent & "if implicitNames.len > 0:\n")
+      result.add(wiringIndent & "  setRegisteredActionTargetNames(" &
+        actionRef & ".id, implicitNames)\n")
+      result.add(wiringIndent & "  registerImplicitTargetExports(" &
+        actionRef & ".id, " & escForCode(pkg.packageName) &
+        ", implicitNames, " & escForCode(cmd.sourceFile) & ", " &
+        $cmd.sourceLine & ")\n")
 
 proc wrapperCode(pkg: PackageDef; recordActions = false): string =
   if recordActions:
@@ -1642,6 +1833,23 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
     if calleeName(stmt).normalize == "outputs":
       if stmt.len < 2:
         error("outputs requires at least one flag name", stmt)
+      # Typed-Outputs M0: ``defineCliInterface`` accepts the typed form
+      # too — it lowers to the same ``TypedOutputDef`` records that the
+      # ``package`` macro builds. The ``BuildEdge`` subtype emission
+      # path is in ``toolActionWrapperCode`` (the package-scoped
+      # wrapper); the ``defineCliInterface`` wrapper currently returns
+      # a plain ``BuildActionDef`` and only records the typed entries
+      # for inspection. M1 unifies the two emission paths.
+      if isTypedOutputsHead(stmt):
+        let td = parseTypedOutputsStatement(stmt)
+        var duplicate = false
+        for existing in result.typedOutputs:
+          if existing.fieldName == td.fieldName:
+            duplicate = true
+            break
+        if not duplicate:
+          result.typedOutputs.add(td)
+        continue
       var operands: seq[NimNode] = @[]
       for i in 1 ..< stmt.len:
         collectOutputsOperands(stmt[i], operands)

@@ -38,6 +38,31 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  TypedOutputDef* = object
+    ## Typed-Outputs M0: one record per typed ``outputs`` statement of the
+    ## form ``outputs <fieldName> is <Type1>[, <Type2>...], <pathExpression>``.
+    ##
+    ## The first type names the static type of the field emitted on the
+    ## per-tool-call ``BuildEdge`` subtype (see ``macros_a.nim``'s
+    ## ``buildEdgeSubtypeName`` / ``toolActionWrapperCode``). Additional
+    ## types tag the output as implementing further interfaces so
+    ## reprobuild's type-class-style framework recognition can find it
+    ## without re-parsing the DSL (consumed by M1 onwards).
+    ##
+    ## ``pathExpr`` is stored as the verbatim source repr of the
+    ## ``NimNode`` written at the declaration site. The expression is NOT
+    ## evaluated at parse time — M1 reparses it (via
+    ## ``parseExpr(pathExpr)``) at action-emission time to bind the
+    ## runtime path against the call-site flag values. Storing the source
+    ## form, rather than a live ``NimNode``, lets the parsed
+    ## ``PackageDef`` round-trip through ``packageLiteral`` and survive
+    ## as a runtime ``const`` like every other field on ``CliCommandDef``.
+    fieldName*: string
+    types*: seq[string]
+    pathExpr*: string
+    sourceFile*: string
+    sourceLine*: int
+
   CliCommandDef* = object
     name*: string
     path*: seq[string]
@@ -53,6 +78,12 @@ type
       ## the lexical path from the cli root to this command, materialised per
       ## subcommand at parse time. The DSL only records names; the M1 engine
       ## evaluates them against actual call values and runs the basename rule.
+    typedOutputs*: seq[TypedOutputDef]
+      ## Typed-Outputs M0: one entry per ``outputs <fieldName> is <Type>...,
+      ## <pathExpr>`` statement seen on the lexical path from the cli root
+      ## to this command (parent entries flow into nested ``subcmd`` scopes
+      ## the same way ``outputFlags`` does). Each entry contributes one
+      ## typed field on the per-call ``BuildEdge`` subtype.
     sourceFile*: string
     sourceLine*: int
 
