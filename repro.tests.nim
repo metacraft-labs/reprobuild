@@ -1271,9 +1271,17 @@ build:
     source = "tests/integration/t_integration_scheduler_dependency_gathering_policies.nim",
     binary = "build/test-bin/t_integration_scheduler_dependency_gathering_policies")
 
+  let _t_just_test_end_to_end_via_parallel_runner = buildNimUnittest.build(
+    source = "tests/integration/t_just_test_end_to_end_via_parallel_runner.nim",
+    binary = "build/test-bin/t_just_test_end_to_end_via_parallel_runner")
+
   let _t_just_test_hot_cache_is_no_op_build = buildNimUnittest.build(
     source = "tests/integration/t_just_test_hot_cache_is_no_op_build.nim",
     binary = "build/test-bin/t_just_test_hot_cache_is_no_op_build")
+
+  let _t_just_test_via_ct_test_runner = buildNimUnittest.build(
+    source = "tests/integration/t_just_test_via_ct_test_runner.nim",
+    binary = "build/test-bin/t_just_test_via_ct_test_runner")
 
   let _t_local_daemons_control_plane_m0 = buildNimUnittest.build(
     source = "tests/integration/t_local_daemons_control_plane_m0.nim",
@@ -1338,6 +1346,14 @@ build:
   let _t_repro_core_binary_roundtrip = buildNimUnittest.build(
     source = "tests/integration/t_repro_core_binary_roundtrip.nim",
     binary = "build/test-bin/t_repro_core_binary_roundtrip")
+
+  let _t_repro_test_runner_aggregate_exit_code = buildNimUnittest.build(
+    source = "tests/integration/t_repro_test_runner_aggregate_exit_code.nim",
+    binary = "build/test-bin/t_repro_test_runner_aggregate_exit_code")
+
+  let _t_repro_test_runner_parallel_n_workers = buildNimUnittest.build(
+    source = "tests/integration/t_repro_test_runner_parallel_n_workers.nim",
+    binary = "build/test-bin/t_repro_test_runner_parallel_n_workers")
 
   let _t_stackable_hooks_extracted_process_tree = buildNimUnittest.build(
     source = "tests/integration/t_stackable_hooks_extracted_process_tree.nim",
@@ -1909,7 +1925,9 @@ build:
     _t_integration_provider_fragment_refresh_and_pruning.action,
     _t_integration_reprobuild_sessions_share_runquota.action,
     _t_integration_scheduler_dependency_gathering_policies.action,
+    _t_just_test_end_to_end_via_parallel_runner.action,
     _t_just_test_hot_cache_is_no_op_build.action,
+    _t_just_test_via_ct_test_runner.action,
     _t_local_daemons_control_plane_m0.action,
     _t_local_daemons_control_plane_m1.action,
     _t_local_daemons_control_plane_m10.action,
@@ -1926,6 +1944,8 @@ build:
     _t_project_interface_artifact_import_modes.action,
     _t_repro_build_test_aggregate_builds_every_test.action,
     _t_repro_core_binary_roundtrip.action,
+    _t_repro_test_runner_aggregate_exit_code.action,
+    _t_repro_test_runner_parallel_n_workers.action,
     _t_stackable_hooks_extracted_process_tree.action,
     _t_store_daemon_m66_dev.action,
     _t_test_edge_migration_covers_all_test_files.action,

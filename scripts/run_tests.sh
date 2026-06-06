@@ -193,28 +193,42 @@ done < <(
   find tests -type f -name 'test_*.py' -print0
 )
 
-# M3 runner: build if missing, then delegate the entire Nim test
-# execution phase to the parallel runner. The runner discovers test
-# binaries under ``build/test-bin/``, probes each for the M2
-# protocol surface, and fans out per-test invocations across
-# ``nproc`` workers. Sequential per-binary execution is gone.
-runner_bin="build/bin/repro_test_runner${exe_ext}"
-if [[ ! -x "${runner_bin}" ]]; then
-  printf 'Building test runner: %s\n' "${runner_bin}" >&2
-  nim c \
-    -d:release \
-    --threads:on \
-    --hints:off \
-    --warnings:off \
-    --nimcache:build/nimcache/repro_test_runner \
-    --out:"${runner_bin}" \
-    tools/test-runner/repro_test_runner.nim
+# M4: prefer ct-test-runner from the sibling ``ct-test`` repo. The
+# protocol contract is identical to the M3 internal runner (both speak
+# the Tier-1 Standard --list-json/--run/$NIMTEST_RESULT_FILE wire), so
+# the cut-over is the equivalent of swapping which binary is invoked.
+# If ct-test-runner isn't built (e.g. workspace without ct-test
+# checked out, or pre-build environment), fall back to the M3 internal
+# runner at ``tools/test-runner/repro_test_runner.nim``. The fallback
+# keeps the build green during the transition and is removed once the
+# wider workspace catalog wires ct-test-runner as a typed ``uses:``
+# dependency.
+ct_test_runner="../ct-test/build/bin/ct-test-runner${exe_ext}"
+if [[ -x "${ct_test_runner}" ]]; then
+  printf 'Using ct-test-runner: %s\n' "${ct_test_runner}" >&2
+  "${ct_test_runner}" run \
+    --bin-dir=build/test-bin \
+    --summary-json=test-logs/parallel-run.json \
+    --results-dir=test-logs/results
+else
+  printf 'ct-test-runner not built; falling back to M3 internal runner\n' >&2
+  runner_bin="build/bin/repro_test_runner${exe_ext}"
+  if [[ ! -x "${runner_bin}" ]]; then
+    printf 'Building M3 fallback runner: %s\n' "${runner_bin}" >&2
+    nim c \
+      -d:release \
+      --threads:on \
+      --hints:off \
+      --warnings:off \
+      --nimcache:build/nimcache/repro_test_runner \
+      --out:"${runner_bin}" \
+      tools/test-runner/repro_test_runner.nim
+  fi
+  # The runner already ran ``repro build test`` for us above; tell it to
+  # skip its own build step so we don't double-build.
+  "${runner_bin}" \
+    --no-build \
+    --bin-dir=build/test-bin \
+    --summary-json=test-logs/parallel-run.json \
+    --results-dir=test-logs/results
 fi
-
-# The runner already ran ``repro build test`` for us above; tell it to
-# skip its own build step so we don't double-build.
-"${runner_bin}" \
-  --no-build \
-  --bin-dir=build/test-bin \
-  --summary-json=test-logs/parallel-run.json \
-  --results-dir=test-logs/results
