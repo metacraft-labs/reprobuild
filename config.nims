@@ -162,6 +162,7 @@ for libName in [
   "runquota_persistence",
   "runquota_daemon",
   "runquota_cli_support",
+  "runquota_partition",
 ]:
   switch("path", runquotaRoot / "libs" / libName / "src")
 
