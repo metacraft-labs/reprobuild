@@ -19,6 +19,18 @@ type
     client*: PeerCacheClient
     registry*: PeerRegistry
 
+  LoopbackPeerOptions* = object
+    ## Per-peer M1 wiring: optional store reader (consulted by the
+    ## peer's *server* when answering `mkFetchRequest`), optional
+    ## store writer (called by the peer's *client* after a verified
+    ## `mkFetchResponse`), and optional response interceptor (test
+    ## seam for the corrupted-payload verification).
+    localStoreReader*: LocalStoreReader
+    localStoreWriter*: LocalStoreWriter
+    responseInterceptor*: ResponseInterceptor
+    maxBlobBytes*: uint64
+      ## When non-zero, overrides the default `maxBlobBytes` (100 MB).
+
 const LoopbackCidr* = "127.0.0.0/8"
 
 proc makePeerId(index: int): PeerId =
@@ -32,15 +44,26 @@ proc makePeerId(index: int): PeerId =
   raw[2] = byte((index shr 8) and 0xff)
   peerIdFromBytes(raw)
 
-proc spawnLoopbackPeers*(n: int): seq[LoopbackPeer] =
+proc spawnLoopbackPeers*(n: int;
+                         options: seq[LoopbackPeerOptions] = @[]):
+                         seq[LoopbackPeer] =
   ## Spawns `n` peers on `127.0.0.1:0` (ephemeral OS-assigned ports).
   ## Each peer's server is started before the next peer is created so
   ## the ephemeral port is settled before being used as a seed for
   ## the others. After all servers are up, each peer's client is
   ## dialled with the other peers' endpoints as seeds.
   ##
+  ## The optional `options` argument, when provided, must have length
+  ## `n` and supplies per-peer M1 wiring (store reader / writer,
+  ## response interceptor, maxBlobBytes override). When omitted, all
+  ## peers run the M0 stub fetch path.
+  ##
   ## Returns handles in the order they were created. Use
   ## `shutdownLoopbackPeers` for a graceful close.
+  if options.len != 0 and options.len != n:
+    raise newException(ValueError,
+      "spawnLoopbackPeers: options.len must equal n (got " &
+      $options.len & " vs " & $n & ")")
   let allowlist = @[parseCidrV4(LoopbackCidr)]
   result = newSeq[LoopbackPeer](n)
   # Phase 1: build all peers and start their servers so endpoints
@@ -49,12 +72,23 @@ proc spawnLoopbackPeers*(n: int): seq[LoopbackPeer] =
     let peerId = makePeerId(i)
     let endpoint = initEndpoint("127.0.0.1", Port(0))
     let registry = newPeerRegistry(peerId, endpoint)
+    var reader: LocalStoreReader = nil
+    var interceptor: ResponseInterceptor = nil
+    var maxBytes: uint64 = DefaultMaxBlobBytes
+    if options.len > 0:
+      reader = options[i].localStoreReader
+      interceptor = options[i].responseInterceptor
+      if options[i].maxBlobBytes != 0:
+        maxBytes = options[i].maxBlobBytes
     let server = newPeerCacheServer(
       selfPeerId = peerId,
       listenAddr = "127.0.0.1",
       listenPort = Port(0),
       registry = registry,
-      cidrAllowlist = allowlist)
+      cidrAllowlist = allowlist,
+      maxBlobBytes = maxBytes,
+      localStoreReader = reader,
+      responseInterceptor = interceptor)
     server.start()
     result[i] = LoopbackPeer(
       peerId: peerId,
@@ -68,12 +102,16 @@ proc spawnLoopbackPeers*(n: int): seq[LoopbackPeer] =
     for j in 0 ..< n:
       if j == i: continue
       seeds.add(initEndpoint("127.0.0.1", result[j].server.actualPort))
+    var writer: LocalStoreWriter = nil
+    if options.len > 0:
+      writer = options[i].localStoreWriter
     let client = newPeerCacheClient(
       selfPeerId = result[i].peerId,
       listenPort = uint16(result[i].server.actualPort),
       registry = result[i].registry,
       seedPeers = seeds,
-      cidrAllowlist = allowlist)
+      cidrAllowlist = allowlist,
+      localStoreWriter = writer)
     result[i].client = client
 
 proc dialAllLoopbackClients*(peers: seq[LoopbackPeer]):

@@ -37,6 +37,14 @@ type
     registry*: PeerRegistry
     allowlist*: seq[CidrV4]
     maxBlobBytes*: uint64
+    localStoreReader*: LocalStoreReader
+      ## Peer-Cache M1: optional injected reader for `mkFetchRequest`.
+      ## When `nil`, the server falls back to the M0 stub behaviour
+      ## (responds with `truncated:true, payload:@[]`).
+    responseInterceptor*: ResponseInterceptor
+      ## Peer-Cache M1: optional test seam. When non-nil, the proc is
+      ## called on the `mkFetchResponse` payload bytes just before
+      ## encoding. Production code leaves this `nil`.
     listener: AsyncSocket
     running: bool
     activeConnections: seq[AsyncSocket]
@@ -140,7 +148,9 @@ proc newPeerCacheServer*(selfPeerId: PeerId;
                          listenPort: Port;
                          registry: PeerRegistry;
                          cidrAllowlist: openArray[CidrV4];
-                         maxBlobBytes: uint64 = DefaultMaxBlobBytes):
+                         maxBlobBytes: uint64 = DefaultMaxBlobBytes;
+                         localStoreReader: LocalStoreReader = nil;
+                         responseInterceptor: ResponseInterceptor = nil):
                          PeerCacheServer =
   result = PeerCacheServer(
     selfPeerId: selfPeerId,
@@ -149,6 +159,8 @@ proc newPeerCacheServer*(selfPeerId: PeerId;
     registry: registry,
     allowlist: @cidrAllowlist,
     maxBlobBytes: maxBlobBytes,
+    localStoreReader: localStoreReader,
+    responseInterceptor: responseInterceptor,
     listener: nil,
     running: false,
     activeConnections: @[])
@@ -242,12 +254,32 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
       of mkGoodbye:
         break
       of mkFetchRequest:
-        # M0 stub: respond truncated. M1 wires this to the local store.
+        # M1: consult the injected `LocalStoreReader`. Reply truncated
+        # when there is no reader (M0 fallback), the blob is absent, or
+        # the blob exceeds `maxBlobBytes`. On hit, run the optional
+        # `responseInterceptor` (test seam for the corrupted-payload
+        # verification path) before encoding the response payload.
         let req = decodeFetchRequest(frame.payload)
-        let resp = FetchResponse(
-          digest: req.digest,
-          truncated: true,
-          payload: @[])
+        var resp: FetchResponse
+        if server.localStoreReader.isNil:
+          resp = FetchResponse(
+            digest: req.digest, truncated: true, payload: @[])
+        else:
+          let lookup = server.localStoreReader(req.digest)
+          if lookup.isNone:
+            resp = FetchResponse(
+              digest: req.digest, truncated: true, payload: @[])
+          else:
+            let bytes = lookup.get()
+            if uint64(bytes.len) > server.maxBlobBytes:
+              resp = FetchResponse(
+                digest: req.digest, truncated: true, payload: @[])
+            else:
+              var payload = bytes
+              if not server.responseInterceptor.isNil:
+                payload = server.responseInterceptor(payload)
+              resp = FetchResponse(
+                digest: req.digest, truncated: false, payload: payload)
         await sendFrame(client, mkFetchResponse, encodeFetchResponse(resp))
       of mkFetchResponse:
         # Server-side receipt of a fetch response is unusual (the
@@ -258,8 +290,24 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
         # Server doesn't expect HelloOk from a client.
         discard
       of mkWant:
-        # M0 acknowledges but does not act on Want.
-        discard
+        # M1: a `wkSnapshotRequest` asks for a fresh advertise
+        # snapshot — used by the receiver after detecting a
+        # sequence-number gap (see registry.needsSnapshot). We reply
+        # with the current `mkAdvertise` snapshot from the registry.
+        # `wkBlobs` (point fetch list) remains a no-op until M2 wires
+        # batched fetches; senders that want a single blob today use
+        # `mkFetchRequest` instead.
+        if not hasRegisteredPeer:
+          raise newException(PeerCacheServerError,
+            "Want received before Hello on peer-cache connection")
+        let want = decodeWant(frame.payload)
+        case want.kind
+        of wkSnapshotRequest:
+          let snapshot = server.registry.snapshotFor(registeredPeerId)
+          await sendFrame(
+            client, mkAdvertise, encodeAdvertise(snapshot))
+        of wkBlobs:
+          discard
   except CatchableError:
     # Connection-level errors close the socket; the registry retains
     # the peer entry so a reconnection re-uses it.

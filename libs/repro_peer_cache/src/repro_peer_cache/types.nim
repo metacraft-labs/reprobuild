@@ -15,9 +15,10 @@
 ## (`Peer-Cache.md` §"Identity model") and the algorithm tag
 ## would be wasted bandwidth on every advertise.
 
-import std/[hashes, nativesockets]
+import std/[hashes, nativesockets, options]
 
 export nativesockets.Port
+export options
 
 type
   PeerId* = distinct array[32, byte]
@@ -134,3 +135,38 @@ proc `==`*(a, b: Endpoint): bool =
 
 proc initEndpoint*(host: string; port: Port): Endpoint =
   Endpoint(host: host, port: port)
+
+# ---------------------------------------------------------------------------
+# Local store injection seams (Peer-Cache M1).
+#
+# `LocalStoreReader` / `LocalStoreWriter` are intentionally small typed
+# procs so the peer-cache library doesn't take a hard dependency on
+# `repro_local_store`. The caller wires the actual store implementation
+# via closures: production code threads `LocalCas.readBlob` /
+# `LocalCas.storeBlob`; tests wrap an in-memory `Table[BlobDigest,
+# seq[byte]]`. See `Peer-Cache.milestones.org` §M1.
+# ---------------------------------------------------------------------------
+
+type
+  LocalStoreReader* = proc(digest: BlobDigest): Option[seq[byte]]
+    {.gcsafe, closure.}
+    ## Returns `some(bytes)` if the local store has a blob at
+    ## `digest`, `none` otherwise. The bytes are returned by value so
+    ## the codec can frame them without sharing ownership with the
+    ## caller's storage. The reader MUST NOT raise — store-layer
+    ## errors should surface as `none` plus an out-of-band log.
+
+  LocalStoreWriter* = proc(digest: BlobDigest; payload: seq[byte])
+    {.gcsafe, closure.}
+    ## Writes a verified payload to the local store under `digest`.
+    ## Called by the client after a successful `mkFetchResponse`
+    ## BLAKE3-256 verification. The writer is idempotent — repeated
+    ## writes for the same digest are a no-op.
+
+  ResponseInterceptor* = proc(payload: seq[byte]): seq[byte]
+    {.gcsafe, closure.}
+    ## Server-side seam injected by tests. Called on the
+    ## `mkFetchResponse` payload just before the codec encodes it.
+    ## Production code leaves this `nil` (identity). The corrupted-
+    ## payload verification test (`Peer-Cache.milestones.org` §M1)
+    ## wires this to flip a byte.

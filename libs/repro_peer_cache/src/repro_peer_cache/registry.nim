@@ -4,7 +4,7 @@
 ## every peer this node has handshaken with. See
 ## `Peer-Cache.md` §"Advertisement index".
 
-import std/[monotimes, sets, tables]
+import std/[algorithm, monotimes, sets, tables]
 
 import ./types
 
@@ -119,14 +119,28 @@ proc needsSnapshot*(reg: PeerRegistry; peerId: PeerId): bool =
 
 proc findPeersWithBlob*(reg: PeerRegistry; digest: BlobDigest): seq[PeerId] =
   ## Returns every known peer that has advertised `digest`. Order is
-  ## table-iteration order — M1 will sort by recency + observed
-  ## latency.
+  ## lexicographic-by-peerId-bytes — stable across runs so callers
+  ## (and tests) can rely on deterministic candidate ordering. The
+  ## spec's "sorted by recency + observed latency" lands in M2; M1
+  ## ships the stable lexicographic order as a sensible default that
+  ## avoids `std/tables` hash-bucket nondeterminism leaking into test
+  ## results.
   result = @[]
   for peerId, entry in reg.entries.pairs:
     if entry.suspect:
       continue
     if digest in entry.advertised:
       result.add(peerId)
+  result.sort do (a, b: PeerId) -> int:
+    let
+      aa = bytes(a)
+      bb = bytes(b)
+    var i = 0
+    while i < aa.len:
+      if aa[i] < bb[i]: return -1
+      if aa[i] > bb[i]: return 1
+      inc i
+    0
 
 proc markSuspect*(reg: PeerRegistry; peerId: PeerId) =
   ## Flags the peer as suspect (corrupt response, protocol violation).

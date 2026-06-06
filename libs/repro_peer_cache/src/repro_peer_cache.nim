@@ -11,6 +11,7 @@ import ./repro_peer_cache/registry
 import ./repro_peer_cache/server
 import ./repro_peer_cache/client
 import ./repro_peer_cache/loopback
+import ./repro_peer_cache/engine_seam
 
 export types
 export codec
@@ -18,3 +19,4 @@ export registry
 export server
 export client
 export loopback
+export engine_seam

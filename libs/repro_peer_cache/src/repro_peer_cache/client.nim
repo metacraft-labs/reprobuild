@@ -7,12 +7,21 @@
 ## (one per peer) so subsequent fetch requests and advertisements
 ## reuse them; `stop` sends `mkGoodbye` to each peer and closes.
 
-import std/[asyncdispatch, asyncnet, nativesockets, tables]
+import std/[asyncdispatch, asyncnet, nativesockets, options, tables]
+
+import blake3
 
 import ./codec
 import ./registry
 import ./server  # for inAllowlist + CidrV4
 import ./types
+
+const DefaultFetchTimeoutMs* = 5_000
+  ## Per-candidate fetch timeout for `requestFetch`. The spec
+  ## (`Peer-Cache.md` §"Fetch semantics") doesn't pin a value; 5 s is
+  ## generous for LAN round-trips and short enough that an unresponsive
+  ## peer doesn't block the engine for long. Tests override this via
+  ## `PeerCacheClient.fetchTimeoutMs`.
 
 type
   PeerCacheClient* = ref object
@@ -21,6 +30,27 @@ type
     registry*: PeerRegistry
     seedPeers*: seq[Endpoint]
     allowlist*: seq[CidrV4]
+    localStoreWriter*: LocalStoreWriter
+      ## Peer-Cache M1: optional writer. When non-nil,
+      ## `requestFetch` writes the verified payload to the local
+      ## store and advertises the new blob via `registry.selfAddBlob`
+      ## so subsequent advertise rounds carry it.
+    fetchTimeoutMs*: int
+      ## Per-candidate fetch timeout in milliseconds.
+    fetchRoundTripCount*: int
+      ## Test instrumentation: number of `mkFetchRequest` sends that
+      ## the client has issued. The action-cache-reader verification
+      ## test asserts a single round-trip per logical fetch (the
+      ## second read hits the local cache).
+    pendingFetches: Table[BlobDigest,
+                          Future[Option[seq[byte]]]]
+      ## In-flight `mkFetchRequest` correlation table. Entries are
+      ## keyed by the *expected* digest carried in the request
+      ## envelope; the reader loop completes the future when the
+      ## matching `mkFetchResponse` arrives (after BLAKE3
+      ## verification). Only one outstanding request per digest per
+      ## client is tracked — concurrent requests for the same digest
+      ## share the same future.
     connections: Table[PeerId, AsyncSocket]
     running: bool
 
@@ -30,13 +60,21 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
                         listenPort: uint16;
                         registry: PeerRegistry;
                         seedPeers: openArray[Endpoint];
-                        cidrAllowlist: openArray[CidrV4]): PeerCacheClient =
+                        cidrAllowlist: openArray[CidrV4];
+                        localStoreWriter: LocalStoreWriter = nil;
+                        fetchTimeoutMs: int = DefaultFetchTimeoutMs):
+                        PeerCacheClient =
   result = PeerCacheClient(
     selfPeerId: selfPeerId,
     listenPort: listenPort,
     registry: registry,
     seedPeers: @seedPeers,
     allowlist: @cidrAllowlist,
+    localStoreWriter: localStoreWriter,
+    fetchTimeoutMs: fetchTimeoutMs,
+    fetchRoundTripCount: 0,
+    pendingFetches: initTable[BlobDigest,
+                              Future[Option[seq[byte]]]](),
     connections: initTable[PeerId, AsyncSocket](),
     running: false)
 
@@ -119,11 +157,27 @@ proc handshakePeer(client: PeerCacheClient;
 
   return helloOk.peerId
 
+proc completePending(client: PeerCacheClient;
+                     digest: BlobDigest;
+                     value: Option[seq[byte]]) =
+  ## Looks up the digest in the pending-fetch table and completes its
+  ## future with `value` (or `none` on miss / verification failure).
+  ## Removes the entry from the table so subsequent responses for the
+  ## same digest (e.g. duplicate sends from a misbehaving peer) are
+  ## dropped silently. Idempotent: if the future is already finished
+  ## (e.g. the request timed out) the late response is discarded.
+  if not client.pendingFetches.hasKey(digest):
+    return
+  let fut = client.pendingFetches[digest]
+  client.pendingFetches.del(digest)
+  if not fut.finished:
+    fut.complete(value)
+
 proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
                 peerId: PeerId) {.async.} =
   ## After the handshake, keep reading framed messages — applying
-  ## advertise updates, responding to ping, processing fetch
-  ## responses (M1). M0 honours advertise + ping + goodbye.
+  ## advertise updates, responding to ping, completing fetch-response
+  ## futures (M1).
   try:
     while client.running:
       let frameBytes = await readFrameBytes(sock)
@@ -140,8 +194,33 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
         client.registry.updateLastSeen(peerId)
       of mkGoodbye:
         break
-      of mkFetchResponse, mkWant, mkHello, mkHelloOk, mkFetchRequest:
-        # M0: surfaces these in M1. Drop silently for now.
+      of mkFetchResponse:
+        # M1: correlate the digest with an outstanding `requestFetch`
+        # call, BLAKE3-verify the payload, mark the peer suspect on
+        # mismatch, and complete the future with `some(payload)` or
+        # `none`. The spec's fetch semantics
+        # (`Peer-Cache.md` §"Fetch semantics" step 3) live here.
+        let resp = decodeFetchResponse(frame.payload)
+        if resp.truncated:
+          client.completePending(resp.digest, none(seq[byte]))
+        else:
+          let observed = blake3.digest(resp.payload)
+          let expected = bytes(resp.digest)
+          if observed != expected:
+            # BLAKE3 mismatch — drop the response, mark the peer
+            # suspect, and fall through (the caller's `requestFetch`
+            # loop tries the next candidate). Per spec, mismatch is
+            # always the *peer's* fault: the digest was supplied by
+            # the receiver, the payload was supplied by the peer.
+            client.registry.markSuspect(peerId)
+            client.completePending(resp.digest, none(seq[byte]))
+          else:
+            client.completePending(resp.digest,
+              some(resp.payload))
+      of mkWant, mkHello, mkHelloOk, mkFetchRequest:
+        # The client is a fetch *requester*; servers send these.
+        # Discard silently — the spec lets either side dispatch any
+        # message, so a benign cross-direction send isn't an error.
         discard
   except CatchableError:
     discard
@@ -167,6 +246,64 @@ proc start*(client: PeerCacheClient) {.async.} =
     futures.add(dialPeer(client, endpoint))
   if futures.len > 0:
     await all(futures)
+
+proc requestFetch*(client: PeerCacheClient;
+                   digest: BlobDigest): Future[Option[seq[byte]]]
+                   {.async.} =
+  ## Peer-Cache M1: implements the fetch flow described in
+  ## `Peer-Cache.md` §"Fetch semantics" (steps 2–4). The local-store
+  ## consult (step 1) is the caller's responsibility — wire it
+  ## upstream via the engine-seam reader.
+  ##
+  ## Iterates candidate peers (from `registry.findPeersWithBlob`) in
+  ## order. For each, sends `mkFetchRequest{digest}` on the
+  ## existing connection and `await`s the matching
+  ## `mkFetchResponse` (correlated via `pendingFetches`). On
+  ## BLAKE3-verified hit, writes to the injected `localStoreWriter`
+  ## (if any), advertises the digest on the next round, and returns
+  ## `some(payload)`. On verification failure (or any I/O / timeout
+  ## error) tries the next candidate. Returns `none` on exhaustion.
+  let candidates = client.registry.findPeersWithBlob(digest)
+  for candidate in candidates:
+    if not client.connections.hasKey(candidate):
+      continue
+    let sock = client.connections[candidate]
+    # Reuse an existing in-flight request for the same digest so
+    # concurrent fetchers share one round-trip per blob.
+    var fut: Future[Option[seq[byte]]]
+    if client.pendingFetches.hasKey(digest):
+      fut = client.pendingFetches[digest]
+    else:
+      fut = newFuture[Option[seq[byte]]]("peer_cache.requestFetch")
+      client.pendingFetches[digest] = fut
+      let req = FetchRequest(digest: digest)
+      try:
+        await sendFrame(sock, mkFetchRequest, encodeFetchRequest(req))
+        inc client.fetchRoundTripCount
+      except CatchableError:
+        # Send failed — the connection is likely broken; remove the
+        # entry and try the next candidate.
+        client.completePending(digest, none(seq[byte]))
+        continue
+    # Wait for completion with a timeout. `withTimeout` returns
+    # `false` if the timeout fires first; in that case we treat the
+    # peer as unresponsive, complete the future with `none`, and try
+    # the next candidate.
+    let timeoutOk = await withTimeout(fut, client.fetchTimeoutMs)
+    if not timeoutOk:
+      client.completePending(digest, none(seq[byte]))
+      continue
+    let outcome = fut.read()
+    if outcome.isNone:
+      # Verification failure (marked suspect by readerLoop) or
+      # truncated/miss — fall through to the next candidate.
+      continue
+    let payload = outcome.get()
+    if not client.localStoreWriter.isNil:
+      client.localStoreWriter(digest, payload)
+      client.registry.selfAddBlob(digest)
+    return some(payload)
+  return none(seq[byte])
 
 proc stop*(client: PeerCacheClient) {.async.} =
   ## Sends Goodbye to each connected peer and closes the connections.
