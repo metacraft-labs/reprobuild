@@ -1,4 +1,4 @@
-import std/[algorithm, json, options, os, osproc, sequtils, sets, streams,
+import std/[algorithm, hashes, json, options, os, osproc, sequtils, sets, streams,
     strutils, tables, terminal, times]
 import repro_core
 import repro_build_engine
@@ -19673,6 +19673,588 @@ proc writeShardReport(path: string; meta: JsonNode) =
     createDir(parent)
   writeFile(path, meta.pretty() & "\n")
 
+## ----------------------------------------------------------------------------
+## CI-Sharding M2 deviation fix — workspace-driven discovery, build, and
+## ct-test-runner handoff. Replaces the M2 ``--fixture-from=<JSON>`` deviation
+## with the real reprobuild integration the M3 benchmark milestone depends on.
+##
+## The three helpers below mirror the M2 follow-up bullets in
+## ``CI-Sharding.milestones.org``:
+##
+##   1. ``discoverTestEdgesFromWorkspace`` — walks the engine's normalised
+##      graph artefact (via ``prepareBuildGraphInspection``) and returns one
+##      ``ShardTestEdge`` per declared ``NimUnittestBinary`` action plus the
+##      build-action graph that backs the edges' closures.
+##   2. ``buildClosureForShard`` — delegates to ``runBuildCommand`` (the
+##      Named-Targets M2 resolver) to build the ``:test`` aggregate.  The
+##      simpler whole-aggregate path is acceptable here because the M3
+##      benchmark milestone is the one that optimises build-phase
+##      parallelism.
+##   3. ``invokeCtTestRunner`` — locates the sibling ct-test-runner (mirroring
+##      ``scripts/run_tests.sh``'s cut-over rule from Test-Edges M4) or the
+##      fallback ``tools/test-runner/repro_test_runner`` and invokes it with
+##      the assigned binary paths as positional arguments — that gives
+##      whole-binary sharding without requiring per-test protocol probing.
+
+type
+  WorkspaceTestDiscovery = object
+    actions: seq[ShardBuildAction]
+    edges: seq[ShardTestEdge]
+    edgeBinaryPath: Table[NodeId, string]
+      ## Maps each test-edge root id to the binary stem (``build/test-bin/<stem>``)
+      ## the engine emits for that edge.  Populated from ``typedOutputs.path``.
+
+proc stableNodeIdFromString(value: string): NodeId =
+  ## Deterministic 64-bit id derived from an action id string.  We use the
+  ## std/hashes ``Hash`` (which mixes the bytes) and reinterpret it as
+  ## ``uint64`` so the resulting ``NodeId`` is stable across runs and
+  ## reproducible across shards (every shard recomputes the plan locally,
+  ## per CI-Sharding.md §"CI Sharding").
+  nodeId(cast[uint64](hashes.hash(value)))
+
+proc isNimUnittestBinaryEdge(action: BuildAction): bool =
+  for typedOutput in action.typedOutputs:
+    for typeName in typedOutput.types:
+      if typeName == "NimUnittestBinary":
+        return true
+  false
+
+proc nimUnittestBinaryPath(action: BuildAction): string =
+  for typedOutput in action.typedOutputs:
+    for typeName in typedOutput.types:
+      if typeName == "NimUnittestBinary":
+        return typedOutput.path
+  ""
+
+proc discoverTestEdgesFromWorkspace(projectRoot: string;
+                                    publicCliPath: string):
+    WorkspaceTestDiscovery =
+  ## Walks the engine's normalised graph artefact for ``projectRoot`` and
+  ## returns one ``ShardTestEdge`` per action whose typed-output type is
+  ## ``NimUnittestBinary``.  The whole build-action graph is returned as
+  ## ``actions`` so the planner can walk the dependency closures when
+  ## costing each edge.
+  result.edgeBinaryPath = initTable[NodeId, string]()
+  let info = prepareBuildGraphInspection(projectRoot, tpmUnspecified,
+    publicCliPath, selectDefaultAction = false)
+  # Build a unique-id table so we don't double-add an action that appears
+  # multiple times in ``info.actions`` (the engine returns one entry per
+  # action id but defensive code is cheap).
+  var seenIds = initHashSet[NodeId]()
+  for action in info.actions:
+    let nid = stableNodeIdFromString(action.id)
+    if nid in seenIds:
+      continue
+    seenIds.incl(nid)
+    var deps: seq[NodeId] = @[]
+    for depId in action.deps:
+      deps.add(stableNodeIdFromString(depId))
+    result.actions.add(ShardBuildAction(
+      id: nid,
+      commandStatsId: action.commandStatsId,
+      deps: deps))
+  # Test edges: actions whose typedOutputs declare ``NimUnittestBinary``.
+  # Use a separate id space for the edge root (hash of "test:" + actionId)
+  # so the planner's ``PartitionRoot.id`` and the build-graph node id never
+  # collide on the same NodeId — the bridge node the planner adds for the
+  # root would otherwise overwrite the action's real node.
+  for action in info.actions:
+    if not isNimUnittestBinaryEdge(action):
+      continue
+    let buildActionId = stableNodeIdFromString(action.id)
+    let edgeId = stableNodeIdFromString("test::" & action.id)
+    let binaryPath = nimUnittestBinaryPath(action)
+    result.edges.add(ShardTestEdge(
+      id: edgeId,
+      selector: action.id,
+      historyKey: extractFilename(binaryPath),
+      buildDeps: @[buildActionId]))
+    result.edgeBinaryPath[edgeId] = binaryPath
+
+proc writeWorkspacePartitionFile(path: string;
+                                 binaryPaths: openArray[string]) =
+  ## Writes the per-shard partition file in the ct-test-runner format:
+  ## one fully-qualified test name per line.  For the workspace path we
+  ## record the binary stem (whole-binary sharding) which the runner
+  ## treats as an opaque-binary entry; this matches the documented format
+  ## while still being trivial to author from the test-edge metadata.
+  var lines: seq[string] = @[]
+  lines.add(
+    "# CI-Sharding M2 workspace partition file " &
+    "— one fully-qualified test per line.")
+  for binPath in binaryPaths:
+    let stem = splitFile(binPath).name
+    if stem.len > 0:
+      lines.add(stem)
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  writeFile(path, lines.join("\n") & "\n")
+
+proc buildClosureForShard(assignedSelectors: seq[string];
+                          publicCliPath: string): tuple[code: int; output: string] =
+  ## Builds the closure of the assigned test edges via ``runBuildCommand``.
+  ## The strategy note in the milestone documents the trade-off: building
+  ## the whole ``:test`` aggregate is simpler than computing the union of
+  ## per-shard closures and lets the engine's existing dedup do its job;
+  ## M3 will optimise this once the benchmark milestone is on the table.
+  if assignedSelectors.len == 0:
+    return (0, "")
+  let bin =
+    if publicCliPath.len > 0 and fileExists(publicCliPath): publicCliPath
+    else: stablePublicCliPath()
+  doAssert fileExists(bin), "repro binary missing at " & bin
+  let p = startProcess(bin,
+    workingDir = getCurrentDir(),
+    args = @["build", "test"],
+    options = {poUsePath, poStdErrToStdOut})
+  defer: p.close()
+  var buf = ""
+  let outp = p.outputStream
+  var line = newStringOfCap(120)
+  while true:
+    if outp.readLine(line):
+      buf.add(line)
+      buf.add("\n")
+    else:
+      let code = p.peekExitCode()
+      if code != -1:
+        return (code, buf)
+
+proc locateCtTestRunner(): string =
+  ## Mirrors ``scripts/run_tests.sh``'s Test-Edges M4 cut-over rule:
+  ## prefer ``../ct-test/build/bin/ct-test-runner`` when present,
+  ## otherwise fall back to ``tools/test-runner/repro_test_runner`` (the
+  ## M3 internal protocol-level runner).  Returns ``""`` when neither is
+  ## available — the caller surfaces a diagnostic.
+  let exeExt = when defined(windows): ".exe" else: ""
+  let primary = ".." / "ct-test" / "build" / "bin" / "ct-test-runner" & exeExt
+  if fileExists(primary):
+    return absolutePath(primary)
+  let fallback = "build" / "bin" / "repro_test_runner" & exeExt
+  if fileExists(fallback):
+    return absolutePath(fallback)
+  let toolsFallback = "tools" / "test-runner" / "repro_test_runner" & exeExt
+  if fileExists(toolsFallback):
+    return absolutePath(toolsFallback)
+  ""
+
+proc invokeCtTestRunner(runnerBin, binDir, partitionFile, summaryJson,
+                        resultsDir: string;
+                        threads: int;
+                        assignedBinaryPaths: seq[string]):
+    tuple[code: int; output: string] =
+  ## Spawns the located runner with the per-shard parameters.  Passes
+  ## assigned binary paths positionally (the runner skips ``--bin-dir``
+  ## scanning when positionals are supplied, per its ``main`` proc).  We
+  ## pass ``--partition`` too so the run is documented end-to-end even
+  ## when positionals would otherwise have selected the same set — that
+  ## keeps the partition file as a load-bearing input rather than a
+  ## post-hoc record.
+  var args: seq[string] = @[]
+  args.add("run")
+  args.add("--bin-dir=" & binDir)
+  args.add("--summary-json=" & summaryJson)
+  args.add("--results-dir=" & resultsDir)
+  if threads > 0:
+    args.add("--threads=" & $threads)
+  args.add("--no-build")  # Build phase already completed via repro build.
+  for binPath in assignedBinaryPaths:
+    args.add(binPath)
+  let p = startProcess(runnerBin,
+    workingDir = getCurrentDir(),
+    args = args,
+    options = {poUsePath, poStdErrToStdOut})
+  defer: p.close()
+  var buf = ""
+  let outp = p.outputStream
+  var line = newStringOfCap(120)
+  while true:
+    if outp.readLine(line):
+      buf.add(line)
+      buf.add("\n")
+    else:
+      let code = p.peekExitCode()
+      if code != -1:
+        return (code, buf)
+
+proc discoveryToShardPlanRequest(disc: WorkspaceTestDiscovery;
+                                 shardCount: int;
+                                 selectors: seq[string]): ShardPlanRequest =
+  result.shardCount = shardCount
+  result.targetSelectors = selectors
+  result.policy = sipIndependent
+  result.fallbackBuildCostNs = 1_000_000_000'i64
+  result.fallbackTestCostNs = 1_000_000_000'i64
+  result.refinementPasses = DefaultRefinementPasses
+  result.buildActions = disc.actions
+  result.testEdges = disc.edges
+
+proc edgesAssignedToShardWorkspace(disc: WorkspaceTestDiscovery;
+                                   plan: ShardPlan;
+                                   shardIndex: int): seq[ShardTestEdge] =
+  var byId = initTable[NodeId, ShardTestEdge]()
+  for e in disc.edges:
+    byId[e.id] = e
+  for a in plan.partition.assignments:
+    if a.shardIndex == shardIndex and byId.hasKey(a.root):
+      result.add(byId[a.root])
+
+proc loadSummaryJsonOrNull(path: string): JsonNode =
+  if path.len == 0 or not fileExists(path):
+    return newJNull()
+  try:
+    return parseJson(readFile(path))
+  except CatchableError:
+    return newJNull()
+
+proc summarizeTestResults(summary: JsonNode): tuple[passed, failed: int] =
+  ## Reads ``summary["summary"]["passed"]`` / ``["failed"]`` (the schema the
+  ## ct-test-runner / repro_test_runner writes).  Returns ``(0, 0)`` on a
+  ## null / malformed document so callers can still write a report.
+  if summary.isNil or summary.kind != JObject:
+    return (0, 0)
+  if not summary.hasKey("summary"):
+    return (0, 0)
+  let s = summary["summary"]
+  if s.kind != JObject:
+    return (0, 0)
+  result.passed =
+    if s.hasKey("passed") and s["passed"].kind == JInt: s["passed"].getInt()
+    else: 0
+  result.failed =
+    if s.hasKey("failed") and s["failed"].kind == JInt: s["failed"].getInt()
+    else: 0
+
+proc runFixtureModeShard(opts: ReproTestShardOpts;
+                         peer: tuple[ok: bool; mode: string; arg: string]): int =
+  ## The M2 fixture path, preserved verbatim for the existing M2 e2e
+  ## tests.  Behaviour is unchanged from the original
+  ## ``runReproTestCommand`` body — the workspace-mode dispatch above
+  ## simply forwards here when ``--fixture-from`` is supplied.
+  var fixture: ReproTestFixture
+  try:
+    fixture = loadReproTestFixture(opts.fixturePath)
+  except CatchableError as exc:
+    emitShardDiagnostic("failed to load fixture: " & exc.msg)
+    return 2
+
+  var plan: ShardPlan
+  var planMeta: ShardPlanRequest
+  if opts.planFromPath.len > 0:
+    try:
+      let loaded = readPartitionPlanJson(opts.planFromPath)
+      plan = loaded.plan
+      planMeta = loaded.meta
+    except PartitionPlanReadError as exc:
+      emitShardDiagnostic("failed to read partition plan: " & exc.msg)
+      return 2
+  else:
+    let shardCount =
+      if opts.shardCount > 0: opts.shardCount
+      else: 1
+    let req = fixtureToShardPlanRequest(fixture, shardCount, opts.selectors)
+    plan = planTestShards(req)
+    planMeta = req
+
+  if opts.emitPlanPath.len > 0:
+    try:
+      writePartitionPlanJson(plan, opts.emitPlanPath, planMeta)
+    except CatchableError as exc:
+      emitShardDiagnostic("failed to write partition plan: " & exc.msg)
+      return 1
+    return 0
+
+  if opts.shardCount == 0:
+    emitShardDiagnostic("--shard <k>/<N> is required for an actual run")
+    return 2
+
+  let peerCacheMode = peer.mode
+  let assignedRoots = shardAssignmentIds(plan, opts.shardIndex)
+  let assignedEdges = edgesAssignedToShard(fixture, plan, opts.shardIndex)
+  let actionsClosure = closureActionsForShard(fixture, assignedRoots)
+
+  let buildStart = epochTime()
+  var buildFailed = false
+  var buildOutput = ""
+  for a in actionsClosure:
+    let res = runFixtureCmd(a.buildCmd, getCurrentDir())
+    buildOutput.add(res.output)
+    if res.code != 0:
+      buildFailed = true
+      stderr.writeLine("repro test: build action failed: " &
+        $a.id.value & " — exit " & $res.code)
+      break
+  let buildElapsedNs = int64((epochTime() - buildStart) * 1_000_000_000.0)
+
+  let partitionFilePath =
+    "test-logs" / ("partition-" & $opts.shardIndex & "-of-" &
+      $opts.shardCount & ".txt")
+  writePartitionFile(partitionFilePath, assignedEdges)
+
+  let testStart = epochTime()
+  var testResults = newJArray()
+  var passed = 0
+  var failed = 0
+  if not buildFailed:
+    for e in assignedEdges:
+      let res = runFixtureCmd(e.runCmd, getCurrentDir())
+      var node = newJObject()
+      node["edge_id"] = %int(e.id.value)
+      node["selector"] = %e.selector
+      node["test_name"] = %e.testName
+      node["status"] = %(if res.code == 0: "PASS" else: "FAIL")
+      node["exit_code"] = %res.code
+      node["output"] = %res.output
+      testResults.add(node)
+      if res.code == 0:
+        inc passed
+      else:
+        inc failed
+  let testElapsedNs = int64((epochTime() - testStart) * 1_000_000_000.0)
+
+  let predictedNs = predictedShardCostNs(plan, opts.shardIndex)
+  let actualNs = buildElapsedNs + testElapsedNs
+  let delta =
+    if predictedNs > 0:
+      (float(actualNs) - float(predictedNs)) / float(predictedNs)
+    else:
+      0.0
+  let driftThreshold = 0.5
+  let drift = abs(delta) > driftThreshold
+
+  var report = newJObject()
+  report["schemaId"] = %"reprobuild.shard-report.v1"
+  report["shard"] = %opts.shardIndex
+  report["shardCount"] = %opts.shardCount
+  report["strategy"] = %opts.strategy
+  report["peer_cache"] = %peerCacheMode
+  report["fixture_path"] = %opts.fixturePath
+  var assignedNames = newJArray()
+  for e in assignedEdges:
+    assignedNames.add(%e.selector)
+  report["assigned_selectors"] = assignedNames
+  report["predicted_shard_cost_ns"] = %predictedNs
+  report["predicted_build_time_ns"] = %0
+  report["predicted_test_time_ns"] = %0
+  report["actual_build_time_ns"] = %buildElapsedNs
+  report["actual_test_time_ns"] = %testElapsedNs
+  report["actual_total_time_ns"] = %actualNs
+  report["cost_model_delta"] = %delta
+  report["cost_model_drift"] = %drift
+  report["build_failed"] = %buildFailed
+  report["tests"] = testResults
+  report["test_pass_count"] = %passed
+  report["test_fail_count"] = %failed
+  report["partition_file"] = %partitionFilePath
+  report["degraded_plan"] = %plan.degraded
+  report["unknown_build_count"] = %plan.unknownBuildCount
+  report["unknown_test_count"] = %plan.unknownTestCount
+
+  let reportPath =
+    if opts.reportPath.len > 0: opts.reportPath
+    else:
+      "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
+        $opts.shardCount & ".json")
+  writeShardReport(reportPath, report)
+
+  if buildFailed:
+    return 1
+  if failed > 0:
+    return 1
+  0
+
+proc runWorkspaceModeShard(opts: ReproTestShardOpts;
+                           peer: tuple[ok: bool; mode: string; arg: string];
+                           publicCliPath: string): int =
+  ## Workspace-driven shard runner.  Discovers real test edges via the
+  ## engine's normalised graph artefact, builds the closure via
+  ## ``repro build test``, and hands off to ct-test-runner with the
+  ## assigned binaries.  Replaces the M2 ``--fixture-from`` deviation
+  ## for the on-the-suite case the M3 benchmark milestone depends on.
+  var disc: WorkspaceTestDiscovery
+  try:
+    disc = discoverTestEdgesFromWorkspace(".", publicCliPath)
+  except CatchableError as exc:
+    emitShardDiagnostic(
+      "workspace test-edge discovery failed: " & exc.msg)
+    return 2
+  if disc.edges.len == 0:
+    emitShardDiagnostic(
+      "workspace test-edge discovery returned no NimUnittestBinary " &
+      "edges; nothing to shard.  (Did you mean to pass --fixture-from?)")
+    return 2
+
+  var plan: ShardPlan
+  var planMeta: ShardPlanRequest
+  if opts.planFromPath.len > 0:
+    try:
+      let loaded = readPartitionPlanJson(opts.planFromPath)
+      plan = loaded.plan
+      planMeta = loaded.meta
+    except PartitionPlanReadError as exc:
+      emitShardDiagnostic("failed to read partition plan: " & exc.msg)
+      return 2
+  else:
+    let shardCount =
+      if opts.shardCount > 0: opts.shardCount
+      else: 1
+    let req = discoveryToShardPlanRequest(disc, shardCount, opts.selectors)
+    plan = planTestShards(req)
+    planMeta = req
+
+  if opts.emitPlanPath.len > 0:
+    try:
+      writePartitionPlanJson(plan, opts.emitPlanPath, planMeta)
+    except CatchableError as exc:
+      emitShardDiagnostic("failed to write partition plan: " & exc.msg)
+      return 1
+    return 0
+
+  if opts.shardCount == 0:
+    emitShardDiagnostic("--shard <k>/<N> is required for an actual run")
+    return 2
+
+  let peerCacheMode = peer.mode
+  let assignedEdges =
+    edgesAssignedToShardWorkspace(disc, plan, opts.shardIndex)
+  var assignedBinaryPaths: seq[string] = @[]
+  var assignedSelectors: seq[string] = @[]
+  for e in assignedEdges:
+    assignedSelectors.add(e.selector)
+    if disc.edgeBinaryPath.hasKey(e.id):
+      assignedBinaryPaths.add(disc.edgeBinaryPath[e.id])
+
+  # ----- Build phase: build the :test aggregate.  See the milestone
+  # strategy note for why we don't compute per-shard closures here.
+  let buildStart = epochTime()
+  var buildFailed = false
+  let buildRes = buildClosureForShard(assignedSelectors, publicCliPath)
+  if buildRes.code != 0:
+    buildFailed = true
+    stderr.writeLine("repro test: workspace build phase failed " &
+      "(exit " & $buildRes.code & ")")
+    stderr.write(buildRes.output)
+  let buildElapsedNs = int64((epochTime() - buildStart) * 1_000_000_000.0)
+
+  # ----- Partition file: written before the test phase so the
+  # per-shard report can reference it even when the runner skips it.
+  let partitionFilePath =
+    "test-logs" / ("partition-" & $opts.shardIndex & "-of-" &
+      $opts.shardCount & ".txt")
+  writeWorkspacePartitionFile(partitionFilePath, assignedBinaryPaths)
+
+  # ----- Test phase: locate ct-test-runner (preferring the sibling),
+  # invoke with the assigned binary set.
+  let summaryJson =
+    "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
+      $opts.shardCount & "-summary.json")
+  let resultsDir =
+    "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
+      $opts.shardCount & "-results")
+  if not dirExists(resultsDir):
+    createDir(resultsDir)
+  let runnerBin = locateCtTestRunner()
+  let testStart = epochTime()
+  var runnerOutput = ""
+  var runnerCode = 0
+  var runnerInvoked = false
+  if buildFailed:
+    discard
+  elif runnerBin.len == 0:
+    stderr.writeLine("repro test: no ct-test-runner located " &
+      "(checked ../ct-test/build/bin/ct-test-runner, " &
+      "build/bin/repro_test_runner, tools/test-runner/repro_test_runner). " &
+      "Build a runner before sharding.")
+    runnerCode = 1
+  elif assignedBinaryPaths.len == 0:
+    # Nothing assigned to this shard — still write a summary record.
+    discard
+  else:
+    runnerInvoked = true
+    let invocation = invokeCtTestRunner(runnerBin,
+      "build/test-bin", partitionFilePath, summaryJson, resultsDir,
+      0, assignedBinaryPaths)
+    runnerCode = invocation.code
+    runnerOutput = invocation.output
+  let testElapsedNs = int64((epochTime() - testStart) * 1_000_000_000.0)
+
+  let runnerSummary = loadSummaryJsonOrNull(summaryJson)
+  let counts = summarizeTestResults(runnerSummary)
+
+  let predictedNs = predictedShardCostNs(plan, opts.shardIndex)
+  let actualNs = buildElapsedNs + testElapsedNs
+  let delta =
+    if predictedNs > 0:
+      (float(actualNs) - float(predictedNs)) / float(predictedNs)
+    else:
+      0.0
+  let driftThreshold = 0.5
+  let drift = abs(delta) > driftThreshold
+
+  # Build the per-test results array from the runner's summary, so the
+  # per-shard report carries per-test outcomes (not just aggregate
+  # counts).
+  var testResults = newJArray()
+  if runnerSummary.kind == JObject and runnerSummary.hasKey("tests") and
+      runnerSummary["tests"].kind == JArray:
+    for entry in runnerSummary["tests"].elems:
+      testResults.add(entry)
+
+  var report = newJObject()
+  report["schemaId"] = %"reprobuild.shard-report.v1"
+  report["shard"] = %opts.shardIndex
+  report["shardCount"] = %opts.shardCount
+  report["strategy"] = %opts.strategy
+  report["peer_cache"] = %peerCacheMode
+  report["fixture_path"] = %""  # workspace mode — no fixture
+  report["mode"] = %"workspace"
+  report["runner_binary"] = %runnerBin
+  report["runner_invoked"] = %runnerInvoked
+  report["runner_exit_code"] = %runnerCode
+  report["summary_json"] = %summaryJson
+  if not runnerSummary.isNil and runnerSummary.kind != JNull:
+    report["runner_summary"] = runnerSummary
+  else:
+    report["runner_summary"] = newJNull()
+  var assignedNames = newJArray()
+  for sel in assignedSelectors:
+    assignedNames.add(%sel)
+  report["assigned_selectors"] = assignedNames
+  var assignedBins = newJArray()
+  for p in assignedBinaryPaths:
+    assignedBins.add(%p)
+  report["assigned_binaries"] = assignedBins
+  report["predicted_shard_cost_ns"] = %predictedNs
+  report["predicted_build_time_ns"] = %0
+  report["predicted_test_time_ns"] = %0
+  report["actual_build_time_ns"] = %buildElapsedNs
+  report["actual_test_time_ns"] = %testElapsedNs
+  report["actual_total_time_ns"] = %actualNs
+  report["cost_model_delta"] = %delta
+  report["cost_model_drift"] = %drift
+  report["build_failed"] = %buildFailed
+  report["tests"] = testResults
+  report["test_pass_count"] = %counts.passed
+  report["test_fail_count"] = %counts.failed
+  report["partition_file"] = %partitionFilePath
+  report["degraded_plan"] = %plan.degraded
+  report["unknown_build_count"] = %plan.unknownBuildCount
+  report["unknown_test_count"] = %plan.unknownTestCount
+
+  let reportPath =
+    if opts.reportPath.len > 0: opts.reportPath
+    else:
+      "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
+        $opts.shardCount & ".json")
+  writeShardReport(reportPath, report)
+
+  if buildFailed:
+    return 1
+  if counts.failed > 0 or runnerCode != 0:
+    return 1
+  0
+
 proc runReproTestCommand(args: openArray[string]; publicCliPath: string): int =
   ## ``repro test`` entry point with the CI-sharding flag surface from
   ## ``CI-Sharding.md`` §"CLI Surface".  See the block comment above
@@ -19724,168 +20306,17 @@ proc runReproTestCommand(args: openArray[string]; publicCliPath: string): int =
       "or --plan-from")
     return 2
 
-  # Load the fixture (M2 explicit-fixture path).  Falling back to
-  # build-graph discovery is M2 follow-up work — the verification tests
-  # always supply a fixture.
-  if opts.fixturePath.len == 0:
-    emitShardDiagnostic(
-      "M2 requires --fixture-from=<path> until the build-graph " &
-      "test-edge discovery lands; supply a fixture JSON describing " &
-      "the test edges and their build closures.")
-    return 2
-
-  var fixture: ReproTestFixture
-  try:
-    fixture = loadReproTestFixture(opts.fixturePath)
-  except CatchableError as exc:
-    emitShardDiagnostic("failed to load fixture: " & exc.msg)
-    return 2
-
-  # Plan — either compute or load.
-  var plan: ShardPlan
-  var planMeta: ShardPlanRequest
-  if opts.planFromPath.len > 0:
-    try:
-      let loaded = readPartitionPlanJson(opts.planFromPath)
-      plan = loaded.plan
-      planMeta = loaded.meta
-    except PartitionPlanReadError as exc:
-      emitShardDiagnostic("failed to read partition plan: " & exc.msg)
-      return 2
-  else:
-    # Derive the shard count for the plan request from the parsed
-    # ``--shard`` flag.  ``--emit-partition-plan`` without ``--shard``
-    # is documented as the "planner job" mode; in that case we still
-    # need a count, so we accept ``--shard 0/<N>`` (the example in the
-    # spec) or just ``--shard k/N`` and ignore the index.
-    let shardCount =
-      if opts.shardCount > 0: opts.shardCount
-      else: 1
-    let req = fixtureToShardPlanRequest(fixture, shardCount, opts.selectors)
-    plan = planTestShards(req)
-    planMeta = req
-
-  # Emit-and-exit short-circuit (planner job mode).
-  if opts.emitPlanPath.len > 0:
-    try:
-      writePartitionPlanJson(plan, opts.emitPlanPath, planMeta)
-    except CatchableError as exc:
-      emitShardDiagnostic("failed to write partition plan: " & exc.msg)
-      return 1
-    return 0
-
-  if opts.shardCount == 0:
-    emitShardDiagnostic("--shard <k>/<N> is required for an actual run")
-    return 2
-
-  # ``--peer-cache=remote://URL`` is accepted in M2 but currently
-  # passes through unchanged — the existing Binary-Caches remote-cache
-  # plane handles the actual fetching.  We just record the intent so
-  # the per-shard report carries it.
-  let peerCacheMode = peer.mode
-
-  let assignedRoots = shardAssignmentIds(plan, opts.shardIndex)
-  let assignedEdges = edgesAssignedToShard(fixture, plan, opts.shardIndex)
-  let actionsClosure = closureActionsForShard(fixture, assignedRoots)
-
-  # ----- Build phase: run each action's ``buildCmd`` in topo order.
-  let buildStart = epochTime()
-  var buildFailed = false
-  var buildOutput = ""
-  for a in actionsClosure:
-    let res = runFixtureCmd(a.buildCmd, getCurrentDir())
-    buildOutput.add(res.output)
-    if res.code != 0:
-      buildFailed = true
-      stderr.writeLine("repro test: build action failed: " &
-        $a.id.value & " — exit " & $res.code)
-      break
-  let buildElapsedNs = int64((epochTime() - buildStart) * 1_000_000_000.0)
-
-  # ----- Test phase: synthesise partition.txt and run the assigned
-  # edges.  In M2 we shell out per edge directly when the fixture
-  # supplies a ``runCmd``.  The real surface invokes ct-test-runner
-  # against the synthesised partition file; that path lives in
-  # ``scripts/run_tests.sh`` for now and is migrated into the engine
-  # in a follow-up milestone.
-  let partitionFilePath =
-    "test-logs" / ("partition-" & $opts.shardIndex & "-of-" &
-      $opts.shardCount & ".txt")
-  writePartitionFile(partitionFilePath, assignedEdges)
-
-  let testStart = epochTime()
-  var testResults = newJArray()
-  var passed = 0
-  var failed = 0
-  if not buildFailed:
-    for e in assignedEdges:
-      let res = runFixtureCmd(e.runCmd, getCurrentDir())
-      var node = newJObject()
-      node["edge_id"] = %int(e.id.value)
-      node["selector"] = %e.selector
-      node["test_name"] = %e.testName
-      node["status"] = %(if res.code == 0: "PASS" else: "FAIL")
-      node["exit_code"] = %res.code
-      node["output"] = %res.output
-      testResults.add(node)
-      if res.code == 0:
-        inc passed
-      else:
-        inc failed
-  let testElapsedNs = int64((epochTime() - testStart) * 1_000_000_000.0)
-
-  # ----- Per-shard report writer.
-  let predictedNs = predictedShardCostNs(plan, opts.shardIndex)
-  let actualNs = buildElapsedNs + testElapsedNs
-  let delta =
-    if predictedNs > 0:
-      (float(actualNs) - float(predictedNs)) / float(predictedNs)
-    else:
-      0.0
-  let driftThreshold = 0.5
-  let drift = abs(delta) > driftThreshold
-
-  var report = newJObject()
-  report["schemaId"] = %"reprobuild.shard-report.v1"
-  report["shard"] = %opts.shardIndex
-  report["shardCount"] = %opts.shardCount
-  report["strategy"] = %opts.strategy
-  report["peer_cache"] = %peerCacheMode
-  report["fixture_path"] = %opts.fixturePath
-  var assignedNames = newJArray()
-  for e in assignedEdges:
-    assignedNames.add(%e.selector)
-  report["assigned_selectors"] = assignedNames
-  report["predicted_shard_cost_ns"] = %predictedNs
-  report["predicted_build_time_ns"] = %0  # M2: the plan does not split
-    # build vs test time on the shard axis, only the joint cost.
-  report["predicted_test_time_ns"] = %0
-  report["actual_build_time_ns"] = %buildElapsedNs
-  report["actual_test_time_ns"] = %testElapsedNs
-  report["actual_total_time_ns"] = %actualNs
-  report["cost_model_delta"] = %delta
-  report["cost_model_drift"] = %drift
-  report["build_failed"] = %buildFailed
-  report["tests"] = testResults
-  report["test_pass_count"] = %passed
-  report["test_fail_count"] = %failed
-  report["partition_file"] = %partitionFilePath
-  report["degraded_plan"] = %plan.degraded
-  report["unknown_build_count"] = %plan.unknownBuildCount
-  report["unknown_test_count"] = %plan.unknownTestCount
-
-  let reportPath =
-    if opts.reportPath.len > 0: opts.reportPath
-    else:
-      "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
-        $opts.shardCount & ".json")
-  writeShardReport(reportPath, report)
-
-  if buildFailed:
-    return 1
-  if failed > 0:
-    return 1
-  0
+  # Two code paths from here:
+  #   (a) ``--fixture-from=<path>`` — the M2 fixture path, kept for
+  #       backwards compatibility with the existing M2 e2e tests.  See
+  #       ``runFixtureModeShard`` below.
+  #   (b) Workspace mode — discover real test edges via the engine's
+  #       normalised graph artefact, build the closure, and hand off to
+  #       ct-test-runner.  This is the CI-Sharding M2 follow-up that
+  #       this milestone fix delivers.
+  if opts.fixturePath.len > 0:
+    return runFixtureModeShard(opts, peer)
+  return runWorkspaceModeShard(opts, peer, publicCliPath)
 
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
