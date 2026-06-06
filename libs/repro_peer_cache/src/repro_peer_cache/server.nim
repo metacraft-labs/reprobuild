@@ -341,6 +341,13 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
             client, mkAdvertise, encodeAdvertise(snapshot))
         of wkBlobs:
           discard
+      of mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,
+         mkSwimSuspect, mkSwimConfirm, mkSwimRefute:
+        # Peer-Cache-Scale M0: SWIM frames are handled by the SWIM
+        # engine's own transport, not by the M0 TCP server. Drop them
+        # silently if they arrive on a TCP connection — production
+        # code routes SWIM traffic out-of-band.
+        discard
   except CatchableError:
     # Connection-level errors close the socket; the registry retains
     # the peer entry so a reconnection re-uses it.

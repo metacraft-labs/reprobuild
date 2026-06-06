@@ -48,6 +48,13 @@ type
     mkPing = 6
     mkPong = 7
     mkGoodbye = 8
+    mkSwimProbe = 9            ## Peer-Cache-Scale M0: direct probe.
+    mkSwimAck = 10             ## Reply to a direct probe.
+    mkSwimProbeReq = 11        ## Indirect-probe request to a peer.
+    mkSwimProbeAckIndirect = 12  ## Indirect-probe ack forwarded by intermediary.
+    mkSwimSuspect = 13         ## Dissemination: peer X is suspected.
+    mkSwimConfirm = 14         ## Dissemination: peer X is confirmed dead.
+    mkSwimRefute = 15          ## Refutation with bumped incarnation.
 
   AdvertiseMode* = enum
     amSnapshot = 0
@@ -88,6 +95,57 @@ type
   Ping* = object
   Pong* = object
   Goodbye* = object
+
+  # ---------------------------------------------------------------------------
+  # Peer-Cache-Scale M0: SWIM membership + failure detection.
+  #
+  # The record shapes here mirror the SWIM paper (Das et al. 2002), with one
+  # adaptation: the peer table tracks an explicit `Endpoint` per member so that
+  # piggybacked dissemination teaches receivers about previously-unknown peers'
+  # network addresses without a separate "join" round.
+  # ---------------------------------------------------------------------------
+
+  SwimMemberStatus* = enum
+    smsAlive = 0
+    smsSuspected = 1
+    smsConfirmed = 2
+
+  SwimMember* = object
+    ## Piggybacked dissemination payload — one entry per known peer the
+    ## sender wants the receiver to learn about. The `endpoint` field
+    ## carries the peer's TCP endpoint so a receiver that does not yet
+    ## know about `peerId` can populate its registry.
+    peerId*: PeerId
+    endpoint*: Endpoint
+    status*: SwimMemberStatus
+    incarnation*: uint64
+
+  SwimProbe* = object
+    sourcePeerId*: PeerId
+    sourceEndpoint*: Endpoint
+    targetPeerId*: PeerId
+    sourceIncarnation*: uint64
+    gossip*: seq[SwimMember]
+
+  SwimAck* = object
+    responderPeerId*: PeerId
+    responderEndpoint*: Endpoint
+    responderIncarnation*: uint64
+    gossip*: seq[SwimMember]
+
+  SwimProbeReq* = object
+    initiatorPeerId*: PeerId
+    initiatorEndpoint*: Endpoint
+    targetPeerId*: PeerId
+    targetEndpoint*: Endpoint
+    gossip*: seq[SwimMember]
+
+  SwimProbeAckIndirect* = object
+    initiatorPeerId*: PeerId
+    targetPeerId*: PeerId
+    intermediaryPeerId*: PeerId
+    targetIncarnation*: uint64
+    gossip*: seq[SwimMember]
 
 # ---------------------------------------------------------------------------
 # Equality + hashing for the distinct array types. The compiler does not
@@ -197,7 +255,22 @@ type
 
   PeerCacheDiscoveryMode* = enum
     pdmUnicastSeed,  ## M0 mode — explicit seed peer list.
-    pdmMulticast     ## M2 mode — UDP multicast announcements.
+    pdmMulticast,    ## M2 mode — UDP multicast announcements.
+    pdmSwim          ## Peer-Cache-Scale M0 — SWIM gossip protocol.
+
+  SwimConfig* = object
+    ## Per-peer SWIM tuning. Defaults match the SWIM paper §6.3:
+    ## one second protocol period, half-second direct-probe timeout,
+    ## three indirect probers, five second suspect timeout, thirty
+    ## seconds before a confirmed peer is forgotten. The dissemination
+    ## cap and max-forwards mirror Hashicorp's `memberlist`.
+    swimProbePeriodMs*: int
+    swimProbeTimeoutMs*: int
+    swimIndirectProbeCount*: int
+    swimSuspectTimeoutMs*: int
+    swimConfirmTimeoutMs*: int
+    swimGossipMessageCap*: int
+    swimGossipMaxForwards*: int
 
   PeerCacheConfig* = object
     ## Unified peer-cache configuration. The CLI parser produces one of
@@ -216,6 +289,10 @@ type
     advertiseIntervalMs*: int
     pingIntervalMs*: int
     maxBlobBytes*: uint64
+    swimConfig*: SwimConfig
+      ## Peer-Cache-Scale M0: SWIM tuning carried in the unified config.
+      ## Populated by callers (test fixtures + production CLI) when
+      ## `discoveryMode == pdmSwim`. Other modes ignore the field.
 
 const
   DefaultMulticastAddress* = "224.0.0.123"
@@ -226,6 +303,30 @@ const
     ## conflicts) on the admin-scope group `239.255.42.42`.
   DefaultAdvertiseIntervalMs* = 5_000
   DefaultPingIntervalMs* = 15_000
+
+  # SWIM defaults — Peer-Cache-Scale milestone M0.
+  DefaultSwimProbePeriodMs* = 1_000
+  DefaultSwimProbeTimeoutMs* = 500
+  DefaultSwimIndirectProbeCount* = 3
+  DefaultSwimSuspectTimeoutMs* = 5_000
+  DefaultSwimConfirmTimeoutMs* = 30_000
+  DefaultSwimGossipMessageCap* = 32
+  DefaultSwimGossipMaxForwards* = 6
+    ## ≈ `3 * log2(N)` for `N` up to a few hundred; the engine recomputes a
+    ## membership-size-aware cap at runtime in `nextGossipBatch` but this
+    ## static default suffices when the configured value is left at zero.
+
+proc defaultSwimConfig*(): SwimConfig =
+  ## Spec defaults for SWIM. Tests typically clone this and tighten the
+  ## period (e.g. 100 ms) to bound wall-clock time.
+  SwimConfig(
+    swimProbePeriodMs: DefaultSwimProbePeriodMs,
+    swimProbeTimeoutMs: DefaultSwimProbeTimeoutMs,
+    swimIndirectProbeCount: DefaultSwimIndirectProbeCount,
+    swimSuspectTimeoutMs: DefaultSwimSuspectTimeoutMs,
+    swimConfirmTimeoutMs: DefaultSwimConfirmTimeoutMs,
+    swimGossipMessageCap: DefaultSwimGossipMessageCap,
+    swimGossipMaxForwards: DefaultSwimGossipMaxForwards)
 
 proc defaultMulticastGroup*(): MulticastGroup =
   ## Spec-default multicast group bound to INADDR_ANY (0.0.0.0).

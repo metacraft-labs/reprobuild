@@ -25,6 +25,19 @@ type
       ## any other protocol-level inconsistency. M0 only flips this
       ## via `markSuspect`; M1 wires the BLAKE3-verification failure
       ## path into the same flag.
+    swimStatus*: SwimMemberStatus
+      ## Peer-Cache-Scale M0: SWIM lifecycle status. Distinct from the
+      ## advertise-layer `suspect` flag above — SWIM's `Suspected`
+      ## means "no probe ack in the last suspect window", whereas
+      ## `suspect` means "this peer is mis-advertising blobs".
+    swimIncarnation*: uint64
+      ## Peer-Cache-Scale M0: incarnation number for SWIM refutation.
+      ## Bumped by the peer itself on self-refute; mirrored locally as
+      ## dissemination updates arrive.
+    swimStatusSince*: MonoTime
+      ## Peer-Cache-Scale M0: timestamp of the last `swimStatus`
+      ## transition. The SWIM scheduler scans this to age
+      ## `Suspected` → `Confirmed` and `Confirmed` → removed.
 
   PeerRegistry* = ref object
     entries*: Table[PeerId, PeerEntry]
@@ -52,13 +65,17 @@ proc addPeer*(reg: PeerRegistry; peerId: PeerId; endpoint: Endpoint) =
     entry.lastSeen = getMonoTime()
     reg.entries[peerId] = entry
   else:
+    let now = getMonoTime()
     reg.entries[peerId] = PeerEntry(
       endpoint: endpoint,
       advertised: initHashSet[BlobDigest](),
-      lastSeen: getMonoTime(),
+      lastSeen: now,
       lastAdvertiseSequence: 0'u64,
       hasAdvertiseSequence: false,
-      suspect: false)
+      suspect: false,
+      swimStatus: smsAlive,
+      swimIncarnation: 0'u64,
+      swimStatusSince: now)
 
 proc removePeer*(reg: PeerRegistry; peerId: PeerId) =
   reg.entries.del(peerId)

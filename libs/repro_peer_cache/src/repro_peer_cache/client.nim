@@ -238,6 +238,12 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
         # Discard silently — the spec lets either side dispatch any
         # message, so a benign cross-direction send isn't an error.
         discard
+      of mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,
+         mkSwimSuspect, mkSwimConfirm, mkSwimRefute:
+        # Peer-Cache-Scale M0: SWIM frames don't ride the long-lived
+        # peer-cache connection — they have their own transport. If
+        # one shows up here, drop it.
+        discard
   except CatchableError:
     discard
 

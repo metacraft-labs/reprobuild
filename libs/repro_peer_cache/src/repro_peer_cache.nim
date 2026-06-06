@@ -11,6 +11,7 @@ import ./repro_peer_cache/multicast
 import ./repro_peer_cache/registry
 import ./repro_peer_cache/server
 import ./repro_peer_cache/client
+import ./repro_peer_cache/swim
 import ./repro_peer_cache/loopback
 import ./repro_peer_cache/engine_seam
 
@@ -20,5 +21,6 @@ export multicast
 export registry
 export server
 export client
+export swim
 export loopback
 export engine_seam

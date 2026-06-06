@@ -10,6 +10,7 @@ import std/[asyncdispatch, nativesockets]
 import ./client
 import ./registry
 import ./server
+import ./swim
 import ./types
 
 type
@@ -18,6 +19,9 @@ type
     server*: PeerCacheServer
     client*: PeerCacheClient
     registry*: PeerRegistry
+    swim*: SwimEngine
+      ## Peer-Cache-Scale M0: optional SWIM engine. Non-nil when the
+      ## peer was spawned via `spawnLoopbackSwimPeers`.
 
   LoopbackPeerOptions* = object
     ## Per-peer M1 wiring: optional store reader (consulted by the
@@ -194,3 +198,91 @@ proc spawnLoopbackMulticastPeers*(n: int;
       advertiseIntervalMs = advertiseIntervalMs)
     result[i].client = client
     client.multicastBroadcast(group)
+
+# ---------------------------------------------------------------------------
+# Peer-Cache-Scale M0: SWIM-based loopback spawn helper.
+# ---------------------------------------------------------------------------
+
+import std/[random, sets]
+
+proc spawnLoopbackSwimPeers*(n: int;
+                             swimConfig: SwimConfig;
+                             seedsPerPeer: int = 5;
+                             seed: int64 = 0xC0FFEE): seq[LoopbackPeer] =
+  ## Spawns `n` SWIM peers entirely in-process. Each peer gets a
+  ## distinct synthetic endpoint (host `127.0.0.1`, port = 30000 + i),
+  ## registers itself in the in-process SWIM directory, and is seeded
+  ## with `seedsPerPeer` other random peers' endpoints so the
+  ## bootstrap layer has somewhere to send its first probe.
+  ##
+  ## Ports here are synthetic — the in-process transport uses them as
+  ## directory keys, not as real TCP sockets. This keeps the 50-peer
+  ## convergence test from contending with kernel ephemeral-port
+  ## allocation. A future M-step can layer the engine over real
+  ## UDP/TCP transport without touching this helper.
+  result = newSeq[LoopbackPeer](n)
+  var rng = initRand(seed)
+  # First construct every peer + registry so we can build the seed
+  # list across the full population.
+  var endpoints = newSeq[Endpoint](n)
+  for i in 0 ..< n:
+    endpoints[i] = initEndpoint("127.0.0.1", Port(30000 + i))
+  for i in 0 ..< n:
+    let peerId = makePeerId(i)
+    let registry = newPeerRegistry(peerId, endpoints[i])
+    result[i] = LoopbackPeer(
+      peerId: peerId,
+      server: nil,
+      client: nil,
+      registry: registry,
+      swim: nil)
+  # Now build per-peer seed lists (small random subsets) and create
+  # the SWIM engines.
+  for i in 0 ..< n:
+    var chosen = initHashSet[int]()
+    while chosen.len < min(seedsPerPeer, n - 1):
+      let pick = rng.rand(n - 1)
+      if pick == i: continue
+      chosen.incl(pick)
+    var seeds: seq[Endpoint] = @[]
+    for idx in chosen:
+      seeds.add(endpoints[idx])
+    let engine = newSwimEngine(
+      selfPeerId = result[i].peerId,
+      selfEndpoint = endpoints[i],
+      registry = result[i].registry,
+      config = swimConfig,
+      transport = newInProcessTransport(),
+      seedEndpoints = seeds)
+    result[i].swim = engine
+
+proc startLoopbackSwimPeers*(peers: seq[LoopbackPeer]) =
+  ## Starts each peer's SWIM engine. Splits start from spawn so tests
+  ## can pre-seed registries (e.g. inject a fake suspect) before the
+  ## scheduler runs.
+  ##
+  ## Two-phase to avoid the race where peer A's bootstrap probe lands
+  ## at peer B before B has registered itself in the in-process
+  ## directory: phase 1 marks each engine `running` and adds it to
+  ## the directory, phase 2 fires the bootstrap probes + period loop.
+  # Phase 1: directory registration only.
+  for peer in peers:
+    if not peer.swim.isNil:
+      peer.swim.running = true
+      registerEngineInDirectory(peer.swim)
+      # Seed gossip with self so the first ack teaches the seed about us.
+      peer.swim.enqueueGossip(SwimMember(
+        peerId: peer.swim.selfPeerId,
+        endpoint: peer.swim.selfEndpoint,
+        status: smsAlive,
+        incarnation: peer.swim.selfIncarnation))
+  # Phase 2: kick the bootstrap + period scheduler for each engine.
+  for peer in peers:
+    if not peer.swim.isNil:
+      asyncCheck peer.swim.bootstrap()
+      asyncCheck peer.swim.periodLoop()
+
+proc shutdownLoopbackSwimPeers*(peers: seq[LoopbackPeer]) =
+  for peer in peers:
+    if not peer.swim.isNil:
+      peer.swim.stop()

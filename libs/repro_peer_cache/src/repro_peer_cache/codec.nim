@@ -260,6 +260,175 @@ proc decodeGoodbye*(data: openArray[byte]): Goodbye =
       "Goodbye payload must be empty, got " & $data.len & " bytes")
 
 # ---------------------------------------------------------------------------
+# Peer-Cache-Scale M0: SWIM record codecs.
+#
+# Each variable-length field is length-prefixed with a `uint32` count
+# (matching the M0 advertise payloads). Endpoints carry a length-prefixed
+# host string + a `uint16` port. Member entries are fixed-size apart from
+# their host string.
+# ---------------------------------------------------------------------------
+
+proc writeString(buf: var seq[byte]; value: string) =
+  buf.writeU32(uint32(value.len))
+  for ch in value:
+    buf.add(byte(ord(ch)))
+
+proc readString(data: openArray[byte]; pos: var int): string =
+  let length = int(readU32(data, pos))
+  ensureBytes(data.len - pos, length, "string bytes")
+  result = newString(length)
+  for i in 0 ..< length:
+    result[i] = char(data[pos + i])
+  inc pos, length
+
+proc writeEndpoint(buf: var seq[byte]; endpoint: Endpoint) =
+  buf.writeString(endpoint.host)
+  buf.writeU16(uint16(endpoint.port))
+
+proc readEndpoint(data: openArray[byte]; pos: var int): Endpoint =
+  let host = readString(data, pos)
+  let port = readU16(data, pos)
+  initEndpoint(host, Port(port))
+
+proc writeSwimMember(buf: var seq[byte]; member: SwimMember) =
+  buf.writePeerId(member.peerId)
+  buf.writeEndpoint(member.endpoint)
+  buf.writeU8(uint8(ord(member.status)))
+  buf.writeU64(member.incarnation)
+
+proc readSwimMember(data: openArray[byte]; pos: var int): SwimMember =
+  result.peerId = readPeerId(data, pos)
+  result.endpoint = readEndpoint(data, pos)
+  let statusRaw = readU8(data, pos)
+  if statusRaw > uint8(ord(high(SwimMemberStatus))):
+    raise newException(PeerCacheCodecError,
+      "SwimMember status tag out of range: " & $statusRaw)
+  result.status = SwimMemberStatus(statusRaw)
+  result.incarnation = readU64(data, pos)
+
+proc writeGossip(buf: var seq[byte]; gossip: seq[SwimMember]) =
+  buf.writeU32(uint32(gossip.len))
+  for member in gossip:
+    buf.writeSwimMember(member)
+
+proc readGossip(data: openArray[byte]; pos: var int): seq[SwimMember] =
+  let count = int(readU32(data, pos))
+  result = newSeq[SwimMember](count)
+  for i in 0 ..< count:
+    result[i] = readSwimMember(data, pos)
+
+proc encodeSwimProbe*(msg: SwimProbe): seq[byte] =
+  result = @[]
+  result.writePeerId(msg.sourcePeerId)
+  result.writeEndpoint(msg.sourceEndpoint)
+  result.writePeerId(msg.targetPeerId)
+  result.writeU64(msg.sourceIncarnation)
+  result.writeGossip(msg.gossip)
+
+proc decodeSwimProbe*(data: openArray[byte]): SwimProbe =
+  var pos = 0
+  result.sourcePeerId = readPeerId(data, pos)
+  result.sourceEndpoint = readEndpoint(data, pos)
+  result.targetPeerId = readPeerId(data, pos)
+  result.sourceIncarnation = readU64(data, pos)
+  result.gossip = readGossip(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after SwimProbe payload: " & $(data.len - pos))
+
+proc encodeSwimAck*(msg: SwimAck): seq[byte] =
+  result = @[]
+  result.writePeerId(msg.responderPeerId)
+  result.writeEndpoint(msg.responderEndpoint)
+  result.writeU64(msg.responderIncarnation)
+  result.writeGossip(msg.gossip)
+
+proc decodeSwimAck*(data: openArray[byte]): SwimAck =
+  var pos = 0
+  result.responderPeerId = readPeerId(data, pos)
+  result.responderEndpoint = readEndpoint(data, pos)
+  result.responderIncarnation = readU64(data, pos)
+  result.gossip = readGossip(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after SwimAck payload: " & $(data.len - pos))
+
+proc encodeSwimProbeReq*(msg: SwimProbeReq): seq[byte] =
+  result = @[]
+  result.writePeerId(msg.initiatorPeerId)
+  result.writeEndpoint(msg.initiatorEndpoint)
+  result.writePeerId(msg.targetPeerId)
+  result.writeEndpoint(msg.targetEndpoint)
+  result.writeGossip(msg.gossip)
+
+proc decodeSwimProbeReq*(data: openArray[byte]): SwimProbeReq =
+  var pos = 0
+  result.initiatorPeerId = readPeerId(data, pos)
+  result.initiatorEndpoint = readEndpoint(data, pos)
+  result.targetPeerId = readPeerId(data, pos)
+  result.targetEndpoint = readEndpoint(data, pos)
+  result.gossip = readGossip(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after SwimProbeReq payload: " & $(data.len - pos))
+
+proc encodeSwimProbeAckIndirect*(msg: SwimProbeAckIndirect): seq[byte] =
+  result = @[]
+  result.writePeerId(msg.initiatorPeerId)
+  result.writePeerId(msg.targetPeerId)
+  result.writePeerId(msg.intermediaryPeerId)
+  result.writeU64(msg.targetIncarnation)
+  result.writeGossip(msg.gossip)
+
+proc decodeSwimProbeAckIndirect*(data: openArray[byte]): SwimProbeAckIndirect =
+  var pos = 0
+  result.initiatorPeerId = readPeerId(data, pos)
+  result.targetPeerId = readPeerId(data, pos)
+  result.intermediaryPeerId = readPeerId(data, pos)
+  result.targetIncarnation = readU64(data, pos)
+  result.gossip = readGossip(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after SwimProbeAckIndirect payload: " & $(data.len - pos))
+
+# Single-member dissemination frames — same record shape as one entry in
+# the gossip seq. Used when a node wants to broadcast a state change
+# eagerly rather than wait for the next probe/ack round to piggyback it.
+
+proc encodeSwimSuspect*(msg: SwimMember): seq[byte] =
+  result = @[]
+  result.writeSwimMember(msg)
+
+proc decodeSwimSuspect*(data: openArray[byte]): SwimMember =
+  var pos = 0
+  result = readSwimMember(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after SwimSuspect payload: " & $(data.len - pos))
+
+proc encodeSwimConfirm*(msg: SwimMember): seq[byte] =
+  result = @[]
+  result.writeSwimMember(msg)
+
+proc decodeSwimConfirm*(data: openArray[byte]): SwimMember =
+  var pos = 0
+  result = readSwimMember(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after SwimConfirm payload: " & $(data.len - pos))
+
+proc encodeSwimRefute*(msg: SwimMember): seq[byte] =
+  result = @[]
+  result.writeSwimMember(msg)
+
+proc decodeSwimRefute*(data: openArray[byte]): SwimMember =
+  var pos = 0
+  result = readSwimMember(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after SwimRefute payload: " & $(data.len - pos))
+
+# ---------------------------------------------------------------------------
 # Frame encode / decode.
 # ---------------------------------------------------------------------------
 
@@ -317,6 +486,14 @@ type
   PingHandler*          = proc (msg: Ping)          {.gcsafe, closure.}
   PongHandler*          = proc (msg: Pong)          {.gcsafe, closure.}
   GoodbyeHandler*       = proc (msg: Goodbye)       {.gcsafe, closure.}
+  SwimProbeHandler*     = proc (msg: SwimProbe)     {.gcsafe, closure.}
+  SwimAckHandler*       = proc (msg: SwimAck)       {.gcsafe, closure.}
+  SwimProbeReqHandler*  = proc (msg: SwimProbeReq)  {.gcsafe, closure.}
+  SwimProbeAckIndirectHandler* =
+    proc (msg: SwimProbeAckIndirect) {.gcsafe, closure.}
+  SwimSuspectHandler*   = proc (msg: SwimMember)    {.gcsafe, closure.}
+  SwimConfirmHandler*   = proc (msg: SwimMember)    {.gcsafe, closure.}
+  SwimRefuteHandler*    = proc (msg: SwimMember)    {.gcsafe, closure.}
 
 proc dispatch*(frame: Frame;
                onHello: HelloHandler = nil;
@@ -327,7 +504,14 @@ proc dispatch*(frame: Frame;
                onFetchResponse: FetchResponseHandler = nil;
                onPing: PingHandler = nil;
                onPong: PongHandler = nil;
-               onGoodbye: GoodbyeHandler = nil) =
+               onGoodbye: GoodbyeHandler = nil;
+               onSwimProbe: SwimProbeHandler = nil;
+               onSwimAck: SwimAckHandler = nil;
+               onSwimProbeReq: SwimProbeReqHandler = nil;
+               onSwimProbeAckIndirect: SwimProbeAckIndirectHandler = nil;
+               onSwimSuspect: SwimSuspectHandler = nil;
+               onSwimConfirm: SwimConfirmHandler = nil;
+               onSwimRefute: SwimRefuteHandler = nil) =
   ## Decodes the frame's payload to the concrete record type and invokes
   ## the matching handler. Handlers default to `nil`, in which case the
   ## frame for that kind is silently dropped — useful for the test
@@ -361,6 +545,27 @@ proc dispatch*(frame: Frame;
   of mkGoodbye:
     if not onGoodbye.isNil:
       onGoodbye(decodeGoodbye(frame.payload))
+  of mkSwimProbe:
+    if not onSwimProbe.isNil:
+      onSwimProbe(decodeSwimProbe(frame.payload))
+  of mkSwimAck:
+    if not onSwimAck.isNil:
+      onSwimAck(decodeSwimAck(frame.payload))
+  of mkSwimProbeReq:
+    if not onSwimProbeReq.isNil:
+      onSwimProbeReq(decodeSwimProbeReq(frame.payload))
+  of mkSwimProbeAckIndirect:
+    if not onSwimProbeAckIndirect.isNil:
+      onSwimProbeAckIndirect(decodeSwimProbeAckIndirect(frame.payload))
+  of mkSwimSuspect:
+    if not onSwimSuspect.isNil:
+      onSwimSuspect(decodeSwimSuspect(frame.payload))
+  of mkSwimConfirm:
+    if not onSwimConfirm.isNil:
+      onSwimConfirm(decodeSwimConfirm(frame.payload))
+  of mkSwimRefute:
+    if not onSwimRefute.isNil:
+      onSwimRefute(decodeSwimRefute(frame.payload))
 
 # ---------------------------------------------------------------------------
 # Hex helpers — useful for diagnostics + test failure messages.
