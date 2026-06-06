@@ -137,12 +137,20 @@ proc encodeHello*(msg: Hello): seq[byte] =
   result.writePeerId(msg.peerId)
   result.writeU16(msg.listenPort)
   result.writeU32(msg.capabilities)
+  result.writeBool(msg.capTier2)
 
 proc decodeHello*(data: openArray[byte]): Hello =
   var pos = 0
   result.peerId = readPeerId(data, pos)
   result.listenPort = readU16(data, pos)
   result.capabilities = readU32(data, pos)
+  # Peer-Cache-Scale M2: `capTier2` bit appended to the v1 payload.
+  # A v1-only sender omits this byte; treat the truncated tail as
+  # `capTier2 = false` so legacy peers keep handshaking cleanly.
+  if pos < data.len:
+    result.capTier2 = readBool(data, pos)
+  else:
+    result.capTier2 = false
   if pos != data.len:
     raise newException(PeerCacheCodecError,
       "trailing bytes after Hello payload: " & $(data.len - pos))
@@ -152,12 +160,18 @@ proc encodeHelloOk*(msg: HelloOk): seq[byte] =
   result.writePeerId(msg.peerId)
   result.writeU16(msg.protocolVersion)
   result.writeU64(msg.maxBlobBytes)
+  result.writeBool(msg.capTier2)
 
 proc decodeHelloOk*(data: openArray[byte]): HelloOk =
   var pos = 0
   result.peerId = readPeerId(data, pos)
   result.protocolVersion = readU16(data, pos)
   result.maxBlobBytes = readU64(data, pos)
+  # Peer-Cache-Scale M2: optional `capTier2` tail (see decodeHello).
+  if pos < data.len:
+    result.capTier2 = readBool(data, pos)
+  else:
+    result.capTier2 = false
   if pos != data.len:
     raise newException(PeerCacheCodecError,
       "trailing bytes after HelloOk payload: " & $(data.len - pos))

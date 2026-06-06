@@ -69,11 +69,20 @@ type
     peerId*: PeerId
     listenPort*: uint16
     capabilities*: uint32
+    capTier2*: bool
+      ## Peer-Cache-Scale M2: tier-2 capability bit. Set when the
+      ## sending peer is a long-lived "fat peer" cache node (see
+      ## `Peer-Cache-Scale.md` §"Tier-2 cache hierarchy"). Receivers
+      ## record the value in `PeerEntry.isTier2` so `requestFetch`
+      ## can prefer tier-2 candidates.
 
   HelloOk* = object
     peerId*: PeerId
     protocolVersion*: uint16
     maxBlobBytes*: uint64
+    capTier2*: bool
+      ## Peer-Cache-Scale M2: same tier-2 capability bit echoed on the
+      ## acceptor side of the handshake.
 
   Advertise* = object
     sequence*: uint64

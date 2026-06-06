@@ -65,6 +65,10 @@ type
       ## share the same future.
     connections: Table[PeerId, AsyncSocket]
     running: bool
+    capTier2*: bool
+      ## Peer-Cache-Scale M2: this peer's tier-2 capability. Stamped
+      ## into outbound `Hello` frames so remote peers can record us
+      ## as a tier-2 candidate in their registries.
 
   PeerCacheClientError* = object of CatchableError
 
@@ -75,7 +79,8 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
                         cidrAllowlist: openArray[CidrV4];
                         localStoreWriter: LocalStoreWriter = nil;
                         fetchTimeoutMs: int = DefaultFetchTimeoutMs;
-                        advertiseIntervalMs: int = 5_000):
+                        advertiseIntervalMs: int = 5_000;
+                        capTier2: bool = false):
                         PeerCacheClient =
   result = PeerCacheClient(
     selfPeerId: selfPeerId,
@@ -92,7 +97,8 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
     pendingFetches: initTable[BlobDigest,
                               Future[Option[seq[byte]]]](),
     connections: initTable[PeerId, AsyncSocket](),
-    running: false)
+    running: false,
+    capTier2: capTier2)
 
 # ---------------------------------------------------------------------------
 # Frame I/O — mirrors the server's helpers.
@@ -144,7 +150,8 @@ proc handshakePeer(client: PeerCacheClient;
   let hello = Hello(
     peerId: client.selfPeerId,
     listenPort: client.listenPort,
-    capabilities: 0'u32)
+    capabilities: 0'u32,
+    capTier2: client.capTier2)
   await sendFrame(sock, mkHello, encodeHello(hello))
 
   let helloOkBytes = await readFrameBytes(sock)
@@ -158,6 +165,8 @@ proc handshakePeer(client: PeerCacheClient;
       "expected mkHelloOk, got " & $helloOkFrame.messageKind)
   let helloOk = decodeHelloOk(helloOkFrame.payload)
   client.registry.addPeer(helloOk.peerId, endpoint)
+  # Peer-Cache-Scale M2: record the remote's tier-2 capability.
+  client.registry.setPeerTier2(helloOk.peerId, helloOk.capTier2)
 
   # Send our initial advertise snapshot.
   let snapshot = client.registry.snapshotFor(helloOk.peerId)
@@ -272,6 +281,22 @@ proc start*(client: PeerCacheClient) {.async.} =
   if futures.len > 0:
     await all(futures)
 
+proc sortTier2First*(registry: PeerRegistry;
+                     candidates: seq[PeerId]): seq[PeerId] =
+  ## Peer-Cache-Scale M2: reorders a candidate list so that tier-2
+  ## peers come before ordinary peers. Within each group the relative
+  ## order is preserved (stable partition). See
+  ## `Peer-Cache-Scale.md` §"Discovery extension".
+  result = newSeq[PeerId]()
+  var ordinary = newSeq[PeerId]()
+  for p in candidates:
+    if registry.isPeerTier2(p):
+      result.add(p)
+    else:
+      ordinary.add(p)
+  for p in ordinary:
+    result.add(p)
+
 proc requestFetch*(client: PeerCacheClient;
                    digest: BlobDigest): Future[Option[seq[byte]]]
                    {.async.} =
@@ -288,7 +313,8 @@ proc requestFetch*(client: PeerCacheClient;
   ## (if any), advertises the digest on the next round, and returns
   ## `some(payload)`. On verification failure (or any I/O / timeout
   ## error) tries the next candidate. Returns `none` on exhaustion.
-  let candidates = client.registry.findPeersWithBlob(digest)
+  let candidates = sortTier2First(client.registry,
+                                  client.registry.findPeersWithBlob(digest))
   for candidate in candidates:
     if not client.connections.hasKey(candidate):
       continue
@@ -360,7 +386,8 @@ proc multicastBroadcastLoop(client: PeerCacheClient;
   let hello = Hello(
     peerId: client.selfPeerId,
     listenPort: client.listenPort,
-    capabilities: 0'u32)
+    capabilities: 0'u32,
+    capTier2: client.capTier2)
   let packet = encodeHelloPacket(hello)
   while client.multicastRunning:
     try:

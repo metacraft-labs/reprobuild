@@ -62,6 +62,11 @@ type
       ## Peer-Cache-Scale M0: timestamp of the last `swimStatus`
       ## transition. The SWIM scheduler scans this to age
       ## `Suspected` → `Confirmed` and `Confirmed` → removed.
+    isTier2*: bool
+      ## Peer-Cache-Scale M2: mirrors the `cap_tier2` capability bit
+      ## from the remote's `Hello` / `HelloOk`. Set when this peer is
+      ## a tier-2 cache node so `requestFetch` can sort tier-2
+      ## candidates ahead of ordinary peers.
 
   PeerRegistry* = ref object
     entries*: Table[PeerId, PeerEntry]
@@ -102,7 +107,26 @@ proc addPeer*(reg: PeerRegistry; peerId: PeerId; endpoint: Endpoint) =
       suspect: false,
       swimStatus: smsAlive,
       swimIncarnation: 0'u64,
-      swimStatusSince: now)
+      swimStatusSince: now,
+      isTier2: false)
+
+proc setPeerTier2*(reg: PeerRegistry; peerId: PeerId; isTier2: bool) =
+  ## Peer-Cache-Scale M2: records the remote's `cap_tier2` capability
+  ## bit on the registry entry. Called by `client.nim` /
+  ## `server.nim` after the handshake decodes `HelloOk` / `Hello`.
+  ## No-op if the peer hasn't been registered yet.
+  if reg.entries.hasKey(peerId):
+    var entry = reg.entries[peerId]
+    entry.isTier2 = isTier2
+    reg.entries[peerId] = entry
+
+proc isPeerTier2*(reg: PeerRegistry; peerId: PeerId): bool =
+  ## Peer-Cache-Scale M2: convenience reader used by `requestFetch`
+  ## when sorting candidates.
+  if reg.entries.hasKey(peerId):
+    reg.entries[peerId].isTier2
+  else:
+    false
 
 proc removePeer*(reg: PeerRegistry; peerId: PeerId) =
   reg.entries.del(peerId)

@@ -77,6 +77,10 @@ type
       ## emits a first-time off-CIDR warning. Tracks the "warning is
       ## logged exactly once per peer ID per session" assertion in
       ## the M2 CIDR-allowlist test independent of `stderr` capture.
+    capTier2*: bool
+      ## Peer-Cache-Scale M2: this server's tier-2 capability. Echoed
+      ## back to peers in `mkHelloOk` so clients can record us as a
+      ## tier-2 candidate.
 
   PeerCacheServerError* = object of CatchableError
 
@@ -177,7 +181,8 @@ proc newPeerCacheServer*(selfPeerId: PeerId;
                          cidrAllowlist: openArray[CidrV4];
                          maxBlobBytes: uint64 = DefaultMaxBlobBytes;
                          localStoreReader: LocalStoreReader = nil;
-                         responseInterceptor: ResponseInterceptor = nil):
+                         responseInterceptor: ResponseInterceptor = nil;
+                         capTier2: bool = false):
                          PeerCacheServer =
   result = PeerCacheServer(
     selfPeerId: selfPeerId,
@@ -196,7 +201,8 @@ proc newPeerCacheServer*(selfPeerId: PeerId;
     multicastRunning: false,
     multicastWarnedPeers: initHashSet[PeerId](),
     droppedAnnounceCount: 0,
-    warningEmitCount: 0)
+    warningEmitCount: 0,
+    capTier2: capTier2)
 
 # ---------------------------------------------------------------------------
 # Frame I/O helpers.
@@ -261,13 +267,16 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
         # endpoint becomes the peer's known fetch address.
         let endpoint = initEndpoint(remoteAddress, Port(hello.listenPort))
         server.registry.addPeer(hello.peerId, endpoint)
+        # Peer-Cache-Scale M2: record the remote's `cap_tier2`.
+        server.registry.setPeerTier2(hello.peerId, hello.capTier2)
         registeredPeerId = hello.peerId
         hasRegisteredPeer = true
         # Reply with HelloOk.
         let helloOk = HelloOk(
           peerId: server.selfPeerId,
           protocolVersion: PeerCacheProtocolVersion,
-          maxBlobBytes: server.maxBlobBytes)
+          maxBlobBytes: server.maxBlobBytes,
+          capTier2: server.capTier2)
         await sendFrame(client, mkHelloOk, encodeHelloOk(helloOk))
         # Send the initial advertise snapshot.
         let snapshot = server.registry.snapshotFor(hello.peerId)
@@ -454,7 +463,8 @@ proc dialAnnouncedPeer(server: PeerCacheServer;
     let ourHello = Hello(
       peerId: server.selfPeerId,
       listenPort: uint16(server.listenPort),
-      capabilities: 0'u32)
+      capabilities: 0'u32,
+      capTier2: server.capTier2)
     let helloFrame = encodeFrame(mkHello, encodeHello(ourHello))
     var helloStr = newString(helloFrame.len)
     for i, b in helloFrame:
@@ -488,6 +498,10 @@ proc dialAnnouncedPeer(server: PeerCacheServer;
     let helloOk = decodeHelloOk(okFrame.payload)
     let endpoint = initEndpoint(remoteAddress, Port(hello.listenPort))
     server.registry.addPeer(helloOk.peerId, endpoint)
+    # Peer-Cache-Scale M2: record the dialed peer's tier-2 capability
+    # from both the announced Hello and the returned HelloOk.
+    server.registry.setPeerTier2(helloOk.peerId,
+                                 hello.capTier2 or helloOk.capTier2)
     # Drain one more frame (the initial advertise snapshot) so the
     # registry's blob set is primed. Best-effort.
     try:
