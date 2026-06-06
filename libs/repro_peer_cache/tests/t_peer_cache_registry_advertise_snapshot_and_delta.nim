@@ -1,8 +1,14 @@
-## Peer-Cache M0 verification test: `PeerRegistry` correctly applies
-## snapshot vs delta advertisements, and a sequence-number gap is
-## surfaced via `needsSnapshot`.
+## Peer-Cache M0 verification test (updated for Peer-Cache-Scale M1):
+## `PeerRegistry` correctly applies snapshot vs delta advertisements,
+## and a sequence-number gap is surfaced via `needsSnapshot`.
+##
+## M1 note: `PeerEntry.advertised` is now a `CuckooFilter`, so the
+## v1-style `len` / `in` checks have been replaced with `cuckoo.query`.
+## Cuckoo filters are probabilistic — the assertions here only depend
+## on the no-false-negatives guarantee (every inserted digest must
+## query as present), not on counting the set.
 
-import std/[sets, tables, unittest]
+import std/[tables, unittest]
 
 import repro_peer_cache
 
@@ -17,6 +23,9 @@ proc peerIdN(value: byte): PeerId =
   for i in 0 ..< 32:
     raw[i] = byte((int(value) + 3 * i + 5) and 0xff)
   peerIdFromBytes(raw)
+
+proc has(cf: CuckooFilter; d: BlobDigest): bool =
+  cf.query(bytes(d))
 
 suite "peer-cache registry advertise":
   test "snapshot replaces the known set; delta applies; gap surfaces":
@@ -40,10 +49,11 @@ suite "peer-cache registry advertise":
       removed: @[]))
     block:
       let entry = registry.entries[remotePeerId]
-      check entry.advertised.len == 2
-      check d1 in entry.advertised
-      check d2 in entry.advertised
-      check d3 notin entry.advertised
+      check not entry.advertised.isNil
+      check entry.advertised.has(d1)
+      check entry.advertised.has(d2)
+      check not entry.advertised.has(d3)
+      check entry.advertised.count == 2'u32
       check entry.lastAdvertiseSequence == 1'u64
       check entry.hasAdvertiseSequence
     check not registry.needsSnapshot(remotePeerId)
@@ -56,10 +66,9 @@ suite "peer-cache registry advertise":
       removed: @[d1]))
     block:
       let entry = registry.entries[remotePeerId]
-      check entry.advertised.len == 2
-      check d1 notin entry.advertised
-      check d2 in entry.advertised
-      check d3 in entry.advertised
+      check not entry.advertised.has(d1)
+      check entry.advertised.has(d2)
+      check entry.advertised.has(d3)
       check entry.lastAdvertiseSequence == 2'u64
     check not registry.needsSnapshot(remotePeerId)
     check registry.findPeersWithBlob(d2) == @[remotePeerId]
@@ -77,8 +86,7 @@ suite "peer-cache registry advertise":
     block:
       let entry = registry.entries[remotePeerId]
       # Gap is rejected — the gap-causing delta is NOT applied.
-      check digestN(0x04) notin entry.advertised
-      check entry.advertised.len == 2
+      check not entry.advertised.has(digestN(0x04))
       check entry.lastAdvertiseSequence == 2'u64
       check entry.suspect
 
@@ -91,11 +99,10 @@ suite "peer-cache registry advertise":
     check not registry.needsSnapshot(remotePeerId)
     block:
       let entry = registry.entries[remotePeerId]
-      check entry.advertised.len == 3
-      check d1 in entry.advertised
-      check d2 notin entry.advertised
-      check d3 in entry.advertised
-      check digestN(0x05) in entry.advertised
+      check entry.advertised.has(d1)
+      check not entry.advertised.has(d2)
+      check entry.advertised.has(d3)
+      check entry.advertised.has(digestN(0x05))
       check entry.lastAdvertiseSequence == 6'u64
 
   test "advertise from unknown peer is dropped":

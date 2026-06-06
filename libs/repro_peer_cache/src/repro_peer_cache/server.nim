@@ -279,6 +279,13 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
             "Advertise received before Hello on peer-cache connection")
         let ad = decodeAdvertise(frame.payload)
         server.registry.applyAdvertise(registeredPeerId, ad)
+      of mkAdvertiseV2:
+        # Peer-Cache-Scale M1: v2 cuckoo-filter advertisement.
+        if not hasRegisteredPeer:
+          raise newException(PeerCacheServerError,
+            "AdvertiseV2 received before Hello on peer-cache connection")
+        let ad = decodeAdvertiseV2(frame.payload)
+        server.registry.applyAdvertiseV2(registeredPeerId, ad)
       of mkPing:
         await sendFrame(client, mkPong, encodePong(Pong()))
       of mkPong:

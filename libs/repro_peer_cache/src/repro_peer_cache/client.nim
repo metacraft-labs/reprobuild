@@ -204,6 +204,9 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
       of mkAdvertise:
         client.registry.applyAdvertise(peerId,
           decodeAdvertise(frame.payload))
+      of mkAdvertiseV2:
+        client.registry.applyAdvertiseV2(peerId,
+          decodeAdvertiseV2(frame.payload))
       of mkPing:
         await sendFrame(sock, mkPong, encodePong(Pong()))
       of mkPong:

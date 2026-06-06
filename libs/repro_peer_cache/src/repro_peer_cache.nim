@@ -7,6 +7,7 @@
 
 import ./repro_peer_cache/types
 import ./repro_peer_cache/codec
+import ./repro_peer_cache/cuckoo
 import ./repro_peer_cache/multicast
 import ./repro_peer_cache/registry
 import ./repro_peer_cache/server
@@ -17,6 +18,7 @@ import ./repro_peer_cache/engine_seam
 
 export types
 export codec
+export cuckoo
 export multicast
 export registry
 export server

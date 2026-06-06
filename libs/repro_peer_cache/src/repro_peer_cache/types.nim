@@ -55,6 +55,7 @@ type
     mkSwimSuspect = 13         ## Dissemination: peer X is suspected.
     mkSwimConfirm = 14         ## Dissemination: peer X is confirmed dead.
     mkSwimRefute = 15          ## Refutation with bumped incarnation.
+    mkAdvertiseV2 = 16         ## Peer-Cache-Scale M1: cuckoo-filter advertisement.
 
   AdvertiseMode* = enum
     amSnapshot = 0
@@ -79,6 +80,21 @@ type
     mode*: AdvertiseMode
     added*: seq[BlobDigest]
     removed*: seq[BlobDigest]
+
+  AdvertiseV2* = object
+    ## Peer-Cache-Scale M1 cuckoo-filter advertisement. The
+    ## `filterBytes` field carries the serialised cuckoo filter from
+    ## `cuckoo.nim`; the `filterCapacity` and `filterCount` mirror the
+    ## constructor parameter + the current insertion count so that
+    ## receivers can validate the filter before deserialising. The
+    ## `sequence` and `mode` semantics are unchanged from `Advertise`
+    ## v1 (the wire-protocol version bump from 1 to 2 indicates the
+    ## payload shape change, not a semantic change).
+    sequence*: uint64
+    mode*: AdvertiseMode
+    filterCapacity*: uint32
+    filterCount*: uint32
+    filterBytes*: seq[byte]
 
   Want* = object
     kind*: WantKind

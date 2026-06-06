@@ -18,7 +18,20 @@ import std/strutils
 
 import ./types
 
-const PeerCacheProtocolVersion* = 1'u16
+const
+  PeerCacheProtocolVersion* = 1'u16
+    ## Wire-protocol version used by the M0 framing helpers
+    ## (`encodeFrame`). Peer-Cache-Scale M1 introduces a v2 advertise
+    ## payload carried in a frame stamped with
+    ## `PeerCacheProtocolVersionV2`; both versions coexist during the
+    ## migration window described in
+    ## `reprobuild-specs/Peer-Cache-Scale.md` §"Cuckoo-filter
+    ## advertisements".
+  PeerCacheProtocolVersionV2* = 2'u16
+    ## Wire-protocol version stamped on `mkAdvertiseV2` frames. A v2
+    ## decoder accepts both v1 and v2 frames; a v1-only decoder rejects
+    ## v2 frames as "unsupported version" via the existing
+    ## `decodeFrame` version check.
 
 type
   PeerCacheCodecError* = object of CatchableError
@@ -179,6 +192,41 @@ proc decodeAdvertise*(data: openArray[byte]): Advertise =
   if pos != data.len:
     raise newException(PeerCacheCodecError,
       "trailing bytes after Advertise payload: " & $(data.len - pos))
+
+proc encodeAdvertiseV2*(msg: AdvertiseV2): seq[byte] =
+  ## Peer-Cache-Scale M1 v2 advertise payload. The serialised cuckoo
+  ## filter is carried verbatim with an explicit length prefix; the
+  ## `filterCapacity` and `filterCount` fields are echoed from the
+  ## sender's filter state so receivers can sanity-check before
+  ## deserialising.
+  result = @[]
+  result.writeU64(msg.sequence)
+  result.writeU8(uint8(ord(msg.mode)))
+  result.writeU32(msg.filterCapacity)
+  result.writeU32(msg.filterCount)
+  result.writeU32(uint32(msg.filterBytes.len))
+  for b in msg.filterBytes:
+    result.add(b)
+
+proc decodeAdvertiseV2*(data: openArray[byte]): AdvertiseV2 =
+  var pos = 0
+  result.sequence = readU64(data, pos)
+  let modeRaw = readU8(data, pos)
+  if modeRaw > uint8(ord(high(AdvertiseMode))):
+    raise newException(PeerCacheCodecError,
+      "AdvertiseV2 mode tag out of range: " & $modeRaw)
+  result.mode = AdvertiseMode(modeRaw)
+  result.filterCapacity = readU32(data, pos)
+  result.filterCount = readU32(data, pos)
+  let filterLen = int(readU32(data, pos))
+  ensureBytes(data.len - pos, filterLen, "AdvertiseV2 filter bytes")
+  result.filterBytes = newSeq[byte](filterLen)
+  for i in 0 ..< filterLen:
+    result.filterBytes[i] = data[pos + i]
+  inc pos, filterLen
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after AdvertiseV2 payload: " & $(data.len - pos))
 
 proc encodeWant*(msg: Want): seq[byte] =
   result = @[]
@@ -435,9 +483,14 @@ proc decodeSwimRefute*(data: openArray[byte]): SwimMember =
 proc encodeFrame*(messageKind: MessageKind; payload: openArray[byte]):
     seq[byte] =
   ## Encodes a complete on-the-wire frame: version + kind + payloadLen +
-  ## payload bytes. Always emits version = 1.
+  ## payload bytes. Defaults to wire-protocol version 1 for legacy
+  ## message kinds; `mkAdvertiseV2` is stamped with version 2 so the
+  ## migration-window decoder logic can route on `Frame.version`.
   result = @[]
-  result.writeU16(PeerCacheProtocolVersion)
+  let version =
+    if messageKind == mkAdvertiseV2: PeerCacheProtocolVersionV2
+    else: PeerCacheProtocolVersion
+  result.writeU16(version)
   result.writeU16(uint16(ord(messageKind)))
   result.writeU32(uint32(payload.len))
   for b in payload:
@@ -445,18 +498,29 @@ proc encodeFrame*(messageKind: MessageKind; payload: openArray[byte]):
 
 proc decodeFrame*(data: openArray[byte]): Frame =
   ## Decodes a complete on-the-wire frame. Raises `PeerCacheCodecError`
-  ## on version mismatch (with the observed version in the message),
-  ## unknown message-kind tag, or payload-length mismatch.
+  ## on unsupported wire-protocol version, unknown message-kind tag,
+  ## or payload-length mismatch.
+  ##
+  ## Version routing: v1 is the default for every message kind except
+  ## `mkAdvertiseV2`; v2 is the only valid framing for `mkAdvertiseV2`.
+  ## A v2 frame carrying any other kind is rejected as a version
+  ## mismatch — this preserves the M0 "version != 1" guard for legacy
+  ## message kinds while opening the v2 channel exclusively for the
+  ## cuckoo-filter advertise payload.
   var pos = 0
   let version = readU16(data, pos)
-  if version != PeerCacheProtocolVersion:
-    raise newException(PeerCacheCodecError,
-      "unsupported peer-cache protocol version: observed " & $version &
-      ", expected " & $PeerCacheProtocolVersion)
   let kindRaw = readU16(data, pos)
   if kindRaw > uint16(ord(high(MessageKind))):
     raise newException(PeerCacheCodecError,
       "unknown peer-cache message kind: " & $kindRaw)
+  let kind = MessageKind(kindRaw)
+  let expectedVersion =
+    if kind == mkAdvertiseV2: PeerCacheProtocolVersionV2
+    else: PeerCacheProtocolVersion
+  if version != expectedVersion:
+    raise newException(PeerCacheCodecError,
+      "unsupported peer-cache protocol version: observed " & $version &
+      ", expected " & $expectedVersion & " for message kind " & $kind)
   let payloadLen = readU32(data, pos)
   ensureBytes(data.len - pos, int(payloadLen), "frame payload")
   var payload = newSeq[byte](int(payloadLen))
@@ -480,6 +544,7 @@ type
   HelloHandler*         = proc (msg: Hello)         {.gcsafe, closure.}
   HelloOkHandler*       = proc (msg: HelloOk)       {.gcsafe, closure.}
   AdvertiseHandler*     = proc (msg: Advertise)     {.gcsafe, closure.}
+  AdvertiseV2Handler*   = proc (msg: AdvertiseV2)   {.gcsafe, closure.}
   WantHandler*          = proc (msg: Want)          {.gcsafe, closure.}
   FetchRequestHandler*  = proc (msg: FetchRequest)  {.gcsafe, closure.}
   FetchResponseHandler* = proc (msg: FetchResponse) {.gcsafe, closure.}
@@ -499,6 +564,7 @@ proc dispatch*(frame: Frame;
                onHello: HelloHandler = nil;
                onHelloOk: HelloOkHandler = nil;
                onAdvertise: AdvertiseHandler = nil;
+               onAdvertiseV2: AdvertiseV2Handler = nil;
                onWant: WantHandler = nil;
                onFetchRequest: FetchRequestHandler = nil;
                onFetchResponse: FetchResponseHandler = nil;
@@ -527,6 +593,9 @@ proc dispatch*(frame: Frame;
   of mkAdvertise:
     if not onAdvertise.isNil:
       onAdvertise(decodeAdvertise(frame.payload))
+  of mkAdvertiseV2:
+    if not onAdvertiseV2.isNil:
+      onAdvertiseV2(decodeAdvertiseV2(frame.payload))
   of mkWant:
     if not onWant.isNil:
       onWant(decodeWant(frame.payload))

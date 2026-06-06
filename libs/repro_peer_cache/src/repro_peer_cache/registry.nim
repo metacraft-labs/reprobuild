@@ -1,17 +1,41 @@
-## In-memory peer registry — Peer-Cache M0.
+## In-memory peer registry — Peer-Cache M0 + Peer-Cache-Scale M1.
 ##
 ## Maintains `peerId → endpoint + advertised blobs + lastSeen` for
 ## every peer this node has handshaken with. See
 ## `Peer-Cache.md` §"Advertisement index".
+##
+## Peer-Cache-Scale M1 changes the `advertised` representation from an
+## exact `HashSet[BlobDigest]` to a probabilistic `CuckooFilter`. The
+## filter is lazily allocated when the first advertisement arrives.
+## `applyAdvertise` (v1) and `applyAdvertiseV2` (v2) both route through
+## the same in-memory shape: v1 builds a filter from the digest list,
+## v2 deserialises the wire bytes. `findPeersWithBlob` becomes
+## probabilistic — false positives are bounded by the filter's
+## configured FPR (default 1%), false negatives are impossible.
 
 import std/[algorithm, monotimes, sets, tables]
 
 import ./types
+import ./cuckoo
+
+export cuckoo
+
+const
+  DefaultPeerFilterCapacity* = 1024'u32
+    ## Default cuckoo-filter capacity used when a peer's first
+    ## advertisement is a v1 raw-digest list (we don't know the peer's
+    ## intended capacity from a v1 frame, so we size for a comfortable
+    ## working set and grow lazily if necessary). v2 frames carry an
+    ## explicit `filterCapacity`.
 
 type
   PeerEntry* = object
     endpoint*: Endpoint
-    advertised*: HashSet[BlobDigest]
+    advertised*: CuckooFilter
+      ## Peer-Cache-Scale M1: cuckoo-filter representation of the
+      ## peer's advertised blob set. Lazily allocated when the first
+      ## advertisement arrives. `nil` while the peer has only
+      ## handshaken.
     lastSeen*: MonoTime
     lastAdvertiseSequence*: uint64
     hasAdvertiseSequence*: bool
@@ -44,6 +68,9 @@ type
     selfPeerId*: PeerId
     selfEndpoint*: Endpoint
     selfAdvertised*: HashSet[BlobDigest]
+      ## Self-side stays as a `HashSet` — the local node knows its
+      ## own digests exactly and only converts to a `CuckooFilter`
+      ## when emitting an `AdvertiseV2` snapshot.
     selfSequence*: uint64
 
 proc newPeerRegistry*(selfPeerId: PeerId; selfEndpoint: Endpoint):
@@ -58,7 +85,7 @@ proc newPeerRegistry*(selfPeerId: PeerId; selfEndpoint: Endpoint):
 proc addPeer*(reg: PeerRegistry; peerId: PeerId; endpoint: Endpoint) =
   ## Registers a peer with no advertised blobs yet. Idempotent: a
   ## second call with the same peer ID refreshes the endpoint and
-  ## `lastSeen` but preserves the advertised set.
+  ## `lastSeen` but preserves the advertised filter.
   if reg.entries.hasKey(peerId):
     var entry = reg.entries[peerId]
     entry.endpoint = endpoint
@@ -68,7 +95,7 @@ proc addPeer*(reg: PeerRegistry; peerId: PeerId; endpoint: Endpoint) =
     let now = getMonoTime()
     reg.entries[peerId] = PeerEntry(
       endpoint: endpoint,
-      advertised: initHashSet[BlobDigest](),
+      advertised: nil,
       lastSeen: now,
       lastAdvertiseSequence: 0'u64,
       hasAdvertiseSequence: false,
@@ -83,28 +110,86 @@ proc removePeer*(reg: PeerRegistry; peerId: PeerId) =
 proc hasPeer*(reg: PeerRegistry; peerId: PeerId): bool =
   reg.entries.hasKey(peerId)
 
-proc applyAdvertise*(reg: PeerRegistry; peerId: PeerId; ad: Advertise) =
-  ## Applies a snapshot or delta advertisement from `peerId`. Snapshot
-  ## replaces the peer's known set; delta applies `removed` then
-  ## `added` (the spec lists the operations as "remove then add" so a
-  ## peer rotating a blob — drop old, advertise new in the same
-  ## delta — collapses to the post-rotation set). Sequence-gap
-  ## detection records the gap on the entry; `needsSnapshot` returns
-  ## `true` until a fresh snapshot arrives.
+proc digestBytes(d: BlobDigest): array[32, byte] = bytes(d)
+
+proc buildFilterFromDigests(digests: openArray[BlobDigest];
+                            capacity: uint32): CuckooFilter =
+  ## Helper: builds a fresh cuckoo filter sized for `capacity` and
+  ## inserts every digest. Used for v1 → in-memory routing and as the
+  ## reset path inside `applyAdvertise(...amSnapshot)`.
+  let sized =
+    if capacity < uint32(digests.len): uint32(digests.len)
+    else: capacity
+  result = newCuckooFilter(max(sized, 1'u32))
+  for d in digests:
+    let raw = digestBytes(d)
+    discard result.insert(raw)
+
+proc applyAdvertiseV2*(reg: PeerRegistry; peerId: PeerId; ad: AdvertiseV2) =
+  ## Peer-Cache-Scale M1: applies a v2 cuckoo-filter advertisement.
+  ## Snapshot deserialises and replaces the peer's filter; delta is
+  ## not defined for v2 (the wire shape carries the full filter on
+  ## every snapshot; deltas would need a separate "insert this
+  ## fingerprint" payload, which is deferred to a follow-up). For the
+  ## v2-snapshot path we ignore the `filterCount` field after
+  ## deserialisation — the deserialised filter already carries the
+  ## same count.
   if not reg.entries.hasKey(peerId):
-    # Drop advertisements from peers we haven't handshaken with —
-    # the handshake is the authority on whether a peer is in the
-    # registry at all.
     return
   var entry = reg.entries[peerId]
   entry.lastSeen = getMonoTime()
   case ad.mode
   of amSnapshot:
-    entry.advertised.clear()
-    for d in ad.added:
-      entry.advertised.incl(d)
+    entry.advertised = deserialize(ad.filterBytes)
+    entry.lastAdvertiseSequence = ad.sequence
+    entry.hasAdvertiseSequence = true
+    entry.suspect = false
+  of amDelta:
+    # Sequence-gap detection mirrors the v1 path.
+    let expected =
+      if entry.hasAdvertiseSequence: entry.lastAdvertiseSequence + 1
+      else: ad.sequence
+    if entry.hasAdvertiseSequence and ad.sequence != expected:
+      entry.suspect = true
+      reg.entries[peerId] = entry
+      return
+    # v2 delta carries a replacement filter; merge by deserialising
+    # into a temporary and unioning into the existing one. The wire
+    # shape currently only ships full-replacement filters, so deltas
+    # arrive as either an empty filter (no-op) or a new filter (treat
+    # as a snapshot at the v2 layer). We deserialise + replace; a
+    # future M1.x can wire a richer "add these fingerprints" payload.
+    entry.advertised = deserialize(ad.filterBytes)
+    entry.lastAdvertiseSequence = ad.sequence
+    entry.hasAdvertiseSequence = true
+  reg.entries[peerId] = entry
+
+proc applyAdvertise*(reg: PeerRegistry; peerId: PeerId; ad: Advertise) =
+  ## Applies a v1 snapshot or delta advertisement from `peerId`. The
+  ## v1 wire shape (raw digest lists) is converted to the v2 in-memory
+  ## shape (cuckoo filter) before storage so `findPeersWithBlob` only
+  ## needs to query the filter. Snapshot rebuilds the filter from the
+  ## `added` list; delta inserts/deletes against the existing filter.
+  ## Sequence-gap detection mirrors the v1 semantics — the suspect
+  ## flag is set on a detected gap and the gap-causing delta is
+  ## dropped so the receiver can request a fresh snapshot.
+  if not reg.entries.hasKey(peerId):
+    return
+  var entry = reg.entries[peerId]
+  entry.lastSeen = getMonoTime()
+  case ad.mode
+  of amSnapshot:
+    # Build a fresh filter from the snapshot. The `removed` list is
+    # honoured for symmetry with the v1 semantics — a snapshot with
+    # an explicit removal list collapses to (added minus removed).
+    var live = newSeq[BlobDigest]()
+    var removedSet = initHashSet[BlobDigest]()
     for d in ad.removed:
-      entry.advertised.excl(d)
+      removedSet.incl(d)
+    for d in ad.added:
+      if d notin removedSet:
+        live.add(d)
+    entry.advertised = buildFilterFromDigests(live, DefaultPeerFilterCapacity)
     entry.lastAdvertiseSequence = ad.sequence
     entry.hasAdvertiseSequence = true
     entry.suspect = false
@@ -113,16 +198,15 @@ proc applyAdvertise*(reg: PeerRegistry; peerId: PeerId; ad: Advertise) =
       if entry.hasAdvertiseSequence: entry.lastAdvertiseSequence + 1
       else: ad.sequence
     if entry.hasAdvertiseSequence and ad.sequence != expected:
-      # Gap detected — keep the current set as-is and flag the entry as
-      # needing a snapshot. The receiver issues
-      # `mkWant{ kind: wkSnapshotRequest }` on the next round.
       entry.suspect = true
       reg.entries[peerId] = entry
       return
+    if entry.advertised.isNil:
+      entry.advertised = newCuckooFilter(DefaultPeerFilterCapacity)
     for d in ad.removed:
-      entry.advertised.excl(d)
+      discard entry.advertised.delete(digestBytes(d))
     for d in ad.added:
-      entry.advertised.incl(d)
+      discard entry.advertised.insert(digestBytes(d))
     entry.lastAdvertiseSequence = ad.sequence
     entry.hasAdvertiseSequence = true
   reg.entries[peerId] = entry
@@ -135,18 +219,24 @@ proc needsSnapshot*(reg: PeerRegistry; peerId: PeerId): bool =
   reg.entries[peerId].suspect
 
 proc findPeersWithBlob*(reg: PeerRegistry; digest: BlobDigest): seq[PeerId] =
-  ## Returns every known peer that has advertised `digest`. Order is
-  ## lexicographic-by-peerId-bytes — stable across runs so callers
-  ## (and tests) can rely on deterministic candidate ordering. The
-  ## spec's "sorted by recency + observed latency" lands in M2; M1
-  ## ships the stable lexicographic order as a sensible default that
-  ## avoids `std/tables` hash-bucket nondeterminism leaking into test
-  ## results.
+  ## Returns every known peer whose cuckoo filter answers `query` true
+  ## for `digest`. Order is lexicographic-by-peerId-bytes — stable
+  ## across runs so callers (and tests) can rely on deterministic
+  ## candidate ordering.
+  ##
+  ## Peer-Cache-Scale M1: the result is probabilistic. False positives
+  ## are bounded by the per-peer filter FPR (default 1%); false
+  ## negatives are impossible. The fetch path is expected to handle a
+  ## false-positive "this peer doesn't actually have the blob"
+  ## response gracefully — see `client.nim` §"`fetchBlob`".
   result = @[]
+  let raw = digestBytes(digest)
   for peerId, entry in reg.entries.pairs:
     if entry.suspect:
       continue
-    if digest in entry.advertised:
+    if entry.advertised.isNil:
+      continue
+    if entry.advertised.query(raw):
       result.add(peerId)
   result.sort do (a, b: PeerId) -> int:
     let
@@ -224,3 +314,24 @@ proc snapshotFor*(reg: PeerRegistry; peerId: PeerId): Advertise =
   for d in reg.selfAdvertised:
     result.added[i] = d
     inc i
+
+proc snapshotV2For*(reg: PeerRegistry; peerId: PeerId;
+                    capacity: uint32 = DefaultPeerFilterCapacity): AdvertiseV2 =
+  ## Peer-Cache-Scale M1: builds an `AdvertiseV2{ mode: amSnapshot }`
+  ## carrying this node's self-advertised set serialised as a cuckoo
+  ## filter. Used by v2 senders; v1 callers continue to use
+  ## `snapshotFor` until the unicast paths are upgraded in a
+  ## follow-up.
+  discard peerId
+  let cap =
+    if capacity < uint32(reg.selfAdvertised.len): uint32(reg.selfAdvertised.len)
+    else: capacity
+  let cf = newCuckooFilter(max(cap, 1'u32))
+  for d in reg.selfAdvertised:
+    discard cf.insert(digestBytes(d))
+  result = AdvertiseV2(
+    sequence: reg.selfSequence,
+    mode: amSnapshot,
+    filterCapacity: cap,
+    filterCount: cf.count,
+    filterBytes: cf.serialize())
