@@ -50,6 +50,13 @@ import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
 import repro_cli_support/infra
 import repro_cli_support/mode1_loader
+from repro_cli_support/partition as repro_partition import
+  ShardBuildAction, ShardTestEdge, ShardPlanRequest, ShardPlan,
+  PartitionPlanReadError,
+  planTestShards, writePartitionPlanJson, readPartitionPlanJson
+from runquota_partition/types import
+  NodeId, value, nodeId, SharedInputPolicy, sipIndependent, sipShared,
+  PartitionAssignment, PartitionPlan, DefaultRefinementPasses, `==`, hash
 import repro_profile_compile
 import repro_home_resources/drivers/managed_block
 
@@ -19348,6 +19355,538 @@ proc runWorkspaceStartCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
+## ----------------------------------------------------------------------------
+## CI-Sharding M2 — ``repro test`` shard runner.
+##
+## This block implements the user-facing surface specified in
+## ``reprobuild-specs/CI-Sharding.md`` §"CLI Surface" and wired up
+## end-to-end in milestone M2 of
+## ``reprobuild-specs/CI-Sharding.milestones.org``:
+##
+##   repro test --shard <k>/<N>
+##              [--partition-strategy <slice|hash|duration|joint-duration>]
+##              [--peer-cache=<none|lan://CIDR|remote://URL>]
+##              [--emit-partition-plan=<path>] [--plan-from=<path>]
+##              [<test-selectors>...]
+##
+## Test-edge discovery is intentionally pluggable: when the workspace
+## already carries an aggregated target-export table the CLI will
+## eventually walk it (that is M2-followup work; see the planner
+## docstring), but for the M2 verification tests and for the
+## first-end-to-end demo a JSON fixture path can be supplied via
+## ``--fixture-from=<path>``.  The fixture format is:
+##
+##   {
+##     "buildActions": [
+##       { "id": <int>, "commandStatsId": <str>, "deps": [<int>, ...],
+##         "buildCmd": [<argv>, ...] }, ...
+##     ],
+##     "testEdges": [
+##       { "id": <int>, "selector": <str>, "historyKey": <str>,
+##         "buildDeps": [<int>, ...], "runCmd": [<argv>, ...],
+##         "testName": "<binary>::<suite>::<test>" }, ...
+##     ],
+##     "fallbackBuildCostNs": <int>,
+##     "fallbackTestCostNs": <int>,
+##     "historyDir": <str>, "estimateDbPath": <str>,
+##     "estimateScope": <str>, "policy": "independent"|"shared"
+##   }
+##
+## The M2 per-shard report lives at
+## ``test-logs/shard-<k>-of-<N>.json`` and carries the fields specified
+## in CI-Sharding.milestones.org M2 "Per-shard report writer".
+
+type
+  ReproTestFixtureAction = object
+    id: NodeId
+    commandStatsId: string
+    deps: seq[NodeId]
+    buildCmd: seq[string]
+
+  ReproTestFixtureEdge = object
+    id: NodeId
+    selector: string
+    historyKey: string
+    buildDeps: seq[NodeId]
+    runCmd: seq[string]
+    testName: string  # ``<binary>::<suite>::<test>`` or just ``<binary>``
+
+  ReproTestFixture = object
+    actions: seq[ReproTestFixtureAction]
+    edges: seq[ReproTestFixtureEdge]
+    fallbackBuildCostNs: int64
+    fallbackTestCostNs: int64
+    historyDir: string
+    estimateDbPath: string
+    estimateScope: string
+    policy: SharedInputPolicy
+    refinementPasses: int
+
+  ReproTestShardOpts = object
+    shardIndex: int                # 1-indexed; 0 means none parsed
+    shardCount: int
+    strategy: string               # "joint-duration" | "slice" | "hash" | "duration"
+    peerCacheSpec: string          # raw text
+    emitPlanPath: string
+    planFromPath: string
+    selectors: seq[string]
+    fixturePath: string
+    binDir: string
+    reportPath: string
+
+proc emitShardDiagnostic(msg: string) =
+  stderr.writeLine("repro test: error: " & msg)
+
+proc parsePeerCache(spec: string): tuple[ok: bool; mode: string; arg: string] =
+  ## Recognises the three forms documented in CI-Sharding.md.
+  ## Returns ``ok=false`` when the spec is structurally invalid.
+  if spec.len == 0 or spec == "none":
+    return (true, "none", "")
+  if spec.startsWith("lan://"):
+    return (true, "lan", spec[len("lan://") .. ^1])
+  if spec.startsWith("remote://"):
+    return (true, "remote", spec[len("remote://") .. ^1])
+  (false, "", "")
+
+proc parseShardSpec(value: string): tuple[ok: bool; k, n: int] =
+  let parts = value.split('/')
+  if parts.len != 2:
+    return (false, 0, 0)
+  try:
+    let k = parseInt(parts[0])
+    let n = parseInt(parts[1])
+    if n <= 0 or k < 1 or k > n:
+      return (false, 0, 0)
+    return (true, k, n)
+  except ValueError:
+    return (false, 0, 0)
+
+proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
+  result.strategy = "joint-duration"
+  result.binDir = "build/test-bin"
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--shard" or arg.startsWith("--shard="):
+      let v = valueFromFlag(args, i, "--shard")
+      let parsed = parseShardSpec(v)
+      if not parsed.ok:
+        raise newException(ValueError,
+          "invalid --shard value: " & v & " (expected <k>/<N>, 1-indexed)")
+      result.shardIndex = parsed.k
+      result.shardCount = parsed.n
+    elif arg == "--partition-strategy" or arg.startsWith("--partition-strategy="):
+      result.strategy = valueFromFlag(args, i, "--partition-strategy")
+    elif arg == "--peer-cache" or arg.startsWith("--peer-cache="):
+      result.peerCacheSpec = valueFromFlag(args, i, "--peer-cache")
+    elif arg == "--emit-partition-plan" or
+        arg.startsWith("--emit-partition-plan="):
+      result.emitPlanPath = valueFromFlag(args, i, "--emit-partition-plan")
+    elif arg == "--plan-from" or arg.startsWith("--plan-from="):
+      result.planFromPath = valueFromFlag(args, i, "--plan-from")
+    elif arg == "--fixture-from" or arg.startsWith("--fixture-from="):
+      result.fixturePath = valueFromFlag(args, i, "--fixture-from")
+    elif arg == "--bin-dir" or arg.startsWith("--bin-dir="):
+      result.binDir = valueFromFlag(args, i, "--bin-dir")
+    elif arg == "--report" or arg.startsWith("--report="):
+      result.reportPath = valueFromFlag(args, i, "--report")
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported repro test flag: " & arg)
+    else:
+      result.selectors.add(arg)
+    inc i
+
+proc loadReproTestFixture(path: string): ReproTestFixture =
+  if not fileExists(path):
+    raise newException(IOError, "fixture file not found: " & path)
+  let raw = readFile(path)
+  let parsed = parseJson(raw)
+  result.fallbackBuildCostNs =
+    if parsed.hasKey("fallbackBuildCostNs"):
+      parsed["fallbackBuildCostNs"].getBiggestInt().int64
+    else: 1_000_000'i64
+  result.fallbackTestCostNs =
+    if parsed.hasKey("fallbackTestCostNs"):
+      parsed["fallbackTestCostNs"].getBiggestInt().int64
+    else: 1_000_000'i64
+  result.historyDir =
+    if parsed.hasKey("historyDir"): parsed["historyDir"].getStr()
+    else: ""
+  result.estimateDbPath =
+    if parsed.hasKey("estimateDbPath"): parsed["estimateDbPath"].getStr()
+    else: ""
+  result.estimateScope =
+    if parsed.hasKey("estimateScope"): parsed["estimateScope"].getStr()
+    else: ""
+  result.policy =
+    if parsed.hasKey("policy") and parsed["policy"].getStr() == "shared":
+      sipShared
+    else: sipIndependent
+  result.refinementPasses =
+    if parsed.hasKey("refinementPasses"):
+      parsed["refinementPasses"].getInt()
+    else: DefaultRefinementPasses
+  if parsed.hasKey("buildActions"):
+    for a in parsed["buildActions"].elems:
+      var deps: seq[NodeId] = @[]
+      if a.hasKey("deps"):
+        for d in a["deps"].elems:
+          deps.add(nodeId(uint64(d.getInt())))
+      var buildCmd: seq[string] = @[]
+      if a.hasKey("buildCmd"):
+        for s in a["buildCmd"].elems:
+          buildCmd.add(s.getStr())
+      result.actions.add(ReproTestFixtureAction(
+        id: nodeId(uint64(a["id"].getInt())),
+        commandStatsId:
+          if a.hasKey("commandStatsId"): a["commandStatsId"].getStr() else: "",
+        deps: deps,
+        buildCmd: buildCmd))
+  if parsed.hasKey("testEdges"):
+    for e in parsed["testEdges"].elems:
+      var buildDeps: seq[NodeId] = @[]
+      if e.hasKey("buildDeps"):
+        for d in e["buildDeps"].elems:
+          buildDeps.add(nodeId(uint64(d.getInt())))
+      var runCmd: seq[string] = @[]
+      if e.hasKey("runCmd"):
+        for s in e["runCmd"].elems:
+          runCmd.add(s.getStr())
+      result.edges.add(ReproTestFixtureEdge(
+        id: nodeId(uint64(e["id"].getInt())),
+        selector:
+          if e.hasKey("selector"): e["selector"].getStr() else: "",
+        historyKey:
+          if e.hasKey("historyKey"): e["historyKey"].getStr() else: "",
+        buildDeps: buildDeps,
+        runCmd: runCmd,
+        testName:
+          if e.hasKey("testName"): e["testName"].getStr() else: ""))
+
+proc fixtureToShardPlanRequest(f: ReproTestFixture; shardCount: int;
+                               selectors: seq[string]): ShardPlanRequest =
+  result.shardCount = shardCount
+  result.targetSelectors = selectors
+  result.policy = f.policy
+  result.historyDir = f.historyDir
+  result.estimateDbPath = f.estimateDbPath
+  result.estimateScope = f.estimateScope
+  result.fallbackBuildCostNs = f.fallbackBuildCostNs
+  result.fallbackTestCostNs = f.fallbackTestCostNs
+  result.refinementPasses = f.refinementPasses
+  for a in f.actions:
+    result.buildActions.add(ShardBuildAction(
+      id: a.id,
+      commandStatsId: a.commandStatsId,
+      deps: a.deps))
+  for e in f.edges:
+    result.testEdges.add(ShardTestEdge(
+      id: e.id,
+      selector: e.selector,
+      historyKey: e.historyKey,
+      buildDeps: e.buildDeps))
+
+proc shardAssignmentIds(plan: ShardPlan; shardIndex: int): seq[NodeId] =
+  for a in plan.partition.assignments:
+    if a.shardIndex == shardIndex:
+      result.add(a.root)
+
+proc closureActionsForShard(fixture: ReproTestFixture; rootIds: seq[NodeId]):
+    seq[ReproTestFixtureAction] =
+  var actionById = initTable[NodeId, ReproTestFixtureAction]()
+  for a in fixture.actions:
+    actionById[a.id] = a
+  var edgeById = initTable[NodeId, ReproTestFixtureEdge]()
+  for e in fixture.edges:
+    edgeById[e.id] = e
+  var visited = initHashSet[NodeId]()
+  var ordered: seq[NodeId] = @[]
+
+  proc dfs(id: NodeId) =
+    if id in visited:
+      return
+    visited.incl(id)
+    if actionById.hasKey(id):
+      for dep in actionById[id].deps:
+        dfs(dep)
+      ordered.add(id)
+
+  for root in rootIds:
+    if edgeById.hasKey(root):
+      for dep in edgeById[root].buildDeps:
+        dfs(dep)
+  for id in ordered:
+    result.add(actionById[id])
+
+proc runFixtureCmd(cmd: seq[string]; cwd: string): tuple[code: int; output: string] =
+  if cmd.len == 0:
+    return (0, "")
+  let process = startProcess(cmd[0],
+    workingDir = cwd,
+    args = (if cmd.len > 1: cmd[1 .. ^1] else: @[]),
+    options = {poUsePath, poStdErrToStdOut})
+  defer: process.close()
+  let outp = process.outputStream
+  var buf = ""
+  var line = newStringOfCap(120)
+  while true:
+    if outp.readLine(line):
+      buf.add(line)
+      buf.add("\n")
+    else:
+      let code = process.peekExitCode()
+      if code != -1:
+        return (code, buf)
+
+proc writePartitionFile(path: string; edges: seq[ReproTestFixtureEdge]) =
+  var lines: seq[string] = @[]
+  lines.add("# CI-Sharding M2 partition file — one fully-qualified test per line.")
+  for e in edges:
+    if e.testName.len > 0:
+      lines.add(e.testName)
+    elif e.selector.len > 0:
+      lines.add(e.selector)
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  writeFile(path, lines.join("\n") & "\n")
+
+proc edgesAssignedToShard(fixture: ReproTestFixture;
+                          plan: ShardPlan;
+                          shardIndex: int): seq[ReproTestFixtureEdge] =
+  var byId = initTable[NodeId, ReproTestFixtureEdge]()
+  for e in fixture.edges:
+    byId[e.id] = e
+  for a in plan.partition.assignments:
+    if a.shardIndex == shardIndex and byId.hasKey(a.root):
+      result.add(byId[a.root])
+
+proc predictedShardCostNs(plan: ShardPlan; shardIndex: int): int64 =
+  let idx = shardIndex - 1
+  if idx < 0 or idx >= plan.partition.perShardCost.len:
+    return 0
+  plan.partition.perShardCost[idx].inNanoseconds
+
+proc writeShardReport(path: string; meta: JsonNode) =
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  writeFile(path, meta.pretty() & "\n")
+
+proc runReproTestCommand(args: openArray[string]; publicCliPath: string): int =
+  ## ``repro test`` entry point with the CI-sharding flag surface from
+  ## ``CI-Sharding.md`` §"CLI Surface".  See the block comment above
+  ## for the per-flag semantics.
+  var opts: ReproTestShardOpts
+  try:
+    opts = parseReproTestFlags(args)
+  except ValueError as exc:
+    emitShardDiagnostic(exc.msg)
+    return 2
+
+  # ``--peer-cache=lan://CIDR`` — not implemented in M2.  Diagnostic
+  # points at the CI-Sharding M3 (benchmark) and M4 (conditional
+  # implementation) milestones per the spec.
+  let peer = parsePeerCache(opts.peerCacheSpec)
+  if not peer.ok:
+    emitShardDiagnostic(
+      "invalid --peer-cache spec: " & opts.peerCacheSpec &
+      " (expected ``none``, ``lan://<CIDR>``, or ``remote://<URL>``)")
+    return 2
+  if peer.mode == "lan":
+    emitShardDiagnostic(
+      "--peer-cache=lan://" & peer.arg &
+      " is not implemented yet — see CI-Sharding.milestones.org M3 " &
+      "(benchmark) and M4 (conditional LAN peer-cache implementation).")
+    return 2
+
+  # ``--partition-strategy hash`` / ``duration`` — recognised by the
+  # parser but the wired strategies in M2 are ``joint-duration`` (the
+  # planner-driven path) and ``slice`` (a planner cold-cache fallback).
+  case opts.strategy
+  of "joint-duration", "slice":
+    discard
+  of "hash", "duration":
+    emitShardDiagnostic(
+      "--partition-strategy=" & opts.strategy &
+      " is not implemented in this milestone — see CI-Sharding " &
+      "M3+ for the duration/hash strategies.")
+    return 2
+  else:
+    emitShardDiagnostic(
+      "unknown --partition-strategy value: " & opts.strategy)
+    return 2
+
+  if opts.shardCount == 0 and opts.emitPlanPath.len == 0 and
+      opts.planFromPath.len == 0:
+    emitShardDiagnostic(
+      "--shard <k>/<N> is required when not using --emit-partition-plan " &
+      "or --plan-from")
+    return 2
+
+  # Load the fixture (M2 explicit-fixture path).  Falling back to
+  # build-graph discovery is M2 follow-up work — the verification tests
+  # always supply a fixture.
+  if opts.fixturePath.len == 0:
+    emitShardDiagnostic(
+      "M2 requires --fixture-from=<path> until the build-graph " &
+      "test-edge discovery lands; supply a fixture JSON describing " &
+      "the test edges and their build closures.")
+    return 2
+
+  var fixture: ReproTestFixture
+  try:
+    fixture = loadReproTestFixture(opts.fixturePath)
+  except CatchableError as exc:
+    emitShardDiagnostic("failed to load fixture: " & exc.msg)
+    return 2
+
+  # Plan — either compute or load.
+  var plan: ShardPlan
+  var planMeta: ShardPlanRequest
+  if opts.planFromPath.len > 0:
+    try:
+      let loaded = readPartitionPlanJson(opts.planFromPath)
+      plan = loaded.plan
+      planMeta = loaded.meta
+    except PartitionPlanReadError as exc:
+      emitShardDiagnostic("failed to read partition plan: " & exc.msg)
+      return 2
+  else:
+    # Derive the shard count for the plan request from the parsed
+    # ``--shard`` flag.  ``--emit-partition-plan`` without ``--shard``
+    # is documented as the "planner job" mode; in that case we still
+    # need a count, so we accept ``--shard 0/<N>`` (the example in the
+    # spec) or just ``--shard k/N`` and ignore the index.
+    let shardCount =
+      if opts.shardCount > 0: opts.shardCount
+      else: 1
+    let req = fixtureToShardPlanRequest(fixture, shardCount, opts.selectors)
+    plan = planTestShards(req)
+    planMeta = req
+
+  # Emit-and-exit short-circuit (planner job mode).
+  if opts.emitPlanPath.len > 0:
+    try:
+      writePartitionPlanJson(plan, opts.emitPlanPath, planMeta)
+    except CatchableError as exc:
+      emitShardDiagnostic("failed to write partition plan: " & exc.msg)
+      return 1
+    return 0
+
+  if opts.shardCount == 0:
+    emitShardDiagnostic("--shard <k>/<N> is required for an actual run")
+    return 2
+
+  # ``--peer-cache=remote://URL`` is accepted in M2 but currently
+  # passes through unchanged — the existing Binary-Caches remote-cache
+  # plane handles the actual fetching.  We just record the intent so
+  # the per-shard report carries it.
+  let peerCacheMode = peer.mode
+
+  let assignedRoots = shardAssignmentIds(plan, opts.shardIndex)
+  let assignedEdges = edgesAssignedToShard(fixture, plan, opts.shardIndex)
+  let actionsClosure = closureActionsForShard(fixture, assignedRoots)
+
+  # ----- Build phase: run each action's ``buildCmd`` in topo order.
+  let buildStart = epochTime()
+  var buildFailed = false
+  var buildOutput = ""
+  for a in actionsClosure:
+    let res = runFixtureCmd(a.buildCmd, getCurrentDir())
+    buildOutput.add(res.output)
+    if res.code != 0:
+      buildFailed = true
+      stderr.writeLine("repro test: build action failed: " &
+        $a.id.value & " — exit " & $res.code)
+      break
+  let buildElapsedNs = int64((epochTime() - buildStart) * 1_000_000_000.0)
+
+  # ----- Test phase: synthesise partition.txt and run the assigned
+  # edges.  In M2 we shell out per edge directly when the fixture
+  # supplies a ``runCmd``.  The real surface invokes ct-test-runner
+  # against the synthesised partition file; that path lives in
+  # ``scripts/run_tests.sh`` for now and is migrated into the engine
+  # in a follow-up milestone.
+  let partitionFilePath =
+    "test-logs" / ("partition-" & $opts.shardIndex & "-of-" &
+      $opts.shardCount & ".txt")
+  writePartitionFile(partitionFilePath, assignedEdges)
+
+  let testStart = epochTime()
+  var testResults = newJArray()
+  var passed = 0
+  var failed = 0
+  if not buildFailed:
+    for e in assignedEdges:
+      let res = runFixtureCmd(e.runCmd, getCurrentDir())
+      var node = newJObject()
+      node["edge_id"] = %int(e.id.value)
+      node["selector"] = %e.selector
+      node["test_name"] = %e.testName
+      node["status"] = %(if res.code == 0: "PASS" else: "FAIL")
+      node["exit_code"] = %res.code
+      node["output"] = %res.output
+      testResults.add(node)
+      if res.code == 0:
+        inc passed
+      else:
+        inc failed
+  let testElapsedNs = int64((epochTime() - testStart) * 1_000_000_000.0)
+
+  # ----- Per-shard report writer.
+  let predictedNs = predictedShardCostNs(plan, opts.shardIndex)
+  let actualNs = buildElapsedNs + testElapsedNs
+  let delta =
+    if predictedNs > 0:
+      (float(actualNs) - float(predictedNs)) / float(predictedNs)
+    else:
+      0.0
+  let driftThreshold = 0.5
+  let drift = abs(delta) > driftThreshold
+
+  var report = newJObject()
+  report["schemaId"] = %"reprobuild.shard-report.v1"
+  report["shard"] = %opts.shardIndex
+  report["shardCount"] = %opts.shardCount
+  report["strategy"] = %opts.strategy
+  report["peer_cache"] = %peerCacheMode
+  report["fixture_path"] = %opts.fixturePath
+  var assignedNames = newJArray()
+  for e in assignedEdges:
+    assignedNames.add(%e.selector)
+  report["assigned_selectors"] = assignedNames
+  report["predicted_shard_cost_ns"] = %predictedNs
+  report["predicted_build_time_ns"] = %0  # M2: the plan does not split
+    # build vs test time on the shard axis, only the joint cost.
+  report["predicted_test_time_ns"] = %0
+  report["actual_build_time_ns"] = %buildElapsedNs
+  report["actual_test_time_ns"] = %testElapsedNs
+  report["actual_total_time_ns"] = %actualNs
+  report["cost_model_delta"] = %delta
+  report["cost_model_drift"] = %drift
+  report["build_failed"] = %buildFailed
+  report["tests"] = testResults
+  report["test_pass_count"] = %passed
+  report["test_fail_count"] = %failed
+  report["partition_file"] = %partitionFilePath
+  report["degraded_plan"] = %plan.degraded
+  report["unknown_build_count"] = %plan.unknownBuildCount
+  report["unknown_test_count"] = %plan.unknownTestCount
+
+  let reportPath =
+    if opts.reportPath.len > 0: opts.reportPath
+    else:
+      "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
+        $opts.shardCount & ".json")
+  writeShardReport(reportPath, report)
+
+  if buildFailed:
+    return 1
+  if failed > 0:
+    return 1
+  0
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -19582,6 +20121,20 @@ proc runThinApp*(programName: string): int =
       return 2
     except CatchableError as err:
       stderr.writeLine("repro build: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "test":
+    # CI-Sharding M2 — ``repro test --shard k/N [...]``.  Implementation
+    # in ``runReproTestCommand`` above; see the block comment there for
+    # the user-visible flag surface and the fixture / plan I/O shape.
+    try:
+      let testArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runReproTestCommand(testArgs, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro test: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "stats":
     try:
