@@ -73,6 +73,7 @@ for libName in [
   "repro_workspace_vcs",
   "repro_test_support",
   "repro_workspace_manifests",
+  "repro_peer_cache",
 ]:
   switch("path", "libs" / libName / "src")
 

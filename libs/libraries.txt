@@ -35,3 +35,4 @@ repro_standard_provider_protocol
 repro_standard_provider
 repro_profile_compile
 repro_homebrew_adapter
+repro_peer_cache
