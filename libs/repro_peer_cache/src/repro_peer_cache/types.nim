@@ -56,6 +56,8 @@ type
     mkSwimConfirm = 14         ## Dissemination: peer X is confirmed dead.
     mkSwimRefute = 15          ## Refutation with bumped incarnation.
     mkAdvertiseV2 = 16         ## Peer-Cache-Scale M1: cuckoo-filter advertisement.
+    mkAuthChallenge = 17       ## Peer-Cache-Scale M3: mTLS handshake — random challenge + own pubkey.
+    mkAuthResponse = 18        ## Peer-Cache-Scale M3: mTLS handshake — signature over peer's challenge.
 
   AdvertiseMode* = enum
     amSnapshot = 0
@@ -99,11 +101,19 @@ type
     ## `sequence` and `mode` semantics are unchanged from `Advertise`
     ## v1 (the wire-protocol version bump from 1 to 2 indicates the
     ## payload shape change, not a semantic change).
+    ##
+    ## Peer-Cache-Scale M3: the optional `signature` field carries a
+    ## detached MAC over the canonical advertisement bytes
+    ## (`auth.canonicaliseAdvertiseForSigning`). Empty for `tmCidr`
+    ## senders; non-empty for `tmMtls` senders. Decoders treat
+    ## missing-trailing-bytes as `signature = @[]` so v2 and v2+M3
+    ## peers stay codec-compatible.
     sequence*: uint64
     mode*: AdvertiseMode
     filterCapacity*: uint32
     filterCount*: uint32
     filterBytes*: seq[byte]
+    signature*: seq[byte]
 
   Want* = object
     kind*: WantKind
@@ -171,6 +181,26 @@ type
     intermediaryPeerId*: PeerId
     targetIncarnation*: uint64
     gossip*: seq[SwimMember]
+
+  # ---------------------------------------------------------------------------
+  # Peer-Cache-Scale M3: mTLS-equivalent in-protocol auth handshake.
+  #
+  # M3 ships a simplified handshake instead of full X.509 + OpenSSL. After TCP
+  # accept/dial, each side sends `mkAuthChallenge` (own pubkey + 32 random
+  # bytes), then `mkAuthResponse` (a detached signature over the peer's 32B
+  # challenge). Receivers verify against the trust-anchor list before any
+  # `mkHello` flow. The MAC-based "signature" primitive is implemented in
+  # `auth.nim`; the wire shape is asymmetric-crypto-compatible (a future
+  # follow-up can swap in Ed25519 without touching the framing).
+  # ---------------------------------------------------------------------------
+
+  AuthChallenge* = object
+    challengeBytes*: array[32, byte]
+    senderPubKey*: array[32, byte]
+
+  AuthResponse* = object
+    challengeBytes*: array[32, byte]
+    signature*: array[64, byte]
 
 # ---------------------------------------------------------------------------
 # Equality + hashing for the distinct array types. The compiler does not
@@ -283,6 +313,15 @@ type
     pdmMulticast,    ## M2 mode — UDP multicast announcements.
     pdmSwim          ## Peer-Cache-Scale M0 — SWIM gossip protocol.
 
+  TrustMode* = enum
+    ## Peer-Cache-Scale M3: how the peer authenticates inbound + outbound
+    ## peers. `tmCidr` is the M0–M2 default (CIDR allowlist only);
+    ## `tmMtls` enables the in-protocol mTLS-equivalent auth handshake
+    ## + signed advertisements described in `Peer-Cache-Scale.md`
+    ## §"mTLS + signed advertisements".
+    tmCidr = 0
+    tmMtls = 1
+
   SwimConfig* = object
     ## Per-peer SWIM tuning. Defaults match the SWIM paper §6.3:
     ## one second protocol period, half-second direct-probe timeout,
@@ -318,6 +357,25 @@ type
       ## Peer-Cache-Scale M0: SWIM tuning carried in the unified config.
       ## Populated by callers (test fixtures + production CLI) when
       ## `discoveryMode == pdmSwim`. Other modes ignore the field.
+    trustMode*: TrustMode
+      ## Peer-Cache-Scale M3: trust gating. Defaults to `tmCidr` so the
+      ## M0–M2 behaviour is preserved when callers don't initialise this
+      ## field. `tmMtls` activates the in-protocol auth handshake +
+      ## signed advertisement enforcement.
+    trustAnchorPath*: string
+      ## Peer-Cache-Scale M3: path to the trust-anchor file for
+      ## `tmMtls`. The file format is one entry per line:
+      ##   `<pubkey_hex_64>:<privkey_hex_64>`
+      ## See `auth.loadTrustAnchors` for the canonical parser. Empty
+      ## for `tmCidr`.
+    peerCertPath*: string
+      ## Peer-Cache-Scale M3: path to this peer's own public-key file.
+      ## Hex-encoded 32 bytes per line (typically one line). Created on
+      ## first start when missing.
+    peerKeyPath*: string
+      ## Peer-Cache-Scale M3: path to this peer's own private-key file.
+      ## Hex-encoded 32 bytes per line (typically one line). Created on
+      ## first start when missing.
 
 const
   DefaultMulticastAddress* = "224.0.0.123"

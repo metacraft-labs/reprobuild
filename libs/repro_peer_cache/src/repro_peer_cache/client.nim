@@ -7,14 +7,15 @@
 ## (one per peer) so subsequent fetch requests and advertisements
 ## reuse them; `stop` sends `mkGoodbye` to each peer and closes.
 
-import std/[asyncdispatch, asyncnet, nativesockets, options, tables]
+import std/[asyncdispatch, asyncnet, nativesockets, options, sets, tables]
 
 import blake3
 
+import ./auth
 import ./codec
 import ./multicast
 import ./registry
-import ./server  # for inAllowlist + CidrV4
+import ./server  # for inAllowlist + CidrV4 + performAuthHandshake
 import ./types
 
 const DefaultFetchTimeoutMs* = 5_000
@@ -69,6 +70,25 @@ type
       ## Peer-Cache-Scale M2: this peer's tier-2 capability. Stamped
       ## into outbound `Hello` frames so remote peers can record us
       ## as a tier-2 candidate in their registries.
+    trustMode*: TrustMode
+      ## Peer-Cache-Scale M3: trust gating. `tmCidr` preserves the
+      ## M0–M2 path; `tmMtls` activates the in-protocol auth handshake.
+    keypair*: PeerKeypair
+      ## Peer-Cache-Scale M3: this client's own keypair (only used
+      ## when `trustMode == tmMtls`).
+    trustAnchors*: TrustAnchors
+      ## Peer-Cache-Scale M3: allowed remote public keys (only used
+      ## when `trustMode == tmMtls`).
+    peerKeyByPeerId*: Table[PeerId, PublicKeyBytes]
+      ## Peer-Cache-Scale M3: remembers which pubkey was presented at
+      ## handshake time per peer ID.
+    signatureRejectedCount*: int
+      ## Peer-Cache-Scale M3: signed advertisement frames the client's
+      ## receiver path rejected.
+    signatureRejectedPeers: HashSet[PeerId]
+    handshakeRejectedCount*: int
+      ## Peer-Cache-Scale M3: outbound dials whose mTLS handshake the
+      ## remote (or we) rejected.
 
   PeerCacheClientError* = object of CatchableError
 
@@ -80,7 +100,10 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
                         localStoreWriter: LocalStoreWriter = nil;
                         fetchTimeoutMs: int = DefaultFetchTimeoutMs;
                         advertiseIntervalMs: int = 5_000;
-                        capTier2: bool = false):
+                        capTier2: bool = false;
+                        trustMode: TrustMode = tmCidr;
+                        keypair: PeerKeypair = PeerKeypair();
+                        trustAnchors: TrustAnchors = nil):
                         PeerCacheClient =
   result = PeerCacheClient(
     selfPeerId: selfPeerId,
@@ -98,7 +121,14 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
                               Future[Option[seq[byte]]]](),
     connections: initTable[PeerId, AsyncSocket](),
     running: false,
-    capTier2: capTier2)
+    capTier2: capTier2,
+    trustMode: trustMode,
+    keypair: keypair,
+    trustAnchors: trustAnchors,
+    peerKeyByPeerId: initTable[PeerId, PublicKeyBytes](),
+    signatureRejectedCount: 0,
+    signatureRejectedPeers: initHashSet[PeerId](),
+    handshakeRejectedCount: 0)
 
 # ---------------------------------------------------------------------------
 # Frame I/O — mirrors the server's helpers.
@@ -143,7 +173,9 @@ proc sendFrame(sock: AsyncSocket; messageKind: MessageKind;
 
 proc handshakePeer(client: PeerCacheClient;
                    sock: AsyncSocket;
-                   endpoint: Endpoint): Future[PeerId] {.async.} =
+                   endpoint: Endpoint;
+                   authenticatedPubKey: Option[PublicKeyBytes] =
+                     none(PublicKeyBytes)): Future[PeerId] {.async.} =
   ## Sends Hello, waits for HelloOk + initial Advertise snapshot,
   ## registers the remote peer in the registry. Returns the
   ## remote peer ID.
@@ -167,6 +199,9 @@ proc handshakePeer(client: PeerCacheClient;
   client.registry.addPeer(helloOk.peerId, endpoint)
   # Peer-Cache-Scale M2: record the remote's tier-2 capability.
   client.registry.setPeerTier2(helloOk.peerId, helloOk.capTier2)
+  # Peer-Cache-Scale M3: bind the peer ID to the authenticated pubkey.
+  if authenticatedPubKey.isSome:
+    client.peerKeyByPeerId[helloOk.peerId] = authenticatedPubKey.get()
 
   # Send our initial advertise snapshot.
   let snapshot = client.registry.snapshotFor(helloOk.peerId)
@@ -214,8 +249,24 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
         client.registry.applyAdvertise(peerId,
           decodeAdvertise(frame.payload))
       of mkAdvertiseV2:
-        client.registry.applyAdvertiseV2(peerId,
-          decodeAdvertiseV2(frame.payload))
+        let ad = decodeAdvertiseV2(frame.payload)
+        # Peer-Cache-Scale M3: signed-advertisement enforcement.
+        if client.trustMode == tmMtls:
+          var verified = false
+          if ad.signature.len == 64 and
+             client.peerKeyByPeerId.hasKey(peerId):
+            var sig: SignatureBytes
+            for i in 0 ..< 64:
+              sig[i] = ad.signature[i]
+            let msg = canonicaliseAdvertiseForSigning(peerId, ad)
+            verified = verifySignature(client.trustAnchors,
+              client.peerKeyByPeerId[peerId], msg, sig)
+          if not verified:
+            if peerId notin client.signatureRejectedPeers:
+              client.signatureRejectedPeers.incl(peerId)
+              inc client.signatureRejectedCount
+            continue
+        client.registry.applyAdvertiseV2(peerId, ad)
       of mkPing:
         await sendFrame(sock, mkPong, encodePong(Pong()))
       of mkPong:
@@ -256,6 +307,12 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
         # peer-cache connection — they have their own transport. If
         # one shows up here, drop it.
         discard
+      of mkAuthChallenge, mkAuthResponse:
+        # Peer-Cache-Scale M3: auth-handshake frames are only valid
+        # before the post-handshake reader loop runs. Close the
+        # connection so a `tmCidr` client doesn't deadlock against a
+        # mid-stream `tmMtls` handshake retry.
+        break
   except CatchableError:
     discard
 
@@ -264,7 +321,18 @@ proc dialPeer(client: PeerCacheClient;
   var sock = newAsyncSocket()
   try:
     await sock.connect(endpoint.host, endpoint.port)
-    let peerId = await handshakePeer(client, sock, endpoint)
+    # Peer-Cache-Scale M3: drive the mTLS auth handshake (when
+    # `tmMtls`) before the Hello/HelloOk flow. A `none` outcome means
+    # the remote isn't a trusted peer; close + count.
+    var authPub = none(PublicKeyBytes)
+    if client.trustMode == tmMtls:
+      authPub = await performAuthHandshake(
+        sock, client.keypair, client.trustAnchors)
+      if authPub.isNone:
+        inc client.handshakeRejectedCount
+        try: sock.close() except CatchableError: discard
+        return
+    let peerId = await handshakePeer(client, sock, endpoint, authPub)
     client.connections[peerId] = sock
     asyncCheck readerLoop(client, sock, peerId)
   except CatchableError:
@@ -280,6 +348,44 @@ proc start*(client: PeerCacheClient) {.async.} =
     futures.add(dialPeer(client, endpoint))
   if futures.len > 0:
     await all(futures)
+
+proc sendRawFrameForTesting*(client: PeerCacheClient;
+                             targetPeerId: PeerId;
+                             messageKind: MessageKind;
+                             payload: seq[byte]): Future[void] {.async.} =
+  ## Test-only seam: encode + send `messageKind` with the supplied
+  ## payload bytes over the existing connection to `targetPeerId`.
+  ## The signed-advertisement verification test uses this to inject a
+  ## hand-forged signature (covering the wrong message) that the
+  ## production `sendAdvertiseV2` would never produce.
+  if not client.connections.hasKey(targetPeerId):
+    raise newException(PeerCacheClientError,
+      "sendRawFrameForTesting: no live connection to target peer")
+  let sock = client.connections[targetPeerId]
+  await sendFrame(sock, messageKind, payload)
+
+proc sendAdvertiseV2*(client: PeerCacheClient;
+                     targetPeerId: PeerId;
+                     ad: AdvertiseV2): Future[void] {.async.} =
+  ## Peer-Cache-Scale M3 helper: sends a signed `mkAdvertiseV2` over
+  ## the existing connection to `targetPeerId`. The signature is
+  ## computed over the canonical bytes (sender = client.selfPeerId)
+  ## using the client's keypair when `tmMtls`; for `tmCidr` the
+  ## signature is left empty so the wire shape stays backward-
+  ## compatible. Used by the M3 verification test to inject signed
+  ## advertisements without the production advertise scheduler.
+  if not client.connections.hasKey(targetPeerId):
+    raise newException(PeerCacheClientError,
+      "sendAdvertiseV2: no live connection to target peer")
+  var signed = ad
+  if client.trustMode == tmMtls:
+    let msg = canonicaliseAdvertiseForSigning(client.selfPeerId, signed)
+    let sig = signMessage(client.keypair, msg)
+    signed.signature = newSeq[byte](64)
+    for i in 0 ..< 64:
+      signed.signature[i] = sig[i]
+  let sock = client.connections[targetPeerId]
+  await sendFrame(sock, mkAdvertiseV2, encodeAdvertiseV2(signed))
 
 proc sortTier2First*(registry: PeerRegistry;
                      candidates: seq[PeerId]): seq[PeerId] =

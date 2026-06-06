@@ -7,6 +7,7 @@
 
 import std/[asyncdispatch, nativesockets]
 
+import ./auth
 import ./client
 import ./registry
 import ./server
@@ -37,7 +38,7 @@ type
 
 const LoopbackCidr* = "127.0.0.0/8"
 
-proc makePeerId(index: int): PeerId =
+proc makePeerId*(index: int): PeerId =
   var raw: array[32, byte]
   # Deterministic-but-distinct: byte 0 marks "loopback test peer",
   # byte 1 carries the index. Production code derives peer IDs from
@@ -286,3 +287,67 @@ proc shutdownLoopbackSwimPeers*(peers: seq[LoopbackPeer]) =
   for peer in peers:
     if not peer.swim.isNil:
       peer.swim.stop()
+
+# ---------------------------------------------------------------------------
+# Peer-Cache-Scale M3: mTLS loopback spawn helper.
+# ---------------------------------------------------------------------------
+
+type
+  MtlsPeerSpec* = object
+    ## Per-peer mTLS configuration for `spawnLoopbackMtlsPeers`.
+    ## `keypair` is the peer's own keypair; `anchors` is the trust-
+    ## anchor table the peer uses to gate inbound + outbound peers.
+    ## When `keypair.privateKey` is all zeros, the helper generates a
+    ## fresh keypair.
+    keypair*: PeerKeypair
+    anchors*: TrustAnchors
+
+proc spawnLoopbackMtlsPeers*(specs: openArray[MtlsPeerSpec];
+                            seedAll: bool = true): seq[LoopbackPeer] =
+  ## Spawns one peer per `specs` entry, each configured with
+  ## `trustMode = tmMtls`. Mirrors `spawnLoopbackPeers` but plumbs the
+  ## per-peer keypair + trust-anchor table through to the server +
+  ## client constructors. When `seedAll` is true (default) each peer
+  ## seeds with every other peer's endpoint (the M3 verification tests
+  ## want this all-to-all topology so they can observe which dials
+  ## succeed and which the auth handshake rejects).
+  let allowlist = @[parseCidrV4(LoopbackCidr)]
+  let n = specs.len
+  result = newSeq[LoopbackPeer](n)
+  # Phase 1: spawn every server first so endpoints are known.
+  for i in 0 ..< n:
+    let peerId = makePeerId(i)
+    let endpoint = initEndpoint("127.0.0.1", Port(0))
+    let registry = newPeerRegistry(peerId, endpoint)
+    let server = newPeerCacheServer(
+      selfPeerId = peerId,
+      listenAddr = "127.0.0.1",
+      listenPort = Port(0),
+      registry = registry,
+      cidrAllowlist = allowlist,
+      trustMode = tmMtls,
+      keypair = specs[i].keypair,
+      trustAnchors = specs[i].anchors)
+    server.start()
+    result[i] = LoopbackPeer(
+      peerId: peerId,
+      server: server,
+      client: nil,
+      registry: registry)
+  # Phase 2: spawn clients with all-to-all seed lists.
+  for i in 0 ..< n:
+    var seeds: seq[Endpoint] = @[]
+    if seedAll:
+      for j in 0 ..< n:
+        if j == i: continue
+        seeds.add(initEndpoint("127.0.0.1", result[j].server.actualPort))
+    let client = newPeerCacheClient(
+      selfPeerId = result[i].peerId,
+      listenPort = uint16(result[i].server.actualPort),
+      registry = result[i].registry,
+      seedPeers = seeds,
+      cidrAllowlist = allowlist,
+      trustMode = tmMtls,
+      keypair = specs[i].keypair,
+      trustAnchors = specs[i].anchors)
+    result[i].client = client
