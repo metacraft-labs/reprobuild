@@ -12,6 +12,7 @@ import std/[asyncdispatch, asyncnet, nativesockets, options, tables]
 import blake3
 
 import ./codec
+import ./multicast
 import ./registry
 import ./server  # for inAllowlist + CidrV4
 import ./types
@@ -42,6 +43,17 @@ type
       ## the client has issued. The action-cache-reader verification
       ## test asserts a single round-trip per logical fetch (the
       ## second read hits the local cache).
+    advertiseIntervalMs*: int
+      ## Peer-Cache M2: cadence (ms) at which `multicastBroadcast`
+      ## re-sends the peer's `mkHello` announcement. Matches the spec
+      ## default `peer_cache.advertise_interval_ms` (`Peer-Cache.md`
+      ## §"Configuration surface"); defaults to 5_000.
+    multicastSocket*: AsyncSocket
+      ## Peer-Cache M2: held open across the broadcast loop. Created on
+      ## first `multicastBroadcast` invocation; closed by `stop()`.
+    multicastRunning*: bool
+      ## Peer-Cache M2: `multicastBroadcast`'s loop terminates when
+      ## this flips to `false` (set by `stop()`).
     pendingFetches: Table[BlobDigest,
                           Future[Option[seq[byte]]]]
       ## In-flight `mkFetchRequest` correlation table. Entries are
@@ -62,7 +74,8 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
                         seedPeers: openArray[Endpoint];
                         cidrAllowlist: openArray[CidrV4];
                         localStoreWriter: LocalStoreWriter = nil;
-                        fetchTimeoutMs: int = DefaultFetchTimeoutMs):
+                        fetchTimeoutMs: int = DefaultFetchTimeoutMs;
+                        advertiseIntervalMs: int = 5_000):
                         PeerCacheClient =
   result = PeerCacheClient(
     selfPeerId: selfPeerId,
@@ -73,6 +86,9 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
     localStoreWriter: localStoreWriter,
     fetchTimeoutMs: fetchTimeoutMs,
     fetchRoundTripCount: 0,
+    advertiseIntervalMs: advertiseIntervalMs,
+    multicastSocket: nil,
+    multicastRunning: false,
     pendingFetches: initTable[BlobDigest,
                               Future[Option[seq[byte]]]](),
     connections: initTable[PeerId, AsyncSocket](),
@@ -307,7 +323,12 @@ proc requestFetch*(client: PeerCacheClient;
 
 proc stop*(client: PeerCacheClient) {.async.} =
   ## Sends Goodbye to each connected peer and closes the connections.
+  ## Also stops any in-flight multicast broadcast loop.
   client.running = false
+  client.multicastRunning = false
+  if not client.multicastSocket.isNil:
+    try: client.multicastSocket.close() except CatchableError: discard
+    client.multicastSocket = nil
   for peerId, sock in client.connections.pairs:
     try:
       await sendFrame(sock, mkGoodbye, encodeGoodbye(Goodbye()))
@@ -315,3 +336,50 @@ proc stop*(client: PeerCacheClient) {.async.} =
       discard
     try: sock.close() except CatchableError: discard
   client.connections.clear()
+
+# ---------------------------------------------------------------------------
+# Peer-Cache M2: multicast broadcast loop.
+# ---------------------------------------------------------------------------
+
+proc multicastBroadcastLoop(client: PeerCacheClient;
+                            group: MulticastGroup;
+                            sock: AsyncSocket): Future[void] {.async.} =
+  ## Background loop: repeatedly send the peer's `mkHello` to the
+  ## multicast group. Runs while `client.multicastRunning` is true.
+  ## Errors on send are swallowed and the loop continues — a transient
+  ## network glitch shouldn't terminate discovery.
+  let hello = Hello(
+    peerId: client.selfPeerId,
+    listenPort: client.listenPort,
+    capabilities: 0'u32)
+  let packet = encodeHelloPacket(hello)
+  while client.multicastRunning:
+    try:
+      sendMulticastPacket(sock, group, packet)
+    except CatchableError:
+      # Drop send failures silently; M2 verification tests assert the
+      # discovery outcome, not error reporting on individual sends.
+      discard
+    let interval =
+      if client.advertiseIntervalMs > 0: client.advertiseIntervalMs
+      else: 5_000
+    await sleepAsync(interval)
+
+proc multicastBroadcast*(client: PeerCacheClient;
+                        group: MulticastGroup) =
+  ## Peer-Cache M2: start a background loop that re-broadcasts this
+  ## peer's `mkHello` to the configured multicast group at
+  ## `client.advertiseIntervalMs` cadence. The loop continues until
+  ## `client.stop()` is called.
+  ##
+  ## Sends one immediate hello before yielding to the dispatcher, so
+  ## the M2 verification test sees discovery progress on the first
+  ## tick rather than waiting a full advertise interval. The
+  ## subsequent loop runs via `asyncCheck` and is owned by the
+  ## dispatcher.
+  if client.multicastRunning:
+    return
+  client.multicastRunning = true
+  let sock = newMulticastSenderSocket(group)
+  client.multicastSocket = sock
+  asyncCheck multicastBroadcastLoop(client, group, sock)

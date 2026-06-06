@@ -15,9 +15,12 @@
 ## (`Peer-Cache.md` §"Identity model") and the algorithm tag
 ## would be wasted bandwidth on every advertise.
 
-import std/[hashes, nativesockets, options]
+import std/[hashes, nativesockets, net, options]
 
 export nativesockets.Port
+export net.IpAddress
+export net.IpAddressFamily
+export net.parseIpAddress
 export options
 
 type
@@ -170,3 +173,75 @@ type
     ## Production code leaves this `nil` (identity). The corrupted-
     ## payload verification test (`Peer-Cache.milestones.org` §M1)
     ## wires this to flip a byte.
+
+# ---------------------------------------------------------------------------
+# Peer-cache discovery configuration (Peer-Cache M2).
+#
+# `PeerCacheConfig` is the unified configuration record that the CLI
+# parser produces and that callers thread through to
+# `newPeerCacheServer` / `newPeerCacheClient`. It captures both the M0
+# unicast-seed-list discovery shape and the M2 UDP multicast discovery
+# shape so the surface stays one-step-from-the-CLI even as new
+# discovery modes land.
+# ---------------------------------------------------------------------------
+
+type
+  MulticastGroup* = object
+    ## A UDP multicast group + the local interface to join it on. For
+    ## loopback tests, `interfaceIp` is `127.0.0.1`; for LAN
+    ## deployments it is typically `0.0.0.0` (INADDR_ANY) so the
+    ## kernel picks any multicast-capable interface.
+    address*: IpAddress
+    port*: Port
+    interfaceIp*: IpAddress
+
+  PeerCacheDiscoveryMode* = enum
+    pdmUnicastSeed,  ## M0 mode — explicit seed peer list.
+    pdmMulticast     ## M2 mode — UDP multicast announcements.
+
+  PeerCacheConfig* = object
+    ## Unified peer-cache configuration. The CLI parser produces one of
+    ## these; callers populate the `cidrAllowlist` and either the
+    ## `seedPeers` (for `pdmUnicastSeed`) or the `multicastGroup` (for
+    ## `pdmMulticast`).
+    discoveryMode*: PeerCacheDiscoveryMode
+    seedPeers*: seq[Endpoint]
+    multicastGroup*: MulticastGroup
+    cidrAllowlistRaw*: seq[string]
+      ## CIDR strings as parsed from the CLI (e.g. `127.0.0.0/8`). The
+      ## server / client construct typed `CidrV4` values at start time
+      ## via `server.parseCidrV4`. The raw form is retained so the
+      ## CLI report can echo back the original spec without
+      ## re-decoding.
+    advertiseIntervalMs*: int
+    pingIntervalMs*: int
+    maxBlobBytes*: uint64
+
+const
+  DefaultMulticastAddress* = "224.0.0.123"
+    ## Spec default per `Peer-Cache.md` §"Configuration surface".
+  DefaultMulticastPort* = 7654'u16
+    ## Spec default; the M2 verification tests override this with
+    ## `17654` (high port to avoid kernel filtering / system
+    ## conflicts) on the admin-scope group `239.255.42.42`.
+  DefaultAdvertiseIntervalMs* = 5_000
+  DefaultPingIntervalMs* = 15_000
+
+proc defaultMulticastGroup*(): MulticastGroup =
+  ## Spec-default multicast group bound to INADDR_ANY (0.0.0.0).
+  MulticastGroup(
+    address: parseIpAddress(DefaultMulticastAddress),
+    port: Port(DefaultMulticastPort),
+    interfaceIp: parseIpAddress("0.0.0.0"))
+
+proc loopbackMulticastGroup*(address: string;
+                             port: Port): MulticastGroup =
+  ## Convenience constructor used by the loopback multicast test
+  ## helper. Binds the multicast socket to `127.0.0.1` so the kernel
+  ## restricts the multicast traffic to the loopback interface — the
+  ## M2 verification tests rely on this to avoid leaking announcements
+  ## onto the real LAN.
+  MulticastGroup(
+    address: parseIpAddress(address),
+    port: port,
+    interfaceIp: parseIpAddress("127.0.0.1"))

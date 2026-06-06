@@ -17,9 +17,11 @@
 ## configured CIDR allowlist; non-matching peers are dropped without
 ## sending any frames.
 
-import std/[asyncdispatch, asyncnet, nativesockets, net, strutils]
+import std/[asyncdispatch, asyncnet, nativesockets, net, sets,
+            strutils]
 
 import ./codec
+import ./multicast
 import ./registry
 import ./types
 
@@ -50,6 +52,31 @@ type
     activeConnections: seq[AsyncSocket]
       ## Tracked so `stop()` can drain them cleanly. Closed connections
       ## are pruned lazily on next start/stop pass.
+    started*: bool
+      ## Peer-Cache M2: flips to `true` after `start()` has both opened
+      ## the TCP listener and spawned the accept loop. The CLI
+      ## verification test asserts this becomes `true` after
+      ## `--peer-cache=lan://...` wiring runs.
+    multicastSocket: AsyncSocket
+      ## Peer-Cache M2: the UDP multicast receiver socket created by
+      ## `multicastListen`. Held so `stop()` can close it cleanly.
+    multicastRunning: bool
+    multicastWarnedPeers: HashSet[PeerId]
+      ## Peer-Cache M2: peers whose off-CIDR `mkHello` we've already
+      ## warned about in this session. The warning is logged
+      ## once-per-peer-id-per-session per the milestone spec; this
+      ## set is the dedup index.
+    droppedAnnounceCount*: int
+      ## Peer-Cache M2: incremented each time the multicast receiver
+      ## drops an announcement because its source IP is outside the
+      ## CIDR allowlist. Test instrumentation: the M2 CIDR-allowlist
+      ## verification test asserts this hits exactly 1 (and the
+      ## warning fires once) after a single off-CIDR send.
+    warningEmitCount*: int
+      ## Peer-Cache M2: incremented each time the multicast receiver
+      ## emits a first-time off-CIDR warning. Tracks the "warning is
+      ## logged exactly once per peer ID per session" assertion in
+      ## the M2 CIDR-allowlist test independent of `stderr` capture.
 
   PeerCacheServerError* = object of CatchableError
 
@@ -163,7 +190,13 @@ proc newPeerCacheServer*(selfPeerId: PeerId;
     responseInterceptor: responseInterceptor,
     listener: nil,
     running: false,
-    activeConnections: @[])
+    activeConnections: @[],
+    started: false,
+    multicastSocket: nil,
+    multicastRunning: false,
+    multicastWarnedPeers: initHashSet[PeerId](),
+    droppedAnnounceCount: 0,
+    warningEmitCount: 0)
 
 # ---------------------------------------------------------------------------
 # Frame I/O helpers.
@@ -351,6 +384,7 @@ proc start*(server: PeerCacheServer) =
   server.listenPort = actualPort
   server.listener.listen()
   server.running = true
+  server.started = true
   asyncCheck acceptLoop(server)
 
 proc stop*(server: PeerCacheServer) =
@@ -358,6 +392,11 @@ proc stop*(server: PeerCacheServer) =
   if not server.running:
     return
   server.running = false
+  server.started = false
+  server.multicastRunning = false
+  if not server.multicastSocket.isNil:
+    try: server.multicastSocket.close() except CatchableError: discard
+    server.multicastSocket = nil
   if not server.listener.isNil:
     try: server.listener.close() except CatchableError: discard
     server.listener = nil
@@ -367,3 +406,166 @@ proc stop*(server: PeerCacheServer) =
 
 proc actualPort*(server: PeerCacheServer): Port =
   server.listenPort
+
+# ---------------------------------------------------------------------------
+# Peer-Cache M2: UDP multicast receiver.
+# ---------------------------------------------------------------------------
+
+proc dialAnnouncedPeer(server: PeerCacheServer;
+                       hello: Hello;
+                       remoteAddress: string) {.async.} =
+  ## After an inbound multicast announcement passes the CIDR check,
+  ## open a TCP connection to the announced endpoint and complete the
+  ## standard `mkHello` / `mkHelloOk` handshake. The accepted side
+  ## (in this server) is a passive listener; here we explicitly act
+  ## as the *dialer*, since the originator's announcement told us
+  ## where to find them.
+  ##
+  ## Errors are swallowed — a stale announcement (peer went away
+  ## between sending and our dial) is not a protocol violation, just
+  ## a miss.
+  if hello.peerId == server.selfPeerId:
+    # Self-announce on loopback — `IP_MULTICAST_LOOP` delivers our
+    # own packets back. Drop without warning.
+    return
+  if server.registry.hasPeer(hello.peerId):
+    # Already discovered via a previous announcement; nothing more
+    # to do. The TCP connection from the prior round still feeds the
+    # registry advertisements.
+    return
+  var sock = newAsyncSocket()
+  try:
+    await sock.connect(remoteAddress, Port(hello.listenPort))
+    # Send our own Hello.
+    let ourHello = Hello(
+      peerId: server.selfPeerId,
+      listenPort: uint16(server.listenPort),
+      capabilities: 0'u32)
+    let helloFrame = encodeFrame(mkHello, encodeHello(ourHello))
+    var helloStr = newString(helloFrame.len)
+    for i, b in helloFrame:
+      helloStr[i] = char(b)
+    await sock.send(helloStr)
+    # Read HelloOk (8-byte header then payload).
+    let header = await sock.recv(8)
+    if header.len != 8:
+      try: sock.close() except CatchableError: discard
+      return
+    var hdrBytes = newSeq[byte](8)
+    for i in 0 ..< 8:
+      hdrBytes[i] = byte(ord(header[i]))
+    var payloadLen: uint32 = 0
+    for i in 0 ..< 4:
+      payloadLen = payloadLen or (uint32(hdrBytes[4 + i]) shl uint32(i * 8))
+    var frameBytes = hdrBytes
+    if payloadLen > 0'u32:
+      let payload = await sock.recv(int(payloadLen))
+      if payload.len != int(payloadLen):
+        try: sock.close() except CatchableError: discard
+        return
+      let prefix = frameBytes.len
+      frameBytes.setLen(prefix + payload.len)
+      for i in 0 ..< payload.len:
+        frameBytes[prefix + i] = byte(ord(payload[i]))
+    let okFrame = decodeFrame(frameBytes)
+    if okFrame.messageKind != mkHelloOk:
+      try: sock.close() except CatchableError: discard
+      return
+    let helloOk = decodeHelloOk(okFrame.payload)
+    let endpoint = initEndpoint(remoteAddress, Port(hello.listenPort))
+    server.registry.addPeer(helloOk.peerId, endpoint)
+    # Drain one more frame (the initial advertise snapshot) so the
+    # registry's blob set is primed. Best-effort.
+    try:
+      let advHeader = await sock.recv(8)
+      if advHeader.len == 8:
+        var ahBytes = newSeq[byte](8)
+        for i in 0 ..< 8:
+          ahBytes[i] = byte(ord(advHeader[i]))
+        var advLen: uint32 = 0
+        for i in 0 ..< 4:
+          advLen = advLen or (uint32(ahBytes[4 + i]) shl uint32(i * 8))
+        var advBytes = ahBytes
+        if advLen > 0'u32:
+          let advPayload = await sock.recv(int(advLen))
+          for i in 0 ..< advPayload.len:
+            advBytes.add(byte(ord(advPayload[i])))
+        let advFrame = decodeFrame(advBytes)
+        if advFrame.messageKind == mkAdvertise:
+          server.registry.applyAdvertise(helloOk.peerId,
+            decodeAdvertise(advFrame.payload))
+    except CatchableError:
+      discard
+    # Close the dialer side. Future fetches go through the regular
+    # `PeerCacheClient.requestFetch` path which opens its own
+    # connection from the seed-list / multicast-derived endpoints —
+    # by the time we add the peer to the registry the client side
+    # can dial them on the next round. M3 may merge the dialer +
+    # long-lived connection holders.
+    try: sock.close() except CatchableError: discard
+  except CatchableError:
+    try: sock.close() except CatchableError: discard
+
+proc multicastReceiveLoop(server: PeerCacheServer;
+                          group: MulticastGroup;
+                          sock: AsyncSocket) {.async.} =
+  ## Inner recv loop: read UDP packets, decode `mkHello`, enforce the
+  ## CIDR allowlist at the packet level, and (on accept) dial the
+  ## announced TCP endpoint.
+  const MaxPacketBytes = 2_048
+  while server.multicastRunning:
+    var triple: tuple[data: string, address: string, port: Port]
+    try:
+      triple = await sock.recvFrom(MaxPacketBytes)
+    except CatchableError:
+      break
+    if triple.data.len == 0:
+      continue
+    # CIDR check at the multicast receiver level (primary security
+    # gate per Peer-Cache M2). Off-CIDR announcements are dropped
+    # before any TCP dial is attempted.
+    if not inAllowlist(triple.address, server.allowlist):
+      inc server.droppedAnnounceCount
+      var hello: Hello
+      var helloOk = true
+      try:
+        hello = decodeHelloPacket(triple.data)
+      except CatchableError:
+        helloOk = false
+      if helloOk and hello.peerId notin server.multicastWarnedPeers:
+        server.multicastWarnedPeers.incl(hello.peerId)
+        inc server.warningEmitCount
+        try:
+          stderr.writeLine(
+            "peer-cache: dropping multicast announcement from " &
+            triple.address & " (peer " & $hello.peerId &
+            ") — outside configured CIDR allowlist")
+        except CatchableError:
+          discard
+      continue
+    var hello: Hello
+    try:
+      hello = decodeHelloPacket(triple.data)
+    except CatchableError:
+      # Malformed packet — drop silently.
+      continue
+    asyncCheck dialAnnouncedPeer(server, hello, triple.address)
+
+proc multicastListen*(server: PeerCacheServer;
+                     group: MulticastGroup) =
+  ## Peer-Cache M2: start a background loop that joins the configured
+  ## UDP multicast group, receives `mkHello` announcements, enforces
+  ## the CIDR allowlist at the packet level, and (on accept) opens
+  ## the standard M0 TCP handshake to the announced endpoint.
+  ##
+  ## The CIDR check is the primary security gate at the multicast
+  ## layer; the TCP-level CIDR check in `acceptLoop` remains as
+  ## defense in depth (announcements that pass packet-level routing
+  ## via a routable group but originate from outside the CIDR get
+  ## dropped twice — once here, once at TCP accept).
+  if server.multicastRunning:
+    return
+  server.multicastRunning = true
+  let sock = newMulticastReceiverSocket(group)
+  server.multicastSocket = sock
+  asyncCheck multicastReceiveLoop(server, group, sock)

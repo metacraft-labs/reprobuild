@@ -133,3 +133,64 @@ proc shutdownLoopbackPeers*(peers: seq[LoopbackPeer]) {.async.} =
   for peer in peers:
     if not peer.server.isNil:
       peer.server.stop()
+
+# ---------------------------------------------------------------------------
+# Peer-Cache M2: multicast-based loopback spawn helper.
+# ---------------------------------------------------------------------------
+
+proc spawnLoopbackMulticastPeers*(n: int;
+                                 group: MulticastGroup;
+                                 advertiseIntervalMs: int = 200):
+                                 seq[LoopbackPeer] =
+  ## Spawns `n` peers configured for UDP multicast discovery on the
+  ## loopback interface. Mirrors `spawnLoopbackPeers` but replaces
+  ## the seed-list discovery with `pdmMulticast`: each peer's server
+  ## runs both the TCP accept loop AND a multicast receive loop on
+  ## `group`; each peer's client runs the multicast broadcast loop.
+  ##
+  ## The shorter default `advertiseIntervalMs` (200 ms vs the spec's
+  ## 5000 ms) keeps the M2 verification test fast — three peers
+  ## settle within a few hundred ms on a quiet loopback. Production
+  ## callers leave the default to the spec value.
+  ##
+  ## Returns handles in creation order; use `dialAllLoopbackClients`
+  ## (a no-op for multicast peers, since dialing happens reactively
+  ## inside the server's multicast receiver) — for symmetry with the
+  ## M0 helper we still expose a `start` entrypoint via
+  ## `startLoopbackMulticastClients`.
+  let allowlist = @[parseCidrV4(LoopbackCidr)]
+  result = newSeq[LoopbackPeer](n)
+  # Phase 1: construct every server + start the TCP listener + start
+  # the multicast receiver. Each server gets its own ephemeral TCP
+  # port; the multicast group is shared.
+  for i in 0 ..< n:
+    let peerId = makePeerId(i)
+    let endpoint = initEndpoint("127.0.0.1", Port(0))
+    let registry = newPeerRegistry(peerId, endpoint)
+    let server = newPeerCacheServer(
+      selfPeerId = peerId,
+      listenAddr = "127.0.0.1",
+      listenPort = Port(0),
+      registry = registry,
+      cidrAllowlist = allowlist)
+    server.start()
+    server.multicastListen(group)
+    result[i] = LoopbackPeer(
+      peerId: peerId,
+      server: server,
+      client: nil,
+      registry: registry)
+  # Phase 2: each peer's client uses an empty seed list — discovery
+  # is multicast-only — and starts its broadcast loop. The client
+  # still carries the listen port + peer ID so its `mkHello`
+  # announcements advertise the correct TCP endpoint.
+  for i in 0 ..< n:
+    let client = newPeerCacheClient(
+      selfPeerId = result[i].peerId,
+      listenPort = uint16(result[i].server.actualPort),
+      registry = result[i].registry,
+      seedPeers = newSeq[Endpoint](),
+      cidrAllowlist = allowlist,
+      advertiseIntervalMs = advertiseIntervalMs)
+    result[i].client = client
+    client.multicastBroadcast(group)

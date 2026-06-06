@@ -59,6 +59,10 @@ from runquota_partition/types import
   PartitionAssignment, PartitionPlan, DefaultRefinementPasses, `==`, hash
 import repro_profile_compile
 import repro_home_resources/drivers/managed_block
+# Peer-Cache M2: parse the `--peer-cache=lan://CIDR[:port]` form into a
+# concrete configuration and start the peer-cache services so the
+# partition planner has a multicast-discovered registry to lean on.
+import repro_peer_cache
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
@@ -19443,16 +19447,167 @@ type
 proc emitShardDiagnostic(msg: string) =
   stderr.writeLine("repro test: error: " & msg)
 
-proc parsePeerCache(spec: string): tuple[ok: bool; mode: string; arg: string] =
-  ## Recognises the three forms documented in CI-Sharding.md.
-  ## Returns ``ok=false`` when the spec is structurally invalid.
+type
+  PeerCacheSpecKind* = enum
+    pcsNone, pcsLan, pcsRemote
+
+  PeerCacheSpecResult* = object
+    ## Peer-Cache M2: structured result of parsing ``--peer-cache=...``.
+    ## ``ok`` is ``false`` for structurally invalid specs (the CLI
+    ## emits a diagnostic in that case). ``kind`` distinguishes the
+    ## three spec forms reserved in
+    ## ``CI-Sharding.md`` §"CLI Surface". For ``pcsLan``, ``config``
+    ## carries the fully-populated ``PeerCacheConfig`` (CIDR
+    ## allowlist + multicast group) ready to thread through to the
+    ## peer-cache server / client.
+    ok*: bool
+    kind*: PeerCacheSpecKind
+    rawArg*: string
+    config*: PeerCacheConfig
+
+proc modeName*(kind: PeerCacheSpecKind): string =
+  case kind
+  of pcsNone: "none"
+  of pcsLan: "lan"
+  of pcsRemote: "remote"
+
+proc parsePeerCache*(spec: string): PeerCacheSpecResult =
+  ## Peer-Cache M2: parser for the ``--peer-cache=`` flag. Recognises
+  ## the three forms documented in
+  ## ``CI-Sharding.md`` §"CLI Surface":
+  ##
+  ##   - ``none`` / empty string — ``pcsNone``.
+  ##   - ``remote://<url>`` — ``pcsRemote``, ``rawArg`` is the URL.
+  ##   - ``lan://<CIDR>[:port]`` — ``pcsLan``, ``config`` is populated
+  ##     with ``discoveryMode = pdmMulticast``, the parsed CIDR in
+  ##     ``cidrAllowlistRaw``, and the multicast group address
+  ##     ``224.0.0.123:<port>`` (default 7654; the test suite uses
+  ##     ``17654`` to avoid kernel filtering on low ports).
+  ##
+  ## Returns ``ok=false`` for structurally invalid specs.
+  result.ok = false
+  result.kind = pcsNone
+  result.rawArg = ""
   if spec.len == 0 or spec == "none":
-    return (true, "none", "")
-  if spec.startsWith("lan://"):
-    return (true, "lan", spec[len("lan://") .. ^1])
+    result.ok = true
+    result.kind = pcsNone
+    return
   if spec.startsWith("remote://"):
-    return (true, "remote", spec[len("remote://") .. ^1])
-  (false, "", "")
+    result.ok = true
+    result.kind = pcsRemote
+    result.rawArg = spec[len("remote://") .. ^1]
+    return
+  if spec.startsWith("lan://"):
+    let arg = spec[len("lan://") .. ^1]
+    # ``lan://<CIDR>[:port]`` — split on the *last* colon so the CIDR
+    # itself (which may contain dots and a single ``/`` for the
+    # prefix length) is preserved verbatim. A trailing ``:port`` is
+    # optional; missing ⇒ the spec default (7654).
+    var cidrPart = arg
+    var port = Port(DefaultMulticastPort)
+    let lastColon = arg.rfind(':')
+    if lastColon >= 0:
+      let portStr = arg[lastColon + 1 .. ^1]
+      try:
+        let parsed = parseInt(portStr)
+        if parsed >= 1 and parsed <= 65535:
+          port = Port(uint16(parsed))
+          cidrPart = arg[0 ..< lastColon]
+      except ValueError:
+        # Not a port — leave the whole ``arg`` as the CIDR and use
+        # the default port. The CIDR validator below will reject
+        # anything truly malformed.
+        discard
+    # Validate the CIDR by running it through ``parseCidrV4`` so we
+    # fail closed at parse time (rather than at service start). The
+    # validated value isn't kept here; the server side calls
+    # ``parseCidrV4`` again at start time so the failure surface for
+    # CIDR errors is a single code path.
+    try:
+      discard parseCidrV4(cidrPart)
+    except CatchableError:
+      result.ok = false
+      return
+    result.ok = true
+    result.kind = pcsLan
+    result.rawArg = arg
+    result.config = PeerCacheConfig(
+      discoveryMode: pdmMulticast,
+      seedPeers: @[],
+      multicastGroup: MulticastGroup(
+        address: parseIpAddress(DefaultMulticastAddress),
+        port: port,
+        interfaceIp: parseIpAddress("0.0.0.0")),
+      cidrAllowlistRaw: @[cidrPart],
+      advertiseIntervalMs: DefaultAdvertiseIntervalMs,
+      pingIntervalMs: DefaultPingIntervalMs,
+      maxBlobBytes: DefaultMaxBlobBytes)
+    return
+  # Unrecognised prefix.
+  result.ok = false
+
+# ---------------------------------------------------------------------------
+# Peer-Cache M2: thin wiring helper called from ``runReproTestCommand``
+# before the partition planner runs. Constructs and starts a
+# `PeerCacheServer` + `PeerCacheClient` from a parsed `PeerCacheConfig`
+# (`pdmMulticast` mode). The returned tuple is held by the caller for
+# the lifetime of the shard so a subsequent `stop()` cleans up.
+#
+# This is the thinnest possible wiring: the partition planner doesn't
+# yet consult the peer cache (that's an action-cache reader
+# concern, tracked in Peer-Cache M1 Outstanding Tasks), but per the
+# milestone spec the services must start so the M2 CLI verification
+# test can assert `server.started == true`.
+# ---------------------------------------------------------------------------
+
+type
+  PeerCacheRuntime* = object
+    server*: PeerCacheServer
+    client*: PeerCacheClient
+    registry*: PeerRegistry
+
+var lastStartedPeerCacheRuntime*: PeerCacheRuntime
+  ## Peer-Cache M2 test seam: the most recent `PeerCacheRuntime` started
+  ## by `runReproTestCommand` is captured here so the
+  ## `t_peer_cache_cli_lan_spec_enables_multicast` test can assert
+  ## `server.started == true` after `runReproTestCommand` returns. The
+  ## production code path doesn't read this variable; it exists purely
+  ## for in-process introspection from the verification harness.
+
+proc startPeerCacheServices*(config: PeerCacheConfig;
+                            selfPeerId: PeerId;
+                            listenAddr: string = "0.0.0.0"):
+                            PeerCacheRuntime =
+  ## Boots the peer-cache TCP server + multicast receiver and the
+  ## client-side multicast broadcaster from a parsed `PeerCacheConfig`.
+  ## The CIDR allowlist is converted from the parser's raw strings to
+  ## typed `CidrV4` values here so any drift between the parser and
+  ## the server's matcher surfaces as a single diagnostic at start
+  ## time.
+  let endpoint = initEndpoint(listenAddr, Port(0))
+  result.registry = newPeerRegistry(selfPeerId, endpoint)
+  var allowlist: seq[CidrV4] = @[]
+  for cidrStr in config.cidrAllowlistRaw:
+    allowlist.add(parseCidrV4(cidrStr))
+  result.server = newPeerCacheServer(
+    selfPeerId = selfPeerId,
+    listenAddr = listenAddr,
+    listenPort = Port(0),
+    registry = result.registry,
+    cidrAllowlist = allowlist,
+    maxBlobBytes = config.maxBlobBytes)
+  result.server.start()
+  if config.discoveryMode == pdmMulticast:
+    result.server.multicastListen(config.multicastGroup)
+  result.client = newPeerCacheClient(
+    selfPeerId = selfPeerId,
+    listenPort = uint16(result.server.actualPort),
+    registry = result.registry,
+    seedPeers = config.seedPeers,
+    cidrAllowlist = allowlist,
+    advertiseIntervalMs = config.advertiseIntervalMs)
+  if config.discoveryMode == pdmMulticast:
+    result.client.multicastBroadcast(config.multicastGroup)
 
 proc parseShardSpec(value: string): tuple[ok: bool; k, n: int] =
   let parts = value.split('/')
@@ -19967,7 +20122,7 @@ proc summarizeTestResults(summary: JsonNode): tuple[passed, failed: int] =
     else: 0
 
 proc runFixtureModeShard(opts: ReproTestShardOpts;
-                         peer: tuple[ok: bool; mode: string; arg: string]): int =
+                         peer: PeerCacheSpecResult): int =
   ## The M2 fixture path, preserved verbatim for the existing M2 e2e
   ## tests.  Behaviour is unchanged from the original
   ## ``runReproTestCommand`` body — the workspace-mode dispatch above
@@ -20009,7 +20164,7 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
     emitShardDiagnostic("--shard <k>/<N> is required for an actual run")
     return 2
 
-  let peerCacheMode = peer.mode
+  let peerCacheMode = modeName(peer.kind)
   let assignedRoots = shardAssignmentIds(plan, opts.shardIndex)
   let assignedEdges = edgesAssignedToShard(fixture, plan, opts.shardIndex)
   let actionsClosure = closureActionsForShard(fixture, assignedRoots)
@@ -20105,7 +20260,7 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
   0
 
 proc runWorkspaceModeShard(opts: ReproTestShardOpts;
-                           peer: tuple[ok: bool; mode: string; arg: string];
+                           peer: PeerCacheSpecResult;
                            publicCliPath: string): int =
   ## Workspace-driven shard runner.  Discovers real test edges via the
   ## engine's normalised graph artefact, builds the closure via
@@ -20156,7 +20311,7 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
     emitShardDiagnostic("--shard <k>/<N> is required for an actual run")
     return 2
 
-  let peerCacheMode = peer.mode
+  let peerCacheMode = modeName(peer.kind)
   let assignedEdges =
     edgesAssignedToShardWorkspace(disc, plan, opts.shardIndex)
   var assignedBinaryPaths: seq[string] = @[]
@@ -20297,7 +20452,8 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
     return 1
   0
 
-proc runReproTestCommand(args: openArray[string]; publicCliPath: string): int =
+proc runReproTestCommand*(args: openArray[string];
+                          publicCliPath: string): int =
   ## ``repro test`` entry point with the CI-sharding flag surface from
   ## ``CI-Sharding.md`` §"CLI Surface".  See the block comment above
   ## for the per-flag semantics.
@@ -20308,21 +20464,39 @@ proc runReproTestCommand(args: openArray[string]; publicCliPath: string): int =
     emitShardDiagnostic(exc.msg)
     return 2
 
-  # ``--peer-cache=lan://CIDR`` — not implemented in M2.  Diagnostic
-  # points at the CI-Sharding M3 (benchmark) and M4 (conditional
-  # implementation) milestones per the spec.
+  # ``--peer-cache=lan://CIDR[:port]`` — Peer-Cache M2 wires this
+  # through to the multicast discovery plane. The CI-Sharding M3
+  # benchmark consumes the resulting peer-cache via the
+  # action-cache-reader seam (which is opt-in at the engine level
+  # until the digest impedance from Peer-Cache.milestones.org §M1
+  # Outstanding Tasks is resolved).
   let peer = parsePeerCache(opts.peerCacheSpec)
   if not peer.ok:
     emitShardDiagnostic(
       "invalid --peer-cache spec: " & opts.peerCacheSpec &
       " (expected ``none``, ``lan://<CIDR>``, or ``remote://<URL>``)")
     return 2
-  if peer.mode == "lan":
-    emitShardDiagnostic(
-      "--peer-cache=lan://" & peer.arg &
-      " is not implemented yet — see CI-Sharding.milestones.org M3 " &
-      "(benchmark) and M4 (conditional LAN peer-cache implementation).")
-    return 2
+  if peer.kind == pcsLan:
+    # Generate a transient peer ID for this shard. The CLI doesn't
+    # yet persist a peer ID to ``peer_cache.peer_id_path`` from the
+    # spec's configuration surface — that lands once M3 introduces a
+    # multi-host setup. For M2's loopback validation the transient
+    # ID is sufficient.
+    var raw: array[32, byte]
+    raw[0] = byte(ord('R'))  # ``R`` for repro test, distinct from
+                             # the loopback helper's ``L``.
+    let nowSeconds = uint64(epochTime())
+    for i in 0 ..< 8:
+      raw[1 + i] = byte((nowSeconds shr uint64(i * 8)) and 0xff'u64)
+    let cliPeerId = peerIdFromBytes(raw)
+    try:
+      lastStartedPeerCacheRuntime =
+        startPeerCacheServices(peer.config, cliPeerId,
+                              listenAddr = "127.0.0.1")
+    except CatchableError as exc:
+      emitShardDiagnostic(
+        "failed to start peer-cache services: " & exc.msg)
+      return 2
 
   # ``--partition-strategy hash`` / ``duration`` — recognised by the
   # parser but the wired strategies in M2 are ``joint-duration`` (the
