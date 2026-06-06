@@ -19433,6 +19433,12 @@ type
     fixturePath: string
     binDir: string
     reportPath: string
+    toolProvisioning: ToolProvisioningMode
+      ## Workspace-mode discovery needs typed tool provisioning when the
+      ## project's interface declares ``uses:`` blocks (the default for any
+      ## real reprobuild workspace).  ``tpmUnspecified`` defers to the
+      ## project-interface's declared default; if there is none the engine
+      ## raises the documented "pass --tool-provisioning=path" diagnostic.
 
 proc emitShardDiagnostic(msg: string) =
   stderr.writeLine("repro test: error: " & msg)
@@ -19490,6 +19496,9 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
       result.binDir = valueFromFlag(args, i, "--bin-dir")
     elif arg == "--report" or arg.startsWith("--report="):
       result.reportPath = valueFromFlag(args, i, "--report")
+    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported repro test flag: " & arg)
     else:
@@ -19621,22 +19630,47 @@ proc closureActionsForShard(fixture: ReproTestFixture; rootIds: seq[NodeId]):
 proc runFixtureCmd(cmd: seq[string]; cwd: string): tuple[code: int; output: string] =
   if cmd.len == 0:
     return (0, "")
-  let process = startProcess(cmd[0],
+  # Redirect the child's stdout+stderr to a temp file rather than a pipe.
+  # A pipe-based ``readLine`` loop blocks indefinitely when a test forks
+  # a long-lived subprocess that keeps the inherited stdout fd open past
+  # the test's own exit (a reproducible failure mode in the CI-sharding
+  # M4 demonstration harness on the real reprobuild suite — multiple
+  # tests spawn sibling daemons / monitors that survive the test).
+  # File-backed IO has no liveness coupling: ``waitForExit`` on the
+  # leader returns as soon as the leader is gone regardless of any
+  # grandchild state.
+  let logPath = getTempDir() / ("repro-test-fixture-" &
+    $epochTime() & "-" & $getCurrentProcessId() & ".log")
+  # Build an argv that pipes the original command through ``sh -c`` with
+  # explicit stdout/stderr redirection.  When the caller already wraps
+  # in ``sh -c``, we append the redirection to the existing -c body.
+  var argv: seq[string] = @[]
+  if cmd.len >= 3 and cmd[0] == "sh" and cmd[1] == "-c":
+    let body = cmd[2] & " >'" & logPath & "' 2>&1"
+    argv = @["sh", "-c", body]
+  else:
+    var quoted: seq[string] = @[]
+    for s in cmd:
+      quoted.add(quoteShell(s))
+    let body = quoted.join(" ") & " >'" & logPath & "' 2>&1"
+    argv = @["sh", "-c", body]
+  let process = startProcess(argv[0],
     workingDir = cwd,
-    args = (if cmd.len > 1: cmd[1 .. ^1] else: @[]),
+    args = argv[1 .. ^1],
     options = {poUsePath, poStdErrToStdOut})
   defer: process.close()
-  let outp = process.outputStream
+  let code = process.waitForExit(timeout = -1)
   var buf = ""
-  var line = newStringOfCap(120)
-  while true:
-    if outp.readLine(line):
-      buf.add(line)
-      buf.add("\n")
-    else:
-      let code = process.peekExitCode()
-      if code != -1:
-        return (code, buf)
+  if fileExists(logPath):
+    try:
+      buf = readFile(logPath)
+    except CatchableError:
+      discard
+    try:
+      removeFile(logPath)
+    except OSError:
+      discard
+  return (code, buf)
 
 proc writePartitionFile(path: string; edges: seq[ReproTestFixtureEdge]) =
   var lines: seq[string] = @[]
@@ -19727,7 +19761,8 @@ proc nimUnittestBinaryPath(action: BuildAction): string =
   ""
 
 proc discoverTestEdgesFromWorkspace(projectRoot: string;
-                                    publicCliPath: string):
+                                    publicCliPath: string;
+                                    mode: ToolProvisioningMode = tpmUnspecified):
     WorkspaceTestDiscovery =
   ## Walks the engine's normalised graph artefact for ``projectRoot`` and
   ## returns one ``ShardTestEdge`` per action whose typed-output type is
@@ -19735,7 +19770,7 @@ proc discoverTestEdgesFromWorkspace(projectRoot: string;
   ## ``actions`` so the planner can walk the dependency closures when
   ## costing each edge.
   result.edgeBinaryPath = initTable[NodeId, string]()
-  let info = prepareBuildGraphInspection(projectRoot, tpmUnspecified,
+  let info = prepareBuildGraphInspection(projectRoot, mode,
     publicCliPath, selectDefaultAction = false)
   # Build a unique-id table so we don't double-add an action that appears
   # multiple times in ``info.actions`` (the engine returns one entry per
@@ -19792,7 +19827,9 @@ proc writeWorkspacePartitionFile(path: string;
   writeFile(path, lines.join("\n") & "\n")
 
 proc buildClosureForShard(assignedSelectors: seq[string];
-                          publicCliPath: string): tuple[code: int; output: string] =
+                          publicCliPath: string;
+                          mode: ToolProvisioningMode = tpmUnspecified):
+    tuple[code: int; output: string] =
   ## Builds the closure of the assigned test edges via ``runBuildCommand``.
   ## The strategy note in the milestone documents the trade-off: building
   ## the whole ``:test`` aggregate is simpler than computing the union of
@@ -19804,9 +19841,12 @@ proc buildClosureForShard(assignedSelectors: seq[string];
     if publicCliPath.len > 0 and fileExists(publicCliPath): publicCliPath
     else: stablePublicCliPath()
   doAssert fileExists(bin), "repro binary missing at " & bin
+  var buildArgs = @["build", "test"]
+  if mode != tpmUnspecified:
+    buildArgs.add("--tool-provisioning=" & modeName(mode))
   let p = startProcess(bin,
     workingDir = getCurrentDir(),
-    args = @["build", "test"],
+    args = buildArgs,
     options = {poUsePath, poStdErrToStdOut})
   defer: p.close()
   var buf = ""
@@ -20074,7 +20114,8 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
   ## for the on-the-suite case the M3 benchmark milestone depends on.
   var disc: WorkspaceTestDiscovery
   try:
-    disc = discoverTestEdgesFromWorkspace(".", publicCliPath)
+    disc = discoverTestEdgesFromWorkspace(".", publicCliPath,
+      opts.toolProvisioning)
   except CatchableError as exc:
     emitShardDiagnostic(
       "workspace test-edge discovery failed: " & exc.msg)
@@ -20129,7 +20170,8 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
   # strategy note for why we don't compute per-shard closures here.
   let buildStart = epochTime()
   var buildFailed = false
-  let buildRes = buildClosureForShard(assignedSelectors, publicCliPath)
+  let buildRes = buildClosureForShard(assignedSelectors, publicCliPath,
+    opts.toolProvisioning)
   if buildRes.code != 0:
     buildFailed = true
     stderr.writeLine("repro test: workspace build phase failed " &
