@@ -482,7 +482,11 @@ proc decodeSwimProbeAckIndirect*(data: openArray[byte]): SwimProbeAckIndirect =
 # eagerly rather than wait for the next probe/ack round to piggyback it.
 
 proc encodeAuthChallenge*(msg: AuthChallenge): seq[byte] =
-  ## Peer-Cache-Scale M3 auth-handshake challenge frame.
+  ## Peer-Cache-BearSSL M1 auth-handshake challenge frame. Payload shape
+  ## is 32-byte challenge || 65-byte uncompressed ECDSA-P256 pubkey =
+  ## 97 bytes (widened from the M3 stand-in's 64 bytes when the pubkey
+  ## slot grew from 32 B to 65 B). The frame is scheduled for deletion
+  ## at campaign M3 alongside the rest of the synthetic handshake.
   result = @[]
   for b in msg.challengeBytes:
     result.add(b)
@@ -490,14 +494,14 @@ proc encodeAuthChallenge*(msg: AuthChallenge): seq[byte] =
     result.add(b)
 
 proc decodeAuthChallenge*(data: openArray[byte]): AuthChallenge =
-  ensureBytes(data.len, 64, "AuthChallenge payload")
+  ensureBytes(data.len, 32 + 65, "AuthChallenge payload")
   var pos = 0
   for i in 0 ..< 32:
     result.challengeBytes[i] = data[pos + i]
   inc pos, 32
-  for i in 0 ..< 32:
+  for i in 0 ..< 65:
     result.senderPubKey[i] = data[pos + i]
-  inc pos, 32
+  inc pos, 65
   if pos != data.len:
     raise newException(PeerCacheCodecError,
       "trailing bytes after AuthChallenge payload: " & $(data.len - pos))

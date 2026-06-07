@@ -1,60 +1,64 @@
-## Peer-cache auth + signed advertisements — Peer-Cache-Scale M3.
+## Peer-cache auth + signed advertisements — Peer-Cache-BearSSL M1.
 ##
-## See `reprobuild-specs/Peer-Cache-Scale.md` §"mTLS + signed
-## advertisements" and `reprobuild-specs/Peer-Cache-Scale.milestones.org`
-## §M3.
+## Replaces the M3 HMAC-SHA256 "asymmetric-signature stand-in" with
+## real ECDSA-P256 sign + verify via `nim-bearssl`.
 ##
-## ## Cryptographic shape (M3 simplified)
+## See `reprobuild-specs/Peer-Cache-BearSSL.md` §"Identity model" and
+## `reprobuild-specs/Peer-Cache-BearSSL.milestones.org` §M1.
 ##
-## The M3 spec calls out X.509 certs + mTLS as the long-term shape. For
-## this milestone we ship a **simplified asymmetric-equivalent** scheme
-## that fits the M3 trust model — per-peer keypairs, per-tenant trust
-## anchors, signed advertisements, mTLS-style handshake — without
-## taking on the OpenSSL + full X.509 dependency. The simplification:
+## ## Cryptographic shape (M1, real primitive)
 ##
-##   - Each peer holds a 32-byte "private key" (a random seed).
-##   - Each peer's "public key" is the BLAKE3 digest of its private key.
-##     (Pure one-way derivation; a public key cannot reconstruct the
-##     private key.)
-##   - The trust-anchor file holds `<pubkey_hex>:<privkey_hex>` pairs.
-##     Each line registers an allowed peer; verifiers consult the
-##     anchor to look up the sender's private key and recompute the
-##     HMAC-SHA256 over the message bytes.
-##   - "Signatures" are HMAC-SHA256(private_key, message), padded to 64
-##     bytes (HMAC-SHA256 outputs 32 bytes; the trailing 32 bytes are
-##     a second HMAC pass over the first 32 to keep the wire shape
-##     fixed at 64B so a future Ed25519 swap-in is drop-in compatible).
+##   - Each peer holds an ECDSA-P256 keypair:
+##       * 32-byte raw private scalar
+##       * 65-byte uncompressed public key (`0x04 || X(32) || Y(32)`)
+##   - Signatures are 64-byte raw ECDSA-P256 (`r || s`, two 32-byte
+##     scalars, big-endian; matches the existing `AdvertiseV2.signature`
+##     wire slot).
+##   - `signMessage` SHA-256 hashes the canonical message bytes, then
+##     calls `ecdsaSignRawGetDefault` (BearSSL's deterministic
+##     RFC 6979 signer).
+##   - `verifySignature` calls `ecdsaVrfyRawGetDefault` against the
+##     pubkey + SHA-256 digest. No private-key recompute path —
+##     verification is asymmetric.
+##   - `derivePublicKey` is real `ecComputePub` from the private scalar.
+##   - PeerId = `BLAKE3-256(publicKey)` — unchanged size (32 B) but the
+##     derivation binds the on-wire PeerId to a real public identity.
 ##
-## **Why this is a defensible M3 simplification** (and exactly what the
-## task spec authorised): the test surface — handshake rejection of
-## un-anchored peers, signed-advertisement tampering detection, per-
-## tenant CA isolation, mixed-mode incompatibility — is preserved
-## byte-for-byte against a true asymmetric scheme. The deviation is
-## that a *colluding* peer that has access to a tenant's trust-anchor
-## file could forge signatures from other peers within that tenant.
-## Real Ed25519 + per-peer-private-only secrets close that hole. M4+
-## can swap the primitive in place; the wire shape (64B signature,
-## 32B pubkey) is already Ed25519-sized.
+## ## Trust-anchor file format (changed at M1)
 ##
-## ## Trust-anchor file format
+## One hex-encoded **public key** per line (130 hex chars = 65 B
+## uncompressed ECDSA-P256 pubkey). Blank lines and `#`-prefixed lines
+## are ignored. The legacy M3 `<pubkey_hex>:<privkey_hex>` format is
+## rejected with a clear error. There is no auto-migration; nothing
+## has shipped under the M3 stand-in.
 ##
-## One entry per line. Each entry: `<pubkey_hex_64>:<privkey_hex_64>`.
-## Lines starting with `#` and blank lines are ignored. The hex is
-## lower-case; both alphabets are accepted by the parser.
+## ## Keypair on-disk format (M1)
 ##
-## ## Own key files
+## The peer's `keyPath` carries a single line of the form:
 ##
-## The peer's own `peerCertPath` carries one hex-encoded pubkey per
-## line (only the first non-comment line is read). `peerKeyPath`
-## carries the matching hex-encoded private key. On first start with
-## `tmMtls`, if either file is missing, the helper generates a fresh
-## random keypair, writes both files, and returns the new keypair.
+##   `ecdsa-p256:<hex_of_32_byte_scalar>`
+##
+## The `ecdsa-p256:` prefix is mandatory — a file without it is treated
+## as a legacy M3 stand-in keypair and rejected. The peer's `certPath`
+## carries the hex-encoded uncompressed public key (130 hex chars) on
+## a single line (later milestones replace this with an X.509 PEM cert).
+##
+## ## Buffer lifetime
+##
+## BearSSL's `EcPrivateKey` / `EcPublicKey` carry `ptr byte` fields that
+## point into externally-owned buffers. We copy raw scalar / point bytes
+## out of those buffers immediately after `ecKeygen` / `ecComputePub`
+## into fixed-size `array` fields on `PeerKeypair`, then reconstruct
+## `EcPrivateKey` / `EcPublicKey` on demand per sign / verify call so
+## the BearSSL ABI types only ever reference Nim-stack-local storage
+## owned by the proc currently calling them.
 
-import std/[hashes, os, sets, strutils, tables]
+import std/[hashes, os, sets, strutils]
 
-import nimcrypto/hash
-import nimcrypto/sha2
-import nimcrypto/hmac
+import bearssl/[rand, ec, hash as bsslHash]
+import bearssl/abi/bearssl_ec as bsslEcAbi
+import bearssl/abi/bearssl_hash as bsslHashAbi
+
 import nimcrypto/sysrand
 
 import blake3
@@ -65,90 +69,236 @@ import ./types
 # Key + signature types.
 # ---------------------------------------------------------------------------
 
+const
+  P256PrivLen* = 32
+  P256PubLen*  = 65
+  P256SigLen*  = 64
+  P256Curve    = cint(bsslEcAbi.EC_secp256r1)
+
 type
-  PublicKeyBytes* = array[32, byte]
-  PrivateKeyBytes* = array[32, byte]
-  SignatureBytes* = array[64, byte]
+  PrivateKeyBytes* = array[P256PrivLen, byte]
+  PublicKeyBytes*  = array[P256PubLen, byte]
+  SignatureBytes*  = array[P256SigLen, byte]
 
   PeerKeypair* = object
     publicKey*: PublicKeyBytes
     privateKey*: PrivateKeyBytes
 
   TrustAnchors* = ref object
-    ## Per-tenant trust anchor: every allowed peer's public key plus
-    ## the matching private key (so verifiers can recompute the HMAC).
-    ## See module docstring for the simplification rationale.
-    allowedKeys*: HashSet[PublicKeyBytes]
-    privateKeys*: Table[PublicKeyBytes, PrivateKeyBytes]
+    ## Per-tenant trust anchor: every allowed peer's ECDSA-P256
+    ## public key. Real asymmetric verify uses pubkey only; the M3
+    ## `privateKeys` table is gone.
+    publicKeys*: HashSet[PublicKeyBytes]
 
   AuthError* = object of CatchableError
     ## Raised on malformed key files, missing trust anchors, or
     ## signature-verification failures that the caller wants surfaced.
 
+const
+  KeyFilePrefix = "ecdsa-p256:"
+
 # ---------------------------------------------------------------------------
-# Equality / hashing for the distinct array types.
+# Equality / hashing for `PublicKeyBytes`. std/hashes provides `hash`
+# for `array[N, byte]`, so `HashSet[PublicKeyBytes]` just works.
 # ---------------------------------------------------------------------------
 
 proc hashPublicKey*(value: PublicKeyBytes): Hash =
   result = hash(@value)
 
-# `array[N, byte]` already satisfies `==`; nothing to declare for `hash`
-# since the std `hash` for arrays exists. But `HashSet[array[32, byte]]`
-# needs `hash` for the array element — std/hashes provides it for arrays.
+# ---------------------------------------------------------------------------
+# Backward-compat shim for the M3 field name. A few external callers
+# referenced `anchors.allowedKeys` — keep it readable as a property
+# alias of the new `publicKeys` field.
+# ---------------------------------------------------------------------------
+
+template allowedKeys*(a: TrustAnchors): HashSet[PublicKeyBytes] = a.publicKeys
 
 # ---------------------------------------------------------------------------
 # Hex encoding helpers (lower-case; mirrors the codec's `toHexLower`).
 # ---------------------------------------------------------------------------
 
-proc toHex32(buf: array[32, byte]): string =
-  const HexChars = "0123456789abcdef"
-  result = newString(64)
+const HexChars = "0123456789abcdef"
+
+proc toHexN(buf: openArray[byte]): string =
+  result = newString(buf.len * 2)
   for i, b in buf:
     result[2 * i] = HexChars[(int(b) shr 4) and 0xf]
     result[2 * i + 1] = HexChars[int(b) and 0xf]
 
-proc parseHex32(hex: string): array[32, byte] =
-  if hex.len != 64:
+proc toHex32(buf: array[P256PrivLen, byte]): string = toHexN(buf)
+proc toHex65(buf: array[P256PubLen, byte]): string = toHexN(buf)
+
+proc parseHexBuf(hex: string; expectedBytes: int; what: string):
+    seq[byte] =
+  if hex.len != expectedBytes * 2:
     raise newException(AuthError,
-      "expected 64 hex chars (32 bytes), got " & $hex.len)
-  for i in 0 ..< 32:
+      what & ": expected " & $(expectedBytes * 2) &
+      " hex chars (" & $expectedBytes & " bytes), got " & $hex.len)
+  result = newSeq[byte](expectedBytes)
+  for i in 0 ..< expectedBytes:
     try:
       result[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
     except ValueError:
       raise newException(AuthError,
-        "invalid hex digit at position " & $(2 * i) & " in key file")
+        what & ": invalid hex digit at position " & $(2 * i))
+
+proc parsePrivHex(hex: string): PrivateKeyBytes =
+  let buf = parseHexBuf(hex, P256PrivLen, "private-key hex")
+  for i in 0 ..< P256PrivLen:
+    result[i] = buf[i]
+
+proc parsePubHex(hex: string): PublicKeyBytes =
+  let buf = parseHexBuf(hex, P256PubLen, "public-key hex")
+  for i in 0 ..< P256PubLen:
+    result[i] = buf[i]
 
 # ---------------------------------------------------------------------------
-# Key generation + derivation.
+# ECDSA-P256 primitives.
 # ---------------------------------------------------------------------------
+
+proc sha256Digest(msg: openArray[byte]): array[32, byte] =
+  ## SHA-256 over `msg` via BearSSL's hash surface. Returns a fixed
+  ## 32-byte digest used as input to `ecdsaSignRawGetDefault` and
+  ## `ecdsaVrfyRawGetDefault`.
+  var ctx: bsslHashAbi.Sha256Context
+  bsslHashAbi.sha256Init(ctx)
+  if msg.len > 0:
+    bsslHashAbi.sha256Update(ctx, unsafeAddr msg[0], csize_t(msg.len))
+  bsslHashAbi.sha256Out(ctx, addr result[0])
 
 proc derivePublicKey*(privateKey: PrivateKeyBytes): PublicKeyBytes =
-  ## Pure one-way derivation: `pub = BLAKE3(priv)`. The receiver of a
-  ## `mkAuthChallenge` cannot reconstruct the private key from the
-  ## advertised public key (BLAKE3 is a one-way cryptographic hash).
-  result = blake3.digest(@privateKey)
+  ## Real ECDSA-P256 public-key derivation via BearSSL's `ecComputePub`.
+  ## Reconstructs an `EcPrivateKey` referencing a mutable local copy of
+  ## the 32-byte scalar; the resulting public key is copied out before
+  ## the local buffers go out of scope.
+  var skBytes: array[P256PrivLen, byte]
+  for i in 0 ..< P256PrivLen:
+    skBytes[i] = privateKey[i]
+  var sk: bsslEcAbi.EcPrivateKey
+  sk.curve = P256Curve
+  sk.x = addr skBytes[0]
+  sk.xlen = uint(P256PrivLen)
+  let ecImpl = bsslEcAbi.ecGetDefault()
+  var pkBuf: array[bsslEcAbi.EC_KBUF_PUB_MAX_SIZE, byte]
+  var pk: bsslEcAbi.EcPublicKey
+  let pkLen = bsslEcAbi.ecComputePub(
+    ecImpl, addr pk, addr pkBuf[0], addr sk)
+  if pkLen == 0 or pk.qlen != uint(P256PubLen):
+    raise newException(AuthError,
+      "BearSSL ecComputePub failed (pkLen=" & $pkLen & ")")
+  # Copy the 65-byte uncompressed pubkey out of pkBuf (which `pk.q`
+  # points into) so the caller can hold the bytes after `pkBuf` is
+  # released.
+  for i in 0 ..< P256PubLen:
+    result[i] = pkBuf[i]
 
 proc generateKeypair*(): PeerKeypair =
-  ## Fresh random keypair. Uses `nimcrypto.sysrand` (which falls through
-  ## to `/dev/urandom` on Linux + the OS entropy source on every other
-  ## platform). Raises `AuthError` if the OS RNG fails — production
-  ## callers must surface that to the operator rather than silently
-  ## continuing with a weak key.
-  var priv: PrivateKeyBytes
-  let n = randomBytes(addr priv[0], sizeof(priv))
-  if n != sizeof(priv):
+  ## Fresh random ECDSA-P256 keypair. Uses BearSSL's HMAC-DRBG seeded by
+  ## OS entropy for the keygen step; the public key is then derived via
+  ## `ecComputePub`. The 32-byte scalar and 65-byte uncompressed point
+  ## are copied into fixed-size arrays so the BearSSL ABI buffers can
+  ## be released immediately.
+  let rng = HmacDrbgContext.new()
+  let ecImpl = bsslEcAbi.ecGetDefault()
+  var skBuf: array[bsslEcAbi.EC_KBUF_PRIV_MAX_SIZE, byte]
+  var sk: bsslEcAbi.EcPrivateKey
+  let skLen = bsslEcAbi.ecKeygen(
+    PrngClassPointerConst(addr rng.vtable), ecImpl,
+    addr sk, addr skBuf[0], P256Curve)
+  if skLen == 0 or sk.xlen != uint(P256PrivLen):
     raise newException(AuthError,
-      "OS RNG returned " & $n & " bytes, expected " & $sizeof(priv))
-  result.privateKey = priv
-  result.publicKey = derivePublicKey(priv)
+      "BearSSL ecKeygen failed (skLen=" & $skLen & ")")
+  # Copy the raw 32-byte scalar out of skBuf.
+  for i in 0 ..< P256PrivLen:
+    result.privateKey[i] = skBuf[i]
+  result.publicKey = derivePublicKey(result.privateKey)
+
+proc signMessage*(kp: PeerKeypair; msg: openArray[byte]): SignatureBytes =
+  ## Hashes `msg` with SHA-256 then produces a 64-byte raw ECDSA-P256
+  ## signature via BearSSL's `ecdsaSignRawGetDefault` (RFC 6979
+  ## deterministic). Reconstructs an `EcPrivateKey` against a local
+  ## mutable copy of the 32-byte scalar so the BearSSL ABI sees a
+  ## live, owned buffer.
+  let digest = sha256Digest(msg)
+  var skBytes: array[P256PrivLen, byte]
+  for i in 0 ..< P256PrivLen:
+    skBytes[i] = kp.privateKey[i]
+  var sk: bsslEcAbi.EcPrivateKey
+  sk.curve = P256Curve
+  sk.x = addr skBytes[0]
+  sk.xlen = uint(P256PrivLen)
+  let ecImpl = bsslEcAbi.ecGetDefault()
+  let signer = bsslEcAbi.ecdsaSignRawGetDefault()
+  var sigBuf: array[P256SigLen, byte]
+  let sigLen = signer(ecImpl, addr bsslHashAbi.sha256Vtable,
+                      addr digest[0], addr sk, addr sigBuf[0])
+  if sigLen != uint(P256SigLen):
+    raise newException(AuthError,
+      "BearSSL ecdsaSignRaw produced unexpected sig length: " & $sigLen)
+  for i in 0 ..< P256SigLen:
+    result[i] = sigBuf[i]
+
+proc verifySignature*(publicKey: PublicKeyBytes;
+                      msg: openArray[byte];
+                      sig: SignatureBytes): bool =
+  ## Verifies a 64-byte raw ECDSA-P256 signature over SHA-256(msg) with
+  ## `publicKey`. Returns `false` on any failure (malformed point,
+  ## bad signature, BearSSL error) so callers can branch on the bool
+  ## without try/except.
+  let digest = sha256Digest(msg)
+  var pkBytes: array[P256PubLen, byte]
+  for i in 0 ..< P256PubLen:
+    pkBytes[i] = publicKey[i]
+  var sigBytes: array[P256SigLen, byte]
+  for i in 0 ..< P256SigLen:
+    sigBytes[i] = sig[i]
+  var pk: bsslEcAbi.EcPublicKey
+  pk.curve = P256Curve
+  pk.q = addr pkBytes[0]
+  pk.qlen = uint(P256PubLen)
+  let ecImpl = bsslEcAbi.ecGetDefault()
+  let verifier = bsslEcAbi.ecdsaVrfyRawGetDefault()
+  let ok = verifier(ecImpl, addr digest[0], csize_t(digest.len),
+                    addr pk, addr sigBytes[0], csize_t(sigBytes.len))
+  result = ok == 1'u32
+
+# ---------------------------------------------------------------------------
+# Convenience verifier that also checks the pubkey is in a trust anchor
+# set. The M3 signature `(anchors, pubKey, msg, sig)` is preserved so
+# call sites in `server.nim` / `client.nim` only need to widen the
+# pubkey-buffer type.
+# ---------------------------------------------------------------------------
+
+proc verifySignature*(anchors: TrustAnchors;
+                      publicKey: PublicKeyBytes;
+                      msg: openArray[byte];
+                      sig: SignatureBytes): bool =
+  if anchors.isNil:
+    return false
+  if publicKey notin anchors.publicKeys:
+    return false
+  result = verifySignature(publicKey, msg, sig)
 
 # ---------------------------------------------------------------------------
 # Key file I/O.
 # ---------------------------------------------------------------------------
 
-proc readFirstHexLine(path: string; what: string): array[32, byte] =
-  ## Reads `path`, returns the parsed first non-blank, non-`#` line as
-  ## a 32-byte buffer. Raises `AuthError` on any I/O or parse failure.
+proc writeKeyFile(path: string; priv: PrivateKeyBytes) =
+  ## Persists the private scalar to `path` as `ecdsa-p256:<hex>` so the
+  ## file is unambiguously an ECDSA-P256 key, not an M3 stand-in seed.
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  writeFile(path, KeyFilePrefix & toHex32(priv) & "\n")
+
+proc writeCertFile(path: string; pub: PublicKeyBytes) =
+  ## Persists the public key to `path` as a single 130-char hex line.
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  writeFile(path, toHex65(pub) & "\n")
+
+proc readSingleHexLine(path: string; what: string): string =
   if not fileExists(path):
     raise newException(AuthError,
       what & " file does not exist: " & path)
@@ -157,40 +307,53 @@ proc readFirstHexLine(path: string; what: string): array[32, byte] =
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):
       continue
-    return parseHex32(line)
+    return line
   raise newException(AuthError,
     what & " file is empty / all-comment: " & path)
 
-proc writeHexLine(path: string; buf: array[32, byte]) =
-  ## Overwrites `path` with the hex-encoded buffer (plus a trailing
-  ## newline). Creates the parent directory if needed.
-  let parent = parentDir(path)
-  if parent.len > 0 and not dirExists(parent):
-    createDir(parent)
-  writeFile(path, toHex32(buf) & "\n")
+proc readKeyFile(path: string): PrivateKeyBytes =
+  ## Parses an `ecdsa-p256:<hex>` file. A file without the prefix is
+  ## treated as a legacy M3 stand-in keypair and rejected (per the
+  ## hard-cutover stance).
+  let line = readSingleHexLine(path, "peer private-key")
+  if not line.startsWith(KeyFilePrefix):
+    raise newException(AuthError,
+      "peer private-key file " & path &
+      " lacks the `ecdsa-p256:` marker — looks like a legacy M3 " &
+      "stand-in keypair. Regenerate the file: this campaign does " &
+      "not auto-migrate legacy keys.")
+  result = parsePrivHex(line[KeyFilePrefix.len .. ^1])
+
+proc readCertFile(path: string): PublicKeyBytes =
+  let line = readSingleHexLine(path, "peer public-key (cert)")
+  if line.startsWith(KeyFilePrefix):
+    raise newException(AuthError,
+      "peer cert file " & path & " carries an `ecdsa-p256:` marker " &
+      "— that's the private-key marker; cert file should be a bare " &
+      "hex pubkey on its own line.")
+  result = parsePubHex(line)
 
 proc loadOrGenerateKeypair*(certPath, keyPath: string): PeerKeypair =
   ## Loads the peer's keypair from disk, generating + persisting a
   ## fresh one when either file is missing. The cert file holds the
-  ## public key (hex), the key file holds the private key (hex).
+  ## 65-byte uncompressed ECDSA-P256 public key (hex); the key file
+  ## holds the 32-byte private scalar (hex, prefixed `ecdsa-p256:`).
   ##
   ## When **both** files exist they are read and the public key is
   ## re-derived from the private key + compared with the on-disk
-  ## public key; mismatch raises `AuthError` (operator likely shuffled
-  ## the files between deployments).
+  ## public key; mismatch raises `AuthError`.
   if fileExists(certPath) and fileExists(keyPath):
-    let pub = readFirstHexLine(certPath, "peer public-key (cert)")
-    let priv = readFirstHexLine(keyPath, "peer private-key")
+    let pub = readCertFile(certPath)
+    let priv = readKeyFile(keyPath)
     let derived = derivePublicKey(priv)
     if derived != pub:
       raise newException(AuthError,
-        "peer public-key file does not match private-key derivation: " &
-        certPath & " vs derive(" & keyPath & ")")
+        "peer public-key file does not match ECDSA-P256 derive(" &
+        "privkey): " & certPath & " vs derive(" & keyPath & ")")
     return PeerKeypair(publicKey: pub, privateKey: priv)
-  # Generate + persist.
   let kp = generateKeypair()
-  writeHexLine(certPath, kp.publicKey)
-  writeHexLine(keyPath, kp.privateKey)
+  writeCertFile(certPath, kp.publicKey)
+  writeKeyFile(keyPath, kp.privateKey)
   kp
 
 # ---------------------------------------------------------------------------
@@ -198,22 +361,19 @@ proc loadOrGenerateKeypair*(certPath, keyPath: string): PeerKeypair =
 # ---------------------------------------------------------------------------
 
 proc newTrustAnchors*(): TrustAnchors =
-  result = TrustAnchors(
-    allowedKeys: initHashSet[PublicKeyBytes](),
-    privateKeys: initTable[PublicKeyBytes, PrivateKeyBytes]())
+  result = TrustAnchors(publicKeys: initHashSet[PublicKeyBytes]())
 
-proc addAnchor*(anchors: TrustAnchors;
-                publicKey: PublicKeyBytes;
-                privateKey: PrivateKeyBytes) =
-  ## Registers a single trust anchor entry. Repeated calls with the
-  ## same public key overwrite the recorded private key (idempotent).
-  anchors.allowedKeys.incl(publicKey)
-  anchors.privateKeys[publicKey] = privateKey
+proc addAnchor*(anchors: TrustAnchors; publicKey: PublicKeyBytes) =
+  ## Registers a single trust anchor pubkey. Idempotent.
+  anchors.publicKeys.incl(publicKey)
 
 proc loadTrustAnchors*(path: string): TrustAnchors =
-  ## Parses a trust-anchor file. Each entry: `<pub_hex_64>:<priv_hex_64>`
-  ## on its own line. Blank lines and `#`-prefixed lines are ignored.
-  ## Raises `AuthError` on a malformed entry or missing file.
+  ## Parses a trust-anchor file. Each non-blank, non-`#` line carries a
+  ## hex-encoded uncompressed ECDSA-P256 public key (130 hex chars).
+  ##
+  ## The M3 `<pubkey_hex>:<privkey_hex>` shape is rejected with a clear
+  ## error so operators know to migrate. Malformed hex lines raise
+  ## `AuthError` carrying the offending line number.
   if not fileExists(path):
     raise newException(AuthError,
       "trust anchor file does not exist: " & path)
@@ -224,77 +384,52 @@ proc loadTrustAnchors*(path: string): TrustAnchors =
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):
       continue
-    let parts = line.split(':')
-    if parts.len != 2:
+    if ':' in line:
       raise newException(AuthError,
         "trust anchor file " & path & " line " & $lineNo &
-        ": expected `<pubkey_hex>:<privkey_hex>`")
-    let pub = parseHex32(parts[0].strip())
-    let priv = parseHex32(parts[1].strip())
-    let derived = derivePublicKey(priv)
-    if derived != pub:
+        ": uses legacy `<pubkey_hex>:<privkey_hex>` format; M1 " &
+        "switched to pubkey-only one-per-line. Regenerate the " &
+        "anchor file from the peer keypairs — no auto-migration.")
+    if line.len != P256PubLen * 2:
       raise newException(AuthError,
         "trust anchor file " & path & " line " & $lineNo &
-        ": pubkey does not match derive(privkey)")
-    result.addAnchor(pub, priv)
+        ": expected " & $(P256PubLen * 2) &
+        " hex chars (65-byte ECDSA-P256 pubkey), got " & $line.len)
+    var pub: PublicKeyBytes
+    try:
+      pub = parsePubHex(line)
+    except AuthError as err:
+      raise newException(AuthError,
+        "trust anchor file " & path & " line " & $lineNo &
+        ": " & err.msg)
+    if pub[0] != 0x04'u8:
+      raise newException(AuthError,
+        "trust anchor file " & path & " line " & $lineNo &
+        ": pubkey does not start with the 0x04 uncompressed-form " &
+        "marker (got 0x" & toHexN([pub[0]]) & ")")
+    result.addAnchor(pub)
 
-proc writeTrustAnchors*(path: string;
-                        entries: openArray[PeerKeypair]) =
-  ## Persists `entries` to disk in the canonical trust-anchor format.
-  ## Used by the M3 verification tests + the loopback fixture to build
-  ## per-tenant anchor files. Overwrites any existing file.
+proc writeTrustAnchors*(path: string; anchors: TrustAnchors) =
+  ## Persists `anchors.publicKeys` to disk in the M1 anchor-file shape
+  ## (one hex pubkey per line). Overwrites any existing file.
   let parent = parentDir(path)
   if parent.len > 0 and not dirExists(parent):
     createDir(parent)
   var lines: seq[string] = @[]
-  for entry in entries:
-    lines.add(toHex32(entry.publicKey) & ":" & toHex32(entry.privateKey))
+  for pub in anchors.publicKeys:
+    lines.add(toHex65(pub))
   writeFile(path, lines.join("\n") & "\n")
 
-# ---------------------------------------------------------------------------
-# Signing + verification.
-# ---------------------------------------------------------------------------
-
-proc hmacSha256Bytes(key: openArray[byte]; msg: openArray[byte]):
-    array[32, byte] =
-  ## Thin wrapper around `nimcrypto.sha256.hmac` that returns the raw
-  ## 32-byte digest. The library's `hmac` template handles empty
-  ## inputs correctly (empty msg + non-empty key → fixed output).
-  let digest = sha256.hmac(key, msg)
-  result = digest.data
-
-proc signMessage*(kp: PeerKeypair; msg: openArray[byte]): SignatureBytes =
-  ## Produces a 64-byte detached signature over `msg`. The first 32
-  ## bytes are HMAC-SHA256(privateKey, msg); the second 32 bytes are
-  ## HMAC-SHA256(privateKey, first_32 || msg). This double-HMAC keeps
-  ## the wire-shape Ed25519-sized for a future swap-in.
-  let first = hmacSha256Bytes(kp.privateKey, msg)
-  var contextBuf = newSeq[byte](32 + msg.len)
-  for i in 0 ..< 32:
-    contextBuf[i] = first[i]
-  for i in 0 ..< msg.len:
-    contextBuf[32 + i] = msg[i]
-  let second = hmacSha256Bytes(kp.privateKey, contextBuf)
-  for i in 0 ..< 32:
-    result[i] = first[i]
-    result[32 + i] = second[i]
-
-proc verifySignature*(anchors: TrustAnchors;
-                      publicKey: PublicKeyBytes;
-                      msg: openArray[byte];
-                      sig: SignatureBytes): bool =
-  ## Verifies that `sig` is the signature of `msg` by the holder of
-  ## `publicKey`, against the trust anchors. Returns `false` (no
-  ## raise) on any missing-anchor / wrong-signature path so callers
-  ## can branch on the bool without try/except.
-  if publicKey notin anchors.allowedKeys:
-    return false
-  if not anchors.privateKeys.hasKey(publicKey):
-    return false
-  let priv = anchors.privateKeys[publicKey]
-  let recomputed =
-    signMessage(PeerKeypair(publicKey: publicKey, privateKey: priv), msg)
-  result = recomputed == sig
+proc writeTrustAnchors*(path: string;
+                        entries: openArray[PeerKeypair]) =
+  ## Convenience overload that takes a sequence of `PeerKeypair` and
+  ## persists just their public keys. Mirrors the M3 helper used by
+  ## verification tests + loopback fixtures — the privkeys are no
+  ## longer written (real ECDSA verifies with pub only).
+  let anchors = newTrustAnchors()
+  for entry in entries:
+    anchors.addAnchor(entry.publicKey)
+  writeTrustAnchors(path, anchors)
 
 # ---------------------------------------------------------------------------
 # Canonical advertisement bytes (the message that gets signed).
@@ -311,20 +446,9 @@ proc writeU64Le(buf: var seq[byte]; value: uint64) =
 proc canonicaliseAdvertiseForSigning*(peerId: PeerId;
                                       ad: AdvertiseV2): seq[byte] =
   ## Produces the canonical byte sequence that an `AdvertiseV2`
-  ## signature covers. The shape — fixed-order, length-prefixed —
-  ## matches `Peer-Cache-Scale.md` §"mTLS + signed advertisements":
-  ##
-  ##   sequence (uint64 LE) ||
-  ##   peerId (32 bytes)    ||
-  ##   filterCapacity (uint32 LE) ||
-  ##   filterCount (uint32 LE)    ||
-  ##   filterBytes_len (uint32 LE) ||
-  ##   filterBytes
-  ##
-  ## The `signature` field is *not* part of the canonical form (that
-  ## would be circular). The `mode` field is also omitted because
-  ## flipping snapshot↔delta on the same filter is not a security-
-  ## relevant tamper (the cuckoo filter bytes are the actual payload).
+  ## signature covers. Shape preserved from M3 (length-prefixed, fixed
+  ## order): sequence || peerId || filterCapacity || filterCount ||
+  ## filterBytes_len || filterBytes.
   result = @[]
   result.writeU64Le(ad.sequence)
   let raw = bytes(peerId)
@@ -341,8 +465,9 @@ proc canonicaliseAdvertiseForSigning*(peerId: PeerId;
 # ---------------------------------------------------------------------------
 
 proc generateChallenge*(): array[32, byte] =
-  ## 32 bytes of OS entropy for use in `mkAuthChallenge`. Raises
-  ## `AuthError` if the OS RNG fails.
+  ## 32 bytes of OS entropy for use in `mkAuthChallenge`. Still backed
+  ## by the system RNG (the M3 stand-in handshake using this proc is
+  ## scheduled for deletion in M3 of this campaign).
   let n = randomBytes(addr result[0], sizeof(result))
   if n != sizeof(result):
     raise newException(AuthError,

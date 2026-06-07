@@ -196,7 +196,11 @@ type
 
   AuthChallenge* = object
     challengeBytes*: array[32, byte]
-    senderPubKey*: array[32, byte]
+    senderPubKey*: array[65, byte]
+      ## Peer-Cache-BearSSL M1: widened from 32 B to 65 B to carry the
+      ## uncompressed ECDSA-P256 public key (`0x04 || X(32) || Y(32)`).
+      ## The M3-era `tmMtls` handshake using this stand-in record is
+      ## scheduled for deletion at campaign M3.
 
   AuthResponse* = object
     challengeBytes*: array[32, byte]
