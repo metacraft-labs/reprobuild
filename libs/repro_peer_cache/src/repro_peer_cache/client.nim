@@ -7,16 +7,69 @@
 ## (one per peer) so subsequent fetch requests and advertisements
 ## reuse them; `stop` sends `mkGoodbye` to each peer and closes.
 
-import std/[asyncdispatch, asyncnet, nativesockets, options, sets, tables]
+import std/[asyncdispatch, asyncnet, monotimes, nativesockets, options, sets,
+            tables, times]
 
 import blake3
 
 import ./auth
 import ./codec
+import ./metrics
 import ./multicast
 import ./registry
 import ./server  # for inAllowlist + CidrV4 + performAuthHandshake
 import ./types
+
+export metrics
+
+type
+  PooledConn* = ref object
+    ## Peer-Cache-Scale M4: a single pooled outbound connection.
+    ## The wire-level socket is opened by `acquireConn` and (re)used
+    ## across multiple `requestFetch` calls until either
+    ## `reapIdle` evicts it or `close` is called explicitly.
+    socket*: AsyncSocket
+    peerId*: PeerId
+    endpoint*: Endpoint
+    lastUsed*: MonoTime
+    inUse*: bool
+    valid*: bool
+      ## Set to `false` when the socket is closed (e.g. peer FIN, send
+      ## error). Reused as a tombstone so concurrent waiters don't
+      ## hand back a half-closed connection.
+    hasHandshaked*: bool
+      ## `true` after the first `mkHello` / `mkHelloOk` round on this
+      ## connection. The pool reuses the same socket for subsequent
+      ## fetches; the handshake only fires on the fresh-dial path.
+
+  PeerConnPool* = ref object
+    ## Per-client outbound connection pool keyed by peer ID. Pools are
+    ## created with `newPeerConnPool` and held by `PeerCacheClient`. The
+    ## counter fields are public so verification tests can assert pool
+    ## behaviour without depending on internal HTTP scraping.
+    maxPerPeer*: int
+    idleTimeoutMs*: int
+    conns*: Table[PeerId, seq[PooledConn]]
+    totalCheckouts*: uint64
+      ## Number of `acquireConn` calls that returned a `PooledConn`.
+    totalCheckoutHits*: uint64
+      ## Subset of `totalCheckouts` that reused an existing pooled
+      ## entry (i.e. a cache hit).
+    totalOpened*: uint64
+      ## Number of fresh TCP connections opened (cache miss path).
+    totalEvicted*: uint64
+      ## Connections closed by `reapIdle` because they were idle past
+      ## `idleTimeoutMs`.
+    totalLruEvicted*: uint64
+      ## Connections closed because the per-peer cap was reached and
+      ## the oldest non-`inUse` entry was kicked.
+    peakConcurrentInUse*: int
+      ## Highest observed `inUse` count summed across all peers.
+      ## Updated on every `acquireConn` return.
+    metrics*: PeerCacheMetrics
+      ## Optional shared metrics shell. Pool counters are mirrored into
+      ## the gauges (`poolConnsActive`, `poolConnsIdle`) after every
+      ## acquire/release/reap.
 
 const DefaultFetchTimeoutMs* = 5_000
   ## Per-candidate fetch timeout for `requestFetch`. The spec
@@ -64,7 +117,7 @@ type
       ## verification). Only one outstanding request per digest per
       ## client is tracked — concurrent requests for the same digest
       ## share the same future.
-    connections: Table[PeerId, AsyncSocket]
+    connections*: Table[PeerId, AsyncSocket]
     running: bool
     capTier2*: bool
       ## Peer-Cache-Scale M2: this peer's tier-2 capability. Stamped
@@ -89,8 +142,36 @@ type
     handshakeRejectedCount*: int
       ## Peer-Cache-Scale M3: outbound dials whose mTLS handshake the
       ## remote (or we) rejected.
+    pool*: PeerConnPool
+      ## Peer-Cache-Scale M4: per-peer connection pool. Used by
+      ## `requestFetchPooled`; the legacy long-lived `connections`
+      ## table is left intact so the handshake / advertise side stays
+      ## on its existing path.
+    metrics*: PeerCacheMetrics
+      ## Peer-Cache-Scale M4: optional shared metrics shell.
+      ## `requestFetch`'s increment sites are no-ops when nil.
 
   PeerCacheClientError* = object of CatchableError
+
+proc newPeerConnPool*(maxPerPeer: int = DefaultPoolMaxPerPeer;
+                      idleTimeoutMs: int = DefaultPoolIdleTimeoutMs;
+                      metrics: PeerCacheMetrics = nil): PeerConnPool =
+  ## Constructs an empty per-peer connection pool. Defaults match the
+  ## spec (`Peer-Cache-Scale.md` §"Connection lifecycle + observability"):
+  ## 4 connections per peer, 30 s idle window.
+  let cap = if maxPerPeer > 0: maxPerPeer else: DefaultPoolMaxPerPeer
+  let idle = if idleTimeoutMs > 0: idleTimeoutMs else: DefaultPoolIdleTimeoutMs
+  PeerConnPool(
+    maxPerPeer: cap,
+    idleTimeoutMs: idle,
+    conns: initTable[PeerId, seq[PooledConn]](),
+    totalCheckouts: 0,
+    totalCheckoutHits: 0,
+    totalOpened: 0,
+    totalEvicted: 0,
+    totalLruEvicted: 0,
+    peakConcurrentInUse: 0,
+    metrics: metrics)
 
 proc newPeerCacheClient*(selfPeerId: PeerId;
                         listenPort: uint16;
@@ -103,7 +184,10 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
                         capTier2: bool = false;
                         trustMode: TrustMode = tmCidr;
                         keypair: PeerKeypair = PeerKeypair();
-                        trustAnchors: TrustAnchors = nil):
+                        trustAnchors: TrustAnchors = nil;
+                        poolMaxPerPeer: int = DefaultPoolMaxPerPeer;
+                        poolIdleTimeoutMs: int = DefaultPoolIdleTimeoutMs;
+                        metrics: PeerCacheMetrics = nil):
                         PeerCacheClient =
   result = PeerCacheClient(
     selfPeerId: selfPeerId,
@@ -128,7 +212,241 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
     peerKeyByPeerId: initTable[PeerId, PublicKeyBytes](),
     signatureRejectedCount: 0,
     signatureRejectedPeers: initHashSet[PeerId](),
-    handshakeRejectedCount: 0)
+    handshakeRejectedCount: 0,
+    pool: newPeerConnPool(poolMaxPerPeer, poolIdleTimeoutMs, metrics),
+    metrics: metrics)
+
+# ---------------------------------------------------------------------------
+# Connection-pool ops — Peer-Cache-Scale M4.
+# ---------------------------------------------------------------------------
+
+proc countInUseAcrossPeers(pool: PeerConnPool): int =
+  result = 0
+  for _, lst in pool.conns.pairs:
+    for c in lst:
+      if c.valid and c.inUse:
+        inc result
+
+proc countIdleAcrossPeers(pool: PeerConnPool): int =
+  result = 0
+  for _, lst in pool.conns.pairs:
+    for c in lst:
+      if c.valid and not c.inUse:
+        inc result
+
+proc updatePoolGauges(pool: PeerConnPool) =
+  let active = countInUseAcrossPeers(pool)
+  let idle = countIdleAcrossPeers(pool)
+  if active > pool.peakConcurrentInUse:
+    pool.peakConcurrentInUse = active
+  if not pool.metrics.isNil:
+    setPoolGauges(pool.metrics, active, idle)
+
+proc idleMs(conn: PooledConn): int =
+  ## Milliseconds since the connection was last used. Tests use this to
+  ## sanity-check the eviction branch.
+  int((getMonoTime() - conn.lastUsed).inMilliseconds)
+
+proc removeFromPeer(pool: PeerConnPool; peerId: PeerId;
+                    conn: PooledConn) =
+  if not pool.conns.hasKey(peerId):
+    return
+  var lst = pool.conns[peerId]
+  var i = 0
+  while i < lst.len:
+    if lst[i] == conn:
+      lst.delete(i)
+    else:
+      inc i
+  if lst.len == 0:
+    pool.conns.del(peerId)
+  else:
+    pool.conns[peerId] = lst
+
+proc closeAndCount(pool: PeerConnPool; peerId: PeerId;
+                   conn: PooledConn; bumpEvict: bool;
+                   bumpLru: bool = false) =
+  if conn.valid:
+    conn.valid = false
+    try: conn.socket.close() except CatchableError: discard
+  removeFromPeer(pool, peerId, conn)
+  if bumpEvict:
+    inc pool.totalEvicted
+  if bumpLru:
+    inc pool.totalLruEvicted
+
+proc reapIdle*(pool: PeerConnPool) =
+  ## Closes every pooled connection that is idle past `idleTimeoutMs`.
+  ## Idempotent and synchronous (no `await`); production callers run
+  ## this from a periodic loop.
+  if pool.isNil:
+    return
+  var peerKeys: seq[PeerId] = @[]
+  for k in pool.conns.keys:
+    peerKeys.add(k)
+  for peerId in peerKeys:
+    var lst = pool.conns[peerId]
+    var keep: seq[PooledConn] = @[]
+    for c in lst:
+      if c.valid and not c.inUse and
+         (pool.idleTimeoutMs > 0 and idleMs(c) > pool.idleTimeoutMs):
+        # Idle-expired — close + count.
+        c.valid = false
+        try: c.socket.close() except CatchableError: discard
+        inc pool.totalEvicted
+      else:
+        keep.add(c)
+    if keep.len == 0:
+      pool.conns.del(peerId)
+    else:
+      pool.conns[peerId] = keep
+  updatePoolGauges(pool)
+
+proc findIdleConn(pool: PeerConnPool; peerId: PeerId): PooledConn =
+  if not pool.conns.hasKey(peerId):
+    return nil
+  let lst = pool.conns[peerId]
+  # Idle-eviction sweep happens lazily on acquire so the caller never
+  # gets handed a connection that's been sitting beyond the window.
+  for c in lst:
+    if c.valid and not c.inUse:
+      if pool.idleTimeoutMs > 0 and idleMs(c) > pool.idleTimeoutMs:
+        # Will be closed on the next pass; treat as missing.
+        continue
+      return c
+  return nil
+
+proc activeForPeerCount*(pool: PeerConnPool; peerId: PeerId): int
+proc activeForPeer(pool: PeerConnPool; peerId: PeerId): int =
+  result = 0
+  if not pool.conns.hasKey(peerId):
+    return 0
+  for c in pool.conns[peerId]:
+    if c.valid:
+      inc result
+
+proc activeForPeerCount*(pool: PeerConnPool; peerId: PeerId): int =
+  activeForPeer(pool, peerId)
+
+proc lruEvict(pool: PeerConnPool; peerId: PeerId) =
+  ## When the per-peer cap is reached and no idle conn is available,
+  ## close the *oldest non-inUse* entry to make room for the new dial.
+  if not pool.conns.hasKey(peerId):
+    return
+  let lst = pool.conns[peerId]
+  var victim: PooledConn = nil
+  for c in lst:
+    if c.valid and not c.inUse:
+      if victim.isNil or c.lastUsed < victim.lastUsed:
+        victim = c
+  if not victim.isNil:
+    closeAndCount(pool, peerId, victim, bumpEvict = false, bumpLru = true)
+
+proc openFreshConn(pool: PeerConnPool; peerId: PeerId;
+                   endpoint: Endpoint): Future[PooledConn] {.async.} =
+  let sock = newAsyncSocket()
+  try:
+    await sock.connect(endpoint.host, endpoint.port)
+  except CatchableError as err:
+    try: sock.close() except CatchableError: discard
+    raise err
+  result = PooledConn(
+    socket: sock,
+    peerId: peerId,
+    endpoint: endpoint,
+    lastUsed: getMonoTime(),
+    inUse: true,
+    valid: true,
+    hasHandshaked: false)
+  if not pool.conns.hasKey(peerId):
+    pool.conns[peerId] = @[]
+  var lst = pool.conns[peerId]
+  lst.add(result)
+  pool.conns[peerId] = lst
+  inc pool.totalOpened
+
+proc acquireConn*(pool: PeerConnPool; peerId: PeerId;
+                  endpoint: Endpoint): Future[PooledConn] {.async.} =
+  ## Returns a pooled connection to `peerId`. Reuses an existing
+  ## not-inUse entry whose idle age is below the configured window
+  ## (cache hit, bumps `totalCheckoutHits`). On miss, opens a new TCP
+  ## connection — respecting `maxPerPeer` by evicting the oldest idle
+  ## entry or, if every slot is currently `inUse`, polling until one is
+  ## released (max wait 200 ms).
+  if pool.isNil:
+    raise newException(PeerCacheClientError, "acquireConn on nil pool")
+  # Lazy reap before we look — keeps cache-hit logic honest.
+  reapIdle(pool)
+  inc pool.totalCheckouts
+  # Cache hit path.
+  let cached = findIdleConn(pool, peerId)
+  if not cached.isNil:
+    cached.inUse = true
+    cached.lastUsed = getMonoTime()
+    inc pool.totalCheckoutHits
+    updatePoolGauges(pool)
+    return cached
+  # No idle conn. Try to honour the cap: if room, dial fresh; if all
+  # slots full and any is idle, evict; else wait briefly for a release.
+  if activeForPeer(pool, peerId) >= pool.maxPerPeer:
+    # First try to evict an idle entry to free a slot.
+    lruEvict(pool, peerId)
+  # If we still have no room (everyone in-use), poll.
+  var waitedMs = 0
+  while activeForPeer(pool, peerId) >= pool.maxPerPeer and
+        waitedMs < 200:
+    await sleepAsync(10)
+    waitedMs += 10
+    # Someone may have released — try the hit path again.
+    let now = findIdleConn(pool, peerId)
+    if not now.isNil:
+      now.inUse = true
+      now.lastUsed = getMonoTime()
+      inc pool.totalCheckoutHits
+      updatePoolGauges(pool)
+      return now
+    lruEvict(pool, peerId)
+  result = await openFreshConn(pool, peerId, endpoint)
+  updatePoolGauges(pool)
+
+proc releaseConn*(pool: PeerConnPool; conn: PooledConn) =
+  ## Marks the connection as available for reuse. Caller MUST NOT use
+  ## the socket after release. If `conn.valid == false` (peer FIN /
+  ## send error), the entry is removed instead of returned to the
+  ## pool.
+  if pool.isNil or conn.isNil:
+    return
+  conn.inUse = false
+  conn.lastUsed = getMonoTime()
+  if not conn.valid:
+    removeFromPeer(pool, conn.peerId, conn)
+  updatePoolGauges(pool)
+
+proc invalidate*(pool: PeerConnPool; conn: PooledConn) =
+  ## Marks a connection as broken (failed I/O). The pool closes it on
+  ## the next release / reap.
+  if pool.isNil or conn.isNil:
+    return
+  conn.valid = false
+  try: conn.socket.close() except CatchableError: discard
+  removeFromPeer(pool, conn.peerId, conn)
+  updatePoolGauges(pool)
+
+proc closeAll*(pool: PeerConnPool) =
+  ## Closes every pooled connection. Called from `client.stop()`.
+  if pool.isNil:
+    return
+  var peerKeys: seq[PeerId] = @[]
+  for k in pool.conns.keys:
+    peerKeys.add(k)
+  for peerId in peerKeys:
+    let lst = pool.conns[peerId]
+    for c in lst:
+      if c.valid:
+        c.valid = false
+        try: c.socket.close() except CatchableError: discard
+    pool.conns.del(peerId)
+  updatePoolGauges(pool)
 
 # ---------------------------------------------------------------------------
 # Frame I/O — mirrors the server's helpers.
@@ -462,6 +780,89 @@ proc requestFetch*(client: PeerCacheClient;
     return some(payload)
   return none(seq[byte])
 
+proc fetchBlobFrom*(client: PeerCacheClient;
+                    peerId: PeerId;
+                    endpoint: Endpoint;
+                    digest: BlobDigest): Future[Option[seq[byte]]]
+                    {.async.} =
+  ## Peer-Cache-Scale M4: pool-backed point fetch. Acquires a pooled
+  ## outbound connection (opening + handshaking on first use, reusing
+  ## an idle one when present), sends `mkFetchRequest{digest}`, reads
+  ## the matching `mkFetchResponse`, BLAKE3-verifies, and returns the
+  ## bytes (or `none` on truncated / verification failure / I/O).
+  ##
+  ## The pool is acquired by the caller via `client.pool`; counter
+  ## invariants visible to the verification tests:
+  ##
+  ##   - `totalCheckouts` += 1 per call
+  ##   - `totalCheckoutHits` += 1 when the entry was reused
+  ##   - `totalEvicted`     += 1 per idle-expired close
+  ##   - `totalLruEvicted`  += 1 per cap-driven LRU close
+  let conn = await acquireConn(client.pool, peerId, endpoint)
+  let startMs = nowMs()
+  var result0 = none(seq[byte])
+  let req = FetchRequest(digest: digest)
+  var ok = true
+  try:
+    # First-use handshake on a freshly-opened socket. Subsequent
+    # acquires for the same `PooledConn` skip this (the pool reused
+    # the entry, and `hasHandshaked` is sticky).
+    if not conn.hasHandshaked:
+      let hello = Hello(
+        peerId: client.selfPeerId,
+        listenPort: client.listenPort,
+        capabilities: 0'u32,
+        capTier2: client.capTier2)
+      await sendFrame(conn.socket, mkHello, encodeHello(hello))
+      # Drain HelloOk + initial Advertise. Best-effort.
+      let okFrame = await readFrameBytes(conn.socket)
+      if okFrame.len > 0:
+        let decoded = decodeFrame(okFrame)
+        if decoded.messageKind == mkHelloOk:
+          discard decodeHelloOk(decoded.payload)
+      # Optional advertise frame.
+      let advFrame = await readFrameBytes(conn.socket)
+      if advFrame.len > 0:
+        let decoded = decodeFrame(advFrame)
+        if decoded.messageKind == mkAdvertise:
+          client.registry.applyAdvertise(peerId,
+            decodeAdvertise(decoded.payload))
+      conn.hasHandshaked = true
+    await sendFrame(conn.socket, mkFetchRequest, encodeFetchRequest(req))
+    inc client.fetchRoundTripCount
+    let respBytes = await readFrameBytes(conn.socket)
+    if respBytes.len == 0:
+      ok = false
+    else:
+      let frame = decodeFrame(respBytes)
+      if frame.messageKind == mkFetchResponse:
+        let resp = decodeFetchResponse(frame.payload)
+        if not resp.truncated:
+          let observed = blake3.digest(resp.payload)
+          let expected = bytes(resp.digest)
+          if observed == expected:
+            result0 = some(resp.payload)
+            if not client.localStoreWriter.isNil:
+              client.localStoreWriter(digest, resp.payload)
+              client.registry.selfAddBlob(digest)
+  except CatchableError:
+    ok = false
+  if not ok:
+    invalidate(client.pool, conn)
+  else:
+    releaseConn(client.pool, conn)
+  # Latency + metric counters.
+  let elapsed = int(nowMs() - startMs)
+  if not client.metrics.isNil:
+    recordFetchLatency(client.metrics, elapsed)
+    if result0.isSome:
+      inc client.metrics.fetchHitsPeer
+      if client.registry.isPeerTier2(peerId):
+        inc client.metrics.fetchHitsTier2
+    else:
+      inc client.metrics.fetchMissesTotal
+  return result0
+
 proc stop*(client: PeerCacheClient) {.async.} =
   ## Sends Goodbye to each connected peer and closes the connections.
   ## Also stops any in-flight multicast broadcast loop.
@@ -477,6 +878,7 @@ proc stop*(client: PeerCacheClient) {.async.} =
       discard
     try: sock.close() except CatchableError: discard
   client.connections.clear()
+  closeAll(client.pool)
 
 # ---------------------------------------------------------------------------
 # Peer-Cache M2: multicast broadcast loop.

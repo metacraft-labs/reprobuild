@@ -22,9 +22,12 @@ import std/[asyncdispatch, asyncnet, nativesockets, net, options, sets,
 
 import ./auth
 import ./codec
+import ./metrics
 import ./multicast
 import ./registry
 import ./types
+
+export metrics
 
 type
   CidrV4* = object
@@ -107,6 +110,11 @@ type
       ## Peer-Cache-Scale M3: number of mTLS auth-handshake attempts
       ## that this server rejected (peer not in trust anchors,
       ## bad signature, malformed frames, etc.).
+    metrics*: PeerCacheMetrics
+      ## Peer-Cache-Scale M4: shared observability shell. Increment
+      ## sites at fetch / advertise / signature paths are no-ops when
+      ## nil. Provided by `newPeerCacheServer` or set after the fact
+      ## by the daemon's `--metrics-addr` wiring.
 
   PeerCacheServerError* = object of CatchableError
 
@@ -211,7 +219,8 @@ proc newPeerCacheServer*(selfPeerId: PeerId;
                          capTier2: bool = false;
                          trustMode: TrustMode = tmCidr;
                          keypair: PeerKeypair = PeerKeypair();
-                         trustAnchors: TrustAnchors = nil):
+                         trustAnchors: TrustAnchors = nil;
+                         metrics: PeerCacheMetrics = nil):
                          PeerCacheServer =
   result = PeerCacheServer(
     selfPeerId: selfPeerId,
@@ -238,7 +247,8 @@ proc newPeerCacheServer*(selfPeerId: PeerId;
     peerKeyByPeerId: initTable[PeerId, PublicKeyBytes](),
     signatureRejectedCount: 0,
     signatureRejectedPeers: initHashSet[PeerId](),
-    handshakeRejectedCount: 0)
+    handshakeRejectedCount: 0,
+    metrics: metrics)
 
 # ---------------------------------------------------------------------------
 # Frame I/O helpers.
@@ -412,6 +422,8 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
             "Advertise received before Hello on peer-cache connection")
         let ad = decodeAdvertise(frame.payload)
         server.registry.applyAdvertise(registeredPeerId, ad)
+        if not server.metrics.isNil:
+          inc server.metrics.advertisementsReceivedTotal
       of mkAdvertiseV2:
         # Peer-Cache-Scale M1: v2 cuckoo-filter advertisement.
         if not hasRegisteredPeer:
@@ -436,8 +448,12 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
             if registeredPeerId notin server.signatureRejectedPeers:
               server.signatureRejectedPeers.incl(registeredPeerId)
               inc server.signatureRejectedCount
+            if not server.metrics.isNil:
+              inc server.metrics.signatureRejectionsTotal
             continue
         server.registry.applyAdvertiseV2(registeredPeerId, ad)
+        if not server.metrics.isNil:
+          inc server.metrics.advertisementsReceivedTotal
       of mkPing:
         await sendFrame(client, mkPong, encodePong(Pong()))
       of mkPong:
@@ -452,26 +468,36 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
         # `responseInterceptor` (test seam for the corrupted-payload
         # verification path) before encoding the response payload.
         let req = decodeFetchRequest(frame.payload)
+        if not server.metrics.isNil:
+          inc server.metrics.fetchRequestsTotal
         var resp: FetchResponse
         if server.localStoreReader.isNil:
           resp = FetchResponse(
             digest: req.digest, truncated: true, payload: @[])
+          if not server.metrics.isNil:
+            inc server.metrics.fetchMissesTotal
         else:
           let lookup = server.localStoreReader(req.digest)
           if lookup.isNone:
             resp = FetchResponse(
               digest: req.digest, truncated: true, payload: @[])
+            if not server.metrics.isNil:
+              inc server.metrics.fetchMissesTotal
           else:
             let bytes = lookup.get()
             if uint64(bytes.len) > server.maxBlobBytes:
               resp = FetchResponse(
                 digest: req.digest, truncated: true, payload: @[])
+              if not server.metrics.isNil:
+                inc server.metrics.fetchMissesTotal
             else:
               var payload = bytes
               if not server.responseInterceptor.isNil:
                 payload = server.responseInterceptor(payload)
               resp = FetchResponse(
                 digest: req.digest, truncated: false, payload: payload)
+              if not server.metrics.isNil:
+                inc server.metrics.fetchHitsLocal
         await sendFrame(client, mkFetchResponse, encodeFetchResponse(resp))
       of mkFetchResponse:
         # Server-side receipt of a fetch response is unusual (the
@@ -594,6 +620,24 @@ proc stop*(server: PeerCacheServer) =
 
 proc actualPort*(server: PeerCacheServer): Port =
   server.listenPort
+
+proc sampleMetrics*(server: PeerCacheServer) =
+  ## Peer-Cache-Scale M4: mirrors registry size + counter snapshots
+  ## into the shared `PeerCacheMetrics`. The HTTP scrape handler reads
+  ## the metrics shell, so callers (or a periodic loop) must call this
+  ## before scrapes to keep the gauges current.
+  if server.metrics.isNil:
+    return
+  setActivePeers(server.metrics,
+                 if server.registry.isNil: 0
+                 else: server.registry.peerCount())
+  refreshDebugRegistry(server.metrics, server.registry)
+  # Mirror M3 signature-rejection counter into the metrics counter so
+  # `repro_peer_cache_signature_rejections_total` reflects both the
+  # M4-only increment site (above) and any M3-only flow.
+  server.metrics.signatureRejectionsTotal =
+    max(server.metrics.signatureRejectionsTotal,
+        uint64(server.signatureRejectedCount))
 
 # ---------------------------------------------------------------------------
 # Peer-Cache M2: UDP multicast receiver.

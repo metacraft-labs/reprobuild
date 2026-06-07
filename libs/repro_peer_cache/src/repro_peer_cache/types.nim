@@ -376,6 +376,19 @@ type
       ## Peer-Cache-Scale M3: path to this peer's own private-key file.
       ## Hex-encoded 32 bytes per line (typically one line). Created on
       ## first start when missing.
+    poolMaxPerPeer*: int
+      ## Peer-Cache-Scale M4: maximum number of pooled outbound
+      ## connections per remote peer. Default 4 when zero. Used by the
+      ## `PeerConnPool` in `client.nim`. See `Peer-Cache-Scale.md`
+      ## §"Connection lifecycle + observability".
+    poolIdleTimeoutMs*: int
+      ## Peer-Cache-Scale M4: idle-eviction window (ms). Pooled
+      ## connections older than this with `inUse == false` are closed
+      ## by `reapIdle`. Default 30_000 when zero.
+    metricsListenAddr*: string
+      ## Peer-Cache-Scale M4: bind spec for the Prometheus metrics
+      ## scrape endpoint (e.g. `127.0.0.1:9456`). Empty string disables
+      ## the metrics HTTP server.
 
 const
   DefaultMulticastAddress* = "224.0.0.123"
@@ -398,6 +411,12 @@ const
     ## ≈ `3 * log2(N)` for `N` up to a few hundred; the engine recomputes a
     ## membership-size-aware cap at runtime in `nextGossipBatch` but this
     ## static default suffices when the configured value is left at zero.
+
+  # Peer-Cache-Scale M4 connection-pool + metrics defaults.
+  DefaultPoolMaxPerPeer* = 4
+    ## Default cap on simultaneous pooled connections per remote peer.
+  DefaultPoolIdleTimeoutMs* = 30_000
+    ## Default idle-eviction window for `PeerConnPool.reapIdle`.
 
 proc defaultSwimConfig*(): SwimConfig =
   ## Spec defaults for SWIM. Tests typically clone this and tighten the

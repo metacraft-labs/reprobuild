@@ -6,6 +6,7 @@ repro-controller apps/repro-controller/repro_controller.nim
 repro-worker apps/repro-worker/repro_worker.nim
 repro-daemon apps/repro-daemon/repro_daemon.nim
 repro-peer-cache-tier2 apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim
+repro-peer-cache-admin apps/repro-peer-cache-admin/repro_peer_cache_admin.nim
 reprostored apps/reprostored/reprostored.nim
 repro-provider-host apps/repro-provider-host/repro_provider_host.nim
 repro-cmake-dyndep-fragment apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim
