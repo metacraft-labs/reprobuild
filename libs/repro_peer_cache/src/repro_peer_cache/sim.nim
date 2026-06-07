@@ -32,9 +32,11 @@
 import std/[asyncdispatch, math, monotimes, random,
             sequtils, sets, strformat, tables, times]
 
+import ./auth
 import ./client
 import ./loopback
 import ./metrics
+import ./pki
 import ./registry
 import ./server
 import ./swim
@@ -73,6 +75,48 @@ type
     metrics*: PeerCacheMetrics
     blobs*: Table[BlobDigest, seq[byte]]
       ## Locally seeded blobs this peer can serve. Indexed by digest.
+    keypair*: PeerKeypair
+      ## Peer-Cache-BearSSL M5: ECDSA-P256 keypair used to sign the
+      ## per-peer `AdvertiseV2` payload during `seedRandomBlobs`. Only
+      ## populated when `spec.trustMode == tmTls`; remains zeroed in
+      ## `tmCidr` fleets.
+    cert*: CertAndKey
+      ## Peer-Cache-BearSSL M5: self-signed cert minted for the peer.
+      ## Populated when `spec.trustMode == tmTls`; the
+      ## `PeerCacheServer` / `PeerCacheClient` constructors carry
+      ## non-nil cert + anchor surfaces so the production shells work
+      ## even when the in-process transport short-circuits the TLS
+      ## wrap.
+
+  SimFleetOptions* = object
+    ## Peer-Cache-BearSSL M5: knobs for `spawnSimFleet`. Defaults
+    ## preserve the Peer-Cache-Scale M5 behaviour bit-for-bit; the
+    ## `tlsEnabled` flag is the BearSSL campaign's one new lever.
+    seedsPerPeer*: int
+      ## How many bootstrap seed peers each SWIM engine gets. Same
+      ## semantic as the legacy positional argument.
+    seed*: int64
+      ## RNG seed for the in-process fleet. Same as the legacy
+      ## positional argument.
+    tlsEnabled*: bool
+      ## When `false` (the default), peers configured for `tmTls`
+      ## generate per-peer ECDSA-P256 keypairs + self-signed certs and
+      ## exercise real ECDSA-P256 sign/verify over their seeded
+      ## `AdvertiseV2` payloads, but the SWIM transport remains the
+      ## in-process synthetic channel — there is no actual TLS wrap
+      ## (the peers are in the same process; TLS would be self-talk
+      ## encryption with no protocol value). The simulation's value
+      ## is membership + advertisement + filter correctness with
+      ## real cert-bound identity.
+      ##
+      ## When `true`, the simulation still uses the in-process SWIM
+      ## transport, but a real `wrapClientSocket` /
+      ## `wrapServerSocket` pump runs once between every peer pair
+      ## as a smoke test (executed via the loopback TLS spawn path
+      ## inside `seedRandomBlobs`). This is the expensive opt-in
+      ## variant that the `just bench-peer-cache-bearssl-tls` target
+      ## drives — TLS-on-self-talk pays the encryption cost without
+      ## any of the network savings.
 
   SimFleet* = ref object
     peers*: seq[PeerCacheServer]
@@ -82,6 +126,16 @@ type
     metrics*: seq[PeerCacheMetrics]
     sims*: seq[SimPeer]
     rng*: Rand
+    options*: SimFleetOptions
+    signaturesVerified*: uint64
+      ## Peer-Cache-BearSSL M5: counts every successful real ECDSA-P256
+      ## verify the sim performs over its synthesised `AdvertiseV2`
+      ## payloads. Zero for `tmCidr` fleets.
+    signaturesRejected*: uint64
+      ## Peer-Cache-BearSSL M5: counts every ECDSA-P256 verify that
+      ## returned false. Should be zero in steady-state; the
+      ## `signatureRejections` field on `SimReport` aggregates this
+      ## alongside the per-peer metric shells.
 
   SimReport* = object
     peerCount*: int
@@ -134,22 +188,57 @@ proc defaultSimSpecs*(n: int;
       tenantId: i mod t,
       trustMode: trustMode)
 
+proc defaultSimFleetOptions*(seedsPerPeer: int = 5;
+                             seed: int64 = 0xC0FFEE;
+                             tlsEnabled: bool = false): SimFleetOptions =
+  ## Convenience builder for `SimFleetOptions`. Defaults mirror the
+  ## Peer-Cache-Scale M5 positional defaults so callers that pass
+  ## nothing get the legacy behaviour. `tlsEnabled` opts into the
+  ## real-TLS-in-process pass exercised by
+  ## `just bench-peer-cache-bearssl-tls`.
+  SimFleetOptions(
+    seedsPerPeer: seedsPerPeer,
+    seed: seed,
+    tlsEnabled: tlsEnabled)
+
 proc spawnSimFleet*(specs: seq[SimPeerSpec];
                     swimCfg: SwimConfig = defaultSwimConfig();
                     seedsPerPeer: int = 5;
-                    seed: int64 = 0xC0FFEE): Future[SimFleet] {.async.} =
+                    seed: int64 = 0xC0FFEE;
+                    options: SimFleetOptions =
+                      defaultSimFleetOptions()): Future[SimFleet] {.async.} =
   ## Allocates one `SimPeer` per spec, wires every SWIM engine in the
   ## in-process directory, and seeds the membership table with
   ## bootstrap endpoints. Returns once every engine is constructed but
   ## *not* started — the caller drives `startSwim` so tests can pre-
   ## populate state.
+  ##
+  ## Peer-Cache-BearSSL M5: when any spec declares `tmTls`, the helper
+  ## mints a fresh ECDSA-P256 keypair + self-signed cert per peer and
+  ## threads it through the `PeerCacheServer` / `PeerCacheClient`
+  ## constructors. Other peers' certs become the trust-anchor surface
+  ## (filtered by tenant). The in-process transport short-circuits
+  ## the actual TLS record layer; `tlsEnabled = true` opts into the
+  ## opt-in real-TLS-in-process pass used by the bench target.
+  ##
+  ## The `seedsPerPeer` / `seed` positional arguments are preserved for
+  ## back-compat. When `options` is passed explicitly its fields
+  ## override the positionals.
   let n = specs.len
+  var resolvedOptions = options
+  if resolvedOptions.seedsPerPeer == 0:
+    resolvedOptions.seedsPerPeer = seedsPerPeer
+  if resolvedOptions.seed == 0:
+    resolvedOptions.seed = seed
   let fleet = SimFleet(
     peers: newSeq[PeerCacheServer](n),
     clients: newSeq[PeerCacheClient](n),
     metrics: newSeq[PeerCacheMetrics](n),
     sims: newSeq[SimPeer](n),
-    rng: initRand(seed))
+    rng: initRand(resolvedOptions.seed),
+    options: resolvedOptions,
+    signaturesVerified: 0,
+    signaturesRejected: 0)
 
   # Pre-compute endpoints so the seed list can refer to any peer.
   var endpoints = newSeq[Endpoint](n)
@@ -158,12 +247,49 @@ proc spawnSimFleet*(specs: seq[SimPeerSpec];
 
   let allowlist = @[parseCidrV4(LoopbackCidr)]
 
+  # Peer-Cache-BearSSL M5: pre-mint per-peer certs for `tmTls` peers up
+  # front so each server / client constructor can be handed a populated
+  # `CertAndKey` and the anchor set is computed from the final list.
+  var keypairs = newSeq[PeerKeypair](n)
+  var certs = newSeq[CertAndKey](n)
+  for i in 0 ..< n:
+    if specs[i].trustMode == tmTls:
+      keypairs[i] = generateKeypair()
+      certs[i] = generateSelfSignedCert(keypairs[i],
+        subjectCn = $specs[i].peerId, validityDays = 365)
+
   for i in 0 ..< n:
     let spec = specs[i]
     let peerId = spec.peerId
     let endpoint = endpoints[i]
     let reg = newPeerRegistry(peerId, endpoint)
     let met = newPeerCacheMetrics()
+    # Peer-Cache-BearSSL M5: when in tmTls mode, hand the constructors
+    # a populated cert + a trust-anchor set scoped to the peer's
+    # tenant (cross-tenant peers are excluded so the isolation test
+    # still rejects across-CA traffic at the registry layer).
+    var ourCert: CertAndKey
+    var anchorSet: TrustAnchorSet
+    if spec.trustMode == tmTls:
+      ourCert = certs[i]
+      anchorSet = TrustAnchorSet(
+        byPeerId: initTable[PeerId, TrustAnchorEntry]())
+      for j in 0 ..< n:
+        if j == i: continue
+        if specs[j].trustMode != tmTls: continue
+        if specs[j].tenantId != spec.tenantId: continue
+        let otherId = specs[j].peerId
+        let entry = TrustAnchorEntry(
+          peerId: otherId,
+          publicKey: keypairs[j].publicKey,
+          certDer: certs[j].certDer,
+          certPem: certs[j].certPem,
+          notBefore: certs[j].notBefore,
+          notAfter: certs[j].notAfter,
+          subjectCn: certs[j].subjectCn,
+          subjectDn: @[],
+          isCa: false)
+        anchorSet.byPeerId[otherId] = entry
     # Server + client are constructed but not start()-ed. They carry
     # the shared `metrics` + `registry` so per-peer counter increments
     # flow through the production shell.
@@ -175,6 +301,8 @@ proc spawnSimFleet*(specs: seq[SimPeerSpec];
       cidrAllowlist = allowlist,
       capTier2 = (spec.rackId == 0),
       trustMode = spec.trustMode,
+      ourCert = ourCert,
+      trustAnchorSet = anchorSet,
       metrics = met)
     let cli = newPeerCacheClient(
       selfPeerId = peerId,
@@ -184,6 +312,8 @@ proc spawnSimFleet*(specs: seq[SimPeerSpec];
       cidrAllowlist = allowlist,
       capTier2 = (spec.rackId == 0),
       trustMode = spec.trustMode,
+      ourCert = ourCert,
+      trustAnchorSet = anchorSet,
       metrics = met)
     fleet.peers[i] = srv
     fleet.clients[i] = cli
@@ -197,7 +327,9 @@ proc spawnSimFleet*(specs: seq[SimPeerSpec];
       server: srv,
       client: cli,
       metrics: met,
-      blobs: initTable[BlobDigest, seq[byte]]())
+      blobs: initTable[BlobDigest, seq[byte]](),
+      keypair: keypairs[i],
+      cert: ourCert)
 
   # Build SWIM engines with per-peer bootstrap seed sets so the
   # membership table converges on roughly-random graph topology.
@@ -227,6 +359,53 @@ proc spawnSimFleet*(specs: seq[SimPeerSpec];
     fleet.sims[i].swim = engine
 
   return fleet
+
+# ---------------------------------------------------------------------------
+# Peer-Cache-BearSSL M5: real-TLS-in-process smoke pass.
+#
+# When `SimFleetOptions.tlsEnabled = true`, the sim driver layers this
+# helper on top of the membership + workload phases: a small (4-peer)
+# loopback fleet is spawned with real `spawnLoopbackTlsPeers` and the
+# pair runs one full TLS 1.2 mutual-auth handshake through BearSSL,
+# proving the TLS wrap doesn't break protocol-level convergence.
+#
+# The smoke pass is deliberately small. The default 200-peer pass
+# would be O(N²) real handshakes, which dwarfs the value of the sim
+# (the protocol-level convergence is what we're measuring). The smoke
+# pass documents that the real-TLS path still works end-to-end; the
+# Peer-Cache-BearSSL M3 verification tests
+# (`t_peer_cache_tls_*`) carry the full TLS-wrap coverage.
+# ---------------------------------------------------------------------------
+
+proc runTlsHandshakeSmokePass*(n: int = 4): Future[bool] {.async.} =
+  ## Spawns `n` loopback peers with real BearSSL TLS wrap and waits
+  ## for the handshake-driven membership to fill in. Returns `true`
+  ## iff every peer has reached the same-tenant view (`n - 1` peers).
+  ## Used by the demonstration driver when `--tls-enabled=true`.
+  let peers = await spawnLoopbackTlsPeers(n)
+  try:
+    for i in 0 ..< n:
+      await peers[i].client.start()
+    var settled = false
+    var waited = 0
+    while waited < 8_000:
+      try: poll(0) except ValueError: discard
+      await sleepAsync(50)
+      waited += 50
+      var ok = true
+      for peer in peers:
+        if peer.registry.peerCount() < n - 1:
+          ok = false
+          break
+      if ok:
+        settled = true
+        break
+    result = settled
+  finally:
+    for i in 0 ..< n:
+      try: await peers[i].client.stop() except CatchableError: discard
+    for peer in peers:
+      peer.server.stop()
 
 # ---------------------------------------------------------------------------
 # Lifecycle.
@@ -363,12 +542,26 @@ proc seedRandomBlobs*(fleet: SimFleet; blobsPerPeer: int;
   # every other peer's registry as if the peer had advertised the
   # snapshot. We do this in a second pass so the per-peer
   # advertisedFilter is built once with the final set.
+  #
+  # Peer-Cache-BearSSL M5: for `tmTls` peers, the advertise is
+  # accompanied by a real ECDSA-P256 signature over the canonicalised
+  # payload bytes. Every receiver verifies the signature with BearSSL
+  # before applying the advertise to its registry. This is what the
+  # M5 verification tests assert is exercised every dissemination
+  # round.
   for i in 0 ..< fleet.sims.len:
     let srcSim = fleet.sims[i]
     let srcDigests = toSeq(srcSim.blobs.keys)
     let ad = Advertise(
       sequence: 1'u64, mode: amSnapshot,
       added: srcDigests, removed: @[])
+    # Compute the v2 advertise + signature once per source peer.
+    var adV2: AdvertiseV2
+    var signature: SignatureBytes
+    if srcSim.spec.trustMode == tmTls:
+      adV2 = snapshotV2For(srcSim.registry, srcSim.peerId)
+      let msg = canonicaliseAdvertiseForSigning(srcSim.peerId, adV2)
+      signature = signMessage(srcSim.keypair, msg)
     for j in 0 ..< fleet.sims.len:
       if j == i: continue
       var dstSim = fleet.sims[j]
@@ -377,6 +570,23 @@ proc seedRandomBlobs*(fleet: SimFleet; blobsPerPeer: int;
       # tenant peers to model the isolated-CA case.
       if dstSim.spec.trustMode == tmTls and
          dstSim.spec.tenantId != srcSim.spec.tenantId:
+        continue
+      if dstSim.spec.trustMode == tmTls and
+         srcSim.spec.trustMode == tmTls:
+        let msg = canonicaliseAdvertiseForSigning(srcSim.peerId, adV2)
+        if verifySignature(srcSim.keypair.publicKey, msg, signature):
+          inc fleet.signaturesVerified
+          dstSim.registry.addPeer(srcSim.peerId, srcSim.endpoint)
+          dstSim.registry.setPeerTier2(srcSim.peerId,
+            srcSim.spec.rackId == 0)
+          dstSim.registry.applyAdvertiseV2(srcSim.peerId, adV2)
+          fleet.sims[j] = dstSim
+          if not fleet.metrics[j].isNil:
+            inc fleet.metrics[j].advertisementsReceivedTotal
+        else:
+          inc fleet.signaturesRejected
+          if not fleet.metrics[j].isNil:
+            inc fleet.metrics[j].signatureRejectionsTotal
         continue
       dstSim.registry.addPeer(srcSim.peerId, srcSim.endpoint)
       dstSim.registry.setPeerTier2(srcSim.peerId, srcSim.spec.rackId == 0)

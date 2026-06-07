@@ -186,6 +186,23 @@ bench *args:
 bench-quick:
     just bench --quick
 
+# Peer-Cache-BearSSL M5: opt-in 200-peer in-process simulation under
+# tmTls with the real BearSSL TLS 1.2 record-layer pump engaged. The
+# default sim run (no --tls-enabled) short-circuits the TLS wrap and
+# still exercises real ECDSA-P256 sign + verify on the seeded
+# AdvertiseV2 payload; this target is the explicit opt-in that pays
+# the TLS-on-self-talk cost so the wrap is verified end-to-end.
+bench-peer-cache-bearssl-tls:
+    mkdir -p bench-results test-logs build/test-bin build/nimcache
+    BEARSSL_SRC="${BEARSSL_SRC:-/tmp/m0-bearssl/nim-bearssl}" \
+    nim c -r -d:release --hints:off \
+        --nimcache:build/nimcache/repro-peer-cache-bearssl-tls \
+        --out:build/test-bin/repro_peer_cache_sim_bearssl_tls \
+        apps/repro-peer-cache-sim/repro_peer_cache_sim.nim \
+        --trust-mode=tmTls --tls-enabled=true \
+        --out=bench-results/peer-cache-bearssl-tls-demonstration.md \
+        2>&1 | tee test-logs/bench-peer-cache-bearssl-tls.log
+
 bench_reprobuild_core_mvp_performance *args:
     mkdir -p bench-results test-logs
     bash ./scripts/run-m23-benchmark.sh {{args}} 2> >(tee test-logs/bench_reprobuild_core_mvp_performance.log >&2)
