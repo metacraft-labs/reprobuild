@@ -124,6 +124,13 @@ addPackagePath("NIMCRYPTO_SRC", [
   ".." / "codetracer" / "libs" / "nimcrypto",
   ".." / "nimcrypto",
 ], "nimcrypto" / "hash.nim")
+# Peer-Cache-BearSSL M0: status-im/nim-bearssl. The package's entry module
+# is `bearssl.nim` at the repo root with submodules under `bearssl/`, so the
+# repo root itself is the path we want on --path. Marker is `bearssl.nim`.
+addPackagePath("BEARSSL_SRC", [
+  ".." / "nim-bearssl",
+  "libs" / "nim-bearssl",
+], "bearssl.nim")
 addPackagePath("RESULTS_SRC", [
   "libs" / "results" / "src",
 ], "results.nim")

@@ -60,6 +60,26 @@ checked against the remote network address from `accept` (not the
 `Hello`-announced endpoint). A small `inCidr(ip, cidr)` helper handles
 IPv4 prefix matching via integer-mask comparison.
 
+## Dependencies
+
+Peer-Cache-BearSSL M0 adopts
+[`status-im/nim-bearssl`](https://github.com/status-im/nim-bearssl) as
+a workspace dependency for the campaign that closes the M3 HMAC and
+synthetic-handshake stand-ins. The bindings are pinned in
+`flake.nix` as the `bearssl-src` input (with `?submodules=1` so the
+upstream BearSSL C csources tree comes along) and surfaced to
+`nim c` via the `BEARSSL_SRC` `addPackagePath` block in
+`config.nims`. M0 ships two smoke tests
+(`t_peer_cache_bearssl_ecdsa_smoke` and
+`t_peer_cache_bearssl_tls_context_smoke`) that exercise the signing
+and TLS-context surfaces; the M1/M2/M3 milestones consume the
+binding from `auth.nim`, `pki.nim`, and `tls.nim`. The asymmetric
+primitive is **ECDSA-P256** (not Ed25519 as originally drafted —
+BearSSL does not ship EdDSA; see the M0 smoke test header for the
+discovery notes). See
+[`Peer-Cache-BearSSL.md`](../../../reprobuild-specs/Peer-Cache-BearSSL.md)
+for the spec amendment.
+
 ## Tests
 
 Run from the repo root via `just test`. The five M0 verification tests

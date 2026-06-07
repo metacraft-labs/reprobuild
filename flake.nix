@@ -14,6 +14,12 @@
       url = "github:cheatfate/nimcrypto/69eec0375dd146aede41f920c702c531bfe89c6b";
       flake = false;
     };
+    bearssl-src = {
+      # ?submodules=1 pulls bearssl/csources (the upstream BearSSL C tree
+      # nim-bearssl wraps); without it the bindings compile but link-fail.
+      url = "github:status-im/nim-bearssl/9a4eed052abbded2d94feaf3f5bbd95a30ec4671?submodules=1";
+      flake = false;
+    };
   };
 
   outputs =
@@ -21,6 +27,7 @@
       flake-parts,
       git-hooks,
       nimcrypto-src,
+      bearssl-src,
       runquota-src,
       ...
     }:
@@ -71,6 +78,7 @@
                 }:$PATH
                 export BLAKE3_PREFIX=${blake3Prefix}
                 export NIMCRYPTO_SRC=${nimcrypto-src}
+                export BEARSSL_SRC=${bearssl-src}
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
                 export XXHASH_PREFIX=${pkgs.xxHash}
@@ -101,6 +109,7 @@
 
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
+            BEARSSL_SRC = bearssl-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             SQLITE_PREFIX = pkgs.sqlite.out;
@@ -167,6 +176,7 @@
           devShells.default = pkgs.mkShell {
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
+            BEARSSL_SRC = bearssl-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             SQLITE_PREFIX = pkgs.sqlite.out;
