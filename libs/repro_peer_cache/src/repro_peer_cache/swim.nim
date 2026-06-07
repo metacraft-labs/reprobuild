@@ -39,6 +39,7 @@ import std/[asyncdispatch, hashes, math, monotimes, random, sequtils,
             sets, tables, times]
 
 import ./codec
+import ./metrics
 import ./registry
 import ./types
 
@@ -76,6 +77,18 @@ type
       ## probed peer ID. The future is completed `true` when an ack
       ## (direct or indirect) lands; `false` on the suspect-window
       ## timeout.
+    probeOrder: seq[PeerId]
+      ## SWIM paper-style randomized round-robin: a shuffled queue of
+      ## members to probe. `probeOnce` pops the next peer from the
+      ## front; when the queue empties, it's refilled from the current
+      ## membership and reshuffled. This bounds the worst-case
+      ## detection latency for any single peer at one round-trip of
+      ## the probe period × membership size, instead of the heavy-tail
+      ## geometric distribution that purely-random selection produces.
+      ## Critical for partition recovery: without it, a survivor that
+      ## misses the suspect-gossip wave for a dead peer waits an
+      ## unbounded number of probe periods before re-rolling the dice
+      ## on that peer.
 
     # Test seams.
     dropDirectProbesFrom*: HashSet[PeerId]
@@ -108,6 +121,13 @@ type
       ## Number of `(member, status)` updates attached to outbound
       ## probe/ack frames as gossip. Compared against the standalone
       ## count by the verification test.
+
+    metrics*: PeerCacheMetrics
+      ## Peer-Cache-Scale M5: optional shared observability shell.
+      ## When non-nil, ping-send and ack-send sites bump
+      ## `swimPingsTotal` / `swimPingAcksTotal` so the metrics scrape
+      ## reflects gossip-layer activity. Tenant peers may share one
+      ## shell across server + client + SWIM engine.
 
   SwimTransport* = ref object of RootObj
     ## Abstract send surface used by the engine. The default
@@ -246,7 +266,8 @@ proc newSwimEngine*(selfPeerId: PeerId;
                     registry: PeerRegistry;
                     config: SwimConfig;
                     transport: SwimTransport = nil;
-                    seedEndpoints: openArray[Endpoint] = @[]):
+                    seedEndpoints: openArray[Endpoint] = @[];
+                    metrics: PeerCacheMetrics = nil):
                     SwimEngine =
   ## Constructs a SWIM engine. The caller wires in a `PeerRegistry`
   ## (typically the same registry the rest of the peer-cache code
@@ -265,7 +286,9 @@ proc newSwimEngine*(selfPeerId: PeerId;
     seedEndpoints: @seedEndpoints,
     gossip: @[],
     pendingProbes: initTable[PeerId, Future[bool]](),
-    dropDirectProbesFrom: initHashSet[PeerId]())
+    probeOrder: @[],
+    dropDirectProbesFrom: initHashSet[PeerId](),
+    metrics: metrics)
 
 proc transportOf(engine: SwimEngine): SwimTransport =
   engine.transport
@@ -314,9 +337,23 @@ proc enqueueGossip*(engine: SwimEngine; member: SwimMember) =
       return
   engine.gossip.add(GossipEntry(member: member, forwardCount: 0))
 
+proc gossipPriority(status: SwimMemberStatus): int =
+  ## Lower value = higher priority in gossip selection. Non-Alive
+  ## state transitions (Suspect / Confirmed) must outrun the
+  ## continuous Alive re-flood so they reach every peer before
+  ## retiring out of the buffer. Alive is the steady-state default
+  ## and is allowed to ride only after the state-change entries have
+  ## been sent.
+  case status
+  of smsSuspected: 0
+  of smsConfirmed: 0
+  of smsAlive:     1
+
 proc nextGossipBatch(engine: SwimEngine): seq[SwimMember] =
-  ## Returns up to `swimGossipMessageCap` entries with the lowest
-  ## forward counts. Increments each chosen entry's count and retires
+  ## Returns up to `swimGossipMessageCap` entries, preferring state-
+  ## change updates (Suspect/Confirmed) over Alive re-floods, and
+  ## within each priority class preferring entries with the lowest
+  ## forward count. Increments each chosen entry's count and retires
   ## any whose count crosses the per-engine max-forwards threshold.
   ##
   ## Retired entries can be re-introduced by `enqueueGossip` if a new
@@ -330,21 +367,23 @@ proc nextGossipBatch(engine: SwimEngine): seq[SwimMember] =
       engine.config.swimGossipMessageCap
     else: DefaultSwimGossipMessageCap
 
-  # Sort indices by forwardCount, breaking ties with a per-call random
-  # shuffle so multiple peers selecting from the same gossip buffer
-  # don't converge on the same 32 entries (which would starve the
-  # remaining 18 of forwarding bandwidth).
+  # Sort indices by (priority, forwardCount), breaking ties with a
+  # per-call random shuffle so multiple peers selecting from the same
+  # gossip buffer don't converge on the same 32 entries (which would
+  # starve the remaining entries of forwarding bandwidth). Suspect /
+  # Confirmed entries have priority 0 and ride before any Alive entry.
   var indices = newSeq[int](engine.gossip.len)
   for i in 0 ..< indices.len:
     indices[i] = i
   engine.rng.shuffle(indices)
-  # Stable insertion sort by forwardCount on the pre-shuffled order:
-  # the shuffle is the tie-breaker, the count is the primary key.
+  # Stable insertion sort by (priority, forwardCount) on the pre-
+  # shuffled order: the shuffle is the tie-breaker.
+  proc rankOf(eng: SwimEngine; idx: int): (int, int) =
+    let entry = eng.gossip[idx]
+    (gossipPriority(entry.member.status), entry.forwardCount)
   for i in 1 ..< indices.len:
     var j = i
-    while j > 0 and
-          engine.gossip[indices[j]].forwardCount <
-          engine.gossip[indices[j - 1]].forwardCount:
+    while j > 0 and rankOf(engine, indices[j]) < rankOf(engine, indices[j - 1]):
       let tmp = indices[j]
       indices[j] = indices[j - 1]
       indices[j - 1] = tmp
@@ -459,6 +498,8 @@ proc sendProbe(engine: SwimEngine; target: Endpoint;
   transport.sendProbe(target, payload)
   inc engine.sentDirectProbeCount
   engine.piggybackedDisseminationCount += gossip.len
+  if not engine.metrics.isNil:
+    inc engine.metrics.swimPingsTotal
 
 proc sendAck(engine: SwimEngine; target: Endpoint) =
   let gossip = engine.nextGossipBatch()
@@ -472,6 +513,8 @@ proc sendAck(engine: SwimEngine; target: Endpoint) =
   transport.sendAck(target, payload)
   inc engine.sentAckCount
   engine.piggybackedDisseminationCount += gossip.len
+  if not engine.metrics.isNil:
+    inc engine.metrics.swimPingAcksTotal
 
 proc sendProbeReq(engine: SwimEngine; intermediary: Endpoint;
                   targetPeerId: PeerId; targetEndpoint: Endpoint) =
@@ -487,6 +530,8 @@ proc sendProbeReq(engine: SwimEngine; intermediary: Endpoint;
   transport.sendProbeReq(intermediary, payload)
   inc engine.sentIndirectProbeReqCount
   engine.piggybackedDisseminationCount += gossip.len
+  if not engine.metrics.isNil:
+    inc engine.metrics.swimPingsTotal
 
 proc sendIndirectAck(engine: SwimEngine; target: Endpoint;
                      initiatorPeerId: PeerId; targetPeerId: PeerId;
@@ -503,6 +548,8 @@ proc sendIndirectAck(engine: SwimEngine; target: Endpoint;
   transport.sendIndirectAck(target, payload)
   inc engine.sentIndirectAckCount
   engine.piggybackedDisseminationCount += gossip.len
+  if not engine.metrics.isNil:
+    inc engine.metrics.swimPingAcksTotal
 
 # ---------------------------------------------------------------------------
 # Incoming handlers.
@@ -676,28 +723,38 @@ proc agedTransitions(engine: SwimEngine) =
   for peerId in toRemove:
     engine.registry.removePeer(peerId)
 
-proc chooseRandomMember(engine: SwimEngine; exclude: openArray[PeerId];
-                       suspected: var bool): PeerId =
-  ## Picks a random `Alive` member (preferred) or `Suspected` member
-  ## (fallback). Sets `suspected = true` if the choice was a
-  ## `Suspected` peer. Returns a zeroed `PeerId` if no candidates
-  ## exist.
-  var alive: seq[PeerId] = @[]
-  var susp: seq[PeerId] = @[]
+proc refillProbeOrder(engine: SwimEngine) =
+  ## Rebuilds the round-robin probe queue from the current set of
+  ## probeable members (Alive + Suspected, excluding self) and
+  ## shuffles it. Called when the queue empties — guarantees every
+  ## probeable peer gets a fresh probe inside one membership round.
+  var members: seq[PeerId] = @[]
   for peerId, entry in engine.registry.entries.pairs:
-    if peerId in exclude: continue
-    if entry.swimStatus == smsAlive:
-      alive.add(peerId)
-    elif entry.swimStatus == smsSuspected:
-      susp.add(peerId)
-  if alive.len > 0:
-    suspected = false
-    return alive[engine.rng.rand(alive.len - 1)]
-  if susp.len > 0:
-    suspected = true
-    return susp[engine.rng.rand(susp.len - 1)]
-  var zero: array[32, byte]
-  return peerIdFromBytes(zero)
+    if peerId == engine.selfPeerId: continue
+    if entry.swimStatus == smsAlive or entry.swimStatus == smsSuspected:
+      members.add(peerId)
+  engine.rng.shuffle(members)
+  engine.probeOrder = members
+
+proc nextProbeTarget(engine: SwimEngine): PeerId =
+  ## Returns the next peer to probe per the round-robin queue. Skips
+  ## entries that have left the probeable set since the queue was
+  ## built (e.g. a peer that gossip moved to Confirmed in between
+  ## rounds). Refills + reshuffles when the queue empties.
+  ## Returns a zeroed `PeerId` if no candidates exist.
+  while true:
+    if engine.probeOrder.len == 0:
+      refillProbeOrder(engine)
+    if engine.probeOrder.len == 0:
+      var zero: array[32, byte]
+      return peerIdFromBytes(zero)
+    let candidate = engine.probeOrder[engine.probeOrder.len - 1]
+    engine.probeOrder.setLen(engine.probeOrder.len - 1)
+    if candidate == engine.selfPeerId: continue
+    if not engine.registry.hasPeer(candidate): continue
+    let status = engine.registry.entries[candidate].swimStatus
+    if status != smsAlive and status != smsSuspected: continue
+    return candidate
 
 proc isZeroPeerId(peerId: PeerId): bool =
   let raw = bytes(peerId)
@@ -751,8 +808,7 @@ proc markSuspected(engine: SwimEngine; targetPeerId: PeerId;
 
 proc probeOnce(engine: SwimEngine) {.async.} =
   agedTransitions(engine)
-  var suspected: bool
-  let targetPeerId = chooseRandomMember(engine, @[engine.selfPeerId], suspected)
+  let targetPeerId = nextProbeTarget(engine)
   if isZeroPeerId(targetPeerId):
     return
   let targetEndpoint = engine.registry.endpointOf(targetPeerId)
@@ -809,6 +865,8 @@ proc bootstrap*(engine: SwimEngine) {.async.} =
     let payload = encodeSwimProbe(probe)
     transportOf(engine).sendProbe(seed, payload)
     inc engine.sentDirectProbeCount
+    if not engine.metrics.isNil:
+      inc engine.metrics.swimPingsTotal
 
 proc start*(engine: SwimEngine) =
   ## Starts the engine: registers in the in-process directory, fires

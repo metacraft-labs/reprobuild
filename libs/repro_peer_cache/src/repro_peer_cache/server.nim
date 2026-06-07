@@ -415,6 +415,8 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
         # Send the initial advertise snapshot.
         let snapshot = server.registry.snapshotFor(hello.peerId)
         await sendFrame(client, mkAdvertise, encodeAdvertise(snapshot))
+        if not server.metrics.isNil:
+          inc server.metrics.advertisementsSentTotal
       of mkAdvertise:
         if not hasRegisteredPeer:
           # Advertise before Hello — protocol violation.
@@ -524,6 +526,8 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
           let snapshot = server.registry.snapshotFor(registeredPeerId)
           await sendFrame(
             client, mkAdvertise, encodeAdvertise(snapshot))
+          if not server.metrics.isNil:
+            inc server.metrics.advertisementsSentTotal
         of wkBlobs:
           discard
       of mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,

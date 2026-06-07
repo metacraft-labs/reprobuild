@@ -19,6 +19,7 @@ import ./repro_peer_cache/loopback
 import ./repro_peer_cache/engine_seam
 import ./repro_peer_cache/disk_store
 import ./repro_peer_cache/tier2
+import ./repro_peer_cache/sim
 
 export types
 export codec
@@ -34,3 +35,4 @@ export loopback
 export engine_seam
 export disk_store
 export tier2
+export sim

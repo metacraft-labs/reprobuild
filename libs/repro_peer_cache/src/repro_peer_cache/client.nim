@@ -524,6 +524,8 @@ proc handshakePeer(client: PeerCacheClient;
   # Send our initial advertise snapshot.
   let snapshot = client.registry.snapshotFor(helloOk.peerId)
   await sendFrame(sock, mkAdvertise, encodeAdvertise(snapshot))
+  if not client.metrics.isNil:
+    inc client.metrics.advertisementsSentTotal
 
   # Read the server's initial advertise snapshot.
   let advBytes = await readFrameBytes(sock)
@@ -704,6 +706,8 @@ proc sendAdvertiseV2*(client: PeerCacheClient;
       signed.signature[i] = sig[i]
   let sock = client.connections[targetPeerId]
   await sendFrame(sock, mkAdvertiseV2, encodeAdvertiseV2(signed))
+  if not client.metrics.isNil:
+    inc client.metrics.advertisementsSentTotal
 
 proc sortTier2First*(registry: PeerRegistry;
                      candidates: seq[PeerId]): seq[PeerId] =
