@@ -59,8 +59,6 @@ import bearssl/[rand, ec, hash as bsslHash]
 import bearssl/abi/bearssl_ec as bsslEcAbi
 import bearssl/abi/bearssl_hash as bsslHashAbi
 
-import nimcrypto/sysrand
-
 import blake3
 
 import ./types
@@ -104,14 +102,6 @@ const
 
 proc hashPublicKey*(value: PublicKeyBytes): Hash =
   result = hash(@value)
-
-# ---------------------------------------------------------------------------
-# Backward-compat shim for the M3 field name. A few external callers
-# referenced `anchors.allowedKeys` — keep it readable as a property
-# alias of the new `publicKeys` field.
-# ---------------------------------------------------------------------------
-
-template allowedKeys*(a: TrustAnchors): HashSet[PublicKeyBytes] = a.publicKeys
 
 # ---------------------------------------------------------------------------
 # Hex encoding helpers (lower-case; mirrors the codec's `toHexLower`).
@@ -420,16 +410,10 @@ proc writeTrustAnchors*(path: string; anchors: TrustAnchors) =
     lines.add(toHex65(pub))
   writeFile(path, lines.join("\n") & "\n")
 
-proc writeTrustAnchors*(path: string;
-                        entries: openArray[PeerKeypair]) =
-  ## Convenience overload that takes a sequence of `PeerKeypair` and
-  ## persists just their public keys. Mirrors the M3 helper used by
-  ## verification tests + loopback fixtures — the privkeys are no
-  ## longer written (real ECDSA verifies with pub only).
-  let anchors = newTrustAnchors()
-  for entry in entries:
-    anchors.addAnchor(entry.publicKey)
-  writeTrustAnchors(path, anchors)
+# Peer-Cache-BearSSL M3: the `writeTrustAnchors(path, openArray[PeerKeypair])`
+# convenience overload (M1 fixture-compat shim) was deleted in this
+# milestone. M3 fixtures live in the cert-directory world built by
+# `pki.nim`; loopback tests cross-install per-peer `*.crt` files instead.
 
 # ---------------------------------------------------------------------------
 # Canonical advertisement bytes (the message that gets signed).
@@ -460,15 +444,6 @@ proc canonicaliseAdvertiseForSigning*(peerId: PeerId;
   for b in ad.filterBytes:
     result.add(b)
 
-# ---------------------------------------------------------------------------
-# Random challenge generation.
-# ---------------------------------------------------------------------------
-
-proc generateChallenge*(): array[32, byte] =
-  ## 32 bytes of OS entropy for use in `mkAuthChallenge`. Still backed
-  ## by the system RNG (the M3 stand-in handshake using this proc is
-  ## scheduled for deletion in M3 of this campaign).
-  let n = randomBytes(addr result[0], sizeof(result))
-  if n != sizeof(result):
-    raise newException(AuthError,
-      "OS RNG returned " & $n & " bytes, expected " & $sizeof(result))
+# Peer-Cache-BearSSL M3: `generateChallenge` (random nonce for the
+# synthetic `mkAuthChallenge` handshake) was deleted in this milestone.
+# TLS owns nonce generation under `tmTls`.

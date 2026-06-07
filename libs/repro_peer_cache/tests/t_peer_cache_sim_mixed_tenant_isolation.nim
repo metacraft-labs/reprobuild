@@ -1,6 +1,6 @@
 ## Peer-Cache-Scale M5 verification: mixed-tenant fleet stays isolated.
 ##
-## Builds a fleet of 80 `tmMtls` peers split into two tenants (40 +
+## Builds a fleet of 80 `tmTls` peers split into two tenants (40 +
 ## 40). After convergence each peer's SWIM membership view must
 ## contain only peers from its own tenant — the cross-tenant trust
 ## anchors don't overlap, so `spawnSimFleet` restricts the bootstrap
@@ -19,7 +19,7 @@ const
   ConvergenceBudgetMs = 8_000
 
 suite "peer-cache simulation mixed-tenant isolation":
-  test "tmMtls fleet keeps tenants in disjoint membership views":
+  test "tmTls fleet keeps tenants in disjoint membership views":
     var cfg = defaultSwimConfig()
     cfg.swimProbePeriodMs = ProbePeriodMs
     cfg.swimProbeTimeoutMs = 20
@@ -31,7 +31,7 @@ suite "peer-cache simulation mixed-tenant isolation":
         listenPort: 42100 + i,
         rackId: i mod 4,
         tenantId: i div PeersPerTenant,
-        trustMode: tmMtls)
+        trustMode: tmTls)
     let fleet = waitFor spawnSimFleet(specs, cfg, seedsPerPeer = 5)
     try:
       startSwim(fleet)

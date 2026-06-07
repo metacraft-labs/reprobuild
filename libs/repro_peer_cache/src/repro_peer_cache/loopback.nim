@@ -5,10 +5,11 @@
 ## CIDR allowlist of `127.0.0.0/8`. Useful for both the M0
 ## verification tests and ad-hoc smoke runs.
 
-import std/[asyncdispatch, nativesockets]
+import std/[asyncdispatch, nativesockets, os, times]
 
 import ./auth
 import ./client
+import ./pki
 import ./registry
 import ./server
 import ./swim
@@ -289,65 +290,109 @@ proc shutdownLoopbackSwimPeers*(peers: seq[LoopbackPeer]) =
       peer.swim.stop()
 
 # ---------------------------------------------------------------------------
-# Peer-Cache-Scale M3: mTLS loopback spawn helper.
+# Peer-Cache-BearSSL M3: TLS loopback spawn helper.
+#
+# Replaces the M3-era `spawnLoopbackMtlsPeers` (synthetic handshake).
+# Each peer generates a fresh ECDSA-P256 keypair, self-signs a cert
+# via `pki.generateSelfSignedCert`, and cross-installs the other peers'
+# certs into its trust-anchor directory (filtered by tenant, so the
+# isolation test can run two tenants under one helper call).
 # ---------------------------------------------------------------------------
 
 type
-  MtlsPeerSpec* = object
-    ## Per-peer mTLS configuration for `spawnLoopbackMtlsPeers`.
-    ## `keypair` is the peer's own keypair; `anchors` is the trust-
-    ## anchor table the peer uses to gate inbound + outbound peers.
-    ## When `keypair.privateKey` is all zeros, the helper generates a
-    ## fresh keypair.
-    keypair*: PeerKeypair
-    anchors*: TrustAnchors
+  LoopbackTlsOptions* = object
+    tenantId*: int
+      ## Peers with the same tenantId cross-install each other's certs;
+      ## peers from different tenants do not.
+    validityDays*: int
+      ## Forwarded to `generateSelfSignedCert`. Defaults to 365 when 0.
 
-proc spawnLoopbackMtlsPeers*(specs: openArray[MtlsPeerSpec];
-                            seedAll: bool = true): seq[LoopbackPeer] =
-  ## Spawns one peer per `specs` entry, each configured with
-  ## `trustMode = tmMtls`. Mirrors `spawnLoopbackPeers` but plumbs the
-  ## per-peer keypair + trust-anchor table through to the server +
-  ## client constructors. When `seedAll` is true (default) each peer
-  ## seeds with every other peer's endpoint (the M3 verification tests
-  ## want this all-to-all topology so they can observe which dials
-  ## succeed and which the auth handshake rejects).
-  let allowlist = @[parseCidrV4(LoopbackCidr)]
-  let n = specs.len
-  result = newSeq[LoopbackPeer](n)
-  # Phase 1: spawn every server first so endpoints are known.
+proc spawnLoopbackTlsPeers*(
+    n: int;
+    options: seq[LoopbackTlsOptions] = @[];
+    fleetTag: string = "tls"): Future[seq[LoopbackPeer]] {.async.} =
+  ## Spawns `n` peers configured for `tmTls`. Per-peer cert + key live
+  ## under a per-fleet tempdir; each peer's anchor directory contains
+  ## the certs of every other peer in the same tenant (everyone is
+  ## tenant 0 by default, so the simple "all-pairs" case works without
+  ## any options).
+  if options.len != 0 and options.len != n:
+    raise newException(ValueError,
+      "spawnLoopbackTlsPeers: options.len must equal n (got " &
+      $options.len & " vs " & $n & ")")
+  var tenants = newSeq[int](n)
+  var validity = newSeq[int](n)
   for i in 0 ..< n:
-    let peerId = makePeerId(i)
+    if options.len > 0:
+      tenants[i] = options[i].tenantId
+      validity[i] = if options[i].validityDays > 0: options[i].validityDays
+                    else: 365
+    else:
+      tenants[i] = 0
+      validity[i] = 365
+  let tmpRoot = getTempDir() / ("peer_cache_tls_loopback_" & fleetTag &
+                                "_" & $epochTime())
+  createDir(tmpRoot)
+  # Phase 0: generate per-peer certs into tmpRoot/peer-<i>/peer.crt+.key.
+  var certs = newSeq[CertAndKey](n)
+  var peerIds = newSeq[PeerId](n)
+  for i in 0 ..< n:
+    let peerDir = tmpRoot / ("peer-" & $i)
+    createDir(peerDir)
+    let kp = generateKeypair()
+    let peerId = derivePeerIdFromPublicKey(kp.publicKey)
+    peerIds[i] = peerId
+    let cnHex = $peerId
+    let cert = generateSelfSignedCert(kp, subjectCn = cnHex,
+                                       validityDays = validity[i])
+    writeCertAndKey(cert, peerDir / "peer.crt", peerDir / "peer.key")
+    certs[i] = cert
+  # Phase 1: per-peer anchor directory = certs of every same-tenant
+  # sibling (excluding self), reloaded from disk so the verifier sees
+  # the same byte representation production code does.
+  var anchorSets = newSeq[TrustAnchorSet](n)
+  for i in 0 ..< n:
+    let anchorDir = tmpRoot / ("peer-" & $i) / "anchors"
+    createDir(anchorDir)
+    for j in 0 ..< n:
+      if j == i: continue
+      if tenants[j] != tenants[i]: continue
+      writeFile(anchorDir / ("peer-" & $j & ".crt"), certs[j].certPem)
+    anchorSets[i] = loadTrustAnchorDir(anchorDir)
+  # Phase 2: spawn each server with its cert + anchor set.
+  let allowlist = @[parseCidrV4(LoopbackCidr)]
+  result = newSeq[LoopbackPeer](n)
+  for i in 0 ..< n:
     let endpoint = initEndpoint("127.0.0.1", Port(0))
-    let registry = newPeerRegistry(peerId, endpoint)
+    let registry = newPeerRegistry(peerIds[i], endpoint)
     let server = newPeerCacheServer(
-      selfPeerId = peerId,
+      selfPeerId = peerIds[i],
       listenAddr = "127.0.0.1",
       listenPort = Port(0),
       registry = registry,
       cidrAllowlist = allowlist,
-      trustMode = tmMtls,
-      keypair = specs[i].keypair,
-      trustAnchors = specs[i].anchors)
+      trustMode = tmTls,
+      ourCert = certs[i],
+      trustAnchorSet = anchorSets[i])
     server.start()
     result[i] = LoopbackPeer(
-      peerId: peerId,
+      peerId: peerIds[i],
       server: server,
       client: nil,
       registry: registry)
-  # Phase 2: spawn clients with all-to-all seed lists.
+  # Phase 3: clients with all-to-all seed lists.
   for i in 0 ..< n:
     var seeds: seq[Endpoint] = @[]
-    if seedAll:
-      for j in 0 ..< n:
-        if j == i: continue
-        seeds.add(initEndpoint("127.0.0.1", result[j].server.actualPort))
-    let client = newPeerCacheClient(
+    for j in 0 ..< n:
+      if j == i: continue
+      seeds.add(initEndpoint("127.0.0.1", result[j].server.actualPort))
+    let cli = newPeerCacheClient(
       selfPeerId = result[i].peerId,
       listenPort = uint16(result[i].server.actualPort),
       registry = result[i].registry,
       seedPeers = seeds,
       cidrAllowlist = allowlist,
-      trustMode = tmMtls,
-      keypair = specs[i].keypair,
-      trustAnchors = specs[i].anchors)
-    result[i].client = client
+      trustMode = tmTls,
+      ourCert = certs[i],
+      trustAnchorSet = anchorSets[i])
+    result[i].client = cli

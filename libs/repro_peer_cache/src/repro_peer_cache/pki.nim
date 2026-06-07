@@ -26,7 +26,8 @@
 ##     curve `prime256v1` (1.2.840.10045.3.1.7) and the 65-byte
 ##     uncompressed public point.
 ##   * Extensions: BasicConstraints (CA: false), KeyUsage
-##     (digitalSignature + keyEncipherment), SubjectAltName (DNS:peerId).
+##     (digitalSignature; `keyEncipherment` is dropped because the
+##     ECDSA-P256 cert never key-wraps), SubjectAltName (DNS:peerId).
 ##
 ## ## Signature wrap
 ##
@@ -80,6 +81,13 @@ type
     notBefore*: int64
     notAfter*: int64
     subjectCn*: string
+    subjectDn*: seq[byte]
+      ## Peer-Cache-BearSSL M3: raw DER-encoded Subject Name SEQUENCE
+      ## bytes (tag + length + content) lifted from the parsed cert.
+      ## Required because `br_x509_minimal` matches a leaf cert's
+      ## issuer DN against the trust anchor's DN byte-for-byte during
+      ## chain validation, and the M2 `parseCertDer` path didn't
+      ## surface it. See `findSubjectDn` / `loadTrustAnchorDir`.
 
   TrustAnchorSet* = object
     byPeerId*: Table[PeerId, TrustAnchorEntry]
@@ -561,6 +569,40 @@ proc readDerTlv(buf: openArray[byte]; pos: var int): (byte, int, int) =
   pos = contentStart + contentLen
   (tag, contentLen, contentStart)
 
+proc findSubjectDn*(certDer: openArray[byte]): seq[byte] =
+  ## Peer-Cache-BearSSL M3: extracts the raw DER bytes of the cert's
+  ## Subject Name SEQUENCE (tag + length + content). Returns the empty
+  ## seq if the cert doesn't parse. Used by `loadTrustAnchorDir` to
+  ## populate `TrustAnchorEntry.subjectDn` so the BearSSL X509Minimal
+  ## verifier can match a leaf's issuer DN against the anchor's DN.
+  var pos = 0
+  let (tag0, _, c0) = readDerTlv(certDer, pos)
+  if tag0 != AsnSequence:
+    return @[]
+  pos = c0
+  let (tagTbs, _, cTbs) = readDerTlv(certDer, pos)
+  if tagTbs != AsnSequence:
+    return @[]
+  pos = cTbs
+  # Skip optional [0] version.
+  if pos < certDer.len and certDer[pos] == AsnContext0Constructed:
+    discard readDerTlv(certDer, pos)
+  # Skip serial INTEGER.
+  discard readDerTlv(certDer, pos)
+  # Skip signatureAlgorithm SEQUENCE.
+  discard readDerTlv(certDer, pos)
+  # Skip Issuer Name SEQUENCE.
+  discard readDerTlv(certDer, pos)
+  # Skip Validity SEQUENCE.
+  discard readDerTlv(certDer, pos)
+  # Subject Name SEQUENCE — capture tag+length+content as a single span.
+  let subjectStart = pos
+  discard readDerTlv(certDer, pos)
+  let subjectEnd = pos
+  result = newSeq[byte](subjectEnd - subjectStart)
+  for i in 0 ..< result.len:
+    result[i] = certDer[subjectStart + i]
+
 proc findSubjectCn(certDer: openArray[byte]): string =
   ## Walks the cert DER far enough to find the subject Name and pulls
   ## the first CN attribute out. Returns `""` if not found.
@@ -785,6 +827,7 @@ proc loadTrustAnchorDir*(path: string): TrustAnchorSet =
     let der = certPemToDer(pem)
     let info = parseCertDer(der)
     let cn = findSubjectCn(der)
+    let dn = findSubjectDn(der)
     let peerId = derivePeerIdFromPublicKey(info.publicKey)
     result.byPeerId[peerId] = TrustAnchorEntry(
       peerId: peerId,
@@ -793,7 +836,8 @@ proc loadTrustAnchorDir*(path: string): TrustAnchorSet =
       certPem: pem,
       notBefore: info.notBefore,
       notAfter: info.notAfter,
-      subjectCn: cn)
+      subjectCn: cn,
+      subjectDn: dn)
 
 # ---------------------------------------------------------------------------
 # Validity-window enforcement.

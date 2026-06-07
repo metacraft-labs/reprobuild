@@ -56,8 +56,12 @@ type
     mkSwimConfirm = 14         ## Dissemination: peer X is confirmed dead.
     mkSwimRefute = 15          ## Refutation with bumped incarnation.
     mkAdvertiseV2 = 16         ## Peer-Cache-Scale M1: cuckoo-filter advertisement.
-    mkAuthChallenge = 17       ## Peer-Cache-Scale M3: mTLS handshake — random challenge + own pubkey.
-    mkAuthResponse = 18        ## Peer-Cache-Scale M3: mTLS handshake — signature over peer's challenge.
+    # Peer-Cache-BearSSL M3: the M3-era `tmMtls` synthetic handshake
+    # message kinds (`mkAuthChallenge` / `mkAuthResponse`, tags 17 / 18)
+    # were deleted in this milestone alongside the rest of the
+    # stand-in. `tmTls` runs a real BearSSL TLS 1.2 mutual-auth
+    # handshake under the framing layer; no in-protocol auth frames are
+    # carried any more.
 
   AdvertiseMode* = enum
     amSnapshot = 0
@@ -102,12 +106,12 @@ type
     ## v1 (the wire-protocol version bump from 1 to 2 indicates the
     ## payload shape change, not a semantic change).
     ##
-    ## Peer-Cache-Scale M3: the optional `signature` field carries a
-    ## detached MAC over the canonical advertisement bytes
-    ## (`auth.canonicaliseAdvertiseForSigning`). Empty for `tmCidr`
-    ## senders; non-empty for `tmMtls` senders. Decoders treat
-    ## missing-trailing-bytes as `signature = @[]` so v2 and v2+M3
-    ## peers stay codec-compatible.
+    ## Peer-Cache-BearSSL M1: the optional `signature` field carries a
+    ## detached 64-byte ECDSA-P256 signature over the canonical
+    ## advertisement bytes (`auth.canonicaliseAdvertiseForSigning`).
+    ## Empty for `tmCidr` senders; non-empty for `tmTls` senders.
+    ## Decoders treat missing-trailing-bytes as `signature = @[]` so
+    ## v2 frames from earlier milestones stay codec-compatible.
     sequence*: uint64
     mode*: AdvertiseMode
     filterCapacity*: uint32
@@ -182,29 +186,12 @@ type
     targetIncarnation*: uint64
     gossip*: seq[SwimMember]
 
-  # ---------------------------------------------------------------------------
-  # Peer-Cache-Scale M3: mTLS-equivalent in-protocol auth handshake.
-  #
-  # M3 ships a simplified handshake instead of full X.509 + OpenSSL. After TCP
-  # accept/dial, each side sends `mkAuthChallenge` (own pubkey + 32 random
-  # bytes), then `mkAuthResponse` (a detached signature over the peer's 32B
-  # challenge). Receivers verify against the trust-anchor list before any
-  # `mkHello` flow. The MAC-based "signature" primitive is implemented in
-  # `auth.nim`; the wire shape is asymmetric-crypto-compatible (a future
-  # follow-up can swap in Ed25519 without touching the framing).
-  # ---------------------------------------------------------------------------
-
-  AuthChallenge* = object
-    challengeBytes*: array[32, byte]
-    senderPubKey*: array[65, byte]
-      ## Peer-Cache-BearSSL M1: widened from 32 B to 65 B to carry the
-      ## uncompressed ECDSA-P256 public key (`0x04 || X(32) || Y(32)`).
-      ## The M3-era `tmMtls` handshake using this stand-in record is
-      ## scheduled for deletion at campaign M3.
-
-  AuthResponse* = object
-    challengeBytes*: array[32, byte]
-    signature*: array[64, byte]
+  # Peer-Cache-BearSSL M3: the M3-era `AuthChallenge` / `AuthResponse`
+  # records (synthetic-handshake stand-ins for real mTLS) were deleted in
+  # this milestone. `tmTls` wraps the TCP socket with a BearSSL TLS 1.2
+  # mutual-auth context (see `tls.nim`); peer identity is bound to the
+  # X.509 SubjectPublicKeyInfo presented during the TLS handshake, not
+  # to in-protocol auth frames.
 
 # ---------------------------------------------------------------------------
 # Equality + hashing for the distinct array types. The compiler does not
@@ -318,13 +305,27 @@ type
     pdmSwim          ## Peer-Cache-Scale M0 — SWIM gossip protocol.
 
   TrustMode* = enum
-    ## Peer-Cache-Scale M3: how the peer authenticates inbound + outbound
-    ## peers. `tmCidr` is the M0–M2 default (CIDR allowlist only);
-    ## `tmMtls` enables the in-protocol mTLS-equivalent auth handshake
-    ## + signed advertisements described in `Peer-Cache-Scale.md`
-    ## §"mTLS + signed advertisements".
+    ## Peer-Cache-BearSSL M3: how the peer authenticates inbound +
+    ## outbound peers.
+    ##
+    ## `tmCidr` (the M0-M2 default) drops the trust check at the CIDR
+    ## allowlist layer — fine for tightly controlled loopback /
+    ## intra-DC operator deployments where the network already
+    ## isolates the cluster.
+    ##
+    ## `tmTls` wraps every accept/dial with a BearSSL TLS 1.2 mutual-
+    ## auth context (see `tls.nim`) backed by the M2 self-signed
+    ## ECDSA-P256 cert primitives in `pki.nim`. The trust anchor is a
+    ## directory of allowed-peer certificates; both sides of the
+    ## handshake validate the remote leaf against that directory before
+    ## any `mkHello` frame crosses the tunnel.
+    ##
+    ## The M3-era `tmMtls` variant (a synthetic in-protocol auth-
+    ## handshake stand-in) was deleted in this milestone alongside the
+    ## stand-in primitives — see `Peer-Cache-BearSSL.milestones.org`
+    ## §M3 "Hard cutover".
     tmCidr = 0
-    tmMtls = 1
+    tmTls  = 1
 
   SwimConfig* = object
     ## Per-peer SWIM tuning. Defaults match the SWIM paper §6.3:
@@ -362,24 +363,26 @@ type
       ## Populated by callers (test fixtures + production CLI) when
       ## `discoveryMode == pdmSwim`. Other modes ignore the field.
     trustMode*: TrustMode
-      ## Peer-Cache-Scale M3: trust gating. Defaults to `tmCidr` so the
-      ## M0–M2 behaviour is preserved when callers don't initialise this
-      ## field. `tmMtls` activates the in-protocol auth handshake +
-      ## signed advertisement enforcement.
-    trustAnchorPath*: string
-      ## Peer-Cache-Scale M3: path to the trust-anchor file for
-      ## `tmMtls`. The file format is one entry per line:
-      ##   `<pubkey_hex_64>:<privkey_hex_64>`
-      ## See `auth.loadTrustAnchors` for the canonical parser. Empty
-      ## for `tmCidr`.
-    peerCertPath*: string
-      ## Peer-Cache-Scale M3: path to this peer's own public-key file.
-      ## Hex-encoded 32 bytes per line (typically one line). Created on
-      ## first start when missing.
-    peerKeyPath*: string
-      ## Peer-Cache-Scale M3: path to this peer's own private-key file.
-      ## Hex-encoded 32 bytes per line (typically one line). Created on
-      ## first start when missing.
+      ## Peer-Cache-BearSSL M3: trust gating. Defaults to `tmCidr` so
+      ## the M0-M2 behaviour is preserved when callers don't initialise
+      ## this field. `tmTls` activates the BearSSL TLS 1.2 mutual-auth
+      ## wrap (see `tls.nim`).
+    tlsCertPath*: string
+      ## Peer-Cache-BearSSL M3: path to this peer's own PEM-encoded
+      ## X.509 cert. Generated on first start under `tmTls` if missing.
+    tlsKeyPath*: string
+      ## Peer-Cache-BearSSL M3: path to this peer's own ECDSA-P256
+      ## private-key file (M1 `ecdsa-p256:<hex>` format). Generated on
+      ## first start under `tmTls` if missing.
+    tlsTrustAnchorsPath*: string
+      ## Peer-Cache-BearSSL M3: directory of PEM-encoded allowed-peer
+      ## certificates. Each `.crt` file in the directory is one trust
+      ## anchor; the parsed `TrustAnchorSet` gates inbound + outbound
+      ## TLS handshakes.
+    tlsCertValidityDays*: int
+      ## Peer-Cache-BearSSL M3: validity window stamped on a self-
+      ## signed cert generated on first start. Defaults to 365 days
+      ## when zero.
     poolMaxPerPeer*: int
       ## Peer-Cache-Scale M4: maximum number of pooled outbound
       ## connections per remote peer. Default 4 when zero. Used by the

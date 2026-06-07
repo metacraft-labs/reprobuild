@@ -16,8 +16,10 @@ import ./auth
 import ./codec
 import ./metrics
 import ./multicast
+import ./pki
 import ./registry
-import ./server  # for inAllowlist + CidrV4 + performAuthHandshake
+import ./server  # for inAllowlist + CidrV4
+import ./tls
 import ./types
 
 export metrics
@@ -124,24 +126,30 @@ type
       ## into outbound `Hello` frames so remote peers can record us
       ## as a tier-2 candidate in their registries.
     trustMode*: TrustMode
-      ## Peer-Cache-Scale M3: trust gating. `tmCidr` preserves the
-      ## M0–M2 path; `tmMtls` activates the in-protocol auth handshake.
-    keypair*: PeerKeypair
-      ## Peer-Cache-Scale M3: this client's own keypair (only used
-      ## when `trustMode == tmMtls`).
-    trustAnchors*: TrustAnchors
-      ## Peer-Cache-Scale M3: allowed remote public keys (only used
-      ## when `trustMode == tmMtls`).
+      ## Peer-Cache-BearSSL M3: trust gating. `tmCidr` preserves the
+      ## M0-M2 path; `tmTls` wraps every dial with a BearSSL TLS 1.2
+      ## mutual-auth handshake (see `tls.nim`).
+    ourCert*: CertAndKey
+      ## Peer-Cache-BearSSL M3: this client's X.509 cert + key. Only
+      ## used when `trustMode == tmTls`.
+    trustAnchorSet*: TrustAnchorSet
+      ## Peer-Cache-BearSSL M3: parsed allowed-peer cert directory.
+      ## Only used when `trustMode == tmTls`.
+    tlsConnsByPeerId*: Table[PeerId, TlsConn]
+      ## Peer-Cache-BearSSL M3: live TLS tunnels keyed by remote peer
+      ## ID. Mirror of `connections` for the `tmTls` path so callers
+      ## that send signed advertisements via `sendAdvertiseV2` can find
+      ## the active tunnel without re-keying through the socket table.
     peerKeyByPeerId*: Table[PeerId, PublicKeyBytes]
-      ## Peer-Cache-Scale M3: remembers which pubkey was presented at
-      ## handshake time per peer ID.
+      ## Peer-Cache-BearSSL M3: TLS-validated remote pubkey per peer ID.
     signatureRejectedCount*: int
       ## Peer-Cache-Scale M3: signed advertisement frames the client's
       ## receiver path rejected.
     signatureRejectedPeers: HashSet[PeerId]
-    handshakeRejectedCount*: int
-      ## Peer-Cache-Scale M3: outbound dials whose mTLS handshake the
-      ## remote (or we) rejected.
+    tlsHandshakeRejectedCount*: int
+      ## Peer-Cache-BearSSL M3: outbound dials whose TLS handshake
+      ## failed (cert not in anchors, expired, malformed, I/O,
+      ## timeout).
     pool*: PeerConnPool
       ## Peer-Cache-Scale M4: per-peer connection pool. Used by
       ## `requestFetchPooled`; the legacy long-lived `connections`
@@ -183,8 +191,8 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
                         advertiseIntervalMs: int = 5_000;
                         capTier2: bool = false;
                         trustMode: TrustMode = tmCidr;
-                        keypair: PeerKeypair = PeerKeypair();
-                        trustAnchors: TrustAnchors = nil;
+                        ourCert: CertAndKey = CertAndKey();
+                        trustAnchorSet: TrustAnchorSet = TrustAnchorSet();
                         poolMaxPerPeer: int = DefaultPoolMaxPerPeer;
                         poolIdleTimeoutMs: int = DefaultPoolIdleTimeoutMs;
                         metrics: PeerCacheMetrics = nil):
@@ -207,12 +215,13 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
     running: false,
     capTier2: capTier2,
     trustMode: trustMode,
-    keypair: keypair,
-    trustAnchors: trustAnchors,
+    ourCert: ourCert,
+    trustAnchorSet: trustAnchorSet,
+    tlsConnsByPeerId: initTable[PeerId, TlsConn](),
     peerKeyByPeerId: initTable[PeerId, PublicKeyBytes](),
     signatureRejectedCount: 0,
     signatureRejectedPeers: initHashSet[PeerId](),
-    handshakeRejectedCount: 0,
+    tlsHandshakeRejectedCount: 0,
     pool: newPeerConnPool(poolMaxPerPeer, poolIdleTimeoutMs, metrics),
     metrics: metrics)
 
@@ -491,12 +500,11 @@ proc sendFrame(sock: AsyncSocket; messageKind: MessageKind;
 
 proc handshakePeer(client: PeerCacheClient;
                    sock: AsyncSocket;
-                   endpoint: Endpoint;
-                   authenticatedPubKey: Option[PublicKeyBytes] =
-                     none(PublicKeyBytes)): Future[PeerId] {.async.} =
+                   endpoint: Endpoint): Future[PeerId] {.async.} =
   ## Sends Hello, waits for HelloOk + initial Advertise snapshot,
   ## registers the remote peer in the registry. Returns the
-  ## remote peer ID.
+  ## remote peer ID. Used on the `tmCidr` path; the TLS path uses
+  ## `handshakePeerTls` below.
   let hello = Hello(
     peerId: client.selfPeerId,
     listenPort: client.listenPort,
@@ -515,11 +523,7 @@ proc handshakePeer(client: PeerCacheClient;
       "expected mkHelloOk, got " & $helloOkFrame.messageKind)
   let helloOk = decodeHelloOk(helloOkFrame.payload)
   client.registry.addPeer(helloOk.peerId, endpoint)
-  # Peer-Cache-Scale M2: record the remote's tier-2 capability.
   client.registry.setPeerTier2(helloOk.peerId, helloOk.capTier2)
-  # Peer-Cache-Scale M3: bind the peer ID to the authenticated pubkey.
-  if authenticatedPubKey.isSome:
-    client.peerKeyByPeerId[helloOk.peerId] = authenticatedPubKey.get()
 
   # Send our initial advertise snapshot.
   let snapshot = client.registry.snapshotFor(helloOk.peerId)
@@ -570,8 +574,10 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
           decodeAdvertise(frame.payload))
       of mkAdvertiseV2:
         let ad = decodeAdvertiseV2(frame.payload)
-        # Peer-Cache-Scale M3: signed-advertisement enforcement.
-        if client.trustMode == tmMtls:
+        # Peer-Cache-BearSSL M3: signed-advertisement enforcement when
+        # `tmTls`. The pubkey was bound to `peerId` at TLS-handshake
+        # time via `peerKeyByPeerId`.
+        if client.trustMode == tmTls and ad.signature.len > 0:
           var verified = false
           if ad.signature.len == 64 and
              client.peerKeyByPeerId.hasKey(peerId):
@@ -579,7 +585,7 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
             for i in 0 ..< 64:
               sig[i] = ad.signature[i]
             let msg = canonicaliseAdvertiseForSigning(peerId, ad)
-            verified = verifySignature(client.trustAnchors,
+            verified = verifySignature(
               client.peerKeyByPeerId[peerId], msg, sig)
           if not verified:
             if peerId notin client.signatureRejectedPeers:
@@ -627,12 +633,137 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
         # peer-cache connection — they have their own transport. If
         # one shows up here, drop it.
         discard
-      of mkAuthChallenge, mkAuthResponse:
-        # Peer-Cache-Scale M3: auth-handshake frames are only valid
-        # before the post-handshake reader loop runs. Close the
-        # connection so a `tmCidr` client doesn't deadlock against a
-        # mid-stream `tmMtls` handshake retry.
+  except CatchableError:
+    discard
+
+# ---------------------------------------------------------------------------
+# Peer-Cache-BearSSL M3: TLS-side frame I/O + handshake + reader loop.
+# ---------------------------------------------------------------------------
+
+proc readFrameBytesTls(conn: TlsConn): Future[seq[byte]] {.async.} =
+  var header: string = ""
+  while header.len < 8:
+    let chunk = await tls.recv(conn, 8 - header.len)
+    if chunk.len == 0:
+      return @[]
+    header.add(chunk)
+  var bytes = newSeq[byte](8)
+  for i in 0 ..< 8:
+    bytes[i] = byte(ord(header[i]))
+  var payloadLen: uint32 = 0
+  for i in 0 ..< 4:
+    payloadLen = payloadLen or (uint32(bytes[4 + i]) shl uint32(i * 8))
+  if payloadLen > 0'u32:
+    var payload: string = ""
+    while payload.len < int(payloadLen):
+      let chunk = await tls.recv(conn, int(payloadLen) - payload.len)
+      if chunk.len == 0:
+        raise newException(PeerCacheClientError,
+          "short read on TLS peer-cache frame payload: expected " &
+          $payloadLen & ", got " & $payload.len)
+      payload.add(chunk)
+    let prefix = bytes.len
+    bytes.setLen(prefix + payload.len)
+    for i in 0 ..< payload.len:
+      bytes[prefix + i] = byte(ord(payload[i]))
+  return bytes
+
+proc sendFrameTls(conn: TlsConn; messageKind: MessageKind;
+                  payload: seq[byte]): Future[void] {.async.} =
+  let bytes = encodeFrame(messageKind, payload)
+  await tls.send(conn, bytes)
+
+proc handshakePeerTls(client: PeerCacheClient;
+                      conn: TlsConn;
+                      endpoint: Endpoint): Future[PeerId] {.async.} =
+  let hello = Hello(
+    peerId: client.selfPeerId,
+    listenPort: client.listenPort,
+    capabilities: 0'u32,
+    capTier2: client.capTier2)
+  await sendFrameTls(conn, mkHello, encodeHello(hello))
+  let helloOkBytes = await readFrameBytesTls(conn)
+  if helloOkBytes.len == 0:
+    raise newException(PeerCacheClientError,
+      "peer closed TLS tunnel before HelloOk: " & endpoint.host & ":" &
+      $endpoint.port.int)
+  let helloOkFrame = decodeFrame(helloOkBytes)
+  if helloOkFrame.messageKind != mkHelloOk:
+    raise newException(PeerCacheClientError,
+      "expected mkHelloOk over TLS, got " & $helloOkFrame.messageKind)
+  let helloOk = decodeHelloOk(helloOkFrame.payload)
+  client.registry.addPeer(helloOk.peerId, endpoint)
+  client.registry.setPeerTier2(helloOk.peerId, helloOk.capTier2)
+  # Bind the validated peer cert pubkey to the registered peer ID so
+  # subsequent signed advertisements verify against the TLS-anchored
+  # identity (not a self-asserted one).
+  let pkOpt = remotePublicKey(conn)
+  if pkOpt.isSome:
+    client.peerKeyByPeerId[helloOk.peerId] = pkOpt.get()
+  let snapshot = client.registry.snapshotFor(helloOk.peerId)
+  await sendFrameTls(conn, mkAdvertise, encodeAdvertise(snapshot))
+  if not client.metrics.isNil:
+    inc client.metrics.advertisementsSentTotal
+  let advBytes = await readFrameBytesTls(conn)
+  if advBytes.len > 0:
+    let advFrame = decodeFrame(advBytes)
+    if advFrame.messageKind == mkAdvertise:
+      let ad = decodeAdvertise(advFrame.payload)
+      client.registry.applyAdvertise(helloOk.peerId, ad)
+  return helloOk.peerId
+
+proc readerLoopTls(client: PeerCacheClient; conn: TlsConn;
+                   peerId: PeerId) {.async.} =
+  try:
+    while client.running:
+      let frameBytes = await readFrameBytesTls(conn)
+      if frameBytes.len == 0:
         break
+      let frame = decodeFrame(frameBytes)
+      case frame.messageKind
+      of mkAdvertise:
+        client.registry.applyAdvertise(peerId,
+          decodeAdvertise(frame.payload))
+      of mkAdvertiseV2:
+        let ad = decodeAdvertiseV2(frame.payload)
+        if client.trustMode == tmTls and ad.signature.len > 0:
+          var verified = false
+          if ad.signature.len == 64 and
+             client.peerKeyByPeerId.hasKey(peerId):
+            var sig: SignatureBytes
+            for i in 0 ..< 64:
+              sig[i] = ad.signature[i]
+            let msg = canonicaliseAdvertiseForSigning(peerId, ad)
+            verified = verifySignature(
+              client.peerKeyByPeerId[peerId], msg, sig)
+          if not verified:
+            if peerId notin client.signatureRejectedPeers:
+              client.signatureRejectedPeers.incl(peerId)
+              inc client.signatureRejectedCount
+            continue
+        client.registry.applyAdvertiseV2(peerId, ad)
+      of mkPing:
+        await sendFrameTls(conn, mkPong, encodePong(Pong()))
+      of mkPong:
+        client.registry.updateLastSeen(peerId)
+      of mkGoodbye:
+        break
+      of mkFetchResponse:
+        let resp = decodeFetchResponse(frame.payload)
+        if resp.truncated:
+          client.completePending(resp.digest, none(seq[byte]))
+        else:
+          let observed = blake3.digest(resp.payload)
+          let expected = bytes(resp.digest)
+          if observed != expected:
+            client.registry.markSuspect(peerId)
+            client.completePending(resp.digest, none(seq[byte]))
+          else:
+            client.completePending(resp.digest, some(resp.payload))
+      of mkWant, mkHello, mkHelloOk, mkFetchRequest,
+         mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,
+         mkSwimSuspect, mkSwimConfirm, mkSwimRefute:
+        discard
   except CatchableError:
     discard
 
@@ -641,18 +772,22 @@ proc dialPeer(client: PeerCacheClient;
   var sock = newAsyncSocket()
   try:
     await sock.connect(endpoint.host, endpoint.port)
-    # Peer-Cache-Scale M3: drive the mTLS auth handshake (when
-    # `tmMtls`) before the Hello/HelloOk flow. A `none` outcome means
-    # the remote isn't a trusted peer; close + count.
-    var authPub = none(PublicKeyBytes)
-    if client.trustMode == tmMtls:
-      authPub = await performAuthHandshake(
-        sock, client.keypair, client.trustAnchors)
-      if authPub.isNone:
-        inc client.handshakeRejectedCount
+    # Peer-Cache-BearSSL M3: when `tmTls` is active, run the TLS
+    # handshake before the Hello/HelloOk flow. On failure, close +
+    # count + return.
+    if client.trustMode == tmTls:
+      let connOpt = await wrapClientSocket(
+        sock, endpoint.host, client.ourCert, client.trustAnchorSet)
+      if connOpt.isNone:
+        inc client.tlsHandshakeRejectedCount
         try: sock.close() except CatchableError: discard
         return
-    let peerId = await handshakePeer(client, sock, endpoint, authPub)
+      let conn = connOpt.get()
+      let peerId = await handshakePeerTls(client, conn, endpoint)
+      client.tlsConnsByPeerId[peerId] = conn
+      asyncCheck readerLoopTls(client, conn, peerId)
+      return
+    let peerId = await handshakePeer(client, sock, endpoint)
     client.connections[peerId] = sock
     asyncCheck readerLoop(client, sock, peerId)
   except CatchableError:
@@ -675,9 +810,12 @@ proc sendRawFrameForTesting*(client: PeerCacheClient;
                              payload: seq[byte]): Future[void] {.async.} =
   ## Test-only seam: encode + send `messageKind` with the supplied
   ## payload bytes over the existing connection to `targetPeerId`.
-  ## The signed-advertisement verification test uses this to inject a
-  ## hand-forged signature (covering the wrong message) that the
-  ## production `sendAdvertiseV2` would never produce.
+  ## Routes through whichever transport (TCP or TLS) is live for the
+  ## remote peer.
+  if client.tlsConnsByPeerId.hasKey(targetPeerId):
+    let conn = client.tlsConnsByPeerId[targetPeerId]
+    await sendFrameTls(conn, messageKind, payload)
+    return
   if not client.connections.hasKey(targetPeerId):
     raise newException(PeerCacheClientError,
       "sendRawFrameForTesting: no live connection to target peer")
@@ -687,23 +825,28 @@ proc sendRawFrameForTesting*(client: PeerCacheClient;
 proc sendAdvertiseV2*(client: PeerCacheClient;
                      targetPeerId: PeerId;
                      ad: AdvertiseV2): Future[void] {.async.} =
-  ## Peer-Cache-Scale M3 helper: sends a signed `mkAdvertiseV2` over
+  ## Peer-Cache-BearSSL M3 helper: sends a signed `mkAdvertiseV2` over
   ## the existing connection to `targetPeerId`. The signature is
   ## computed over the canonical bytes (sender = client.selfPeerId)
-  ## using the client's keypair when `tmMtls`; for `tmCidr` the
-  ## signature is left empty so the wire shape stays backward-
-  ## compatible. Used by the M3 verification test to inject signed
-  ## advertisements without the production advertise scheduler.
-  if not client.connections.hasKey(targetPeerId):
-    raise newException(PeerCacheClientError,
-      "sendAdvertiseV2: no live connection to target peer")
+  ## using the client's TLS-bound ECDSA keypair when `tmTls`; for
+  ## `tmCidr` the signature is left empty so the wire shape stays
+  ## backward-compatible.
   var signed = ad
-  if client.trustMode == tmMtls:
+  if client.trustMode == tmTls:
     let msg = canonicaliseAdvertiseForSigning(client.selfPeerId, signed)
-    let sig = signMessage(client.keypair, msg)
+    let sig = signMessage(client.ourCert.keypair, msg)
     signed.signature = newSeq[byte](64)
     for i in 0 ..< 64:
       signed.signature[i] = sig[i]
+  if client.tlsConnsByPeerId.hasKey(targetPeerId):
+    let conn = client.tlsConnsByPeerId[targetPeerId]
+    await sendFrameTls(conn, mkAdvertiseV2, encodeAdvertiseV2(signed))
+    if not client.metrics.isNil:
+      inc client.metrics.advertisementsSentTotal
+    return
+  if not client.connections.hasKey(targetPeerId):
+    raise newException(PeerCacheClientError,
+      "sendAdvertiseV2: no live connection to target peer")
   let sock = client.connections[targetPeerId]
   await sendFrame(sock, mkAdvertiseV2, encodeAdvertiseV2(signed))
   if not client.metrics.isNil:
@@ -744,9 +887,10 @@ proc requestFetch*(client: PeerCacheClient;
   let candidates = sortTier2First(client.registry,
                                   client.registry.findPeersWithBlob(digest))
   for candidate in candidates:
-    if not client.connections.hasKey(candidate):
+    let hasTls = client.tlsConnsByPeerId.hasKey(candidate)
+    let hasTcp = client.connections.hasKey(candidate)
+    if not hasTls and not hasTcp:
       continue
-    let sock = client.connections[candidate]
     # Reuse an existing in-flight request for the same digest so
     # concurrent fetchers share one round-trip per blob.
     var fut: Future[Option[seq[byte]]]
@@ -757,7 +901,12 @@ proc requestFetch*(client: PeerCacheClient;
       client.pendingFetches[digest] = fut
       let req = FetchRequest(digest: digest)
       try:
-        await sendFrame(sock, mkFetchRequest, encodeFetchRequest(req))
+        if hasTls:
+          let conn = client.tlsConnsByPeerId[candidate]
+          await sendFrameTls(conn, mkFetchRequest, encodeFetchRequest(req))
+        else:
+          let sock = client.connections[candidate]
+          await sendFrame(sock, mkFetchRequest, encodeFetchRequest(req))
         inc client.fetchRoundTripCount
       except CatchableError:
         # Send failed — the connection is likely broken; remove the
@@ -882,6 +1031,13 @@ proc stop*(client: PeerCacheClient) {.async.} =
       discard
     try: sock.close() except CatchableError: discard
   client.connections.clear()
+  for peerId, conn in client.tlsConnsByPeerId.pairs:
+    try:
+      await sendFrameTls(conn, mkGoodbye, encodeGoodbye(Goodbye()))
+    except CatchableError:
+      discard
+    try: await tls.close(conn) except CatchableError: discard
+  client.tlsConnsByPeerId.clear()
   closeAll(client.pool)
 
 # ---------------------------------------------------------------------------

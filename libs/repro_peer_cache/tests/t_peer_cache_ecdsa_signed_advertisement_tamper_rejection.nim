@@ -1,19 +1,20 @@
-## Peer-Cache-BearSSL M1 verification: signed `AdvertiseV2` round trip
-## using real ECDSA-P256 (the M3-era HMAC stand-in has been swapped
-## out under the same wire shape).
+## Peer-Cache-BearSSL M1 verification (M3-migrated): signed
+## `AdvertiseV2` round trip using real ECDSA-P256.
 ##
-## The trust-model behaviour the M3 test exercised stays unchanged:
+## Originally landed in M1 against the M3-era `spawnLoopbackMtlsPeers`
+## fixture. M3's hard cutover deleted the synthetic-handshake fixture
+## and replaced it with `spawnLoopbackTlsPeers`; this test now exercises
+## the same per-message signature behaviour over the BearSSL TLS
+## tunnel:
+##
 ##   - A well-formed signed advertise is accepted.
 ##   - A tampered advertise (signature covers different bytes than the
 ##     ones on the wire) is rejected at verification.
 ##   - `signatureRejectedCount` increments once per peer per session
 ##     (the dedup window prevents a single misbehaving peer from
 ##     bumping the counter every frame).
-##
-## The functional shape proves the real-primitive swap doesn't break
-## the M3 trust-model wire shape; the inner crypto is now real ECDSA.
 
-import std/[asyncdispatch, os, unittest]
+import std/[asyncdispatch, os, times, unittest]
 
 import repro_peer_cache
 
@@ -46,22 +47,8 @@ proc waitForReject(server: PeerCacheServer;
 
 suite "peer-cache ECDSA-P256 signed advertisement tamper rejection":
   test "valid sig accepted; tampered sig rejected; counter de-duped":
-    let tmpDir = getTempDir() / "t_peer_cache_ecdsa_signed_ad"
-    if dirExists(tmpDir):
-      removeDir(tmpDir)
-    createDir(tmpDir)
-    defer:
-      try: removeDir(tmpDir) except CatchableError: discard
-
-    let kpA = generateKeypair()
-    let kpB = generateKeypair()
-    let anchorPath = tmpDir / "shared.anchor"
-    writeTrustAnchors(anchorPath, [kpA, kpB])
-    let anchors = loadTrustAnchors(anchorPath)
-
-    let peers = spawnLoopbackMtlsPeers(@[
-      MtlsPeerSpec(keypair: kpA, anchors: anchors),
-      MtlsPeerSpec(keypair: kpB, anchors: anchors)])
+    let peers = waitFor spawnLoopbackTlsPeers(2,
+      fleetTag = "ecdsa_tamper_" & $epochTime())
     try:
       waitFor dialAllLoopbackClients(peers)
       check waitFor1Peer(peers[0].registry, MaxWaitMs)
@@ -105,7 +92,8 @@ suite "peer-cache ECDSA-P256 signed advertisement tamper rejection":
           filterCapacity: tamperedAd.filterCapacity,
           filterCount: tamperedAd.filterCount,
           filterBytes: baseAd.filterBytes))
-      let forgedSig = signMessage(kpA, canonicalOriginal)
+      let forgedSig = signMessage(peers[0].client.ourCert.keypair,
+                                  canonicalOriginal)
       tamperedAd.signature = newSeq[byte](64)
       for i in 0 ..< 64:
         tamperedAd.signature[i] = forgedSig[i]

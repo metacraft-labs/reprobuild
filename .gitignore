@@ -24,6 +24,24 @@ libs/*/tests/t_*
 !libs/*/tests/t_*.nims
 !libs/*/tests/t_*.cfg
 
+# Stray Nim build artifacts dropped beside library source files when an
+# implementation module is compiled directly with `nim c` (e.g. `nim c
+# auth.nim` produces a `./auth` binary next to `auth.nim`). The pattern
+# excludes every file under libs/*/src/ then re-allows the source-file
+# extensions so the genuine Nim sources stay tracked.
+libs/*/src/**/*
+!libs/*/src/**/
+!libs/*/src/**/*.nim
+!libs/*/src/**/*.nims
+!libs/*/src/**/*.cfg
+
+# Same pattern for app entry points compiled in-place during local
+# iteration (e.g. `nim c apps/repro-peer-cache-sim/repro_peer_cache_sim.nim`).
+apps/*/repro_peer_cache_*
+!apps/*/repro_peer_cache_*.nim
+!apps/*/repro_peer_cache_*.nims
+!apps/*/repro_peer_cache_*.cfg
+
 test-logs/
 repomix/
 bench-results/

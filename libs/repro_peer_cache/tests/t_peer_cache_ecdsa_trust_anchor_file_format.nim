@@ -42,7 +42,10 @@ suite "peer-cache ECDSA-P256 trust-anchor file format":
     let kpA = generateKeypair()
     let kpB = generateKeypair()
     let path = tmpDir / "anchors.txt"
-    writeTrustAnchors(path, [kpA, kpB])
+    let toWrite = newTrustAnchors()
+    toWrite.addAnchor(kpA.publicKey)
+    toWrite.addAnchor(kpB.publicKey)
+    writeTrustAnchors(path, toWrite)
 
     let anchors = loadTrustAnchors(path)
     check kpA.publicKey in anchors.publicKeys
@@ -102,7 +105,10 @@ suite "peer-cache ECDSA-P256 trust-anchor file format":
     let kps = @[generateKeypair(), generateKeypair(), generateKeypair()]
     let pathA = tmpDir / "first.anchor"
     let pathB = tmpDir / "second.anchor"
-    writeTrustAnchors(pathA, kps)
+    let anchorsToWrite = newTrustAnchors()
+    for kp in kps:
+      anchorsToWrite.addAnchor(kp.publicKey)
+    writeTrustAnchors(pathA, anchorsToWrite)
     let loadedA = loadTrustAnchors(pathA)
     writeTrustAnchors(pathB, loadedA)
     let loadedB = loadTrustAnchors(pathB)

@@ -56,11 +56,11 @@ type
     tenantId*: int
       ## Per-tenant CA isolation. Two peers with the same `tenantId`
       ## share trust anchors; two peers with distinct `tenantId`s do
-      ## not. Drives `tmMtls` isolation tests.
+      ## not. Drives `tmTls` isolation tests.
     trustMode*: TrustMode
-      ## `tmCidr` for the M0 / M2-style CIDR path; `tmMtls` for the
-      ## mTLS handshake path. The simulation respects this for SWIM
-      ## membership and the simulated fetch routing.
+      ## `tmCidr` for the M0 / M2-style CIDR path; `tmTls` for the
+      ## BearSSL TLS 1.2 mutual-auth path. The simulation respects
+      ## this for SWIM membership and the simulated fetch routing.
 
   SimPeer* = object
     spec*: SimPeerSpec
@@ -122,7 +122,7 @@ proc defaultSimSpecs*(n: int;
   ## Convenience: build `n` per-peer specs partitioned across `racks`
   ## racks and `tenants` tenants in a round-robin pattern. Each
   ## peer's `trustMode` is uniform; the mixed-tenant verification test
-  ## supplies its own specs to pin `tmMtls`.
+  ## supplies its own specs to pin `tmTls`.
   result = newSeq[SimPeerSpec](n)
   let r = max(1, racks)
   let t = max(1, tenants)
@@ -206,10 +206,10 @@ proc spawnSimFleet*(specs: seq[SimPeerSpec];
     while chosen.len < min(seedsPerPeer, n - 1):
       let pick = fleet.rng.rand(n - 1)
       if pick == i: continue
-      # In `tmMtls` mode peers from a foreign tenant never accept each
+      # In `tmTls` mode peers from a foreign tenant never accept each
       # other's traffic, so we restrict the seed list to same-tenant
       # peers up front. (CIDR mode keeps the cross-tenant edges.)
-      if specs[i].trustMode == tmMtls and
+      if specs[i].trustMode == tmTls and
          specs[pick].tenantId != specs[i].tenantId:
         continue
       chosen.incl(pick)
@@ -283,7 +283,7 @@ proc waitForConvergence*(fleet: SimFleet; targetMembership: int;
   ## Polls every 100 ms until every peer's SWIM membership table has at
   ## least `targetMembership` alive members. Returns the elapsed
   ## milliseconds when the predicate holds, or `-1` if the timeout
-  ## fires first. Honours tenant isolation in `tmMtls` mode by capping
+  ## fires first. Honours tenant isolation in `tmTls` mode by capping
   ## the per-peer expectation at the tenant-local population.
   let started = getMonoTime()
   while true:
@@ -291,7 +291,7 @@ proc waitForConvergence*(fleet: SimFleet; targetMembership: int;
     for sim in fleet.sims:
       if sim.swim.isNil: continue
       let cap =
-        if sim.spec.trustMode == tmMtls:
+        if sim.spec.trustMode == tmTls:
           min(targetMembership, isolatedForTenant(fleet, sim))
         else:
           targetMembership
@@ -373,9 +373,9 @@ proc seedRandomBlobs*(fleet: SimFleet; blobsPerPeer: int;
       if j == i: continue
       var dstSim = fleet.sims[j]
       # Mirror the production-style "we know about this peer" addPeer
-      # before applying the advertise. In tmMtls mode skip across-
+      # before applying the advertise. In tmTls mode skip across-
       # tenant peers to model the isolated-CA case.
-      if dstSim.spec.trustMode == tmMtls and
+      if dstSim.spec.trustMode == tmTls and
          dstSim.spec.tenantId != srcSim.spec.tenantId:
         continue
       dstSim.registry.addPeer(srcSim.peerId, srcSim.endpoint)
@@ -406,8 +406,8 @@ proc runWorkload*(fleet: SimFleet;
       if ownerBlobs.len == 0: continue
       let digest = ownerBlobs[rng.rand(ownerBlobs.len - 1)]
       # The sim peer's registry should know about `owner` from the
-      # seed phase. Same-tenant `tmMtls` peers see each other; cross-
-      # tenant `tmMtls` peers do not — that fetch becomes a miss.
+      # seed phase. Same-tenant `tmTls` peers see each other; cross-
+      # tenant `tmTls` peers do not — that fetch becomes a miss.
       let startMs = nowMs()
       let candidates = sim.registry.findPeersWithBlob(digest)
       var found = false

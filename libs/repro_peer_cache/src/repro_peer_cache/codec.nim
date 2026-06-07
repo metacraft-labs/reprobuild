@@ -214,13 +214,13 @@ proc encodeAdvertiseV2*(msg: AdvertiseV2): seq[byte] =
   ## sender's filter state so receivers can sanity-check before
   ## deserialising.
   ##
-  ## Peer-Cache-Scale M3: the optional trailing `signature` field is
+  ## Peer-Cache-BearSSL M1: the optional trailing `signature` field is
   ## length-prefixed. A `tmCidr` sender writes a zero-length signature
-  ## (1 byte: `0x00 0x00 0x00 0x00`); a `tmMtls` sender writes the MAC
-  ## bytes produced by `auth.signMessage`. A decoder reading a frame
-  ## that lacks the trailing length prefix entirely (early v2 callers
-  ## from M1/M2 written before this milestone) interprets the missing
-  ## bytes as an empty signature.
+  ## (1 byte: `0x00 0x00 0x00 0x00`); a `tmTls` sender writes the 64-byte
+  ## ECDSA-P256 raw signature produced by `auth.signMessage`. A decoder
+  ## reading a frame that lacks the trailing length prefix entirely
+  ## (early v2 callers from M1/M2 written before this milestone)
+  ## interprets the missing bytes as an empty signature.
   result = @[]
   result.writeU64(msg.sequence)
   result.writeU8(uint8(ord(msg.mode)))
@@ -481,51 +481,10 @@ proc decodeSwimProbeAckIndirect*(data: openArray[byte]): SwimProbeAckIndirect =
 # the gossip seq. Used when a node wants to broadcast a state change
 # eagerly rather than wait for the next probe/ack round to piggyback it.
 
-proc encodeAuthChallenge*(msg: AuthChallenge): seq[byte] =
-  ## Peer-Cache-BearSSL M1 auth-handshake challenge frame. Payload shape
-  ## is 32-byte challenge || 65-byte uncompressed ECDSA-P256 pubkey =
-  ## 97 bytes (widened from the M3 stand-in's 64 bytes when the pubkey
-  ## slot grew from 32 B to 65 B). The frame is scheduled for deletion
-  ## at campaign M3 alongside the rest of the synthetic handshake.
-  result = @[]
-  for b in msg.challengeBytes:
-    result.add(b)
-  for b in msg.senderPubKey:
-    result.add(b)
-
-proc decodeAuthChallenge*(data: openArray[byte]): AuthChallenge =
-  ensureBytes(data.len, 32 + 65, "AuthChallenge payload")
-  var pos = 0
-  for i in 0 ..< 32:
-    result.challengeBytes[i] = data[pos + i]
-  inc pos, 32
-  for i in 0 ..< 65:
-    result.senderPubKey[i] = data[pos + i]
-  inc pos, 65
-  if pos != data.len:
-    raise newException(PeerCacheCodecError,
-      "trailing bytes after AuthChallenge payload: " & $(data.len - pos))
-
-proc encodeAuthResponse*(msg: AuthResponse): seq[byte] =
-  ## Peer-Cache-Scale M3 auth-handshake response frame.
-  result = @[]
-  for b in msg.challengeBytes:
-    result.add(b)
-  for b in msg.signature:
-    result.add(b)
-
-proc decodeAuthResponse*(data: openArray[byte]): AuthResponse =
-  ensureBytes(data.len, 96, "AuthResponse payload")
-  var pos = 0
-  for i in 0 ..< 32:
-    result.challengeBytes[i] = data[pos + i]
-  inc pos, 32
-  for i in 0 ..< 64:
-    result.signature[i] = data[pos + i]
-  inc pos, 64
-  if pos != data.len:
-    raise newException(PeerCacheCodecError,
-      "trailing bytes after AuthResponse payload: " & $(data.len - pos))
+# Peer-Cache-BearSSL M3: the M3-era `encodeAuthChallenge` /
+# `decodeAuthChallenge` / `encodeAuthResponse` / `decodeAuthResponse`
+# codecs were deleted in this milestone. `tmTls` carries no in-
+# protocol auth frames — TLS handshakes run below the framing layer.
 
 proc encodeSwimSuspect*(msg: SwimMember): seq[byte] =
   result = @[]
@@ -643,8 +602,6 @@ type
   SwimSuspectHandler*   = proc (msg: SwimMember)    {.gcsafe, closure.}
   SwimConfirmHandler*   = proc (msg: SwimMember)    {.gcsafe, closure.}
   SwimRefuteHandler*    = proc (msg: SwimMember)    {.gcsafe, closure.}
-  AuthChallengeHandler* = proc (msg: AuthChallenge) {.gcsafe, closure.}
-  AuthResponseHandler*  = proc (msg: AuthResponse)  {.gcsafe, closure.}
 
 proc dispatch*(frame: Frame;
                onHello: HelloHandler = nil;
@@ -663,9 +620,7 @@ proc dispatch*(frame: Frame;
                onSwimProbeAckIndirect: SwimProbeAckIndirectHandler = nil;
                onSwimSuspect: SwimSuspectHandler = nil;
                onSwimConfirm: SwimConfirmHandler = nil;
-               onSwimRefute: SwimRefuteHandler = nil;
-               onAuthChallenge: AuthChallengeHandler = nil;
-               onAuthResponse: AuthResponseHandler = nil) =
+               onSwimRefute: SwimRefuteHandler = nil) =
   ## Decodes the frame's payload to the concrete record type and invokes
   ## the matching handler. Handlers default to `nil`, in which case the
   ## frame for that kind is silently dropped — useful for the test
@@ -723,12 +678,6 @@ proc dispatch*(frame: Frame;
   of mkSwimRefute:
     if not onSwimRefute.isNil:
       onSwimRefute(decodeSwimRefute(frame.payload))
-  of mkAuthChallenge:
-    if not onAuthChallenge.isNil:
-      onAuthChallenge(decodeAuthChallenge(frame.payload))
-  of mkAuthResponse:
-    if not onAuthResponse.isNil:
-      onAuthResponse(decodeAuthResponse(frame.payload))
 
 # ---------------------------------------------------------------------------
 # Hex helpers — useful for diagnostics + test failure messages.
