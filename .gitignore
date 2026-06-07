@@ -17,6 +17,13 @@ htmldocs/
 # outside build/ during local iteration).
 *.exe
 
+# Nim test binaries produced by `nim c -r` next to the `.nim` source.
+# Matches any extension-less sibling of a tests/*.nim file.
+libs/*/tests/t_*
+!libs/*/tests/t_*.nim
+!libs/*/tests/t_*.nims
+!libs/*/tests/t_*.cfg
+
 test-logs/
 repomix/
 bench-results/
