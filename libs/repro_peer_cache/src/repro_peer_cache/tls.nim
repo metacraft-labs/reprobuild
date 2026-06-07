@@ -178,17 +178,32 @@ proc buildAnchorList(conn: TlsConn; anchors: TrustAnchorSet) =
       pubCopy[i] = entry.publicKey[i]
     conn.anchorPubkeys.add(pubCopy)
     conn.anchorList.add(X509TrustAnchor())
+  # Track each anchor's CA status alongside its dn/pubkey index so the
+  # flag-pass below can discriminate per anchor.
+  var isCaFlags = newSeq[bool](conn.anchorList.len)
+  var idx = 0
+  for _, entry in anchors.byPeerId.pairs:
+    if entry.subjectDn.len == 0 or entry.publicKey.len != P256PubLen:
+      continue
+    isCaFlags[idx] = entry.isCa
+    inc idx
   # Wire up the pointers in a second pass — the per-conn-owned buffers
   # have stable addresses now (no further `add` reallocations).
   for i in 0 ..< conn.anchorList.len:
     conn.anchorList[i].dn.data = addr conn.anchorDns[i][0]
     conn.anchorList[i].dn.len = uint(conn.anchorDns[i].len)
-    # Peer-cache anchors are *directly* trusted peer leaf certs — they
-    # are NOT CA certs (`BR_X509_TA_CA` would put them in the
-    # intermediate-issuer lookup path; clearing the bit puts them in
-    # the leaf-cert direct-trust path, which matches our self-signed
-    # per-peer cert model).
-    conn.anchorList[i].flags = 0'u32
+    # Peer-Cache-BearSSL M4: per-anchor CA flag discrimination.
+    #
+    # Direct-trust mode (M3 default): each peer's leaf cert IS its own
+    # anchor; `flags = 0` puts it in the leaf-cert direct-trust path.
+    #
+    # CA-trust mode (M4 mini-CA flow): the mini-CA cert is the anchor;
+    # peer leaf certs are NOT in the anchor set; `flags = X509_TA_CA`
+    # puts the anchor in the intermediate-issuer lookup path so the
+    # BearSSL X509Minimal verifier validates peer leaf certs against
+    # it.
+    conn.anchorList[i].flags =
+      if isCaFlags[i]: cuint(bsslX509Abi.X509_TA_CA) else: 0'u32
     conn.anchorList[i].pkey.keyType = byte(bsslX509Abi.KEYTYPE_EC)
     conn.anchorList[i].pkey.key.ec.curve = cint(bsslEcAbi.EC_secp256r1)
     conn.anchorList[i].pkey.key.ec.q = addr conn.anchorPubkeys[i][0]

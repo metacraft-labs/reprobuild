@@ -19,7 +19,6 @@ import std/[options]
 
 import ./disk_store
 import ./registry
-import ./server
 import ./types
 
 type

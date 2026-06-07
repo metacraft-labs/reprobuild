@@ -19498,7 +19498,26 @@ proc parsePeerCache*(spec: string): PeerCacheSpecResult =
     result.rawArg = spec[len("remote://") .. ^1]
     return
   if spec.startsWith("lan://"):
-    let arg = spec[len("lan://") .. ^1]
+    var arg = spec[len("lan://") .. ^1]
+    # Peer-Cache-BearSSL M4: strip an optional ``?tls=1`` query knob
+    # before parsing the CIDR + port. When present, populate the
+    # ``tlsCertPath`` / ``tlsKeyPath`` / ``tlsTrustAnchorsPath`` fields
+    # from ``XDG_STATE_HOME/repro-peer-cache/tls/`` and flip the trust
+    # mode to ``tmTls``. Any other query knob is rejected.
+    var enableTls = false
+    let queryIdx = arg.find('?')
+    if queryIdx >= 0:
+      let query = arg[queryIdx + 1 .. ^1]
+      arg = arg[0 ..< queryIdx]
+      for piece in query.split('&'):
+        case piece
+        of "tls=1":
+          enableTls = true
+        of "tls=0", "":
+          discard
+        else:
+          result.ok = false
+          return
     # ``lan://<CIDR>[:port]`` — split on the *last* colon so the CIDR
     # itself (which may contain dots and a single ``/`` for the
     # prefix length) is preserved verbatim. A trailing ``:port`` is
@@ -19531,7 +19550,7 @@ proc parsePeerCache*(spec: string): PeerCacheSpecResult =
     result.ok = true
     result.kind = pcsLan
     result.rawArg = arg
-    result.config = PeerCacheConfig(
+    var cfg = PeerCacheConfig(
       discoveryMode: pdmMulticast,
       seedPeers: @[],
       multicastGroup: MulticastGroup(
@@ -19542,6 +19561,17 @@ proc parsePeerCache*(spec: string): PeerCacheSpecResult =
       advertiseIntervalMs: DefaultAdvertiseIntervalMs,
       pingIntervalMs: DefaultPingIntervalMs,
       maxBlobBytes: DefaultMaxBlobBytes)
+    if enableTls:
+      let envState = getEnv("XDG_STATE_HOME")
+      let stateRoot =
+        if envState.len > 0: envState
+        else: getHomeDir() / ".local" / "state"
+      let tlsDir = stateRoot / "repro-peer-cache" / "tls"
+      cfg.trustMode = tmTls
+      cfg.tlsCertPath = tlsDir / "peer.crt"
+      cfg.tlsKeyPath = tlsDir / "peer.key"
+      cfg.tlsTrustAnchorsPath = tlsDir / "anchors"
+    result.config = cfg
     return
   # Unrecognised prefix.
   result.ok = false

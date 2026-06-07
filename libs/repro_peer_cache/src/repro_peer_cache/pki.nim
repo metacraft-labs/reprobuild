@@ -88,6 +88,12 @@ type
       ## issuer DN against the trust anchor's DN byte-for-byte during
       ## chain validation, and the M2 `parseCertDer` path didn't
       ## surface it. See `findSubjectDn` / `loadTrustAnchorDir`.
+    isCa*: bool
+      ## Peer-Cache-BearSSL M4: true iff this anchor cert carries
+      ## BasicConstraints `cA: TRUE`. The `buildAnchorList` in
+      ## `tls.nim` maps this to `X509_TA_CA` so the BearSSL X.509
+      ## verifier uses the anchor as an intermediate-issuer for
+      ## chain validation rather than direct-trusting it as a leaf.
 
   TrustAnchorSet* = object
     byPeerId*: Table[PeerId, TrustAnchorEntry]
@@ -310,19 +316,31 @@ proc encodeSpki(publicKey: PublicKeyBytes): seq[byte] =
 proc encodeValidity(notBefore, notAfter: int64): seq[byte] =
   result = derSequence([derUtcTime(notBefore), derUtcTime(notAfter)])
 
-proc encodeBasicConstraints(): seq[byte] =
-  ## Extension: BasicConstraints { cA: false }. Marked critical.
-  let inner = derSequence([])  # SEQUENCE { } — cA defaults to FALSE.
+proc encodeBasicConstraints(isCa: bool = false): seq[byte] =
+  ## Extension: BasicConstraints. Marked critical.
+  ## When `isCa == false` we emit an empty inner SEQUENCE so the
+  ## decoder interprets `cA` as DEFAULT FALSE; when `isCa == true`
+  ## we emit a single explicit `BOOLEAN TRUE` so BearSSL's verifier
+  ## accepts the cert as an intermediate-issuer trust anchor.
+  let inner =
+    if isCa: derSequence([derBoolean(true)])
+    else: derSequence([])
   let extnValue = derOctetString(inner)
   result = derSequence([
     derOid(OidBasicConstraints),
     derBoolean(true),    # critical
     extnValue])
 
-proc encodeKeyUsage(): seq[byte] =
-  ## Extension: KeyUsage = digitalSignature(0) + keyEncipherment(2).
-  ## BIT STRING content: 1 byte 0b10100000 = 0xA0; high bit = digitalSignature.
-  let usage = derBitString(@[0xa0'u8], unusedBits = 5)
+proc encodeKeyUsage(isCa: bool = false): seq[byte] =
+  ## Extension: KeyUsage.
+  ## - Non-CA (M2 default preserved): digitalSignature(0) +
+  ##   keyEncipherment(2). BIT STRING content: 1 byte 0b10100000 = 0xA0.
+  ## - CA: keyCertSign(5). BIT STRING content: 1 byte 0b00000100 = 0x04;
+  ##   bit 5 from the left is the keyCertSign bit.
+  let (mask, unused) =
+    if isCa: (@[0x04'u8], 2)
+    else: (@[0xa0'u8], 5)
+  let usage = derBitString(mask, unusedBits = unused)
   let extnValue = derOctetString(usage)
   result = derSequence([
     derOid(OidKeyUsage),
@@ -350,24 +368,36 @@ proc encodeSubjectAltName(dnsName: string): seq[byte] =
 proc buildTbs(serial: openArray[byte];
               subjectCn: string;
               notBefore, notAfter: int64;
-              publicKey: PublicKeyBytes): seq[byte] =
-  ## Assemble the TBSCertificate. Self-signed: issuer == subject.
+              publicKey: PublicKeyBytes;
+              isCa: bool = false;
+              issuerName: seq[byte] = @[]): seq[byte] =
+  ## Assemble the TBSCertificate.
+  ##
+  ## - For a self-signed cert, pass `issuerName = @[]` and the issuer
+  ##   defaults to the same `subjectCn`-derived Name.
+  ## - For a CA-signed peer cert, pass the CA's full Subject Name DER
+  ##   bytes (as returned by `findSubjectDn(caCertDer)`).
+  ## - `isCa = true` flips the BasicConstraints + KeyUsage extensions
+  ##   to the CA shape (cA:TRUE + keyCertSign instead of digitalSignature).
   let version = derContext(AsnContext0Constructed, derSmallInteger(2))  # v3
   let serialInt = derInteger(serial)
   let sigAlg = encodeAlgorithmEcdsaSha256()
-  let name = encodeSubjectName(subjectCn)
+  let subjectName = encodeSubjectName(subjectCn)
+  let issuer =
+    if issuerName.len == 0: subjectName
+    else: @issuerName
   let validity = encodeValidity(notBefore, notAfter)
   let spki = encodeSpki(publicKey)
 
   let extList = derSequence([
-    encodeBasicConstraints(),
-    encodeKeyUsage(),
+    encodeBasicConstraints(isCa),
+    encodeKeyUsage(isCa),
     encodeSubjectAltName(subjectCn)])
   let exts = derContext(AsnContext3Constructed, extList)
 
   result = derSequence([
     version, serialInt, sigAlg,
-    name, validity, name,
+    issuer, validity, subjectName,
     spki, exts])
 
 proc sha256Digest(msg: openArray[byte]): array[32, byte] =
@@ -478,6 +508,52 @@ proc generateSelfSignedCert*(
   let now = getTime().toUnix
   let notAfter = now + int64(validityDays) * 86_400
   result = generateSelfSignedCertWithWindow(keypair, subjectCn, now, notAfter)
+
+# ---------------------------------------------------------------------------
+# Peer-Cache-BearSSL M4: CA-flagged self-signed cert and CA-signed peer cert.
+# ---------------------------------------------------------------------------
+
+proc generateCaCertWithWindow*(
+    keypair: PeerKeypair;
+    subjectCn: string;
+    notBefore: int64;
+    notAfter: int64): CertAndKey =
+  ## Generates a self-signed X.509 v3 mini-CA cert. Differs from
+  ## `generateSelfSignedCertWithWindow` in that the BasicConstraints
+  ## extension carries `cA: TRUE` and KeyUsage carries `keyCertSign`
+  ## (instead of `digitalSignature` + `keyEncipherment`). BearSSL's
+  ## minimal X.509 verifier accepts this as a chain-validation anchor
+  ## when paired with `X509_TA_CA` in the trust-anchor flags.
+  if notAfter <= notBefore:
+    raise newException(CertParseError,
+      "CA cert validity window is empty: notBefore=" & $notBefore &
+      " notAfter=" & $notAfter)
+  let serial = randomSerial()
+  let tbs = buildTbs(serial, subjectCn, notBefore, notAfter,
+                     keypair.publicKey, isCa = true)
+  let sigDer = signTbsAsn1(keypair, tbs)
+  let sigBit = derBitString(sigDer)
+  let sigAlg = encodeAlgorithmEcdsaSha256()
+  let certDer = derSequence([tbs, sigAlg, sigBit])
+
+  result = CertAndKey(
+    keypair: keypair,
+    certPem: derToPem("CERTIFICATE", certDer),
+    certDer: certDer,
+    subjectCn: subjectCn,
+    notBefore: notBefore,
+    notAfter: notAfter)
+
+proc generateCaCert*(
+    keypair: PeerKeypair;
+    subjectCn: string;
+    validityDays: int = 365): CertAndKey =
+  let now = getTime().toUnix
+  let notAfter = now + int64(validityDays) * 86_400
+  result = generateCaCertWithWindow(keypair, subjectCn, now, notAfter)
+
+# generateCaSignedCert* lives after `findSubjectDn` because it depends
+# on issuer-name extraction from the CA's DER bytes.
 
 # ---------------------------------------------------------------------------
 # Cert parsing (round-trip + trust-anchor loading).
@@ -603,6 +679,140 @@ proc findSubjectDn*(certDer: openArray[byte]): seq[byte] =
   for i in 0 ..< result.len:
     result[i] = certDer[subjectStart + i]
 
+proc generateCaSignedCertWithWindow*(
+    peerKeypair: PeerKeypair;
+    subjectCn: string;
+    caCertDer: openArray[byte];
+    caKeypair: PeerKeypair;
+    notBefore: int64;
+    notAfter: int64): CertAndKey =
+  ## Peer-Cache-BearSSL M4: generates a peer cert whose `Issuer` Name
+  ## comes from the CA's Subject Name and whose signature is computed
+  ## using the CA's private key (not the peer's). The
+  ## SubjectPublicKeyInfo binds the peer's pubkey; BasicConstraints
+  ## carries `cA: FALSE`.
+  if notAfter <= notBefore:
+    raise newException(CertParseError,
+      "peer cert validity window is empty: notBefore=" & $notBefore &
+      " notAfter=" & $notAfter)
+  let issuerDn = findSubjectDn(caCertDer)
+  if issuerDn.len == 0:
+    raise newException(CertParseError,
+      "CA cert subject DN could not be extracted")
+  let serial = randomSerial()
+  let tbs = buildTbs(serial, subjectCn, notBefore, notAfter,
+                     peerKeypair.publicKey, isCa = false,
+                     issuerName = issuerDn)
+  let sigDer = signTbsAsn1(caKeypair, tbs)
+  let sigBit = derBitString(sigDer)
+  let sigAlg = encodeAlgorithmEcdsaSha256()
+  let certDer = derSequence([tbs, sigAlg, sigBit])
+
+  result = CertAndKey(
+    keypair: peerKeypair,
+    certPem: derToPem("CERTIFICATE", certDer),
+    certDer: certDer,
+    subjectCn: subjectCn,
+    notBefore: notBefore,
+    notAfter: notAfter)
+
+proc generateCaSignedCert*(
+    peerKeypair: PeerKeypair;
+    subjectCn: string;
+    caCertDer: openArray[byte];
+    caKeypair: PeerKeypair;
+    validityDays: int = 365): CertAndKey =
+  let now = getTime().toUnix
+  let notAfter = now + int64(validityDays) * 86_400
+  result = generateCaSignedCertWithWindow(peerKeypair, subjectCn,
+                                          caCertDer, caKeypair,
+                                          now, notAfter)
+
+proc findIsCa*(certDer: openArray[byte]): bool =
+  ## Peer-Cache-BearSSL M4: walks the cert TBS far enough to find the
+  ## v3 extensions block and returns `true` iff the cert carries a
+  ## BasicConstraints extension with `cA: TRUE`. Returns `false` if
+  ## no BasicConstraints extension is present or `cA` is absent /
+  ## explicitly FALSE.
+  result = false
+  var pos = 0
+  let (tag0, _, c0) = readDerTlv(certDer, pos)
+  if tag0 != AsnSequence:
+    return
+  pos = c0
+  let (tagTbs, _, cTbs) = readDerTlv(certDer, pos)
+  if tagTbs != AsnSequence:
+    return
+  let tbsEnd = pos
+  pos = cTbs
+  # Skip optional [0] version.
+  if pos < certDer.len and certDer[pos] == AsnContext0Constructed:
+    discard readDerTlv(certDer, pos)
+  # Skip serial INTEGER.
+  discard readDerTlv(certDer, pos)
+  # Skip signatureAlgorithm SEQUENCE.
+  discard readDerTlv(certDer, pos)
+  # Skip Issuer Name SEQUENCE.
+  discard readDerTlv(certDer, pos)
+  # Skip Validity SEQUENCE.
+  discard readDerTlv(certDer, pos)
+  # Skip Subject Name SEQUENCE.
+  discard readDerTlv(certDer, pos)
+  # Skip SubjectPublicKeyInfo SEQUENCE.
+  discard readDerTlv(certDer, pos)
+  # Walk remaining children, looking for the [3] EXPLICIT extensions
+  # block.
+  while pos < tbsEnd:
+    let extsStart = pos
+    let (tag, _, cExt) = readDerTlv(certDer, pos)
+    if tag != AsnContext3Constructed:
+      discard extsStart
+      continue
+    # [3] EXPLICIT — inner is a SEQUENCE OF Extension.
+    var inner = cExt
+    let (innerTag, _, innerStart) = readDerTlv(certDer, inner)
+    if innerTag != AsnSequence:
+      return
+    var extPos = innerStart
+    let extEnd = inner
+    while extPos < extEnd:
+      let (extTag, _, extStart) = readDerTlv(certDer, extPos)
+      if extTag != AsnSequence:
+        continue
+      var fields = extStart
+      let (oidTag, oidLen, oidStart) = readDerTlv(certDer, fields)
+      if oidTag != AsnOid:
+        continue
+      # BasicConstraints OID = 2.5.29.19 -> DER `55 1d 13`.
+      if oidLen == 3 and certDer[oidStart] == 0x55'u8 and
+         certDer[oidStart + 1] == 0x1d'u8 and
+         certDer[oidStart + 2] == 0x13'u8:
+        # Optional critical BOOLEAN may precede the extnValue
+        # OCTET STRING. Peek at the next tag.
+        if fields < extPos and certDer[fields] == AsnBoolean:
+          discard readDerTlv(certDer, fields)
+        if fields >= extPos:
+          return
+        # extnValue OCTET STRING.
+        let (octTag, _, octStart) = readDerTlv(certDer, fields)
+        if octTag != AsnOctetString:
+          return
+        # Inner BasicConstraints SEQUENCE.
+        var inner2 = octStart
+        let (bcTag, bcLen, bcStart) = readDerTlv(certDer, inner2)
+        if bcTag != AsnSequence:
+          return
+        if bcLen == 0:
+          return  # cA defaulted to FALSE
+        # First child should be the cA BOOLEAN (or pathLenConstraint).
+        var bcFields = bcStart
+        let (boolTag, boolLen, boolStart) = readDerTlv(certDer, bcFields)
+        if boolTag == AsnBoolean and boolLen >= 1:
+          result = certDer[boolStart] != 0
+        return
+      discard extEnd
+    return
+
 proc findSubjectCn(certDer: openArray[byte]): string =
   ## Walks the cert DER far enough to find the subject Name and pulls
   ## the first CN attribute out. Returns `""` if not found.
@@ -669,6 +879,79 @@ proc findSubjectCn(certDer: openArray[byte]): string =
 # and the signature BIT STRING content, then call
 # `ecdsaVrfyAsn1GetDefault`.
 # ---------------------------------------------------------------------------
+
+proc verifyCertSignatureWith*(certDer: openArray[byte];
+                              signerPubKey: PublicKeyBytes): bool =
+  ## Peer-Cache-BearSSL M4: returns `true` iff the outer signature on
+  ## `certDer` verifies under `signerPubKey`. Used for chain
+  ## validation: pass the CA's pubkey to verify that a peer cert was
+  ## signed by the CA. (The self-signed case is the special form where
+  ## `signerPubKey == SPKI(certDer)`.)
+  var pos = 0
+  let (outerTag, _, outerStart) = readDerTlv(certDer, pos)
+  if outerTag != AsnSequence:
+    return false
+  var inner = outerStart
+  let tbsStart = inner
+  let (tbsTag, _, _) = readDerTlv(certDer, inner)
+  if tbsTag != AsnSequence:
+    return false
+  let tbsEnd = inner
+  let tbsLen = tbsEnd - tbsStart
+  discard readDerTlv(certDer, inner)  # skip sigAlgorithm
+  let (sigTag, sigLen, sigStart) = readDerTlv(certDer, inner)
+  if sigTag != AsnBitString or sigLen < 1:
+    return false
+  if certDer[sigStart] != 0:
+    return false
+  let sigDerLen = sigLen - 1
+  if sigDerLen <= 0:
+    return false
+  var tbsBytes = newSeq[byte](tbsLen)
+  for i in 0 ..< tbsLen:
+    tbsBytes[i] = certDer[tbsStart + i]
+  let tbsHash = sha256Digest(tbsBytes)
+  var pkBytes: array[P256PubLen, byte]
+  for i in 0 ..< P256PubLen:
+    pkBytes[i] = signerPubKey[i]
+  var pk: bsslEcAbi.EcPublicKey
+  pk.curve = cint(bsslEcAbi.EC_secp256r1)
+  pk.q = addr pkBytes[0]
+  pk.qlen = uint(P256PubLen)
+  let ecImpl = bsslEcAbi.ecGetDefault()
+  let verifier = bsslEcAbi.ecdsaVrfyAsn1GetDefault()
+  var sigBytes = newSeq[byte](sigDerLen)
+  for i in 0 ..< sigDerLen:
+    sigBytes[i] = certDer[sigStart + 1 + i]
+  var hashBuf: array[32, byte]
+  for i in 0 ..< 32:
+    hashBuf[i] = tbsHash[i]
+  let ok = verifier(ecImpl, addr hashBuf[0], csize_t(hashBuf.len),
+                    addr pk, addr sigBytes[0], csize_t(sigBytes.len))
+  result = ok == 1'u32
+
+proc findIssuerDn*(certDer: openArray[byte]): seq[byte] =
+  ## Returns the raw DER bytes (tag + length + content) of the cert's
+  ## Issuer Name SEQUENCE.
+  var pos = 0
+  let (tag0, _, c0) = readDerTlv(certDer, pos)
+  if tag0 != AsnSequence:
+    return @[]
+  pos = c0
+  let (tagTbs, _, cTbs) = readDerTlv(certDer, pos)
+  if tagTbs != AsnSequence:
+    return @[]
+  pos = cTbs
+  if pos < certDer.len and certDer[pos] == AsnContext0Constructed:
+    discard readDerTlv(certDer, pos)
+  discard readDerTlv(certDer, pos)  # serial
+  discard readDerTlv(certDer, pos)  # sigAlg
+  let issuerStart = pos
+  discard readDerTlv(certDer, pos)  # Issuer Name
+  let issuerEnd = pos
+  result = newSeq[byte](issuerEnd - issuerStart)
+  for i in 0 ..< result.len:
+    result[i] = certDer[issuerStart + i]
 
 proc verifyCertSelfSignature*(der: openArray[byte]): bool =
   ## Returns true iff the outer signature on `der` verifies under the
@@ -828,6 +1111,7 @@ proc loadTrustAnchorDir*(path: string): TrustAnchorSet =
     let info = parseCertDer(der)
     let cn = findSubjectCn(der)
     let dn = findSubjectDn(der)
+    let isCa = findIsCa(der)
     let peerId = derivePeerIdFromPublicKey(info.publicKey)
     result.byPeerId[peerId] = TrustAnchorEntry(
       peerId: peerId,
@@ -837,7 +1121,8 @@ proc loadTrustAnchorDir*(path: string): TrustAnchorSet =
       notBefore: info.notBefore,
       notAfter: info.notAfter,
       subjectCn: cn,
-      subjectDn: dn)
+      subjectDn: dn,
+      isCa: isCa)
 
 # ---------------------------------------------------------------------------
 # Validity-window enforcement.
