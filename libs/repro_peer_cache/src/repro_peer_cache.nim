@@ -11,6 +11,7 @@ import ./repro_peer_cache/cuckoo
 import ./repro_peer_cache/multicast
 import ./repro_peer_cache/registry
 import ./repro_peer_cache/auth
+import ./repro_peer_cache/pki
 import ./repro_peer_cache/metrics
 import ./repro_peer_cache/server
 import ./repro_peer_cache/client
@@ -27,6 +28,7 @@ export cuckoo
 export multicast
 export registry
 export auth
+export pki
 export metrics
 export server
 export client
