@@ -6,10 +6,61 @@
 ## existing Scoop install is required (real binary requirement) — but
 ## $env:SCOOP redirects every state change into the test temp dir.
 
-import std/[json, os, osproc, sequtils, strutils]
+import std/[exitprocs, json, os, osproc, sequtils, strutils]
 
 import repro_interface_artifacts
 import repro_tool_profiles
+
+when defined(windows):
+  # When the test runs real `scoop install`, scoop itself adds
+  # `<$env:SCOOP>\shims` to HKCU\Environment\Path via Win32
+  # SetEnvironmentVariable — bypassing the REPRO_REGISTRY_ROOT
+  # registry driver completely. This leak does not go through any
+  # reprobuild driver we control, so the cleanup has to live in the
+  # test harness itself.
+  #
+  # Strategy: on the FIRST call to setupScoopSandbox in a given test
+  # process, snapshot HKCU\Environment\Path verbatim. Register an
+  # addExitProc that writes that exact snapshot back when the test
+  # process exits. Subsequent setupScoopSandbox calls re-use the
+  # original snapshot — they don't reset the baseline mid-suite.
+  #
+  # This restores the pre-test PATH byte-for-byte regardless of how
+  # many entries scoop accumulated, and it survives test failures
+  # (Nim's exitprocs fire on normal exits, panics from raised
+  # exceptions in unittest, AND `quit()` calls).
+  var gHkcuPathSnapshot: string = ""
+  var gHkcuPathSnapshotted: bool = false
+
+  proc snapshotAndRegisterHkcuRestore() =
+    if gHkcuPathSnapshotted: return
+    gHkcuPathSnapshotted = true
+    let readPs = "[Environment]::GetEnvironmentVariable('Path', 'User')"
+    let r = execCmdEx("pwsh -NoProfile -NoLogo -Command \"" & readPs & "\"")
+    if r.exitCode == 0:
+      gHkcuPathSnapshot = r.output.strip()
+    addExitProc(proc() =
+      # Round-trip through a per-process pair of temp files because:
+      #   1. The snapshot may be many KB; inlining it into the pwsh
+      #      `-Command` argument fails when cmd.exe interprets the
+      #      semicolons inside the double-quoted argument as statement
+      #      separators (observed empirically on Windows 11 26200).
+      #   2. The PS1 file reads the snapshot via
+      #      [System.IO.File]::ReadAllText which preserves the
+      #      semicolons byte-exact.
+      try:
+        let tempDir = getEnv("TEMP", "C:\\Windows\\Temp")
+        let snapPath = tempDir / "repro-hkcu-snapshot.txt"
+        let scriptPath = tempDir / "repro-hkcu-restore.ps1"
+        writeFile(snapPath, gHkcuPathSnapshot)
+        writeFile(scriptPath,
+          "[Environment]::SetEnvironmentVariable('Path', " &
+          "[System.IO.File]::ReadAllText('" &
+          snapPath.replace("\\", "\\\\") & "'), 'User')")
+        discard execCmdEx("pwsh -NoProfile -NoLogo -File \"" &
+                          scriptPath & "\"")
+      except CatchableError: discard
+    )
 
 proc deleteJunctionsRec*(root: string) =
   ## Walks a tree and removes every directory entry that is a junction
@@ -130,6 +181,14 @@ proc setupScoopSandbox*(tempRoot, bucketName: string): ScoopSandbox =
   # each read/write/delete; subprocesses inherit it from this process.
   # See project memory: reprobuild user PATH pollution (2026-06-06).
   putEnv("REPRO_REGISTRY_ROOT", tempRoot / "registry")
+  when defined(windows):
+    # Real `scoop install` (triggered by `repro home apply` resolving
+    # a not-yet-installed scoop package) bypasses our registry driver
+    # and writes `<sandbox>\shims` straight to HKCU\Environment\Path
+    # via Win32. Snapshot+restore HKCU on test process exit to undo
+    # whatever scoop accumulates regardless of how many sandboxes the
+    # suite created.
+    snapshotAndRegisterHkcuRestore()
 
 proc populateScoopApp*(sandbox: ScoopSandbox; app, version, executableName,
                       executablePayload: string): ScoopFixtureApp =
