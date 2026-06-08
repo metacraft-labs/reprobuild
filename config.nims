@@ -2,9 +2,16 @@ import std/[os, strutils]
 
 switch("styleCheck", "hint")
 
-# Test-Edges-And-Parallel-Runner M1: ``repro.nim`` includes the
-# generated ``repro.tests.nim`` whose entries call
-# ``buildNimUnittest.build(...)`` from the codetracer-side
+# Project-DSL-Composition M6: ``repro.nim`` ``import``s the generated
+# ``repro_tests.nim`` (data table of declared test edges) that lives
+# alongside it at the repo root. Adding ``.`` to ``--path`` lets
+# library-local tests in ``libs/*/tests/`` also import the table for
+# the M6 smoke check.
+switch("path", ".")
+
+# Test-Edges-And-Parallel-Runner M1: ``repro.nim`` consumes the
+# generated ``repro_tests.nim`` whose data entries each become a
+# ``buildNimUnittest.build(...)`` call from the codetracer-side
 # ``ct_test_nim_unittest`` adapter. The adapter re-exports
 # ``ct_test_interface`` so both module paths land on ``--path``.
 let ctTestRoot = block:

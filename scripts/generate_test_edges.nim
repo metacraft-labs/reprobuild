@@ -1,17 +1,16 @@
 ## generate_test_edges.nim — discover Nim test files and emit
-## ``repro.tests.nim`` so each test becomes a declared typed-output
-## build edge instead of a ``find`` + ``nim c -r`` shell loop entry.
+## ``repro_tests.nim`` as a normal Nim module exporting a
+## ``reprobuildTestSpecs*`` const table. ``repro.nim`` imports the
+## module and iterates the table inside its ``build:`` block, calling
+## ``buildNimUnittest.build(...)`` for each entry — the Project-DSL-
+## Composition M6 migration shape (Approach A: data + iteration).
 ##
 ## Run from the repo root::
 ##
 ##   nim r scripts/generate_test_edges.nim
 ##
-## The output (``repro.tests.nim``) is checked into git so the diff is
-## review-visible.  ``repro.nim`` ``include``s the file inside its
-## ``package reprobuild:`` body; the include lands inside a ``build:``
-## block emitted by this generator so the typed-tool calls land in the
-## right macro-collection scope (see ``macros_b.nim``'s
-## ``collectBuildStatements``).
+## The output (``repro_tests.nim``) is checked into git so the diff is
+## review-visible.
 ##
 ## Idempotency: a second invocation against the same source tree
 ## produces byte-identical output. The discovered file list is sorted
@@ -23,13 +22,23 @@
 ## A small number of tests need ``--define:reproProviderMode`` at
 ## compile time. The ``ct_test_nim_unittest`` adapter's ``cli:`` block
 ## accepts a ``defines: seq[string]`` parameter (Test-Edges M2), so the
-## generator emits the define directly in the typed-tool call for the
-## affected tests — no path-based shell carry-forward needed.
+## generator emits the define directly in each ``TestSpec`` entry's
+## ``defines`` field — no path-based shell carry-forward needed.
+##
+## Migration history (M6)
+## ----------------------
+## Before M6 this generator emitted a ``build:`` block directly, which
+## was ``include``-d into ``repro.nim`` inside its ``package reprobuild:``
+## body. The package macro's ``collectBuildStatements`` did not see
+## through ``include`` nodes, so ``repro build test`` saw no edges.
+## Project-DSL-Composition M5 added the active-build-context handle and
+## confirmed that ``for`` loops survive inside ``build:``; this generator
+## now emits a data table and iteration happens at the call site.
 
-import std/[algorithm, os, sequtils, strutils, sets]
+import std/[algorithm, os, strutils, sets]
 
 const
-  GeneratedFile = "repro.tests.nim"
+  GeneratedFile = "repro_tests.nim"
   BinaryRoot = "build/test-bin"
 
 type
@@ -154,51 +163,52 @@ proc render(edges: seq[TestEdge]): string =
     "do not edit by hand.\n")
   result.add("# Regenerate with: nim r scripts/generate_test_edges.nim\n")
   result.add("#\n")
-  result.add("# Each block declares one Nim unittest test binary as a " &
-    "typed-output\n")
-  result.add("# build edge. ``buildNimUnittest.build(...)`` is supplied " &
-    "by\n")
-  result.add("# ``ct_test_nim_unittest`` (the framework adapter at\n")
-  result.add("# ``../ct-test/libs/ct_test_nim_unittest/``); the let-binding\n")
-  result.add("# captures the returned ``BuildNimUnittestBuildEdge`` so the " &
-    "aggregate\n")
-  result.add("# ``test`` target at the bottom can reference every edge's " &
-    "action id.\n")
+  result.add("# This module is a plain Nim module exporting a single const,\n")
+  result.add("# ``reprobuildTestSpecs*``: a ``seq[TestSpec]`` table of every\n")
+  result.add("# discovered Nim ``unittest`` test binary in the repository.\n")
   result.add("#\n")
-  result.add("# Tests that need ``--define:reproProviderMode`` at compile " &
-    "time\n")
-  result.add("# pass it through the ``defines`` parameter on " &
-    "``buildNimUnittest.build``.\n")
-  result.add("# The adapter wires each entry as ``--define:<name>`` on the " &
-    "underlying\n")
-  result.add("# ``nim c`` invocation, so the build is fully routed through " &
-    "the\n")
-  result.add("# typed-output edge graph (no path-based shell carry-forward " &
-    "needed).\n")
+  result.add("# ``repro.nim`` ``import``s this module and iterates the table\n")
+  result.add("# inside its ``package reprobuild: build:`` block, calling\n")
+  result.add("# ``buildNimUnittest.build(...)`` once per spec. The returned\n")
+  result.add("# build-edge actions are then aggregated into the ``test``\n")
+  result.add("# target so ``repro build test`` schedules every test-binary\n")
+  result.add("# compilation in one engine pass.\n")
+  result.add("#\n")
+  result.add("# Tests that need ``--define:reproProviderMode`` at compile\n")
+  result.add("# time carry the define in their ``TestSpec.defines`` field.\n")
+  result.add("# The adapter wires each entry as ``--define:<name>`` on the\n")
+  result.add("# underlying ``nim c`` invocation, so the build is fully routed\n")
+  result.add("# through the typed-output edge graph (no path-based shell\n")
+  result.add("# carry-forward needed).\n")
+  result.add("#\n")
+  result.add("# Project-DSL-Composition M6 migration: the previous shape\n")
+  result.add("# emitted a ``build:`` block ``include``-d from ``repro.nim``,\n")
+  result.add("# which the package macro silently dropped. The data-table\n")
+  result.add("# shape lifts the registration into the caller, so the macro\n")
+  result.add("# sees every typed-tool call.\n")
   result.add("\n")
-  result.add("build:\n")
-  for edge in edges:
-    result.add("  let " & edge.identName &
-      " = buildNimUnittest.build(\n")
-    result.add("    source = \"" & edge.source & "\",\n")
-    if edge.needsProviderMode:
-      result.add("    binary = \"" & edge.binary & "\",\n")
-      result.add("    defines = @[\"reproProviderMode\"])\n")
-    else:
-      result.add("    binary = \"" & edge.binary & "\")\n")
-    result.add("\n")
-
-  result.add("  # Aggregate ``test`` target — `repro build test` selects " &
-    "every\n")
-  result.add("  # declared test edge in one engine pass. Each entry is " &
-    "the edge's\n")
-  result.add("  # ``.action`` field (the engine-side ``BuildActionDef`` " &
-    "handle).\n")
-  result.add("  discard aggregate(\"test\", @[\n")
+  result.add("type\n")
+  result.add("  TestSpec* = object\n")
+  result.add("    ## One row of the test-suite table. ``source`` is the\n")
+  result.add("    ## repo-relative path to the ``.nim`` test file;\n")
+  result.add("    ## ``binary`` is the repo-relative output binary path;\n")
+  result.add("    ## ``defines`` is the per-test ``-d:`` flag list passed\n")
+  result.add("    ## through to ``buildNimUnittest.build``.\n")
+  result.add("    source*: string\n")
+  result.add("    binary*: string\n")
+  result.add("    defines*: seq[string]\n")
+  result.add("\n")
+  result.add("const reprobuildTestSpecs*: seq[TestSpec] = @[\n")
   for i, edge in edges:
     let sep = if i == edges.high: "" else: ","
-    result.add("    " & edge.identName & ".action" & sep & "\n")
-  result.add("  ])\n")
+    result.add("  TestSpec(\n")
+    result.add("    source: \"" & edge.source & "\",\n")
+    result.add("    binary: \"" & edge.binary & "\",\n")
+    if edge.needsProviderMode:
+      result.add("    defines: @[\"reproProviderMode\"])" & sep & "\n")
+    else:
+      result.add("    defines: @[])" & sep & "\n")
+  result.add("]\n")
 
 proc main() =
   let repoRoot = getCurrentDir()
