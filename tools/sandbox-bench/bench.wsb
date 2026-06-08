@@ -1,0 +1,54 @@
+<Configuration>
+  <!--
+    Sandbox-bench harness - Windows Sandbox config for measuring
+    per-test-suite overhead vs bare-host runs. Modelled on
+    tools/sandbox-migration/migration.wsb but stripped to the
+    minimum needed to run a pre-built nim test exe:
+
+      - the test binary directory (build/test-bin)
+      - the production repro binary directory (build/bin) so any
+        subprocess apply has repro.exe + sqlite3_64.dll on hand
+      - vcruntime DLLs (mandatory: a pristine Windows Sandbox image
+        ships without the VC++ 2015-2022 runtime; mingw-gcc-built
+        nim exes need msvcp140 et al. to LoadLibrary correctly)
+      - the bench provision script
+      - the writable OUTPUT directory
+
+    Nothing else is needed because the bench runs a PRE-BUILT exe,
+    so the dev shell and the Nim/gcc toolchain stay on the host.
+  -->
+  <VGpu>Disable</VGpu>
+  <Networking>Disable</Networking>
+  <MemoryInMB>4096</MemoryInMB>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\build\test-bin</HostFolder>
+      <SandboxFolder>C:\harness\test-bin</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\build\bin</HostFolder>
+      <SandboxFolder>C:\harness\repro-bin</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\tools\sandbox-migration\vcruntime</HostFolder>
+      <SandboxFolder>C:\harness\vcruntime</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>D:\metacraft\reprobuild\tools\sandbox-bench</HostFolder>
+      <SandboxFolder>C:\harness\scripts</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>D:\metacraft\sandbox-bench-out</HostFolder>
+      <SandboxFolder>C:\harness\out</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+
+  <LogonCommand>
+    <Command>cmd.exe /c "echo logon-fired %DATE% %TIME% &gt; C:\harness\out\_logon-heartbeat.txt &amp; copy /Y C:\harness\scripts\provision-and-bench.ps1 C:\provision-and-bench.ps1 &gt;&gt; C:\harness\out\_logon-heartbeat.txt 2&gt;&amp;1 &amp; powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\provision-and-bench.ps1 &gt; C:\harness\out\_logon-powershell.log 2&gt;&amp;1"</Command>
+  </LogonCommand>
+</Configuration>
