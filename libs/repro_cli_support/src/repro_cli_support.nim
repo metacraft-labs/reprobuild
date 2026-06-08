@@ -7720,7 +7720,14 @@ const
     "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
     "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
     "REPROBUILD_AUTO_RUNQUOTA",
-    "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS"
+    "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS",
+    # Reprobuild's own build-time env vars consumed by config.nims and the
+    # interface-extraction nim subprocesses. Without these, config.nims
+    # defaults to vendored-hash mode and tries to compile from
+    # references/mold/, which is gitignored and so missing in CI checkouts.
+    "REPROBUILD_USE_SYSTEM_HASH_LIBS",
+    "BLAKE3_PREFIX", "XXHASH_PREFIX", "SQLITE_PREFIX",
+    "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC"
   ]
 
   ## Well-known toolchain env vars that must also be forwarded to the daemon
