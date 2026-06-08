@@ -18,23 +18,13 @@
 ## alphabetically by full relative path so any addition/removal
 ## generates a clean diff.
 ##
-## Per-file metadata carry-forward
-## --------------------------------
+## Per-file metadata
+## -----------------
 ## A small number of tests need ``--define:reproProviderMode`` at
 ## compile time. The ``ct_test_nim_unittest`` adapter's ``cli:`` block
-## does NOT yet accept a ``defines:`` parameter (see
-## Test-Edges-And-Parallel-Runner M1 in the spec) so we cannot route
-## the define through the typed-tool call at this milestone. Instead:
-##
-##   * The generator recognises the per-path rules below and tags the
-##     emitted call with a ``# REPRO_PROVIDER_MODE`` comment.
-##   * ``scripts/run_tests.sh`` keeps the path-based
-##     ``--define:reproProviderMode`` injection for the affected tests
-##     until a follow-on milestone teaches the adapter the
-##     ``defines:`` parameter and reroutes the carry-forward through
-##     the typed call.
-##
-## The path rules mirror ``scripts/run_tests.sh`` lines ~128-167.
+## accepts a ``defines: seq[string]`` parameter (Test-Edges M2), so the
+## generator emits the define directly in the typed-tool call for the
+## affected tests — no path-based shell carry-forward needed.
 
 import std/[algorithm, os, sequtils, strutils, sets]
 
@@ -175,29 +165,27 @@ proc render(edges: seq[TestEdge]): string =
   result.add("# ``test`` target at the bottom can reference every edge's " &
     "action id.\n")
   result.add("#\n")
-  result.add("# Tests marked ``REPRO_PROVIDER_MODE`` need\n")
-  result.add("# ``--define:reproProviderMode`` at compile time. The " &
-    "adapter's\n")
-  result.add("# ``cli:`` block does not currently accept a ``defines:`` " &
-    "parameter\n")
-  result.add("# (see Test-Edges-And-Parallel-Runner M1 in the spec); for " &
-    "now\n")
-  result.add("# ``scripts/run_tests.sh`` carries the define forward via " &
-    "its\n")
-  result.add("# path-based injection rules. A follow-on milestone will " &
-    "teach\n")
-  result.add("# the adapter a ``defines:`` parameter and reroute the " &
-    "carry-forward\n")
-  result.add("# through the typed call.\n")
+  result.add("# Tests that need ``--define:reproProviderMode`` at compile " &
+    "time\n")
+  result.add("# pass it through the ``defines`` parameter on " &
+    "``buildNimUnittest.build``.\n")
+  result.add("# The adapter wires each entry as ``--define:<name>`` on the " &
+    "underlying\n")
+  result.add("# ``nim c`` invocation, so the build is fully routed through " &
+    "the\n")
+  result.add("# typed-output edge graph (no path-based shell carry-forward " &
+    "needed).\n")
   result.add("\n")
   result.add("build:\n")
   for edge in edges:
-    if edge.needsProviderMode:
-      result.add("  # REPRO_PROVIDER_MODE: " & edge.source & "\n")
     result.add("  let " & edge.identName &
       " = buildNimUnittest.build(\n")
     result.add("    source = \"" & edge.source & "\",\n")
-    result.add("    binary = \"" & edge.binary & "\")\n")
+    if edge.needsProviderMode:
+      result.add("    binary = \"" & edge.binary & "\",\n")
+      result.add("    defines = @[\"reproProviderMode\"])\n")
+    else:
+      result.add("    binary = \"" & edge.binary & "\")\n")
     result.add("\n")
 
   result.add("  # Aggregate ``test`` target — `repro build test` selects " &

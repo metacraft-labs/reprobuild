@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Test-Edges-And-Parallel-Runner M3 — ``scripts/run_tests.sh`` is now
-# a thin shim around the protocol-level parallel runner shipped at
-# ``tools/test-runner/repro_test_runner.nim``. The build phase is
-# unchanged (sibling daemons, test helpers, the provider-mode
-# carry-forward ``nim c`` loop, then ``repro build test`` for the
-# engine-driven majority); execution is delegated to the new runner,
-# which speaks the Tier-1 binary protocol shipped in
-# ``ct_test_unittest_parallel`` (M2) and fans out per-test ``--run``
+# ``scripts/run_tests.sh`` is a thin shim around the protocol-level
+# parallel runner at ``tools/test-runner/repro_test_runner.nim``. The
+# build phase builds sibling daemons + test helpers, then runs
+# ``repro build test`` for every test binary (the typed-output edge
+# graph in ``repro.tests.nim`` declares each test as a
+# ``buildNimUnittest.build`` call; tests that need
+# ``--define:reproProviderMode`` pass it through the adapter's
+# ``defines`` parameter, so the full suite is routed through reprobuild
+# with no path-based shell carry-forward). Execution is delegated to
+# the new runner, which speaks the Tier-1 binary protocol shipped in
+# ``ct_test_unittest_parallel`` and fans out per-test ``--run``
 # invocations across ``nproc`` workers.
 #
-# The provider-mode carry-forward loop stays for now: the
-# ``ct_test_nim_unittest`` adapter learned a ``defines:`` parameter in
-# M2 but the mechanical migration of the affected test sources to
-# routed-through-engine builds is tracked separately. M3 keeps the
-# carry-forward in place so all 385 test binaries land in
-# ``build/test-bin/`` either way; the runner doesn't care which build
-# path produced them.
+# The only build-phase carry-forward that remains is the macOS arm64
+# HCR codesign workaround for three ``t_hcr_*`` / ``t_e2e_repro_watch_hcr_*``
+# tests that need ``--passC:-fpatchable-function-entry=16,0`` plus
+# ``--passL:-Wl,-segprot,__HCR,rwx,rwx``; the typed-tool ``defines:``
+# slot only carries ``-d:`` defines, not arbitrary ``--passC`` /
+# ``--passL`` flags. This is platform-specific and stays separate.
 
 mkdir -p build/test-bin build/nimcache test-logs
 
@@ -83,30 +85,12 @@ if [[ -f tests/e2e/home-generations/harness_apply_lock_holder.nim ]]; then
     tests/e2e/home-generations/harness_apply_lock_holder.nim
 fi
 
-# Provider-mode carry-forward: ``--define:reproProviderMode`` for the
-# tests that exercise ``buildPackageFragment`` directly. These remain
-# direct ``nim c`` invocations until per-edge migration through the
-# ``defines:`` adapter parameter is mechanical-merged.
-needs_provider_mode() {
-  local test_file="$1"
-  case "${test_file}" in
-    libs/repro_standard_provider/tests/*|*/libs/repro_standard_provider/tests/*)
-      return 0 ;;
-    libs/repro_build_engine/tests/t_engine_implicit_*|*/libs/repro_build_engine/tests/t_engine_implicit_*|\
-    libs/repro_build_engine/tests/t_engine_multiple_outputs_*|*/libs/repro_build_engine/tests/t_engine_multiple_outputs_*|\
-    libs/repro_build_engine/tests/t_engine_target_export_*|*/libs/repro_build_engine/tests/t_engine_target_export_*)
-      return 0 ;;
-    libs/repro_build_engine/tests/t_engine_typed_output_*|*/libs/repro_build_engine/tests/t_engine_typed_output_*|\
-    libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_*|*/libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_*)
-      return 0 ;;
-    tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim|*/tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim)
-      return 0 ;;
-    tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim|*/tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim)
-      return 0 ;;
-  esac
-  return 1
-}
-
+# macOS arm64 HCR codesign workaround: three tests need
+# --passC:-fpatchable-function-entry=16,0 plus
+# --passL:-Wl,-segprot,__HCR,rwx,rwx that the typed-tool defines: slot
+# can't carry. These compile via direct ``nim c`` on Apple Silicon and
+# are skipped (already built via repro build test) on every other
+# platform.
 hcr_extra_flags() {
   local test_name="$1"
   if [[ "${test_name}" == "t_hcr_agent_process_target" ||
@@ -119,18 +103,15 @@ hcr_extra_flags() {
   fi
 }
 
-compile_carry_forward_test() {
+compile_hcr_workaround() {
   local test_file="$1"
   local test_name
   test_name="$(basename "${test_file}" .nim)"
   local extra_flags=()
-  if needs_provider_mode "${test_file}"; then
-    extra_flags+=("--define:reproProviderMode")
-  fi
   while IFS= read -r flag; do
     [[ -n "${flag}" ]] && extra_flags+=("${flag}")
   done < <(hcr_extra_flags "${test_name}")
-  printf 'Compiling carry-forward test: %s\n' "${test_file}" >&2
+  printf 'Compiling HCR-workaround test: %s\n' "${test_file}" >&2
   nim c \
     --threads:on \
     --hints:off \
@@ -141,48 +122,25 @@ compile_carry_forward_test() {
     "${test_file}"
 }
 
-carry_forward_tests=()
-engine_built_tests=()
-while IFS= read -r -d '' test_file; do
-  if needs_provider_mode "${test_file}"; then
-    carry_forward_tests+=("${test_file}")
-  else
-    engine_built_tests+=("${test_file}")
-  fi
-done < <(
-  find tests -type f -name 't_*.nim' -print0
-  find libs -path '*/tests/t_*.nim' -type f -print0
-  find libs -path '*/tests/test_*.nim' -type f -print0
-  find tools -path '*/tests/test_*.nim' -type f -print0 2>/dev/null
-)
+# Build the engine-driven test binaries (the entire suite minus the
+# macOS arm64 HCR workaround tests).
+printf 'Building test binaries via repro build test\n' >&2
+./build/bin/repro build test
 
-# HCR carry-forward: a handful of macOS arm64 tests need extra
-# compile flags beyond the --define carry-forward.
-for test_file in "${engine_built_tests[@]}"; do
-  test_name="$(basename "${test_file}" .nim)"
-  if [[ -n "$(hcr_extra_flags "${test_name}")" ]]; then
-    carry_forward_tests+=("${test_file}")
-  fi
-done
-
-filtered_engine_tests=()
-for test_file in "${engine_built_tests[@]}"; do
-  test_name="$(basename "${test_file}" .nim)"
-  if [[ -n "$(hcr_extra_flags "${test_name}")" ]]; then
-    continue
-  fi
-  filtered_engine_tests+=("${test_file}")
-done
-engine_built_tests=("${filtered_engine_tests[@]}")
-
-for test_file in "${carry_forward_tests[@]+"${carry_forward_tests[@]}"}"; do
-  compile_carry_forward_test "${test_file}"
-done
-
-if [[ "${#engine_built_tests[@]}" -gt 0 ]]; then
-  printf 'Building %d test binaries via repro build test\n' \
-    "${#engine_built_tests[@]}" >&2
-  ./build/bin/repro build test
+# macOS arm64 HCR workaround: rebuild three specific tests via direct
+# ``nim c`` so they pick up the patchable-function-entry + segprot
+# flags repro build test cannot supply. No-op on Linux / other archs.
+if [[ "$(uname -s)" == "Darwin" &&
+      ( "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ) ]]; then
+  while IFS= read -r -d '' test_file; do
+    test_name="$(basename "${test_file}" .nim)"
+    if [[ -n "$(hcr_extra_flags "${test_name}")" ]]; then
+      compile_hcr_workaround "${test_file}"
+    fi
+  done < <(
+    find tests -type f -name 't_*.nim' -print0
+    find libs -path '*/tests/t_*.nim' -type f -print0
+  )
 fi
 
 # Python tests run before the Nim suite so a Python regression surfaces

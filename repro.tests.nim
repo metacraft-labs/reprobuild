@@ -8,49 +8,58 @@
 # captures the returned ``BuildNimUnittestBuildEdge`` so the aggregate
 # ``test`` target at the bottom can reference every edge's action id.
 #
-# Tests marked ``REPRO_PROVIDER_MODE`` need
-# ``--define:reproProviderMode`` at compile time. The adapter's
-# ``cli:`` block does not currently accept a ``defines:`` parameter
-# (see Test-Edges-And-Parallel-Runner M1 in the spec); for now
-# ``scripts/run_tests.sh`` carries the define forward via its
-# path-based injection rules. A follow-on milestone will teach
-# the adapter a ``defines:`` parameter and reroute the carry-forward
-# through the typed call.
+# Tests that need ``--define:reproProviderMode`` at compile time
+# pass it through the ``defines`` parameter on ``buildNimUnittest.build``.
+# The adapter wires each entry as ``--define:<name>`` on the underlying
+# ``nim c`` invocation, so the build is fully routed through the
+# typed-output edge graph (no path-based shell carry-forward needed).
 
 build:
   let _t_engine_action_create_dyndep = buildNimUnittest.build(
     source = "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
     binary = "build/test-bin/t_engine_action_create_dyndep")
 
-  # REPRO_PROVIDER_MODE: libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim
   let _t_engine_implicit_target_name_basename_rule = buildNimUnittest.build(
     source = "libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim",
-    binary = "build/test-bin/t_engine_implicit_target_name_basename_rule")
+    binary = "build/test-bin/t_engine_implicit_target_name_basename_rule",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_build_engine/tests/t_engine_implicit_target_name_hook_overrides_canonical.nim
   let _t_engine_implicit_target_name_hook_overrides_canonical = buildNimUnittest.build(
     source = "libs/repro_build_engine/tests/t_engine_implicit_target_name_hook_overrides_canonical.nim",
-    binary = "build/test-bin/t_engine_implicit_target_name_hook_overrides_canonical")
+    binary = "build/test-bin/t_engine_implicit_target_name_hook_overrides_canonical",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_emits_execution_edge.nim
   let _t_engine_method_call_on_typed_field_emits_execution_edge = buildNimUnittest.build(
     source = "libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_emits_execution_edge.nim",
-    binary = "build/test-bin/t_engine_method_call_on_typed_field_emits_execution_edge")
+    binary = "build/test-bin/t_engine_method_call_on_typed_field_emits_execution_edge",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_build_engine/tests/t_engine_multiple_outputs_produce_multiple_names.nim
   let _t_engine_multiple_outputs_produce_multiple_names = buildNimUnittest.build(
     source = "libs/repro_build_engine/tests/t_engine_multiple_outputs_produce_multiple_names.nim",
-    binary = "build/test-bin/t_engine_multiple_outputs_produce_multiple_names")
+    binary = "build/test-bin/t_engine_multiple_outputs_produce_multiple_names",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_build_engine/tests/t_engine_target_export_table_records_ambiguity.nim
   let _t_engine_target_export_table_records_ambiguity = buildNimUnittest.build(
     source = "libs/repro_build_engine/tests/t_engine_target_export_table_records_ambiguity.nim",
-    binary = "build/test-bin/t_engine_target_export_table_records_ambiguity")
+    binary = "build/test-bin/t_engine_target_export_table_records_ambiguity",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph.nim
   let _t_engine_typed_output_recorded_in_normalized_graph = buildNimUnittest.build(
     source = "libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph.nim",
-    binary = "build/test-bin/t_engine_typed_output_recorded_in_normalized_graph")
+    binary = "build/test-bin/t_engine_typed_output_recorded_in_normalized_graph",
+    defines = @["reproProviderMode"])
+
+  let _t_partition_plan_json_round_trip = buildNimUnittest.build(
+    source = "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
+    binary = "build/test-bin/t_partition_plan_json_round_trip")
+
+  let _t_partition_planner_degrades_gracefully_on_cold_cache = buildNimUnittest.build(
+    source = "libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim",
+    binary = "build/test-bin/t_partition_planner_degrades_gracefully_on_cold_cache")
+
+  let _t_partition_planner_reads_runquota_estimates = buildNimUnittest.build(
+    source = "libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim",
+    binary = "build/test-bin/t_partition_planner_reads_runquota_estimates")
 
   let _test_m10_home_gc_cli = buildNimUnittest.build(
     source = "libs/repro_cli_support/tests/test_m10_home_gc_cli.nim",
@@ -308,6 +317,226 @@ build:
     source = "libs/repro_monitor_shim/tests/t_windows_hook_registry.nim",
     binary = "build/test-bin/t_windows_hook_registry")
 
+  let _t_peer_cache_action_cache_reader_consults_peer_on_miss = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_action_cache_reader_consults_peer_on_miss.nim",
+    binary = "build/test-bin/t_peer_cache_action_cache_reader_consults_peer_on_miss")
+
+  let _t_peer_cache_admin_cli_status = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim",
+    binary = "build/test-bin/t_peer_cache_admin_cli_status")
+
+  let _t_peer_cache_advertise_v1_decoded_as_v2 = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_advertise_v1_decoded_as_v2.nim",
+    binary = "build/test-bin/t_peer_cache_advertise_v1_decoded_as_v2")
+
+  let _t_peer_cache_advertise_v2_codec_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_advertise_v2_codec_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_advertise_v2_codec_round_trip")
+
+  let _t_peer_cache_bearssl_200_peer_tls_convergence = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_bearssl_200_peer_tls_convergence.nim",
+    binary = "build/test-bin/t_peer_cache_bearssl_200_peer_tls_convergence")
+
+  let _t_peer_cache_bearssl_ecdsa_smoke = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_bearssl_ecdsa_smoke.nim",
+    binary = "build/test-bin/t_peer_cache_bearssl_ecdsa_smoke")
+
+  let _t_peer_cache_bearssl_tls_context_smoke = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_bearssl_tls_context_smoke.nim",
+    binary = "build/test-bin/t_peer_cache_bearssl_tls_context_smoke")
+
+  let _t_peer_cache_bearssl_tls_partition_recovery = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_bearssl_tls_partition_recovery.nim",
+    binary = "build/test-bin/t_peer_cache_bearssl_tls_partition_recovery")
+
+  let _t_peer_cache_cert_validity_window_enforced = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_cert_validity_window_enforced.nim",
+    binary = "build/test-bin/t_peer_cache_cert_validity_window_enforced")
+
+  let _t_peer_cache_cli_lan_spec_enables_multicast = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_cli_lan_spec_enables_multicast.nim",
+    binary = "build/test-bin/t_peer_cache_cli_lan_spec_enables_multicast")
+
+  let _t_peer_cache_cli_lan_tls_query = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_cli_lan_tls_query.nim",
+    binary = "build/test-bin/t_peer_cache_cli_lan_tls_query")
+
+  let _t_peer_cache_codec_frame_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_codec_frame_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_codec_frame_round_trip")
+
+  let _t_peer_cache_codec_version_mismatch_rejected = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_codec_version_mismatch_rejected.nim",
+    binary = "build/test-bin/t_peer_cache_codec_version_mismatch_rejected")
+
+  let _t_peer_cache_connection_pool_eviction_lru = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_connection_pool_eviction_lru.nim",
+    binary = "build/test-bin/t_peer_cache_connection_pool_eviction_lru")
+
+  let _t_peer_cache_cuckoo_filter_delete_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_cuckoo_filter_delete_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_cuckoo_filter_delete_round_trip")
+
+  let _t_peer_cache_cuckoo_filter_false_positive_rate = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_cuckoo_filter_false_positive_rate.nim",
+    binary = "build/test-bin/t_peer_cache_cuckoo_filter_false_positive_rate")
+
+  let _t_peer_cache_ecdsa_sign_verify_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_sign_verify_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_ecdsa_sign_verify_round_trip")
+
+  let _t_peer_cache_ecdsa_signed_advertisement_tamper_rejection = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_signed_advertisement_tamper_rejection.nim",
+    binary = "build/test-bin/t_peer_cache_ecdsa_signed_advertisement_tamper_rejection")
+
+  let _t_peer_cache_ecdsa_trust_anchor_file_format = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_trust_anchor_file_format.nim",
+    binary = "build/test-bin/t_peer_cache_ecdsa_trust_anchor_file_format")
+
+  let _t_peer_cache_event_stream_jsonl_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_event_stream_jsonl_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_event_stream_jsonl_round_trip")
+
+  let _t_peer_cache_fetch_corrupted_payload_rejected = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_fetch_corrupted_payload_rejected.nim",
+    binary = "build/test-bin/t_peer_cache_fetch_corrupted_payload_rejected")
+
+  let _t_peer_cache_fetch_loopback_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_fetch_loopback_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_fetch_loopback_round_trip")
+
+  let _t_peer_cache_fetch_oversize_truncated_flag = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_fetch_oversize_truncated_flag.nim",
+    binary = "build/test-bin/t_peer_cache_fetch_oversize_truncated_flag")
+
+  let _t_peer_cache_find_peers_with_blob_uses_filter = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_find_peers_with_blob_uses_filter.nim",
+    binary = "build/test-bin/t_peer_cache_find_peers_with_blob_uses_filter")
+
+  let _t_peer_cache_handshake_rejects_unknown_peer_id = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_handshake_rejects_unknown_peer_id.nim",
+    binary = "build/test-bin/t_peer_cache_handshake_rejects_unknown_peer_id")
+
+  let _t_peer_cache_loopback_three_peer_discovery = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_loopback_three_peer_discovery.nim",
+    binary = "build/test-bin/t_peer_cache_loopback_three_peer_discovery")
+
+  let _t_peer_cache_metrics_prometheus_format = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_metrics_prometheus_format.nim",
+    binary = "build/test-bin/t_peer_cache_metrics_prometheus_format")
+
+  let _t_peer_cache_mint_cert_ca_signed_chain = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_mint_cert_ca_signed_chain.nim",
+    binary = "build/test-bin/t_peer_cache_mint_cert_ca_signed_chain")
+
+  let _t_peer_cache_mint_cert_self_signed_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_mint_cert_self_signed_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_mint_cert_self_signed_round_trip")
+
+  let _t_peer_cache_multicast_cidr_allowlist_drops_off_network = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_multicast_cidr_allowlist_drops_off_network.nim",
+    binary = "build/test-bin/t_peer_cache_multicast_cidr_allowlist_drops_off_network")
+
+  let _t_peer_cache_multicast_loopback_discovery = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_multicast_loopback_discovery.nim",
+    binary = "build/test-bin/t_peer_cache_multicast_loopback_discovery")
+
+  let _t_peer_cache_registry_advertise_snapshot_and_delta = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_registry_advertise_snapshot_and_delta.nim",
+    binary = "build/test-bin/t_peer_cache_registry_advertise_snapshot_and_delta")
+
+  let _t_peer_cache_self_signed_cert_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_self_signed_cert_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_self_signed_cert_round_trip")
+
+  let _t_peer_cache_sim_fetch_workload_hits_peer_cache = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_sim_fetch_workload_hits_peer_cache.nim",
+    binary = "build/test-bin/t_peer_cache_sim_fetch_workload_hits_peer_cache")
+
+  let _t_peer_cache_sim_mixed_tenant_isolation = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_sim_mixed_tenant_isolation.nim",
+    binary = "build/test-bin/t_peer_cache_sim_mixed_tenant_isolation")
+
+  let _t_peer_cache_sim_report_renders_markdown = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_sim_report_renders_markdown.nim",
+    binary = "build/test-bin/t_peer_cache_sim_report_renders_markdown")
+
+  let _t_peer_cache_simulation_200_peer_convergence = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_simulation_200_peer_convergence.nim",
+    binary = "build/test-bin/t_peer_cache_simulation_200_peer_convergence")
+
+  let _t_peer_cache_simulation_partition_recovery = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_simulation_partition_recovery.nim",
+    binary = "build/test-bin/t_peer_cache_simulation_partition_recovery")
+
+  let _t_peer_cache_swim_50_peer_convergence = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_swim_50_peer_convergence.nim",
+    binary = "build/test-bin/t_peer_cache_swim_50_peer_convergence")
+
+  let _t_peer_cache_swim_dissemination_piggyback = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_swim_dissemination_piggyback.nim",
+    binary = "build/test-bin/t_peer_cache_swim_dissemination_piggyback")
+
+  let _t_peer_cache_swim_incarnation_self_refute = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_swim_incarnation_self_refute.nim",
+    binary = "build/test-bin/t_peer_cache_swim_incarnation_self_refute")
+
+  let _t_peer_cache_swim_indirect_probe_K_3 = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_swim_indirect_probe_K_3.nim",
+    binary = "build/test-bin/t_peer_cache_swim_indirect_probe_K_3")
+
+  let _t_peer_cache_swim_partition_recovery = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_swim_partition_recovery.nim",
+    binary = "build/test-bin/t_peer_cache_swim_partition_recovery")
+
+  let _t_peer_cache_tier2_central_fallthrough = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tier2_central_fallthrough.nim",
+    binary = "build/test-bin/t_peer_cache_tier2_central_fallthrough")
+
+  let _t_peer_cache_tier2_eviction_policy = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tier2_eviction_policy.nim",
+    binary = "build/test-bin/t_peer_cache_tier2_eviction_policy")
+
+  let _t_peer_cache_tier2_inter_rack_advertisement = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tier2_inter_rack_advertisement.nim",
+    binary = "build/test-bin/t_peer_cache_tier2_inter_rack_advertisement")
+
+  let _t_peer_cache_tier2_preferred_in_fetch_order = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tier2_preferred_in_fetch_order.nim",
+    binary = "build/test-bin/t_peer_cache_tier2_preferred_in_fetch_order")
+
+  let _t_peer_cache_tls_application_data_flows_through_tunnel = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tls_application_data_flows_through_tunnel.nim",
+    binary = "build/test-bin/t_peer_cache_tls_application_data_flows_through_tunnel")
+
+  let _t_peer_cache_tls_handshake_rejects_unknown_cert = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tls_handshake_rejects_unknown_cert.nim",
+    binary = "build/test-bin/t_peer_cache_tls_handshake_rejects_unknown_cert")
+
+  let _t_peer_cache_tls_handshake_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tls_handshake_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_tls_handshake_round_trip")
+
+  let _t_peer_cache_tls_handshake_validates_cert_chain = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tls_handshake_validates_cert_chain.nim",
+    binary = "build/test-bin/t_peer_cache_tls_handshake_validates_cert_chain")
+
+  let _t_peer_cache_tls_mixed_mode_compat = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tls_mixed_mode_compat.nim",
+    binary = "build/test-bin/t_peer_cache_tls_mixed_mode_compat")
+
+  let _t_peer_cache_tls_per_tenant_ca_isolation = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_ca_isolation.nim",
+    binary = "build/test-bin/t_peer_cache_tls_per_tenant_ca_isolation")
+
+  let _t_peer_cache_tls_per_tenant_isolation = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_isolation.nim",
+    binary = "build/test-bin/t_peer_cache_tls_per_tenant_isolation")
+
+  let _t_peer_cache_tls_signed_advertisement_round_trip = buildNimUnittest.build(
+    source = "libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim",
+    binary = "build/test-bin/t_peer_cache_tls_signed_advertisement_round_trip")
+
   let _t_smoke_repro_profile = buildNimUnittest.build(
     source = "libs/repro_profile/tests/t_smoke_repro_profile.nim",
     binary = "build/test-bin/t_smoke_repro_profile")
@@ -420,190 +649,190 @@ build:
     source = "libs/repro_project_dsl/tests/test_library_macro.nim",
     binary = "build/test-bin/test_library_macro")
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_ada_direct_convention.nim
   let _test_ada_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_ada_direct_convention.nim",
-    binary = "build/test-bin/test_ada_direct_convention")
+    binary = "build/test-bin/test_ada_direct_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim
   let _test_c_cpp_autotools_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim",
-    binary = "build/test-bin/test_c_cpp_autotools_convention")
+    binary = "build/test-bin/test_c_cpp_autotools_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim
   let _test_c_cpp_cmake_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim",
-    binary = "build/test-bin/test_c_cpp_cmake_convention")
+    binary = "build/test-bin/test_c_cpp_cmake_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim
   let _test_c_cpp_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim",
-    binary = "build/test-bin/test_c_cpp_direct_convention")
+    binary = "build/test-bin/test_c_cpp_direct_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim
   let _test_c_cpp_make_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim",
-    binary = "build/test-bin/test_c_cpp_make_convention")
+    binary = "build/test-bin/test_c_cpp_make_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim
   let _test_c_cpp_meson_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim",
-    binary = "build/test-bin/test_c_cpp_meson_convention")
+    binary = "build/test-bin/test_c_cpp_meson_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_convention_registry_dispatch.nim
   let _test_convention_registry_dispatch = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_convention_registry_dispatch.nim",
-    binary = "build/test-bin/test_convention_registry_dispatch")
+    binary = "build/test-bin/test_convention_registry_dispatch",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_crude_fallback.nim
   let _test_crude_fallback = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_crude_fallback.nim",
-    binary = "build/test-bin/test_crude_fallback")
+    binary = "build/test-bin/test_crude_fallback",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_crystal_convention.nim
   let _test_crystal_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_crystal_convention.nim",
-    binary = "build/test-bin/test_crystal_convention")
+    binary = "build/test-bin/test_crystal_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim
   let _test_csharp_dotnet_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim",
-    binary = "build/test-bin/test_csharp_dotnet_convention")
+    binary = "build/test-bin/test_csharp_dotnet_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_d_direct_convention.nim
   let _test_d_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_d_direct_convention.nim",
-    binary = "build/test-bin/test_d_direct_convention")
+    binary = "build/test-bin/test_d_direct_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_elixir_mix_convention.nim
   let _test_elixir_mix_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_elixir_mix_convention.nim",
-    binary = "build/test-bin/test_elixir_mix_convention")
+    binary = "build/test-bin/test_elixir_mix_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_emit_cache_m18.nim
   let _test_emit_cache_m18 = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_emit_cache_m18.nim",
-    binary = "build/test-bin/test_emit_cache_m18")
+    binary = "build/test-bin/test_emit_cache_m18",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_emit_cache_m29.nim
   let _test_emit_cache_m29 = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_emit_cache_m29.nim",
-    binary = "build/test-bin/test_emit_cache_m29")
+    binary = "build/test-bin/test_emit_cache_m29",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim
   let _test_erlang_rebar3_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim",
-    binary = "build/test-bin/test_erlang_rebar3_convention")
+    binary = "build/test-bin/test_erlang_rebar3_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_examples_layout.nim
   let _test_examples_layout = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_examples_layout.nim",
-    binary = "build/test-bin/test_examples_layout")
+    binary = "build/test-bin/test_examples_layout",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_fortran_direct_convention.nim
   let _test_fortran_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_fortran_direct_convention.nim",
-    binary = "build/test-bin/test_fortran_direct_convention")
+    binary = "build/test-bin/test_fortran_direct_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_go_convention.nim
   let _test_go_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_go_convention.nim",
-    binary = "build/test-bin/test_go_convention")
+    binary = "build/test-bin/test_go_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_go_direct_convention.nim
   let _test_go_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_go_direct_convention.nim",
-    binary = "build/test-bin/test_go_direct_convention")
+    binary = "build/test-bin/test_go_direct_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim
   let _test_haskell_cabal_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim",
-    binary = "build/test-bin/test_haskell_cabal_convention")
+    binary = "build/test-bin/test_haskell_cabal_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_java_maven_convention.nim
   let _test_java_maven_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_java_maven_convention.nim",
-    binary = "build/test-bin/test_java_maven_convention")
+    binary = "build/test-bin/test_java_maven_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_jsts_convention.nim
   let _test_jsts_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_jsts_convention.nim",
-    binary = "build/test-bin/test_jsts_convention")
+    binary = "build/test-bin/test_jsts_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_jsts_direct_convention.nim
   let _test_jsts_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_jsts_direct_convention.nim",
-    binary = "build/test-bin/test_jsts_direct_convention")
+    binary = "build/test-bin/test_jsts_direct_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim
   let _test_kotlin_gradle_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim",
-    binary = "build/test-bin/test_kotlin_gradle_convention")
+    binary = "build/test-bin/test_kotlin_gradle_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_mode1_loader.nim
   let _test_mode1_loader = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_mode1_loader.nim",
-    binary = "build/test-bin/test_mode1_loader")
+    binary = "build/test-bin/test_mode1_loader",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_nim_convention.nim
   let _test_nim_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_nim_convention.nim",
-    binary = "build/test-bin/test_nim_convention")
+    binary = "build/test-bin/test_nim_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim
   let _test_ocaml_dune_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim",
-    binary = "build/test-bin/test_ocaml_dune_convention")
+    binary = "build/test-bin/test_ocaml_dune_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_pascal_direct_convention.nim
   let _test_pascal_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_pascal_direct_convention.nim",
-    binary = "build/test-bin/test_pascal_direct_convention")
+    binary = "build/test-bin/test_pascal_direct_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_php_composer_convention.nim
   let _test_php_composer_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_php_composer_convention.nim",
-    binary = "build/test-bin/test_php_composer_convention")
+    binary = "build/test-bin/test_php_composer_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_project_file_alias.nim
   let _test_project_file_alias = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_project_file_alias.nim",
-    binary = "build/test-bin/test_project_file_alias")
+    binary = "build/test-bin/test_project_file_alias",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_python_convention.nim
   let _test_python_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_python_convention.nim",
-    binary = "build/test-bin/test_python_convention")
+    binary = "build/test-bin/test_python_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_python_direct_convention.nim
   let _test_python_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_python_direct_convention.nim",
-    binary = "build/test-bin/test_python_direct_convention")
+    binary = "build/test-bin/test_python_direct_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim
   let _test_ruby_bundler_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim",
-    binary = "build/test-bin/test_ruby_bundler_convention")
+    binary = "build/test-bin/test_ruby_bundler_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_rust_convention.nim
   let _test_rust_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_rust_convention.nim",
-    binary = "build/test-bin/test_rust_convention")
+    binary = "build/test-bin/test_rust_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_rust_direct_convention.nim
   let _test_rust_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_rust_direct_convention.nim",
-    binary = "build/test-bin/test_rust_direct_convention")
+    binary = "build/test-bin/test_rust_direct_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim
   let _test_swift_swiftpm_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim",
-    binary = "build/test-bin/test_swift_swiftpm_convention")
+    binary = "build/test-bin/test_swift_swiftpm_convention",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: libs/repro_standard_provider/tests/test_zig_direct_convention.nim
   let _test_zig_direct_convention = buildNimUnittest.build(
     source = "libs/repro_standard_provider/tests/test_zig_direct_convention.nim",
-    binary = "build/test-bin/test_zig_direct_convention")
+    binary = "build/test-bin/test_zig_direct_convention",
+    defines = @["reproProviderMode"])
 
   let _t_e2e_repro_develop_cmake = buildNimUnittest.build(
     source = "tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim",
@@ -865,15 +1094,15 @@ build:
     source = "tests/e2e/local-build-engine/t_e2e_repro_build_named_target.nim",
     binary = "build/test-bin/t_e2e_repro_build_named_target")
 
-  # REPRO_PROVIDER_MODE: tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim
   let _t_repro_build_ambiguous_target_diagnostic = buildNimUnittest.build(
     source = "tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim",
-    binary = "build/test-bin/t_repro_build_ambiguous_target_diagnostic")
+    binary = "build/test-bin/t_repro_build_ambiguous_target_diagnostic",
+    defines = @["reproProviderMode"])
 
-  # REPRO_PROVIDER_MODE: tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim
   let _t_repro_build_qualified_target_resolves = buildNimUnittest.build(
     source = "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
-    binary = "build/test-bin/t_repro_build_qualified_target_resolves")
+    binary = "build/test-bin/t_repro_build_qualified_target_resolves",
+    defines = @["reproProviderMode"])
 
   let _t_repro_build_unknown_target_diagnostic = buildNimUnittest.build(
     source = "tests/e2e/local-build-engine/t_repro_build_unknown_target_diagnostic.nim",
@@ -1178,6 +1407,26 @@ build:
   let _t_e2e_scoop_practical_hardening = buildNimUnittest.build(
     source = "tests/e2e/scoop/t_e2e_scoop_practical_hardening.nim",
     binary = "build/test-bin/t_e2e_scoop_practical_hardening")
+
+  let _t_e2e_repro_test_shard_balances_wall_time = buildNimUnittest.build(
+    source = "tests/e2e/sharding/t_e2e_repro_test_shard_balances_wall_time.nim",
+    binary = "build/test-bin/t_e2e_repro_test_shard_balances_wall_time")
+
+  let _t_e2e_repro_test_shard_emit_plan_then_consume = buildNimUnittest.build(
+    source = "tests/e2e/sharding/t_e2e_repro_test_shard_emit_plan_then_consume.nim",
+    binary = "build/test-bin/t_e2e_repro_test_shard_emit_plan_then_consume")
+
+  let _t_e2e_repro_test_shard_lan_peer_cache_not_implemented = buildNimUnittest.build(
+    source = "tests/e2e/sharding/t_e2e_repro_test_shard_lan_peer_cache_not_implemented.nim",
+    binary = "build/test-bin/t_e2e_repro_test_shard_lan_peer_cache_not_implemented")
+
+  let _t_e2e_repro_test_shard_partition_total_coverage = buildNimUnittest.build(
+    source = "tests/e2e/sharding/t_e2e_repro_test_shard_partition_total_coverage.nim",
+    binary = "build/test-bin/t_e2e_repro_test_shard_partition_total_coverage")
+
+  let _t_e2e_repro_test_shard_workspace_integration = buildNimUnittest.build(
+    source = "tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim",
+    binary = "build/test-bin/t_e2e_repro_test_shard_workspace_integration")
 
   let _t_m54_verified_tarball_profile = buildNimUnittest.build(
     source = "tests/e2e/t_m54_verified_tarball_profile.nim",
@@ -1630,6 +1879,9 @@ build:
     _t_engine_multiple_outputs_produce_multiple_names.action,
     _t_engine_target_export_table_records_ambiguity.action,
     _t_engine_typed_output_recorded_in_normalized_graph.action,
+    _t_partition_plan_json_round_trip.action,
+    _t_partition_planner_degrades_gracefully_on_cold_cache.action,
+    _t_partition_planner_reads_runquota_estimates.action,
     _test_m10_home_gc_cli.action,
     _test_m2_env_ps1_migration_clean.action,
     _test_m69_home_add_versioned.action,
@@ -1694,6 +1946,61 @@ build:
     _t_dispatch_mechanism_coverage_windows.action,
     _t_install_audit_zero_failures_windows.action,
     _t_windows_hook_registry.action,
+    _t_peer_cache_action_cache_reader_consults_peer_on_miss.action,
+    _t_peer_cache_admin_cli_status.action,
+    _t_peer_cache_advertise_v1_decoded_as_v2.action,
+    _t_peer_cache_advertise_v2_codec_round_trip.action,
+    _t_peer_cache_bearssl_200_peer_tls_convergence.action,
+    _t_peer_cache_bearssl_ecdsa_smoke.action,
+    _t_peer_cache_bearssl_tls_context_smoke.action,
+    _t_peer_cache_bearssl_tls_partition_recovery.action,
+    _t_peer_cache_cert_validity_window_enforced.action,
+    _t_peer_cache_cli_lan_spec_enables_multicast.action,
+    _t_peer_cache_cli_lan_tls_query.action,
+    _t_peer_cache_codec_frame_round_trip.action,
+    _t_peer_cache_codec_version_mismatch_rejected.action,
+    _t_peer_cache_connection_pool_eviction_lru.action,
+    _t_peer_cache_cuckoo_filter_delete_round_trip.action,
+    _t_peer_cache_cuckoo_filter_false_positive_rate.action,
+    _t_peer_cache_ecdsa_sign_verify_round_trip.action,
+    _t_peer_cache_ecdsa_signed_advertisement_tamper_rejection.action,
+    _t_peer_cache_ecdsa_trust_anchor_file_format.action,
+    _t_peer_cache_event_stream_jsonl_round_trip.action,
+    _t_peer_cache_fetch_corrupted_payload_rejected.action,
+    _t_peer_cache_fetch_loopback_round_trip.action,
+    _t_peer_cache_fetch_oversize_truncated_flag.action,
+    _t_peer_cache_find_peers_with_blob_uses_filter.action,
+    _t_peer_cache_handshake_rejects_unknown_peer_id.action,
+    _t_peer_cache_loopback_three_peer_discovery.action,
+    _t_peer_cache_metrics_prometheus_format.action,
+    _t_peer_cache_mint_cert_ca_signed_chain.action,
+    _t_peer_cache_mint_cert_self_signed_round_trip.action,
+    _t_peer_cache_multicast_cidr_allowlist_drops_off_network.action,
+    _t_peer_cache_multicast_loopback_discovery.action,
+    _t_peer_cache_registry_advertise_snapshot_and_delta.action,
+    _t_peer_cache_self_signed_cert_round_trip.action,
+    _t_peer_cache_sim_fetch_workload_hits_peer_cache.action,
+    _t_peer_cache_sim_mixed_tenant_isolation.action,
+    _t_peer_cache_sim_report_renders_markdown.action,
+    _t_peer_cache_simulation_200_peer_convergence.action,
+    _t_peer_cache_simulation_partition_recovery.action,
+    _t_peer_cache_swim_50_peer_convergence.action,
+    _t_peer_cache_swim_dissemination_piggyback.action,
+    _t_peer_cache_swim_incarnation_self_refute.action,
+    _t_peer_cache_swim_indirect_probe_K_3.action,
+    _t_peer_cache_swim_partition_recovery.action,
+    _t_peer_cache_tier2_central_fallthrough.action,
+    _t_peer_cache_tier2_eviction_policy.action,
+    _t_peer_cache_tier2_inter_rack_advertisement.action,
+    _t_peer_cache_tier2_preferred_in_fetch_order.action,
+    _t_peer_cache_tls_application_data_flows_through_tunnel.action,
+    _t_peer_cache_tls_handshake_rejects_unknown_cert.action,
+    _t_peer_cache_tls_handshake_round_trip.action,
+    _t_peer_cache_tls_handshake_validates_cert_chain.action,
+    _t_peer_cache_tls_mixed_mode_compat.action,
+    _t_peer_cache_tls_per_tenant_ca_isolation.action,
+    _t_peer_cache_tls_per_tenant_isolation.action,
+    _t_peer_cache_tls_signed_advertisement_round_trip.action,
     _t_smoke_repro_profile.action,
     _t_smoke_apply_integration.action,
     _t_smoke_module_imports.action,
@@ -1902,6 +2209,11 @@ build:
     _t_e2e_scoop_adapter_diagnostics.action,
     _t_e2e_scoop_adapter_realize_and_launch.action,
     _t_e2e_scoop_practical_hardening.action,
+    _t_e2e_repro_test_shard_balances_wall_time.action,
+    _t_e2e_repro_test_shard_emit_plan_then_consume.action,
+    _t_e2e_repro_test_shard_lan_peer_cache_not_implemented.action,
+    _t_e2e_repro_test_shard_partition_total_coverage.action,
+    _t_e2e_repro_test_shard_workspace_integration.action,
     _t_m54_verified_tarball_profile.action,
     _t_e2e_repro_watch.action,
     _t_e2e_repro_watch_multiple_named_targets.action,
