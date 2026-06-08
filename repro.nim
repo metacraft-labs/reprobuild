@@ -68,42 +68,42 @@ import ct_test_nim_unittest
 import repro_tests
 
 package reprobuild:
+  # Declare ``path``-mode tool provisioning so the engine adopts it
+  # automatically. Without this, ``repro build`` refuses to run with
+  # "typed tool provisioning is required for uses declarations" unless
+  # the caller passes ``--tool-provisioning=path`` explicitly. The
+  # reprobuild dev shell (``nix develop``) and the Nix package both
+  # furnish every tool we need via PATH and via env vars
+  # (BLAKE3_PREFIX / XXHASH_PREFIX / SQLITE_PREFIX / NIMCRYPTO_SRC /
+  # RUNQUOTA_SRC / SSZ_SERIALIZATION_SRC), so the weak-local PATH mode
+  # is the right default for this repo.
+  defaultToolProvisioning "path"
+
   uses:
-    # Toolchain floor — mirrors flake.nix's nativeBuildInputs.
+    # Toolchain floor — mirrors flake.nix's nativeBuildInputs. These
+    # are the PATH-resolvable binaries the reprobuild build needs;
+    # they're sufficient for the path-mode tool resolver to succeed
+    # under ``nix develop``.
     "nim >=2.2 <3.0"
     "gcc >=12"
     "just >=1"
+    "sh"
 
-    # System hash libraries surfaced as ``uses:`` so consumers picking
-    # up ``reprobuild`` inherit the same buildInputs. The Linux/macOS
-    # flake.nix provisions these via libblake3 / xxHash / sqlite; the
-    # selectors are recorded here even though the package catalog only
-    # ships a ``sqlite3`` shape today — unknown selectors are
-    # registered without an import, which keeps ``nim check`` green
-    # while leaving the constraint visible to anyone resolving the
-    # ``uses:`` graph.
-    "libblake3"
-    "xxhash"
-    "sqlite3"
-
-    # Source-only fixed inputs the reprobuild build needs at compile
-    # time. ``config.nims`` resolves them via NIMCRYPTO_SRC /
-    # RUNQUOTA_SRC env vars, which the flake.nix and the
-    # nixpkgs-format package.nix both set before invoking ``just
-    # build``.
-    "nimcrypto"
-    "runquota"
-
-    # The dev-env artifact codec links against nim-ssz-serialization
-    # (see config.nims's SSZ_SERIALIZATION_SRC slot).
-    "ssz-serialization"
-
-    # Test-Edges-And-Parallel-Runner M1: codetracer-supplied
-    # Nim-unittest framework adapter. Each entry in the generated
-    # ``repro.tests.nim`` (included below) calls
-    # ``buildNimUnittest.build(...)`` from this module so the test
-    # binaries become typed-output build edges.
-    "ct_test_nim_unittest"
+    # Note: the system hash libraries (libblake3, xxhash, sqlite3) and
+    # the source-only fixed inputs (nimcrypto, runquota,
+    # ssz-serialization, ct_test_nim_unittest) are NOT listed here.
+    # The path-mode resolver requires every ``uses:`` selector to be
+    # findable on ``$PATH`` as an executable file, and these are
+    # shared libraries, header bundles, or Nim source trees rather
+    # than CLI binaries. They are provisioned by ``flake.nix`` /
+    # ``nix/pkgs/by-name/re/reprobuild/package.nix`` via env vars
+    # (BLAKE3_PREFIX / XXHASH_PREFIX / SQLITE_PREFIX / NIMCRYPTO_SRC /
+    # RUNQUOTA_SRC / SSZ_SERIALIZATION_SRC) and consumed by
+    # ``config.nims``. Once the DSL grows a typed "env-provided
+    # dependency" concept (a ``provides:`` clause, or a Mode 2 catalog
+    # shape for header-only / source-only deps) the list above will
+    # grow back to capture them; until then the constraints live in
+    # ``flake.nix`` and ``config.nims``.
 
   # Library declaration — every ``.nim`` file under ``libs/<name>/src``
   # that ``config.nims`` adds to ``--path`` is importable when this
