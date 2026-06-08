@@ -141,18 +141,18 @@ package x:
   executable hello:
     discard
 """)
-    createDir(dir / "hello")
-    writeFile(dir / "hello" / "main.go",
+      createDir(dir / "hello")
+      writeFile(dir / "hello" / "main.go",
       "package main\nfunc main() {}\n")
-    writeFile(dir / "go.mod", "module example.com/x\ngo 1.21\n")
-    let conv = go_direct_convention.goDirectConvention()
-    let request = dummyRequest(dir)
-    check not conv.recognize(dir, request)
-    removeDir(dir)
+      writeFile(dir / "go.mod", "module example.com/x\ngo 1.21\n")
+      let conv = go_direct_convention.goDirectConvention()
+      let request = dummyRequest(dir)
+      check not conv.recognize(dir, request)
+      removeDir(dir)
 
-  test "recognize: negative — uses lacks go":
-    let dir = makeScratch("no-go-toolchain")
-    writeFile(dir / "repro.nim", """
+    test "recognize: negative — uses lacks go":
+      let dir = makeScratch("no-go-toolchain")
+      writeFile(dir / "repro.nim", """
 import repro_project_dsl
 
 package x:
@@ -161,43 +161,16 @@ package x:
   executable hello:
     discard
 """)
-    createDir(dir / "hello")
-    writeFile(dir / "hello" / "main.go",
-      "package main\nfunc main() {}\n")
-    let conv = go_direct_convention.goDirectConvention()
-    let request = dummyRequest(dir)
-    check not conv.recognize(dir, request)
-    removeDir(dir)
+      createDir(dir / "hello")
+      writeFile(dir / "hello" / "main.go",
+        "package main\nfunc main() {}\n")
+      let conv = go_direct_convention.goDirectConvention()
+      let request = dummyRequest(dir)
+      check not conv.recognize(dir, request)
+      removeDir(dir)
 
-  test "recognize: negative — go.work present (workspaces deferred)":
-    let dir = makeScratch("with-go-work")
-    writeFile(dir / "repro.nim", """
-import repro_project_dsl
-
-package x:
-  uses:
-    "go"
-  executable hello:
-    discard
-""")
-    createDir(dir / "hello")
-    writeFile(dir / "hello" / "main.go",
-      "package main\nfunc main() {}\n")
-    writeFile(dir / "go.work", "go 1.21\nuse ./hello\n")
-    let conv = go_direct_convention.goDirectConvention()
-    let request = dummyRequest(dir)
-    check not conv.recognize(dir, request)
-    removeDir(dir)
-
-  test "recognize: positive — import \"C\" anywhere (M36: cgo lifted)":
-    # M36 lifts the M31 cgo-rejection. A workspace with ``import "C"``
-    # now routes through the go-direct convention; the per-member
-    # ``go build`` path (instead of ``go tool compile / go tool link``)
-    # handles cgo's preprocessor + linker integration.
-    if not goOnPath():
-      skip()
-    else:
-      let dir = makeScratch("with-cgo")
+    test "recognize: negative — go.work present (workspaces deferred)":
+      let dir = makeScratch("with-go-work")
       writeFile(dir / "repro.nim", """
 import repro_project_dsl
 
@@ -208,7 +181,34 @@ package x:
     discard
 """)
       createDir(dir / "hello")
-      writeFile(dir / "hello" / "main.go", """
+      writeFile(dir / "hello" / "main.go",
+        "package main\nfunc main() {}\n")
+      writeFile(dir / "go.work", "go 1.21\nuse ./hello\n")
+      let conv = go_direct_convention.goDirectConvention()
+      let request = dummyRequest(dir)
+      check not conv.recognize(dir, request)
+      removeDir(dir)
+
+    test "recognize: positive — import \"C\" anywhere (M36: cgo lifted)":
+      # M36 lifts the M31 cgo-rejection. A workspace with ``import "C"``
+      # now routes through the go-direct convention; the per-member
+      # ``go build`` path (instead of ``go tool compile / go tool link``)
+      # handles cgo's preprocessor + linker integration.
+      if not goOnPath():
+        skip()
+      else:
+        let dir = makeScratch("with-cgo")
+        writeFile(dir / "repro.nim", """
+import repro_project_dsl
+
+package x:
+  uses:
+    "go"
+  executable hello:
+    discard
+""")
+        createDir(dir / "hello")
+        writeFile(dir / "hello" / "main.go", """
 package main
 
 // #include <stdio.h>
@@ -216,10 +216,10 @@ import "C"
 
 func main() { C.puts(C.CString("hi")) }
 """)
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(dir)
-      check conv.recognize(dir, request)
-      removeDir(dir)
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(dir)
+        check conv.recognize(dir, request)
+        removeDir(dir)
 
 when isNixSupported:
   suite "go-direct convention emit (Mode 3 fixture)":
@@ -360,25 +360,25 @@ package betaPkg:
 depends_on alphaPkg: betaPkg
 depends_on betaPkg: alphaPkg
 """)
-      createDir(dir / "alpha")
-      writeFile(dir / "alpha" / "alpha.go",
+        createDir(dir / "alpha")
+        writeFile(dir / "alpha" / "alpha.go",
         "package alpha\nfunc Alpha() int { return 1 }\n")
-      createDir(dir / "beta")
-      writeFile(dir / "beta" / "beta.go",
+        createDir(dir / "beta")
+        writeFile(dir / "beta" / "beta.go",
         "package beta\nfunc Beta() int { return 2 }\n")
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(dir)
-      check conv.recognize(dir, request)
-      expect ValueError:
-        discard conv.emitFragment(dir, request)
-      removeDir(dir)
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(dir)
+        check conv.recognize(dir, request)
+        expect ValueError:
+          discard conv.emitFragment(dir, request)
+        removeDir(dir)
 
-  test "depends_on references undeclared package — rejected":
-    if not goOnPath():
-      skip()
-    else:
-      let dir = makeScratch("undeclared")
-      writeFile(dir / "repro.nim", """
+    test "depends_on references undeclared package — rejected":
+      if not goOnPath():
+        skip()
+      else:
+        let dir = makeScratch("undeclared")
+        writeFile(dir / "repro.nim", """
 import repro_project_dsl
 
 package onlyPkg:
@@ -389,15 +389,15 @@ package onlyPkg:
 
 depends_on onlyPkg: nonexistentPkg
 """)
-      createDir(dir / "hello")
-      writeFile(dir / "hello" / "main.go",
-        "package main\nfunc main() {}\n")
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(dir)
-      check conv.recognize(dir, request)
-      expect ValueError:
-        discard conv.emitFragment(dir, request)
-      removeDir(dir)
+        createDir(dir / "hello")
+        writeFile(dir / "hello" / "main.go",
+          "package main\nfunc main() {}\n")
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(dir)
+        check conv.recognize(dir, request)
+        expect ValueError:
+          discard conv.emitFragment(dir, request)
+        removeDir(dir)
 
 # ---------------------------------------------------------------------------
 # Layout recognition. Pins the convention's behaviour for single-package
@@ -427,23 +427,23 @@ package binPkg:
   executable mybin:
     discard
 """)
-      createDir(dir / "mylib")
-      writeFile(dir / "mylib" / "lib.go",
+        createDir(dir / "mylib")
+        writeFile(dir / "mylib" / "lib.go",
         "package mylib\nfunc Helper() int { return 42 }\n")
-      createDir(dir / "mybin")
-      writeFile(dir / "mybin" / "main.go",
+        createDir(dir / "mybin")
+        writeFile(dir / "mybin" / "main.go",
         "package main\nfunc main() {}\n")
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(dir)
-      check conv.recognize(dir, request)
-      removeDir(dir)
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(dir)
+        check conv.recognize(dir, request)
+        removeDir(dir)
 
-  test "layout A: single-member workspace with src/*.go at root":
-    if not goOnPath():
-      skip()
-    else:
-      let dir = makeScratch("layout-a-bin")
-      writeFile(dir / "repro.nim", """
+    test "layout A: single-member workspace with src/*.go at root":
+      if not goOnPath():
+        skip()
+      else:
+        let dir = makeScratch("layout-a-bin")
+        writeFile(dir / "repro.nim", """
 import repro_project_dsl
 
 package soloPkg:
@@ -452,13 +452,13 @@ package soloPkg:
   executable solo:
     discard
 """)
-      createDir(dir / "src")
-      writeFile(dir / "src" / "main.go",
-        "package main\nfunc main() {}\n")
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(dir)
-      check conv.recognize(dir, request)
-      removeDir(dir)
+        createDir(dir / "src")
+        writeFile(dir / "src" / "main.go",
+          "package main\nfunc main() {}\n")
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(dir)
+        check conv.recognize(dir, request)
+        removeDir(dir)
 
 # ---------------------------------------------------------------------------
 # M36 cross-language Go ↔ C/C++ verification.
@@ -720,16 +720,16 @@ package goAppPkg:
 depends_on goAppPkg: cLibPkg
 depends_on cLibPkg: goAppPkg
 """)
-      createDir(dir / "clib" / "src")
-      writeFile(dir / "clib" / "src" / "add.c",
+        createDir(dir / "clib" / "src")
+        writeFile(dir / "clib" / "src" / "add.c",
         "int add(int a, int b) { return a + b; }\n")
-      createDir(dir / "goapp")
-      writeFile(dir / "goapp" / "main.go",
+        createDir(dir / "goapp")
+        writeFile(dir / "goapp" / "main.go",
         "package main\n\n// #include <stdio.h>\nimport \"C\"\n" &
         "func main() { C.puts(C.CString(\"hi\")) }\n")
-      let conv = go_direct_convention.goDirectConvention()
-      let request = dummyRequest(dir)
-      check conv.recognize(dir, request)
-      expect ValueError:
-        discard conv.emitFragment(dir, request)
-      removeDir(dir)
+        let conv = go_direct_convention.goDirectConvention()
+        let request = dummyRequest(dir)
+        check conv.recognize(dir, request)
+        expect ValueError:
+          discard conv.emitFragment(dir, request)
+        removeDir(dir)
