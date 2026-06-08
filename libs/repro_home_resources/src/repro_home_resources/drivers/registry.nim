@@ -9,8 +9,17 @@
 ## We hand-roll a small Win32 binding rather than pulling in winim
 ## because it's a tiny, stable surface and avoids a transitive
 ## dependency only this driver needs.
+##
+## Test-isolation seam: when `REPRO_REGISTRY_ROOT` is set in the
+## environment, all three primitives (read/write/delete) target a
+## filesystem-backed fake hive rooted at that path instead of HKCU.
+## Production leaves the env var unset and the real Win32 path runs
+## unchanged. This exists because e2e tests that exercise real
+## `repro home apply` against profiles with `env.userPath` resources
+## were leaking PATH entries into the host's `HKCU\Environment\Path`
+## across thousands of runs.
 
-import std/[strutils]
+import std/[os, strutils]
 
 import ./../errors
 import ./../manifest_record
@@ -157,6 +166,106 @@ proc decodeMultiString*(bytes: openArray[byte]): seq[string] =
       itemBytes.add(bytes[i+1])
     i += 2
 
+# ---------------------------------------------------------------------------
+# Test-isolation fake hive (cross-platform — driven by REPRO_REGISTRY_ROOT).
+# ---------------------------------------------------------------------------
+#
+# Layout under `$REPRO_REGISTRY_ROOT`:
+#   <subkey-path-as-given>/<value-name>.regval
+# File body:
+#   [u32 regType LE][u32 byteLen LE][raw value bytes]
+# The byte sequence matches what `RegSetValueExW` is handed; the
+# regType matches what `RegQueryValueExW` would return. Subkey and
+# value-name path components are lowercased on disk to mirror the
+# Windows registry's case-insensitive name resolution.
+
+const FakeHiveSuffix = ".regval"
+
+proc registryRootOverride*(): string =
+  ## Returns the fake-hive root if `REPRO_REGISTRY_ROOT` is set,
+  ## else empty string. Checked at the start of each read/write/delete
+  ## so a test can opt in via subprocess env without recompiling.
+  getEnv("REPRO_REGISTRY_ROOT")
+
+proc normalizeSubkey(subkey: string): string =
+  ## Windows treats subkeys case-insensitively; mirror that by
+  ## lowercasing each path component. Also normalize both `\` and
+  ## `/` separators to the host's path separator.
+  var pieces: seq[string] = @[]
+  for piece in subkey.replace('/', '\\').split('\\'):
+    if piece.len > 0:
+      pieces.add(piece.toLowerAscii())
+  pieces.join($DirSep)
+
+proc fakeHiveValuePath(root, subkey, name: string): string =
+  root / normalizeSubkey(subkey) / (name.toLowerAscii() & FakeHiveSuffix)
+
+proc encodeFakeValue(regType: uint32; data: openArray[byte]): seq[byte] =
+  result = newSeq[byte](8 + data.len)
+  let byteLen = uint32(data.len)
+  result[0] = byte(regType and 0xff)
+  result[1] = byte((regType shr 8) and 0xff)
+  result[2] = byte((regType shr 16) and 0xff)
+  result[3] = byte((regType shr 24) and 0xff)
+  result[4] = byte(byteLen and 0xff)
+  result[5] = byte((byteLen shr 8) and 0xff)
+  result[6] = byte((byteLen shr 16) and 0xff)
+  result[7] = byte((byteLen shr 24) and 0xff)
+  for i, b in data:
+    result[8 + i] = b
+
+proc decodeFakeValue(blob: openArray[byte]):
+    tuple[regType: uint32; bytes: seq[byte]] =
+  if blob.len < 8:
+    raiseResourceDriver("fake-hive", "windows.registryValue",
+      "decodeFakeValue", "value file shorter than 8-byte header")
+  let regType =
+    uint32(blob[0]) or
+    (uint32(blob[1]) shl 8) or
+    (uint32(blob[2]) shl 16) or
+    (uint32(blob[3]) shl 24)
+  let byteLen =
+    int(uint32(blob[4]) or
+        (uint32(blob[5]) shl 8) or
+        (uint32(blob[6]) shl 16) or
+        (uint32(blob[7]) shl 24))
+  if blob.len < 8 + byteLen:
+    raiseResourceDriver("fake-hive", "windows.registryValue",
+      "decodeFakeValue",
+      "header declares " & $byteLen &
+      " bytes but file body is " & $(blob.len - 8) & " bytes")
+  var bytes = newSeq[byte](byteLen)
+  for i in 0 ..< byteLen:
+    bytes[i] = blob[8 + i]
+  (regType, bytes)
+
+proc readFakeRegistryValue(root, subkey, name: string):
+    tuple[present: bool; regType: uint32; bytes: seq[byte]] =
+  let path = fakeHiveValuePath(root, subkey, name)
+  if not fileExists(path):
+    return (false, 0'u32, @[])
+  let raw = readFile(path)
+  var blob = newSeq[byte](raw.len)
+  for i in 0 ..< raw.len:
+    blob[i] = byte(raw[i])
+  let decoded = decodeFakeValue(blob)
+  (true, decoded.regType, decoded.bytes)
+
+proc writeFakeRegistryValue(root, subkey, name: string;
+                            regType: uint32; data: openArray[byte]) =
+  let path = fakeHiveValuePath(root, subkey, name)
+  createDir(parentDir(path))
+  let blob = encodeFakeValue(regType, data)
+  var raw = newString(blob.len)
+  for i, b in blob:
+    raw[i] = char(b)
+  writeFile(path, raw)
+
+proc deleteFakeRegistryValue(root, subkey, name: string) =
+  let path = fakeHiveValuePath(root, subkey, name)
+  if fileExists(path):
+    removeFile(path)
+
 when defined(windows):
   # -------------------------------------------------------------------------
   # Win32 binding (hand-rolled — small stable surface).
@@ -263,6 +372,13 @@ when defined(windows):
     ## Read a registry value. `present == false` when the value is
     ## absent (the SUBKEY may still exist; we don't auto-create on
     ## read). Raises on unexpected Win32 errors.
+    let override = registryRootOverride()
+    if override.len > 0:
+      let r = readFakeRegistryValue(override, subkey, name)
+      result.present = r.present
+      result.regType = r.regType
+      result.bytes = r.bytes
+      return
     var hk: HKEY
     var wide = subkeyWide(subkey)
     let widePtr = cast[LPCWSTR](addr wide[0])
@@ -312,6 +428,10 @@ when defined(windows):
                           data: openArray[byte]) =
     ## Create the subkey if missing, then set the value with the
     ## given REG_TYPE and raw bytes.
+    let override = registryRootOverride()
+    if override.len > 0:
+      writeFakeRegistryValue(override, subkey, name, regType, data)
+      return
     let hk = openOrCreateKey(subkey, KEY_WRITE, create = true)
     defer: discard RegCloseKey(hk)
     var nameWide = valueNameWide(name)
@@ -331,6 +451,10 @@ when defined(windows):
   proc deleteRegistryValue*(subkey, name: string) =
     ## Delete the value. Silently succeeds if the value (or the
     ## subkey) was already gone.
+    let override = registryRootOverride()
+    if override.len > 0:
+      deleteFakeRegistryValue(override, subkey, name)
+      return
     var hk: HKEY
     var wide = subkeyWide(subkey)
     let widePtr = cast[LPCWSTR](addr wide[0])
@@ -377,31 +501,58 @@ when defined(windows):
       result.rawBytes = @[]
 
 else:
-  # Non-Windows stubs so the module compiles. The lifecycle layer
-  # platform-skips registry resources outside Windows; these stubs
-  # exist only so the umbrella import succeeds in tests on macOS /
-  # Linux (the gates that exercise registry are Windows-only).
+  # Non-Windows: the lifecycle layer platform-skips registry resources
+  # in production, but when `REPRO_REGISTRY_ROOT` is set we still honor
+  # the fake hive so unit tests can validate the driver cross-platform.
   type RegReadResult* = object
     present*: bool
     regType*: uint32
     bytes*: seq[byte]
 
   proc readRegistryValue*(subkey, name: string): RegReadResult =
+    let override = registryRootOverride()
+    if override.len > 0:
+      let r = readFakeRegistryValue(override, subkey, name)
+      result.present = r.present
+      result.regType = r.regType
+      result.bytes = r.bytes
+      return
     raiseResourceDriver("HKCU\\" & subkey, "windows.registryValue",
       "platform", "registry driver is Windows-only")
 
   proc writeRegistryValue*(subkey, name: string; regType: uint32;
                           data: openArray[byte]) =
+    let override = registryRootOverride()
+    if override.len > 0:
+      writeFakeRegistryValue(override, subkey, name, regType, data)
+      return
     raiseResourceDriver("HKCU\\" & subkey, "windows.registryValue",
       "platform", "registry driver is Windows-only")
 
   proc deleteRegistryValue*(subkey, name: string) =
+    let override = registryRootOverride()
+    if override.len > 0:
+      deleteFakeRegistryValue(override, subkey, name)
+      return
     raiseResourceDriver("HKCU\\" & subkey, "windows.registryValue",
       "platform", "registry driver is Windows-only")
 
   proc broadcastEnvironmentChange*() = discard
 
   proc observeRegistryValue*(key, name: string): ObservedState =
+    let override = registryRootOverride()
+    if override.len > 0:
+      let subkey = stripHkcuPrefix(key)
+      let r = readFakeRegistryValue(override, subkey, name)
+      if r.present:
+        result.present = true
+        result.rawBytes = r.bytes
+        result.digest = digestOfBytes(r.bytes)
+      else:
+        result.present = false
+        result.digest = zeroDigest()
+        result.rawBytes = @[]
+      return
     result.present = false
     result.digest = zeroDigest()
     result.rawBytes = @[]

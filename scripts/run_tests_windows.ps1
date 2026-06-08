@@ -29,6 +29,29 @@ $env:PATH = "D:\metacraft-dev-deps\nim\2.2.8\prebuilt\nim-2.2.8\bin;" +
 
 Set-Location $RepoRoot
 
+# ---------------------------------------------------------------------------
+# HKCU\Environment\Path pollution guard.
+# E2e tests that run real ``repro home apply`` against profiles with
+# ``env.userPath`` resources used to leak entries into the host's
+# persistent user PATH, eventually blowing past Windows' ~32 KB cap
+# and silently truncating real shims off the end. See project memory:
+# reprobuild user PATH pollution (2026-06-06). The REPRO_REGISTRY_ROOT
+# override in libs/repro_home_resources/.../drivers/registry.nim closes
+# the leak at the driver level; this snapshot acts as a backstop that
+# fails CI loudly if anything bypasses the override and writes to the
+# real registry.
+function Get-UserPathSnapshot {
+  $raw = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if ($null -eq $raw) { $raw = '' }
+  $entries = ($raw -split ';') | Where-Object { $_.Length -gt 0 }
+  return [pscustomobject]@{
+    Length     = $raw.Length
+    EntryCount = $entries.Count
+    Entries    = $entries
+  }
+}
+$pathBefore = Get-UserPathSnapshot
+
 $candidates = Get-ChildItem -Path $TestBinDir -Filter "t_$Filter.exe"
 # Skip stale ``.exe`` artifacts whose source has been deleted (e.g.,
 # ``t_catalog_profile_cli`` whose ``.nim`` was rolled back at some
@@ -112,4 +135,29 @@ if ($timedOut.Count -gt 0) {
   Write-Host "Timed-out tests:"
   foreach ($t in $timedOut) { Write-Host "  $t" }
 }
-exit ($failed.Count + $timedOut.Count)
+
+# HKCU\Environment\Path pollution check (see header for context).
+$pathAfter = Get-UserPathSnapshot
+$entryDelta = $pathAfter.EntryCount - $pathBefore.EntryCount
+$lengthDelta = $pathAfter.Length - $pathBefore.Length
+$pollutionFailures = 0
+if ($entryDelta -ne 0 -or $lengthDelta -ne 0) {
+  Write-Host ""
+  Write-Host "==== HKCU\Environment\Path pollution detected ====" -ForegroundColor Red
+  Write-Host "  Entries: $($pathBefore.EntryCount) -> $($pathAfter.EntryCount)  (delta $entryDelta)"
+  Write-Host "  Length:  $($pathBefore.Length) -> $($pathAfter.Length)  (delta $lengthDelta)"
+  $added = Compare-Object -ReferenceObject $pathBefore.Entries `
+    -DifferenceObject $pathAfter.Entries -PassThru |
+    Where-Object { $_.SideIndicator -eq '=>' -or $_ -in $pathAfter.Entries -and $_ -notin $pathBefore.Entries }
+  if ($added) {
+    Write-Host "  Newly-added entries:"
+    foreach ($e in $added) { Write-Host "    $e" }
+  }
+  Write-Host ""
+  Write-Host "Some test wrote to the host's persistent user PATH." -ForegroundColor Red
+  Write-Host "If it's a new e2e test, set REPRO_REGISTRY_ROOT in its baseEnv"
+  Write-Host "or call setupScoopSandbox (which sets it automatically)."
+  $pollutionFailures = 1
+}
+
+exit ($failed.Count + $timedOut.Count + $pollutionFailures)

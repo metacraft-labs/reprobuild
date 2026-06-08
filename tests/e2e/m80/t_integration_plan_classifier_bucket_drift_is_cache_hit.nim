@@ -55,6 +55,7 @@ import std/[algorithm, json, os, osproc, streams, strtabs, strutils,
 
 import repro_home_generations
 import repro_local_store
+import repro_test_support
 
 import ../scoop/scoop_sandbox
 
@@ -254,7 +255,8 @@ suite "integration_plan_classifier_bucket_drift_is_cache_hit":
       (k: "USERPROFILE", v: homeDir),
       (k: "REPRO_HOST", v: "m80-gate-host"),
       (k: "REPRO_HOME_PACKAGE_CATALOG", v: driftApp & "," & realizeApp),
-      (k: "SCOOP", v: sandbox.root)]
+      (k: "SCOOP", v: sandbox.root),
+      registryRootEnv(tempRoot)]
 
     # =================================================================
     # Part 1: `repro home apply --plan` classification.

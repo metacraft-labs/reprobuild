@@ -123,6 +123,13 @@ proc setupScoopSandbox*(tempRoot, bucketName: string): ScoopSandbox =
                root / "cache", root / "shims", root / "persist"]:
     createDir(dir)
   putEnv("SCOOP", result.root)
+  # Redirect registry writes (env.userPath / env.userVariable /
+  # windows.registryValue) into a per-test fake hive so apply
+  # subprocesses don't leak entries into the host's real
+  # HKCU\Environment\Path. The driver checks REPRO_REGISTRY_ROOT at
+  # each read/write/delete; subprocesses inherit it from this process.
+  # See project memory: reprobuild user PATH pollution (2026-06-06).
+  putEnv("REPRO_REGISTRY_ROOT", tempRoot / "registry")
 
 proc populateScoopApp*(sandbox: ScoopSandbox; app, version, executableName,
                       executablePayload: string): ScoopFixtureApp =
