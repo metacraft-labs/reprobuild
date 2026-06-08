@@ -289,6 +289,23 @@
         "type": "github"
       }
     },
+    "ct-test-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780704683,
+        "narHash": "sha256-jH9cmxsY+1Qz3EEkL5+82Gq5NqJKkVxlZ0WDCu0Z55s=",
+        "owner": "metacraft-labs",
+        "repo": "ct-test",
+        "rev": "06a4dcd34c5a85496a973ea07b4b9f8506ad18e9",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "ref": "main",
+        "repo": "ct-test",
+        "type": "github"
+      }
+    },
     "devenv": {
       "inputs": {
         "cachix": [
@@ -1961,6 +1978,7 @@
     "root": {
       "inputs": {
         "bearssl-src": "bearssl-src",
+        "ct-test-src": "ct-test-src",
         "flake-parts": [
           "nixos-modules",
           "flake-parts"

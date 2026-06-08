@@ -22,6 +22,15 @@
       url = "git+https://github.com/status-im/nim-bearssl?submodules=1&rev=9a4eed052abbded2d94feaf3f5bbd95a30ec4671";
       flake = false;
     };
+    ct-test-src = {
+      # ct-test ships the ct_test_nim_unittest adapter that
+      # `buildNimUnittest.build` in repro.tests.nim depends on, plus the
+      # ct_test_unittest_parallel framework adapter the parallel runner
+      # speaks. config.nims reads CT_TEST_SRC to thread these onto Nim's
+      # --path.
+      url = "github:metacraft-labs/ct-test/main";
+      flake = false;
+    };
   };
 
   outputs =
@@ -30,6 +39,7 @@
       git-hooks,
       nimcrypto-src,
       bearssl-src,
+      ct-test-src,
       runquota-src,
       ...
     }:
@@ -81,6 +91,7 @@
                 export BLAKE3_PREFIX=${blake3Prefix}
                 export NIMCRYPTO_SRC=${nimcrypto-src}
                 export BEARSSL_SRC=${bearssl-src}
+                export CT_TEST_SRC=${ct-test-src}
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
                 export XXHASH_PREFIX=${pkgs.xxHash}
@@ -112,6 +123,7 @@
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
+            CT_TEST_SRC = ct-test-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             SQLITE_PREFIX = pkgs.sqlite.out;
@@ -179,6 +191,7 @@
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
+            CT_TEST_SRC = ct-test-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             SQLITE_PREFIX = pkgs.sqlite.out;
