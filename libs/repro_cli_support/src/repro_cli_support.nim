@@ -1291,6 +1291,105 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   let executableName = payload.call.executableName
   let packageName = payload.call.packageName
   let exactKey = packageName & "|" & executableName
+
+  # ct_test_nim_unittest.buildNimUnittest.build typed-tool passthrough.
+  # The typed-tool defined via ``defineCliInterface buildNimUnittest,
+  # NimUnittestToolId`` has no real backing binary — its action is
+  # conceptually a ``nim c`` invocation that compiles a Nim unittest
+  # test binary. Translate the call into a direct ``nim c`` action
+  # using the ``nim`` profile from ``uses: "nim"``. Argument mapping:
+  #
+  #   subcommand "build"          -> subcommand "c"
+  #   --source=<path> (positional)-> positional <path>
+  #   --binary=<path>             -> --out:<path>
+  #   --threads:on (verbatim)     -> --threads:on
+  #   --hints:off (verbatim)      -> --hints:off
+  #   --warnings:off (verbatim)   -> --warnings:off
+  #   --define:<X> (verbatim)     -> --define:<X>
+  #   --import:<X> (verbatim)     -> --import:<X>
+  #
+  # This is a pragmatic shim until a typed-tool passthrough feature
+  # (typed tool that dispatches through an underlying tool's profile)
+  # lands in the engine. The 454-edge reprobuild test suite is the
+  # primary consumer.
+  if executableName == "ct_test_nim_unittest.buildNimUnittest" and
+      payload.call.subcommand == "build":
+    if not profiles.hasKey("nim"):
+      raise newException(ValueError,
+        "tool-resolution failed: action " & payload.id &
+          " references typed tool ct_test_nim_unittest.buildNimUnittest " &
+          "which dispatches through `nim` but no `nim` profile was " &
+          "resolved. Declare `uses: \"nim\"` in your project file.")
+    let nimProfile = profiles["nim"]
+    var argv: seq[string] = @[nimProfile.resolvedExecutablePath, "c"]
+    var sourcePath = ""
+    for arg in payload.call.arguments:
+      case arg.name
+      of "source":
+        sourcePath = arg.encodedValue
+      of "binary":
+        argv.add("--out:" & arg.encodedValue)
+      of "threadsOn":
+        if arg.encodedValue.normalize == "true":
+          argv.add("--threads:on")
+      of "hintsOff":
+        if arg.encodedValue.normalize == "true":
+          argv.add("--hints:off")
+      of "warningsOff":
+        if arg.encodedValue.normalize == "true":
+          argv.add("--warnings:off")
+      of "defines":
+        if arg.encodedValue.len > 0:
+          for item in arg.encodedValue.split("\x1f"):
+            argv.add("--define:" & item)
+      of "imports":
+        if arg.encodedValue.len > 0:
+          for item in arg.encodedValue.split("\x1f"):
+            argv.add("--import:" & item)
+      else:
+        discard
+    if sourcePath.len > 0:
+      argv.add(sourcePath)
+    var translatedInputs: seq[string] = @[]
+    for input in payload.inputs:
+      translatedInputs.add(materialProjectPath(projectRoot, input))
+    let commandStatsId =
+      if payload.commandStatsId.len > 0:
+        payload.commandStatsId
+      else:
+        payload.id
+    let fingerprintText = [
+      "reprobuild.localProjectAction.v1",
+      payload.id,
+      "nim",
+      "nim",
+      "c",
+      node.payload,
+      digestHex(nimProfile.profileFingerprint)
+    ].join("\n")
+    return repro_build_engine.action(
+      payload.id,
+      argv,
+      cwd = projectRoot,
+      deps = payload.deps,
+      inputs = translatedInputs,
+      outputs = payload.outputs,
+      pool = payload.pool,
+      poolUnits = payload.poolUnits,
+      depfile = payload.depfile,
+      dynamicDepsFile = payload.dynamicDepsFile,
+      cacheable = payload.cacheable,
+      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      actionCachePolicy = actionCachePolicy,
+      dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
+        payload.dependencyPolicy),
+      commandStatsId = commandStatsId,
+      env =
+        if actionPathPrefix.len > 0:
+          @["PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")]
+        else:
+          @[])
+
   let profile =
     if profiles.hasKey(exactKey):
       profiles[exactKey]
