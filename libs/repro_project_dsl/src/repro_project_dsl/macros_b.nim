@@ -140,6 +140,7 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let procName = ident("build" & titleIdent(pkg.packageName))
   let devEnvProcName = ident("devEnv" & titleIdent(pkg.packageName))
   let pkgLiteral = parseExpr(packageLiteral(pkg))
+  let pkgNameLit = newLit(pkg.packageName)
   let devEnvProc =
     if devEnvBody.len > 0:
       quote do:
@@ -148,13 +149,21 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
             `devEnvBody`
     else:
       newStmtList()
+  # Project-DSL-Composition M5 — Approach B: wrap the lowered build
+  # body in a beginBuildBlock/endBuildBlock try/finally so helper-proc
+  # call sites (and unknown preserved top-level statements) can find
+  # the active package via `currentBuildState()` / `tryCurrentBuildState()`.
   if lifted.lifts.len == 0:
     let rootBody = lifted.rootBody
     result = quote do:
       when not defined(reproInterfaceMode):
         `devEnvProc`
         proc `procName`*() =
-          `rootBody`
+          let buildStateHandle = beginBuildBlock(`pkgNameLit`)
+          try:
+            `rootBody`
+          finally:
+            endBuildBlock(buildStateHandle)
         when defined(reproProviderMode) and isMainModule:
           when compiles(`devEnvProcName`()):
             quit runPackageProvider(`pkgLiteral`, `procName`,
@@ -173,7 +182,11 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
         `devEnvProc`
         `liftedProcs`
         proc `procName`*() =
-          `rootBody`
+          let buildStateHandle = beginBuildBlock(`pkgNameLit`)
+          try:
+            `rootBody`
+          finally:
+            endBuildBlock(buildStateHandle)
         when defined(reproProviderMode):
           `dispatchProc`
           when isMainModule:
@@ -295,8 +308,64 @@ proc collectImplicitTargetNameHooks(pkgBody: NimNode): NimNode =
       result.add(parseStmt(procSrc))
 
 macro package*(name: untyped; body: untyped): untyped =
+  ## Top-level package declaration.
+  ##
+  ## Project-DSL-Composition M5 — extends the legacy "parse body → emit
+  ## new code" pipeline with three additive emissions:
+  ##
+  ## 1. Active-build-context wrapping. The generated `build<Name>*()`
+  ##    proc now opens with `beginBuildBlock(packageName)` and pairs
+  ##    it with `endBuildBlock(<state>)` in a `try/finally`. Helper
+  ##    procs and unknown-but-preserved top-level Nim statements that
+  ##    invoke typed-tool wrappers find the active package via the
+  ##    thread-local stack instead of relying on lexical position.
+  ##
+  ## 2. Cross-project edge references. Top-level `let`/`var` bindings
+  ##    inside the outermost `build:` block(s) become public members
+  ##    of `<package>.build` via:
+  ##      - module-level storage vars (one per binding) plus paired
+  ##        init flags;
+  ##      - storage-write splices in the lowered `build:` body;
+  ##      - per-binding accessor templates dispatching on
+  ##        `PackageBuild["<name>"]`;
+  ##      - a bridging `template build*` that routes the legacy
+  ##        `const <name>* = <Title>Package()` const into the
+  ##        `PackageBuild["<name>"]` namespace.
+  ##    A compile-time `uses:` registry detects cycles before they
+  ##    cause downstream semcheck failures.
+  ##
+  ## 3. Unknown-node preservation. Top-level statements that don't
+  ##    match a recognised DSL section (raw `include`, `import`,
+  ##    `proc`, `when`, `echo`, …) are emitted verbatim alongside
+  ##    the generated code so they survive macro expansion. This is
+  ##    the "add-alongside" minimum-viable port of v8's
+  ##    `transformPackageBody` pattern; a full in-place rewrite is
+  ##    deferred (the legacy `parsePackageDef` + `buildCode` chain
+  ##    still does the section lowering).
   let pkg = parsePackageDef(name, body)
-  let recordActions = collectBuildStatements(body).len == 0 and
+  let packageName = pkg.packageName
+  # ── M5: cross-project uses + cycle detection ─────────────────────
+  var declaredUses: seq[string] = @[]
+  for u in pkg.toolUses:
+    if u.packageSelector.len > 0:
+      declaredUses.add(u.packageSelector)
+  let cycleError = detectCrossProjectCycle(packageName, declaredUses)
+  if cycleError.len > 0:
+    error(cycleError, name)
+  registerCrossProjectUses(packageName, declaredUses)
+  # ── M5: collect top-level build: bindings BEFORE lowering ────────
+  let crossProjectBindings = collectTopLevelBuildBindings(body)
+  # Splice storage writes after each captured binding so the lowered
+  # build proc populates the module-level vars at runtime. We use the
+  # ORIGINAL body for binding collection (read-only) and a copy for
+  # the lowered builder (write-through).
+  let bodyForBuild =
+    if crossProjectBindings.len > 0:
+      instrumentBuildBindings(body, packageName, crossProjectBindings)
+    else:
+      body
+  # ── existing M0/M1 emissions ─────────────────────────────────────
+  let recordActions = collectBuildStatements(bodyForBuild).len == 0 and
     pkg.executables.len > 0
   let generated = parseStmt(
     usesImportCode(pkg) &
@@ -309,7 +378,26 @@ macro package*(name: untyped; body: untyped): untyped =
   # type-checks against the already-declared hook.
   result.add(collectImplicitTargetNameHooks(body))
   result.add(generated)
-  result.add(buildCode(pkg, body))
+  # ── M5: cross-project storage / const / accessors ────────────────
+  # `wrapperCode` and `toolActionWrapperCode` BOTH unconditionally
+  # emit `const <packageValueIdent>* = <typeName>()` regardless of
+  # executable count (see `macros_a.nim` lines 1423 / 1562). The
+  # cross-project emitter therefore ALWAYS bridges via an overloaded
+  # `build*` template instead of trying to redeclare the const.
+  let legacyConstAlreadyEmitted = true
+  let legacyTypeIdent = ident(titleIdent(packageName))
+  if crossProjectBindings.len > 0:
+    result.add(generatedCrossProjectStorage(packageName, crossProjectBindings))
+    result.add(generatedCrossProjectPackageConst(packageName,
+                                                 crossProjectBindings,
+                                                 legacyConstAlreadyEmitted,
+                                                 legacyTypeIdent))
+    result.add(generatedCrossProjectAccessors(packageName,
+                                              crossProjectBindings))
+  # ── existing builder emission (now feeding instrumented body) ────
+  result.add(buildCode(pkg, bodyForBuild))
+  # ── M5: preserved unknown top-level nodes (include, raw Nim) ─────
+  result.add(preservedTopLevelNodes(bodyForBuild))
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

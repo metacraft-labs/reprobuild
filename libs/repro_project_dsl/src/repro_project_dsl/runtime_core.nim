@@ -44,6 +44,74 @@ type
 
 var workspaceDepRegistry: seq[WorkspaceDepEdge] = @[]
 
+# ---------------------------------------------------------------------------
+# Project-DSL-Composition M5 — Approach B active-build-context handle.
+#
+# Mirrors the v8 staged layer's `PackageBuildState` / `activeBuilds`
+# (`tools/prototypes/v8/staged/package_catalog/project_package_dsl.nim`
+# lines 42-129). Helper procs and unknown top-level Nim statements that
+# reach typed-tool wrappers from OUTSIDE a literal `build:` block query
+# this stack to find the active package frame; the `package` macro
+# pushes a frame on entry to its lowered `build:` block and pops on exit.
+#
+# `ownerKind` distinguishes `"package"` (the build block sat directly at
+# package top level — M1's symmetry rule) from artifact-owner kinds
+# (`"executable"`, `"library"`, `"files"`, `"service"`). M5 only wires
+# the package-owner shape; artifact-owner support follows in the
+# M6 test-suite migration if needed.
+# ---------------------------------------------------------------------------
+type
+  PackageBuildState* = ref object
+    ownerKind*: string   ## "package" or "executable" / "library" / ...
+    ownerName*: string   ## package name (or artifact ident when artifact-owned)
+    packageName*: string ## the enclosing package — always set
+
+var activeBuilds {.threadvar.}: seq[PackageBuildState]
+
+proc beginBuildBlock*(packageName: string;
+                      ownerKind = "package";
+                      ownerName = ""): PackageBuildState {.dynOrStatic.} =
+  ## Push a frame onto the active-build stack. Called by the lowered
+  ## form of a `build:` block; `package` macro expansion wraps the
+  ## user's build statements in a `try/finally` that pairs this with
+  ## `endBuildBlock`. The returned handle is opaque to authors.
+  result = PackageBuildState(
+    ownerKind: ownerKind,
+    ownerName: (if ownerName.len > 0: ownerName else: packageName),
+    packageName: packageName)
+  activeBuilds.add(result)
+
+proc endBuildBlock*(state: PackageBuildState) {.dynOrStatic.} =
+  ## Pop the matching frame. Safe to call with a stale handle — the
+  ## stack is searched and the top-most matching frame is removed so
+  ## an exception thrown across nested `build:` blocks unwinds cleanly.
+  if activeBuilds.len == 0:
+    return
+  for i in countdown(activeBuilds.high, 0):
+    if activeBuilds[i] == state:
+      activeBuilds.delete(i)
+      return
+  # Fallback: just pop the top (shouldn't be reached in healthy code).
+  activeBuilds.setLen(activeBuilds.len - 1)
+
+proc currentBuildState*(): PackageBuildState {.dynOrStatic.} =
+  ## Raises ``ValueError`` if no `build:` block is currently active.
+  ## The error message names the typed tool only at the call site;
+  ## here we surface a stable, traceable spelling.
+  if activeBuilds.len == 0:
+    raise newException(ValueError,
+      "build DSL operation used outside an active build: block")
+  activeBuilds[^1]
+
+proc tryCurrentBuildState*(): PackageBuildState {.dynOrStatic.} =
+  ## Returns nil instead of raising when no `build:` block is active.
+  ## Helper-proc wrappers that want to surface a richer error use this
+  ## and craft the message themselves.
+  if activeBuilds.len == 0:
+    return nil
+  activeBuilds[^1]
+
+
 const fs* = ReproFs()
 const hcr* = ReproHcr()
 

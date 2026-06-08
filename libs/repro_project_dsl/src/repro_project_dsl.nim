@@ -42,6 +42,12 @@ when defined(reproProviderMode):
 
 include "repro_project_dsl/types"
 
+# Project-DSL-Composition M5: per-section typed-object prelude.
+# Defines ``Package[name]`` / ``PackageBuild[name]`` and the section-
+# accessor templates the new cross-project reference machinery emits
+# binding accessors against.
+include "repro_project_dsl/prelude_typed_objects"
+
 # The ``dynOrStatic`` pragma macro toggles each public runtime proc
 # between three roles:
 #   * legacy monolithic build (default): body stays, no decoration;
@@ -67,4 +73,10 @@ export dyn_or_static
 include "repro_project_dsl/runtime_core"
 include "repro_project_dsl/macros_a"
 include "repro_project_dsl/runtime_provider"
+# Project-DSL-Composition M5: cross-project edge references —
+# compile-time uses-registry, cycle detection, top-level `let`/`var`
+# binding collection inside the producer's `build:` block, plus the
+# storage / accessor-template / instrumentation emitters used by the
+# `package` macro.
+include "repro_project_dsl/cross_project"
 include "repro_project_dsl/macros_b"
