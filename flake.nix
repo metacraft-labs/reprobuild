@@ -15,9 +15,11 @@
       flake = false;
     };
     bearssl-src = {
-      # ?submodules=1 pulls bearssl/csources (the upstream BearSSL C tree
+      # Submodules=1 pulls bearssl/csources (the upstream BearSSL C tree
       # nim-bearssl wraps); without it the bindings compile but link-fail.
-      url = "github:status-im/nim-bearssl/9a4eed052abbded2d94feaf3f5bbd95a30ec4671?submodules=1";
+      # The git+https URL form preserves the submodule flag through the lock
+      # (the github: + ?submodules=1 form drops it on lock).
+      url = "git+https://github.com/status-im/nim-bearssl?submodules=1&rev=9a4eed052abbded2d94feaf3f5bbd95a30ec4671";
       flake = false;
     };
   };
