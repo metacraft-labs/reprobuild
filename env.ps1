@@ -75,12 +75,21 @@ if ([string]::IsNullOrEmpty($nativeRecorderDir)) {
     Write-Warning "reprobuild env.ps1: ../codetracer-native-recorder sibling missing -- the monitor shim's hook_registry comes from ct_interpose/src. Clone metacraft-labs/codetracer-native-recorder if you plan to build the Windows monitor shim."
 }
 
-# Re-export the resolved sibling paths so config.nims picks them up
-# without re-discovering relative paths.
-if ($codetracerDir) {
-    $env:NIMCRYPTO_SRC = Join-Path $codetracerDir "libs\nimcrypto"
-    $env:NIM_STEW_SRC = Join-Path $codetracerDir "libs\nim-stew"
-}
+# Re-export the resolved sibling paths so `config.nims` doesn't have to
+# walk relative-path candidates. Only the entries that have no vendored
+# fallback inside `reprobuild/libs/` are exported here:
+#
+#   * RUNQUOTA_SRC / CT_INTERPOSE_SRC -- no vendored fallback, must point
+#     at the sibling checkout.
+#
+# `NIMCRYPTO_SRC` / `NIM_STEW_SRC` / `NIM_FASTSTREAMS_SRC` are
+# DELIBERATELY NOT exported, even though their codetracer-side copies
+# exist: `config.nims` already searches `reprobuild/libs/` FIRST, and
+# the vendored copies under `reprobuild/libs/` are newer than the
+# pinned submodule snapshots under `codetracer/libs/`. Setting an
+# override would force the older copy and miss API additions
+# (notably `stew/ptrops.baseAddr` which the vendored
+# `nim-faststreams/buffers.nim` depends on).
 if ($runquotaDir) { $env:RUNQUOTA_SRC = $runquotaDir }
 if ($nativeRecorderDir) {
     $env:CT_INTERPOSE_SRC = Join-Path $nativeRecorderDir "ct_interpose\src"
