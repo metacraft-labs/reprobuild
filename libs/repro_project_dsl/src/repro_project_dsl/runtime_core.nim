@@ -66,6 +66,32 @@ type
     ownerName*: string   ## package name (or artifact ident when artifact-owned)
     packageName*: string ## the enclosing package — always set
 
+    # ---------------------------------------------------------------
+    # Spec-Implementation M3 — cross-cutting interface slots.
+    #
+    # Reprobuild-Standard-Library §"Cross-Cutting Interfaces" declares
+    # four vtable-style interfaces (``TestRunner``, ``Toolchain``,
+    # ``CrossTarget``, ``FeatureSet``). The interface types live in the
+    # stdlib library (``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/
+    # interfaces/``) which depends on ``repro_project_dsl``, so the
+    # slots are stored as ``RootRef`` here and the stdlib accessor
+    # ``currentBuildContext()`` returns them with the proper interface
+    # types. Recipes never read the raw ``RootRef`` form; they go
+    # through the stdlib accessor. M4 (ct-test) plugs into
+    # ``testRunner``; M5 (cross-compilation) plugs into ``toolchain``
+    # and ``crossTarget``.
+    #
+    # When a slot is ``nil`` the stdlib accessor lazily installs the
+    # stdlib default adapter (``defaultToolchain``,
+    # ``defaultCrossTarget``, ``defaultTestRunner``,
+    # ``defaultFeatureSet``) so recipes that don't opt into a variant
+    # still get a working build context.
+    # ---------------------------------------------------------------
+    testRunnerSlot*: RootRef
+    toolchainSlot*: RootRef
+    crossTargetSlot*: RootRef
+    featureSetSlot*: RootRef
+
 var activeBuilds {.threadvar.}: seq[PackageBuildState]
 
 proc beginBuildBlock*(packageName: string;
