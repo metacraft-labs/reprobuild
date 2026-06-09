@@ -1586,8 +1586,28 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_integration_configurable_system_incremental_refinalize",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_integration_context_default_slots.nim",
+    binary: "build/test-bin/t_integration_context_default_slots",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_context_variant_driven_slots.nim",
+    binary: "build/test-bin/t_integration_context_variant_driven_slots",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_cross_target_native.nim",
+    binary: "build/test-bin/t_integration_cross_target_native",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_cross_target_splice.nim",
+    binary: "build/test-bin/t_integration_cross_target_splice",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_integration_daemon_nix_and_tarball_realize.nim",
     binary: "build/test-bin/t_integration_daemon_nix_and_tarball_realize",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_feature_set_solver_backed.nim",
+    binary: "build/test-bin/t_integration_feature_set_solver_backed",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_hcr_linkgraph_relocation_classification.nim",
@@ -1614,6 +1634,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_integration_provider_fragment_refresh_and_pruning",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_integration_recipe_consumes_interface.nim",
+    binary: "build/test-bin/t_integration_recipe_consumes_interface",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_integration_reprobuild_sessions_share_runquota.nim",
     binary: "build/test-bin/t_integration_reprobuild_sessions_share_runquota",
     defines: @[]),
@@ -1628,6 +1652,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_integration_solver_resolves_variants.nim",
     binary: "build/test-bin/t_integration_solver_resolves_variants",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_test_runner_interface.nim",
+    binary: "build/test-bin/t_integration_test_runner_interface",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_toolchain_interface.nim",
+    binary: "build/test-bin/t_integration_toolchain_interface",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_variant_cli_flag.nim",

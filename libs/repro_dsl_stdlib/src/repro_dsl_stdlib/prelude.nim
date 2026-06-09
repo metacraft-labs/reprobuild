@@ -1,7 +1,9 @@
 import repro_project_dsl
 import repro_dsl_stdlib/fs
 import repro_dsl_stdlib/configurables
+import repro_dsl_stdlib/active_context
 
 export repro_project_dsl
 export fs
 export configurables
+export active_context
