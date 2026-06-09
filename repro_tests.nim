@@ -290,6 +290,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_smoke_home_intent",
     defines: @[]),
   TestSpec(
+    source: "libs/repro_home_resources/tests/t_registry_root_override.nim",
+    binary: "build/test-bin/t_registry_root_override",
+    defines: @[]),
+  TestSpec(
     source: "libs/repro_home_resources/tests/t_smoke_home_resources.nim",
     binary: "build/test-bin/t_smoke_home_resources",
     defines: @[]),
