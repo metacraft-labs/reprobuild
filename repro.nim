@@ -172,7 +172,13 @@ package reprobuild:
         binary = spec.binary,
         defines = spec.defines)
       reprobuildTestActions.add(edge.action)
-    discard aggregate("test", reprobuildTestActions)
+    # Spec-Implementation M0: the ``test`` build graph collection
+    # (per reprobuild-specs/Build-Graph-Collections.md). ``repro test``
+    # and ``repro build test`` both materialize this collection's
+    # closure. Previously expressed as ``aggregate("test", ...)``; the
+    # ``collect`` primitive is the build-graph-collection-shaped name
+    # for the same data model in M0 (the registry split lands later).
+    discard collect("test", reprobuildTestActions)
 
     # Option (A) from the repo packaging memo: wrap scripts/build_apps.sh
     # byte-for-byte so the action's behaviour is identical to ``just

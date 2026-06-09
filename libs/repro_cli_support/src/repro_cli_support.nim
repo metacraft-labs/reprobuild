@@ -20909,6 +20909,13 @@ proc runThinApp*(programName: string): int =
     # CI-Sharding M2 — ``repro test --shard k/N [...]``.  Implementation
     # in ``runReproTestCommand`` above; see the block comment there for
     # the user-visible flag surface and the fixture / plan I/O shape.
+    #
+    # Spec-Implementation M0 alias contract: ``repro test`` is also the
+    # CLI verb alias for ``repro build test`` per Build-Graph-Collections.md
+    # §"Verb Aliases for Conventional Collections". The CI-sharding
+    # implementation already maps to ``repro build test`` internally
+    # (see ``buildArgs = @["build", "test"]`` at the head of this file),
+    # so the alias is satisfied without further dispatch routing.
     try:
       let testArgs =
         if args.len > 1:
@@ -20918,6 +20925,53 @@ proc runThinApp*(programName: string): int =
       return runReproTestCommand(testArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro test: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "bench":
+    # Spec-Implementation M0: ``repro bench`` is a CLI verb alias for
+    # ``repro build bench`` per Build-Graph-Collections.md §"Verb Aliases
+    # for Conventional Collections" and CLI/bench.md. The alias is a
+    # one-arg rewrite that delegates to ``runBuildCommand``; the bench
+    # build graph collection itself is the project's responsibility to
+    # declare (via ``collect("bench", ...)`` or the M1-era
+    # ``aggregate("bench", ...)`` interim form). When no collection
+    # named ``bench`` exists the standard ``unknown_target`` diagnostic
+    # from Named-Targets M2 surfaces — no special "no benchmarks" case.
+    try:
+      let benchArgs =
+        if args.len > 1:
+          @["bench"] & args[1 .. ^1]
+        else:
+          @["bench"]
+      return runBuildCommand(benchArgs, publicCliPath)
+    except BuildTargetAmbiguousError as err:
+      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+      return 2
+    except BuildTargetUnknownError as err:
+      stderr.write(renderUnknownTargetDiagnostic(err[]))
+      return 2
+    except CatchableError as err:
+      stderr.writeLine("repro bench: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "lint":
+    # Spec-Implementation M0: ``repro lint`` is a CLI verb alias for
+    # ``repro build lint`` per Build-Graph-Collections.md §"Verb Aliases
+    # for Conventional Collections" and CLI/lint.md. Mirror shape of the
+    # ``bench`` alias above.
+    try:
+      let lintArgs =
+        if args.len > 1:
+          @["lint"] & args[1 .. ^1]
+        else:
+          @["lint"]
+      return runBuildCommand(lintArgs, publicCliPath)
+    except BuildTargetAmbiguousError as err:
+      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+      return 2
+    except BuildTargetUnknownError as err:
+      stderr.write(renderUnknownTargetDiagnostic(err[]))
+      return 2
+    except CatchableError as err:
+      stderr.writeLine("repro lint: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "stats":
     try:

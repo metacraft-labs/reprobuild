@@ -705,6 +705,45 @@ proc aggregate*(name: string; actions: openArray[BuildActionDef] = [];
     actions: actionRefs,
     targets: targetRefs))
 
+# ---------------------------------------------------------------------------
+# Spec-Implementation M0 — build graph collections (per
+# reprobuild-specs/Build-Graph-Collections.md).
+#
+# A build graph collection is a named set of build-graph targets that
+# ``repro build <name>`` materializes as a unit. Distinct from package
+# *shared* collections (which accumulate values during package
+# evaluation and get finalized into configs/resources): build graph
+# collections live at graph emission time and operate on target
+# identities only.
+#
+# M0 implementation note: the runtime data model is shared with
+# ``aggregate`` — collections and aggregates both produce a
+# ``BuildTargetDef`` that lands in the project-scoped target-export
+# table. The CLI resolver treats them identically. A future milestone
+# splits the registries so the build-report can distinguish
+# ``kind: "collection"`` from ``kind: "aggregate"`` per
+# Build-Graph-Collections.md §"Build-Report Integration". For M0, the
+# semantic distinction lives in the call-site naming: authors call
+# ``collect`` for build graph collections (test/bench/lint/docs/package
+# and project-defined ones) and ``aggregate`` for ad-hoc target groups
+# that are not part of the collection contract.
+# ---------------------------------------------------------------------------
+
+proc collect*(name: string; actions: openArray[BuildActionDef] = [];
+              targets: openArray[BuildTargetDef] = []): BuildTargetDef
+    {.discardable, dynOrStatic.} =
+  ## Register a build graph collection under ``name`` carrying every
+  ## supplied build-edge action and/or sub-target. ``repro build <name>``
+  ## materializes the union of their dependency closures in one engine
+  ## pass; the conventional collections (``test``, ``bench``, ``lint``,
+  ## ``docs``, ``package``) additionally receive CLI verb aliases per
+  ## Build-Graph-Collections.md §"Verb Aliases for Conventional
+  ## Collections".
+  ##
+  ## See ``aggregate`` for ad-hoc target groupings that are not part of
+  ## the collection contract.
+  aggregate(name, actions, targets)
+
 proc exportTarget*(name: string; target: BuildTargetDef): BuildTargetDef
     {.discardable, dynOrStatic.} =
   registerBuildTarget(BuildTargetDef(name: name, targets: @[target.name]))
