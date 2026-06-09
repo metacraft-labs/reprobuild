@@ -9,6 +9,7 @@ import std/[algorithm, os, strutils]
 from repro_core/paths import extendedPath
 
 import blake3
+import repro_profile_intent/envelope as profile_envelope
 
 # ---------------------------------------------------------------------------
 # Repo-root + Nim path discovery.
@@ -192,12 +193,34 @@ type
 proc computeProfileDigest*(sources: seq[string]; anchorDir: string):
     ProfileDigest =
   ## Compute the BLAKE3-256 cache key over the concatenation of
-  ## `(rel-path, blake3(content))` for each source file. `anchorDir`
-  ## is the directory the relative paths are computed against — the
-  ## profile root's parent. Using a stable anchor makes the digest
-  ## reproducible across machines.
+  ## `(rel-path, blake3(content))` for each source file, prefixed with
+  ## a stable schema-identity tag. `anchorDir` is the directory the
+  ## relative paths are computed against — the profile root's parent.
+  ## Using a stable anchor makes the digest reproducible across machines.
+  ##
+  ## Schema-identity prefix (2026-06-09): the digest input starts with
+  ## a fixed `"rbpi-schema-v<N>\n"` line, where `<N>` is the current
+  ## `RbpiSchemaVersion`. Bumping the envelope schema therefore
+  ## changes the digest for the SAME source content — every cache
+  ## entry under `<state-dir>/profile-cache/<digest>.rbpi` from the
+  ## previous schema is automatically a cache miss (the cache key
+  ## doesn't collide with any v<N> entry). Combined with the strict
+  ## envelope reader (which rejects unsupported versions outright),
+  ## this gives two-layer cache safety: the lookup misses BEFORE we
+  ## try to read a stale file, and even if we did read one, the
+  ## reader would reject it.
+  ##
+  ## What this does NOT cover: behaviour changes within a single
+  ## schema version (e.g. a bug-fix to the planner that doesn't
+  ## change the envelope shape). Those need a manual
+  ## `--force-rebuild` or a wider-scoped invalidation mechanism. The
+  ## schema version is the right granularity for *interpretation*
+  ## changes only.
   var hasher = initHasher()
+  hasher.update("rbpi-schema-v" & $profile_envelope.RbpiSchemaVersion & "\n")
   var manifestParts: seq[string]
+  manifestParts.add "schema-version\t" &
+    $profile_envelope.RbpiSchemaVersion & "\n"
   for absPath in sources:
     let relPath = relativePath(absPath, anchorDir).replace('\\', '/')
     let content =
@@ -232,3 +255,51 @@ proc cachedSourcesPath*(stateDir, digestHex: string): string =
 
 proc cachedNimcacheDir*(stateDir, digestHex: string): string =
   profileCacheDir(stateDir) / "nimcache" / digestHex
+
+proc pruneStaleProfileCache*(stateDir: string): int =
+  ## Walk `<stateDir>/profile-cache/` and delete every `.rbpi` file
+  ## whose envelope header does NOT match the current
+  ## `RbpiSchemaVersion`. Also removes any sibling `.source.txt`
+  ## manifest. Returns the number of `.rbpi` files deleted.
+  ##
+  ## The `readRbpiHeader` envelope reader raises on version mismatch,
+  ## corrupt magic, or truncated input — we treat all of those the
+  ## same way (the file is unusable to the current build) and remove
+  ## the artefact. Files we cannot delete (e.g. read-only filesystem)
+  ## are silently skipped.
+  ##
+  ## Called once per compile-entry from `edge.nim` so a reprobuild
+  ## upgrade that bumps the schema version automatically cleans the
+  ## previous version's cache the next time anyone runs
+  ## `repro home apply`. The walk is O(N) over the file list but
+  ## bounded by the per-profile cache footprint (usually 1-3 files);
+  ## the call is no-op cheap when no stale entries exist.
+  let cacheDir = profileCacheDir(stateDir)
+  if not dirExists(extendedPath(cacheDir)):
+    return 0
+  for kind, path in walkDir(extendedPath(cacheDir)):
+    if kind != pcFile: continue
+    if not path.endsWith(".rbpi"): continue
+    var isStale = false
+    try:
+      let raw = readFile(path)
+      var bytes = newSeq[byte](raw.len)
+      for i, ch in raw:
+        bytes[i] = byte(ord(ch))
+      discard profile_envelope.readRbpiHeader(bytes)
+      # Reached: header is current schema. Keep the file.
+    except CatchableError:
+      isStale = true
+    if isStale:
+      try:
+        removeFile(path)
+        inc result
+      except CatchableError:
+        continue
+      # Best-effort clean-up of the sibling manifest. Failure is
+      # acceptable — the .rbpi removal alone is enough to force a
+      # recompile on the next lookup.
+      let manifestPath = path[0 ..< path.len - ".rbpi".len] & ".source.txt"
+      if fileExists(extendedPath(manifestPath)):
+        try: removeFile(extendedPath(manifestPath))
+        except CatchableError: discard

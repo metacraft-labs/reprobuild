@@ -182,6 +182,16 @@ proc compileProfileToRbpi*(profileRoot: string;
 
   createDir(extendedPath(profileCacheDir(opts.stateDir)))
 
+  # Sweep stale-schema-version cache entries from any previous
+  # reprobuild build. The sweep is bounded by the per-profile cache
+  # footprint (typically 1-3 files); on a clean dir it's a no-op.
+  # Without this, a reprobuild upgrade that bumps RbpiSchemaVersion
+  # would leave the previous version's `.rbpi` files lying around;
+  # they'd be cache-missed (because the digest now includes the
+  # schema version, and the strict reader rejects the old version),
+  # but they'd accumulate on disk over many upgrades.
+  discard pruneStaleProfileCache(opts.stateDir)
+
   let inputSources = discoverProfileSources(absProfile)
   let anchorDir = absProfile.parentDir
   let digest = computeProfileDigest(inputSources, anchorDir)

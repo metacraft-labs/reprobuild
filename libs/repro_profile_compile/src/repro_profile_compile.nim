@@ -45,6 +45,7 @@ export sources.profileCacheDir
 export sources.cachedRbpiPath
 export sources.cachedSourcesPath
 export sources.cachedNimcacheDir
+export sources.pruneStaleProfileCache
 
 # Direct nim invocation + JSON->RBPI bridge.
 export compile.CompileFailure

@@ -25,7 +25,33 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 1'u16            ## Current envelope schema version.
+  RbpiSchemaVersion* = 2'u16            ## Current envelope schema version.
+    ##
+    ## Version history:
+    ##   1 (M83 Phase B): initial envelope; ActivityElement carries
+    ##     pkgName only on the CBOR side (pkgVersion was dropped at the
+    ##     RBPI boundary in early M83 — a latent bug). configOverrides,
+    ##     hosts, resources, adapterPreference all present.
+    ##   2 (2026-06-09): ActivityElement.aekPackageRef CBOR map gains
+    ##     two OPTIONAL fields:
+    ##       "version"  -- the literal version pin (fixes the M83
+    ##                     drop); present only when non-empty.
+    ##       "binaries" -- the explicit binary names a package installs,
+    ##                     used by path-based catalog adapters when the
+    ##                     package name doesn't match the binary name
+    ##                     (e.g. `ripgrep` -> `rg`); present only when
+    ##                     non-empty.
+    ##     The version bump matters for the on-disk cache: profile
+    ##     compile artifacts at `<state-dir>/profile-cache/<digest>.rbpi`
+    ##     mix the schema version into the digest input (see
+    ##     `computeProfileDigest`), so a v1 cache entry's digest never
+    ##     collides with a v2 entry for the same source set; v1 files
+    ##     are also rejected by the strict reader at read time
+    ##     (`unsupported RBPI schema version`), which the cache validity
+    ##     check (`cachedArtifactIsValid`) catches as "miss → recompile".
+    ## When you change the on-the-wire CBOR shape of ANY field that
+    ## affects how a downstream consumer would interpret the envelope,
+    ## bump this constant AND document the change here.
   RbpiHeaderSize*    = 4 + 2 + 4        ## magic + version + bodyLen.
   RbpiTrailerSize*   = 32               ## BLAKE3-256 trailing checksum.
 
