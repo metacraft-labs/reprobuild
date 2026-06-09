@@ -126,6 +126,19 @@ type
     policyPath*: seq[string]
     sourceFile*: string
     sourceLine*: int
+    gateVariant*: string
+      ## Spec-Implementation M2d: when non-empty, this ``uses:`` entry
+      ## was collected from a variant-conditioned arm (``if
+      ## <variant>.value: ...`` or ``case <variant>.value: of "value":
+      ## ...``). The arm only contributes the dependency when the named
+      ## variant resolves to ``gateValue``. M2d's solver-driven
+      ## ``finalizeVariants()`` propagates the gate through
+      ## ``ConditionalGate`` in the solver's ``DependencyDecl``.
+    gateValue*: string
+      ## The variant value that activates the gate. For ``case
+      ## compiler.value: of "gcc": "gcc >=12 <15"`` this is ``"gcc"``;
+      ## for ``if enableTLS.value: "openssl >=3.3 <4.0"`` this is
+      ## ``"true"`` (bool variants encode triggers as the string form).
 
   NixPackageProvisioningDef* = object
     selector*: string

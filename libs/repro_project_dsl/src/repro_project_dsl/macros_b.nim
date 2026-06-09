@@ -307,26 +307,32 @@ proc collectImplicitTargetNameHooks(pkgBody: NimNode): NimNode =
         indentBody(spec.bodyRepr)
       result.add(parseStmt(procSrc))
 
-proc emitVariantDeclarations(variants: seq[VariantDecl]): NimNode =
-  ## Spec-Implementation M1: lower the parsed ``VariantDecl`` list into
-  ## Nim source code. Emits a single ``import`` of the configurables
-  ## umbrella (when variants are present), one
-  ## ``let <name> = declareVariant[T](<args>)`` per declaration, plus
-  ## a trailing ``finalizeVariants()`` call. Together these make every
-  ## variant's ``.value`` accessor work for code that runs after the
-  ## ``package`` macro expands — both the ``uses:`` parser (compile-time
-  ## walk only, see ``collectUses``) and the generated ``buildXyz()``
-  ## proc (runtime).
+proc emitVariantDeclarations(variants: seq[VariantDecl];
+                              pkg: PackageDef): NimNode =
+  ## Spec-Implementation M1/M2d: lower the parsed ``VariantDecl`` list
+  ## into Nim source code. Emits a single ``import`` of the
+  ## configurables umbrella (when variants OR solver-bound dependencies
+  ## are present), one ``let <name> = declareVariant[T](<args>)`` per
+  ## declaration, one ``registerSolverDependency(...)`` per
+  ## ``PackageUseDef`` so the solver sees the package's dependency
+  ## graph and conditional gates, plus a trailing ``finalizeVariants()``
+  ## call. Together these make every variant's ``.value`` accessor work
+  ## and let ``chosenVersion(pkg)`` return the solver-chosen version.
   ##
   ## The generated import is guarded by ``when not declared(...)`` so
   ## projects with multiple ``package`` blocks (or with their own
   ## explicit configurables import) don't get a redeclaration error.
+  ##
+  ## When neither variants nor tool-uses are present we elide the
+  ## entire block — packages with no solver participation pay zero
+  ## runtime cost.
   result = newStmtList()
-  if variants.len == 0:
+  if variants.len == 0 and pkg.toolUses.len == 0:
     return
-  # Emit the import lazily so package files without variants don't get
-  # an unused import. ``finalizeVariants`` is the sentinel symbol that
-  # tells us the configurables module is in scope.
+  # Emit the import lazily so package files without variants OR
+  # solver-bound dependencies don't get an unused import.
+  # ``finalizeVariants`` is the sentinel symbol that tells us the
+  # configurables module is in scope.
   result.add(parseStmt(
     "when not declared(finalizeVariants):\n" &
     "  import repro_dsl_stdlib/configurables\n"))
@@ -354,6 +360,24 @@ proc emitVariantDeclarations(variants: seq[VariantDecl]): NimNode =
       "  site = newSourceSite(" & fileLit & ", " & lineLit &
         ", 0, ckDefault))\n"
     result.add(parseStmt(declCode))
+  # Spec-Implementation M2d: emit one registerSolverDependency call per
+  # parsed PackageUseDef. The solver consumes these to (a) materialize
+  # the package version universe (via ``chosenVersion(...)``) and (b)
+  # gate variant-conditioned arms (the ``gateVariant`` / ``gateValue``
+  # pair is the M2c ``ConditionalGate``). Calls are emitted BEFORE
+  # ``finalizeVariants()`` so the registry is populated when the
+  # solver runs.
+  for useDef in pkg.toolUses:
+    if useDef.packageSelector.len == 0: continue
+    let parentLit = escForCode(pkg.packageName)
+    let depLit = escForCode(useDef.packageSelector)
+    let rngLit = escForCode(useDef.rawConstraint)
+    let gateVarLit = escForCode(useDef.gateVariant)
+    let gateValLit = escForCode(useDef.gateValue)
+    result.add(parseStmt(
+      "registerSolverDependency(" & parentLit & ", " & depLit & ", " &
+      rngLit & ", gateVariant = " & gateVarLit & ", gateValue = " &
+      gateValLit & ")\n"))
   result.add(parseStmt("finalizeVariants()\n"))
 
 macro package*(name: untyped; body: untyped): untyped =
@@ -401,7 +425,7 @@ macro package*(name: untyped; body: untyped): untyped =
   # ``declareVariant`` template lives in
   # ``repro_dsl_stdlib/configurables/variants.nim``; the import below
   # is gated so packages without variants don't pull the stdlib in.
-  let variantsEmission = emitVariantDeclarations(pkg.variants)
+  let variantsEmission = emitVariantDeclarations(pkg.variants, pkg)
   # ── M5: cross-project uses + cycle detection ─────────────────────
   var declaredUses: seq[string] = @[]
   for u in pkg.toolUses:

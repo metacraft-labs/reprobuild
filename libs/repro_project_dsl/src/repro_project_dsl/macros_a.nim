@@ -670,8 +670,47 @@ proc compileTimeConditionValue(node: NimNode): bool =
   else:
     false
 
-proc collectUses(node: NimNode; policyPath: seq[string];
-                 output: var seq[PackageUseDef]) =
+proc variantSelectorName(expr: NimNode): string =
+  ## Spec-Implementation M2d: recognise the ``<variant>.value`` form
+  ## used by variant-conditioned ``uses:`` arms. Returns the variant
+  ## name (e.g. ``"compiler"`` for ``compiler.value``) or the empty
+  ## string when the expression is not a ``.value`` selector. Bare
+  ## ``<variant>`` (no trailing ``.value``) is also accepted so
+  ## ``if enableTLS: ...`` shorthand works without ``.value``.
+  if expr.kind == nnkDotExpr and expr.len == 2 and
+      expr[0].kind in {nnkIdent, nnkSym} and
+      expr[1].kind in {nnkIdent, nnkSym} and
+      identText(expr[1]).normalize == "value":
+    return identText(expr[0])
+  if expr.kind in {nnkIdent, nnkSym}:
+    return identText(expr)
+  ""
+
+proc literalCaseLabel(label: NimNode): string =
+  ## Lower a ``case`` arm's label literal into the gate value string
+  ## the solver expects. ``of "gcc": ...`` yields ``"gcc"``; ``of true:
+  ## ...`` yields ``"true"``; integer labels yield their decimal repr.
+  ## Returns the empty string when the label shape is not a single
+  ## literal (e.g. ``of "a", "b": ...``) — the caller falls back to the
+  ## union behaviour for those cases.
+  case label.kind
+  of nnkStrLit..nnkTripleStrLit:
+    label.strVal
+  of nnkIdent, nnkSym:
+    case identText(label).normalize
+    of "true": "true"
+    of "false": "false"
+    else: ""
+  of nnkIntLit..nnkInt64Lit:
+    $label.intVal
+  else:
+    ""
+
+proc collectUsesGated(node: NimNode; policyPath: seq[string];
+                       gateVariant, gateValue: string;
+                       output: var seq[PackageUseDef]) =
+  ## Internal helper carrying the (gateVariant, gateValue) through the
+  ## recursion so nested ``case`` arms tag their leaves consistently.
   case node.kind
   of nnkStrLit..nnkTripleStrLit:
     let loc = lineFile(node)
@@ -682,20 +721,24 @@ proc collectUses(node: NimNode; policyPath: seq[string];
       executableName: selector,
       policyPath: policyPath,
       sourceFile: loc.file,
-      sourceLine: loc.line))
+      sourceLine: loc.line,
+      gateVariant: gateVariant,
+      gateValue: gateValue))
   of nnkStmtList:
     for child in node:
-      collectUses(child, policyPath, output)
+      collectUsesGated(child, policyPath, gateVariant, gateValue, output)
   of nnkWhenStmt:
     for branch in node:
       case branch.kind
       of nnkElifBranch:
         if branch.len >= 2 and compileTimeConditionValue(branch[0]):
-          collectUses(branch[1], policyPath, output)
+          collectUsesGated(branch[1], policyPath, gateVariant, gateValue,
+            output)
           break
       of nnkElse:
         if branch.len >= 1:
-          collectUses(branch[0], policyPath, output)
+          collectUsesGated(branch[0], policyPath, gateVariant, gateValue,
+            output)
           break
       else:
         discard
@@ -704,42 +747,111 @@ proc collectUses(node: NimNode; policyPath: seq[string];
     if node.len > 0 and name.len > 0:
       for i in 1 ..< node.len:
         if node[i].kind == nnkStmtList:
-          collectUses(node[i], policyPath & @[name], output)
+          collectUsesGated(node[i], policyPath & @[name], gateVariant,
+            gateValue, output)
         else:
-          collectUses(node[i], policyPath, output)
+          collectUsesGated(node[i], policyPath, gateVariant, gateValue,
+            output)
   of nnkIfStmt, nnkIfExpr:
-    # Spec-Implementation M1 — variant-conditioned ``uses:`` arms. At
-    # macro expansion time we do NOT know the variant's resolved value
-    # (the solver lands in M2), so we walk every branch's body and
-    # collect the union of declared dependencies. M2 will refine this
-    # to register the dependencies conditionally against the variant
-    # assignment in the SAT formula.
+    # Spec-Implementation M2d — variant-conditioned ``uses:`` arms.
+    # When the if's condition is ``<variant>.value`` we propagate the
+    # gate (variant, "true") onto the then-branch and (variant, "false")
+    # onto the else-branch so the solver gates the dependencies
+    # accordingly. Conditions we don't recognise as variant selectors
+    # fall back to the M1 union behaviour: every branch contributes its
+    # leaves UNGATED so the macro stays forward-compatible with
+    # non-variant predicates.
+    var nestedGateVariant = ""
+    var thenGateValue = ""
+    var elseGateValue = ""
+    block detectVariantGate:
+      # Only single-arm if's (``if v.value: ... else: ...``) are
+      # recognised; ``elif`` cascades fall back to the union form so
+      # we don't accidentally over-constrain a non-variant cascade.
+      var elifCount = 0
+      var hasElse = false
+      for b in node:
+        case b.kind
+        of nnkElifBranch, nnkElifExpr:
+          inc elifCount
+        of nnkElse, nnkElseExpr:
+          hasElse = true
+        else: discard
+      if elifCount != 1: break detectVariantGate
+      var cond: NimNode = nil
+      for b in node:
+        if b.kind in {nnkElifBranch, nnkElifExpr} and b.len >= 1:
+          cond = b[0]
+          break
+      if cond.isNil: break detectVariantGate
+      let varName = variantSelectorName(cond)
+      if varName.len == 0: break detectVariantGate
+      nestedGateVariant = varName
+      thenGateValue = "true"
+      if hasElse:
+        elseGateValue = "false"
     for branch in node:
       case branch.kind
       of nnkElifBranch, nnkElifExpr:
         if branch.len >= 2:
-          collectUses(branch[^1], policyPath, output)
+          if nestedGateVariant.len > 0 and gateVariant.len == 0:
+            collectUsesGated(branch[^1], policyPath,
+              nestedGateVariant, thenGateValue, output)
+          else:
+            # Inherit the existing gate (no nested override) for the
+            # union case OR when we already have an outer gate.
+            collectUsesGated(branch[^1], policyPath,
+              gateVariant, gateValue, output)
       of nnkElse, nnkElseExpr:
         if branch.len >= 1:
-          collectUses(branch[^1], policyPath, output)
+          if nestedGateVariant.len > 0 and gateVariant.len == 0 and
+              elseGateValue.len > 0:
+            collectUsesGated(branch[^1], policyPath,
+              nestedGateVariant, elseGateValue, output)
+          else:
+            collectUsesGated(branch[^1], policyPath,
+              gateVariant, gateValue, output)
       else:
         discard
   of nnkCaseStmt:
-    # Spec-Implementation M1 — variant-driven ``case`` selector. Walk
-    # every arm's body for the same reason as the ``if`` arm above.
+    # Spec-Implementation M2d — ``case <variant>.value: of "gcc": ...``
+    # lowers each arm to a per-value gate. The case selector must be
+    # the ``<variant>.value`` form (or the bare variant ident); other
+    # selectors fall back to the M1 union behaviour.
+    var nestedGateVariant = ""
+    if node.len >= 1 and gateVariant.len == 0:
+      nestedGateVariant = variantSelectorName(node[0])
     for i in 1 ..< node.len:
       let branch = node[i]
       case branch.kind
       of nnkOfBranch, nnkElifBranch:
         if branch.len >= 2:
-          collectUses(branch[^1], policyPath, output)
+          var armValue = ""
+          if nestedGateVariant.len > 0 and branch.kind == nnkOfBranch:
+            # The case-arm has a list of labels in branch[0 .. ^2] and
+            # the body at branch[^1]. We only set the gate when there
+            # is a SINGLE literal label; multi-label arms fall back to
+            # ungated union.
+            if branch.len == 2:
+              armValue = literalCaseLabel(branch[0])
+          if armValue.len > 0:
+            collectUsesGated(branch[^1], policyPath,
+              nestedGateVariant, armValue, output)
+          else:
+            collectUsesGated(branch[^1], policyPath,
+              gateVariant, gateValue, output)
       of nnkElse:
         if branch.len >= 1:
-          collectUses(branch[^1], policyPath, output)
+          collectUsesGated(branch[^1], policyPath,
+            gateVariant, gateValue, output)
       else:
         discard
   else:
     discard
+
+proc collectUses(node: NimNode; policyPath: seq[string];
+                 output: var seq[PackageUseDef]) =
+  collectUsesGated(node, policyPath, "", "", output)
 
 proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
   let loc = lineFile(node)
@@ -1197,7 +1309,9 @@ proc packageLiteral(pkg: PackageDef): string =
         result.add(", ")
       result.add(escForCode(policy))
     result.add("], sourceFile: " & escForCode(useDef.sourceFile) &
-      ", sourceLine: " & $useDef.sourceLine & ")")
+      ", sourceLine: " & $useDef.sourceLine &
+      ", gateVariant: " & escForCode(useDef.gateVariant) &
+      ", gateValue: " & escForCode(useDef.gateValue) & ")")
   result.add("], executables: @[")
   for exeIndex, exe in pkg.executables:
     if exeIndex > 0:

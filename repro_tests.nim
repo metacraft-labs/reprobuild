@@ -1601,6 +1601,31 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     source: "tests/integration/t_integration_variant_value_accessor.nim",
     binary: "build/test-bin/t_integration_variant_value_accessor",
     defines: @[]),
+  # Spec-Implementation M2d — unified solver integration.
+  TestSpec(
+    source: "tests/integration/t_integration_solver_resolves_variants.nim",
+    binary: "build/test-bin/t_integration_solver_resolves_variants",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_solver_chosen_version.nim",
+    binary: "build/test-bin/t_integration_solver_chosen_version",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_variant_conditioned_uses.nim",
+    binary: "build/test-bin/t_integration_variant_conditioned_uses",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_cli_variant_flag_drives_solver.nim",
+    binary: "build/test-bin/t_integration_cli_variant_flag_drives_solver",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_e2e_selectable_toolchain_fixture.nim",
+    binary: "build/test-bin/t_e2e_selectable_toolchain_fixture",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_e2e_variant_feature_flag_drops_tls.nim",
+    binary: "build/test-bin/t_e2e_variant_feature_flag_drops_tls",
+    defines: @[]),
   TestSpec(
     source: "tests/integration/t_just_test_end_to_end_via_parallel_runner.nim",
     binary: "build/test-bin/t_just_test_end_to_end_via_parallel_runner",
