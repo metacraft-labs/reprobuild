@@ -126,6 +126,22 @@ import ./packages/alire
 #     header note — Scoop main has no ``clang.json``).
 import ./packages/gcc_winlibs
 import ./packages/llvm_mingw
+# Recorder dev-env additions (codetracer-*-recorder family). Each
+# entry pairs an existing nixpkgs# selector (where one exists) with
+# a Windows / non-Nix-Linux catalog slice. ``circom`` and ``forc``
+# carry only the catalog block because their tools live outside
+# nixpkgs (mcl-blockchain builds them out-of-tree). ``rustc`` /
+# ``cargo`` / ``rustfmt`` / ``clippy`` all share the same per-channel
+# Rust toolchain archive on Windows; the realize loop dedups the
+# download by URL when multiple consumers reference the same SHA.
+import ./packages/cargo
+import ./packages/circom
+import ./packages/clippy
+import ./packages/forc
+import ./packages/foundry
+import ./packages/rustc
+import ./packages/rustfmt
+import ./packages/solc
 
 export packages_schema
 
@@ -195,6 +211,18 @@ const RegisteredTools* = [
   # clang+lld distribution (the first clang-on-Windows catalog entry).
   "gcc-winlibs",
   "llvm-mingw",
+  # Recorder dev-env additions (codetracer-*-recorder family). The
+  # five new tools are joined by Windows/non-Nix-Linux slices on the
+  # four existing Rust-toolchain entries so the recorder dev shells
+  # can be materialised end-to-end through cakBuiltin.
+  "cargo",
+  "circom",
+  "clippy",
+  "forc",
+  "foundry",
+  "rustc",
+  "rustfmt",
+  "solc",
 ]
 
 proc getCatalog*(toolName: string):
@@ -257,6 +285,15 @@ proc getCatalog*(toolName: string):
   # ``llvm-mingw``).
   of "gcc-winlibs": selectIfNonEmpty(gcc_winlibsCatalog)
   of "llvm-mingw":  selectIfNonEmpty(llvm_mingwCatalog)
+  # Recorder dev-env additions.
+  of "cargo":       selectIfNonEmpty(cargoCatalog)
+  of "circom":      selectIfNonEmpty(circomCatalog)
+  of "clippy":      selectIfNonEmpty(clippyCatalog)
+  of "forc":        selectIfNonEmpty(forcCatalog)
+  of "foundry":     selectIfNonEmpty(foundryCatalog)
+  of "rustc":       selectIfNonEmpty(rustcCatalog)
+  of "rustfmt":     selectIfNonEmpty(rustfmtCatalog)
+  of "solc":        selectIfNonEmpty(solcCatalog)
   else:
     none(seq[VersionedProvisioning])
 
