@@ -34,9 +34,13 @@ import std/[sets, strutils, tables]
 
 import clingo_bindings
 import variant_encoder
+import version_encoder
+import version_constraints
 
 export clingo_bindings
 export variant_encoder
+export version_encoder
+export version_constraints
 
 # --------------------------------------------------------------------
 # Constraint surface (placeholder)
@@ -305,6 +309,198 @@ proc solveVariants*(variants: openArray[VariantDecl]): VariantSolution =
     # The search is "optimal" when the solver exhausted the space
     # without interruption. clingo's #minimize problems carry the
     # ``exhausted`` bit on the final solve-result.
+    result.optimal = (solveResult and clingoSolveResultExhausted) != 0
+  finally:
+    if not handle.isNil:
+      discard clingo_solve_handle_close(handle)
+    if not control.isNil:
+      clingo_control_free(control)
+
+# --------------------------------------------------------------------
+# M2c — unified variant + version solver
+# --------------------------------------------------------------------
+
+type
+  UnifiedSolution* = object
+    ## Outcome of a combined variant + package version solve.
+    ## ``variants`` maps each variant's declared name to the resolved
+    ## value as a string; ``packages`` maps each package name to its
+    ## resolved version string; ``optimal`` carries clingo's
+    ## ``exhausted`` bit so callers can detect when the solver proved
+    ## optimality vs. terminated on the first model.
+    variants*: Table[string, string]
+    packages*: Table[string, string]
+    optimal*: bool
+
+  EUnsatisfiable* = object of CatchableError
+    ## Raised when the unified encoded program has no stable model.
+    ## ``programText`` carries the ASP program for diagnostic replay;
+    ## ``unsatCore`` enumerates the constraint-participating variants
+    ## and packages on a best-effort basis (the assumption-based
+    ## clingo unsat-core enumeration is M2e work and stays deferred).
+    programText*: string
+    unsatCore*: seq[string]
+
+# --------------------------------------------------------------------
+# Internal helpers for the unified driver
+# --------------------------------------------------------------------
+
+proc parseUnifiedSymbol(rendered: string;
+                        variants: var Table[string, string];
+                        packages: var Table[string, string]) =
+  ## Dispatch on the predicate name. The shape of the two predicates
+  ## is identical so we share the same parsing core (lifted from
+  ## ``parseModelSymbol``) and choose the output table on the head
+  ## token.
+  let stripped = rendered.strip()
+  var head = ""
+  if stripped.startsWith("variant_assigned("):
+    head = "variant_assigned("
+  elif stripped.startsWith("package_chosen("):
+    head = "package_chosen("
+  else:
+    return
+  if not stripped.endsWith(")"):
+    return
+  let body = stripped[head.len .. ^2]
+  var inQuote = false
+  var splitAt = -1
+  for i, c in body:
+    if c == '"': inQuote = not inQuote
+    elif c == ',' and not inQuote:
+      splitAt = i
+      break
+  if splitAt < 0:
+    return
+  proc dequote(s: string): string =
+    let t = s.strip()
+    if t.len >= 2 and t[0] == '"' and t[^1] == '"':
+      return t[1 ..< ^1]
+    t
+  let name = dequote(body[0 ..< splitAt])
+  let value = dequote(body[splitAt + 1 .. ^1])
+  if name.len == 0:
+    return
+  if head == "variant_assigned(":
+    variants[name] = value
+  else:
+    packages[name] = value
+
+proc collectUnifiedUnsatCore(variants: openArray[VariantDecl];
+                             packages: openArray[PackageDecl]): seq[string] =
+  ## Enumerate the names of every variant and package that participates
+  ## in any constraint or dependency edge. Best-effort: clingo's true
+  ## unsat-core enumeration is M2e. This at least narrows the suspect
+  ## set the diagnostic surface presents.
+  var seen: HashSet[string]
+  for v in variants:
+    if v.constraints.len > 0:
+      if v.name notin seen:
+        seen.incl(v.name)
+        result.add(v.name)
+      for c in v.constraints:
+        if c.target notin seen:
+          seen.incl(c.target)
+          result.add(c.target)
+  for p in packages:
+    if p.depends.len > 0 or p.variants.len > 0:
+      if p.name notin seen:
+        seen.incl(p.name)
+        result.add(p.name)
+    for d in p.depends:
+      if d.name notin seen:
+        seen.incl(d.name)
+        result.add(d.name)
+    for v in p.variants:
+      if v.constraints.len > 0 and v.name notin seen:
+        seen.incl(v.name)
+        result.add(v.name)
+
+# --------------------------------------------------------------------
+# Public M2c entry point
+# --------------------------------------------------------------------
+
+proc solve*(variants: openArray[VariantDecl];
+            packages: openArray[PackageDecl]): UnifiedSolution =
+  ## Combined variant + package version solve. Encodes both via
+  ## ``encodeUnified``, runs clingo, parses both
+  ## ``variant_assigned/2`` and ``package_chosen/2`` from the optimum
+  ## model. Raises ``EUnsatisfiable`` (carrying the ASP program text
+  ## and best-effort unsat-core) when no stable model exists.
+  ##
+  ## The driver lifecycle mirrors ``solveVariants``'s nine-step
+  ## sequence; the only difference is the show directive surfaces two
+  ## predicate families and the parse step routes by predicate name.
+  let program = encodeUnified(variants, packages)
+  result = UnifiedSolution(variants: initTable[string, string](),
+                           packages: initTable[string, string](),
+                           optimal: false)
+
+  var control: ClingoControlPtr = nil
+  var handle: ClingoSolveHandlePtr = nil
+  var model: ptr ClingoModel = nil
+  var sawAnyModel = false
+  var solveResult: ClingoSolveResult = 0
+
+  try:
+    if not clingo_control_new(nil, 0, nil, nil, 20, addr control):
+      raise newException(CatchableError,
+        "clingo_control_new failed: " & lastError())
+    let progC = cstring(program)
+    if not clingo_control_add(control, "base", nil, 0, progC):
+      raise newException(CatchableError,
+        "clingo_control_add failed: " & lastError())
+    var parts = @[ClingoPart(name: "base", params: nil, size: 0)]
+    if not clingo_control_ground(control, addr parts[0], 1, nil, nil):
+      raise newException(CatchableError,
+        "clingo_control_ground failed: " & lastError())
+    if not clingo_control_solve(control, clingoSolveModeYield, nil, 0,
+                                 nil, nil, addr handle):
+      raise newException(CatchableError,
+        "clingo_control_solve failed: " & lastError())
+
+    while true:
+      model = nil
+      if not clingo_solve_handle_model(handle, addr model):
+        raise newException(CatchableError,
+          "clingo_solve_handle_model failed: " & lastError())
+      if model.isNil:
+        break
+      sawAnyModel = true
+      var symCount: csize_t = 0
+      if not clingo_model_symbols_size(model, clingoShowTypeShown,
+                                       addr symCount):
+        raise newException(CatchableError,
+          "clingo_model_symbols_size failed: " & lastError())
+      var syms = newSeq[ClingoSymbol](int(symCount))
+      if symCount > 0:
+        if not clingo_model_symbols(model, clingoShowTypeShown,
+                                    addr syms[0], symCount):
+          raise newException(CatchableError,
+            "clingo_model_symbols failed: " & lastError())
+      var pendingVariants = initTable[string, string]()
+      var pendingPackages = initTable[string, string]()
+      for s in syms:
+        parseUnifiedSymbol(symbolToString(s),
+                           pendingVariants, pendingPackages)
+      result.variants = pendingVariants
+      result.packages = pendingPackages
+      if not clingo_solve_handle_resume(handle):
+        raise newException(CatchableError,
+          "clingo_solve_handle_resume failed: " & lastError())
+
+    if not clingo_solve_handle_get(handle, addr solveResult):
+      raise newException(CatchableError,
+        "clingo_solve_handle_get failed: " & lastError())
+
+    if not sawAnyModel:
+      var e = newException(EUnsatisfiable,
+        "no satisfying assignment exists for the supplied variant + " &
+        "package registry")
+      e.programText = program
+      e.unsatCore = collectUnifiedUnsatCore(variants, packages)
+      raise e
+
     result.optimal = (solveResult and clingoSolveResultExhausted) != 0
   finally:
     if not handle.isNil:

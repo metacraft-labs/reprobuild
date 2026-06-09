@@ -682,6 +682,26 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_clingo_smoke",
     defines: @[]),
   TestSpec(
+    source: "libs/repro_solver/tests/t_cross_package_propagates.nim",
+    binary: "build/test-bin/t_cross_package_propagates",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_semver_range_parsing.nim",
+    binary: "build/test-bin/t_semver_range_parsing",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_semver_satisfies.nim",
+    binary: "build/test-bin/t_semver_satisfies",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_solve_unified_end_to_end.nim",
+    binary: "build/test-bin/t_solve_unified_end_to_end",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_solve_unified_unsatisfiable.nim",
+    binary: "build/test-bin/t_solve_unified_unsatisfiable",
+    defines: @[]),
+  TestSpec(
     source: "libs/repro_solver/tests/t_solve_variants_end_to_end.nim",
     binary: "build/test-bin/t_solve_variants_end_to_end",
     defines: @[]),
@@ -712,6 +732,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_solver/tests/t_variant_encoder_requires.nim",
     binary: "build/test-bin/t_variant_encoder_requires",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_version_encoder_conditional_deps.nim",
+    binary: "build/test-bin/t_version_encoder_conditional_deps",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_version_encoder_constraints.nim",
+    binary: "build/test-bin/t_version_encoder_constraints",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_version_encoder_transitive.nim",
+    binary: "build/test-bin/t_version_encoder_transitive",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_version_encoder_universe.nim",
+    binary: "build/test-bin/t_version_encoder_universe",
     defines: @[]),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_ada_direct_convention.nim",

@@ -32,6 +32,12 @@
 
 import repro_solver/clingo_bindings
 import repro_solver/solver_api
+import repro_solver/variant_encoder
+import repro_solver/version_constraints
+import repro_solver/version_encoder
 
 export clingo_bindings
 export solver_api
+export variant_encoder
+export version_constraints
+export version_encoder
