@@ -228,8 +228,20 @@ else
   fi
   # The runner already ran ``repro build test`` for us above; tell it to
   # skip its own build step so we don't double-build.
+  #
+  # Thread count: the M3 fallback runner has an fd-race when a test child
+  # exits while the parent is mid-pipe-read; the runner's exception path
+  # converts that into ``Error: unhandled exception: Bad file descriptor
+  # [OSError]`` from oserrors.nim and the whole pumping thread chain
+  # tears down without finishing the remaining tests (seen on CI run
+  # 27185579601 after 8 PASSes). Cap the worker count via
+  # REPROBUILD_TEST_THREADS (default 2) so a future fix to the runner
+  # can lift the cap by setting the env var higher. ct-test-runner is
+  # not affected; once it ships in this workspace the M3 fallback can
+  # be retired.
   "${runner_bin}" \
     --no-build \
+    --threads=${REPROBUILD_TEST_THREADS:-2} \
     --bin-dir=build/test-bin \
     --summary-json=test-logs/parallel-run.json \
     --results-dir=test-logs/results
