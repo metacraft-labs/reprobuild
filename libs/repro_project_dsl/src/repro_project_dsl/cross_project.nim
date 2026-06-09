@@ -163,15 +163,30 @@ proc generatedCrossProjectStorage(packageName: string;
     let storageIdent = composeBindingStorageIdent(packageName, binding.name)
     let initIdent = composeBindingInitFlagIdent(packageName, binding.name)
     if binding.typeAnnot != nil:
+      # An explicit type annotation is resolvable at module scope without
+      # evaluating the RHS, so the storage var can always be emitted.
       let annot = binding.typeAnnot.copyNimTree()
       result.add quote do:
         var `storageIdent`*: `annot`
+        var `initIdent`* {.used.}: bool = false
     else:
+      # No annotation: we must infer the type from the RHS via
+      # `typeof`. The RHS is evaluated HERE at module scope, where
+      # `build:`-block-local helpers (templates/procs defined inside the
+      # block) and sibling build-local bindings are NOT visible. If the
+      # type does not resolve here, the binding cannot back a
+      # module-level cross-project storage var — so we skip the storage
+      # entirely rather than emit an `undeclared identifier` hard error.
+      # Such a binding stays a plain build-local `let` (still preserved
+      # by the lowered builder); it just isn't reachable as
+      # `<pkg>.build.<binding>`. The paired accessor template and the
+      # storage-write splice both key off `when declared(<storageIdent>)`
+      # so they consistently skip when the storage is absent.
       let rhs = binding.rhs.copyNimTree()
       result.add quote do:
-        var `storageIdent`*: typeof(`rhs`)
-    result.add quote do:
-      var `initIdent`* {.used.}: bool = false
+        when compiles(typeof(`rhs`)):
+          var `storageIdent`*: typeof(`rhs`)
+          var `initIdent`* {.used.}: bool = false
 
 proc generatedCrossProjectPackageConst(packageName: string;
                                        bindings:
@@ -228,14 +243,20 @@ proc generatedCrossProjectAccessors(packageName: string;
     let initIdent = composeBindingInitFlagIdent(packageName, binding.name)
     let packageLit = newLit(packageName)
     let bindingLit = newLit(binding.name)
+    # Gate the accessor on the storage var actually existing: a
+    # non-annotated binding whose RHS does not type at module scope is
+    # not exposed (see `generatedCrossProjectStorage`), so its accessor
+    # must be skipped too — otherwise it would reference an undeclared
+    # `storageIdent`.
     result.add quote do:
-      template `templateIdent`*(b: PackageBuild[`packageLit`]): auto =
-        if not `initIdent`:
-          raise newException(ValueError,
-            "cross-project build binding '" & `packageLit` & ".build." &
-            `bindingLit` & "' read before producer build: block ran. " &
-            "Ensure '" & `packageLit` & "' is built before the consumer.")
-        `storageIdent`
+      when declared(`storageIdent`):
+        template `templateIdent`*(b: PackageBuild[`packageLit`]): auto =
+          if not `initIdent`:
+            raise newException(ValueError,
+              "cross-project build binding '" & `packageLit` & ".build." &
+              `bindingLit` & "' read before producer build: block ran. " &
+              "Ensure '" & `packageLit` & "' is built before the consumer.")
+          `storageIdent`
 
 proc instrumentBuildBindings(body: NimNode;
                              packageName: string;
@@ -283,9 +304,16 @@ proc instrumentBuildBindings(body: NimNode;
                 let initIdent =
                   composeBindingInitFlagIdent(packageName, $identNode)
                 let valueIdent = ident($identNode)
+                # Only write through to the storage var when it exists.
+                # `when declared` mirrors the storage-emission decision in
+                # `generatedCrossProjectStorage`: bindings that couldn't
+                # back a module-level storage var (RHS not typeable at
+                # module scope) get no write-through and simply remain
+                # ordinary build-local `let`s.
                 rewritten.add quote do:
-                  `storageIdent` = `valueIdent`
-                  `initIdent` = true
+                  when declared(`storageIdent`):
+                    `storageIdent` = `valueIdent`
+                    `initIdent` = true
       stmt[^1] = rewritten
 
 # ---------------------------------------------------------------------------

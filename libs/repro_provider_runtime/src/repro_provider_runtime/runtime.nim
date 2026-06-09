@@ -137,19 +137,38 @@ proc runProviderProtocol*(config: ProviderExecutionConfig;
   let argv = @[config.binaryPath] & config.extraArgs & @[
     "--repro-provider-request", requestPath,
     "--repro-provider-response", responsePath]
-  # M8 stderr-truncation fix: previously used
-  # ``startProcess + outputStream.readAll + waitForExit`` to drive the
-  # provider, but on Windows the ``readAll`` path returned only the first
-  # byte of merged stderr — diagnostics like
-  # ``repro-standard-provider: no convention matched ...`` surfaced as a
-  # single ``r``. ``execCmdEx`` uses ``readLine`` + ``peekExitCode`` to
-  # drain incrementally, mirroring the M6.5 cargo/cargo metadata fix in
-  # ``conventions/rust.nim`` and the Go convention's ``runGoListExport``.
-  # ``poStdErrToStdOut`` merges stderr into the captured stream so a
-  # single drain catches the provider's diagnostic.
-  let (output, exitCode) = execCmdEx(quoteShellCommand(argv),
-    options = {poStdErrToStdOut, poUsePath},
-    workingDir = cwd)
+  # Spawn the provider binary DIRECTLY, without an intermediate shell.
+  #
+  # The earlier form ran the provider via ``execCmdEx`` →
+  # ``/bin/sh -c <quoted argv>``. On macOS ``/bin/sh`` is a System
+  # Integrity Protection–restricted binary, and dyld purges every
+  # ``DYLD_*`` environment variable across an ``exec`` of a restricted
+  # binary. So a ``DYLD_LIBRARY_PATH`` the caller exported to make
+  # ``libclingo`` discoverable was silently dropped before it could reach
+  # the provider: providers transitively import the solver bindings, which
+  # ``dlopen`` ``libclingo.dylib`` by leaf name, and the process aborted at
+  # startup with ``could not load: libclingo.dylib``. Executing the
+  # provider binary directly preserves the caller's environment —
+  # including ``DYLD_LIBRARY_PATH`` — so the leaf-name ``dlopen`` resolves.
+  #
+  # We keep the M8 stderr-truncation fix: ``startProcess +
+  # outputStream.readAll`` returned only the first byte of merged stderr on
+  # Windows, so we drain incrementally with ``readLine`` until EOF and then
+  # ``waitForExit``. ``poStdErrToStdOut`` merges stderr into the single
+  # captured stream so one drain catches the provider's diagnostics.
+  let process = startProcess(argv[0],
+    workingDir = cwd,
+    args = argv[1 .. ^1],
+    options = {poStdErrToStdOut, poUsePath})
+  var output = ""
+  block drainProvider:
+    let outStream = process.outputStream
+    var line = ""
+    while outStream.readLine(line):
+      output.add(line)
+      output.add('\n')
+  let exitCode = process.waitForExit()
+  process.close()
   if exitCode != 0:
     raiseRuntime("provider exited with code " & $exitCode & ": " & output)
   if not fileExists(extendedPath(responsePath)):
