@@ -81,6 +81,11 @@ for libName in [
   "repro_test_support",
   "repro_workspace_manifests",
   "repro_peer_cache",
+  # Spec-Implementation M2a: ``repro_solver`` ships the clingo Nim
+  # bindings + the high-level Solver/Solution/Constraint placeholder
+  # types. M2b-M2e extend it with the ASP encoder; downstream libs
+  # import it via ``import repro_solver`` once the encoder is alive.
+  "repro_solver",
 ]:
   switch("path", "libs" / libName / "src")
 

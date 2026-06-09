@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild ASP-based solver bindings and public API (Spec-Implementation M2a scaffold)"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

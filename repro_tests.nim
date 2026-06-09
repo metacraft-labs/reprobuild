@@ -678,6 +678,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/test_library_macro",
     defines: @[]),
   TestSpec(
+    source: "libs/repro_solver/tests/t_clingo_smoke.nim",
+    binary: "build/test-bin/t_clingo_smoke",
+    defines: @[]),
+  TestSpec(
     source: "libs/repro_standard_provider/tests/test_ada_direct_convention.nim",
     binary: "build/test-bin/test_ada_direct_convention",
     defines: @["reproProviderMode"]),

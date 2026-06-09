@@ -112,12 +112,22 @@
             nativeBuildInputs = [
               pkgs.just
               pkgs.nim2
+              # Spec-Implementation M2a: clingo is the ASP solver
+              # reprobuild's repro_solver lib binds against. The CLI
+              # tool is used by smoke tests and the C library
+              # (libclingo.so + <clingo/clingo.h>) is what the Nim
+              # bindings dlopen at runtime. Adding it to
+              # nativeBuildInputs makes the headers visible during
+              # `just build`; the buildInputs entry below pulls the
+              # shared library into the runtime closure.
+              pkgs.clingo
             ];
 
             buildInputs = [
               pkgs.libblake3
               pkgs.sqlite
               pkgs.xxHash
+              pkgs.clingo
             ];
 
             BLAKE3_PREFIX = blake3Prefix;
@@ -215,6 +225,11 @@
               pkgs.shellcheck
               pkgs.shfmt
               pkgs.typos
+              # Spec-Implementation M2a: clingo for the repro_solver
+              # ASP bindings. Ships the `clingo` CLI tool and the
+              # libclingo.so shared library + <clingo/clingo.h> headers
+              # the Nim bindings dlopen and pass to the compiler.
+              pkgs.clingo
             ]
             # libbpf for the codetracer-subset `ct` build: CodeTracer's
             # native monitor under src/ct/bpf_monitor_native.nim and
