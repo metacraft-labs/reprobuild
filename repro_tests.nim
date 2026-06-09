@@ -1546,6 +1546,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_dev_env_artifact",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_e2e_engine_shim_removed.nim",
+    binary: "build/test-bin/t_e2e_engine_shim_removed",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_e2e_selectable_toolchain_fixture.nim",
     binary: "build/test-bin/t_e2e_selectable_toolchain_fixture",
     defines: @[]),
@@ -1652,6 +1656,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_integration_solver_resolves_variants.nim",
     binary: "build/test-bin/t_integration_solver_resolves_variants",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_test_runner_adapter_registered.nim",
+    binary: "build/test-bin/t_integration_test_runner_adapter_registered",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_test_runner_interface.nim",

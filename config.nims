@@ -24,6 +24,17 @@ for ctTestLib in [
   "ct_test_interface",
   "ct_test_nim_unittest",
   "ct_test_unittest_parallel",
+  # Spec-Implementation M4: ``ct_test_runner_adapter`` is the
+  # ``TestRunner`` cross-cutting-interface adapter that delegates to
+  # ``ct-test-runner`` for run/list/enumerate. Reprobuild project files
+  # import it after ``ct_test_nim_unittest`` to wire the adapter into
+  # the active build context. The previous shim at
+  # ``libs/repro_cli_support/src/repro_cli_support.nim`` ~line 1295
+  # was retired in M4; the adapter shoulders the execution-time
+  # responsibility while the build-time ``buildNimUnittest.build`` call
+  # now routes through the normal ``nim`` profile via the typed-tool
+  # wrapper machinery.
+  "ct_test_runner_adapter",
 ]:
   let candidate = ctTestRoot / "libs" / ctTestLib / "src"
   if dirExists(candidate):

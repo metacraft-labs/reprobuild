@@ -102,7 +102,13 @@ proc runHotCacheCheck() =
   var cacheMisses = 0
   for entry in actions:
     let id = entry{"id"}.getStr("")
-    if not id.startsWith("ct_test_nim_unittest.buildNimUnittest-build-"):
+    # Spec-Implementation M4 reshaped ``buildNimUnittest.build`` to
+    # record a ``PublicCliCall`` against the ``nim`` profile directly
+    # so the engine-side action id is now ``nim-c-<hash>`` rather
+    # than the pre-M4 ``ct_test_nim_unittest.buildNimUnittest-build-``
+    # shape. The hot-cache invariant (every action cache-hits on the
+    # second run) is unchanged; only the action-id prefix moved.
+    if not id.startsWith("nim-c-"):
       continue
     inc testEdgeActions
     if entry{"wouldLaunch"}.getBool(false):
