@@ -30,11 +30,13 @@
 ## stops at the typed surface so the review agent has a small diff to
 ## sign off on.
 
-import std/tables
+import std/[sets, strutils, tables]
 
 import clingo_bindings
+import variant_encoder
 
 export clingo_bindings
+export variant_encoder
 
 # --------------------------------------------------------------------
 # Constraint surface (placeholder)
@@ -108,3 +110,204 @@ proc solve*(solver: Solver): Solution {.exportc.} =
   ## hasn't been pulled in yet (build-time visibility of the binding
   ## doesn't imply load-time presence of the shared library).
   Solution(isEmpty: true, variantAssignments: initTable[string, string]())
+
+# --------------------------------------------------------------------
+# M2b — variant solver
+# --------------------------------------------------------------------
+
+type
+  VariantSolution* = object
+    ## Outcome of a variant-only solve. ``assignments`` maps each
+    ## variant's declared name to the resolved value as a string
+    ## (clingo's symbol form). ``optimal`` is true when clingo proved
+    ## optimality (the search exhausted alternatives), false when only
+    ## one model was retrieved without an optimization proof — for M2b
+    ## inputs the search space is small enough that clingo always
+    ## proves optimality, but the flag is here so M2c/M2d can detect
+    ## a non-optimal terminal model without breaking the API.
+    assignments*: Table[string, string]
+    optimal*: bool
+
+  EVariantUnsatisfiable* = object of CatchableError
+    ## Raised when the encoded program has no stable model. M2b carries
+    ## the ASP program text in ``programText`` so callers can re-print
+    ## it for the diagnostic; the explicit unsat-core enumeration is
+    ## M2e work (clingo's ``solve_handle_core`` requires an
+    ## assumption-based encoding that we don't ship in M2b). For M2b,
+    ## the ``unsatCore`` field holds the list of variant names that
+    ## participated in any constraint expression so the diagnostic at
+    ## least names which variants are part of the conflict.
+    programText*: string
+    unsatCore*: seq[string]
+
+# --------------------------------------------------------------------
+# Internal helpers
+# --------------------------------------------------------------------
+
+proc parseModelSymbol(rendered: string;
+                      assignments: var Table[string, string]) =
+  ## Parse one rendered ``variant_assigned("name", "value")`` symbol
+  ## into the assignments table. Tolerates extra whitespace clingo
+  ## occasionally inserts in argument lists; rejects symbols whose
+  ## structure does not match the predicate shape.
+  const head = "variant_assigned("
+  let stripped = rendered.strip()
+  if not stripped.startsWith(head):
+    return
+  if not stripped.endsWith(")"):
+    return
+  let body = stripped[head.len .. ^2]  # strip head and closing ')'
+  # Find the comma separating the two string arguments — the names
+  # and values in M2b's encoder are clingo string literals
+  # (double-quoted), so the first comma OUTSIDE quotes is the
+  # delimiter.
+  var inQuote = false
+  var splitAt = -1
+  for i, c in body:
+    if c == '"': inQuote = not inQuote
+    elif c == ',' and not inQuote:
+      splitAt = i
+      break
+  if splitAt < 0:
+    return
+  proc dequote(s: string): string =
+    let t = s.strip()
+    if t.len >= 2 and t[0] == '"' and t[^1] == '"':
+      return t[1 ..< ^1]
+    t
+  let name = dequote(body[0 ..< splitAt])
+  let value = dequote(body[splitAt + 1 .. ^1])
+  if name.len == 0:
+    return
+  assignments[name] = value
+
+proc collectUnsatCore(variants: openArray[VariantDecl]): seq[string] =
+  ## Best-effort: gather the names of every variant that participates
+  ## in at least one constraint expression. Clingo's true unsat-core
+  ## enumeration requires the assumption-based interface (M2e); for
+  ## M2b we surface the constraint-participating variant set so the
+  ## diagnostic at least narrows the suspect list.
+  var seen: HashSet[string]
+  for v in variants:
+    if v.constraints.len > 0:
+      if v.name notin seen:
+        seen.incl(v.name)
+        result.add(v.name)
+      for c in v.constraints:
+        if c.target notin seen:
+          seen.incl(c.target)
+          result.add(c.target)
+
+# --------------------------------------------------------------------
+# Public M2b entry point
+# --------------------------------------------------------------------
+
+proc solveVariants*(variants: openArray[VariantDecl]): VariantSolution =
+  ## Encode the registry through ``encodeVariants`` and drive it
+  ## through ``libclingo.so`` via the M2a bindings. Returns the
+  ## resolved assignment per variant. Raises
+  ## ``EVariantUnsatisfiable`` when no stable model exists; the
+  ## exception carries the ASP program text and a best-effort
+  ## unsat-core enumeration of the variants that participated in
+  ## constraint expressions.
+  ##
+  ## The driver follows the standard nine-step clingo lifecycle:
+  ##
+  ## 1. ``clingo_control_new`` with an empty argv.
+  ## 2. ``clingo_control_add`` against the canonical ``"base"`` part.
+  ## 3. ``clingo_control_ground`` on the same ``"base"`` part.
+  ## 4. ``clingo_control_solve`` in ``yield`` mode.
+  ## 5. ``clingo_solve_handle_model`` — extract the LAST model the
+  ##    solver yields before exhausting the search; clingo's
+  ##    optimization stream yields successively better models, so the
+  ##    last model under ``yield`` mode is the optimum.
+  ## 6. ``clingo_model_symbols`` — fetch the shown atoms.
+  ## 7. Parse each ``variant_assigned("name","value")`` symbol into
+  ##    the result table.
+  ## 8. ``clingo_solve_handle_resume`` + ``clingo_solve_handle_get``
+  ##    to drain the search and read the solve-result bitset; this is
+  ##    how we know whether the search proved optimality.
+  ## 9. Cleanup pair (``handle_close`` + ``control_free``) runs on
+  ##    both happy and error paths.
+  let program = encodeVariants(variants)
+  result = VariantSolution(assignments: initTable[string, string](),
+                           optimal: false)
+
+  var control: ClingoControlPtr = nil
+  var handle: ClingoSolveHandlePtr = nil
+  var model: ptr ClingoModel = nil
+  var sawAnyModel = false
+  var solveResult: ClingoSolveResult = 0
+
+  try:
+    if not clingo_control_new(nil, 0, nil, nil, 20, addr control):
+      raise newException(CatchableError,
+        "clingo_control_new failed: " & lastError())
+    # clingo copies the program buffer internally so a transient
+    # cstring view of our Nim ``string`` is safe; explicit cast quiets
+    # the implicit-conversion warning.
+    let progC = cstring(program)
+    if not clingo_control_add(control, "base", nil, 0, progC):
+      raise newException(CatchableError,
+        "clingo_control_add failed: " & lastError())
+    var parts = @[ClingoPart(name: "base", params: nil, size: 0)]
+    if not clingo_control_ground(control, addr parts[0], 1, nil, nil):
+      raise newException(CatchableError,
+        "clingo_control_ground failed: " & lastError())
+    if not clingo_control_solve(control, clingoSolveModeYield, nil, 0,
+                                 nil, nil, addr handle):
+      raise newException(CatchableError,
+        "clingo_control_solve failed: " & lastError())
+
+    # Walk every model the optimizer yields; the LAST model is the
+    # optimal one. clingo's #minimize directive emits intermediate
+    # models in non-increasing cost order, so overwriting ``assignments``
+    # on each step lands the optimum at the end of the loop.
+    while true:
+      model = nil
+      if not clingo_solve_handle_model(handle, addr model):
+        raise newException(CatchableError,
+          "clingo_solve_handle_model failed: " & lastError())
+      if model.isNil:
+        break
+      sawAnyModel = true
+      var symCount: csize_t = 0
+      if not clingo_model_symbols_size(model, clingoShowTypeShown,
+                                       addr symCount):
+        raise newException(CatchableError,
+          "clingo_model_symbols_size failed: " & lastError())
+      var syms = newSeq[ClingoSymbol](int(symCount))
+      if symCount > 0:
+        if not clingo_model_symbols(model, clingoShowTypeShown,
+                                    addr syms[0], symCount):
+          raise newException(CatchableError,
+            "clingo_model_symbols failed: " & lastError())
+      var pending = initTable[string, string]()
+      for s in syms:
+        parseModelSymbol(symbolToString(s), pending)
+      result.assignments = pending
+      if not clingo_solve_handle_resume(handle):
+        raise newException(CatchableError,
+          "clingo_solve_handle_resume failed: " & lastError())
+
+    if not clingo_solve_handle_get(handle, addr solveResult):
+      raise newException(CatchableError,
+        "clingo_solve_handle_get failed: " & lastError())
+
+    if not sawAnyModel:
+      var e = newException(EVariantUnsatisfiable,
+        "no satisfying assignment exists for the supplied variant " &
+        "registry")
+      e.programText = program
+      e.unsatCore = collectUnsatCore(variants)
+      raise e
+
+    # The search is "optimal" when the solver exhausted the space
+    # without interruption. clingo's #minimize problems carry the
+    # ``exhausted`` bit on the final solve-result.
+    result.optimal = (solveResult and clingoSolveResultExhausted) != 0
+  finally:
+    if not handle.isNil:
+      discard clingo_solve_handle_close(handle)
+    if not control.isNil:
+      clingo_control_free(control)

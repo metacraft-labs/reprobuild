@@ -682,6 +682,38 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_clingo_smoke",
     defines: @[]),
   TestSpec(
+    source: "libs/repro_solver/tests/t_solve_variants_end_to_end.nim",
+    binary: "build/test-bin/t_solve_variants_end_to_end",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_solve_variants_unsatisfiable.nim",
+    binary: "build/test-bin/t_solve_variants_unsatisfiable",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_variant_encoder_bool_universe.nim",
+    binary: "build/test-bin/t_variant_encoder_bool_universe",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_variant_encoder_conflicts.nim",
+    binary: "build/test-bin/t_variant_encoder_conflicts",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_variant_encoder_enum_universe.nim",
+    binary: "build/test-bin/t_variant_encoder_enum_universe",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_variant_encoder_priorities.nim",
+    binary: "build/test-bin/t_variant_encoder_priorities",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_variant_encoder_propagates.nim",
+    binary: "build/test-bin/t_variant_encoder_propagates",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_variant_encoder_requires.nim",
+    binary: "build/test-bin/t_variant_encoder_requires",
+    defines: @[]),
+  TestSpec(
     source: "libs/repro_standard_provider/tests/test_ada_direct_convention.nim",
     binary: "build/test-bin/test_ada_direct_convention",
     defines: @["reproProviderMode"]),
