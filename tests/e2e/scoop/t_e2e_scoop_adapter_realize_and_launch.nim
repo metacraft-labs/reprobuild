@@ -61,7 +61,7 @@ suite "e2e_scoop_adapter_realize_and_launch":
       # Real Scoop must observe the sandboxed install. Use `scoop list`
       # against $env:SCOOP to verify; the spec requires "verifies
       # installation through real Scoop".
-      let listing = execCmdEx(shellCommand([scoopBinary, "list"]))
+      let listing = execCmdEx(scoop_sandbox.shellCommand([scoopBinary, "list"]))
       check listing.exitCode == 0
       check listing.output.contains("repro-m55-fixture")
 
