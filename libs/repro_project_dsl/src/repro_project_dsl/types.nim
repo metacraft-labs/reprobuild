@@ -165,6 +165,29 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  VariantDecl* = object
+    ## Spec-Implementation M1: one entry per variant declared in a
+    ## package ``config:`` block. Both spellings — ``variant: T =
+    ## default`` and ``name: T = default`` paired with a ``@variant``
+    ## doc directive — produce the same record. The ``package`` macro
+    ## consumes the list to emit one ``declareVariant[T](...)`` per
+    ## entry plus a single ``finalizeVariants()`` call afterwards.
+    name*: string
+    nimType*: string
+      ## The Nim type the variant resolves to. Typically ``bool``,
+      ## ``string``, or ``int``; the M1 CLI override parser handles
+      ## those three. Enum and compound types are accepted at the
+      ## declaration level but the CLI parser raises at override time
+      ## (until M2 broadens parsing).
+    defaultExpr*: string
+      ## Source-form Nim expression for the default value. Re-parsed
+      ## by the ``package`` macro into the lowered
+      ## ``declareVariant[T](...)`` call.
+    description*: string
+    explicitId*: string
+    sourceFile*: string
+    sourceLine*: int
+
   PackageDef* = object
     packageName*: string
     defaultToolProvisioning*: string
@@ -180,6 +203,12 @@ type
     devEnvBodyHash*: string
     sourceFile*: string
     sourceLine*: int
+    variants*: seq[VariantDecl]
+      ## Spec-Implementation M1: variants declared in the package's
+      ## ``config:`` block. The ``package`` macro emits one
+      ## ``declareVariant[T](...)`` call per entry followed by
+      ## ``finalizeVariants()`` so subsequent ``build:`` code can read
+      ## each variant's ``.value`` as a concrete Nim value.
 
   ProviderForeachDef* = object
     id*: string

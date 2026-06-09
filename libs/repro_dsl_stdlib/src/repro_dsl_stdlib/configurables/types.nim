@@ -107,6 +107,16 @@ type
     resolvedVal*: ConfigurableValue
     forceSite*: SourceSite
     hasForce*: bool
+    solverParticipating*: bool
+      ## Spec-Implementation M1: ``Configurable`` system extension per
+      ## ``Configurable-System.md`` §"Solver-Participating Configurables
+      ## (Variants)". A *variant* is an ordinary ``Configurable[T]`` whose
+      ## node carries this tag so the solver stage (M2) consumes it. In M1
+      ## the tag is informational — resolution still happens at
+      ## ``evalConfig`` finalize time using the same priority lattice as
+      ## a regular Configurable — but the tag is what distinguishes a
+      ## variant from a plain Configurable for the ``.value`` accessor's
+      ## phase-ordering check and for the future SAT extension.
 
   ConfigContextState* = enum
     ccsOpen
@@ -176,6 +186,21 @@ type
     ## callers can offer a "regenerate the persisted graph" path
     ## instead of treating it as data corruption.
   EInvalidId* = object of ConfigurableError
+  EVariantNotResolved* = object of ConfigurableError
+    ## Spec-Implementation M1: raised when ``variant.value`` is read
+    ## before the surrounding evaluation context has finalized. The
+    ## message names the violated phase ordering (stage 4 read against
+    ## a stage-2/3 resolution) so authors can fix the call site.
+  ENotAVariant* = object of ConfigurableError
+    ## Raised when an API that requires a solver-participating
+    ## Configurable (a variant) is invoked on a plain Configurable.
+
+  Variant*[T] = Configurable[T]
+    ## Type alias making it explicit that a value is intended to be a
+    ## solver-participating Configurable (a variant). The runtime type
+    ## is identical to ``Configurable[T]``; the solver-participation
+    ## tag lives on the underlying ``ConfigurableNode`` per
+    ## ``Configurable-System.md`` §"Why Not a Parallel Primitive".
 
 proc newSourceSite*(file: string; line, column: int;
                     kind: ContributionKind): SourceSite =

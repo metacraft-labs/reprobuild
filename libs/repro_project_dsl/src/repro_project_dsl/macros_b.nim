@@ -307,6 +307,55 @@ proc collectImplicitTargetNameHooks(pkgBody: NimNode): NimNode =
         indentBody(spec.bodyRepr)
       result.add(parseStmt(procSrc))
 
+proc emitVariantDeclarations(variants: seq[VariantDecl]): NimNode =
+  ## Spec-Implementation M1: lower the parsed ``VariantDecl`` list into
+  ## Nim source code. Emits a single ``import`` of the configurables
+  ## umbrella (when variants are present), one
+  ## ``let <name> = declareVariant[T](<args>)`` per declaration, plus
+  ## a trailing ``finalizeVariants()`` call. Together these make every
+  ## variant's ``.value`` accessor work for code that runs after the
+  ## ``package`` macro expands — both the ``uses:`` parser (compile-time
+  ## walk only, see ``collectUses``) and the generated ``buildXyz()``
+  ## proc (runtime).
+  ##
+  ## The generated import is guarded by ``when not declared(...)`` so
+  ## projects with multiple ``package`` blocks (or with their own
+  ## explicit configurables import) don't get a redeclaration error.
+  result = newStmtList()
+  if variants.len == 0:
+    return
+  # Emit the import lazily so package files without variants don't get
+  # an unused import. ``finalizeVariants`` is the sentinel symbol that
+  # tells us the configurables module is in scope.
+  result.add(parseStmt(
+    "when not declared(finalizeVariants):\n" &
+    "  import repro_dsl_stdlib/configurables\n"))
+  for entry in variants:
+    let nameLit = escForCode(entry.name)
+    let descLit = escForCode(entry.description)
+    let idLit = escForCode(entry.explicitId)
+    let fileLit = escForCode(entry.sourceFile)
+    let lineLit = $entry.sourceLine
+    # The declared default expression is re-parsed by Nim's compiler
+    # when the generated ``let`` is type-checked. We pass it verbatim
+    # so authors get whatever literal / constant expression syntax they
+    # wrote — e.g. ``true``, ``"native"``, ``8080``. The generic ``T``
+    # is inferred from the explicit type annotation; we re-emit the
+    # nimType repr from the parser.
+    let declCode =
+      "let " & entry.name & "* = declareVariant[" & entry.nimType & "](\n" &
+      "  defaultValue = " & entry.defaultExpr & ",\n" &
+      "  scopeName = " & nameLit & ",\n" &
+      "  description = " & descLit & ",\n" &
+      "  explicitId = " & idLit & ",\n" &
+      "  descriptionFile = " & fileLit & ",\n" &
+      "  descriptionLine = " & lineLit & ",\n" &
+      "  descriptionColumn = 0,\n" &
+      "  site = newSourceSite(" & fileLit & ", " & lineLit &
+        ", 0, ckDefault))\n"
+    result.add(parseStmt(declCode))
+  result.add(parseStmt("finalizeVariants()\n"))
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -344,6 +393,15 @@ macro package*(name: untyped; body: untyped): untyped =
   ##    still does the section lowering).
   let pkg = parsePackageDef(name, body)
   let packageName = pkg.packageName
+  # ── Spec-Implementation M1: variant declarations + finalization ────
+  # ``parsePackageDef`` collected every ``variant: T = default`` (and
+  # ``@variant``-tagged) declaration from the ``config:`` block into
+  # ``pkg.variants``. We emit one ``let <name> = declareVariant[T](...)``
+  # per entry plus a single ``finalizeVariants()`` call. The
+  # ``declareVariant`` template lives in
+  # ``repro_dsl_stdlib/configurables/variants.nim``; the import below
+  # is gated so packages without variants don't pull the stdlib in.
+  let variantsEmission = emitVariantDeclarations(pkg.variants)
   # ── M5: cross-project uses + cycle detection ─────────────────────
   var declaredUses: seq[string] = @[]
   for u in pkg.toolUses:
@@ -378,6 +436,11 @@ macro package*(name: untyped; body: untyped): untyped =
   # type-checks against the already-declared hook.
   result.add(collectImplicitTargetNameHooks(body))
   result.add(generated)
+  # Spec-Implementation M1: emit ``let <name> = declareVariant[T](...)``
+  # bindings + the trailing ``finalizeVariants()`` call at top-level
+  # module scope (after the package wrapper code so the variant
+  # accessor symbols are visible to ``build:`` code emitted below).
+  result.add(variantsEmission)
   # ── M5: cross-project storage / const / accessors ────────────────
   # `wrapperCode` and `toolActionWrapperCode` BOTH unconditionally
   # emit `const <packageValueIdent>* = <typeName>()` regardless of

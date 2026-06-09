@@ -8885,6 +8885,27 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       bypassRunQuota = true
     elif arg == "--runquota":
       bypassRunQuota = false
+    elif arg == "--variant" or arg.startsWith("--variant="):
+      # Spec-Implementation M1 — ``--variant name=value`` registers a
+      # ``prSet`` contribution against the named solver-participating
+      # Configurable before evaluation begins. The accumulated set is
+      # exported as the ``REPRO_VARIANTS`` env var so it survives the
+      # CLI -> provider process hop; both halves of the contract live
+      # in ``repro_dsl_stdlib/configurables/variants.nim``.
+      #
+      # M1 explicitly defers solver integration to M2; here the flag
+      # only feeds the priority lattice (``prDefault < prSet <
+      # prOverride < prForce``) the existing ``Configurable`` system
+      # already implements.
+      let spec = valueFromFlag(args, i, "--variant")
+      if spec.find('=') <= 0:
+        raise newException(ValueError,
+          "--variant expects name=value (got: " & spec & ")")
+      var existing = getEnv("REPRO_VARIANTS")
+      if existing.len > 0:
+        existing.add(',')
+      existing.add(spec)
+      putEnv("REPRO_VARIANTS", existing)
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported build flag: " & arg)
     else:
@@ -19790,6 +19811,22 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
     elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--variant" or arg.startsWith("--variant="):
+      # Spec-Implementation M1 — relay through ``runBuildCommand``'s
+      # contract: ``--variant name=value`` is appended to the
+      # ``REPRO_VARIANTS`` env var so the provider process picks it up
+      # via ``repro_dsl_stdlib/configurables/variants.nim``. The CLI
+      # surface mirrors the ``repro build`` arm so ``repro test``
+      # inherits the same flag automatically.
+      let spec = valueFromFlag(args, i, "--variant")
+      if spec.find('=') <= 0:
+        raise newException(ValueError,
+          "--variant expects name=value (got: " & spec & ")")
+      var existing = getEnv("REPRO_VARIANTS")
+      if existing.len > 0:
+        existing.add(',')
+      existing.add(spec)
+      putEnv("REPRO_VARIANTS", existing)
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported repro test flag: " & arg)
     else:

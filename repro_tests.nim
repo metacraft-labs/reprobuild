@@ -1510,6 +1510,26 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_integration_scheduler_dependency_gathering_policies",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_integration_variant_cli_flag.nim",
+    binary: "build/test-bin/t_integration_variant_cli_flag",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_variant_conditional_uses_static_value.nim",
+    binary: "build/test-bin/t_integration_variant_conditional_uses_static_value",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_variant_declaration_basic.nim",
+    binary: "build/test-bin/t_integration_variant_declaration_basic",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_variant_override_priorities.nim",
+    binary: "build/test-bin/t_integration_variant_override_priorities",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_variant_value_accessor.nim",
+    binary: "build/test-bin/t_integration_variant_value_accessor",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_just_test_end_to_end_via_parallel_runner.nim",
     binary: "build/test-bin/t_just_test_end_to_end_via_parallel_runner",
     defines: @[]),
@@ -1592,6 +1612,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_repro_test_runner_parallel_n_workers.nim",
     binary: "build/test-bin/t_repro_test_runner_parallel_n_workers",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_spec_example_fixtures_compile.nim",
+    binary: "build/test-bin/t_spec_example_fixtures_compile",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_spec_example_fixtures_present.nim",

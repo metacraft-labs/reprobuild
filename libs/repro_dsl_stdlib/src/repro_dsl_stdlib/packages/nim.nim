@@ -153,6 +153,31 @@ package nim:
         outputs output
 
 # ---------------------------------------------------------------------------
+# Spec-Implementation M1 — fixture-friendly ``binary`` alias.
+#
+# Spec-example fixtures at ``reprobuild/tests/fixtures/spec-examples/``
+# use ``nim.c(source = ..., binary = "build/bin/foo", ...)`` instead of
+# the typed-tool's verbatim ``output`` flag. The shorthand below maps
+# ``binary`` onto the wrapper's ``output`` flag so the fixtures
+# compile without rewriting their DSL surface. Long-form
+# ``nim.c(..., output = ...)`` continues to work; only the alias is
+# additive. The cross-cutting ``Toolchain`` interface in M3 will
+# subsume this alias.
+# ---------------------------------------------------------------------------
+
+proc c*(pkg: NimPackage; source: string; binary: string;
+        defines: seq[string] = @[];
+        paths: seq[string] = @[];
+        imports: seq[string] = @[];
+        actionId = "";
+        deps: openArray[string] = [];
+        after: openArray[BuildActionDef] = []): BuildActionDef
+    {.discardable.} =
+  discard imports
+  c(pkg = pkg, source = source, output = binary, defines = defines,
+    paths = paths, actionId = actionId, deps = deps, after = after)
+
+# ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
 # Harvested from bucket: ScoopInstaller/Main
 # Versions (newest-first): 2.2.10

@@ -10,6 +10,7 @@ import ./configurables/doc_directives
 import ./configurables/eval_config
 import ./configurables/refinalize
 import ./configurables/rbcg
+import ./configurables/variants
 
 export types
 export context
@@ -20,3 +21,4 @@ export doc_directives
 export eval_config
 export refinalize
 export rbcg
+export variants

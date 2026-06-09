@@ -707,6 +707,37 @@ proc collectUses(node: NimNode; policyPath: seq[string];
           collectUses(node[i], policyPath & @[name], output)
         else:
           collectUses(node[i], policyPath, output)
+  of nnkIfStmt, nnkIfExpr:
+    # Spec-Implementation M1 — variant-conditioned ``uses:`` arms. At
+    # macro expansion time we do NOT know the variant's resolved value
+    # (the solver lands in M2), so we walk every branch's body and
+    # collect the union of declared dependencies. M2 will refine this
+    # to register the dependencies conditionally against the variant
+    # assignment in the SAT formula.
+    for branch in node:
+      case branch.kind
+      of nnkElifBranch, nnkElifExpr:
+        if branch.len >= 2:
+          collectUses(branch[^1], policyPath, output)
+      of nnkElse, nnkElseExpr:
+        if branch.len >= 1:
+          collectUses(branch[^1], policyPath, output)
+      else:
+        discard
+  of nnkCaseStmt:
+    # Spec-Implementation M1 — variant-driven ``case`` selector. Walk
+    # every arm's body for the same reason as the ``if`` arm above.
+    for i in 1 ..< node.len:
+      let branch = node[i]
+      case branch.kind
+      of nnkOfBranch, nnkElifBranch:
+        if branch.len >= 2:
+          collectUses(branch[^1], policyPath, output)
+      of nnkElse:
+        if branch.len >= 1:
+          collectUses(branch[^1], policyPath, output)
+      else:
+        discard
   else:
     discard
 
@@ -913,6 +944,111 @@ proc collectProvisioning(node: NimNode;
   else:
     discard
 
+proc parseVariantDeclaration(stmt: NimNode; pendingDoc: string;
+                             output: var seq[VariantDecl]) =
+  ## Spec-Implementation M1: recognise the two ``variant`` spellings
+  ## inside a ``config:`` block and append a ``VariantDecl`` to
+  ## ``output``. Other declaration shapes are silently skipped — the
+  ## ``config:`` block accepts non-variant scalar metadata
+  ## (``sourceRepository = "..."``) that the M1 surface treats as
+  ## informational.
+  ##
+  ## Supported AST shapes:
+  ##
+  ##   * ``name: variant T = default`` →
+  ##     ``Call(Ident name, StmtList(Command(Ident variant,
+  ##       ExprEqExpr(typeExpr, defaultExpr))))``
+  ##
+  ##   * ``name: T = default`` paired with a leading ``## @variant``
+  ##     doc directive →
+  ##     ``Call(Ident name, StmtList(Asgn(typeExpr, defaultExpr)))``
+  ##     plus a previous ``nnkCommentStmt`` whose content contains
+  ##     ``@variant`` on its own line.
+  let loc = lineFile(stmt)
+  proc tagFromDocDirective(): bool =
+    for line in pendingDoc.splitLines():
+      var trimmed = line.strip()
+      while trimmed.len > 0 and trimmed[0] == '#':
+        trimmed = trimmed[1 .. ^1]
+      trimmed = trimmed.strip()
+      if trimmed == "@variant":
+        return true
+    false
+  proc cleanDescription(): string =
+    var lines: seq[string] = @[]
+    for line in pendingDoc.splitLines():
+      var trimmed = line.strip()
+      while trimmed.len > 0 and trimmed[0] == '#':
+        trimmed = trimmed[1 .. ^1]
+      let stripped = trimmed.strip()
+      if stripped == "@variant": continue
+      if stripped.startsWith("@id "):
+        continue
+      lines.add(stripped)
+    result = lines.join("\n").strip()
+  proc explicitIdFromDocDirective(): string =
+    for line in pendingDoc.splitLines():
+      var trimmed = line.strip()
+      while trimmed.len > 0 and trimmed[0] == '#':
+        trimmed = trimmed[1 .. ^1]
+      let stripped = trimmed.strip()
+      if stripped.startsWith("@id "):
+        return stripped[4 .. ^1].strip()
+    ""
+
+  if stmt.kind == nnkCall and stmt.len == 2 and
+      stmt[0].kind in {nnkIdent, nnkSym} and
+      stmt[1].kind == nnkStmtList and stmt[1].len == 1:
+    let nameStr = identText(stmt[0])
+    let inner = stmt[1][0]
+    # Shape 1: ``name: variant T = default``
+    if inner.kind == nnkCommand and inner.len == 2 and
+        inner[0].kind in {nnkIdent, nnkSym} and
+        identText(inner[0]).normalize == "variant" and
+        inner[1].kind == nnkExprEqExpr and inner[1].len == 2:
+      let typeRepr = inner[1][0].repr
+      let defaultRepr = inner[1][1].repr
+      output.add(VariantDecl(
+        name: nameStr,
+        nimType: typeRepr,
+        defaultExpr: defaultRepr,
+        description: cleanDescription(),
+        explicitId: explicitIdFromDocDirective(),
+        sourceFile: loc.file,
+        sourceLine: loc.line))
+      return
+    # Shape 2: ``name: T = default`` plus ``@variant`` directive.
+    if inner.kind == nnkAsgn and inner.len == 2 and
+        tagFromDocDirective():
+      let typeRepr = inner[0].repr
+      let defaultRepr = inner[1].repr
+      output.add(VariantDecl(
+        name: nameStr,
+        nimType: typeRepr,
+        defaultExpr: defaultRepr,
+        description: cleanDescription(),
+        explicitId: explicitIdFromDocDirective(),
+        sourceFile: loc.file,
+        sourceLine: loc.line))
+      return
+
+proc collectConfigSection(body: NimNode; output: var seq[VariantDecl]) =
+  ## Spec-Implementation M1: walk the ``config:`` block body, peeling
+  ## leading doc comments per declaration so the ``@variant`` directive
+  ## attaches to the next declaration. Non-variant declarations
+  ## (``name = "value"``) are silently accepted as informational
+  ## metadata; the M1 surface does not register them as Configurables.
+  if body.kind != nnkStmtList:
+    return
+  var pendingDoc = ""
+  for stmt in body:
+    if stmt.kind == nnkCommentStmt:
+      if pendingDoc.len > 0: pendingDoc.add "\n"
+      pendingDoc.add stmt.strVal
+      continue
+    parseVariantDeclaration(stmt, pendingDoc, output)
+    pendingDoc = ""
+
 proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   let loc = lineFile(name)
   result.packageName = identText(name)
@@ -948,6 +1084,15 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       result.hasDevEnv = true
       result.devEnvBodyHash = stableHashHex(result.packageName & ".dev-env\n" &
         stmt[stmt.len - 1].repr)
+    elif calleeName(stmt).normalize == "config":
+      # Spec-Implementation M1 — variants surface. The ``config:`` block
+      # carries (a) informational scalar metadata (``sourceRepository``
+      # etc.) the M1 surface accepts but does not register, and (b)
+      # ``variant: T = default`` declarations that the ``package`` macro
+      # lowers into ``declareVariant[T](...)`` calls plus a single
+      # ``finalizeVariants()`` call once the block ends.
+      if stmt.len >= 2:
+        collectConfigSection(stmt[stmt.len - 1], result.variants)
 
 proc escForCode(text: string): string =
   text.escape()

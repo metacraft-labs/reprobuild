@@ -1,20 +1,22 @@
 ## Structural verifier for the spec-example fixtures under
 ## ``tests/fixtures/spec-examples/``.
 ##
-## The fixtures are spec exhibits that reference DSL constructs not yet
-## implemented (build graph collections, solver-participating
-## Configurables / variants, the `Toolchain` cross-cutting interface,
-## the `test` template's auto-enrollment). They cannot be compiled by
-## the current engine. This test therefore performs structural checks:
-## it walks each fixture's ``repro.nim`` and asserts the expected DSL
-## surface markers are present so the fixtures cannot drift silently
-## from the spec.
+## The fixtures are spec exhibits. The two M1 fixtures
+## (``simple-test-collection`` and ``variant-feature-flag``) compile
+## under ``nim check`` against the live engine — that sibling check
+## lives in ``t_spec_example_fixtures_compile.nim``. The third
+## fixture (``selectable-toolchain``) still references DSL constructs
+## not yet implemented (constraint expressions ``requires:`` /
+## ``conflicts:`` / ``propagates:`` and the ``Toolchain``
+## cross-cutting interface) and is M2+ work.
 ##
-## Once the implementation milestones land, a sibling driver gated on
-## ``REPRO_SPEC_EXAMPLES_RUN=1`` will compile + run each fixture and
-## assert behavioural contracts (verb-alias dispatch, variant override
-## effects, conditional collection enrollment). The structural verifier
-## stays in place as the cheap always-on backstop.
+## This test performs structural checks: it walks each fixture's
+## ``repro.nim`` and asserts the expected DSL surface markers are
+## present so the fixtures cannot drift silently from the spec. A
+## sibling driver gated on ``REPRO_SPEC_EXAMPLES_RUN=1`` is planned
+## once the M3+ ``TestRunner`` interface lands and the fixtures can
+## run end-to-end. The structural verifier stays in place as the
+## cheap always-on backstop.
 ##
 ## Specs covered:
 ## - reprobuild-specs/Build-Graph-Collections.md
@@ -51,12 +53,16 @@ suite "spec-example fixtures: simple-test-collection":
     requireSurface repro, "package simple_test_collection:",
                    "simple-test-collection/repro.nim"
 
-  test "uses the `test` template (Package-Model §The `test` template)":
-    requireSurface repro, "test buildNimUnittest(",
+  test "uses the buildNimUnittest typed-tool (M1 long-form shape)":
+    requireSurface repro, "buildNimUnittest.build(",
+                   "simple-test-collection/repro.nim"
+
+  test "registers the `test` build graph collection":
+    requireSurface repro, "collect(\"test\", ",
                    "simple-test-collection/repro.nim"
 
   test "exercises at least two test edges so the collection has multiple members":
-    check repro.count("test buildNimUnittest(") >= 2
+    check repro.count("buildNimUnittest.build(") >= 2
 
   test "library and test sources are present":
     discard readFixture("simple-test-collection/src/lib.nim")
@@ -74,11 +80,16 @@ suite "spec-example fixtures: variant-feature-flag":
     requireSurface repro, "if enableTLS.value: \"openssl",
                    "variant-feature-flag/repro.nim"
 
-  test "variant-conditioned build edge (test template under control flow)":
+  test "variant-conditioned build edge (typed-tool call under control flow)":
     requireSurface repro, "if enableTLS.value:",
                    "variant-feature-flag/repro.nim"
     # The TLS test edge sits inside the variant-guarded block.
-    check "test buildNimUnittest(source = \"tests/t_tls.nim\"" in repro
+    check "buildNimUnittest.build(" in repro
+    check "source = \"tests/t_tls.nim\"" in repro
+
+  test "registers the `test` build graph collection":
+    requireSurface repro, "collect(\"test\", ",
+                   "variant-feature-flag/repro.nim"
 
   test "both test sources and the server source are present":
     discard readFixture("variant-feature-flag/src/server.nim")
