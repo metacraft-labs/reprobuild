@@ -1594,6 +1594,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_repro_test_runner_parallel_n_workers",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_spec_example_fixtures_present.nim",
+    binary: "build/test-bin/t_spec_example_fixtures_present",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_stackable_hooks_extracted_process_tree.nim",
     binary: "build/test-bin/t_stackable_hooks_extracted_process_tree",
     defines: @[]),

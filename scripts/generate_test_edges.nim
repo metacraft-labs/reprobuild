@@ -95,6 +95,11 @@ proc identFromBasename(stem: string): string =
       result.add('_')
 
 proc acceptTestsTree(rel: string): bool =
+  # Fixture trees are spec exhibits / test scaffolding, not reprobuild
+  # tests; their per-fixture `tests/t_*.nim` files mimic real test
+  # binaries but cannot compile against the live engine. Skip them.
+  if rel.startsWith("tests/fixtures/"):
+    return false
   let stem = rel.splitFile().name
   rel.endsWith(".nim") and stem.startsWith("t_")
 
