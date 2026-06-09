@@ -53,13 +53,42 @@
 # ``libclingo.so`` and ``libclingo.so.4`` exist as symlinks pointing at
 # the same library. We prefer the unsuffixed soname so the binding
 # stays version-agnostic.
-const clingoLib* =
-  when defined(windows):
-    "clingo.dll"
-  elif defined(macosx):
-    "libclingo.dylib"
-  else:
-    "libclingo.so"
+#
+# Eager vs lazy loading. When the ``{.dynlib.}`` argument is a string
+# *constant*, Nim loads the library EAGERLY at process startup and aborts
+# the process if it cannot be resolved. When the argument is a runtime
+# *variable* (``let``/``var``), Nim loads LAZILY on the first call into the
+# library. We exploit that distinction:
+#
+# * In provider binaries (compiled with ``-d:reproProviderMode``) the ASP
+#   solver is never invoked — providers only emit build-graph fragments;
+#   the concretizer runs inside ``repro`` proper. Binding clingo through a
+#   ``let`` makes the load lazy, so a provider that never calls clingo does
+#   not require ``libclingo`` to be present or on the loader path. This
+#   matters because providers are spawned in restricted environments — on
+#   macOS the ``/bin/sh`` that historically launched them is SIP-protected,
+#   so dyld purges every ``DYLD_*`` variable across the exec and a
+#   caller-set ``DYLD_LIBRARY_PATH`` never reaches the provider. Without
+#   this, providers aborted at startup with ``could not load:
+#   libclingo.dylib`` even though they never use the solver.
+# * Everywhere else (``repro`` itself) we keep the eager ``const`` form so
+#   a genuinely missing solver library fails fast and loudly.
+when defined(reproProviderMode):
+  let clingoLib* =
+    when defined(windows):
+      "clingo.dll"
+    elif defined(macosx):
+      "libclingo.dylib"
+    else:
+      "libclingo.so"
+else:
+  const clingoLib* =
+    when defined(windows):
+      "clingo.dll"
+    elif defined(macosx):
+      "libclingo.dylib"
+    else:
+      "libclingo.so"
 
 # --------------------------------------------------------------------
 # Opaque handle types
