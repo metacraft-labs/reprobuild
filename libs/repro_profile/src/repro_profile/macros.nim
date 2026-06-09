@@ -127,9 +127,11 @@ proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
     # intent layer records concrete versions, never expressions).
     if stmt.len >= 2 and stmt[0].kind == nnkIdent and $stmt[0] == "package" and
        (stmt[1].kind notin {nnkStmtList}):
-      if stmt.len > 3:
-        error("`package(...)` takes 1 or 2 arguments " &
-              "(`package(<id>)` or `package(<id>, \"<version>\")`)", stmt)
+      # Accepted forms:
+      #   package(<id>)
+      #   package(<id>, "<version>")
+      #   package(<id>, binaries = @["a", "b"])
+      #   package(<id>, "<version>", binaries = @["a", "b"])
       var pkgName = ""
       case stmt[1].kind
       of nnkIdent: pkgName = $stmt[1]
@@ -140,21 +142,60 @@ proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
         error("`package(<id>, ...)` id argument must be an identifier " &
               "or string literal, got " & $stmt[1].kind, stmt[1])
       var version = ""
-      if stmt.len == 3:
-        let vNode = stmt[2]
-        case vNode.kind
-        of nnkStrLit, nnkRStrLit, nnkTripleStrLit: version = vNode.strVal
+      var binariesNode = newNimNode(nnkBracket) # default: empty seq[string]
+      for i in 2 ..< stmt.len:
+        let arg = stmt[i]
+        if arg.kind == nnkExprEqExpr:
+          # Named arg. Only `binaries = @[...]` is recognised.
+          if arg[0].kind != nnkIdent or $arg[0] != "binaries":
+            error("`package(...)` named argument must be `binaries = " &
+                  "@[\"<name>\", ...]`, got `" & repr(arg) & "`", arg)
+          let valNode = arg[1]
+          # Accept `@[\"a\", \"b\"]` (Prefix '@' over Bracket) or just
+          # `[\"a\", \"b\"]` (raw Bracket); harvest the literals.
+          var bracketNode: NimNode = nil
+          if valNode.kind == nnkPrefix and valNode.len == 2 and
+             valNode[0].kind == nnkIdent and $valNode[0] == "@" and
+             valNode[1].kind == nnkBracket:
+            bracketNode = valNode[1]
+          elif valNode.kind == nnkBracket:
+            bracketNode = valNode
+          else:
+            error("`package(<id>, binaries = ...)` value must be an array " &
+                  "literal of string literals (e.g. `@[\"rg\"]`); got " &
+                  $valNode.kind, valNode)
+          binariesNode = newNimNode(nnkBracket)
+          for child in bracketNode:
+            case child.kind
+            of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+              binariesNode.add newStrLitNode(child.strVal)
+            else:
+              error("`package(<id>, binaries = @[...])` entries must be " &
+                    "string literals; got " & $child.kind, child)
         else:
-          error("`package(<id>, \"<version>\")` version argument must be " &
-                "a string literal (the intent layer records concrete " &
-                "versions; expressions are not allowed); got " &
-                $vNode.kind, vNode)
-        if version.len == 0:
-          error("`package(<id>, \"\")` empty version literal; pass " &
-                "`package(<id>)` for a bare reference", vNode)
+          # Positional version argument. Must be a string literal.
+          if version.len > 0:
+            error("`package(...)` takes at most one positional version " &
+                  "argument", arg)
+          case arg.kind
+          of nnkStrLit, nnkRStrLit, nnkTripleStrLit: version = arg.strVal
+          else:
+            error("`package(<id>, \"<version>\")` version argument must be " &
+                  "a string literal (the intent layer records concrete " &
+                  "versions; expressions are not allowed); got " &
+                  $arg.kind, arg)
+          if version.len == 0:
+            error("`package(<id>, \"\")` empty version literal; pass " &
+                  "`package(<id>)` for a bare reference", arg)
+      # Emit: `targetSeq.add ActivityElement(kind: aekPackageRef,
+      #   pkgName: <name>, pkgVersion: <version>, pkgBinaries: @[<binaries>])`
+      let binariesSeq = newNimNode(nnkPrefix)
+      binariesSeq.add newIdentNode("@")
+      binariesSeq.add binariesNode
       result = quote do:
         `targetSeq`.add ActivityElement(kind: aekPackageRef,
-          pkgName: `pkgName`, pkgVersion: `version`)
+          pkgName: `pkgName`, pkgVersion: `version`,
+          pkgBinaries: `binariesSeq`)
     else:
       # Splat: user-authored helper that returns seq[ActivityElement].
       # The macro emits `for elem in <call>: targetSeq.add elem` so the

@@ -87,7 +87,17 @@ proc encodeActivityElement(e: ActivityElement): string =
   case e.kind
   of aekPackageRef:
     result = "{\"kind\":\"packageRef\",\"name\":" & encodeStr(e.pkgName) &
-      ",\"version\":" & encodeStr(e.pkgVersion) & "}"
+      ",\"version\":" & encodeStr(e.pkgVersion)
+    if e.pkgBinaries.len > 0:
+      # Only emit the field when non-empty so existing JSON envelopes
+      # round-trip unchanged for the common case (package name == binary
+      # name).
+      result.add ",\"binaries\":["
+      for i, b in e.pkgBinaries:
+        if i > 0: result.add ","
+        result.add encodeStr(b)
+      result.add "]"
+    result.add "}"
   of aekWhenGuard:
     result = "{\"kind\":\"whenGuard\",\"predicate\":" &
       encodeStr(e.predicate.expr) &
@@ -233,10 +243,15 @@ proc parseActivityElement(n: JsonNode): ActivityElement =
   let kind = n["kind"].getStr()
   case kind
   of "packageRef":
+    var binaries: seq[string] = @[]
+    if n.hasKey("binaries"):
+      for it in n["binaries"]:
+        binaries.add it.getStr()
     result = ActivityElement(kind: aekPackageRef,
       pkgName: n["name"].getStr(),
       pkgVersion:
-        (if n.hasKey("version"): n["version"].getStr() else: ""))
+        (if n.hasKey("version"): n["version"].getStr() else: ""),
+      pkgBinaries: binaries)
   of "whenGuard":
     var body: seq[ActivityElement] = @[]
     for it in n["body"]:

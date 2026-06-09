@@ -669,6 +669,7 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
         try:
           resolution = chainResolvePackage(prodCatalog, p.packageId,
             chain = chain, version = p.requestedVersion,
+            binaries = p.binaries,
             hostCpu = hostCpu, hostOs = hostOs)
         except EAdapterChainExhausted as err:
           preview.kind = ppkMissing
@@ -729,7 +730,8 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
         # that have no built-in catalog entry.
         when defined(windows):
           try:
-            let resolution = resolvePackage(prodCatalog, p.packageId)
+            let resolution = resolvePackage(prodCatalog, p.packageId,
+              binaries = p.binaries)
             if resolution.adapter == cakPath:
               preview.kind = ppkCacheHit
               preview.detail = "path " & resolution.sourcePath &
@@ -752,7 +754,8 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
               err.searchedCatalogs.join(", ")
         else:
           try:
-            let resolution = resolvePackage(prodCatalog, p.packageId)
+            let resolution = resolvePackage(prodCatalog, p.packageId,
+              binaries = p.binaries)
             if resolution.adapter == cakPath:
               preview.kind = ppkCacheHit
               preview.detail = "path " & resolution.sourcePath &

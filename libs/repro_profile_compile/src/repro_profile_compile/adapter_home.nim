@@ -103,6 +103,8 @@ proc buildActivityElement(elem: ActivityElement): IntentNode =
   of aekPackageRef:
     result = IntentNode(kind: nkPackageRef,
       packageName: elem.pkgName,
+      packageVersion: elem.pkgVersion,
+      packageBinaries: elem.pkgBinaries,
       packageLine: 0,
       startLine: 0, endLine: 0, indent: 0)
   of aekWhenGuard:

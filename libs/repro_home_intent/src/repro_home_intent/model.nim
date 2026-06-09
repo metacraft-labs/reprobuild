@@ -60,6 +60,15 @@ type
                                      ## (and for the bare `package(<id>)`
                                      ## call form). The structural editor
                                      ## round-trips this verbatim.
+      packageBinaries*: seq[string]  ## 2026-06-09: explicit binary names
+                                     ## the package installs, used by
+                                     ## path-based catalog adapters when
+                                     ## the package name doesn't match
+                                     ## the binary name (e.g. nixpkgs
+                                     ## `ripgrep` ships `rg`). Empty seq
+                                     ## preserves pre-2026-06 behavior:
+                                     ## the adapter probes `packageName`
+                                     ## itself.
     of nkConfigBlock:
       configHeaderLine*: int
       configPackages*: seq[IntentNode]

@@ -557,24 +557,38 @@ proc satisfiesProfile(installedVersion, pinnedVersion,
     # executable is a cache-hit.
     pinnedVersion.len == 0 and preferredVersion.len == 0
 
-proc resolvePathPackage(packageId: string; searched: var seq[string]):
+proc resolvePathPackage(packageId: string; searched: var seq[string];
+                        binaries: seq[string] = @[]):
     tuple[found: bool; resolution: CatalogResolution] =
+  ## 2026-06-09 (binaries metadata): when `binaries` is non-empty,
+  ## probe EACH binary name on PATH and report a hit on the first one
+  ## that exists. Empty `binaries` preserves the pre-2026-06 behavior:
+  ## probe the package name itself.
   searched.add("path:" & getEnv("PATH"))
-  let exe = findExe(packageId)
-  if exe.len == 0:
+  let probeNames =
+    if binaries.len > 0: binaries
+    else: @[packageId]
+  var firstFound = ""
+  for name in probeNames:
+    let exe = findExe(name)
+    if exe.len > 0:
+      firstFound = exe
+      break
+  if firstFound.len == 0:
     return (false, CatalogResolution())
   var r = CatalogResolution(
     packageId: packageId,
     adapter: cakPath,
     app: packageId,
-    executableName: extractFilename(exe),
-    sourcePath: exe,
+    executableName: extractFilename(firstFound),
+    sourcePath: firstFound,
     installed: true,
     cacheHit: true,
     searchedCatalogs: searched)
   (true, r)
 
-proc resolvePackage*(cat: var ProductionCatalog; packageId: string):
+proc resolvePackage*(cat: var ProductionCatalog; packageId: string;
+                     binaries: seq[string] = @[]):
     CatalogResolution =
   ## Resolve one `PlannedPackage` reference against the production
   ## catalog. Raises `EUnknownPackage` (naming the package and the
@@ -651,13 +665,13 @@ proc resolvePackage*(cat: var ProductionCatalog; packageId: string):
       result.cacheHit = false
       result.resolvedVersion = manifest.version
       return result
-    let pathResolution = resolvePathPackage(packageId, searched)
+    let pathResolution = resolvePathPackage(packageId, searched, binaries)
     if pathResolution.found:
       return pathResolution.resolution
     result.searchedCatalogs = searched
     raiseUnknownPackage(packageId, searched)
   else:
-    let pathResolution = resolvePathPackage(packageId, searched)
+    let pathResolution = resolvePathPackage(packageId, searched, binaries)
     if pathResolution.found:
       return pathResolution.resolution
     result.searchedCatalogs = searched
@@ -1042,25 +1056,47 @@ proc tryResolveScoop(cat: var ProductionCatalog; packageId: string;
           manifest.version & "' (not yet installed)"
     return (true, resolution)
 
-proc tryResolvePath(packageId: string; step: var ChainStep):
+proc tryResolvePath(packageId: string; binaries: seq[string];
+                    step: var ChainStep):
     tuple[found: bool; resolution: CatalogResolution] =
   ## M65: the cakPath branch of the chain. The last-resort adapter:
   ## the executable is on PATH, so we record it as a path-adapter
   ## resolution. Already-on-PATH is an implicit cache-hit.
+  ##
+  ## 2026-06-09 (binaries metadata): when `binaries` is non-empty, the
+  ## adapter probes EACH binary name on PATH and reports a hit on the
+  ## first one that exists. This handles upstream packages whose
+  ## binary name differs from the package name (e.g. nixpkgs `ripgrep`
+  ## ships the `rg` binary; `package("ripgrep", binaries = @["rg"])`
+  ## resolves correctly). Empty `binaries` preserves the pre-2026-06
+  ## behavior: probe the package name itself.
   step.adapter = cakPath
-  let exe = findExe(packageId)
-  if exe.len == 0:
+  let probeNames =
+    if binaries.len > 0: binaries
+    else: @[packageId]
+  var firstFound = ""
+  var foundName = ""
+  for name in probeNames:
+    let exe = findExe(name)
+    if exe.len > 0:
+      firstFound = exe
+      foundName = name
+      break
+  if firstFound.len == 0:
     step.outcome = csoToolNotFound
-    step.reason = "'" & packageId & "' not found on PATH"
+    if probeNames.len == 1:
+      step.reason = "'" & probeNames[0] & "' not found on PATH"
+    else:
+      step.reason = "none of [" & probeNames.join(", ") & "] found on PATH"
     return (false, CatalogResolution())
   step.outcome = csoResolved
-  step.reason = "found '" & exe & "' on PATH"
+  step.reason = "found '" & firstFound & "' on PATH"
   var resolution = CatalogResolution(
     packageId: packageId,
     adapter: cakPath,
     app: packageId,
-    executableName: extractFilename(exe),
-    sourcePath: exe,
+    executableName: extractFilename(firstFound),
+    sourcePath: firstFound,
     installed: true,
     cacheHit: true,
     searchedCatalogs: @["path:" & getEnv("PATH")])
@@ -1098,6 +1134,7 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
                           packageId: string;
                           chain: seq[CatalogAdapterKind] = @[];
                           version = "";
+                          binaries: seq[string] = @[];
                           hostCpu = detectHostCpu();
                           hostOs = detectHostOs()):
     CatalogResolution =
@@ -1144,7 +1181,7 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
         resolution.chainTrace = trace
         return resolution
     of cakPath:
-      let outcome = tryResolvePath(packageId, step)
+      let outcome = tryResolvePath(packageId, binaries, step)
       trace.add(step)
       if outcome.found:
         var resolution = outcome.resolution

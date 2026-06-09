@@ -62,6 +62,27 @@ template package*(name: string): ActivityElement =
   ## characters).
   ActivityElement(kind: aekPackageRef, pkgName: name)
 
+template package*(name: string; binaries: openArray[string]): ActivityElement =
+  ## A package reference whose installed binaries do not share the
+  ## package name. Path-based catalog adapters (the Linux fallback)
+  ## probe each binary on PATH instead of probing the package name.
+  ##
+  ## Example: nixpkgs `ripgrep` ships the `rg` binary; without the
+  ## hint reprobuild's Linux adapter searches PATH for `ripgrep` and
+  ## returns "missing" even when `ripgrep` is fully installed. With
+  ## `package("ripgrep", binaries = @["rg"])` the adapter probes
+  ## `rg` and returns a cache-hit. The same shape works for
+  ## multi-binary packages (e.g. `package("inetutils",
+  ## binaries = @["telnet", "ftp"])`).
+  ActivityElement(kind: aekPackageRef, pkgName: name,
+                  pkgBinaries: @binaries)
+
+template package*(name, version: string;
+                  binaries: openArray[string]): ActivityElement =
+  ## Version-pinned package reference with explicit binaries metadata.
+  ActivityElement(kind: aekPackageRef, pkgName: name,
+                  pkgVersion: version, pkgBinaries: @binaries)
+
 template envUserPath*(targetResources: var seq[ResourceIntent];
                       entries: string;
                       address: string = "";

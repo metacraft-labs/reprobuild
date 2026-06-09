@@ -41,6 +41,14 @@ type
                                        ## or "" when the reference was bare
                                        ## (defaultVersion will resolve at
                                        ## realize time).
+    binaries*: seq[string]             ## 2026-06-09: explicit binary names
+                                       ## the package installs, used by
+                                       ## the path-based catalog adapter
+                                       ## (the Linux fallback) when the
+                                       ## package name doesn't match the
+                                       ## binary name. Empty seq preserves
+                                       ## pre-2026-06 behavior: the adapter
+                                       ## probes the package id itself.
 
   PlannedGeneratedFileSource* = enum
     pgfsPackageOutput = "package-output"
@@ -157,7 +165,8 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
     of nkPackageRef:
       outSeq.add(PlannedPackage(packageId: child.packageName,
         fromActivity: activity, predicateText: "",
-        requestedVersion: child.packageVersion))
+        requestedVersion: child.packageVersion,
+        binaries: child.packageBinaries))
     of nkCondBlock:
       if not evaluateHostPredicate(child.predicateAst, ctx):
         continue
@@ -166,7 +175,8 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
           continue
         outSeq.add(PlannedPackage(packageId: pkgRef.packageName,
           fromActivity: activity, predicateText: child.predicateSource,
-          requestedVersion: pkgRef.packageVersion))
+          requestedVersion: pkgRef.packageVersion,
+          binaries: pkgRef.packageBinaries))
     else:
       discard
 

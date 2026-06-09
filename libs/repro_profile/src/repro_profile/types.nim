@@ -39,6 +39,19 @@ type
                                       ## `package(<id>, "<version>")`; "" for
                                       ## a bare identifier reference or
                                       ## the bare `package(<id>)` call form.
+      pkgBinaries*: seq[string]       ## 2026-06-09: the binary names the
+                                      ## package installs, when they differ
+                                      ## from `pkgName`. Path-based catalog
+                                      ## adapters (the Linux fallback) probe
+                                      ## EACH of these on PATH so e.g.
+                                      ## `package("ripgrep", binaries = @["rg"])`
+                                      ## resolves via the `rg` binary. Empty
+                                      ## seq preserves pre-2026-06 behavior:
+                                      ## the adapter probes the package name
+                                      ## itself. Metadata is per-package
+                                      ## (NOT a global catalog) so each
+                                      ## profile declares only what it
+                                      ## actually uses.
     of aekWhenGuard:
       predicate*: PredicateExpr
       guardedBody*: seq[ActivityElement]

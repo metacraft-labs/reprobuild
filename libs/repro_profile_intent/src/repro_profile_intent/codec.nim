@@ -48,6 +48,16 @@ const
   KeyAddress      = "address"
   KeyFields       = "fields"
   KeyDependsOn    = "dependsOn"
+  KeyVersion      = "version"
+    ## M69: the literal version pin from `package(<id>, "<version>")`.
+    ## Optional; omitted from the CBOR map when empty so existing
+    ## pre-M69 RBPI artifacts round-trip unchanged.
+  KeyBinaries     = "binaries"
+    ## 2026-06-09: the explicit binary names a package installs, used
+    ## by the path-based catalog adapter when the package name
+    ## doesn't match the binary name (e.g. `ripgrep` -> `rg`).
+    ## Optional; omitted when empty so the common case round-trips
+    ## unchanged.
 
   # Variant tag values.
   TagPackageRef   = "packageRef"
@@ -135,8 +145,16 @@ proc encodeActivityElementSeq(es: seq[ActivityElement]): DynamicValue =
 proc encodeActivityElement(e: ActivityElement): DynamicValue =
   case e.kind
   of aekPackageRef:
-    cborMap(@[entry(KeyKind, cborText(TagPackageRef)),
-              entry(KeyName, cborText(e.pkgName))])
+    var fields = @[entry(KeyKind, cborText(TagPackageRef)),
+                   entry(KeyName, cborText(e.pkgName))]
+    if e.pkgVersion.len > 0:
+      fields.add entry(KeyVersion, cborText(e.pkgVersion))
+    if e.pkgBinaries.len > 0:
+      var binItems: seq[DynamicValue] = @[]
+      for b in e.pkgBinaries:
+        binItems.add cborText(b)
+      fields.add entry(KeyBinaries, cborArray(binItems))
+    cborMap(fields)
   of aekWhenGuard:
     cborMap(@[entry(KeyKind, cborText(TagWhenGuard)),
               entry(KeyPredicate, cborText(e.predicate.expr)),
@@ -312,9 +330,22 @@ proc decodeActivityElement(v: DynamicValue): ActivityElement =
   let kind = expectText(lookup(entries, KeyKind, "ActivityElement"), KeyKind)
   case kind
   of TagPackageRef:
+    var version = ""
+    var versionFound = false
+    let verVal = lookupOpt(entries, KeyVersion, versionFound)
+    if versionFound:
+      version = expectText(verVal, KeyVersion)
+    var binaries: seq[string] = @[]
+    var binFound = false
+    let binVal = lookupOpt(entries, KeyBinaries, binFound)
+    if binFound:
+      for it in expectArray(binVal, KeyBinaries):
+        binaries.add expectText(it, KeyBinaries)
     ActivityElement(kind: aekPackageRef,
       pkgName: expectText(lookup(entries, KeyName, "ActivityElement"),
-        KeyName))
+        KeyName),
+      pkgVersion: version,
+      pkgBinaries: binaries)
   of TagWhenGuard:
     ActivityElement(kind: aekWhenGuard,
       predicate: PredicateExpr(expr: expectText(
