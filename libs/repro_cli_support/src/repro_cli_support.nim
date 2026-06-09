@@ -63,6 +63,9 @@ import repro_home_resources/drivers/managed_block
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
 import repro_peer_cache
+# Spec-Implementation M2e — ``repro lock explain`` consumes the
+# explainer surface to render structured chosen / unsat justifications.
+import repro_solver
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
@@ -20707,6 +20710,380 @@ proc runReproTestCommand*(args: openArray[string];
     return runFixtureModeShard(opts, peer)
   return runWorkspaceModeShard(opts, peer, publicCliPath)
 
+# --------------------------------------------------------------------
+# Spec-Implementation M2e — `repro lock explain <variant>` subcommand
+# --------------------------------------------------------------------
+#
+# Surfaces the M2e structured ``ExplainChain`` (for chosen-variant
+# justifications) and the assumption-interface unsat-core (for
+# unsatisfiable solves) on the operator-facing CLI. The verb lives
+# under the ``repro lock`` namespace per Locking-And-Solver.md
+# §"CLI Surface" (which earmarks ``repro lock solve``, ``debug``, and
+# ``visualize`` for the same namespace; ``explain`` is the M2e sibling).
+#
+# The subcommand operates in two modes:
+#
+#   1. **Fixture mode** (``--fixture <path>``): the fixture file is a
+#      tiny declarative format describing variants + packages so the
+#      command is testable without a full project on disk. The format
+#      is line-oriented and intentionally minimal — it is NOT a
+#      replacement for the project DSL.
+#
+#   2. **Default mode**: when no fixture is supplied, the command
+#      reports an error explaining that workspace-driven explain
+#      requires an active build context (M3+ wiring; M2e ships the
+#      fixture mode so the diagnostic surface is testable on its
+#      own).
+#
+# Output: human-readable text by default; ``--json`` emits a
+# machine-readable JSON document.
+
+type
+  FixtureParserState = object
+    variants: seq[variant_encoder.VariantDecl]
+    packages: seq[PackageDecl]
+    currentKind: string
+    currentName: string
+    vKind: VariantKind
+    vValues: seq[string]
+    vContribs: seq[VariantContribution]
+    vConstraints: seq[ConstraintExpr]
+    pVersions: seq[string]
+    pDepends: seq[DependencyDecl]
+
+proc flushFixtureBlock(s: var FixtureParserState) =
+  if s.currentKind == "variant":
+    s.variants.add(variant_encoder.VariantDecl(
+      name: s.currentName, kind: s.vKind,
+      allowedValues: s.vValues,
+      contributions: s.vContribs,
+      constraints: s.vConstraints))
+  elif s.currentKind == "package":
+    s.packages.add(PackageDecl(
+      name: s.currentName, versions: s.pVersions,
+      depends: s.pDepends, variants: @[]))
+  s.currentKind = ""
+  s.currentName = ""
+  s.vKind = vkEnum
+  s.vValues = @[]
+  s.vContribs = @[]
+  s.vConstraints = @[]
+  s.pVersions = @[]
+  s.pDepends = @[]
+
+proc parseExplainFixture(text: string): tuple[
+    variants: seq[variant_encoder.VariantDecl],
+    packages: seq[PackageDecl]] =
+  ## Parse the M2e fixture format. The format is a sequence of blocks
+  ## separated by blank lines; each block declares one variant or one
+  ## package. Variant blocks start with ``variant <name>``; package
+  ## blocks start with ``package <name>``. Inside a variant block:
+  ##
+  ##   kind: bool|enum
+  ##   values: a, b, c          (enum only)
+  ##   default: <value>
+  ##   set: <value>             (vpSet contribution)
+  ##   override: <value>        (vpOverride contribution)
+  ##   force: <value>           (vpForce contribution)
+  ##   requires: <src> -> <target> = <value>
+  ##   conflicts: <src> -> <target> = <value>
+  ##   propagates: <src> -> <target> = <value>
+  ##
+  ## Inside a package block:
+  ##
+  ##   versions: 1.0.0, 1.1.0
+  ##   depends: <name> <range>
+  ##   depends: <name> <range> when <variant>=<value>
+  var s = FixtureParserState(
+    variants: @[], packages: @[],
+    currentKind: "", currentName: "",
+    vKind: vkEnum, vValues: @[],
+    vContribs: @[], vConstraints: @[],
+    pVersions: @[], pDepends: @[])
+
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0:
+      if s.currentKind.len > 0:
+        flushFixtureBlock(s)
+      continue
+    if line.startsWith("#"):
+      continue
+    if line.startsWith("variant "):
+      if s.currentKind.len > 0: flushFixtureBlock(s)
+      s.currentKind = "variant"
+      s.currentName = line[len("variant ") .. ^1].strip()
+      continue
+    if line.startsWith("package "):
+      if s.currentKind.len > 0: flushFixtureBlock(s)
+      s.currentKind = "package"
+      s.currentName = line[len("package ") .. ^1].strip()
+      continue
+    let colonAt = line.find(':')
+    if colonAt < 0: continue
+    let key = line[0 ..< colonAt].strip()
+    let val = line[colonAt + 1 .. ^1].strip()
+    case s.currentKind
+    of "variant":
+      case key
+      of "kind":
+        if val == "bool":
+          s.vKind = vkBool
+          s.vValues = @["true", "false"]
+        else:
+          s.vKind = vkEnum
+      of "values":
+        s.vKind = vkEnum
+        s.vValues = @[]
+        for piece in val.split(','):
+          s.vValues.add(piece.strip())
+      of "default":
+        s.vContribs.add(contribution(vpDefault, val))
+      of "set":
+        s.vContribs.add(contribution(vpSet, val))
+      of "override":
+        s.vContribs.add(contribution(vpOverride, val))
+      of "force":
+        s.vContribs.add(contribution(vpForce, val))
+      of "requires", "conflicts", "propagates":
+        # Format: "<sourceValue> -> <target> = <value>"
+        let arrow = val.find("->")
+        if arrow < 0: continue
+        let sourceValue = val[0 ..< arrow].strip()
+        let rhs = val[arrow + 2 .. ^1].strip()
+        let eq = rhs.find('=')
+        if eq < 0: continue
+        let target = rhs[0 ..< eq].strip()
+        let targetValue = rhs[eq + 1 .. ^1].strip()
+        case key
+        of "requires":
+          s.vConstraints.add(requiresExpr(sourceValue, target, targetValue))
+        of "conflicts":
+          s.vConstraints.add(conflictsExpr(sourceValue, target, targetValue))
+        of "propagates":
+          s.vConstraints.add(propagatesExpr(sourceValue, target, targetValue))
+        else: discard
+      else: discard
+    of "package":
+      case key
+      of "versions":
+        s.pVersions = @[]
+        for piece in val.split(','):
+          s.pVersions.add(piece.strip())
+      of "depends":
+        # "name range" or "name range when variant=value"
+        let whenAt = val.find(" when ")
+        var head = val
+        var gateVariant = ""
+        var gateValue = ""
+        if whenAt >= 0:
+          head = val[0 ..< whenAt].strip()
+          let gate = val[whenAt + len(" when ") .. ^1].strip()
+          let eq = gate.find('=')
+          if eq >= 0:
+            gateVariant = gate[0 ..< eq].strip()
+            gateValue = gate[eq + 1 .. ^1].strip()
+        let firstSpace = head.find(' ')
+        if firstSpace < 0:
+          s.pDepends.add(newDependency(head.strip(), ""))
+        else:
+          let depName = head[0 ..< firstSpace].strip()
+          let depRange = head[firstSpace + 1 .. ^1].strip()
+          if gateVariant.len > 0:
+            s.pDepends.add(newConditionalDependency(
+              depName, depRange, gateVariant, gateValue))
+          else:
+            s.pDepends.add(newDependency(depName, depRange))
+      else: discard
+    else: discard
+  if s.currentKind.len > 0:
+    flushFixtureBlock(s)
+  result = (variants: s.variants, packages: s.packages)
+
+proc renderExplainChainText(chain: ExplainChain): string =
+  ## Human-readable rendering of an ExplainChain. Mirrors the shape
+  ## of Spack's ``spack spec --explain`` output: one block per
+  ## evidence kind, each prefixed by the variant name and the chosen
+  ## value at the top.
+  result = ""
+  result.add("variant: " & chain.variant & "\n")
+  result.add("chosen: " & chain.chosen & "\n")
+  result.add("contributions:\n")
+  if chain.contributions.len == 0:
+    result.add("  (none)\n")
+  else:
+    for c in chain.contributions:
+      let pName = case c.priority
+        of vpDefault: "default"
+        of vpSet: "set"
+        of vpOverride: "override"
+        of vpForce: "force"
+      result.add("  - " & pName & " -> " & c.value & "\n")
+  result.add("gating constraints:\n")
+  if chain.gatingConstraints.len == 0:
+    result.add("  (none)\n")
+  else:
+    for g in chain.gatingConstraints:
+      let kindStr = case g.kind
+        of crkRequires: "requires"
+        of crkConflicts: "conflicts"
+        of crkPropagates: "propagates"
+      result.add("  - " & kindStr & ": " & g.sourceValue & " -> " &
+                 g.target & "=" & g.targetValue & "\n")
+  result.add("parent influences:\n")
+  if chain.parentInfluences.len == 0:
+    result.add("  (none)\n")
+  else:
+    for p in chain.parentInfluences:
+      result.add("  - " & p.parentPackage & "." & p.parentVariant &
+                 "==" & p.parentValue & "\n")
+
+proc renderExplainChainJson(chain: ExplainChain): JsonNode =
+  result = newJObject()
+  result["variant"] = %chain.variant
+  result["chosen"] = %chain.chosen
+  let contribs = newJArray()
+  for c in chain.contributions:
+    let cj = newJObject()
+    cj["priority"] = %(
+      case c.priority
+      of vpDefault: "default"
+      of vpSet: "set"
+      of vpOverride: "override"
+      of vpForce: "force")
+    cj["value"] = %c.value
+    contribs.add(cj)
+  result["contributions"] = contribs
+  let gates = newJArray()
+  for g in chain.gatingConstraints:
+    let gj = newJObject()
+    gj["kind"] = %(case g.kind
+      of crkRequires: "requires"
+      of crkConflicts: "conflicts"
+      of crkPropagates: "propagates")
+    gj["sourceValue"] = %g.sourceValue
+    gj["target"] = %g.target
+    gj["targetValue"] = %g.targetValue
+    gates.add(gj)
+  result["gatingConstraints"] = gates
+  let parents = newJArray()
+  for p in chain.parentInfluences:
+    let pj = newJObject()
+    pj["parentPackage"] = %p.parentPackage
+    pj["parentVariant"] = %p.parentVariant
+    pj["parentValue"] = %p.parentValue
+    parents.add(pj)
+  result["parentInfluences"] = parents
+
+proc renderUnsatCoreText(entries: seq[UnsatCoreEntry];
+                         programText: string): string =
+  result = "UNSAT — minimal core:\n"
+  if entries.len == 0:
+    result.add("  (no minimal core produced; falling back to " &
+               "best-effort participants)\n")
+  else:
+    for e in entries:
+      result.add("  - [" & e.kind & "] " & e.source & "\n")
+
+proc renderUnsatCoreJson(entries: seq[UnsatCoreEntry];
+                        programText: string): JsonNode =
+  result = newJObject()
+  result["status"] = %"unsat"
+  let arr = newJArray()
+  for e in entries:
+    let j = newJObject()
+    j["kind"] = %e.kind
+    j["source"] = %e.source
+    j["atom"] = %e.atom
+    arr.add(j)
+  result["core"] = arr
+
+proc runReproLockCommand*(args: openArray[string]): int =
+  ## Top-level dispatcher for ``repro lock <verb> ...``. M2e ships the
+  ## ``explain`` verb; future milestones land ``solve``, ``debug``,
+  ## ``visualize`` per Locking-And-Solver.md §"CLI Surface".
+  if args.len == 0:
+    stderr.writeLine("repro lock: error: missing verb (try `explain`)")
+    return 2
+  case args[0]
+  of "explain":
+    let rest =
+      if args.len > 1: args[1 .. ^1]
+      else: @[]
+    var variantName = ""
+    var fixturePath = ""
+    var asJson = false
+    var i = 0
+    while i < rest.len:
+      let arg = rest[i]
+      if arg == "--json":
+        asJson = true
+        inc i
+      elif arg == "--fixture" or arg.startsWith("--fixture="):
+        if arg.startsWith("--fixture="):
+          fixturePath = arg["--fixture=".len .. ^1]
+        else:
+          if i + 1 >= rest.len:
+            stderr.writeLine("repro lock explain: --fixture requires a path")
+            return 2
+          fixturePath = rest[i + 1]
+          inc i
+        inc i
+      elif arg.startsWith("--"):
+        stderr.writeLine("repro lock explain: unknown flag " & arg)
+        return 2
+      else:
+        if variantName.len > 0:
+          stderr.writeLine("repro lock explain: at most one variant " &
+                           "positional accepted")
+          return 2
+        variantName = arg
+        inc i
+    if variantName.len == 0:
+      stderr.writeLine("repro lock explain: missing <variant> positional")
+      return 2
+    if fixturePath.len == 0:
+      stderr.writeLine("repro lock explain: --fixture <path> is required " &
+                       "in M2e (workspace-driven explain lands in M3+)")
+      return 2
+    if not fileExists(fixturePath):
+      stderr.writeLine("repro lock explain: fixture not found: " & fixturePath)
+      return 1
+    let text = readFile(fixturePath)
+    let parsed = parseExplainFixture(text)
+    var sol: UnifiedSolution
+    var unsatErr: ref EUnsatisfiable = nil
+    try:
+      sol = solve(parsed.variants, parsed.packages)
+    except EUnsatisfiable as e:
+      unsatErr = (ref EUnsatisfiable)()
+      unsatErr.msg = e.msg
+      unsatErr.programText = e.programText
+      unsatErr.unsatCore = e.unsatCore
+      unsatErr.coreAtoms = e.coreAtoms
+    if unsatErr != nil:
+      let entries = explainUnsat(unsatErr.coreAtoms, parsed.variants,
+                                  parsed.packages)
+      if asJson:
+        echo $renderUnsatCoreJson(entries, unsatErr.programText)
+      else:
+        stdout.write(renderUnsatCoreText(entries, unsatErr.programText))
+      return 3  # exit code 3 reserved for "unsat"
+    try:
+      let chain = explainChosen(sol, variantName, parsed.variants,
+                                parsed.packages)
+      if asJson:
+        echo $renderExplainChainJson(chain)
+      else:
+        stdout.write(renderExplainChainText(chain))
+      return 0
+    except EVariantNotInSolution as e:
+      stderr.writeLine("repro lock explain: " & e.msg)
+      return 1
+  else:
+    stderr.writeLine("repro lock: unknown verb '" & args[0] & "'")
+    return 2
+
 proc runThinApp*(programName: string): int =
   let args = commandLineParams()
   let publicCliPath = stablePublicCliPath()
@@ -21131,6 +21508,21 @@ proc runThinApp*(programName: string): int =
       return runHooksCommand(hookArgs)
     except CatchableError as err:
       stderr.writeLine("repro hooks: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "lock":
+    # Spec-Implementation M2e — ``repro lock <verb>``. M2e ships the
+    # ``explain`` verb under this namespace per
+    # Locking-And-Solver.md §"CLI Surface" (which earmarks
+    # ``solve`` / ``debug`` / ``visualize`` for the same family).
+    try:
+      let lockArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runReproLockCommand(lockArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro lock: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "check":
     # M18 — top-level `repro check` subcommand per CLI/check.md. The

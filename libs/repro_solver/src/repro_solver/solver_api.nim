@@ -36,11 +36,13 @@ import clingo_bindings
 import variant_encoder
 import version_encoder
 import version_constraints
+import explainer
 
 export clingo_bindings
 export variant_encoder
 export version_encoder
 export version_constraints
+export explainer
 
 # --------------------------------------------------------------------
 # Constraint surface (placeholder)
@@ -320,26 +322,11 @@ proc solveVariants*(variants: openArray[VariantDecl]): VariantSolution =
 # M2c — unified variant + version solver
 # --------------------------------------------------------------------
 
-type
-  UnifiedSolution* = object
-    ## Outcome of a combined variant + package version solve.
-    ## ``variants`` maps each variant's declared name to the resolved
-    ## value as a string; ``packages`` maps each package name to its
-    ## resolved version string; ``optimal`` carries clingo's
-    ## ``exhausted`` bit so callers can detect when the solver proved
-    ## optimality vs. terminated on the first model.
-    variants*: Table[string, string]
-    packages*: Table[string, string]
-    optimal*: bool
-
-  EUnsatisfiable* = object of CatchableError
-    ## Raised when the unified encoded program has no stable model.
-    ## ``programText`` carries the ASP program for diagnostic replay;
-    ## ``unsatCore`` enumerates the constraint-participating variants
-    ## and packages on a best-effort basis (the assumption-based
-    ## clingo unsat-core enumeration is M2e work and stays deferred).
-    programText*: string
-    unsatCore*: seq[string]
+## ``UnifiedSolution`` and ``EUnsatisfiable`` were moved into
+## ``explainer.nim`` for M2e so the explainer can take the solution
+## record directly without a circular import. They are re-exported
+## above via ``export explainer``, so callers continue to see them at
+## the same path.
 
 # --------------------------------------------------------------------
 # Internal helpers for the unified driver
@@ -420,6 +407,13 @@ proc collectUnifiedUnsatCore(variants: openArray[VariantDecl];
 # Public M2c entry point
 # --------------------------------------------------------------------
 
+# Forward declaration: the M2e unsat-core re-solve helper lives below
+# the main ``solve()`` because Nim requires its definition order to
+# follow the surface it consumes. ``solve()`` calls into this helper
+# on the unsat path.
+proc solveForUnsatCore*(variants: openArray[VariantDecl];
+                        packages: openArray[PackageDecl]): seq[string]
+
 proc solve*(variants: openArray[VariantDecl];
             packages: openArray[PackageDecl]): UnifiedSolution =
   ## Combined variant + package version solve. Encodes both via
@@ -499,9 +493,150 @@ proc solve*(variants: openArray[VariantDecl];
         "package registry")
       e.programText = program
       e.unsatCore = collectUnifiedUnsatCore(variants, packages)
+      # M2e: re-run with the annotation-based encoder so the assumption
+      # interface populates the minimal core. We must close the current
+      # handle FIRST because clingo's API forbids overlapping solve
+      # contexts on the same control. The re-solve happens on a brand
+      # new control object so it can never observe stale state.
+      if not handle.isNil:
+        discard clingo_solve_handle_close(handle)
+        handle = nil
+      if not control.isNil:
+        clingo_control_free(control)
+        control = nil
+      e.coreAtoms = solveForUnsatCore(variants, packages)
       raise e
 
     result.optimal = (solveResult and clingoSolveResultExhausted) != 0
+  finally:
+    if not handle.isNil:
+      discard clingo_solve_handle_close(handle)
+    if not control.isNil:
+      clingo_control_free(control)
+
+# --------------------------------------------------------------------
+# M2e — assumption-interface unsat-core enumeration
+# --------------------------------------------------------------------
+
+proc lookupAssumeLiteral(atomsPtr: ClingoSymbolicAtomsPtr;
+                         constraintId: int;
+                         literal: var ClingoLiteral): bool =
+  ## Materialise the symbol ``assume_constraint(constraintId)`` and
+  ## look up its program literal via the symbolic-atoms API. Returns
+  ## false if the atom is not in the grounded program (which happens
+  ## when clingo's grounder decided the external is unreferenced; we
+  ## treat that as "constraint not in core" and skip the assumption).
+  var idSym: ClingoSymbol = 0
+  clingo_symbol_create_number(cint(constraintId), addr idSym)
+  var fname: cstring = cstring("assume_constraint")
+  var args = @[idSym]
+  var funSym: ClingoSymbol = 0
+  if not clingo_symbol_create_function(fname, addr args[0], 1, true,
+                                        addr funSym):
+    return false
+  var it: ClingoSymbolicAtomIterator = 0
+  if not clingo_symbolic_atoms_find(atomsPtr, funSym, addr it):
+    return false
+  var valid = false
+  if not clingo_symbolic_atoms_is_valid(atomsPtr, it, addr valid):
+    return false
+  if not valid:
+    return false
+  if not clingo_symbolic_atoms_literal(atomsPtr, it, addr literal):
+    return false
+  return true
+
+proc solveForUnsatCore*(variants: openArray[VariantDecl];
+                        packages: openArray[PackageDecl]): seq[string] =
+  ## Run a parallel solve with the annotated encoding from
+  ## ``explainer.encodeWithAssumptions``: each constraint is guarded
+  ## by an ``assume_constraint(N).`` external atom; we assume every
+  ## external true; clingo's ``clingo_solve_handle_core`` returns the
+  ## literals participating in the conflict; the
+  ## ``ConstraintAnnotation`` table maps each literal back to the
+  ## constraint identity via its atom name.
+  ##
+  ## Returns the list of ``assume_constraint(N)`` atom names that
+  ## participate in the minimal unsat core. Returns the empty seq if
+  ## the annotated program is unexpectedly satisfiable, or if any
+  ## clingo C call fails — in either case the caller's diagnostic
+  ## still has the M2c best-effort core to fall back to.
+  let (program, annotations) = encodeWithAssumptions(variants, packages)
+  result = @[]
+  if annotations.len == 0:
+    return @[]
+
+  var control: ClingoControlPtr = nil
+  var handle: ClingoSolveHandlePtr = nil
+  var atomsPtr: ClingoSymbolicAtomsPtr = nil
+  var solveResult: ClingoSolveResult = 0
+
+  try:
+    if not clingo_control_new(nil, 0, nil, nil, 20, addr control):
+      return @[]
+    let progC = cstring(program)
+    if not clingo_control_add(control, "base", nil, 0, progC):
+      return @[]
+    var parts = @[ClingoPart(name: "base", params: nil, size: 0)]
+    if not clingo_control_ground(control, addr parts[0], 1, nil, nil):
+      return @[]
+    if not clingo_control_symbolic_atoms(control, addr atomsPtr):
+      return @[]
+
+    # Build the assumption literal list by looking up each annotation's
+    # symbol in the symbolic atoms collection. Annotations whose atoms
+    # didn't ground (clingo dropped the external as redundant) are
+    # silently skipped — their constraint won't appear in any core.
+    var literals: seq[ClingoLiteral] = @[]
+    var litToAtomName: Table[ClingoLiteral, string]
+    for ann in annotations:
+      var lit: ClingoLiteral = 0
+      if lookupAssumeLiteral(atomsPtr, ann.id, lit):
+        literals.add(lit)
+        litToAtomName[lit] = ann.atomName
+
+    if literals.len == 0:
+      return @[]
+
+    let assumptionPtr = cast[pointer](addr literals[0])
+    if not clingo_control_solve(control, clingoSolveModeYield,
+                                 assumptionPtr, csize_t(literals.len),
+                                 nil, nil, addr handle):
+      return @[]
+    # Drain — under unsat we expect no models. Resume each (none-found)
+    # event until the search exhausts.
+    while true:
+      var model: ptr ClingoModel = nil
+      if not clingo_solve_handle_model(handle, addr model):
+        return @[]
+      if model.isNil:
+        break
+      if not clingo_solve_handle_resume(handle):
+        return @[]
+    if not clingo_solve_handle_get(handle, addr solveResult):
+      return @[]
+    if (solveResult and clingoSolveResultUnsatisfiable) == 0:
+      # Surprisingly satisfiable — the structural unsat is outside the
+      # annotated rules. Return empty so the M2c best-effort core
+      # survives as the caller's diagnostic.
+      return @[]
+    # Extract the core.
+    var corePtr: ptr ClingoLiteral = nil
+    var coreSize: csize_t = 0
+    if not clingo_solve_handle_core(handle, addr corePtr, addr coreSize):
+      return @[]
+    if coreSize == 0:
+      return @[]
+    for i in 0 ..< int(coreSize):
+      let lit = cast[ptr ClingoLiteral](
+        cast[int](corePtr) + i * sizeof(ClingoLiteral))[]
+      # Match on signed literal first (positive assumption); then on
+      # the negated form clingo sometimes returns; then drop unknown
+      # entries silently.
+      if lit in litToAtomName:
+        result.add(litToAtomName[lit])
+      elif (-lit) in litToAtomName:
+        result.add(litToAtomName[-lit])
   finally:
     if not handle.isNil:
       discard clingo_solve_handle_close(handle)

@@ -686,6 +686,30 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_cross_package_propagates",
     defines: @[]),
   TestSpec(
+    source: "libs/repro_solver/tests/t_explainer_chosen_basic.nim",
+    binary: "build/test-bin/t_explainer_chosen_basic",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_explainer_chosen_cross_package.nim",
+    binary: "build/test-bin/t_explainer_chosen_cross_package",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_explainer_chosen_with_constraints.nim",
+    binary: "build/test-bin/t_explainer_chosen_with_constraints",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_explainer_chosen_with_override.nim",
+    binary: "build/test-bin/t_explainer_chosen_with_override",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_explainer_unsat_basic.nim",
+    binary: "build/test-bin/t_explainer_unsat_basic",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_explainer_unsat_version_range.nim",
+    binary: "build/test-bin/t_explainer_unsat_version_range",
+    defines: @[]),
+  TestSpec(
     source: "libs/repro_solver/tests/t_semver_range_parsing.nim",
     binary: "build/test-bin/t_semver_range_parsing",
     defines: @[]),
@@ -1510,6 +1534,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_action_cache_fingerprint_policies",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_cli_repro_lock_explain.nim",
+    binary: "build/test-bin/t_cli_repro_lock_explain",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_dependency_report_and_converter_paths.nim",
     binary: "build/test-bin/t_dependency_report_and_converter_paths",
     defines: @[]),
@@ -1518,12 +1546,24 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_dev_env_artifact",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_e2e_selectable_toolchain_fixture.nim",
+    binary: "build/test-bin/t_e2e_selectable_toolchain_fixture",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_e2e_variant_feature_flag_drops_tls.nim",
+    binary: "build/test-bin/t_e2e_variant_feature_flag_drops_tls",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_entrypoints.nim",
     binary: "build/test-bin/t_entrypoints",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_build_engine_api_ready_queue.nim",
     binary: "build/test-bin/t_integration_build_engine_api_ready_queue",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_cli_variant_flag_drives_solver.nim",
+    binary: "build/test-bin/t_integration_cli_variant_flag_drives_solver",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_configurable_doc_comment_directives.nim",
@@ -1582,12 +1622,24 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_integration_scheduler_dependency_gathering_policies",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_integration_solver_chosen_version.nim",
+    binary: "build/test-bin/t_integration_solver_chosen_version",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_solver_resolves_variants.nim",
+    binary: "build/test-bin/t_integration_solver_resolves_variants",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_integration_variant_cli_flag.nim",
     binary: "build/test-bin/t_integration_variant_cli_flag",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_variant_conditional_uses_static_value.nim",
     binary: "build/test-bin/t_integration_variant_conditional_uses_static_value",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_variant_conditioned_uses.nim",
+    binary: "build/test-bin/t_integration_variant_conditioned_uses",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_variant_declaration_basic.nim",
@@ -1600,31 +1652,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_integration_variant_value_accessor.nim",
     binary: "build/test-bin/t_integration_variant_value_accessor",
-    defines: @[]),
-  # Spec-Implementation M2d — unified solver integration.
-  TestSpec(
-    source: "tests/integration/t_integration_solver_resolves_variants.nim",
-    binary: "build/test-bin/t_integration_solver_resolves_variants",
-    defines: @[]),
-  TestSpec(
-    source: "tests/integration/t_integration_solver_chosen_version.nim",
-    binary: "build/test-bin/t_integration_solver_chosen_version",
-    defines: @[]),
-  TestSpec(
-    source: "tests/integration/t_integration_variant_conditioned_uses.nim",
-    binary: "build/test-bin/t_integration_variant_conditioned_uses",
-    defines: @[]),
-  TestSpec(
-    source: "tests/integration/t_integration_cli_variant_flag_drives_solver.nim",
-    binary: "build/test-bin/t_integration_cli_variant_flag_drives_solver",
-    defines: @[]),
-  TestSpec(
-    source: "tests/integration/t_e2e_selectable_toolchain_fixture.nim",
-    binary: "build/test-bin/t_e2e_selectable_toolchain_fixture",
-    defines: @[]),
-  TestSpec(
-    source: "tests/integration/t_e2e_variant_feature_flag_drops_tls.nim",
-    binary: "build/test-bin/t_e2e_variant_feature_flag_drops_tls",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_just_test_end_to_end_via_parallel_runner.nim",

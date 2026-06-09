@@ -30,6 +30,17 @@
 ## callbacks, configuration, statistics, async solve, symbolic-atom
 ## iteration. M2b–M2e add what they need.
 ##
+## **M2e additions:** symbolic-atoms lookup
+## (``clingo_control_symbolic_atoms`` /
+## ``clingo_symbolic_atoms_find`` / ``clingo_symbolic_atoms_literal``)
+## so callers can map ground atoms back to program literals for use
+## as assumptions; ``clingo_solve_handle_core`` to extract the
+## minimal unsat core after a solve under assumptions; and the
+## symbol construction entry points
+## (``clingo_symbol_create_string`` /
+## ``clingo_symbol_create_function``) needed to materialise a
+## ``clingo_symbol_t`` for the ``find`` call.
+##
 ## **Doc-page references:** signatures are taken verbatim from the
 ## clingo 5.8 C API headers shipped at
 ## ``<nixpkgs>/pkgs/development/tools/clingo``. Each proc's docstring
@@ -70,16 +81,34 @@ type
   ClingoControl* = object
   ClingoSolveHandle* = object
   ClingoModel* = object
+  ClingoSymbolicAtoms* = object
+    ## ``clingo_symbolic_atoms_t`` — the opaque handle the symbolic
+    ## atoms API hangs off of. ``clingo_control_symbolic_atoms``
+    ## returns one of these (borrowed from the control); we never
+    ## free it directly.
 
   ClingoControlPtr* = ptr ClingoControl
   ClingoSolveHandlePtr* = ptr ClingoSolveHandle
   ClingoModelPtr* = ptr ClingoModel
+  ClingoSymbolicAtomsPtr* = ptr ClingoSymbolicAtoms
 
   ClingoSymbol* = uint64
     ## ``clingo_symbol_t`` is a tagged uint64 encoding of a grounded
     ## symbol (number, string, function, infimum, supremum). We use
     ## ``clingo_symbol_to_string_*`` to render them for the smoke test
     ## rather than decoding the tag bits by hand.
+
+  ClingoLiteral* = int32
+    ## ``clingo_literal_t`` — a signed program literal. Positive
+    ## means the atom holds; negative means the atom's negation
+    ## holds. Used as the assumption type passed to
+    ## ``clingo_control_solve`` and as the entry type of the unsat
+    ## core returned by ``clingo_solve_handle_core``.
+
+  ClingoSymbolicAtomIterator* = uint64
+    ## Opaque iterator into the symbolic atoms collection. The C type
+    ## is ``clingo_symbolic_atom_iterator_t`` (a 64-bit integer the
+    ## library treats as an iterator handle).
 
   ClingoSolveResult* = cuint
     ## Bitset of ``clingo_solve_result_e`` (satisfiable=1,
@@ -240,6 +269,73 @@ proc clingo_error_message*(): cstring
   ## Per-thread last-error message. Returns NULL when no error has
   ## been recorded since the previous successful call. Upstream doc:
   ## "Error Handling".
+
+# --------------------------------------------------------------------
+# M2e — assumption interface + symbolic atom lookup
+# --------------------------------------------------------------------
+
+proc clingo_solve_handle_core*(handle: ClingoSolveHandlePtr;
+                               core: ptr ptr ClingoLiteral;
+                               size: ptr csize_t): bool
+  ## Extract the unsat core from a handle whose solve completed
+  ## unsatisfiably under assumptions. Upstream doc: Solving module,
+  ## "Solve Handle". The returned ``core`` array is borrowed from
+  ## the handle and stays valid until the handle is closed. Each
+  ## entry is a ``clingo_literal_t`` matching one of the assumption
+  ## literals the caller passed to ``clingo_control_solve``; the sign
+  ## tells whether the positive or the negative form participates in
+  ## the conflict.
+
+proc clingo_control_symbolic_atoms*(control: ClingoControlPtr;
+                                    atoms: ptr ClingoSymbolicAtomsPtr): bool
+  ## Borrow the symbolic-atoms collection from a grounded control.
+  ## Upstream doc: Control module, "Inspection". The collection is
+  ## only meaningful AFTER grounding; calling this before
+  ## ``clingo_control_ground`` returns an empty collection.
+
+proc clingo_symbolic_atoms_find*(atoms: ClingoSymbolicAtomsPtr;
+                                 symbol: ClingoSymbol;
+                                 iterator_out: ptr ClingoSymbolicAtomIterator): bool
+  ## Locate an atom in the symbolic-atoms collection by its grounded
+  ## symbol. Upstream doc: SymbolicAtoms module. When the atom is
+  ## present the iterator points at it; when absent the iterator
+  ## equals the end iterator (test with ``clingo_symbolic_atoms_is_valid``).
+
+proc clingo_symbolic_atoms_is_valid*(atoms: ClingoSymbolicAtomsPtr;
+                                     iterator_in: ClingoSymbolicAtomIterator;
+                                     valid: ptr bool): bool
+  ## Check whether an iterator points at a real atom (true) or at the
+  ## end-of-collection sentinel (false). Upstream doc: SymbolicAtoms
+  ## module.
+
+proc clingo_symbolic_atoms_literal*(atoms: ClingoSymbolicAtomsPtr;
+                                    iterator_in: ClingoSymbolicAtomIterator;
+                                    literal: ptr ClingoLiteral): bool
+  ## Read the program literal of the atom an iterator points at.
+  ## Upstream doc: SymbolicAtoms module. Use this literal as an
+  ## assumption to ``clingo_control_solve``.
+
+proc clingo_symbol_create_string*(str: cstring;
+                                  symbol: ptr ClingoSymbol): bool
+  ## Construct a string symbol from a cstring. Upstream doc: Symbol
+  ## module, "Symbols Construction". The returned tagged ``uint64``
+  ## carries the string by reference into clingo's symbol table; the
+  ## caller's buffer can be freed immediately afterwards.
+
+proc clingo_symbol_create_number*(number: cint; symbol: ptr ClingoSymbol)
+  ## Construct a number symbol from a C int. Upstream doc: Symbol
+  ## module, "Symbols Construction". Cannot fail (the operation is
+  ## pure tagging); returns ``void`` in the C header.
+
+proc clingo_symbol_create_function*(name: cstring;
+                                    arguments: ptr ClingoSymbol;
+                                    argumentsSize: csize_t;
+                                    positive: bool;
+                                    symbol: ptr ClingoSymbol): bool
+  ## Construct a function symbol from a name + argument array.
+  ## Upstream doc: Symbol module, "Symbols Construction". ``positive``
+  ## is true for the standard ``name(args)`` form; false produces the
+  ## negation form ``-name(args)``.
 
 {.pop.}
 
