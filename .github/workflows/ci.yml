@@ -28,7 +28,25 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    # Self-hosted bare-metal Linux runner. Standard ubuntu-latest hits
+    # OOM on the 8-parallel `nim c` default and the fd race in the M3
+    # fallback test runner because the 4 vCPU / 16 GB shape is the
+    # bottleneck. Our metacraft-labs bare-metal pool has ~12 Linux
+    # nixos hosts with plenty of cores + RAM; lift the parallelism
+    # caps via env vars below for runs that land there.
+    runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
+    env:
+      # Cap engine action parallelism. nproc/2 on a bare-metal host
+      # with 32+ cores and 64+ GB RAM still leaves headroom; the cap
+      # exists only because scripts/run_tests.sh would otherwise cap
+      # at 4 for GitHub-hosted-runner safety. Override with a generous
+      # value here so the suite finishes fast.
+      REPROBUILD_MAX_PARALLELISM: "16"
+      # M3 fallback test runner's pipe pumper crashes at 4 threads on
+      # GitHub-hosted runners (fd race). Bare-metal hosts have the
+      # process headroom to tolerate higher concurrency, but cap at 4
+      # until the underlying race is fixed in the runner.
+      REPROBUILD_TEST_THREADS: "4"
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v30
