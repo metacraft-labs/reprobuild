@@ -133,7 +133,25 @@ compile_hcr_workaround() {
 
 # Build the engine-driven test binaries (the entire suite minus the
 # macOS arm64 HCR workaround tests).
-printf 'Building test binaries via repro build test\n' >&2
+#
+# Cap parallelism for memory-constrained CI runners. The engine defaults
+# to maxParallelism=8 (libs/repro_cli_support/src/repro_cli_support.nim
+# ``buildMaxParallelism``); each ``nim c`` peaks around 300-500 MB, so
+# 8 concurrent invocations easily exhaust the ~7 GB on a standard
+# GitHub Actions ubuntu-latest runner — the kernel SIGKILLs whichever
+# process happens to grow first, producing a random per-run "1 of 454
+# failed" failure with no captured stderr. Cap at REPROBUILD_MAX_PARALLELISM
+# from the caller (CI sets a low value), or default to ``nproc / 2``
+# capped at 4 here when unset.
+if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
+  available_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+  cap=$(( available_cores / 2 ))
+  if (( cap < 1 )); then cap=1; fi
+  if (( cap > 4 )); then cap=4; fi
+  export REPROBUILD_MAX_PARALLELISM="${cap}"
+fi
+printf 'Building test binaries via repro build test (REPROBUILD_MAX_PARALLELISM=%s)\n' \
+  "${REPROBUILD_MAX_PARALLELISM}" >&2
 if ! ./build/bin/repro build test; then
   # Surface failed-action details from the build report so CI logs show
   # the nim error rather than the bare "daemon-hosted build failed"
