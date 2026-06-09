@@ -134,7 +134,24 @@ compile_hcr_workaround() {
 # Build the engine-driven test binaries (the entire suite minus the
 # macOS arm64 HCR workaround tests).
 printf 'Building test binaries via repro build test\n' >&2
-./build/bin/repro build test
+if ! ./build/bin/repro build test; then
+  # Surface failed-action details from the build report so CI logs show
+  # the nim error rather than the bare "daemon-hosted build failed"
+  # marker. The engine writes the report to .repro/build/repro/build-report.json
+  # with per-action stdout/stderr captured.
+  report_path=".repro/build/repro/build-report.json"
+  if [[ -f "${report_path}" ]]; then
+    printf '\n=== Failed actions (from %s) ===\n' "${report_path}" >&2
+    if command -v jq >/dev/null 2>&1; then
+      jq '.actions[] | select(.exitCode != 0 and .exitCode != null) | {id, exitCode, executable, args, stdout, stderr, evidence}' "${report_path}" >&2 || true
+    else
+      printf '(jq not available; copying full report to test-logs/build-report.json)\n' >&2
+    fi
+    mkdir -p test-logs
+    cp "${report_path}" test-logs/build-report.json 2>/dev/null || true
+  fi
+  exit 1
+fi
 
 # macOS arm64 HCR workaround: rebuild three specific tests via direct
 # ``nim c`` so they pick up the patchable-function-entry + segprot
