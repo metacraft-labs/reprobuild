@@ -31,6 +31,19 @@
       url = "github:metacraft-labs/ct-test/main";
       flake = false;
     };
+    codetracer-native-recorder = {
+      # ct_interpose lives under ``ct_interpose/src`` in the native-recorder
+      # repo. ``repro_monitor_hooks/macos_interpose_runtime`` imports
+      # ``ct_interpose/propagation`` and the cross-platform monitor shim uses
+      # ``ct_interpose/hook_registry``; config.nims threads CT_INTERPOSE_SRC
+      # onto Nim's --path (falling back to a sibling checkout or a vendored
+      # copy when the env var is unset). The Nix build is sandboxed and sees
+      # neither, so we must seed CT_INTERPOSE_SRC from this input. In the
+      # CodeTracer workspace this input ``follows`` codetracer's own
+      # native-recorder input, so a local sibling checkout is used.
+      url = "github:metacraft-labs/codetracer-native-recorder/stable";
+      flake = false;
+    };
   };
 
   outputs =
@@ -40,6 +53,7 @@
       nimcrypto-src,
       bearssl-src,
       ct-test-src,
+      codetracer-native-recorder,
       runquota-src,
       ...
     }:
@@ -73,6 +87,11 @@
               pkgs.libblake3.out
             ];
           };
+          # CT_INTERPOSE_SRC points at the directory that *contains* the
+          # ``ct_interpose`` package (config.nims validates it by probing
+          # ``<dir>/ct_interpose/hook_registry.nim``), which is
+          # ``ct_interpose/src`` inside the native-recorder checkout.
+          ctInterposeSrc = "${codetracer-native-recorder}/ct_interpose/src";
           pre-commit-check = git-hooks.lib.${system}.run {
             src = ./.;
             hooks.just-lint = {
@@ -92,6 +111,7 @@
                 export NIMCRYPTO_SRC=${nimcrypto-src}
                 export BEARSSL_SRC=${bearssl-src}
                 export CT_TEST_SRC=${ct-test-src}
+                export CT_INTERPOSE_SRC=${ctInterposeSrc}
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
                 export XXHASH_PREFIX=${pkgs.xxHash}
@@ -134,6 +154,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             CT_TEST_SRC = ct-test-src;
+            CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             SQLITE_PREFIX = pkgs.sqlite.out;
@@ -202,6 +223,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             CT_TEST_SRC = ct-test-src;
+            CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             SQLITE_PREFIX = pkgs.sqlite.out;
