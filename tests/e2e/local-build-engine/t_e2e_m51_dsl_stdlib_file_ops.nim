@@ -51,8 +51,21 @@ proc build(reproBin, target, repoRoot: string): string =
   # `progress: bpkActionCompleted ...` markers and the `scheduler:`
   # / `providerInvocations:` / `buildReport:` headers, none of which
   # carry per-action runquota labels.
+  #
+  # Pass `--daemon=off` so the test exercises the DSL stdlib in direct
+  # mode without coupling to whichever user-daemon happens to be
+  # running on the host. The default `--daemon=auto` either reuses a
+  # pre-existing `repro-daemon` (whose forwarded env may carry stale
+  # PATH entries from a previous unrelated test — e.g. a stale
+  # `repro-m30-codetracer-target-selection*` tmp dir baked into a
+  # cached tool-identity) or launches a new daemon that the test
+  # leaves running. Either coupling produces flaky "Could not find
+  # command: '/tmp/nix-shell.*/.../nim'" failures that are not bugs
+  # in the m51 surface this test guards. Direct mode covers the same
+  # build-engine code path, just without the daemon hop.
   requireSuccess(shellCommand([reproBin, "build", target,
-    "--tool-provisioning=path", "--log=actions"]), repoRoot)
+    "--daemon=off", "--tool-provisioning=path", "--log=actions"]),
+    repoRoot)
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
