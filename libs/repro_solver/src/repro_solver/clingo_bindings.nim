@@ -54,41 +54,38 @@
 # the same library. We prefer the unsuffixed soname so the binding
 # stays version-agnostic.
 #
-# Eager vs lazy loading. When the ``{.dynlib.}`` argument is a string
-# *constant*, Nim loads the library EAGERLY at process startup and aborts
-# the process if it cannot be resolved. When the argument is a runtime
-# *variable* (``let``/``var``), Nim loads LAZILY on the first call into the
-# library. We exploit that distinction:
+# Nim resolves ``{.dynlib: const-string.}`` at compile time: the Nim
+# compiler walks the linker's search path and bakes the resolved absolute
+# library path into the generated C. The dynlib block then executes at
+# module init time — ``nimLoadLibrary`` dlopens the baked abs path and
+# every ``nimGetProcAddr`` resolves immediately. That is why a binary
+# compiled inside ``nix develop`` finds
+# ``/nix/store/.../libclingo.so`` at runtime even though
+# ``LD_LIBRARY_PATH`` is empty for its children.
 #
-# * In provider binaries (compiled with ``-d:reproProviderMode``) the ASP
-#   solver is never invoked — providers only emit build-graph fragments;
-#   the concretizer runs inside ``repro`` proper. Binding clingo through a
-#   ``let`` makes the load lazy, so a provider that never calls clingo does
-#   not require ``libclingo`` to be present or on the loader path. This
-#   matters because providers are spawned in restricted environments — on
-#   macOS the ``/bin/sh`` that historically launched them is SIP-protected,
-#   so dyld purges every ``DYLD_*`` variable across the exec and a
-#   caller-set ``DYLD_LIBRARY_PATH`` never reaches the provider. Without
-#   this, providers aborted at startup with ``could not load:
-#   libclingo.dylib`` even though they never use the solver.
-# * Everywhere else (``repro`` itself) we keep the eager ``const`` form so
-#   a genuinely missing solver library fails fast and loudly.
-when defined(reproProviderMode):
-  let clingoLib* =
-    when defined(windows):
-      "clingo.dll"
-    elif defined(macosx):
-      "libclingo.dylib"
-    else:
-      "libclingo.so"
-else:
-  const clingoLib* =
-    when defined(windows):
-      "clingo.dll"
-    elif defined(macosx):
-      "libclingo.dylib"
-    else:
-      "libclingo.so"
+# A previous attempt (37e3990) tried to opt provider binaries out of this
+# eager-load behaviour by binding ``clingoLib`` through a ``let`` in
+# ``-d:reproProviderMode``. That does NOT produce a lazy load — Nim's
+# ``DatInit`` (which performs the dlopen + every dlsym for the dynlib
+# block) runs BEFORE the module's ``Init`` (which assigns the ``let``).
+# At ``DatInit`` time ``clingoLib`` is the zero-initialised empty string,
+# so ``dlopen("")`` returns a handle to the main program, every dlsym
+# misses, and the provider aborts at startup with
+# ``could not import: clingo_control_new``. The original macOS
+# DYLD-purging problem still needs a fix, but the ``let`` form makes
+# every provider call site unconditionally broken — the
+# ``t_repro_list_targets_lists_implicit_and_explicit`` end-to-end test
+# catches exactly that failure. Until the macOS path gets a real lazy-
+# load mechanism (proc-level dlopen or ``dynlibOverride``), keep the
+# eager ``const`` form on both ``repro`` and the providers so the
+# compile-time path resolution can do its job.
+const clingoLib* =
+  when defined(windows):
+    "clingo.dll"
+  elif defined(macosx):
+    "libclingo.dylib"
+  else:
+    "libclingo.so"
 
 # --------------------------------------------------------------------
 # Opaque handle types
