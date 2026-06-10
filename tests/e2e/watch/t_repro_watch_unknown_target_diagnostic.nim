@@ -157,10 +157,45 @@ suite "t_repro_watch_unknown_target_diagnostic":
     # daemon worker's ``terminalSent`` guard suppresses the generic
     # "daemon-hosted watch failed" status line. Result: byte-identical
     # diagnostic + exit code 2 across both modes.
+    #
+    # Isolate the daemon endpoint / state-dir via ``REPRO_DAEMON_*`` env
+    # overrides so the test never adopts a pre-existing user-daemon
+    # whose forwarded env may carry stale PATH entries from an
+    # unrelated tmp dir (the same daemon-coupling failure mode that
+    # forced ``--daemon=off`` pins in
+    # ``t_e2e_local_reprobuild_project_build`` (commit 448b887),
+    # ``t_e2e_m51_dsl_stdlib_file_ops`` (091cba4),
+    # ``t_e2e_repro_build_named_target`` (30a7ce6) and
+    # ``t_e2e_repro_build_multiple_named_targets`` (86be3f1)). Here we
+    # cannot use ``--daemon=off`` for THIS invocation -- the whole
+    # point is to cover ``installUserDaemonWatchExecutor``'s typed-
+    # exception arm. Isolation preserves that coverage without the
+    # cross-test coupling.
+    let daemonEndpoint = daemonSocketEndpoint(
+      "repro-m3-watch-unknown-d-" & $getCurrentProcessId())
+    if pathExists(daemonEndpoint):
+      removeFile(daemonEndpoint)
+    let daemonStateDir = tempRoot / "daemon-state"
+    let daemonEnv = @[
+      ("PATH", pathValue),
+      ("REPRO_DAEMON_ENDPOINT", daemonEndpoint),
+      ("REPRO_DAEMON_STATE_DIR", daemonStateDir),
+      ("REPRO_DAEMON_RUNTIME_DIR", tempRoot / "daemon-runtime")
+    ]
+    defer:
+      # Best-effort: stop the isolated daemon (if any) so it does not
+      # outlive the test. Errors swallowed -- the test process exiting
+      # closes the daemon socket regardless.
+      discard runShell(shellCommand([
+        reproBin, "daemon", "stop"
+      ], daemonEnv), projectRoot)
+      if pathExists(daemonEndpoint):
+        try: removeFile(daemonEndpoint) except OSError: discard
+
     let daemonRes = runShell(shellCommand([
       reproBin, "watch", "codetraver",
       "--tool-provisioning=path"
-    ], [("PATH", pathValue)]), projectRoot)
+    ], daemonEnv), projectRoot)
 
     check daemonRes.code == 2
     check daemonRes.output.contains("unknown_target")
