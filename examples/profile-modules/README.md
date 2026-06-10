@@ -86,6 +86,36 @@ Three rules cover the common cases:
        content = "...")
    ```
 
+   **Use a `proc` (not a `template`) when your wrapper has parameter
+   names that overlap with the inner constructor's named-argument
+   keys.** Nim's template hygiene substitutes EVERY occurrence of a
+   template parameter in the body, including the LHS of named-argument
+   expressions. A wrapper with `mode` and `address` parameters that
+   does `fsUserFile(... mode = mode, address = ...)` expands to
+   `fsUserFile(... "0600" = "0600", ...)` -- the parser then rejects it
+   with `Error: identifier expected, but found '"0600"'`. Procs are
+   immune; the regression test at
+   `libs/repro_profile_compile/tests/t_template_in_template_named_args.nim`
+   locks this convention in both directions (positive: proc wrapper
+   round-trips named args; negative: template wrapper trips the bug).
+   The `zah/dotfiles/modules/age_secrets.nim` `ageSecret` and
+   `ageGpgImport` wrappers are the canonical real-world examples of
+   this pattern.
+
+   ```nim
+   # Correct: `proc` wrapper because `mode` + `address` collide with
+   # fsUserFile's parameter names.
+   proc ageSecret*(targetResources: var seq[ResourceIntent];
+                   src: string; dest: string;
+                   identity = "~/.config/age/keys.txt";
+                   mode = "0600"; address = "") =
+     fsUserFile(targetResources, hostFile = dest,
+       contentFromCommand = @["age", "-d", "-i", identity, src],
+       mode = mode,
+       address = if address.len > 0: address else: "ageSecret:" & dest,
+       cacheKey = "age:" & src & "@" & identity)
+   ```
+
 3. **Config-override helpers** follow the same convention as
    resource helpers, but the first positional parameter is the
    in-scope `targetOverrides` (a `var seq[ConfigOverride]`). The
