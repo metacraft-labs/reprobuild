@@ -2,8 +2,23 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
+
+# CI replays the project's deterministic dev environment via the
+# shared `metacraft-github-actions` composite actions. Per the
+# `ci-shared-dev-env` policy, this workflow:
+#
+#   - does NOT install tools (nim, gcc, capnp, etc.) directly; the
+#     flake's devShell declares them.
+#   - does NOT inline `nix develop --command …` invocations; it
+#     uses `dev-exec` from the shared `setup-dev-env` action.
+#   - clones sibling repos via `clone-repo` and threads them through
+#     `flake-override-inputs` so the dev shell consumes the local
+#     checkouts instead of pinned github tarballs.
+#
+# Policy doc:
+#   github.com/metacraft-labs/metacraft-dev-guidelines/blob/latest/policies/ci-shared-dev-env.md
 
 jobs:
   lint:
@@ -11,13 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v30
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
-      - name: Run linters
-        run: nix develop --command just lint
+          env-flavor: nix
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: just lint
+        run: dev-exec just lint
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -28,34 +42,48 @@ jobs:
 
   test:
     name: Test
-    # Self-hosted bare-metal Linux runner. Standard ubuntu-latest hits
-    # OOM on the 8-parallel `nim c` default and the fd race in the M3
-    # fallback test runner because the 4 vCPU / 16 GB shape is the
-    # bottleneck. Our metacraft-labs bare-metal pool has ~12 Linux
-    # nixos hosts with plenty of cores + RAM; lift the parallelism
-    # caps via env vars below for runs that land there.
+    # Self-hosted bare-metal Linux runner. Standard ubuntu-latest is
+    # too small (4 vCPU / 16 GB) — the parallel nim c phase trips OOM
+    # and the test runner hits an fd race at higher concurrency. The
+    # metacraft-labs bare-metal pool has nixos hosts with plenty of
+    # cores + RAM; lift the parallelism caps below for them.
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
     env:
-      # Cap engine action parallelism. nproc/2 on a bare-metal host
-      # with 32+ cores and 64+ GB RAM still leaves headroom; the cap
-      # exists only because scripts/run_tests.sh would otherwise cap
-      # at 4 for GitHub-hosted-runner safety. Override with a generous
-      # value here so the suite finishes fast.
       REPROBUILD_MAX_PARALLELISM: "16"
-      # M3 fallback test runner's pipe pumper crashes at 4 threads on
-      # GitHub-hosted runners (fd race). Bare-metal hosts have the
-      # process headroom to tolerate higher concurrency, but cap at 4
-      # until the underlying race is fixed in the runner.
       REPROBUILD_TEST_THREADS: "4"
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v30
+
+      # Sibling clones: scripts/run_tests.sh builds ../runquota and
+      # ct_test_nim_unittest resolves the ct-test source via the
+      # `CT_TEST_SRC` env var. Both come from local clones so changes
+      # in either sibling are picked up immediately without waiting
+      # for a flake.lock bump.
+      - name: Clone ct-test sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
-      - name: Run tests
-        run: nix develop --command just test
+          repo: metacraft-labs/ct-test
+          ref: main
+          path: ${{ github.workspace }}/../ct-test
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clone runquota sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
+        with:
+          repo: metacraft-labs/runquota
+          ref: main
+          path: ${{ github.workspace }}/../runquota
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        with:
+          env-flavor: nix
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          flake-override-inputs: |
+            ct-test-src=../ct-test
+            runquota-src=../runquota
+
+      - name: just test
+        run: dev-exec just test
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -69,13 +97,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v30
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
-      - name: Build default package
-        run: nix build .#default
+          env-flavor: nix
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: nix build
+        run: dev-exec nix build .#default
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4

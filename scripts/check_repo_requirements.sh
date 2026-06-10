@@ -69,9 +69,16 @@ for recipe in build test lint format fmt t bump-version bench bench-quick bench_
   printf '%s\n' "${just_recipes}" | grep -Fxq "${recipe}" || fail "missing Justfile recipe ${recipe}"
 done
 
-require_contains .github/workflows/ci.yml "run: nix develop --command just lint"
-require_contains .github/workflows/ci.yml "run: nix develop --command just test"
-require_contains .github/workflows/ci.yml "run: nix build .#default"
+# Shared-dev-env policy
+# (metacraft-dev-guidelines/policies/ci-shared-dev-env.md): CI runs
+# every build/test command through `dev-exec` from the shared
+# `setup-dev-env` action so the toolchain matches the local nix shell
+# exactly. The literal `nix develop --command` forms enforced before
+# the migration are explicitly forbidden going forward.
+require_contains .github/workflows/ci.yml "metacraft-labs/metacraft-github-actions/setup-dev-env"
+require_contains .github/workflows/ci.yml "run: dev-exec just lint"
+require_contains .github/workflows/ci.yml "run: dev-exec just test"
+require_contains .github/workflows/ci.yml "run: dev-exec nix build .#default"
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "benchmark"]'\'''
