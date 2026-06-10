@@ -361,6 +361,12 @@ proc renderStanza*(r: SystemResource): seq[string] =
     if r.lfwLocalPort.len > 0:
       result.add("  localPort = " & renderScalar(r.lfwLocalPort))
     result.add("  action = " & renderScalar(r.lfwAction))
+  of srkLinuxNixosSystemModule:
+    result.add("  name = " & renderScalar(r.nixosModuleName))
+    result.add("  content = " & renderScalar(r.nixosModuleContent))
+  of srkMacosDarwinSystemModule:
+    result.add("  name = " & renderScalar(r.darwinModuleName))
+    result.add("  content = " & renderScalar(r.darwinModuleContent))
   # M82 Phase B: emit `depends_on` last so its presence is obvious in a
   # rendered stanza without disrupting the legacy kind-field order.
   # Absent / empty seq omits the line entirely (the common case), so

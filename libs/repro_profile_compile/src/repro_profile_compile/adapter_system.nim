@@ -399,6 +399,32 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       lfwChain: chain, lfwName: lname,
       lfwProtocol: protocol, lfwDirection: direction,
       lfwLocalPort: localPort, lfwAction: action)
+  of "linux.nixosSystemModule":
+    let n = fieldString(r, "name")
+    let c = fieldString(r, "content")
+    if not isSafeDropInBasename(n):
+      raise newException(ValueError,
+        "linux.nixosSystemModule name '" & n &
+        "' is not a safe single-segment basename")
+    if not n.endsWith(".nix"):
+      raise newException(ValueError,
+        "linux.nixosSystemModule name '" & n &
+        "' must end with '.nix'")
+    result = SystemResource(kind: srkLinuxNixosSystemModule,
+      nixosModuleName: n, nixosModuleContent: c)
+  of "macos.darwinSystemModule":
+    let n = fieldString(r, "name")
+    let c = fieldString(r, "content")
+    if not isSafeDropInBasename(n):
+      raise newException(ValueError,
+        "macos.darwinSystemModule name '" & n &
+        "' is not a safe single-segment basename")
+    if not n.endsWith(".nix"):
+      raise newException(ValueError,
+        "macos.darwinSystemModule name '" & n &
+        "' must end with '.nix'")
+    result = SystemResource(kind: srkMacosDarwinSystemModule,
+      darwinModuleName: n, darwinModuleContent: c)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -427,7 +453,8 @@ proc isSystemScopeResource(kind: string): bool =
      "linux.sysctl", "linux.udevRule", "linux.polkitRule",
      "linux.tmpfilesRule", "linux.sudoersRule",
      "passwd.group", "linux.nixDaemonSetting",
-     "systemd.systemTimer", "linux.firewallRule":
+     "systemd.systemTimer", "linux.firewallRule",
+     "linux.nixosSystemModule", "macos.darwinSystemModule":
     true
   else:
     false
@@ -646,5 +673,11 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       if r.lfwLocalPort.len > 0:
         pairs.add(("localPort", quoteSystemValue(r.lfwLocalPort)))
       pairs.add(("action", quoteSystemValue(r.lfwAction)))
+    of srkLinuxNixosSystemModule:
+      pairs.add(("name", quoteSystemValue(r.nixosModuleName)))
+      pairs.add(("content", quoteSystemValue(r.nixosModuleContent)))
+    of srkMacosDarwinSystemModule:
+      pairs.add(("name", quoteSystemValue(r.darwinModuleName)))
+      pairs.add(("content", quoteSystemValue(r.darwinModuleContent)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

@@ -58,6 +58,8 @@ type
     srkLinuxNixDaemonSetting = "linux.nixDaemonSetting"
     srkSystemdSystemTimer = "systemd.systemTimer"
     srkLinuxFirewallRule = "linux.firewallRule"
+    srkLinuxNixosSystemModule = "linux.nixosSystemModule"
+    srkMacosDarwinSystemModule = "macos.darwinSystemModule"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -184,6 +186,12 @@ type
       lfwDirection*: string               ## inbound/outbound (informational)
       lfwLocalPort*: string               ## port number / range
       lfwAction*: string                  ## accept/drop/reject
+    of srkLinuxNixosSystemModule:
+      nixosModuleName*: string            ## basename, must end `.nix`
+      nixosModuleContent*: string         ## verbatim Nix expression
+    of srkMacosDarwinSystemModule:
+      darwinModuleName*: string           ## basename, must end `.nix`
+      darwinModuleContent*: string        ## verbatim Nix expression
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -242,6 +250,10 @@ proc realWorldIdentity*(r: SystemResource): string =
     "systemTimer:" & r.stName
   of srkLinuxFirewallRule:
     "firewallRule:" & r.lfwName
+  of srkLinuxNixosSystemModule:
+    "nixosSystemModule:" & r.nixosModuleName
+  of srkMacosDarwinSystemModule:
+    "darwinSystemModule:" & r.darwinModuleName
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -285,6 +297,8 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxNixDaemonSetting: r.nixKey
   of srkSystemdSystemTimer: r.stName
   of srkLinuxFirewallRule: r.lfwName
+  of srkLinuxNixosSystemModule: r.nixosModuleName
+  of srkMacosDarwinSystemModule: r.darwinModuleName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -492,6 +506,8 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkLinuxNixDaemonSetting: srk = srkLinuxNixDaemonSetting
     of $srkSystemdSystemTimer: srk = srkSystemdSystemTimer
     of $srkLinuxFirewallRule: srk = srkLinuxFirewallRule
+    of $srkLinuxNixosSystemModule: srk = srkLinuxNixosSystemModule
+    of $srkMacosDarwinSystemModule: srk = srkMacosDarwinSystemModule
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -935,6 +951,30 @@ proc parseSystemProfile*(text: string): SystemProfile =
         lfwChain: chain, lfwName: lname,
         lfwProtocol: protocol, lfwDirection: direction,
         lfwLocalPort: localPort, lfwAction: action)
+    of srkLinuxNixosSystemModule:
+      let n = need("name")
+      let c = need("content")
+      if not isSafeDropInBasename(n):
+        raiseSystemProfileInvalid("linux.nixosSystemModule name '" & n &
+          "' is not a safe single-segment basename (letters, digits, " &
+          "'.', '-', '_'; no '/', '..', or shell metacharacter)")
+      if not n.endsWith(".nix"):
+        raiseSystemProfileInvalid("linux.nixosSystemModule name '" & n &
+          "' must end with '.nix' (Nix module convention)")
+      res = SystemResource(kind: srkLinuxNixosSystemModule,
+        nixosModuleName: n, nixosModuleContent: c)
+    of srkMacosDarwinSystemModule:
+      let n = need("name")
+      let c = need("content")
+      if not isSafeDropInBasename(n):
+        raiseSystemProfileInvalid("macos.darwinSystemModule name '" & n &
+          "' is not a safe single-segment basename (letters, digits, " &
+          "'.', '-', '_'; no '/', '..', or shell metacharacter)")
+      if not n.endsWith(".nix"):
+        raiseSystemProfileInvalid("macos.darwinSystemModule name '" & n &
+          "' must end with '.nix' (Nix module convention)")
+      res = SystemResource(kind: srkMacosDarwinSystemModule,
+        darwinModuleName: n, darwinModuleContent: c)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -1107,6 +1147,16 @@ proc toPrivilegedOperation*(r: SystemResource;
       lfwLocalPort: r.lfwLocalPort,
       lfwAction: r.lfwAction,
       lfwDestroy: destroy)
+  of srkLinuxNixosSystemModule:
+    PrivilegedOperation(kind: pokLinuxNixosSystemModule, address: r.address,
+      nixosModuleName: r.nixosModuleName,
+      nixosModuleContent: r.nixosModuleContent,
+      nixosModuleDestroy: destroy)
+  of srkMacosDarwinSystemModule:
+    PrivilegedOperation(kind: pokMacosDarwinSystemModule, address: r.address,
+      darwinModuleName: r.darwinModuleName,
+      darwinModuleContent: r.darwinModuleContent,
+      darwinModuleDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

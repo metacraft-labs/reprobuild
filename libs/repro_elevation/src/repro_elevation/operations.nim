@@ -205,6 +205,37 @@ type
       ## via `nft -a list chain <chain>`. Linux counterpart of
       ## `pokWindowsFirewallRule` — both manage a port-rule, the
       ## platform backend differs.
+    pokLinuxNixosSystemModule = "linux.nixosSystemModule"
+      ## The Dotfiles-Migration-Completion M2 NixOS escape-hatch:
+      ## write a typed NixOS module fragment to
+      ## `/etc/nixos/reprobuild-managed/<name>.nix`. The fragment is a
+      ## verbatim Nix expression the operator pulls into
+      ## `/etc/nixos/configuration.nix` via a `./reprobuild-managed.nix`
+      ## glob import (the index file lists every drop-in basename and
+      ## imports them as a list). Reprobuild does NOT run
+      ## `nixos-rebuild switch` itself — the operator triggers the
+      ## rebuild, the driver only converges the bytes. This is the
+      ## "specific to NixOS hosts, but matches the existing flake model
+      ## 1:1" escape-hatch the M2 spec describes; it lets every
+      ## NixOS-module surface item (services.pipewire.enable,
+      ## programs.hyprland.enable, etc.) flow from `system.nim` through
+      ## the typed broker without recreating Nix's module evaluator.
+      ## `nixosModuleDestroy` selects the rollback direction (delete
+      ## the drop-in file).
+    pokMacosDarwinSystemModule = "macos.darwinSystemModule"
+      ## The macOS counterpart of `pokLinuxNixosSystemModule`: write a
+      ## typed nix-darwin module fragment to
+      ## `/etc/nix-darwin/reprobuild-managed/<name>.nix`. The operator
+      ## runs `darwin-rebuild switch` separately to realise it; the
+      ## driver only converges the bytes. Used for cross-OS dotfiles
+      ## items the existing per-resource primitives don't cover
+      ## (system.defaults.NSGlobalDomain settings beyond the
+      ## `macos.systemDefault` catalog, `users.knownGroups`, the
+      ## `services.*` family declared by `nix-darwin`'s module library,
+      ## and the `homebrew.casks` block when the operator prefers a
+      ## single declarative entry over the per-cask
+      ## `pkg.homebrewCask` resources). `darwinModuleDestroy` selects
+      ## the rollback direction (delete the drop-in file).
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -492,6 +523,28 @@ type
       lfwLocalPort*: string
       lfwAction*: string
       lfwDestroy*: bool
+    of pokLinuxNixosSystemModule:
+      ## Write `nixosModuleContent` to
+      ## `/etc/nixos/reprobuild-managed/<nixosModuleName>` (the basename
+      ## must be a single segment ending `.nix`). The fragment body is
+      ## a verbatim Nix expression — typically a single attribute set
+      ## `{ services.pipewire.enable = true; }` or the equivalent
+      ## module function `{ ... }: { ... }`. `nixosModuleDestroy`
+      ## selects the rollback direction (delete the drop-in file).
+      nixosModuleName*: string
+      nixosModuleContent*: string
+      nixosModuleDestroy*: bool
+    of pokMacosDarwinSystemModule:
+      ## Write `darwinModuleContent` to
+      ## `/etc/nix-darwin/reprobuild-managed/<darwinModuleName>` (the
+      ## basename must be a single segment ending `.nix`). The fragment
+      ## body is a verbatim Nix expression — typically an attribute set
+      ## like `{ system.defaults.dock.autohide = true; }` or a module
+      ## function. `darwinModuleDestroy` selects the rollback direction
+      ## (delete the drop-in file).
+      darwinModuleName*: string
+      darwinModuleContent*: string
+      darwinModuleDestroy*: bool
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -536,6 +589,8 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxNixDaemonSetting: true
   of pokSystemdSystemTimer: true
   of pokLinuxFirewallRule: true
+  of pokLinuxNixosSystemModule: true
+  of pokMacosDarwinSystemModule: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -572,6 +627,8 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxNixDaemonSetting: pokLinuxNixDaemonSetting
   of $pokSystemdSystemTimer: pokSystemdSystemTimer
   of $pokLinuxFirewallRule: pokLinuxFirewallRule
+  of $pokLinuxNixosSystemModule: pokLinuxNixosSystemModule
+  of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -1340,6 +1397,22 @@ proc operationValidationError*(op: PrivilegedOperation): string =
           "' requires a non-empty localPort (port number, port " &
           "range, or comma list); 'any' is not accepted by `nft " &
           "add rule <chain> " & op.lfwProtocol & " dport ...`"
+  of pokLinuxNixosSystemModule:
+    if not isSafeDropInBasename(op.nixosModuleName):
+      return "linux.nixosSystemModule name '" & op.nixosModuleName &
+        "' is not a safe single-segment basename (letters, digits, " &
+        "'.', '-', '_'; no '/', '..', or shell metacharacter)"
+    if not op.nixosModuleName.endsWith(".nix"):
+      return "linux.nixosSystemModule name '" & op.nixosModuleName &
+        "' must end with '.nix' (Nix module convention)"
+  of pokMacosDarwinSystemModule:
+    if not isSafeDropInBasename(op.darwinModuleName):
+      return "macos.darwinSystemModule name '" & op.darwinModuleName &
+        "' is not a safe single-segment basename (letters, digits, " &
+        "'.', '-', '_'; no '/', '..', or shell metacharacter)"
+    if not op.darwinModuleName.endsWith(".nix"):
+      return "macos.darwinSystemModule name '" & op.darwinModuleName &
+        "' must end with '.nix' (Nix module convention)"
   return ""
 
 # ---------------------------------------------------------------------------

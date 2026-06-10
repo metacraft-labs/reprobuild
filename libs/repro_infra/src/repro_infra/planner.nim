@@ -227,6 +227,10 @@ proc observeResource*(r: SystemResource): ResourceObservation =
         observeSystemdSystemTimer(op)
       of srkLinuxFirewallRule:
         observeLinuxFirewallRule(op)
+      of srkLinuxNixosSystemModule:
+        observeLinuxNixosSystemModule(op)
+      of srkMacosDarwinSystemModule:
+        observeMacosDarwinSystemModule(op)
   except ENotImplementedPlatform:
     obs.present = false
     obs.digestHex = ZeroDigestHex
@@ -338,6 +342,12 @@ proc summaryLine(r: SystemResource; action: string): string =
       r.lfwChain & ", " & r.lfwProtocol &
       (if r.lfwLocalPort.len > 0: " dport " & r.lfwLocalPort else: "") &
       " -> " & r.lfwAction & ")"
+  of srkLinuxNixosSystemModule:
+    action & " nixos-module " & r.nixosModuleName &
+      " (" & $r.nixosModuleContent.len & " bytes)"
+  of srkMacosDarwinSystemModule:
+    action & " darwin-module " & r.darwinModuleName &
+      " (" & $r.darwinModuleContent.len & " bytes)"
 
 # ---------------------------------------------------------------------------
 # Resource dependency graph + topological sort (M82 Phase B).

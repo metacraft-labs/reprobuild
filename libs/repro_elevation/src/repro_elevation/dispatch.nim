@@ -106,7 +106,8 @@ proc desiredDigest(op: PrivilegedOperation): string =
      pokLinuxSysctl, pokLinuxUdevRule, pokLinuxPolkitRule,
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
-     pokLinuxFirewallRule:
+     pokLinuxFirewallRule, pokLinuxNixosSystemModule,
+     pokMacosDarwinSystemModule:
     posixSystemDesiredDigestHex(op)
   of pokOsTimezone, pokOsHostname:
     # Cross-platform: every platform's desired digest is the canonical
@@ -192,6 +193,10 @@ proc reobserve*(ctx: FixtureContext;
     observeSystemdSystemTimer(op)
   of pokLinuxFirewallRule:
     observeLinuxFirewallRule(op)
+  of pokLinuxNixosSystemModule:
+    observeLinuxNixosSystemModule(op)
+  of pokMacosDarwinSystemModule:
+    observeMacosDarwinSystemModule(op)
 
 proc applyOne(ctx: FixtureContext;
               op: PrivilegedOperation): ObservedOperationState =
@@ -263,6 +268,10 @@ proc applyOne(ctx: FixtureContext;
     result = applySystemdSystemTimer(op)
   of pokLinuxFirewallRule:
     result = applyLinuxFirewallRule(op)
+  of pokLinuxNixosSystemModule:
+    result = applyLinuxNixosSystemModule(op)
+  of pokMacosDarwinSystemModule:
+    result = applyMacosDarwinSystemModule(op)
 
 # ---------------------------------------------------------------------------
 # Dispatch one planned operation with the re-observe / drift gate.
@@ -322,7 +331,9 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokPasswdGroup and op.pgDestroy) or
     (op.kind == pokLinuxNixDaemonSetting and op.nixDestroy) or
     (op.kind == pokSystemdSystemTimer and op.stDestroy) or
-    (op.kind == pokLinuxFirewallRule and op.lfwDestroy)
+    (op.kind == pokLinuxFirewallRule and op.lfwDestroy) or
+    (op.kind == pokLinuxNixosSystemModule and op.nixosModuleDestroy) or
+    (op.kind == pokMacosDarwinSystemModule and op.darwinModuleDestroy)
   let firstSampleLooksLikeCacheHit =
     if destroyOp: not observed.present
     else: observed.present and observed.digestHex == desiredHex

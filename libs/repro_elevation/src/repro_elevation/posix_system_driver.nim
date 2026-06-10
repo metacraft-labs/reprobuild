@@ -191,6 +191,21 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       # drift gate re-applies).
       posixDigestHexOfText(nftRuleBody(op.lfwProtocol, op.lfwLocalPort,
         op.lfwAction, op.lfwName))
+  of pokLinuxNixosSystemModule:
+    if op.nixosModuleDestroy:
+      ZeroDigestHex
+    else:
+      # The driver writes `nixosModuleContent` verbatim — no
+      # canonicalization is applied. Two operators authoring the same
+      # module fragment digest identically; whitespace differences
+      # show up as drift (the user authors the content via the
+      # constructor so the bytes are stable).
+      posixDigestHexOfText(op.nixosModuleContent)
+  of pokMacosDarwinSystemModule:
+    if op.darwinModuleDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.darwinModuleContent)
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -2447,3 +2462,212 @@ proc applyLinuxFirewallRule*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("linux.firewallRule apply")
+
+# ===========================================================================
+# linux.nixosSystemModule — managed NixOS module fragment under
+# /etc/nixos/reprobuild-managed/.
+#
+# Dotfiles-Migration-Completion M2 escape-hatch. The driver writes a
+# verbatim Nix expression to `/etc/nixos/reprobuild-managed/<name>.nix`
+# (mode 0644). The operator pulls every basename in that directory into
+# `/etc/nixos/configuration.nix` via a one-time edit (e.g.
+# `imports = (import ./reprobuild-managed).fragments`). Reprobuild does
+# NOT run `nixos-rebuild switch` itself — every fragment write is a
+# typed file converge; the operator triggers the system rebuild
+# explicitly. This keeps the broker's closed-typed-operation contract
+# intact while letting `system.nim` flow declarative NixOS module
+# settings (services.pipewire.enable, programs.hyprland.enable, ...)
+# through the same dispatcher that handles every other system-scope
+# resource.
+#
+# Drop-in mechanics match the existing Linux drop-in driver family
+# (`linux.nixDaemonSetting`, `linux.sysctl`, ...): one basename per
+# resource, hard-rooted under a fixed directory, content-digest model,
+# 0644 mode, destroy = remove file.
+# ===========================================================================
+
+const LinuxNixosManagedDir* = "/etc/nixos/reprobuild-managed"
+  ## The directory a `linux.nixosSystemModule` fragment lands in. The
+  ## operator's `configuration.nix` lists this directory's contents
+  ## as `imports`; reprobuild only converges the directory's bytes.
+
+proc nixosModulePath*(op: PrivilegedOperation): string =
+  ## Full on-disk path of the fragment for `op`.
+  LinuxNixosManagedDir & "/" & op.nixosModuleName
+
+proc observeLinuxNixosSystemModule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe the fragment file. The digest covers the verbatim
+  ## bytes; a hand-edited fragment yields a different observed digest
+  ## (the broker's drift gate re-applies the desired bytes).
+  when defined(linux):
+    let path = nixosModulePath(op)
+    if not fileExists(path):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let content = readFile(path)
+    result.present = true
+    result.digestHex = posixDigestHexOfText(content)
+  else:
+    raiseNotImplementedPlatform("linux.nixosSystemModule observe")
+
+proc destroyLinuxNixosSystemModule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the fragment file. The next `nixos-rebuild switch` no
+  ## longer sees the module attribute set; the operator is
+  ## responsible for the rebuild.
+  when defined(linux):
+    let path = nixosModulePath(op)
+    if fileExists(path):
+      try: removeFile(path)
+      except OSError: discard
+    if fileExists(path):
+      raiseProtocol("linux.nixosSystemModule destroy of " & path &
+        " post-apply observation disagrees with desired state: " &
+        "the fragment file still exists after `removeFile`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.nixosSystemModule destroy")
+
+proc applyLinuxNixosSystemModule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the fragment file. Per the driver's contract, NO
+  ## `nixos-rebuild` is invoked — the operator triggers the rebuild
+  ## separately. The driver's job is to converge the file's bytes
+  ## and fail closed on a re-read mismatch.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): after the write,
+  ## re-read via the same file-read path `observeLinuxNixosSystem
+  ## Module` uses; raise `EProtocol` on a canonical-bytes digest
+  ## mismatch.
+  when defined(linux):
+    if op.nixosModuleDestroy:
+      return destroyLinuxNixosSystemModule(op)
+    let path = nixosModulePath(op)
+    createDir(LinuxNixosManagedDir)
+    writeLinuxDropInFile(path, op.nixosModuleContent, 0o644)
+    let post = observeLinuxNixosSystemModule(op)
+    let desiredHex = posixDigestHexOfText(op.nixosModuleContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.nixosSystemModule fragment " & path &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The fragment write completed but a re-read shows a different " &
+        "value — the driver fails closed rather than reporting a " &
+        "spurious success.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.nixosSystemModule apply")
+
+# ===========================================================================
+# macos.darwinSystemModule — managed nix-darwin module fragment under
+# /etc/nix-darwin/reprobuild-managed/.
+#
+# The macOS counterpart of `linux.nixosSystemModule`. The driver writes
+# a verbatim Nix expression to
+# `/etc/nix-darwin/reprobuild-managed/<name>.nix` (mode 0644). The
+# operator runs `darwin-rebuild switch` separately to realise it; the
+# driver only converges the bytes. Used for cross-OS dotfiles items the
+# existing per-resource primitives don't cover (system.defaults beyond
+# the `macos.systemDefault` catalog, `users.knownGroups`, the
+# `services.*` family declared by nix-darwin's module library, and the
+# `homebrew.casks` block when the operator prefers a single declarative
+# entry over the per-cask `pkg.homebrewCask` resources).
+# ===========================================================================
+
+const MacosDarwinManagedDir* = "/etc/nix-darwin/reprobuild-managed"
+  ## The directory a `macos.darwinSystemModule` fragment lands in. The
+  ## operator's `darwin-configuration.nix` lists this directory's
+  ## contents as `imports`; reprobuild only converges the bytes.
+
+proc darwinModulePath*(op: PrivilegedOperation): string =
+  ## Full on-disk path of the fragment for `op`.
+  MacosDarwinManagedDir & "/" & op.darwinModuleName
+
+when defined(macosx):
+  proc writeMacosManagedFile(path, content: string; modeOctal: int) =
+    ## macOS counterpart of `writeLinuxDropInFile`. Same shape: write
+    ## the bytes, then `chmod` to the requested mode so the file's
+    ## permission bits match the driver contract.
+    var f: File
+    if not open(f, path, fmWrite):
+      raiseProtocol("macos.darwinSystemModule cannot open " & path)
+    try:
+      if content.len > 0:
+        discard f.writeBuffer(unsafeAddr content[0], content.len)
+    finally:
+      close(f)
+    let modeStr = toOct(modeOctal, 4)
+    discard execCmd("chmod " & modeStr & " " & quoteShell(path))
+
+proc observeMacosDarwinSystemModule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe the fragment file. Digest covers the verbatim bytes.
+  when defined(macosx):
+    let path = darwinModulePath(op)
+    if not fileExists(path):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let content = readFile(path)
+    result.present = true
+    result.digestHex = posixDigestHexOfText(content)
+  else:
+    raiseNotImplementedPlatform("macos.darwinSystemModule observe")
+
+proc destroyMacosDarwinSystemModule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Remove the fragment file. The next `darwin-rebuild switch` no
+  ## longer sees the module attribute set; the operator is
+  ## responsible for the rebuild.
+  when defined(macosx):
+    let path = darwinModulePath(op)
+    if fileExists(path):
+      try: removeFile(path)
+      except OSError: discard
+    if fileExists(path):
+      raiseProtocol("macos.darwinSystemModule destroy of " & path &
+        " post-apply observation disagrees with desired state: " &
+        "the fragment file still exists after `removeFile`.")
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("macos.darwinSystemModule destroy")
+
+proc applyMacosDarwinSystemModule*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the fragment file. NO `darwin-rebuild` is invoked — the
+  ## operator triggers the rebuild separately. The driver's job is to
+  ## converge the file's bytes and fail closed on a re-read mismatch.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): after the write,
+  ## re-read via the same file-read path `observeMacosDarwinSystem
+  ## Module` uses; raise `EProtocol` on a digest mismatch.
+  when defined(macosx):
+    if op.darwinModuleDestroy:
+      return destroyMacosDarwinSystemModule(op)
+    let path = darwinModulePath(op)
+    createDir(MacosDarwinManagedDir)
+    writeMacosManagedFile(path, op.darwinModuleContent, 0o644)
+    let post = observeMacosDarwinSystemModule(op)
+    let desiredHex = posixDigestHexOfText(op.darwinModuleContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("macos.darwinSystemModule fragment " & path &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present &
+        " digest " & (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+                      else: post.digestHex) &
+        ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex) &
+        ". The fragment write completed but a re-read shows a different " &
+        "value — the driver fails closed rather than reporting a " &
+        "spurious success.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("macos.darwinSystemModule apply")

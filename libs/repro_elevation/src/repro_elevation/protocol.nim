@@ -391,6 +391,14 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.lfwLocalPort)
     body.writeString(op.lfwAction)
     body.writeBool(op.lfwDestroy)
+  of pokLinuxNixosSystemModule:
+    body.writeString(op.nixosModuleName)
+    body.writeString(op.nixosModuleContent)
+    body.writeBool(op.nixosModuleDestroy)
+  of pokMacosDarwinSystemModule:
+    body.writeString(op.darwinModuleName)
+    body.writeString(op.darwinModuleContent)
+    body.writeBool(op.darwinModuleDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -622,6 +630,20 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.lfwLocalPort = readString(body, pos)
     result.operation.lfwAction = readString(body, pos)
     result.operation.lfwDestroy = readBool(body, pos, "lfwDestroy")
+  of pokLinuxNixosSystemModule:
+    result.operation = PrivilegedOperation(kind: pokLinuxNixosSystemModule,
+      address: address)
+    result.operation.nixosModuleName = readString(body, pos)
+    result.operation.nixosModuleContent = readString(body, pos)
+    result.operation.nixosModuleDestroy = readBool(body, pos,
+      "nixosModuleDestroy")
+  of pokMacosDarwinSystemModule:
+    result.operation = PrivilegedOperation(kind: pokMacosDarwinSystemModule,
+      address: address)
+    result.operation.darwinModuleName = readString(body, pos)
+    result.operation.darwinModuleContent = readString(body, pos)
+    result.operation.darwinModuleDestroy = readBool(body, pos,
+      "darwinModuleDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

@@ -891,3 +891,63 @@ template linuxFirewallRule*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("linux.firewallRule", name)
     pushResource(targetResources, "linux.firewallRule", addr0,
       fields, dependsOn)
+
+template linuxNixosSystemModule*(targetResources: var seq[ResourceIntent];
+                                  name: string;
+                                  content: string;
+                                  address: string = "";
+                                  dependsOn: seq[string] = @[]) =
+  ## Dotfiles-Migration-Completion M2 — typed NixOS module fragment.
+  ## Writes `content` (a verbatim Nix expression — typically a single
+  ## attribute set `{ services.pipewire.enable = true; }` or the
+  ## module-function form `{ ... }: { ... }`) to
+  ## `/etc/nixos/reprobuild-managed/<name>` (`name` must be a
+  ## single-segment basename ending `.nix`).
+  ##
+  ## REPROBUILD DOES NOT RUN `nixos-rebuild switch` — the operator
+  ## triggers the rebuild separately. The driver only converges the
+  ## file's bytes; the broker's drift gate covers a hand-edited
+  ## fragment. The constraint mirrors `linux.nixDaemonSetting`'s "Nix
+  ## re-reads on each invocation" model: the file is the source of
+  ## truth; the realization step is downstream.
+  ##
+  ## TEXT-FORMAT CONSTRAINT: the M69 system-profile text round-tripper
+  ## quotes each field with simple `"..."` literals and the parser's
+  ## `unquote` strips ONE surrounding pair without escapes; the
+  ## `content` value therefore MUST NOT contain a double-quote
+  ## character. Use Nix's `''...''` URL-string form (which the Nix
+  ## parser treats verbatim, no `"` needed) or pre-bind quoted
+  ## strings to `let` variables in an upstream module.
+  ##
+  ## Address default: `linux.nixosSystemModule:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.nixosSystemModule", name)
+    pushResource(targetResources, "linux.nixosSystemModule", addr0,
+      fields, dependsOn)
+
+template macosDarwinSystemModule*(targetResources: var seq[ResourceIntent];
+                                   name: string;
+                                   content: string;
+                                   address: string = "";
+                                   dependsOn: seq[string] = @[]) =
+  ## Dotfiles-Migration-Completion M2 — typed nix-darwin module
+  ## fragment. macOS counterpart of `linuxNixosSystemModule`. Writes
+  ## `content` to `/etc/nix-darwin/reprobuild-managed/<name>` (`name`
+  ## must be a single-segment basename ending `.nix`). The operator
+  ## runs `darwin-rebuild switch` separately to realise it.
+  ##
+  ## Same text-format quote constraint as `linuxNixosSystemModule`.
+  ##
+  ## Address default: `macos.darwinSystemModule:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("macos.darwinSystemModule", name)
+    pushResource(targetResources, "macos.darwinSystemModule", addr0,
+      fields, dependsOn)
