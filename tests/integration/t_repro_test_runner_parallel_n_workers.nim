@@ -23,7 +23,7 @@ proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
   while dir.len > 0:
     if fileExists(dir / RepoRootMarker) and
-        fileExists(dir / "repro.tests.nim"):
+        fileExists(dir / "repro_tests.nim"):
       return dir
     let parent = dir.parentDir
     if parent == dir:
