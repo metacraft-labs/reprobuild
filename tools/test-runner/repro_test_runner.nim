@@ -36,8 +36,8 @@
 ##   REPRO_TEST_THREADS=N     override default worker count
 ##
 
-import std/[algorithm, json, locks, os, osproc, parseopt, strutils,
-            times]
+import std/[algorithm, json, locks, os, osproc, parseopt, strtabs,
+            strutils, times]
 
 const
   DefaultBinDir = "build/test-bin"
@@ -89,6 +89,14 @@ type
     quiet: bool
     failFast: bool
     activeCount: ptr int
+    ## Snapshot of the parent process environment taken once before
+    ## any worker thread is spawned. ``runOneProtocol`` clones this into
+    ## a fresh ``StringTableRef`` per child and adds ``NIMTEST_RESULT_FILE``
+    ## — so child env composition is purely thread-local and never
+    ## touches the global ``environ``. This is the fix for the M3
+    ## "two workers race on ``putEnv``" hazard called out in the
+    ## Test-Edges-And-Parallel-Runner milestones.
+    baseEnv: ptr seq[tuple[key, value: string]]
 
 proc ensureDir(dir: string) =
   if dir.len > 0 and not dirExists(dir):
@@ -225,18 +233,28 @@ proc runWholeBinary(tc: TestCase; resultsDir: string): TestResult =
   of 2: result.status = tsSkip
   else: result.status = tsFail
 
-proc runOneProtocol(tc: TestCase; resultsDir: string): TestResult =
+proc runOneProtocol(tc: TestCase; resultsDir: string;
+                    baseEnv: seq[tuple[key, value: string]]): TestResult =
   result.testCase = tc
   result.status = tsFail
   let resultFile = resultsDir / (tc.binaryStem & "__" &
     tc.qualifiedName.multiReplace([
       ("::", "__"), ("/", "_"), (" ", "_"), ("\t", "_")]) & ".json")
   result.resultFile = resultFile
-  putEnv("NIMTEST_RESULT_FILE", resultFile)
+  # Build a per-child env table that inherits the parent snapshot and
+  # overrides only ``NIMTEST_RESULT_FILE``. Doing this per-call keeps
+  # each child's env composition thread-local (no shared mutable state)
+  # and replaces the old ``putEnv`` global mutation that races between
+  # workers under concurrent spawns.
+  var childEnv = newStringTable(modeCaseSensitive)
+  for (k, v) in baseEnv:
+    childEnv[k] = v
+  childEnv["NIMTEST_RESULT_FILE"] = resultFile
   let t0 = epochTime()
   let (output, exitCode) = execCmdEx(
     quoteShell(tc.binary) & " --run " &
-    quoteShell(tc.qualifiedName))
+    quoteShell(tc.qualifiedName),
+    env = childEnv)
   result.durationMs = int((epochTime() - t0) * 1000)
   result.stdout = output
   case exitCode
@@ -288,7 +306,7 @@ proc workerLoop(args: WorkerArgs) =
     discard atomicInc(args.activeCount[])
     var res: TestResult
     if tc.protocolAware:
-      res = runOneProtocol(tc, args.resultsDir)
+      res = runOneProtocol(tc, args.resultsDir, args.baseEnv[])
     else:
       res = runWholeBinary(tc, args.resultsDir)
     discard atomicDec(args.activeCount[])
@@ -485,6 +503,14 @@ proc main() =
   var activeCount: int = 0
   let failFast = getEnv("REPRO_TEST_FAIL_FAST") == "1"
 
+  # Snapshot the process environment exactly once, on the main thread,
+  # before any worker is created. From this point on no code in this
+  # process touches the global ``environ`` — workers compose per-child
+  # env tables by cloning this seq and overriding ``NIMTEST_RESULT_FILE``.
+  var baseEnv: seq[tuple[key, value: string]] = @[]
+  for (k, v) in envPairs():
+    baseEnv.add((k, v))
+
   let args = WorkerArgs(
     queue: addr queue,
     resultsLock: addr resultsLock,
@@ -492,7 +518,8 @@ proc main() =
     resultsDir: opts.resultsDir,
     quiet: opts.quiet,
     failFast: failFast,
-    activeCount: addr activeCount)
+    activeCount: addr activeCount,
+    baseEnv: addr baseEnv)
 
   let nThreads = min(opts.threads, max(1, queue.items.len))
   var threads = newSeq[Thread[WorkerArgs]](nThreads)
