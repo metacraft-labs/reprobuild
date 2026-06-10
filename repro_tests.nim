@@ -586,6 +586,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_smoke_repro_profile_intent",
     defines: @[]),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
+    binary: "build/test-bin/t_dsl_cross_project_binding_guard",
+    defines: @[]),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim",
     binary: "build/test-bin/t_dsl_executable_cli_only_no_build",
     defines: @[]),
