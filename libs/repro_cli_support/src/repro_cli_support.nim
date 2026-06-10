@@ -4785,6 +4785,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       actionLogStart)
     buildResult.stats = buildStats
     recordStatsForBuildRun(buildResult)
+    if buildResult.hasFailedActions():
+      emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
     if statsMode == bsmText:
       let statsRenderStart = statStart(statsEnabled)
       if eventSink != nil:
