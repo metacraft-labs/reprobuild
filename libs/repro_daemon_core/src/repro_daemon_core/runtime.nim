@@ -1535,9 +1535,38 @@ proc waitForUserDaemonStatus*(endpoint: string; timeoutMs = 60000):
 
 proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     UserDaemonStatus =
+  let sourceExe =
+    if config.daemonExe.len > 0: config.daemonExe
+    else: siblingUserDaemonPath(publicCliPath)
   let existing = queryUserDaemonStatus(config.endpoint)
   if existing.running:
-    return existing
+    # A user daemon is persistent and can outlive the `repro` that started it.
+    # If the running daemon's binary differs from the one this `repro` would
+    # spawn — i.e. reprobuild was rebuilt to a newer version — continuing to
+    # use it means talking to a stale build engine: an older build-target
+    # payload decoder (`unsupported build target payload version`), a progress
+    # encoding the new client renders as raw `progress:` lines, and so on.
+    # Detect that by comparing the daemon-reported running-image hash to the
+    # on-disk hash of the sibling daemon binary, and restart the daemon so it
+    # always tracks the current `repro`. The dev-mode self-restart only covers
+    # daemons already running the new image; this covers the hand-off from an
+    # older daemon. If either hash is unavailable we cannot prove staleness, so
+    # we leave the daemon running (fail safe).
+    let expectedHash =
+      if isAbsolute(sourceExe) and fileExists(sourceExe):
+        fileDigestHex(sourceExe)
+      else:
+        ""
+    if expectedHash.len == 0 or existing.runningHash.len == 0 or
+        existing.runningHash == expectedHash:
+      return existing
+    logLine(config.logPath, "restarting outdated daemon: running-hash=" &
+      existing.runningHash & " expected-hash=" & expectedHash &
+      " (reprobuild image changed)")
+    try:
+      requestUserDaemonShutdown(config.endpoint)
+    except CatchableError as err:
+      logLine(config.logPath, "outdated-daemon shutdown failed: " & err.msg)
   when defined(posix):
     if userDaemonEndpointExists(config.endpoint) and
         userDaemonEndpointAcceptsConnections(config.endpoint):
@@ -1546,9 +1575,6 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
           "compatible status handshake at " & config.endpoint &
           "; stop the incompatible daemon or set REPRO_DAEMON=off for direct mode")
   discard cleanupStaleUserDaemonDiscovery(config)
-  let sourceExe =
-    if config.daemonExe.len > 0: config.daemonExe
-    else: siblingUserDaemonPath(publicCliPath)
   # Fail fast when the daemon binary cannot be located. Without this guard the
   # bare unqualified name returned by ``siblingUserDaemonPath`` propagates into
   # ``launchctl bootstrap`` (which silently registers a non-executable plist
