@@ -9055,7 +9055,16 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     daemonCarriedEnvironment()
 
   proc runDaemonBuild(): int =
-    let config = defaultUserDaemonConfig()
+    # Auto-spawn the daemon in dev (self-restart) mode. The daemon is a
+    # persistent process that can outlive the `repro` that started it; when
+    # `repro` is rebuilt to a new version, a frozen daemon keeps decoding
+    # build-target payloads with its old engine and the build fails with
+    # `unsupported build target payload version`. In dev mode the idle daemon
+    # notices its on-disk image changed and self-restarts to the new build —
+    # see `restartCandidateReady`, which only fires on a real hash change,
+    # debounces, and defers while any session is active. `repro-daemon`
+    # launched directly (no `--dev`) still defaults to the frozen regime.
+    let config = defaultUserDaemonConfig(devMode = true)
     let projectRoot = requestProjectRoot()
     discard startUserDaemon(publicCliPath, config)
     let request = UserDaemonBuildRequest(
@@ -12250,7 +12259,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     flushStdout()
 
   proc runDaemonAttach(): int =
-    let config = defaultUserDaemonConfig()
+    let config = defaultUserDaemonConfig(devMode = true)
     discard startUserDaemon(publicCliPath, config)
     let result = requestUserDaemonWatchAttach(attachSessionId, config.endpoint,
       renderDaemonWatchEvent)
@@ -12259,7 +12268,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     result.exitCode
 
   proc runDaemonStop(): int =
-    let config = defaultUserDaemonConfig()
+    let config = defaultUserDaemonConfig(devMode = true)
     discard startUserDaemon(publicCliPath, config)
     let result = requestUserDaemonWatchStop(stopSessionId, config.endpoint)
     echo "repro watch: " & result.message & " session=" & result.sessionId
@@ -12328,7 +12337,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       # ``--daemon=off``.
       raise newException(DaemonBuildUnsupported,
         "daemon-hosted HCR watch is deferred; use --daemon=off")
-    let config = defaultUserDaemonConfig()
+    let config = defaultUserDaemonConfig(devMode = true)
     let projectRoot = requestProjectRoot()
     discard startUserDaemon(publicCliPath, config)
     # Named-Targets M3: ``selectedRoots`` carries the full user-facing
