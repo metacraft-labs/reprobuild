@@ -22,6 +22,32 @@ binary-first domain envelopes, and real BLAKE3/XXH3-backed hash policy.
 This target does not claim full CodeTracer build replacement or Windows
 development-environment replacement; those remain follow-up integration scopes.
 
+## Development shell
+
+`nix develop` works against this repo's flake, but the
+`codetracer-native-recorder` input is private; hosts without a
+Nix-aware GitHub token will hit a 404 from the GitHub tarball
+endpoint when Nix tries to fetch it. The wrapper
+`scripts/dev-shell.sh` detects a sibling checkout and overrides
+the input automatically:
+
+```bash
+# Clone the sibling once (gh handles auth):
+gh repo clone metacraft-labs/codetracer-native-recorder \
+  ../codetracer-native-recorder
+
+# Then enter the dev shell:
+bash scripts/dev-shell.sh                 # interactive shell
+bash scripts/dev-shell.sh nim --version   # one-shot command
+
+# Or point at a non-default checkout:
+CTNR_PATH=/abs/path/to/codetracer-native-recorder \
+  bash scripts/dev-shell.sh
+```
+
+If no sibling is found the wrapper falls through to a plain
+`github:` fetch and surfaces a clear hint when that fails.
+
 ## Install
 
 The automatic installer uses the Nix flake package when `nix` is available:
