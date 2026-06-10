@@ -573,7 +573,13 @@ template macosSystemDefault*(targetResources: var seq[ResourceIntent];
     fields["domain"] = strField(domain)
     fields["key"] = strField(key)
     fields["value"] = strField(value)
-    fields["kind"] = strField(astToStr(kind))
+    # Field is named "type" so it lines up with the adapter
+    # (adapter_system.nim's macos.systemDefault arm reads "type") and
+    # the text-format emitter (which emits `type = "<value>"`). The
+    # constructor's `kind` parameter is kept to preserve the
+    # user-facing constructor surface; only the internal field name
+    # was misaligned.
+    fields["type"] = strField(astToStr(kind))
     let addr0 = if address.len > 0: address
                 else: autoAddress("macos.systemDefault", domain, key)
     pushResource(targetResources, "macos.systemDefault", addr0, fields,

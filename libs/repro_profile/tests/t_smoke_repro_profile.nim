@@ -584,7 +584,32 @@ suite "Resource constructors":
       value = "false",
       kind = bool)
     check target[0].kind == "macos.systemDefault"
-    check target[0].fields["kind"].s == "bool"
+    # Internal field name aligns with the adapter (adapter_system.nim
+    # reads "type") + the text-format emitter (emits `type = "..."`).
+    # The user-facing constructor parameter remains `kind`.
+    check target[0].fields["type"].s == "bool"
+
+  test "macosSystemDefault: dotted-attribute key passes through verbatim":
+    ## Regression for Dotfiles-Migration-Completion N3. Nix attribute paths
+    ## like `NSGlobalDomain."com.apple.swipescrolldirection"` lower to a
+    ## bare string `key`; the period is just a character, no escapes
+    ## required. Confirms the field-store preserves the dotted form so
+    ## downstream `defaults write NSGlobalDomain com.apple.swipescrolldirection`
+    ## receives the exact bytes the author wrote.
+    var target: seq[ResourceIntent] = @[]
+    macosSystemDefault(target,
+      domain = "NSGlobalDomain",
+      key = "com.apple.swipescrolldirection",
+      value = "false",
+      kind = bool)
+    check target[0].kind == "macos.systemDefault"
+    check target[0].fields["domain"].s == "NSGlobalDomain"
+    check target[0].fields["key"].s == "com.apple.swipescrolldirection"
+    check target[0].fields["value"].s == "false"
+    check target[0].fields["type"].s == "bool"
+    # Auto-address must also preserve the dotted key without mangling.
+    check target[0].address ==
+      "macos.systemDefault:NSGlobalDomain:com.apple.swipescrolldirection"
 
   test "systemdSystemUnit":
     var target: seq[ResourceIntent] = @[]
