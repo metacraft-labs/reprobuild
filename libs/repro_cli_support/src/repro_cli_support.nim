@@ -3593,6 +3593,63 @@ proc finishProgress(renderer: var BuildProgressRenderer) =
     stderr.flushFile()
     renderer.lastLen = 0
 
+proc tryRenderDaemonProgress(renderer: var BuildProgressRenderer;
+                             payloadJson: string): bool =
+  ## Re-render a daemon-forwarded progress event through the CLIENT's own
+  ## `BuildProgressRenderer` so `--progress` is honored in daemon-hosted mode.
+  ## The daemon emits each `BuildProgressEvent` as a `bekDiagnostic` whose
+  ## payload carries the structured fields (tagged `"event":"progress"`);
+  ## without this the client would print the raw `progress: <kind> <id>`
+  ## message verbatim and ignore the requested progress mode. Returns true
+  ## (and renders) when `payloadJson` is a progress event.
+  if payloadJson.len == 0:
+    return false
+  var node: JsonNode
+  try:
+    node = parseJson(payloadJson)
+  except CatchableError:
+    return false
+  if node.kind != JObject or node{"event"}.getStr != "progress":
+    return false
+  var event: BuildProgressEvent
+  try:
+    event.kind = parseEnum[BuildProgressKind](node{"kind"}.getStr)
+    if node{"status"}.getStr.len > 0:
+      event.status = parseEnum[ActionStatus](node{"status"}.getStr)
+  except ValueError:
+    return false
+  event.actionId = node{"actionId"}.getStr
+  event.total = node{"total"}.getInt
+  event.completed = node{"completed"}.getInt
+  event.checked = node{"checked"}.getInt
+  event.running = node{"running"}.getInt
+  event.ready = node{"ready"}.getInt
+  renderer.renderProgress(event)
+  true
+
+proc emitFailedActionSummaries(buildResult: BuildRunResult;
+                               eventSink: BuildCommandEventSink;
+                               renderer: var BuildProgressRenderer) =
+  ## Surface each failed action's id, exit code, and stderr to the terminal.
+  ## Otherwise the only failure signal is a non-zero exit code (and, over the
+  ## daemon protocol, the generic "daemon-hosted build failed" line), which
+  ## forces the user to open build-report.json to learn what actually broke.
+  for item in buildResult.results:
+    if item.status != asFailed:
+      continue
+    var summary = "repro build: action failed: " & item.id &
+      " (exit code " & $item.exitCode & ")"
+    if item.stderr.len > 0:
+      summary.add('\n')
+      summary.add(strip(item.stderr, leading = false))
+    if eventSink != nil:
+      # The client routes ``"stream":"stderr"`` diagnostics to its stderr.
+      eventSink("diagnostic", summary, "{\"stream\":\"stderr\"}")
+    else:
+      renderer.clearProgressLine()
+      stderr.writeLine(summary)
+      stderr.flushFile()
+
 proc statStart(enabled: bool): float =
   if enabled:
     epochTime()
@@ -3979,12 +4036,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         })
         eventSink("diagnostic", "progress: " & $event.kind & " " &
           event.actionId, $(%*{
+            "event": "progress",
             "kind": $event.kind,
             "actionId": event.actionId,
             "status": $event.status,
             "cacheDecision": $event.cacheDecision,
             "total": event.total,
             "completed": event.completed,
+            "checked": event.checked,
             "running": event.running,
             "ready": event.ready
           }))
@@ -4034,6 +4093,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       actionLogStart)
     buildResult.stats = buildStats
     recordStatsForBuildRun(buildResult)
+    if buildResult.hasFailedActions():
+      emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
     # Only dump the text-mode table to stderr when --stats=text was
     # requested explicitly. The implicit enable-via-REPRO_STATS_DIR path
     # uses the JSON dropfile and does not want to spam CMake's child
@@ -4656,12 +4717,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         })
         eventSink("diagnostic", "progress: " & $event.kind & " " &
           event.actionId, $(%*{
+            "event": "progress",
             "kind": $event.kind,
             "actionId": event.actionId,
             "status": $event.status,
             "cacheDecision": $event.cacheDecision,
             "total": event.total,
             "completed": event.completed,
+            "checked": event.checked,
             "running": event.running,
             "ready": event.ready
           }))
@@ -9067,6 +9130,12 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     let config = defaultUserDaemonConfig(devMode = true)
     let projectRoot = requestProjectRoot()
     discard startUserDaemon(publicCliPath, config)
+    # Honor --progress in daemon-hosted mode. The daemon forwards each
+    # BuildProgressEvent as a tagged diagnostic; render it through the
+    # client's own renderer so the requested mode (bar-line/etc.) is applied
+    # instead of dumping the raw "progress: <kind> <id>" line.
+    var clientProgress = newBuildProgressRenderer(progressMode,
+      progressBarStyle)
     let request = UserDaemonBuildRequest(
       runId: buildRunId(),
       target: target,
@@ -9081,6 +9150,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       cancelOnDisconnect: true)
     let daemonResult = requestUserDaemonBuild(request, config.endpoint,
       proc(event: UserDaemonBuildEvent) =
+        # Progress events carry the structured BuildProgressEvent in their
+        # payload — render them through the client renderer and stop.
+        if event.kind == bekDiagnostic and
+            tryRenderDaemonProgress(clientProgress, event.payloadJson):
+          return
         # Daemon-side error paths (e.g. the "refusing implicit PATH
         # fallback" ValueError when --tool-provisioning is omitted)
         # surface as a single bekFinished event with severity=error
@@ -9093,6 +9167,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
             bekUnsupported} and event.severity == "error"
         if (event.kind == bekDiagnostic or isError) and
             event.message.len > 0:
+          # Clear any in-progress bar line so the message lands cleanly.
+          clientProgress.clearProgressLine()
           if isError or
               event.payloadJson.contains("\"stream\":\"stderr\""):
             stderr.write(event.message)
@@ -9102,6 +9178,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
             stdout.write(event.message)
             if not event.message.endsWith("\n"):
               stdout.writeLine(""))
+    clientProgress.finishProgress()
     if not daemonResult.supported:
       raise newException(DaemonBuildUnsupported, daemonResult.message)
     updateBenchmarkDaemonConnection(benchmarkPath, daemonResult.connectionUs)
