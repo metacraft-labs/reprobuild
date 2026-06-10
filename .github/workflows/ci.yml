@@ -29,7 +29,7 @@ jobs:
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
-          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
       - name: just lint
         run: dev-exec just lint
       - name: Upload logs
@@ -65,19 +65,35 @@ jobs:
           repo: metacraft-labs/ct-test
           ref: main
           path: ${{ github.workspace }}/../ct-test
-          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
       - name: Clone runquota sibling
         uses: metacraft-labs/metacraft-github-actions/clone-repo@main
         with:
           repo: metacraft-labs/runquota
           ref: main
           path: ${{ github.workspace }}/../runquota
-          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
+
+      # reprobuild-examples carries the canonical M71 reference home.nim
+      # under m71-home-profile-walkthrough/ + a number of hello-binary
+      # fixtures (haskell-cabal, crystal-shards, nim/mode3-pilot, …) that
+      # several library / e2e tests assert against by walking up to the
+      # metacraft root and then into ../reprobuild-examples. Without this
+      # clone, the M71 reference-home check fails at runtime because the
+      # path baked in via currentSourcePath() at compile time points at
+      # a non-existent file on the CI runner.
+      - name: Clone reprobuild-examples sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
+        with:
+          repo: metacraft-labs/reprobuild-examples
+          ref: main
+          path: ${{ github.workspace }}/../reprobuild-examples
+          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
 
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
-          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
           flake-override-inputs: |
             ct-test-src=../ct-test
             runquota-src=../runquota
@@ -100,7 +116,7 @@ jobs:
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
-          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
       - name: nix build
         run: dev-exec nix build .#default
       - name: Upload logs
