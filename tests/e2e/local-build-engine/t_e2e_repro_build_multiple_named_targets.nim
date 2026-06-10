@@ -161,8 +161,21 @@ suite "t_e2e_repro_build_multiple_named_targets":
     # Invoke ``repro build alpha beta gamma`` from inside the project
     # directory. The M2 resolver must take the union of their dependency
     # closures and execute them in a single ``runBuildCommand`` pass.
+    #
+    # Pin ``--daemon=off`` so the test exercises the build engine in
+    # direct mode without coupling to whichever user-daemon happens to
+    # be running on the host. The default ``--daemon=auto`` either
+    # reuses a pre-existing ``repro-daemon`` (whose forwarded env may
+    # carry stale PATH entries from a previous unrelated test) or
+    # launches a new daemon that subsequent tests inherit. Either
+    # coupling produces hangs / spurious cache misses that are not
+    # bugs in the Named-Targets M2 resolver this test guards. Mirrors
+    # the pin applied in ``t_e2e_repro_build_named_target.nim``
+    # (commit 30a7ce6) and ``t_e2e_m51_dsl_stdlib_file_ops.nim``
+    # (commit 091cba4).
     let output = requireSuccess(shellCommand([
       reproBin, "build", "alpha", "beta", "gamma",
+      "--daemon=off",
       "--tool-provisioning=path", "--log=actions"
     ], [("PATH", pathValue)]), projectRoot)
 
