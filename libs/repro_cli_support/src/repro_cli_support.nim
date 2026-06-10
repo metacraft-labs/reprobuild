@@ -7811,7 +7811,16 @@ const
     # references/mold/, which is gitignored and so missing in CI checkouts.
     "REPROBUILD_USE_SYSTEM_HASH_LIBS",
     "BLAKE3_PREFIX", "XXHASH_PREFIX", "SQLITE_PREFIX",
-    "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC", "CT_TEST_SRC"
+    "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC", "CT_TEST_SRC",
+    # CT_INTERPOSE_SRC threads the ct_interpose package (monitor hooks /
+    # SIP-rewrite helpers) onto config.nims's --path. REPROBUILD_SOURCE_ROOT
+    # lets reprobuildLibraryWorkDir() locate reprobuild's OWN libs
+    # (repro_interface_artifacts, repro_project_dsl, ...) when compiling the
+    # interface extractor and providers — the compiled-in source path points
+    # at the now-deleted build sandbox, so without this env var the daemon
+    # falls back to the project dir and the extractor fails with
+    # "cannot open file: repro_interface_artifacts".
+    "CT_INTERPOSE_SRC", "REPROBUILD_SOURCE_ROOT"
   ]
 
   ## Well-known toolchain env vars that must also be forwarded to the daemon
