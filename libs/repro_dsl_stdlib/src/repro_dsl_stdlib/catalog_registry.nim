@@ -34,6 +34,11 @@ import ./packages/jdk
 # M67 bulk-harvested catalogs. The Scoop bucket provenance and per-tool
 # version pin live in each module's auto-generated header comment.
 import ./packages/cabal
+# Dotfiles-Migration-Completion M0 — Anthropic Claude Code CLI.
+# Upstream ships a single bare native binary per (cpu, os) under a
+# stable GCS prefix; catalog uses afRaw + imExtract per
+# packages/claude_code.nim's header.
+import ./packages/claude_code
 import ./packages/composer
 import ./packages/crystal
 import ./packages/elixir
@@ -154,6 +159,8 @@ const RegisteredTools* = [
   # M67 — JVM/Apple toolchains, niche obj+linker, functional + dynamic
   # langs (alphabetized within the M67 block for grep-friendliness).
   "cabal",
+  # Dotfiles-Migration-Completion M0 — Anthropic Claude Code CLI.
+  "claude-code",
   "composer",
   "crystal",
   "elixir",
@@ -244,6 +251,7 @@ proc getCatalog*(toolName: string):
   case toolName
   of "jdk":        selectIfNonEmpty(jdkCatalog)
   of "cabal":      selectIfNonEmpty(cabalCatalog)
+  of "claude-code": selectIfNonEmpty(claudeCodeCatalog)
   of "composer":   selectIfNonEmpty(composerCatalog)
   of "crystal":    selectIfNonEmpty(crystalCatalog)
   of "elixir":     selectIfNonEmpty(elixirCatalog)
