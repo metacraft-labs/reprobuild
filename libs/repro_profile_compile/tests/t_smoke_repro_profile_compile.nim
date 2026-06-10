@@ -126,13 +126,20 @@ suite "M83 Phase C: source-discovery + digest":
     let sources = discoverProfileSources(dir / "home.nim")
     let digest = computeProfileDigest(sources, dir)
     let lines = digest.manifest.strip().splitLines()
-    check lines.len == 2
+    # Schema-version prefix line + one line per discovered source file.
+    check lines.len == 3
     var paths: seq[string]
     for line in lines:
       let parts = line.split('\t')
       check parts.len == 2
-      check parts[1].len == 64
       paths.add parts[0]
+      # Schema-version line carries the version literal; file lines
+      # carry the 64-char BLAKE3 hex digest.
+      if parts[0] == "schema-version":
+        check parts[1].len > 0
+      else:
+        check parts[1].len == 64
+    check "schema-version" in paths
     check "home.nim" in paths
     check "sibling_helpers.nim" in paths
 

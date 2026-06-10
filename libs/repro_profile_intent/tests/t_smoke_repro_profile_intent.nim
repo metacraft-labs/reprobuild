@@ -88,9 +88,9 @@ suite "RBPI envelope: wrap / unwrap":
     check env[1] == byte(ord('B'))
     check env[2] == byte(ord('P'))
     check env[3] == byte(ord('I'))
-    # u16 LE schema version = 1
-    check env[4] == 0x01'u8
-    check env[5] == 0x00'u8
+    # u16 LE schema version (tracks RbpiSchemaVersion).
+    check env[4] == byte(RbpiSchemaVersion and 0xFF)
+    check env[5] == byte((RbpiSchemaVersion shr 8) and 0xFF)
 
   test "encodeRbpiHeader output matches the wrap prefix":
     let body = smallBody()
