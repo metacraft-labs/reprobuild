@@ -215,6 +215,27 @@ proc addDefaultTestBuildLog(args: var seq[string];
   if not hasInlineFlag(extraArgs, "--log") and not requestsQuietProgress(extraArgs):
     args.add("--log=actions")
 
+proc addDefaultTestDaemonFlag(args: var seq[string];
+                              extraArgs: openArray[string]) =
+  # Pin ``--daemon=off`` by default so the test exercises the build
+  # engine in direct mode without coupling to whichever user-daemon
+  # happens to be running on the host. The default ``--daemon=auto``
+  # either reuses a pre-existing ``repro-daemon`` (whose forwarded env
+  # may carry stale PATH entries from a previous unrelated test --
+  # e.g. a stale ``repro-m30-codetracer-target-selection*`` tmp dir
+  # baked into a cached tool-identity) or launches a new daemon that
+  # subsequent tests reuse. Either coupling produces flaky
+  # "Could not find command: '/tmp/nix-shell.*/.../nim'" failures
+  # that are not bugs in the build-engine code path this suite guards.
+  # Direct mode covers the same code path, just without the daemon
+  # hop. Mirrors the pin applied in
+  # ``t_e2e_m51_dsl_stdlib_file_ops.nim`` (commit 091cba4).
+  #
+  # Honour an explicit ``--daemon=...`` override in ``extraArgs`` so
+  # subtests that intentionally exercise daemon-mode still can.
+  if not hasInlineFlag(extraArgs, "--daemon"):
+    args.add("--daemon=off")
+
 proc pathExists(path: string): bool =
   try:
     discard getFileInfo(path, followSymlink = false)
@@ -926,6 +947,7 @@ proc build(reproBin, target, repoRoot, pathValue: string;
   for item in env:
     entries.add(item)
   var args = @[reproBin, "build", target, "--tool-provisioning=path"]
+  addDefaultTestDaemonFlag(args, extraArgs)
   addDefaultTestBuildLog(args, extraArgs)
   for arg in extraArgs:
     args.add(arg)
@@ -938,6 +960,7 @@ proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
   for item in env:
     entries.add(item)
   var args = @[reproBin, "build", "--tool-provisioning=path"]
+  addDefaultTestDaemonFlag(args, extraArgs)
   addDefaultTestBuildLog(args, extraArgs)
   for arg in extraArgs:
     args.add(arg)
@@ -1082,7 +1105,8 @@ suite "e2e_local_reprobuild_project_build":
       writePolicyProject(invalidRoot / "reprobuild.nim", "automaticMonitorPolicy()")
 
       let invalid = requireFailure(shellCommand([reproBin, "build", invalidRoot,
-        "--tool-provisioning=path"], [("PATH", pathValue)]), repoRoot)
+        "--daemon=off", "--tool-provisioning=path"],
+        [("PATH", pathValue)]), repoRoot)
       check invalid.contains("supplies legacy depfile and automatic monitor")
       check invalid.contains("remove depfile or use makeDepfilePolicy")
 
@@ -1140,10 +1164,21 @@ suite "e2e_local_reprobuild_project_build":
       check reportAction(selectedReport, "unrelated").kind == JNull
 
       let unknown = requireFailure(shellCommand(@[reproBin, "build",
-        projectRoot & "#does-not-exist", "--tool-provisioning=path"],
+        projectRoot & "#does-not-exist", "--daemon=off",
+        "--tool-provisioning=path"],
         @[(name: "PATH", value: pathValue)]), repoRoot)
-      check unknown.contains("unknown build target/action id: does-not-exist")
-      check unknown.contains("available:")
+      # Named-Targets M2 (commit 396e312) replaced the pre-existing
+      # ``unknown build target/action id: ... (available: ...)`` error
+      # text with the shared ``renderUnknownTargetDiagnostic`` output:
+      # ``repro build: error: unknown_target: no build target matches
+      # '<sel>'`` followed by a ``did you mean:`` block listing the
+      # Levenshtein top-3 candidates. The diagnostic is emitted
+      # byte-identically by the direct-mode CLI dispatch and the
+      # daemon-hosted executor, so the shape below holds under both
+      # ``--daemon=off`` and ``--daemon=auto`` once the daemon is up.
+      check unknown.contains("unknown_target: no build target matches " &
+        "'does-not-exist'")
+      check unknown.contains("did you mean:")
       check unknown.contains("consume")
 
     test "public CLI no-target build uses current project default action":
@@ -1543,7 +1578,8 @@ suite "e2e_local_reprobuild_project_build":
       writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
       discard buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
       discard requireSuccess(shellCommand([
-        reproBin, "build", "--tool-provisioning", "path",
+        reproBin, "build", "--daemon=off",
+        "--tool-provisioning", "path",
         "--progress", "quiet", "--log", "quiet"
       ]), projectRoot)
 
@@ -1694,7 +1730,7 @@ suite "e2e_local_reprobuild_project_build":
 
       let selected = requireSuccess(shellCommand([
         "build/test-bin/repro", "build", projectRoot & "#consume",
-        "--tool-provisioning=path", "--log=actions"
+        "--daemon=off", "--tool-provisioning=path", "--log=actions"
       ], [("PATH", pathValue)]), repoRoot)
       check selected.contains("selectedTarget: consume")
       check selected.contains("scheduler: actions=2")
@@ -1735,8 +1771,8 @@ suite "e2e_local_reprobuild_project_build":
 
       let target = projectRoot & "#aggregate"
       let first = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-        "--log=actions"
+        "build/test-bin/repro", "build", target, "--daemon=off",
+        "--tool-provisioning=path", "--log=actions"
       ], [("PATH", pathValue)]), repoRoot)
       check first.contains("selectedTarget: aggregate")
       check first.contains("providerInvocations: 1")
@@ -1749,8 +1785,8 @@ suite "e2e_local_reprobuild_project_build":
 
       writeFile(projectRoot / "src" / "resources" / "gamma.txt", "gamma\n")
       let added = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-        "--log=actions"
+        "build/test-bin/repro", "build", target, "--daemon=off",
+        "--tool-provisioning=path", "--log=actions"
       ], [("PATH", pathValue)]), repoRoot)
       check added.contains("providerInvocations: 1")
       check added.contains("scheduler: actions=4")
@@ -1760,8 +1796,8 @@ suite "e2e_local_reprobuild_project_build":
 
       removeFile(projectRoot / "src" / "resources" / "beta.txt")
       let removed = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-        "--log=actions"
+        "build/test-bin/repro", "build", target, "--daemon=off",
+        "--tool-provisioning=path", "--log=actions"
       ], [("PATH", pathValue)]), repoRoot)
       check removed.contains("providerInvocations: 1")
       check removed.contains("scheduler: actions=3")
@@ -1801,8 +1837,8 @@ suite "e2e_local_reprobuild_project_build":
       let traceEnv = [("PATH", pathValue), ("REPRO_PROVIDER_TRACE", tracePath)]
 
       let first = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-        "--log=actions"
+        "build/test-bin/repro", "build", target, "--daemon=off",
+        "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check first.contains("providerInvocations: 3")
       check first.contains("scheduler: actions=2")
@@ -1815,8 +1851,8 @@ suite "e2e_local_reprobuild_project_build":
 
       resetTrace(tracePath)
       let second = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-        "--log=actions"
+        "build/test-bin/repro", "build", target, "--daemon=off",
+        "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check second.contains("providerInvocations: 0")
       check actionLineCacheEffective(second, "style-alpha")
@@ -1826,8 +1862,8 @@ suite "e2e_local_reprobuild_project_build":
       writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v2\n")
       resetTrace(tracePath)
       let contentChanged = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-        "--log=actions"
+        "build/test-bin/repro", "build", target, "--daemon=off",
+        "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check contentChanged.contains("providerInvocations: 0")
       check contentChanged.contains(
@@ -1839,8 +1875,8 @@ suite "e2e_local_reprobuild_project_build":
       writeFile(projectRoot / "styles" / "gamma.styl", "gamma-v1\n")
       resetTrace(tracePath)
       let added = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-        "--log=actions"
+        "build/test-bin/repro", "build", target, "--daemon=off",
+        "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check added.contains("providerInvocations: 1")
       check added.contains("scheduler: actions=3")
@@ -1853,8 +1889,8 @@ suite "e2e_local_reprobuild_project_build":
       removeFile(projectRoot / "styles" / "beta.styl")
       resetTrace(tracePath)
       let removed = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--tool-provisioning=path",
-        "--log=actions"
+        "build/test-bin/repro", "build", target, "--daemon=off",
+        "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check removed.contains("providerInvocations: 0")
       check removed.contains("scheduler: actions=2")
@@ -1993,13 +2029,14 @@ suite "e2e_local_reprobuild_project_build":
         "action: consume status=asSucceeded launched=true")
       check actionLineCacheEffective(upstreamOutputDeleted, "unrelated")
 
-      let noFlag = requireFailure(shellCommand([reproBin, "build", target]), repoRoot)
+      let noFlag = requireFailure(shellCommand(
+        [reproBin, "build", target, "--daemon=off"]), repoRoot)
       check noFlag.contains("refusing implicit PATH fallback")
 
       let missingRoot = tempRoot / "missing-project"
       writeMissingProject(missingRoot / "reprobuild.nim")
       let missing = requireFailure(shellCommand(@[reproBin, "build",
-        missingRoot, "--tool-provisioning=path"],
+        missingRoot, "--daemon=off", "--tool-provisioning=path"],
         @[(name: "PATH", value: pathValue)]), repoRoot)
       check missing.contains("tool-resolution failed")
       check missing.contains("m19-missing-tool")
