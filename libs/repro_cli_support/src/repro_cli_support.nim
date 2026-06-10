@@ -1433,8 +1433,14 @@ proc aggregateTargetExportTable*(snapshot: ProviderGraphSnapshot):
   ## single package's call set.
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
+      # Spec-Implementation M5: accept both v1 and v2 metadata-node
+      # stable names. The on-disk payload codec is backward-compatible
+      # (v1 envelopes decode through ``decodeTargetExportTablePayload``
+      # with the original two-value ``kind`` enum) so existing
+      # snapshots from older builds still flow through this aggregator.
       if node.kind == gnkMetadata and
-          node.stableName == "reprobuild.target-export-table.v1":
+          (node.stableName == "reprobuild.target-export-table.v1" or
+           node.stableName == "reprobuild.target-export-table.v2"):
         let perPackage = decodeTargetExportTablePayload(toBytes(node.payload))
         for entry in perPackage.entries:
           result.entries.add(entry)
@@ -1476,6 +1482,18 @@ type
     owningPackage*: string    ## ``trkResolved``: the package whose call
                               ## emitted this edge (empty for explicit
                               ## ``target "..."`` labels and action ids).
+    targetKind*: TargetExportKind ## Spec-Implementation M5: per
+                              ## Build-Graph-Collections.md §"Persistence
+                              ## and the Target-Export Table" the build
+                              ## report carries the resolved row's
+                              ## origin marker so JSON consumers can
+                              ## tell a ``collection`` resolution apart
+                              ## from an ``aggregate`` resolution apart
+                              ## from a plain implicit / explicit
+                              ## target. Defaults to ``tekImplicit`` (the
+                              ## historical record kind) when the
+                              ## resolver could not derive a row — e.g.
+                              ## action-id pass-throughs.
     candidates*: seq[string]  ## ``trkAmbiguous``: the sorted qualified
                               ## ``<package>:<name>`` candidates.
     suggestions*: seq[string] ## ``trkUnknown``: top-3 Levenshtein
@@ -1505,6 +1523,12 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
       entriesByName[entry.name] = @[]
     entriesByName[entry.name].add(entry)
 
+  # Spec-Implementation M5: collection rows shadow same-name implicit
+  # / explicit / aggregate rows per Build-Graph-Collections.md
+  # §"Naming" — the bare-name path below prefers a ``tekCollection``
+  # entry when both exist. The qualified-resolution and pass-through
+  # paths return the entry's recorded kind directly.
+
   # 1. Qualified ``<package>:<name>``.
   let colon = selector.find(':')
   if colon > 0 and colon < selector.high:
@@ -1514,6 +1538,7 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
       result.kind = trkResolved
       result.actionId = entry.actionId
       result.owningPackage = entry.owningPackage
+      result.targetKind = entry.kind
       return
 
   # 2. Existing explicit target / action id pass-through.
@@ -1521,21 +1546,32 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
     if actionId == selector:
       result.kind = trkResolved
       result.actionId = selector
+      result.targetKind = tekImplicit
       return
   for explicitName in knownExplicitTargets:
     if explicitName == selector:
       result.kind = trkResolved
       result.actionId = selector
+      result.targetKind = tekExplicit
       return
 
   # 3. Bare implicit name.
   if entriesByName.hasKey(selector):
     var ownerPackages: seq[string] = @[]
     var lastEntry: TargetExportEntry
+    # Spec-Implementation M5: prefer a ``tekCollection`` entry when
+    # one is present so ``repro build test`` resolves to the test
+    # collection rather than an implicit name with the same spelling
+    # produced by a test-binary edge.
+    var collectionEntry: TargetExportEntry
+    var hasCollectionEntry = false
     for entry in entriesByName[selector]:
       if ownerPackages.find(entry.owningPackage) < 0:
         ownerPackages.add(entry.owningPackage)
       lastEntry = entry
+      if entry.kind == tekCollection and not hasCollectionEntry:
+        collectionEntry = entry
+        hasCollectionEntry = true
     if ownerPackages.len > 1:
       var candidates: seq[string] = @[]
       for pkg in ownerPackages:
@@ -1544,9 +1580,11 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
       result.kind = trkAmbiguous
       result.candidates = candidates
       return
+    let chosen = if hasCollectionEntry: collectionEntry else: lastEntry
     result.kind = trkResolved
-    result.actionId = lastEntry.actionId
-    result.owningPackage = lastEntry.owningPackage
+    result.actionId = chosen.actionId
+    result.owningPackage = chosen.owningPackage
+    result.targetKind = chosen.kind
     return
 
   # 4. Unknown — synthesize Levenshtein suggestions.
@@ -2289,10 +2327,15 @@ proc actionResultJson(item: ActionResult): JsonNode =
   }
 
 proc targetResolutionJson(record: TargetResolutionRecord): JsonNode =
-  ## Named-Targets M5: serialise one resolver outcome for the build
-  ## report's ``targetResolution`` array. Mirrors the CLI text
-  ## diagnostic taxonomy (``resolved`` / ``ambiguous`` / ``unknown``)
-  ## so JSON consumers see the same shape as the stderr lines.
+  ## Named-Targets M5 / Spec-Implementation M5: serialise one resolver
+  ## outcome for the build report's ``targetResolution`` array. Mirrors
+  ## the CLI text diagnostic taxonomy (``resolved`` / ``ambiguous`` /
+  ## ``unknown``) so JSON consumers see the same shape as the stderr
+  ## lines. The Spec-Implementation M5 registry split adds a
+  ## ``targetKind`` field on ``trkResolved`` records carrying the
+  ## row's origin marker per Build-Graph-Collections.md §"Persistence
+  ## and the Target-Export Table" — one of ``"collection"``,
+  ## ``"aggregate"``, ``"implicit"``, or ``"explicit"``.
   let kindText =
     case record.kind
     of trkResolved: "resolved"
@@ -2306,6 +2349,13 @@ proc targetResolutionJson(record: TargetResolutionRecord): JsonNode =
   of trkResolved:
     result["actionId"] = %record.actionId
     result["package"] = %record.owningPackage
+    let targetKindText =
+      case record.targetKind
+      of tekImplicit: "implicit"
+      of tekExplicit: "explicit"
+      of tekAggregate: "aggregate"
+      of tekCollection: "collection"
+    result["targetKind"] = %targetKindText
   of trkAmbiguous:
     result["candidates"] = jsonStringSeq(record.candidates)
   of trkUnknown:
@@ -9608,12 +9658,23 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
     entries.sort(proc(a, b: TargetExportEntry): int =
       let pkgCmp = cmp(a.owningPackage, b.owningPackage)
       if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
+    # Spec-Implementation M5: ``--list-targets`` JSON / text formatter
+    # extended with the new ``aggregate`` and ``collection`` row kinds
+    # per Build-Graph-Collections.md §"Persistence and the Target-Export
+    # Table" / §"--list-targets". The text formatter widens the ``kind``
+    # column so the longer ``collection`` label aligns.
+    proc kindToText(k: TargetExportKind): string =
+      case k
+      of tekImplicit: "implicit"
+      of tekExplicit: "explicit"
+      of tekAggregate: "aggregate"
+      of tekCollection: "collection"
     if asJson:
       var arr = newJArray()
       for entry in entries:
         arr.add(%*{
           "name": entry.name,
-          "kind": (if entry.kind == tekImplicit: "implicit" else: "explicit"),
+          "kind": kindToText(entry.kind),
           "package": entry.owningPackage,
           "actionId": entry.actionId,
           "source-file": entry.sourceFile,
@@ -9636,12 +9697,10 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
         else:
           echo "repro build --list-targets: no named targets in this project"
       else:
-        echo "kind     package                   name                      source"
+        echo "kind        package                   name                      source"
         for entry in entries:
-          let kindText =
-            if entry.kind == tekImplicit: "implicit" else: "explicit"
           let source = entry.sourceFile & ":" & $entry.sourceLine
-          echo kindText & "  " & entry.owningPackage & "  " &
+          echo kindToText(entry.kind) & "  " & entry.owningPackage & "  " &
             entry.name & "  " & source
     return 0
   finally:

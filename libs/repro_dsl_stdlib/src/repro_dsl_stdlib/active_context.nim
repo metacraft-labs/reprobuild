@@ -41,6 +41,7 @@ import ./interfaces/feature_set
 import ./adapters/gcc_toolchain
 import ./adapters/clang_toolchain
 import ./adapters/native_cross_target
+import ./adapters/cross_aarch64_linux_gnu
 import ./adapters/solver_feature_set
 import ./configurables/variants
 
@@ -64,8 +65,30 @@ proc resolveToolchain(): Toolchain =
   ## Pick the toolchain adapter that matches the current variant
   ## state. M3 reads the ``compiler`` variant via the M2d solver
   ## solution; non-default values map to the matching adapter.
+  ##
+  ## Spec-Implementation M5: the ``targetTriple`` variant outranks the
+  ## ``compiler`` variant for cross-compilation triples. A
+  ## ``targetTriple = "aarch64-linux-gnu"`` resolution swaps the
+  ## active toolchain to ``crossAarch64LinuxGnuToolchain`` so a
+  ## recipe's ``currentBuildContext().toolchain.compile(...)`` reaches
+  ## the cross gcc directly. When the ``targetTriple`` resolves to
+  ## ``native`` (or is absent) the ``compiler`` variant drives the
+  ## host-toolchain selection as before.
   if hasSolverSolution():
     let sol = lastSolverSolution()
+    if "targetTriple" in sol.variants:
+      let triple = sol.variants["targetTriple"]
+      if triple.len > 0 and triple.toLowerAscii() != "native":
+        if isCrossAarch64Triple(triple):
+          return crossAarch64LinuxGnuToolchain()
+        # Fall through to the host-compiler branch when no
+        # specialised cross-toolchain adapter is registered for the
+        # triple. The crossTarget slot still moves to the matching
+        # cross adapter via ``resolveCrossTarget`` below; the
+        # toolchain slot's ``compile`` proc then has to thread the
+        # right ``--target=`` flag through the build context's
+        # ``cFlags``. That is the standard "use a host clang with
+        # --target=" pattern.
     if "compiler" in sol.variants:
       case sol.variants["compiler"].toLowerAscii()
       of "clang": return clangToolchain()
@@ -77,11 +100,19 @@ proc resolveCrossTarget(): CrossTarget =
   ## state. Reads the ``targetTriple`` variant via the M2d solver
   ## solution; non-``"native"`` values build a
   ## ``crossTargetFromTriple`` adapter.
+  ##
+  ## Spec-Implementation M5: when the resolved triple matches the
+  ## ``cross-aarch64-linux-gnu`` adapter the selector returns the
+  ## populated adapter; other triples fall through to the M3 generic
+  ## ``crossTargetFromTriple`` stub so the existing cross-target
+  ## test surface keeps working.
   if hasSolverSolution():
     let sol = lastSolverSolution()
     if "targetTriple" in sol.variants:
       let triple = sol.variants["targetTriple"]
       if triple.len > 0 and triple.toLowerAscii() != "native":
+        if isCrossAarch64Triple(triple):
+          return crossAarch64LinuxGnuTarget()
         return crossTargetFromTriple(triple)
   nativeCrossTarget()
 

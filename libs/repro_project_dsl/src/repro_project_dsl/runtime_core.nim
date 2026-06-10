@@ -1,6 +1,22 @@
 var registry: seq[PackageDef] = @[]
 var buildActionRegistry: seq[BuildActionDef] = @[]
 var buildTargetRegistry: seq[BuildTargetDef] = @[]
+  ## Pre-M5 single ``BuildTargetDef`` registry. After the M5 split this
+  ## holds explicit ``target "name", handle`` registrations PLUS ad-hoc
+  ## ``aggregate("name", ...)`` registrations. ``collect("name", ...)``
+  ## now writes to the parallel ``collectionRegistry`` below per
+  ## Build-Graph-Collections.md §"Persistence and the Target-Export
+  ## Table" — Spec-Implementation M5.
+var collectionRegistry: seq[BuildTargetDef] = @[]
+  ## Spec-Implementation M5: parallel registry for build graph
+  ## collections (the ``collect("...", ...)`` surface). Distinct from
+  ## ``buildTargetRegistry`` so the target-export-table v2 emitter can
+  ## tag each row with the proper ``kind`` discriminator without
+  ## re-classifying at emit time. ``collect()`` writes here; ``aggregate``
+  ## stays on ``buildTargetRegistry``. Both registries union into one
+  ## resolved name-space at lookup time so the CLI's ``classifyBuild
+  ## Selector`` / ``resolveTargetExportSelector`` callers consume a
+  ## single view; the ``kind`` field on each row distinguishes them.
 var buildPoolRegistry: seq[BuildPoolDef] = @[]
 var defaultBuildActionRegistry = ""
 var targetExportRegistry: TargetExportTable = TargetExportTable()
@@ -167,7 +183,15 @@ const
     ## with an empty ``targetNames`` list.
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
-  BuildTargetPayloadVersion = 2'u16
+  BuildTargetPayloadVersion = 3'u16
+    ## v3: Spec-Implementation M5 — appends the ``kind`` byte distinguishing
+    ## ``btkAggregate`` (0) from ``btkCollection`` (1) so the registry
+    ## split is preserved when payloads round-trip through the engine
+    ## artifact path. v1 / v2 payloads decode with the default
+    ## ``btkAggregate`` discriminator (backward-compatible per
+    ## Build-Graph-Collections.md §"Persistence and the Target-Export
+    ## Table"'s v1 decoder rule).
+    ##
     ## v2: Named-Targets M1 — appends ``sourceFile`` + ``sourceLine`` so
     ## collision diagnostics from the target-export table can cite the
     ## explicit ``target "name", handle`` call site. v1 payloads decode
@@ -179,7 +203,18 @@ const
     byte(ord('E')), byte(ord('T'))]
     ## Named-Targets M1: tag for the project-scoped target-export table
     ## payload carried as a metadata node on the GraphFragment.
-  TargetExportTablePayloadVersion = 1'u16
+  TargetExportTablePayloadVersion = 2'u16
+    ## Spec-Implementation M5: schema bump per
+    ## Build-Graph-Collections.md §"Persistence and the Target-Export
+    ## Table". v2 expands the per-row ``kind`` enumeration from
+    ## ``{implicit, explicit}`` to ``{implicit, explicit, aggregate,
+    ## collection}``. v1 payloads still decode through the same code
+    ## path because the v1 decoder only saw bytes 0 / 1; the v2
+    ## decoder accepts bytes 0..3 (the M5 additions hold discriminator
+    ## bytes 2 / 3). The metadata-node stable-name string is
+    ## ``reprobuild.target-export-table.v1`` for v1 emissions and
+    ## ``reprobuild.target-export-table.v2`` for v2 emissions; the
+    ## aggregator at ``aggregateTargetExportTable`` recognises both.
 
 proc resetPackageRegistry*() {.dynOrStatic.} =
   registry.setLen(0)
@@ -217,10 +252,39 @@ proc registeredBuildActions*(): seq[BuildActionDef] {.dynOrStatic.} =
   buildActionRegistry
 
 proc resetBuildTargetRegistry*() {.dynOrStatic.} =
+  ## Spec-Implementation M5: clearing the build-target registry also
+  ## clears the parallel collection registry so test fixtures that
+  ## reset between scenarios see both halves empty. The two registries
+  ## are independent on the write side (``collect`` writes one,
+  ## ``aggregate`` writes the other) but logically share the reset
+  ## lifecycle since they belong to the same evaluation pass.
   buildTargetRegistry.setLen(0)
+  collectionRegistry.setLen(0)
 
 proc registeredBuildTargets*(): seq[BuildTargetDef] {.dynOrStatic.} =
+  ## Spec-Implementation M5: returns the unioned view of both
+  ## registries (aggregates first in registration order, then
+  ## collections in registration order). Callers that need just the
+  ## collection half use ``registeredCollections``; callers that need
+  ## just aggregates use ``registeredAggregates``. The union preserves
+  ## the pre-M5 behaviour for downstream consumers that did not yet
+  ## opt into the discriminator.
+  result = buildTargetRegistry
+  for entry in collectionRegistry:
+    result.add(entry)
+
+proc registeredAggregates*(): seq[BuildTargetDef] {.dynOrStatic.} =
+  ## Spec-Implementation M5: collections-free view of the legacy
+  ## ``BuildTargetDef`` registry. Includes explicit ``target "name",
+  ## handle`` registrations and ``aggregate("name", ...)`` rows.
   buildTargetRegistry
+
+proc registeredCollections*(): seq[BuildTargetDef] {.dynOrStatic.} =
+  ## Spec-Implementation M5: the parallel registry of build graph
+  ## collections (the ``collect("...", ...)`` surface). Distinct from
+  ## ``registeredAggregates`` per Build-Graph-Collections.md
+  ## §"Persistence and the Target-Export Table".
+  collectionRegistry
 
 proc resetBuildPoolRegistry*() {.dynOrStatic.} =
   buildPoolRegistry.setLen(0)
@@ -729,7 +793,8 @@ proc aggregate*(name: string; actions: openArray[BuildActionDef] = [];
   registerBuildTarget(BuildTargetDef(
     name: name,
     actions: actionRefs,
-    targets: targetRefs))
+    targets: targetRefs,
+    kind: btkAggregate))
 
 # ---------------------------------------------------------------------------
 # Spec-Implementation M0 — build graph collections (per
@@ -742,17 +807,17 @@ proc aggregate*(name: string; actions: openArray[BuildActionDef] = [];
 # collections live at graph emission time and operate on target
 # identities only.
 #
-# M0 implementation note: the runtime data model is shared with
-# ``aggregate`` — collections and aggregates both produce a
-# ``BuildTargetDef`` that lands in the project-scoped target-export
-# table. The CLI resolver treats them identically. A future milestone
-# splits the registries so the build-report can distinguish
-# ``kind: "collection"`` from ``kind: "aggregate"`` per
-# Build-Graph-Collections.md §"Build-Report Integration". For M0, the
-# semantic distinction lives in the call-site naming: authors call
-# ``collect`` for build graph collections (test/bench/lint/docs/package
-# and project-defined ones) and ``aggregate`` for ad-hoc target groups
-# that are not part of the collection contract.
+# M5 update: the M0 stopgap where ``collect`` was a thin alias over
+# ``aggregate`` is retired. ``collect`` now writes to its own parallel
+# ``collectionRegistry`` and stamps the returned ``BuildTargetDef``
+# with ``kind: btkCollection``; ``aggregate`` keeps writing to
+# ``buildTargetRegistry`` and stamps ``kind: btkAggregate``. The
+# target-export-table v2 payload (Build-Graph-Collections.md
+# §"Persistence and the Target-Export Table") carries the
+# ``tekCollection`` / ``tekAggregate`` row kind so downstream consumers
+# (``classifyBuildSelector`` callers, ``resolveTargetExportSelector``,
+# build report ``targetResolution`` entries) can distinguish them
+# end-to-end.
 # ---------------------------------------------------------------------------
 
 proc collect*(name: string; actions: openArray[BuildActionDef] = [];
@@ -766,9 +831,22 @@ proc collect*(name: string; actions: openArray[BuildActionDef] = [];
   ## Build-Graph-Collections.md §"Verb Aliases for Conventional
   ## Collections".
   ##
-  ## See ``aggregate`` for ad-hoc target groupings that are not part of
-  ## the collection contract.
-  aggregate(name, actions, targets)
+  ## M5: writes to the parallel ``collectionRegistry`` with
+  ## ``kind: btkCollection`` so the target-export-table v2 emitter and
+  ## the CLI ``resolveTargetExportSelector`` can distinguish a
+  ## collection from a plain aggregate row.
+  var actionRefs: seq[string] = @[]
+  var targetRefs: seq[string] = @[]
+  for action in actions:
+    actionRefs.addUniqueValue(action.id)
+  for target in targets:
+    targetRefs.addUniqueValue(target.name)
+  result = BuildTargetDef(
+    name: name,
+    actions: actionRefs,
+    targets: targetRefs,
+    kind: btkCollection)
+  collectionRegistry.add(result)
 
 proc exportTarget*(name: string; target: BuildTargetDef): BuildTargetDef
     {.discardable, dynOrStatic.} =
@@ -995,9 +1073,22 @@ proc registerImplicitTargetExports*(actionId, owningPackage: string;
 
 proc registerExplicitTargetExport*(target: BuildTargetDef;
                                    owningPackage: string) {.dynOrStatic.} =
-  ## Named-Targets M1: surface a ``target "name", handle`` declaration
-  ## in the target-export table as a ``tekExplicit`` row. The
-  ## ``actionId`` is the first action handle the target references
+  ## Named-Targets M1 / Spec-Implementation M5: surface a build-target
+  ## registration in the target-export table. M0 / M1 wrote a single
+  ## ``tekExplicit`` row regardless of whether the underlying
+  ## ``BuildTargetDef`` was an ``aggregate("...", ...)``, a
+  ## ``collect("...", ...)``, or a plain ``target "name", handle``;
+  ## M5 fans the discriminator out per Build-Graph-Collections.md
+  ## §"Persistence and the Target-Export Table" so v2 payloads carry
+  ## ``tekCollection`` / ``tekAggregate`` for the matching call-site
+  ## shapes. Plain ``target "name", handle`` registrations still
+  ## resolve to ``tekExplicit`` (their ``kind`` field reads
+  ## ``btkAggregate`` because ``BuildTargetKind`` zero-defaults to
+  ## that value, but ``actions``/``targets`` shape distinguishes them:
+  ## explicit targets have exactly one action handle and no nested
+  ## targets, while ``aggregate``/``collect`` carry the union shape).
+  ##
+  ## The ``actionId`` is the first action handle the target references
   ## (most explicit targets attach to exactly one action; the
   ## aggregate-over-many form falls back to the target's own name as
   ## the handle). Collision/ambiguity logic matches the implicit case.
@@ -1005,9 +1096,28 @@ proc registerExplicitTargetExport*(target: BuildTargetDef;
     return
   let handle =
     if target.actions.len > 0: target.actions[0] else: target.name
+  # Spec-Implementation M5: select the export-row kind from the
+  # build-target's discriminator. A plain ``target "name", handle``
+  # registration leaves ``kind`` at its zero value (``btkAggregate``)
+  # AND carries exactly one action handle + no nested targets;
+  # ``aggregate("...", ...)`` and ``collect("...", ...)`` both carry
+  # the union shape but their ``kind`` byte distinguishes them.
+  let exportKind =
+    case target.kind
+    of btkCollection: tekCollection
+    of btkAggregate:
+      # Distinguish a plain explicit ``target "name", action`` (one
+      # action, no nested targets) from a real ``aggregate("name",
+      # ...)`` call by checking the shape. The runtime never sees
+      # an explicit ``target`` registration with more than one
+      # action OR with any nested targets — only ``aggregate``
+      # produces the union shape. See ``target*`` / ``exportTarget*``
+      # constructors above.
+      if target.actions.len > 1 or target.targets.len > 0: tekAggregate
+      else: tekExplicit
   registerTargetExportEntry(TargetExportEntry(
     name: target.name,
-    kind: tekExplicit,
+    kind: exportKind,
     owningPackage: owningPackage,
     actionId: handle,
     sourceFile: target.sourceFile,
@@ -1589,6 +1699,8 @@ proc encodeBuildTargetPayload*(target: BuildTargetDef): seq[byte] {.dynOrStatic.
   payload.writeStringSeq(target.targets)
   payload.writeString(target.sourceFile)
   payload.writeU32Le(uint32(max(target.sourceLine, 0)))
+  # Spec-Implementation M5: v3 ``kind`` discriminator.
+  payload.writeByte(byte(ord(target.kind)))
 
   result.add(BuildTargetPayloadMagic)
   result.writeU16Le(BuildTargetPayloadVersion)
@@ -1603,7 +1715,7 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
       raisePayload("unknown build target payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, BuildTargetPayloadVersion}:
+  if version notin {1'u16, 2'u16, BuildTargetPayloadVersion}:
     raisePayload("unsupported build target payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -1614,6 +1726,15 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
   if version >= 2'u16:
     result.sourceFile = readString(bytes, pos)
     result.sourceLine = int(readU32Le(bytes, pos))
+  if version >= 3'u16:
+    # Spec-Implementation M5: v3 discriminator. v1 / v2 payloads decode
+    # with ``btkAggregate`` (the zero value of ``BuildTargetKind``) per
+    # the backward-compat rule in Build-Graph-Collections.md
+    # §"Persistence and the Target-Export Table".
+    let kindByte = readByte(bytes, pos)
+    if kindByte > byte(ord(btkCollection)):
+      raisePayload("invalid build target kind in build target payload")
+    result.kind = BuildTargetKind(kindByte)
   if pos != bytes.len:
     raisePayload("trailing build target payload bytes")
 
@@ -1659,11 +1780,15 @@ proc writeTargetExportEntry(outp: var seq[byte]; entry: TargetExportEntry) =
   outp.writeString(entry.sourceFile)
   outp.writeU32Le(uint32(max(entry.sourceLine, 0)))
 
-proc readTargetExportEntry(bytes: openArray[byte]; pos: var int):
+proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
+                           version: uint16):
     TargetExportEntry =
   result.name = readString(bytes, pos)
   let kindByte = readByte(bytes, pos)
-  if kindByte > byte(ord(tekExplicit)):
+  let maxKind =
+    if version >= 2'u16: byte(ord(tekCollection))
+    else: byte(ord(tekExplicit))
+  if kindByte > maxKind:
     raisePayload("invalid target export entry kind")
   result.kind = TargetExportKind(kindByte)
   result.owningPackage = readString(bytes, pos)
@@ -1703,6 +1828,13 @@ proc encodeTargetExportTablePayload*(table: TargetExportTable):
 
 proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
     TargetExportTable {.dynOrStatic.} =
+  ## Decode the SSZ-style framed target-export-table payload.
+  ## Spec-Implementation M5: v1 and v2 payloads both decode through
+  ## this proc per the backward-compatibility rule in
+  ## Build-Graph-Collections.md §"Persistence and the Target-Export
+  ## Table". v1 entries' ``kind`` byte is restricted to
+  ## ``{tekImplicit, tekExplicit}``; v2 entries additionally accept
+  ## ``{tekAggregate, tekCollection}``.
   if bytes.len < 10:
     raisePayload("truncated target export table envelope")
   for i in 0 ..< TargetExportTablePayloadMagic.len:
@@ -1710,7 +1842,7 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
       raisePayload("unknown target export table payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != TargetExportTablePayloadVersion:
+  if version notin {1'u16, TargetExportTablePayloadVersion}:
     raisePayload("unsupported target export table payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -1718,7 +1850,7 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
   let entryCount = int(readU32Le(bytes, pos))
   result.entries = newSeq[TargetExportEntry](entryCount)
   for i in 0 ..< entryCount:
-    result.entries[i] = readTargetExportEntry(bytes, pos)
+    result.entries[i] = readTargetExportEntry(bytes, pos, version)
   let ambiguityCount = int(readU32Le(bytes, pos))
   result.ambiguities = newSeq[TargetExportAmbiguity](ambiguityCount)
   for i in 0 ..< ambiguityCount:

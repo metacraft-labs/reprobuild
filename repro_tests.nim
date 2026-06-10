@@ -1546,6 +1546,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_dev_env_artifact",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_e2e_cross_compilation_aarch64.nim",
+    binary: "build/test-bin/t_e2e_cross_compilation_aarch64",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_e2e_engine_shim_removed.nim",
     binary: "build/test-bin/t_e2e_engine_shim_removed",
     defines: @[]),
@@ -1566,8 +1570,16 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_integration_build_engine_api_ready_queue",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_integration_build_report_target_resolution_kind.nim",
+    binary: "build/test-bin/t_integration_build_report_target_resolution_kind",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_integration_cli_variant_flag_drives_solver.nim",
     binary: "build/test-bin/t_integration_cli_variant_flag_drives_solver",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_collection_distinct_from_aggregate.nim",
+    binary: "build/test-bin/t_integration_collection_distinct_from_aggregate",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_configurable_doc_comment_directives.nim",
@@ -1596,6 +1608,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_integration_context_variant_driven_slots.nim",
     binary: "build/test-bin/t_integration_context_variant_driven_slots",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_cross_compilation_fixture_compiles.nim",
+    binary: "build/test-bin/t_integration_cross_compilation_fixture_compiles",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_cross_target_aarch64_adapter.nim",
+    binary: "build/test-bin/t_integration_cross_target_aarch64_adapter",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_cross_target_native.nim",
@@ -1656,6 +1676,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_integration_solver_resolves_variants.nim",
     binary: "build/test-bin/t_integration_solver_resolves_variants",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_integration_target_export_table_v2_schema.nim",
+    binary: "build/test-bin/t_integration_target_export_table_v2_schema",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_integration_test_runner_adapter_registered.nim",

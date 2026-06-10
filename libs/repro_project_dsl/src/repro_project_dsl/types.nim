@@ -316,21 +316,50 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  BuildTargetKind* = enum
+    ## Spec-Implementation M5: discriminator on ``BuildTargetDef`` so the
+    ## persistence path can distinguish ad-hoc aggregates (the
+    ## Named-Targets M1 ``aggregate("...", ...)`` shape) from build
+    ## graph collections (Build-Graph-Collections.md §"Persistence and
+    ## the Target-Export Table"). M0 shipped the ``collect()`` primitive
+    ## as a thin alias over ``aggregate()`` so a single registry was
+    ## fine; M5 splits the registries so the target-export-table v2
+    ## rows carry the right ``kind`` discriminator end-to-end.
+    btkAggregate     ## ad-hoc ``aggregate("...", ...)`` grouping
+    btkCollection    ## ``collect("...", ...)`` graph collection
+
   BuildTargetDef* = object
     name*: string
     actions*: seq[string]
     targets*: seq[string]
     sourceFile*: string
     sourceLine*: int
+    kind*: BuildTargetKind
+      ## Spec-Implementation M5: ``btkAggregate`` for legacy ``aggregate``
+      ## registrations; ``btkCollection`` for ``collect`` registrations.
+      ## Default ``btkAggregate`` is intentional: target-export-table v1
+      ## payloads decode with no ``kind`` field; promoting the zero value
+      ## to ``btkAggregate`` keeps backward-compat with the v1 record
+      ## shape.
 
   BuildPoolDef* = object
     name*: string
     capacity*: uint32
 
   TargetExportKind* = enum
-    ## Named-Targets M1: per-edge target-name origin marker.
-    tekImplicit  ## Computed from ``outputs`` statements and optional hook.
-    tekExplicit  ## Declared via ``target "name", handle`` in the DSL.
+    ## Named-Targets M1 / Spec-Implementation M5: per-edge target-name
+    ## origin marker. M0/M1 shipped ``tekImplicit`` + ``tekExplicit``;
+    ## M5 adds ``tekAggregate`` + ``tekCollection`` so target-export
+    ## table v2 rows can distinguish aggregate-target registrations
+    ## (``aggregate("...", ...)``) from collection registrations
+    ## (``collect("...", ...)``) per Build-Graph-Collections.md
+    ## §"Persistence and the Target-Export Table". v1 payloads decode
+    ## with ``tekImplicit`` / ``tekExplicit`` only — the v2 wire format
+    ## marks the M5 additions with discriminator bytes 2 / 3.
+    tekImplicit   ## Computed from ``outputs`` statements and optional hook.
+    tekExplicit   ## Declared via ``target "name", handle`` in the DSL.
+    tekAggregate  ## Declared via ``aggregate("name", ...)`` (M0 surface).
+    tekCollection ## Declared via ``collect("name", ...)`` (M0 + M5 split).
 
   TargetExportEntry* = object
     ## Named-Targets M1: one row in the project-scoped target-export

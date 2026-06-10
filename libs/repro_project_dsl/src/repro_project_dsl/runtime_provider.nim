@@ -153,10 +153,17 @@ when defined(reproProviderMode):
     # CLI resolver can consume it directly out of the GraphFragment.
     # Always emitted (even when empty) so consumers can rely on the
     # node's presence as a schema version marker.
+    #
+    # Spec-Implementation M5: schema-version bump from v1 to v2. The
+    # stable-name string moves to ``...v2``; the aggregator at
+    # ``aggregateTargetExportTable`` matches both v1 and v2 nodes so
+    # on-disk artifacts from older fragments continue to flow through
+    # the decoder per Build-Graph-Collections.md §"Persistence and
+    # the Target-Export Table"'s backward-compat rule.
     result.nodes.add(GraphNode(
       id: targetExportTableNode(request.namespace),
       kind: gnkMetadata,
-      stableName: "reprobuild.target-export-table.v1",
+      stableName: "reprobuild.target-export-table.v2",
       payload: targetExportTablePayload(exportTable)))
     if includeDefault and defaultAction.len > 0:
       var found = false

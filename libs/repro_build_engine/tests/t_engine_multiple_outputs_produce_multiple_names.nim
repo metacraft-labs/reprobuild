@@ -44,7 +44,7 @@ proc actionsFromFragment(fragment: GraphFragment): seq[BuildActionDef] =
 proc exportTableFromFragment(fragment: GraphFragment): TargetExportTable =
   for node in fragment.nodes:
     if node.kind == gnkMetadata and
-        node.stableName == "reprobuild.target-export-table.v1":
+        (node.stableName == "reprobuild.target-export-table.v1" or node.stableName == "reprobuild.target-export-table.v2"):
       return decodeTargetExportTablePayload(toBytes(node.payload))
   raise newException(ValueError,
     "fragment is missing the target-export-table metadata node")
