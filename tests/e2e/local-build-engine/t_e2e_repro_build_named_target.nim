@@ -121,9 +121,22 @@ proc runBuild(reproBin, repoRoot, pathValue: string;
   ## Run ``repro build <args>`` from ``cwd`` and return the merged
   ## stdout/stderr. Asserts success so the test fails fast on any
   ## non-zero exit code.
+  ##
+  ## Pin ``--daemon=off`` so the test exercises the build engine in
+  ## direct mode without coupling to whichever user-daemon happens to
+  ## be running on the host. The default ``--daemon=auto`` either
+  ## reuses a pre-existing ``repro-daemon`` (whose forwarded env may
+  ## carry stale PATH entries from a previous unrelated test) or
+  ## launches a new daemon that subsequent tests inherit. Either
+  ## coupling produces hangs / spurious cache misses that are not
+  ## bugs in the Named-Targets M2 resolver this test guards. Mirrors
+  ## the pin applied in ``t_e2e_m51_dsl_stdlib_file_ops.nim``
+  ## (commit 091cba4) and ``t_e2e_local_reprobuild_project_build.nim``
+  ## (commit 448b887).
   var args = @[reproBin, "build"]
   for a in extraArgs:
     args.add(a)
+  args.add("--daemon=off")
   args.add("--tool-provisioning=path")
   args.add("--log=actions")
   let entries = @[("PATH", pathValue)]
