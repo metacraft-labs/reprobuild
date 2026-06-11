@@ -89,6 +89,19 @@ package reprobuild:
     "just >=1"
     "sh"
 
+    # Bootstrap-And-Self-Build B0: ``runquotad`` is a runtime
+    # dependency (spawned as a subprocess by daemon tests at
+    # ``../runquota/build/bin/runquotad``). Declaring it in ``uses:``
+    # makes the dependency explicit + lets path-mode resolution find
+    # the sibling-built binary when ``../runquota/build/bin`` is on
+    # ``$PATH``. The sibling ``runquota`` repo now ships its own
+    # ``repro.nim`` so later milestones (B1+) can flip this to
+    # ``uses: "runquota"`` and consume runquota's typed
+    # ``executable runquotad`` output via cross-project resolution;
+    # ``runquotad`` (the bare executable selector) is the path-mode
+    # form that works today.
+    "runquotad"
+
     # Note: the system hash libraries (libblake3, xxhash, sqlite3) and
     # the source-only fixed inputs (nimcrypto, runquota,
     # ssz-serialization, ct_test_nim_unittest) are NOT listed here.

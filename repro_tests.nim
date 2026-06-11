@@ -146,6 +146,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_smoke_repro_core",
     defines: @[]),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_catalog_claude_code.nim",
+    binary: "build/test-bin/t_catalog_claude_code",
+    defines: @[]),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim",
     binary: "build/test-bin/t_m67_bulk_catalog",
     defines: @[]),
@@ -176,6 +180,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim",
     binary: "build/test-bin/test_m69_package_macro",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim",
+    binary: "build/test-bin/t_m2_nixos_darwin_modules",
     defines: @[]),
   TestSpec(
     source: "libs/repro_elevation/tests/t_smoke_repro_elevation.nim",
@@ -580,6 +588,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim",
     binary: "build/test-bin/t_smoke_system_apply_integration",
+    defines: @[]),
+  TestSpec(
+    source: "libs/repro_profile_compile/tests/t_template_in_template_named_args.nim",
+    binary: "build/test-bin/t_template_in_template_named_args",
     defines: @[]),
   TestSpec(
     source: "libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim",
@@ -1536,6 +1548,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_action_cache_fingerprint_policies.nim",
     binary: "build/test-bin/t_action_cache_fingerprint_policies",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_b0_develop_mode_uses_local_source.nim",
+    binary: "build/test-bin/t_b0_develop_mode_uses_local_source",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_b0_repro_build_runquota_daemon.nim",
+    binary: "build/test-bin/t_b0_repro_build_runquota_daemon",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_b0_runquota_repro_nim_compiles.nim",
+    binary: "build/test-bin/t_b0_runquota_repro_nim_compiles",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_cli_repro_lock_explain.nim",
