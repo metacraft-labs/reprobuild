@@ -21946,6 +21946,16 @@ proc runThinApp*(programName: string): int =
         args[1 .. ^1]
       else:
         @[]
+    # Executable-Consolidation M2: `repro daemon serve` is the daemon PROCESS
+    # entry — the role formerly carried by the standalone `repro-daemon` binary
+    # (whose program name stays a compatibility alias below). Every other
+    # `daemon` subcommand (status / start / stop / restart / logs / sessions)
+    # is a client control command.
+    if daemonArgs.len > 0 and daemonArgs[0] == "serve":
+      installUserDaemonBuildPrewarmer()
+      installUserDaemonBuildExecutor()
+      installUserDaemonWatchExecutor()
+      return runUserDaemonCommand(daemonArgs[1 .. ^1])
     return runUserDaemonCliCommand(daemonArgs)
   if programName == "repro" and args.len > 0 and args[0] == "launch-plan":
     let lpArgs =
