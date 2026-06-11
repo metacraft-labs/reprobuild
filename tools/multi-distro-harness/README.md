@@ -359,8 +359,120 @@ Ubuntu gcc-11, Arch gcc-15.x) + glibc + binutils combination, so the
 linked binaries don't match across distros. Cross-distro bit-identity
 via the peer cache (build on Arch, pull on Debian) is M5's scope.
 
-## Future work (M3+)
+## M3 — Fedora self-bootstrap
 
-- M3: same for Fedora.
+`bootstrap-fedora.sh` mirrors M1+M2's shape inside `repro-fedora`
+(Fedora 44). Same flow: dnf prereqs + `nim c -d:release` of
+`apps/repro` + `apps/repro-standard-provider` from
+`/mnt/d/metacraft/reprobuild`, no `nix develop`. Like M2's bootstraps,
+it uses M0's choosenim-installed Nim 2.2.10 at `/root/.nimble/bin/nim`
+(Fedora 44's main repo ships no `nim` at all).
+
+The headline divergence from M1+M2: **Fedora 44 ships clingo, BLAKE3,
+and xxhash in its main repo**, so neither the M1 AUR-style upstream
+clingo build nor the M2 upstream BLAKE3 build is needed. The script
+skips Steps 2 and 3 entirely; everything that M2 fetched as a tarball
+comes from `dnf install`.
+
+Dnf prereqs (Step 1):
+
+```
+gcc make git curl ca-certificates xz
+pkgconf-pkg-config openssl-devel sqlite-devel
+cmake bison re2c unzip
+clingo-devel blake3-devel xxhash-devel
+```
+
+Pkg sources (dnf vs upstream):
+
+| Component  | Fedora 44 dnf            | Source chosen | Reason                                                       |
+| ---------- | ------------------------ | ------------- | ------------------------------------------------------------ |
+| nim 2.2+   | not in repos             | choosenim     | No `nim` rpm in main+updates as of 2026-06.                  |
+| libclingo  | `clingo-devel` 5.8.0     | dnf           | Same upstream version M1+M2 built from tarball; ships ready. |
+| libblake3  | `blake3-devel` 1.8.3     | dnf           | Newer than M1+M2's 1.5.0 tarball; ships ready.               |
+| xxhash     | `xxhash-devel` 0.8.3     | dnf           | Same version M2 got from apt; ships ready.                   |
+
+Divergences from M1 (Arch) + M2 (Debian/Ubuntu):
+
+- **No upstream clingo build.** M1's AUR re2c-4.3 compat patch +
+  upstream-tarball clingo build, and M2's identical upstream-tarball
+  clingo build, are both dropped on Fedora. `dnf install clingo-devel`
+  lands `libclingo.so` at `/usr/lib64/libclingo.so` and the system
+  loader finds it via the default `ldconfig` cache (`/usr/lib64` is on
+  the default search path on Fedora).
+- **No upstream BLAKE3 build.** Same removal — `dnf install
+  blake3-devel` lands `libblake3.so` at `/usr/lib64/libblake3.so` +
+  the header at `/usr/include/blake3.h`. The dnf-shipped 1.8.3 is
+  newer than M1+M2's upstream 1.5.0 but the C API is back-compatible.
+- **`/usr/lib64` symlink workaround.** Fedora installs shared libs to
+  `/usr/lib64/` (32-bit libs go to `/usr/lib/`). Reprobuild's
+  `config.nims` `firstExistingPrefix` only probes `<prefix>/lib/<dylib>`
+  — NOT `lib64`. So setting `BLAKE3_PREFIX=/usr` would fail (the
+  resolver finds `/usr/include/blake3.h` but no `/usr/lib/libblake3.so`).
+  Mirror M2's apt-multiarch workaround: symlink `/usr/lib64/libblake3.so`
+  and `/usr/lib64/libxxhash.so` (plus their `.so.0` aliases + headers)
+  into `/usr/local/lib` + `/usr/local/include`, then export
+  `BLAKE3_PREFIX=/usr/local` + `XXHASH_PREFIX=/usr/local`. A cleaner
+  fix would be a `config.nims` patch teaching the helper about
+  `/usr/lib64`; that is a source change and out of M3's bootstrap-only
+  scope.
+- **Package-name nits.** Fedora uses `pkgconf-pkg-config` (not
+  `pkg-config` or `pkgconfig`), `openssl-devel` (not `libssl-dev`),
+  `sqlite-devel` (not `libsqlite3-dev`), `xz` (not `xz-utils`). No
+  meta-pkg like `base-devel`/`build-essential` — list `gcc` + `make`
+  explicitly. (Fedora's `@development-tools` group exists but pulls
+  in ~40 packages incl. autoconf/automake we don't need; the explicit
+  list is leaner.)
+
+Bootstrap timing (WSL2 / Ryzen-class host):
+
+| Distro | Run  | Wall time   | Notes                                                                  |
+| ------ | ---- | ----------- | ---------------------------------------------------------------------- |
+| Fedora | Cold | 3 min 14 s  | dnf install (clingo+blake3+xxhash+toolchain) + 2x `nim c -d:release`.  |
+| Fedora | Warm | 2 min 32 s  | dnf already-installed short-circuits; only Nim recompiles.             |
+
+Fedora's cold time is FASTER than M2's Debian cold (11:02) and matches
+M2's Ubuntu cold (4:08) within noise — the difference is the absence
+of the upstream clingo + BLAKE3 cmake builds (~7 min on Debian, ~2 min
+on Ubuntu). Fedora's warm is faster than M1's Arch warm (3:14) and
+M2's Debian/Ubuntu warm (3:14 / 3:20), again because Fedora skips the
+"is upstream clingo/blake3 still installed?" filesystem checks the
+M1/M2 scripts make on every warm run.
+
+### Running M3 acceptance
+
+```bash
+bash scripts/run_multi_distro_tests.sh m3_self_bootstrap fedora
+```
+
+The test script (`tools/multi-distro-harness/tests/m3_self_bootstrap.sh`):
+
+1. Detects distro (must be `fedora`).
+2. Runs `bootstrap-fedora.sh`.
+3. Copies `examples/hello-world-c/` (the same M1+M2 recipe, unchanged)
+   to `/tmp/reprobuild-bootstrap-fedora/m3-recipe/hello-world-c/`.
+4. Invokes `repro build . --tool-provisioning=path --no-runquota`.
+5. Asserts the binary outputs `hello from reprobuild M1` (recipe is
+   unchanged from M1).
+6. Wipes the per-project `.repro/build/` tree + global
+   `~/.cache/repro/action-cache/`, rebuilds, asserts intra-distro
+   sha256 bit-identity.
+
+The test refuses to run on non-Fedora hosts.
+
+### Content-addressability sha256 (intra-distro)
+
+| Distro | sha256 of `hello-world-c` (build #1 == build #2 across full cache wipe) |
+| ------ | ----------------------------------------------------------------------- |
+| Fedora | `c26c2cd986f789e9970b564dea245f0f3b17812340a4a88151c2a12055530b33`      |
+
+Cross-distro sha256 differs from M1's Arch (`f602a18b...`), M2's
+Debian (`9057905d...`) and M2's Ubuntu (`1ed6a952...`) — Fedora 44's
+gcc 16.1.1 + glibc differs from every M1/M2 baseline (Arch gcc 15.x,
+Debian gcc 12, Ubuntu gcc 11). Cross-distro bit-identity is M5's
+scope (peer-cache pull).
+
+## Future work (M4+)
+
 - M4: same for Alpine (musl baseline).
 - M5: cross-distro binary-cache push/pull.
