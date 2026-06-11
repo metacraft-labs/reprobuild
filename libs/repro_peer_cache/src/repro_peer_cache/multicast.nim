@@ -18,17 +18,17 @@
 ## dropping packets whose `Hello.peerId` equals the receiver's
 ## `selfPeerId`.
 ##
-## Windows support: this file's socket procs depend on the POSIX
-## `<netinet/in.h>` / `<arpa/inet.h>` headers and `posix.sendto` /
-## `posix.setsockopt`, which don't exist on Windows. Rather than port
-## the multicast path to `winlean` (separate effort — would need
-## WSAStartup + ws2_32 sockopt), v1 gates the socket procs to POSIX
-## only and provides Windows stubs that raise `MulticastSocketError`
-## at the first call site. This keeps `repro_peer_cache` consumers
-## (client.nim, server.nim, etc.) compiling on Windows while making
-## the multicast-dependent peer discovery path explicitly unavailable.
-## Pure-data procs (`ipAddressToString`, `encodeHelloPacket`,
-## `decodeHelloPacket`) remain cross-platform.
+## Windows support: the Windows branch implements the same shape via
+## `std/winlean` (ws2_32). A module-init `wsaInit` runs `WSAStartup`
+## exactly once before the first socket is created; the socket and
+## setsockopt calls use the winlean primitives with `<ws2tcpip.h>`'s
+## `ip_mreq` struct + the four `IP_*` constants (`IP_ADD_MEMBERSHIP`,
+## `IP_MULTICAST_IF`, `IP_MULTICAST_LOOP`, `IP_MULTICAST_TTL`)
+## imported via `header: "<ws2tcpip.h>"`. The async wrap is the
+## cross-platform `createAsyncNativeSocket` + `newAsyncSocket(fd)`
+## idiom — `asyncdispatch`'s Windows backend registers the handle
+## with the IOCP. Pure-data procs (`ipAddressToString`,
+## `encodeHelloPacket`, `decodeHelloPacket`) remain cross-platform.
 
 import std/[asyncnet, net]
 
@@ -200,30 +200,183 @@ when defined(posix):
                          SockLen(sizeof(destAddr)))
 
 else:
-  # Windows stub layer: keep `repro_peer_cache` consumers compiling
-  # while making any attempted multicast operation surface a clear
-  # error at the first call. A real port would replace these with
-  # `winlean`-backed equivalents (WSAStartup + ws2_32 setsockopt +
-  # ip_mreq via mswsock).
+  # Windows multicast layer (Dotfiles-Migration-Completion N7).
+  # winlean exports the bare ws2_32 procs (`socket`, `bindSocket`,
+  # `setsockopt`, `sendto`, `wsaStartup`, `closesocket`) and the
+  # generic Winsock types (`Sockaddr_in`, `InAddr`, `SockLen`,
+  # `SocketHandle`). The four `IP_*` multicast option constants and
+  # the `ip_mreq` struct live in `<ws2tcpip.h>` and are pulled in
+  # via `importc, header: "<ws2tcpip.h>"`.
+  import std/[asyncdispatch, nativesockets, winlean]
+
+  const
+    ws2tcpip = "<ws2tcpip.h>"
+    # IPPROTO_IP is `0` on every Winsock-compatible header; winlean
+    # doesn't export it as an importc so we use the well-known
+    # literal. (See `nativesockets.toInt(IPPROTO_IP)` which also
+    # returns `0.cint` on the Windows branch.)
+    IPPROTO_IP_WIN: cint = 0
+
+  let
+    IP_ADD_MEMBERSHIP_WIN* {.importc: "IP_ADD_MEMBERSHIP",
+                              header: ws2tcpip.}: cint
+    IP_MULTICAST_IF_WIN*   {.importc: "IP_MULTICAST_IF",
+                              header: ws2tcpip.}: cint
+    IP_MULTICAST_LOOP_WIN* {.importc: "IP_MULTICAST_LOOP",
+                              header: ws2tcpip.}: cint
+    IP_MULTICAST_TTL_WIN*  {.importc: "IP_MULTICAST_TTL",
+                              header: ws2tcpip.}: cint
+
+  type
+    IpMreqWin* {.importc: "struct ip_mreq", header: ws2tcpip,
+                 bycopy.} = object
+      imr_multiaddr* {.importc.}: InAddr
+      imr_interface* {.importc.}: InAddr
+
+  # WSAStartup is idempotent within a process when the matching
+  # WSACleanup count is observed; we never WSACleanup here because the
+  # lifetime is the whole process. A single global flag avoids the
+  # per-call WSAStartup overhead (which would still return 0 on a
+  # warm winsock, but the syscall is non-zero cost).
+  var wsaStarted {.global.}: bool
+
+  proc wsaInit() =
+    if wsaStarted:
+      return
+    var wsaData: WSAData
+    let rc = wsaStartup(0x0202'i16, addr wsaData)
+    if rc != 0:
+      raise newException(MulticastSocketError,
+        "multicast: WSAStartup(2.2) failed with rc=" & $rc)
+    wsaStarted = true
+
+  proc ipAddressToInAddrWin(ip: IpAddress): InAddr =
+    ## Converts an `IpAddress` (assumed IPv4) to the Winsock `InAddr`
+    ## wire form expected by `setsockopt(IP_ADD_MEMBERSHIP, ...)`.
+    doAssert ip.family == IpAddressFamily.IPv4,
+      "peer-cache multicast is IPv4-only (got " & $ip.family & ")"
+    let s = $ip
+    # winlean exports `inet_addr(cstring): uint32`; on Windows the
+    # `InAddr.s_addr` field is `uint32`, so a direct assignment works
+    # without the POSIX `InAddrScalar` wrapper.
+    result.s_addr = winlean.inet_addr(s.cstring)
 
   proc newMulticastReceiverSocket*(group: MulticastGroup): AsyncSocket =
-    raise newException(MulticastSocketError,
-      "multicast receiver: not supported on this platform " &
-      "(repro_peer_cache v1 ships POSIX-only multicast; Windows " &
-      "port deferred — see Dotfiles-Migration-Completion N2)")
+    ## Creates a UDP socket, sets `SO_REUSEADDR` (Windows: allows
+    ## binding a port already bound by another socket — what we want
+    ## for multicast on loopback where each peer needs its own
+    ## receiver on the same port), binds to `INADDR_ANY:port`, and
+    ## joins the multicast group via `IP_ADD_MEMBERSHIP`.
+    ##
+    ## The returned socket is wrapped with `newAsyncSocket(fd, ...)`
+    ## after `createAsyncNativeSocket` registered the handle with the
+    ## dispatcher's IOCP.
+    wsaInit()
+    let fd = createAsyncNativeSocket(
+      Domain.AF_INET, SockType.SOCK_DGRAM, Protocol.IPPROTO_UDP)
+    if fd.SocketHandle == osInvalidSocket:
+      raise newException(MulticastSocketError,
+        "multicast receiver: createAsyncNativeSocket failed")
+    let nativeFd = fd.SocketHandle
+    var reuse: cint = 1
+    if winlean.setsockopt(nativeFd, winlean.SOL_SOCKET,
+                          winlean.SO_REUSEADDR,
+                          cast[pointer](addr reuse),
+                          SockLen(sizeof(reuse))) < 0:
+      discard winlean.closesocket(nativeFd)
+      raise newException(MulticastSocketError,
+        "multicast receiver: setsockopt SO_REUSEADDR failed " &
+        "(WSAGetLastError=" & $wsaGetLastError() & ")")
+    var bindAddr: Sockaddr_in
+    bindAddr.sin_family = uint16(winlean.AF_INET)
+    bindAddr.sin_port = nativesockets.htons(uint16(group.port))
+    bindAddr.sin_addr.s_addr = 0'u32  # INADDR_ANY
+    if winlean.bindSocket(nativeFd, cast[ptr SockAddr](addr bindAddr),
+                          SockLen(sizeof(bindAddr))) < 0:
+      discard winlean.closesocket(nativeFd)
+      raise newException(MulticastSocketError,
+        "multicast receiver: bind to port " & $group.port.int &
+        " failed (WSAGetLastError=" & $wsaGetLastError() & ")")
+    var mreq: IpMreqWin
+    mreq.imr_multiaddr = ipAddressToInAddrWin(group.address)
+    mreq.imr_interface = ipAddressToInAddrWin(group.interfaceIp)
+    if winlean.setsockopt(nativeFd, IPPROTO_IP_WIN,
+                          IP_ADD_MEMBERSHIP_WIN,
+                          cast[pointer](addr mreq),
+                          SockLen(sizeof(mreq))) < 0:
+      discard winlean.closesocket(nativeFd)
+      raise newException(MulticastSocketError,
+        "multicast receiver: IP_ADD_MEMBERSHIP failed on group " &
+        $group.address & " interface " & $group.interfaceIp &
+        " (WSAGetLastError=" & $wsaGetLastError() & ")")
+    result = newAsyncSocket(fd, Domain.AF_INET,
+                            SockType.SOCK_DGRAM, Protocol.IPPROTO_UDP,
+                            buffered = false)
 
   proc newMulticastSenderSocket*(group: MulticastGroup): AsyncSocket =
-    raise newException(MulticastSocketError,
-      "multicast sender: not supported on this platform " &
-      "(repro_peer_cache v1 ships POSIX-only multicast; Windows " &
-      "port deferred — see Dotfiles-Migration-Completion N2)")
+    ## Creates a UDP socket configured for sending to a multicast
+    ## group: `IP_MULTICAST_IF` selects the outbound interface,
+    ## `IP_MULTICAST_LOOP` is explicitly enabled (Windows default is
+    ## already on; explicit for symmetry with the POSIX branch +
+    ## documentation), and `IP_MULTICAST_TTL` is 1 for link-local
+    ## scope (the loopback test path never crosses a router but the
+    ## TTL is still load-bearing for the LAN-scope path).
+    wsaInit()
+    let fd = createAsyncNativeSocket(
+      Domain.AF_INET, SockType.SOCK_DGRAM, Protocol.IPPROTO_UDP)
+    if fd.SocketHandle == osInvalidSocket:
+      raise newException(MulticastSocketError,
+        "multicast sender: createAsyncNativeSocket failed")
+    let nativeFd = fd.SocketHandle
+    var ifaceAddr = ipAddressToInAddrWin(group.interfaceIp)
+    if winlean.setsockopt(nativeFd, IPPROTO_IP_WIN,
+                          IP_MULTICAST_IF_WIN,
+                          cast[pointer](addr ifaceAddr),
+                          SockLen(sizeof(ifaceAddr))) < 0:
+      discard winlean.closesocket(nativeFd)
+      raise newException(MulticastSocketError,
+        "multicast sender: IP_MULTICAST_IF failed on interface " &
+        $group.interfaceIp &
+        " (WSAGetLastError=" & $wsaGetLastError() & ")")
+    # IP_MULTICAST_LOOP on Windows takes a DWORD (cuint). Many
+    # examples pass a single byte and it works thanks to a kernel
+    # compatibility shim, but the documented type is DWORD; we use
+    # cuint to match. Same for IP_MULTICAST_TTL.
+    var loopOn: cuint = 1
+    discard winlean.setsockopt(nativeFd, IPPROTO_IP_WIN,
+                               IP_MULTICAST_LOOP_WIN,
+                               cast[pointer](addr loopOn),
+                               SockLen(sizeof(loopOn)))
+    var ttl: cuint = 1
+    discard winlean.setsockopt(nativeFd, IPPROTO_IP_WIN,
+                               IP_MULTICAST_TTL_WIN,
+                               cast[pointer](addr ttl),
+                               SockLen(sizeof(ttl)))
+    result = newAsyncSocket(fd, Domain.AF_INET,
+                            SockType.SOCK_DGRAM, Protocol.IPPROTO_UDP,
+                            buffered = false)
 
   proc sendMulticastPacket*(sock: AsyncSocket; group: MulticastGroup;
                             data: string) =
-    raise newException(MulticastSocketError,
-      "sendMulticastPacket: not supported on this platform " &
-      "(repro_peer_cache v1 ships POSIX-only multicast; Windows " &
-      "port deferred — see Dotfiles-Migration-Completion N2)")
+    ## Posts a UDP packet to the multicast group via raw
+    ## `winlean.sendto`, bypassing `asyncnet.sendTo` (which routes
+    ## through `getaddrinfo` and surfaces hostname resolution errors
+    ## on multicast literals). UDP `sendto` on a non-blocking socket
+    ## (which `newAsyncSocket` sets) is intentionally synchronous
+    ## here: the kernel never blocks on a transient outbound
+    ## multicast packet so a `Future[void]` would just complete on
+    ## the dispatcher's next tick.
+    var destAddr: Sockaddr_in
+    destAddr.sin_family = uint16(winlean.AF_INET)
+    destAddr.sin_port = nativesockets.htons(uint16(group.port))
+    destAddr.sin_addr = ipAddressToInAddrWin(group.address)
+    let nativeFd = sock.getFd()
+    discard winlean.sendto(nativeFd,
+                           cast[pointer](data.cstring),
+                           cint(data.len),
+                           0.cint,
+                           cast[ptr SockAddr](addr destAddr),
+                           SockLen(sizeof(destAddr)))
 
 # ---------------------------------------------------------------------------
 # Mkhello-as-multicast-packet helpers (cross-platform).
