@@ -48,6 +48,27 @@ package python3:
     nixPackage "nixpkgs#python3", executablePath = "bin/python3",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux: official Python embeddable build via
+    # ScoopInstaller/Main's `python` manifest. The DSL package name
+    # remains `python3` (matches the POSIX command); `app = "python"`
+    # is the Scoop side.
+    scoopApp(bucket = "main", app = "python",
+      preferredVersion = ">=3", executablePath = "python.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: python.org embeddable zip (not the NSIS
+    # installer — the official `python-X.Y.Z-amd64.exe` is not a
+    # passive archive). The embeddable distribution is the same
+    # python interpreter without the launcher / IDLE / docs, ships
+    # `python.exe` at the archive root and is what the existing
+    # `python3Catalog` consumes on Windows.
+    tarball url = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+      sha256 = "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
+      archiveType = "zip",
+      executablePath = "python.exe",
+      packageId = "python@3.12.10",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:python@3.12.10:sha256:4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

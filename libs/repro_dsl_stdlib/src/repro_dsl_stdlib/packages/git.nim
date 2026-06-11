@@ -38,6 +38,23 @@ package git:
     nixPackage "nixpkgs#git", executablePath = "bin/git",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux: PortableGit via ScoopInstaller/Main.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "bin/git.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: Git for Windows ships PortableGit as a 7z self-
+    # extracting EXE (`.7z.exe`). Our `7z.exe` archiveType handles SFX
+    # envelopes transparently; the archive expands flat to a tree whose
+    # `bin/git.exe` we expose at the prefix root (no stripComponents
+    # needed — the PortableGit layout already sits at the root).
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "bin/git.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 # ---------------------------------------------------------------------------
 # M3-extended bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

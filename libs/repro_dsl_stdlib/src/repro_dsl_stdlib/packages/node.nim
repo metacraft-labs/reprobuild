@@ -49,6 +49,24 @@ package node:
     nixPackage "nixpkgs#nodejs", executablePath = "bin/node",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux: Node.js zip via ScoopInstaller/Main. The
+    # manifest extracts the `node-vX.Y.Z-win-x64/` subtree to the prefix
+    # root, so node.exe ends up at the top level.
+    scoopApp(bucket = "main", app = "nodejs",
+      preferredVersion = ">=20", executablePath = "node.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: official Node.js 7z from nodejs.org. archive
+    # layout is `node-v24.16.0-win-x64/node.exe` so stripComponents=1
+    # flattens the leading directory.
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.7z",
+      sha256 = "9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211",
+      archiveType = "7z",
+      stripComponents = 1,
+      executablePath = "node.exe",
+      packageId = "node@24.16.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:node@24.16.0:sha256:9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211"
 
   executable node:
     cli:

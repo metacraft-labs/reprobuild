@@ -5,3 +5,20 @@ package npx:
     nixPackage "nixpkgs#nodejs", executablePath = "bin/npx",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows: npx ships as part of the Node.js zip from ScoopInstaller/
+    # Main's `nodejs` app. After extract, npx.cmd lives at the prefix
+    # root alongside node.exe.
+    scoopApp(bucket = "main", app = "nodejs",
+      preferredVersion = ">=20", executablePath = "npx.cmd",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: same Node.js 7z as `node.nim`; npx.cmd ships at
+    # the root of the flattened tree.
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.7z",
+      sha256 = "9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211",
+      archiveType = "7z",
+      stripComponents = 1,
+      executablePath = "npx.cmd",
+      packageId = "node@24.16.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:node@24.16.0:sha256:9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211"

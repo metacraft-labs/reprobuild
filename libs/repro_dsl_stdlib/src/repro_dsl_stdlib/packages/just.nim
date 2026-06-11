@@ -27,6 +27,22 @@ package just:
     nixPackage "nixpkgs#just", executablePath = "bin/just",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux: just via ScoopInstaller/Main. Single
+    # static binary at the prefix root.
+    scoopApp(bucket = "main", app = "just",
+      preferredVersion = ">=1", executablePath = "just.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: just from GitHub Releases. Archive ships
+    # `just.exe` flat at the root (no enclosing directory), so
+    # stripComponents defaults to 0.
+    tarball url = "https://github.com/casey/just/releases/download/1.51.0/just-1.51.0-x86_64-pc-windows-msvc.zip",
+      sha256 = "09d1138b6845e73f04bff5e26be3f57663bddca25e36fe6241d28a5aa310b64e",
+      archiveType = "zip",
+      executablePath = "just.exe",
+      packageId = "just@1.51.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:just@1.51.0:sha256:09d1138b6845e73f04bff5e26be3f57663bddca25e36fe6241d28a5aa310b64e"
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

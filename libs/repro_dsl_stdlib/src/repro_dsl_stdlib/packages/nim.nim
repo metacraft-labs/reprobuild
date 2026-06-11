@@ -42,6 +42,42 @@ package nim:
     nixPackage "nixpkgs#nim", executablePath = "bin/nim",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux provisioning via Scoop's ScoopInstaller/Main
+    # bucket. The bucket version is the source of truth — `preferredVersion`
+    # is used here (vs. `version`) so any later 2.2.x publication satisfies
+    # the codetracer constraint without forcing a downgrade. The bin path
+    # matches `nimCatalog` below (Scoop manifest's first `bin` entry).
+    # `requiresExecutionProfileChecksum = false` keeps the engine from
+    # demanding a recorded execution-profile when the operator hasn't yet
+    # captured one for the host architecture.
+    scoopApp(bucket = "main", app = "nim",
+      preferredVersion = ">=1.6,<3.0", executablePath = "bin/nim.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download provisioning consumed by --tool-provisioning=tarball.
+    # One tarball(...) entry per (cpu, os) slice the package supports.
+    # The resolver picks the first entry whose constraints match the
+    # build host; entries with cpu/os = "any" (or omitted) match every
+    # host and act as a catch-all. URLs + SHAs come straight from
+    # nim-lang.org — the same upstream that `nimCatalog` below
+    # harvests from.
+    tarball url = "https://nim-lang.org/download/nim-2.2.10_x64.zip",
+      sha256 = "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f",
+      archiveType = "zip",
+      stripComponents = 1,
+      executablePath = "bin/nim.exe",
+      packageId = "nim@2.2.10",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:nim@2.2.10:sha256:fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f"
+    tarball url = "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz",
+      sha256 = "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/nim",
+      packageId = "nim@2.2.10",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:nim@2.2.10:linux:sha256:0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211"
 
   executable nim:
     cli:
