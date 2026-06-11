@@ -856,11 +856,114 @@ covers arch/debian/ubuntu/fedora/alpine). The harness reports
 `opensuse` as FAIL with `unrecognized ID` when invoked via `--all`;
 this is by design.
 
-## Future work (M9+)
+## M9 — Generation switch + rollback demo
 
-- M9: generation switch + rollback on debian-wsl. The real system-
-  apply path lands here — M7's plan-only observation graduates to
-  apply + rollback with elevation under M82's broker.
+`tools/multi-distro-harness/tests/m9_rollback.sh` exercises the M83
+generation registry + M10 home-gc engine + M56 content-addressed
+store end-to-end on a non-NixOS distro. The fixture pair
+(`tests/fixtures/m9_profile_a.nim` + `m9_profile_b.nim`) declares
+the SAME resource address (`rollbackFile`) with DIFFERENT
+`fs.userFile` content so the test driver can byte-compare the live
+file's contents after each transition.
+
+The test driver:
+
+1. Re-runs `bootstrap-debian.sh` (warm-build short-circuit).
+2. Stages profile A as `home.nim` under `${WORK_ROOT}/m9-rollback/profile/`.
+3. Resets per-run `STATE_DIR` + `STORE_ROOT` + `${HOME}/.config/m9-test/`.
+4. Runs `repro home apply` for profile A; captures `ID_A` from the
+   `applied generation <hex>` log line; asserts the live file's
+   bytes match `m9-profile-A\n`.
+5. Swaps the staged profile to B; re-applies; captures `ID_B`;
+   asserts `ID_A != ID_B` + the live file is now `m9-profile-B\n`.
+6. Runs `repro home history`; asserts both generation short ids
+   (12-char hex) appear AND B's row carries the `[active]` marker.
+7. Runs `repro home rollback ${ID_A}`; asserts the log contains
+   `rolled back from ${ID_B} to ${ID_A}`; re-reads the live file
+   and asserts the bytes are back to `m9-profile-A\n`; re-runs
+   `repro home history` and asserts the `[active]` marker is now
+   on A's row (NOT on B's).
+8. Runs `repro home gc --dry-run --keep-generations 1`; asserts the
+   log contains `no orphaned prefixes` (the M9 profile is
+   package-free, so the M10 gc engine has nothing to reclaim —
+   the assertion confirms the engine ran against the right
+   state-dir + store-root + correctly computed the empty
+   live-prefix set).
+9. Runs `repro store gc`; asserts the `reclaimed: <N>` line is
+   present and `repro store roots` still lists `${ID_A}` (the
+   active generation MUST stay registered).
+
+The `EXIT` trap removes `${WORK_ROOT}/m9-rollback/` + `~/.config/m9-test/`
+so a re-run starts clean even after a failure.
+
+### Debian-only by design
+
+M9 runs on `repro-debian` only. The M83 generation registry, the
+M10 home-gc engine, and the M56 store gc are all platform-pure —
+per-distro divergences (gcc version, glibc vs musl, multiarch dir
+layout, systemd vs openrc) sit BELOW this layer in the build
+pipeline. M6 already proves the home apply pipeline materializes
+uniformly across all five non-NixOS distros (5/5 op count, no-op
+drift); re-running M9 on arch/ubuntu/fedora/alpine would re-prove
+the M6 gate without adding signal. The script refuses to run on
+non-debian distros with a clear error message.
+
+### Two env-var notes
+
+- **`REPRO_STORE_ROOT`, not `REPRO_HOME_STORE_ROOT`.** The home
+  apply pipeline reads `REPRO_STORE_ROOT` (the canonical M56
+  store-root env var, surfaced by
+  `libs/repro_local_store/src/repro_local_store/store.nim` as
+  `StoreRootEnvVar`). `REPRO_HOME_STORE_ROOT` (which M6's test
+  driver sets) is unused — verified via grep + a side-by-side
+  store-root comparison run. M9 deliberately uses the right env
+  var so the gc step asserts against the same store the apply
+  pipeline wrote to. The M6 pin is benign for the M6 gate (M6
+  never reads the store) but would silently leak realization into
+  the user's real `~/.cache/repro/store` if M6 ever started
+  asserting on store contents. Flagging for a future M6 cleanup.
+
+- **Package-free profile + `no orphaned prefixes` assertion.** The
+  M9 fixtures declare a single `fs.userFile` resource with no
+  package realization. The M10 home-gc engine reclaims orphaned
+  content-addressed prefixes (i.e. realized packages); the
+  `fs.userFile` primitive is rolled back/forward via the
+  in-process file manager, not via store prefixes. So
+  `repro home gc --keep-generations 1` deterministically reports
+  `no orphaned prefixes — store is clean` on this profile shape.
+  Asserting that exact outcome IS the M9 gate for a package-free
+  profile — it confirms the engine runs against the right
+  state-dir + store-root + that it correctly computes the empty
+  live-prefix set across the kept generations. Package-realization
+  gc IS exercised by the Nim e2e suite (`t_home_gc.nim`,
+  `t_integration_local_store_gc.nim`,
+  `t_e2e_repro_home_rollback_round_trip.nim`); that surface uses
+  `REPRO_TEST_PACKAGE_SOURCE` to install fake packages without a
+  real adapter, which is a test-only seam that does not belong in
+  a cross-distro shell-test gate.
+
+### Running M9 acceptance
+
+```bash
+bash scripts/run_multi_distro_tests.sh m9_rollback debian       # 1/1 expected
+```
+
+Sample green run:
+
+```
+==== debian (repro-debian) : m9_rollback ====
+  store-root:   /tmp/reprobuild-bootstrap-debian/m9-rollback/store
+  ID_A:         bb590b4edb91eee1056e53f55b4b39a2
+  ID_B:         fc958f2d0bb3143a012e365f3415ba70
+  transitions:  apply A -> apply B -> rollback to A (live file restored)
+  gc:           home gc clean; store gc clean; active root preserved
+[PASS] debian: m9_rollback (rc=0)
+
+repro multi-distro: 1/1 distros passed
+```
+
+## Cross-campaign blocked milestones
+
 - M5: cross-distro binary-cache push/pull (blocked on
   Peer-Cache-Server-And-Tooling M1).
 - M8: multi-output package realize (blocked on a cross-campaign
