@@ -1030,10 +1030,120 @@ with NO `--unshare-pid`, NO `--unshare-net`, NO `--unshare-ipc`, NO
   future distro DOES, `sandbox_check_bubblewrap` will FAIL with a
   clear remediation line.
 
+### Sandbox-MVP M5 — Closure dedup + cold/warm profile
+
+`tools/sandbox-harness/m5_dedup_profile.sh` is the Sandbox-MVP M5
+deliverable: a POSIX-sh measurement runner that profiles the M2 / M3 /
+M4 orchestrators' cold + warm + cross-package realize timings on the
+applicable per-distro fetcher, asserts per-fetcher dedup, and documents
+the cross-fetcher namespace divergence + the peer-cache cross-campaign
+blocker. Honest scope: M5 is largely measurement + documentation, NOT
+new orchestration code. The dedup behaviour itself is already-working
+by virtue of the M2/M3/M4 content-addressed prefix layout
+(`sha256-<upstream-bytes-sha>-<pkg>/data/`) — the existing M2/M3/M4
+integration tests' warm-run gates already assert "cache hit" lines.
+
+Running:
+
+```bash
+# Inside any of repro-debian / repro-ubuntu / repro-fedora / repro-arch.
+bash tools/sandbox-harness/m5_dedup_profile.sh
+```
+
+The script detects distro via `/etc/os-release` and dispatches to the
+matching fetcher block (`debian|ubuntu` -> apt; `fedora` -> dnf;
+`arch` -> pacman). Each block:
+
+1. **Cold realize root #1** (`--no-exec` — isolates the realize pipeline
+   from the bwrap launch round-trip). Wall time captured via
+   `/usr/bin/time -p`.
+2. **Warm realize root #1** (same `$REPRO_STORE_ROOT`). Wall time +
+   "cache hit" count + `cold/warm` speedup ratio. Asserts:
+   - cache-hit line count >= per-fetcher floor (3 for apt, 3 for dnf,
+     5 for pacman; covers per-prefix + composed-tree + index hits).
+   - `cold/warm` speedup >= 10x (the M5 spec verification clause).
+3. **Cross-package realize of root #2**. Root #2's first-level
+   dependencies overlap root #1's closure on the shared libc dependency:
+
+   | fetcher | root #1 | root #2    | shared dep         |
+   | ------- | ------- | ---------- | ------------------ |
+   | apt     | hello   | sed        | libc6              |
+   | dnf     | hello   | which      | glibc              |
+   | pacman  | bash    | coreutils  | glibc              |
+
+   Asserts the shared lib's prefix is a cache hit (cross-package dedup).
+4. **Summary block** with per-fetcher CSV table + the dedup verdict
+   (per-fetcher: verified; cross-fetcher: not possible by design;
+   peer-cache: blocked).
+
+**Per-fetcher dedup verdict (verified):**
+
+- Per-fetcher dedup works as designed. The orchestrators' "if data
+  dir already exists" cache-hit branches (apt_mvp.sh L391, dnf_mvp.sh
+  L586, pacman_mvp.sh L563) short-circuit the second realize of the
+  same upstream sha256.
+- The composed FHS tree is ALSO cached by closure digest, and the
+  per-fetcher index file (`Packages.gz` / `primary.xml.gz` / `desc`
+  dir) is cached by its own upstream sha256.
+
+**Cross-fetcher dedup verdict (not possible by design):**
+
+apt's `libc6_2.36-9+deb12u13_amd64.deb`, dnf's
+`glibc-2.38-7.fc39.x86_64.rpm`, and pacman's
+`glibc-2.40+r16+gaa533d58ff-2-x86_64.pkg.tar.zst` have THREE different
+upstream sha256 values — they are three different binary container
+formats over conceptually the same upstream glibc but with different
+vendor patches, build flags, and binary layouts. The store is
+content-addressed by upstream BYTES, so the three realize into three
+distinct `sha256-<...>-libc6` / `sha256-<...>-glibc` prefixes. This is
+correct behaviour and matches Nix (a glibc derivation built via apt is
+a different store path from one built via dnf even when both are
+"logically glibc 2.36"). Cross-distro shared store paths are the
+[`Linux-Distro-Recipe-Validation.milestones.org`](../../../reprobuild-specs/Linux-Distro-Recipe-Validation.milestones.org)
+M5 problem space and require either Realize-Closure-style toolchain
+pinning or per-toolchain-tier keying — both out-of-scope for the
+Tier 3 sandbox consumption story.
+
+**Peer-cache integration verdict (blocked):**
+
+Same blocker as Linux-Distro-Recipe-Validation M5:
+`apps/repro/repro.nim` -> `runBuildCommand` in
+`libs/repro_cli_support/src/repro_cli_support.nim` does not yet consult
+`PeerCacheActionCacheReader`
+(`libs/repro_peer_cache/src/repro_peer_cache/engine_seam.nim`). The
+peer-cache daemon + the reader work in isolation (60+ unit tests pass),
+but no consumer in `repro_build_engine`, `repro_local_store`,
+`repro_cli_support`, or any worker path instantiates it. Until a
+"wire `PeerCacheActionCacheReader` into `runBuildCommand`" task lands
+in the Peer-Cache campaign, neither Recipe-Validation nor Sandbox-MVP
+can demonstrate cross-host pull of a realized prefix at the harness
+surface.
+
+The Sandbox-MVP M5 spec section mirrors Recipe-Validation M5a:
+document the gap, mark M5 `in_review` for the measurement +
+documentation deliverable, proceed to M6 (steam-run use-case
+validation) which doesn't depend on cross-host cache.
+
+### Cold/warm timing envelopes
+
+The script reports VERBATIM what it measures; numbers below are the
+per-orchestrator header comments' honest scope estimates, NOT pinned
+fixtures. The script's PASS / FAIL lines surface whatever the actual
+host measures.
+
+| Fetcher | Cold (est.) | Warm (est.) | Speedup (est.) | Source                          |
+| ------- | ----------- | ----------- | -------------- | ------------------------------- |
+| apt     | 10-30 s     | <2 s        | >=10x          | apt_mvp.sh header               |
+| dnf     | 30-90 s     | <5 s        | >=10x          | dnf_mvp.sh header               |
+| pacman  | 30-90 s     | <5 s        | >=10x          | pacman_mvp.sh header            |
+
 ## Cross-campaign blocked milestones
 
-- M5: cross-distro binary-cache push/pull (blocked on
-  Peer-Cache-Server-And-Tooling M1).
+- M5 peer-cache push/pull arm: cross-distro binary-cache push/pull
+  (blocked on Peer-Cache campaign wiring
+  `PeerCacheActionCacheReader` into `runBuildCommand`). The
+  per-fetcher dedup + cold/warm profile arms ARE delivered; only the
+  cross-host pull demo is blocked.
 - M8: multi-output package realize (blocked on a cross-campaign
   Reprobuild-Development milestone — DSL, build graph, and
   content-addressed store do not yet partition a package's
