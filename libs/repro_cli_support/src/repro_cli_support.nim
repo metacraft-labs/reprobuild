@@ -1364,6 +1364,109 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # at engine execution time so recipes that need to dispatch back to
   # ct-test-runner do so through ``currentBuildContext().testRunner``.
 
+  # Deferred-Item D1: ``ct_test_nim_unittest.buildNimUnittest.{run,
+  # runTest, list}`` execute-edge passthrough. The
+  # ``NimUnittestBinary`` UFCS dispatch procs at
+  # ``ct-test/libs/ct_test_nim_unittest/src/ct_test_nim_unittest.nim``
+  # record their call against the ``NimUnittestToolId`` typed-tool
+  # identifier (``ct_test_nim_unittest.buildNimUnittest``) — there is
+  # NO backing executable for that identifier on PATH because the
+  # test binary IS the executable to invoke. The binary path flows in
+  # as a typed input under the ``binary`` arg slot. Resolve the call
+  # by treating the ``binary`` input value as the executable directly
+  # and translating the per-subcommand argv to the convention the
+  # stdlib's ``directRun`` / ``directList`` / ``directEnumerate``
+  # implementations in
+  # ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/interfaces/test_runner.nim``
+  # use today:
+  #
+  #   subcommand "run"     -> [binary]  (+ filter as positional)
+  #   subcommand "runTest" -> [binary, testName]
+  #   subcommand "list"    -> [binary, "--list-json"]
+  #
+  # This unblocks the Bootstrap-And-Self-Build B3/B4 outcomes by
+  # closing the path-mode resolver gap the engine documented in the
+  # ``no tool profile was resolved`` diagnostic. The ``test`` build
+  # graph collection's EXECUTE half now lowers without a profile
+  # lookup — the binary's own content is the action's executable
+  # contract.
+  const NimUnittestToolId = "ct_test_nim_unittest.buildNimUnittest"
+  if executableName == NimUnittestToolId and
+      payload.call.subcommand in ["run", "runTest", "list"]:
+    var binaryPath = ""
+    var filterValue = ""
+    var testNameValue = ""
+    var listJson = false
+    for arg in payload.call.arguments:
+      case arg.name
+      of "binary":
+        binaryPath = arg.encodedValue
+      of "filter":
+        filterValue = arg.encodedValue
+      of "run":
+        testNameValue = arg.encodedValue
+      of "list-json":
+        listJson = arg.encodedValue.normalize == "true"
+      else:
+        discard
+    if binaryPath.len == 0:
+      raise newException(ValueError,
+        "tool-resolution failed: action " & payload.id &
+          " references " & NimUnittestToolId &
+          " but the ``binary`` input slot is empty")
+    let resolvedBinary = materialProjectPath(projectRoot, binaryPath)
+    var argv: seq[string] = @[resolvedBinary]
+    case payload.call.subcommand
+    of "run":
+      if filterValue.len > 0:
+        argv.add(filterValue)
+    of "runTest":
+      if testNameValue.len > 0:
+        argv.add(testNameValue)
+    of "list":
+      if listJson:
+        argv.add("--list-json")
+    else:
+      discard
+    var translatedInputs: seq[string] = @[]
+    for input in payload.inputs:
+      translatedInputs.add(materialProjectPath(projectRoot, input))
+    let commandStatsId =
+      if payload.commandStatsId.len > 0:
+        payload.commandStatsId
+      else:
+        payload.id
+    let fingerprintText = [
+      "reprobuild.localProjectAction.v1",
+      payload.id,
+      NimUnittestToolId,
+      NimUnittestToolId,
+      payload.call.subcommand,
+      node.payload
+    ].join("\n")
+    return repro_build_engine.action(
+      payload.id,
+      argv,
+      cwd = projectRoot,
+      deps = payload.deps,
+      inputs = translatedInputs,
+      outputs = payload.outputs,
+      pool = payload.pool,
+      poolUnits = payload.poolUnits,
+      depfile = payload.depfile,
+      dynamicDepsFile = payload.dynamicDepsFile,
+      cacheable = payload.cacheable,
+      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      actionCachePolicy = actionCachePolicy,
+      dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
+        payload.dependencyPolicy),
+      commandStatsId = commandStatsId,
+      env =
+        if actionPathPrefix.len > 0:
+          @["PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")]
+        else:
+          @[])
+
   let profile =
     if profiles.hasKey(exactKey):
       profiles[exactKey]

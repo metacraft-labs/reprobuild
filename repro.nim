@@ -110,6 +110,19 @@ package reprobuild:
     "just >=1"
     "sh"
 
+    # Deferred-Item D1: ``python3`` is required by the in-graph Python
+    # test execute edges emitted via ``pythonUnittest.run(...)`` (see
+    # the ``for source in pythonTestPaths`` loop in the ``build:``
+    # block below). The wrapper at
+    # ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/python_unittest_runner.nim``
+    # records a ``PublicCliCall`` with ``executableName = "python3"``,
+    # so the path-mode resolver needs an explicit ``uses:`` entry to
+    # populate a profile for ``python3``. Without this entry the engine
+    # raises ``no tool profile was resolved`` when lowering any
+    # ``reprobuild.python_test.<stem>`` action. The Bootstrap-And-Self-
+    # Build B4 outcome documented this gap; D1 closes it.
+    "python3"
+
     # Bootstrap-And-Self-Build B0: ``runquotad`` is a runtime
     # dependency (spawned as a subprocess by daemon tests at
     # ``../runquota/build/bin/runquotad``). Declaring it in ``uses:``
