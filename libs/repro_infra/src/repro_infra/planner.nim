@@ -158,7 +158,11 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
      pokLinuxSysctl, pokLinuxUdevRule, pokLinuxPolkitRule,
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
-     pokLinuxFirewallRule:
+     pokLinuxFirewallRule,
+     pokLinuxNixosSystemModule, pokMacosDarwinSystemModule:
+    # The M2 (Dotfiles-Migration-Completion) NixOS + nix-darwin
+    # escape-hatch drivers are POSIX-side; their digest lives in
+    # posix_system_driver alongside the other Phase-C kinds.
     posixSystemDesiredDigestHex(op)
   else:
     systemDesiredDigestHex(op)
