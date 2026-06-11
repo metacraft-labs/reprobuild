@@ -75,6 +75,8 @@ type
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
+    cpu*: string
+    os*: string
     location*: SourceLocation
 
   InterfaceScoopProvisioning* = object
@@ -206,8 +208,14 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 9'u16
-    ## v9 (current): adds ``ProjectInterface.publicLibraries`` — the M12
+  EnvelopeVersion = 10'u16
+    ## v10 (current): adds ``InterfaceTarballProvisioning.cpu`` /
+    ##                ``InterfaceTarballProvisioning.os`` per-platform
+    ##                target fields. Encoded as two strings appended
+    ##                AFTER ``lockIdentity`` and BEFORE ``location`` in
+    ##                ``writeTarballProvisioning``. v9 payloads decode
+    ##                with empty cpu/os strings ( = "any" semantics).
+    ## v9: adds ``ProjectInterface.publicLibraries`` — the M12
     ##               DSL ``library`` member enumerates here. Encoded as a
     ##               ``u32`` count + per-entry ``InterfaceLibrary`` rows
     ##               appended to the interface payload BEFORE the
@@ -486,10 +494,12 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeU32Le(uint32(max(provisioning.stripComponents, 0)))
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
+  outp.writeString(provisioning.cpu)
+  outp.writeString(provisioning.os)
   outp.writeLocation(provisioning.location)
 
-proc readTarballProvisioning(bytes: openArray[byte]; pos: var int):
-    InterfaceTarballProvisioning =
+proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
+                             version: uint16): InterfaceTarballProvisioning =
   result.packageName = readString(bytes, pos)
   result.url = readString(bytes, pos)
   result.mirrors = readStringSeq(bytes, pos)
@@ -499,6 +509,12 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int):
   result.stripComponents = int(readU32Le(bytes, pos))
   result.packageId = readString(bytes, pos)
   result.lockIdentity = readString(bytes, pos)
+  if version >= 10'u16:
+    # v10: per-platform target fields. v9 payloads have no cpu/os —
+    # the empty defaults are semantically "any", matching the
+    # any-host behaviour the single-platform v9 schema implied.
+    result.cpu = readString(bytes, pos)
+    result.os = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
@@ -564,7 +580,8 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
     result.tarballProvisioning = newSeq[InterfaceTarballProvisioning](
       tarballCount)
     for i in 0 ..< tarballCount:
-      result.tarballProvisioning[i] = readTarballProvisioning(bytes, pos)
+      result.tarballProvisioning[i] = readTarballProvisioning(bytes, pos,
+        version)
   if version >= 5'u16:
     let scoopCount = int(readU32Le(bytes, pos))
     result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
@@ -907,6 +924,8 @@ proc toInterfaceTarballProvisioning(packageName: string;
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
+    cpu: provisioning.cpu,
+    os: provisioning.os,
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
 
