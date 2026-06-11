@@ -309,11 +309,11 @@
     "ct-test-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1781049322,
-        "narHash": "sha256-kUD3/UYcStGjdr4Cv9bUDXWy05HYRZY0YHVDn7g9B64=",
+        "lastModified": 1781207335,
+        "narHash": "sha256-wVZ0M8qGwdo0UqjXDGyNZXgxtW/omx30NUJLIox07U8=",
         "owner": "metacraft-labs",
         "repo": "ct-test",
-        "rev": "f746367c7f996b1599508971fdab3f37832c3dfe",
+        "rev": "29471027b1daf05c68c550cda4e0c3016702f093",
         "type": "github"
       },
       "original": {

@@ -3262,6 +3262,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_d3_ct_test_flake_pin_carries_b4_api.nim",
+    binary: "build/test-bin/t_d3_ct_test_flake_pin_carries_b4_api",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_d4_evidence_collection_scales_linearly.nim",
+    binary: "build/test-bin/t_d4_evidence_collection_scales_linearly",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_dependency_report_and_converter_paths.nim",
     binary: "build/test-bin/t_dependency_report_and_converter_paths",
     defines: @[],

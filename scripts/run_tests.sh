@@ -29,17 +29,6 @@ esac
 # Idempotent — the recipe no-ops when the binary already exists.
 just bootstrap
 
-# Override the flake-pinned CT_TEST_SRC with the live workspace
-# sibling when present. B4's ``buildNimUnittest`` cli surface (the
-# ``extraPassC`` / ``extraPassL`` parameters the HCR tests forward)
-# may be ahead of the flake-locked ct-test snapshot; the live
-# sibling is the source of truth in develop mode. CI workflows
-# pre-clone ct-test under ``../ct-test`` for exactly this reason.
-if [[ -d "../ct-test" && -d "../ct-test/libs/ct_test_nim_unittest" ]]; then
-  CT_TEST_SRC_ABS="$(cd ../ct-test && pwd)"
-  export CT_TEST_SRC="${CT_TEST_SRC_ABS}"
-fi
-
 # Step 2 (B5): build the runquota sibling so ``runquotad`` is on
 # PATH before the engine starts. The cross-project ``uses: runquota``
 # resolver isn't online yet (B0 outcome), so the daemon still builds
