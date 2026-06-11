@@ -1,30 +1,29 @@
 ## Bootstrap-And-Self-Build B0: end-to-end cross-project build.
 ##
 ## From inside reprobuild, invoke
-##   ./build/bin/repro --tool-provisioning=path --daemon=off \
-##     build runquota:runquotad
+##   ./build/bin/repro build runquota:runquotad \
+##     --tool-provisioning=path --daemon=off
 ## and assert that the resulting ``../runquota/build/bin/runquotad`` is
 ## executable and that ``runquotad --version`` exits 0.
 ##
-## Current behaviour / known limitation
-## ------------------------------------
-## The engine's named-target resolver (Named-Targets M1-M5) operates
-## inside a single project. Cross-project target syntax ``<pkg>:<name>``
-## — pointing the build action graph at *another* project's
-## ``repro.nim`` and consuming its declared ``executable`` outputs —
-## is not yet wired through. The B0 milestone deliberately ships the
-## test in this form so that a later milestone (B1+ or whenever the
-## cross-project resolver lands) can flip the ``skip()`` arm into a
-## hard assertion without rewriting the test.
+## Deferred-item D2 lifted the cross-project limitation. The engine's
+## named-target resolver now recognises the ``<pkg>:<target>`` form:
+## when ``<pkg>`` names a sibling checkout (``../<pkg>/repro.nim`` or
+## ``../<pkg>/reprobuild.nim``), the build redirects through the
+## engine's existing path-with-fragment codepath, treating the sibling
+## as the project anchor and the RHS as the named-target fragment.
 ##
-## Until that lands, the test self-classifies the engine's response:
+## The test self-classifies the engine's response:
 ##
-##   * If the engine returns a clear "unknown target" / "no such
-##     project" / "ambiguous target" diagnostic, the limitation is
-##     known and the test reports ``skip()`` rather than a hard fail.
 ##   * If the engine returns exit 0, the assertion is upgraded: the
 ##     output binary must exist, be non-empty, and respond to
 ##     ``--version``.
+##   * If the engine returns a clear "unknown target" / "no such
+##     project" / "ambiguous target" diagnostic (or a known
+##     tool-resolution / provisioning failure unrelated to the
+##     selector), the test reports ``skip()`` so the regression arm
+##     stays informative on hosts that lack the sibling checkout or a
+##     working tool environment.
 ##
 ## Skip-when-absent: the sibling ``../runquota/`` may not be present
 ## in every CI environment. Skip cleanly in that case.
@@ -119,12 +118,14 @@ suite "Bootstrap-And-Self-Build B0: repro build runquota:runquotad":
         if fileExists(runquotadBinary):
           removeFile(runquotadBinary)
 
+        # Spec-form invocation per Bootstrap-And-Self-Build B0: subcommand
+        # flags follow the ``build`` verb, not precede the program name.
         let args = @[
           reproBin.quoteShell,
-          "--tool-provisioning=path",
-          "--daemon=off",
           "build",
           "runquota:runquotad",
+          "--tool-provisioning=path",
+          "--daemon=off",
         ]
         let cmd = args.join(" ")
         checkpoint("running: " & cmd)

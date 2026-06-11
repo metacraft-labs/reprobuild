@@ -476,6 +476,46 @@ type
       ## this to flip ``selectDefaultAction = true``; watch sets the
       ## same flag for the same reason.
 
+proc findSiblingProjectFile*(packageName: string;
+                             currentDir = ""): string =
+  ## **Deferred Item D2** cross-project sibling discovery.
+  ##
+  ## Given a bare package name (the LHS of a ``<pkg>:<target>`` qualified
+  ## selector), check whether a sibling checkout exists alongside the
+  ## current project (one level up: ``../<pkg>/repro.nim`` or
+  ## ``../<pkg>/reprobuild.nim``). Returns the resolved project-file path
+  ## when found, otherwise the empty string.
+  ##
+  ## This is the minimum-viable cross-project discovery for D2 — the
+  ## broader workspace-manifest-backed develop-mode mechanism
+  ## (Workspace-And-Develop-Mode.md) is deferred to a later milestone.
+  ## Until that lands, sibling-directory discovery is enough to make
+  ## ``repro build runquota:runquotad`` route through the engine's
+  ## existing path-with-fragment codepath (which already supports
+  ## arbitrary out-of-tree project files; see the B0 outcome).
+  if packageName.len == 0:
+    return ""
+  # Filter out obviously-unsafe spellings — a package name with a path
+  # separator is not a bare package name; let the upstream qualified-
+  # selector validator reject it instead.
+  for ch in packageName:
+    if ch == '/' or ch == '\\' or ch == '.' or ch == ':':
+      return ""
+  let anchor =
+    if currentDir.len > 0: currentDir
+    else: getCurrentDir()
+  let siblingDir = anchor.parentDir / packageName
+  if not dirExists(extendedPath(siblingDir)):
+    return ""
+  let match =
+    try:
+      resolveProjectFile(siblingDir)
+    except ProjectFileAmbiguousError:
+      # Both repro.nim AND reprobuild.nim — let the regular project-
+      # loading codepath surface the diagnostic if the user proceeds.
+      return ""
+  match.path
+
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
                                command: string): ResolvedPositionalSelectors =
   ## Named-Targets M3: shared path-vs-name resolver for ``repro build``
@@ -518,7 +558,50 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
           command & ": multiple path / fragment selectors are not " &
             "supported in M3 (got '" & result.target & "' and '" & sel &
             "'); name-shaped selectors may follow a single path anchor")
-    of bskName, bskQualified:
+    of bskQualified:
+      # **Deferred Item D2** cross-project selector resolution. A
+      # qualified selector ``<pkg>:<target>`` whose LHS names a sibling
+      # checkout (``../<pkg>/repro.nim`` or ``reprobuild.nim``) routes
+      # through the engine's existing path-with-fragment codepath. The
+      # sibling's project file becomes the engine's project anchor, and
+      # the RHS becomes the named-target fragment. This intentionally
+      # short-circuits ahead of the same-project ``<package>:<name>``
+      # disambiguator below — the disambiguator is for cross-package
+      # collisions inside ONE project, so it never legitimately matches
+      # a sibling-checkout package name. The sibling-found branch wins.
+      let siblingProjectFile = findSiblingProjectFile(classified.package)
+      if siblingProjectFile.len > 0:
+        if not anchorSet:
+          result.target = siblingProjectFile & "#" & classified.name
+          anchorSet = true
+          # Do NOT also push the qualified selector into
+          # ``extraNameSelectors``: the path-with-fragment form already
+          # selects the action by name; a duplicate selector would
+          # trigger the lowering pass's name-resolver on the SIBLING
+          # project's export table (which would also work, but in
+          # ``--list-targets``-style invocations we want exactly one
+          # selector per action).
+          continue
+        else:
+          # A second cross-project anchor isn't supported in the same
+          # invocation today; the engine still loads one project per
+          # ``repro build`` run. Surface the same diagnostic shape as
+          # the multi-path-anchor case so the user knows to split it.
+          raise newException(ValueError,
+            command & ": multiple project anchors are not supported " &
+              "in one invocation (got '" & result.target & "' and " &
+              "cross-project selector '" & sel & "'); run two builds")
+      # Fall through to the in-project name-selector handling — a
+      # qualified selector without a matching sibling still routes
+      # through the existing same-project resolver, which lets the
+      # spec's same-project ``<package>:<name>`` disambiguator keep
+      # working unchanged.
+      if not anchorSet and firstNameSelector.len == 0:
+        firstNameSelector = sel
+      else:
+        if result.extraNameSelectors.find(sel) < 0:
+          result.extraNameSelectors.add(sel)
+    of bskName:
       if not anchorSet and firstNameSelector.len == 0:
         firstNameSelector = sel
       else:
