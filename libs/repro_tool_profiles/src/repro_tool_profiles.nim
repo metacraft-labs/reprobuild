@@ -1197,13 +1197,64 @@ proc fileSha256Hex*(path: string): string =
       "produced no recognizable digest in:\n" & res.output)
   normalizedSha256(parsed)
 
+proc hostCpuToken(): string =
+  ## Host CPU as the lowercase string DSL ``tarball cpu = "..."``
+  ## entries match against. Mirrors the M63 ``PlatformCpu`` taxonomy
+  ## (``x86_64`` and ``aarch64``) — anything else falls back to the
+  ## raw `hostCPU` name.
+  case hostCPU
+  of "amd64", "x86_64": "x86_64"
+  of "arm64", "aarch64": "aarch64"
+  else: hostCPU
+
+proc hostOsToken(): string =
+  ## Host OS as the lowercase string DSL ``tarball os = "..."`` entries
+  ## match against. Mirrors the M63 ``PlatformOs`` taxonomy
+  ## (``windows`` / ``linux`` / ``macos``). The DSL accepts both
+  ## ``macos`` and ``darwin`` for the Apple OS; we report ``macos``.
+  when defined(windows): "windows"
+  elif defined(macosx): "macos"
+  elif defined(linux): "linux"
+  else: hostOS.toLowerAscii()
+
+proc matchesHostPlatform(provisioning: InterfaceTarballProvisioning): bool =
+  ## Empty cpu / os fields mean "any host", matching everything. A
+  ## non-empty value must match the host. ``darwin`` and ``macos`` are
+  ## aliases (the DSL parser accepts both spellings).
+  let cpuOk = provisioning.cpu.len == 0 or
+    provisioning.cpu.toLowerAscii() == "any" or
+    provisioning.cpu.toLowerAscii() == hostCpuToken()
+  let osNorm = provisioning.os.toLowerAscii()
+  let hostOsNorm = hostOsToken()
+  let osOk = osNorm.len == 0 or osNorm == "any" or
+    osNorm == hostOsNorm or
+    (hostOsNorm == "macos" and osNorm == "darwin") or
+    (hostOsNorm == "darwin" and osNorm == "macos")
+  cpuOk and osOk
+
+proc selectTarballProvisioning(useDef: InterfaceToolUse):
+    InterfaceTarballProvisioning =
+  ## Pick the first ``tarballProvisioning`` entry that matches the host
+  ## platform. ``cpu = ""`` / ``os = ""`` entries match every host and
+  ## act as a catch-all when no per-platform slice is supplied. Entries
+  ## are walked in declaration order so author intent is preserved
+  ## (early entries beat later catch-alls).
+  for provisioning in useDef.tarballProvisioning:
+    if matchesHostPlatform(provisioning):
+      return provisioning
+  raise newException(ValueError,
+    "tool-resolution failed: no tarball provisioning entry for package \"" &
+    useDef.packageSelector & "\" matches host cpu=" & hostCpuToken() &
+    " os=" & hostOsToken() & " (" & $useDef.tarballProvisioning.len &
+    " entries; see the package's `provisioning:` block)")
+
 proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
   if useDef.tarballProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: tarball metadata")
-  let selected = useDef.tarballProvisioning[0]
+  let selected = selectTarballProvisioning(useDef)
   let sha256 = normalizedSha256(selected.sha256)
   if selected.url.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -1298,13 +1349,25 @@ proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
     plan.packageSelector & "\n" & diagnostics.join("\n"))
 
 proc validateTarEntries(archivePath, archiveType: string) =
+  ## Sanity-check that the archive's entry names do not escape the
+  ## extraction directory via absolute paths or `..` traversal. Only
+  ## tar-family archives carry a cheap-to-list table; for zip / 7z /
+  ## raw payloads the extraction tools themselves refuse unsafe
+  ## entries (Expand-Archive, 7z, unzip all reject parent-relative
+  ## paths in their default modes), so we skip the pre-listing pass.
   let lowerType = archiveType.toLowerAscii()
   let args =
     case lowerType
     of "tar.gz", "tgz":
       @["tar", "-tzf", archivePath]
+    of "tar.xz", "txz":
+      @["tar", "-tJf", archivePath]
+    of "tar.bz2", "tbz", "tbz2":
+      @["tar", "-tjf", archivePath]
     of "tar":
       @["tar", "-tf", archivePath]
+    of "zip", "7z", "7z.exe", "raw":
+      return
     else:
       raise newException(ValueError,
         "tool-resolution failed: unsupported tarball archiveType " & archiveType)
@@ -1323,27 +1386,157 @@ proc validateTarEntries(archivePath, archiveType: string) =
       raise newException(OSError,
         "tool-resolution failed: unsafe archive entry: " & entry)
 
+proc resolveZipExtractor(): tuple[exe: string; kind: string] =
+  ## Choose a zip extractor. PowerShell's `Expand-Archive` is the
+  ## native Windows path and round-trips both `\\`- and `/`-separated
+  ## archives. `unzip` is the POSIX baseline. Returns a (path, kind)
+  ## pair; `kind` discriminates the command line shape because they
+  ## are NOT interchangeable.
+  when defined(windows):
+    let ps = findExe("powershell")
+    if ps.len > 0:
+      return (exe: ps, kind: "powershell")
+  let unzipExe = findExe("unzip")
+  if unzipExe.len > 0:
+    return (exe: unzipExe, kind: "unzip")
+  when not defined(windows):
+    let ps = findExe("powershell")
+    if ps.len > 0:
+      return (exe: ps, kind: "powershell")
+  raise newException(OSError,
+    "tool-resolution failed: no zip extractor available (looked for " &
+    (when defined(windows): "powershell + unzip" else: "unzip + powershell") &
+    ")")
+
+proc resolveSevenZipExe(): string =
+  ## Look up a `7z` / `7z.exe` on PATH. Used for `.7z` archives and
+  ## `.7z.exe` (SFX) payloads. Both Scoop's `main/7zip` and the
+  ## system 7-Zip install satisfy this; on POSIX, `p7zip`'s `7z`
+  ## binary speaks the same CLI.
+  for name in @["7z", "7z.exe", "7zz"]:
+    let exe = findExe(name)
+    if exe.len > 0:
+      return exe
+  raise newException(OSError,
+    "tool-resolution failed: no 7z extractor available (looked for 7z, 7z.exe, 7zz on PATH)")
+
+proc removeSingleTopLevelDir(destination: string) =
+  ## When a zip / 7z archive ships its payload under a single top-
+  ## level directory (the convention for nuwen.net's mingw, nim-
+  ## lang.org's nim-X.Y.Z_x64.zip, capnproto's tools zip, etc.),
+  ## flatten one level so the prefix root matches the layout the
+  ## DSL's `executablePath` references. The `stripComponents = 1`
+  ## tarball idiom maps onto this for non-tar archives.
+  var children: seq[string] = @[]
+  for kind, entry in walkDir(extendedPath(destination)):
+    children.add(entry)
+    if children.len > 1:
+      break
+  if children.len != 1:
+    return
+  let solo = children[0]
+  if not dirExists(extendedPath(solo)):
+    return
+  for kind, entry in walkDir(extendedPath(solo)):
+    let leaf = lastPathPart(entry)
+    let target = destination / leaf
+    moveFile(extendedPath(entry), extendedPath(target))
+  removeDir(extendedPath(solo))
+
+proc flattenStripComponents(destination: string; stripComponents: int) =
+  ## Approximates tar's ``--strip-components=N`` for archive formats
+  ## (zip, 7z) that have no native flag. v1 implements N=1, which
+  ## covers every Windows tool archive in the M68 catalog (each ships
+  ## its payload under a single top-level directory). N >= 2 raises
+  ## so a caller's misuse is caught at realize time rather than
+  ## silently producing the wrong prefix.
+  if stripComponents <= 0:
+    return
+  if stripComponents == 1:
+    removeSingleTopLevelDir(destination)
+    return
+  raise newException(ValueError,
+    "tool-resolution failed: stripComponents=" & $stripComponents &
+    " is not supported for non-tar archives; use stripComponents=1 or " &
+    "rely on a tarball archiveType")
+
 proc extractTarballArchive(archivePath, destination, archiveType: string;
                            stripComponents: int) =
   validateTarEntries(archivePath, archiveType)
   createDir(extendedPath(destination))
   let lowerType = archiveType.toLowerAscii()
-  var args =
-    case lowerType
-    of "tar.gz", "tgz":
-      @["tar", "-xzf", archivePath, "-C", destination]
-    of "tar":
-      @["tar", "-xf", archivePath, "-C", destination]
-    else:
-      raise newException(ValueError,
-        "tool-resolution failed: unsupported tarball archiveType " & archiveType)
-  if stripComponents > 0:
-    args.add("--strip-components=" & $stripComponents)
-  let res = execCmdEx(shellCommand(args))
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "tool-resolution failed: tar extraction failed for " & archivePath &
-      "\n" & res.output)
+  case lowerType
+  of "tar.gz", "tgz", "tar.xz", "txz", "tar.bz2", "tbz", "tbz2", "tar":
+    var args =
+      case lowerType
+      of "tar.gz", "tgz":
+        @["tar", "-xzf", archivePath, "-C", destination]
+      of "tar.xz", "txz":
+        @["tar", "-xJf", archivePath, "-C", destination]
+      of "tar.bz2", "tbz", "tbz2":
+        @["tar", "-xjf", archivePath, "-C", destination]
+      else: # "tar"
+        @["tar", "-xf", archivePath, "-C", destination]
+    if stripComponents > 0:
+      args.add("--strip-components=" & $stripComponents)
+    let res = execCmdEx(shellCommand(args))
+    if res.exitCode != 0:
+      raise newException(OSError,
+        "tool-resolution failed: tar extraction failed for " & archivePath &
+        "\n" & res.output)
+  of "zip":
+    let extractor = resolveZipExtractor()
+    let command =
+      case extractor.kind
+      of "powershell":
+        # `Expand-Archive` over PowerShell handles both `\\` and `/`
+        # separator archives correctly. We pipe via -Command + -File
+        # would require an on-disk script; -Command + a one-line
+        # expression keeps the call self-contained.
+        quoteShell(extractor.exe) &
+          " -NoProfile -ExecutionPolicy Bypass -Command " &
+          quoteShell("Expand-Archive -Path " & quoteShell(archivePath) &
+            " -DestinationPath " & quoteShell(destination) & " -Force")
+      of "unzip":
+        quoteShell(extractor.exe) & " -q -o " & quoteShell(archivePath) &
+          " -d " & quoteShell(destination)
+      else:
+        raise newException(ValueError, "unreachable")
+    let res = execCmdEx(command)
+    if res.exitCode != 0:
+      raise newException(OSError,
+        "tool-resolution failed: zip extraction failed for " & archivePath &
+        "\n" & res.output)
+    flattenStripComponents(destination, stripComponents)
+  of "7z", "7z.exe":
+    let sevenZipExe = resolveSevenZipExe()
+    # `x` = extract with full paths preserved.
+    # `-o<dir>` = output directory (NO space between -o and the path).
+    # `-y` = assume yes for all prompts (overwrites).
+    # `-bsp0` = no progress output on stdout.
+    # `-bso0` = no standard output (only errors go to stderr).
+    # 7z transparently recognises `.7z.exe` SFX envelopes; same call.
+    let command = quoteShell(sevenZipExe) & " x " &
+      quoteShell("-o" & destination) & " " & quoteShell(archivePath) &
+      " -y -bsp0 -bso0"
+    let res = execCmdEx(command)
+    if res.exitCode != 0:
+      raise newException(OSError,
+        "tool-resolution failed: 7z extraction failed for " & archivePath &
+        "\n" & res.output)
+    flattenStripComponents(destination, stripComponents)
+  of "raw":
+    # `raw` payloads are the executable themselves (e.g. rustup-init.exe).
+    # The `executablePath` declared by the package definition is the
+    # filename inside the prefix; copy the downloaded archive into
+    # place under that name. `stripComponents` is meaningless here.
+    raise newException(ValueError,
+      "tool-resolution failed: archiveType=raw extraction requires the " &
+      "caller to supply executablePath as the destination filename; " &
+      "use the cakBuiltin adapter for installer payloads")
+  else:
+    raise newException(ValueError,
+      "tool-resolution failed: unsupported tarball archiveType " & archiveType)
 
 proc tarballReceiptPath(prefix: string): string =
   prefix / ".reprobuild-tarball-receipt.json"
