@@ -9,6 +9,22 @@ build:
     mkdir -p test-logs
     bash ./scripts/build_apps.sh 2>&1 | tee test-logs/build.log
 
+# Bootstrap-And-Self-Build B5: materialise ./build/bin/repro from nim
+# when not already on disk. Idempotent — no-op when the binary already
+# exists; otherwise drives scripts/build_apps.sh to compile every
+# entrypoint in apps/entrypoints.txt (including ``repro``) via the
+# same path the engine-built ``apps`` collection uses. The ``test``
+# recipe + ``scripts/run_tests.sh`` call this first so a fresh checkout
+# without a pre-built engine binary still boots.
+bootstrap:
+    @if [ ! -x ./build/bin/repro ]; then \
+        echo "bootstrapping ./build/bin/repro from nim..."; \
+        mkdir -p test-logs; \
+        bash ./scripts/build_apps.sh 2>&1 | tee test-logs/bootstrap.log; \
+    else \
+        echo "./build/bin/repro already exists; skipping bootstrap"; \
+    fi
+
 test:
     mkdir -p test-logs
     bash ./scripts/run_tests.sh 2>&1 | tee test-logs/test.log

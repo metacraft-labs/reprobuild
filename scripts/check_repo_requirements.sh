@@ -65,7 +65,7 @@ require_contains flake.nix "shellHook = pre-commit-check.shellHook"
 # that 141 as a "missing recipe" false positive for whichever recipes
 # happen to sort first in just's output.
 just_recipes="$(just --summary | tr ' ' '\n')"
-for recipe in build test lint format fmt t bump-version bench bench-quick bench_reprobuild_core_mvp_performance bench_cmake_reprobuild_vs_ninja bench_cmake_reprobuild_vs_ninja_quick bench_cmake_reprobuild_vs_ninja_medium e2e_reprobuild_mvp_acceptance repomix check-repo-requirements; do
+for recipe in build bootstrap test lint format fmt t bump-version bench bench-quick bench_reprobuild_core_mvp_performance bench_cmake_reprobuild_vs_ninja bench_cmake_reprobuild_vs_ninja_quick bench_cmake_reprobuild_vs_ninja_medium e2e_reprobuild_mvp_acceptance repomix check-repo-requirements; do
   printf '%s\n' "${just_recipes}" | grep -Fxq "${recipe}" || fail "missing Justfile recipe ${recipe}"
 done
 
