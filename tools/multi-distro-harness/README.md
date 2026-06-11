@@ -472,7 +472,153 @@ gcc 16.1.1 + glibc differs from every M1/M2 baseline (Arch gcc 15.x,
 Debian gcc 12, Ubuntu gcc 11). Cross-distro bit-identity is M5's
 scope (peer-cache pull).
 
-## Future work (M4+)
+## M4 — Alpine self-bootstrap (musl baseline)
 
-- M4: same for Alpine (musl baseline).
+`bootstrap-alpine.sh` mirrors M1+M2+M3's shape inside `repro-alpine`
+(Alpine Linux 3.19, musl 1.2.4). Same flow: apk prereqs +
+`nim c -d:release` of `apps/repro` + `apps/repro-standard-provider`
+from `/mnt/d/metacraft/reprobuild`, no `nix develop`. Two new wrinkles
+relative to M1-M3:
+
+1. **Nim 2.2.10 is built from source** (~2 min) because Alpine
+   edge/community's apk nim is at 2.2.0, which has a codegen bug that
+   mis-generates the eqdestroy hook signature for sequence types
+   (`apps/repro` fails to compile at `codec_u551` in
+   `repro_dev_env_artifacts/codec.nim`). The fix landed in Nim 2.2.2+;
+   we use 2.2.10 to match M1-M3 exactly. choosenim is NOT a fallback:
+   its pre-built nim binaries are glibc-linked and refuse to execute
+   on musl. The source build path is:
+
+   ```sh
+   curl -fsSL -o nim-2.2.10.tar.xz https://nim-lang.org/download/nim-2.2.10.tar.xz
+   tar xJf nim-2.2.10.tar.xz && cd nim-2.2.10
+   sh ./build.sh                   # csources -> v1 nim via gcc
+   ./bin/nim c koch                # compile koch
+   ./koch boot -d:release          # self-host up to 2.2.10
+   ```
+
+   No pre-existing Nim is required — Nim's release tarball includes a
+   frozen `c_code/` csources subtree that `build.sh` compiles via plain
+   gcc.
+
+2. **Apk's edge repos** are enabled for the three hash/solver
+   dev packages (`blake3-dev`, `xxhash-dev`, `clingo-dev`). Alpine 3.19
+   main has clingo 5.6.2 + xxhash-dev 0.8.2 but **no blake3 at all**;
+   the edge repos carry blake3-dev 1.8.5 + clingo-dev 5.8.0 +
+   xxhash-dev 0.8.3 — all matching the versions M3 (Fedora) consumes
+   from dnf. Like M3 and unlike M1+M2, no upstream tarball builds of
+   clingo or blake3 are needed.
+
+Apk prereqs (Step 1):
+
+```
+build-base git curl ca-certificates xz
+pkgconf openssl-dev sqlite-dev
+cmake bison re2c unzip
+blake3-dev xxhash-dev clingo-dev   (from edge/community + edge/main)
+```
+
+Pkg sources (apk vs upstream):
+
+| Component  | Alpine 3.19 main    | Alpine edge             | Source chosen | Reason                                              |
+| ---------- | ------------------- | ----------------------- | ------------- | --------------------------------------------------- |
+| nim 2.2.2+ | nim 1.6.16 (too old)| nim 2.2.0 (codegen bug) | source build  | apk 2.2.0 mis-generates eqdestroy hooks; choosenim is glibc-only on musl. |
+| libclingo  | clingo-dev 5.6.2    | clingo-dev 5.8.0        | apk/edge      | Edge matches the upstream version M1+M2 built from tarball. |
+| libblake3  | (not present)       | blake3-dev 1.8.5        | apk/edge      | Same back-compat C API as M1+M2's upstream 1.5.0.   |
+| xxhash     | xxhash-dev 0.8.2    | xxhash-dev 0.8.3        | apk/edge      | Edge for version consistency with the other edge deps. |
+
+Divergences from M1 (Arch) + M2 (Debian/Ubuntu) + M3 (Fedora):
+
+- **Nim from source.** The most distinctive M4 trait; no other
+  milestone needs to build the Nim compiler. Adds ~2 min to the cold
+  bootstrap and ~120 MB to the work tree.
+- **Flat /usr/lib + /usr/include — no /usr/local symlink.** Unlike
+  M2's Debian multiarch (`/usr/lib/x86_64-linux-gnu/`) and M3's Fedora
+  `/usr/lib64/`, Alpine installs all shared libraries to `/usr/lib/`.
+  That's exactly what reprobuild's `config.nims` `firstExistingPrefix`
+  probes natively (`<prefix>/lib/<dylib>`), so `BLAKE3_PREFIX=/usr` +
+  `XXHASH_PREFIX=/usr` resolve directly. The M2/M3 `/usr/local`
+  symlink workaround is NOT needed on Alpine.
+- **POSIX-sh strictness.** Alpine's `/bin/sh` is busybox ash, not bash.
+  The bootstrap script is strictly POSIX sh — no `[[ ]]`, no
+  `$'...'`, no arrays. (M1-M3's scripts are already POSIX-clean; M4
+  maintains the contract.)
+- **Nim PATH injection requires the source-built bin dir.**
+  Like M2+M3 and unlike M1 (where pacman's nim is on `/usr/bin`),
+  Alpine's source-built nim lives under
+  `${WORK_ROOT}/nim-2.2.10/bin/`. The test script injects that
+  directory ahead of `repro build` so the recipe-build leg (which
+  forks `nim` to compile the recipe's `repro.nim`) finds the right
+  Nim — not apk's broken 2.2.0 (or no nim at all if apk's nim was
+  never installed).
+- **Package-name nits.** Alpine uses `build-base` (not `base-devel` /
+  `build-essential` / `gcc make`), `pkgconf` (not `pkg-config` /
+  `pkgconf-pkg-config`), `openssl-dev` (no `lib` prefix),
+  `sqlite-dev` (no `lib` prefix), `xz` (no `-utils`). musl-dev is
+  pulled in by build-base and replaces glibc-headers.
+
+Bootstrap timing (WSL2 / Ryzen-class host):
+
+| Distro | Run        | Wall time   | Notes                                                                  |
+| ------ | ---------- | ----------- | ---------------------------------------------------------------------- |
+| Alpine | Cold       | 4 min 41 s  | apk (~30s) + Nim source build (~2 min) + reprobuild Nim build (~2 min). |
+| Alpine | Warm       | ~25 s       | apk no-op, Nim binary reused, only reprobuild Nim recompiles.          |
+| Alpine | Test runner cold | 5 min 34 s  | Full m4_self_bootstrap including recipe build + cache wipe + rebuild. |
+| Alpine | Test runner warm | 2 min 27 s  | Bootstrap short-circuits; only recipe build + wipe + rebuild.        |
+
+Alpine's cold bootstrap is the slowest of the four because of the
+~2 min Nim source build; the rest (apk install + reprobuild Nim
+builds) is comparable to M3 (Fedora) cold's 3:14. Warm Alpine is the
+fastest of M1-M4 (apk no-op + Nim binary already built; only the
+reprobuild Nim re-link runs).
+
+### Running M4 acceptance
+
+```bash
+bash scripts/run_multi_distro_tests.sh m4_self_bootstrap alpine
+```
+
+The test script (`tools/multi-distro-harness/tests/m4_self_bootstrap.sh`):
+
+1. Detects distro (must be `alpine`).
+2. Runs `bootstrap-alpine.sh`.
+3. Copies `examples/hello-world-c/` (the same M1+M2+M3 recipe,
+   unchanged) to `/tmp/reprobuild-bootstrap-alpine/m4-recipe/hello-world-c/`.
+4. Invokes `repro build . --tool-provisioning=path --no-runquota`.
+5. Asserts the binary outputs `hello from reprobuild M1` (recipe is
+   unchanged from M1).
+6. Wipes the per-project `.repro/build/` tree + global
+   `~/.cache/repro/action-cache/`, rebuilds, asserts intra-distro
+   sha256 bit-identity.
+
+The test refuses to run on non-Alpine hosts.
+
+### Content-addressability sha256 (intra-distro)
+
+| Distro | sha256 of `hello-world-c` (build #1 == build #2 across full cache wipe) |
+| ------ | ----------------------------------------------------------------------- |
+| Alpine | `6752c496a26fd6f60c8b6724ba9d173eb916f346333a17c6343684ff682dce5b`      |
+
+Cross-distro sha256 differs from M1's Arch (`f602a18b...`), M2's
+Debian (`9057905d...`), M2's Ubuntu (`1ed6a952...`), and M3's Fedora
+(`c26c2cd9...`). The musl-vs-glibc gap is the headline source of
+divergence on Alpine, layered on top of Alpine 3.19's gcc 13.x +
+binutils + linker versions. **This is the most architecturally
+distinct sha256 of the campaign so far** and the most important data
+point for the ReproOS-MVP cross-distro story — when M5 wires the
+peer-cache pull path, the input recipe + action-cache keys MUST hash
+the same on Alpine as on Arch/Debian/Ubuntu/Fedora (the content-address
+gate); the OUTPUT shas legitimately differ because the toolchains are
+different.
+
+### ReproOS-MVP relevance
+
+M4 closes the only musl-libc data point in the Linux-Distro-Recipe-
+Validation campaign. The ReproOS-MVP Phase 1 chain (hex0 -> tcc ->
+gcc -> musl) bootstraps a musl-only userland; M4's findings
+(Nim 2.2.0 codegen bug, source-build path, flat /usr/lib layout)
+all feed directly into that work.
+
+## Future work (M5+)
+
 - M5: cross-distro binary-cache push/pull.
