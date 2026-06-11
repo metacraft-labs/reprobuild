@@ -44,6 +44,26 @@ package gcc:
     nixPackage "nixpkgs#gcc", executablePath = "bin/gcc",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux: nuwen.net's `components-20.0` mingw
+    # distribution shipped via ScoopInstaller/Main. The manifest's
+    # `env_add_path: "bin"` is what exposes gcc.exe on PATH.
+    scoopApp(bucket = "main", app = "gcc",
+      preferredVersion = ">=12", executablePath = "bin/gcc.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: brechtsanders' winlibs distribution from GitHub
+    # Releases. Same toolchain shape as the nuwen.net `main/gcc` Scoop
+    # entry but ships as a single (non-nested) .7z, which our tarball
+    # resolver can extract directly. archive layout is `mingw64/bin/
+    # gcc.exe` so stripComponents=1 flattens to `bin/gcc.exe`.
+    tarball url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r2.7z",
+      sha256 = "62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232",
+      archiveType = "7z",
+      stripComponents = 1,
+      executablePath = "bin/gcc.exe",
+      packageId = "gcc-winlibs@16.1.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:gcc-winlibs@16.1.0:sha256:62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232"
 
   executable gcc:
     cli:

@@ -21,6 +21,27 @@ package rustfmt:
     nixPackage "nixpkgs#rustfmt", executablePath = "bin/rustfmt",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux: same shape as cargo / rustc — provisioned
+    # through Scoop's `rustup-msvc`, then materialised by rustup-init.exe
+    # into `$persist_dir\.cargo\bin\rustfmt.exe`. The declared
+    # executablePath references `rustup.exe` at the prefix root because
+    # the scoop-app prefix doesn't contain rustfmt.exe directly; cargo's
+    # `$persist_dir\.cargo\bin` PATH injection is what makes rustfmt
+    # reachable at build time.
+    scoopApp(bucket = "main", app = "rustup-msvc",
+      preferredVersion = ">=1.20", executablePath = "rustup.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: same rust standalone-distribution tarball as
+    # `cargo.nim`; rustfmt.exe ships under `rustfmt-preview/bin/`.
+    tarball url = "https://static.rust-lang.org/dist/rust-1.85.0-x86_64-pc-windows-msvc.tar.xz",
+      sha256 = "6f04dd4cc0ce1bb69507fb7b61ce8d502a58d70abc3dfb0b90b8ae12222b8f46",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "rustfmt-preview/bin/rustfmt.exe",
+      packageId = "rust@1.85.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:rust@1.85.0:sha256:6f04dd4cc0ce1bb69507fb7b61ce8d502a58d70abc3dfb0b90b8ae12222b8f46"
 
 let rustfmtCatalog* = @[
   VersionedProvisioning(

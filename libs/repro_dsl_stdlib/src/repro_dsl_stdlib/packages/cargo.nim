@@ -8,6 +8,33 @@ package cargo:
     nixPackage "nixpkgs#cargo", executablePath = "bin/cargo",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux: cargo ships as part of the Rust toolchain
+    # which Scoop's `rustup-msvc` installs via `rustup-init.exe`. After
+    # install, cargo.exe lives in `$persist_dir\.cargo\bin\cargo.exe` (a
+    # rustup-managed location outside the Scoop app prefix). The scoop
+    # adapter junction-mounts the version dir at `<prefix>/bin`, so the
+    # declared executablePath references rustup.exe at the prefix root
+    # — invoking it (via cargo wrappers on the PATH-injected
+    # `$persist_dir\.cargo\bin`) hits the real cargo. Operators who
+    # haven't yet had rustup bootstrap a default toolchain should run
+    # `rustup default stable-msvc` once after the scoop install.
+    scoopApp(bucket = "main", app = "rustup-msvc",
+      preferredVersion = ">=1.20", executablePath = "rustup.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: the upstream Rust standalone-distribution tarball
+    # ships cargo / rustc / rustfmt / rust-std under a single
+    # `rust-X.Y.Z-x86_64-pc-windows-msvc/` top-level dir. cargo.exe
+    # lives at `cargo/bin/cargo.exe` inside that tree. With
+    # stripComponents=1 the prefix root holds `cargo/bin/cargo.exe`.
+    tarball url = "https://static.rust-lang.org/dist/rust-1.85.0-x86_64-pc-windows-msvc.tar.xz",
+      sha256 = "6f04dd4cc0ce1bb69507fb7b61ce8d502a58d70abc3dfb0b90b8ae12222b8f46",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "cargo/bin/cargo.exe",
+      packageId = "rust@1.85.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:rust@1.85.0:sha256:6f04dd4cc0ce1bb69507fb7b61ce8d502a58d70abc3dfb0b90b8ae12222b8f46"
 
   executable cargo:
     cli:
