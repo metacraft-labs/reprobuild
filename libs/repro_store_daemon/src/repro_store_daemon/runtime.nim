@@ -564,7 +564,10 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
       return existing
     raise newException(StoreDaemonRuntimeError,
       "dev store daemon already running with store root " & existing.storeRoot)
-  let exe = siblingReprostoredPath(publicCliPath)
+  # Executable-Consolidation M3: the store daemon IS the `repro` image, run as
+  # `repro store serve …`. Self-spawn `repro` rather than locating the
+  # standalone `reprostored` binary.
+  let exe = publicCliPath
   when defined(posix):
     let pid = fork()
     if pid < 0:
@@ -580,7 +583,7 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
       for fd in 3.cint .. 255.cint:
         discard posix.close(fd)
       let argv = allocCStringArray([
-        exe, "--dev", "--store-root", config.storeRoot,
+        exe, "store", "serve", "--dev", "--store-root", config.storeRoot,
         "--endpoint", config.endpoint])
       discard execv(cstring(exe), argv)
       quit(127)
@@ -590,7 +593,7 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
       env[key] = value
     env["REPROSTORED_ENDPOINT"] = config.endpoint
     let process = startProcess(exe,
-      args = @["--dev", "--store-root", config.storeRoot,
+      args = @["store", "serve", "--dev", "--store-root", config.storeRoot,
         "--endpoint", config.endpoint],
       env = env,
       options = {poUsePath, poDaemon})

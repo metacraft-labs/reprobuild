@@ -13404,6 +13404,12 @@ proc runStoreCommand*(args: seq[string]): int =
     echo "usage: repro store {gc | recover | roots | list} " &
       "[--store-root=PATH] [--grace-seconds=N]"
     return 2
+  if args[0] == "serve":
+    # Executable-Consolidation M3: `repro store serve` is the store daemon
+    # PROCESS entry — the role formerly carried by the standalone `reprostored`
+    # binary (whose program name stays a compatibility alias). `repro store
+    # daemon …` remain the client control commands.
+    return runReprostoredCommand(if args.len > 1: args[1 .. ^1] else: @[])
   if args[0] == "daemon":
     let daemonArgs = if args.len > 1: args[1 .. ^1] else: @[]
     return runStoreDaemonCommand(daemonArgs)
