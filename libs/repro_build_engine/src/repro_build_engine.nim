@@ -501,6 +501,26 @@ proc addUnique(values: var seq[string]; value: string) =
   if values.find(value) < 0:
     values.add(value)
 
+# Deferred-D4: the legacy ``addUnique(values, value)`` does a linear ``find``
+# before appending, so N successive calls cost O(N^2). For per-action evidence
+# aggregation (``collectEvidence``, ``addPathSet``, ``evidenceFromRecord``,
+# ``evidenceInputPaths``, ``cacheInputPaths``) where N can reach into the
+# thousands per action, the post-build wrap-up was dominating wall time at
+# the 14-app collection (B1) and again at ~1044 actions (B3, B5).
+#
+# This overload keeps the existing ``seq[string]`` field types (so we don't
+# perturb any public-API caller that depends on the seq's insertion order or
+# the seq itself), but tracks membership in a side-car ``HashSet[string]``
+# threaded in by the caller. Each call is O(1) amortised; the aggregation
+# becomes linear in N.
+proc addUnique(values: var seq[string]; seen: var HashSet[string];
+               value: string) =
+  if value.len == 0:
+    return
+  if seen.containsOrIncl(value):
+    return
+  values.add(value)
+
 proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
   result = path.replace('\\', '/').strip()
   while result.startsWith("./"):
@@ -685,29 +705,46 @@ proc needsExecutionForPolicy(action: BuildAction): bool =
   action.dependencyPolicy.kind in MonitorPolicyKinds or
     action.kind == bakPreserveTree
 
-proc addPathSet(evidence: var PathSetEvidence; pathSet: DependencyPathSet;
-                recognized: bool) =
+type
+  EvidenceSeenSets = object
+    # Deferred-D4: side-car membership trackers for the parallel ``seq[string]``
+    # fields on ``PathSetEvidence``. Threaded through the per-action evidence
+    # aggregation so each ``addUnique`` lookup is O(1) instead of O(N).
+    depfileInputs: HashSet[string]
+    monitorReads: HashSet[string]
+    monitorWrites: HashSet[string]
+    monitorProbes: HashSet[string]
+
+proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
+                pathSet: DependencyPathSet; recognized: bool) =
   if recognized:
     for input in pathSet.inputs:
-      evidence.depfileInputs.addUnique(input)
+      evidence.depfileInputs.addUnique(seen.depfileInputs, input)
   else:
     for input in pathSet.inputs:
-      evidence.monitorReads.addUnique(input)
+      evidence.monitorReads.addUnique(seen.monitorReads, input)
     for output in pathSet.outputs:
-      evidence.monitorWrites.addUnique(output)
+      evidence.monitorWrites.addUnique(seen.monitorWrites, output)
     for probe in pathSet.probes:
-      evidence.monitorProbes.addUnique(probe)
+      evidence.monitorProbes.addUnique(seen.monitorProbes, probe)
   for diagnostic in pathSet.diagnostics:
     evidence.diagnostics.add(diagnostic)
 
 proc collectConvertedEvidence(action: BuildAction;
                               specs: openArray[PostBuildDependencyConverterSpec];
-                              evidence: var PathSetEvidence): bool
+                              evidence: var PathSetEvidence;
+                              seen: var EvidenceSeenSets): bool
 
 proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
   result.publishable = true
   result.evidence.declaredInputs = action.inputs
   result.evidence.declaredOutputs = action.outputs
+  # Deferred-D4: track membership in side-car ``HashSet``s so adding the
+  # k-th unique evidence entry costs O(1) instead of O(k). Monitor
+  # records on a single action can exceed several thousand entries; the
+  # legacy linear ``find`` made the per-action wrap-up the dominant
+  # term on the 14-app / ~1044-action collections from B1/B3/B5.
+  var seen: EvidenceSeenSets
   let reports = action.reportSpecsForPolicy()
   if action.dependencyPolicy.kind in RecognizedPolicyKinds and reports.len == 0:
     result.evidence.diagnostics.add(
@@ -723,7 +760,7 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
       if not fileExists(extendedPath(path)):
         continue
       try:
-        result.evidence.addPathSet(
+        result.evidence.addPathSet(seen,
           readRecognizedDependencyReport($report.formatName, path),
           recognized = true)
       except DependencyReportError as err:
@@ -734,7 +771,7 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
     result.evidence.diagnostics.add(
       "dependency policy requires a post-build converter but none is declared")
     result.publishable = false
-  if not action.collectConvertedEvidence(converters, result.evidence):
+  if not action.collectConvertedEvidence(converters, result.evidence, seen):
     result.publishable = false
   if action.monitorEvidenceRequired():
     if action.monitorDepfile.len == 0:
@@ -750,19 +787,19 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
         let path = materialPath(action.cwd, record.path)
         case record.kind
         of mrFileRead:
-          result.evidence.monitorReads.addUnique(path)
+          result.evidence.monitorReads.addUnique(seen.monitorReads, path)
         of mrFileOpen:
           case record.observationKind
           of moFileRead, moFileOpen:
-            result.evidence.monitorReads.addUnique(path)
+            result.evidence.monitorReads.addUnique(seen.monitorReads, path)
           of moFileWrite:
-            result.evidence.monitorWrites.addUnique(path)
+            result.evidence.monitorWrites.addUnique(seen.monitorWrites, path)
           else:
             discard
         of mrFileWrite:
-          result.evidence.monitorWrites.addUnique(path)
+          result.evidence.monitorWrites.addUnique(seen.monitorWrites, path)
         of mrPathProbe, mrDirectoryEnumerate:
-          result.evidence.monitorProbes.addUnique(path)
+          result.evidence.monitorProbes.addUnique(seen.monitorProbes, path)
         else:
           discard
       if dep.completeness != mcComplete:
@@ -775,14 +812,19 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
     discard
 
 proc evidenceInputPaths(evidence: PathSetEvidence): seq[string] =
+  # Deferred-D4: side-car ``HashSet`` keeps the per-action wrap-up linear
+  # in N rather than quadratic. The output ``seq`` preserves insertion
+  # order — callers downstream of action-cache key construction (see
+  # ``cacheInputPaths``) depend on it for stable fingerprints.
+  var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
-    result.addUnique(input)
+    result.addUnique(seen, input)
   for input in evidence.depfileInputs:
-    result.addUnique(input)
+    result.addUnique(seen, input)
   for input in evidence.monitorReads:
-    result.addUnique(input)
+    result.addUnique(seen, input)
   for probe in evidence.monitorProbes:
-    result.addUnique(probe)
+    result.addUnique(seen, probe)
 
 proc nixStoreRoot(path: string): string =
   let normalized = path.replace('\\', '/')
@@ -864,28 +906,32 @@ proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string
   let toolRoots = action.toolInputRoots()
   let ignoredRoots = action.ignoredInputRoots()
   var declaredMaterialized = initHashSet[string]()
+  # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
+  # output ``seq`` retains insertion order because the action-cache key
+  # construction downstream is order-sensitive.
+  var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
     let path = materialPath(action.cwd, input)
     declaredMaterialized.incl(path.replace('\\', '/'))
-    result.addUnique(path)
+    result.addUnique(seen, path)
   for input in evidence.depfileInputs:
     let path = materialPath(action.cwd, input)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
-    result.addUnique(path)
+    result.addUnique(seen, path)
   for input in evidence.monitorReads:
     let path = materialPath(action.cwd, input)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
-    result.addUnique(path)
+    result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
     let path = materialPath(action.cwd, probe)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
-    result.addUnique(path)
+    result.addUnique(seen, path)
 
 proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSetEvidence =
   result.declaredInputs = action.inputs
@@ -893,12 +939,16 @@ proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSe
   var declaredInputPaths = initHashSet[string]()
   for input in action.inputs:
     declaredInputPaths.incl(materialPath(action.cwd, input))
+  # Deferred-D4: side-car ``HashSet``s — N successive ``addUnique`` calls
+  # would otherwise be O(N^2) over the cache-hit reconstructed evidence.
+  var seenMonitorReads = initHashSet[string]()
+  var seenDepfileInputs = initHashSet[string]()
   for input in record.inputs:
     if not declaredInputPaths.contains(input.path):
       if action.dependencyPolicy.kind in MonitorPolicyKinds:
-        result.monitorReads.addUnique(input.path)
+        result.monitorReads.addUnique(seenMonitorReads, input.path)
       else:
-        result.depfileInputs.addUnique(input.path)
+        result.depfileInputs.addUnique(seenDepfileInputs, input.path)
 
 proc processCwd(action: BuildAction; process: ProcessSpec): string =
   let cwd = $process.cwd
@@ -955,7 +1005,8 @@ proc runConverters(action: BuildAction;
 
 proc collectConvertedEvidence(action: BuildAction;
                               specs: openArray[PostBuildDependencyConverterSpec];
-                              evidence: var PathSetEvidence): bool =
+                              evidence: var PathSetEvidence;
+                              seen: var EvidenceSeenSets): bool =
   result = true
   for converterSpec in specs:
     for output in converterSpec.outputs:
@@ -969,9 +1020,9 @@ proc collectConvertedEvidence(action: BuildAction;
       try:
         case converterSpec.outputKind
         of dcoReproPathSet:
-          evidence.addPathSet(readReproPathSet(path), recognized = false)
+          evidence.addPathSet(seen, readReproPathSet(path), recognized = false)
         of dcoRecognizedFormat:
-          evidence.addPathSet(
+          evidence.addPathSet(seen,
             readRecognizedDependencyReport($converterSpec.outputFormatName, path),
             recognized = true)
       except DependencyReportError as err:
