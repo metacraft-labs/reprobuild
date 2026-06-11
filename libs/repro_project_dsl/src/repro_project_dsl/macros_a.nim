@@ -1945,6 +1945,7 @@ proc usesImportCode(pkg: PackageDef): string =
       "nim",
       "nimble",
       "nix",
+      "nsis",
       "node",
       "npm",
       "npx",
