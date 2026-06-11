@@ -167,6 +167,45 @@ proc renderUsage*(programName: string): string =
   else:
     programName & " " & versionString() & "\nusage: " & programName & " --version"
 
+proc renderInternalUsage*(programName: string): string =
+  ## Usage text for the documented-but-hidden ``repro internal …`` command
+  ## group (Executable-Consolidation M1). These subcommands are role
+  ## processes that ``repro`` reaches by self-spawn (``getAppFilename()`` +
+  ## the ``internal`` argv) rather than via standalone sibling binaries.
+  ## They are intentionally kept OUT of the primary ``repro`` help body —
+  ## discoverable for debugging, walled off from the user surface — but
+  ## ``repro internal --help`` prints this so the namespace is documented.
+  ##
+  ## The ``__repro-*`` argument spellings remain accepted as compatibility
+  ## aliases for one release; the ``internal``-namespaced spellings below
+  ## are the documented forms.
+  programName & " " & versionString() & "\n" &
+    "usage: " & programName & " internal <subcommand> [args...]\n\n" &
+    "internal subcommands (role processes; not part of `" & programName &
+      " help`):\n" &
+    "  fs-snoop [options] -- <command> [args...]   filesystem-monitor shim " &
+      "(user form: " & programName & " debug fs-snoop)\n" &
+    "  runquota-helper …                           RunQuota lease helper " &
+      "(alias of __repro-runquota-helper)\n" &
+    "  compile-provider …                          provider-compile helper " &
+      "(alias of __repro-compile-provider)\n" &
+    "  compile-profile …                           profile-compile helper " &
+      "(alias of __repro-compile-profile)\n" &
+    "  dev-env-introspect …                        dev-env introspection " &
+      "helper (alias of __repro-dev-env-introspect)\n" &
+    "  render-dev-env-shell …                      dev-env shell renderer " &
+      "(alias of __repro-render-dev-env-shell)\n" &
+    "  direnv-activate …                           direnv activation helper " &
+      "(alias of __repro-direnv-activate)\n" &
+    "  native-shell-activate …                     native-shell activation " &
+      "helper (alias of __repro-native-shell-activate)\n" &
+    "  dev-session-supervisor …                    dev-session supervisor " &
+      "(alias of __repro-dev-session-supervisor)\n" &
+    "  dev-session-http …                          dev-session HTTP bridge " &
+      "(alias of __repro-dev-session-http)\n" &
+    "  cmake-regenerate …                          CMake regeneration helper " &
+      "(alias of __repro-cmake-regenerate)"
+
 proc parseToolProvisioning(value: string): ToolProvisioningMode =
   case value
   of "path":
@@ -2887,13 +2926,19 @@ proc stablePublicCliPath(): string =
     return os.normalizedPath(getCurrentDir() / resolved)
   os.normalizedPath(getCurrentDir() / app)
 
-proc siblingFsSnoopPath(publicCliPath: string): string =
-  let candidate = parentDir(publicCliPath) /
-    addFileExt("repro-fs-snoop", ExeExt)
-  if fileExists(extendedPath(candidate)):
-    os.normalizedPath(candidate)
-  else:
-    ""
+# Executable-Consolidation M1: the internal filesystem-monitor shim is no
+# longer a standalone ``repro-fs-snoop`` binary. ``repro`` self-spawns its own
+# image with this subcommand selector (``repro internal fs-snoop …``). The
+# executable path is ``getAppFilename()`` (more robust than argv[0]/sibling
+# lookup) and the selector below is prepended by the build engine via
+# ``BuildEngineConfig.monitorCliArgs``.
+const internalFsSnoopArgs* = @["internal", "fs-snoop"]
+
+proc selfSpawnFsSnoopPath(): string =
+  ## Path to the running ``repro`` image used to self-spawn the internal
+  ## fs-snoop role. Replaces the former ``siblingFsSnoopPath`` /
+  ## ``repro-fs-snoop`` sibling-binary lookup.
+  os.normalizedPath(getAppFilename())
 
 proc siblingTryCompileProviderPath(publicCliPath: string): string =
   ## Pre-built Tier 2a direct provider binary, normally shipped next to
@@ -4007,7 +4052,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
-      monitorCliPath: siblingFsSnoopPath(publicCliPath),
+      monitorCliPath: selfSpawnFsSnoopPath(),
+      monitorCliArgs: internalFsSnoopArgs,
       maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
@@ -4169,7 +4215,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         cacheRoot: cmakeCacheRoot,
         actionCacheRoot: currentActionCacheRoot(),
         runQuotaCliPath: publicCliPath,
-        monitorCliPath: siblingFsSnoopPath(publicCliPath),
+        monitorCliPath: selfSpawnFsSnoopPath(),
+        monitorCliArgs: internalFsSnoopArgs,
         maxParallelism: 1'u32,
         stdoutLimit: 1024 * 1024,
         stderrLimit: 1024 * 1024,
@@ -4688,7 +4735,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
-      monitorCliPath: siblingFsSnoopPath(publicCliPath),
+      monitorCliPath: selfSpawnFsSnoopPath(),
+      monitorCliArgs: internalFsSnoopArgs,
       maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
@@ -5368,28 +5416,31 @@ proc parseDevEnvShellArgs(args: openArray[string]): ParsedDevEnvShell =
   selection.resolveDevEnvSelection()
   result.selection = selection
 
-proc publicDevEnvFsSnoop(publicCliPath: string): string =
-  result = siblingFsSnoopPath(publicCliPath)
-  if result.len > 0:
-    return
-  result = getEnv("REPRO_FS_SNOOP")
-  if result.len > 0:
-    return
-  let candidate = reprobuildLibraryWorkDir() / "build" / "bin" /
-    addFileExt("repro-fs-snoop", ExeExt)
-  if fileExists(extendedPath(candidate)):
-    result = os.normalizedPath(candidate)
+proc publicDevEnvFsSnoop(publicCliPath: string):
+    tuple[path: string, args: seq[string]] =
+  ## Executable-Consolidation M1: the dev-env monitor self-spawns the ``repro``
+  ## image (``internal fs-snoop`` selector returned in ``args``, threaded via
+  ## ``DevEnvEdgeConfig.monitorCliArgs``) rather than locating a standalone
+  ## ``repro-fs-snoop`` binary. ``REPRO_FS_SNOOP`` is still honored as an
+  ## override escape hatch for tests / custom monitor drivers; when set it is a
+  ## standalone driver path used with NO extra subcommand args.
+  let override = getEnv("REPRO_FS_SNOOP")
+  if override.len > 0:
+    return (override, @[])
+  (selfSpawnFsSnoopPath(), internalFsSnoopArgs)
 
 proc computePublicDevEnv(selection: DevEnvCliSelection;
                          publicCliPath: string;
                          renderShell = false): DevEnvEdgeResult =
+  let monitor = publicDevEnvFsSnoop(publicCliPath)
   computeDevEnvEdge(DevEnvEdgeConfig(
     modulePath: selection.modulePath,
     projectRoot: selection.projectRoot,
     outDir: selection.outDir,
     workDir: reprobuildLibraryWorkDir(),
     publicCliPath: publicCliPath,
-    monitorCliPath: publicDevEnvFsSnoop(publicCliPath),
+    monitorCliPath: monitor.path,
+    monitorCliArgs: monitor.args,
     monitorShimLibPath: getEnv("REPRO_MONITOR_SHIM_LIB"),
     activity: selection.activity,
     lockSliceId: selection.lockSliceId,
@@ -5988,7 +6039,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
     outDir: parsed.selection.outDir,
     workDir: reprobuildLibraryWorkDir(),
     publicCliPath: publicCliPath,
-    monitorCliPath: publicDevEnvFsSnoop(publicCliPath),
+    monitorCliPath: publicDevEnvFsSnoop(publicCliPath).path,
     monitorShimLibPath: getEnv("REPRO_MONITOR_SHIM_LIB"),
     artifactPath: edge.artifactPath,
     activity: parsed.selection.activity,
@@ -21172,8 +21223,42 @@ proc runReproLockCommand*(args: openArray[string]): int =
     stderr.writeLine("repro lock: unknown verb '" & args[0] & "'")
     return 2
 
+const internalHelperAliases = {
+  # Documented ``repro internal <name>`` spellings (Executable-Consolidation
+  # M1) mapped to the historical ``__repro-<name>`` argument forms. The
+  # ``__``-prefixed forms remain accepted as compatibility aliases for one
+  # release; both route to the identical handler. ``fs-snoop`` is handled
+  # separately because it has no ``__repro-`` form (its user-facing spelling
+  # is ``repro debug fs-snoop``).
+  "runquota-helper": "__repro-runquota-helper",
+  "compile-provider": "__repro-compile-provider",
+  "compile-profile": "__repro-compile-profile",
+  "dev-env-introspect": "__repro-dev-env-introspect",
+  "render-dev-env-shell": "__repro-render-dev-env-shell",
+  "direnv-activate": "__repro-direnv-activate",
+  "native-shell-activate": "__repro-native-shell-activate",
+  "dev-session-supervisor": "__repro-dev-session-supervisor",
+  "dev-session-http": "__repro-dev-session-http",
+  "cmake-regenerate": "__repro-cmake-regenerate",
+}.toTable
+
+proc normalizeInternalArgs(args: seq[string]): seq[string] =
+  ## Map ``internal <name> <rest…>`` onto the same argument vector the
+  ## ``__repro-<name>`` helper forms use, so the documented ``internal``
+  ## namespace and the historical ``__``-prefixed aliases share one set of
+  ## handlers below. Subcommands without a ``__repro-`` equivalent (``fs-snoop``,
+  ## usage/help) are left untouched for the dedicated ``internal`` arm in
+  ## ``runThinApp`` to handle.
+  if args.len >= 1 and args[0] == "internal" and args.len >= 2 and
+      internalHelperAliases.hasKey(args[1]):
+    result = @[internalHelperAliases[args[1]]]
+    if args.len > 2:
+      result.add(args[2 .. ^1])
+  else:
+    result = args
+
 proc runThinApp*(programName: string): int =
-  let args = commandLineParams()
+  let args = normalizeInternalArgs(commandLineParams())
   let publicCliPath = stablePublicCliPath()
   if programName == "repro" and args.len > 0 and
       args[0] == BrokerModeFlag:
@@ -21197,6 +21282,34 @@ proc runThinApp*(programName: string): int =
     return runUserDaemonCommand(args)
   if programName == "repro-fs-snoop":
     return runFsSnoopCli(programName, args)
+  # Documented ``repro internal …`` namespace (Executable-Consolidation M1).
+  # ``internal <helper>`` spellings for the role helpers were already rewritten
+  # to their ``__repro-<helper>`` argument form by ``normalizeInternalArgs``
+  # above, so any ``internal`` argv still reaching here is either ``fs-snoop``
+  # (which has no ``__repro-`` form), an explicit ``--help``, or an
+  # unknown/bare subcommand — all handled by this arm. ``repro internal`` is
+  # intentionally absent from the primary ``repro help`` body; it is documented
+  # via ``renderInternalUsage`` (and ``CLI/internal/`` in the specs).
+  if args.len > 0 and args[0] == "internal":
+    if args.len >= 2 and args[1] == "fs-snoop":
+      # Mirror ``repro debug fs-snoop``: forward the remaining args to the
+      # shared fs-snoop CLI. This is the spelling the internal monitor spawn
+      # self-spawns (``getAppFilename() internal fs-snoop …``).
+      let fsArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runFsSnoopCli("repro internal fs-snoop", fsArgs)
+    # Bare ``repro internal``, ``repro internal --help``, or an unrecognized
+    # subcommand: print the internal-namespace usage. Exit 0 for an explicit
+    # help request (pipeable), exit 2 for an unknown/missing subcommand —
+    # matching the stdout/exit-0 vs stderr/exit-2 convention used elsewhere.
+    if args.len == 1 or (args.len >= 2 and args[1] in ["help", "--help", "-h"]):
+      echo renderInternalUsage(programName)
+      return 0
+    stderr.writeLine(renderInternalUsage(programName))
+    return 2
   if args.len > 0 and args[0] == "__repro-runquota-helper":
     let helperArgs =
       if args.len > 1:

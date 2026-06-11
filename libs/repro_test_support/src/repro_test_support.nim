@@ -315,6 +315,28 @@ proc ctInterposeSrcPath*(repoRoot: string): string =
     return vendored
   ""
 
+proc fsSnoopWrapperSource*(repoRoot, cacheKey: string): string =
+  ## Executable-Consolidation M1 deleted the standalone
+  ## ``apps/repro-fs-snoop/repro_fs_snoop.nim`` entry point: the internal
+  ## filesystem-monitor role now ships inside ``repro`` and is reached via
+  ## ``repro internal fs-snoop`` (build/monitor self-spawn) or
+  ## ``repro debug fs-snoop`` (user-facing). Tests that set ``REPRO_FS_SNOOP``
+  ## to a standalone driver path still need a single-binary fs-snoop image
+  ## whose argv is ``<bin> --depfile … -- <cmd>`` (no subcommand prefix). This
+  ## synthesizes the same four-line wrapper the deleted entry point carried —
+  ## ``runThinApp("repro-fs-snoop")`` routes through the retained compat
+  ## program-name branch to the identical ``runFsSnoopCli`` path — and returns
+  ## its path so callers can ``compileNim`` it exactly as they compiled the
+  ## former source. The file is written UNDER ``repoRoot`` so Nim's
+  ## ``config.nims`` path setup resolves as it did for the original source.
+  let wrapperDir = repoRoot / "build" / "test-fs-snoop" / cacheKey
+  createDir(wrapperDir)
+  result = wrapperDir / "repro_fs_snoop.nim"
+  writeFile(result,
+    "import repro_cli_support\n\n" &
+    "when isMainModule:\n" &
+    "  quit runThinApp(\"repro-fs-snoop\")\n")
+
 proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
   ## Compile the per-test ``repro-fs-snoop`` binary AND the monitor
   ## shim library on demand. The same surface that ``compileRepro``
@@ -364,11 +386,14 @@ proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
   shimArgs.add(shimSource)
   discard requireSuccess(shellCommand(shimArgs), repoRoot)
 
+  # Executable-Consolidation M1: compile the synthesized fs-snoop wrapper
+  # (see ``fsSnoopWrapperSource``) instead of the deleted standalone entry
+  # point source.
   let fsSnoopArgs = @[
     "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
     "--warnings:off",
     "--nimcache:" & repoRoot / "build" / "nimcache" / (cacheKey & "-fs-snoop"),
     "--out:" & result.fsSnoop,
-    repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim"
+    fsSnoopWrapperSource(repoRoot, cacheKey)
   ]
   discard requireSuccess(shellCommand(fsSnoopArgs), repoRoot)

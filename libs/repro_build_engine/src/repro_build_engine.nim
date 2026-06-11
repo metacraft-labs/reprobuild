@@ -122,6 +122,15 @@ type
     actionCacheRoot*: string
     runQuotaCliPath*: string
     monitorCliPath*: string
+    # Argument vector prepended to ``monitorCliPath`` when wrapping a monitored
+    # action (Executable-Consolidation M1). When ``monitorCliPath`` is the
+    # ``repro`` executable itself (self-spawn, ``getAppFilename()``), this holds
+    # the ``internal fs-snoop`` subcommand selector so the monitored argv
+    # becomes ``repro internal fs-snoop --depfile … -- <cmd>`` rather than
+    # invoking a standalone ``repro-fs-snoop`` binary. Empty (the default)
+    # preserves the legacy ``<monitorCliPath> --depfile …`` shape used by tests
+    # and any caller that still points at a dedicated fs-snoop binary.
+    monitorCliArgs*: seq[string]
     maxParallelism*: uint32
     stdoutLimit*: int
     stderrLimit*: int
@@ -1055,7 +1064,8 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
     let depfile = cacheRoot / "monitor-depfiles" /
       (sanitizeActionId(action.id) & ".rdep")
     result.action.monitorDepfile = depfile
-    result.action.argv = @[monitorCli, "--depfile", depfile, "--"] & action.argv
+    result.action.argv = @[monitorCli] & config.monitorCliArgs &
+      @["--depfile", depfile, "--"] & action.argv
 
 proc envTableFromArgvStyle(env: openArray[string]): StringTableRef =
   ## Convert the ``"NAME=VALUE"`` argv-style env (carried on BuildAction.env)

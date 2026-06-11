@@ -255,8 +255,17 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
     writeFile(childInputPath, "child input\n")
 
     compileShim(repoRoot, shimDylib)
-    compileNim(repoRoot, repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      fsSnoopBin, "e2e-repro-fs-snoop")
+    # Executable-Consolidation M1 deleted apps/repro-fs-snoop; the standalone
+    # fs-snoop driver this test invokes directly is reproduced by compiling the
+    # same four-line wrapper (runThinApp("repro-fs-snoop") → runFsSnoopCli),
+    # written under repoRoot so config.nims resolves as before.
+    let fsSnoopSource = repoRoot / "build" / "test-fs-snoop" /
+      "e2e-repro-fs-snoop" / "repro_fs_snoop.nim"
+    createDir(parentDir(fsSnoopSource))
+    writeFile(fsSnoopSource,
+      "import repro_cli_support\n\nwhen isMainModule:\n" &
+      "  quit runThinApp(\"repro-fs-snoop\")\n")
+    compileNim(repoRoot, fsSnoopSource, fsSnoopBin, "e2e-repro-fs-snoop")
     compileNim(repoRoot, repoRoot / "apps" / "repro" / "repro.nim",
       reproBin, "e2e-repro")
     compileFixture(fixtureSource, fixtureBin)

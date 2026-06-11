@@ -444,9 +444,16 @@ when defined(macosx) or defined(linux):
       else:
         libDir / "librepro_monitor_shim.dylib"
     compileShim(repoRoot, result.shim)
-    compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
-      result.fsSnoop, "m32-ct-repro-fs-snoop")
+    # Executable-Consolidation M1 deleted apps/repro-fs-snoop; reproduce the
+    # standalone driver by compiling the same four-line wrapper, written
+    # under repoRoot so config.nims resolves as before.
+    let fsSnoopSource = repoRoot / "build" / "test-fs-snoop" /
+      "m32-ct-repro-fs-snoop" / "repro_fs_snoop.nim"
+    createDir(parentDir(fsSnoopSource))
+    writeFile(fsSnoopSource,
+      "import repro_cli_support\n\nwhen isMainModule:\n" &
+      "  quit runThinApp(\"repro-fs-snoop\")\n")
+    compileNim(repoRoot, fsSnoopSource, result.fsSnoop, "m32-ct-repro-fs-snoop")
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =

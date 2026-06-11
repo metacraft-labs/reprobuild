@@ -189,8 +189,10 @@ when defined(macosx) or defined(linux):
       else:
         libDir / "librepro_monitor_shim.dylib"
     compileShim(repoRoot, result.shim)
+    # Executable-Consolidation M1: apps/repro-fs-snoop was deleted; compile the
+    # synthesized standalone fs-snoop wrapper instead (same runFsSnoopCli path).
     compileNim(repoRoot,
-      repoRoot / "apps" / "repro-fs-snoop" / "repro_fs_snoop.nim",
+      fsSnoopWrapperSource(repoRoot, "m17-repro-fs-snoop"),
       result.fsSnoop, "m17-repro-fs-snoop")
 
 proc converterMain(args: seq[string]) =

@@ -14,7 +14,7 @@
 ##   (see ``config.nims`` for the active path list); there is no single
 ##   ``src/reprobuild.nim`` umbrella because the repo is a fan-out of
 ##   independent libs the apps wire together explicitly.
-## * Declares the eleven shipping executables one-for-one with
+## * Declares the six shipping executables one-for-one with
 ##   ``apps/entrypoints.txt``. The Nim-identifier names are camelCase
 ##   stand-ins for the hyphenated binary names; ``name: "<bin>"``
 ##   inside each ``executable`` body pins the on-disk artifact.
@@ -149,20 +149,13 @@ package reprobuild:
   # ``name:`` and ``cli:`` body members — a ``build:`` body inside an
   # executable would be silently ignored, so the edges live one scope
   # out and aggregate into the ``apps`` build graph collection there).
+  #
+  # Executable-Consolidation M1 retired the five placeholder /
+  # standalone-fs-snoop entry points (repro-controller, repro-worker,
+  # repro-provider-host, repro-hcr-link, repro-fs-snoop); fs-snoop logic is
+  # now reached via `repro internal fs-snoop` / `repro debug fs-snoop`.
   executable repro:
     discard
-
-  executable reproFsSnoop:
-    name: "repro-fs-snoop"
-
-  executable reproHcrLink:
-    name: "repro-hcr-link"
-
-  executable reproController:
-    name: "repro-controller"
-
-  executable reproWorker:
-    name: "repro-worker"
 
   executable reproDaemon:
     name: "repro-daemon"
@@ -178,9 +171,6 @@ package reprobuild:
 
   executable reprostored:
     discard
-
-  executable reproProviderHost:
-    name: "repro-provider-host"
 
   executable reproCmakeDyndepFragment:
     name: "repro-cmake-dyndep-fragment"
@@ -367,26 +357,6 @@ package reprobuild:
       actionId = "reprobuild.apps.repro"))
 
     reprobuildAppsActions.add(nim.c(
-      source = "apps/repro-fs-snoop/repro_fs_snoop.nim",
-      binary = "build/bin/repro-fs-snoop",
-      actionId = "reprobuild.apps.repro-fs-snoop"))
-
-    reprobuildAppsActions.add(nim.c(
-      source = "apps/repro-hcr-link/repro_hcr_link.nim",
-      binary = "build/bin/repro-hcr-link",
-      actionId = "reprobuild.apps.repro-hcr-link"))
-
-    reprobuildAppsActions.add(nim.c(
-      source = "apps/repro-controller/repro_controller.nim",
-      binary = "build/bin/repro-controller",
-      actionId = "reprobuild.apps.repro-controller"))
-
-    reprobuildAppsActions.add(nim.c(
-      source = "apps/repro-worker/repro_worker.nim",
-      binary = "build/bin/repro-worker",
-      actionId = "reprobuild.apps.repro-worker"))
-
-    reprobuildAppsActions.add(nim.c(
       source = "apps/repro-daemon/repro_daemon.nim",
       binary = "build/bin/repro-daemon",
       actionId = "reprobuild.apps.repro-daemon"))
@@ -410,11 +380,6 @@ package reprobuild:
       source = "apps/reprostored/reprostored.nim",
       binary = "build/bin/reprostored",
       actionId = "reprobuild.apps.reprostored"))
-
-    reprobuildAppsActions.add(nim.c(
-      source = "apps/repro-provider-host/repro_provider_host.nim",
-      binary = "build/bin/repro-provider-host",
-      actionId = "reprobuild.apps.repro-provider-host"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim",

@@ -27,6 +27,11 @@ type
     workDir*: string
     publicCliPath*: string
     monitorCliPath*: string
+    # Argument vector prepended to ``monitorCliPath`` for monitored actions
+    # (Executable-Consolidation M1). When ``monitorCliPath`` is the ``repro``
+    # executable itself, this carries ``internal fs-snoop`` so the dev-env
+    # monitor self-spawns instead of locating a standalone ``repro-fs-snoop``.
+    monitorCliArgs*: seq[string]
     monitorShimLibPath*: string
     entryPointId*: string
     activity*: string
@@ -119,6 +124,7 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
     cacheRoot: config.outDir / "build-engine-cache",
     runQuotaCliPath: config.publicCliPath,
     monitorCliPath: config.monitorCliPath,
+    monitorCliArgs: config.monitorCliArgs,
     maxParallelism: 1'u32,
     stdoutLimit: 1024 * 1024,
     stderrLimit: 1024 * 1024,
