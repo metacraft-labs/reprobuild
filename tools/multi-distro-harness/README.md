@@ -144,9 +144,123 @@ the instance can grow it further. WSL2 VHDX doesn't auto-shrink; use
 3. **Smoke probe only.** M0 stops at "hello world compiles + runs"; M1
    begins reprobuild self-bootstrap on each distro.
 
-## Future work (M1+)
+## M1 — Arch self-bootstrap
 
-- M1: build `repro` binary inside `repro-arch`.
+The `bootstrap-arch.sh` script (`tools/multi-distro-harness/bootstrap-arch.sh`)
+runs inside the provisioned `repro-arch` instance and builds the
+`repro` + `repro-standard-provider` binaries from the Windows-mounted
+source tree at `/mnt/d/metacraft/reprobuild`. The build path uses
+ONLY pacman packages + two upstream sources (clingo + BLAKE3), no
+`nix develop` anywhere.
+
+Pacman prereqs (Step 1):
+
+```
+base-devel git curl ca-certificates xz nim sqlite openssl
+cmake bison re2c
+```
+
+Upstream sources built from tarballs (Steps 2-3):
+
+| Component | Version | Source                                                                   | Why                                                            |
+| --------- | ------- | ------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| clingo    | 5.8.0   | <https://github.com/potassco/clingo/archive/refs/tags/v5.8.0.tar.gz>     | reprobuild_solver dlopens libclingo.so; not in Arch core/extra. |
+| BLAKE3    | 1.5.0   | <https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.5.0.tar.gz>   | reprobuild_hash links libblake3; not in Arch core/extra.        |
+
+Clingo needs an inline `re2c >= 4.3` compatibility patch pulled from
+the AUR PKGBUILD (current Arch ships re2c 4.5+ which removed the
+legacy `condition` block syntax clingo's vendored grammar files used);
+the bootstrap script fetches the patch via a depth-1 git clone of
+`aur.archlinux.org/clingo.git` and applies it before configuring
+clingo's cmake build. Both clingo and BLAKE3 install to `/usr/local`
+and the script wires `/etc/ld.so.conf.d/local.conf` so the runtime
+loader sees them.
+
+Nim build invocations (Step 4):
+
+```sh
+nim c -d:release --out:<work>/bin/repro \
+    apps/repro/repro.nim
+nim c -d:release -d:reproProviderMode \
+    --out:<work>/bin/repro-standard-provider \
+    apps/repro-standard-provider/repro_standard_provider.nim
+```
+
+Required env at build time:
+
+```sh
+REPROBUILD_USE_SYSTEM_HASH_LIBS=1   # config.nims: switch off vendored hash path
+BLAKE3_PREFIX=/usr/local            # config.nims: where libblake3 lives
+XXHASH_PREFIX=/usr                  # config.nims: where libxxhash lives
+REPROBUILD_REPO_ROOT=/mnt/d/metacraft/reprobuild
+```
+
+Bootstrap timing (Arch on WSL2, Ryzen-class host):
+
+| Run    | Wall time | Notes                                                |
+| ------ | --------- | ---------------------------------------------------- |
+| Cold   | ~4-7 min  | clingo + BLAKE3 cmake builds dominate (Nim ~80 s).   |
+| Warm   | ~30-60 s  | clingo + BLAKE3 short-circuit; only Nim recompiles.  |
+
+### Running M1 acceptance
+
+```bash
+bash scripts/run_multi_distro_tests.sh m1_self_bootstrap arch
+```
+
+The test script (`tools/multi-distro-harness/tests/m1_self_bootstrap.sh`):
+
+1. Runs `bootstrap-arch.sh` inside `repro-arch`.
+2. Copies `examples/hello-world-c/` to `/tmp/reprobuild-bootstrap-arch/
+   m1-recipe/hello-world-c/` (avoids the 9P-mounted Windows tree).
+3. Invokes `repro build . --tool-provisioning=path --no-runquota`.
+4. Asserts the produced binary at
+   `.repro/build/hello-world-c/hello-world-c` outputs
+   `hello from reprobuild M1`.
+5. Wipes BOTH the per-project `.repro/build/` tree AND the global
+   `~/.cache/repro/action-cache/`, rebuilds, asserts the new binary's
+   sha256 matches the first build (content-addressability gate).
+
+The test is Arch-specific by construction (`pacman -S` + upstream
+clingo build) and refuses to run if `/etc/os-release` doesn't say
+`ID=arch`. M2/M3/M4 will mirror the script shape for Debian / Fedora /
+Alpine, replacing the package manager calls and (where the distro
+packages clingo natively) the upstream-clingo-build step.
+
+### Output layout
+
+`repro build` lands per-package outputs under
+`<project-root>/.repro/build/<package>/`. The global content-addressable
+action cache (where the source-to-output digest mapping lives) is
+`~/.cache/repro/action-cache/cas/`. NOTE: this is the production
+layout as of 2026-06; it does NOT match the spec wording
+`$REPRO_STORE_ROOT/<algo>-<digest>-<name>/` from
+`Linux-Distro-Recipe-Validation.milestones.org` M1 verification clause.
+The content-addressability guarantee (same input -> same digest) holds
+under the actual layout but the surface name + per-output prefix
+convention is yet to be implemented.
+
+### Known scope adjustments
+
+- **C/C++ recipes use Mode 3, not Mode 1.** The Mode 1 layout-as-
+  manifest path (`libs/repro_cli_support/src/repro_cli_support/
+  mode1_loader.nim`) does not yet emit a per-member C source shim, so
+  the standard provider's `c_cpp_direct` convention reports "no
+  convention matched" when invoked against a Mode-1-synthesised C
+  project root. The `examples/hello-world-c/` recipe is Mode 3 (explicit
+  `repro.nim` with `executable hello-world-c: discard` + `uses: "gcc"`)
+  to sidestep this.
+- **Hash libs source.** Arch's official repos ship `xxhash` but NOT
+  `blake3`; the bootstrap script builds BLAKE3 from the upstream cmake
+  project and installs to `/usr/local`. An alternative would be to wire
+  `repro_interface_artifacts.nim`'s `externalHashFlags()` to fall back
+  to the in-repo vendored sources under `references/mold/third-party/`
+  on Linux (it currently only does so on Windows), eliminating the
+  upstream build entirely. That is a source change and out of scope
+  for the bootstrap.
+
+## Future work (M2+)
+
 - M2: same for Debian + Ubuntu.
 - M3: same for Fedora.
 - M4: same for Alpine (musl baseline).
