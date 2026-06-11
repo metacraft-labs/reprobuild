@@ -167,9 +167,6 @@ package reprobuild:
   executable repro:
     discard
 
-  executable reproDaemon:
-    name: "repro-daemon"
-
   executable reproPeerCacheTier2:
     name: "repro-peer-cache-tier2"
 
@@ -178,9 +175,6 @@ package reprobuild:
 
   executable reproPeerCacheMintCert:
     name: "repro-peer-cache-mint-cert"
-
-  executable reprostored:
-    discard
 
   executable reproCmakeDyndepFragment:
     name: "repro-cmake-dyndep-fragment"
@@ -420,11 +414,6 @@ package reprobuild:
       actionId = "reprobuild.apps.repro"))
 
     reprobuildAppsActions.add(nim.c(
-      source = "apps/repro-daemon/repro_daemon.nim",
-      binary = "build/bin/repro-daemon",
-      actionId = "reprobuild.apps.repro-daemon"))
-
-    reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
       binary = "build/bin/repro-peer-cache-tier2",
       actionId = "reprobuild.apps.repro-peer-cache-tier2"))
@@ -438,11 +427,6 @@ package reprobuild:
       source = "apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim",
       binary = "build/bin/repro-peer-cache-mint-cert",
       actionId = "reprobuild.apps.repro-peer-cache-mint-cert"))
-
-    reprobuildAppsActions.add(nim.c(
-      source = "apps/reprostored/reprostored.nim",
-      binary = "build/bin/reprostored",
-      actionId = "reprobuild.apps.reprostored"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim",

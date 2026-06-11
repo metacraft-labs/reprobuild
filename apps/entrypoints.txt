@@ -1,10 +1,8 @@
 # name path [extra-nim-flags...]
 repro apps/repro/repro.nim
-repro-daemon apps/repro-daemon/repro_daemon.nim
 repro-peer-cache-tier2 apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim
 repro-peer-cache-admin apps/repro-peer-cache-admin/repro_peer_cache_admin.nim
 repro-peer-cache-mint-cert apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim
-reprostored apps/reprostored/reprostored.nim
 repro-cmake-dyndep-fragment apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim
 repro-cmake-trycompile-provider apps/repro-cmake-trycompile-provider/repro_cmake_trycompile_provider.nim --define:reproProviderMode
 repro-standard-provider apps/repro-standard-provider/repro_standard_provider.nim --define:reproProviderMode
