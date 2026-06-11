@@ -856,11 +856,17 @@ covers arch/debian/ubuntu/fedora/alpine). The harness reports
 `opensuse` as FAIL with `unrecognized ID` when invoked via `--all`;
 this is by design.
 
-## Future work (M8+)
+## Future work (M9+)
 
-- M8: multi-output package realize on arch + debian + fedora.
 - M9: generation switch + rollback on debian-wsl. The real system-
   apply path lands here — M7's plan-only observation graduates to
   apply + rollback with elevation under M82's broker.
 - M5: cross-distro binary-cache push/pull (blocked on
   Peer-Cache-Server-And-Tooling M1).
+- M8: multi-output package realize (blocked on a cross-campaign
+  Reprobuild-Development milestone — DSL, build graph, and
+  content-addressed store do not yet partition a package's
+  outputs into independently-realized prefixes; see the
+  `Linux-Distro-Recipe-Validation.milestones.org` M8 "Blocker
+  Investigation" + "Cross-Campaign Dependency" sections for the
+  layer-by-layer gap analysis).
