@@ -1578,6 +1578,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_b1_repro_build_apps_collection",
     defines: @[]),
   TestSpec(
+    source: "tests/integration/t_b2_helper_invalidation.nim",
+    binary: "build/test-bin/t_b2_helper_invalidation",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_b2_helpers_built_by_engine.nim",
+    binary: "build/test-bin/t_b2_helpers_built_by_engine",
+    defines: @[]),
+  TestSpec(
     source: "tests/integration/t_cli_repro_lock_explain.nim",
     binary: "build/test-bin/t_cli_repro_lock_explain",
     defines: @[]),

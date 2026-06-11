@@ -191,6 +191,32 @@ package reprobuild:
   executable reproStandardProvider:
     name: "repro-standard-provider"
 
+  # Bootstrap-And-Self-Build B2: test-helper executables.
+  #
+  # Three helper binaries that more than one test suite reuses. Before
+  # B2 these were direct ``nim c`` calls in ``scripts/run_tests.sh``
+  # (the ``build_test_helper`` shell function + the
+  # ``harness_apply_lock_holder`` block); B2 declares them as typed
+  # ``executable`` blocks here and adds per-helper ``nim.c(...)`` edges
+  # in the package-level ``build:`` body below. The helpers form their
+  # own ``test-helpers`` build graph collection so consumers can
+  # ``repro build .#test-helpers`` to materialise the trio in one
+  # engine pass (and so test edges can declare typed-input dependencies
+  # on them later — B2 spec deliverable note about
+  # ``buildNimUnittest``'s ``inputs:`` slot).
+  #
+  # B5 retires the corresponding ``build_test_helper`` lines from
+  # ``scripts/run_tests.sh`` once the in-graph path is the supported
+  # one end-to-end.
+  executable liveEndpointHelper:
+    name: "live_endpoint_helper"
+
+  executable fakeProtocolDaemonHelper:
+    name: "fake_protocol_daemon_helper"
+
+  executable harnessApplyLockHolder:
+    name: "harness_apply_lock_holder"
+
   build:
     # Project-DSL-Composition M6: declared typed-output build edges for
     # every ``t_*.nim`` / ``test_*.nim`` file under tests/,
@@ -323,6 +349,49 @@ package reprobuild:
       actionId = "reprobuild.apps.repro-standard-provider"))
 
     discard collect("apps", reprobuildAppsActions)
+
+    # Bootstrap-And-Self-Build B2: per-helper typed-tool build edges +
+    # the ``test-helpers`` build graph collection.
+    #
+    # One ``nim.c(...)`` edge per helper binary. The source paths
+    # mirror the three ``build_test_helper`` (and one inline ``nim c``)
+    # invocations in ``scripts/run_tests.sh``:
+    #
+    #   * ``live_endpoint_helper`` —
+    #     ``tests/fixtures/local-daemons-control-plane/live-endpoint-helper/``
+    #   * ``fake_protocol_daemon_helper`` —
+    #     ``tests/fixtures/local-daemons-control-plane/fake-protocol-daemon-helper/``
+    #   * ``harness_apply_lock_holder`` —
+    #     ``tests/e2e/home-generations/``
+    #
+    # The three actions aggregate into a separate ``test-helpers``
+    # collection (NOT ``apps`` — apps are shipping binaries; helpers
+    # are test scaffolding). ``repro build .#test-helpers`` materialises
+    # all three in one engine pass. As with ``apps``, the fragment form
+    # is required because the path-vs-name classifier would otherwise
+    # try to resolve ``test-helpers`` against the on-disk tree.
+    #
+    # The corresponding ``build_test_helper`` / inline ``nim c`` lines
+    # in ``scripts/run_tests.sh`` stay during the transition; B5
+    # retires them once the in-graph path is the supported one.
+    var reprobuildTestHelpersActions: seq[BuildActionDef] = @[]
+
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/fixtures/local-daemons-control-plane/live-endpoint-helper/live_endpoint_helper.nim",
+      binary = "build/test-bin/live_endpoint_helper",
+      actionId = "reprobuild.test_helpers.live_endpoint_helper"))
+
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/fixtures/local-daemons-control-plane/fake-protocol-daemon-helper/fake_protocol_daemon_helper.nim",
+      binary = "build/test-bin/fake_protocol_daemon_helper",
+      actionId = "reprobuild.test_helpers.fake_protocol_daemon_helper"))
+
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/e2e/home-generations/harness_apply_lock_holder.nim",
+      binary = "build/test-bin/harness_apply_lock_holder",
+      actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
+
+    discard collect("test-helpers", reprobuildTestHelpersActions)
 
     # Option (A) from the repo packaging memo: wrap scripts/build_apps.sh
     # byte-for-byte so the action's behaviour is identical to ``just
