@@ -25,7 +25,9 @@ tools/multi-distro-harness/
   provision-alpine.ps1
   teardown-all.ps1          # unregister ALL repro-* WSL instances (cache preserved)
   tests/
-    smoke_hello.sh          # POSIX-sh hello-world test (runs inside each WSL instance)
+    smoke_hello.sh                  # POSIX-sh hello-world test (Recipe-Val M0)
+    sandbox_check_bubblewrap.sh     # bwrap + user-ns probe (Sandbox-MVP M0)
+    sandbox_transparency_probe.sh   # bwrap passthrough transparency probe (Sandbox-MVP M0)
 scripts/
   run_multi_distro_tests.sh # cross-distro test driver
 ```
@@ -961,6 +963,72 @@ Sample green run:
 
 repro multi-distro: 1/1 distros passed
 ```
+
+## Sandbox-MVP (Linux-Third-Party-Sandbox-MVP M0)
+
+A second campaign reuses this harness for the Tier-3 FHS-view wrapper.
+See
+[`Linux-Third-Party-Sandbox-MVP.milestones.org`](../../../reprobuild-specs/Linux-Third-Party-Sandbox-MVP.milestones.org)
+for the full spec. The M0 deliverable is two probes, both POSIX-sh,
+sitting alongside the Recipe-Validation tests:
+
+| Test                          | Purpose                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| `sandbox_check_bubblewrap`    | Read-only: probe `bwrap` presence + version + unprivileged user-ns state. |
+| `sandbox_transparency_probe`  | Install `bwrap` on demand, then verify a no-isolation bwrap invocation behaves identically to a native exec (echo determinism, host /etc visibility, host PID visibility, identity-mapped UID). |
+
+Running:
+
+```bash
+bash scripts/run_multi_distro_tests.sh sandbox_check_bubblewrap --all
+bash scripts/run_multi_distro_tests.sh sandbox_transparency_probe --all
+```
+
+The probes use the same per-distro provisioned `repro-<distro>` WSL
+instances; nothing else is required.
+
+### M0 results (2026-06-11)
+
+| Distro             | bwrap version (post-install) | unprivileged user-ns | transparency 4/4 |
+| ------------------ | ---------------------------- | -------------------- | ---------------- |
+| arch               | bubblewrap 0.11.2            | enabled              | PASS             |
+| debian             | bubblewrap 0.8.0             | enabled              | PASS             |
+| ubuntu             | bubblewrap 0.6.1             | enabled              | PASS             |
+| fedora             | bubblewrap 0.11.0            | enabled              | PASS             |
+| opensuse-tumbleweed| bubblewrap 0.11.2            | enabled              | PASS             |
+| alpine             | bubblewrap 0.11.2            | enabled              | PASS             |
+
+All six distros: `unshare --user true` exits 0, confirming
+unprivileged-user-namespace creation works out of the box on the WSL
+kernel for every provisioned instance. No `sysctl
+kernel.unprivileged_userns_clone=1` admin step is needed on any of them.
+
+The transparency probe's bwrap shape is the M0-spec minimum-policy
+invocation:
+
+```sh
+bwrap --dev-bind / / --proc /proc -- <argv...>
+```
+
+with NO `--unshare-pid`, NO `--unshare-net`, NO `--unshare-ipc`, NO
+`--unshare-uts`, NO `--unshare-cgroup`, NO `--cap-drop`, NO
+`--seccomp`. The four assertions inside the probe:
+
+1. `bwrap ... -- echo 'hello from bwrap'` -> exact match, rc=0.
+2. `bwrap ... -- ls /etc` lists at least one entry (host etc visible).
+3. `bwrap ... -- ps aux | wc -l` >= 5 lines (host PID table visible).
+4. `bwrap ... -- id -u` == host `id -u` (UID identity-mapped).
+
+### Notes for M1 (driver scaffold)
+
+- bwrap is shipped by every target distro's package manager; the M1
+  driver can install it via the same closed-set switch the probes use.
+- ubuntu jammy's `bwrap 0.6.1` is the oldest version we have to
+  support. It DOES support `--dev-bind` and `--proc`; M1 should
+  validate any newer bwrap flags it wants against this version.
+- No distro in this campaign needs the user-ns sysctl drop-in. If a
+  future distro DOES, `sandbox_check_bubblewrap` will FAIL with a
+  clear remediation line.
 
 ## Cross-campaign blocked milestones
 
