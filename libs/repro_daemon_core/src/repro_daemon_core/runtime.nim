@@ -1374,7 +1374,13 @@ proc siblingUserDaemonPath*(publicCliPath: string): string =
   addFileExt("repro-daemon", ExeExt)
 
 proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
-  result = @["--foreground", "--endpoint", config.endpoint,
+  # Executable-Consolidation M2: the daemon process is `repro daemon serve …`
+  # (the self-spawned `repro` image), so every launch site (`launchWithFork`,
+  # `launchWithLaunchd`, `launchWithSystemdUser`, and the dev self-restart
+  # re-exec) prepends the `daemon serve` subcommand selector ahead of the
+  # daemon flags. `runThinApp` consumes `daemon serve` and hands the remaining
+  # flags to `runUserDaemonCommand` → `parseUserDaemonArgs`.
+  result = @["daemon", "serve", "--foreground", "--endpoint", config.endpoint,
     "--state-dir", config.stateDir, "--log", config.logPath]
   if config.devMode:
     result.add("--dev")
@@ -1536,8 +1542,15 @@ proc waitForUserDaemonStatus*(endpoint: string; timeoutMs = 60000):
 proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     UserDaemonStatus =
   let sourceExe =
+    # Executable-Consolidation M2: the user daemon IS the `repro` image, run as
+    # `repro daemon serve …` (see `daemonProcessArgs`). Self-spawn the current
+    # `repro` rather than locating a separate `repro-daemon` binary, so the
+    # image-hash compared below is `repro`'s own image on both sides. (An older
+    # daemon still running the standalone `repro-daemon` binary therefore
+    # reports a different `runningHash` and is auto-restarted onto the new
+    # `repro daemon serve` image.)
     if config.daemonExe.len > 0: config.daemonExe
-    else: siblingUserDaemonPath(publicCliPath)
+    else: publicCliPath
   let existing = queryUserDaemonStatus(config.endpoint)
   if existing.running:
     # A user daemon is persistent and can outlive the `repro` that started it.
