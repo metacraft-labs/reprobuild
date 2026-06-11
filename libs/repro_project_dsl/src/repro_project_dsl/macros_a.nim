@@ -949,6 +949,12 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     let lockIdentityValue = namedValue(node[i], "lockIdentity")
     if not lockIdentityValue.isNil:
       result.lockIdentity = stringLiteral(lockIdentityValue)
+    let cpuValue = namedValue(node[i], "cpu")
+    if not cpuValue.isNil:
+      result.cpu = stringLiteral(cpuValue)
+    let osValue = namedValue(node[i], "os")
+    if not osValue.isNil:
+      result.os = stringLiteral(osValue)
   if result.url.len == 0:
     error("tarball requires url = \"...\"", node)
   if result.sha256.len == 0:
@@ -959,6 +965,14 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     error("tarball executablePath must be relative to the realized prefix", node)
   if result.stripComponents < 0:
     error("tarball stripComponents must not be negative", node)
+  if result.cpu.len > 0 and
+      result.cpu.toLowerAscii() notin ["any", "x86_64", "aarch64"]:
+    error("tarball cpu must be one of any|x86_64|aarch64; got '" &
+      result.cpu & "'", node)
+  if result.os.len > 0 and
+      result.os.toLowerAscii() notin ["any", "windows", "linux", "macos", "darwin"]:
+    error("tarball os must be one of any|windows|linux|macos|darwin; got '" &
+      result.os & "'", node)
   if result.packageId.len == 0:
     result.packageId = result.url
   if result.lockIdentity.len == 0:
@@ -1266,6 +1280,8 @@ proc packageLiteral(pkg: PackageDef): string =
       ", stripComponents: " & $provisioning.stripComponents &
       ", packageId: " & escForCode(provisioning.packageId) &
       ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", cpu: " & escForCode(provisioning.cpu) &
+      ", os: " & escForCode(provisioning.os) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], scoopProvisioning: @[")
