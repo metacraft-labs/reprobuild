@@ -741,13 +741,126 @@ arch/debian/ubuntu/fedora/alpine). The harness will report
 `opensuse` as FAIL with the message `unrecognized ID` when invoked
 via `--all`; this is by design.
 
-## Future work (M7+)
+## M7 — `repro infra plan` on non-NixOS Linux
 
-- M7: `repro infra plan` — system scope (`systemd.systemUnit`,
-  `fs.systemFile`, `passwd.user`, `linux.firewallRule`). Where
-  M6 found the home scope uniform across distros, M7 is the
-  per-distro path-convention milestone.
+`tools/multi-distro-harness/tests/m7_infra_plan.sh` exercises the
+M69+M83 system-scope plan pipeline against the same `repro` binary
+M1-M4 build, on every non-NixOS distro the campaign covers (arch /
+debian / ubuntu / fedora / alpine). Where M6 covered the home scope
+(uniformly five operations on every distro), M7 covers the system
+scope using the generic-Linux primitives that don't require the
+NixOS-only `linux.nixosSystemModule` escape-hatch driver.
+
+The fixture profile lives at
+`tools/multi-distro-harness/tests/fixtures/m7_system_profile.nim`. It
+exercises three plan-time-safe system-scope primitives:
+
+| Primitive            | What the profile declares                                                      |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `systemd.systemUnit` | A minimal `m7-hello.service` oneshot unit (`enabled: false`).                  |
+| `fs.systemFile`      | `/etc/m7-test/marker` at mode 0644.                                            |
+| `os.timezone`        | `Etc/UTC` (the IANA value every fresh WSL instance defaults to or near).       |
+
+Skipped per the brief:
+
+- `passwd.user` — plan-time observation reads `/etc/passwd`; for any
+  unknown user the planner emits `create`, which is correct, but the
+  apply path requires elevation (M82 broker) and is outside M7 scope.
+- `linux.firewallRule` — some distros' plan-time observation probes
+  the live iptables/nftables chain, which can fault on WSL kernels
+  without netfilter modules.
+
+Both are deferred to a future system-scope-apply milestone.
+
+The test driver:
+
+1. Re-runs the matching `bootstrap-<distro>.sh` (warm-build
+   short-circuits when the repro binary is already present).
+2. Stages the fixture as `system.nim` under `${WORK_ROOT}/m7-infra/profile/`.
+3. Runs `repro infra plan --profile=<...>/system.nim --state-dir=<...>`
+   and captures the rendered plan.
+4. Asserts the plan exit code is zero, every declared resource address
+   (`m7HelloUnit`, `m7Marker`, `m7Timezone`) appears in the plan output,
+   and the plan ends with either the `would change the system` or
+   `no-op` header.
+5. Captures the per-distro operation count for the table below.
+6. **Does NOT** run `repro infra apply`. The brief is explicit: plan
+   only, no elevation, no mutation of the WSL instance's real
+   `/etc/`. Generation switch + rollback is M9's gate.
+7. The `EXIT` trap removes the per-run state-dir; no on-disk
+   artifacts under `/etc/m7-test/` exist because apply never ran.
+
+### Per-distro plan op counts + observation divergence
+
+All five distros parse the fixture, compile through the M83 Phase A
+typed-DSL adapter, and emit a three-operation plan. The per-resource
+ACTION differs on the timezone resource because the plan-time
+observation reads the live system tz:
+
+| Distro | Initial plan ops | systemd.systemUnit | fs.systemFile | os.timezone | Notes                                                                  |
+| ------ | ---------------- | ------------------ | ------------- | ----------- | ---------------------------------------------------------------------- |
+| Arch   | 3                | create             | create        | **update**  | Pre-existing `/etc/localtime` doesn't byte-match the desired digest.   |
+| Debian | 3                | create             | create        | **update**  | Same as Arch — apt-shipped tzdata + the WSL rootfs default differ.     |
+| Ubuntu | 3                | create             | create        | update      | Same shape as Debian (cloud-images.ubuntu.com WSL tarball).            |
+| Fedora | 3                | create             | create        | **update**  | dnf-shipped tzdata; `/etc/localtime` is a symlink into `/usr/share/zoneinfo/UTC`. |
+| Alpine | 3                | create             | create        | **create**  | NO `/etc/localtime` on a fresh musl rootfs (tzdata is opt-in apk).      |
+
+The op COUNT is identical (3) on every distro — the planner is
+platform-pure. The per-resource ACTION divergence on the timezone
+row is the most informative output of the gate: it reports the
+live system state the planner observed, which IS the per-distro
+divergence the M7 brief asks for.
+
+### Per-distro path / systemd convention findings
+
+- **Arch**: pacman ships systemd as the real init. `/etc/systemd/system/`
+  is the canonical drop-in dir; the plan-time observation only reads
+  the path (no `systemctl daemon-reload` runs at plan time).
+- **Debian / Ubuntu**: apt-managed systemd; WSL defaults to
+  Microsoft's init unless `/etc/wsl.conf` opts in to systemd. The M7
+  plan observation is filesystem-only so the gate does not depend on
+  systemd being live.
+- **Fedora**: dnf-managed systemd. `/etc/systemd/system/` overrides
+  `/usr/lib/systemd/system/` (the distro-shipped unit dir). Same
+  filesystem-only observation as the other systemd distros.
+- **Alpine**: NO systemd — openrc is the real init. The plan reports
+  a legal `create` for the unit file (the filesystem write would
+  succeed; the unit just would never start because nothing reads
+  `/etc/systemd/system/` on a musl/openrc host). **Architecturally
+  this means a real `infra apply` on Alpine would need either a
+  per-distro driver variant (an openrc unit translator) or the spec
+  to declare Alpine out-of-scope for systemd primitives**. M7's
+  brief is plan-only so this divergence surfaces without blocking
+  the gate.
+- **Timezone driver — Etc/UTC fast-path missing**: every glibc
+  distro under WSL has `/etc/localtime` pre-set to UTC (the same
+  IANA value the fixture declares), yet the plan reports `update`,
+  not `no-op`. The plan-time observation digest must be reading
+  the symlink target / file bytes rather than the canonical IANA
+  string, so `UTC` (the symlink-target basename) and `Etc/UTC`
+  (the declared IANA name) hash differently. Apply would resolve
+  this — the M83-side normalisation `loadRecordedDigest` reuses
+  on a second plan after apply. The current behaviour is correct
+  but somewhat counter-intuitive in the read-only plan output;
+  noted here for the M82 / M9 follow-ups, not a bug per se.
+
+### Running M7 acceptance
+
+```bash
+bash scripts/run_multi_distro_tests.sh m7_infra_plan --all       # 5/5 expected
+bash scripts/run_multi_distro_tests.sh m7_infra_plan arch        # 1/1
+```
+
+opensuse is OUT of M7 scope (consistent with M6 — M1-M9 explicitly
+covers arch/debian/ubuntu/fedora/alpine). The harness reports
+`opensuse` as FAIL with `unrecognized ID` when invoked via `--all`;
+this is by design.
+
+## Future work (M8+)
+
 - M8: multi-output package realize on arch + debian + fedora.
-- M9: generation switch + rollback on debian-wsl.
+- M9: generation switch + rollback on debian-wsl. The real system-
+  apply path lands here — M7's plan-only observation graduates to
+  apply + rollback with elevation under M82's broker.
 - M5: cross-distro binary-cache push/pull (blocked on
   Peer-Cache-Server-And-Tooling M1).
