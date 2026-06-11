@@ -41,7 +41,37 @@ const
   GeneratedFile = "repro_tests.nim"
   BinaryRoot = "build/test-bin"
 
+  # Bootstrap-And-Self-Build B4: the three macOS-arm64 HCR tests
+  # previously had their special compile flags emitted by
+  # ``scripts/run_tests.sh``'s ``compile_hcr_workaround`` direct
+  # ``nim c`` re-compile loop. The flags now live in the typed-tool's
+  # ``extraPassC`` / ``extraPassL`` slots (see ct-test's
+  # ``buildNimUnittest.build`` extension); the generator stamps the
+  # per-test entries with both lists. The ``targetOs`` field guards
+  # the flags so a non-Apple-Silicon host doesn't activate the macOS-
+  # specific linker hint (on Linux/gcc the flags are typically ignored
+  # with a warning, so the fallback path is "emit unconditionally" —
+  # the runtime guard sits in ``repro.nim``'s test-spec loop).
+  HcrTestStems = [
+    "t_hcr_agent_process_target",
+    "t_e2e_repro_watch_hcr_multi_target_independent_patches",
+    "t_e2e_repro_watch_hcr_one_target_agent_inject_failure",
+  ]
+
+  HcrExtraPassC = "-fpatchable-function-entry=16,0"
+  HcrExtraPassL = "-Wl,-segprot,__HCR,rwx,rwx"
+
 type
+  TargetOs = enum
+    ## Bootstrap-And-Self-Build B4: per-test target-OS guard. ``soAny``
+    ## (the default) means the test compiles on every supported host;
+    ## ``soMacosArm64`` means the test carries platform-conditional
+    ## flags (today: the HCR codesign workaround) that the build edge's
+    ## runtime body activates only when the cross-target is
+    ## aarch64-darwin. The runtime guard sits in ``repro.nim``; the
+    ## generator only stamps the field.
+    soAny, soMacosArm64
+
   TestEdge = object
     source: string        # repo-relative path to the .nim file
     binary: string        # repo-relative output path
@@ -56,6 +86,20 @@ type
       ## EXECUTE edge so (a) the engine builds ``repro`` before the
       ## test runs and (b) touching a source under ``libs/repro_*/``
       ## invalidates the test's execute-edge cache.
+    extraPassC: seq[string]
+      ## Bootstrap-And-Self-Build B4: per-test ``--passC:`` flags. The
+      ## generator emits one entry per ``--passC:<value>`` flag the
+      ## build edge should pass to ``nim c`` (and on through to the
+      ## C backend). Today this covers the macOS-arm64 HCR codesign
+      ## workaround on three specific tests; the field is empty for
+      ## everything else.
+    extraPassL: seq[string]
+      ## Bootstrap-And-Self-Build B4: per-test ``--passL:`` flags;
+      ## same shape and semantics as ``extraPassC`` but for the
+      ## linker side.
+    targetOs: TargetOs
+      ## Bootstrap-And-Self-Build B4: per-test target-OS guard for the
+      ## ``extraPassC`` / ``extraPassL`` activation. See ``TargetOs``.
 
 proc isProviderModePath(path: string): bool =
   ## Mirrors ``scripts/run_tests.sh`` lines ~128-167. ``path`` is a
@@ -155,6 +199,12 @@ proc detectReproBinaryUsage(repoRoot, rel: string): bool =
   except IOError, OSError:
     return false
 
+proc isHcrTestStem(stem: string): bool =
+  for known in HcrTestStems:
+    if stem == known:
+      return true
+  false
+
 proc discoverTests(repoRoot: string): seq[TestEdge] =
   result = @[]
   var seenBinaries = initHashSet[string]()
@@ -182,14 +232,58 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
         rel & ")")
       continue
     seenBinaries.incl(binary)
+    var extraPassC: seq[string] = @[]
+    var extraPassL: seq[string] = @[]
+    var targetOs = soAny
+    if isHcrTestStem(stem):
+      extraPassC = @[HcrExtraPassC]
+      extraPassL = @[HcrExtraPassL]
+      targetOs = soMacosArm64
     result.add(TestEdge(
       source: rel,
       binary: binary,
       identName: identFromBasename(stem),
       needsProviderMode: isProviderModePath(rel),
-      requiresReproBinary: detectReproBinaryUsage(repoRoot, rel)))
+      requiresReproBinary: detectReproBinaryUsage(repoRoot, rel),
+      extraPassC: extraPassC,
+      extraPassL: extraPassL,
+      targetOs: targetOs))
 
-proc render(edges: seq[TestEdge]): string =
+proc acceptPythonTest(rel: string): bool =
+  ## Bootstrap-And-Self-Build B4: discover Python tests participating in
+  ## the ``test`` collection. The pre-B4 ``scripts/run_tests.sh`` Python
+  ## loop walked ``tests/`` with ``find -name 'test_*.py'``; this
+  ## generator preserves the same discovery rule.
+  if not rel.endsWith(".py"):
+    return false
+  let stem = rel.splitFile().name
+  stem.startsWith("test_")
+
+proc discoverPythonTests(repoRoot: string): seq[string] =
+  ## Bootstrap-And-Self-Build B4: returns repo-relative paths to every
+  ## ``test_*.py`` file under ``tests/``. Sorted alphabetically for
+  ## deterministic output.
+  result = @[]
+  let absRoot = repoRoot / "tests"
+  if not dirExists(absRoot):
+    return
+  for path in walkDirRec(absRoot, relative = true):
+    let rel = ("tests" / path).toForward()
+    if acceptPythonTest(rel):
+      result.add(rel)
+  result.sort()
+
+proc seqLiteral(values: seq[string]): string =
+  if values.len == 0:
+    return "@[]"
+  result = "@["
+  for i, v in values:
+    if i > 0:
+      result.add(", ")
+    result.add('"' & v & '"')
+  result.add("]")
+
+proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
   result = ""
   result.add("# AUTO-GENERATED by scripts/generate_test_edges.nim — " &
     "do not edit by hand.\n")
@@ -218,8 +312,27 @@ proc render(edges: seq[TestEdge]): string =
   result.add("# which the package macro silently dropped. The data-table\n")
   result.add("# shape lifts the registration into the caller, so the macro\n")
   result.add("# sees every typed-tool call.\n")
+  result.add("#\n")
+  result.add("# Bootstrap-And-Self-Build B4: the three macOS-arm64 HCR\n")
+  result.add("# tests carry ``extraPassC`` / ``extraPassL`` + ``targetOs:\n")
+  result.add("# soMacosArm64`` so the build edge emits the codesign\n")
+  result.add("# workaround flags conditional on the cross-target. Python\n")
+  result.add("# ``test_*.py`` files are enumerated as ``pythonTestPaths*``\n")
+  result.add("# and consumed by ``repro.nim``'s ``pythonUnittest.run(...)``\n")
+  result.add("# loop, so Python tests participate in the ``test``\n")
+  result.add("# collection alongside the Nim tests.\n")
   result.add("\n")
   result.add("type\n")
+  result.add("  TargetOs* = enum\n")
+  result.add("    ## Bootstrap-And-Self-Build B4: per-test target-OS\n")
+  result.add("    ## guard. ``soAny`` (default) — the test compiles on\n")
+  result.add("    ## every supported host. ``soMacosArm64`` — the test\n")
+  result.add("    ## carries platform-conditional flags (today: the HCR\n")
+  result.add("    ## codesign workaround) that the build edge's runtime\n")
+  result.add("    ## body activates only when the cross-target is\n")
+  result.add("    ## aarch64-darwin.\n")
+  result.add("    soAny, soMacosArm64\n")
+  result.add("\n")
   result.add("  TestSpec* = object\n")
   result.add("    ## One row of the test-suite table. ``source`` is the\n")
   result.add("    ## repo-relative path to the ``.nim`` test file;\n")
@@ -231,10 +344,17 @@ proc render(edges: seq[TestEdge]): string =
   result.add("    ## built ``repro`` artifact is declared as a typed input\n")
   result.add("    ## on the EXECUTE edge (build edge stays purely a Nim\n")
   result.add("    ## compile).\n")
+  result.add("    ## ``extraPassC`` / ``extraPassL`` (B4): per-test\n")
+  result.add("    ## ``--passC:`` / ``--passL:`` flag lists, activated by\n")
+  result.add("    ## the ``targetOs`` guard.\n")
+  result.add("    ## ``targetOs`` (B4): see ``TargetOs``.\n")
   result.add("    source*: string\n")
   result.add("    binary*: string\n")
   result.add("    defines*: seq[string]\n")
   result.add("    requiresReproBinary*: bool\n")
+  result.add("    extraPassC*: seq[string]\n")
+  result.add("    extraPassL*: seq[string]\n")
+  result.add("    targetOs*: TargetOs\n")
   result.add("\n")
   result.add("const reprobuildTestSpecs*: seq[TestSpec] = @[\n")
   for i, edge in edges:
@@ -246,24 +366,47 @@ proc render(edges: seq[TestEdge]): string =
       if edge.needsProviderMode: "@[\"reproProviderMode\"]"
       else: "@[]"
     let reqLit = if edge.requiresReproBinary: "true" else: "false"
+    let targetOsLit = case edge.targetOs
+      of soAny: "soAny"
+      of soMacosArm64: "soMacosArm64"
     result.add("    defines: " & definesLit & ",\n")
-    result.add("    requiresReproBinary: " & reqLit & ")" & sep & "\n")
+    result.add("    requiresReproBinary: " & reqLit & ",\n")
+    result.add("    extraPassC: " & seqLiteral(edge.extraPassC) & ",\n")
+    result.add("    extraPassL: " & seqLiteral(edge.extraPassL) & ",\n")
+    result.add("    targetOs: " & targetOsLit & ")" & sep & "\n")
+  result.add("]\n")
+  result.add("\n")
+  result.add("## Bootstrap-And-Self-Build B4: Python tests discovered\n")
+  result.add("## under ``tests/`` whose stem starts with ``test_``. The\n")
+  result.add("## ``repro.nim`` ``build:`` block iterates this list and\n")
+  result.add("## emits one ``pythonUnittest.run(...)`` execute edge per\n")
+  result.add("## entry. Those edges are appended to the same\n")
+  result.add("## ``reprobuildTestExecuteActions`` accumulator as the Nim\n")
+  result.add("## test execute edges, so the ``test`` collection covers\n")
+  result.add("## both languages in one engine pass.\n")
+  result.add("const pythonTestPaths*: seq[string] = @[\n")
+  for i, path in pythonTests:
+    let sep = if i == pythonTests.high: "" else: ","
+    result.add("  \"" & path & "\"" & sep & "\n")
   result.add("]\n")
 
 proc main() =
   let repoRoot = getCurrentDir()
   let edges = discoverTests(repoRoot)
+  let pythonTests = discoverPythonTests(repoRoot)
   let outputPath = repoRoot / GeneratedFile
-  let content = render(edges)
+  let content = render(edges, pythonTests)
   let existing =
     if fileExists(outputPath): readFile(outputPath) else: ""
   if existing == content:
     stderr.writeLine("generate_test_edges: " & GeneratedFile &
-      " is up to date (" & $edges.len & " tests)")
+      " is up to date (" & $edges.len & " Nim tests, " &
+      $pythonTests.len & " Python tests)")
     return
   writeFile(outputPath, content)
   stderr.writeLine("generate_test_edges: wrote " & GeneratedFile &
-    " (" & $edges.len & " tests)")
+    " (" & $edges.len & " Nim tests, " & $pythonTests.len &
+    " Python tests)")
 
 when isMainModule:
   main()
