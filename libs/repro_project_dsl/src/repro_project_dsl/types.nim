@@ -161,6 +161,17 @@ type
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
+    # Per-platform targeting. Empty (= "any") means the entry matches
+    # any host. Multiple ``tarball(...)`` entries inside one
+    # ``provisioning:`` block let a single package definition serve
+    # several (cpu, os) combinations; the resolver picks the first
+    # entry whose (cpu, os) constraints match the host. Allowed
+    # values mirror the M63 ``PlatformCpu`` / ``PlatformOs``
+    # taxonomy: cpu ∈ {"", "any", "x86_64", "aarch64"}; os ∈ {"",
+    # "any", "windows", "linux", "macos", "darwin"} (``darwin`` is
+    # an alias for ``macos``).
+    cpu*: string
+    os*: string
     sourceFile*: string
     sourceLine*: int
 
