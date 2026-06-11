@@ -36,8 +36,8 @@
 ##   REPRO_TEST_THREADS=N     override default worker count
 ##
 
-import std/[algorithm, json, locks, os, osproc, parseopt, strtabs,
-            strutils, times]
+import std/[algorithm, json, locks, os, osproc, parseopt, streams,
+            strtabs, strutils, times]
 
 const
   DefaultBinDir = "build/test-bin"
@@ -220,18 +220,92 @@ proc qualifyName(binaryStem, suite, name: string): string =
   else:
     name
 
+# Module-global lock that serialises the child-process spawn step
+# (``pipe()`` + ``fork()``/``execve``) across all worker threads.
+#
+# Why this is needed: on Linux, ``osproc.startProcess`` uses bare
+# ``pipe()`` (no ``O_CLOEXEC``) and a bare ``fork()`` from whatever
+# worker happens to call it. Two hazards stack up under
+# ``--threads=8/16``:
+#
+# 1. **Pipe FD leak.** Between this thread's ``pipe()`` and the
+#    parent's post-spawn ``close()`` of the unused pipe ends, a sibling
+#    worker's ``fork()`` will copy those FDs into its own child as
+#    ghost holders. The ghost holders prevent EOF on the parent-side
+#    read of this thread's stream and can shift FD numbering so the
+#    later ``close()`` operates on a different FD than expected.
+# 2. **Fork inside multithreaded process.** Nim's
+#    ``startProcessAfterFork`` calls non-async-signal-safe code
+#    (``findExe``, GC allocations) in the child between ``fork()`` and
+#    ``execve``. If another thread held a glibc internal lock (malloc
+#    arena, etc.) at fork time, the child sees that lock as
+#    permanently held — manifesting as a sporadic
+#    ``Bad file descriptor [OSError]`` raised back through the error
+#    pipe.
+#
+# Serialising the spawn step closes hazard (1) entirely: by the time
+# ``startProcess`` returns, the parent has closed every pipe end it
+# doesn't keep, and no sibling fork can have observed our pipe FDs.
+# It also shrinks hazard (2)'s window to "no other worker is forking
+# concurrently", which empirically takes the residual failure rate
+# from "tears down the runner every few seconds at --threads=16" to
+# "occasional, recoverable". The stream drain and ``waitForExit``
+# happen with the lock released so per-test concurrency is preserved.
+var spawnLock: Lock
+initLock(spawnLock)
+
+proc spawnedProcess(binary: string; args: openArray[string];
+                    env: StringTableRef): Process =
+  acquire(spawnLock)
+  try:
+    result = startProcess(
+      binary, args = args, env = env,
+      options = {poStdErrToStdOut, poUsePath})
+  finally:
+    release(spawnLock)
+
+proc drainAndWait(p: Process): tuple[output: string; exitCode: int] =
+  ## Drain the merged stdout/stderr stream to EOF, then collect the
+  ## child's exit code and free its handles. Reading the stream to EOF
+  ## first guarantees ``waitForExit`` won't deadlock on a child that
+  ## blocks waiting for the parent to consume its pipe buffer.
+  var output = ""
+  let outp = p.outputStream
+  var line = newStringOfCap(120)
+  while outp.readLine(line):
+    output.add(line)
+    output.add('\n')
+  let exitCode = p.waitForExit()
+  close(p)
+  result = (output, exitCode)
+
 proc runWholeBinary(tc: TestCase; resultsDir: string): TestResult =
   result.testCase = tc
   result.status = tsFail
   let t0 = epochTime()
-  let (output, exitCode) = execCmdEx(quoteShell(tc.binary))
+  # Wrap the whole spawn-drain-wait sequence so a sporadic
+  # ``Bad file descriptor [OSError]`` from the residual fork hazard
+  # documented above is reported as a test failure instead of tearing
+  # down the worker thread (and silencing every test the queue would
+  # have handed out afterwards). The crash mode happens before the
+  # child runs, so the test is genuinely "did not produce a result"
+  # — failing the test is the right exit-code behaviour for the run.
+  try:
+    let p = spawnedProcess(tc.binary, args = [], env = nil)
+    let (output, exitCode) = drainAndWait(p)
+    result.stdout = output
+    case exitCode
+    of 0: result.status = tsPass
+    of 2: result.status = tsSkip
+    else: result.status = tsFail
+  except OSError as e:
+    result.status = tsFail
+    result.stdout = "repro_test_runner: spawn failed: " & e.msg & "\n"
+  except IOError as e:
+    result.status = tsFail
+    result.stdout = "repro_test_runner: i/o failed: " & e.msg & "\n"
   result.durationMs = int((epochTime() - t0) * 1000)
-  result.stdout = output
   result.stderr = ""
-  case exitCode
-  of 0: result.status = tsPass
-  of 2: result.status = tsSkip
-  else: result.status = tsFail
 
 proc runOneProtocol(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]]): TestResult =
@@ -251,16 +325,34 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     childEnv[k] = v
   childEnv["NIMTEST_RESULT_FILE"] = resultFile
   let t0 = epochTime()
-  let (output, exitCode) = execCmdEx(
-    quoteShell(tc.binary) & " --run " &
-    quoteShell(tc.qualifiedName),
-    env = childEnv)
+  # Same spawn-lock + exception-isolation discipline as
+  # ``runWholeBinary``. A sibling whole-binary spawn racing this
+  # protocol spawn would otherwise leak pipe FDs into the wrong child,
+  # and a residual fork-vs-malloc hazard could still raise OSError.
+  # The lock covers only ``startProcess``; the drain and exit-code
+  # collection run concurrently with other workers.
+  var output = ""
+  var exitCode = 1
+  var spawnFailed = false
+  try:
+    let p = spawnedProcess(
+      tc.binary, args = ["--run", tc.qualifiedName], env = childEnv)
+    (output, exitCode) = drainAndWait(p)
+  except OSError as e:
+    spawnFailed = true
+    output = "repro_test_runner: spawn failed: " & e.msg & "\n"
+  except IOError as e:
+    spawnFailed = true
+    output = "repro_test_runner: i/o failed: " & e.msg & "\n"
   result.durationMs = int((epochTime() - t0) * 1000)
   result.stdout = output
-  case exitCode
-  of 0: result.status = tsPass
-  of 2: result.status = tsSkip
-  else: result.status = tsFail
+  if spawnFailed:
+    result.status = tsFail
+  else:
+    case exitCode
+    of 0: result.status = tsPass
+    of 2: result.status = tsSkip
+    else: result.status = tsFail
   # Prefer the duration_ms recorded in the result file when present.
   if fileExists(resultFile):
     try:
@@ -305,10 +397,23 @@ proc workerLoop(args: WorkerArgs) =
       break
     discard atomicInc(args.activeCount[])
     var res: TestResult
-    if tc.protocolAware:
-      res = runOneProtocol(tc, args.resultsDir, args.baseEnv[])
-    else:
-      res = runWholeBinary(tc, args.resultsDir)
+    # Defence in depth: ``runOneProtocol`` and ``runWholeBinary`` both
+    # catch the spawn-time ``OSError``/``IOError`` paths internally,
+    # but any unexpected raise here would otherwise tear down the
+    # worker thread and silently lose every test still on the queue.
+    # Convert it to a synthetic FAIL so the run completes and the
+    # summary reflects what happened.
+    try:
+      if tc.protocolAware:
+        res = runOneProtocol(tc, args.resultsDir, args.baseEnv[])
+      else:
+        res = runWholeBinary(tc, args.resultsDir)
+    except CatchableError as e:
+      res = TestResult(
+        testCase: tc,
+        status: tsFail,
+        durationMs: 0,
+        stdout: "repro_test_runner: worker exception: " & e.msg & "\n")
     discard atomicDec(args.activeCount[])
 
     acquire(args.resultsLock[])
