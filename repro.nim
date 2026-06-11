@@ -232,20 +232,107 @@ package reprobuild:
     # ``currentBuildState()`` to find the active package even though
     # the call now happens inside a runtime ``for`` loop rather than
     # at a literal top-level position in the ``build:`` body.
-    var reprobuildTestActions: seq[BuildActionDef] = @[]
+    #
+    # Bootstrap-And-Self-Build B3: each TestSpec now expands into TWO
+    # edges (per Package-Model.md §"The test template"):
+    #
+    #   * A BUILD edge — the compile-only ``buildNimUnittest.build(...)``
+    #     call that produces ``build/test-bin/<stem>``. Actions accumulate
+    #     into ``reprobuildTestBuildActions`` and collect into a
+    #     ``test-builds`` build graph collection so callers that want
+    #     compile-only verification (the old ``repro build test``
+    #     semantics) can still do ``repro build .#test-builds``.
+    #
+    #   * An EXECUTE edge — ``edge.testBinary.run(...)`` per Package-
+    #     Model.md ~line 994. The binary path flows in as a typed input
+    #     so the engine action-cache keys on the binary content. When
+    #     the TestSpec's ``requiresReproBinary`` flag is set the engine-
+    #     built ``./build/bin/repro`` artifact is declared as an extra
+    #     typed input via the ``requiredBinaries`` slot the
+    #     ``ct_test_nim_unittest`` adapter exposes — this is the
+    #     mechanism that triggers a ``repro`` rebuild before an e2e test
+    #     runs, and re-runs the test execute edge when a source under
+    #     ``libs/repro_*/`` changes. Execute actions accumulate into
+    #     ``reprobuildTestExecuteActions`` and the resulting collection
+    #     is registered as ``test``, so ``repro test`` /
+    #     ``repro build test`` now materialises the EXECUTE closures
+    #     (each execute action transitively depends on its build edge).
+    #
+    # B5 retires the out-of-band ``ct-test-runner`` walk of
+    # ``build/test-bin/`` in favour of these graph-native execute edges
+    # entirely; B3 + B4 land both paths in parallel.
+    var reprobuildTestBuildActions: seq[BuildActionDef] = @[]
+    var reprobuildTestExecuteActions: seq[BuildActionDef] = @[]
+    const reproBinaryPath = "build/bin/repro"
+
+    proc reproTestExecuteId(binary: string): string =
+      ## Compute the per-test EXECUTE-edge action id from the build
+      ## edge's binary path. Uses raw string-slicing instead of
+      ## ``os.extractFilename`` because the package macro lifts the
+      ## body into a generated proc whose scope does not transparently
+      ## see ``std/os``.
+      var lastSlash = -1
+      for i in 0 ..< binary.len:
+        if binary[i] == '/' or binary[i] == '\\':
+          lastSlash = i
+      let stem =
+        if lastSlash >= 0: binary[lastSlash + 1 .. ^1]
+        else: binary
+      "reprobuild.test_execute." & stem
+
     for spec in reprobuildTestSpecs:
       let edge = buildNimUnittest.build(
         source = spec.source,
         binary = spec.binary,
         defines = spec.defines)
-      reprobuildTestActions.add(edge.action)
+      reprobuildTestBuildActions.add(edge.action)
+      # B3: emit the EXECUTE edge.
+      #
+      # ``requiredBinaries`` is the typed input slot the
+      # ``ct_test_nim_unittest.run`` proc exposes (Bootstrap-And-Self-
+      # Build B3 extension): when a TestSpec carries
+      # ``requiresReproBinary``, the engine-built
+      # ``build/bin/repro`` artifact is recorded as an input on the
+      # execute edge. Without the flag the execute edge depends only on
+      # its own binary content — keeping the action-cache fingerprint
+      # small for the 500+ tests that do NOT spawn the CLI.
+      let executeActionId = reproTestExecuteId(spec.binary)
+      # ``registerImplicitName = false`` because the BUILD edge
+      # already registers the binary basename as the implicit target
+      # name for this package; the execute edge would otherwise
+      # collide on the same name and the per-package target-export
+      # table rejects the duplicate with a ``duplicate implicit target
+      # name`` diagnostic at provider time. The explicit ``actionId``
+      # is the selector for the execute edge.
+      let executeEdge =
+        if spec.requiresReproBinary:
+          edge.testBinary.run(
+            requiredBinaries = [reproBinaryPath],
+            actionId = executeActionId,
+            registerImplicitName = false)
+        else:
+          edge.testBinary.run(
+            actionId = executeActionId,
+            registerImplicitName = false)
+      reprobuildTestExecuteActions.add(executeEdge)
     # Spec-Implementation M0: the ``test`` build graph collection
     # (per reprobuild-specs/Build-Graph-Collections.md). ``repro test``
     # and ``repro build test`` both materialize this collection's
-    # closure. Previously expressed as ``aggregate("test", ...)``; the
-    # ``collect`` primitive is the build-graph-collection-shaped name
-    # for the same data model in M0 (the registry split lands later).
-    discard collect("test", reprobuildTestActions)
+    # closure.
+    #
+    # B3: the collection now holds EXECUTE edges (the build edges are
+    # transitive inputs reached automatically by the engine's closure
+    # walk). The semantic change is per Bootstrap-And-Self-Build B3
+    # outcome and Package-Model.md §"The test template". The compile-
+    # only verification (former ``repro build test`` semantics) is
+    # available via the ``test-builds`` collection registered below.
+    discard collect("test", reprobuildTestExecuteActions)
+
+    # B3: a parallel collection of just the BUILD halves for callers
+    # that want compile-only verification of the test corpus without
+    # actually executing the tests (e.g. CI byte-equivalence checks,
+    # the historical ``repro build test`` behaviour before B3).
+    discard collect("test-builds", reprobuildTestBuildActions)
 
     # Bootstrap-And-Self-Build B1: per-app typed-tool build edges +
     # the ``apps`` build graph collection.

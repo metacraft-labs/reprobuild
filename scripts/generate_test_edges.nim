@@ -47,6 +47,15 @@ type
     binary: string        # repo-relative output path
     identName: string     # Nim identifier for the let-binding
     needsProviderMode: bool
+    requiresReproBinary: bool
+      ## Bootstrap-And-Self-Build B3: ``true`` when the test spawns
+      ## ``./build/bin/repro`` as a subprocess. The generator detects
+      ## this by scanning the test source for the ``build/bin/repro``
+      ## literal. When set, ``repro.nim`` declares the engine-built
+      ## ``build/bin/repro`` artifact as a typed input on the test's
+      ## EXECUTE edge so (a) the engine builds ``repro`` before the
+      ## test runs and (b) touching a source under ``libs/repro_*/``
+      ## invalidates the test's execute-edge cache.
 
 proc isProviderModePath(path: string): bool =
   ## Mirrors ``scripts/run_tests.sh`` lines ~128-167. ``path`` is a
@@ -129,6 +138,23 @@ proc walkRoot(repoRoot, dir: string;
     if accept(rel):
       result.add(rel)
 
+proc detectReproBinaryUsage(repoRoot, rel: string): bool =
+  ## Bootstrap-And-Self-Build B3: returns ``true`` when the test source
+  ## at ``repoRoot/rel`` contains the literal ``build/bin/repro`` (or
+  ## the ``reproBin`` convention used by the integration suite). The
+  ## scan is a cheap substring match against the test file — false
+  ## positives (e.g. tests that reference the path in a string only
+  ## for diagnostics) are acceptable here: declaring an unused typed
+  ## input on the execute edge is harmless beyond a small action-cache
+  ## key change.
+  let abs = repoRoot / rel
+  try:
+    let content = readFile(abs)
+    return ("build/bin/repro" in content) or
+           ("build\\bin\\repro" in content)
+  except IOError, OSError:
+    return false
+
 proc discoverTests(repoRoot: string): seq[TestEdge] =
   result = @[]
   var seenBinaries = initHashSet[string]()
@@ -160,7 +186,8 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
       source: rel,
       binary: binary,
       identName: identFromBasename(stem),
-      needsProviderMode: isProviderModePath(rel)))
+      needsProviderMode: isProviderModePath(rel),
+      requiresReproBinary: detectReproBinaryUsage(repoRoot, rel)))
 
 proc render(edges: seq[TestEdge]): string =
   result = ""
@@ -199,9 +226,15 @@ proc render(edges: seq[TestEdge]): string =
   result.add("    ## ``binary`` is the repo-relative output binary path;\n")
   result.add("    ## ``defines`` is the per-test ``-d:`` flag list passed\n")
   result.add("    ## through to ``buildNimUnittest.build``.\n")
+  result.add("    ## ``requiresReproBinary`` (B3): the test spawns\n")
+  result.add("    ## ``./build/bin/repro`` as a subprocess, so the engine-\n")
+  result.add("    ## built ``repro`` artifact is declared as a typed input\n")
+  result.add("    ## on the EXECUTE edge (build edge stays purely a Nim\n")
+  result.add("    ## compile).\n")
   result.add("    source*: string\n")
   result.add("    binary*: string\n")
   result.add("    defines*: seq[string]\n")
+  result.add("    requiresReproBinary*: bool\n")
   result.add("\n")
   result.add("const reprobuildTestSpecs*: seq[TestSpec] = @[\n")
   for i, edge in edges:
@@ -209,10 +242,12 @@ proc render(edges: seq[TestEdge]): string =
     result.add("  TestSpec(\n")
     result.add("    source: \"" & edge.source & "\",\n")
     result.add("    binary: \"" & edge.binary & "\",\n")
-    if edge.needsProviderMode:
-      result.add("    defines: @[\"reproProviderMode\"])" & sep & "\n")
-    else:
-      result.add("    defines: @[])" & sep & "\n")
+    let definesLit =
+      if edge.needsProviderMode: "@[\"reproProviderMode\"]"
+      else: "@[]"
+    let reqLit = if edge.requiresReproBinary: "true" else: "false"
+    result.add("    defines: " & definesLit & ",\n")
+    result.add("    requiresReproBinary: " & reqLit & ")" & sep & "\n")
   result.add("]\n")
 
 proc main() =
