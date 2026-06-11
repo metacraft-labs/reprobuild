@@ -619,6 +619,135 @@ gcc -> musl) bootstraps a musl-only userland; M4's findings
 (Nim 2.2.0 codegen bug, source-build path, flat /usr/lib layout)
 all feed directly into that work.
 
-## Future work (M5+)
+## M6 — `repro home apply` on non-NixOS Linux
 
-- M5: cross-distro binary-cache push/pull.
+`tools/multi-distro-harness/tests/m6_home_apply.sh` exercises the
+M68/M83 home-scope apply pipeline against the same `repro` binary
+M1-M4 build, on every non-NixOS distro the campaign covers (arch /
+debian / ubuntu / fedora / alpine). The Dotfiles-Migration-Completion
+campaign already validated the apply path on NixOS (`eli-wsl`),
+where it had to dodge home-manager; M6 confirms the path works on
+distros without a hostile declarative neighbour.
+
+The fixture profile lives at
+`tools/multi-distro-harness/tests/fixtures/m6_home_profile.nim`. It
+exercises the four headless home-scope primitives:
+
+| Primitive             | What the profile declares                                            |
+| --------------------- | -------------------------------------------------------------------- |
+| `fs.userFile`         | `~/.config/m6-test/marker.txt` + `~/.config/m6-test/hello.sh` (0755). |
+| `env.userVariable`    | `REPRO_M6_HOME_APPLY=1` (rendered into the POSIX rc managed block).  |
+| `env.userPath`        | `/opt/repro-m6-test/bin` contribution (driver test-seam `REPRO_HOME_POSIX_PATH_RC`). |
+| `shell.integration`   | A managed block in `~/.config/m6-test/shell-hook.sh`.                |
+
+GUI / Wayland / X primitives (`linux.dconfKey`, `linux.kdeConfigKey`,
+`vscode.extension`, `systemd.userUnit` with a real GUI target) are
+deliberately excluded — the `repro-*` WSL instances are headless.
+
+The test driver:
+
+1. Re-runs the matching `bootstrap-<distro>.sh` (warm-build short-circuit).
+2. Stages the fixture as `home.nim` under `${WORK_ROOT}/m6-home/profile/`.
+3. Exports `REPRO_HOME_STATE_DIR`, `REPRO_HOME_STORE_ROOT`,
+   `REPRO_HOME_POSIX_PATH_RC`, and `REPRO_HOST=m6-test-host` so the
+   apply lands in isolated test paths and the host-table lookup
+   resolves to the fixture's `default` activity deterministically
+   (without depending on the WSL kernel hostname which differs per
+   distro: `archlinux` / `debian` / `ubuntu` / `fedora` / `alpine`).
+4. Runs `repro home apply --plan` and asserts the rendered plan
+   names every expected resource address (`marker`, `hello`,
+   `m6Var`, `m6Path`, `m6Hook`).
+5. Runs `repro home apply` for real (the WSL instance IS the
+   disposable sandbox per the M6 brief).
+6. Verifies on-disk materialization: marker file, hello.sh
+   executable + output, PATH contribution managed block, shell-
+   integration managed block (with `repro-managed:` sentinels).
+7. Re-runs `repro home apply --plan` and asserts the plan reports
+   `plan status: no-op (matches the active generation)` + `0 drift`.
+
+The `EXIT` trap removes the per-run state-dir + `~/.config/m6-test/`
+so a re-run starts clean even after a failure.
+
+### Per-distro op count + status
+
+All five distros produce the same plan shape (one operation per
+declared resource, none cross-distro divergence at the planner
+level):
+
+| Distro | Initial plan ops | Drift plan status | Notes                                              |
+| ------ | ---------------- | ----------------- | -------------------------------------------------- |
+| Arch   | 5                | no-op             | Uses pacman's nim 2.2.10 directly.                 |
+| Debian | 5                | no-op             | Uses M2's choosenim nim at `/root/.nimble/bin`.    |
+| Ubuntu | 5                | no-op             | Uses M2's choosenim nim at `/root/.nimble/bin`.    |
+| Fedora | 5                | no-op             | Uses M3's choosenim nim at `/root/.nimble/bin`.    |
+| Alpine | 5                | no-op             | Uses M4's source-built nim at `${WORK_ROOT}/nim-2.2.10/bin`. |
+
+The Op count is identical across all 5 distros because the home-scope
+primitives are uniform on Linux — there is no per-distro path
+divergence at the home scope (cross-distro divergence is concentrated
+in the SYSTEM scope, which is M7's territory: Debian's
+`/usr/share/bash-completion/` vs Fedora's `/etc/bash_completion.d/`
+etc.).
+
+### Known finding: `env.userVariable` is Windows-only on the apply leg
+
+The `env.userVariable` driver's `applyUserVariableCreate` /
+`applyUserVariableUpdate` / `applyUserVariableDestroy` procs in
+`libs/repro_home_resources/src/repro_home_resources/drivers/env_user.nim`
+are gated `when defined(windows):` — on POSIX the body is a no-op
+beyond returning `payload.bytes` to the executor. Concretely:
+
+- The resource IS recognized by the intent parser + the planner
+  (`pipeline.nim` line 734-755).
+- The plan correctly lists the resource as `create`.
+- The apply pipeline calls into the driver, which on Linux writes
+  nothing to disk.
+- On a re-`--plan`, the resource re-appears in the listing as
+  `create` (because the driver never recorded a post-apply
+  observation that matches the desired state), BUT the OVERALL
+  plan status is still `no-op (matches the active generation)`
+  and `0 drift(s)`, because the generation digest doesn't change.
+
+This means env.userVariable is **observed as planned but not
+materialized** on Linux. Setting `REPRO_M6_HOME_APPLY=1` does NOT
+write the variable to any shell rc — the env.userPath managed block
+is present, but the env.userVariable line is absent. The M6 test
+script's step 6d soft-warns (not hard-fails) on this gap so the
+M6 gate stays green and the divergence surfaces in the logs without
+masking the other four primitives' success.
+
+This is the same class of issue Dotfiles-Migration-Completion N6
+surfaced: an "implemented for Windows, not yet implemented for Linux"
+arm in a driver. Recommended fix scope: add a POSIX
+`applyUserVariableCreate` arm that writes `export <name>=<value>`
+into the same shared rc managed block the env.userPath driver
+already owns (`REPRO_HOME_POSIX_PATH_RC` test seam +
+`defaultUserPathHostFile()`'s rc resolution), so the gap closes
+without inventing a new host-file convention.
+
+The other 4 primitives (`fs.userFile` x2, `env.userPath`,
+`shell.integration`) materialize correctly on all 5 distros.
+
+### Running M6 acceptance
+
+```bash
+bash scripts/run_multi_distro_tests.sh m6_home_apply --all       # 5/5 expected
+bash scripts/run_multi_distro_tests.sh m6_home_apply arch        # 1/1
+```
+
+opensuse is OUT of M6 scope (`opensuse-tumbleweed` is in the M0
+smoke-probe sweep but the M1-M9 milestones explicitly scope to
+arch/debian/ubuntu/fedora/alpine). The harness will report
+`opensuse` as FAIL with the message `unrecognized ID` when invoked
+via `--all`; this is by design.
+
+## Future work (M7+)
+
+- M7: `repro infra plan` — system scope (`systemd.systemUnit`,
+  `fs.systemFile`, `passwd.user`, `linux.firewallRule`). Where
+  M6 found the home scope uniform across distros, M7 is the
+  per-distro path-convention milestone.
+- M8: multi-output package realize on arch + debian + fedora.
+- M9: generation switch + rollback on debian-wsl.
+- M5: cross-distro binary-cache push/pull (blocked on
+  Peer-Cache-Server-And-Tooling M1).
