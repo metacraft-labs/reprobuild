@@ -259,9 +259,108 @@ convention is yet to be implemented.
   upstream build entirely. That is a source change and out of scope
   for the bootstrap.
 
-## Future work (M2+)
+## M2 — Debian + Ubuntu self-bootstrap
 
-- M2: same for Debian + Ubuntu.
+`bootstrap-debian.sh` and `bootstrap-ubuntu.sh` mirror M1's shape inside
+`repro-debian` (Debian 12 / bookworm) and `repro-ubuntu` (Ubuntu 22.04
+LTS / jammy). Same flow: apt prereqs + upstream-built clingo + upstream-
+built BLAKE3 + `nim c -d:release` of `apps/repro` + `apps/repro-standard-
+provider` from `/mnt/d/metacraft/reprobuild`, no `nix develop`. Both
+scripts use M0's choosenim-installed Nim 2.2.10 at `/root/.nimble/bin/nim`
+(neither distro's apt repo ships a usable Nim).
+
+The two scripts are clone-and-tweak rather than refactored into a shared
+helper; consolidation is its own concern (a future cleanup milestone),
+not part of M2's deliverable.
+
+Apt prereqs (Step 1, identical on both):
+
+```
+build-essential git curl ca-certificates xz-utils
+pkg-config libssl-dev libsqlite3-dev libxxhash-dev
+cmake bison re2c unzip
+```
+
+Upstream sources built from tarballs (Steps 2-3, identical to M1):
+
+| Component | Version | Source                                                                   | Why                                                                          |
+| --------- | ------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| clingo    | 5.8.0   | <https://github.com/potassco/clingo/archive/refs/tags/v5.8.0.tar.gz>     | Not in Debian bookworm or Ubuntu jammy apt repos as of 2026-06.              |
+| BLAKE3    | 1.5.0   | <https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.5.0.tar.gz>   | Not in bookworm or jammy apt repos. (Ubuntu 24.04 noble DOES ship libblake3-dev.) |
+
+Per-distro divergences from M1 (Arch):
+
+- **No re2c-4.3 compat patch.** Both Debian bookworm and Ubuntu jammy
+  ship re2c 3.0, which still accepts clingo 5.8.0's vendored grammar
+  files. The AUR patch M1 applies (targeting Arch's re2c 4.5+) is
+  NOT applied on either apt-based distro.
+- **xxhash multiarch symlink.** `libxxhash-dev` installs into
+  `/usr/lib/x86_64-linux-gnu/` but reprobuild's `config.nims`
+  `firstExistingPrefix` only probes `<prefix>/lib/<dylib>`. Both
+  bootstrap scripts symlink the apt-shipped `.so` + headers into
+  `/usr/local/lib` + `/usr/local/include` (alongside BLAKE3) and
+  export `XXHASH_PREFIX=/usr/local`.
+- **Nim source.** Arch's pacman ships nim 2.2.10 on `/usr/sbin/nim`
+  (on PATH). Debian's apt nim is 1.6.10 (too old); Ubuntu jammy has
+  no `nim` apt package at all. Both bootstrap scripts use M0's
+  choosenim install at `/root/.nimble/bin/nim` (Nim 2.2.10) and
+  inject that directory into PATH for downstream `repro build`
+  invocations (the test script adds it ahead of `repro build`).
+
+Bootstrap timing (WSL2 / Ryzen-class host):
+
+| Distro | Run  | Wall time   | Notes                                                       |
+| ------ | ---- | ----------- | ----------------------------------------------------------- |
+| Debian | Cold | 11 min 02 s | clingo + BLAKE3 cmake builds dominate (~7 min combined).    |
+| Debian | Warm | 3 min 14 s  | clingo + BLAKE3 short-circuit; only Nim recompiles.         |
+| Ubuntu | Cold | 4 min 08 s  | clingo + BLAKE3 cmake builds + first Nim build.             |
+| Ubuntu | Warm | 3 min 20 s  | clingo + BLAKE3 short-circuit; only Nim recompiles.         |
+
+(The Debian cold timing is higher than Ubuntu's despite identical
+script logic — both ran on the same host. Likely sources of the gap:
+WSL2 9P I/O cold-cache effects on the very first `apt-get install` run
+that warmed Ubuntu by the time Debian's was measured, and Debian's
+slightly larger clingo + BLAKE3 install footprint into the freshly-
+wiped `/usr/local`. The warm timings, which exclude cmake/install, are
+within 6 s of each other.)
+
+### Running M2 acceptance
+
+```bash
+bash scripts/run_multi_distro_tests.sh m2_self_bootstrap debian ubuntu
+```
+
+The test script (`tools/multi-distro-harness/tests/m2_self_bootstrap.sh`)
+is a single file that dispatches on `/etc/os-release` `ID`:
+
+1. Detects distro (must be `debian` or `ubuntu`).
+2. Runs the matching `bootstrap-{debian,ubuntu}.sh`.
+3. Copies `examples/hello-world-c/` (the same M1 recipe, unchanged) to
+   `/tmp/reprobuild-bootstrap-<distro>/m2-recipe/hello-world-c/`.
+4. Invokes `repro build . --tool-provisioning=path --no-runquota`.
+5. Asserts the binary outputs `hello from reprobuild M1` (recipe is
+   unchanged from M1).
+6. Wipes the per-project `.repro/build/` tree + global
+   `~/.cache/repro/action-cache/`, rebuilds, asserts intra-distro
+   sha256 bit-identity.
+
+The test refuses to run on non-Debian / non-Ubuntu hosts.
+
+### Content-addressability sha256 (intra-distro)
+
+| Distro | sha256 of `hello-world-c` (build #1 == build #2)                        |
+| ------ | ----------------------------------------------------------------------- |
+| Debian | `9057905d822360d4c14c2c8460cd157dedabdd90e770cc7aabc3b3ada332a378`      |
+| Ubuntu | `1ed6a9525cdb9af8766c8a5a6cff1a329f5d91ba62359bb0d5f5a56b54e763db`      |
+
+Cross-distro sha256 differ from each other and from M1's Arch
+(`f602a18b...`); each distro pins a different gcc (Debian gcc-12,
+Ubuntu gcc-11, Arch gcc-15.x) + glibc + binutils combination, so the
+linked binaries don't match across distros. Cross-distro bit-identity
+via the peer cache (build on Arch, pull on Debian) is M5's scope.
+
+## Future work (M3+)
+
 - M3: same for Fedora.
 - M4: same for Alpine (musl baseline).
 - M5: cross-distro binary-cache push/pull.
